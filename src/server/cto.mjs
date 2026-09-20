@@ -1039,7 +1039,11 @@ export function createCtoEngine(deps = {}) {
   // conversation via the runtime binding (§8.1's headless completion parent).
   const workControl =
     deps.workControl ??
-    createCtoWorkControl({ listProjects, ...(deps.delegateOps ? { delegateOps: deps.delegateOps } : {}) });
+    createCtoWorkControl({
+      listProjects,
+      ...(deps.delegateOps ? { delegateOps: deps.delegateOps } : {}),
+      ...(deps.isInteractiveActive ? { isInteractiveActive: deps.isInteractiveActive } : {}),
+    });
   registerCtoWorkTools(register, workControl);
 
   // -------------------------------------------------------------------------

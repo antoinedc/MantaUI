@@ -144,6 +144,7 @@ const MUTABLE_FIELDS = Object.freeze([
   "decisions",
   "resources",
   "evidence",
+  "deadlineAt",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -275,6 +276,17 @@ export function validateDeliveryTarget(target) {
     assertNonEmptyString(target.channel, "deliveryTarget.channel");
   }
   if (target.kind === "deployed") assertNonEmptyString(target.instance, "deliveryTarget.instance");
+}
+
+// A scheduling deadline (§9's scheduling order: "dependency readiness, explicit
+// priorities/deadlines, …") — an OPTIONAL absolute epoch-ms bound, or null
+// when the work carries none. A deadline orders time-bound work ahead of
+// priority alone; it never gates admission.
+export function validateDeadlineAt(value) {
+  if (value === undefined || value === null) return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw workError("unsupported", `deadlineAt must be a non-negative finite epoch-ms number (got ${JSON.stringify(value)})`);
+  }
 }
 
 function validateStateFields({ state, stage, waitingReason }) {
@@ -411,6 +423,15 @@ function assertValidEnvelope(env, id) {
         throw workError("unsupported", "claims must be an array when present");
       }
       for (const entry of env.claims) assertPlainObject(entry, "claims[]");
+    }
+    // §10 bounded context handoffs (written by the P6 work_handoff tool).
+    // OPTIONAL for envelopes created before P6; validated whenever present.
+    validateDeadlineAt(env.deadlineAt);
+    if (env.handoffs !== undefined) {
+      if (!Array.isArray(env.handoffs)) {
+        throw workError("unsupported", "handoffs must be an array when present");
+      }
+      for (const entry of env.handoffs) assertPlainObject(entry, "handoffs[]");
     }
     if (!Array.isArray(env.operations)) {
       throw workError("unsupported", "operations must be an array");
@@ -576,6 +597,7 @@ function validateWorkInput(input) {
   if (input.priorityReason !== undefined && typeof input.priorityReason !== "string") {
     throw workError("unsupported", "priorityReason must be a string");
   }
+  validateDeadlineAt(input.deadlineAt);
   for (const field of ["attempts", "decisions", "resources", "evidence"]) {
     if (input[field] !== undefined) validateRefArray(input[field], field);
   }
@@ -614,6 +636,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       dependencies: [...(input.dependencies ?? [])],
       priority: input.priority ?? 0,
       priorityReason: input.priorityReason ?? "",
+      deadlineAt: input.deadlineAt ?? null,
       stage: input.stage ?? "specify",
       state: input.state ?? "draft",
       ...(input.waitingReason !== undefined ? { waitingReason: input.waitingReason } : {}),
@@ -622,6 +645,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       decisions: [...(input.decisions ?? [])],
       resources: [...(input.resources ?? [])],
       evidence: [...(input.evidence ?? [])],
+      handoffs: [],
       createdAt: ts,
       updatedAt: ts,
     };
@@ -682,6 +706,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       if (patch.priorityReason !== undefined && typeof patch.priorityReason !== "string") {
         throw workError("unsupported", "priorityReason must be a string");
       }
+      if (patch.deadlineAt !== undefined) validateDeadlineAt(patch.deadlineAt);
       if (patch.project !== undefined) validateProjectRef(patch.project);
       if (patch.deliveryTarget !== undefined) validateDeliveryTarget(patch.deliveryTarget);
       for (const field of ["attempts", "decisions", "resources", "evidence"]) {

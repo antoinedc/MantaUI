@@ -137,8 +137,11 @@ import {
   ACCEPTANCE_CLAIM,
   RELEASE_CONTRACT_FIELDS,
   DEFAULT_MAX_STAGE_ATTEMPTS,
+  HANDOFF_HISTORY_CAPACITY,
+  isDependencyMet,
   parseReviewVerdict,
   parseRepoKey,
+  scheduleWorks,
   validateReleaseContract,
   resolveReleaseContract,
 } from "./ctoWorkTools.mjs";
@@ -314,6 +317,7 @@ function makeWorkControl({
   conversationId = "ses_cto",
   maxStageAttempts,
   cap,
+  isInteractiveActive,
   // ---- §4.1 identity deps --------------------------------------------------
   identityRecords = [mantaIdentityRecord()],
   observedOpencodeIds = {},
@@ -359,6 +363,7 @@ function makeWorkControl({
     observeOpencodeProjectId: async (dir) => observedOpencodeIds[dir] ?? null,
     gitRemoteUrl: async () => remoteUrl,
     ...(maxStageAttempts !== undefined ? { maxStageAttempts } : {}),
+    ...(isInteractiveActive !== undefined ? { isInteractiveActive } : {}),
     ...(forge !== null ? { forge } : {}),
     ...(releaseContracts !== undefined ? { releaseContracts } : {}),
     ...(releaseTrigger !== null ? { releaseTrigger } : {}),
@@ -1425,22 +1430,22 @@ test("sandbox canary: the production work and control stores resolve under MANTA
 // W18 — tool registration
 // ---------------------------------------------------------------------------
 
-test("tool registration: 21 family tools, reads auto, mutations confirm, params action-specific", () => {
+test("tool registration: 23 family tools, reads auto, mutations confirm, params action-specific", () => {
   const { control } = makeWorkControl();
   const tools = [];
   registerCtoWorkTools((def) => tools.push(def), control);
-  // 15 record+dispatch (PR #1518) + 6 §11 completion stages: review, merge,
-  // release, verify, complete, rollback. Every §11 stage is a MUTATION —
-  // none widens the read set, so an unverified observation can never be
-  // established by a read-mode tool.
-  assert.equal(tools.length, 21);
+  // 17 record+dispatch (PR #1518 + P6's work_schedule read + work_handoff) +
+  // 6 §11 completion stages: review, merge, release, verify, complete,
+  // rollback. Every §11 stage is a MUTATION — none widens the read set, so an
+  // unverified observation can never be established by a read-mode tool.
+  assert.equal(tools.length, 23);
   for (const stage of ["work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_rollback"]) {
     assert.ok(
       tools.some((t) => t.name === stage),
       `${stage} is registered`,
     );
   }
-  const reads = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
+  const reads = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity", "work_schedule"]);
   for (const t of tools) {
     assert.ok(t.name.startsWith("work_"));
     assert.equal(t.mode, reads.has(t.name) ? "auto" : "confirm");
@@ -2496,4 +2501,406 @@ test("V11: parseRepoKey is the canonical owner/repo identity — no host prefix,
   assert.throws(() => parseRepoKey("/manta"), /owner\/repo/);
   assert.throws(() => parseRepoKey("justone"), /owner\/repo/);
   assert.throws(() => parseRepoKey(""), /non-empty string/);
+});
+
+// ---------------------------------------------------------------------------
+// P6 — §9 scheduling across work items (scheduleWorks / work_schedule)
+// ---------------------------------------------------------------------------
+
+// Minimal server-realistic envelopes for the pure scheduler. The shape is what
+// ctoWork.mjs's strict loader guarantees (plus the optional P6 fields), so the
+// scheduler is tested against exactly what production can produce.
+function schedEnv(overrides = {}) {
+  return {
+    id: overrides.id ?? `w_${Math.random().toString(36).slice(2, 8)}`,
+    state: overrides.state ?? "ready",
+    ...(overrides.waitingReason ? { waitingReason: overrides.waitingReason } : {}),
+    stage: overrides.stage ?? "implement",
+    priority: overrides.priority ?? 0,
+    ...(overrides.deadlineAt !== undefined ? { deadlineAt: overrides.deadlineAt } : {}),
+    dependencies: overrides.dependencies ?? [],
+    attempts: overrides.attempts ?? [],
+    claims: overrides.claims ?? [],
+    spec: overrides.spec ?? { revision: 1, hash: "sha256:aaa", documentRef: "d" },
+    updatedAt: overrides.updatedAt ?? 1000,
+    createdAt: overrides.createdAt ?? 1000,
+  };
+}
+
+test("S1: §9 order — deadline, then priority, then fair aging; ties are deterministic", () => {
+  const plan = scheduleWorks(
+    [
+      schedEnv({ id: "w-prio", priority: 5, updatedAt: 3000 }),
+      schedEnv({ id: "w-deadline", priority: 0, deadlineAt: 5000, updatedAt: 2000 }),
+      schedEnv({ id: "w-plain", priority: 0, updatedAt: 1000 }),
+    ],
+    { now: 10_000, availableSlots: 5 },
+  );
+  assert.deepEqual(
+    plan.plan.map((p) => p.id),
+    ["w-deadline", "w-prio", "w-plain"],
+    "a time-bound deadline outranks an open-ended high priority; priority outranks aging; oldest first",
+  );
+  const aged = plan.plan[2];
+  assert.equal(aged.whyNow.dependency, "met");
+  assert.equal(aged.whyNow.priority, 0);
+  assert.ok(aged.whyNow.agingSeconds > 0, "the aging observation is carried");
+});
+
+test("counterfactual: equalized signals hand the order to fair aging — flipping updatedAt flips the plan", () => {
+  const a = schedEnv({ id: "w-a", priority: 2, updatedAt: 1000 });
+  const b = schedEnv({ id: "w-b", priority: 2, updatedAt: 2000 });
+  const olderFirst = scheduleWorks([a, b], { now: 10_000, availableSlots: 5 });
+  assert.deepEqual(olderFirst.plan.map((p) => p.id), ["w-a", "w-b"], "longest-unprogressed first");
+  const bumped = scheduleWorks([{ ...a, updatedAt: 9000 }, b], { now: 10_000, availableSlots: 5 });
+  assert.deepEqual(bumped.plan.map((p) => p.id), ["w-b", "w-a"], "aging is load-bearing, not decoration");
+});
+
+test("S2: dependency readiness gates the plan — unmet → waiting with the reason recorded; met → dispatchable", () => {
+  const dep = schedEnv({ id: "w-dep", state: "ready" });
+  const dependent = schedEnv({ id: "w-child", dependencies: ["w-dep"] });
+  const blocked = scheduleWorks([dependent, dep], { now: 10_000, availableSlots: 5 });
+  assert.deepEqual(blocked.plan.map((p) => p.id), ["w-dep"]);
+  const entry = blocked.waiting.find((w) => w.id === "w-child");
+  assert.equal(entry.waitReason, "dependency");
+  assert.match(entry.note, /w-dep/, "the wait reason names WHAT it waits on");
+
+  // The dependency predecessor only REPORTED completion (a claim): the §9
+  // readiness read admits the child, labelled as a claim — the same rule the
+  // dispatch gate applies.
+  const depClaimed = schedEnv({
+    id: "w-dep",
+    state: "waiting",
+    waitingReason: "external",
+    claims: [{ id: "att_x:implementation_reported", kind: IMPLEMENTATION_CLAIM, superseded: false, specHash: "sha256:aaa" }],
+  });
+  const admissible = scheduleWorks([schedEnv({ id: "w-child", dependencies: ["w-dep"] }), depClaimed], {
+    now: 10_000,
+    availableSlots: 5,
+  });
+  assert.deepEqual(admissible.plan.map((p) => p.id), ["w-child"], "the dependent is dispatchable; the waiting/external predecessor is not a candidate");
+  assert.equal(admissible.waiting.some((w) => w.id === "w-child"), false, "a reported (claim) readiness stops the dependency wait");
+  assert.equal(isDependencyMet(depClaimed).source, "reported (claim — unverified)", "the claim source is labelled, never a silent verdict");
+});
+
+test("counterfactual: superseding the dependency's claim flips readiness — the paired test goes red without the guard", () => {
+  const depStale = schedEnv({
+    id: "w-dep",
+    state: "ready",
+    claims: [{ id: "att_x:implementation_reported", kind: IMPLEMENTATION_CLAIM, superseded: true, specHash: "sha256:aaa" }],
+  });
+  assert.equal(isDependencyMet(depStale).met, false, "a superseded claim is NOT readiness");
+  const plan = scheduleWorks([schedEnv({ id: "w-child", dependencies: ["w-dep"] }), depStale], { now: 10_000, availableSlots: 5 });
+  assert.equal(plan.waiting.find((w) => w.id === "w-child").waitReason, "dependency");
+});
+
+test("S3: capacity is the availability constraint — the ordered list fills the slots, the rest queue with the reason", () => {
+  const works = [
+    schedEnv({ id: "w-1", priority: 3, updatedAt: 1000 }),
+    schedEnv({ id: "w-2", priority: 2, updatedAt: 1000 }),
+    schedEnv({ id: "w-3", priority: 1, updatedAt: 1000 }),
+  ];
+  const tight = scheduleWorks(works, { now: 10_000, availableSlots: 1 });
+  assert.deepEqual(tight.plan.map((p) => p.id), ["w-1"]);
+  assert.equal(tight.waiting.find((w) => w.id === "w-2").waitReason, "capacity", "the queued item records WHY it waits");
+  const roomy = scheduleWorks(works, { now: 10_000, availableSlots: 2 });
+  assert.deepEqual(roomy.plan.map((p) => p.id), ["w-1", "w-2"], "more slots move more work");
+  assert.equal(roomy.waiting.find((w) => w.id === "w-3").waitReason, "capacity");
+});
+
+test("S4: interactive reservation — ambient yields before a CEO request; an operator plan is never starved", () => {
+  const works = [schedEnv({ id: "w-hot", priority: 9 })];
+  const ambient = scheduleWorks(works, { now: 10_000, availableSlots: 3, interactiveActive: true, intent: "ambient" });
+  assert.equal(ambient.plan.length, 0, "an ambient plan dispatches NOTHING while interactive holds the model");
+  assert.equal(ambient.interactiveReserved, true);
+  assert.equal(ambient.waiting.find((w) => w.id === "w-hot").waitReason, "interactive_reserved", "the yield is recorded, not silent");
+  const operator = scheduleWorks(works, { now: 10_000, availableSlots: 3, interactiveActive: true, intent: "operator" });
+  assert.deepEqual(operator.plan.map((p) => p.id), ["w-hot"], "the CEO asking for the plan is itself interactive — no self-starvation");
+});
+
+test("S5: the per-stage attempt budget is a scheduling policy — exhausted work waits with the reason", () => {
+  const attempts = [1, 2, 3].map((n) => ({ id: `att_${n}`, stage: "implement", status: "failed" }));
+  const exhausted = scheduleWorks([schedEnv({ id: "w-loopy", attempts })], { now: 10_000, availableSlots: 5 });
+  assert.equal(exhausted.plan.length, 0, "a work past its attempt budget is not a dispatch candidate");
+  assert.equal(exhausted.waiting.find((w) => w.id === "w-loopy").waitReason, "policy_blocked");
+  assert.match(exhausted.waiting.find((w) => w.id === "w-loopy").note, /3\/3/);
+  const fresh = scheduleWorks([schedEnv({ id: "w-loopy", attempts: attempts.slice(0, 2) })], { now: 10_000, availableSlots: 5 });
+  assert.deepEqual(fresh.plan.map((p) => p.id), ["w-loopy"], "counterfactual: within budget the same work plans normally");
+});
+
+test("S6 integrated through the control: the plan read is dispatch-free and agrees with the durable waiting state", async () => {
+  const { control, calls, jobs } = makeWorkControl();
+  const a = await seedReadyWork(control, { id: "w-sched-a", priority: 5 });
+  const b = await seedReadyWork(control, { id: "w-sched-b", priority: 1 });
+  await control.workDispatch({ key: "w-sched-da", work: a.workId });
+  const running = jobs.jobs.filter((j) => j.status === "running").length;
+  const { data } = await control.workSchedule({});
+  assert.equal(data.availableSlots, MAX_RUNNING_JOBS - running, "the plan composes the REAL delegate capacity");
+  assert.deepEqual(data.plan.map((p) => p.id), [b.workId], "the running work is not a candidate; the ready one is");
+  assert.equal(data.reservation.interactiveActive, false, "an unwired composition observes no reservation — never a fake signal");
+  // Read-only proof: the plan moved nothing.
+  const startCalls = calls.filter((c) => c.name === "startJob").length;
+  const { data: after } = await control.workInspect({ work: b.workId });
+  assert.equal(after.state, "ready");
+  assert.equal(calls.filter((c) => c.name === "startJob").length, startCalls, "a scheduling read never dispatches");
+});
+
+test("U19 integrated: at cap, dispatch parks the envelope on waiting/capacity AND the plan records the same reason", async () => {
+  // A box whose slots are all taken by foreign jobs (the W9 fixture shape):
+  // the dispatch is refused BEFORE any worker starts, the work parks on
+  // waiting/capacity, and the schedule plan reads the same reality.
+  const foreign = Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => ({
+    id: `job_foreign_u19_${i}`,
+    status: "running",
+    correlation: null,
+  }));
+  const control2 = createCtoWorkControl({
+    store: workStoreFixture(),
+    createReceiptsStore: ledgerFixture(),
+    now: makeClock(),
+    listProjects: async () => fixtureProjects(),
+    listDelegateJobs: async () => foreign,
+    delegateOps: makeDelegateSpy({ cap: MAX_RUNNING_JOBS, jobs: foreign }).engine,
+    resolveCwd: resolveCwdOrThrow,
+    getConversationId: async () => "ses_cto",
+    observeOpencodeProjectId: async () => null,
+    gitRemoteUrl: async () => null,
+  });
+  const a = await control2.workCreate({
+    key: "w-cap-a", project: "manta", objective: "x",
+    spec: { revision: 1, hash: "h", documentRef: "d" }, deliveryTarget: { kind: "pr" }, state: "ready",
+  });
+  const b = await control2.workCreate({
+    key: "w-cap-b", project: "manta", objective: "y",
+    spec: { revision: 1, hash: "h", documentRef: "d" }, deliveryTarget: { kind: "pr" }, state: "ready",
+  });
+  await assert.rejects(
+    control2.workDispatch({ key: "w-cap-da", work: a.workId }),
+    (error) => error.code === "capacity_wait" && error.retrySafe === true,
+    "the box is at its delegate cap",
+  );
+  const { data: env } = await control2.workInspect({ work: b.workId });
+  assert.equal(env.state, "ready", "b was never dispatched, so it never parked — the plan read is what sees the wait");
+  const { data: plan } = await control2.workSchedule({});
+  assert.equal(plan.availableSlots, 0, "the plan composes the REAL delegate capacity");
+  const entry = plan.waiting.find((w) => w.id === b.workId);
+  assert.ok(entry, "the plan surfaces the work");
+  assert.equal(entry.waitReason, "capacity", "the plan records WHY it waits — the same reality the envelope parks on");
+  const parked = await assert.rejects(
+    control2.workDispatch({ key: "w-cap-db", work: b.workId }),
+    (error) => error.code === "capacity_wait",
+    "a dispatch attempt at cap also refuses",
+  );
+  void parked;
+  const { data: envB } = await control2.workInspect({ work: b.workId });
+  assert.equal(envB.waitingReason, "capacity", "after a dispatch attempt the durable wait reason is explicit");
+  const { data: planAfter } = await control2.workSchedule({});
+  assert.equal(planAfter.waiting.find((w) => w.id === b.workId).waitReason, "capacity", "plan and envelope agree on WHY it waits");
+});
+
+test("U19 counterfactual: a priority change reorders the plan the moment it lands", async () => {
+  const { control } = makeWorkControl();
+  const low = await seedReadyWork(control, { id: "w-low", priority: 1 });
+  const high = await seedReadyWork(control, { id: "w-high", priority: 2 });
+  const before = await control.workSchedule({ intent: "operator" });
+  assert.deepEqual(before.data.plan.map((p) => p.id), [high.workId, low.workId]);
+  await control.workPrioritize({ key: "w19p", work: low.workId, priority: 10, priorityReason: "moved up" });
+  const afterPlan = await control.workSchedule({ intent: "operator" });
+  assert.deepEqual(afterPlan.data.plan.map((p) => p.id), [low.workId, high.workId], "the priority change is visible in the next plan read");
+});
+
+// ---------------------------------------------------------------------------
+// P6 — §10 bounded context handoffs (work_handoff)
+// ---------------------------------------------------------------------------
+
+test("H1: a handoff survives server replacement — a fresh control over the same store rehydrates it", async () => {
+  const store = workStoreFixture();
+  const { control } = makeWorkControl({ store });
+  const created = await seedReadyWork(control, { id: "w-h1" });
+  const recorded = await control.workHandoff({
+    key: "w-h1-k",
+    work: created.workId,
+    specHash: "sha256:aaa",
+    nextStep: "resume at the parser branch; the failing case is export-empty-file",
+    attemptId: "att_1",
+    target: "manta",
+    diff: "3 files changed",
+    commit: "abc1234",
+    testResults: "14 pass, 1 fail (export-empty-file)",
+    pendingDecisions: "none",
+  });
+  assert.equal(recorded.ok, true);
+  assert.match(recorded.summary, /handoff/);
+  // A compaction/replacement means a NEW control over the SAME durable store.
+  const { control: fresh } = makeWorkControl({ store });
+  const { data } = await fresh.workInspect({ work: created.workId });
+  assert.equal(data.handoffs.length, 1);
+  const handoff = data.handoffs[0];
+  assert.equal(handoff.nextStep, "resume at the parser branch; the failing case is export-empty-file");
+  assert.equal(handoff.specHash, "sha256:aaa", "the snapshot is pinned to the spec it was taken under");
+  assert.equal(handoff.commit, "abc1234");
+  const ev = await fresh.workEvidence({ work: created.workId });
+  assert.equal(ev.data.handoffs.length, 1, "the handoff is part of the evidence trail");
+});
+
+test("H2: a handoff is bounded — fields clip visibly and the oldest is evicted past the capacity, visibly", async () => {
+  const { control } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w-h2" });
+  const clipped = await control.workHandoff({
+    key: "w-h2-clip",
+    work: created.workId,
+    specHash: "sha256:aaa",
+    nextStep: "x".repeat(5000),
+  });
+  assert.equal(clipped.ok, true);
+  assert.ok(clipped.handoff.nextStep.length < 2050, "the field is bounded");
+  assert.ok(clipped.handoff.nextStep.includes("(truncated)"), "the bound is visible, not silent");
+  // Fill to capacity, then record one more: the eviction is named.
+  for (let i = 0; i < HANDOFF_HISTORY_CAPACITY; i += 1) {
+    await control.workHandoff({ key: `w-h2-${i}`, work: created.workId, specHash: `sha256:aaa-${i}`, nextStep: `step ${i}` });
+  }
+  const { data: full } = await control.workInspect({ work: created.workId });
+  assert.equal(full.handoffs.length, HANDOFF_HISTORY_CAPACITY);
+  const firstId = full.handoffs[0].id;
+  const overflow = await control.workHandoff({ key: "w-h2-over", work: created.workId, specHash: "sha256:aaa-final", nextStep: "the real next step" });
+  assert.equal(overflow.ok, true);
+  assert.deepEqual(overflow.evicted, [firstId], "the eviction is visible in the result");
+  const { data: capped } = await control.workInspect({ work: created.workId });
+  assert.equal(capped.handoffs.length, HANDOFF_HISTORY_CAPACITY, "the history stays bounded");
+  assert.equal(capped.handoffs.some((h) => h.id === firstId), false);
+});
+
+test("H3: a handoff never dispatches and never fabricates a prompt — recording is a pure durable write", async () => {
+  const { control, calls, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w-h3" });
+  const starts = calls.filter((c) => c.name === "startJob").length;
+  await control.workHandoff({ key: "w-h3-k", work: created.workId, specHash: "sha256:aaa", nextStep: "hold position" });
+  assert.equal(calls.filter((c) => c.name === "startJob").length, starts, "no delegate job was started by a handoff");
+  assert.equal(jobs.jobs.length, starts, "the job store is untouched — no keepalive turn was fabricated");
+  await control.workSchedule({});
+  assert.equal(calls.filter((c) => c.name === "startJob").length, starts, "a schedule read never dispatches either");
+  // And a handoff REQUIRES content: an empty nextStep is refused, so the
+  // rehydration contract can never degrade into an empty keepalive.
+  await assert.rejects(
+    control.workHandoff({ key: "w-h3-empty", work: created.workId, specHash: "sha256:aaa", nextStep: "" }),
+    (error) => error.code === "unsupported",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// P6 — §12 lifecycle verification (U18 deployment stop / U20 / U21)
+// ---------------------------------------------------------------------------
+
+function releaseReceiptSeed({ workId, key, input, status, leaseExpiresAt }) {
+  return {
+    id: `op_seed_${key}`,
+    key,
+    op: "work.release",
+    argsHash: canonicalArgsHash("work.release", input),
+    args: input,
+    workRevision: 1,
+    stage: "release",
+    specHash: "sha256:aaa",
+    status,
+    externalRef: null,
+    resultCode: null,
+    lease: { owner: "seed", expiresAt: leaseExpiresAt },
+    takeoverCount: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    resultAt: null,
+  };
+}
+
+test("U18: cancelling during a running release names the EXTERNAL effect — it is never claimed stopped", async () => {
+  const store = workStoreFixture();
+  const { control, calls, jobs } = makeWorkControl({ store });
+  const created = await seedReadyWork(control, { id: "w-u18" });
+  await seedEnvelopeReceipt(store, created.workId, releaseReceiptSeed({
+    workId: created.workId,
+    key: "u18-release",
+    input: { key: "u18-release", work: created.workId },
+    status: "in_flight",
+    leaseExpiresAt: 9007199254740991,
+  }));
+  const cancelled = await control.workCancel({ key: "u18-cancel", work: created.workId });
+  assert.equal(cancelled.ok, true);
+  assert.ok(cancelled.summary.includes("EXTERNAL EFFECT IN FLIGHT"), "the summary names the deployment effect");
+  assert.equal(cancelled.externalInFlight.length, 1);
+  assert.equal(cancelled.externalInFlight[0].op, "work.release");
+  assert.equal(calls.filter((c) => c.name === "startJob").length, 0);
+  assert.equal(jobs.jobs.length, 0);
+  // The envelope keeps the unknown receipt: reconciliation stays possible.
+  const { data } = await control.workInspect({ work: created.workId });
+  assert.equal(data.unresolvedReceipts.some((r) => r.op === "work.release"), true);
+});
+
+test("U18 counterfactual: the same cancel with NO external effect reports none", async () => {
+  const { control } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w-u18-plain" });
+  const cancelled = await control.workCancel({ key: "u18-plain-cancel", work: created.workId });
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.externalInFlight.length, 0, "the field exists and is empty — no fabricated external effect");
+});
+
+test("U20: a dirty worktree fails cleanup VISIBLY and the retry after the worktree is cleaned succeeds", async () => {
+  // The spy's deleteJob only refuses for a still-running job; emulate the
+  // dirty-worktree refusal the real non-forced removal returns.
+  const spy = makeDelegateSpy({ jobs: [] });
+  spy.engine.deleteJob = async (id) => (id === "job_1" ? { ok: false, reason: "dirty" } : { ok: true });
+  const control2 = directWorkControl({ store: workStoreFixture(), spy });
+  const created = await control2.workCreate({
+    key: "u20-create",
+    project: "manta",
+    objective: "x",
+    spec: { revision: 1, hash: "h", documentRef: "d" },
+    deliveryTarget: { kind: "pr" },
+    state: "ready",
+  });
+  await control2.workDispatch({ key: "u20-d", work: created.workId });
+  await control2.workCancel({ key: "u20-c", work: created.workId });
+  await assert.rejects(
+    control2.workCleanup({ key: "u20-x1", work: created.workId }),
+    (error) => {
+      assert.equal(error.code, "dirty_resource");
+      return true;
+    },
+  );
+  const { data } = await control2.workInspect({ work: created.workId });
+  const res = data.resources.find((r) => r.kind === "delegate_job");
+  assert.equal(res.cleanupStatus, "failed", "the failure is retained and visible");
+  assert.equal(res.path !== null, true, "metadata kept to retry");
+  assert.equal(data.operations.length > 0, true, "the record was never dropped because removal threw");
+  // The worktree is cleaned out-of-band (the operator resolved the dirt); the
+  // SAME retryable surface now removes the resource.
+  spy.engine.deleteJob = async () => ({ ok: true });
+  const retried = await control2.workCleanup({ key: "u20-x2", work: created.workId });
+  assert.equal(retried.ok, true, "cleanup failure is retryable, not permanent");
+  assert.deepEqual(retried.removed, ["job_1"]);
+  const { data: after } = await control2.workInspect({ work: created.workId });
+  const resAfter = after.resources.find((r) => r.kind === "delegate_job" && r.ref === "job_1");
+  assert.equal(resAfter.cleanupStatus, "removed", "the retry records the removal on the resource");
+  assert.equal(after.operations.length > 0, true, "the work record still stands");
+});
+
+test("U21: after archiving a completed worker, the evidence — and the worker's rationale — are still retrievable", async () => {
+  const { control, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w-u21" });
+  await control.workDispatch({ key: "w-u21-d", work: created.workId });
+  const job = jobs.jobs.find((j) => j.correlation?.workId === created.workId);
+  job.status = "done";
+  job.result = "moved the export fix behind a feature flag because the parser rejects empty files (rationale)";
+  await control.recordWorkerOutcome(job);
+  const { data: before } = await control.workInspect({ work: created.workId });
+  const claim = before.claims[0];
+  assert.equal(claim.kind, IMPLEMENTATION_CLAIM);
+  assert.match(claim.note, /feature flag/, "the rationale is the worker's report");
+  const archived = await control.workArchive({ key: "w-u21-a", work: created.workId });
+  assert.equal(archived.ok, true);
+  const ev = await control.workEvidence({ work: created.workId });
+  assert.equal(ev.data.claims.length, 1, "the claim survives the archive");
+  assert.equal(ev.data.claims[0].kind, IMPLEMENTATION_CLAIM);
+  assert.match(String(ev.data.claims[0].note), /feature flag/, "the worker's rationale is still retrievable after archive");
+  const list = await control.workList({ state: "archived" });
+  assert.ok(list.data.works.some((w) => w.id === created.workId), "the archived work stays listable by state");
 });

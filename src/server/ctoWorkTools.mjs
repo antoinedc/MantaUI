@@ -77,7 +77,7 @@ import {
   argsSnapshot,
   MANTA_CONTROL_LEASE_TTL_MS,
 } from "./ctoMantaTools.mjs";
-import { canonicalArgsHash } from "./ctoWork.mjs";
+import { canonicalArgsHash, validateDeadlineAt } from "./ctoWork.mjs";
 import {
   createCtoWork as createCtoWorkService,
   validateSpec as validateSpecRef,
@@ -194,6 +194,188 @@ const DISPATCH_OPS = Object.freeze(["work.dispatch", "work.retry"]);
 
 // The states dispatch may enter FROM (the §6 admission surface).
 const DISPATCHABLE_WAITING_REASONS = Object.freeze(["capacity", "provider"]);
+
+// §9 scheduling intents. "ambient" = speculative backfill / nonurgent analysis
+// the scheduler itself picks up — it yields before an interactive (CEO)
+// request. "operator" = the CEO explicitly asked for the plan, so no
+// reservation is applied to what the plan reports.
+export const SCHEDULE_INTENTS = Object.freeze(["ambient", "operator"]);
+
+// §10 bounded context handoffs — the durable record a long worker leaves so
+// compaction/replacement can rehydrate without losing the work. Each handoff
+// is a snapshot; the envelope keeps the newest N (oldest evicted, visibly).
+export const HANDOFF_HISTORY_CAPACITY = 10;
+// Per-field bound for a handoff's string slots (same bound as notes/claims).
+const HANDOFF_FIELD_MAX_CHARS = NOTE_MAX_CHARS;
+// The §10 handoff contract: which slots a recorded handoff must fill. `specHash`
+// pins the snapshot to a spec revision; `nextStep` is the rehydration contract.
+const HANDOFF_REQUIRED_FIELDS = Object.freeze(["specHash", "nextStep"]);
+const HANDOFF_TEXT_FIELDS = Object.freeze([
+  "specHash",
+  "attemptId",
+  "target",
+  "diff",
+  "commit",
+  "testResults",
+  "pendingDecisions",
+  "nextStep",
+  "note",
+]);
+
+// §9 dependency readiness — MODULE-LEVEL so the scheduler and the per-work
+// readiness read share ONE definition (extend, never duplicate). A dependency
+// is met when the dependency work is completed, or when it carries a
+// non-superseded implementation claim matching its CURRENT spec (a REPORTED
+// outcome — labelled as a claim, never silently a verdict; the §11 PR adds
+// verified completion as the stronger signal).
+export function isDependencyMet(dep) {
+  if (dep?.state === "completed") {
+    return { met: true, source: "completed" };
+  }
+  const claimed = (dep?.claims ?? []).some(
+    (c) => c?.kind === IMPLEMENTATION_CLAIM && c.superseded !== true && c.specHash === dep.spec.hash,
+  );
+  if (claimed) {
+    return { met: true, source: "reported (claim — unverified)" };
+  }
+  return { met: false, source: dep?.state ?? "unknown" };
+}
+
+/**
+ * §9 scheduling across work items — the ORDERED plan (pure; the tool layer
+ * composes it with real capacity + the interactive-reservation observation).
+ *
+ * Scheduling order (§9): dependency readiness, explicit priorities/deadlines,
+ * existing policy/availability, then fair aging. Every item that cannot
+ * dispatch carries a recorded plan-level reason WHY (dependency unmet, stage
+ * attempt budget, capacity, interactive reservation). The plan READS — it
+ * dispatches nothing; work_dispatch remains the only admission mutator.
+ *
+ * Plan-level wait reasons (a scheduling vocabulary, not the envelope's closed
+ * WAITING_REASONS set — the plan persists nothing):
+ *   dependency / policy_blocked / interactive_reserved / capacity.
+ */
+export function scheduleWorks(
+  works,
+  { now: nowMs = Date.now(), availableSlots = 0, interactiveActive = false, intent = "ambient", maxStageAttempts = DEFAULT_MAX_STAGE_ATTEMPTS } = {},
+) {
+  if (!SCHEDULE_INTENTS.includes(intent)) {
+    throw new Error(`scheduleWorks intent must be one of ${SCHEDULE_INTENTS.join(", ")} (got ${JSON.stringify(intent)})`);
+  }
+  const list = (Array.isArray(works) ? works : []).filter((env) => env && typeof env === "object");
+  const byId = new Map(list.map((env) => [env.id, env]));
+
+  // §9 admission candidates mirror work_dispatch's admission surface: ready,
+  // or waiting on a dispatchable reason (capacity/provider).
+  const candidates = list.filter(
+    (env) => env.state === "ready" || (env.state === "waiting" && DISPATCHABLE_WAITING_REASONS.includes(env.waitingReason)),
+  );
+
+  const blocked = [];
+  const ready = [];
+  for (const env of candidates) {
+    const unmet = (env.dependencies ?? [])
+      .map((id) => byId.get(id))
+      .filter((dep) => dep && !isDependencyMet(dep).met);
+    if (unmet.length > 0) {
+      blocked.push({
+        id: env.id,
+        waitReason: "dependency",
+        note: `waiting on ${unmet.map((d) => `"${d.id}" (${d.state ?? "unknown"})`).join(", ")}`,
+      });
+      continue;
+    }
+    const attemptsUsed = (env.attempts ?? []).filter((a) => a?.stage === env.stage).length;
+    if (attemptsUsed >= maxStageAttempts) {
+      blocked.push({
+        id: env.id,
+        waitReason: "policy_blocked",
+        note: `stage "${env.stage}" attempt limit reached (${attemptsUsed}/${maxStageAttempts}) — escalate rather than looping (§8.2)`,
+      });
+      continue;
+    }
+    ready.push({ env, attemptsUsed });
+  }
+
+  // §9 order among dependency-ready candidates: explicit deadlines first
+  // (time-bound work outranks an open-ended high priority), then priority
+  // descending, then fair aging (longest-unprogressed first), then id —
+  // deterministic end to end.
+  ready.sort((a, b) => {
+    const da = a.env.deadlineAt ?? null;
+    const db = b.env.deadlineAt ?? null;
+    if (da !== null && db !== null && da !== db) return da - db;
+    if (da !== null && db === null) return -1;
+    if (da === null && db !== null) return 1;
+    if ((b.env.priority ?? 0) !== (a.env.priority ?? 0)) return (b.env.priority ?? 0) - (a.env.priority ?? 0);
+    const ageA = a.env.updatedAt ?? a.env.createdAt ?? 0;
+    const ageB = b.env.updatedAt ?? b.env.createdAt ?? 0;
+    if (ageA !== ageB) return ageA - ageB;
+    return String(a.env.id).localeCompare(String(b.env.id));
+  });
+
+  const entryFor = ({ env, attemptsUsed }) => ({
+    id: env.id,
+    stage: env.stage,
+    state: env.state,
+    ...(env.state === "waiting" ? { waitingReason: env.waitingReason } : {}),
+    priority: env.priority ?? 0,
+    deadlineAt: env.deadlineAt ?? null,
+    attemptsUsed,
+    whyNow: {
+      dependency: "met",
+      priority: env.priority ?? 0,
+      deadlineAt: env.deadlineAt ?? null,
+      agingSeconds: Math.max(0, Math.round((nowMs - (env.updatedAt ?? env.createdAt ?? nowMs)) / 1000)),
+    },
+  });
+
+  // §9: reserve interactive capacity. Cheap reads stay possible, but ambient
+  // backfill yields before a CEO request: with the reservation active, an
+  // ambient plan dispatches NOTHING and every candidate waits, visibly.
+  const interactiveReserved = intent === "ambient" && interactiveActive === true;
+  if (interactiveReserved) {
+    return {
+      generatedAt: new Date(nowMs).toISOString(),
+      intent,
+      interactiveReserved,
+      availableSlots: Math.max(0, availableSlots),
+      plan: [],
+      queued: [],
+      waiting: ready.map(({ env }) => ({
+        id: env.id,
+        waitReason: "interactive_reserved",
+        note: "ambient dispatch yields before an interactive (CEO) request (§9)",
+      })).concat(blocked),
+      counts: { candidates: candidates.length, dispatchableNow: 0, queuedBehindCapacity: 0, waiting: candidates.length },
+    };
+  }
+
+  // Capacity is the remaining policy constraint: the ordered ready list fills
+  // the available delegate slots; the rest queue BEHIND capacity, each with
+  // the recorded reason.
+  const slots = Math.max(0, availableSlots);
+  const plan = ready.slice(0, slots).map(entryFor);
+  const queued = ready.slice(slots).map(entryFor);
+  const waiting = blocked
+    .map((b) => ({ ...b }))
+    .concat(queued.map((q) => ({ id: q.id, waitReason: "capacity", note: "delegate capacity is filled — dispatch when a slot frees" })));
+  return {
+    generatedAt: new Date(nowMs).toISOString(),
+    intent,
+    interactiveReserved,
+    availableSlots: slots,
+    plan,
+    queued,
+    waiting,
+    counts: {
+      candidates: candidates.length,
+      dispatchableNow: plan.length,
+      queuedBehindCapacity: queued.length,
+      waiting: waiting.length,
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Errors — one mapping for this family: controlError-shaped errors pass
@@ -447,6 +629,10 @@ export function createCtoWorkControl({
   // resolves for a directory (null when unobservable). Feeds the rebind gate
   // and ProjectRef.repositoryId derivation.
   observeOpencodeProjectId = defaultObserveOpencodeProjectId,
+  // §9 interactive-capacity reservation READ dep — true when an interactive
+  // (CEO) request holds the model right now. Ambient scheduling yields before
+  // it; an unwired composition observes no reservation (false), never a fake.
+  isInteractiveActive = async () => false,
   // ---- WRITE deps (mutations only; reads never reference these) ------------
   delegateOps = null, // { startJob, stopJob, pauseJob, resumeJob, deleteJob } — the bound engine
   resolveCwd = resolveCwdOrThrow,
@@ -729,22 +915,11 @@ export function createCtoWorkControl({
     }
   }
 
-  // §9 dependency readiness — bounded, honest about its source: a dependency
-  // is met when the dependency work is completed, or when it carries a
-  // non-superseded implementation claim matching its CURRENT spec (a
-  // REPORTED outcome — labelled as a claim, never silently a verdict; the
-  // §11 PR adds verified completion as the stronger signal).
+  // §9 dependency readiness — ONE shared definition (isDependencyMet, module
+  // level): dispatch-time revalidation and the work_schedule plan read it
+  // identically, so the plan can never disagree with the admission gate.
   function dependencyReadiness(dep) {
-    if (dep.state === "completed") {
-      return { met: true, source: "completed" };
-    }
-    const claimed = (dep.claims ?? []).some(
-      (c) => c?.kind === IMPLEMENTATION_CLAIM && c.superseded !== true && c.specHash === dep.spec.hash,
-    );
-    if (claimed) {
-      return { met: true, source: "reported (claim — unverified)" };
-    }
-    return { met: false, source: dep.state };
+    return isDependencyMet(dep);
   }
 
   // ---------------------------------------------------------------------------
@@ -821,6 +996,17 @@ export function createCtoWorkControl({
 
   function isLiveJob(job) {
     return job?.status === "running" || job?.status === "paused";
+  }
+
+  // U18 (deployment): a stage whose external effect is NOT a worker (release,
+  // rollback) cannot be cancelled or paused — its trigger run is already
+  // executing outside the box. A stop/pause surfaces such in-flight stage
+  // receipts EXPLICITLY instead of claiming the external effect stopped
+  // (§3.3: the UI must be able to say what is still running).
+  function externalInFlight(env) {
+    return (env.operations ?? [])
+      .filter((r) => r?.status === "in_flight" && ["work.release", "work.rollback"].includes(r.op))
+      .map((r) => ({ op: r.op, receiptId: r.id, stage: r.stage ?? null }));
   }
 
   // Attempts of this work that still own a live (running/paused) worker per
@@ -1440,6 +1626,8 @@ export function createCtoWorkControl({
       origin: env.origin,
       attempts: (env.attempts ?? []).length,
       claims: (env.claims ?? []).length,
+      handoffs: (env.handoffs ?? []).length,
+      deadlineAt: env.deadlineAt ?? null,
       decisions: (env.decisions ?? []).length,
       updatedAt: env.updatedAt,
       createdAt: env.createdAt,
@@ -1541,6 +1729,9 @@ export function createCtoWorkControl({
         ...workRow(env),
         attempts,
         claims: env.claims ?? [],
+        // §10: bounded context handoffs are part of the record a replacement
+        // worker rehydrates from — inspectable like every other part.
+        handoffs: env.handoffs ?? [],
         // §11: each observation becomes durable, attributable evidence — it
         // must be inspectable, not just the claims it supports.
         evidence: env.evidence ?? [],
@@ -1572,10 +1763,11 @@ export function createCtoWorkControl({
     return {
       ok: true,
       data: {
-        workId: env.id,
-        spec: env.spec,
-        claims: env.claims ?? [],
-        evidence: env.evidence ?? [],
+      workId: env.id,
+      spec: env.spec,
+      claims: env.claims ?? [],
+      handoffs: env.handoffs ?? [],
+      evidence: env.evidence ?? [],
         operations: (env.operations ?? []).map((r) => ({
           id: r.id,
           key: r.key,
@@ -1614,6 +1806,132 @@ export function createCtoWorkControl({
   }
 
   // ---------------------------------------------------------------------------
+  // §9 scheduling across work items — the ORDERED plan read. Pure core
+  // (scheduleWorks, exported for the contract tests), composed here with the
+  // real capacity + interactive-reservation seams. The plan READS: it dispatches
+  // nothing — work_dispatch stays the only admission mutator, so the plan can
+  // never disagree with the envelope state it reads.
+  // ---------------------------------------------------------------------------
+
+  async function workSchedule({ intent = "ambient" } = {}) {
+    if (!SCHEDULE_INTENTS.includes(intent)) {
+      throw controlError("unsupported", `work_schedule intent must be one of ${SCHEDULE_INTENTS.join(", ")} (got ${JSON.stringify(intent)})`, {
+        retrySafe: false,
+      });
+    }
+    const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
+    const jobs = await readJobsOrThrow("scheduling");
+    const running = jobs.filter((j) => j?.status === "running").length;
+    const availableSlots = Math.max(0, MAX_RUNNING_JOBS - running);
+    // §9: the reservation is an OBSERVATION. A signal that cannot be read
+    // fails closed for ambient planning (yield) — never silently plans a
+    // backfill while an interactive request may be holding the model.
+    let interactiveActive = false;
+    let interactiveSource = "unwired";
+    try {
+      interactiveActive = (await isInteractiveActive()) === true;
+      interactiveSource = "wired";
+    } catch (error) {
+      interactiveActive = true;
+      interactiveSource = `unavailable (${String(error?.message ?? error).slice(0, 120)})`;
+    }
+    const plan = scheduleWorks(works, {
+      now: now(),
+      availableSlots,
+      interactiveActive,
+      intent,
+      maxStageAttempts,
+    });
+    return {
+      ok: true,
+      data: {
+        ...plan,
+        observedAt: new Date(now()).toISOString(),
+        reservation: { interactiveActive, interactiveSource, intent },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // work_handoff (§10) — the durable bounded snapshot a long worker leaves so
+  // compaction/replacement rehydrates objective (on the envelope), spec hash,
+  // target, current diff/commit, test results, pending decisions and the next
+  // step BY REFERENCE. Bounded per field, capped in count; the eviction is
+  // visible. Handoffs are part of the record work_archive preserves — cleanup
+  // never removes them with the compute.
+  // ---------------------------------------------------------------------------
+
+  async function workHandoff(input) {
+    assertPlainObject(input, "handoff input");
+    assertNonEmptyString(input.key, "idempotency key");
+    assertNonEmptyString(input.work, "work");
+    const snapshot = argsSnapshot(input);
+    const reserved = await reserveOrThrow(input.work, {
+      key: input.key,
+      op: "work.handoff",
+      args: snapshot,
+      expectedRevision: input.expectedRevision,
+      leaseOwner: RECEIPT_OWNER,
+      leaseTtlMs,
+    });
+    if (reserved.replay) return replayResponse(reserved.receipt, input.work);
+    const receipt = reserved.receipt;
+    try {
+      const envBefore = await getWorkOrThrow(input.work);
+      if (["cancelled", "archived"].includes(envBefore.state)) {
+        throw controlError("policy_blocked", `work "${input.work}" is ${envBefore.state} — a handoff records an ACTIVE work item`, {
+          retrySafe: false,
+        });
+      }
+      for (const field of HANDOFF_REQUIRED_FIELDS) {
+        assertNonEmptyString(input[field], `handoff ${field}`);
+      }
+      const record = { id: `h_${newId()}`, createdAt: now() };
+      for (const field of HANDOFF_TEXT_FIELDS) {
+        if (input[field] !== undefined && input[field] !== null) {
+          // clipNote bounds the field to NOTE_MAX_CHARS WITH a visible marker —
+          // never a silent cut (the bound is part of the rehydration contract).
+          record[field] = clipNote(String(input[field]));
+        }
+      }
+      if (record.nextStep !== undefined) record.nextStep = clipNote(record.nextStep);
+      const evicted = [];
+      await work.mutateWork(input.work, (cur) => {
+        const handoffs = [...(cur.handoffs ?? []), record];
+        // §10 bounded history: the OLDEST handoff is evicted past the capacity,
+        // and the eviction is visible in the operation's summary.
+        while (handoffs.length > HANDOFF_HISTORY_CAPACITY) {
+          evicted.push(handoffs.shift().id);
+        }
+        return { save: { ...cur, handoffs, updatedAt: now() }, value: null };
+      });
+      const env = await getWorkOrThrow(input.work);
+      const payload = successPayload({
+        env,
+        receipt,
+        state: env.state,
+        summary:
+          `recorded handoff ${record.id} on work "${input.work}" — spec ${record.specHash?.slice(0, 16)}…, ` +
+          `next step: ${record.nextStep}` +
+          (record.attemptId ? ` (attempt ${record.attemptId})` : "") +
+          (evicted.length ? `; evicted the oldest handoff(s): ${evicted.join(", ")}` : ""),
+        extra: { changed: true, handoff: record, evicted },
+      });
+      await work.recordOperationOutcome(input.work, {
+        receiptId: receipt.id,
+        status: "succeeded",
+        resultCode: "handoff_recorded",
+        result: payload,
+      });
+      return { ok: true, replayed: false, ...payload };
+    } catch (error) {
+      const err = toWorkToolError(error);
+      await recordReceiptFailure(input.work, receipt, err);
+      throw err;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // work_create — §7 create. The receipt predates the envelope, so it lives in
   // the shared §7 control ledger (createOperationRunner over mantaControlStore).
   // ---------------------------------------------------------------------------
@@ -1649,6 +1967,7 @@ export function createCtoWorkControl({
           if (input.priorityReason !== undefined && typeof input.priorityReason !== "string") {
             throw controlError("unsupported", "priorityReason must be a string");
           }
+          if (input.deadlineAt !== undefined) validateDeadlineAt(input.deadlineAt);
           for (const d of input.decisions ?? []) validateDecisionRecord(d, "decisions[]");
 
           // §1.1: the target is EXPLICIT and resolved against live tmux — never
@@ -2127,6 +2446,9 @@ export function createCtoWorkControl({
     try {
       const jobs = await readJobsOrThrow(`pausing work "${input.work}"`);
       const live = await liveAttempts(envBefore, jobs);
+      // U18: a release/rollback trigger already executing is an EXTERNAL
+      // effect — named here, never claimed paused.
+      const externalEffects = externalInFlight(envBefore);
       const requested = [];
       const couldNotPause = [];
       for (const { attempt, job } of live) {
@@ -2154,13 +2476,18 @@ export function createCtoWorkControl({
           ? `; COULD NOT PAUSE: ${couldNotPause.map((r) => `${r.jobId} (${r.reason})`).join(", ")} — still running`
           : requested.length
             ? ""
-            : "; no live workers to checkpoint");
+            : "; no live workers to checkpoint") +
+        (externalEffects.length
+          ? `; EXTERNAL EFFECT IN FLIGHT (not pausable): ${externalEffects
+              .map((e) => `${e.op} receipt ${e.receiptId}`)
+              .join(", ")} — its outcome reconciles through work_retry`
+          : "");
       const payload = successPayload({
         env: envBefore,
         receipt,
         state: "paused",
         summary,
-        extra: { changed: true, checkpointRequested: requested, stillRunning: couldNotPause },
+        extra: { changed: true, checkpointRequested: requested, stillRunning: couldNotPause, externalInFlight: externalEffects },
       });
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "paused", result: payload });
       return { ok: true, replayed: false, ...payload };
@@ -2282,6 +2609,9 @@ export function createCtoWorkControl({
     try {
       const jobs = await readJobsOrThrow(`cancelling work "${input.work}"`);
       const live = await liveAttempts(envBefore, jobs);
+      // U18: a release/rollback trigger already executing is an EXTERNAL
+      // effect — named here, never claimed stopped.
+      const externalEffects = externalInFlight(envBefore);
       const stopped = [];
       const leftIntact = [];
       const couldNotStop = [];
@@ -2312,16 +2642,21 @@ export function createCtoWorkControl({
         (couldNotStop.length
           ? `; COULD NOT CANCEL: ${couldNotStop.map((r) => `${r.jobId} (${r.reason})`).join(", ")} — still running externally`
           : "") +
+        (externalEffects.length
+          ? `; EXTERNAL EFFECT IN FLIGHT (not cancellable): ${externalEffects
+              .map((e) => `${e.op} receipt ${e.receiptId}`)
+              .join(", ")} — its outcome reconciles through work_retry`
+          : "") +
         (leftIntact.length
           ? `; paused worker(s) left intact with their worktrees: ${leftIntact.join(", ")}`
           : "") +
-        (!stopped.length && !leftIntact.length && !couldNotStop.length ? "; no live workers" : "");
+        (!stopped.length && !leftIntact.length && !couldNotStop.length && !externalEffects.length ? "; no live workers" : "");
       const payload = successPayload({
         env: envBefore,
         receipt,
         state: "cancelled",
         summary,
-        extra: { changed: true, stopped, stillRunning: couldNotStop, leftIntact },
+        extra: { changed: true, stopped, stillRunning: couldNotStop, leftIntact, externalInFlight: externalEffects },
       });
       await work.recordOperationOutcome(input.work, { receiptId: receipt.id, status: "succeeded", resultCode: "cancelled", result: payload });
       return { ok: true, replayed: false, ...payload };
@@ -3327,6 +3662,9 @@ export function createCtoWorkControl({
     workInspect,
     workEvidence,
     workCapacity,
+    // §9 scheduling plan (read) + §10 bounded context handoff (write)
+    workSchedule,
+    workHandoff,
     // mutations
     workCreate,
     workRevise,
@@ -3358,7 +3696,7 @@ export function createCtoWorkControl({
 // bag). Reads are mode "auto"; every mutation is mode "confirm".
 // ---------------------------------------------------------------------------
 
-const READ_TOOLS = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
+const READ_TOOLS = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity", "work_schedule"]);
 
 export function registerCtoWorkTools(register, workControl) {
   const def = (name, description, params, run) =>
@@ -3416,6 +3754,42 @@ export function registerCtoWorkTools(register, workControl) {
   );
 
   def(
+    "work_schedule",
+    "§9 scheduling plan across work items, in dispatch order: dependency readiness, explicit " +
+      "priorities/deadlines, availability, fair aging. Every item that cannot dispatch carries a recorded " +
+      "wait reason (dependency / policy_blocked / capacity / interactive_reserved). With intent 'ambient' " +
+      "the plan yields to an active interactive request (empty plan, reservation recorded). READ-ONLY — " +
+      "dispatches nothing; work_dispatch remains the only admission.",
+    {
+      intent: { type: "string", description: "ambient (default — yields before an interactive request) | operator (the CEO asked; no reservation)." },
+    },
+    (args) => workControl.workSchedule(args),
+  );
+
+  def(
+    "work_handoff",
+    "§10 record a BOUNDED context handoff on a work item so long work survives compaction/replacement: " +
+      "spec hash, target, current diff/commit, test results, pending decisions and the NEXT STEP — rehydrated " +
+      "by reference through work_inspect/work_evidence. Bounded per field; the oldest handoff is evicted past " +
+      "the capacity, visibly. Never a keepalive prompt. Idempotent via key.",
+    {
+      key: { type: "string", description: "Stable idempotency key." },
+      work: { type: "string", description: "The work id." },
+      specHash: { type: "string", description: "The spec hash the handoff was taken under (required)." },
+      nextStep: { type: "string", description: "The next concrete step (required — the rehydration contract)." },
+      attemptId: { type: "string", description: "The attempt the handoff preserves (optional)." },
+      target: { type: "string", description: "Target/checkout identity (optional)." },
+      diff: { type: "string", description: "Current diff reference (optional — a ref, not the diff itself)." },
+      commit: { type: "string", description: "Current head commit, if known (optional)." },
+      testResults: { type: "string", description: "Latest test results statement (optional)." },
+      pendingDecisions: { type: "string", description: "Pending decisions summary (optional)." },
+      note: { type: "string", description: "Free context (optional)." },
+      expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
+    },
+    (args) => workControl.workHandoff(args),
+  );
+
+  def(
     "work_create",
     "Create a tracked work item. The target project is EXPLICIT (exact tmux session name — resolved against " +
       "live state, never inferred); the spec (revision + hash + document ref) and the delivery target are " +
@@ -3436,6 +3810,7 @@ export function registerCtoWorkTools(register, workControl) {
       dependencies: { type: "array", description: "Work ids this depends on (acyclic; existence enforced)." },
       priority: { type: "number", description: "Scheduling priority (higher first)." },
       priorityReason: { type: "string", description: "Why this priority." },
+      deadlineAt: { type: "number", description: "Optional scheduling deadline (epoch ms) — orders time-bound work in work_schedule." },
       repositoryId: { type: "string", description: "Optional canonical repository identity (defaults to 'unmapped')." },
       decisions: { type: "array", description: "Initial decision records (usually empty)." },
       originMessageId: { type: "string", description: "Optional originating CTO message id." },
@@ -3453,7 +3828,7 @@ export function registerCtoWorkTools(register, workControl) {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
-      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason)." },
+      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason, deadlineAt)." },
       reason: { type: "string", description: "Why the revision (recorded in the summary)." },
     },
     (args) => workControl.workRevise(args),
