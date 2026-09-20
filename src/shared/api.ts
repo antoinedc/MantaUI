@@ -1541,6 +1541,12 @@ export interface Api {
   // POST /api/cto/pause — the §10.6-5 kill switch (manual "Pause everything
   // now"). Idempotent. Returns `{ok:false, error}` on failure.
   ctoPause(): Promise<{ ok: boolean; error?: string }>;
+  // POST /api/cto — dispatch an existing cto tool by name through the engine
+  // (read tools run confirm-free). The §11 work-lifecycle cards read through
+  // it: `work_list` + `work_inspect` are pure store reads, so polling them is
+  // safe and no new server surface is added. Returns the tool's own result
+  // (`{ok, data}` for reads, `{ok:false, error}` on failure).
+  ctoWorkRun(tool: string, args?: Record<string, unknown>): Promise<{ ok: boolean; error?: string; data?: unknown }>;
   // POST /api/cto/resume — lift the kill switch. Idempotent.
   ctoResume(): Promise<{ ok: boolean; error?: string }>;
   // GET /api/cto/digest — the view read of the latest stored digest (§5.5);

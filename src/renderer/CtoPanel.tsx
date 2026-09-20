@@ -79,6 +79,8 @@ import {
 import type { CtoCard, CtoFinishedItem, CtoDigest, CtoHeldRow, CtoLedgerPage, CtoLedgerRow, CtoProfileRender, CtoSkill, CtoTonightTask, CtoFactsRender, CtoFactRow, CtoToolsRender, CtoToolRegistryRow } from "../shared/api.js";
 import { formatAge } from "./chatUtils";
 import { Toggle } from "./Toggle";
+import { WorkSection } from "./ctoWorkCardsView";
+import { useCtoWorkCards } from "./ctoWorkCards";
 
 // The effort-dial options (§12.1, D12). Plain-language scope per tier. Medium
 // and High list the features they ADD over the tier below; their additional
@@ -201,6 +203,9 @@ export function CtoPanel({
   // line can be gated on both (see `mayShowResting` in ctoView.ts).
   const [overviewLoaded, setOverviewLoaded] = useState(false);
   const [overviewLoadError, setOverviewLoadError] = useState<string | null>(null);
+  // §11 work-lifecycle cards on the overview — the same work_list + work_inspect
+  // reads the conversation's cards use, refetch-driven (poll + focus).
+  const work = useCtoWorkCards({ pollMs: 15_000, enabled: view === "overview" });
   const reportOverviewError = useCallback(
     (label: string) => (e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e);
@@ -783,6 +788,7 @@ export function CtoPanel({
           <BlockerSection cards={blockerCardList} now={Date.now()} onAnswer={handleAnswer} />
           <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
+          <WorkSection cards={work.cards} error={work.error} />
           <NowRail cards={nowCards} />
           <JustFinishedRail items={finished} now={Date.now()} onOpen={handleOpenFinished} />
           <DigestSection
