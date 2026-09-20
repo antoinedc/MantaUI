@@ -989,23 +989,18 @@ test("counterfactual: cancel leaves a PAUSED worker intact and names it (never p
 // W9 — capacity
 // ---------------------------------------------------------------------------
 
-test("work_capacity reflects the delegate cap and dispatch at cap parks the work on waiting/capacity", async () => {
-  const { control, calls } = makeWorkControl({ cap: 1 });
-  const created = await seedReadyWork(control, { id: "w9-cap" });
-  const capacity1 = await control.workCapacity();
-  assert.equal(capacity1.data.delegate.maxRunningJobs, MAX_RUNNING_JOBS);
-  assert.equal(capacity1.data.delegate.runningJobs, 0);
-  assert.equal(capacity1.data.delegate.availableSlots, MAX_RUNNING_JOBS);
-
-  // A box whose slots are all taken by foreign jobs: capacity reads 0 and the
-  // dispatch is refused with capacity_wait (retry-safe), the work parked on
-  // waiting/capacity with the reason durable.
-  const foreign = Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => ({
-    id: `job_foreign_${i}`,
+// A box whose slots are all taken by foreign running jobs — the server-
+// realistic "at cap" fixture shared by the capacity tests (W9, U19).
+function foreignRunningJobs(tag) {
+  return Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => ({
+    id: `job_foreign_${tag}_${i}`,
     status: "running",
     correlation: null,
   }));
-  const control2 = createCtoWorkControl({
+}
+
+function atCapControl(foreign) {
+  return createCtoWorkControl({
     store: workStoreFixture(),
     createReceiptsStore: ledgerFixture(),
     now: makeClock(),
@@ -1017,6 +1012,20 @@ test("work_capacity reflects the delegate cap and dispatch at cap parks the work
     observeOpencodeProjectId: async () => null,
     gitRemoteUrl: async () => null,
   });
+}
+
+test("work_capacity reflects the delegate cap and dispatch at cap parks the work on waiting/capacity", async () => {
+  const { control, calls } = makeWorkControl({ cap: 1 });
+  const created = await seedReadyWork(control, { id: "w9-cap" });
+  const capacity1 = await control.workCapacity();
+  assert.equal(capacity1.data.delegate.maxRunningJobs, MAX_RUNNING_JOBS);
+  assert.equal(capacity1.data.delegate.runningJobs, 0);
+  assert.equal(capacity1.data.delegate.availableSlots, MAX_RUNNING_JOBS);
+
+  // A box whose slots are all taken by foreign jobs: capacity reads 0 and the
+  // dispatch is refused with capacity_wait (retry-safe), the work parked on
+  // waiting/capacity with the reason durable.
+  const control2 = atCapControl(foreignRunningJobs("w9"));
   const w2 = await control2.workCreate({
     key: "w9-create",
     project: "manta",
@@ -2649,23 +2658,7 @@ test("U19 integrated: at cap, dispatch parks the envelope on waiting/capacity AN
   // A box whose slots are all taken by foreign jobs (the W9 fixture shape):
   // the dispatch is refused BEFORE any worker starts, the work parks on
   // waiting/capacity, and the schedule plan reads the same reality.
-  const foreign = Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => ({
-    id: `job_foreign_u19_${i}`,
-    status: "running",
-    correlation: null,
-  }));
-  const control2 = createCtoWorkControl({
-    store: workStoreFixture(),
-    createReceiptsStore: ledgerFixture(),
-    now: makeClock(),
-    listProjects: async () => fixtureProjects(),
-    listDelegateJobs: async () => foreign,
-    delegateOps: makeDelegateSpy({ cap: MAX_RUNNING_JOBS, jobs: foreign }).engine,
-    resolveCwd: resolveCwdOrThrow,
-    getConversationId: async () => "ses_cto",
-    observeOpencodeProjectId: async () => null,
-    gitRemoteUrl: async () => null,
-  });
+  const control2 = atCapControl(foreignRunningJobs("u19"));
   const a = await control2.workCreate({
     key: "w-cap-a", project: "manta", objective: "x",
     spec: { revision: 1, hash: "h", documentRef: "d" }, deliveryTarget: { kind: "pr" }, state: "ready",
