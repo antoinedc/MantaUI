@@ -102,6 +102,17 @@ type PromptModel = { providerID: string; modelID: string; variant?: string };
 // substitution is offered. Never throws: on an internal failure the server
 // returns the incumbent unchanged with reason "routing unavailable".
 type RoutingChooseDecision = {
+  // BET-1535 (S3): the discriminated verdict. "selected" — a healthy model
+  // qualified. "no-healthy-endpoint" — routing was active, nothing healthy
+  // survived, and the incumbent fallback is itself health-excluded (I1) or
+  // health is why nothing survived (I2): `model` is null, `excluded` names the
+  // dead endpoints, and the caller must NOT fall through to the provider
+  // default. "unrouted" — off-path / routing inactive / ordinary no-candidate
+  // fallback (the incumbent rides in `model`, as always).
+  kind?: "selected" | "no-healthy-endpoint" | "unrouted";
+  // no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
+  // router knows are excluded.
+  excluded?: string[];
   model: PromptModel | null;
   reason: string;
   alternatives: PromptModel[];

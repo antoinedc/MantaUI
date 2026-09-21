@@ -403,36 +403,9 @@ import { _normalizeProviderModel } from "./opencode.mjs";
 import { chooseSubagentModel } from "./delegate.mjs";
 // @ts-expect-error — the snapshots reader-shape helper under test.
 import { readSnapshotsForRouting } from "./ctoSessions.mjs";
-import { familyKey } from "../shared/modelGuide.mjs";
-
-function rawProviderModel(over = {}) {
-  return {
-    id: "m",
-    status: "active",
-    limit: { context: 32000, output: 16000 },
-    cost: { input: 3, output: 15, cache: { read: 0.3, write: 3 } },
-    capabilities: { toolcall: true, input: ["text", "image", "pdf"] },
-    ...over,
-  };
-}
-
-function routingServicesFor(list, extra = {}) {
-  const declared = {};
-  for (const m of list ?? []) {
-    if (!m || typeof m !== "object") continue;
-    declared[`${m.providerID}/${m.id}`] = { catalogId: m.id, price: {}, caches: true };
-  }
-  return {
-    catalogMatcher: { lookupModel: (id) => ({ id }), matchModel: (id) => ({ kind: "exact", candidates: [{ id }] }) },
-    catalogEntryFor: (c) => ({ family: familyKey(c?.id) ?? undefined }),
-    qualityField: {},
-    declared,
-    accounts: {},
-    health: {},
-    telemetry: {},
-    ...extra,
-  };
-}
+// Shared routing-test fixtures (BET-1535 Block 3 — one factory, no per-file
+// re-derivations for the duplication gate to flag).
+import { rawProviderModel, routingServicesFor } from "./fixtures/routingTestFixtures.mjs";
 
 // The resolver shape defaultResolveModel builds: the REAL router, the class
 // tier forced through perAgent, no incumbent (a CTO run has none).

@@ -159,6 +159,30 @@ describe("AGENT_TIER", () => {
   });
 });
 
+// BET-1535 Block 3: the shared "sole candidate, health-excluded" route input —
+// the minimal scenario where health is why nothing survives (rule 3). Reused by
+// the trace test and the verdict test.
+const soleExcludedRoute = (over: Record<string, unknown> = {}) => ({
+  catalog: [endpoint("dead", { providerID: "p" })],
+  policy: { preset: "balanced" },
+  intent: { incumbent: endpoint("m", { providerID: "a" }) },
+  // A still-hard drop (provider out of credit) — status no longer excludes
+  // a model (BET-1267 3d), so "nothing survives" must come from a real
+  // per-turn constraint.
+  services: { health: { p: "out-of-credit" } },
+  ...over,
+});
+
+// BET-1535 Block 3: the shared below-floor build scenario — every endpoint
+// scores 0.25 under build's 0.4 floor, so the band is empty and the incumbent's
+// health decides between rule 2 (excluded) and rule 4 (today's behaviour).
+const belowFloorBuildRoute = (health?: Record<string, string>) => ({
+  catalog: [endpoint("low2", { providerID: "q", tier: "fast", score: 0.25 })],
+  policy: { preset: "balanced" },
+  intent: { agent: "build", incumbent: endpoint("low", { providerID: "p", tier: "fast", score: 0.25 }) },
+  ...(health ? { services: { health } } : {}),
+});
+
 describe("chooseModel — off-path and invariants", () => {
   it("returns the incumbent by reference when routing is not activated", () => {
     const incumbent = endpoint("m", { providerID: "a" });
@@ -182,16 +206,7 @@ describe("chooseModel — off-path and invariants", () => {
   });
 
   it("no-healthy-endpoint verdict carries the full trace (BET-1535)", () => {
-    const incumbent = endpoint("m", { providerID: "a" });
-    const res = route({
-      catalog: [endpoint("dead", { providerID: "p" })],
-      policy: { preset: "balanced" },
-      intent: { incumbent },
-      // A still-hard drop (provider out of credit) — status no longer excludes
-      // a model (BET-1267 3d), so "nothing survives" must come from a real
-      // per-turn constraint.
-      services: { health: { p: "out-of-credit" } },
-    });
+    const res = route(soleExcludedRoute());
     // BET-1535 (S3) rule 3: the sole candidate was killed only by health, so
     // the verdict is typed — but the trace still records the assessment pass.
     expect(res.kind).toBe("no-healthy-endpoint");
@@ -622,17 +637,23 @@ describe("chooseModel — judge the resolved endpoint, not the provider's raw cl
     )) as RoutingServices;
   }
 
-  it("1. the catalogue's real context limit reaches the headroom filter — a conversation that fits 262k is not dropped", async () => {
+  // BET-1535 Block 3: the shared declared-price scenario — real services, the
+  // hallucinating provider, and a declared catalogue entry priced input 2 / output 8.
+  async function declaredSonnetRoute() {
     const services = await realServices({
       "p/declared-sonnet": { catalogId: "declared-sonnet", price: { input: 2, output: 8 }, caches: false },
     });
     const candidate = _normalizeProviderModel("p", "declared-sonnet", HALLUCINATING)!;
-    const res = chooseModel({
+    return chooseModel({
       intent: { kind: "start", agent: "general", needs: {}, contextTokens: 150000 },
       catalog: [candidate],
       policy: { preset: "balanced" },
       services,
     });
+  }
+
+  it("1. the catalogue's real context limit reaches the headroom filter — a conversation that fits 262k is not dropped", async () => {
+    const res = await declaredSonnetRoute();
     // The provider claimed `context: 0`; the catalogue's 262k is what governs.
     // 150k tokens fit 262k, so the endpoint survives — it is not dropped for
     // "context headroom".
@@ -642,16 +663,7 @@ describe("chooseModel — judge the resolved endpoint, not the provider's raw cl
   });
 
   it("2. a declared price reaches the cost — trace.winner.cost.value reflects it, not 0", async () => {
-    const services = await realServices({
-      "p/declared-sonnet": { catalogId: "declared-sonnet", price: { input: 2, output: 8 }, caches: false },
-    });
-    const candidate = _normalizeProviderModel("p", "declared-sonnet", HALLUCINATING)!;
-    const res = chooseModel({
-      intent: { kind: "start", agent: "general", needs: {}, contextTokens: 150000 },
-      catalog: [candidate],
-      policy: { preset: "balanced" },
-      services,
-    });
+    const res = await declaredSonnetRoute();
     const w = res.trace.winner!;
     expect(w).not.toBeNull();
     // input 2 / output 8, missing cache rates bill at the input rate under the
@@ -829,23 +841,23 @@ describe("chooseModel — the cost stage (BET-1269): measured mix, catalogue ref
   // A stale 100% window (set by the usage poller the moment a reset passes) must
   // not escalate: it contributes neither exhaustion nor pace. On main the
   // exhaustion check ignores `stale` and drops the provider.
-  it("7. a stale 100% window leaves the provider selectable", () => {
+  // BET-1535 Block 3: the shared stale-window route (tests 7 / 7b).
+  const staleAccountRoute = () => {
     const a = endpoint("m", { providerID: "a" });
-    const res = route({
+    return route({
       catalog: [a],
       policy: { preset: "balanced" },
       services: { accounts: { a: { kind: "subscription", windows: [{ pct: 100, stale: true }] } } },
     });
+  };
+
+  it("7. a stale 100% window leaves the provider selectable", () => {
+    const res = staleAccountRoute();
     expect(res.model?.providerID).toBe("a");
   });
 
   it("7b. if every window is stale the account is priced as if it had none (no-window), not exhausted", () => {
-    const a = endpoint("m", { providerID: "a" });
-    const res = route({
-      catalog: [a],
-      policy: { preset: "balanced" },
-      services: { accounts: { a: { kind: "subscription", windows: [{ pct: 100, stale: true }] } } },
-    });
+    const res = staleAccountRoute();
     expect(res.model?.providerID).toBe("a");
     expect(res.trace.winner!.cost.basis).toBe("subscription-no-window");
   });
@@ -1166,13 +1178,7 @@ describe("chooseModel — no-healthy-endpoint verdict (BET-1535)", () => {
   });
 
   it("rule 3: a non-empty health-neutral set yields the verdict (health is why there is nothing)", () => {
-    const incumbent = endpoint("inc", { providerID: "x" });
-    const res = route({
-      catalog: [endpoint("dead", { providerID: "p" })],
-      policy: { preset: "balanced" },
-      intent: { incumbent },
-      services: { health: { p: "out-of-credit" } },
-    });
+    const res = route(soleExcludedRoute());
     expect(res.kind).toBe("no-healthy-endpoint");
     expect((res as any).excluded).toEqual(["p/dead"]);
   });
@@ -1196,26 +1202,15 @@ describe("chooseModel — no-healthy-endpoint verdict (BET-1535)", () => {
     // All survivors sit below build's quality floor, so the band is empty and
     // today's code returns the incumbent — but the incumbent's provider is
     // rate-limited, so I1 (strictly prior) forces the typed verdict.
-    const incumbent = endpoint("low", { providerID: "p", tier: "fast", score: 0.25 });
-    const res = route({
-      catalog: [endpoint("low2", { providerID: "q", tier: "fast", score: 0.25 })],
-      policy: { preset: "balanced" },
-      intent: { agent: "build", incumbent },
-      services: { health: { p: "rate-limited" } },
-    });
+    const res = route(belowFloorBuildRoute({ p: "rate-limited" }));
     expect(res.kind).toBe("no-healthy-endpoint");
     expect((res as any).excluded).toEqual(["p/low"]);
   });
 
   it("band-empty: a healthy incumbent still takes today's path (the floor, not health, emptied the band)", () => {
-    const incumbent = endpoint("low", { providerID: "p", tier: "fast", score: 0.25 });
-    const res = route({
-      catalog: [endpoint("low2", { providerID: "q", tier: "fast", score: 0.25 })],
-      policy: { preset: "balanced" },
-      intent: { agent: "build", incumbent },
-    });
+    const res = route(belowFloorBuildRoute());
     expect(res.kind).toBe("unrouted");
-    expect(res.model).toBe(incumbent);
+    expect(res.model?.providerID).toBe("p");
     expect(res.reason).toContain("above the 0.4 floor");
   });
 

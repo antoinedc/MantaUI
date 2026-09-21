@@ -30,6 +30,10 @@ import {
   isToolStepBoundary,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
+
+// Shared routing-test fixtures (BET-1535 Block 3: one factory, no per-file
+// re-derivations for the duplication gate to flag).
+import { rawProviderModel, normalize, routingServicesFor } from "./fixtures/routingTestFixtures.mjs";
 // Per standing rule 9: a routing test may not hand-write a candidate literal.
 // Build every candidate through the REAL normaliser so the fixtures can never
 // drift from what production produces (that drift is how this epic's defects
@@ -43,26 +47,37 @@ import { chooseModel } from "../shared/modelRouter.mjs";
 // No real tmux, no real opencode, no real git.
 // ----------------------------------------------------------------------------
 
+// The shared in-memory job-store core both harnesses build (BET-1535 Block 3:
+// one definition — the duplication gate flags the repeated dep block).
+function jobStoreCore({ jobs, published, deliver, now }) {
+  return {
+    load: async () => jobs.map((j) => ({ ...j })),
+    save: async (next) => {
+      jobs.splice(0, jobs.length, ...next.map((j) => ({ ...j })));
+    },
+    publish: (evt) => published.push(evt),
+    deliver,
+    listMessages: async () => [],
+    gitRun: async () => ({ stdout: "" }),
+    now: typeof now === "function" ? now : () => 1_700_000_000_000,
+  };
+}
+
 function harness(initialJobs = [], fixedNow = 1_700_000_000_000) {
-  let jobs = initialJobs.map((j) => ({ ...j }));
+  const jobs = initialJobs.map((j) => ({ ...j }));
   const published = [];
   const delivered = [];
   let nowMs = fixedNow;
-  const deps = {
-    load: async () => jobs.map((j) => ({ ...j })),
-    save: async (next) => {
-      jobs = next.map((j) => ({ ...j }));
-    },
-    publish: (evt) => published.push(evt),
+  const deps = jobStoreCore({
+    jobs,
+    published,
     deliver: async (args) => {
       delivered.push(args);
       return { delivered: true, queued: false };
     },
-    listMessages: async () => [],
-    gitRun: async () => ({ stdout: "" }),
     now: () => nowMs,
-    setNow: (n) => { nowMs = n; },
-  };
+  });
+  deps.setNow = (n) => { nowMs = n; };
   return {
     deps,
     published,
@@ -80,43 +95,8 @@ const CAP_ERROR =
 // (identity matcher + quality entry + declared price/caching) so the bare
 // {providerID, id, status} fixtures are eligible, exactly as the box's wiring
 // will when it lands. Without these the router honestly reports "no usable
-// endpoint" and returns the incumbent.
-function routingServicesFor(list, extra = {}) {
-  const declared = {};
-  for (const m of list ?? []) {
-    if (!m || typeof m !== "object") continue;
-    declared[`${m.providerID}/${m.id}`] = { catalogId: m.id, price: {}, caches: true };
-  }
-  return {
-    catalogMatcher: { lookupModel: (id) => ({ id }), matchModel: (id) => ({ kind: "exact", candidates: [{ id }] }) },
-    catalogEntryFor: (c) => ({ family: familyKey(c?.id) ?? undefined }),
-    qualityField: {},
-    declared,
-    accounts: {},
-    health: {},
-    telemetry: {},
-    ...extra,
-  };
-}
-
-// A raw provider-model payload in the shape opencode's `/provider` emits, and
-// the normaliser that turns it into the canonical OpencodeModel the router
-// actually sees. Tests NEVER construct the router candidate by hand.
-function rawProviderModel(over = {}) {
-  return {
-    id: "m",
-    status: "active",
-    limit: { context: 32000, output: 16000 },
-    cost: { input: 3, output: 15, cache: { read: 0.3, write: 3 } },
-    capabilities: { toolcall: true, input: ["text", "image", "pdf"] },
-    ...over,
-  };
-}
-function normalize(providerID, modelId, raw) {
-  const m = _normalizeProviderModel(providerID, modelId, raw);
-  assert.ok(m, "candidate must normalise (fixture drift check)");
-  return m;
-}
+// endpoint" and returns the incumbent. The factory lives in
+// fixtures/routingTestFixtures.mjs (shared with ctoSessions.test.mjs).
 
 // ----------------------------------------------------------------------------
 // 1. buildJobPrompt — with and without a worktree
@@ -511,11 +491,7 @@ test("startJob persists the session link on the job record (BET-844)", async () 
 });
 
 test("startJob leaves the link null when none is provided", async () => {
-  const h = harness([]);
-  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
-  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async () => ({ sessionId: "child_nolink", windowIndex: 1 });
+  const h = startHarness("child_nolink");
   const res = await startJob(
     { prompt: "plain delegate", parentSessionID: "parent", parentDirectory: "/repo" },
     h.deps,
@@ -530,11 +506,7 @@ test("startJob leaves the link null when none is provided", async () => {
 // user's window for the CTO digest. Best-effort — a stamp failure must not
 // fail the job start.
 test("startJob stamps the new window's owner as job (BET-1377)", async () => {
-  const h = harness([]);
-  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
-  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async () => ({ sessionId: "child_owner", windowIndex: 4 });
+  const h = startHarness("child_owner", 4);
   const stamps = [];
   h.deps.stampOwner = async (sessionName, windowIndex, owner) => {
     stamps.push({ sessionName, windowIndex, owner });
@@ -548,11 +520,7 @@ test("startJob stamps the new window's owner as job (BET-1377)", async () => {
 });
 
 test("startJob still succeeds when the owner stamp fails (best-effort)", async () => {
-  const h = harness([]);
-  h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
-  const parentWin = { index: 1, name: "p", opencodeSessionId: "parent", paneCurrentPath: "/repo" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
-  h.deps.newWindow = async () => ({ sessionId: "child_owner_fail", windowIndex: 2 });
+  const h = startHarness("child_owner_fail", 2);
   h.deps.stampOwner = async () => { throw new Error("tmux exploded"); };
   const res = await startJob(
     { prompt: "delegate work", parentSessionID: "parent", parentDirectory: "/repo" },
@@ -574,26 +542,99 @@ function mockModels() {
   ];
 }
 
-function startHarness(childSessionId) {
+// BET-1535 Block 3: the shared delegate startJob input (over = per-test knobs).
+function delegateInput(over = {}) {
+  return { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", ...over };
+}
+
+// The shared routed-spawn: wire models + routing services, start the job,
+// expect a delivered decision.
+async function routedSpawn(h, models, input = delegateInput()) {
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
+  const res = await startJob(input, h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  return res;
+}
+
+// The shared LIVE-READER spawn harness (BET-1252/1354): box-style readers
+// (catalogue + health + ledger) on a routing-activated spawn — NOT a pre-built
+// routingServices injection.
+function liveReaderHarness(childId, { preset, models, familyOf = familyKey, health, summary, cfg = {} }) {
+  const h = startHarness(childId);
+  h.deps.configGet = async () => ({ modelRouting: { preset }, ...cfg });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => models;
+  const cat = (id) => ({ id, family: familyOf(id) });
+  h.deps.catalogIndex = {
+    lookupModel: (id) => cat(id),
+    matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
+    allModels: () => [],
+  };
+  h.deps.providerHealthState = health;
+  h.deps.endpointSummary = summary;
+  return h;
+}
+
+// The shared routed-spawn harness for the [router]-line tests (balanced preset,
+// the three-tier roster, RoutingServices injection).
+function routingLinesHarness(childId) {
+  const h = startHarness(childId);
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  const models = threeTierAnthropicModels();
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models);
+  return h;
+}
+
+// The standard three-model anthropic roster at default fixture prices
+// (BET-1535 Block 3: one roster literal, not one per test).
+function anthropicTrio() {
+  return [
+    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),   // deep
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })), // balanced
+    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),  // fast
+  ];
+}
+
+// BET-1535 Block 3: start the job with an EXPLICIT model and assert it is
+// delivered verbatim (the off-switch path — routing never runs).
+async function startWithModel(h, model) {
+  const res = await startJob(delegateInput({ model }), h.deps);
+  assert.equal(res.ok, true);
+  assert.equal(h.delivered.length, 1);
+  assert.deepEqual(h.delivered[0].model, model);
+  return res;
+}
+
+// BET-1535 Block 3: assert the [router] line's BET-1301 shape for the agent
+// the spawn routed as (the intent — not which model won).
+function assertRouterLine(lines, agent) {
+  const line = lines.find((l) => l.includes("[router]"));
+  assert.ok(line, `expected a [router] line; got: ${lines.join(" | ")}`);
+  assert.ok(
+    line.startsWith(`[router] sub/${agent} → `),
+    `expected the BET-1301 sub/${agent} format; got: ${line}`,
+  );
+  assert.ok(line.includes("ctx=0 needs=tools"), `expected the turn's inputs; got: ${line}`);
+}
+
+function startHarness(childSessionId, windowIndex = 1) {
   const h = harness([]);
   h.deps.gitAddWorktree = async () => { throw new Error("not a git repository"); };
   h.deps.listProjects = async () => [
     { tmuxSession: "s", windows: [{ index: 1, opencodeSessionId: "parent", paneCurrentPath: "/repo" }] },
   ];
-  h.deps.newWindow = async () => ({ sessionId: childSessionId, windowIndex: 1 });
+  h.deps.newWindow = async () => ({ sessionId: childSessionId, windowIndex });
   return h;
 }
 
 test("startJob with a structured model passes it to deliver and records requestedModel (BET-947)", async () => {
   const h = startHarness("child_struct");
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
-      model: { providerID: "anthropic", modelID: "claude-opus-4-5" } },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(h.delivered.length, 1);
-  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+  const opus = { providerID: "anthropic", modelID: "claude-opus-4-5" };
+  const res = await startWithModel(h, opus);
   const job = h.jobs.find((j) => j.childSessionID === "child_struct");
   assert.equal(job.requestedModel, "anthropic/claude-opus-4-5");
 });
@@ -601,10 +642,7 @@ test("startJob with a structured model passes it to deliver and records requeste
 test("startJob resolves free text matching a known model and passes it (BET-947)", async () => {
   const h = startHarness("child_freetext");
   h.deps.listModels = async () => mockModels();
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", model: "opus" },
-    h.deps,
-  );
+  const res = await startJob(delegateInput({ model: "opus" }), h.deps);
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
@@ -649,15 +687,8 @@ test("startJob with routing off delivers the incumbent model byte-identical (BET
   h.deps.configGet = async () => ({}); // no routing config → not activated
   h.deps.listSnapshots = () => [];
   h.deps.listModels = async () => mockModels();
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo",
-      model: { providerID: "anthropic", modelID: "claude-opus-4-5" } },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(h.delivered.length, 1);
   // routing off → the requested model passes through exactly as before BET-1220
-  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+  await startWithModel(h, { providerID: "anthropic", modelID: "claude-opus-4-5" });
 });
 
 test("startJob survives a throwing listSnapshots and delivers the incumbent (BET-1220)", async () => {
@@ -706,19 +737,7 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
   // the key, not just the behaviour.
   h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
   h.deps.listSnapshots = () => [];
-  const models = [
-    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),   // deep
-    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })), // balanced
-    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),  // fast
-  ];
-  h.deps.listModels = async () => models;
-  h.deps.routingServices = routingServicesFor(models);
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(h.delivered.length, 1);
+  const res = await routedSpawn(h, anthropicTrio());
   assert.ok(h.delivered[0].model, "routing on should deliver a decided model");
   assert.equal(h.delivered[0].model.providerID, "anthropic");
   // economy + general → the balanced floor wins; the winner is NORMALISED from
@@ -733,9 +752,6 @@ test("startJob with routing on normalises the catalog winner to a {providerID, m
 // non-incumbent model. A provider the reader reports as out-of-credit /
 // rate-limited is excluded from the outcome.
 test("startJob routes to a non-incumbent model from live routing readers (BET-1252)", async () => {
-  const h = startHarness("child_live_routing");
-  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
-  h.deps.listSnapshots = () => [];
   const models = [
     // openai/gpt-5 is the CHEAPEST — but the health reader reports it
     // rate-limited, so it must be excluded from the decision.
@@ -744,21 +760,15 @@ test("startJob routes to a non-incumbent model from live routing readers (BET-12
     normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
     normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 5, cache: { read: 0.1, write: 1.5 } }, capabilities: { toolcall: true } })),
   ];
-  h.deps.listModels = async () => models;
   // Live-style readers (NOT a pre-built routingServices).
-  const cat = (id) => ({ id, family: familyKey(id) });
-  h.deps.catalogIndex = {
-    lookupModel: (id) => cat(id),
-    matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
-    allModels: () => [],
-  };
-  h.deps.providerHealthState = (pid) => (pid === "openai" ? "rate-limited" : "ok");
-  h.deps.endpointSummary = async () => ({ supported: true, endpoints: {} });
+  const h = liveReaderHarness("child_live_routing", {
+    preset: "economy",
+    models,
+    health: (pid) => (pid === "openai" ? "rate-limited" : "ok"),
+    summary: async () => ({ supported: true, endpoints: {} }),
+  });
 
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
-    h.deps,
-  );
+  const res = await startJob(delegateInput(), h.deps);
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
   // A decided, non-incumbent model — never the rate-limited openai/gpt-5.
@@ -776,9 +786,6 @@ test("startJob routes to a non-incumbent model from live routing readers (BET-12
 // price, never the broken one. Proves the ledger wiring actually reaches the
 // router's derank and influences the outcome.
 test("startJob routes to the non-deranked sibling when an endpoint is reliability-penalised (BET-1252)", async () => {
-  const h = startHarness("child_derank");
-  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
-  h.deps.listSnapshots = () => [];
   const models = [
     // Same model served by two endpoints at the SAME price — only reliability
     // can separate them. anthropic/claude-sonnet-4 is the alphabetical
@@ -788,26 +795,21 @@ test("startJob routes to the non-deranked sibling when an endpoint is reliabilit
     normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
     normalize("openai", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
   ];
-  h.deps.listModels = async () => models;
-  const cat = (id) => ({ id, family: "sonnet" });
-  h.deps.catalogIndex = {
-    lookupModel: (id) => cat(id),
-    matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
-    allModels: () => [],
-  };
-  h.deps.providerHealthState = () => "ok";
-  h.deps.endpointSummary = async () => ({
-    supported: true,
-    endpoints: {
-      "anthropic/claude-sonnet-4": { reliability: { requests: 25, errored: 12, rate: 0.48 }, speed: {}, latency: {}, mix: {} },
-      "openai/claude-sonnet-4": { reliability: { requests: 25, errored: 0, rate: 0 }, speed: {}, latency: {}, mix: {} },
-    },
+  const h = liveReaderHarness("child_derank", {
+    preset: "balanced",
+    models,
+    familyOf: () => "sonnet",
+    health: () => "ok",
+    summary: async () => ({
+      supported: true,
+      endpoints: {
+        "anthropic/claude-sonnet-4": { reliability: { requests: 25, errored: 12, rate: 0.48 }, speed: {}, latency: {}, mix: {} },
+        "openai/claude-sonnet-4": { reliability: { requests: 25, errored: 0, rate: 0 }, speed: {}, latency: {}, mix: {} },
+      },
+    }),
   });
 
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
-    h.deps,
-  );
+  const res = await startJob(delegateInput(), h.deps);
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
   // The deranked (anthropic, alphabetical winner) endpoint must NOT win the
@@ -824,26 +826,18 @@ test("startJob routes to the non-deranked sibling when an endpoint is reliabilit
 // as today. This is the subagent side of the main-panel routing:choose pacing
 // wiring (BET-1345).
 test("startJob applies optimizer pacing pressure to the subagent decision (BET-1354)", async () => {
-  const liveReaders = () => {
-    const h = startHarness("child_pacing");
-    h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" }, optimizerEnabled: true });
-    h.deps.listSnapshots = () => [];
-    const models = [
-      normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", cost: { input: 15, output: 75, cache: { read: 1.5, write: 22.5 } }, capabilities: { reasoning: true, toolcall: true } })),
-      normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
-      normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 5, cache: { read: 0.1, write: 1.5 } }, capabilities: { toolcall: true } })),
-    ];
-    h.deps.listModels = async () => models;
-    const cat = (id) => ({ id, family: familyKey(id) });
-    h.deps.catalogIndex = {
-      lookupModel: (id) => cat(id),
-      matchModel: (id) => ({ kind: "exact", candidates: [cat(id)] }),
-      allModels: () => [],
-    };
-    h.deps.providerHealthState = () => "ok";
-    h.deps.endpointSummary = async () => ({ supported: true, endpoints: {} });
-    return h;
-  };
+  const liveReaders = () =>
+    liveReaderHarness("child_pacing", {
+      preset: "balanced",
+      cfg: { optimizerEnabled: true },
+      models: [
+        normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4", cost: { input: 15, output: 75, cache: { read: 1.5, write: 22.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+        normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4", cost: { input: 3, output: 15, cache: { read: 0.3, write: 4.5 } }, capabilities: { reasoning: true, toolcall: true } })),
+        normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 5, cache: { read: 0.1, write: 1.5 } }, capabilities: { toolcall: true } })),
+      ],
+      health: () => "ok",
+      summary: async () => ({ supported: true, endpoints: {} }),
+    });
 
   // No pacing reader: optimizer is on but pressure is absent -> eco 0 -> the
   // balanced preset stands, build targets "deep" -> opus-4 wins.
@@ -902,20 +896,8 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
     deactivatedSubagents: ["anthropic/claude-sonnet-4", "anthropic/claude-haiku-4"],
   });
   h.deps.listSnapshots = () => [];
-  const models = [
-    normalize("anthropic", "claude-opus-4", rawProviderModel({ id: "claude-opus-4" })),
-    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),
-    normalize("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
-    normalize("openai", "gpt-5", rawProviderModel({ id: "gpt-5" })),
-  ];
-  h.deps.listModels = async () => models;
-  h.deps.routingServices = routingServicesFor(models);
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(h.delivered.length, 1);
+  const models = [...anthropicTrio(), normalize("openai", "gpt-5", rawProviderModel({ id: "gpt-5" }))];
+  const res = await routedSpawn(h, models);
   assert.ok(h.delivered[0].model, "routing should decide a model");
   const key = `${h.delivered[0].model.providerID}/${h.delivered[0].model.modelID}`;
   // The winner must be within the consented set — never a deactivated model.
@@ -1114,77 +1096,33 @@ test("BET-1275 11b: resolveNamedModel rejects a structured model missing from th
 });
 
 test("BET-1275 11a: delegate({}) with subagent_type 'explore' routes with agent=explore (intent, not the winner)", async () => {
-  const h = startHarness("child_explore");
-  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
-  h.deps.listSnapshots = () => [];
-  const models = threeTierAnthropicModels();
-  h.deps.listModels = async () => models;
-  h.deps.routingServices = routingServicesFor(models);
-  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), {
-    prompt: "do it",
-    parentSessionID: "parent",
-    parentDirectory: "/repo",
-    subagent_type: "explore",
-  });
+  const h = routingLinesHarness("child_explore");
+  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), delegateInput({ subagent_type: "explore" }));
   assert.equal(out.ok, true);
   assert.equal(h.delivered.length, 1);
   // The requested subagent type IS the intent — the [router] line names the
-  // agent the spawn routed as, in the BET-1301 format (sub surface, plus the
-  // decision's inputs: ctx + needs=tools). Assert the intent, not which model
-  // won.
-  const line = lines.find((l) => l.includes("[router]"));
-  assert.ok(line, `expected a [router] line; got: ${lines.join(" | ")}`);
-  assert.ok(
-    line.startsWith("[router] sub/explore → "),
-    `expected the BET-1301 sub/explore format; got: ${line}`,
-  );
-  assert.ok(line.includes("ctx=0 needs=tools"), `expected the turn's inputs; got: ${line}`);
+  // agent the spawn routed as. Assert the intent, not which model won.
+  assertRouterLine(lines, "explore");
 });
 
 test("BET-1275 11a: an absent/blank subagent_type routes with agent=general", async () => {
-  const h = startHarness("child_blank_agent");
-  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
-  h.deps.listSnapshots = () => [];
-  const models = threeTierAnthropicModels();
-  h.deps.listModels = async () => models;
-  h.deps.routingServices = routingServicesFor(models);
-  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), {
-    prompt: "do it",
-    parentSessionID: "parent",
-    parentDirectory: "/repo",
-    subagent_type: "   ",
-  });
+  const h = routingLinesHarness("child_blank_agent");
+  const { out, lines } = await captureRouterLines((input) => startJob(input, h.deps), delegateInput({ subagent_type: "   " }));
   assert.equal(out.ok, true);
   // A blank subagent_type (unknown) must map to the general agent, not leak
-  // through as an empty agent and not crash. The line is the BET-1301 format
-  // (sub surface) and carries the turn's inputs.
+  // through as an empty agent and not crash.
   assert.equal(h.delivered.length, 1);
-  const line = lines.find((l) => l.includes("[router]"));
-  assert.ok(line, `expected a [router] line; got: ${lines.join(" | ")}`);
-  assert.ok(
-    line.startsWith("[router] sub/general → "),
-    `expected the BET-1301 sub/general format; got: ${line}`,
-  );
-  assert.ok(line.includes("ctx=0 needs=tools"), `expected the turn's inputs; got: ${line}`);
+  assertRouterLine(lines, "general");
 });
 
 test("BET-1275: a background job routes from the box config even with no parent-Auto input", async () => {
   const h = startHarness("child_routes_unaauto");
   h.deps.configGet = async () => ({ modelRouting: { preset: "economy" }, deactivatedSubagents: [] });
-  h.deps.listSnapshots = () => [];
-  const models = threeTierAnthropicModels();
-  h.deps.listModels = async () => models;
-  h.deps.routingServices = routingServicesFor(models);
   // No `model`, no subagent_type, no composer, NO path where the parent
   // conversation's Auto state could be consulted — the delegate has no
   // per-conversation auto choice to inherit (rule 4). Routing must still fire
   // from the box config's preset and decide a model.
-  const res = await startJob(
-    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
-    h.deps,
-  );
-  assert.equal(res.ok, true);
-  assert.equal(h.delivered.length, 1);
+  const res = await routedSpawn(h, threeTierAnthropicModels());
   assert.ok(h.delivered[0].model, "routing decided a model with no parent-Auto input");
 });
 
@@ -1395,6 +1333,15 @@ test("startJob rolls back the worktree when window creation throws", async () =>
 // 5. observeEvent: idle before any busy does NOT complete; busy then idle DOES
 // ----------------------------------------------------------------------------
 
+// BET-1535 Block 3: one busy→error dispatch pair for the observeEvent tests.
+async function sendSessionError(deps, sawBusy, errorName, message) {
+  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, deps, sawBusy);
+  await observeEvent({
+    type: "session.error",
+    properties: { sessionID: "child", error: { name: errorName, message } },
+  }, deps, sawBusy);
+}
+
 function runningObserverJob() {
   return {
     id: "j1", name: "bg", prompt: "p", model: null,
@@ -1448,11 +1395,7 @@ test("observeEvent: session.status idle (not session.idle) also completes after 
 test("observeEvent: session.error fails the job", async () => {
   const h = harness([runningObserverJob()]);
   const sawBusy = new Map();
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, h.deps, sawBusy);
-  await observeEvent({
-    type: "session.error",
-    properties: { sessionID: "child", error: { name: "ProviderAuthError", message: "bad key" } },
-  }, h.deps, sawBusy);
+  await sendSessionError(h.deps, sawBusy, "ProviderAuthError", "bad key");
   assert.equal(h.jobs[0].status, "failed");
   assert.equal(h.jobs[0].error, "bad key");
   assert.equal(h.delivered.length, 1);
@@ -1463,11 +1406,7 @@ test("observeEvent: session.error fails the job", async () => {
 test("observeEvent: MessageAbortedError is ignored (intentional abort)", async () => {
   const h = harness([runningObserverJob()]);
   const sawBusy = new Map();
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, h.deps, sawBusy);
-  await observeEvent({
-    type: "session.error",
-    properties: { sessionID: "child", error: { name: "MessageAbortedError", message: "aborted" } },
-  }, h.deps, sawBusy);
+  await sendSessionError(h.deps, sawBusy, "MessageAbortedError", "aborted");
   assert.equal(h.jobs[0].status, "running");
   assert.equal(h.delivered.length, 0);
 });
@@ -2050,12 +1989,11 @@ function approvalEngineHarness(initialJobs = []) {
   const parentWin = { index: 1, name: "parent", opencodeSessionId: "ses_p", paneCurrentPath: "/proj" };
   const childWin = { index: 2, name: "run-the-tests", opencodeSessionId: "ses_child", paneCurrentPath: "/proj" };
   const deps = {
-    load: async () => jobs.map((j) => ({ ...j })),
-    save: async (next) => { jobs = next.map((j) => ({ ...j })); },
-    publish: (evt) => published.push(evt),
-    deliver: async () => ({ delivered: true, queued: false }),
-    listMessages: async () => [],
-    gitRun: async () => ({ stdout: "" }),
+    ...jobStoreCore({
+      jobs,
+      published,
+      deliver: async () => ({ delivered: true, queued: false }),
+    }),
     gitAddWorktree: async () => { throw new Error("not a git repository"); },
     gitRemoveWorktree: async () => ({ removed: true }),
     killWindow: async () => {},
@@ -2080,28 +2018,27 @@ function approvalEngineHarness(initialJobs = []) {
   return { engine, published, get jobs() { return jobs; }, newWindowCalls, createSessionCalls };
 }
 
-test("startJobWithApproval auto-approves (no card) when trust mode is on", async () => {
-  const h = approvalEngineHarness([]);
-  const res = await h.engine.startJobWithApproval({
+// BET-1535 Block 3: the shared startJobWithApproval input (over = per-test knobs).
+function approvalInput(over = {}) {
+  return {
     prompt: "run the tests",
     parentSessionID: "ses_p",
     parentDirectory: "/proj",
     tools: [{ permission: "bash", pattern: "pytest *" }],
-    trustMode: true,
-  });
+    ...over,
+  };
+}
+
+test("startJobWithApproval auto-approves (no card) when trust mode is on", async () => {
+  const h = approvalEngineHarness([]);
+  const res = await h.engine.startJobWithApproval({ ...approvalInput(), trustMode: true });
   assert.equal(res.ok, true);
   assert.equal(h.published.find((e) => e.kind === "delegate.approval.requested"), undefined, "no approval requested in trust mode");
 });
 
 test("startJobWithApproval requests approval + declines when the user says Not now", async () => {
   const h = approvalEngineHarness([]);
-  const p = h.engine.startJobWithApproval({
-    prompt: "run the tests",
-    parentSessionID: "ses_p",
-    parentDirectory: "/proj",
-    tools: [{ permission: "bash", pattern: "pytest *" }],
-    trustMode: false,
-  });
+  const p = h.engine.startJobWithApproval({ ...approvalInput(), trustMode: false });
   // The approval request was published.
   const req = h.published.find((e) => e.kind === "delegate.approval.requested");
   assert.ok(req, "approval requested");
@@ -2114,13 +2051,7 @@ test("startJobWithApproval requests approval + declines when the user says Not n
 
 test("startJobWithApproval starts the job on approve and forwards the ruleset", async () => {
   const h = approvalEngineHarness([]);
-  const p = h.engine.startJobWithApproval({
-    prompt: "run the tests",
-    parentSessionID: "ses_p",
-    parentDirectory: "/proj",
-    tools: [{ permission: "bash", pattern: "pytest *" }],
-    trustMode: false,
-  });
+  const p = h.engine.startJobWithApproval({ ...approvalInput(), trustMode: false });
   const req = h.published.find((e) => e.kind === "delegate.approval.requested");
   // User approves with edited tools.
   assert.ok(h.engine.approve(req.payload.id, [{ permission: "bash", pattern: "pytest * -x" }]));

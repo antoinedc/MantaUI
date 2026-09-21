@@ -1394,6 +1394,25 @@ export function ChatPanel({
           // Optimizer P2.3: the decision's eco level feeds the Auto-row label
           // ("Eco" while the box moves the target tier under pressure).
           setRoutingEco(decision?.trace?.target?.eco ?? 0);
+          // BET-1535 (S3, review Block 1): the typed health verdict — the router
+          // knows every candidate is dead. The turn must NOT fall through to the
+          // provider default (the very endpoint the verdict refused): refuse the
+          // send with the typed reason. Mirrors the send-failure rollback below
+          // (banner + optimistic row stripped + running cleared). This is the
+          // ONE send-refusing branch, and it covers the queued-drain path too
+          // (the drain re-enters submit()); the catch below — a routing
+          // FAILURE — still never fails a turn.
+          if (decision?.kind === "no-healthy-endpoint") {
+            const excludedList = Array.isArray(decision.excluded) ? decision.excluded.join(", ") : "";
+            setSendError(
+              `Auto couldn't pick a healthy model${excludedList ? ` — ${excludedList} excluded` : ""}. The turn was not sent; switch off Auto or pick a model to send.`,
+            );
+            setRunning(false);
+            setMessages((prev) =>
+              prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
+            );
+            return;
+          }
           const ranked = decision.model
             ? [decision.model, ...decision.alternatives]
             : decision.alternatives;
