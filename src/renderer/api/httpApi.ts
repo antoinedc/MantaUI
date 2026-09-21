@@ -1105,6 +1105,7 @@ export const httpApi: Api = {
   routingChoose: (input) => rpc(IPC.routingChoose, input),
   accountsRetry: (providerID) => rpc(IPC.accountsRetry, { providerID }),
   accountHealth: () => rpc(IPC.accountsHealth),
+  accountsEndpointProbe: (endpointKey) => rpc(IPC.accountsEndpointProbe, { endpointKey }),
   opencodeModelCatalog: () => rpc(IPC.opencodeModelCatalog),
   opencodeGetProviders: () => rpc(IPC.opencodeGetProviders),
   opencodeSetProviders: (ops) => rpc(IPC.opencodeSetProviders, ops),

@@ -34,6 +34,7 @@ import { explicitMethods } from "./demoApi.js";
 //     Delete the name from this list.
 export const DEMO_UNIMPLEMENTED = [
   "accountHealth",
+  "accountsEndpointProbe",
   "accountsRetry",
   "agentPullFile",
   "authClaim",

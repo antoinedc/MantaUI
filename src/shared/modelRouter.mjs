@@ -577,10 +577,31 @@ export function chooseModel(input = {}) {
         const ik = endpointKey(incumbent);
         if (!excluded.includes(ik)) excluded.push(ik);
       }
+      // BET-1537 (W9): WHY each key is excluded — STRUCTURED states (the
+      // endpoint-register state and the provider-facade state), never prose.
+      // The renderer's shared labels do the words, so the verdict's copy
+      // cannot drift from the Accounts/Models surface. A key with neither
+      // state recorded still appears in `excluded` (the renderer falls back
+      // to naming it without a reason).
+      const excludedWhy = {};
+      for (const a of healthNeutral) {
+        excludedWhy[a.key] = {
+          endpoint: typeof services.endpointHealth?.[a.key] === "string" ? services.endpointHealth[a.key] : null,
+          provider: typeof services.health?.[a.candidate.providerID] === "string" ? services.health[a.candidate.providerID] : null,
+        };
+      }
+      if (incumbentExcluded) {
+        const ik = endpointKey(incumbent);
+        excludedWhy[ik] = {
+          endpoint: typeof services.endpointHealth?.[ik] === "string" ? services.endpointHealth[ik] : null,
+          provider: typeof services.health?.[incumbent.providerID] === "string" ? services.health[incumbent.providerID] : null,
+        };
+      }
       return {
         kind: "no-healthy-endpoint",
         reason: `no healthy ${agent} endpoint available (${bindingReason(counts)})`,
         excluded,
+        excludedWhy,
         // W8 self-doubt input (BET-1536): every drop was a health drop.
         healthOnly: isHealthOnlyVerdict(drops),
         changed: false,

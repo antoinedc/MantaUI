@@ -2016,3 +2016,57 @@ test("config:get with nothing pending does not add the flag as true", async () =
   const cfg = await handlers["config:get"]();
   assert.equal(cfg.ctoDoctrineRestartPending, false);
 });
+
+// ---- BET-1537 (S5): accounts:health's two-map shape + the endpoint probe ----
+
+test("accounts:health returns the provider facade AND the per-endpoint detail from the ONE engine", async () => {
+  const { deps } = makeDeps([]);
+  deps.providerHealth = {
+    all: () => ({ anthropic: "rate-limited" }),
+    retryIn: () => 4 * 60_000,
+    engine: {
+      endpointDetail: () => ({
+        "anthropic/claude-x": { state: "rate-limited", retryInMs: 3 * 60_000, reason: { httpStatus: 429, errorName: "APIError" } },
+      }),
+    },
+  };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["accounts:health"]();
+  assert.deepEqual(out.providers, { anthropic: { state: "rate-limited", retryInMs: 4 * 60_000 } });
+  assert.equal(out.endpoints["anthropic/claude-x"].state, "rate-limited");
+  assert.equal(out.endpoints["anthropic/claude-x"].reason.httpStatus, 429);
+  // Not wired → BOTH maps degrade, never throw.
+  const deps2 = makeDeps([]);
+  deps2.deps.providerHealth = null;
+  const handlers2 = buildHandlers(deps2.deps);
+  const empty = await handlers2["accounts:health"]();
+  assert.deepEqual(empty, { providers: {}, endpoints: {} });
+});
+
+test("accounts:endpoint-probe reports BOTH branches and validates its input", async () => {
+  const { deps } = makeDeps([]);
+  deps.providerHealth = {
+    engine: {
+      probeEndpoint: async (key) =>
+        key === "anthropic/good" ? { outcome: "success" } : { outcome: "failure", httpStatus: 404 },
+    },
+  };
+  const handlers = buildHandlers(deps);
+  const ok = await handlers["accounts:endpoint-probe"]({ endpointKey: "anthropic/good" });
+  assert.equal(ok.ok, true);
+  assert.ok(ok.message.length > 0, "success needs a message");
+
+  const bad = await handlers["accounts:endpoint-probe"]({ endpointKey: "anthropic/nope" });
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /did not respond/);
+
+  const noKey = await handlers["accounts:endpoint-probe"]({ endpointKey: "" });
+  assert.equal(noKey.ok, false);
+  assert.ok(noKey.message.length > 0);
+
+  const deps3 = makeDeps([]);
+  const handlers3 = buildHandlers(deps3.deps);
+  const unwired = await handlers3["accounts:endpoint-probe"]({ endpointKey: "anthropic/good" });
+  assert.equal(unwired.ok, false);
+  assert.ok(unwired.message.length > 0);
+});

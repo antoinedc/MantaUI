@@ -80,6 +80,14 @@ import {
   OP_CLASS_LOOKBACK_MS,
   OP_CLASS_WATCH_INTERVAL_MS,
 } from "./ctoOpClassWatcher.mjs";
+// BET-1537 (S5, §W7 items 2+3): the endpoint + infrastructure watchers — the
+// same pure-fold + latch plumbing, fed by the SAME tick and ledger read.
+import {
+  evaluateEndpointIncidents,
+  evaluateInfraIncidents,
+  formatHealthReason,
+  HEALTHWATCH_LOOKBACK_MS,
+} from "./ctoHealthWatchers.mjs";
 // BET-1518 (§9.3/§9.5): the per-class calibration engine (the Beta estimator
 // over last-30 outcomes + the act-and-report queue) and the τ gate over the
 // triage stage's stored plans. The v2 earned-trust ladder is deleted (D22).
@@ -1695,13 +1703,15 @@ export function createCtoEngine(deps = {}) {
     }
   }
 
-  // BET-1533: the operation-class outcome watcher (§W7 item 1). Reads recent
-  // `cto.operation_outcome` rows through the existing ledgerStore, runs the
-  // pure fold (ctoOpClassWatcher.mjs), raises one pendingBlockers entry per
-  // newly-fired incident through the EXISTING blocker path (one health card
-  // per class via the `op-class:<taskClass>` source), and latches the alarm
-  // under the `opClassAlarms` key in engine-state.json (keyed
-  // (taskClass, incidentGeneration); re-arms only after a fresh `ok`). No new
+  // BET-1533 + BET-1537: the outcome watchers (§W7 items 1–3), one tick, ONE
+  // ledger read. (1) the operation-class watcher (ctoOpClassWatcher.mjs), (2)
+  // the endpoint watcher and (3) the infrastructure watcher (both
+  // ctoHealthWatchers.mjs, fed by the endpointHealth / endpointAttempts
+  // transition + alarm rows). Every raise goes through the EXISTING blocker
+  // path (recordBlocker → one health card per source via
+  // `op-class:<taskClass>` / `endpoint:<subject>` / `infra:<subject>`); the
+  // latches live in engine-state.json (`opClassAlarms`, `healthAlarms`, keyed
+  // (subject, incidentGeneration); re-arming only after recovery). No new
   // notification mechanism, no new bus kind, no new config flag, no new store.
   // Paced to at most one ledger read per interval (the read is O(file)).
   async function opClassWatcherTick() {
@@ -1709,7 +1719,7 @@ export function createCtoEngine(deps = {}) {
     if (t - lastOpClassWatchAt < opClassWatchIntervalMs) return;
     lastOpClassWatchAt = t;
     try {
-      const rows = await ledger.read({ from: t - OP_CLASS_LOOKBACK_MS });
+      const rows = await ledger.read({ from: t - Math.max(OP_CLASS_LOOKBACK_MS, HEALTHWATCH_LOOKBACK_MS) });
       let prev = {};
       try {
         prev = (await engineState.load())?.opClassAlarms ?? {};
@@ -1731,6 +1741,36 @@ export function createCtoEngine(deps = {}) {
       }
       if (recovered.length > 0) {
         await ledgerLog({ kind: "cto.opclass_recovered", classes: recovered });
+      }
+      // BET-1537: watchers 2 + 3 off the SAME read — the endpoint incidents
+      // (durable exclusion transitions) and the infrastructure incidents
+      // (persistence failures, quarantined state files, a sustained
+      // not-dispatched/abandoned rate, the self-doubt flag, verdict codes).
+      let prevHealth = {};
+      try {
+        prevHealth = (await engineState.load())?.healthAlarms ?? {};
+      } catch {
+        prevHealth = {};
+      }
+      const ep = evaluateEndpointIncidents(rows, { nowMs: t, alarms: prevHealth });
+      const infra = evaluateInfraIncidents(rows, { nowMs: t, alarms: ep.alarms });
+      for (const alarm of ep.raised) {
+        await recordBlocker(`endpoint:${alarm.subject}`, formatHealthReason(alarm));
+      }
+      for (const alarm of infra.raised) {
+        await recordBlocker(`infra:${alarm.subject}`, formatHealthReason(alarm));
+      }
+      if (ep.raised.length > 0 || infra.raised.length > 0 || ep.recovered.length > 0 || infra.recovered.length > 0) {
+        await patchEngineState(() => ({ healthAlarms: infra.alarms }), { engineState });
+      }
+      // §W7.2: the closing notification — the same ledger-row shape S1 uses
+      // for recovered class incidents.
+      if (ep.recovered.length > 0 || infra.recovered.length > 0) {
+        await ledgerLog({
+          kind: "cto.healthwatch_recovered",
+          endpoint: ep.recovered.map((a) => a.subject),
+          infra: infra.recovered.map((a) => a.subject),
+        });
       }
     } catch {
       /* best-effort — never take the engine down */

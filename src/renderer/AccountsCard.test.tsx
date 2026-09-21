@@ -7,9 +7,26 @@
 // covered in AccountsCard.test.ts.
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mount, installMockApi, clickCheckbox, type Harness, type MockApi } from "./testHarness";
+import {
+  mount,
+  installMockApi,
+  clickCheckbox,
+  buttonByText,
+  checkboxByLabel,
+  type Harness,
+  type MockApi,
+} from "./testHarness";
 import { invalidateCachedResource } from "./useCachedResource";
 import { AccountsCard } from "./AccountsCard";
+
+// BET-1537 (review cycle 2, duplication gate): the mock-api boilerplate the
+// endpoint/register tests share — one object, spread at each site.
+const ENDPOINT_TEST_API_DEFAULTS = {
+  configGet: () => Promise.resolve({}),
+  opencodeSetProviders: () => Promise.resolve({ ok: true }),
+  opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
+  accountsRetry: () => Promise.resolve({ ok: true, state: "ok", message: "x" }),
+};
 
 function statusProvider() {
   return {
@@ -25,7 +42,7 @@ async function underOutOfCredit(accountsRetry: MockApi["accountsRetry"]) {
   installMockApi({
     opencodeProviderAuth: () => Promise.resolve(statusProvider()),
     opencodeGetProviders: () => Promise.resolve([]),
-    accountHealth: () => Promise.resolve({ anthropic: { state: "out-of-credit" } }),
+    accountHealth: () => Promise.resolve({ providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} }),
     configGet: () => Promise.resolve({}),
     opencodeSetProviders: () => Promise.resolve({ ok: true }),
     opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
@@ -34,21 +51,6 @@ async function underOutOfCredit(accountsRetry: MockApi["accountsRetry"]) {
   const h = mount(<AccountsCard />);
   await h.flush();
   return h;
-}
-
-function buttonByText(h: Harness, text: string): HTMLButtonElement | null {
-  for (const b of Array.from(h.container.querySelectorAll("button"))) {
-    if ((b.textContent ?? "").trim() === text) return b;
-  }
-  return null;
-}
-
-function checkboxByLabel(h: Harness, label: string): HTMLInputElement | null {
-  return (
-    (Array.from(h.container.querySelectorAll('input[type="checkbox"]')).find(
-      (i) => i.getAttribute("aria-label") === label,
-    ) as HTMLInputElement | null) ?? null
-  );
 }
 
 // Mount the card with ONE custom endpoint ("voska", enabled blend "alpha") whose
@@ -67,7 +69,7 @@ function customProviderSetup(overrides: Record<string, unknown> = {}) {
   const { api } = installMockApi({
     opencodeProviderAuth: () => Promise.resolve({ action: "status" as const, providers: [] }),
     opencodeGetProviders: () => Promise.resolve(providerState),
-    accountHealth: () => Promise.resolve({}),
+    accountHealth: () => Promise.resolve({ providers: {}, endpoints: {} }),
     configGet: () => Promise.resolve({}),
     opencodeSetProviders: (input: {
       upsert?: { id: string; name?: string; baseURL?: string; enabledModels: string[] }[];
@@ -131,11 +133,11 @@ describe("AccountsCard Try again (out-of-credit)", () => {
       opencodeProviderAuth: () => Promise.resolve(statusProvider()),
       opencodeGetProviders: () => Promise.resolve([]),
       accountHealth: () =>
-        Promise.resolve({ anthropic: { state: "rate-limited", retryInMs: 12 * 60 * 1000 } }),
-      configGet: () => Promise.resolve({}),
-      opencodeSetProviders: () => Promise.resolve({ ok: true }),
-      opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
-      accountsRetry: () => Promise.resolve({ ok: true, state: "ok", message: "x" }),
+        Promise.resolve({
+          providers: { anthropic: { state: "rate-limited", retryInMs: 12 * 60 * 1000 } },
+          endpoints: {},
+        }),
+      ...ENDPOINT_TEST_API_DEFAULTS,
     });
     h = mount(<AccountsCard />);
     await h.flush();
@@ -253,11 +255,8 @@ describe("AccountsCard Disconnect gating (9g BET-1320)", () => {
       opencodeProviderAuth: () =>
         Promise.resolve({ action: "status" as const, providers: statuses }),
       opencodeGetProviders: () => Promise.resolve([]),
-      accountHealth: () => Promise.resolve({}),
-      configGet: () => Promise.resolve({}),
-      opencodeSetProviders: () => Promise.resolve({ ok: true }),
-      opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
-      accountsRetry: () => Promise.resolve({ ok: true, state: "ok", message: "x" }),
+      accountHealth: () => Promise.resolve({ providers: {}, endpoints: {} }),
+      ...ENDPOINT_TEST_API_DEFAULTS,
     });
   }
 
@@ -345,7 +344,7 @@ describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
         calls++;
         // First read (mount) is out-of-credit; every later read (retry's own
         // refetch) shows the flag cleared — so the verdict must not linger.
-        return Promise.resolve(calls <= 1 ? { anthropic: { state: "out-of-credit" } } : { anthropic: { state: "ok" } });
+        return Promise.resolve(calls <= 1 ? { providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} } : { providers: { anthropic: { state: "ok" } }, endpoints: {} });
       },
       configGet: () => Promise.resolve({}),
       opencodeSetProviders: () => Promise.resolve({ ok: true }),
@@ -370,5 +369,80 @@ describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
     expect(h.container.textContent).not.toContain("still reports out of credit");
     expect(buttonByText(h, "Try again")).toBeNull();
     h.unmount();
+  });
+});
+
+// ---- BET-1537 (S5, §W9): the custom row's endpoint register line + probe ----
+
+describe("AccountsCard endpoint register (custom rows)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("shows the register state and the rate-limit deadline on the custom row", async () => {
+    const s = customProviderSetup({
+      accountHealth: () =>
+        Promise.resolve({
+          providers: {},
+          endpoints: {
+            "voska/alpha": {
+              state: "rate-limited",
+              retryInMs: 4 * 60_000,
+              reason: { httpStatus: 429, errorName: "APIError" },
+            },
+          },
+        }),
+    });
+    h = s.h;
+    await h.flush();
+    const line = h.container.querySelector('[data-testid="endpoint-register-voska"]');
+    expect(line).toBeTruthy();
+    expect(line?.textContent).toContain("Rate limited");
+    expect(line?.textContent).toContain("retry in 4m");
+    expect(line?.textContent).toContain("HTTP 429");
+    // The Models list badge reads the SAME register.
+    expect(h.container.querySelector('[data-testid="endpoint-state-alpha"]')?.textContent).toContain(
+      "Rate limited",
+    );
+    expect(buttonByText(h, "Send probe")).toBeTruthy();
+  });
+
+  it("Send probe reports the failure branch in text-danger (never silent)", async () => {
+    let probeKey = "";
+    const s = customProviderSetup({
+      accountsEndpointProbe: (endpointKey: string) => {
+        probeKey = endpointKey;
+        return Promise.resolve({ ok: false, outcome: "failure", message: "voska/alpha did not respond (404)." });
+      },
+    });
+    h = s.h;
+    await h.flush();
+    const btn = buttonByText(h, "Send probe");
+    expect(btn).toBeTruthy();
+    btn!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    const result = h.container.querySelector('[data-testid="probe-result-voska"]');
+    expect(result).toBeTruthy();
+    expect(result?.textContent).toContain("did not respond");
+    expect((result as HTMLElement).className).toContain("text-danger");
+    // It probed the row's (first enabled) endpoint key.
+    expect(probeKey).toBe("voska/alpha");
+  });
+
+  it("Send probe reports the success branch in text-ok", async () => {
+    const s = customProviderSetup({
+      accountsEndpointProbe: () =>
+        Promise.resolve({ ok: true, outcome: "success", message: "voska/alpha responded — unproven flag cleared." }),
+    });
+    h = s.h;
+    await h.flush();
+    const btn = buttonByText(h, "Send probe");
+    btn!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    await h.flush();
+    const result = h.container.querySelector('[data-testid="probe-result-voska"]');
+    expect(result?.textContent).toContain("responded");
+    expect((result as HTMLElement).className).toContain("text-ok");
   });
 });

@@ -380,3 +380,41 @@ test("beginOperation stores the probe marker and the post-persist hook fires onc
 test("newAttemptId returns unique ids", () => {
   assert.notEqual(newAttemptId(), newAttemptId());
 });
+
+// ---- BET-1537 (S5, §W7.3): the loss-signal rows for the infrastructure
+// watcher's sustained-rate signal. ----
+
+test("a terminalize that settles still-not-dispatched emits one loss row; a refined settle emits none", async () => {
+  const { rec, ledger } = makeRecorder();
+  await rec.beginOperation({ attemptId: "lost-1", operation: "triage", startedAt: 10, deadlineAt: 100 });
+  await rec.terminalizeOperation({
+    attemptId: "lost-1", attribution: "not-dispatched",
+    terminal: { at: 50, code: "no-healthy-endpoint", stage: null },
+  });
+  let rows = ledger.rows.filter((r) => r.kind === "cto.operation_not_dispatched");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].operation, "lost-1");
+
+  // A settle whose attribution was REFINED before terminalizing is not a loss.
+  await rec.beginOperation({ attemptId: "ran-1", operation: "triage", startedAt: 10, deadlineAt: 100 });
+  await rec.markDispatched("ran-1", true);
+  await rec.terminalizeOperation({
+    attemptId: "ran-1", attribution: "observed",
+    terminal: { at: 60, code: "ok", stage: null },
+  });
+  rows = ledger.rows.filter((r) => r.kind === "cto.operation_not_dispatched");
+  assert.equal(rows.length, 1, "the dispatched run is not a loss");
+});
+
+test("sweepAbandoned emits ONE weighted row for the batch it closed", async () => {
+  const { rec, ledger } = makeRecorder({ now: () => 1_000_000 });
+  await rec.beginOperation({ attemptId: "g-1", operation: "triage", startedAt: 10, deadlineAt: 100 });
+  await rec.beginOperation({ attemptId: "g-2", operation: "triage", startedAt: 10, deadlineAt: 100 });
+  await rec.sweepAbandoned();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operations_abandoned");
+  assert.equal(rows.length, 1, "one row per sweep, not per record");
+  assert.equal(rows[0].count, 2);
+  // A second sweep with nothing to close emits nothing.
+  await rec.sweepAbandoned();
+  assert.equal(ledger.rows.filter((r) => r.kind === "cto.operations_abandoned").length, 1);
+});

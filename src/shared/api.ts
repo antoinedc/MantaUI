@@ -113,6 +113,12 @@ type RoutingChooseDecision = {
   // no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
   // router knows are excluded.
   excluded?: string[];
+  // BET-1537 (W9): WHY each excluded key is excluded — the raw endpoint
+  // register state and provider facade state per key (structured; the
+  // renderer's shared endpoint/provider labels do the words). A key missing
+  // here, or with both states null, is still named in `excluded` without a
+  // reason.
+  excludedWhy?: Record<string, { endpoint: string | null; provider: string | null }>;
   model: PromptModel | null;
   reason: string;
   alternatives: PromptModel[];
@@ -1048,13 +1054,34 @@ export interface Api {
     state: string;
     message: string;
   }>;
-  // BET-1250: the Accounts list's per-provider health snapshot, keyed by
-  // opencode providerID. `retryInMs` is present only while the provider is
-  // rate-limited (its cooldown remaining). Never throws; {} when health isn't
-  // wired on the box (routing inert).
-  accountHealth(): Promise<
-    Record<string, { state: string; retryInMs?: number | null }>
-  >;
+  // BET-1250: the Accounts list's health snapshot — TWO maps (BET-1537): the
+  // provider facade keyed by opencode providerID, and the per-ENDPOINT
+  // register detail keyed "providerID/modelID" (the resolved state, the
+  // rate-limit deadline, and the last failure's reason — what the custom
+  // rows and the Models list badges render). Never throws; both maps empty
+  // when health isn't wired on the box (routing inert).
+  accountHealth(): Promise<{
+    providers: Record<string, { state: string; retryInMs?: number | null }>;
+    endpoints: Record<
+      string,
+      {
+        state: string;
+        until?: number;
+        retryInMs?: number;
+        streak?: number;
+        since?: number;
+        reason?: { httpStatus?: number | null; errorName?: string | null } | null;
+      }
+    >;
+  }>;
+  // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
+  // probe against one endpoint key now. `message` is a factual row string and
+  // is NEVER empty — the control reports both outcomes.
+  accountsEndpointProbe(endpointKey: string): Promise<{
+    ok: boolean;
+    outcome: string | null;
+    message: string;
+  }>;
   // BET-1249: the provider-agnostic model catalogue for the "Models we
   // couldn't identify" block — resolve opaque endpoint ids and typeahead over
   // every known model. `supported:false` when the box has no catalogue yet

@@ -116,6 +116,11 @@ import {
   describePressure,
   describeActivityEntry,
   formatCompactionSaving,
+  formatRetryMinutes,
+  formatAgeAt,
+  formatEndpointStateLine,
+  formatNoHealthyEndpointCopy,
+  providersFromExcludedKeys,
   usageDialState,
   formatWindowReset,
   formatResetAt,
@@ -6084,5 +6089,112 @@ describe("formatCompactionSaving", () => {
   it("returns '0' for missing/non-finite inputs", () => {
     expect(formatCompactionSaving(0, 0)).toBe("0");
     expect(formatCompactionSaving(Number.NaN, 1000)).toBe("0");
+  });
+});
+
+
+// ===== Endpoint health formatting (BET-1537 S5 review Blocks 1+3) =====
+
+describe("formatRetryMinutes / formatAgeAt", () => {
+  it("floors the cooldown to whole minutes, minimum 1, null without a deadline", () => {
+    expect(formatRetryMinutes(4 * 60_000)).toBe(4);
+    expect(formatRetryMinutes(1)).toBe(1);
+    expect(formatRetryMinutes(0)).toBeNull();
+    expect(formatRetryMinutes(null)).toBeNull();
+    expect(formatRetryMinutes(undefined)).toBeNull();
+  });
+
+  it("formats ages compactly", () => {
+    const now = 1_000_000_000;
+    expect(formatAgeAt(now, now)).toBe("just now");
+    expect(formatAgeAt(now - 5 * 60_000, now)).toBe("5m ago");
+    expect(formatAgeAt(now - 3 * 3_600_000, now)).toBe("3h ago");
+    expect(formatAgeAt(now - 6 * 86_400_000, now)).toBe("6d ago");
+    expect(formatAgeAt(null, now)).toBeNull();
+    expect(formatAgeAt(0, now)).toBeNull();
+  });
+});
+
+describe("formatEndpointStateLine", () => {
+  const NOW = 1_000_000_000;
+
+  it("carries state, deadline, reason and the §W9 window activity", () => {
+    expect(
+      formatEndpointStateLine(
+        {
+          state: "rate-limited",
+          retryInMs: 4 * 60_000,
+          reason: { httpStatus: 429, errorName: "APIError" },
+          lastSuccessAt: NOW - 2 * 3_600_000,
+          attempts: 12,
+          successes: 2,
+        },
+        NOW,
+      ),
+    ).toBe("Rate limited · retry in 4m · HTTP 429 · last success 2h ago · 12 attempts · 17% success in window");
+  });
+
+  it("omits absent fields; falls back to the raw state when the label is unknown", () => {
+    expect(formatEndpointStateLine({ state: "dead" }, NOW)).toBe("Dead");
+    expect(formatEndpointStateLine({ state: "mystery" }, NOW)).toBe("mystery");
+    expect(formatEndpointStateLine(null, NOW)).toBe("");
+    expect(
+      formatEndpointStateLine({ state: "unproven", attempts: 1, successes: 0 }, NOW),
+    ).toBe("Unproven · 1 attempt · 0% success in window");
+  });
+});
+
+describe("formatNoHealthyEndpointCopy", () => {
+  it("names each excluded endpoint and WHY (shared labels), with the way out", () => {
+    expect(
+      formatNoHealthyEndpointCopy({
+        excluded: ["anthropic/claude-x", "voska/alpha"],
+        excludedWhy: {
+          "anthropic/claude-x": { endpoint: "not-found", provider: null },
+          "voska/alpha": { endpoint: "dead", provider: "out-of-credit" },
+        },
+      }),
+    ).toBe(
+      "Auto couldn't pick a healthy model — anthropic/claude-x (Not found), voska/alpha (Dead, Out of credit) excluded. " +
+        "The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
+    );
+  });
+
+  it("falls back to the plain key list for a box without excludedWhy", () => {
+    expect(
+      formatNoHealthyEndpointCopy({ excluded: ["anthropic/claude-x"] }),
+    ).toBe(
+      "Auto couldn't pick a healthy model — anthropic/claude-x excluded. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
+    );
+  });
+
+  it("handles an empty/absent decision", () => {
+    expect(formatNoHealthyEndpointCopy({})).toBe(
+      "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
+    );
+    expect(formatNoHealthyEndpointCopy(null)).toBe(
+      "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.",
+    );
+  });
+});
+
+describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
+  it("derives the distinct providers behind the excluded keys", () => {
+    expect(providersFromExcludedKeys(["anthropic/a", "anthropic/b", "voska/c", "junk"])).toEqual([
+      "anthropic",
+      "voska",
+    ]);
+    expect(providersFromExcludedKeys(undefined)).toEqual([]);
+  });
+
+  it("every endpoint state label is non-empty and distinct; unknown states map to null", async () => {
+    const { ENDPOINT_STATE_LABEL, endpointStateLabel } = await import("../shared/providerHealthLabel.mjs");
+    const labels = Object.values(ENDPOINT_STATE_LABEL);
+    for (const l of labels) expect(typeof l === "string" && l.length > 0).toBe(true);
+    expect(new Set(labels).size).toBe(labels.length);
+    for (const state of Object.keys(ENDPOINT_STATE_LABEL)) {
+      expect(endpointStateLabel(state)).toBe(ENDPOINT_STATE_LABEL[state]);
+    }
+    expect(endpointStateLabel("nonexistent-state")).toBeNull();
   });
 });

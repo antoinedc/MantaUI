@@ -12,23 +12,8 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { act } from "react";
-import { mount, type Harness } from "./testHarness";
+import { buttonByText, checkboxByLabel, mount, type Harness } from "./testHarness";
 import { ModelChecklist } from "./ModelChecklist";
-
-function buttonByText(h: Harness, text: string): HTMLButtonElement | null {
-  for (const b of Array.from(h.container.querySelectorAll("button"))) {
-    if ((b.textContent ?? "").trim() === text) return b;
-  }
-  return null;
-}
-
-function checkboxByLabel(h: Harness, label: string): HTMLInputElement | null {
-  return (
-    (Array.from(h.container.querySelectorAll('input[type="checkbox"]')).find(
-      (i) => i.getAttribute("aria-label") === label,
-    ) as HTMLInputElement | null) ?? null
-  );
-}
 
 function filterInput(h: Harness): HTMLInputElement | null {
   return h.container.querySelector('input[aria-label="Filter models"]') as HTMLInputElement | null;
@@ -221,5 +206,42 @@ describe("ModelChecklist", () => {
     expect(checkboxByLabel(h, "a")!.disabled).toBe(true);
     expect(buttonByText(h, "All")!.disabled).toBe(true);
     expect(buttonByText(h, "None")!.disabled).toBe(true);
+  });
+});
+
+// ---- BET-1537 (S5, §W9): per-model endpoint health badges ----
+
+describe("ModelChecklist endpoint states", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("shows the register state next to model names, with the rate-limit deadline", () => {
+    h = mount(
+      <ModelChecklist
+        models={MODELS}
+        checked={new Set(["a"])}
+        onToggle={() => {}}
+        disabled={false}
+        states={{
+          a: { state: "unproven" },
+          b: { state: "rate-limited", retryInMs: 3.4 * 60_000 },
+          c: { state: "dead" },
+        }}
+      />,
+    );
+    expect(h.container.querySelector('[data-testid="endpoint-state-a"]')?.textContent).toContain("Unproven");
+    expect(h.container.querySelector('[data-testid="endpoint-state-b"]')?.textContent).toContain("Rate limited");
+    expect(h.container.querySelector('[data-testid="endpoint-state-b"]')?.textContent).toContain("retry in 4m");
+    expect(h.container.querySelector('[data-testid="endpoint-state-c"]')?.textContent).toContain("Dead");
+  });
+
+  it("no states prop → no badges (the checklist is unchanged without a wired health engine)", () => {
+    h = mount(
+      <ModelChecklist models={MODELS} checked={new Set()} onToggle={() => {}} disabled={false} />,
+    );
+    expect(h.container.querySelector('[data-testid="endpoint-state-a"]')).toBeNull();
   });
 });
