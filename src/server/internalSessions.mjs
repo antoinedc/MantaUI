@@ -9,6 +9,7 @@ export const CTO_INTERNAL_ROLE = "cto_internal";
 
 const generations = new WeakMap();
 export function createInternalSessions({ store = internalSessionsStore, now = Date.now, barrierMs = 250,
+  readAttempts = 3,
   report = (row) => ledgerStore.append(row),
   conversationReader = readConversationRole } = {}) {
   const creating = new Set();
@@ -55,31 +56,58 @@ export function createInternalSessions({ store = internalSessionsStore, now = Da
     })();
   }
 
-  async function internalSessionIds() {
-    try {
-      await bounded(Promise.all([...creating]));
-      if (!loading) {
-        loading = (async () => {
-          const generation = generations.get(store) ?? 0;
-          const stamp = await store.stamp?.();
-          if (!snapshot || snapshot.stamp !== stamp || snapshot.generation !== generation || snapshot.until <= now()) {
-            snapshot = { ids: new Set([...ids(await store.load()), ...internal]), stamp, generation, until: now() + 5000 };
-          }
-          return snapshot.ids;
-        })().finally(() => { loading = null; });
-      }
-      const loaded = await bounded(loading);
-      if (snapshot?.generation !== (generations.get(store) ?? 0)) throw new Error("provenance-updating");
-      return loaded;
-    } catch (error) {
-      snapshot = null;
-      if (now() - lastReport >= 300_000) {
-        lastReport = now();
-        void Promise.resolve().then(() => report({ kind: "cto.provenance_unavailable", actor: "cto", ts: now(),
-          code: error.message === "provenance-timeout" ? "timeout" : "store-unavailable" })).catch(() => {});
-      }
-      throw error;
+  // One read attempt: barrier on in-flight registrations (a read that precedes
+  // a still-queued registration could fail OPEN — classify a cto-internal
+  // session as a pipeline session — so the wait is load-bearing), then the
+  // shared load flight, then the writer/read generation check.
+  async function readInternalSessionIdsOnce() {
+    await bounded(Promise.all([...creating]));
+    if (!loading) {
+      loading = (async () => {
+        const generation = generations.get(store) ?? 0;
+        const stamp = await store.stamp?.();
+        if (!snapshot || snapshot.stamp !== stamp || snapshot.generation !== generation || snapshot.until <= now()) {
+          snapshot = { ids: new Set([...ids(await store.load()), ...internal]), stamp, generation, until: now() + 5000 };
+        }
+        return snapshot.ids;
+      })().finally(() => { loading = null; });
     }
+    const loaded = await bounded(loading);
+    if (snapshot?.generation !== (generations.get(store) ?? 0)) throw new Error("provenance-updating");
+    return loaded;
+  }
+
+  // BET-1541: the 250ms barrier is a per-attempt bound, not a total one. Under
+  // patchStore write-lock contention (concurrent ephemeral-session
+  // registrations) the creating set drains slower than one barrier, which sent
+  // 749 provenance-timeout rows to the ledger — every read of the scan, search
+  // and backfill died on a transient stall. A read is now retried: each
+  // attempt gets a fresh barrierMs window, `provenance-updating` (a pure
+  // writer/read generation race) retries immediately. The fail-closed budget
+  // is readAttempts × barrierMs (default 3 × 250ms = 750ms): a genuinely stuck
+  // store still fails every consumer closed within that budget, and only the
+  // FINAL failure reports to the ledger (transient blips that recover on
+  // retry stay out of the noise). Non-transient failures (corrupt payload,
+  // store.load rejections) break immediately.
+  async function internalSessionIds() {
+    const attempts = Math.max(1, readAttempts);
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await readInternalSessionIdsOnce();
+      } catch (error) {
+        lastError = error;
+        snapshot = null;
+        const transient = error?.message === "provenance-updating" || error?.message === "provenance-timeout";
+        if (!transient || attempt === attempts) break;
+      }
+    }
+    if (now() - lastReport >= 300_000) {
+      lastReport = now();
+      void Promise.resolve().then(() => report({ kind: "cto.provenance_unavailable", actor: "cto", ts: now(),
+        code: lastError?.message === "provenance-timeout" ? "timeout" : "store-unavailable" })).catch(() => {});
+    }
+    throw lastError;
   }
 
   async function isInternalSession(sid) {
