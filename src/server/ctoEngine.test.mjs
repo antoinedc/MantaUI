@@ -1786,16 +1786,22 @@ test("ONE pipeline: a suggest finding and an inbox blocker share ONE cardTick dr
 // ---------------------------------------------------------------------------
 
 // A memory ledger with a ts-filtered read, shaped like createLedgerStore.
+// `readCalls` counts reads so tests can assert on the watcher's pacing
+// directly (the append count says nothing about how often read() ran).
 function makeMemoryLedger() {
   const rows = [];
+  const counters = { readCalls: 0 };
   return {
     rows,
+    counters,
     append: async (row) => {
       rows.push({ ...row });
       return true;
     },
-    read: async ({ from, to } = {}) =>
-      rows.filter((r) => (from === undefined || r.ts >= from) && (to === undefined || r.ts <= to)),
+    read: async ({ from, to } = {}) => {
+      counters.readCalls += 1;
+      return rows.filter((r) => (from === undefined || r.ts >= from) && (to === undefined || r.ts <= to));
+    },
   };
 }
 
@@ -1807,15 +1813,23 @@ const OP_ROW = (over = {}) => ({
   ...over,
 });
 
-test("op-class watcher raises one blocker through pendingBlockers when a class is dead", async () => {
+// Shared wiring setup: an enabled engine over a memory ledger, seeded with
+// one dead class (10 failures spanning ≥1h) and driven through the first
+// watcher tick. Extracted because inline copies across sibling cases trip
+// the strict duplication gate (min-tokens 70, self-clones count).
+async function deadClassHarness() {
   const ledger = makeMemoryLedger();
   const h = makeHarness({ ctoEnabled: true, ledger });
   const base = h.clock.ms;
-  // 10 failures spanning ≥1h.
   for (let i = 0; i < 10; i++) {
     await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
   }
   await h.engine.tick();
+  return { ledger, h };
+}
+
+test("op-class watcher raises one blocker through pendingBlockers when a class is dead", async () => {
+  const { h } = await deadClassHarness();
   const entries = h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary");
   assert.equal(entries.length, 1);
   assert.equal(entries[0].kind, "blocker");
@@ -1828,13 +1842,7 @@ test("op-class watcher raises one blocker through pendingBlockers when a class i
 });
 
 test("op-class watcher does not re-fire on a second tick with no new data", async () => {
-  const ledger = makeMemoryLedger();
-  const h = makeHarness({ ctoEnabled: true, ledger });
-  const base = h.clock.ms;
-  for (let i = 0; i < 10; i++) {
-    await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
-  }
-  await h.engine.tick();
+  const { h } = await deadClassHarness();
   assert.equal(h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary").length, 1);
   // Advance past the watch interval and tick again — the latch holds.
   h.advance(30 * 60_000);
@@ -1845,13 +1853,7 @@ test("op-class watcher does not re-fire on a second tick with no new data", asyn
 });
 
 test("op-class watcher re-arms after a success then a fresh failure run", async () => {
-  const ledger = makeMemoryLedger();
-  const h = makeHarness({ ctoEnabled: true, ledger });
-  const base = h.clock.ms;
-  for (let i = 0; i < 10; i++) {
-    await ledger.append(OP_ROW({ ts: base - 3 * HOUR_MS + i * (HOUR_MS / 9 + 1) }));
-  }
-  await h.engine.tick();
+  const { ledger, h } = await deadClassHarness();
   assert.equal(h.pendingBlockers.filter((b) => b.source === "op-class:segment-summary").length, 1);
   // A fresh ok (after the alarm's fire time) demonstrates recovery. The
   // advance clears the watcher's read-pacing interval first.
@@ -1873,11 +1875,14 @@ test("op-class watcher re-arms after a success then a fresh failure run", async 
 });
 
 test("op-class watcher paces its ledger reads to the watch interval", async () => {
-  const ledger = makeMemoryLedger();
-  const h = makeHarness({ ctoEnabled: true, ledger });
+  const { ledger, h } = await deadClassHarness();
+  assert.equal(ledger.counters.readCalls, 1, "the first tick read the ledger once");
+  // Inside the default 10-minute interval: the tick runs, the read does not.
+  h.advance(60_000);
   await h.engine.tick();
-  const readsAfterFirst = ledger.rows.length; // no rows — read happened once
-  h.advance(60_000); // inside the default 10-minute interval
+  assert.equal(ledger.counters.readCalls, 1, "no re-read inside the watch interval");
+  // Past the interval: the next tick reads again.
+  h.advance(10 * 60_000);
   await h.engine.tick();
-  assert.equal(ledger.rows.length, readsAfterFirst);
+  assert.equal(ledger.counters.readCalls, 2, "the read resumes after the interval");
 });

@@ -199,11 +199,19 @@ test("fires once per incident: re-feeding the same rows does not re-fire", () =>
   assert.equal(third.raised.length, 0);
 });
 
-test("recovery: one ok newer than the alarm clears the latch", () => {
-  const base = 12_000_000;
+// Seed one full incident: 10 consecutive failures spanning ≥1h, evaluated
+// once with a clean latch map. Shared by the recovery and re-arm tests —
+// inline copies across sibling cases trip the strict duplication gate.
+function seededIncident(base) {
   const rows = [];
   for (let i = 0; i < 10; i++) rows.push(fail({ ts: base + i * (HOUR / 9 + 1) }));
-  let out = evaluateOpClass(rows, { nowMs: base + HOUR + 10 });
+  const out = evaluateOpClass(rows, { nowMs: base + HOUR + 10 });
+  return { rows, out };
+}
+
+test("recovery: one ok newer than the alarm clears the latch", () => {
+  const base = 12_000_000;
+  const { rows, out } = seededIncident(base);
   assert.equal(out.raised.length, 1);
   // An ok row OLDER than firedAt (sliding-window re-feed) must NOT clear.
   let stale = evaluateOpClass(rows, { nowMs: base + HOUR + 20, alarms: out.alarms });
@@ -219,9 +227,7 @@ test("recovery: one ok newer than the alarm clears the latch", () => {
 
 test("re-arms after one success then a fresh failure run, with a new generation", () => {
   const base = 13_000_000;
-  const rows = [];
-  for (let i = 0; i < 10; i++) rows.push(fail({ ts: base + i * (HOUR / 9 + 1) }));
-  let out = evaluateOpClass(rows, { nowMs: base + HOUR + 10 });
+  let { out } = seededIncident(base);
   assert.equal(out.raised.length, 1);
   assert.equal(out.raised[0].generation, 1);
 
