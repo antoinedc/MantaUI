@@ -23,6 +23,7 @@ import {
   ENGAGEMENT_MIN_WEEKS,
   agentHealth,
 } from "./ctoToolRegistry.mjs";
+import { SURFACES_READER_CODES } from "./ctoToolScan.mjs";
 
 const DAY = 24 * 3_600_000;
 const W0 = 1_700_000_000_000; // a fixed epoch
@@ -1169,4 +1170,67 @@ test("dailyScan: a malformed cursor reports invalid-cursor, not a db label", asy
   const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
   assert.equal(rows.length, 1);
   assert.equal(rows[0].code, "invalid-cursor");
+});
+
+// W10/BET-1542: the seam resolves each surfaces reader's failure into its own
+// code — the row names the failing reader, and the commit stays all-or-nothing.
+
+test("dailyScan: a reader-code surfaces failure names the failing reader and commits nothing", async () => {
+  const { registry, registryStore, ledger } = makeRegistry({
+    nowMs: W0,
+    // Even with usable config data present, the resolved code wins: the
+    // surfaces evidence never fuses and the day stays unstamped for retry.
+    collectSurfaces: async () => ({
+      config: { mcp: { linear: { url: "https://mcp.linear.app/sse" } } },
+      configCode: "surfaces-config-unavailable",
+    }),
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "surfaces-config-unavailable");
+  const state = registryStore._state();
+  assert.equal(state.tools.some((t) => t.tool === "linear"), false, "no partial evidence committed");
+  assert.equal(state.lastSurfaceDay, null, "the day stays unstamped — the retry re-reads the surfaces");
+  assert.equal(state.scanFailures, 1);
+  assert.ok(state.scanRetryAt > W0, "the scan backs off");
+});
+
+test("dailyScan: each failing surfaces reader names itself in the row", async () => {
+  for (const [key, code] of Object.entries(SURFACES_READER_CODES)) {
+    const surfaces = { [`${key}Code`]: code };
+    const { registry, ledger } = makeRegistry({ nowMs: W0, collectSurfaces: async () => surfaces });
+    await registry.dailyScan();
+    const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+    assert.equal(rows.length, 1, key);
+    assert.equal(rows[0].code, code, key);
+  }
+});
+
+test("dailyScan: a surfaces seam throw still maps to the catch-all surfaces-unavailable", async () => {
+  const { registry, ledger } = makeRegistry({
+    nowMs: W0,
+    collectSurfaces: async () => {
+      throw new Error("SECRET seam blew up token=abc123");
+    },
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "surfaces-unavailable");
+  assert.equal(JSON.stringify(ledger.rows).includes("abc123"), false);
+});
+
+test("dailyScan: a db failure keeps precedence over a surfaces reader code", async () => {
+  const { registry, ledger } = makeRegistry({
+    nowMs: W0,
+    collectDb: async () => {
+      throw Object.assign(new Error("db down"), { code: "db-query-failed" });
+    },
+    collectSurfaces: async () => ({ configCode: "surfaces-config-unavailable" }),
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "db-query-failed");
 });
