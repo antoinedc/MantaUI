@@ -152,6 +152,7 @@ import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
+import { endpointAttempts } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -2779,7 +2780,12 @@ const stopCtoStoreSweeper = startCtoStoreSweeper({
   // SAME sweeper timer (unique per-occurrence ids make terminal receipts grow
   // one per delivery — without the trim, the store wedges at MAX_ENTRIES).
   // `hooks` → createCtoStoreSweep: one sweeper, no second poller.
-  hooks: [() => ctoAdmissionEngine.trimTerminal()],
+  hooks: [
+    () => ctoAdmissionEngine.trimTerminal(),
+    // §4.3 (BET-1534): records past deadlineAt+60s with no terminal close as
+    // `abandoned` — a killed server's skeleton is an outcome, not a deletion.
+    () => endpointAttempts.sweepAbandoned(),
+  ],
 });
 void stopCtoStoreSweeper;
 

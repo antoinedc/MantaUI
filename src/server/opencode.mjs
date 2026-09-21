@@ -16,7 +16,9 @@ import { expandTilde, patchPath } from "../shared/paths.mjs";
 import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
-import { assistantCompletion } from "./ctoRunOutcome.mjs";
+import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs";
+import { endpointKey } from "../shared/endpointKey.mjs";
+import { endpointAttempts, newAttemptId } from "./endpointAttempts.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import {
   CREDENTIALS_PATH,
@@ -1063,6 +1065,8 @@ export function generateSessionTitle({ directory, instruction }) {
  * @param {number} [a.pollIntervalMs]  ms between message-list polls (default 1000)
  * @param {number} [a.maxAttempts]  max polls before giving up (default 30)
  * @param {Function} [a.onCreated]  async (sid) => {} — called after create, before prompt
+ * @param {string} [a.operation]  operation label for the §4.1 record (default: the title tag)
+ * @param {object} [a.attempts]  §4 recorder injection (default: the real endpoint-attempts store)
  * @returns {Promise<{text: string, sid: string|null}>}
  */
 export async function runSynchronousSession({
@@ -1075,14 +1079,64 @@ export async function runSynchronousSession({
   maxAttempts = 30,
   onCreated,
   trackCreation = beginInternalSession,
+  operation,
+  attempts = endpointAttempts,
 }) {
   const absDir = expandTilde(directory);
+
+  // §4.1/W2 — the operation record. The attemptId correlates the operation
+  // record with its provider attempt; deadlineAt derives from the request's
+  // own parameters (never a fixed wall clock), so the abandoned sweep's
+  // deadlineAt+60s rule fires only for operations that truly could not finish.
+  const attemptId = newAttemptId();
+  const startedAt = Date.now();
+  const pinned = !!(model && model.providerID && model.modelID);
+  const deadlineAt = startedAt + 10_000 + (maxAttempts + 1) * pollIntervalMs + 15_000;
+  let dispatched = false;
+  let stage = "create";
+  let providerAttempt = null; // §4.3 step 1: captured BEFORE deletion, persisted in the finally
+  let promptRefusal = null;   // §4.1a: preserved status + Retry-After
+
+  // §4.2 — a provider attempt keyed by the row's own identity. A row without
+  // identity yields null (never an empty-keyed record).
+  function attemptFromRow(info, extra) {
+    const key = endpointKey({ providerID: info?.providerID, modelID: info?.modelID });
+    if (!key) return null;
+    return {
+      attemptId, endpointKey: key, accountKey: info?.providerID ?? null,
+      at: Date.now(), attribution: "observed",
+      outcome: extra.outcome, errorName: extra.errorName ?? null,
+      httpStatus: extra.httpStatus ?? null, retryable: extra.retryable ?? null,
+      finish: extra.finish ?? null,
+    };
+  }
+
+  // §4.1a — the provider attempt for a prompt-boundary 402/429 refusal, only
+  // on a pinned model (unpinned = opencode chose; we do not know what ran).
+  function promptBoundaryAttempt() {
+    if (!promptRefusal || !pinned) return null;
+    if (promptRefusal.httpStatus !== 402 && promptRefusal.httpStatus !== 429) return null;
+    return {
+      attemptId, endpointKey: endpointKey(model), accountKey: model.providerID,
+      at: Date.now(), attribution: "intended", outcome: "failure",
+      errorName: null, httpStatus: promptRefusal.httpStatus, retryable: null, finish: null,
+      ...(promptRefusal.retryAfterMs !== undefined ? { retryAfterMs: promptRefusal.retryAfterMs } : {}),
+    };
+  }
+
+  void attempts.beginOperation({
+    attemptId, operation: operation ?? title, startedAt, deadlineAt,
+    intendedEndpointKey: pinned ? endpointKey(model) : null,
+  }).catch(() => {});
 
   let sid = null;
   let result;
   const finish = (out) => { result = out; return out; };
-  const finishCreation = trackCreation();
+  let finishCreation = null;
   try {
+    // §4.3 fix: trackCreation() runs INSIDE the try — a synchronous throw here
+    // previously escaped the function with no finish(), no cleanup and no record.
+    finishCreation = trackCreation();
     const createRes = await ocFetch(
       apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
       {
@@ -1110,10 +1164,13 @@ export async function runSynchronousSession({
     }
 
     const promptBody = { parts: [{ type: "text", text: instruction }], agent };
-    if (model && model.providerID && model.modelID) {
+    if (pinned) {
       promptBody.model = { providerID: model.providerID, modelID: model.modelID };
       if (model.variant) promptBody.variant = model.variant;
     }
+    stage = "prompt";
+    dispatched = true;
+    void attempts.markDispatched(attemptId, pinned).catch(() => {});
     const promptRes = await ocFetch(
       apiUrl(
         `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
@@ -1125,9 +1182,15 @@ export async function runSynchronousSession({
       },
     );
     if (!promptRes.ok) {
+      // §4.1a: preserve the refusal's status and Retry-After, mirroring sendPrompt.
+      const status = promptRes.status;
+      const retryAfterMs = parseRetryAfterMs(promptRes.headers?.get?.("retry-after"));
       await discardBody(promptRes);
-      return finish({ text: "", sid, ok: false, code: "prompt-http" });
+      promptRefusal = { httpStatus: status, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
+      return finish({ text: "", sid, ok: false, code: "prompt-http",
+        httpStatus: status, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) });
     }
+    stage = "poll";
 
     const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
     let readFailed = false;
@@ -1141,13 +1204,41 @@ export async function runSynchronousSession({
       }
       readFailed = false;
       const msgs = await r.json();
-      if (Array.isArray(msgs) && msgs.some((m) => m?.info?.role === "assistant" && m.info.error)) {
-        return finish({ text: "", sid, ok: false, code: "model-error" });
+      if (Array.isArray(msgs)) {
+        // D7: build the provider attempt from the CAUSATIVE assistant row —
+        // the message carrying the error, not merely the last row.
+        const errorRow = msgs.find((m) => m?.info?.role === "assistant" && m.info.error);
+        if (errorRow) {
+          const err = errorRow.info.error;
+          const status = err?.data?.statusCode;
+          providerAttempt = attemptFromRow(errorRow.info, {
+            outcome: "failure",
+            errorName: typeof err?.name === "string" ? err.name : null,
+            httpStatus: typeof status === "number" ? status : null,
+            retryable: typeof err?.data?.isRetryable === "boolean" ? err.data.isRetryable : null,
+            finish: null,
+          });
+          stage = "model";
+          // W3/D6: the status bucket IS the code — bare "model-error" survives
+          // only where no status is classifiable. Only structured cause fields
+          // cross the boundary; never exception text.
+          return finish({
+            text: "", sid, ok: false, code: classifyModelErrorCode(err),
+            errorName: typeof err?.name === "string" ? err.name : null,
+            httpStatus: typeof status === "number" ? status : null,
+            retryable: typeof err?.data?.isRetryable === "boolean" ? err.data.isRetryable : null,
+          });
+        }
       }
       const assistant = Array.isArray(msgs) ? msgs.filter((m) => m?.info?.role === "assistant").at(-1) : null;
       // A completed tool-use step is not the end of the assistant's turn.
       const completion = assistantCompletion(assistant?.info);
       if (!completion) continue;
+      stage = "model";
+      providerAttempt = attemptFromRow(assistant.info, {
+        outcome: completion === "ok" ? "success" : "failure",
+        errorName: null, httpStatus: null, retryable: null, finish: assistant?.info?.finish ?? null,
+      });
       if (completion !== "ok") return finish({ text: "", sid, ok: false, code: completion });
       const text = extractAssistantText([assistant]);
       return finish(text ? { text, sid, ok: true } : { text: "", sid, ok: false, code: "empty-output" });
@@ -1156,8 +1247,22 @@ export async function runSynchronousSession({
   } catch {
     return finish({ text: "", sid, ok: false, code: "transport-error" });
   } finally {
-    // A provenance failure must not bypass cleanup or leak a rejected promise.
-    try { await finishCreation(sid); } catch { /* already returned a safe runner failure */ }
+    // §4.3 finalization order — capture was pure (above); now:
+    // 1. persist the provider attempt (guarded; never skips cleanup),
+    // 2. cleanup (provenance release + session delete, guarded),
+    // 3. append the operation record stating the cleanup outcome truthfully.
+    // The result stays built from locals; a persistence failure never changes
+    // what the caller sees (it alarms instead — W7.3 reads the ledger rows).
+    const boundaryAttempt = promptBoundaryAttempt();
+    try {
+      await attempts.recordProviderAttempt(providerAttempt ?? boundaryAttempt);
+    } catch { /* guarded */ }
+    try {
+      await finishCreation?.(sid);
+    } catch { /* already returned a safe runner failure */ }
+    // The model/lifecycle outcome BEFORE the cleanup rewrite below — the
+    // record keeps both truths (terminal code + cleanupCode), never merging them.
+    const outcomeCode = result?.ok ? "ok" : (result?.code ?? "transport-error");
     if (sid) {
       try {
         await deleteSessionRaw(sid);
@@ -1167,6 +1272,18 @@ export async function runSynchronousSession({
         if (result.ok) Object.assign(result, { ok: false, code: "cleanup-error" });
       }
     }
+    let attribution;
+    if (boundaryAttempt && !providerAttempt) attribution = "intended";
+    else if (providerAttempt) attribution = "observed";
+    else if (!dispatched) attribution = "not-dispatched";
+    else attribution = pinned ? "intended" : "dispatched-unattributed";
+    try {
+      await attempts.terminalizeOperation({
+        attemptId, attribution,
+        terminal: { at: Date.now(), code: outcomeCode, stage },
+        cleanupCode: result?.cleanupCode,
+      });
+    } catch { /* guarded */ }
   }
 }
 

@@ -222,7 +222,7 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
     await record("cto.operation_attempt", null);
     let out;
     try {
-      out = await runOnce({ taskClass, meta, tier, context, directory, deps });
+      out = await runOnce({ taskClass, meta, tier, context, directory, deps, operation: op });
     } catch (error) {
       await record("cto.operation_outcome", "runner-error");
       throw error;
@@ -246,7 +246,7 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
   throw new Error(`runEphemeral: cascade exceeded maximum attempts for "${taskClass}"`);
 }
 
-async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
+async function runOnce({ taskClass, meta, tier, context, directory, deps, operation }) {
   const {
     oc,
     engineState = engineStateStore,
@@ -267,6 +267,9 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
     const res = await oc.runEphemeralSession({
       directory,
       title: `${CTO_TITLE_PREFIX}${taskClass}`,
+      // §4.1: the operation record's label must match the ledger's `operation`
+      // (the task class or the explicit op), not the title tag.
+      operation: operation ?? taskClass,
       instruction,
       model,
       onCreated: async (s) => {
@@ -289,6 +292,12 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps }) {
     }
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
       ...(res?.ok === false ? { ok: false, code: safeSummaryCode(res.code) } : {}),
+      // W3/D6: the structured cause fields survive the caller boundary (the
+      // transport runner only ever emits name/status/isRetryable, no text).
+      ...(res?.errorName ? { errorName: res.errorName } : {}),
+      ...(typeof res?.httpStatus === "number" ? { httpStatus: res.httpStatus } : {}),
+      ...(typeof res?.retryable === "boolean" ? { retryable: res.retryable } : {}),
+      ...(typeof res?.retryAfterMs === "number" ? { retryAfterMs: res.retryAfterMs } : {}),
       ...(res?.cleanupCode ? { cleanupCode: safeSummaryCode(res.cleanupCode) } : {}) };
   } finally {
     // Remove from the active set even when the run errored (finally).
