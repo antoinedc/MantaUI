@@ -883,3 +883,31 @@ test("live close persists summaryAttempts: 0 so a later failure is retryable, no
   assert.equal(isRetryEligibleSegment(rec), true);
   assert.equal(isSegmentSummaryEmpty(rec.summary), true);
 });
+
+test("the 98% case: a legacy shell with NO summaryOutcome field is selected and retried", async () => {
+  const fed = [];
+  const h = makeRetryHarness({
+    summarize: async () => ({ ok: true, summary: validSummary() }),
+    onSummary: async (s) => fed.push(s),
+  });
+  // 23,027 of the live shells predate the marker — no summaryOutcome at all.
+  const { summaryOutcome, ...legacy } = storedDegraded();
+  h.store.files.set("s1-1000", legacy);
+  assert.equal(isRetryEligibleSegment(h.store.files.get("s1-1000")), true);
+  const res = await h.seg.retryFailedSummaries({ force: true });
+  assert.deepEqual(res, { kind: "done", attempted: 1, recovered: 1 });
+  assert.equal(h.store.files.get("s1-1000").summary.intent, "fixed login");
+  assert.deepEqual(h.store.files.get("s1-1000").summaryOutcome, { ok: true, code: null });
+  assert.equal(fed.length, 1);
+});
+
+test("re-running the sweep is a no-op on already-recovered segments", async () => {
+  let calls = 0;
+  const h = makeRetryHarness({ summarize: async () => { calls += 1; return { ok: true, summary: validSummary() }; } });
+  h.store.files.set("s1-1000", storedDegraded());
+  assert.deepEqual(await h.seg.retryFailedSummaries({ force: true }), { kind: "done", attempted: 1, recovered: 1 });
+  const after = h.store.files.get("s1-1000");
+  assert.deepEqual(await h.seg.retryFailedSummaries({ force: true }), { kind: "done", attempted: 0, recovered: 0 });
+  assert.equal(calls, 1); // non-empty summary → skipped, no second summarize
+  assert.deepEqual(h.store.files.get("s1-1000"), after); // file untouched
+});
