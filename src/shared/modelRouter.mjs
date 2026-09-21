@@ -78,6 +78,13 @@ function capabilityDrop(m, { contextTokens, needs, health }) {
   return hs ?? null;
 }
 
+// BET-1535 (S3): is this a HEALTH exclusion label/state — i.e. an endpoint the
+// router knows is dead (out-of-credit / rate-limited)? `failing` is soft and
+// never excludes. hasOwn guards against inherited-key false positives.
+function isHealthExcluded(state) {
+  return state != null && Object.prototype.hasOwnProperty.call(HEALTH_EXCLUDED, state);
+}
+
 // Assess one endpoint once — Hard Stage 1 (eligibility), marginal cost and
 // reliability — everything the hard and soft stages read. The shadow price is
 // folded in HERE (the full `services` bag is visible), never inside the
@@ -366,8 +373,20 @@ function explain({ agent, tierName, preset, winner, cost }) {
 }
 
 /**
- * THE entry point. Always returns a model and a non-empty reason; never
+ * THE entry point. Always returns a decision and a non-empty reason; never
  * throws. Candidate = one (model, provider) endpoint; the set never merges.
+ *
+ * BET-1535 (S3): the result is a discriminated union on `kind` — the router
+ * must never hand back an endpoint it knows is dead:
+ * - `{ kind: "selected", model, ... }` — a healthy model qualified.
+ * - `{ kind: "no-healthy-endpoint", reason, excluded, trace }` — routing was
+ *   active, nothing healthy survived, and either the incumbent the caller
+ *   would fall back to is itself health-excluded (I1 — strictly prior) or
+ *   health is why nothing survived (I2). NO model is returned; the caller
+ *   fails its operation with the typed reason instead of substituting a
+ *   possibly-dead default.
+ * - `{ kind: "unrouted", model, ... }` — off-path / routing inactive / ordinary
+ *   no-candidate fallback: today's behaviour, unchanged.
  *
  * @param {object} [input]
  * @param {object} [input.intent]   - { kind, agent, needs, contextTokens, incumbent }
@@ -378,7 +397,7 @@ function explain({ agent, tierName, preset, winner, cost }) {
  *   (all optional; absent is permissive / measured-average, never false):
  *   { catalogMatcher, catalogEntryFor, qualityField, declared, providerClass,
  *     accounts, health, telemetry, reliability, mix, referenceByModel }
- * @returns {{ model: object|null, reason: string, alternatives: object[], changed: boolean, trace: object }}
+ * @returns {{ kind: "selected"|"no-healthy-endpoint"|"unrouted", model?: object|null, reason: string, excluded?: string[], alternatives?: object[], changed?: boolean, trace: object }}
  */
 export function chooseModel(input = {}) {
   const { intent = {}, catalog = [], policy = {}, nowMs = 0 } = input;
@@ -395,6 +414,7 @@ export function chooseModel(input = {}) {
 
   if (intent?.kind === "mid-exchange") {
     return {
+      kind: "unrouted",
       model: incumbent,
       reason: "mid-exchange switching is disabled",
       alternatives: [],
@@ -406,6 +426,7 @@ export function chooseModel(input = {}) {
   // byte-identical so a box without routing behaves exactly as before.
   if (!routingActive(policy)) {
     return {
+      kind: "unrouted",
       model: incumbent,
       reason: "routing not activated for this conversation",
       alternatives: [],
@@ -422,6 +443,10 @@ export function chooseModel(input = {}) {
   const hardCtx = { contextTokens: typeof intent?.contextTokens === "number" ? intent.contextTokens : undefined, needs, health: services.health };
 
   const survivors = [];
+  // BET-1535 (S3): the HEALTH-NEUTRAL survivor set — the candidates that would
+  // have survived had health exclusions not applied (survivors ∪ health-only
+  // drops). Tracked in the SAME assessment pass, never a second filter run.
+  const healthNeutral = [];
   const counts = {};
   const drops = [];
   let considered = 0;
@@ -451,9 +476,15 @@ export function chooseModel(input = {}) {
       // "capable" = can't do THIS turn (missing capability / exhausted);
       // "eligible" = not admissible by the completeness rules at all.
       addDrop(cap || a.exhausted ? "capable" : "eligible", label);
+      // A health-only drop: the health labels are checked LAST in
+      // capabilityDrop, so a health label as `cap` means no capability reason
+      // fired — ignoring health, this candidate would have survived unless it
+      // also fails on exhaustion or eligibility.
+      if (isHealthExcluded(cap) && !a.exhausted && a.eligible) healthNeutral.push(a);
       continue;
     }
     survivors.push(a);
+    healthNeutral.push(a);
   }
 
   // Eco (Optimizer P2.3): `policy.preset` stays whatever config holds
@@ -476,7 +507,33 @@ export function chooseModel(input = {}) {
   };
 
   if (survivors.length === 0) {
+    // BET-1535 (S3) — the ordered rule (endpoint-health spec W1):
+    //   1. no healthy model qualified (survivors is empty);
+    //   2. I1 is strictly prior: the value today's code would return is the
+    //      incumbent — if health excludes it, it may NOT be handed back;
+    //   3. else, if the health-neutral survivor set is non-empty, health is
+    //      WHY there is nothing (a survivor existed before the exclusions) —
+    //      the verdict names the true cause (I2);
+    //   4. otherwise today's behaviour, unchanged: a healthy incumbent that is
+    //      merely unqualified (context too small, wrong modality) still takes
+    //      this path. Only health can produce the new verdict.
+    const incumbentExcluded = incumbent !== null && isHealthExcluded(services.health?.[incumbent.providerID]);
+    if (incumbentExcluded || healthNeutral.length > 0) {
+      const excluded = healthNeutral.map((a) => a.key);
+      if (incumbentExcluded) {
+        const ik = endpointKey(incumbent);
+        if (!excluded.includes(ik)) excluded.push(ik);
+      }
+      return {
+        kind: "no-healthy-endpoint",
+        reason: `no healthy ${agent} endpoint available (${bindingReason(counts)})`,
+        excluded,
+        changed: false,
+        trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
+      };
+    }
     return {
+      kind: "unrouted",
       model: incumbent,
       reason: `no ${agent} model passes constraints (${bindingReason(counts)})`,
       alternatives: [],
@@ -488,7 +545,24 @@ export function chooseModel(input = {}) {
   const explored = stage3Order(survivors, { preset: effectivePreset, telemetry: services.telemetry, health: services.health });
   const band = selectBand(explored, targetRank, agent);
   if (band.length === 0) {
+    // BET-1535 (S3): rule 2 applies here too — I1 is strictly prior at every
+    // fallback point, so an excluded incumbent is never handed back. Rule 3
+    // does NOT fire here: the survivor set was non-empty (health cannot be
+    // "why there is nothing" when something survived — the floor is why the
+    // band is empty), so a healthy incumbent still takes today's path.
+    if (incumbent !== null && isHealthExcluded(services.health?.[incumbent.providerID])) {
+      return {
+        kind: "no-healthy-endpoint",
+        reason:
+          `no ${agent} model meets the ${TIER_BY_RANK[targetRank]} target above the ${floorScore} floor; ` +
+          `incumbent ${endpointKey(incumbent)} is ${services.health?.[incumbent.providerID]}`,
+        excluded: [endpointKey(incumbent)],
+        changed: false,
+        trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
+      };
+    }
     return {
+      kind: "unrouted",
       model: incumbent,
       reason: `no ${agent} model meets the ${TIER_BY_RANK[targetRank]} target above the ${floorScore} floor`,
       alternatives: [],
@@ -508,6 +582,7 @@ export function chooseModel(input = {}) {
     ? (survivors.find((a) => endpointKey(a.candidate) === endpointKey(incumbent)) ?? null)
     : null;
   return {
+    kind: "selected",
     model: winner,
     reason: explain({ agent, tierName: TIER_BY_RANK[tierRank(band[0].tier)], preset: effectivePreset, winner, cost: winnerEntry.marginalCost }),
     alternatives: band.slice(1, 4).map((a) => a.candidate),

@@ -100,9 +100,23 @@ export interface RoutingTrace {
   winner: RoutingSignals | null;
 }
 
-export interface ChooseResult {
-  model: Model | null;
+/** BET-1535 (S3): the discriminated chooseModel verdicts. "selected" — a
+ *  healthy model qualified. "no-healthy-endpoint" — routing was active,
+ *  nothing healthy survived, and the incumbent fallback is itself excluded
+ *  (I1) or health is why nothing survived (I2); NO model is returned and the
+ *  caller fails its operation with the typed reason. "unrouted" — off-path /
+ *  routing inactive / ordinary no-candidate fallback (today's behaviour). */
+export type ChooseKind = "selected" | "no-healthy-endpoint" | "unrouted";
+
+interface ChooseResultBase {
+  kind: ChooseKind;
   reason: string;
+  trace: RoutingTrace;
+}
+
+export interface SelectedResult extends ChooseResultBase {
+  kind: "selected";
+  model: Model;
   alternatives: Model[];
   changed: boolean;
   /** Optimizer P2.3 (BET-1345) — the assessed-cost accessor for the wiring
@@ -113,8 +127,22 @@ export interface ChooseResult {
     incumbent: number | null;
     winnerCacheWritePrice: number | null;
   };
-  trace: RoutingTrace;
 }
+
+export interface NoHealthyEndpointResult extends ChooseResultBase {
+  kind: "no-healthy-endpoint";
+  /** Endpoint keys ("providerID/modelID") the router knows are excluded. */
+  excluded: string[];
+}
+
+export interface UnroutedResult extends ChooseResultBase {
+  kind: "unrouted";
+  model: Model | null;
+  alternatives: Model[];
+  changed: boolean;
+}
+
+export type ChooseResult = SelectedResult | NoHealthyEndpointResult | UnroutedResult;
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
 

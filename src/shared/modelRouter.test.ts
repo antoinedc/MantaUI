@@ -181,7 +181,7 @@ describe("chooseModel — off-path and invariants", () => {
     expect(res.reason).toBe("mid-exchange switching is disabled");
   });
 
-  it("returns incumbent + non-empty reason when nothing survives filtering", () => {
+  it("no-healthy-endpoint verdict carries the full trace (BET-1535)", () => {
     const incumbent = endpoint("m", { providerID: "a" });
     const res = route({
       catalog: [endpoint("dead", { providerID: "p" })],
@@ -192,9 +192,15 @@ describe("chooseModel — off-path and invariants", () => {
       // per-turn constraint.
       services: { health: { p: "out-of-credit" } },
     });
-    expect(res.model).toBe(incumbent);
+    // BET-1535 (S3) rule 3: the sole candidate was killed only by health, so
+    // the verdict is typed — but the trace still records the assessment pass.
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).model).toBeUndefined();
     expect(res.changed).toBe(false);
-    expect(res.reason).toContain("no general model passes constraints");
+    expect(res.reason).toContain("no healthy general endpoint available");
+    expect(res.trace.considered).toBe(1);
+    expect(res.trace.dropped).toEqual([{ stage: "capable", reason: "out-of-credit", n: 1 }]);
+    expect(res.trace.winner).toBeNull();
   });
 
   it("REGRESSION: routing activates from a preset alone (BET-1251)", () => {
@@ -285,7 +291,7 @@ describe("chooseModel — hard stages (eligibility, capability, health)", () => 
     expect(res.model?.id).toBe("known");
   });
 
-  it("unhealthy excluded: an out-of-credit provider is unselectable even when sole candidate", () => {
+  it("no-healthy-endpoint: an out-of-credit provider is unselectable even when sole candidate (BET-1535)", () => {
     const only = endpoint("m", { providerID: "a" });
     const incumbent = endpoint("inc", { providerID: "x" });
     const res = route({
@@ -294,12 +300,16 @@ describe("chooseModel — hard stages (eligibility, capability, health)", () => 
       services: { health: { a: "out-of-credit" } },
       intent: { incumbent },
     });
-    expect(res.model).toBe(incumbent);
-    expect(res.changed).toBe(false);
-    expect(res.reason).toContain("out-of-credit");
+    // BET-1535 (S3) rule 3: the sole candidate was killed ONLY by health, so
+    // health is why there is nothing — the verdict is typed and no model is
+    // handed back (the healthy incumbent x/inc was the old fail-open answer).
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).model).toBeUndefined();
+    expect((res as any).excluded).toEqual(["a/m"]);
+    expect(res.reason).toContain("no healthy general endpoint available");
   });
 
-  it("rate-limited is also excluded as a hard constraint", () => {
+  it("no-healthy-endpoint: rate-limited is also excluded as a hard constraint (BET-1535)", () => {
     const only = endpoint("m", { providerID: "a" });
     const incumbent = endpoint("inc", { providerID: "x" });
     const res = route({
@@ -308,8 +318,9 @@ describe("chooseModel — hard stages (eligibility, capability, health)", () => 
       services: { health: { a: "rate-limited" } },
       intent: { incumbent },
     });
-    expect(res.model).toBe(incumbent);
-    expect(res.reason).toContain("rate-limited");
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toEqual(["a/m"]);
+    expect(res.reason).toContain("no healthy general endpoint available");
   });
 });
 
@@ -538,7 +549,7 @@ describe("chooseModel — decision trace (BET-1265)", () => {
     expect(res.trace.intent).toEqual({ contextTokens: 0, needs: {} });
   });
 
-  it("no-survivor: winner is null and dropped names every stage/reason pair with counts", () => {
+  it("no-survivor: typed no-healthy-endpoint verdict, no model, dropped names every stage/reason pair with counts (BET-1535)", () => {
     // Three candidates dropped for three still-hard reasons: out-of-credit
     // (health), unknown identity, and no tool-calling. Status no longer drops
     // a model (BET-1267 3d), so no "no active model" here.
@@ -552,7 +563,12 @@ describe("chooseModel — decision trace (BET-1265)", () => {
       intent: { incumbent, contextTokens: 0, needs: { tools: true } },
       services: { declared: defaultDeclared([credit, toolLess]), health: { p: "out-of-credit" } },
     });
-    expect(res.model?.providerID).toBe("x"); // incumbent returned unchanged
+    // BET-1535 (S3) rule 3: `credit` was killed ONLY by health — health is why
+    // there is nothing, so the verdict is typed and the healthy-but-unroutable
+    // incumbent is no longer silently handed back.
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).model).toBeUndefined();
+    expect((res as any).excluded).toEqual(["p/credit"]);
     expect(res.trace.winner).toBeNull();
     expect(res.trace.considered).toBe(3);
     expect(res.trace.dropped).toHaveLength(3);
@@ -872,8 +888,11 @@ describe("provider health in routing (BET-1270 6a)", () => {
         policy: { preset: "balanced" },
         services: { health: { p: state } },
       });
-      expect(res.model).toBeNull();
-      expect(res.reason).toContain("no general model passes constraints");
+      // BET-1535 (S3): with no incumbent to fall back to, health being the
+      // only killer yields the typed verdict, not a silent null model.
+      expect(res.kind).toBe("no-healthy-endpoint");
+      expect((res as any).excluded).toEqual(["p/m"]);
+      expect(res.reason).toContain("no healthy general endpoint available");
     }
   });
 });
@@ -1102,5 +1121,117 @@ describe("modelRouter — eco level moves the target, never the floor", () => {
     // Eco relaxed the TARGET tier (economy/build → balanced) but the floor held:
     // the only candidate is below the floor, so no model is offered.
     expect(res.model).toBeNull();
+  });
+});
+
+// --- BET-1535 (S3): fail closed — the ordered rule at the fallback points ----
+// The router must never hand back an endpoint it knows is dead. I1 is strictly
+// prior: an excluded incumbent is never returned, including on fallback paths.
+// I2: the verdict names the true cause. The consequence pinned by the issue: a
+// healthy incumbent that is merely UNQUALIFIED (context too small, wrong
+// modality) still takes today's path — only health can produce the verdict.
+describe("chooseModel — no-healthy-endpoint verdict (BET-1535)", () => {
+  it("rule 2: all candidates excluded → typed verdict; the excluded incumbent is NOT returned", () => {
+    // The incumbent is itself on the excluded provider: today's code would
+    // hand it back, which is exactly the fail-open S3 closes.
+    const incumbent = endpoint("m", { providerID: "p" });
+    const res = route({
+      catalog: [endpoint("m", { providerID: "p" }), endpoint("m2", { providerID: "q" })],
+      policy: { preset: "balanced" },
+      intent: { incumbent },
+      services: { health: { p: "out-of-credit", q: "rate-limited" } },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).model).toBeUndefined();
+    expect(res.trace.winner).toBeNull();
+    // Every candidate the router knows is dead is named, incumbent included.
+    expect((res as any).excluded).toEqual(expect.arrayContaining(["p/m", "q/m2"]));
+    expect((res as any).excluded).toContain("p/m");
+  });
+
+  it("rule 2: an excluded fallback incumbent with an EMPTY health-neutral set still yields the verdict (I1 forced)", () => {
+    // The only candidate is dropped for a NON-health reason (too small for the
+    // context), so no candidate would survive without health — the health-
+    // neutral set is empty — and the incumbent itself is health-excluded.
+    const incumbent = endpoint("tiny", { providerID: "p", tier: "deep" });
+    const res = route({
+      catalog: [endpoint("small", { providerID: "p", tier: "fast", limit: { context: 128_000 } })],
+      policy: { preset: "balanced" },
+      intent: { incumbent, contextTokens: 200_000 },
+      services: { health: { p: "out-of-credit" } },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).model).toBeUndefined();
+    expect((res as any).excluded).toEqual(["p/tiny"]);
+  });
+
+  it("rule 3: a non-empty health-neutral set yields the verdict (health is why there is nothing)", () => {
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [endpoint("dead", { providerID: "p" })],
+      policy: { preset: "balanced" },
+      intent: { incumbent },
+      services: { health: { p: "out-of-credit" } },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toEqual(["p/dead"]);
+  });
+
+  it("rule 4: a healthy-but-unqualified incumbent still takes today's path (regression guard)", () => {
+    // The sole candidate is the incumbent, dropped for context headroom — a
+    // non-health reason. Health excludes nothing; today's behaviour stands.
+    const incumbent = endpoint("small", { providerID: "p", tier: "fast", limit: { context: 128_000 } });
+    const res = route({
+      catalog: [incumbent],
+      policy: { preset: "balanced" },
+      intent: { incumbent, contextTokens: 200_000 },
+    });
+    expect(res.kind).toBe("unrouted");
+    expect(res.model).toBe(incumbent);
+    expect(res.changed).toBe(false);
+    expect(res.reason).toContain("no general model passes constraints");
+  });
+
+  it("band-empty: rule 2 fires on an excluded incumbent even though survivors existed", () => {
+    // All survivors sit below build's quality floor, so the band is empty and
+    // today's code returns the incumbent — but the incumbent's provider is
+    // rate-limited, so I1 (strictly prior) forces the typed verdict.
+    const incumbent = endpoint("low", { providerID: "p", tier: "fast", score: 0.25 });
+    const res = route({
+      catalog: [endpoint("low2", { providerID: "q", tier: "fast", score: 0.25 })],
+      policy: { preset: "balanced" },
+      intent: { agent: "build", incumbent },
+      services: { health: { p: "rate-limited" } },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toEqual(["p/low"]);
+  });
+
+  it("band-empty: a healthy incumbent still takes today's path (the floor, not health, emptied the band)", () => {
+    const incumbent = endpoint("low", { providerID: "p", tier: "fast", score: 0.25 });
+    const res = route({
+      catalog: [endpoint("low2", { providerID: "q", tier: "fast", score: 0.25 })],
+      policy: { preset: "balanced" },
+      intent: { agent: "build", incumbent },
+    });
+    expect(res.kind).toBe("unrouted");
+    expect(res.model).toBe(incumbent);
+    expect(res.reason).toContain("above the 0.4 floor");
+  });
+
+  it("off-path: routing inactive and mid-exchange are unrouted, never verdicts", () => {
+    const incumbent = endpoint("m", { providerID: "p" });
+    const off = route({ catalog: [], policy: {}, intent: { incumbent } });
+    expect(off.kind).toBe("unrouted");
+    expect(off.model).toBe(incumbent);
+    const mid = route({ catalog: [], policy: { preset: "balanced" }, intent: { kind: "mid-exchange", incumbent } });
+    expect(mid.kind).toBe("unrouted");
+    expect(mid.model).toBe(incumbent);
+  });
+
+  it("selected carries the kind on the normal path", () => {
+    const res = route({ catalog: [endpoint("m")], policy: { preset: "balanced" } });
+    expect(res.kind).toBe("selected");
+    expect(res.model).toBeTruthy();
   });
 });

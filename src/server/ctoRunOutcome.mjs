@@ -10,6 +10,10 @@ const CODES = new Set([
   // no classifiable status.
   "model-error-402", "model-error-401", "model-error-403", "model-error-404",
   "model-error-429", "model-error-5xx",
+  // BET-1535 (S3): the router's typed verdict when it knows every candidate is
+  // health-excluded — the run fails with this reason instead of dispatching on
+  // a dead default. Never a quality failure (no tier escalation).
+  "no-healthy-endpoint",
 ]);
 
 // §4.5 status buckets → the W3 code. Unclassifiable statuses (none/400 etc.)
