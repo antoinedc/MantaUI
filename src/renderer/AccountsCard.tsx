@@ -32,6 +32,7 @@ import { X } from "lucide-react";
 import type { DiscoverResult, ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
+import { formatEndpointStateLine } from "./chatUtils";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
 import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConfirmInline } from "./ConfirmInline";
@@ -191,7 +192,41 @@ export function helpText(r: AccountRowModel): string {
 
 // ===== Row assembly (card-side) =====
 
+// BET-1537 (S5, §W9): the accounts:health response now carries TWO maps — the
+// provider facade (keyed by opencode providerID, what gates subscription
+// credentials) and the per-ENDPOINT register detail (keyed
+// "providerID/modelID", the resolved register state + the rate-limit
+// deadline + the last failure's reason). Both come from the ONE health
+// engine, so the row/model badges cannot disagree with what blocks Auto.
 type HealthMap = Record<string, { state: string; retryInMs?: number | null }>;
+
+type EndpointHealthEntry = {
+  state: string;
+  until?: number;
+  retryInMs?: number;
+  streak?: number;
+  since?: number;
+  // §W9 window activity (server-computed from the aggregates, probe-excluded).
+  lastSuccessAt?: number;
+  attempts?: number;
+  successes?: number;
+  reason?: { httpStatus?: number | null; errorName?: string | null } | null;
+};
+
+type AccountsHealth = { providers?: HealthMap; endpoints?: Record<string, EndpointHealthEntry> } | null;
+
+// The §W9 worst-state order for a provider's endpoint entries — what the
+// custom row's register line summarizes. Dead is the worst (the endpoint
+// refuses everything), then the authoritative refusals, then rate-limited,
+// then degraded, then unproven.
+const ENDPOINT_STATE_BADNESS: Record<string, number> = {
+  dead: 5,
+  "not-found": 4,
+  forbidden: 4,
+  "rate-limited": 3,
+  degraded: 2,
+  unproven: 1,
+};
 
 function normalizeHealth(h: HealthMap | null | undefined, id: string): {
   health: AccountRowModel["health"];
@@ -458,10 +493,56 @@ function AccountRow({
 
 // ===== The one list component =====
 
+/**
+ * BET-1537 (S5, §W9): the custom-endpoint row's register line — the worst
+ * endpoint state in the register, with its deadline, failure reason and
+ * window activity (last success, attempts + success rate), plus the "Send
+ * probe" control. One line, one truth: the text comes from the shared pure
+ * helper (chatUtils.formatEndpointStateLine) reading the resolved state the
+ * router itself reads — never a client-side guess.
+ */
+function EndpointRegisterLine({
+  providerID,
+  states,
+  worst,
+  enabledCount,
+  onProbe,
+  probeDisabled,
+}: {
+  providerID: string;
+  states: Record<string, EndpointHealthEntry>;
+  worst: { key: string; modelId: string; entry: EndpointHealthEntry } | null;
+  enabledCount: number;
+  onProbe: () => void;
+  probeDisabled: boolean;
+}) {
+  const line = worst ? formatEndpointStateLine(worst.entry, Date.now()) : "";
+  if (!line && enabledCount === 0) return null;
+  return (
+    <div className="flex items-center gap-2 flex-wrap" data-testid={`endpoint-register-${providerID}`}>
+      {line ? (
+        <span className="text-meta text-text-faint">{line}</span>
+      ) : (
+        <span className="text-meta text-text-faint">
+          {Object.keys(states).length > 0 ? "" : "Unproven"}
+        </span>
+      )}
+      <button
+        type="button"
+        className="text-meta underline text-text-faint hover:text-text-quiet"
+        onClick={onProbe}
+        disabled={probeDisabled}
+      >
+        Send probe
+      </button>
+    </div>
+  );
+}
+
 type AccountsData = {
   statuses: SubscriptionStatus[];
   providers: ProviderEndpoint[];
-  health: HealthMap | null;
+  health: AccountsHealth;
   declared: Record<string, DeclaredModel> | undefined;
 };
 
@@ -499,6 +580,42 @@ export function AccountsCard() {
     return { statuses: res.providers, providers, health, declared };
   });
 
+  // BET-1537 (§W9): this provider's endpoint-register entries, keyed by model
+  // id for the ModelChecklist badges. The key format is the router's own
+  // endpointKey ("providerID/modelID"), so a key that does not start with the
+  // provider id (or a malformed one) is never this provider's.
+  const endpointStatesFor = useCallback(
+    (providerID: string): Record<string, EndpointHealthEntry> => {
+      const all = data?.health?.endpoints ?? {};
+      const out: Record<string, EndpointHealthEntry> = {};
+      const prefix = `${providerID}/`;
+      for (const [key, entry] of Object.entries(all)) {
+        if (!key.startsWith(prefix)) continue;
+        out[key.slice(prefix.length)] = entry;
+      }
+      return out;
+    },
+    [data],
+  );
+
+  // The worst endpoint entry for a provider — what the custom row's register
+  // line summarizes and what "Send probe" targets. `null` when the register
+  // has nothing to say about this provider (no line, no probe target beyond
+  // the first enabled model).
+  const worstEndpointFor = useCallback(
+    (providerID: string): { key: string; modelId: string; entry: EndpointHealthEntry } | null => {
+      const states = endpointStatesFor(providerID);
+      let worst: { key: string; modelId: string; entry: EndpointHealthEntry } | null = null;
+      for (const [modelId, entry] of Object.entries(states)) {
+        if (!worst || (ENDPOINT_STATE_BADNESS[entry.state] ?? 0) > (ENDPOINT_STATE_BADNESS[worst.entry.state] ?? 0)) {
+          worst = { key: `${providerID}/${modelId}`, modelId, entry };
+        }
+      }
+      return worst;
+    },
+    [endpointStatesFor],
+  );
+
   const rows = useMemo<AccountRowModel[]>(() => {
     if (!data) return [];
     const statuses = data.statuses ?? [];
@@ -509,7 +626,7 @@ export function AccountsCard() {
       const snap = snapshots.find((u) => u.providerIDs?.includes(s.id));
       const reading = subscriptionReading(snap, nowMs);
       const balance = typeof snap?.balance === "number" ? snap.balance : null;
-      const { health: h, retryInMinutes } = normalizeHealth(health, s.id);
+      const { health: h, retryInMinutes } = normalizeHealth(health?.providers, s.id);
       // A reader reporting "exhausted" refuses work — surfaced as a health
       // out-of-credit even before providerHealth sees a 402.
       const effectiveHealth: AccountRowModel["health"] =
@@ -535,7 +652,7 @@ export function AccountsCard() {
       .filter((ep) => !isSubscriptionId(ep.id, statuses))
       .map((ep) => {
         const elig = endpointEligibility(ep, data.declared, routingCatalog.matcher);
-        const { health: h, retryInMinutes } = normalizeHealth(health, ep.id);
+        const { health: h, retryInMinutes } = normalizeHealth(health?.providers, ep.id);
         return {
           id: ep.id,
           className: "Custom" as const,
@@ -667,6 +784,38 @@ export function AccountsCard() {
     [busy],
   );
 
+  // BET-1537 (§W9): "Send probe" on a custom endpoint row — force a health
+  // probe against the row's worst register entry (or its first enabled model
+  // when the register has nothing yet) and report BOTH branches, never
+  // discard (same discipline as Refresh/Try again).
+  const [probeResult, setProbeResult] = useState<Record<string, { ok: boolean; message: string }>>({});
+  const probe = useCallback(
+    async (ep: ProviderEndpoint) => {
+      if (busy) return;
+      const worst = worstEndpointFor(ep.id);
+      const key = worst?.key ?? (ep.enabledModels.length > 0 ? `${ep.id}/${ep.enabledModels[0]}` : "");
+      if (!key) return;
+      setBusy(ep.id);
+      try {
+        const res = await window.api.accountsEndpointProbe(key);
+        const ok = res?.ok === true;
+        setProbeResult((r) => ({
+          ...r,
+          [ep.id]: { ok, message: res?.message ?? (ok ? "Probe passed." : "Probe failed — try again.") },
+        }));
+        void refresh();
+      } catch (e) {
+        setProbeResult((r) => ({
+          ...r,
+          [ep.id]: { ok: false, message: e instanceof Error ? e.message : "Probe failed — try again." },
+        }));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, worstEndpointFor, refresh],
+  );
+
   const removeEndpoint = useCallback(
     async (ep: ProviderEndpoint) => {
       if (busy) return;
@@ -746,6 +895,23 @@ export function AccountsCard() {
                 {ep && (
                   <div className="pl-4 space-y-1">
                     <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
+                    <EndpointRegisterLine
+                      providerID={ep.id}
+                      states={endpointStatesFor(ep.id)}
+                      worst={worstEndpointFor(ep.id)}
+                      enabledCount={ep.enabledModels.length}
+                      onProbe={() => void probe(ep)}
+                      probeDisabled={busy === row.id}
+                    />
+                    {probeResult[ep.id] && (
+                      <div
+                        role="status"
+                        data-testid={`probe-result-${ep.id}`}
+                        className={`text-meta ${probeResult[ep.id].ok ? "text-ok" : "text-danger"} break-words`}
+                      >
+                        {probeResult[ep.id].message}
+                      </div>
+                    )}
                     {discoverError[ep.id] && (
                       <div role="alert" className="text-meta text-danger break-words">
                         {discoverError[ep.id]}
@@ -762,6 +928,7 @@ export function AccountsCard() {
                       checked={new Set(ep.enabledModels)}
                       onToggle={(id) => void toggleModel(ep, id)}
                       disabled={busy === row.id}
+                      states={endpointStatesFor(ep.id)}
                     />
                   </div>
                 )}

@@ -307,7 +307,30 @@ export function mount(el: React.ReactElement, opts: MountOptions = {}): Harness 
 }
 
 // Click a Checkbox the way a user does: on the visible box, not the sr-only
-// input. The M527 Checkbox primitive renders a real `<input type="checkbox">`
+// BET-1537 (review cycle 2, duplication gate): the shared DOM-query helpers —
+// previously copy-pasted in AccountsCard.test.tsx and ModelChecklist.test.tsx.
+// ONE home next to clickCheckbox.
+
+/** The first button whose trimmed text equals `text`, or null. */
+export function buttonByText(h: Harness, text: string): HTMLButtonElement | null {
+  for (const b of Array.from(h.container.querySelectorAll("button"))) {
+    if ((b.textContent ?? "").trim() === text) return b;
+  }
+  return null;
+}
+
+/** The checkbox input with the given aria-label, or null (no climbing — the
+ *  read-only counterpart of clickCheckbox). */
+export function checkboxByLabel(h: Harness, label: string): HTMLInputElement | null {
+  return (
+    (Array.from(h.container.querySelectorAll('input[type="checkbox"]')).find(
+      (i) => i.getAttribute("aria-label") === label,
+    ) as HTMLInputElement | null) ?? null
+  );
+}
+
+// Clicks the VISIBLE box of the M527 Checkbox with the given aria-label.
+// The M527 Checkbox primitive renders a real `<input type="checkbox">`
 // as `sr-only` (1px, clipped, invisible) inside a `<label>` next to a styled
 // `span[aria-hidden]` box. A user clicks that box, and the real browser path is
 // label-activation → the input's click — exactly where checkbox defects live.

@@ -103,6 +103,19 @@ export const PROVIDER_HEALTH_STATE = Object.freeze({
   FAILING: "failing",
 });
 
+// BET-1537 S5 (§W7.2): the DURABLE excluding states — the ones that exclude
+// until evidence clears them and therefore merit a blocker card via the
+// endpoint watcher (cto.endpoint_excluded / cto.endpoint_recovered rows).
+// `rate-limited` has a designed clock recovery and the soft states
+// (unproven, degraded) do not exclude hard — neither raises a card; both
+// surface on the Accounts/Models UI (§W9).
+export const DURABLE_EXCLUDING_ENDPOINT_STATES = Object.freeze(
+  new Set([ENDPOINT_HEALTH_STATES.DEAD, ENDPOINT_HEALTH_STATES.NOT_FOUND, ENDPOINT_HEALTH_STATES.FORBIDDEN]),
+);
+export const DURABLE_EXCLUDING_ACCOUNT_STATES = Object.freeze(
+  new Set([ACCOUNT_HEALTH_STATES.OUT_OF_CREDIT, ACCOUNT_HEALTH_STATES.UNAUTHORIZED]),
+);
+
 // `dead` needs a streak of consecutive health-eligible failures. A single
 // transient blip must never exclude; five in a row is a pattern.
 export const DEAD_STREAK = 5;
@@ -361,6 +374,26 @@ export function createEndpointHealth({
     } catch { /* best-effort */ }
   }
 
+  /** Best-effort ledger append for a durable exclusion-state transition
+   *  (§W7.2) — the endpoint watcher's input rows. A transition row failing to
+   *  persist must never break the write path. */
+  async function emitWatchRow(kind, fields) {
+    try {
+      void ledger.append({ actor: "cto", ts: now(), kind, ...fields }).catch(() => {});
+    } catch { /* best-effort */ }
+  }
+
+  /** The durable-excluding state of one derived endpoint state, or null. */
+  function durableEndpoint(state) {
+    return state && DURABLE_EXCLUDING_ENDPOINT_STATES.has(state.state) ? state.state : null;
+  }
+
+  /** The durable-excluding state of one account register entry, or null
+   *  (an arming-only entry — {arming401, ...} with no `state` — is null). */
+  function durableAccount(acc) {
+    return acc && DURABLE_EXCLUDING_ACCOUNT_STATES.has(acc.state) ? acc.state : null;
+  }
+
   /** Rebuild BOTH read-models from the durable stores. */
   async function reload() {
     try {
@@ -497,6 +530,13 @@ export function createEndpointHealth({
   }
 
   async function recordProbeEvidence(attempt) {
+    const key = attempt.endpointKey;
+    const status = Number.isFinite(attempt.httpStatus) ? attempt.httpStatus : null;
+    // §W7.2 transition detection: a probe 404/403 arms an authoritative slot
+    // (excluded — fresh evidence of the refusal) and a probe pass can clear a
+    // transient `dead` (provenAt). Compare the derived state around the write.
+    const preState = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs: now() });
+    const preDurable = durableEndpoint(preState);
     await patchStore(store, (fresh) => {
       const probes = capProbeRing([
         ...fresh.probes,
@@ -510,10 +550,8 @@ export function createEndpointHealth({
         },
       ]);
       const endpoints = { ...fresh.endpoints };
-      const key = attempt.endpointKey;
       const prev = endpoints[key] && typeof endpoints[key] === "object" ? endpoints[key] : {};
       const next = { ...prev };
-      const status = Number.isFinite(attempt.httpStatus) ? attempt.httpStatus : null;
       // Probe evidence is weaker than production evidence (W8): a probe
       // success proves the endpoint (`provenAt` — clears `unproven` and
       // transient `dead`) but NEVER an authoritative state on its own —
@@ -533,6 +571,22 @@ export function createEndpointHealth({
       return { probes, endpoints };
     });
     await reload();
+    const postState = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs: now() });
+    const postDurable = durableEndpoint(postState);
+    if (postDurable && postDurable !== preDurable) {
+      await emitWatchRow("cto.endpoint_excluded", {
+        subject: key,
+        scope: "endpoint",
+        state: postDurable,
+        reason: {
+          httpStatus: status,
+          errorName: attempt.errorName ?? null,
+          streak: postState.streak ?? null,
+        },
+      });
+    } else if (preDurable && !postDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: key, scope: "endpoint" });
+    }
   }
 
   async function recordProductionAttempt(attempt) {
@@ -540,6 +594,11 @@ export function createEndpointHealth({
     const status = Number.isFinite(attempt.httpStatus) ? attempt.httpStatus : null;
     const key = attempt.endpointKey;
     const providerID = providerOf(key);
+    // §W7.2 transition detection inputs: the derived endpoint state and the
+    // account entry BEFORE the write (reg/aggs are the pre-write read-models).
+    const preEpState = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs: at });
+    const preEpDurable = durableEndpoint(preEpState);
+    const preAccDurable = durableAccount(reg.accounts[providerID]);
     const nextReg = await patchStore(store, (fresh) => {
       const accounts = { ...fresh.accounts };
       const endpoints = { ...fresh.endpoints };
@@ -628,6 +687,37 @@ export function createEndpointHealth({
       reg = validateEndpointHealthPayload(nextReg);
     }
     foldIntoAggs(attempt);
+    // §W7.2: emit the durable-exclusion transition rows for the endpoint
+    // watcher. Edge-detected on the derived state — a re-confirming failure
+    // (state unchanged) emits nothing; entering fires once per incident and
+    // an evidence-based clear emits the recovery row.
+    const postEpState = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs: at });
+    const postEpDurable = durableEndpoint(postEpState);
+    const postAccDurable = durableAccount(reg.accounts[providerID]);
+    if (postEpDurable && postEpDurable !== preEpDurable) {
+      await emitWatchRow("cto.endpoint_excluded", {
+        subject: key,
+        scope: "endpoint",
+        state: postEpDurable,
+        reason: {
+          httpStatus: status,
+          errorName: attempt.errorName ?? null,
+          streak: postEpState.streak ?? null,
+        },
+      });
+    } else if (preEpDurable && !postEpDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: key, scope: "endpoint" });
+    }
+    if (postAccDurable && postAccDurable !== preAccDurable) {
+      await emitWatchRow("cto.endpoint_excluded", {
+        subject: providerID,
+        scope: "account",
+        state: postAccDurable,
+        reason: { httpStatus: status, errorName: attempt.errorName ?? null },
+      });
+    } else if (preAccDurable && !postAccDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: providerID, scope: "account" });
+    }
     refreshPublished(providerID);
   }
 
@@ -642,15 +732,65 @@ export function createEndpointHealth({
     return out;
   }
 
-  /** The endpoint states for buildRoutingServices' `services.endpointHealth`. */
+  /**
+   * The endpoint states for buildRoutingServices' `services.endpointHealth`.
+   */
   function endpointSnapshot() {
-    const nowMs = now();
     const out = {};
-    const keys = new Set([...Object.keys(aggs), ...Object.keys(reg.endpoints)]);
-    for (const key of keys) {
+    forEachEndpointKey((key, nowMs) => {
       const s = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs });
       if (s) out[key] = s.state;
+    });
+    return out;
+  }
+
+  /** The keys both read-models know — one scaffold for both read surfaces
+   *  (endpointSnapshot / endpointDetail share the iteration, not the shape). */
+  function forEachEndpointKey(fn) {
+    const nowMs = now();
+    const keys = new Set([...Object.keys(aggs), ...Object.keys(reg.endpoints)]);
+    for (const key of keys) {
+      fn(key, nowMs);
     }
+  }
+
+  /**
+   * BET-1537 (§W9): the Accounts/Models UI's per-ENDPOINT health detail —
+   * every key the registers know with its resolved state, the state's own
+   * fields (since / until / streak), the last failure's reason when the
+   * register holds one, and the WINDOW ACTIVITY the aggregates already
+   * carry: last success, attempts and success rate in the window (the very
+   * measure deriveEndpointState uses for `degraded` — probe evidence
+   * excluded, exactly like routing sees it). The renderer renders this next
+   * to model names, so "what the UI shows" cannot drift from "what blocks
+   * Auto" (one gate).
+   */
+  function endpointDetail() {
+    const out = {};
+    forEachEndpointKey((key, nowMs) => {
+      const s = deriveEndpointState({ register: reg.endpoints[key] ?? null, agg: aggs[key] ?? null, nowMs });
+      if (!s) return;
+      const detail = { state: s.state };
+      if (Number.isFinite(s.since)) detail.since = s.since;
+      if (Number.isFinite(s.until)) {
+        detail.until = s.until;
+        detail.retryInMs = Math.max(0, s.until - nowMs);
+      }
+      if (Number.isFinite(s.streak)) detail.streak = s.streak;
+      const r = reg.endpoints[key]?.reason;
+      if (r && (Number.isFinite(r.httpStatus) || typeof r.errorName === "string")) {
+        detail.reason = { httpStatus: Number.isFinite(r.httpStatus) ? r.httpStatus : null, errorName: r.errorName ?? null };
+      }
+      // §W9 window activity (the aggregates are S2's ring, probe-excluded):
+      const agg = aggs[key] ?? null;
+      if (agg && Number.isFinite(agg.lastSuccessAt)) detail.lastSuccessAt = agg.lastSuccessAt;
+      const stats = windowStats(agg?.attempts, { nowMs });
+      if (stats.total > 0) {
+        detail.attempts = stats.total;
+        detail.successes = stats.successes;
+      }
+      out[key] = detail;
+    });
     return out;
   }
 
@@ -679,6 +819,13 @@ export function createEndpointHealth({
    */
   async function resetProvider(providerID) {
     const keys = endpointKeysOf(providerID);
+    const nowMs = now();
+    // §W7.2: which subjects LEAVE a durable exclusion with this clear — the
+    // watcher closes those incidents (the user's reset is the evidence).
+    const preAccDurable = durableAccount(reg.accounts[providerID]);
+    const clearedEndpointKeys = keys.filter(
+      (k) => durableEndpoint(deriveEndpointState({ register: reg.endpoints[k] ?? null, agg: aggs[k] ?? null, nowMs })),
+    );
     await patchStore(store, (fresh) => {
       const accounts = { ...fresh.accounts };
       delete accounts[providerID];
@@ -688,6 +835,12 @@ export function createEndpointHealth({
     });
     published.delete(providerID);
     await reload();
+    if (preAccDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: providerID, scope: "account" });
+    }
+    for (const key of clearedEndpointKeys) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: key, scope: "endpoint" });
+    }
   }
 
   /**
@@ -871,7 +1024,12 @@ export function createEndpointHealth({
     if (!target) return false;
     const outcome = await probeEndpoint(target, { kind: "last-resort" });
     if (!outcome || outcome.outcome !== "success") return false;
-    // A pass clears the exclusion — the probed endpoint re-enters the pool.
+    // §W7.2: a pass clears the exclusion — if the target held a DURABLE
+    // exclusion (not-found/forbidden), the watcher closes its incident (the
+    // probed endpoint re-enters the pool).
+    const preDurable = durableEndpoint(
+      deriveEndpointState({ register: reg.endpoints[target] ?? null, agg: aggs[target] ?? null, nowMs: now() }),
+    );
     await patchStore(store, (fresh) => {
       const endpoints = { ...fresh.endpoints };
       const cur = endpoints[target] && typeof endpoints[target] === "object" ? endpoints[target] : {};
@@ -884,6 +1042,9 @@ export function createEndpointHealth({
       return { endpoints };
     });
     await reload();
+    if (preDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: target, scope: "endpoint" });
+    }
     refreshPublished(providerOf(target));
     return true;
   }
@@ -922,6 +1083,14 @@ export function createEndpointHealth({
       : providerID
         ? endpointKeysOf(providerID)
         : [];
+    const nowMs = now();
+    // §W7.2: the cleared registrations leave their durable exclusions — the
+    // watcher closes those incidents (the re-registered endpoint re-proves
+    // itself and re-fires a fresh incident if it fails again).
+    const preAccDurable = providerID ? durableAccount(reg.accounts[providerID]) : null;
+    const clearedEndpointKeys = keys.filter(
+      (k) => durableEndpoint(deriveEndpointState({ register: reg.endpoints[k] ?? null, agg: aggs[k] ?? null, nowMs })),
+    );
     await patchStore(store, (fresh) => {
       const accounts = { ...fresh.accounts };
       const endpoints = { ...fresh.endpoints };
@@ -931,6 +1100,12 @@ export function createEndpointHealth({
     });
     if (providerID) published.delete(providerID);
     await reload();
+    if (preAccDurable) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: providerID, scope: "account" });
+    }
+    for (const key of clearedEndpointKeys) {
+      await emitWatchRow("cto.endpoint_recovered", { subject: key, scope: "endpoint" });
+    }
   }
 
   /**
@@ -942,6 +1117,7 @@ export function createEndpointHealth({
    */
   async function deliverSnapshots(snapshots) {
     let touched = false;
+    const clearedAccounts = [];
     for (const s of Array.isArray(snapshots) ? snapshots : []) {
       if (!s || typeof s?.provider !== "string") continue;
       if (s.exhausted === true) continue; // still refusing work — no funds
@@ -955,6 +1131,7 @@ export function createEndpointHealth({
           delete accounts[providerID];
           return { accounts };
         });
+        clearedAccounts.push(providerID); // §W7.2: meter funds = the recovery evidence
         touched = true;
       }
     }
@@ -963,6 +1140,9 @@ export function createEndpointHealth({
       for (const s of Array.isArray(snapshots) ? snapshots : []) {
         const providerID = providerIDForAdapter(s?.provider);
         if (providerID) refreshPublished(providerID);
+      }
+      for (const providerID of clearedAccounts) {
+        await emitWatchRow("cto.endpoint_recovered", { subject: providerID, scope: "account" });
       }
     }
   }
@@ -974,6 +1154,7 @@ export function createEndpointHealth({
     providerState,
     endpointState,
     endpointSnapshot,
+    endpointDetail,
     all,
     retryIn,
     retry,

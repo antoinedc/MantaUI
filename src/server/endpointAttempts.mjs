@@ -221,6 +221,10 @@ export function createEndpointAttemptRecorder({
   // First-writer-wins on attemptId (§4.3 idempotency): a duplicate delivery or
   // a racing sweep is dropped, not merged.
   async function terminalizeOperation({ attemptId, attribution, terminal, cleanupCode }) {
+    // BET-1537 (§W7.3): an operation that settles while its attribution is
+    // STILL "not-dispatched" never reached a provider — one discrete loss
+    // event. The row feeds the infrastructure watcher's sustained-rate signal.
+    let settledAttribution = null;
     try {
       await patchStore(store, (fresh) => {
         const ops = Array.isArray(fresh?.operations) ? fresh.operations : [];
@@ -236,10 +240,18 @@ export function createEndpointAttemptRecorder({
         };
         const next = [...ops];
         next[i] = settled;
+        settledAttribution = settled.attribution;
         return { operations: next };
       });
     } catch (e) {
       persistFailed("terminalize", e);
+    }
+    if (settledAttribution === "not-dispatched") {
+      try {
+        void ledger
+          .append({ actor: "cto", ts: now(), kind: "cto.operation_not_dispatched", operation: attemptId })
+          .catch(() => {});
+      } catch { /* best-effort — the loss row must never break the caller */ }
     }
   }
 
@@ -297,12 +309,28 @@ export function createEndpointAttemptRecorder({
 
   // The store sweep's hook: close abandoned operation records.
   async function sweepAbandoned({ nowMs = now() } = {}) {
-    await patchStore(store, (fresh) => {
-      const ops = Array.isArray(fresh?.operations) ? fresh.operations : [];
-      const { operations, changed } = abandonExpiredOperations(ops, { nowMs });
-      if (!changed) return {};
-      return { operations };
-    });
+    // BET-1537 (§W7.3): every closure here is an abandoned outcome — the
+    // batch lands as ONE weighted row for the infrastructure watcher's
+    // sustained-rate signal.
+    let closed = 0;
+    try {
+      await patchStore(store, (fresh) => {
+        const ops = Array.isArray(fresh?.operations) ? fresh.operations : [];
+        const { operations, changed } = abandonExpiredOperations(ops, { nowMs });
+        if (!changed) return {};
+        closed = operations.length - ops.filter((o) => o?.terminal).length;
+        return { operations };
+      });
+    } catch (e) {
+      persistFailed("sweep", e);
+    }
+    if (closed > 0) {
+      try {
+        void ledger
+          .append({ actor: "cto", ts: now(), kind: "cto.operations_abandoned", count: closed })
+          .catch(() => {});
+      } catch { /* best-effort */ }
+    }
   }
 
   return {

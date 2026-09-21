@@ -24,6 +24,16 @@ import { Field } from "./Field";
 import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { ListRow } from "./ListRow";
+import { formatEndpointStateLine } from "./chatUtils";
+
+/**
+ * BET-1537 (S5, §W9): optional per-model ENDPOINT health, keyed by model id
+ * (the caller resolves `${providerID}/${modelId}` → modelId before handing it
+ * over). Present → each row with a non-ok register state shows the human
+ * state (and the rate-limit deadline) next to its name, from the SAME
+ * register that gates Auto — the badge can never disagree with routing.
+ */
+export type ModelHealthStates = Record<string, { state: string; retryInMs?: number | null }>;
 
 export function ModelChecklist({
   models,
@@ -31,6 +41,7 @@ export function ModelChecklist({
   onToggle,
   onBulkChange,
   disabled,
+  states,
 }: {
   models: { id: string }[];
   /** The ids currently selected. Read-only; mutation flows back via onToggle/onBulkChange. */
@@ -39,6 +50,8 @@ export function ModelChecklist({
   /** Present → render the filter box + All/None row. Absent → neither. */
   onBulkChange?: (ids: string[], next: boolean) => void;
   disabled: boolean;
+  /** Per-model endpoint-register state (BET-1537). Absent → no badges. */
+  states?: ModelHealthStates;
 }) {
   const [query, setQuery] = useState("");
   const trimmed = query.trim().toLowerCase();
@@ -98,21 +111,37 @@ export function ModelChecklist({
             No model matches “{trimmed}”.
           </div>
         ) : (
-          visible.map((m) => (
-            <ListRow
-              key={m.id}
-              leading={
-                <Checkbox
-                  checked={checked.has(m.id)}
-                  onChange={() => onToggle(m.id)}
-                  disabled={disabled}
-                  ariaLabel={m.id}
-                />
-              }
-              name={m.id}
-              onClick={() => onToggle(m.id)}
-            />
-          ))
+          visible.map((m) => {
+            const h = states?.[m.id];
+            // BET-1537 review Block 3: the badge renders through the ONE pure
+            // helper (chatUtils), never inline formatting.
+            const line = h ? formatEndpointStateLine(h, Date.now()) : "";
+            return (
+              <ListRow
+                key={m.id}
+                leading={
+                  <Checkbox
+                    checked={checked.has(m.id)}
+                    onChange={() => onToggle(m.id)}
+                    disabled={disabled}
+                    ariaLabel={m.id}
+                  />
+                }
+                name={m.id}
+                onClick={() => onToggle(m.id)}
+                trailing={
+                  line ? (
+                    <span
+                      data-testid={`endpoint-state-${m.id}`}
+                      className="text-meta text-text-faint whitespace-nowrap"
+                    >
+                      {line}
+                    </span>
+                  ) : undefined
+                }
+              />
+            );
+          })
         )}
       </div>
     </div>

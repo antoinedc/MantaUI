@@ -13,7 +13,8 @@ import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
 import { lookupModel, matchModel, allModels } from "./modelCatalog.mjs";
 import { chooseSubagentModel } from "./delegate.mjs";
-import { safeSummaryCode, isQualityFailure } from "./ctoRunOutcome.mjs";
+import { safeSummaryCode, runFailureClass, canFailover } from "./ctoRunOutcome.mjs";
+import { endpointKey } from "../shared/endpointKey.mjs";
 
 // ---------------------------------------------------------------------------
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
@@ -218,32 +219,71 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
 
   let tier = meta.tier;
   let escalated = false;
-  for (let attempt = 0; attempt <= 1; attempt++) {
+  // BET-1537 (W6): the endpoint failover state — the exclusion set is built
+  // from THIS operation's prior attempts (the endpointKeys already failed),
+  // and the failover attempt must land on a DIFFERENT endpointKey. The
+  // quality cascade and the failover share ONE budget: at most two runOnce
+  // calls, so they can never compose into four.
+  let excluded = [];
+  let priorKey = "";
+  let calls = 0;
+  let out = null;
+  while (calls < 2) {
+    calls += 1;
     await record("cto.operation_attempt", null);
-    let out;
     try {
-      out = await runOnce({ taskClass, meta, tier, context, directory, deps, operation: op });
+      out = await runOnce({ taskClass, meta, tier, context, directory, deps, operation: op,
+        // W6: only the failover attempt (the second call) carries the
+        // exclusion set + the different-endpoint requirement.
+        ...(calls > 1 ? { excludeEndpointKeys: excluded, requireDifferentEndpointKey: priorKey } : {}) });
     } catch (error) {
       await record("cto.operation_outcome", "runner-error");
       throw error;
     }
-    if (out.cleanupCode || (out.ok === false && !isQualityFailure(out.code))) {
+    // W6: remember what we ran on — the exclusion set and the
+    // different-endpoint gate are built from the attempts already made.
+    if (out.model) {
+      const k = endpointKey(out.model);
+      if (k) {
+        excluded = [...excluded, k];
+        priorKey = k;
+      }
+    }
+    if (out.cleanupCode) {
       await record("cto.operation_outcome", safeSummaryCode(out.code));
       return out;
+    }
+    if (out.ok === false) {
+      const cls = runFailureClass(out);
+      if (cls === "provider" && canFailover(out) && out.pinned === true && calls < 2) {
+        // Provider failure on the first call — evidence against the endpoint,
+        // not the box. The second call re-resolves with the exclusion set;
+        // runOnce stops with no-alternate-endpoint when resolution provably
+        // cannot yield a different endpoint (no model call is spent).
+        await record("cto.operation_outcome", safeSummaryCode(out.code));
+        continue;
+      }
+      if (cls !== "quality") {
+        // Local lifecycle failure (or a resolution verdict): not evidence
+        // against the provider — no failover, no escalation. A local failure
+        // retried on the same endpoint would double the cost of a broken box.
+        await record("cto.operation_outcome", safeSummaryCode(out.code));
+        return out;
+      }
+      // quality → fall through to the cascade below.
     }
     const valid = out.ok !== false && (typeof deps.validate === "function" ? await deps.validate(out) : true);
     await record("cto.operation_outcome", valid ? "ok" : out.code ?? "schema-invalid");
     if (valid) return out;
     const next = escalateTier(meta.tier); // nano -> mid; others null
-    if (next && next !== tier && !escalated) {
+    if (next && next !== tier && !escalated && calls < 2) {
       escalated = true;
       tier = next;
       continue; // cascade exactly one tier, at most once per call
     }
     return { ...out, ok: false, code: out.code ?? "schema-invalid" };
   }
-  // unreachable: the loop runs at most twice
-  throw new Error(`runEphemeral: cascade exceeded maximum attempts for "${taskClass}"`);
+  return out;
 }
 
 // BET-1535 (S3): run the model resolver and surface its verdict. A resolver
@@ -261,7 +301,8 @@ async function resolveModelOrVerdict(resolveModel, args) {
   }
 }
 
-async function runOnce({ taskClass, meta, tier, context, directory, deps, operation }) {
+async function runOnce({ taskClass, meta, tier, context, directory, deps, operation,
+  excludeEndpointKeys = [], requireDifferentEndpointKey = "" }) {
   const {
     oc,
     engineState = engineStateStore,
@@ -279,12 +320,23 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
   // non-quality-failure branch (recorded verbatim in the ledger, no tier
   // escalation — escalating a tier cannot fix health).
   const resolved = typeof resolveModel === "function"
-    ? await resolveModelOrVerdict(resolveModel, { taskClass, tier, meta, configGet })
+    ? await resolveModelOrVerdict(resolveModel, { taskClass, tier, meta, configGet, excludeEndpointKeys })
     : null;
   if (resolved && typeof resolved === "object" && resolved.ok === false) {
     return { ok: false, code: resolved.code, taskClass, tier };
   }
   const model = resolved;
+  // BET-1537 (S5, W6): the failover gate. The retry only runs when resolution
+  // yields a DIFFERENT endpointKey — identical, unpinned (a box default the
+  // exclusion set cannot name, which may be the very endpoint that failed), or
+  // still-excluded all stop with `no-alternate-endpoint` BEFORE any model
+  // call, so the two-call budget is never spent on a provable repeat.
+  if (requireDifferentEndpointKey) {
+    const key = model ? endpointKey(model) : "";
+    if (!key || key === requireDifferentEndpointKey || excludeEndpointKeys.includes(key)) {
+      return { ok: false, code: "no-alternate-endpoint", taskClass, tier };
+    }
+  }
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;
@@ -316,6 +368,10 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
       /* metering is best-effort */
     }
     return { text: res?.text ?? "", taskClass, tier, sid: res?.sid ?? sid,
+      // W6: the run's resolved model + whether it was pinned — runEphemeral
+      // builds the exclusion set and classifies §4.1a refusals from these.
+      ...(model ? { model } : {}),
+      pinned: model != null,
       ...(res?.ok === false ? { ok: false, code: safeSummaryCode(res.code) } : {}),
       // W3/D6: the structured cause fields survive the caller boundary (the
       // transport runner only ever emits name/status/isRetryable, no text).
@@ -407,8 +463,14 @@ export async function readSnapshotsForRouting(reader) {
  * BET-1535 (S3): a no-healthy-endpoint verdict is NOT null — it THROWS the
  * router's typed error so runOnce fails the run instead of dispatching on the
  * box default (the very endpoint the verdict refused).
+ *
+ * BET-1537 (S5, W6): `excludeEndpointKeys` — endpointKeys THIS operation
+ * already ran on (the failover exclusion set). Filtering the CANDIDATE
+ * CATALOGUE is the whole mechanism: the router cannot pick what is not a
+ * candidate, so no new exclusion state, no router change, no second health
+ * overlay to keep in sync.
  */
-export async function defaultResolveModel({ taskClass, tier, meta, configGet }) {
+export async function defaultResolveModel({ taskClass, tier, meta, configGet, excludeEndpointKeys = [] }) {
   const nowMs = Date.now();
   let cfg = {};
   if (typeof configGet === "function") {
@@ -431,6 +493,11 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
     catalog = (await listRoutableModels("sub", cfg)) ?? [];
   } catch {
     catalog = [];
+  }
+  const exclusions = Array.isArray(excludeEndpointKeys) ? excludeEndpointKeys.filter((k) => typeof k === "string" && k) : [];
+  if (exclusions.length > 0) {
+    const dropped = new Set(exclusions);
+    catalog = catalog.filter((m) => !dropped.has(endpointKey(m)));
   }
 
   // BET-1535 (W0) reader shapes must match buildRoutingServices' contracts:
@@ -499,8 +566,10 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
       if (recovered) {
         try {
           // One re-resolution with fresh readers (the lifted exclusion must be
-          // visible to the router — services are rebuilt inside).
-          return await defaultResolveModel({ taskClass, tier, meta, configGet });
+          // visible to the router — services are rebuilt inside). The
+          // operation's own exclusion set still applies: the endpoints this
+          // operation already failed on do not re-enter.
+          return await defaultResolveModel({ taskClass, tier, meta, configGet, excludeEndpointKeys });
         } catch (e2) {
           if (e2?.code !== "no-healthy-endpoint") return null;
           if (e2.healthOnly === true && typeof engine.raiseSelfDoubtAlarm === "function") {

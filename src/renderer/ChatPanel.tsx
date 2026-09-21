@@ -64,6 +64,8 @@ import {
   selectableModelGroups,
   titleCase,
   formatCompactionSaving,
+  formatNoHealthyEndpointCopy,
+  providersFromExcludedKeys,
 } from "./chatUtils";
 import { planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
@@ -297,6 +299,15 @@ export function ChatPanel({
   const [shipProposal, setShipProposal] = useState<{ head: string; base: string; fileCount: number; title: string; body: string } | null>(null);
   const [shipBusy, setShipBusy] = useState(false);
   const [shipError, setShipError] = useState<string | null>(null);
+  // BET-1537 (W9): the no-healthy-endpoint verdict's INLINE reset affordance —
+  // the W8 manual reset (clear + bounded probe, result reported) for the
+  // providers behind the verdict's excluded keys. The button renders only
+  // while the verdict's own copy is on the send-error banner, so it can never
+  // attach to a different error; the reset result replaces the banner copy.
+  // (The state lives here; the callback that reads setSendError is defined
+  // right after useSseBus owns that setter.)
+  const [verdictReset, setVerdictReset] = useState<{ message: string; providers: string[] } | null>(null);
+  const [verdictResetBusy, setVerdictResetBusy] = useState(false);
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeError, setMergeError] = useState<string | null>(null);
 
@@ -656,6 +667,28 @@ export function ChatPanel({
     submit: () => {}, // placeholder — ChatPanel's submit is used below
     submitRef,
   });
+
+  // BET-1537 (W9): the verdict's inline reset — the W8 manual reset (clear +
+  // bounded probe, result reported) for the providers behind the excluded
+  // keys. Defined AFTER useSseBus so setSendError is in scope.
+  const resetVerdictHealth = useCallback(async () => {
+    const targets = verdictReset?.providers ?? [];
+    if (targets.length === 0 || verdictResetBusy) return;
+    setVerdictResetBusy(true);
+    const results: string[] = [];
+    for (const providerID of targets) {
+      try {
+        const r = await window.api.accountsRetry(providerID);
+        results.push(`${providerID}: ${r?.message ?? (r?.ok ? "reset, probe passed" : "reset failed")}`);
+      } catch (e) {
+        results.push(`${providerID}: ${e instanceof Error ? e.message : "reset failed"}`);
+      }
+    }
+    setVerdictResetBusy(false);
+    setVerdictReset(null);
+    setSendError(`Health reset — ${results.join(" · ")}. Try sending again, or pick a model.`);
+  }, [verdictReset, verdictResetBusy, setSendError]);
+
 
   // Assign the composer controller's forward-declared bridges now that useSseBus
   // has produced their real targets (setSendError, the client-side message
@@ -1403,10 +1436,13 @@ export function ChatPanel({
           // (the drain re-enters submit()); the catch below — a routing
           // FAILURE — still never fails a turn.
           if (decision?.kind === "no-healthy-endpoint") {
-            const excludedList = Array.isArray(decision.excluded) ? decision.excluded.join(", ") : "";
-            setSendError(
-              `Auto couldn't pick a healthy model${excludedList ? ` — ${excludedList} excluded` : ""}. The turn was not sent; switch off Auto or pick a model to send.`,
-            );
+            // BET-1537 (W9, review Block 2): the copy names WHAT was excluded
+            // and WHY (the router's structured per-key states, worded by the
+            // shared labels), and the banner carries the W8 reset affordance
+            // inline — the providers behind the excluded keys.
+            const copy = formatNoHealthyEndpointCopy(decision);
+            setSendError(copy);
+            setVerdictReset({ message: copy, providers: providersFromExcludedKeys(decision.excluded) });
             setRunning(false);
             setMessages((prev) =>
               prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
@@ -2732,6 +2768,19 @@ export function ChatPanel({
     if (sendError) list.push(amb("send-error",
       <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
         <span className="flex-1">⚠ {sendError}</span>
+        {/* BET-1537 (W9): the no-healthy-endpoint verdict's inline reset —
+            the W8 manual reset per affected provider, result reported here. */}
+        {verdictReset && sendError === verdictReset.message && verdictReset.providers.length > 0 && (
+          <button
+            onClick={() => void resetVerdictHealth()}
+            disabled={verdictResetBusy}
+            className="text-danger hover:text-danger underline leading-none px-1 whitespace-nowrap"
+            title="Reset health and run one bounded probe per affected provider"
+            data-testid="verdict-reset-health"
+          >
+            {verdictResetBusy ? "Resetting…" : "Reset health"}
+          </button>
+        )}
         {authReconnect && (
           <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Reconnect ${authReconnect}`}>
             Reconnect
@@ -2811,7 +2860,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {

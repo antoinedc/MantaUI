@@ -1430,10 +1430,17 @@ export function buildHandlers({
     // builds its rows from usage readings + subscription status + the health
     // states below — the same providerHealth engine that gates the router, so
     // "what the UI shows" can never drift from "what blocks Auto" (one gate).
-    // Degrades to {} when providerHealth isn't wired (routing inert) — never
-    // throws. `retryInMs` is present only while a provider is rate-limited.
+    // Degrades to { providers:{}, endpoints:{} } when the engines aren't wired
+    // (routing inert) — never throws. `retryInMs` is present only while a
+    // provider or endpoint is rate-limited.
+    // BET-1537 (S5, §W9): the response gains the per-ENDPOINT detail map
+    // (`endpoints`, keyed "providerID/modelID" — the resolved state, the
+    // rate-limit deadline, and the last failure's reason) next to the
+    // provider facade map (`providers`), both read from the ONE health
+    // engine, so the row/model badges cannot disagree with what blocks Auto.
     "accounts:health": async () => {
-      if (!providerHealth || typeof providerHealth.all !== "function") return {};
+      const empty = { providers: {}, endpoints: {} };
+      if (!providerHealth || typeof providerHealth.all !== "function") return empty;
       const all = providerHealth.all() ?? {};
       const out = {};
       for (const [providerID, state] of Object.entries(all)) {
@@ -1443,7 +1450,46 @@ export function buildHandlers({
             : undefined;
         out[providerID] = { state, retryInMs };
       }
-      return out;
+      let endpoints = {};
+      try {
+        endpoints = providerHealth.engine?.endpointDetail?.() ?? {};
+      } catch {
+        endpoints = {};
+      }
+      return { providers: out, endpoints };
+    },
+
+    // BET-1537 (S5, §W9): "Send probe" on a custom endpoint row — runs the
+    // health engine's probe against ONE endpoint key NOW (forced, evidence is
+    // recorded like any probe: it can prove the endpoint or re-arm an
+    // authoritative state) and reports BOTH branches (AGENTS.md). Returns
+    // { ok, outcome, message }.
+    "accounts:endpoint-probe": async (input) => {
+      const endpointKey = typeof input?.endpointKey === "string" ? input.endpointKey.trim() : "";
+      if (!endpointKey || !endpointKey.includes("/")) {
+        return { ok: false, outcome: null, message: "No endpoint key given to probe." };
+      }
+      const engine = providerHealth?.engine;
+      if (!engine || typeof engine.probeEndpoint !== "function") {
+        return { ok: false, outcome: null, message: "Endpoint health isn't wired on this box — can't probe." };
+      }
+      try {
+        const r = await engine.probeEndpoint(endpointKey, { kind: "manual-reset", force: true });
+        if (r == null) {
+          return { ok: false, outcome: "skipped", message: "Probe didn't run — the probe runner isn't wired or a probe is already in flight for this endpoint." };
+        }
+        const outcome = typeof r?.outcome === "string" ? r.outcome : "failure";
+        return {
+          ok: outcome === "success",
+          outcome,
+          message:
+            outcome === "success"
+              ? `${endpointKey} responded — unproven flag cleared.`
+              : `${endpointKey} did not respond (${r?.httpStatus ?? r?.code ?? "no reply"}).`,
+        };
+      } catch (e) {
+        return { ok: false, outcome: "error", message: `Probe failed: ${e?.message ?? "unknown error"}` };
+      }
     },
 
     // BET-1249: the provider-agnostic model catalogue for the renderer's

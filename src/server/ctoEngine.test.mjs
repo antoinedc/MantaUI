@@ -94,6 +94,8 @@ function makeHarness({ ctoEnabled = false, counts = {}, rollups, facts, realCard
         // BET-1533: the operation-class watcher's alarm latch must round-trip
         // through the fake engineState for the no-refire / re-arm tests.
         if (payload?.opClassAlarms) state.opClassAlarms = payload.opClassAlarms;
+        // BET-1537: the endpoint/infra watchers' alarm latch, same mechanism.
+        if (payload?.healthAlarms) state.healthAlarms = payload.healthAlarms;
       },
     },
     killSwitch: {
@@ -1885,4 +1887,74 @@ test("op-class watcher paces its ledger reads to the watch interval", async () =
   h.advance(10 * 60_000);
   await h.engine.tick();
   assert.equal(ledger.counters.readCalls, 2, "the read resumes after the interval");
+});
+
+// ---- BET-1537 (S5): the endpoint + infrastructure watchers -----------------
+// Same tick, same read, same raise path (recordBlocker → pendingBlockers) and
+// the same (subject, incidentGeneration) latch under `healthAlarms`.
+
+const EP_ROW = (over = {}) => ({
+  actor: "cto",
+  kind: "cto.endpoint_excluded",
+  subject: "anthropic/claude-x",
+  scope: "endpoint",
+  state: "not-found",
+  reason: { httpStatus: 404, errorName: "NotFoundError" },
+  ...over,
+});
+
+test("endpoint watcher raises one blocker per exclusion incident through pendingBlockers", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  h.advance(11 * 60_000);
+  await ledger.append(EP_ROW({ ts: h.clock.ms }));
+  await h.engine.tick();
+  const entries = h.pendingBlockers.filter((b) => b.source === "endpoint:anthropic/claude-x");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "blocker");
+  assert.match(entries[0].reason, /endpoint "anthropic\/claude-x"/);
+  assert.match(entries[0].reason, /not-found/);
+  assert.match(entries[0].reason, /HTTP 404/);
+  assert.equal(h.state.healthAlarms["endpoint:anthropic/claude-x"]?.active, true);
+  assert.equal(h.state.healthAlarms["endpoint:anthropic/claude-x"]?.generation, 1);
+
+  // A recovered row closes the incident and emits the closing notification;
+  // a fresh exclusion re-arms with a new generation.
+  h.advance(11 * 60_000);
+  await ledger.append({ actor: "cto", kind: "cto.endpoint_recovered", ts: h.clock.ms, subject: "anthropic/claude-x", scope: "endpoint" });
+  await h.engine.tick();
+  assert.equal(h.state.healthAlarms["endpoint:anthropic/claude-x"]?.active, false);
+  assert.ok(
+    ledger.rows.some((r) => r.kind === "cto.healthwatch_recovered"),
+    "recovery emits a closing notification row",
+  );
+
+  h.advance(11 * 60_000);
+  await ledger.append(EP_ROW({ ts: h.clock.ms, state: "dead", reason: { httpStatus: 503, streak: 5 } }));
+  await h.engine.tick();
+  assert.equal(h.state.healthAlarms["endpoint:anthropic/claude-x"]?.generation, 2);
+});
+
+test("infra watcher raises on a quarantined state file and a persist failure; verdicts raise too", async () => {
+  const ledger = makeMemoryLedger();
+  const h = makeHarness({ ctoEnabled: true, ledger });
+  h.advance(11 * 60_000);
+  const t = h.clock.ms;
+  await ledger.append({ actor: "cto", kind: "cto.endpoint_health_quarantined", ts: t, detail: "bad json" });
+  await ledger.append({ actor: "cto", kind: "cto.endpoint_health_persist_failed", ts: t, operation: "register" });
+  await ledger.append({ actor: "cto", kind: "cto.health_self_doubt", ts: t });
+  for (let i = 0; i < 10; i++) {
+    await ledger.append({ actor: "cto", kind: "cto.operation_not_dispatched", ts: t + i, operation: `op-${i}` });
+  }
+  await ledger.append({ actor: "cto", kind: "cto.operation_outcome", ts: t, operation: "triage", code: "no-healthy-endpoint" });
+  await h.engine.tick();
+  for (const subject of ["quarantined", "persist", "self-doubt", "sustained-loss", "no-healthy-endpoint"]) {
+    const entries = h.pendingBlockers.filter((b) => b.source === `infra:${subject}`);
+    assert.equal(entries.length, 1, `infra:${subject} raised once`);
+  }
+  assert.equal(h.state.healthAlarms["infra:quarantined"]?.active, true);
+  // A second tick with no new evidence dedupes (the latch holds).
+  h.advance(11 * 60_000);
+  await h.engine.tick();
+  assert.equal(h.pendingBlockers.filter((b) => b.source === "infra:quarantined").length, 1);
 });

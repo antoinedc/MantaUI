@@ -218,6 +218,32 @@ describe("chooseModel — off-path and invariants", () => {
     expect(res.trace.winner).toBeNull();
   });
 
+  it("no-healthy-endpoint verdict names WHY each excluded key is excluded (BET-1537 W9)", () => {
+    // Both layers refuse: the provider facade (account) AND the endpoint
+    // register (rate-limited) — the structured why carries both raw states.
+    const res = route(
+      soleExcludedRoute({
+        services: { health: { p: "out-of-credit" }, endpointHealth: { "p/dead": "rate-limited" } },
+      }),
+    );
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toContain("p/dead");
+    expect((res as any).excludedWhy["p/dead"]).toEqual({
+      endpoint: "rate-limited",
+      provider: "out-of-credit",
+    });
+    // The incumbent ("a/m") has no health entry on either layer — it is NOT
+    // excluded and carries no why.
+    expect((res as any).excluded).toEqual(["p/dead"]);
+    // Selected verdicts carry no why.
+    const ok = route({
+      catalog: [endpoint("haiku-4", { tier: "fast" })],
+      policy: { preset: "balanced" },
+      intent: { incumbent: endpoint("m", { providerID: "a" }) },
+    });
+    expect((ok as any).excludedWhy).toBeUndefined();
+  });
+
   it("REGRESSION: routing activates from a preset alone (BET-1251)", () => {
     const cheap = endpoint("haiku-4", { tier: "fast" });
     const balanced = endpoint("sonnet-4", { tier: "balanced" });
