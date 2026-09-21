@@ -814,6 +814,12 @@ export function createCtoEngine(deps = {}) {
         await toolsTick();
         // §7.5 probe runner (BET-1396): due probes + weekly relevance.
         await probesTick();
+        // W11 (BET-1538): segment retry sweep — re-summarise closed segments
+        // whose summary is empty (the summaryOutcome reader). Self-throttled
+        // inside the segmenter; each attempt rides the same gated summarize
+        // seam as a first-pass close, and the sweep yields while the user is
+        // present. Never replays history — the backfill owns that.
+        await segmentRetryTick();
       }
       // §10.6-4 cold-start backfill — also ambient, gated on enabled. Its own
       // drained state marker makes it run at most once per box.
@@ -823,6 +829,18 @@ export function createCtoEngine(deps = {}) {
       await syncState();
     } catch {
       /* never throw into the poller */
+    }
+  }
+
+  // W11 (BET-1538): the retry sweep's tick home. The segmenter self-throttles
+  // to its own cadence and owns every bound (attempt cap, per-pass cap,
+  // presence yield); this is only the enabledNow-gated invocation point.
+  async function segmentRetryTick() {
+    if (!segmenter?.retryFailedSummaries) return; // segmenterOverride may predate the sweep
+    try {
+      await segmenter.retryFailedSummaries();
+    } catch {
+      /* best-effort */
     }
   }
 
@@ -1157,6 +1175,9 @@ export function createCtoEngine(deps = {}) {
       summarize: gatedSummarize,
       computeOneLiner: gatedOneLiner,
       now,
+      // W11 (BET-1538): the retry sweep yields entirely while the user is
+      // present — the same batch-priority rule the backfill obeys.
+      presenceCheck: () => engine.getPresence().state === "present",
       // §8.2 profile feed: every closed segment's atoms/session-length/project
       // go to the profile engine in the same pass (no second model call).
       // §3.2 journal feed: any `journalProposals` in the same A4 output are
