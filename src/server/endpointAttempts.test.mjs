@@ -27,6 +27,7 @@ import {
   createEndpointAttemptRecorder,
   newAttemptId,
 } from "./endpointAttempts.mjs";
+import { withTmpDir, captureLedger } from "./fixtures/ctoStoreTestFixtures.mjs";
 
 const DAY = 86_400_000;
 
@@ -163,22 +164,9 @@ test("abandonExpiredOperations terminalizes past deadlineAt+60s only", () => {
 // Store: quarantine + alarm, newer-version refusal
 // ---------------------------------------------------------------------------
 
-async function withTmpStore(fn) {
-  const dir = await mkdtemp(join(tmpdir(), "ep-attempts-"));
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-function captureLedger() {
-  const rows = [];
-  return { rows, append: async (row) => { rows.push(row); return true; } };
-}
 
 test("store.load quarantines a corrupt payload aside, rebuilds empty and alarms", async () => {
-  await withTmpStore(async (dir) => {
+  await withTmpDir("ep-attempts-", async (dir) => {
     const path = join(dir, "endpoint-attempts.json");
     await writeFile(path, "{ not json at all", "utf-8");
     const ledger = captureLedger();
@@ -196,7 +184,7 @@ test("store.load quarantines a corrupt payload aside, rebuilds empty and alarms"
 });
 
 test("store.load quarantines a shape-corrupt (non-object) payload too", async () => {
-  await withTmpStore(async (dir) => {
+  await withTmpDir("ep-attempts-", async (dir) => {
     const path = join(dir, "endpoint-attempts.json");
     await writeFile(path, JSON.stringify([1, 2, 3]), "utf-8");
     const ledger = captureLedger();
@@ -207,7 +195,7 @@ test("store.load quarantines a shape-corrupt (non-object) payload too", async ()
 });
 
 test("store.load refuses a NEWER schema version loudly without destroying the file", async () => {
-  await withTmpStore(async (dir) => {
+  await withTmpDir("ep-attempts-", async (dir) => {
     const path = join(dir, "endpoint-attempts.json");
     await writeFile(path, JSON.stringify({ v: 99, operations: [] }), "utf-8");
     const store = createEndpointAttemptsStore({ path, ledger: captureLedger(), now: () => 1234 });
@@ -218,7 +206,7 @@ test("store.load refuses a NEWER schema version loudly without destroying the fi
 });
 
 test("store.load returns empty payload when the file does not exist", async () => {
-  await withTmpStore(async (dir) => {
+  await withTmpDir("ep-attempts-", async (dir) => {
     const store = createEndpointAttemptsStore({ path: join(dir, "missing.json"), now: () => 1234 });
     assert.deepEqual(await store.load(), createEndpointAttemptsPayload());
   });
@@ -344,6 +332,49 @@ test("persistence failures alarm (rate-limited) and never throw", async () => {
   const kinds = ledger.rows.map((r) => r.kind);
   assert.ok(kinds.includes("cto.endpoint_attempts_persist_failed"));
   assert.equal(kinds.length, 1, "rate-limited to one alarm per window");
+});
+
+test("probe attempts are recorded in the ring but never move the aggregates (W8/BET-1536)", async () => {
+  const store = memoryStore();
+  const { rec } = makeRecorder({ store });
+  const probe = {
+    attemptId: "p1", endpointKey: "anthropic/claude-x", accountKey: "anthropic",
+    at: 10, attribution: "observed", outcome: "failure", errorName: "APIError",
+    httpStatus: 500, retryable: true, finish: null, probe: true,
+  };
+  await rec.recordProviderAttempt(probe);
+  let ep = (await store.load()).endpoints["anthropic/claude-x"];
+  assert.equal(ep.attempts.length, 1, "the probe row lands in the ring as evidence");
+  assert.equal(ep.failureStreak, 0, "a probe failure never drives the streak");
+  await rec.recordProviderAttempt({ ...probe, attemptId: "p2", outcome: "success", httpStatus: null });
+  ep = (await store.load()).endpoints["anthropic/claude-x"];
+  assert.equal(ep.lastSuccessAt, undefined, "a probe success never sets lastSuccessAt");
+  // The pure reducer agrees (a reload can never disagree with the live fold).
+  const folded = applyAttempt({ ...probe, outcome: "success" }, { failureStreak: 3, attempts: [] });
+  assert.equal(folded.failureStreak, 3);
+  assert.equal(folded.lastSuccessAt, undefined);
+});
+
+test("beginOperation stores the probe marker and the post-persist hook fires once per attempt", async () => {
+  const store = memoryStore();
+  const seen = [];
+  const rec = createEndpointAttemptRecorder({
+    store, ledger: captureLedger(), now: () => 1000, warn: () => {},
+    onAttempt: async (a) => { seen.push(a.attemptId); },
+  });
+  await rec.beginOperation({ attemptId: "op1", operation: "health-probe:admission", startedAt: 0, deadlineAt: 100, probe: true });
+  const op = (await store.load()).operations.find((o) => o.attemptId === "op1");
+  assert.equal(op.probe, true, "the operation record carries the probe marker");
+  const plain = { attemptId: "a1", endpointKey: "p/m", outcome: "failure" };
+  await rec.recordProviderAttempt(plain);
+  await rec.recordProviderAttempt(plain); // idempotent → the hook fires once
+  assert.deepEqual(seen, ["a1"]);
+  // A throwing hook must never break the recorder contract.
+  const rec2 = createEndpointAttemptRecorder({
+    store: memoryStore(), ledger: captureLedger(), now: () => 1000, warn: () => {},
+    onAttempt: async () => { throw new Error("health engine exploded"); },
+  });
+  await assert.doesNotReject(() => rec2.recordProviderAttempt({ attemptId: "a2", endpointKey: "p/m", outcome: "failure" }));
 });
 
 test("newAttemptId returns unique ids", () => {

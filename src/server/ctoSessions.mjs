@@ -351,6 +351,12 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
 // services build only reads arrays), the others as registered.
 const defaultResolveReaders = {
   providerHealthState: null,
+  // W4/BET-1536: the endpoint register's routing snapshot + the engine
+  // itself (the W8 last-resort probe + self-doubt alarm in
+  // defaultResolveModel). Null → routing runs with no endpoint-health
+  // context and no recovery hook, exactly as before S4.
+  endpointHealthSnapshot: null,
+  endpointHealth: null,
   snapshots: null,
   endpointSummary: null,
   pacing: null,
@@ -443,6 +449,7 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
       endpoints: catalog,
       snapshots: quota,
       providerHealthState: defaultResolveReaders.providerHealthState,
+      endpointHealthSnapshot: defaultResolveReaders.endpointHealthSnapshot,
       endpointSummary: defaultResolveReaders.endpointSummary,
       pacing: defaultResolveReaders.pacing,
     }, nowMs);
@@ -475,8 +482,42 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
     // BET-1535 (S3): the typed verdict propagates to runOnce — it fails the
     // run. Everything else is a resolution failure → null (box default), as
     // before.
-    if (e?.code === "no-healthy-endpoint") throw e;
-    return null;
+    if (e?.code !== "no-healthy-endpoint") return null;
+    // W8 anti-brick (BET-1536): ONE bounded last-resort probe against the
+    // least-recently-failed excluded endpoint before failing the run; a pass
+    // lifts the exclusion and the resolution retries once. The final
+    // fail-closed raises the self-doubt alarm when every drop was a health
+    // drop — the health model may simply be wrong.
+    const engine = defaultResolveReaders.endpointHealth ?? null;
+    if (engine && typeof engine.lastResortRecovery === "function") {
+      let recovered = false;
+      try {
+        recovered = await engine.lastResortRecovery(e.excluded);
+      } catch {
+        recovered = false;
+      }
+      if (recovered) {
+        try {
+          // One re-resolution with fresh readers (the lifted exclusion must be
+          // visible to the router — services are rebuilt inside).
+          return await defaultResolveModel({ taskClass, tier, meta, configGet });
+        } catch (e2) {
+          if (e2?.code !== "no-healthy-endpoint") return null;
+          if (e2.healthOnly === true && typeof engine.raiseSelfDoubtAlarm === "function") {
+            try {
+              await engine.raiseSelfDoubtAlarm({ excluded: e2.excluded, reason: e2.message });
+            } catch { /* never break the refusal on the alarm */ }
+          }
+          throw e2;
+        }
+      }
+    }
+    if (e.healthOnly === true && engine && typeof engine.raiseSelfDoubtAlarm === "function") {
+      try {
+        await engine.raiseSelfDoubtAlarm({ excluded: e.excluded, reason: e.message });
+      } catch { /* never break the refusal on the alarm */ }
+    }
+    throw e;
   }
 }
 

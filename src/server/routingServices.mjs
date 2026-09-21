@@ -157,6 +157,27 @@ export function healthFor(providerIDs, providerHealthState) {
   return out;
 }
 
+// The per-ENDPOINT health map (W4/BET-1536, keyed by "providerID/modelID").
+// Mirrors healthFor but over the candidate endpoints' own keys, resolved from
+// the endpoint register's snapshot. An absent entry (or a throwing reader)
+// stays permissive.
+export function endpointHealthFor(endpoints, endpointHealthSnapshot) {
+  const snapFn = typeof endpointHealthSnapshot === "function" ? endpointHealthSnapshot : null;
+  if (!snapFn) return {};
+  const out = {};
+  for (const m of Array.isArray(endpoints) ? endpoints : []) {
+    const key = endpointKey(m);
+    if (!key) continue;
+    try {
+      const st = snapFn()?.[key];
+      if (typeof st === "string" && st) out[key] = st;
+    } catch {
+      // A throwing health reader must never break the build.
+    }
+  }
+  return out;
+}
+
 // Fold the endpoint ledger (src/server/modelLedger.mjs endpointSummary, keyed
 // by "providerID/modelID") into the router's reliability + telemetry inputs:
 //   reliability.samples  — per-endpoint { requests, errored, rate }
@@ -246,6 +267,8 @@ export function ledgerToServices(stats) {
  *   providerIDs health is keyed by) — e.g. listRoutableModels output
  * @param {Array<object>} [deps.snapshots]  usage snapshots (src/server/usage.mjs)
  * @param {Function} [deps.providerHealthState]  (providerID) => state string
+ * @param {Function} [deps.endpointHealthSnapshot]  () => ({ endpointKey: state })
+ *   — the endpoint register's resolved snapshot (W4/BET-1536)
  * @param {object}  [deps.endpointSummary]  async ({sinceMs}) => { supported, endpoints } —
  *   src/server/modelLedger.mjs endpointSummary (memoised behind a short TTL)
  * @param {Function} [deps.buildReliabilityBaseline]  optional override for the
@@ -355,6 +378,14 @@ export async function buildRoutingServices(cfg = {}, deps = {}, nowMs = Date.now
     if (Object.keys(health).length > 0) services.health = health;
   } catch {
     /* no health tracker → every provider treated as working */
+  }
+
+  // Endpoint health per endpointKey (W4/BET-1536 — the second register).
+  try {
+    const epHealth = endpointHealthFor(deps.endpoints, deps.endpointHealthSnapshot);
+    if (Object.keys(epHealth).length > 0) services.endpointHealth = epHealth;
+  } catch {
+    /* no endpoint register → every endpoint treated as working */
   }
 
   // Reliability + telemetry + mix from the endpoint ledger (DB-backed, async).

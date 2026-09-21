@@ -42,6 +42,7 @@ import { buildRoutingServices } from "./routingServices.mjs";
 import { restartOpencode, runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { pollClaudeLogin, claudeCliStatus, listRoutableModels } from "./opencode.mjs";
 import { chooseModel, incumbentStillEligible, describeDecision } from "../shared/modelRouter.mjs";
+import { endpointKey } from "../shared/endpointKey.mjs";
 import { CACHE_WRITE_MULTIPLIER } from "../shared/routingBoundary.mjs";
 import {
   applyRoutingOverrides,
@@ -401,6 +402,9 @@ export function buildHandlers({
   // to absent services and the router returns the incumbent (routing inert).
   routingCatalogIndex = null,
   routingProviderHealthState = () => null,
+  // W4/BET-1536: the endpoint register's routing snapshot (() => ({key: state})).
+  // Null → no endpoint-health context (routing inert on that axis).
+  routingEndpointHealthSnapshot = () => null,
   routingEndpointSummary = () => null,
   // Optimizer P2.3 (BET-1345): the optimizer pacing state
   // (src/server/optimizer/pacing.mjs). Plugged into buildRoutingServices so the
@@ -1196,6 +1200,7 @@ export function buildHandlers({
             endpoints: catalog,
             snapshots: quota,
             providerHealthState: routingProviderHealthState,
+            endpointHealthSnapshot: routingEndpointHealthSnapshot,
             endpointSummary: routingEndpointSummary,
             pacing: routingPacing,
           }, nowMs);
@@ -1243,11 +1248,20 @@ export function buildHandlers({
         // is the SAME completeness gate the router uses (autoEligibility), so the
         // renderer's shouldSwitch can force an ineligible/unhealthy incumbent out.
         const overriddenHealth = resolveHealthOverride(input?.overrides, routingOverridesOn);
-        const incumbentHealthy = !["out-of-credit", "rate-limited", "failing"].includes(
+        // W4/BET-1536: the incumbent is unhealthy when EITHER register
+        // excludes it — the account (out-of-credit/unauthorized/rate-limited)
+        // or its endpoint (dead/not-found/forbidden/rate-limited deadline).
+        const incumbentAccountState =
           overriddenHealth?.[incumbent?.providerID] ??
-            routingProviderHealthState(incumbent?.providerID) ??
-            "ok",
-        );
+          routingProviderHealthState(incumbent?.providerID) ??
+          "ok";
+        const incumbentEndpointState = incumbent
+          ? (routingEndpointHealthSnapshot?.() ?? {})[endpointKey(incumbent)] ?? "ok"
+          : "ok";
+        const incumbentHealthy = ![
+          "out-of-credit", "unauthorized", "rate-limited", "failing",
+          "dead", "not-found", "forbidden",
+        ].includes(incumbentAccountState === "ok" ? incumbentEndpointState : incumbentAccountState);
         const stillEligible = catalogIncumbent
           ? incumbentStillEligible(catalogIncumbent, effServices)
           : true;
@@ -1469,7 +1483,24 @@ export function buildHandlers({
     // set-providers: apply upsert/remove mutations to opencode.jsonc.
     // Args: { upsert?: ProviderInput[], remove?: string[] }
     "opencode:set-providers": (input) =>
-      providers.setProviders(input ?? {}),
+      providers.setProviders(input ?? {}).then((res) => {
+        // W8 #2 (BET-1536): a provider configuration change clears the
+        // affected keys — config churn is not evidence either way (a new key
+        // or baseURL invalidates the old failures) — and the endpoints
+        // re-admit through their probes/next attempts.
+        try {
+          const affected = [
+            ...(Array.isArray(input?.upsert) ? input.upsert : []).map((p) => p?.id),
+            ...(Array.isArray(input?.remove) ? input.remove : []),
+          ].filter((id) => typeof id === "string" && id);
+          for (const providerID of affected) {
+            void providerHealth?.engine?.noteConfigChange({ providerID });
+          }
+        } catch (e) {
+          console.warn("[provider-health] config-change clear failed:", e?.message ?? e);
+        }
+        return res;
+      }),
 
     // get-subagents: read configured subagent blocks from opencode.jsonc.
     // Returns SubagentDef[] — the config-reading path backing the SubagentsCard.

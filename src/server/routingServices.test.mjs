@@ -9,6 +9,7 @@ import {
   buildBenchmarkField,
   accountsFromSnapshots,
   healthFor,
+  endpointHealthFor,
   ledgerToServices,
   buildRoutingServices,
 } from "./routingServices.mjs";
@@ -99,6 +100,16 @@ test("healthFor maps providerIDs through the state function, guarding a throwing
   });
   assert.deepEqual(health, { anthropic: "out-of-credit", openai: "ok" });
   assert.ok(calls >= 3, "must still query the live providers");
+});
+
+test("endpointHealthFor keys states by endpointKey and guards a throwing snapshot reader", () => {
+  const endpoints = [{ providerID: "a", id: "m1" }, { providerID: "b", id: "m2" }];
+  const snap = () => ({ "a/m1": "dead", "b/m2": "unproven" });
+  // The map carries the register's RESOLVED view (soft states included);
+  // exclusion vs deprioritisation is the ROUTER's read of the state string.
+  assert.deepEqual(endpointHealthFor(endpoints, snap), { "a/m1": "dead", "b/m2": "unproven" });
+  assert.deepEqual(endpointHealthFor(endpoints, () => { throw new Error("boom"); }), {}, "a throwing reader degrades to permissive");
+  assert.deepEqual(endpointHealthFor(endpoints, null), {}, "no reader wired → permissive");
 });
 
 test("healthFor is empty when no state reader is wired", () => {

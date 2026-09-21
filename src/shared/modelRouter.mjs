@@ -47,10 +47,26 @@ export const AGENT_TIER = {
 
 const BINDING_ORDER = [
   "context headroom", "tool calling", "image input", "pdf input",
-  "out-of-credit", "rate-limited", "identity", "price", "caching", "quality",
+  "out-of-credit", "unauthorized", "rate-limited", "dead", "not-found",
+  "forbidden", "identity", "price", "caching", "quality",
 ];
 
-const HEALTH_EXCLUDED = { "out-of-credit": "out-of-credit", "rate-limited": "rate-limited" };
+// Provider-keyed (account register) health states that EXCLUDE a provider
+// from automatic routing. `failing` is soft and never excludes.
+const HEALTH_EXCLUDED = {
+  "out-of-credit": "out-of-credit",
+  "unauthorized": "unauthorized",
+  "rate-limited": "rate-limited",
+};
+
+// Endpoint-keyed (endpoint register, BET-1536/W4) health states that EXCLUDE
+// one endpoint. `unproven`/`degraded` are soft and only deprioritise.
+const ENDPOINT_HEALTH_EXCLUDED = {
+  "dead": "dead",
+  "not-found": "not-found",
+  "forbidden": "forbidden",
+  "rate-limited": "rate-limited",
+};
 
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 
@@ -66,7 +82,12 @@ function routingActive(policy) {
 // `needs.*` stays hard, but the parser PERMISSIVE-missing (an unknown / absent
 // capability set reads as allow — `readModalities` returns [] for "no
 // information" and that is never "supports nothing").
-function capabilityDrop(m, { contextTokens, needs, health }) {
+//
+// Health (W4/BET-1536): the ACCOUNT register (`health`, provider-keyed) is
+// checked first — account state takes precedence when present (§4.4) — then
+// the ENDPOINT register (`endpointHealth`, endpointKey-keyed). An absent
+// entry in either map is permissive.
+function capabilityDrop(m, { contextTokens, needs, health, endpointHealth }) {
   // No `status` check here: an opted-in deprecated model passed the routable
   // catalogue (listRoutableModels) and must not be re-litigated at the decision
   // core. The router trusts its input catalogue for status.
@@ -75,14 +96,30 @@ function capabilityDrop(m, { contextTokens, needs, health }) {
   if (needs.image === true && !acceptsModality(m, "image")) return "image input";
   if (needs.pdf === true && !acceptsModality(m, "pdf")) return "pdf input";
   const hs = HEALTH_EXCLUDED[health?.[m.providerID]];
-  return hs ?? null;
+  if (hs) return hs;
+  const es = ENDPOINT_HEALTH_EXCLUDED[endpointHealth?.[endpointKey(m)]];
+  return es ?? null;
 }
 
-// BET-1535 (S3): is this a HEALTH exclusion label/state — i.e. an endpoint the
-// router knows is dead (out-of-credit / rate-limited)? `failing` is soft and
-// never excludes. hasOwn guards against inherited-key false positives.
+// BET-1535 (S3): is this a HEALTH exclusion label/state — i.e. an endpoint
+// the router knows is unhealthy? Covers BOTH registers' excluding states
+// (account: out-of-credit / unauthorized / rate-limited; endpoint: dead /
+// not-found / forbidden / rate-limited). `failing`, `unproven` and `degraded`
+// are soft and never exclude. hasOwn guards against inherited-key false
+// positives.
 function isHealthExcluded(state) {
-  return state != null && Object.prototype.hasOwnProperty.call(HEALTH_EXCLUDED, state);
+  return (
+    state != null &&
+    (Object.prototype.hasOwnProperty.call(HEALTH_EXCLUDED, state) ||
+      Object.prototype.hasOwnProperty.call(ENDPOINT_HEALTH_EXCLUDED, state))
+  );
+}
+
+// The self-doubt condition (W8 #3): a no-healthy-endpoint verdict where
+// EVERY drop was a health drop — health excluded everything the tier had.
+export function isHealthOnlyVerdict(dropped) {
+  const ds = Array.isArray(dropped) ? dropped : [];
+  return ds.length > 0 && ds.every((d) => isHealthExcluded(d?.reason));
 }
 
 // Assess one endpoint once — Hard Stage 1 (eligibility), marginal cost and
@@ -273,10 +310,18 @@ export function incumbentStillEligible(candidate, services) {
 function healthRank(a, services) {
   const providerID = a?.candidate?.providerID ?? a?.effective?.providerID;
   const st = services?.health?.[providerID];
-  // Only `failing` is a soft/deprioritised signal here. `out-of-credit` and
-  // `rate-limited` never reach the ordering — they are EXCLUDED (hard) in
-  // capabilityDrop, so a survivor's health is either ok or failing.
-  return st === "failing" ? 1 : 0;
+  // Only soft signals rank here. The EXCLUDING states (account:
+  // out-of-credit/unauthorized/rate-limited; endpoint: dead/not-found/
+  // forbidden/rate-limited) never reach the ordering — capabilityDrop drops
+  // them hard — so a survivor's account health is ok or failing.
+  let rank = st === "failing" ? 1 : 0;
+  // Endpoint register soft states (W4/BET-1536): `unproven` (never succeeded
+  // inside the window) and `degraded` (<50% over the window) deprioritise
+  // without excluding. Degraded is measured evidence and ranks behind both.
+  const es = services?.endpointHealth?.[a?.key];
+  if (es === "degraded") rank = Math.max(rank, 2);
+  else if (es === "unproven") rank = Math.max(rank, 1);
+  return rank;
 }
 
 // Soft ordering within a competing set (same model, or a flattened economy
@@ -440,7 +485,12 @@ export function chooseModel(input = {}) {
   // caller bug — let the headroom check SKIP (undefined * 1.25 = NaN never
   // < limit) rather than silently passing 0, which would read as "zero
   // tokens" and lie about how full the context is.
-  const hardCtx = { contextTokens: typeof intent?.contextTokens === "number" ? intent.contextTokens : undefined, needs, health: services.health };
+  const hardCtx = {
+    contextTokens: typeof intent?.contextTokens === "number" ? intent.contextTokens : undefined,
+    needs,
+    health: services.health,
+    endpointHealth: services.endpointHealth,
+  };
 
   const survivors = [];
   // BET-1535 (S3): the HEALTH-NEUTRAL survivor set — the candidates that would
@@ -517,7 +567,10 @@ export function chooseModel(input = {}) {
     //   4. otherwise today's behaviour, unchanged: a healthy incumbent that is
     //      merely unqualified (context too small, wrong modality) still takes
     //      this path. Only health can produce the new verdict.
-    const incumbentExcluded = incumbent !== null && isHealthExcluded(services.health?.[incumbent.providerID]);
+    const incumbentExcluded =
+      incumbent !== null &&
+      (isHealthExcluded(services.health?.[incumbent.providerID]) ||
+        isHealthExcluded(services.endpointHealth?.[endpointKey(incumbent)]));
     if (incumbentExcluded || healthNeutral.length > 0) {
       const excluded = healthNeutral.map((a) => a.key);
       if (incumbentExcluded) {
@@ -528,6 +581,8 @@ export function chooseModel(input = {}) {
         kind: "no-healthy-endpoint",
         reason: `no healthy ${agent} endpoint available (${bindingReason(counts)})`,
         excluded,
+        // W8 self-doubt input (BET-1536): every drop was a health drop.
+        healthOnly: isHealthOnlyVerdict(drops),
         changed: false,
         trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
       };
@@ -542,7 +597,7 @@ export function chooseModel(input = {}) {
     };
   }
 
-  const explored = stage3Order(survivors, { preset: effectivePreset, telemetry: services.telemetry, health: services.health });
+  const explored = stage3Order(survivors, { preset: effectivePreset, telemetry: services.telemetry, health: services.health, endpointHealth: services.endpointHealth });
   const band = selectBand(explored, targetRank, agent);
   if (band.length === 0) {
     // BET-1535 (S3): rule 2 applies here too — I1 is strictly prior at every
@@ -550,13 +605,18 @@ export function chooseModel(input = {}) {
     // does NOT fire here: the survivor set was non-empty (health cannot be
     // "why there is nothing" when something survived — the floor is why the
     // band is empty), so a healthy incumbent still takes today's path.
-    if (incumbent !== null && isHealthExcluded(services.health?.[incumbent.providerID])) {
+    if (
+      incumbent !== null &&
+      (isHealthExcluded(services.health?.[incumbent.providerID]) ||
+        isHealthExcluded(services.endpointHealth?.[endpointKey(incumbent)]))
+    ) {
       return {
         kind: "no-healthy-endpoint",
         reason:
           `no ${agent} model meets the ${TIER_BY_RANK[targetRank]} target above the ${floorScore} floor; ` +
-          `incumbent ${endpointKey(incumbent)} is ${services.health?.[incumbent.providerID]}`,
+          `incumbent ${endpointKey(incumbent)} is ${services.health?.[incumbent.providerID] ?? services.endpointHealth?.[endpointKey(incumbent)]}`,
         excluded: [endpointKey(incumbent)],
+        healthOnly: isHealthOnlyVerdict(drops),
         changed: false,
         trace: { considered, dropped: drops, intent: traceIntent, target: targetTrace, winner: null },
       };

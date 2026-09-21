@@ -1230,3 +1230,94 @@ describe("chooseModel — no-healthy-endpoint verdict (BET-1535)", () => {
     expect(res.model).toBeTruthy();
   });
 });
+
+describe("chooseModel — the endpoint register (W4/BET-1536)", () => {
+  it("an endpoint-register `dead` state excludes the endpoint; an unproven one does not", () => {
+    const dead = endpoint("m", { providerID: "a" });
+    const incumbent = endpoint("inc", { providerID: "x" });
+    const res = route({
+      catalog: [dead],
+      policy: { preset: "balanced" },
+      services: { endpointHealth: { [keyOf(dead)]: "dead" } },
+      intent: { incumbent },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toEqual([keyOf(dead)]);
+    // healthOnly: every drop was a health drop (the W8 self-doubt input).
+    expect((res as any).healthOnly).toBe(true);
+
+    const soft = endpoint("m2", { providerID: "b" });
+    const res2 = route({
+      catalog: [soft],
+      policy: { preset: "balanced" },
+      services: { endpointHealth: { [keyOf(soft)]: "unproven" } },
+      intent: { incumbent: endpoint("inc", { providerID: "x" }) },
+    });
+    expect(res2.kind).toBe("selected");
+    expect((res2 as any).model?.providerID).toBe("b");
+  });
+
+  it("not-found and forbidden are authoritative endpoint exclusions; an expired rate-limit deadline is not", () => {
+    for (const state of ["not-found", "forbidden"]) {
+      const only = endpoint("m", { providerID: "a" });
+      const res = route({
+        catalog: [only],
+        policy: { preset: "balanced" },
+        services: { endpointHealth: { [keyOf(only)]: state } },
+        intent: { incumbent: endpoint("inc", { providerID: "x" }) },
+      });
+      expect(res.kind).toBe("no-healthy-endpoint");
+      expect((res as any).excluded).toEqual([keyOf(only)]);
+    }
+    const ok = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [ok],
+      policy: { preset: "balanced" },
+      // The deadline in the map is RESOLVED by the register before the router
+      // sees it: an expired deadline simply is not there. The map value is
+      // the state string; an absent key is permissive.
+      services: { endpointHealth: {} },
+      intent: { incumbent: endpoint("inc", { providerID: "x" }) },
+    });
+    expect(res.kind).toBe("selected");
+  });
+
+  it("the account register takes precedence: an account exclusion wins over the endpoint state (§4.4)", () => {
+    const only = endpoint("m", { providerID: "a" });
+    const res = route({
+      catalog: [only],
+      policy: { preset: "balanced" },
+      services: { health: { a: "out-of-credit" }, endpointHealth: { [keyOf(only)]: "dead" } },
+      intent: { incumbent: endpoint("inc", { providerID: "x" }) },
+    });
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect(res.reason).toContain("out-of-credit");
+  });
+
+  it("the incumbent's ENDPOINT state excludes it from incumbency (the health-neutral path)", () => {
+    const incumbent = endpoint("m", { providerID: "p" });
+    const res = route({
+      catalog: [incumbent],
+      policy: { preset: "balanced" },
+      services: { endpointHealth: { [keyOf(incumbent)]: "dead" } },
+      intent: { incumbent },
+    });
+    // The incumbent was the sole candidate and its ENDPOINT register state
+    // (not its provider) is what killed it — the verdict fires with the key.
+    expect(res.kind).toBe("no-healthy-endpoint");
+    expect((res as any).excluded).toContain(keyOf(incumbent));
+  });
+
+  it("degraded deprioritises without excluding, and an unroutable surface ignores health entirely", () => {
+    const degraded = endpoint("m", { providerID: "a" });
+    const clean = endpoint("m", { providerID: "b" });
+    const res = route({
+      catalog: [degraded, clean],
+      policy: { preset: "balanced" },
+      services: { endpointHealth: { [keyOf(degraded)]: "degraded" } },
+      intent: { incumbent: null },
+    });
+    expect(res.kind).toBe("selected");
+    expect((res as any).model?.providerID).toBe("b"); // the clean endpoint outranks the degraded one
+  });
+});
