@@ -98,7 +98,7 @@ import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./server
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
-import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, listSnapshots, getUsageHistory } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, getUsageHistory } from "./usage.mjs";
 import {
   createCapJob,
   getJob,
