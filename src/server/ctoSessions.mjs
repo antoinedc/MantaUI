@@ -346,7 +346,9 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
 // endpoint ledger, the optimizer pacing state). Defaults stay null → the
 // services build degrades exactly as before, so a module that never registers
 // (or a test) keeps today's absent-context behaviour. Reuses the ONE
-// buildRoutingServices assembly — no second reader wiring.
+// buildRoutingServices assembly — no second reader wiring. Shape contracts are
+// enforced at consume time: `snapshots` through readSnapshotsForRouting (the
+// services build only reads arrays), the others as registered.
 const defaultResolveReaders = {
   providerHealthState: null,
   snapshots: null,
@@ -358,6 +360,33 @@ export function setDefaultResolveReaders(readers = {}) {
   for (const k of Object.keys(defaultResolveReaders)) {
     if (readers[k] !== undefined) defaultResolveReaders[k] = readers[k];
   }
+}
+
+/**
+ * BET-1535 (W0): normalize the registered snapshots reader into the ARRAY
+ * buildRoutingServices consumes. `buildRoutingServices` reads `deps.snapshots`
+ * only through `Array.isArray(...)` guards (and `accountsFromSnapshots`
+ * likewise), so a function-valued reader reads as ABSENT — the exact inert
+ * wiring this fix closes. delegate's own wiring calls its reader first
+ * (`quota = listSnapshots()`); this helper gives the CTO registration the same
+ * contract. A reader that rejects, or resolves to a non-array, degrades to an
+ * empty array — never an exception, never a silent no-op.
+ *
+ * @param {Function|Array|null|undefined} reader — the registered `snapshots`
+ *   entry: either the live reader function (called once per resolution) or an
+ *   already-resolved array (passthrough).
+ * @returns {Promise<Array<object>>} usage snapshots for the services build
+ */
+export async function readSnapshotsForRouting(reader) {
+  if (typeof reader === "function") {
+    try {
+      const out = (await reader()) ?? [];
+      return Array.isArray(out) ? out : [];
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(reader) ? reader : [];
 }
 
 /**
@@ -398,12 +427,21 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
     catalog = [];
   }
 
+  // BET-1535 (W0) reader shapes must match buildRoutingServices' contracts:
+  // `snapshots` is consumed as an ARRAY (delegate calls its reader first —
+  // `quota = listSnapshots()` — and passes the array), so a function-valued
+  // reader is CALLED here via readSnapshotsForRouting and a failure degrades
+  // to an empty array (never an inert function silently read as absent). The
+  // other readers are consumed as functions/state objects and pass through as
+  // registered.
+  const quota = await readSnapshotsForRouting(defaultResolveReaders.snapshots);
+
   let services = null;
   try {
     services = await buildRoutingServices(cfg, {
       catalogIndex: { lookupModel, matchModel, allModels },
       endpoints: catalog,
-      snapshots: defaultResolveReaders.snapshots,
+      snapshots: quota,
       providerHealthState: defaultResolveReaders.providerHealthState,
       endpointSummary: defaultResolveReaders.endpointSummary,
       pacing: defaultResolveReaders.pacing,

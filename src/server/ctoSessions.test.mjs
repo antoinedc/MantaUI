@@ -401,6 +401,8 @@ test("createEphemeralReaper requires listSessions + deleteSession", () => {
 import { _normalizeProviderModel } from "./opencode.mjs";
 // @ts-expect-error — the real subagent routing wrapper (module-level import).
 import { chooseSubagentModel } from "./delegate.mjs";
+// @ts-expect-error — the snapshots reader-shape helper under test.
+import { readSnapshotsForRouting } from "./ctoSessions.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
 
 function rawProviderModel(over = {}) {
@@ -509,4 +511,27 @@ test("BET-1535: with every candidate excluded the run FAILS with code no-healthy
   assert.equal(out.code, "no-healthy-endpoint", "the typed verdict is the failure reason");
   assert.equal(prompted, 0, "no session was ever created on the dead default");
   assert.equal(validated, 0, "no validation ran — a health verdict does not cascade tiers");
+});
+
+// BET-1535 (W0, review Block 2): the composition root registers `snapshots` as
+// the live READER FUNCTION, but buildRoutingServices consumes `deps.snapshots`
+// only through Array.isArray guards — a function reads as ABSENT. The
+// reader-shape contract is pinned here so the registration can never silently
+// regress to inert.
+test("readSnapshotsForRouting: a function-valued reader is called and yields the array the services build consumes", async () => {
+  const snap = { providerIDs: ["p"], kind: "subscription", windows: [{ pct: 100 }], exhausted: true };
+  // The registered shape (index.mjs): a reader function → called, awaited.
+  assert.deepEqual(await readSnapshotsForRouting(() => [snap]), [snap]);
+  assert.deepEqual(await readSnapshotsForRouting(async () => [snap]), [snap]);
+  // Degradations: a rejecting reader, a non-array resolution, absent — all []
+  assert.deepEqual(await readSnapshotsForRouting(async () => { throw new Error("usage down"); }), []);
+  assert.deepEqual(await readSnapshotsForRouting(() => "not-an-array"), []);
+  assert.deepEqual(await readSnapshotsForRouting(null), []);
+  // Passthrough for an already-resolved array (never double-wrapped).
+  assert.deepEqual(await readSnapshotsForRouting([snap]), [snap]);
+  // THE consumer contract: the normalized array turns into account state; a
+  // raw function would silently read as absent (the Block-2 bug).
+  const { buildRoutingServices } = await import("./routingServices.mjs");
+  const services = await buildRoutingServices({}, { snapshots: await readSnapshotsForRouting(() => [snap]) });
+  assert.equal(services.accounts?.p?.exhausted, true, "function-valued reader must yield account state");
 });
