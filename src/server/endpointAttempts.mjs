@@ -21,18 +21,15 @@
 // ledger), because an unreadable attempt store must never wedge the runner.
 
 import { randomUUID } from "node:crypto";
-import { readFile, rename } from "node:fs/promises";
 import { statePath } from "../shared/paths.mjs";
 import { classifyFinish } from "../shared/streamInterpretation.mjs";
-import { writeJsonAtomic } from "./jsonStore.mjs";
-import { patchStore, ledgerStore } from "./ctoStores.mjs";
+import { patchStore, ledgerStore, createQuarantinedJsonStore } from "./ctoStores.mjs";
 
 export const ENDPOINT_ATTEMPTS_VERSION = 1;
 export const ATTEMPT_RING_CAP = 200;
 export const ATTEMPT_RING_WINDOW_MS = 30 * 86_400_000;
 export const ABANDON_GRACE_MS = 60_000;
 
-const MODE = 0o600;
 const ALARM_RATE_LIMIT_MS = 300_000;
 
 const ATTRIBUTIONS = new Set([
@@ -100,11 +97,22 @@ export function isHealthEligibleFailure(attempt) {
 }
 
 // Pure reducer: fold one provider attempt into the per-endpoint aggregates.
+// Probe attempts (W8/BET-1536) are recorded in the ring as evidence but NEVER
+// move the aggregates — probe evidence is weaker than production evidence, so
+// it must not reset a streak (a probe success) nor drive `dead` (a probe
+// failure). The health register derives identically, so a reload can never
+// disagree with the live fold.
 export function applyAttempt(attempt, endpoint) {
   const next = {
     ...(endpoint ?? {}),
     attempts: [...(Array.isArray(endpoint?.attempts) ? endpoint.attempts : [])],
   };
+  if (attempt?.probe === true) {
+    // Probe rows are evidence only — the aggregates keep their shape but
+    // never move.
+    next.failureStreak = typeof next.failureStreak === "number" ? next.failureStreak : 0;
+    return next;
+  }
   if (attempt.outcome === "success") {
     next.lastSuccessAt = attempt.at;
     next.failureStreak = 0;
@@ -142,58 +150,19 @@ export function createEndpointAttemptsStore({
   warn = (msg) => console.warn(msg),
   now = Date.now,
 } = {}) {
-  let lastAlarm = -Infinity;
-
-  async function alarm(kind, detail) {
-    warn(`[endpoint-attempts] ${kind}: ${detail}`);
-    if (now() - lastAlarm < ALARM_RATE_LIMIT_MS) return;
-    lastAlarm = now();
-    try {
-      await ledger.append({ actor: "cto", ts: now(), kind, detail });
-    } catch { /* the alarm must never break the writer */ }
-  }
-
-  async function quarantine(raw) {
-    const aside = `${path}.corrupt-${now()}.json`;
-    try {
-      await rename(path, aside);
-    } catch (e) {
-      await alarm("cto.endpoint_attempts_quarantined", `rename failed (${e?.message ?? e}); rebuilding empty`);
-    }
-    await alarm(
-      "cto.endpoint_attempts_quarantined",
-      `payload quarantined aside ${aside}${raw ? ` (${raw.length} bytes)` : ""}; rebuilt empty`,
-    );
-    return createEndpointAttemptsPayload();
-  }
-
-  return {
-    name: "endpoint-attempts",
+  // The load/quarantine/alarm/save dance is the SHARED quarantined-store
+  // factory in ctoStores.mjs (one contract, one quarantine semantics); this
+  // wrapper only supplies the attempts schema and alarm kind.
+  return createQuarantinedJsonStore({
     path,
-    async load() {
-      let raw = null;
-      try {
-        raw = await readFile(path, "utf-8");
-      } catch {
-        return createEndpointAttemptsPayload();
-      }
-      let data;
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        return quarantine(raw);
-      }
-      try {
-        return validateEndpointAttemptsPayload(data);
-      } catch (e) {
-        if (String(e?.message ?? e).includes("newer than the supported version")) throw e;
-        return quarantine(raw);
-      }
-    },
-    async save(data) {
-      await writeJsonAtomic(path, JSON.stringify(data, null, 2), { mode: MODE });
-    },
-  };
+    name: "endpoint-attempts",
+    createPayload: createEndpointAttemptsPayload,
+    validate: validateEndpointAttemptsPayload,
+    alarmKind: "cto.endpoint_attempts_quarantined",
+    ledger,
+    warn,
+    now,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +176,7 @@ export function createEndpointAttemptRecorder({
   now = Date.now,
   ledger = ledgerStore,
   warn = (msg) => console.warn(msg),
+  onAttempt = null,
 } = {}) {
   let lastPersistAlarm = -Infinity;
 
@@ -223,8 +193,10 @@ export function createEndpointAttemptRecorder({
 
   // §4.1 skeleton at dispatch start: written immediately so a killed server
   // leaves something the sweep can terminalize as `abandoned`. Attribution
-  // starts as "not-dispatched" and is refined at terminalize.
-  async function beginOperation({ attemptId, operation, startedAt, deadlineAt, intendedEndpointKey = null }) {
+  // starts as "not-dispatched" and is refined at terminalize. `probe: true`
+  // (W8, BET-1536) marks a health probe's operation so downstream consumers
+  // (register statistics, class watchers) can exclude probe evidence.
+  async function beginOperation({ attemptId, operation, startedAt, deadlineAt, intendedEndpointKey = null, probe = false }) {
     try {
       await patchStore(store, (fresh) => {
         const ops = Array.isArray(fresh?.operations) ? fresh.operations : [];
@@ -235,6 +207,7 @@ export function createEndpointAttemptRecorder({
               attemptId, operation, startedAt, deadlineAt,
               intendedEndpointKey: intendedEndpointKey || null,
               attribution: "not-dispatched",
+              ...(probe ? { probe: true } : {}),
             }],
             { nowMs: now() },
           ),
@@ -290,6 +263,7 @@ export function createEndpointAttemptRecorder({
 
   async function recordProviderAttempt(attempt) {
     if (!attempt?.endpointKey) return; // no identity → never key an attempt
+    let persisted = false;
     try {
       await patchStore(store, (fresh) => {
         const endpoints = (fresh && typeof fresh.endpoints === "object" && !Array.isArray(fresh.endpoints))
@@ -298,6 +272,7 @@ export function createEndpointAttemptRecorder({
         const prev = endpoints[key] && typeof endpoints[key] === "object" ? endpoints[key] : {};
         const attempts = Array.isArray(prev.attempts) ? prev.attempts : [];
         if (attempts.some((a) => a?.attemptId === attempt.attemptId)) return {}; // idempotent
+        persisted = true;
         const ring = capAttemptRing([...attempts, attempt], { nowMs: now() });
         const settled = applyAttempt(attempt, { ...prev, attempts });
         settled.attempts = ring;
@@ -305,6 +280,18 @@ export function createEndpointAttemptRecorder({
       });
     } catch (e) {
       persistFailed("attempt", e);
+    }
+    // Post-persist hook (W4/BET-1536): the health registers fold the attempt
+    // AFTER the evidence is durable — and only ONCE (a duplicate delivery
+    // took the idempotent no-op branch above and must not double-fold
+    // downstream). Guarded — a health failure must never break the recorder
+    // contract.
+    if (persisted && typeof onAttempt === "function") {
+      try {
+        await onAttempt(attempt);
+      } catch (e) {
+        persistFailed("onAttempt", e);
+      }
     }
   }
 
@@ -318,11 +305,27 @@ export function createEndpointAttemptRecorder({
     });
   }
 
-  return { beginOperation, markDispatched, terminalizeOperation, recordProviderAttempt, sweepAbandoned };
+  return {
+    beginOperation, markDispatched, terminalizeOperation, recordProviderAttempt, sweepAbandoned,
+    // The engine's read path (W4/BET-1536) reads the durable aggregates —
+    // expose the store so callers never reach into closure state.
+    store,
+  };
+}
+
+// The singleton's LATE-BOUND health hook: the health engine is composed in
+// index.mjs AFTER this module loads, so the composition root registers the
+// fold here. One setter, one wiring point; a test recorder injects `onAttempt`
+// directly instead.
+let singletonOnAttempt = null;
+export function setOnProviderAttempt(fn) {
+  singletonOnAttempt = typeof fn === "function" ? fn : null;
 }
 
 // Process singleton for the runner default. Tests inject their own recorder.
-export const endpointAttempts = createEndpointAttemptRecorder();
+export const endpointAttempts = createEndpointAttemptRecorder({
+  onAttempt: (attempt) => (singletonOnAttempt ? singletonOnAttempt(attempt) : undefined),
+});
 
 export function newAttemptId() {
   return randomUUID();

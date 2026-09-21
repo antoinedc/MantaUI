@@ -734,6 +734,10 @@ export function chooseSubagentModel({
     const err = new Error(decision?.reason || "no healthy endpoint available");
     err.code = "no-healthy-endpoint";
     err.excluded = Array.isArray(decision?.excluded) ? decision.excluded : [];
+    // W8 self-doubt input (BET-1536): true when EVERY drop was a health drop
+    // — health excluded everything the tier had, so the health model itself
+    // may be wrong. The caller raises the alarm on the final fail-closed.
+    err.healthOnly = decision?.healthOnly === true;
     throw err;
   }
   // On the off-path / no-survivors path chooseModel returns the very
@@ -845,35 +849,36 @@ export async function startJob(input, deps = {}) {
   let routedModel = null;
   if (!input?.model) {
     const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
-    // One injected clock for this decision (rolling-window edge + TTL timestamp
-    // in buildRoutingServices, and the router's own ordering) — same instant.
-    const nowMs = Date.now();
-    // Build the router's RoutingServices context from live box state (BET-1252).
-    // `deps.routingServices` (test injection) is used verbatim when present;
-    // otherwise the box-side builder assembles catalogue + accounts + health +
-    // declared + reliability from the readers in `deps`. Every reader inside
-    // buildRoutingServices is individually guarded, and the whole assembly is
-    // wrapped so a failure degrades to absent services — but it must NEVER
-    // degrade SILENTLY (11e): "no services" reads as "no model passes
-    // constraints", so a degraded build logs once with the error message.
-    let services = deps?.routingServices;
-    if (!services) {
-      try {
-        services = await buildRoutingServices(cfg, {
-          catalogIndex: deps.catalogIndex,
-          endpoints: catalog,
-          snapshots: quota,
-          providerHealthState: deps.providerHealthState,
-          endpointSummary: deps.endpointSummary,
-          pacing: deps.pacing,
-        }, nowMs);
-      } catch (e) {
-        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
-        services = null;
+    const resolveRoute = async () => {
+      // One injected clock for this decision (rolling-window edge + TTL timestamp
+      // in buildRoutingServices, and the router's own ordering) — same instant.
+      const nowMs = Date.now();
+      // Build the router's RoutingServices context from live box state (BET-1252).
+      // `deps.routingServices` (test injection) is used verbatim when present;
+      // otherwise the box-side builder assembles catalogue + accounts + health +
+      // declared + reliability from the readers in `deps`. Every reader inside
+      // buildRoutingServices is individually guarded, and the whole assembly is
+      // wrapped so a failure degrades to absent services — but it must NEVER
+      // degrade SILENTLY (11e): "no services" reads as "no model passes
+      // constraints", so a degraded build logs once with the error message.
+      let services = deps?.routingServices;
+      if (!services) {
+        try {
+          services = await buildRoutingServices(cfg, {
+            catalogIndex: deps.catalogIndex,
+            endpoints: catalog,
+            snapshots: quota,
+            providerHealthState: deps.providerHealthState,
+            endpointHealthSnapshot: deps.endpointHealthSnapshot,
+            endpointSummary: deps.endpointSummary,
+            pacing: deps.pacing,
+          }, nowMs);
+        } catch (e) {
+          console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
+          services = null;
+        }
       }
-    }
-    try {
-      routedModel = route({
+      return route({
         incumbent: null,
         catalog,
         policy,
@@ -881,21 +886,59 @@ export async function startJob(input, deps = {}) {
         nowMs,
         services,
       });
+    };
+    let verdictErr = null;
+    try {
+      routedModel = await resolveRoute();
     } catch (e) {
       // The typed health verdict (BET-1535) is not a routing exception — it
       // FAILS the spawn with that reason instead of delivering on a model the
       // router knows is dead. Any other throw is the belt-and-braces guard so
       // an injected route stub can never break a spawn.
-      if (e?.code === "no-healthy-endpoint") {
-        const excluded = Array.isArray(e?.excluded) && e.excluded.length > 0 ? ` (excluded: ${e.excluded.join(", ")})` : "";
-        return {
-          ok: false,
-          code: "no-healthy-endpoint",
-          error: `[router] ${e?.message ?? "no healthy endpoint available"}${excluded}`,
-        };
+      if (e?.code === "no-healthy-endpoint") verdictErr = e;
+      else console.error("[router] subagent routing threw, using default:", e?.message ?? e);
+    }
+    // W8 anti-brick (BET-1536): before failing closed, ONE bounded
+    // last-resort probe runs against the least-recently-failed excluded
+    // endpoint (once, subject to that endpoint's own backoff). A pass lifts
+    // the exclusion and the spawn proceeds normally; a fail is recorded and
+    // the refusal surfaces below.
+    if (!routedModel && verdictErr) {
+      const engine = deps?.endpointHealth ?? null;
+      let recovered = false;
+      if (engine && typeof engine.lastResortRecovery === "function") {
+        try {
+          recovered = await engine.lastResortRecovery(verdictErr.excluded);
+        } catch {
+          recovered = false; // a probe failure must never break the refusal
+        }
       }
-      console.error("[router] subagent routing threw, using default:", e?.message ?? e);
-      routedModel = null;
+      if (recovered) {
+        verdictErr = null;
+        try {
+          routedModel = await resolveRoute(); // one re-route with fresh services
+        } catch (e2) {
+          if (e2?.code === "no-healthy-endpoint") verdictErr = e2;
+          else console.error("[router] subagent routing threw after recovery, using default:", e2?.message ?? e2);
+        }
+      }
+    }
+    // Final fail-closed + the W8 self-doubt alarm: a verdict where EVERY drop
+    // was a health drop means the health model may simply be wrong — fail
+    // closed AND say so (ledger row).
+    if (!routedModel && verdictErr) {
+      const engine = deps?.endpointHealth ?? null;
+      if (verdictErr.healthOnly === true && engine && typeof engine.raiseSelfDoubtAlarm === "function") {
+        try {
+          await engine.raiseSelfDoubtAlarm({ excluded: verdictErr.excluded, reason: verdictErr.message });
+        } catch { /* never break the refusal on the alarm */ }
+      }
+      const excluded = Array.isArray(verdictErr?.excluded) && verdictErr.excluded.length > 0 ? ` (excluded: ${verdictErr.excluded.join(", ")})` : "";
+      return {
+        ok: false,
+        code: "no-healthy-endpoint",
+        error: `[router] ${verdictErr?.message ?? "no healthy endpoint available"}${excluded}`,
+      };
     }
   }
 

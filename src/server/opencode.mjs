@@ -1066,6 +1066,9 @@ export function generateSessionTitle({ directory, instruction }) {
  * @param {number} [a.maxAttempts]  max polls before giving up (default 30)
  * @param {Function} [a.onCreated]  async (sid) => {} — called after create, before prompt
  * @param {string} [a.operation]  operation label for the §4.1 record (default: the title tag)
+ * @param {boolean} [a.probe]  W8 (BET-1536): mark the operation record AND its
+ *   provider attempt as probe evidence — recorded separately, never production
+ *   evidence (excluded from register statistics; no operation_outcome row).
  * @param {object} [a.attempts]  §4 recorder injection (default: the real endpoint-attempts store)
  * @returns {Promise<{text: string, sid: string|null}>}
  */
@@ -1080,6 +1083,7 @@ export async function runSynchronousSession({
   onCreated,
   trackCreation = beginInternalSession,
   operation,
+  probe = false,
   attempts = endpointAttempts,
 }) {
   const absDir = expandTilde(directory);
@@ -1108,6 +1112,7 @@ export async function runSynchronousSession({
       outcome: extra.outcome, errorName: extra.errorName ?? null,
       httpStatus: extra.httpStatus ?? null, retryable: extra.retryable ?? null,
       finish: extra.finish ?? null,
+      ...(probe ? { probe: true } : {}),
     };
   }
 
@@ -1120,6 +1125,7 @@ export async function runSynchronousSession({
       attemptId, endpointKey: endpointKey(model), accountKey: model.providerID,
       at: Date.now(), attribution: "intended", outcome: "failure",
       errorName: null, httpStatus: promptRefusal.httpStatus, retryable: null, finish: null,
+      ...(probe ? { probe: true } : {}),
       ...(promptRefusal.retryAfterMs !== undefined ? { retryAfterMs: promptRefusal.retryAfterMs } : {}),
     };
   }
@@ -1127,6 +1133,7 @@ export async function runSynchronousSession({
   void attempts.beginOperation({
     attemptId, operation: operation ?? title, startedAt, deadlineAt,
     intendedEndpointKey: pinned ? endpointKey(model) : null,
+    probe,
   }).catch(() => {});
 
   let sid = null;
@@ -2098,13 +2105,20 @@ let _refreshInFlight = null;
 // ~25 seconds; without a cooldown each one would spawn its own `claude`
 // process.
 let _lastRecoveryAt = null;
+// §4.5a (W4/BET-1536): the timestamp of the last SUCCESSFUL credential
+// recovery, in SECONDS. The health registers' 401 arming counter reads it:
+// a successful recovery between two 401s means the credential the 401s were
+// rejecting is gone, so the count restarts instead of arming the exclusion.
+// A live ESM binding — importers see the update without a getter dance.
+export let _lastRecoverySuccessAt = null;
 /** Test-only: peek the recovery cooldown state. */
 export function _getRecoveryCooldownState() {
-  return { lastRecoveryAt: _lastRecoveryAt };
+  return { lastRecoveryAt: _lastRecoveryAt, lastRecoverySuccessAt: _lastRecoverySuccessAt };
 }
 /** Test-only: reset recovery cooldown state between scenarios. */
 export function _resetRecoveryCooldownState() {
   _lastRecoveryAt = null;
+  _lastRecoverySuccessAt = null;
 }
 
 /** Resolve the `claude` CLI binary. manta-server's service PATH excludes the
@@ -2288,6 +2302,7 @@ async function doRefresh() {
   const now = Date.now();
   const outcome = classifyRefreshOutcome({ credsBefore, credsAfter, now });
   if (outcome === "ok") {
+    _lastRecoverySuccessAt = Math.floor(now / 1000);
     return logAndReturn({ ok: true, expiresAt: credsAfter.expiresAt });
   }
   return logAndReturn({ ok: false, reason: outcome });

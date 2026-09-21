@@ -42,6 +42,10 @@ export interface RoutingServices {
   accounts?: Record<string, AccountState>;
   /** Keyed by providerID — the provider-health state string. */
   health?: Record<string, string>;
+  /** Keyed by "providerID/modelID" — the endpoint-register state string
+   *  (W4/BET-1536: unproven/degraded/dead/not-found/forbidden/rate-limited).
+   *  Absent → permissive. */
+  endpointHealth?: Record<string, string>;
   /** Keyed by "providerID/modelID". */
   telemetry?: Record<string, TelemetryEntry>;
   reliability?: {

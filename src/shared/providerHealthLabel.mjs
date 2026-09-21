@@ -11,6 +11,7 @@
 export const PROVIDER_STATE_LABEL = Object.freeze({
   "out-of-credit": "Out of credit",
   "rate-limited": "Rate limited",
+  unauthorized: "Sign-in expired",
   failing: "Not responding",
 });
 

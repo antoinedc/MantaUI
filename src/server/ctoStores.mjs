@@ -23,7 +23,7 @@
 // issues that consume them; this layer only fixes the durability contract.
 
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { readFile, writeFile, appendFile, mkdir, rm, readdir, stat } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, rm, readdir, stat, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { statePath } from "../shared/paths.mjs";
@@ -340,6 +340,84 @@ export async function patchStore(store, mutation) {
 // original BET-1425 seam, unchanged for its callers.
 export async function patchEngineState(mutation, { engineState = engineStateStore } = {}) {
   return patchStore(engineState, mutation);
+}
+
+// ---------------------------------------------------------------------------
+// Quarantined versioned JSON store — the shared load/quarantine/alarm/save
+// dance for the CTO state stores (endpoint-attempts, endpoint-health). One
+// factory, one contract (BET-1536 review cycle 2: the two stores had drifted
+// into copy-paste): a missing file reads as the empty payload; a CORRUPT
+// payload is renamed aside (`<path>.corrupt-<ts>.json`), alarmed
+// (rate-limited) and rebuilt empty; a NEWER schema `v` is refused LOUDLY
+// (never silently truncate — §13.2; the validator must phrase it exactly
+// "newer than the supported version"); writes are atomic 0600. Callers keep
+// their own schema (createPayload/validate) and their own alarm kind.
+// ---------------------------------------------------------------------------
+
+export function createQuarantinedJsonStore({
+  path,
+  name,
+  createPayload,
+  validate,
+  alarmKind,
+  ledger = ledgerStore,
+  warn = (msg) => console.warn(msg),
+  now = Date.now,
+  mode = 0o600,
+  alarmRateLimitMs = 300_000,
+} = {}) {
+  let lastAlarm = -Infinity;
+
+  async function alarm(kind, detail) {
+    warn(`[${name}] ${kind}: ${detail}`);
+    if (now() - lastAlarm < alarmRateLimitMs) return;
+    lastAlarm = now();
+    try {
+      await ledger.append({ actor: "cto", ts: now(), kind, detail });
+    } catch { /* the alarm must never break the writer */ }
+  }
+
+  async function quarantine(raw) {
+    const aside = `${path}.corrupt-${now()}.json`;
+    try {
+      await rename(path, aside);
+    } catch (e) {
+      await alarm(alarmKind, `rename failed (${e?.message ?? e}); rebuilding empty`);
+    }
+    await alarm(
+      alarmKind,
+      `payload quarantined aside ${aside}${raw ? ` (${raw.length} bytes)` : ""}; rebuilt empty`,
+    );
+    return createPayload();
+  }
+
+  return {
+    name,
+    path,
+    async load() {
+      let raw = null;
+      try {
+        raw = await readFile(path, "utf-8");
+      } catch {
+        return createPayload();
+      }
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return quarantine(raw);
+      }
+      try {
+        return validate(data);
+      } catch (e) {
+        if (String(e?.message ?? e).includes("newer than the supported version")) throw e;
+        return quarantine(raw);
+      }
+    },
+    async save(data) {
+      await writeJsonAtomic(path, JSON.stringify(data, null, 2), { mode });
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

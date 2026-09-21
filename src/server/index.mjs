@@ -153,7 +153,7 @@ import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
 import { SURFACES_READER_CODES, settleSurface } from "./ctoToolScan.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
-import { endpointAttempts } from "./endpointAttempts.mjs";
+import { endpointAttempts, setOnProviderAttempt } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -630,12 +630,14 @@ const usageStopEngine = createUsageStopEngine({
   },
 });
 
-// Provider health (BET-1240, Automatic Routing Stage 4): tracks whether each
-// provider is WORKING or NOT from the HTTP status of its failed turns (402 =
-// out of credit, 429 = rate limited, other repeated failures = soft failing),
-// recovered by evidence only — never by a clock. Attribute via usageStopEngine's
-// OWN per-session provider cache (getSessionModel — no second cache is built
-// here); observeEvent is fed the opencode pump below alongside the others.
+// Provider health (W4/W5/W8, BET-1536): the TWO health registers — account
+// (providerID → out-of-credit/unauthorized) and endpoint (endpointKey →
+// unproven/degraded/dead/not-found/forbidden/rate-limit deadline) — in the ONE
+// durable store (endpoint-health.json, patchStore RMW). The engine consumes
+// S2's provider attempts ONLY (fed by the attempts recorder's post-persist
+// hook right below — no SSE-pump coupling, no per-session attribution cache);
+// recovered by evidence only — never by a clock. providerHealth.mjs remains
+// as the provider-keyed compatibility facade over this engine.
 const providerHealth = createProviderHealth({
   // BET-1270 6d: a provider going out of credit / rate-limited / failing must
   // SURFACE, not sit unpublished (nobody subscribes to a bus kind that was never
@@ -659,41 +661,45 @@ const providerHealth = createProviderHealth({
     }
     bus.publish(evt);
   },
-  getSessionModel: (sessionId) => usageStopEngine.getSessionModel(sessionId),
   providerIDForAdapter,
-  // BET-1270 6b: attribute adapter-less (custom / pay-as-you-go) providers by
-  // their failing model's endpoint identity. The map below is the synchronous
-  // modelID -> providerID the health pump reads; refreshed from the opencode
-  // model list (the SAME source the adapters are keyed by).
-  providerForModel: (modelID) => modelProviderIndex.get(modelID) ?? null,
+  // The meter recheck in the W8 manual reset (supported providers only —
+  // custom providers have no meter to read).
+  adapterForProvider: adapterForProviderID,
   recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
+  // W8's bounded real probe: ONE cheap pinned call (short instruction,
+  // bounded output, ~10s poll bound), marked `probe: true` so the attempt
+  // lands as probe evidence — never production evidence (no budget row, no
+  // operation statistics, no class-watcher row).
+  probeRun: async ({ providerID, modelID, kind }) => {
+    const res = await oc.runSynchronousSession({
+      directory: "~",
+      instruction: "Reply with exactly: OK",
+      model: { providerID, modelID },
+      title: "manta-health-probe",
+      operation: `health-probe:${kind}`,
+      probe: true,
+      maxAttempts: 10,
+      pollIntervalMs: 1000,
+    });
+    const text = String(res?.text ?? "").trim().toUpperCase();
+    return {
+      outcome: text === "OK" ? "success" : "failure",
+      code: text === "OK" ? null : "probe-unexpected-output",
+    };
+  },
+  // §4.5a: the timestamp of the last SUCCESSFUL credential recovery (epoch
+  // SECONDS) — resets the 401 arming counter when a recovery lands between
+  // two 401s. Live ESM binding, so the getter reads the current value.
+  lastRecoverySuccessAt: () => oc._lastRecoverySuccessAt,
 });
 
-// BET-1270 6b: modelID -> providerID for providers with NO usage adapter. The
-// box cannot ask an adapter-less provider its identity, but it answers "which
-// connected provider exposes this model?" from the opencode model list — first
-// writer wins (stable), refreshed at startup (provider sets change rarely).
-const modelProviderIndex = new Map();
-async function refreshModelProviderIndex() {
-  try {
-    const models = await oc.listModels();
-    for (const m of Array.isArray(models) ? models : []) {
-      const providerID = m?.providerID;
-      const id = m?.id ?? m?.modelID;
-      if (
-        typeof providerID === "string" &&
-        typeof id === "string" &&
-        id !== "" &&
-        !modelProviderIndex.has(id)
-      ) {
-        modelProviderIndex.set(id, providerID);
-      }
-    }
-  } catch {
-    // non-fatal: attribution degrades to the supported-provider path
-  }
-}
-void refreshModelProviderIndex();
+// W4 (BET-1536): feed the health registers from the attempts pipeline's
+// post-persist hook — ONE hook, ONE wiring point. The engine's read-models
+// fold every production attempt (authoritative slots + counters) and every
+// probe attempt (probe evidence) exactly once, AFTER the evidence is durable.
+// Guarded inside the recorder: a health failure never breaks recording.
+setOnProviderAttempt((attempt) => providerHealth.engine.recordAttempt(attempt));
+
 // Recovery path #3 (issue §Three ways the flag clears): a supported provider's
 // reader reporting funds on a normal poll clears its evidence-only
 // out-of-credit flag. Reuses the EXISTING usage poller's `usage.updated`
@@ -715,6 +721,8 @@ providerHealth.deliverSnapshots(listSnapshots());
 // null (the path that picked a dead endpoint 363 times).
 ctoSetDefaultResolveReaders({
   providerHealthState: (providerID) => providerHealth.state(providerID),
+  endpointHealthSnapshot: () => providerHealth.engine.endpointSnapshot(),
+  endpointHealth: providerHealth.engine,
   snapshots: listSnapshots,
   endpointSummary: routingEndpointSummary,
   pacing: optimizerPacing,
@@ -823,6 +831,10 @@ const delegateEngine = createDelegateEngine({
   // endpointSummary is the DB-backed reliability/telemetry ledger.
   catalogIndex: routingCatalogIndex,
   providerHealthState: (providerID) => providerHealth.state(providerID),
+  // W4/BET-1536: the endpoint register feeds routing AND the W8 anti-brick
+  // (last-resort probe + self-doubt alarm) in startJob's verdict path.
+  endpointHealthSnapshot: () => providerHealth.engine.endpointSnapshot(),
+  endpointHealth: providerHealth.engine,
   endpointSummary: routingEndpointSummary,
   // Optimizer P2.3 (BET-1345): pass the pacing state through to startJob's
   // buildRoutingServices so the subagent model router sees the pacing shadow
@@ -1663,6 +1675,12 @@ rpcHandlers = buildHandlers({
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
   routingCatalogIndex,
   routingProviderHealthState: (providerID) => providerHealth.state(providerID),
+  // W4/BET-1536: the endpoint register's resolved routing snapshot for the
+  // routing:choose channel — the renderer-facing preview MUST agree with the
+  // real routing paths (defaultResolveModel, delegate startJob), which already
+  // receive the same register. Absent → the register silently reads empty on
+  // this channel and the preview disagrees with production.
+  routingEndpointHealthSnapshot: () => providerHealth.engine.endpointSnapshot(),
   routingEndpointSummary,
   // Optimizer P2.3 (BET-1345): the pacing state for the routing:choose round
   // trip — the router's cost stage reads services.pressure from it when the
@@ -2808,6 +2826,10 @@ const stopCtoStoreSweeper = startCtoStoreSweeper({
     // §4.3 (BET-1534): records past deadlineAt+60s with no terminal close as
     // `abandoned` — a killed server's skeleton is an outcome, not a deletion.
     () => endpointAttempts.sweepAbandoned(),
+    // W8 (BET-1536): the health registers' admission probes ride the SAME
+    // sweep timer (jittered ladder ≥ 5m fits the sweep cadence; bounded per
+    // tick) and the read-models get a periodic refresh belt.
+    () => providerHealth.engine.tick(),
   ],
 });
 void stopCtoStoreSweeper;
@@ -3032,13 +3054,6 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     resumeEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[usage-resume] observeEvent failed:", e?.message ?? e);
-  }
-  // Provider health (BET-1240): record whether the attributed provider is
-  // rate-limited / out-of-credit / failing from the preserved HTTP status.
-  try {
-    providerHealth.observeEvent(evt);
-  } catch (e) {
-    console.warn("[provider-health] observeEvent failed:", e?.message ?? e);
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
