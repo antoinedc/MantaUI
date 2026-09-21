@@ -75,6 +75,85 @@ test("headless plan execution also persists ownership before its first prompt", 
   assert.equal(sent, true);
 });
 
+// ---------------------------------------------------------------------------
+// BET-1541 — the barrier bound is per-attempt, not total. Transient stalls
+// (patchStore write-lock contention, a writer/read generation race) must
+// recover on retry inside the fail-closed budget (readAttempts × barrierMs);
+// only a genuinely stuck store fails consumers closed within that budget.
+// ---------------------------------------------------------------------------
+
+function fakeProvenanceStore({ gateFirstLoad = false, saveDelayMs = 0 } = {}) {
+  let stored = { v: 1, ids: [] };
+  let loads = 0;
+  let releaseLoad;
+  const loadGate = gateFirstLoad
+    ? new Promise((resolve) => { releaseLoad = resolve; })
+    : null;
+  return {
+    store: {
+      load: async () => {
+        loads += 1;
+        if (loads === 1 && loadGate) await loadGate;
+        return stored;
+      },
+      save: async (next) => {
+        if (saveDelayMs > 0) await new Promise((r) => setTimeout(r, saveDelayMs));
+        stored = next;
+      },
+    },
+    releaseLoad: releaseLoad ?? (() => {}),
+  };
+}
+
+test("BET-1541: a writer bumping the generation mid-read retries instead of failing the reader", async () => {
+  const { store, releaseLoad } = fakeProvenanceStore({ gateFirstLoad: true });
+  const reader = createInternalSessions({ store, barrierMs: 50, readAttempts: 3 });
+  const writer = createInternalSessions({ store, barrierMs: 50, readAttempts: 3 });
+  const read = reader.internalSessionIds();
+  await new Promise((r) => setTimeout(r, 5)); // let the read's flight reach its (gated) load
+  await writer.beginInternalSession()("sid-w"); // bumps the generation while the flight waits
+  releaseLoad();
+  const ids = await read; // attempt 1 throws provenance-updating; attempt 2 must succeed
+  assert.ok(ids.has("sid-w"), "the retried read observes the writer's registration");
+});
+
+test("BET-1541: a registration slower than one barrier resolves on retry within the budget", async () => {
+  const { store } = fakeProvenanceStore({ saveDelayMs: 120 });
+  const reports = [];
+  const inst = createInternalSessions({ store, barrierMs: 50, readAttempts: 3, report: (row) => reports.push(row) });
+  const registration = inst.beginInternalSession()("sid-slow");
+  const read = inst.internalSessionIds(); // attempt 1 barrier times out at 50ms while save is in flight
+  await registration;
+  const ids = await read;
+  assert.ok(ids.has("sid-slow"));
+  assert.equal(reports.length, 0, "a transient stall that recovers stays out of the ledger");
+});
+
+test("BET-1541: a genuinely stuck store fails closed within the retry budget", async () => {
+  let releaseSave;
+  const saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  let stored = { v: 1, ids: [] };
+  const store = {
+    load: async () => stored,
+    save: async (next) => { await saveGate; stored = next; },
+  };
+  const reports = [];
+  const inst = createInternalSessions({ store, barrierMs: 50, readAttempts: 3, report: (row) => reports.push(row) });
+  const registration = inst.beginInternalSession()("sid-stuck");
+  try {
+    const started = Date.now();
+    await assert.rejects(inst.internalSessionIds(), /provenance-timeout/);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1500, `fail-closed budget exceeded: ${elapsed}ms`);
+    await assert.rejects(inst.internalSessionIds(), /provenance-timeout/, "still fail-closed on the next read");
+    assert.equal(reports.length, 1, "one throttled report");
+    assert.equal(reports[0].code, "timeout");
+  } finally {
+    releaseSave();
+    await registration.catch(() => {});
+  }
+});
+
 for (const cleanupFails of [false, true]) {
   test(`headless plan provenance failure stops prompting, cleanup failure=${cleanupFails}`, async () => {
     let deleted = false;
