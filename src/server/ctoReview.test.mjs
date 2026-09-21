@@ -68,7 +68,7 @@ test("a hung creation fence is bounded and produces one deduplicated safe diagno
 });
 
 test("unsupported scans and transient scans persist distinct bounded retry schedules without advancing the cursor", async () => {
-  for (const code of ["unsupported-runtime", "db-unavailable"]) {
+  for (const code of ["unsupported-runtime", "db-source-unavailable"]) {
     let time = 1000, calls = 0;
     const registryStore = mem({ lastScanTs: 10 });
     const deps = { registryStore, classificationStore: mem(), usageStore: mem(), ledger, now: () => time,

@@ -1545,11 +1545,14 @@ export function createCtoEngine(deps = {}) {
   // §7.1-2: the daily batch's db seam — tool-call part rows in the scan
   // window, via the injected opencodeDb read handle (same async supplier the
   // backfill uses; missing/unsupported handles are distinguished for backoff).
+  // W10 scan seam: every distinct failure below carries its own code so the
+  // registry surfaces the real cause instead of a catch-all label. Only codes
+  // cross the boundary; exception text never does.
   async function toolsCollectDb({ sinceTs, untilTs, cap, afterId }) {
     if (typeof getDb !== "function") throw Object.assign(new Error("discovery-db-unavailable"), { code: "unsupported-runtime" });
     const db = await getDb().catch(() => null);
     if (!db) {
-      let code = "db-unavailable";
+      let code = "db-source-unavailable";
       try { await import("node:sqlite"); } catch (error) {
         if (error.code === "ERR_UNKNOWN_BUILTIN_MODULE") code = "unsupported-runtime";
       }

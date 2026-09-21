@@ -32,6 +32,25 @@ export const CHANNEL_CONFIG = "config";
 // Cap on part rows scanned per batch — a runaway range can never wedge a tick.
 export const SCAN_ROW_CAP = 1000;
 
+// W10: every collectDbRows throw site carries its own code so the registry's
+// scan failure surfaces the real cause instead of a catch-all label. Only
+// codes cross the boundary; exception text never does.
+export function withCode(error, code) {
+  if (error instanceof Error) {
+    error.code = code;
+    return error;
+  }
+  const wrapped = new Error(String(error));
+  wrapped.code = code;
+  return wrapped;
+}
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 // ---------------------------------------------------------------------------
 // Channel 2 — transcript extractors
 // ---------------------------------------------------------------------------
@@ -173,27 +192,42 @@ export function extractFromDbRows(rows) {
 // the tombstones), or null (ordinary pipeline sessions). The row's message
 // role is joined from the message table when one exists.
 export async function collectDbRows(db, { sinceTs, afterId = "", untilTs, cap = SCAN_ROW_CAP } = {}) {
-  if (!db || typeof db.prepare !== "function") throw new Error("discovery-db-unavailable");
+  if (!db || typeof db.prepare !== "function") throw codedError("db-handle-invalid", "discovery-db-unavailable");
   const range = `(p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?)) AND p.time_created <= ?`;
   const order = ` ORDER BY p.time_created ASC, p.id ASC LIMIT ?`;
-  const withMessage = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='message'`)
-    .all().length > 0;
-  const stmt = db.prepare(
-    withMessage
-      ? `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created,
+  let rows;
+  try {
+    const withMessage = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='message'`)
+      .all().length > 0;
+    const stmt = db.prepare(
+      withMessage
+        ? `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created,
                 CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END AS role
            FROM part p LEFT JOIN message m ON m.id = p.message_id
           WHERE ${range}${order}`
-      : `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
+        : `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
            FROM part p
           WHERE ${range}${order}`,
-  );
-  const rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
-  const internal = await internalSessionIds();
+    );
+    rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
+  } catch (error) {
+    throw withCode(error, "db-query-failed");
+  }
+  let internal;
+  try {
+    internal = await internalSessionIds();
+  } catch (error) {
+    throw withCode(error, "internal-provenance-failed");
+  }
   // Fail-closed: an unreadable binding store refuses classification rather
   // than letting the CEO channel leak into ordinary evidence.
-  const conversationSid = await readConversationSessionId();
+  let conversationSid;
+  try {
+    conversationSid = await readConversationSessionId();
+  } catch (error) {
+    throw withCode(error, "internal-provenance-failed");
+  }
   // Keep internal rows in the page for cursor advancement, not evidence.
   return rows.map((row) => {
     const isInternal = internal.has(row.session_id);
