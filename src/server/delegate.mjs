@@ -607,6 +607,13 @@ function unroutableError(structured, src) {
  * throw inside the routing is swallowed, falling back to `incumbent`, so a
  * routing failure can never fail a spawn.
  *
+ * BET-1535 (S3): the ONE exception to never-fail is the router's typed health
+ * verdict — when routing was active and every candidate is health-excluded,
+ * this wrapper THROWS `Error` with `.code = "no-healthy-endpoint"` and
+ * `.excluded` (endpoint keys) so the caller fails its operation instead of
+ * dispatching on a model the router knows is dead. startJob refuses the spawn
+ * before any window exists; the CTO's defaultResolveModel lets it fail the run.
+ *
  * @param {object} [input]
  * @param {object|null} [input.incumbent]  the model the code would have used today
  * @param {Array<object>} [input.catalog]  opencode model list
@@ -614,6 +621,7 @@ function unroutableError(structured, src) {
  * @param {string} [input.agent]           subagent type (default "general")
  * @param {number} [input.nowMs]
  * @returns {object|null} the model to run on (incumbent on off-path / failure)
+ * @throws {Error} code "no-healthy-endpoint" when the router's verdict fires
  */
 // The model deliver()/sendPrompt() accept is the structured shape
 // {providerID, modelID} (opencode's sendPrompt reads `model.modelID`). A

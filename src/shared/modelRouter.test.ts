@@ -235,7 +235,7 @@ describe("chooseModel — hard stages (eligibility, capability, health)", () => 
     const cheap = endpoint("m", { providerID: "b", cost: { input: 0.1, output: 0.1, cacheRead: 0.05, cacheWrite: 0.05 } });
     const res = route({ catalog: [dear, cheap], policy: { preset: "balanced" } });
     expect(res.model?.providerID).toBe("b");
-    expect(res.alternatives.some((x) => keyOf(x) === keyOf(dear))).toBe(true);
+    expect((res.alternatives ?? []).some((x) => keyOf(x) === keyOf(dear))).toBe(true);
   });
 
   it("cheaper blended price wins between two endpoints of the same model", () => {
@@ -265,7 +265,7 @@ describe("chooseModel — hard stages (eligibility, capability, health)", () => 
       intent: { needs: { tools: true } },
     });
     expect(res.model?.providerID).toBe("a");
-    expect(res.alternatives.find((x) => keyOf(x) === keyOf(bad))).toBeUndefined();
+    expect((res.alternatives ?? []).find((x) => keyOf(x) === keyOf(bad))).toBeUndefined();
   });
 
   it("modality: an image-carrying turn drops an endpoint that cannot take images", () => {
@@ -500,7 +500,7 @@ describe("chooseModel — return shape", () => {
     const e = endpoint("m", { providerID: "e", cost: { input: 5, output: 5, cacheRead: 2.5, cacheWrite: 2.5 } });
     const res = route({ catalog: [a, b, c, d, e], policy: { preset: "balanced" } });
     expect(res.model?.providerID).toBe("a");
-    expect(res.alternatives.map((x) => x.providerID)).toEqual(["b", "c", "d"]);
+    expect((res.alternatives ?? []).map((x) => x.providerID)).toEqual(["b", "c", "d"]);
   });
 });
 
@@ -865,7 +865,7 @@ describe("provider health in routing (BET-1270 6a)", () => {
       services: { health: { failing: "failing", healthy: "ok" } },
     });
     expect(res.model?.providerID).toBe("healthy");
-    expect(res.alternatives.map((a: any) => a.providerID)).toContain("failing");
+    expect((res.alternatives ?? []).map((a: any) => a.providerID)).toContain("failing");
     expect(res.trace.considered).toBe(2);
   });
 

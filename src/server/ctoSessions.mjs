@@ -278,9 +278,13 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
   // verdict fails the run: the {ok:false} result flows through runEphemeral's
   // non-quality-failure branch (recorded verbatim in the ledger, no tier
   // escalation — escalating a tier cannot fix health).
-  const model = typeof resolveModel === "function"
+  const resolved = typeof resolveModel === "function"
     ? await resolveModelOrVerdict(resolveModel, { taskClass, tier, meta, configGet })
     : null;
+  if (resolved && typeof resolved === "object" && resolved.ok === false) {
+    return { ok: false, code: resolved.code, taskClass, tier };
+  }
+  const model = resolved;
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;

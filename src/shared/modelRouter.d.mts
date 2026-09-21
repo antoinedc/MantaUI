@@ -105,20 +105,22 @@ export interface RoutingTrace {
  *  nothing healthy survived, and the incumbent fallback is itself excluded
  *  (I1) or health is why nothing survived (I2); NO model is returned and the
  *  caller fails its operation with the typed reason. "unrouted" — off-path /
- *  routing inactive / ordinary no-candidate fallback (today's behaviour). */
+ *  routing inactive / ordinary no-candidate fallback (today's behaviour).
+ *  Runtime shape per kind (fields other than kind/reason/trace exist only
+ *  where meaningful): selected → model/alternatives/changed(/costs);
+ *  no-healthy-endpoint → excluded, changed:false, NO model; unrouted →
+ *  model/alternatives/changed. */
 export type ChooseKind = "selected" | "no-healthy-endpoint" | "unrouted";
 
-interface ChooseResultBase {
+export interface ChooseResult {
   kind: ChooseKind;
+  model?: Model | null;
   reason: string;
-  trace: RoutingTrace;
-}
-
-export interface SelectedResult extends ChooseResultBase {
-  kind: "selected";
-  model: Model;
-  alternatives: Model[];
-  changed: boolean;
+  /** no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
+   *  router knows are excluded. */
+  excluded?: string[];
+  alternatives?: Model[];
+  changed?: boolean;
   /** Optimizer P2.3 (BET-1345) — the assessed-cost accessor for the wiring
    *  (savingsPerTurn / rewarmCost) without a second assess() call. Present on
    *  the win-and-switch path; absent elsewhere. */
@@ -127,22 +129,8 @@ export interface SelectedResult extends ChooseResultBase {
     incumbent: number | null;
     winnerCacheWritePrice: number | null;
   };
+  trace: RoutingTrace;
 }
-
-export interface NoHealthyEndpointResult extends ChooseResultBase {
-  kind: "no-healthy-endpoint";
-  /** Endpoint keys ("providerID/modelID") the router knows are excluded. */
-  excluded: string[];
-}
-
-export interface UnroutedResult extends ChooseResultBase {
-  kind: "unrouted";
-  model: Model | null;
-  alternatives: Model[];
-  changed: boolean;
-}
-
-export type ChooseResult = SelectedResult | NoHealthyEndpointResult | UnroutedResult;
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
 

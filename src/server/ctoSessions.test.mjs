@@ -388,3 +388,125 @@ test("reaper tolerates list/delete/state failures without throwing", async () =>
 test("createEphemeralReaper requires listSessions + deleteSession", () => {
   assert.throws(() => createEphemeralReaper(), /requires listSessions/);
 });
+
+// ---------------------------------------------------------------------------
+// BET-1535 (S3) — fail closed: the router's typed health verdict must reach
+// the CTO run and fail it, instead of dispatching on the box default. The
+// resolver below is built EXACTLY like defaultResolveModel's wiring (real
+// chooseSubagentModel + services bearing the provider-health state) but with
+// an injected catalogue, so no live opencode is touched.
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error — server .mjs has no bundled declarations.
+import { _normalizeProviderModel } from "./opencode.mjs";
+// @ts-expect-error — the real subagent routing wrapper (module-level import).
+import { chooseSubagentModel } from "./delegate.mjs";
+import { familyKey } from "../shared/modelGuide.mjs";
+
+function rawProviderModel(over = {}) {
+  return {
+    id: "m",
+    status: "active",
+    limit: { context: 32000, output: 16000 },
+    cost: { input: 3, output: 15, cache: { read: 0.3, write: 3 } },
+    capabilities: { toolcall: true, input: ["text", "image", "pdf"] },
+    ...over,
+  };
+}
+
+function routingServicesFor(list, extra = {}) {
+  const declared = {};
+  for (const m of list ?? []) {
+    if (!m || typeof m !== "object") continue;
+    declared[`${m.providerID}/${m.id}`] = { catalogId: m.id, price: {}, caches: true };
+  }
+  return {
+    catalogMatcher: { lookupModel: (id) => ({ id }), matchModel: (id) => ({ kind: "exact", candidates: [{ id }] }) },
+    catalogEntryFor: (c) => ({ family: familyKey(c?.id) ?? undefined }),
+    qualityField: {},
+    declared,
+    accounts: {},
+    health: {},
+    telemetry: {},
+    ...extra,
+  };
+}
+
+// The resolver shape defaultResolveModel builds: the REAL router, the class
+// tier forced through perAgent, no incumbent (a CTO run has none).
+function routerResolver({ catalog, services }) {
+  return async ({ taskClass, tier }) =>
+    chooseSubagentModel({
+      incumbent: null,
+      catalog,
+      policy: { perAgent: { [`cto:${taskClass}`]: TIER_TO_ROUTER_TIER[tier] } },
+      agent: `cto:${taskClass}`,
+      services,
+    });
+}
+
+test("BET-1535: a CTO ephemeral run does not select an endpoint the router knows is excluded", async () => {
+  // Same model on two providers; anthropic is CHEAPER (would win on cost) but
+  // out of credit. The run must land on the healthy openai endpoint.
+  const catalog = [
+    _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 2, cache: { read: 0.3, write: 3 } } })),
+    _normalizeProviderModel("openai", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 10, output: 20, cache: { read: 3, write: 30 } } })),
+  ];
+  const seenModels = [];
+  const oc = {
+    async runEphemeralSession({ model, onCreated }) {
+      seenModels.push(model);
+      await onCreated("sid-h");
+      return { text: "reply", sid: "sid-h" };
+    },
+  };
+  const out = await runEphemeral({
+    taskClass: "gatekeeper",
+    context: [],
+    deps: {
+      oc,
+      engineState: fakeEngineState(),
+      resolveModel: routerResolver({
+        catalog,
+        services: routingServicesFor(catalog, { health: { anthropic: "out-of-credit" } }),
+      }),
+    },
+  });
+  assert.equal(out.text, "reply");
+  assert.equal(seenModels.length, 1);
+  assert.equal(seenModels[0]?.providerID, "openai", "the excluded (cheaper) endpoint must not be selected");
+});
+
+test("BET-1535: with every candidate excluded the run FAILS with code no-healthy-endpoint (no default dispatch, no escalation)", async () => {
+  const catalog = [
+    _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
+  ];
+  let prompted = 0;
+  let validated = 0;
+  const oc = {
+    async runEphemeralSession() {
+      prompted += 1;
+      return { text: "should never run", sid: "sid-x" };
+    },
+  };
+  const out = await runEphemeral({
+    taskClass: "gatekeeper",
+    context: [],
+    deps: {
+      oc,
+      engineState: fakeEngineState(),
+      validate: async () => {
+        validated += 1;
+        return true;
+      },
+      resolveModel: routerResolver({
+        catalog,
+        services: routingServicesFor(catalog, { health: { anthropic: "out-of-credit" } }),
+      }),
+    },
+  });
+  assert.equal(out.ok, false, "the run fails — it must not dispatch on the box default");
+  assert.equal(out.code, "no-healthy-endpoint", "the typed verdict is the failure reason");
+  assert.equal(prompted, 0, "no session was ever created on the dead default");
+  assert.equal(validated, 0, "no validation ran — a health verdict does not cascade tiers");
+});

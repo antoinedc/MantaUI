@@ -925,6 +925,91 @@ test("startJob routes only within the consent (sub) catalogue (BET-1229)", async
   );
 });
 
+// BET-1535 (S3): the router's typed health verdict is a typed failure, not a
+// model. chooseSubagentModel must PROPAGATE it (code + excluded list) so its
+// callers can refuse the operation, while a routing EXCEPTION still falls back
+// to the incumbent (the never-throw contract, unchanged).
+test("chooseSubagentModel throws the typed no-healthy-endpoint error when every candidate is excluded (BET-1535)", () => {
+  const catalog = [normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" }))];
+  assert.throws(
+    () =>
+      chooseSubagentModel({
+        incumbent: { providerID: "anthropic", modelID: "claude-sonnet-4" },
+        catalog,
+        policy: { preset: "balanced" },
+        quota: [],
+        agent: "general",
+        nowMs: 1_700_000_000_000,
+        services: routingServicesFor(catalog, { health: { anthropic: "out-of-credit" } }),
+      }),
+    (e) => e?.code === "no-healthy-endpoint" && Array.isArray(e?.excluded) && e.excluded.includes("anthropic/claude-sonnet-4"),
+    "the verdict must carry the code and the excluded endpoint keys",
+  );
+});
+
+test("chooseSubagentModel still returns the incumbent on a routing exception (never-throw contract, BET-1535)", () => {
+  const catalog = [normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" }))];
+  const services = routingServicesFor(catalog);
+  // A poisoned reader throws INSIDE chooseModel's assessment pass — a routing
+  // exception, not a health verdict.
+  Object.defineProperty(services, "health", { get() { throw new Error("health reader down"); } });
+  const chosen = chooseSubagentModel({
+    incumbent: { providerID: "anthropic", modelID: "claude-sonnet-4" },
+    catalog,
+    policy: { preset: "balanced" },
+    agent: "general",
+    nowMs: 1_700_000_000_000,
+    services,
+  });
+  assert.deepEqual(chosen, { providerID: "anthropic", modelID: "claude-sonnet-4" });
+});
+
+// BET-1535 (S3): a no-healthy-endpoint verdict FAILS the spawn with the typed
+// reason — before any window, worktree, or job record exists (a rejection must
+// orphan nothing) — instead of delivering the opening prompt on a model the
+// router knows is dead.
+test("startJob refuses the spawn on a no-healthy-endpoint verdict, creating nothing (BET-1535)", async () => {
+  const h = startHarness("child_no_healthy");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  const models = [
+    normalize("anthropic", "claude-sonnet-4", rawProviderModel({ id: "claude-sonnet-4" })),
+    normalize("openai", "gpt-5", rawProviderModel({ id: "gpt-5" })),
+  ];
+  h.deps.listModels = async () => models;
+  h.deps.routingServices = routingServicesFor(models, { health: { anthropic: "out-of-credit", openai: "rate-limited" } });
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "no-healthy-endpoint");
+  assert.match(res.error, /no healthy general endpoint available/);
+  assert.match(res.error, /anthropic\/claude-sonnet-4/, "the excluded endpoints are named");
+  assert.equal(h.delivered.length, 0, "no prompt delivered on the verdict");
+  assert.equal(h.jobs.length, 0, "no job persisted on the verdict");
+});
+
+// BET-1535 (S3): the verdict only fires when routing was ACTIVE and health
+// killed everything. An ordinary routing exception degrades to the box default
+// exactly as before — the spawn proceeds.
+test("startJob still spawns when routing throws an ordinary exception (BET-1535)", async () => {
+  const h = startHarness("child_route_throw");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "balanced" } });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => [];
+  h.deps.chooseSubagentModel = () => {
+    throw new Error("router exploded");
+  };
+  const res = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true, "a routing exception must never break a spawn");
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0].model, undefined, "degraded to the box default, no model pin");
+});
+
 // ----------------------------------------------------------------------------
 // BET-1275 — delegate model precedence: an explicit model wins, silence routes
 // on the subagent's own intent (11a), a named model is never routed over and
