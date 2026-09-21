@@ -310,6 +310,15 @@ export function isSegmentSummaryEmpty(summary) {
   return noEvents && noFiles && noPrs && lowImportance;
 }
 
+// The durable W11 attempt counter of a stored segment record (missing or
+// invalid → 0). Single source for eligibility, failure counting, and the
+// ok-but-still-empty counting path below.
+export function storedSummaryAttempts(rec) {
+  return typeof rec?.summaryAttempts === "number" && Number.isFinite(rec.summaryAttempts)
+    ? Math.max(0, Math.floor(rec.summaryAttempts))
+    : 0;
+}
+
 // Retry eligibility for a STORED segment record: well-formed enough to
 // re-summarise, an empty summary, and under the durable attempt cap.
 // Recency is a scan-level mtime pre-filter, not part of the predicate.
@@ -319,10 +328,7 @@ export function isRetryEligibleSegment(rec, { maxAttempts = MAX_SUMMARY_ATTEMPTS
   const w = rec.window;
   if (!Array.isArray(w) || w.length !== 2 || !Number.isFinite(w[0]) || !Number.isFinite(w[1]) || w[0] > w[1]) return false;
   if (!isSegmentSummaryEmpty(rec.summary)) return false;
-  const attempts = typeof rec.summaryAttempts === "number" && Number.isFinite(rec.summaryAttempts)
-    ? Math.max(0, Math.floor(rec.summaryAttempts))
-    : 0;
-  return attempts < maxAttempts;
+  return storedSummaryAttempts(rec) < maxAttempts;
 }
 
 // ---------------------------------------------------------------------------
@@ -870,30 +876,38 @@ export function createSegmenter(deps = {}) {
       summary.window = [rec.window[0], rec.window[1]];
       summary.sessionID = rec.sessionID;
       if (!summary.one_liner && promptEcho) summary.one_liner = promptEcho;
+      // Review Block (BET-1538 cycle 2): an ok-but-STILL-empty result must not
+      // escape the cap — a schema-valid summary with no content would leave the
+      // shell eligible forever (~4 model calls per sweep, indefinitely). It
+      // consumes an attempt exactly like a failure; only a summary that now
+      // carries content escapes the counter.
+      const stillEmpty = isSegmentSummaryEmpty(summary);
+      const next = {
+        ...rec,
+        summary,
+        summaryOutcome: { ok: true, code: null },
+        summarizedAt: now(),
+      };
+      if (stillEmpty) next.summaryAttempts = storedSummaryAttempts(rec) + 1;
       try {
-        await segments.save(id, {
-          ...rec,
-          summary,
-          summaryOutcome: { ok: true, code: null },
-          summarizedAt: now(),
-        });
+        await segments.save(id, next);
       } catch {
         await ledgerLog({ kind: "cto.segment_persist_failed", sessionID: rec.sessionID, code: "persist-error", retry: true });
         return "failed";
       }
-      await ledgerLog({ kind: "cto.segment_summary_outcome", sessionID: rec.sessionID, code: "ok", retry: true });
+      await ledgerLog({ kind: "cto.segment_summary_outcome", sessionID: rec.sessionID, code: "ok", retry: true, stillEmpty });
       try {
         await onSummary(summary);
       } catch {
         /* profile feed is best-effort */
       }
-      return "recovered";
+      return stillEmpty ? "failed" : "recovered";
     }
     const code = safeSummaryCode(res?.code);
     try {
       await segments.save(id, {
         ...rec,
-        summaryAttempts: (typeof rec.summaryAttempts === "number" && Number.isFinite(rec.summaryAttempts) ? Math.max(0, Math.floor(rec.summaryAttempts)) : 0) + 1,
+        summaryAttempts: storedSummaryAttempts(rec) + 1,
         summaryOutcome: { ok: false, code },
       });
     } catch {

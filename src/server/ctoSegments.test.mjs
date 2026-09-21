@@ -911,3 +911,31 @@ test("re-running the sweep is a no-op on already-recovered segments", async () =
   assert.equal(calls, 1); // non-empty summary → skipped, no second summarize
   assert.deepEqual(h.store.files.get("s1-1000"), after); // file untouched
 });
+
+test("an ok-but-still-empty retry consumes an attempt so the shell cannot escape the cap", async () => {
+  // Schema-valid summary with NO content (what the model can return for a
+  // window with no transcript evidence) — the review Block: it used to persist
+  // ok:true without consuming an attempt, so the segment was re-selected forever.
+  const okButEmpty = () => ({ ok: true, summary: validSummary({ key_events: [], files_touched: [], prs: [], importance: 1, one_liner: "" }) });
+  let calls = 0;
+  const h = makeRetryHarness({ summarize: async () => { calls += 1; return okButEmpty(); } });
+  h.store.files.set("s1-1000", storedDegraded());
+  for (let i = 1; i <= MAX_SUMMARY_ATTEMPTS; i += 1) {
+    const res = await h.seg.retryFailedSummaries({ force: true });
+    assert.deepEqual(res, { kind: "done", attempted: 1, recovered: 0 });
+    const rec = h.store.files.get("s1-1000");
+    assert.equal(rec.summaryAttempts, i); // the cap advances on every ok-but-empty retry
+    assert.deepEqual(rec.summaryOutcome, { ok: true, code: null }); // the call itself succeeded
+    assert.equal(isSegmentSummaryEmpty(rec.summary), true); // content still absent
+    h.set(h.now() + SUMMARY_RETRY_INTERVAL_MS); // clear the cadence gate between passes
+  }
+  assert.equal(calls, MAX_SUMMARY_ATTEMPTS);
+  // cap reached → the shell finally drops out of selection, no more model calls
+  assert.deepEqual(await h.seg.retryFailedSummaries({ force: true }), { kind: "done", attempted: 0, recovered: 0 });
+  assert.equal(calls, MAX_SUMMARY_ATTEMPTS);
+  // a content-bearing summary still escapes the counter (regression guard)
+  const h2 = makeRetryHarness({ summarize: async () => ({ ok: true, summary: validSummary() }) });
+  h2.store.files.set("s1-1000", storedDegraded());
+  await h2.seg.retryFailedSummaries({ force: true });
+  assert.equal(h2.store.files.get("s1-1000").summaryAttempts, 0);
+});
