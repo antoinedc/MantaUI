@@ -81,6 +81,25 @@ export const RAW_CLASSIFY_MIN_USES = 2;
 export const UNRESOLVED_PRUNE_LIMIT = 1000;
 export const UNRESOLVED_RETENTION_MS = 90 * 24 * 3_600_000;
 
+// W10: the closed set of scan-failure codes, one per real throw site. A code
+// outside this set maps to `scan-failed` (safe fallback; exception text never
+// crosses). Kept beside the scan so the catch and the tests read the same list.
+export const SCAN_FAILURE_CODES = new Set([
+  "unsupported-runtime",     // getDb supplier missing / no node:sqlite builtin
+  "db-source-unavailable",   // db handle resolved null (path missing / open failed)
+  "db-handle-invalid",       // handle present but not a usable sqlite handle
+  "db-query-failed",         // prepare/execute against the handle threw
+  "internal-provenance-failed", // internal-session / binding provenance read threw
+  "invalid-cursor",          // the scan's own cursor validation
+  "surfaces-unavailable",    // the config-surface seam threw
+]);
+export const SCAN_FAILED_FALLBACK = "scan-failed";
+
+// The operation class the scan emits outcome rows under (W10: "covered by
+// watcher 1" — the S1 operation-class watcher watches `cto.operation_outcome`
+// rows grouped by `operation ?? taskClass`).
+export const TOOL_SCAN_OP_CLASS = "tool-scan";
+
 // ---------------------------------------------------------------------------
 // IDENTITY RESOLUTION — the one seam. Everything in the grant / access /
 // probe path resolves a tool name through these functions and NOTHING else:
@@ -341,6 +360,28 @@ export function deriveRole(tool, { nowMs = Date.now() } = {}) {
   if (vitHigh) return "data-source";
   if ((tool?.uses ?? 0) > 0) return "dead";
   return null;
+}
+
+// W10: health of a registered agent (a registry row) from OBSERVED dispatch
+// outcomes — the fused use evidence. Reuses the endpoint-health register's
+// vocabulary (W4/W5) so the two registers read the same way:
+//   `unproven` — registered but never demonstrated. Derived from the durable
+//     last-success timestamp (`engagement.last_used`), not from a ring:
+//     zero uses AND no last-used instant. Absence of evidence is not health.
+//   `dead`    — demonstrated once, then silent past the vitality recency
+//     horizon (the same VITALITY_RECENT_MS the role drill-down already uses).
+//   `healthy` — has an observed dispatch inside the horizon.
+// This is a distinct axis from `derivedRole` (§7.3 engagement quadrants); it
+// does not rename or replace that vocabulary.
+export function agentHealth(tool, { nowMs = Date.now() } = {}) {
+  const lastUsed = tool?.engagement?.last_used;
+  const uses = tool?.uses ?? 0;
+  const everDispatched = typeof lastUsed === "number" || (Number.isFinite(uses) && uses > 0);
+  if (!everDispatched) return "unproven";
+  if (typeof lastUsed === "number" && typeof nowMs === "number" && nowMs - lastUsed >= VITALITY_RECENT_MS) {
+    return "dead";
+  }
+  return "healthy";
 }
 
 // Either axis crossed its bar (§7.4 observed → candidate).
@@ -779,13 +820,13 @@ export function createToolRegistry(deps = {}) {
             : { ts: untilTs, id: "" };
           if (!Number.isFinite(dbCursor.ts) || dbCursor.ts < sinceTs || dbCursor.ts > untilTs ||
               typeof dbCursor.id !== "string" || (dbRows.length >= SCAN_ROW_CAP && !dbCursor.id)) {
-            throw new Error("invalid-cursor");
+            throw Object.assign(new Error("invalid-cursor"), { code: "invalid-cursor" });
           }
           rows.push(...extractFromDbRows(dbRows));
         }
       } catch (error) {
         scanOk = false;
-        scanCode = error.code === "unsupported-runtime" ? "unsupported-runtime" : "db-unavailable";
+        scanCode = SCAN_FAILURE_CODES.has(error.code) ? error.code : "scan-failed";
         dbCursor = null;
       }
       try {
@@ -820,6 +861,20 @@ export function createToolRegistry(deps = {}) {
     });
     if (scanLedger) {
       await ledgerLog({ kind: "cto.tool.scan" });
+    }
+    // W10: the scan is an operation class of its own — emit an outcome row so
+    // the S1 operation-class watcher (watcher 1) covers the scan the way it
+    // covers segment summaries. Successes matter as much as failures: without
+    // `ok` rows the watcher cannot distinguish "dying" from "never ran".
+    try {
+      await ledgerLog({
+        kind: "cto.operation_outcome",
+        operation: TOOL_SCAN_OP_CLASS,
+        taskClass: TOOL_SCAN_OP_CLASS,
+        code: scanOk ? "ok" : (scanCode ?? SCAN_FAILED_FALLBACK),
+      });
+    } catch {
+      /* Diagnostics must not prevent cleanup or hide a result. */
     }
     await scaffoldGrantedTools();
     try {
@@ -1186,6 +1241,7 @@ export function createToolRegistry(deps = {}) {
         status: row.status ?? "observed",
         role: row.role ?? null,
         derivedRole: deriveRole(row, { nowMs: t }),
+        health: agentHealth(row, { nowMs: t }),
         uses: row.uses ?? 0,
         weeksActive: row.weeksActive ?? 0,
         ewmaPerWeek: Math.round((row.engagement?.ewma_per_week ?? 0) * 100) / 100,

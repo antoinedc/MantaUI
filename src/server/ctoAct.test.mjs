@@ -563,6 +563,24 @@ test("driver: infrastructure exceptions are observable without poisoning plan ca
   assert.deepEqual(f.state.calibrations, []);
   assert.deepEqual(f.state.escalations, []);
   assert.ok(f.state.ledgerRows.some((r) => r.kind === "cto.execution_unavailable" && r.reason === "runner-error"));
+  // W10: the dispatch is an operation class the S1 watcher watches.
+  assert.ok(f.state.ledgerRows.some((r) =>
+    r.kind === "cto.operation_outcome" && r.operation === "agent-dispatch" && r.code === "runner-error"));
+});
+
+test("driver: the dispatch terminal outcome lands as a watcher-1 row (ok on resolve)", async () => {
+  const f = fakeDriverDeps({ runner: async () => ({ outcome: "resolved", attempts: 1 }) });
+  const d = createCtoExecutorDriver(f.deps);
+  await d.executePlan(basePlan());
+  await settle();
+  assert.ok(f.state.ledgerRows.some((r) =>
+    r.kind === "cto.operation_outcome" && r.operation === "agent-dispatch" && r.code === "ok"));
+  const f2 = fakeDriverDeps({ runner: async () => ({ outcome: "escalated", reason: "verify-failed", attempts: 2 }) });
+  const d2 = createCtoExecutorDriver(f2.deps);
+  await d2.executePlan(basePlan());
+  await settle();
+  assert.ok(f2.state.ledgerRows.some((r) =>
+    r.kind === "cto.operation_outcome" && r.operation === "agent-dispatch" && r.code === "verify-failed"));
 });
 
 test("driver: unknown targets and provenance failures are non-learning outcomes", async () => {

@@ -47,6 +47,11 @@ export const EXECUTIONS_PER_PLAN = 2; // two executions per plan id, ever
 export const QUEUE_MAX = 10;
 export const MAX_IN_FLIGHT = 2; // §3.3 concurrent-delegate sub-cap, §9.4
 
+// W10: agent dispatches are an operation class of their own so the S1
+// operation-class watcher (watcher 1) covers them; every dispatch writes one
+// `cto.operation_outcome` row under this class.
+export const AGENT_DISPATCH_OP_CLASS = "agent-dispatch";
+
 // The exact end-marker the brief asks the session to leave. session-ok
 // verification reads it from the last assistant turn; predicate/probe/
 // condition-gone verification ignores it (the §6.7 surface decides).
@@ -735,6 +740,15 @@ export function createCtoExecutorDriver(deps = {}) {
         "verify-error", "verify-unavailable", "job-gone"].includes(res.reason) ? res.reason : "unknown-error";
       await ledgerLog({ kind: "cto.execution_unavailable", planId, findingId,
         reason, ...(res.cleanupCode === "cleanup-error" ? { cleanupCode: "cleanup-error" } : {}), outcome: "unavailable" });
+      // W10: the dispatch is an operation class the S1 watcher watches. The
+      // `cto.execution_unavailable` row above is the operational record; this
+      // outcome row is what lets watcher 1 see the class dying.
+      try {
+        await ledgerLog({ kind: "cto.operation_outcome", operation: AGENT_DISPATCH_OP_CLASS,
+          taskClass: AGENT_DISPATCH_OP_CLASS, code: reason });
+      } catch {
+        /* Diagnostics must not prevent cleanup or hide a result. */
+      }
       return;
     }
     const outcome = res?.outcome ?? "escalated";
@@ -760,6 +774,15 @@ export function createCtoExecutorDriver(deps = {}) {
     // §9.4-9.5: every execution writes ONE cto.resolve ledger entry (the
     // store row itself is kind-less; the ledger copy carries the kind).
     await ledgerLog({ kind: "cto.resolve", ...row });
+    // W10: the dispatch's terminal outcome as a watcher-1 row — `ok` on a
+    // resolved run, the failure reason otherwise. The `cto.resolve` row above
+    // stays the §9.4 record; this row is the operation-class signal.
+    try {
+      await ledgerLog({ kind: "cto.operation_outcome", operation: AGENT_DISPATCH_OP_CLASS,
+        taskClass: AGENT_DISPATCH_OP_CLASS, code: outcome === "resolved" ? "ok" : (res?.reason ?? "escalated") });
+    } catch {
+      /* Diagnostics must not prevent cleanup or hide a result. */
+    }
     await patchRows((rows) => {
       // An escalated row closes any still-open pending window (its failure
       // already folded); keep one row per execution, newest-capped.

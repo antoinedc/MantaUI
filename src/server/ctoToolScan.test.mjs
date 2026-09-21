@@ -170,7 +170,7 @@ async function openFixture() {
     return null;
   }
   const db = new DatabaseSync(":memory:");
-  return { db, close: () => db.close() };
+  return { db, sqlite: { DatabaseSync }, close: () => db.close() };
 }
 
 test("collectDbRows queries the part table in the half-open window", async () => {
@@ -198,10 +198,23 @@ test("collectDbRows queries the part table in the half-open window", async () =>
   const all = await collectDbRows(db, { sinceTs: 0, untilTs: 1000 });
   assert.equal(all.length, 3);
 
-  // Unavailable data must not be mistaken for an exhausted page.
-  await assert.rejects(collectDbRows(null, { sinceTs: 0, untilTs: 10 }));
+  // Unavailable data must not be mistaken for an exhausted page — and each
+  // distinct throw site (W10) carries its own code, not a catch-all.
+  await assert.rejects(collectDbRows(null, { sinceTs: 0, untilTs: 10 }), (e) => e.code === "db-handle-invalid");
   const bad = { prepare() { throw new Error("boom"); } };
-  await assert.rejects(collectDbRows(bad, { sinceTs: 0, untilTs: 10 }));
+  await assert.rejects(collectDbRows(bad, { sinceTs: 0, untilTs: 10 }), (e) => e.code === "db-query-failed");
+});
+
+test("collectDbRows: a valid handle with a throwing statement reports db-query-failed", async () => {
+  const fx = await openFixture();
+  if (!fx) {
+    test.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { DatabaseSync } = fx.sqlite;
+  // Real sqlite handle, but no part table — prepare/execute throws.
+  const db = new DatabaseSync(":memory:");
+  await assert.rejects(collectDbRows(db, { sinceTs: 0, untilTs: 10 }), (e) => e.code === "db-query-failed");
 });
 
 // ---------------------------------------------------------------------------

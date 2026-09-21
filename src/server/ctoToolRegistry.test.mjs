@@ -21,6 +21,7 @@ import {
   RAW_CLASSIFY_MIN_USES,
   ENGAGEMENT_MIN_USES,
   ENGAGEMENT_MIN_WEEKS,
+  agentHealth,
 } from "./ctoToolRegistry.mjs";
 
 const DAY = 24 * 3_600_000;
@@ -1075,4 +1076,97 @@ test("keyGrantedForTool: the grant seam decides; exact key required; a cross-ser
   );
   assert.equal(await reg4.keyGrantedForTool("GITHUB_TOKEN", "github"), false);
   assert.equal(await reg4.keyGrantedForTool("STRIPE_KEY", "github"), false);
+});
+
+// ---------------------------------------------------------------------------
+// W10 — scan failure codes + agent health register
+// ---------------------------------------------------------------------------
+
+test("agentHealth: a registered agent with zero observed dispatches is unproven, not healthy", () => {
+  const registered = { tool: "fresh-tool", uses: 0, engagement: {} };
+  assert.equal(agentHealth(registered, { nowMs: W0 }), "unproven");
+  // No engagement record at all (catalog candidate) is the same state.
+  assert.equal(agentHealth({ tool: "fresh-tool", uses: 0 }, { nowMs: W0 }), "unproven");
+});
+
+test("agentHealth: one successful dispatch clears unproven", () => {
+  const t = { tool: "github", uses: 1, engagement: { last_used: W0 } };
+  assert.equal(agentHealth(t, { nowMs: W0 + 1 }), "healthy");
+  // uses > 0 with a missing last-used instant still proves demonstration.
+  assert.equal(agentHealth({ tool: "github", uses: 3, engagement: {} }, { nowMs: W0 }), "healthy");
+});
+
+test("agentHealth: demonstrated once, silent past the vitality horizon — dead", () => {
+  const t = { tool: "vercel", uses: 5, engagement: { last_used: W0 } };
+  assert.equal(agentHealth(t, { nowMs: W0 + 14 * DAY + 1 }), "dead");
+  assert.equal(agentHealth(t, { nowMs: W0 + 14 * DAY - 1 }), "healthy");
+});
+
+test("listTools carries the health field beside derivedRole", async () => {
+  const mk = (ts) => ({ channel: "transcript", identity: "vercel", detail: "cli:vercel", ts, source: "catalog" });
+  const { registry } = makeRegistry({ usageRows: [mk(W0)], nowMs: W0 + DAY });
+  await registry.dailyScan();
+  const view = await registry.listTools();
+  assert.equal(view[0].health, "healthy");
+  // A catalog-seeded row with no usage evidence is unproven.
+  const empty = await createToolRegistry({
+    registryStore: memStore({ tools: [{ tool: "brand-new", status: "candidate", uses: 0, engagement: {} }] }),
+    classificationStore: memStore(),
+    usageStore: memStore(),
+    ledger: fakeLedger(),
+    listSecretKeys: () => [],
+    now: () => W0,
+  }).listTools();
+  assert.equal(empty.find((x) => x.tool === "brand-new").health, "unproven");
+});
+
+test("dailyScan emits a watcher-1 outcome row (ok) for the tool-scan class", async () => {
+  const { registry, ledger } = makeRegistry({ nowMs: W0 });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "ok");
+});
+
+test("dailyScan maps each distinct throw site to its own code in the outcome row", async () => {
+  const coded = { code: "internal-provenance-failed" };
+  const { registry, ledger } = makeRegistry({
+    nowMs: W0,
+    collectDb: async () => {
+      throw coded;
+    },
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "internal-provenance-failed");
+});
+
+test("dailyScan: an unknown exception maps to the safe fallback and never leaks exception text", async () => {
+  const { registry, ledger } = makeRegistry({
+    nowMs: W0,
+    collectDb: async () => {
+      throw new Error("SECRET pg_dsn password=hunter2 details leaked");
+    },
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "scan-failed");
+  const serialized = JSON.stringify(ledger.rows);
+  assert.equal(serialized.includes("hunter2"), false);
+  assert.equal(serialized.includes("pg_dsn"), false);
+});
+
+test("dailyScan: a malformed cursor reports invalid-cursor, not a db label", async () => {
+  const cap = 1000;
+  const { registry, ledger } = makeRegistry({
+    nowMs: W0,
+    collectDb: async ({ untilTs }) =>
+      Array.from({ length: cap }, (_, i) => ({ id: `p${i}`, time_created: untilTs + 5_000 })),
+  });
+  await registry.dailyScan();
+  const rows = ledger.rows.filter((r) => r.kind === "cto.operation_outcome" && r.operation === "tool-scan");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].code, "invalid-cursor");
 });
