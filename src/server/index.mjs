@@ -156,7 +156,7 @@ import { endpointAttempts } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
-import { runEphemeral, createEphemeralReaper } from "./ctoSessions.mjs";
+import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
 // BET-1519: the per-class act executors are retired — ctoAct.mjs is now the
@@ -706,6 +706,18 @@ const stopProviderHealthFunds = bus.subscribe((evt) => {
 // Prime on startup with whatever the poller already has cached (same rationale
 // as resumeEngine's warmup; a provider marked exhausted stays excluded).
 providerHealth.deliverSnapshots(listSnapshots());
+
+// BET-1535 (W0): the CTO's default model resolver consumes the SAME live
+// routing readers the composition root wires into delegate's startJob and rpc's
+// routing:choose — one buildRoutingServices assembly, one set of readers. Until
+// this registration the CTO built its services with health/quota/telemetry all
+// null (the path that picked a dead endpoint 363 times).
+ctoSetDefaultResolveReaders({
+  providerHealthState: (providerID) => providerHealth.state(providerID),
+  snapshots: listSnapshots,
+  endpointSummary: routingEndpointSummary,
+  pacing: optimizerPacing,
+});
 
 // BET-1252: the box's model catalogue (provider-agnostic, for routing
 // identity/quality). Starts the page poller (immediate first tick, inFlight

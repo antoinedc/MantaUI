@@ -1573,6 +1573,61 @@ test("routing:choose reports incumbentHealthy=true for a healthy incumbent (6e)"
   assert.equal(out.incumbentHealthy, true);
 });
 
+// BET-1535 (S3): when routing is active and health excludes every candidate,
+// the response carries the TYPED verdict with NO model — never a substitution
+// of the (possibly excluded) incumbent, never a silent fall-through to the box
+// default. Well-formed for the renderer: every field the decision UI reads is
+// present, changed:false, no alternatives.
+test("routing:choose returns the no-healthy-endpoint verdict with model:null when every candidate is excluded (BET-1535)", async () => {
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    declaredModels: {
+      "anthropic/claude-opus-4": { catalogId: "claude-opus-4" },
+      "openai/gpt-5": { catalogId: "gpt-5" },
+    },
+    routableModels: [
+      { providerID: "anthropic", id: "claude-opus-4", status: "active", cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 15 } },
+      { providerID: "openai", id: "gpt-5", status: "active", cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0.5 } },
+    ],
+    catalogIndex: routingFakeCatalog([
+      { id: "claude-opus-4", benchmarks: [{ name: "SWE-Bench Verified", score: 0.95 }] },
+      { id: "gpt-5", benchmarks: [{ name: "SWE-Bench Verified", score: 0.9 }] },
+    ]),
+    healthState: (pid) => (pid === "anthropic" ? "out-of-credit" : pid === "openai" ? "rate-limited" : null),
+  });
+  const handlers = buildHandlers(deps);
+  const incumbent = { providerID: "anthropic", modelID: "claude-opus-4" };
+  const out = await chooseRouting(handlers, { incumbent });
+  assert.equal(out.kind, "no-healthy-endpoint");
+  assert.equal(out.model, null, "no model may be substituted on the verdict");
+  assert.equal(out.changed, false);
+  assert.deepEqual(out.alternatives, []);
+  assert.ok(out.reason.includes("no healthy build endpoint available"), `reason names the verdict: ${out.reason}`);
+  assert.ok(
+    Array.isArray(out.excluded) && out.excluded.includes("anthropic/claude-opus-4") && out.excluded.includes("openai/gpt-5"),
+    `the excluded endpoints are named: ${JSON.stringify(out.excluded)}`,
+  );
+  assert.equal(typeof out.incumbentHealthy, "boolean", "the envelope stays well-formed");
+  assert.equal(out.trace.winner, null);
+});
+
+test("routing:choose carries kind on the normal paths (BET-1535)", async () => {
+  // Off-path: routing not activated → unrouted with the incumbent.
+  const off = await chooseRouting(buildHandlers(makeRoutingDeps({})));
+  assert.equal(off.kind, "unrouted");
+  assert.ok(off.model, "the off-path keeps the incumbent model");
+  // Selected: a healthy catalogue produces a decided winner.
+  const deps = makeRoutingDeps({
+    preset: "economy",
+    declaredModels: SONNET_DECLARED,
+    routableModels: SONNET_ROUTABLE,
+    catalogIndex: routingFakeCatalog(SONNET_CATALOG),
+  });
+  const on = await chooseRouting(buildHandlers(deps));
+  assert.equal(on.kind, "selected");
+  assert.ok(on.model);
+});
+
 // 6e reviewer Block regression: incumbentStillEligible must be computed from the
 // incumbent's FULL catalog endpoint (cost/capabilities/catalogue identity), not
 // a price-less {providerID,id} stub — otherwise a perfectly describable incumbent

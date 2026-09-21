@@ -100,11 +100,27 @@ export interface RoutingTrace {
   winner: RoutingSignals | null;
 }
 
+/** BET-1535 (S3): the discriminated chooseModel verdicts. "selected" — a
+ *  healthy model qualified. "no-healthy-endpoint" — routing was active,
+ *  nothing healthy survived, and the incumbent fallback is itself excluded
+ *  (I1) or health is why nothing survived (I2); NO model is returned and the
+ *  caller fails its operation with the typed reason. "unrouted" — off-path /
+ *  routing inactive / ordinary no-candidate fallback (today's behaviour).
+ *  Runtime shape per kind (fields other than kind/reason/trace exist only
+ *  where meaningful): selected → model/alternatives/changed(/costs);
+ *  no-healthy-endpoint → excluded, changed:false, NO model; unrouted →
+ *  model/alternatives/changed. */
+export type ChooseKind = "selected" | "no-healthy-endpoint" | "unrouted";
+
 export interface ChooseResult {
-  model: Model | null;
+  kind: ChooseKind;
+  model?: Model | null;
   reason: string;
-  alternatives: Model[];
-  changed: boolean;
+  /** no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
+   *  router knows are excluded. */
+  excluded?: string[];
+  alternatives?: Model[];
+  changed?: boolean;
   /** Optimizer P2.3 (BET-1345) — the assessed-cost accessor for the wiring
    *  (savingsPerTurn / rewarmCost) without a second assess() call. Present on
    *  the win-and-switch path; absent elsewhere. */

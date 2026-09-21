@@ -388,3 +388,123 @@ test("reaper tolerates list/delete/state failures without throwing", async () =>
 test("createEphemeralReaper requires listSessions + deleteSession", () => {
   assert.throws(() => createEphemeralReaper(), /requires listSessions/);
 });
+
+// ---------------------------------------------------------------------------
+// BET-1535 (S3) — fail closed: the router's typed health verdict must reach
+// the CTO run and fail it, instead of dispatching on the box default. The
+// resolver below is built EXACTLY like defaultResolveModel's wiring (real
+// chooseSubagentModel + services bearing the provider-health state) but with
+// an injected catalogue, so no live opencode is touched.
+// ---------------------------------------------------------------------------
+
+// @ts-expect-error — server .mjs has no bundled declarations.
+import { _normalizeProviderModel } from "./opencode.mjs";
+// @ts-expect-error — the real subagent routing wrapper (module-level import).
+import { chooseSubagentModel } from "./delegate.mjs";
+// @ts-expect-error — the snapshots reader-shape helper under test.
+import { readSnapshotsForRouting } from "./ctoSessions.mjs";
+// Shared routing-test fixtures (BET-1535 Block 3 — one factory, no per-file
+// re-derivations for the duplication gate to flag).
+import { rawProviderModel, routingServicesFor } from "./fixtures/routingTestFixtures.mjs";
+
+// The resolver shape defaultResolveModel builds: the REAL router, the class
+// tier forced through perAgent, no incumbent (a CTO run has none).
+function routerResolver({ catalog, services }) {
+  return async ({ taskClass, tier }) =>
+    chooseSubagentModel({
+      incumbent: null,
+      catalog,
+      policy: { perAgent: { [`cto:${taskClass}`]: TIER_TO_ROUTER_TIER[tier] } },
+      agent: `cto:${taskClass}`,
+      services,
+    });
+}
+
+test("BET-1535: a CTO ephemeral run does not select an endpoint the router knows is excluded", async () => {
+  // Same model on two providers; anthropic is CHEAPER (would win on cost) but
+  // out of credit. The run must land on the healthy openai endpoint.
+  const catalog = [
+    _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 1, output: 2, cache: { read: 0.3, write: 3 } } })),
+    _normalizeProviderModel("openai", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4", cost: { input: 10, output: 20, cache: { read: 3, write: 30 } } })),
+  ];
+  const seenModels = [];
+  const oc = {
+    async runEphemeralSession({ model, onCreated }) {
+      seenModels.push(model);
+      await onCreated("sid-h");
+      return { text: "reply", sid: "sid-h" };
+    },
+  };
+  const out = await runEphemeral({
+    taskClass: "gatekeeper",
+    context: [],
+    deps: {
+      oc,
+      engineState: fakeEngineState(),
+      resolveModel: routerResolver({
+        catalog,
+        services: routingServicesFor(catalog, { health: { anthropic: "out-of-credit" } }),
+      }),
+    },
+  });
+  assert.equal(out.text, "reply");
+  assert.equal(seenModels.length, 1);
+  assert.equal(seenModels[0]?.providerID, "openai", "the excluded (cheaper) endpoint must not be selected");
+});
+
+test("BET-1535: with every candidate excluded the run FAILS with code no-healthy-endpoint (no default dispatch, no escalation)", async () => {
+  const catalog = [
+    _normalizeProviderModel("anthropic", "claude-haiku-4", rawProviderModel({ id: "claude-haiku-4" })),
+  ];
+  let prompted = 0;
+  let validated = 0;
+  const oc = {
+    async runEphemeralSession() {
+      prompted += 1;
+      return { text: "should never run", sid: "sid-x" };
+    },
+  };
+  const out = await runEphemeral({
+    taskClass: "gatekeeper",
+    context: [],
+    deps: {
+      oc,
+      engineState: fakeEngineState(),
+      validate: async () => {
+        validated += 1;
+        return true;
+      },
+      resolveModel: routerResolver({
+        catalog,
+        services: routingServicesFor(catalog, { health: { anthropic: "out-of-credit" } }),
+      }),
+    },
+  });
+  assert.equal(out.ok, false, "the run fails — it must not dispatch on the box default");
+  assert.equal(out.code, "no-healthy-endpoint", "the typed verdict is the failure reason");
+  assert.equal(prompted, 0, "no session was ever created on the dead default");
+  assert.equal(validated, 0, "no validation ran — a health verdict does not cascade tiers");
+});
+
+// BET-1535 (W0, review Block 2): the composition root registers `snapshots` as
+// the live READER FUNCTION, but buildRoutingServices consumes `deps.snapshots`
+// only through Array.isArray guards — a function reads as ABSENT. The
+// reader-shape contract is pinned here so the registration can never silently
+// regress to inert.
+test("readSnapshotsForRouting: a function-valued reader is called and yields the array the services build consumes", async () => {
+  const snap = { providerIDs: ["p"], kind: "subscription", windows: [{ pct: 100 }], exhausted: true };
+  // The registered shape (index.mjs): a reader function → called, awaited.
+  assert.deepEqual(await readSnapshotsForRouting(() => [snap]), [snap]);
+  assert.deepEqual(await readSnapshotsForRouting(async () => [snap]), [snap]);
+  // Degradations: a rejecting reader, a non-array resolution, absent — all []
+  assert.deepEqual(await readSnapshotsForRouting(async () => { throw new Error("usage down"); }), []);
+  assert.deepEqual(await readSnapshotsForRouting(() => "not-an-array"), []);
+  assert.deepEqual(await readSnapshotsForRouting(null), []);
+  // Passthrough for an already-resolved array (never double-wrapped).
+  assert.deepEqual(await readSnapshotsForRouting([snap]), [snap]);
+  // THE consumer contract: the normalized array turns into account state; a
+  // raw function would silently read as absent (the Block-2 bug).
+  const { buildRoutingServices } = await import("./routingServices.mjs");
+  const services = await buildRoutingServices({}, { snapshots: await readSnapshotsForRouting(() => [snap]) });
+  assert.equal(services.accounts?.p?.exhausted, true, "function-valued reader must yield account state");
+});

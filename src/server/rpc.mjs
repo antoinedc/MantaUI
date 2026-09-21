@@ -1300,6 +1300,27 @@ export function buildHandlers({
             });
           }
         }
+        // BET-1535 (S3): a no-healthy-endpoint verdict is the router saying it
+        // knows every candidate is dead. The response carries the typed
+        // verdict with NO model — never a substitution of the (possibly
+        // excluded) incumbent or a silent fall-through to the box default.
+        // Well-formed for the renderer: every field the decision UI reads is
+        // present, `changed: false`, no alternatives.
+        if (decision?.kind === "no-healthy-endpoint") {
+          return {
+            kind: "no-healthy-endpoint",
+            model: null,
+            reason: decision?.reason ?? "",
+            excluded: Array.isArray(decision?.excluded) ? decision.excluded : [],
+            alternatives: [],
+            changed: false,
+            incumbentHealthy,
+            incumbentStillEligible: stillEligible,
+            trace: decision?.trace ?? null,
+            savingsPerTurn: null,
+            rewarmCost: null,
+          };
+        }
         // On the off-path / no-survivors path chooseModel returns the very
         // catalogIncumbent reference it was handed; map that back to the
         // original structured incumbent so the decision stays byte-identical.
@@ -1325,6 +1346,7 @@ export function buildHandlers({
             ? cachedPrefixTokens * CACHE_WRITE_MULTIPLIER * costs.winnerCacheWritePrice
             : null;
         return {
+          kind: decision?.kind === "selected" ? "selected" : "unrouted",
           model:
             decision?.model === catalogIncumbent
               ? incumbent
@@ -1343,6 +1365,7 @@ export function buildHandlers({
       } catch (e) {
         console.warn("[router] routing:choose failed, using incumbent:", e?.message ?? e);
         return {
+          kind: "unrouted",
           model: incumbent,
           reason: "routing unavailable",
           alternatives: [],

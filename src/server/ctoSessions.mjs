@@ -246,6 +246,21 @@ export async function runEphemeral({ taskClass, operation, context = [], directo
   throw new Error(`runEphemeral: cascade exceeded maximum attempts for "${taskClass}"`);
 }
 
+// BET-1535 (S3): run the model resolver and surface its verdict. A resolver
+// that throws the router's typed no-healthy-endpoint error maps to a
+// {ok:false, code} result (the run fails with that reason); any other throw
+// propagates unchanged (a resolver crash is still a runner-error, as before).
+async function resolveModelOrVerdict(resolveModel, args) {
+  try {
+    return await resolveModel(args);
+  } catch (e) {
+    if (e?.code === "no-healthy-endpoint") {
+      return { ok: false, code: "no-healthy-endpoint", taskClass: args.taskClass, tier: args.tier };
+    }
+    throw e;
+  }
+}
+
 async function runOnce({ taskClass, meta, tier, context, directory, deps, operation }) {
   const {
     oc,
@@ -257,9 +272,19 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
   if (!oc || typeof oc.runEphemeralSession !== "function") {
     throw new Error("runEphemeral requires deps.oc with runEphemeralSession()");
   }
-  const model = typeof resolveModel === "function"
-    ? await resolveModel({ taskClass, tier, meta, configGet })
+  // BET-1535 (S3): the router's typed health verdict must not be swallowed into
+  // "no model pinned" — that would dispatch the run on the box default, which
+  // is exactly the possibly-dead endpoint the verdict exists to refuse. The
+  // verdict fails the run: the {ok:false} result flows through runEphemeral's
+  // non-quality-failure branch (recorded verbatim in the ledger, no tier
+  // escalation — escalating a tier cannot fix health).
+  const resolved = typeof resolveModel === "function"
+    ? await resolveModelOrVerdict(resolveModel, { taskClass, tier, meta, configGet })
     : null;
+  if (resolved && typeof resolved === "object" && resolved.ok === false) {
+    return { ok: false, code: resolved.code, taskClass, tier };
+  }
+  const model = resolved;
   const instruction = assembleContext(context, { taskClass });
 
   let sid = null;
@@ -315,6 +340,55 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
 // Model resolution (productions default — the existing catalog/router path).
 // ---------------------------------------------------------------------------
 
+// BET-1535 (W0): the routing readers the composition root (index.mjs) registers
+// once — the SAME live readers it wires into delegate's startJob and rpc's
+// routing:choose (provider health working state, usage snapshots, the DB-backed
+// endpoint ledger, the optimizer pacing state). Defaults stay null → the
+// services build degrades exactly as before, so a module that never registers
+// (or a test) keeps today's absent-context behaviour. Reuses the ONE
+// buildRoutingServices assembly — no second reader wiring. Shape contracts are
+// enforced at consume time: `snapshots` through readSnapshotsForRouting (the
+// services build only reads arrays), the others as registered.
+const defaultResolveReaders = {
+  providerHealthState: null,
+  snapshots: null,
+  endpointSummary: null,
+  pacing: null,
+};
+
+export function setDefaultResolveReaders(readers = {}) {
+  for (const k of Object.keys(defaultResolveReaders)) {
+    if (readers[k] !== undefined) defaultResolveReaders[k] = readers[k];
+  }
+}
+
+/**
+ * BET-1535 (W0): normalize the registered snapshots reader into the ARRAY
+ * buildRoutingServices consumes. `buildRoutingServices` reads `deps.snapshots`
+ * only through `Array.isArray(...)` guards (and `accountsFromSnapshots`
+ * likewise), so a function-valued reader reads as ABSENT — the exact inert
+ * wiring this fix closes. delegate's own wiring calls its reader first
+ * (`quota = listSnapshots()`); this helper gives the CTO registration the same
+ * contract. A reader that rejects, or resolves to a non-array, degrades to an
+ * empty array — never an exception, never a silent no-op.
+ *
+ * @param {Function|Array|null|undefined} reader — the registered `snapshots`
+ *   entry: either the live reader function (called once per resolution) or an
+ *   already-resolved array (passthrough).
+ * @returns {Promise<Array<object>>} usage snapshots for the services build
+ */
+export async function readSnapshotsForRouting(reader) {
+  if (typeof reader === "function") {
+    try {
+      const out = (await reader()) ?? [];
+      return Array.isArray(out) ? out : [];
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(reader) ? reader : [];
+}
+
 /**
  * Default model resolver: pick the CHEAPEST model satisfying the class tier
  * through the existing router. Reuses the same inputs delegate.mjs builds
@@ -323,6 +397,10 @@ async function runOnce({ taskClass, meta, tier, context, directory, deps, operat
  * step is never up-routed by the user's own modelRouting and never hardcodes a
  * model id. Returns the structured {providerID, modelID} (or null → box
  * default, which chooseSubagentModel returns when nothing survives).
+ *
+ * BET-1535 (S3): a no-healthy-endpoint verdict is NOT null — it THROWS the
+ * router's typed error so runOnce fails the run instead of dispatching on the
+ * box default (the very endpoint the verdict refused).
  */
 export async function defaultResolveModel({ taskClass, tier, meta, configGet }) {
   const nowMs = Date.now();
@@ -349,15 +427,24 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
     catalog = [];
   }
 
+  // BET-1535 (W0) reader shapes must match buildRoutingServices' contracts:
+  // `snapshots` is consumed as an ARRAY (delegate calls its reader first —
+  // `quota = listSnapshots()` — and passes the array), so a function-valued
+  // reader is CALLED here via readSnapshotsForRouting and a failure degrades
+  // to an empty array (never an inert function silently read as absent). The
+  // other readers are consumed as functions/state objects and pass through as
+  // registered.
+  const quota = await readSnapshotsForRouting(defaultResolveReaders.snapshots);
+
   let services = null;
   try {
     services = await buildRoutingServices(cfg, {
       catalogIndex: { lookupModel, matchModel, allModels },
       endpoints: catalog,
-      snapshots: [],
-      providerHealthState: null,
-      endpointSummary: null,
-      pacing: null,
+      snapshots: quota,
+      providerHealthState: defaultResolveReaders.providerHealthState,
+      endpointSummary: defaultResolveReaders.endpointSummary,
+      pacing: defaultResolveReaders.pacing,
     }, nowMs);
   } catch {
     services = null; // degraded → router routes on absent context (box default)
@@ -384,7 +471,11 @@ export async function defaultResolveModel({ taskClass, tier, meta, configGet }) 
       if (priced && priced.cost) return { ...chosen, cost: priced.cost };
     }
     return chosen;
-  } catch {
+  } catch (e) {
+    // BET-1535 (S3): the typed verdict propagates to runOnce — it fails the
+    // run. Everything else is a resolution failure → null (box default), as
+    // before.
+    if (e?.code === "no-healthy-endpoint") throw e;
     return null;
   }
 }

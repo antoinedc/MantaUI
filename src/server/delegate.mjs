@@ -607,6 +607,13 @@ function unroutableError(structured, src) {
  * throw inside the routing is swallowed, falling back to `incumbent`, so a
  * routing failure can never fail a spawn.
  *
+ * BET-1535 (S3): the ONE exception to never-fail is the router's typed health
+ * verdict — when routing was active and every candidate is health-excluded,
+ * this wrapper THROWS `Error` with `.code = "no-healthy-endpoint"` and
+ * `.excluded` (endpoint keys) so the caller fails its operation instead of
+ * dispatching on a model the router knows is dead. startJob refuses the spawn
+ * before any window exists; the CTO's defaultResolveModel lets it fail the run.
+ *
  * @param {object} [input]
  * @param {object|null} [input.incumbent]  the model the code would have used today
  * @param {Array<object>} [input.catalog]  opencode model list
@@ -614,6 +621,7 @@ function unroutableError(structured, src) {
  * @param {string} [input.agent]           subagent type (default "general")
  * @param {number} [input.nowMs]
  * @returns {object|null} the model to run on (incumbent on off-path / failure)
+ * @throws {Error} code "no-healthy-endpoint" when the router's verdict fires
  */
 // The model deliver()/sendPrompt() accept is the structured shape
 // {providerID, modelID} (opencode's sendPrompt reads `model.modelID`). A
@@ -694,8 +702,9 @@ export function chooseSubagentModel({
   // its {providerID, id} projection is passed to chooseModel so the `changed`
   // comparison / modelKey() treat a requested model and a catalog entry of the
   // same model as equal.
+  let decision;
   try {
-    const decision = chooseModel(
+    decision = chooseModel(
       buildChooseModelInput({
         kind: "subagent",
         agent,
@@ -708,22 +717,35 @@ export function chooseSubagentModel({
         services,
       }),
     );
-    // On the off-path / no-survivors path chooseModel returns the very
-    // catalogIncumbent it was handed; map that back to the original
-    // structured incumbent so the deliver call stays byte-identical to today.
-    // A real catalog winner is normalised into the {providerID, modelID} shape
-    // sendPrompt expects.
-    const model =
-      decision?.model === catalogIncumbentOf(incumbent)
-        ? incumbent
-        : toDeliverModel(decision?.model ?? incumbent);
-    console.log(describeDecision(decision, { surface: "sub", agent }));
-    return model;
   } catch (e) {
     // Routing must never break a spawn — fall back to the incumbent model.
     console.warn("[router] subagent routing failed, using incumbent:", e?.message ?? e);
     return incumbent;
   }
+  console.log(describeDecision(decision, { surface: "sub", agent }));
+  // BET-1535 (S3): a no-healthy-endpoint verdict is a typed failure, not a
+  // model. It must reach the operation — the spawn refuses (before any window
+  // exists) and the CTO resolver fails the run — instead of silently
+  // substituting the incumbent (possibly the excluded endpoint) or the box
+  // default. The never-throw contract covers routing EXCEPTIONS only (caught
+  // above, incumbent returned); the verdict propagates as a typed error the
+  // callers distinguish by `code`.
+  if (decision?.kind === "no-healthy-endpoint") {
+    const err = new Error(decision?.reason || "no healthy endpoint available");
+    err.code = "no-healthy-endpoint";
+    err.excluded = Array.isArray(decision?.excluded) ? decision.excluded : [];
+    throw err;
+  }
+  // On the off-path / no-survivors path chooseModel returns the very
+  // catalogIncumbent it was handed; map that back to the original
+  // structured incumbent so the deliver call stays byte-identical to today.
+  // A real catalog winner is normalised into the {providerID, modelID} shape
+  // sendPrompt expects.
+  const model =
+    decision?.model === catalogIncumbentOf(incumbent)
+      ? incumbent
+      : toDeliverModel(decision?.model ?? incumbent);
+  return model;
 }
 
 /**
@@ -811,6 +833,70 @@ export async function startJob(input, deps = {}) {
       return { ok: false, error: e?.message ?? String(e) };
     }
     requestedModel = `${deliverModel.providerID}/${deliverModel.modelID}`;
+  }
+
+  // BET-1535 (S3): the ROUTING decision also happens BEFORE a window is
+  // created, so a no-healthy-endpoint verdict refuses the spawn cleanly and
+  // orphans nothing (the same principle as the 11b named-model rejection
+  // above: a rejection must never leave a created window behind). The inputs
+  // are the same gathered-at-the-top routing readers; every read is guarded
+  // exactly as before, and any routing exception still degrades to the box
+  // default (routing never breaks a spawn — only the typed health verdict does).
+  let routedModel = null;
+  if (!input?.model) {
+    const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
+    // One injected clock for this decision (rolling-window edge + TTL timestamp
+    // in buildRoutingServices, and the router's own ordering) — same instant.
+    const nowMs = Date.now();
+    // Build the router's RoutingServices context from live box state (BET-1252).
+    // `deps.routingServices` (test injection) is used verbatim when present;
+    // otherwise the box-side builder assembles catalogue + accounts + health +
+    // declared + reliability from the readers in `deps`. Every reader inside
+    // buildRoutingServices is individually guarded, and the whole assembly is
+    // wrapped so a failure degrades to absent services — but it must NEVER
+    // degrade SILENTLY (11e): "no services" reads as "no model passes
+    // constraints", so a degraded build logs once with the error message.
+    let services = deps?.routingServices;
+    if (!services) {
+      try {
+        services = await buildRoutingServices(cfg, {
+          catalogIndex: deps.catalogIndex,
+          endpoints: catalog,
+          snapshots: quota,
+          providerHealthState: deps.providerHealthState,
+          endpointSummary: deps.endpointSummary,
+          pacing: deps.pacing,
+        }, nowMs);
+      } catch (e) {
+        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
+        services = null;
+      }
+    }
+    try {
+      routedModel = route({
+        incumbent: null,
+        catalog,
+        policy,
+        agent: resolveSubagentAgent(input?.subagent_type),
+        nowMs,
+        services,
+      });
+    } catch (e) {
+      // The typed health verdict (BET-1535) is not a routing exception — it
+      // FAILS the spawn with that reason instead of delivering on a model the
+      // router knows is dead. Any other throw is the belt-and-braces guard so
+      // an injected route stub can never break a spawn.
+      if (e?.code === "no-healthy-endpoint") {
+        const excluded = Array.isArray(e?.excluded) && e.excluded.length > 0 ? ` (excluded: ${e.excluded.join(", ")})` : "";
+        return {
+          ok: false,
+          code: "no-healthy-endpoint",
+          error: `[router] ${e?.message ?? "no healthy endpoint available"}${excluded}`,
+        };
+      }
+      console.error("[router] subagent routing threw, using default:", e?.message ?? e);
+      routedModel = null;
+    }
   }
 
   // The whole creation — nesting + cap checks, worktree, window, record append —
@@ -921,66 +1007,10 @@ export async function startJob(input, deps = {}) {
   if (!reg.ok) return reg;
 
   // 8. Send the opening prompt via the shared delivery module's deliver. The
-  //    effective model is decided here, and the rule is exactly the composer's
-  //    (BET-1275): an explicit choice is the off switch; only silence routes.
-  //    - 11b: a caller-NAMED model is that off switch — it was resolved + Sub-
-  //      validated above (before any window was created) and is used VERBATIM.
-  //      Routing is skipped entirely: no router is invoked, no [router] line is
-  //      emitted, no substitution can ever happen.
-  //    - 11a/11e: with no named model, Auto routes on the job's REQUESTED
-  //      subagent type (the job's own intent declaration, not a hardcoded
-  //      "general"). A routed decision with no routing directive in the policy
-  //      returns the box default (null), byte-identical to today. Routing must
-  //      never break a spawn, so a degraded services build is logged (never
-  //      silent) and any throw falls back to the default model.
-  let effectiveModel = deliverModel;
-  if (input?.model) {
-    effectiveModel = deliverModel;
-  } else {
-    const route = deps?.chooseSubagentModel ?? chooseSubagentModel;
-    // One injected clock for this decision (rolling-window edge + TTL timestamp
-    // in buildRoutingServices, and the router's own ordering) — same instant.
-    const nowMs = Date.now();
-    // Build the router's RoutingServices context from live box state (BET-1252).
-    // `deps.routingServices` (test injection) is used verbatim when present;
-    // otherwise the box-side builder assembles catalogue + accounts + health +
-    // declared + reliability from the readers in `deps`. Every reader inside
-    // buildRoutingServices is individually guarded, and the whole assembly is
-    // wrapped so a failure degrades to absent services — but it must NEVER
-    // degrade SILENTLY (11e): "no services" reads as "no model passes
-    // constraints", so a degraded build logs once with the error message.
-    let services = deps?.routingServices;
-    if (!services) {
-      try {
-        services = await buildRoutingServices(cfg, {
-          catalogIndex: deps.catalogIndex,
-          endpoints: catalog,
-          snapshots: quota,
-          providerHealthState: deps.providerHealthState,
-          endpointSummary: deps.endpointSummary,
-          pacing: deps.pacing,
-        }, nowMs);
-      } catch (e) {
-        console.error(`[router] routing services degraded, routing on absent context: ${e?.message ?? e}`);
-        services = null;
-      }
-    }
-    try {
-      effectiveModel = route({
-        incumbent: null,
-        catalog,
-        policy,
-        agent: resolveSubagentAgent(input?.subagent_type),
-        nowMs,
-        services,
-      });
-    } catch (e) {
-      // The default route() already swallows internally; this is a second
-      // belt-and-braces guard so an injected route stub can never break a spawn.
-      console.error("[router] subagent routing threw, using default:", e?.message ?? e);
-      effectiveModel = deliverModel;
-    }
-  }
+  //    effective model was decided above, before the lock: a caller-named
+  //    model is used VERBATIM (11b), and silence was routed with the same
+  //    never-break-a-spawn degradation contract (11a/11e, BET-1535).
+  const effectiveModel = input?.model ? deliverModel : routedModel;
   try {
     await deliver({
       sessionId: reg.job.childSessionID,
