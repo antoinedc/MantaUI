@@ -151,6 +151,7 @@ import { createCtoWorkControl } from "./ctoWorkTools.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
+import { SURFACES_READER_CODES, settleSurface } from "./ctoToolScan.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
 import { endpointAttempts } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
@@ -2458,21 +2459,31 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   // scan.
   toolsRunEphemeral: (opts) => gatedSuggestionEphemeral(opts?.taskClass ?? "ambient-summarize", opts),
   toolsGetSurfaces: async () => {
-    const [config, rules, hooks, jobs, gitRemotes] = await Promise.all([
-      readOpencodeConfig().catch(() => ({})),
-      forgeListRules().catch(() => []),
-      listHooks(null).catch(() => []),
-      loadJobs().catch(() => []),
-      collectGitRemotes().catch(() => []),
+    // W10/BET-1542: each reader's failure resolves IN PLACE — the value
+    // degrades to its empty shape and the failure carries its own code on
+    // the returned object as `<reader>Code` — so the scan's ledger row names
+    // WHICH surface failed instead of the single `surfaces-unavailable`
+    // label. Only codes cross the boundary; exception text never does.
+    const [config, forge, webhooks, schedules, gitRemotes] = await Promise.all([
+      settleSurface(readOpencodeConfig, SURFACES_READER_CODES.config, {}),
+      settleSurface(forgeListRules, SURFACES_READER_CODES.forge, []),
+      settleSurface(() => listHooks(null), SURFACES_READER_CODES.webhooks, []),
+      settleSurface(loadJobs, SURFACES_READER_CODES.schedules, []),
+      settleSurface(collectGitRemotes, SURFACES_READER_CODES.gitRemotes, []),
     ]);
     return {
-      config: config ?? {},
-      forgeRepos: (Array.isArray(rules) ? rules : []).map((r) => r?.repoKey).filter(Boolean),
-      webhooks: Array.isArray(hooks) ? hooks : [],
-      schedules: (Array.isArray(jobs) ? jobs : [])
+      config: config.value ?? {},
+      forgeRepos: (Array.isArray(forge.value) ? forge.value : []).map((r) => r?.repoKey).filter(Boolean),
+      webhooks: Array.isArray(webhooks.value) ? webhooks.value : [],
+      schedules: (Array.isArray(schedules.value) ? schedules.value : [])
         .map((j) => ({ label: j?.label ?? j?.name ?? "" }))
         .filter((s) => s.label),
-      gitRemotes,
+      gitRemotes: Array.isArray(gitRemotes.value) ? gitRemotes.value : [],
+      ...(config.code ? { configCode: config.code } : {}),
+      ...(forge.code ? { forgeCode: forge.code } : {}),
+      ...(webhooks.code ? { webhooksCode: webhooks.code } : {}),
+      ...(schedules.code ? { schedulesCode: schedules.code } : {}),
+      ...(gitRemotes.code ? { gitRemotesCode: gitRemotes.code } : {}),
     };
   },
 });

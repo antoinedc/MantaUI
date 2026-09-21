@@ -16,6 +16,9 @@ import {
   extractGitRemoteEvidence,
   extractScheduleEvidence,
   collectConfigEvidence,
+  SURFACES_READER_CODES,
+  settleSurface,
+  firstSurfacesCode,
 } from "./ctoToolScan.mjs";
 
 const TS = 1_700_000_000_000;
@@ -267,6 +270,44 @@ test("collectConfigEvidence gathers all surfaces and never throws", () => {
   assert.equal(rows.length, 5);
   assert.deepEqual(collectConfigEvidence(undefined, { ts: TS }), []);
   assert.deepEqual(collectConfigEvidence({ config: null }, { ts: TS }), []);
+});
+
+// ---------------------------------------------------------------------------
+// W10/BET-1542 — per-reader failure codes resolved through the surfaces seam
+// ---------------------------------------------------------------------------
+
+test("settleSurface passes a resolved read through and degrades a failed one to fallback + code", async () => {
+  const ok = await settleSurface(async () => ({ mcp: {} }), SURFACES_READER_CODES.config, {});
+  assert.deepEqual(ok, { value: { mcp: {} } });
+  assert.equal("code" in ok, false);
+
+  const failed = await settleSurface(
+    async () => {
+      throw new Error("SECRET read failed pg_dsn=hunter2");
+    },
+    SURFACES_READER_CODES.forge,
+    [],
+  );
+  assert.deepEqual(failed, { value: [], code: "surfaces-forge-unavailable" });
+  assert.equal(JSON.stringify(failed).includes("hunter2"), false);
+});
+
+test("firstSurfacesCode names the failing reader in seam order, or null when all succeeded", () => {
+  assert.equal(firstSurfacesCode({}), null);
+  assert.equal(firstSurfacesCode(undefined), null);
+  assert.equal(firstSurfacesCode({ config: { mcp: {} }, gitRemotes: [] }), null);
+  // Two readers failed → the code is deterministic (seam's reader order),
+  // never whichever key happens to sort first on the object.
+  assert.equal(
+    firstSurfacesCode({ gitRemotesCode: SURFACES_READER_CODES.gitRemotes, configCode: SURFACES_READER_CODES.config }),
+    "surfaces-config-unavailable",
+  );
+  assert.equal(
+    firstSurfacesCode({ schedulesCode: SURFACES_READER_CODES.schedules }),
+    "surfaces-schedules-unavailable",
+  );
+  // The five reader codes are distinct — one label per reader is the point.
+  assert.equal(new Set(Object.values(SURFACES_READER_CODES)).size, Object.keys(SURFACES_READER_CODES).length);
 });
 
 // ---------------------------------------------------------------------------

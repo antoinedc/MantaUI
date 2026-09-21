@@ -51,6 +51,41 @@ function codedError(code, message) {
   return error;
 }
 
+// W10/BET-1542: the config-surface seam's five readers, each with its own
+// failure code. The seam resolves every reader's failure in place (see
+// settleSurface) so the scan's ledger row names WHICH surface failed instead
+// of one catch-all `surfaces-unavailable` label. Only codes cross the
+// boundary; exception text never does.
+export const SURFACES_READER_CODES = Object.freeze({
+  config: "surfaces-config-unavailable",
+  forge: "surfaces-forge-unavailable",
+  webhooks: "surfaces-webhooks-unavailable",
+  schedules: "surfaces-schedules-unavailable",
+  gitRemotes: "surfaces-git-unavailable",
+});
+
+// One surfaces reader's outcome: the read resolves → `{ value }`; it rejects
+// → the value degrades to `fallback` and the reader's code is attached, so
+// the seam's surfaces object carries the failure as `<reader>Code`.
+export async function settleSurface(read, code, fallback) {
+  try {
+    return { value: await read() };
+  } catch {
+    return { value: fallback, code };
+  }
+}
+
+// First per-reader failure code on a surfaces object (the seam's resolved
+// outcomes), or null when every reader succeeded. Iterated in the seam's own
+// reader order, so the code the row names is deterministic.
+export function firstSurfacesCode(surfaces = {}) {
+  for (const key of Object.keys(SURFACES_READER_CODES)) {
+    const code = surfaces?.[`${key}Code`];
+    if (typeof code === "string" && code) return code;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Channel 2 — transcript extractors
 // ---------------------------------------------------------------------------

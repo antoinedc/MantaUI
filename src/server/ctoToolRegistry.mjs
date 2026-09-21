@@ -38,6 +38,7 @@ import {
   CHANNEL_CONFIG,
   extractFromDbRows,
   collectConfigEvidence,
+  firstSurfacesCode,
   SCAN_ROW_CAP,
 } from "./ctoToolScan.mjs";
 // One-way dep (ctoProbes never imports this module): the §7.2 well-known
@@ -91,7 +92,14 @@ export const SCAN_FAILURE_CODES = new Set([
   "db-query-failed",         // prepare/execute against the handle threw
   "internal-provenance-failed", // internal-session / binding provenance read threw
   "invalid-cursor",          // the scan's own cursor validation
-  "surfaces-unavailable",    // the config-surface seam threw
+  "surfaces-unavailable",    // the config-surface seam itself threw (no reader code)
+  // BET-1542: the seam resolves each config-surface reader's failure into its
+  // own code on the surfaces object, so the row names WHICH surface failed.
+  "surfaces-config-unavailable",    // opencode.jsonc read failed
+  "surfaces-forge-unavailable",     // forge-rules listing failed
+  "surfaces-webhooks-unavailable",  // webhooks store read failed
+  "surfaces-schedules-unavailable", // schedule store read failed
+  "surfaces-git-unavailable",       // git-remote collection failed
 ]);
 export const SCAN_FAILED_FALLBACK = "scan-failed";
 
@@ -833,8 +841,19 @@ export function createToolRegistry(deps = {}) {
         const day = new Date(nowMs).toISOString().slice(0, 10);
         if (typeof collectSurfaces === "function" && payload.lastSurfaceDay !== day) {
           const surfaces = (await collectSurfaces()) ?? {};
-          rows.push(...collectConfigEvidence(surfaces, { ts: nowMs }));
-          payload.lastSurfaceDay = day;
+          // W10/BET-1542: the seam resolves each reader's failure in place as
+          // a `<reader>Code` on the surfaces object, so the row names the
+          // failing reader. The commit stays all-or-nothing (rows + day stamp
+          // only when every reader succeeded) so a partial read can never
+          // double-count evidence when the scan retries later the same day.
+          const surfaceCode = firstSurfacesCode(surfaces);
+          if (surfaceCode) {
+            scanOk = false;
+            scanCode ??= surfaceCode;
+          } else {
+            rows.push(...collectConfigEvidence(surfaces, { ts: nowMs }));
+            payload.lastSurfaceDay = day;
+          }
         }
       } catch {
         scanOk = false;
