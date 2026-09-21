@@ -29,9 +29,20 @@
 //   - On close, ONE `ambient-summarize` call produces the §5.2 schema. If the
 //     model output fails schema validation the runner's cascade retries once;
 //     on final failure a degraded summary is stored and the failure recorded.
+//   - BET-1538 (endpoint-health spec W11): a segment whose summary is EMPTY
+//     (the degraded shell) becomes eligible for re-summarisation on a later
+//     retry sweep — `retryFailedSummaries()`, ticked by the engine — bounded by
+//     a per-segment `summaryAttempts` counter. A `gated` outcome is expected,
+//     not a failure: it stays eligible without counting against the cap. Each
+//     attempt rides the same injected (engine-gated) `summarize` seam as a
+//     first-pass close — no new rate gate, no second budget path. The sweep
+//     yields to live work via `presenceCheck` and never replays history (the
+//     cold-start backfill in ctoBackfill.mjs owns that).
 //   - Segments persist 30d in the segments area of the rollups store (A1),
 //     swept by ctoStores.sweepSegments.
 
+import { promises as fsp } from "node:fs";
+import { join } from "node:path";
 import { engineStateStore, segmentsStore, ledgerStore, patchEngineState } from "./ctoStores.mjs";
 import { isUserPromptEvent } from "./ctoEvidence.mjs";
 import { validateProposalList } from "./ctoJournal.mjs";
@@ -45,6 +56,15 @@ export const ONE_LINER_MAX = 140;
 export const MIN_GAP_SAMPLES = 8; // below this a refit reuses the current G
 export const MAX_SEGMENT_EVENTS = 32; // cap per-segment context kept in memory
 export const SEGMENT_SUMMARY_VERSION = 1;
+
+// W11 retry sweep bounds. Attempts are per-segment and durable (`summaryAttempts`
+// on the stored record); a gated outcome never consumes one. The window bounds
+// the scan to recently-written files (mtime) — bulk historic shells are the
+// operational cleanup's job (spec W11 step 2), not a resurrect-everything pass.
+export const MAX_SUMMARY_ATTEMPTS = 3;
+export const MAX_RETRIES_PER_PASS = 4;
+export const SUMMARY_RETRY_INTERVAL_MS = 15 * MINUTE_MS;
+export const SUMMARY_RETRY_WINDOW_MS = 48 * 60 * MINUTE_MS;
 
 export const OUTCOMES = Object.freeze(["done", "failed", "blocked", "in-progress"]);
 
@@ -273,6 +293,39 @@ export function degradedSegmentSummary({ sessionID, project, start, end, lastUse
 }
 
 // ---------------------------------------------------------------------------
+// W11 (BET-1538) retry sweep — the summaryOutcome reader
+// ---------------------------------------------------------------------------
+
+// An "empty" summary is the degraded shell persisted when close-time
+// summarisation failed or was gated: no key events, no files, no PRs, and no
+// importance above the default. Selection is CONTENT-based on purpose (spec
+// W11 note): keying on `summaryOutcome` would miss every shell that predates
+// the marker. A missing/unparseable summary counts as empty too.
+export function isSegmentSummaryEmpty(summary) {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return true;
+  const noEvents = !Array.isArray(summary.key_events) || summary.key_events.length === 0;
+  const noFiles = !Array.isArray(summary.files_touched) || summary.files_touched.length === 0;
+  const noPrs = !Array.isArray(summary.prs) || summary.prs.length === 0;
+  const lowImportance = !(typeof summary.importance === "number" && summary.importance > 1);
+  return noEvents && noFiles && noPrs && lowImportance;
+}
+
+// Retry eligibility for a STORED segment record: well-formed enough to
+// re-summarise, an empty summary, and under the durable attempt cap.
+// Recency is a scan-level mtime pre-filter, not part of the predicate.
+export function isRetryEligibleSegment(rec, { maxAttempts = MAX_SUMMARY_ATTEMPTS } = {}) {
+  if (!rec || typeof rec !== "object") return false;
+  if (typeof rec.sessionID !== "string" || !rec.sessionID) return false;
+  const w = rec.window;
+  if (!Array.isArray(w) || w.length !== 2 || !Number.isFinite(w[0]) || !Number.isFinite(w[1]) || w[0] > w[1]) return false;
+  if (!isSegmentSummaryEmpty(rec.summary)) return false;
+  const attempts = typeof rec.summaryAttempts === "number" && Number.isFinite(rec.summaryAttempts)
+    ? Math.max(0, Math.floor(rec.summaryAttempts))
+    : 0;
+  return attempts < maxAttempts;
+}
+
+// ---------------------------------------------------------------------------
 // G refit — 2-component Gaussian mixture on log inter-arrival times (§5.1-d)
 // ---------------------------------------------------------------------------
 
@@ -449,6 +502,12 @@ async function loadStoredG(engineState) {
  *   computeOneLiner — async (data) => string|null — the one-line producer
  *   now             — () => epoch ms (default Date.now)
  *   initialGMinutes — number (default DEFAULT_G_MINUTES; overridden by stored G on boot)
+ *   fs              — node:fs/promises-like for the retry scan (default real fsp)
+ *   presenceCheck   — async () => true when the user is present → the retry sweep yields
+ *   maxSummaryAttempts — W11 per-segment retry cap (default MAX_SUMMARY_ATTEMPTS)
+ *   maxRetriesPerPass  — W11 per-sweep work bound (default MAX_RETRIES_PER_PASS)
+ *   retryWindowMs      — W11 scan window over segment mtimes (default SUMMARY_RETRY_WINDOW_MS)
+ *   retryIntervalMs    — W11 sweep cadence (default SUMMARY_RETRY_INTERVAL_MS)
  */
 export function createSegmenter(deps = {}) {
   const {
@@ -463,6 +522,12 @@ export function createSegmenter(deps = {}) {
     // or degraded) so the profile engine ingests its atoms / session length /
     // project in the same pass — no second model call, best-effort.
     onSummary = async () => {},
+    fs = fsp,
+    presenceCheck = async () => false,
+    maxSummaryAttempts = MAX_SUMMARY_ATTEMPTS,
+    maxRetriesPerPass = MAX_RETRIES_PER_PASS,
+    retryWindowMs = SUMMARY_RETRY_WINDOW_MS,
+    retryIntervalMs = SUMMARY_RETRY_INTERVAL_MS,
   } = deps;
 
   let gMinutes = initialGMinutes;
@@ -470,6 +535,8 @@ export function createSegmenter(deps = {}) {
   const sessions = new Map(); // sessionID -> sessionState
   const oneLiners = new Map(); // sessionID -> { oneLiner, ts }
   let gapSamples = []; // global inter-arrival gaps (ms) since the last refit
+  let lastRetrySweepAt = -Infinity; // W11 sweep cadence gate
+  let retryRunning = false; // W11 re-entry guard
 
   async function boot() {
     if (booted) return;
@@ -559,6 +626,7 @@ export function createSegmenter(deps = {}) {
         summarizedAt: now(), // when the summary was persisted (health §10.5 pipeline-lag measurement)
         summary,
         summaryOutcome: { ok: !failed && code !== "gated", code },
+        summaryAttempts: 0, // W11: durable retry-attempt counter (consumed by retryFailedSummaries)
       });
     } catch {
       await ledgerLog({ kind: "cto.segment_persist_failed", sessionID: seg.sessionID, code: "persist-error" });
@@ -696,9 +764,149 @@ export function createSegmenter(deps = {}) {
     return gMinutes;
   }
 
+  // W11 (BET-1538) retry sweep — the reader `summaryOutcome` never had. Lists
+  // stored segments whose summary is empty and whose file was written inside
+  // the retry window, then re-runs ONE gated `summarize` per selected segment
+  // (the same injected seam a first-pass close uses — beginEphemeral, ambient
+  // budget and rate limits apply unchanged; no second gate). Bounds: per-segment
+  // attempt cap (durable, `summaryAttempts`), per-pass work cap, sweep cadence,
+  // and a full yield while the user is present. A `gated` result persists
+  // nothing and consumes no attempt. Never throws.
+  async function retryFailedSummaries({ force = false } = {}) {
+    const t = now();
+    if (!force && t - lastRetrySweepAt < retryIntervalMs) return { kind: "throttled" };
+    if (retryRunning) return { kind: "busy" };
+    if (typeof segments?.dir !== "string" || typeof segments?.load !== "function" || typeof segments?.save !== "function" || !fs?.readdir || !fs?.stat) {
+      return { kind: "unavailable" };
+    }
+    retryRunning = true;
+    try {
+      if (await presenceCheck().catch(() => false)) return { kind: "present" }; // yield to live work
+      const candidates = await listRetryCandidates({ at: t });
+      let attempted = 0;
+      let recovered = 0;
+      let gated = false;
+      for (const { id, rec } of candidates) {
+        if (attempted >= maxRetriesPerPass) break;
+        const res = await retryOne(id, rec);
+        if (res === "gated") {
+          gated = true;
+          break; // the gate is closed — hammering more candidates is pointless
+        }
+        attempted += 1;
+        if (res === "recovered") recovered += 1;
+      }
+      lastRetrySweepAt = now();
+      return gated ? { kind: "gated", attempted, recovered } : { kind: "done", attempted, recovered };
+    } finally {
+      retryRunning = false;
+    }
+  }
+
+  // Scan the segments dir for retry candidates: only files written inside the
+  // retry window (mtime pre-filter — bounded, and strictly cheaper than the
+  // existing store sweeper's read-every-file pass), loaded and filtered by the
+  // pure eligibility predicate. Oldest window first.
+  async function listRetryCandidates({ at }) {
+    let names = [];
+    try {
+      names = await fs.readdir(segments.dir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const cutoff = at - retryWindowMs;
+    const out = [];
+    for (const e of names) {
+      if (!e || !e.isFile || typeof e.name !== "string" || !e.name.endsWith(".json")) continue;
+      const id = e.name.slice(0, -5);
+      let mtimeMs;
+      try {
+        mtimeMs = (await fs.stat(join(segments.dir, e.name))).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (!(typeof mtimeMs === "number" && mtimeMs >= cutoff)) continue;
+      let rec;
+      try {
+        rec = await segments.load(id);
+      } catch {
+        continue;
+      }
+      if (isRetryEligibleSegment(rec, { maxAttempts: maxSummaryAttempts })) out.push({ id, rec });
+    }
+    out.sort((a, b) => (a.rec.window?.[0] ?? 0) - (b.rec.window?.[0] ?? 0));
+    return out;
+  }
+
+  // Re-summarise ONE stored segment. Returns "recovered" | "failed" | "gated".
+  // The transcript evidence the producer reads comes from the opencode store
+  // via sessionID + window (ctoSegmentEvidence), so the retry data needs only
+  // the anchors the stored record already carries — events stay empty (the
+  // in-memory buffer is long gone) and the prompt echo rides along from the
+  // degraded summary. Success overwrites the shell exactly like a first-pass
+  // close; failure persists only the attempt counter + outcome marker, leaving
+  // the degraded summary and `summarizedAt` (§10.5 lag truth) untouched.
+  async function retryOne(id, rec) {
+    const promptEcho = typeof rec.summary?.one_liner === "string" && rec.summary.one_liner ? rec.summary.one_liner : undefined;
+    const data = {
+      sessionID: rec.sessionID,
+      project: rec.project,
+      start: rec.window[0],
+      end: rec.window[1],
+      events: [],
+      lastUserPrompt: promptEcho,
+      oneLiner: promptEcho,
+    };
+    await ledgerLog({ kind: "cto.segment_summary_attempt", sessionID: rec.sessionID, project: rec.project, retry: true });
+    let res = null;
+    try {
+      res = await summarize(data);
+    } catch {
+      res = { ok: false, gated: false, code: "summary-error" };
+    }
+    if (res?.gated) return "gated";
+    if (res?.ok && validateSegmentSummary(res.summary)) {
+      const summary = res.summary;
+      summary.window = [rec.window[0], rec.window[1]];
+      summary.sessionID = rec.sessionID;
+      if (!summary.one_liner && promptEcho) summary.one_liner = promptEcho;
+      try {
+        await segments.save(id, {
+          ...rec,
+          summary,
+          summaryOutcome: { ok: true, code: null },
+          summarizedAt: now(),
+        });
+      } catch {
+        await ledgerLog({ kind: "cto.segment_persist_failed", sessionID: rec.sessionID, code: "persist-error", retry: true });
+        return "failed";
+      }
+      await ledgerLog({ kind: "cto.segment_summary_outcome", sessionID: rec.sessionID, code: "ok", retry: true });
+      try {
+        await onSummary(summary);
+      } catch {
+        /* profile feed is best-effort */
+      }
+      return "recovered";
+    }
+    const code = safeSummaryCode(res?.code);
+    try {
+      await segments.save(id, {
+        ...rec,
+        summaryAttempts: (typeof rec.summaryAttempts === "number" && Number.isFinite(rec.summaryAttempts) ? Math.max(0, Math.floor(rec.summaryAttempts)) : 0) + 1,
+        summaryOutcome: { ok: false, code },
+      });
+    } catch {
+      /* best-effort — the cap just doesn't advance this pass */
+    }
+    await ledgerLog({ kind: "cto.segment_summary_failed", sessionID: rec.sessionID, project: rec.project, code, retry: true });
+    return "failed";
+  }
+
   return {
     observe,
     monthlyRefit,
+    retryFailedSummaries,
     boot,
     getGMinutes,
     getOneLiner,

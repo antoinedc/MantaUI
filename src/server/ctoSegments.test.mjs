@@ -12,6 +12,10 @@ import {
   G_MIN,
   G_MAX,
   MINUTE_MS,
+  MAX_SUMMARY_ATTEMPTS,
+  MAX_RETRIES_PER_PASS,
+  SUMMARY_RETRY_INTERVAL_MS,
+  SUMMARY_RETRY_WINDOW_MS,
   segmentEventKind,
   isIdleEvent,
   isBusyEvent,
@@ -23,6 +27,8 @@ import {
   parseSegmentSummaryText,
   validateSegmentSummary,
   degradedSegmentSummary,
+  isSegmentSummaryEmpty,
+  isRetryEligibleSegment,
   refitG,
   emGaussianMixture,
   createSegmenter,
@@ -644,4 +650,236 @@ test("createSegmenter exposes diagnostics without leaking internals into the API
   assert.equal(h.seg.openSegmentCount, 1); // session retained (closed) for bookkeeping
   assert.equal(typeof h.seg.monthlyRefit, "function");
   assert.equal(typeof h.seg.boot, "function");
+});
+
+// ---------------------------------------------------------------------------
+// W11 (BET-1538) retry sweep — the summaryOutcome reader
+// ---------------------------------------------------------------------------
+
+function storedDegraded(over = {}) {
+  return {
+    v: 1,
+    id: "s1-1000",
+    sessionID: "s1",
+    project: "p1",
+    window: [1000, 2000],
+    ts: 2000,
+    summarizedAt: 2000,
+    summary: degradedSegmentSummary({ sessionID: "s1", project: "p1", start: 1000, end: 2000, lastUserPrompt: "fix the bug" }),
+    summaryOutcome: { ok: false, code: "model-error" },
+    summaryAttempts: 0,
+    ...over,
+  };
+}
+
+// A dir-backed segments store + fs stub so the retry scan runs without disk.
+function makeRetryHarness({
+  summarize = async () => ({ ok: false, gated: false }),
+  presence = async () => false,
+  onSummary,
+  mtimes = {},
+  retryIntervalMs = SUMMARY_RETRY_INTERVAL_MS,
+  retryWindowMs,
+  maxRetriesPerPass,
+  maxSummaryAttempts,
+} = {}) {
+  const stores = fakeStores();
+  const files = new Map();
+  const store = {
+    dir: "/segments",
+    pathFor: (id) => id,
+    async load(id) {
+      if (!files.has(id)) throw new Error(`missing ${id}`);
+      return files.get(id);
+    },
+    async save(id, data) {
+      files.set(id, data);
+    },
+    peek() {
+      return files;
+    },
+  };
+  const fs = {
+    async readdir() {
+      return [...files.keys()].map((id) => ({ name: `${id}.json`, isFile: () => true }));
+    },
+    async stat(p) {
+      const id = String(p).split("/").pop().replace(/\.json$/, "");
+      return { mtimeMs: mtimes[id] ?? 5_000_000 };
+    },
+  };
+  let t = 1_000_000;
+  const seg = createSegmenter({
+    segments: store,
+    ledger: stores.ledgerStore,
+    engineState: stores.engineState,
+    summarize,
+    computeOneLiner: async () => null,
+    now: () => t,
+    fs,
+    presenceCheck: presence,
+    retryIntervalMs,
+    ...(retryWindowMs != null ? { retryWindowMs } : {}),
+    ...(maxRetriesPerPass != null ? { maxRetriesPerPass } : {}),
+    ...(maxSummaryAttempts != null ? { maxSummaryAttempts } : {}),
+    ...(onSummary ? { onSummary } : {}),
+  });
+  return { seg, store: { ...store, files }, ledger: stores.ledgerStore, set: (v) => (t = v), now: () => t };
+}
+
+test("isSegmentSummaryEmpty matches the degraded shell and misses real summaries", () => {
+  assert.equal(isSegmentSummaryEmpty(null), true);
+  assert.equal(isSegmentSummaryEmpty(undefined), true);
+  assert.equal(isSegmentSummaryEmpty({}), true);
+  assert.equal(isSegmentSummaryEmpty(degradedSegmentSummary({})), true);
+  assert.equal(isSegmentSummaryEmpty(validSummary()), false);
+  assert.equal(isSegmentSummaryEmpty(validSummary({ key_events: [], importance: 5 })), false);
+  assert.equal(isSegmentSummaryEmpty(validSummary({ files_touched: [], importance: 2 })), false);
+  assert.equal(isSegmentSummaryEmpty(validSummary({ prs: ["pr1"] })), false);
+  assert.equal(
+    isSegmentSummaryEmpty({
+      intent: "x", outcome: "in-progress", key_events: [], files_touched: [], prs: [], importance: 1,
+    }),
+    true,
+  );
+});
+
+test("isRetryEligibleSegment: empty summary + under the attempt cap + well-formed anchors", () => {
+  const rec = storedDegraded();
+  assert.equal(isRetryEligibleSegment(rec), true);
+  assert.equal(isRetryEligibleSegment(rec, { maxAttempts: 1 }), true);
+  assert.equal(isRetryEligibleSegment({ ...rec, summaryAttempts: MAX_SUMMARY_ATTEMPTS }), false);
+  assert.equal(isRetryEligibleSegment({ ...rec, summaryAttempts: MAX_SUMMARY_ATTEMPTS - 1 }), true);
+  assert.equal(isRetryEligibleSegment({ ...rec, summaryAttempts: 99 }, { maxAttempts: 100 }), true);
+  assert.equal(isRetryEligibleSegment({ ...rec, summary: validSummary() }), false);
+  assert.equal(isRetryEligibleSegment({ ...rec, sessionID: undefined }), false);
+  assert.equal(isRetryEligibleSegment({ ...rec, window: [2000, 1000] }), false);
+  assert.equal(isRetryEligibleSegment({ ...rec, window: [1000] }), false);
+  assert.equal(isRetryEligibleSegment(null), false);
+});
+
+test("retry sweep recovers a failed segment: real summary persisted, profile fed, outcome logged", async () => {
+  const fed = [];
+  const h = makeRetryHarness({
+    summarize: async () => ({ ok: true, summary: validSummary({ one_liner: "" }) }),
+    onSummary: async (s) => fed.push(s),
+  });
+  h.store.files.set("s1-1000", storedDegraded());
+  const res = await h.seg.retryFailedSummaries();
+  assert.deepEqual(res, { kind: "done", attempted: 1, recovered: 1 });
+  const saved = h.store.files.get("s1-1000");
+  assert.equal(saved.summary.intent, "fixed login");
+  assert.deepEqual(saved.summary.window, [1000, 2000]);
+  assert.equal(saved.summary.sessionID, "s1");
+  // a blank model one-liner falls back to the stored prompt echo
+  assert.equal(saved.summary.one_liner, "fix the bug");
+  assert.deepEqual(saved.summaryOutcome, { ok: true, code: null });
+  assert.equal(saved.summarizedAt, h.now());
+  assert.equal(saved.summaryAttempts, 0);
+  assert.equal(fed.length, 1);
+  assert.ok(h.ledger.peek().some((r) => r.kind === "cto.segment_summary_attempt" && r.retry === true));
+  assert.ok(h.ledger.peek().some((r) => r.kind === "cto.segment_summary_outcome" && r.retry === true && r.code === "ok"));
+});
+
+test("retry sweep counts a real failure: only the attempt counter and outcome marker change", async () => {
+  const h = makeRetryHarness({ summarize: async () => ({ ok: false, code: "model-error" }) });
+  h.store.files.set("s1-1000", storedDegraded());
+  const res = await h.seg.retryFailedSummaries();
+  assert.deepEqual(res, { kind: "done", attempted: 1, recovered: 0 });
+  const saved = h.store.files.get("s1-1000");
+  assert.equal(saved.summaryAttempts, 1);
+  assert.deepEqual(saved.summaryOutcome, { ok: false, code: "model-error" });
+  // the degraded shell and the pipeline-lag timestamp stay untouched
+  assert.equal(saved.summary.intent, "fix the bug");
+  assert.equal(saved.summarizedAt, 2000);
+  assert.ok(h.ledger.peek().some((r) => r.kind === "cto.segment_summary_failed" && r.retry === true && r.code === "model-error"));
+});
+
+test("retry sweep stops at the durable attempt cap", async () => {
+  let calls = 0;
+  const h = makeRetryHarness({ summarize: async () => { calls += 1; return { ok: false, code: "model-error" }; } });
+  h.store.files.set("s1-1000", storedDegraded({ summaryAttempts: MAX_SUMMARY_ATTEMPTS }));
+  const res = await h.seg.retryFailedSummaries();
+  assert.deepEqual(res, { kind: "done", attempted: 0, recovered: 0 });
+  assert.equal(calls, 0);
+  assert.equal(h.store.files.get("s1-1000").summaryAttempts, MAX_SUMMARY_ATTEMPTS);
+});
+
+test("retry sweep treats gated as expected: nothing persisted, no attempt, pass stops", async () => {
+  let calls = 0;
+  const h = makeRetryHarness({ summarize: async () => { calls += 1; return { ok: false, gated: true }; } });
+  h.store.files.set("s1-1000", storedDegraded());
+  h.store.files.set("s2-1000", storedDegraded({ id: "s2-1000", sessionID: "s2" }));
+  const res = await h.seg.retryFailedSummaries();
+  assert.equal(res.kind, "gated");
+  assert.equal(res.attempted, 0);
+  assert.equal(calls, 1); // second candidate never attempted
+  assert.equal(h.store.files.get("s1-1000").summaryAttempts, 0);
+  assert.deepEqual(h.store.files.get("s1-1000").summaryOutcome, { ok: false, code: "model-error" });
+  // the gated segment stays eligible for the next pass
+  assert.equal(isRetryEligibleSegment(h.store.files.get("s1-1000")), true);
+});
+
+test("retry sweep yields to presence and is unavailable without a dir-backed store", async () => {
+  let scanned = false;
+  const h = makeRetryHarness({ presence: async () => true, summarize: async () => { scanned = true; return { ok: true, summary: validSummary() }; } });
+  h.store.files.set("s1-1000", storedDegraded());
+  assert.deepEqual(await h.seg.retryFailedSummaries({ force: true }), { kind: "present" });
+  assert.equal(scanned, false);
+
+  const plain = fakeStores();
+  const seg2 = createSegmenter({ segments: plain.segmentsStore, ledger: plain.ledgerStore, engineState: plain.engineState });
+  assert.equal((await seg2.retryFailedSummaries({ force: true })).kind, "unavailable");
+});
+
+test("retry sweep throttles to its cadence unless forced", async () => {
+  let calls = 0;
+  const h = makeRetryHarness({ summarize: async () => { calls += 1; return { ok: false, gated: true }; }, retryIntervalMs: 60_000 });
+  h.store.files.set("s1-1000", storedDegraded());
+  assert.equal((await h.seg.retryFailedSummaries()).kind, "gated");
+  assert.equal((await h.seg.retryFailedSummaries()).kind, "throttled");
+  assert.equal(calls, 1);
+  h.set(h.now() + SUMMARY_RETRY_INTERVAL_MS);
+  assert.equal((await h.seg.retryFailedSummaries()).kind, "gated");
+  assert.equal(calls, 2);
+});
+
+test("retry scan honors the mtime window and the per-pass cap", async () => {
+  let calls = 0;
+  const h = makeRetryHarness({
+    summarize: async () => { calls += 1; return { ok: false, code: "model-error" }; },
+    // base clock t=200s; the 48h window cutoff is t-48h. old sits 55h back (outside), the rest ~1h back (inside).
+    mtimes: { "old-1000": 10_000_000, "a-1000": 190_000_000, "b-1000": 190_000_000, "c-1000": 190_000_000, "d-1000": 190_000_000, "e-1000": 190_000_000 },
+    retryWindowMs: SUMMARY_RETRY_WINDOW_MS,
+  });
+  h.set(200_000_000);
+  h.store.files.set("old-1000", storedDegraded({ id: "old-1000", sessionID: "old", window: [1000, 2000] }));
+  h.store.files.set("a-1000", storedDegraded({ id: "a-1000", sessionID: "a", window: [3000, 4000] }));
+  h.store.files.set("b-1000", storedDegraded({ id: "b-1000", sessionID: "b", window: [5000, 6000] }));
+  h.store.files.set("c-1000", storedDegraded({ id: "c-1000", sessionID: "c", window: [7000, 8000] }));
+  h.store.files.set("d-1000", storedDegraded({ id: "d-1000", sessionID: "d", window: [9000, 10000] }));
+  h.store.files.set("e-1000", storedDegraded({ id: "e-1000", sessionID: "e", window: [11000, 12000] }));
+  const res = await h.seg.retryFailedSummaries({ force: true });
+  // oldest-window-first, bounded by MAX_RETRIES_PER_PASS; the stale file is skipped
+  assert.deepEqual(res, { kind: "done", attempted: MAX_RETRIES_PER_PASS, recovered: 0 });
+  assert.equal(calls, MAX_RETRIES_PER_PASS);
+  assert.equal(h.store.files.get("old-1000").summaryAttempts, 0);
+  assert.equal(h.store.files.get("a-1000").summaryAttempts, 1);
+  assert.equal(h.store.files.get("d-1000").summaryAttempts, 1);
+  assert.equal(h.store.files.get("e-1000").summaryAttempts, 0); // over the per-pass cap
+});
+
+test("live close persists summaryAttempts: 0 so a later failure is retryable, not orphaned", async () => {
+  const stores = fakeStores();
+  const f = makeSeg({ stores, summarize: async () => ({ ok: false, code: "create-http" }) });
+  f.set(1000);
+  f.seg.observe(prompt(), { sessionID: "s1", project: "p1" });
+  f.seg.observe(busy(), { sessionID: "s1", project: "p1" });
+  f.set(2000);
+  f.seg.observe(idle(), { sessionID: "s1", project: "p1" });
+  await flushClose(f.seg);
+  const rec = [...stores.segmentsStore.peek().values()][0];
+  assert.equal(rec.summaryAttempts, 0);
+  assert.equal(isRetryEligibleSegment(rec), true);
+  assert.equal(isSegmentSummaryEmpty(rec.summary), true);
 });
