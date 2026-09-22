@@ -85,6 +85,11 @@ import {
   validateProjectRef as validateProjectRefRef,
   workError,
   WORK_STATES,
+  // Validates `handoff.stage`. It sat next to the already-imported
+  // WORK_STATES but was never imported itself, so the stage check threw a
+  // ReferenceError instead of rejecting a bad stage — turning input
+  // validation into a crash on the one path it was meant to guard.
+  WORK_STAGES,
   LIST_MAX_LIMIT,
   LIST_DEFAULT_LIMIT,
 } from "./ctoWork.mjs";
