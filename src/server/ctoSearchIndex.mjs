@@ -74,7 +74,12 @@
 // Query policy: the user's query is LITERAL text — see ftsQuery.mjs.
 
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+// `join` is used by canonicalPath's symlinked-parent fallback. It was never
+// imported, so that fallback threw a ReferenceError instead of resolving the
+// path — and because the throw sat inside a nested `catch`, it was swallowed
+// into the outer `return p`, silently degrading canonicalisation to the raw
+// path for every not-yet-existing file.
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { getDb, getDbOpenFailure, resolveDbPath } from "./opencodeDb.mjs";

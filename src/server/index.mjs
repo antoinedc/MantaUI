@@ -97,7 +97,16 @@ import {
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
 import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
-import { startSchedulePoller, createJob, listJobs, deleteJob } from "./schedule.mjs";
+// `loadJobs` backs the tool-scan schedules surface (toolsGetSurfaces, W10/
+// BET-1542). It was referenced there but never imported: the only other
+// `loadJobs` in this file is delegate's, aliased away as `loadDelegateJobs`,
+// so the bare name resolved to nothing and threw a ReferenceError. That throw
+// escaped the per-reader `settleSurface` guards (it fires while BUILDING the
+// Promise.all argument list, before any guard is entered), so the registry's
+// outer catch recorded the catch-all `surfaces-unavailable` and the scan never
+// completed — the failure looked like an unavailable config surface rather
+// than a missing import.
+import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, getUsageHistory } from "./usage.mjs";
 import {
   createCapJob,
