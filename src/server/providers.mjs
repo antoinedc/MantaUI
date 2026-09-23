@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { parse, modify, applyEdits } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { restartOpencode } from "./opencodeAdmin.mjs";
-import { statePath } from "../shared/paths.mjs";
+import { statePath, uploadRoot } from "../shared/paths.mjs";
 import { composeCtoPrompt } from "./ctoDoctrine.mjs";
 
 // ---------------------------------------------------------------------------
@@ -228,6 +228,7 @@ export function upsertAgentBlock(cfg, input) {
     mode: input.mode ?? "subagent",
   };
   if (input.permission !== undefined) agents[input.name].permission = input.permission;
+  if (input.disable !== undefined) agents[input.name].disable = input.disable;
   if (input.prompt !== undefined) agents[input.name].prompt = input.prompt;
   return { ...cfg, agent: agents };
 }
@@ -769,13 +770,23 @@ export function ctoPromptPath(fromMetaUrl = import.meta.url) {
 export function ctoAgentBlock(promptPath, model) {
   return agentBlock({
     name: CTO_AGENT_NAME,
-    // mode primary (NOT subagent) — the cto agent is selectable as a normal
-    // chat session ("ask the on-call CTO what's running"), and modify access
-    // is bounded below to the read-only `cto` tool.
     description:
-      "On-call CTO: answer what's running, git state, usage/stopped conversations, " +
-      "plan mode, context state and the Multica board via deterministic read-only tools.",
-    permission: { cto: "allow" },
+      "CTO orchestrator: discover project context, dispatch tracked work into project workers, verify delivery and report outcomes.",
+    // Fail closed for implementation tools AND future tools. In particular,
+    // task/delegate would bypass explicit project targeting and work tracking.
+    permission: {
+      "*": "deny",
+      cto_cto: "allow",
+      "cto-fact_cto_fact": "allow",
+      "cto-verdict_cto_verdict": "allow",
+      notify_notify: "allow",
+      // Only this conversation's uploads need direct filesystem access.
+      // Gather project context through the gateway, not arbitrary secret files.
+      read: { "*": "deny", [`${uploadRoot()}/__manta_cto_conversation__/**`]: "allow" },
+      external_directory: { "*": "deny", [`${uploadRoot()}/__manta_cto_conversation__/**`]: "allow" },
+      question: "allow",
+      todowrite: "allow",
+    },
     promptPath,
     model,
   });
@@ -783,7 +794,7 @@ export function ctoAgentBlock(promptPath, model) {
 
 /**
  * Best-effort installer/ensurer for the box-side `cto` primary agent block in
- * opencode.jsonc. Idempotent (a no-op diff when the block already exists) and
+ * opencode.jsonc. Reconciles the managed role boundary on existing agents and
  * never throws — I/O/restart failures log and return `{ ok:false }` so the
  * startup wire-in can fire-and-forget. Injected deps default to the real box
  * (readRemoteConfig / setSubagents / restartOpencode) exactly like
@@ -805,7 +816,8 @@ export async function ensureCtoAgent(deps = {}) {
   const {
     readConfig = readRemoteConfig,
     applySubagents = setSubagents,
-    restart = restartOpencode,
+    remove = removeConfigKeys,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     // The agent block points at the MATERIALIZED prompt (this doctrine work),
     // not the committed file directly — see "CTO operating doctrine" below.
     // `materializeCtoPrompt` guarantees this fixed path always holds SOME
@@ -816,15 +828,81 @@ export async function ensureCtoAgent(deps = {}) {
     model,
     log = console,
   } = deps;
-  return runEnsureAgent({
-    agentName: CTO_AGENT_NAME,
-    buildBlock: () => ctoAgentBlock(promptPath, model),
-    readConfig,
-    applySubagents,
-    restart,
-    logPrefix: "ensureCtoAgent",
-    log,
-  });
+  const apply = async (ops) => {
+    // systemctl/launchctl returning does not mean opencode is listening yet.
+    // Same idempotent upsert, bounded ~31s backoff; deterministic 4xx errors
+    // are not retried. The startup recovery timer covers a longer outage.
+    const delays = [250, 500, 1000, 2000, 4000, 8000, 15000];
+    let result = await applySubagents(ops);
+    for (const ms of delays) {
+      if (result.ok || !/unreachable|ECONNREFUSED|fetch failed|config update failed \(5\d\d\)/i.test(result.error ?? "")) break;
+      await sleep(ms);
+      result = await applySubagents(ops);
+    }
+    return result;
+  };
+  // Reconcile both role variants. Planning retains the local capability
+  // boundary; the gateway separately refuses project mutations in plan turns.
+  try {
+    const cfg = await readConfig();
+    let changed = false;
+    for (const name of [CTO_AGENT_NAME, `${CTO_AGENT_NAME}-plan`]) {
+      const existing = cfg?.agent?.[name];
+      const desired = ctoAgentBlock(promptPath, existing?.model ?? model);
+      desired.name = name;
+      desired.disable = false; // the server-owned role follows cto.enabled
+      if (name.endsWith("-plan")) {
+        desired.description = "CTO planning: discuss scope and propose a plan; project mutations are disabled.";
+        desired.prompt += "\n\nPLAN ONLY: discuss scope and propose a plan. Do not dispatch implementation or mutate projects.";
+      }
+      const { name: _name, ...managed } = desired;
+      if (existing && Object.entries(managed).every(([key, value]) => JSON.stringify(existing[key]) === JSON.stringify(value))) {
+        continue;
+      }
+      // JSONC PATCH writes leaves, not objects: scalar -> object throws, and
+      // object updates preserve stale rule order. Disable the role, remove the
+      // permission block via the supported deletion/restart path, then install
+      // it afresh. Any partial failure leaves the role disabled; retry recovers.
+      if (existing && existing.permission !== undefined &&
+          JSON.stringify(existing.permission) !== JSON.stringify(desired.permission)) {
+        const { permission: _permission, ...disabled } = desired;
+        const locked = await apply({ upsert: [{ ...disabled, disable: true }] });
+        if (!locked.ok) return { ok: false, changed, error: locked.error };
+        changed = true;
+        const removed = await remove([["agent", name, "permission"]]);
+        if (!removed.ok) return { ok: false, changed, error: removed.error };
+      }
+      const result = await apply({ upsert: [desired] });
+      if (!result.ok) return { ok: false, changed, error: result.error };
+      changed = true;
+    }
+    // Changed global PATCHes dispose opencode instances. This belongs in the
+    // startup/upgrade lifecycle, never as a side effect of a read.
+    return { ok: true, changed };
+  } catch (error) {
+    log.warn?.("[providers] ensureCtoAgent: reconciliation failed:", error);
+    return { ok: false, changed: false, reason: "unreadable", error: String(error?.message ?? error) };
+  }
+}
+
+// Startup-only recovery. Stop on convergence (or feature disabled); failed
+// attempts retry without overlapping and without needing a server restart.
+export function startCtoAgentRecovery(ensure, { setTimer = setTimeout, clearTimer = clearTimeout, retryMs = 30000 } = {}) {
+  let stopped = false;
+  let timer = null;
+  const run = async () => {
+    if (stopped) return;
+    let ready = false;
+    try { ready = await ensure(); } catch (error) {
+      console.warn("[cto] agent recovery failed:", error);
+    }
+    if (!ready && !stopped) {
+      timer = setTimer(run, retryMs);
+      timer?.unref?.();
+    }
+  };
+  const started = run();
+  return { started, stop() { stopped = true; if (timer) clearTimer(timer); } };
 }
 
 // ---------------------------------------------------------------------------

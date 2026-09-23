@@ -10,6 +10,7 @@ import { makeEngineDeps } from "./ctoTestEngineDeps.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   defaultCtoStore,
   loadCtoStore,
@@ -28,15 +29,31 @@ const TOOL_COUNT = 63; // 16 reads (BET-1164 + BET-1383 read_rollups/read_ledger
 // Registry integrity
 // ---------------------------------------------------------------------------
 
+test("discovery exposes live operation contracts without executing them; registrar advertises every operation", async () => {
+  const engine = makeEngine();
+  const result = await engine.dispatch("describe_tools", { prefix: "work_" });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data.tools, engine.listTools().filter((t) => t.name.startsWith("work_"))
+    .map(({ name, description, params, mode }) => ({ name, description, params, mode })));
+  assert.ok(result.data.tools.find((t) => t.name === "work_create").params.specText);
+  assert.equal(result.data.tools.find((t) => t.name === "work_dispatch").mode, "confirm");
+  assert.equal(JSON.stringify(result).includes('"run"'), false);
+  const registrar = await readFile(new URL("../../docs/opencode-tools/cto.ts", import.meta.url), "utf8");
+  const declared = registrar.split("const CTO_TOOLS =")[1].split(";")[0];
+  const advertised = new Set([...declared.matchAll(/"([^"]*)"/g)].map((m) => m[1]).join("").split(/,\s*/));
+  assert.deepEqual([...advertised].sort(), engine.listTools().map((t) => t.name).sort());
+});
+
 test("registry exposes every cto read tool with a complete shape, all mode auto", () => {
   const engine = makeEngine();
   const tools = engine.listTools();
-  assert.equal(tools.length, TOOL_COUNT);
+  assert.equal(tools.length, TOOL_COUNT + 1); // live operation discovery
   const names = new Set(tools.map((t) => t.name));
   assert.deepEqual(
     [...names].sort(),
     [
       "list_sessions",
+      "describe_tools",
       "list_projects",
       "read_transcript",
       "search_messages",

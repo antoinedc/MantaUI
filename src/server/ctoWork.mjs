@@ -263,6 +263,12 @@ export function validateSpec(spec) {
   }
   assertNonEmptyString(spec.hash, "spec.hash");
   assertNonEmptyString(spec.documentRef, "spec.documentRef");
+  if (spec.content !== undefined) {
+    assertNonEmptyString(spec.content, "spec.content");
+    if (spec.content.length > 64000 || spec.hash !== `sha256:${createHash("sha256").update(spec.content).digest("hex")}`) {
+      throw workError("unsupported", "Inline spec content must fit 64000 characters and match spec.hash");
+    }
+  }
 }
 
 // Discriminated delivery target (spec §5.1): the required fields follow the kind.

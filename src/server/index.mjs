@@ -188,10 +188,11 @@ import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.m
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
-import { createCtoConversationService } from "./ctoConversation.mjs";
+import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
 import {
   ensureMantaPlanAgent,
   ensureCtoAgent,
+  startCtoAgentRecovery,
   materializeCtoPrompt,
   createCtoDoctrineRestarter,
   CTO_AGENT_NAME,
@@ -1886,13 +1887,8 @@ function getCtoEngine() {
 // via the existing writer, restarts opencode only when the block changed.
 async function maybeEnsureCtoAgent() {
   try {
-    let cfg;
-    try {
-      cfg = await local.configGet();
-    } catch {
-      cfg = {};
-    }
-    if (!cfg?.cto?.enabled) return;
+    const cfg = await local.configGet();
+    if (!cfg?.cto?.enabled) return true;
     const model =
       cfg?.defaultModel?.providerID && cfg?.defaultModel?.modelID
         ? `${cfg.defaultModel.providerID}/${cfg.defaultModel.modelID}`
@@ -1904,13 +1900,17 @@ async function maybeEnsureCtoAgent() {
     // never been written before. Best-effort/non-throwing, matching
     // ensureCtoAgent's own contract; on any failure it falls back to writing
     // the committed prompt verbatim (see materializeCtoPrompt's own doc).
-    await materializeCtoPrompt({ style: cfg?.ctoStyle, houseRules: cfg?.ctoHouseRules });
-    await ensureCtoAgent({ model });
+    const prompt = await materializeCtoPrompt({ style: cfg?.ctoStyle, houseRules: cfg?.ctoHouseRules });
+    if (!prompt.ok) return false;
+    const result = await ensureCtoAgent({ model });
+    if (!result.ok) console.warn("[cto] agent upgrade pending; retrying:", result.error);
+    return result.ok;
   } catch (e) {
     console.error("[cto] ensure failed:", e);
+    return false;
   }
 }
-void maybeEnsureCtoAgent();
+startCtoAgentRecovery(maybeEnsureCtoAgent);
 
 // ----- Adaptive CTO engine (BET-1376) -----
 // The background engine (spec §3, §10.1, §13.3). Created + started ALWAYS so
@@ -5400,6 +5400,14 @@ const handleRequest = async (req, res) => {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
         const engine = getCtoEngine();
+        const definition = engine.listTools().find((t) => t.name === body?.tool);
+        if (definition?.mode === "confirm" && /^(projects|sessions|work)_/.test(definition.name)) {
+          const authorization = authorizeCtoProjectMutation(definition, body?.sessionID, await ctoConversation.state(), CTO_AGENT_NAME);
+          if (!authorization.ok) {
+            respondJson(res, 403, authorization);
+            return;
+          }
+        }
         // Text-loop gate (Issue 2): an `approve` id re-authorizes the previously
         // needConfirmation'd (tool, args) — the user said "go ahead". "no" is
         // rejectConfirm; both drive the in-conversation loop (Issue 3 replaces it

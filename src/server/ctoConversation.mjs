@@ -30,13 +30,26 @@
 // re-enters this service. The firehose tap feeding admission.observeEvent is
 // one-way.
 //
-// PLAN MODE (full-parity widening item 5): the caller can STILL never choose
-// an arbitrary agent for the CTO conversation — that invariant is unchanged
-// — but the caller MAY request plan mode. See resolveAgent() below for the
-// closed, one-entry allowlist that makes this possible without opening the
-// door any wider.
+// PLAN MODE: uses the restricted CTO planner, never the general-purpose
+// planner. User text and slash-command arguments are never rewritten.
 
 import { createHash } from "node:crypto";
+
+// Global reads are available to every session; project mutations belong only
+// to an active executive turn. Check before approving or invoking an action.
+export function authorizeCtoProjectMutation(tool, sessionID, state, agentName) {
+  if (!tool || tool.mode !== "confirm" || !/^(projects|sessions|work)_/.test(tool.name)) return { ok: true };
+  const refuse = (error) => ({ ok: false, code: "policy_blocked", retrySafe: false, error });
+  if (!sessionID || sessionID !== state?.binding?.sessionId) {
+    return refuse("Project management actions are restricted to the current CTO conversation; other sessions may use the read operations.");
+  }
+  const active = state.submissions?.find((s) => s.sessionId === sessionID &&
+    ["dispatching", "accepted", "unknown"].includes(s.status));
+  if (!active || !agentName || active.agent !== agentName) {
+    return refuse("Project mutations are unavailable outside an active CTO execution turn (including plan mode). Switch to execution mode to dispatch work.");
+  }
+  return { ok: true };
+}
 // Terminal statuses — the redirect reports a submit receipt's terminal
 // outcome honestly (a terminal replay has NOTHING queued; 202 would promise
 // a run that will never happen).
@@ -156,24 +169,17 @@ export function createCtoConversationService({
   }
 
   /**
-   * Closed server-side allowlist (full-parity widening item 5): the caller
-   * can NEVER choose an arbitrary agent for the CTO conversation — exactly
-   * as strict as before this widening — but MAY request plan mode. A
-   * caller requests plan mode the SAME way an ordinary opencode:prompt
-   * already signals it: the `agent` field carries the plan agent's own name
-   * (see the renderer's ChatPanel.tsx `planAgent`, sent verbatim as
-   * `opencodePrompt`'s `agent` argument). So this seam recognizes exactly
-   * ONE value — `planAgentName` — and passes it through unchanged; any
-   * other value (a box-native "plan", "build", or anything else) is
-   * dropped, falling back to the central role agent. Widening the allowlist
-   * further is a conscious, separate decision — never a side effect of
-   * adding a new caller field.
+   * Map the composer's plan selection to the restricted CTO planner.
    */
   function resolveAgent(inputAgent) {
-    if (typeof planAgentName === "string" && planAgentName.length > 0 && inputAgent === planAgentName) {
-      return planAgentName;
+    return (planAgentName && inputAgent === planAgentName) || inputAgent === `${agentName}-plan`
+      ? `${agentName}-plan` : agentName;
+  }
+
+  function rejectInlineWorkers(input) {
+    if (Array.isArray(input.mentions) && input.mentions.length) {
+      throw new Error("@agent mentions run inline tasks and are unavailable in the CTO conversation. Ask the CTO to dispatch a worker in the target project instead.");
     }
-    return agentName;
   }
 
   // Stamp-validated classification cache: one stat per seam classification
@@ -245,6 +251,7 @@ export function createCtoConversationService({
   // closed plan-mode allowlist (resolveAgent) — never an arbitrary value.
   async function submit(input) {
     requireInputObject(input);
+    rejectInlineWorkers(input);
     return admission.submit({
       origin: "human",
       ...humanAdmissionFields(input, { withText: true, id: input.id }),
@@ -337,6 +344,7 @@ export function createCtoConversationService({
   // never fake success.
   async function admitDirect(input) {
     requireInputObject(input);
+    rejectInlineWorkers(input);
     return admission.submit({
       origin: "human",
       ...humanAdmissionFields(input, { withText: true, id: messageIDToId(input) }),
@@ -358,14 +366,9 @@ export function createCtoConversationService({
   // SAME closed plan-mode allowlist as admitDirect.
   async function admitCommand(input) {
     requireInputObject(input);
-    return admission.submit({
-      origin: "human",
-      kind: "command",
-      command: input.command,
-      args: input.arguments,
-      ...humanAdmissionFields(input, { withText: false, id: messageIDToId(input) }),
-      agent: resolveAgent(input.agent),
-    });
+    // Templates can execute shell expansions or spawn subagents before role
+    // tools are evaluated. Keep command execution in project sessions.
+    throw new Error("Slash commands execute in project sessions, not the CTO conversation. Ask the CTO to dispatch this command in the target project.");
   }
 
   // -- seam: background prompt delivery -------------------------------------

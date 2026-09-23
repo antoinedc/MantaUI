@@ -28,10 +28,18 @@ const CTO_TOOLS =
   "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
   "context_state, session_plan_mode, get_config, read_rollups, read_ledger, read_inbox, watch, unwatch, " +
   "list_watches, read_facts, read_profile, read_toolregistry, " +
-  "context_projects, context_search, context_around";
+  "context_projects, context_search, context_around, describe_tools, " +
+  "projects_list, projects_inspect, projects_create, projects_update, projects_archive, projects_remove, " +
+  "sessions_list, sessions_inspect, sessions_usage, sessions_create, sessions_configure, sessions_fork, sessions_compact, sessions_archive, sessions_remove, " +
+  "work_list, work_inspect, work_evidence, work_capacity, work_create, work_revise, work_prioritize, work_dispatch, " +
+  "work_pause, work_resume, work_cancel, work_retry, work_answer_decision, work_handoff, work_review, work_merge, work_release, work_verify, work_complete, work_archive, work_cleanup, work_rollback";
 
 export const cto = tool({
   description: [
+    "This gateway includes reads AND mutations. Reads are available to all sessions. Project/session/work mutations require an active execution turn in the bound CTO conversation; they are denied in plan mode.",
+    "CTO orchestration gateway. Use describe_tools {prefix:'work_'} (or projects_, sessions_, context_) for LIVE argument contracts.",
+    "For project execution: resolve projects_list/projects_inspect, create tracked work with work_create, then work_dispatch into that explicit project.",
+    "Use work_inspect for progress and the work review/release/verify operations for delivery. Keep implementation in workers, not the CTO conversation.",
     "Deterministic on-call CTO tools: inspect what's running on this box,",
     "read chat transcripts, search messages, git state, models, plan usage,",
     "stopped conversations, per-session cost/context/plan-mode, config, and the",
@@ -55,7 +63,7 @@ export const cto = tool({
     "nextCursor, truncated} envelope — status distinguishes ok / invalid_input",
     "/ unsupported / source_unavailable / reference_expired. Filters take",
     "OBSERVED projectId/directory/sessionId (a Manta workspace key is rejected;",
-    "project mapping is unmapped). All read-only.",
+    "project mapping is unmapped). These context operations are read-only.",
     `Pick \`tool\` from: ${CTO_TOOLS}.`,
     "Pass that tool's arguments as a free-form object in \`args\`",
     "(e.g. {tool:\"read_transcript\", args:{sessionID:\"ses_...\"}}).",
@@ -100,7 +108,9 @@ export const cto = tool({
       json = { ok: false, error: text };
     }
     if (!res.ok || json?.ok === false) {
-      throw new Error(json?.error || `manta-server ${res.status}`);
+      // Preserve structured control failures (code + retrySafe); losing them
+      // invites blind redispatch of a possibly accepted side effect.
+      return JSON.stringify({ ...json, ok: false, error: json?.error || `manta-server ${res.status}` });
     }
     return JSON.stringify(json?.data ?? json);
   },

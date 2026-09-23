@@ -485,6 +485,16 @@ then restart `opencode-serve`.
 
 ## manta on-call CTO reads
 
+The CTO role is an orchestrator: implementation, experiment setup, builds and
+repository edits run in explicit project workers, never inside the central
+CTO conversation. Use `cto {tool:"describe_tools", args:{prefix:"work_"}}`
+for the live work contracts (also `projects_` and `sessions_`). Resolve the
+project, create tracked work with a pinned spec or `specText`, then dispatch
+it with `work_dispatch`. Inspect existing work before creating another item.
+This role-specific path replaces ordinary `task`/`delegate` use for the CTO;
+ordinary project sessions keep those tools. The read operations below remain
+available for gathering context without waking a worker.
+
 You have a `cto` tool (global opencode custom tool, BET-1164) that runs
 deterministic, READ-ONLY diagnostics about this box:
 `cto {tool, args}` where `tool` is one of `list_sessions` / `list_projects` /
