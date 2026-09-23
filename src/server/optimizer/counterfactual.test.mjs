@@ -45,6 +45,11 @@ function fixed(ms) {
   return () => ms;
 }
 
+function makeHourStore() {
+  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
+  return { t, bucket: hourKey(t), ...makeStore({ now: fixed(t) }) };
+}
+
 test("validation: valid report passes, each bad field is rejected", () => {
   assert.equal(
     validateCounterfactualReport({ sessionID: "abc", maskedTokens: 1, maskedParts: 2, ts: 3 }),
@@ -277,9 +282,7 @@ test("a bucket is keyed off report.ts, not the injected clock (delayed report la
 });
 
 test("applied:true contributes to appliedTokens; applied:false/absent does not; maskedTokens counts in both", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(t) });
-  const bucket = hourKey(t);
+  const { t, store, get, bucket } = makeHourStore();
 
   await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 1, ts: t, applied: true });
   await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t, applied: false });
@@ -305,9 +308,7 @@ test("rewarmTokens accumulates on a bucket; absent means 0", async () => {
 });
 
 test("byModel splits maskedTokens on providerID/modelID, 'unknown' when either is missing", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(t) });
-  const bucket = hourKey(t);
+  const { t, store, get, bucket } = makeHourStore();
 
   await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 1, ts: t, providerID: "anthropic", modelID: "claude-sonnet" });
   await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t, providerID: "anthropic", modelID: "claude-sonnet" });
