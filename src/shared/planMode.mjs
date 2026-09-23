@@ -28,7 +28,7 @@ export function planModeFromToolPart(part) {
  */
 export function isPlanAgent(name) {
   if (name === undefined || name === null || typeof name !== "string") return false;
-  return name === "plan" || name === "manta-plan";
+  return name === "plan" || name === "manta-plan" || name === "cto-plan";
 }
 
 // How many [a-z0-9] chars of the session id survive into the plan subdomain.

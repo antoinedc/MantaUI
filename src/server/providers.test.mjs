@@ -5,6 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { parse as parseJsonc, modify as modifyJsonc, applyEdits as applyJsoncEdits } from "jsonc-parser";
 import {
   parseModelsResponse,
   upsertProviderBlock,
@@ -30,6 +31,7 @@ import {
   syncCacheTtl,
   readCacheTtl,
   ensureCtoAgent,
+  startCtoAgentRecovery,
   ctoPromptPath,
   ctoMaterializedPromptPath,
   materializeCtoPrompt,
@@ -1179,26 +1181,116 @@ describe("ensureMantaPlanAgent", () => {
 // doctrine work), not the committed source doc directly.
 // ---------------------------------------------------------------------------
 
-describe("ensureCtoAgent", () => {
-  it("is a no-op (no write, no restart) when a cto block already exists", async () => {
-    let applied = false;
-    let restarted = false;
-    const existingCfg = {
-      agent: { cto: { mode: "primary", description: "X", permission: {}, prompt: "{file:/x.md}" } },
+function jsoncCtoFixture(permission) {
+  let text = JSON.stringify({ agent: { cto: { mode: "primary", model: "user/model", permission, options: { preserve: true } } } });
+  const state = { patches: 0, restarts: 0, config: () => parseJsonc(text) };
+  // Actual .jsonc PATCH semantics: recursively modify EACH LEAF at its full
+  // path. In particular scalar -> object throws instead of replacing it.
+  const patch = async (value) => {
+    state.patches++;
+    const visit = (value, path = []) => {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        for (const [key, child] of Object.entries(value)) visit(child, [...path, key]);
+      } else if (value !== undefined) text = applyJsoncEdits(text, modifyJsonc(text, path, value, {}));
     };
-    const result = await ensureCtoAgent({
-      readConfig: async () => existingCfg,
-      applySubagents: async () => { applied = true; return { ok: true }; },
-      restart: async () => { restarted = true; return { ok: true }; },
-      promptPath: "/box/cto-prompt.md",
-    });
+    visit(value);
+    return { ok: true };
+  };
+  const deps = {
+    readConfig: async () => state.config(),
+    applySubagents: (ops) => setSubagents(ops, { patch }),
+    remove: (paths) => removeConfigKeys(paths, {
+      readText: async () => text,
+      writeText: async (next) => { text = next; },
+      restart: async () => {
+        assert.equal(state.config().agent.cto.disable, true, "role remains disabled across removal restart");
+        state.restarts++;
+        return { ok: true };
+      },
+    }),
+    promptPath: "/box/cto-prompt.md",
+  };
+  return { deps, state, patch };
+}
+
+describe("ensureCtoAgent", () => {
+  for (const permission of [{ read: "allow", cto_cto: "allow", bash: "allow", task: "allow", custom_mutator: "allow" }, "deny"]) {
+  it(`recovers ${typeof permission} permissions through real JSONC removal semantics and stays idempotent`, async () => {
+    const { deps, state } = jsoncCtoFixture(permission);
+    const result = await ensureCtoAgent(deps);
     assert.equal(result.ok, true);
-    assert.equal(result.changed, false);
-    assert.equal(applied, false);
-    assert.equal(restarted, false);
+    assert.equal(result.changed, true);
+    assert.equal(state.patches, 3); // disable + executive allowlist + planner
+    const updated = state.config().agent.cto;
+    assert.equal(updated.model, "user/model");
+    assert.equal(updated.permission["*"], "deny");
+    assert.equal(Object.keys(updated.permission)[0], "*");
+    assert.equal(updated.permission.bash, undefined);
+    assert.equal(updated.permission.task, undefined);
+    assert.equal(updated.permission.custom_mutator, undefined);
+    assert.equal(updated.permission.cto_cto, "allow");
+    assert.equal(updated.permission.read["*"], "deny");
+    assert.equal(updated.permission.external_directory["*"], "deny");
+    assert.equal(updated.permission.webfetch, undefined);
+    assert.deepEqual(state.config().agent["cto-plan"].permission, updated.permission);
+    assert.deepEqual(updated.options, { preserve: true });
+    assert.equal(updated.disable, false);
+    assert.equal((await ensureCtoAgent(deps)).changed, false);
+    assert.equal(state.patches, 3);
+    assert.equal(state.restarts, 1);
+  });
+  }
+
+  it("fixture reproduces the rejected scalar-to-object PATCH and migration recovers a partial failure", async () => {
+    const { deps, state, patch } = jsoncCtoFixture("deny");
+    await assert.rejects(patch({ agent: { cto: { permission: { "*": "deny" } } } }), /parent of type string/);
+    const apply = deps.applySubagents;
+    deps.applySubagents = (ops) => typeof ops.upsert[0].permission === "object"
+      ? Promise.resolve({ ok: false, error: "temporary PATCH failure" }) : apply(ops);
+    assert.equal((await ensureCtoAgent(deps)).ok, false);
+    assert.equal(state.config().agent.cto.disable, true);
+    assert.equal(state.config().agent.cto.permission, undefined);
+    deps.applySubagents = apply;
+    assert.equal((await ensureCtoAgent(deps)).ok, true);
+    assert.equal(state.config().agent.cto.disable, false);
+    assert.equal(state.restarts, 1, "recovery must not restart when the permission block is already absent");
   });
 
-  it("upserts the block referencing the given promptPath and restarts when absent", async () => {
+  it("waits through an unreachable post-restart endpoint before re-enabling the CTO", async () => {
+    const { deps, state } = jsoncCtoFixture({ cto: "allow" });
+    const apply = deps.applySubagents;
+    let misses = 0;
+    const sleeps = [];
+    deps.sleep = async (ms) => { sleeps.push(ms); };
+    deps.applySubagents = async (ops) => {
+      if (state.restarts && ops.upsert[0].name === "cto" && misses++ < 2) {
+        assert.equal(state.config().agent.cto.disable, true);
+        return { ok: false, error: "opencode /global/config unreachable: fetch failed" };
+      }
+      return apply(ops);
+    };
+    assert.equal((await ensureCtoAgent(deps)).ok, true);
+    assert.deepEqual(sleeps, [250, 500]);
+    assert.equal(state.config().agent.cto.disable, false);
+    assert.equal(state.restarts, 1);
+  });
+
+  it("bounds the initial outage retries and leaves a recoverable disabled role", async () => {
+    const { deps, state } = jsoncCtoFixture("deny");
+    const apply = deps.applySubagents;
+    const sleeps = [];
+    deps.sleep = async (ms) => { sleeps.push(ms); };
+    deps.applySubagents = (ops) => state.restarts
+      ? Promise.resolve({ ok: false, error: "opencode /global/config unreachable" }) : apply(ops);
+    assert.equal((await ensureCtoAgent(deps)).ok, false);
+    assert.equal(sleeps.length, 7);
+    assert.equal(state.config().agent.cto.disable, true);
+    deps.applySubagents = apply;
+    assert.equal((await ensureCtoAgent(deps)).ok, true);
+    assert.equal(state.restarts, 1);
+  });
+
+  it("upserts both role variants through global PATCH when absent", async () => {
     const applied = [];
     const restarts = [];
     const result = await ensureCtoAgent({
@@ -1209,11 +1301,12 @@ describe("ensureCtoAgent", () => {
     });
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.equal(restarts.length, 1);
+    assert.equal(restarts.length, 0);
+    assert.equal(applied.length, 2);
     const upsert = applied[0].upsert[0];
     assert.equal(upsert.name, "cto");
     assert.equal(upsert.mode, "primary");
-    assert.equal(upsert.permission.cto, "allow");
+    assert.equal(upsert.permission.cto_cto, "allow");
     assert.equal(upsert.prompt, "{file:/box/cto-prompt.md}");
   });
 
@@ -1223,6 +1316,31 @@ describe("ensureCtoAgent", () => {
     // read-only committed docs/ file (which a user edit has nowhere to live).
     assert.equal(ctoMaterializedPromptPath().endsWith("/cto/prompt.md"), true);
     assert.notEqual(ctoMaterializedPromptPath(), ctoPromptPath());
+  });
+});
+
+describe("CTO agent startup recovery", () => {
+  it("retries a failed install on a timer, stops on success, and never overlaps", async () => {
+    const timers = [];
+    let calls = 0;
+    let finish;
+    const recovery = startCtoAgentRecovery(() => {
+      calls++;
+      return new Promise((resolve) => { finish = resolve; });
+    }, { setTimer: (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; } });
+    assert.equal(calls, 1);
+    assert.equal(timers.length, 0);
+    finish(false);
+    await recovery.started;
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].ms, 30000);
+    const next = timers.shift().fn();
+    assert.equal(calls, 2);
+    assert.equal(timers.length, 0);
+    finish(true);
+    await next;
+    assert.equal(timers.length, 0);
+    recovery.stop();
   });
 });
 

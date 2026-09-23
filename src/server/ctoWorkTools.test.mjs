@@ -625,6 +625,33 @@ test("replay: same key + same args returns the ORIGINAL result without re-execut
   );
 });
 
+test("a CTO brief is pinned server-side and delivered verbatim to a project worker without file writes", async () => {
+  const { control, calls } = makeWorkControl();
+  const specText = "Repair the export. Preserve existing data. Acceptance: export/re-import round trip passes.";
+  const created = await seedReadyWork(control, { id: "inline-brief", spec: undefined, specText });
+  const listed = await control.workList();
+  const row = listed.data.works.find((w) => w.id === created.workId);
+  assert.equal(row.spec.content, undefined);
+  assert.equal(row.spec.contentLength, specText.length);
+  assert.equal((await control.workInspect({ work: created.workId })).data.spec.content, specText);
+  await control.workDispatch({ key: "inline-dispatch", work: created.workId });
+  const start = calls.find((c) => c.name === "startJob");
+  assert.ok(start.input.prompt.includes(specText));
+  assert.match(start.input.prompt, /hash sha256:[a-f0-9]{64}/);
+  assert.ok(start.input.prompt.includes("inline:sha256:"));
+  const replay = await seedReadyWork(control, { id: "inline-brief", spec: undefined, specText });
+  assert.equal(replay.workId, created.workId);
+  assert.equal(replay.replayed, true);
+  const revised = await control.workRevise({ key: "inline-revise", work: created.workId,
+    patch: { specText: `${specText}\nAlso cover empty exports.`, specRevision: 2 } });
+  assert.equal(revised.ok, true);
+  const revisedReplay = await control.workRevise({ key: "inline-revise", work: created.workId,
+    patch: { specText: `${specText}\nAlso cover empty exports.`, specRevision: 2 } });
+  assert.equal(revisedReplay.replayed, true);
+  await assert.rejects(control.workCreate({ key: "inline-ambiguous", project: "manta", objective: "x",
+    spec: { revision: 1, hash: "x", documentRef: "x" }, specText, deliveryTarget: { kind: "pr" } }), /Pass spec OR specText/);
+});
+
 test("same key with different arguments is an error and never executes", async () => {
   const { control, calls } = makeWorkControl();
   const created = await seedReadyWork(control, { id: "w2-mismatch" });

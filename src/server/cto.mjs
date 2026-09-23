@@ -1045,6 +1045,16 @@ export function createCtoEngine(deps = {}) {
   // -------------------------------------------------------------------------
   // Dispatch
   // -------------------------------------------------------------------------
+  register({
+    name: "describe_tools",
+    description: "Discover the live CTO operations and their argument contracts before calling them. Read-only; never dispatches work.",
+    params: { prefix: { type: "string", description: "Optional name prefix, e.g. work_, projects_, sessions_, context_." } },
+    run: async (_ctx, args) => ({
+      ok: true,
+      data: { tools: tools.filter((t) => t.name.startsWith(args?.prefix ?? ""))
+        .map(({ name, description, params, mode }) => ({ name, description, params, mode })) },
+    }),
+  });
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   // The in-conversation confirmation loop (Issue 2's gate wiring). A confirm-
@@ -1404,5 +1414,4 @@ export function buildPreview(def, args) {
   if (firstLine) header.push(`— ${firstLine}`);
   return header.join(" ");
 }
-
 

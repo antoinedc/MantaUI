@@ -383,7 +383,7 @@ test("cto:conversation-submit: stable id, durable queue projection, server-owned
 // Seams: direct sends / slash commands at the conversation session
 // ---------------------------------------------------------------------------
 
-test("opencode:prompt at the conversation session routes plain text, file attachments and @agent mentions through admission — nothing is rejected", async () => {
+test("CTO admits text and attachments but rejects inline @agent tasks with an actionable error", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
   // Plain text (with a caller-chosen agent that must be DROPPED — it is not
@@ -406,48 +406,44 @@ test("opencode:prompt at the conversation session routes plain text, file attach
   // One turn at a time — settle it before the next send can dispatch.
   await completeTurn(t, receipt1.id);
 
-  // File attachments AND @agent mentions → full-parity widening: admitted
-  // through the SAME queue, not rejected — they ride the record verbatim
-  // and reach sendPrompt on dispatch.
   const attachments = [{ mime: "text/plain", remotePath: "/tmp/x", filename: "x.txt" }];
   const mentions = [{ name: "build", source: { value: "@build", start: 0, end: 6 } }];
+  await assert.rejects(dispatch(t.handlers, "opencode:prompt", [
+    { sessionId: open.sessionId, text: "@build see file", mentions, messageID: "m_mention_rejected" },
+  ]), /dispatch a worker in the target project/);
+  await assert.rejects(dispatch(t.handlers, "cto:conversation-submit", [
+    { id: "m_mention_submit_rejected", text: "@build see file", mentions },
+  ]), /dispatch a worker in the target project/);
   await dispatch(t.handlers, "opencode:prompt", [
-    { sessionId: open.sessionId, text: "see file", attachments, mentions, messageID: "m_direct_2" },
+    { sessionId: open.sessionId, text: "see file", attachments, messageID: "m_direct_2" },
   ]);
   assert.ok(await waitFor(() => t.oc.sends.length >= 2), "the attachment-bearing send was also dispatched");
   const dispatched = t.oc.sends[1];
   assert.deepEqual(dispatched.attachments, attachments);
-  assert.deepEqual(dispatched.mentions, mentions);
+  assert.equal(dispatched.mentions, undefined);
 
   const stAfter = await dispatch(t.handlers, "cto:conversation-state", []);
   assert.equal(stAfter.submissions.length, 2, "both sends were admitted — nothing was rejected");
 });
 
-test("opencode:run-command at the conversation session routes a slash command through admission via sendCommand", async () => {
+test("CTO refuses slash templates before they can execute shell expansions or spawn inline agents", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
   const { release } = parkSends(t.oc);
   try {
-    const receipt = await dispatch(t.handlers, "opencode:run-command", [
+    await assert.rejects(dispatch(t.handlers, "opencode:run-command", [
       { sessionId: open.sessionId, command: "compact", arguments: "", agent: "build" },
-    ]);
-    assert.ok(receipt.id, "the command was admitted through the durable queue, not rejected");
-    assert.equal(receipt.origin, "human");
-    assert.ok(await waitFor(() => t.oc.commandCalls.length >= 1), "admission dispatched via sendCommand");
+    ]), /Slash commands execute in project sessions/);
+    assert.equal(t.oc.commandCalls.length, 0);
     assert.equal(t.oc.sends.length, 0, "sendPrompt was never called for a command");
-    const sent = t.oc.commandCalls[0];
-    assert.equal(sent.command, "compact");
-    assert.equal(sent.agent, "cto-test-agent", "server-owned agent — the caller's 'build' was dropped");
     const st = await dispatch(t.handlers, "cto:conversation-state", []);
-    const row = st.submissions.find((s) => s.id === receipt.id);
-    assert.equal(row.kind, "command");
-    assert.equal(row.command, "compact");
+    assert.equal(st.submissions.length, 0);
   } finally {
     release();
   }
 });
 
-test("plan mode: the caller may request the ONE allow-listed plan agent; any other agent value is still dropped", async () => {
+test("plan mode uses the restricted CTO planner without rewriting user text", async () => {
   const t = compose();
   const open = await dispatch(t.handlers, "cto:conversation-open", []);
   // One turn at a time — drive each submission through dispatch AND
@@ -467,11 +463,12 @@ test("plan mode: the caller may request the ONE allow-listed plan agent; any oth
     // dispatched send positionally (one turn at a time, so it's the newest).
     assert.ok(await waitFor(() => t.oc.sends.length > before));
     const sent = t.oc.sends.at(-1);
+    assert.equal(sent.text, `try ${agent}`);
     await completeTurn(t, receipt.id);
     return sent.agent;
   };
   // The allow-listed plan agent passes through unchanged.
-  assert.equal(await tryAgent("cto-test-plan-agent"), "cto-test-plan-agent", "the ONE allow-listed value rides through");
+  assert.equal(await tryAgent("cto-test-plan-agent"), "cto-test-agent-plan", "planning must not escape the CTO permission boundary");
   // ANY other value — including something that merely LOOKS like a plan
   // agent (a box-native "plan", or an arbitrary string) — is still dropped:
   // the allowlist has exactly one entry, not a pattern.
@@ -488,16 +485,15 @@ test("plan mode allowlist applies identically to cto:conversation-submit and ope
     const submitReceipt = await dispatch(t.handlers, "cto:conversation-submit", [
       { id: "m_submit_plan", text: "plan via submit", agent: "cto-test-plan-agent" },
     ]);
-    assert.equal(submitReceipt.agent, "cto-test-plan-agent");
+    assert.equal(submitReceipt.agent, "cto-test-agent-plan");
     const submitReceipt2 = await dispatch(t.handlers, "cto:conversation-submit", [
       { id: "m_submit_arbitrary", text: "not plan", agent: "some-other-agent" },
     ]);
     assert.equal(submitReceipt2.agent, "cto-test-agent", "arbitrary agent refused on cto:conversation-submit too");
 
-    const cmdReceipt = await dispatch(t.handlers, "opencode:run-command", [
+    await assert.rejects(dispatch(t.handlers, "opencode:run-command", [
       { sessionId: open.sessionId, command: "init", arguments: "", agent: "cto-test-plan-agent" },
-    ]);
-    assert.equal(cmdReceipt.agent, "cto-test-plan-agent");
+    ]), /Slash commands execute in project sessions/);
   } finally {
     release();
   }

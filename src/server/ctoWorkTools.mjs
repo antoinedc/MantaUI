@@ -66,7 +66,7 @@
 // with their retry-safety table below. Errors carry `.code` and `.retrySafe`.
 
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   controlError,
   toControlError,
@@ -193,6 +193,16 @@ const HANDOFF_TEXT_FIELDS = Object.freeze(["objective", "target", "diffCommit", 
 
 // Bounded note/result text stored on attempts and claims.
 const NOTE_MAX_CHARS = 2000;
+
+function inlineWorkSpec(content, revision) {
+  assertNonEmptyString(content, "specText");
+  if (!Number.isInteger(revision) || revision < 1) throw controlError("unsupported", "specRevision must be a positive integer");
+  if (content.length > 64000) throw controlError("unsupported", "specText exceeds 64000 characters");
+  const hash = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  const spec = { revision, hash, documentRef: `inline:${hash}`, content };
+  validateSpecRef(spec);
+  return spec;
+}
 
 // retry-safety for the ctoWork service codes this family surfaces (§7: every
 // error states whether retry is safe).
@@ -1097,6 +1107,7 @@ export function createCtoWorkControl({
       `Objective: ${env.objective}`,
       `Target project: ${env.project.workspaceId} (checkout ${env.project.repositoryRoot}, repository identity ${env.project.repositoryId}).`,
       `Spec: revision ${env.spec.revision}, hash ${env.spec.hash}, document ${env.spec.documentRef} — this is the pinned revision; do not consume a newer "latest spec".`,
+      ...(env.spec.content ? [`Pinned specification:\n${env.spec.content}`] : []),
       `Declared delivery target: ${describeDeliveryTarget(env.deliveryTarget)}.`,
       ``,
       `IMPORTANT: completing your implementation does NOT complete the work. Review, merge, release and`,
@@ -1121,6 +1132,7 @@ export function createCtoWorkControl({
       `Repository identity: ${env.project.repositoryId}. Review commit ${headSha} (exact head — verify you`,
       `are reviewing precisely this SHA).`,
       `Spec: revision ${env.spec.revision}, hash ${env.spec.hash}, document ${env.spec.documentRef}.`,
+      ...(env.spec.content ? [`Pinned specification:\n${env.spec.content}`] : []),
       `Your context is independent of the implementation worker's context. Do not trust its report:`,
       `read the diff of ${headSha} and judge it against the spec and its acceptance criteria.`,
       ``,
@@ -1609,6 +1621,7 @@ export function createCtoWorkControl({
   // ---------------------------------------------------------------------------
 
   function workRow(env) {
+    const { content, ...spec } = env.spec;
     return {
       id: env.id,
       revision: env.revision,
@@ -1621,7 +1634,7 @@ export function createCtoWorkControl({
       schedulingClass: env.schedulingClass ?? "background",
       project: env.project,
       deliveryTarget: env.deliveryTarget,
-      spec: env.spec,
+      spec: { ...spec, ...(typeof content === "string" ? { contentLength: content.length } : {}) },
       dependencies: env.dependencies,
       origin: env.origin,
       attempts: (env.attempts ?? []).length,
@@ -1725,6 +1738,7 @@ export function createCtoWorkControl({
       ok: true,
       data: {
         ...workRow(env),
+        spec: env.spec,
         attempts,
         claims: env.claims ?? [],
         // §11: each observation becomes durable, attributable evidence — it
@@ -1836,7 +1850,14 @@ export function createCtoWorkControl({
           assertNonEmptyString(input.objective, "objective");
           assertNonEmptyString(input.project, "project");
           if (input.id !== undefined && input.id !== null) assertSafeWorkId(input.id);
-          validateSpecRef(input.spec);
+          // Bootstrap a pinned brief without granting the central CTO shell
+          // or filesystem writes. The immutable text travels with the work.
+          let spec = input.spec;
+          if (input.specText !== undefined) {
+            if (spec !== undefined) throw controlError("unsupported", "Pass spec OR specText, not both");
+            spec = inlineWorkSpec(input.specText, 1);
+          }
+          validateSpecRef(spec);
           validateDeliveryTargetRef(input.deliveryTarget);
           if (input.state !== undefined && !["draft", "ready"].includes(input.state)) {
             // The create hole in the central invariant: a work item can never be
@@ -1920,7 +1941,7 @@ export function createCtoWorkControl({
               id: input.id,
               origin: { conversationId, messageId: input.originMessageId ?? "unattributed" },
               project: projectRef,
-              spec: { ...input.spec },
+              spec: { ...spec },
               objective: input.objective,
               deliveryTarget: { ...input.deliveryTarget },
               dependencies: input.dependencies ?? [],
@@ -2000,12 +2021,18 @@ export function createCtoWorkControl({
           { retrySafe: false },
         );
       }
-      const env = await work.reviseWork(input.work, input.patch, { expectedRevision: input.expectedRevision });
+      let patch = input.patch;
+      if (patch.specText !== undefined) {
+        if (patch.spec !== undefined) throw controlError("unsupported", "Pass patch.spec OR patch.specText, not both");
+        const { specText, specRevision, ...rest } = patch;
+        patch = { ...rest, spec: inlineWorkSpec(specText, specRevision) };
+      }
+      const env = await work.reviseWork(input.work, patch, { expectedRevision: input.expectedRevision });
       // §5.2: a spec revision pauses advancement — a running worker was
       // pinned to the OLD spec; the envelope already marked its receipts
       // superseded, and the attempt is now marked so a late completion event
       // cannot advance the new spec (adoptOutcomeInEnvelope's staleSpec path).
-      if (input.patch.spec !== undefined && input.patch.spec.hash !== envBefore.spec.hash && env.state === "running") {
+      if (patch.spec !== undefined && patch.spec.hash !== envBefore.spec.hash && env.state === "running") {
         await work.mutateWork(input.work, (e) => {
           const attempts = (e.attempts ?? []).map((a) =>
             a?.status === "running" || a?.status === "dispatching"
@@ -3908,7 +3935,7 @@ export function registerCtoWorkTools(register, workControl) {
   def(
     "work_create",
     "Create a tracked work item. The target project is EXPLICIT (exact tmux session name — resolved against " +
-      "live state, never inferred); the spec (revision + hash + document ref) and the delivery target are " +
+      "live state, never inferred); either spec (revision + hash + document ref) or specText, plus the delivery target, is " +
       "required. Creates as draft (or ready when the spec is settled). schedulingClass marks CEO-requested work " +
       "'interactive' — background dispatches yield to it when capacity is contended (§9). Idempotent via key.",
     {
@@ -3919,6 +3946,7 @@ export function registerCtoWorkTools(register, workControl) {
         type: "object",
         description: "Pinned spec: {revision, hash, documentRef}. Workers never consume a mutable latest spec.",
       },
+      specText: { type: "string", description: "Alternative to spec: complete brief (objective, constraints, acceptance criteria), max 64000 characters. Server stores it in the work envelope, computes its SHA-256 and injects it into the worker. No file write needed." },
       deliveryTarget: {
         type: "object",
         description: "Discriminated: {kind:'spec'} | {kind:'pr'} | {kind:'merged', baseBranch} | {kind:'published', releaseTarget, channel} | {kind:'deployed', releaseTarget, channel, instance}. The delivery target determines completion.",
@@ -3945,7 +3973,7 @@ export function registerCtoWorkTools(register, workControl) {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
-      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason, schedulingClass)." },
+      patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason, schedulingClass). To revise an inline brief instead of spec, provide specText plus specRevision (a higher integer); the server computes the hash." },
       reason: { type: "string", description: "Why the revision (recorded in the summary)." },
     },
     (args) => workControl.workRevise(args),
