@@ -160,7 +160,9 @@ test("summaryFields returns a zero-filled 30d maskedTokens series and per-sessio
   const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
   await store.record({ sessionID: "s1", maskedTokens: 123, maskedParts: 1, ts: t });
 
-  const f = await summaryFields(store);
+  // The summary window must use the same fixed clock as the stored reports;
+  // wall-clock time eventually ages the fixture out of the 30-day series.
+  const f = await summaryFields(store, { now: t });
   assert.equal(f.dailySeries.length, 30);
   const today = dayKey(t);
   assert.equal(f.dailySeries.find((d) => d.day === today).maskedTokens, 123);
