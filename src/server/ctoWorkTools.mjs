@@ -622,7 +622,12 @@ export function createCtoWorkControl({
   function hasExplicitExecutionIntent(text) {
     if (typeof text !== "string" || !text.trim()) return false;
     if (/\b(plan|spec|research|brainstorm)\s+only\b|\bjust\s+(plan|spec|research|brainstorm)\b|\b(do not|don't|dont)\s+(execute|implement|make changes|change files)\b|\bwithout\s+(executing|implementing|making changes)\b|\bno code changes\b|\bwhat would it take\b|\bshould (i|we)\b|\bdo you think\b|\bwould it be better\b|\b(why did|why does|why is|what is|what was|how did|how does|how was|what if|is it|are we|did we|do we|can we|could we)\b|\b(?:make|write|draft|create|prepare|give|show|outline)\s+(?:me\s+)?(?:a|the)?\s*(?:plan|proposal|approach|outline)\b|\bjust\s+(?:tell|explain|describe|outline|discuss)\b/i.test(text)) return false;
-    return /\b(implement|build|fix|create|add|remove|update|change|refactor|migrate|ship|release|merge|deploy|execute|run|complete|deliver|write|make|open|close|delete|archive|spec|specify|research|investigate|audit|analyze|analyse|review|check|verify|test|inspect)\b/i.test(text);
+    if (/\b(implement|build|fix|create|add|remove|update|change|refactor|migrate|ship|release|merge|deploy|execute|run|complete|deliver|write|make|open|close|delete|archive|spec|specify|research|investigate|audit|analyze|analyse|review|check|verify|test|inspect)\b/i.test(text)) return true;
+    // The CEO's ordinary imperatives ("do it", "use gpt 5.6 sol", "just
+    // retry it", "get it done") are as explicit as "implement". Missing them
+    // left CEO-requested work without a charter, so every routine step
+    // after creation stalled on a confirmation only the UI could grant.
+    return /\b(do\s+it|go\s+ahead|proceed|continue|use|try|retry|restart|resume|finish|start|dispatch|unstick|handle|get\s+(?:it|this|that)\s+done)\b/i.test(text);
   }
 
   function hasExplicitControlIntent(text, verb) {
@@ -687,9 +692,9 @@ export function createCtoWorkControl({
         charter.scope.specHash !== envelope.spec.hash ||
         charter.scope.deliveryTargetHash !== createHash("sha256").update(canonicalJson(envelope.deliveryTarget)).digest("hex")) return false;
     if (toolName === "work_resume") {
-      return currentTurn && envelope.state === "paused" && hasExplicitControlIntent(currentTurn.text, "resume")
-        ? grant()
-        : false;
+      // Resuming a chartered worker is routine recovery (the charter already
+      // authorizes retry, which is strictly stronger) — no second CEO ask.
+      return envelope.state === "paused" || (await isStrandedRunning(envelope)) ? grant() : false;
     }
 
     const permissionByTool = {
@@ -1085,6 +1090,22 @@ export function createCtoWorkControl({
 
   // Attempts of this work that still own a live (running/paused) worker per
   // the authoritative delegate store.
+  // A work card that says "running" while every one of its live workers is
+  // paused — the delegate engine paused them outside work_pause, so the
+  // envelope never moved. Resume must accept it, or the item is stuck: dispatch
+  // refuses ("already has a worker") and resume refused ("not paused").
+  async function isStrandedRunning(env) {
+    if (env?.state !== "running") return false;
+    let jobs;
+    try {
+      jobs = await listDelegateJobs();
+    } catch {
+      return false;
+    }
+    const live = await liveAttempts(env, Array.isArray(jobs) ? jobs : []);
+    return live.length > 0 && live.every(({ job }) => job.status === "paused");
+  }
+
   async function liveAttempts(env, jobs) {
     const out = [];
     for (const attempt of env.attempts ?? []) {
@@ -2671,7 +2692,7 @@ export function createCtoWorkControl({
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
     const envBefore = await getWorkOrThrow(input.work);
-    if (envBefore.state !== "paused") {
+    if (envBefore.state !== "paused" && !(await isStrandedRunning(envBefore))) {
       throw controlError("policy_blocked", `work "${input.work}" is not paused (state ${envBefore.state})`, { retrySafe: false });
     }
     const reserved = await reserveStage("work.resume", input);

@@ -180,6 +180,13 @@ export function isRunningCtoRow(row) {
   return row?.actor === ACTOR && row?.status === "running";
 }
 
+// A delegate job started by the tracked-work coordinator (work_dispatch /
+// work_retry / work_resume). Those are owned by the work item, never by the
+// §11.6 overnight window, so overnight preemption must leave them alone.
+export function isTrackedWorkRow(row) {
+  return row?.correlation?.kind === "work";
+}
+
 // Rate limits (spec §3.3): exceed any one and the engine pauses itself and
 // raises a health warning (§10.6-7).
 export const RATE_LIMITS = Object.freeze({
@@ -1905,7 +1912,11 @@ export function createCtoEngine(deps = {}) {
   // clear an armed countdown). Best-effort — a failing pause seam must never
   // break the close; the delegate sweeper still drains a missed pause flag.
   async function preemptOvernight(reason) {
-    for (const j of await runningCtoJobs()) {
+    // Tracked-work dispatches (correlation.kind "work") are CEO-requested
+    // interactive work, not unattended overnight jobs. Preempting them on the
+    // user's return paused every worker ~2s after dispatch — the user's own
+    // prompt (or the worker's first prompt, as "unknown-activity") fired this.
+    for (const j of (await runningCtoJobs()).filter((row) => !isTrackedWorkRow(row))) {
       try {
         await pauseDelegateJob?.(j.id);
         await ledgerLog({ kind: "cto.overnight.preempt", jobId: j.id, reason });
