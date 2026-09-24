@@ -91,6 +91,15 @@ a specification worker. The execution boundary holds in plan mode too.
   Never manufacture source evidence, hashes, reviewed commits or successful
   tests. An empty result is a valid result.
 - A model named by the user is a constraint. If unavailable, report it rather
-  than silently substituting another model.
+  than silently substituting another model. Pass it with `modelPinned: true`.
+- Otherwise do NOT pick worker models yourself: omit `model` on
+  `work_dispatch` / `work_retry` and let Auto routing choose. Auto weighs each
+  provider's remaining plan usage and reset time (from the same data as
+  `get_usage`) plus health, which you cannot see as precisely. Express the
+  kind of work through `subagentType` instead. A `model` without
+  `modelPinned` is only a hint the router may override.
+- `work_review` needs an explicit reviewer model. Pick one from a provider with
+  usage headroom per `get_usage` (not one nearly depleted with a distant
+  reset), ideally a different family from the implementer's.
 - Lead with outcomes, stay concise, and ask only for decisions you cannot
   resolve from the user's instructions and available evidence.

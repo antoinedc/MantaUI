@@ -142,6 +142,7 @@ import {
   parseRepoKey,
   validateReleaseContract,
   resolveReleaseContract,
+  workerModelArgs,
 } from "./ctoWorkTools.mjs";
 import { canonicalArgsHash } from "./ctoWork.mjs";
 import { MAX_RUNNING_JOBS, CAP_ERROR } from "./delegate.mjs";
@@ -789,6 +790,40 @@ test("same key with different arguments is an error and never executes", async (
     (error) => error.code === "idempotency_key_args_mismatch" && error.retrySafe === false,
   );
   assert.equal(calls.length, before);
+});
+
+test("worker model: a CTO-chosen model is a routing HINT; only modelPinned makes it the hard model", async () => {
+  const { control, calls } = makeWorkControl();
+  const a = await seedReadyWork(control, { id: "w-hint" });
+  await control.workDispatch({ key: "hint-1", work: a.workId, model: "openai/gpt-x" });
+  const hinted = calls.filter((c) => c.name === "startJob").at(-1).input;
+  assert.equal(hinted.model, undefined, "an unpinned model must not switch Auto routing off");
+  assert.equal(hinted.modelHint, "openai/gpt-x");
+
+  const b = await seedReadyWork(control, { id: "w-pinned" });
+  await control.workDispatch({ key: "pin-1", work: b.workId, model: "anthropic/claude-y", modelPinned: true });
+  const pinned = calls.filter((c) => c.name === "startJob").at(-1).input;
+  assert.equal(pinned.model, "anthropic/claude-y", "a user-named (pinned) model is honoured verbatim");
+  assert.equal(pinned.modelHint, undefined);
+
+  const c = await seedReadyWork(control, { id: "w-none" });
+  await control.workDispatch({ key: "none-1", work: c.workId });
+  const none = calls.filter((x) => x.name === "startJob").at(-1).input;
+  assert.equal(none.model, undefined);
+  assert.equal(none.modelHint, undefined, "no model → pure Auto routing");
+
+  await assert.rejects(
+    control.workDispatch({ key: "bad-pin", work: c.workId, model: "x", modelPinned: "yes" }),
+    (error) => error.code === "unsupported",
+  );
+});
+
+test("workerModelArgs: pure mapping", () => {
+  assert.deepEqual(workerModelArgs({}), {});
+  assert.deepEqual(workerModelArgs({ model: "" }), {});
+  assert.deepEqual(workerModelArgs({ model: "m" }), { modelHint: "m" });
+  assert.deepEqual(workerModelArgs({ model: "m", modelPinned: false }), { modelHint: "m" });
+  assert.deepEqual(workerModelArgs({ model: "m", modelPinned: true }), { model: "m" });
 });
 
 test("counterfactual: a DIFFERENT key on the same op re-executes (replay is key-scoped)", async () => {
