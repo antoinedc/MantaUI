@@ -2258,9 +2258,13 @@ async function doRefresh() {
   if (!credsBefore) {
     return logAndReturn({ ok: false, reason: "no-credentials" });
   }
-  if (isRefreshTokenExpired(credsBefore, Date.now())) {
-    return logAndReturn({ ok: false, reason: "refresh-token-expired" });
-  }
+  // `refreshTokenExpiresAt` is NOT a reason to skip the refresh: the auth
+  // plugin's write-back renews the token without updating that field, so it
+  // goes stale while the refresh token is still good. Short-circuiting on it
+  // left Anthropic dead for ~20h while a plain `claude` run fixed it at once.
+  // Always try; the file after the attempt is the verdict, and the stale
+  // expiry only picks the failure reason shown to the user.
+  const refreshLooksExpired = isRefreshTokenExpired(credsBefore, Date.now());
 
   // Run the CLI refresh (this is the "run claude" the user does by hand).
   // Non-zero exit / spawn error (e.g. ENOENT) doesn't short-circuit — we
@@ -2305,7 +2309,7 @@ async function doRefresh() {
     _lastRecoverySuccessAt = Math.floor(now / 1000);
     return logAndReturn({ ok: true, expiresAt: credsAfter.expiresAt });
   }
-  return logAndReturn({ ok: false, reason: outcome });
+  return logAndReturn({ ok: false, reason: refreshLooksExpired ? "refresh-token-expired" : outcome });
 }
 
 function logAndReturn(result) {

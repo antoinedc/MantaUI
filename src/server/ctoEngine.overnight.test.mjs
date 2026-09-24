@@ -435,6 +435,20 @@ test("overnight: user prompt preempts — running cto jobs paused and the window
   assert.equal(h.overnightStoreObj.window?.closeReason, "user-return");
 });
 
+test("overnight: preemption never pauses tracked-work dispatches (correlation.kind work)", async () => {
+  const h = makeHarness({ trough: TROUGH, queue: [QUEUE_TASK], projects: [PROJECT_ROW] });
+  await h.engine.tick();
+  h.listedJobs.push(
+    { id: "night-1", actor: "cto", status: "running" },
+    { id: "work-1", actor: "cto", status: "running", correlation: { kind: "work", workId: "w_x", op: "work.dispatch" } },
+  );
+
+  h.engine.observeEvent({ type: "user.message.created", properties: { sessionID: "human-session" } });
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(h.pausedJobs, ["night-1"], "the tracked-work worker keeps running");
+});
+
 test("overnight: veto card arms 30 min before the trough, cancels on the veto verdict, resolves once open", async () => {
   // Inside the pre-window: 20 min before the trough's start.
   const { due, h } = await armVetoCard();

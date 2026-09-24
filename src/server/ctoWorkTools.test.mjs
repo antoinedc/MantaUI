@@ -1767,6 +1767,49 @@ test("resume resumes a paused worker in its worktree, adopts a terminal outcome,
   assert.notEqual(resumed2.state, "completed");
 });
 
+test("resume recovers a card stuck at running whose worker was paused outside work_pause", async () => {
+  const { control, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w20-stranded" });
+  const dispatched = await control.workDispatch({ key: "w20s-d", work: created.workId });
+  // The delegate engine paused the worker directly (e.g. §11.6 preemption):
+  // the job is paused, the work envelope still says running.
+  const job = jobs.jobs.find((j) => j.id === dispatched.jobId);
+  job.status = "paused";
+  const resumed = await control.workResume({ key: "w20s-r", work: created.workId });
+  assert.equal(resumed.ok, true);
+  assert.deepEqual(resumed.resumed, [dispatched.jobId]);
+  assert.equal(resumed.state, "running");
+
+  // A genuinely running worker is not "stranded" — resume still refuses.
+  await assert.rejects(control.workResume({ key: "w20s-r2", work: created.workId }), /not paused/);
+});
+
+test("CEO imperatives without an implementation verb still mint a charter; resume is charter-authorized", async () => {
+  for (const text of [
+    "wtf i'm telling you to fucking do it so do it and use gpt 5.6 sol",
+    "just fucking use another model if chutes doesn't work",
+    "Go ahead and get it done.",
+  ]) {
+    const acceptedTurn = { id: `adm-${text}`, sessionId: "ses_cto", messageID: "msg_ceo", acceptedAt: 9, text };
+    const { control, workStore, jobs } = makeWorkControl({ acceptedTurn });
+    const id = `imp-${Buffer.from(text).toString("hex").slice(0, 12)}`;
+    await control.workCreate({
+      key: `${id}-c`, id, project: "manta", objective: "Recover the worker",
+      specText: "# Outcome\nRecover it.", deliveryTarget: { kind: "pr" }, state: "ready",
+    }, { sessionID: "ses_cto" });
+    assert.ok((await workStore.load(id)).executionCharter, text);
+
+    const dispatched = await control.workDispatch({ key: `${id}-d`, work: id });
+    // Stranded: job paused, card still running — resume needs no second ask.
+    jobs.jobs.find((j) => j.id === dispatched.jobId).status = "paused";
+    acceptedTurn.text = "You are the on-call CTO driving work to completion.";
+    assert.equal((await control.authorizeGoalMutation("work_resume", { work: id }, "ses_cto")).allowed, true, text);
+    // A live worker is not resumable.
+    jobs.jobs.find((j) => j.id === dispatched.jobId).status = "running";
+    assert.equal(await control.authorizeGoalMutation("work_resume", { work: id }, "ses_cto"), false, text);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Delivery target + prompt content
 // ---------------------------------------------------------------------------
