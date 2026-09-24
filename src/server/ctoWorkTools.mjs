@@ -188,6 +188,15 @@ export const DEFAULT_INTERACTIVE_RESERVE = 1;
 // usage-aware router may replace it (a provider at 99% that resets in days
 // loses to one with headroom that resets tonight). The default is the hint, so
 // forgetting the flag can only ever let routing decide — never lock a choice in.
+function assertWorkerStartInput(input, label) {
+  assertPlainObject(input, label);
+  assertNonEmptyString(input.key, "idempotency key");
+  assertNonEmptyString(input.work, "work");
+  if (input.modelPinned !== undefined && typeof input.modelPinned !== "boolean") {
+    throw controlError("unsupported", "modelPinned must be a boolean when present");
+  }
+}
+
 export function workerModelArgs(input) {
   const model = input?.model;
   if (model === undefined || model === null || model === "") return {};
@@ -2486,12 +2495,7 @@ export function createCtoWorkControl({
   }
 
   async function workDispatch(input) {
-    assertPlainObject(input, "dispatch input");
-    assertNonEmptyString(input.key, "idempotency key");
-    assertNonEmptyString(input.work, "work");
-    if (input.modelPinned !== undefined && typeof input.modelPinned !== "boolean") {
-      throw controlError("unsupported", "modelPinned must be a boolean when present");
-    }
+    assertWorkerStartInput(input, "dispatch input");
     // The completion parent (§8.1) — resolved at admission so an unbound
     // conversation fails BEFORE any reservation or external effect.
     const completionParentSessionId = input.completionParentSessionId ?? (await getConversationId());
@@ -2586,12 +2590,7 @@ export function createCtoWorkControl({
   }
 
   async function workRetry(input) {
-    assertPlainObject(input, "retry input");
-    assertNonEmptyString(input.key, "idempotency key");
-    assertNonEmptyString(input.work, "work");
-    if (input.modelPinned !== undefined && typeof input.modelPinned !== "boolean") {
-      throw controlError("unsupported", "modelPinned must be a boolean when present");
-    }
+    assertWorkerStartInput(input, "retry input");
     const completionParentSessionId = input.completionParentSessionId ?? (await getConversationId());
     if (typeof completionParentSessionId !== "string" || !completionParentSessionId) {
       throw controlError(
