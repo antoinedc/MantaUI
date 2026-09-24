@@ -70,6 +70,44 @@ const ENDPOINT_HEALTH_EXCLUDED = {
 
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 
+// --- Quota scarcity (soft rank) ---------------------------------------------
+// The $ cost stage cannot, on its own, keep work off a nearly-depleted plan:
+// a subscription is priced relative to the cheapest paid alternative, and when
+// every alternative is itself a subscription (or free) that price is 0 and
+// every usage signal multiplies to nothing — observed live as a plan at 99%
+// with a 3-day reset winning at "$0.0000" over a plan at 18% resetting in
+// hours. So scarcity is ALSO a soft ORDERING rank, independent of any price:
+//   2 — a live window is at/above SCARCE_WINDOW_PCT and resets more than
+//       SCARCE_RESET_HORIZON_MS away (little left, not coming back soon);
+//   1 — the pacing controller reports the provider well over pace
+//       (eco level >= OVER_PACE_ECO_LEVEL) or projects it to run out before
+//       reset (newsvendor protection);
+//   0 — otherwise (including every non-subscription / unknown account).
+// Soft, like health: it reorders, never excludes — a scarce provider still
+// runs when it is the only one that qualifies. Exhaustion (>= 100%) remains a
+// hard drop in marginalCost.
+export const SCARCE_WINDOW_PCT = 90;
+export const SCARCE_RESET_HORIZON_MS = 24 * 60 * 60 * 1000;
+export const OVER_PACE_ECO_LEVEL = 2;
+
+export function quotaScarcity(account, pressure, nowMs) {
+  if (account?.kind === "subscription") {
+    const windows = Array.isArray(account.windows) ? account.windows : [];
+    for (const w of windows) {
+      if (w?.stale === true || !isNum(w?.pct)) continue;
+      if (w.pct < SCARCE_WINDOW_PCT) continue;
+      // An unknown reset time is treated as far away: no evidence it refills.
+      const farReset = !isNum(w.resetsAt) || !isNum(nowMs) || w.resetsAt - nowMs > SCARCE_RESET_HORIZON_MS;
+      if (farReset) return 2;
+    }
+  }
+  if (pressure && typeof pressure === "object") {
+    if (isNum(pressure.ecoLevel) && pressure.ecoLevel >= OVER_PACE_ECO_LEVEL) return 1;
+    if (pressure.protection === true) return 1;
+  }
+  return 0;
+}
+
 // BET-1251: routing is activated per conversation (a preset or per-agent
 // override), not by a global switch. An empty policy means "did not ask".
 function routingActive(policy) {
@@ -189,6 +227,7 @@ function assess(candidate, { nowMs, replacementCost, expectedTurnTokens, isLowSt
     reliability: services.reliability?.samples?.[key] ? "measured" : "unmeasured",
     telemetry: services.telemetry?.[key] ?? {},
     rank: rankIsNum ? rank : 1,
+    scarcity: quotaScarcity(services.accounts?.[candidate.providerID], services.pressure?.[candidate.providerID], nowMs),
   };
 }
 
@@ -239,6 +278,11 @@ function computeReplacementCost(catalog, services) {
     const identity = resolveIdentity(c, dec, services.catalogMatcher);
     const m = identity.effective ?? c;
     const price = blendedPrice(m, mixFor(services, key), referenceFor(dec, services, c)).price;
+    // A free endpoint (declared "free", or priced 0) says nothing about what
+    // paid quota is worth: anchoring to it prices EVERY subscription at $0,
+    // which zeroes the pace curve and the pacing pressure alike. Only a paid
+    // alternative can be a replacement cost.
+    if (!(isNum(price) && price > 0)) continue;
     if (best === null || price < best) best = price;
   }
   return best === null ? undefined : best;
@@ -340,6 +384,9 @@ function cmpWithinModel(a, b, services) {
   const ha = healthRank(a, services);
   const hb = healthRank(b, services);
   if (ha !== hb) return ha - hb;
+  const sa = a.scarcity ?? 0;
+  const sb = b.scarcity ?? 0;
+  if (sa !== sb) return sa - sb;
   if (a.marginalCost !== b.marginalCost) return a.marginalCost - b.marginalCost;
   if (a.qualityScore !== b.qualityScore) return b.qualityScore - a.qualityScore;
   const ta = telemetryOf(a, services);
@@ -371,14 +418,22 @@ function stage3Order(assessed, services) {
   for (const a of assessed) {
     let g = byModel.get(a.candidate?.id);
     if (!g) {
-      g = { quality: a.qualityScore, minKey: a.key, items: [] };
+      g = { quality: a.qualityScore, minKey: a.key, scarcity: a.scarcity ?? 0, items: [] };
       byModel.set(a.candidate?.id, g);
     }
     if (a.qualityScore > g.quality) g.quality = a.qualityScore;
+    // A model is as available as its LEAST scarce endpoint.
+    if ((a.scarcity ?? 0) < g.scarcity) g.scarcity = a.scarcity ?? 0;
     if (a.key < g.minKey) g.minKey = a.key;
     g.items.push(a);
   }
-  const groups = [...byModel.values()].sort((x, y) => y.quality - x.quality || String(x.minKey).localeCompare(String(y.minKey)));
+  // Quota scarcity sorts BEFORE quality (the tier band selected afterwards
+  // still enforces the quality target + agent floor): among models that meet
+  // the tier, prefer one whose plan has room over one nearly depleted with a
+  // distant reset.
+  const groups = [...byModel.values()].sort(
+    (x, y) => x.scarcity - y.scarcity || y.quality - x.quality || String(x.minKey).localeCompare(String(y.minKey)),
+  );
   const ordered = [];
   for (const g of groups) {
     g.items.sort((a, b) => cmpWithinModel(a, b, services));

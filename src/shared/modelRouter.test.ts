@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { chooseModel, incumbentStillEligible, describeDecision, AGENT_TIER, type RoutingServices } from "./modelRouter.mjs";
+import { chooseModel, incumbentStillEligible, describeDecision, AGENT_TIER, quotaScarcity, SCARCE_RESET_HORIZON_MS, type RoutingServices } from "./modelRouter.mjs";
 import { endpointKey } from "./endpointKey.mjs";
 import { tierRank } from "./modelGuide.mjs";
 import { AGENT_FLOOR_SCORE } from "./modelQuality.mjs";
@@ -1345,5 +1345,109 @@ describe("chooseModel — the endpoint register (W4/BET-1536)", () => {
     });
     expect(res.kind).toBe("selected");
     expect((res as any).model?.providerID).toBe("b"); // the clean endpoint outranks the degraded one
+  });
+});
+
+// --- Quota scarcity (soft rank) ---------------------------------------------
+// The live incident: OpenAI at 99% of a weekly window resetting in ~3 days,
+// Anthropic at 18% resetting in ~7 hours, a declared-FREE endpoint on the box.
+// Every subscription priced at $0 and the higher-quality OpenAI model kept
+// winning. Scarcity is now a soft rank that sorts before quality/cost.
+describe("modelRouter — quota scarcity", () => {
+  const HOUR = 60 * 60 * 1000;
+  const NOW = 1_000 * HOUR;
+  const depleted = { kind: "subscription", windows: [{ kind: "session", label: "7d", pct: 99, resetsAt: NOW + 78 * HOUR }] };
+  const roomy = {
+    kind: "subscription",
+    windows: [
+      { kind: "session", label: "5h", pct: 13, resetsAt: NOW + 4 * HOUR },
+      { kind: "weekly", label: "7d", pct: 18, resetsAt: NOW + 7 * HOUR },
+    ],
+  };
+
+  it("quotaScarcity: nearly depleted with a distant reset = 2; near reset = 0; over pace = 1", () => {
+    expect(quotaScarcity(depleted, null, NOW)).toBe(2);
+    expect(quotaScarcity(roomy, null, NOW)).toBe(0);
+    // 95% but resetting within the horizon: about to refill → not scarce.
+    expect(
+      quotaScarcity({ kind: "subscription", windows: [{ pct: 95, resetsAt: NOW + SCARCE_RESET_HORIZON_MS - HOUR }] }, null, NOW),
+    ).toBe(0);
+    // A stale window never counts.
+    expect(quotaScarcity({ kind: "subscription", windows: [{ pct: 99, resetsAt: NOW + 78 * HOUR, stale: true }] }, null, NOW)).toBe(0);
+    // Pacing controller: well over pace, or projected to run out → 1.
+    expect(quotaScarcity(roomy, { ecoLevel: 2 }, NOW)).toBe(1);
+    expect(quotaScarcity(roomy, { ecoLevel: 1, protection: true }, NOW)).toBe(1);
+    expect(quotaScarcity(roomy, { ecoLevel: 1, protection: false }, NOW)).toBe(0);
+    // Non-subscription accounts carry no window scarcity.
+    expect(quotaScarcity({ kind: "credit", balance: 5 }, null, NOW)).toBe(0);
+    expect(quotaScarcity(undefined, undefined, NOW)).toBe(0);
+  });
+
+  const catalog = () => [
+    endpoint("gpt-deep", { providerID: "openai", tier: "deep", score: 0.95 }),
+    endpoint("claude-deep", { providerID: "anthropic", tier: "deep", score: 0.86 }),
+    endpoint("free-fast", { providerID: "voska", tier: "fast", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+  ];
+  const services = (extra: Record<string, unknown> = {}) => {
+    const c = catalog();
+    return {
+      accounts: { openai: depleted, anthropic: roomy },
+      declared: { ...defaultDeclared(c), "voska/free-fast": { catalogId: "free-fast", price: "free" } },
+      ...extra,
+    };
+  };
+
+  it("balanced: the roomy plan's deep model beats a higher-quality deep model on a depleted plan", () => {
+    const res = route({ catalog: catalog(), policy: { preset: "balanced" }, intent: { agent: "build" }, nowMs: NOW, services: services() });
+    expect(res.model?.providerID).toBe("anthropic");
+  });
+
+  it("counterfactual: with the same usage on both plans, quality decides again (OpenAI wins)", () => {
+    const res = route({
+      catalog: catalog(),
+      policy: { preset: "balanced" },
+      intent: { agent: "build" },
+      nowMs: NOW,
+      services: services({ accounts: { openai: roomy, anthropic: roomy } }),
+    });
+    expect(res.model?.providerID).toBe("openai");
+  });
+
+  it("economy (eco pressure from the depleted plan) still routes deep work to the roomy plan", () => {
+    const res = route({
+      catalog: catalog(),
+      policy: { preset: "balanced" },
+      intent: { agent: "plan" },
+      nowMs: NOW,
+      services: services({ ecoLevel: 3, pressure: { openai: { lambda: 0, tokensPerPct: null, deficit: 68, ecoLevel: 3, protection: true } } }),
+    });
+    expect(res.trace.target.eco).toBe(3);
+    expect(res.model?.providerID).toBe("anthropic");
+  });
+
+  it("soft, not a drop: a depleted plan still runs when it is the only qualifying endpoint", () => {
+    const only = [endpoint("gpt-deep", { providerID: "openai", tier: "deep", score: 0.95 })];
+    const res = route({ catalog: only, policy: { preset: "balanced" }, intent: { agent: "build" }, nowMs: NOW, services: { accounts: { openai: depleted } } });
+    expect(res.model?.providerID).toBe("openai");
+  });
+
+  it("a free endpoint no longer zeroes subscription prices: the paid alternative anchors the rate", () => {
+    const paid = endpoint("paid", { providerID: "credit", tier: "balanced", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } });
+    const sub = endpoint("sub", { providerID: "anthropic", tier: "balanced" });
+    const free = endpoint("free", { providerID: "voska", tier: "fast", cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    const c = [paid, sub, free];
+    const res = route({
+      catalog: c,
+      policy: { preset: "balanced" },
+      intent: { agent: "general" },
+      nowMs: NOW,
+      services: {
+        accounts: { anthropic: roomy },
+        declared: { ...defaultDeclared(c), "voska/free": { catalogId: "free", price: "free" } },
+      },
+    });
+    expect(res.model?.providerID).toBe("anthropic");
+    // Before: the free endpoint made the exchange rate 0 → cost exactly 0.
+    expect(res.trace.winner!.cost.value).toBeGreaterThan(0);
   });
 });

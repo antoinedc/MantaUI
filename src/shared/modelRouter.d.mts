@@ -138,6 +138,18 @@ export interface ChooseResult {
 
 export function chooseModel(input?: ChooseInput): ChooseResult;
 
+/** Soft quota-scarcity rank for one provider: 2 = a live window at/above
+ *  SCARCE_WINDOW_PCT resetting beyond SCARCE_RESET_HORIZON_MS; 1 = the pacing
+ *  controller reports it well over pace / projected to run out; 0 otherwise. */
+export const SCARCE_WINDOW_PCT: number;
+export const SCARCE_RESET_HORIZON_MS: number;
+export const OVER_PACE_ECO_LEVEL: number;
+export function quotaScarcity(
+  account: AccountState | null | undefined,
+  pressure: { ecoLevel?: number; protection?: boolean } | null | undefined,
+  nowMs: number,
+): 0 | 1 | 2;
+
 export function incumbentStillEligible(
   candidate: Model | null | undefined,
   services?: RoutingServices,
