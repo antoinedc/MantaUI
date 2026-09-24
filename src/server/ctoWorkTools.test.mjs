@@ -124,7 +124,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   createCtoWorkControl,
@@ -148,7 +148,7 @@ import { MAX_RUNNING_JOBS, CAP_ERROR } from "./delegate.mjs";
 import { ctoPath, lockForStore, workStore, mantaControlStore } from "./ctoStores.mjs";
 import { stateHome } from "../shared/paths.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
-import { makeJsonStoreFixture } from "./ctoTestJsonStore.mjs";
+import { makeJsonStoreFixture, makeWorkStoreFixture } from "./ctoTestJsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures — what the real server produces. Project cwds are REAL directories
@@ -178,24 +178,7 @@ let testSeq = 0;
 
 function workStoreFixture() {
   testSeq += 1;
-  const dir = ctoPath("work-tools-test", `work-${testSeq}`);
-  return {
-    name: "work",
-    dir,
-    pathFor: (id) => join(dir, `${id}.json`),
-    save: async (id, data) => {
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, `${id}.json`), JSON.stringify({ ...data, v: 1 }, null, 2));
-    },
-    load: async (id) => {
-      try {
-        return JSON.parse(await readFile(join(dir, `${id}.json`), "utf8"));
-      } catch (error) {
-        if (error?.code === "ENOENT") return null;
-        throw error;
-      }
-    },
-  };
+  return makeWorkStoreFixture("work-tools-test", `work-${testSeq}`);
 }
 
 function ledgerFixture() {

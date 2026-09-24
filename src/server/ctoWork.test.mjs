@@ -38,6 +38,7 @@ import {
   WAITING_REASONS,
 } from "./ctoWork.mjs";
 import { ctoPath, workStore, migrateStore } from "./ctoStores.mjs";
+import { makeWorkStoreFixture } from "./ctoTestJsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -50,16 +51,7 @@ let testSeq = 0;
 // ctoWork's strict reader; save mimics the version stamp.
 function sandboxStore(labelSuffix = "") {
   testSeq += 1;
-  const dir = ctoPath("work-test", `${testSeq}${labelSuffix}`);
-  return {
-    name: "work",
-    dir,
-    pathFor: (id) => join(dir, `${id}.json`),
-    save: async (id, data) => {
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, `${id}.json`), JSON.stringify({ ...data, v: 1 }, null, 2));
-    },
-  };
+  return makeWorkStoreFixture("work-test", `work-${testSeq}${labelSuffix}`);
 }
 
 // Observable store: counts COMMITTED writes and lets a test latch on "the
