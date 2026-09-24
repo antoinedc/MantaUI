@@ -958,6 +958,35 @@ describe("syncSubagents", () => {
   const haiku = { providerID: "anthropic", id: "claude-haiku-4" };
   const opus = { providerID: "anthropic", id: "claude-opus-4" };
 
+  it("deactivating a worker model preserves primary CTO roles sharing that model", async () => {
+    const calls = [];
+    const cfg = { agent: {
+      cto: { model: "anthropic/claude-opus-4", mode: "primary" },
+      "cto-plan": { model: "anthropic/claude-opus-4", mode: "primary" },
+      opus: { model: "anthropic/claude-opus-4", mode: "subagent" },
+    } };
+    await syncSubagents(
+      { models: [opus], deactivated: ["anthropic/claude-opus-4"] },
+      async () => cfg,
+      async ops => { calls.push(ops); return { ok: true }; },
+    );
+    assert.deepEqual(calls, [{ upsert: [], remove: ["opus"] }]);
+    assert.deepEqual(readAgentBlocks(cfg).map(a => a.name), ["opus"]);
+  });
+
+  it("registers a worker even when a primary role already uses its model", async () => {
+    const calls = [];
+    await syncSubagents(
+      { models: [opus] },
+      async () => ({ agent: { opus: { model: "anthropic/claude-opus-4", mode: "primary" } } }),
+      async ops => { calls.push(ops); return { ok: true }; },
+    );
+    assert.equal(calls[0].upsert.length, 1);
+    assert.equal(calls[0].upsert[0].model, "anthropic/claude-opus-4");
+    assert.equal(calls[0].upsert[0].name, "opus-2");
+    assert.deepEqual(calls[0].remove, []);
+  });
+
   it("upserts new models and returns the resulting SubagentDef[]", async () => {
     const calls = [];
     const applySubagents = async (ops) => { calls.push(ops); return { ok: true }; };

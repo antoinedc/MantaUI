@@ -36,12 +36,33 @@ test("discovery exposes live operation contracts without executing them; registr
   assert.deepEqual(result.data.tools, engine.listTools().filter((t) => t.name.startsWith("work_"))
     .map(({ name, description, params, mode }) => ({ name, description, params, mode })));
   assert.ok(result.data.tools.find((t) => t.name === "work_create").params.specText);
-  assert.equal(result.data.tools.find((t) => t.name === "work_dispatch").mode, "confirm");
+  assert.equal(result.data.tools.find((t) => t.name === "work_dispatch").mode, "goal");
   assert.equal(JSON.stringify(result).includes('"run"'), false);
   const registrar = await readFile(new URL("../../docs/opencode-tools/cto.ts", import.meta.url), "utf8");
   const declared = registrar.split("const CTO_TOOLS =")[1].split(";")[0];
   const advertised = new Set([...declared.matchAll(/"([^"]*)"/g)].map((m) => m[1]).join("").split(/,\s*/));
   assert.deepEqual([...advertised].sort(), engine.listTools().map((t) => t.name).sort());
+});
+
+test("goal authorization predicates are delegated to the server-owned work control", async () => {
+  const calls = [];
+  const engine = createCtoEngine(makeEngineDeps({ workControl: {
+    authorizeGoalCreation: async (sessionId) => { calls.push(["create", sessionId]); return sessionId === "ses_cto"; },
+    authorizeGoalMutation: async (name, args, sessionId) => {
+      calls.push(["mutation", name, args.work, sessionId]);
+      return name === "work_retry" && args.work === "w_1" && sessionId === "ses_cto";
+    },
+  } }));
+  assert.equal(await engine.authorizeGoalCreation("ses_cto"), true);
+  assert.equal(await engine.authorizeGoalCreation("ses_worker"), false);
+  assert.equal(await engine.authorizeGoalMutation("work_retry", { work: "w_1" }, "ses_cto"), true);
+  assert.equal(await engine.authorizeGoalMutation("work_cancel", { work: "w_1" }, "ses_cto"), false);
+  assert.deepEqual(calls, [
+    ["create", "ses_cto"],
+    ["create", "ses_worker"],
+    ["mutation", "work_retry", "w_1", "ses_cto"],
+    ["mutation", "work_cancel", "w_1", "ses_cto"],
+  ]);
 });
 
 test("registry exposes every cto read tool with a complete shape, all mode auto", () => {
@@ -126,9 +147,9 @@ test("registry exposes every cto read tool with a complete shape, all mode auto"
     assert.equal(typeof t.description, "string");
     assert.ok(t.description.length > 0);
     assert.ok(t.params && typeof t.params === "object");
-    // Reads are auto; the watcher tools are auto/confirm (watch registers a
-    // recurring probe, so it is confirm-gated).
-    assert.ok(t.mode === "auto" || t.mode === "confirm");
+    // Reads are auto, ordinary mutations confirm, and scoped work tools are
+    // goal-mode (auto only after server charter authorization).
+    assert.ok(t.mode === "auto" || t.mode === "confirm" || t.mode === "goal");
     assert.equal(typeof t.run, "function");
   }
 });
@@ -208,6 +229,41 @@ test("a confirm tool pauses by default (no gate) and trustedActions bypasses it"
   assert.equal(run.ok, true);
   assert.equal(run.needConfirmation, undefined);
   assert.ok(registered.length > 0, "trusted confirm tool actually ran (watcher registered)");
+});
+
+test("goal-mode workflow actions pause by default and run only with a server-issued scoped grant", async () => {
+  let dispatches = 0;
+  const engine = createCtoEngine(makeEngineDeps({ workControl: {
+    workDispatch: async () => { dispatches += 1; return { ok: true, workId: "w1" }; },
+    authorizeGoalCreation: async () => false,
+    authorizeGoalMutation: async () => false,
+  } }));
+  const args = { key: "k1", work: "w1" };
+  const paused = await engine.dispatch("work_dispatch", args);
+  assert.equal(paused.needConfirmation, true);
+  assert.equal(dispatches, 0);
+  const authorized = await engine.dispatch("work_dispatch", args, { trustedActions: ["work_dispatch"] });
+  assert.equal(authorized.needConfirmation, undefined);
+  assert.equal(authorized.data?.ok ?? authorized.ok, true);
+  assert.equal(dispatches, 1);
+});
+
+test("an explicitly approved scope edit receives a server-issued confirmation receipt in the tool context", async () => {
+  let received;
+  const engine = createCtoEngine(makeEngineDeps({ workControl: {
+    workRevise: async (args, invocation) => { received = { args, approval: invocation.approvedConfirmation }; return { ok: true }; },
+  } }));
+  const args = { key: "scope-edit", work: "w1", patch: { objective: "Widen the accepted outcome" } };
+  const pending = await engine.dispatch("work_revise", args);
+  assert.equal(pending.needConfirmation, true);
+  assert.equal(received, undefined);
+  assert.equal(engine.approveConfirm(pending.id), true);
+  const approved = await engine.dispatch("work_revise", args);
+  assert.equal(approved.ok, true);
+  assert.deepEqual(received, {
+    args,
+    approval: { id: pending.id, tool: "work_revise" },
+  });
 });
 
 test("default gate returns allow for every tool (Issue 1 ships auto)", async () => {

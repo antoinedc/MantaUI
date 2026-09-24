@@ -38,7 +38,7 @@ import { createHash } from "node:crypto";
 // Global reads are available to every session; project mutations belong only
 // to an active executive turn. Check before approving or invoking an action.
 export function authorizeCtoProjectMutation(tool, sessionID, state, agentName) {
-  if (!tool || tool.mode !== "confirm" || !/^(projects|sessions|work)_/.test(tool.name)) return { ok: true };
+  if (!tool || !["confirm", "goal"].includes(tool.mode) || !/^(projects|sessions|work)_/.test(tool.name)) return { ok: true };
   const refuse = (error) => ({ ok: false, code: "policy_blocked", retrySafe: false, error });
   if (!sessionID || sessionID !== state?.binding?.sessionId) {
     return refuse("Project management actions are restricted to the current CTO conversation; other sessions may use the read operations.");

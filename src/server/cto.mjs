@@ -1058,7 +1058,7 @@ export function createCtoEngine(deps = {}) {
   const byName = new Map(tools.map((t) => [t.name, t]));
 
   // The in-conversation confirmation loop (Issue 2's gate wiring). A confirm-
-  // mode tool that is not in `trustedActions` (and not already approved)
+  // or goal-scoped tool that is not in `trustedActions` (and not already approved)
   // returns `{ needConfirmation: true, id, preview }` WITHOUT running. The
   // caller surfaces "I need your go-ahead: <preview>"; approval or rejection
   // flows through approveConfirm(id) / rejectConfirm(id), and the re-dispatch
@@ -1079,7 +1079,8 @@ export function createCtoEngine(deps = {}) {
     // hardcoded confirm gate; the seam stays for deny/allow policy only.
     const gate = typeof ctx?.gate === "function" ? ctx.gate : DEFAULT_GATE;
 
-    if (def.mode === "confirm") {
+    let approvedConfirmationId = null;
+    if (def.mode === "confirm" || def.mode === "goal") {
       let decision;
       try {
         decision = gate(def.name, args ?? {});
@@ -1089,8 +1090,8 @@ export function createCtoEngine(deps = {}) {
       if (decision === "deny") {
         return { ok: false, error: `tool ${def.name} denied` };
       }
-      // A trusted action runs without asking; anything else pauses for the
-      // user's go-ahead (returns needConfirmation and does NOT act yet).
+      // A charter-authorized goal tool or separately trusted action runs
+      // without asking; anything else pauses for the user's go-ahead.
       const trusted = Array.isArray(ctx?.trustedActions) ? ctx.trustedActions : [];
       if (!trusted.includes(def.name)) {
         const id = computeConfirmId(def.name, args ?? {});
@@ -1099,6 +1100,7 @@ export function createCtoEngine(deps = {}) {
           // The user said "go ahead" → this exact (tool, args) is authorized;
           // consume the approval and run.
           pendingConfirms.delete(id);
+          approvedConfirmationId = id;
         } else {
           if (!prior) pendingConfirms.set(id, { tool: def.name, args: args ?? {}, approved: false });
           return {
@@ -1126,7 +1128,10 @@ export function createCtoEngine(deps = {}) {
     const narrate = typeof ctx?.onNarrate === "function" ? ctx.onNarrate : NOOP_NARRATE;
     try {
       narrate(`[cto] ${def.name}`);
-      const result = await def.run(ctx, args ?? {});
+      const runContext = approvedConfirmationId
+        ? { ...ctx, approvedConfirmation: { id: approvedConfirmationId, tool: def.name } }
+        : ctx;
+      const result = await def.run(runContext, args ?? {});
       narrate(`[cto] ${def.name} ok`);
       return result;
     } catch (e) {
@@ -1139,6 +1144,12 @@ export function createCtoEngine(deps = {}) {
     tools,
     listTools: () => tools.map((t) => ({ ...t })),
     dispatch,
+    // Goal-scoped trust is computed by the server-owned work control, not by
+    // tool args or the model. The HTTP route may use these only after the
+    // central-role/session authorization gate has passed.
+    authorizeGoalCreation: (sessionId) => workControl.authorizeGoalCreation?.(sessionId) ?? false,
+    authorizeGoalMutation: (toolName, args, sessionId) =>
+      workControl.authorizeGoalMutation?.(toolName, args, sessionId) ?? false,
     // In-conversation gate loop (Issue 2): the cto text agent surfaces a
     // needConfirmation preview; the user's "go ahead"/"no" drives these.
     approveConfirm: (id) => {
@@ -1414,4 +1425,3 @@ export function buildPreview(def, args) {
   if (firstLine) header.push(`— ${firstLine}`);
   return header.join(" ");
 }
-

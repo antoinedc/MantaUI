@@ -242,6 +242,10 @@ function assertPlainObject(value, label) {
   }
 }
 
+function objectiveHash(objective) {
+  return createHash("sha256").update(objective).digest("hex");
+}
+
 // Spec §5.1 ProjectRef — STRUCTURAL validation only. `workspaceId`/`repositoryId`
 // are caller-supplied stable identifiers (what they identify is the unresolved
 // §4 mapping; nothing here interprets them), `repositoryRoot` must be an
@@ -434,6 +438,18 @@ function assertValidEnvelope(env, id) {
       }
       for (const entry of env[field]) assertPlainObject(entry, `${field}[]`);
     }
+    if (env.executionCharter !== undefined) {
+      validateExecutionCharter(env.executionCharter);
+      if (env.executionCharter.source.sessionId !== env.origin.conversationId ||
+          env.executionCharter.source.messageId !== env.origin.messageId ||
+          env.executionCharter.scope.workspaceId !== env.project.workspaceId ||
+          env.executionCharter.scope.repositoryId !== env.project.repositoryId ||
+          env.executionCharter.scope.objectiveHash !== objectiveHash(env.objective) ||
+          env.executionCharter.scope.specHash !== env.spec.hash ||
+          env.executionCharter.scope.deliveryTargetHash !== createHash("sha256").update(canonicalJson(env.deliveryTarget)).digest("hex")) {
+        throw workError("unsupported", "executionCharter scope/source does not match the work envelope");
+      }
+    }
     // Worker-outcome claims (written by the P4 work family, ctoWorkTools.mjs).
     // OPTIONAL for envelopes created before that family existed; validated
     // whenever present so the strict-shape invariant holds for every write.
@@ -600,6 +616,18 @@ function validateWorkInput(input) {
   validateProjectRef(input.project);
   validateSpec(input.spec);
   validateDeliveryTarget(input.deliveryTarget);
+  if (input.executionCharter !== undefined) {
+    validateExecutionCharter(input.executionCharter);
+    if (input.executionCharter.source.sessionId !== input.origin.conversationId ||
+        input.executionCharter.source.messageId !== input.origin.messageId ||
+        input.executionCharter.scope.workspaceId !== input.project.workspaceId ||
+        input.executionCharter.scope.repositoryId !== input.project.repositoryId ||
+        input.executionCharter.scope.objectiveHash !== objectiveHash(input.objective) ||
+        input.executionCharter.scope.specHash !== input.spec.hash ||
+        input.executionCharter.scope.deliveryTargetHash !== createHash("sha256").update(canonicalJson(input.deliveryTarget)).digest("hex")) {
+      throw workError("unsupported", "executionCharter scope/source does not match the work envelope");
+    }
+  }
   validateStateFields({ state: input.state, stage: input.stage, waitingReason: input.waitingReason });
   if (input.priority !== undefined && (typeof input.priority !== "number" || !Number.isFinite(input.priority))) {
     throw workError("unsupported", "priority must be a finite number");
@@ -619,6 +647,80 @@ function validateWorkInput(input) {
   if (input.state === "waiting" && input.waitingReason === undefined) {
     throw workError("unsupported", "state \"waiting\" requires a waitingReason");
   }
+}
+
+const CHARTER_PERMISSIONS = Object.freeze([
+  "dispatch", "retry", "handoff", "review", "verify", "complete", "merge", "release",
+]);
+
+export function validateExecutionCharter(charter) {
+  assertPlainObject(charter, "executionCharter");
+  const assertKeys = (value, keys, label) => {
+    for (const key of Object.keys(value)) {
+      if (!keys.includes(key)) throw workError("unsupported", `unknown ${label} field "${key}"`);
+    }
+  };
+  const allowed = new Set(["version", "revision", "status", "goalKey", "source", "acceptedAt", "scope", "limits", "permissions", "scopeApprovals"]);
+  for (const key of Object.keys(charter)) {
+    if (!allowed.has(key)) throw workError("unsupported", `unknown executionCharter field "${key}"`);
+  }
+  if (charter.version !== 1) throw workError("unsupported", "executionCharter.version must be 1");
+  if (!Number.isInteger(charter.revision) || charter.revision < 1) throw workError("unsupported", "executionCharter.revision must be a positive integer");
+  if (charter.status !== "active") throw workError("unsupported", "executionCharter.status must be active");
+  if (typeof charter.acceptedAt !== "number" || !Number.isFinite(charter.acceptedAt)) {
+    throw workError("unsupported", "executionCharter.acceptedAt must be a finite timestamp");
+  }
+  if (typeof charter.goalKey !== "string" || !/^[a-f0-9]{64}$/.test(charter.goalKey)) {
+    throw workError("unsupported", "executionCharter.goalKey must be a SHA-256 hex digest");
+  }
+  assertPlainObject(charter.source, "executionCharter.source");
+  assertKeys(charter.source, ["kind", "sessionId", "messageId"], "executionCharter.source");
+  if (charter.source.kind !== "ceo_instruction") throw workError("unsupported", "executionCharter.source.kind must be ceo_instruction");
+  assertNonEmptyString(charter.source.sessionId, "executionCharter.source.sessionId");
+  assertNonEmptyString(charter.source.messageId, "executionCharter.source.messageId");
+  assertPlainObject(charter.scope, "executionCharter.scope");
+  assertKeys(charter.scope, ["workspaceId", "repositoryId", "objectiveHash", "specHash", "deliveryTargetHash"], "executionCharter.scope");
+  assertNonEmptyString(charter.scope.workspaceId, "executionCharter.scope.workspaceId");
+  assertNonEmptyString(charter.scope.repositoryId, "executionCharter.scope.repositoryId");
+  if (typeof charter.scope.objectiveHash !== "string" || !/^[a-f0-9]{64}$/.test(charter.scope.objectiveHash)) {
+    throw workError("unsupported", "executionCharter.scope.objectiveHash must be a SHA-256 hex digest");
+  }
+  assertNonEmptyString(charter.scope.specHash, "executionCharter.scope.specHash");
+  assertNonEmptyString(charter.scope.deliveryTargetHash, "executionCharter.scope.deliveryTargetHash");
+  if (!Array.isArray(charter.permissions) || charter.permissions.length === 0 ||
+      charter.permissions.some((p) => !CHARTER_PERMISSIONS.includes(p)) ||
+      new Set(charter.permissions).size !== charter.permissions.length) {
+    throw workError("unsupported", "executionCharter.permissions must be unique supported semantic capabilities");
+  }
+  assertPlainObject(charter.limits, "executionCharter.limits");
+  assertKeys(charter.limits, ["maxAttemptsPerStage"], "executionCharter.limits");
+  if (!Number.isInteger(charter.limits.maxAttemptsPerStage) || charter.limits.maxAttemptsPerStage < 1) {
+    throw workError("unsupported", "executionCharter.limits.maxAttemptsPerStage must be a positive integer");
+  }
+  if (charter.scopeApprovals !== undefined) {
+    if (!Array.isArray(charter.scopeApprovals) || charter.scopeApprovals.length > 20) {
+      throw workError("unsupported", "executionCharter.scopeApprovals must be an array with at most 20 entries");
+    }
+    for (const approval of charter.scopeApprovals) {
+      assertPlainObject(approval, "executionCharter.scopeApprovals[]");
+      assertKeys(approval, ["revision", "confirmationId", "approvedAt", "scopeHash"], "executionCharter.scopeApprovals[]");
+      if (!Number.isInteger(approval.revision) || approval.revision < 2) throw workError("unsupported", "scope approval revision must be >= 2");
+      assertNonEmptyString(approval.confirmationId, "scope approval confirmationId");
+      if (typeof approval.approvedAt !== "number" || !Number.isFinite(approval.approvedAt)) throw workError("unsupported", "scope approval approvedAt must be finite");
+      if (typeof approval.scopeHash !== "string" || !/^[a-f0-9]{64}$/.test(approval.scopeHash)) throw workError("unsupported", "scope approval scopeHash must be a SHA-256 hex digest");
+    }
+  }
+  return charter;
+}
+
+function executionScopeHash({ project, objective, spec, deliveryTarget }) {
+  return createHash("sha256").update(canonicalJson({
+    workspaceId: project.workspaceId,
+    repositoryId: project.repositoryId,
+    objectiveHash: objectiveHash(objective),
+    specHash: spec.hash,
+    deliveryTargetHash: createHash("sha256").update(canonicalJson(deliveryTarget)).digest("hex"),
+  })).digest("hex");
 }
 
 // ONE module-level mutex for dependency-graph mutations (validate + commit as
@@ -645,6 +747,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       spec: { ...input.spec },
       objective: input.objective,
       deliveryTarget: { ...input.deliveryTarget },
+      ...(input.executionCharter !== undefined ? { executionCharter: structuredClone(input.executionCharter) } : {}),
       dependencies: [...(input.dependencies ?? [])],
       priority: input.priority ?? 0,
       priorityReason: input.priorityReason ?? "",
@@ -661,11 +764,19 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
       createdAt: ts,
       updatedAt: ts,
     };
-    if (envelope.dependencies.length > 0) {
+    if (envelope.dependencies.length > 0 || envelope.executionCharter) {
       // Graph mutation: validate + commit under the shared graph lock, then
       // the per-file lock inside commitNewWork (lock order: graph → file).
+      // The same lock makes source-goal uniqueness atomic across concurrent
+      // work_create calls with different model-generated operation keys.
       return workGraphLock.runExclusive(async () => {
-        await assertDependenciesValid(store, envelope.dependencies, { selfId: id });
+        if (envelope.executionCharter) {
+          const duplicate = await findExecutionGoal(envelope.executionCharter.goalKey);
+          if (duplicate) throw workError("duplicate_execution_goal", `execution goal already exists as work "${duplicate.id}"`, { workId: duplicate.id });
+        }
+        if (envelope.dependencies.length > 0) {
+          await assertDependenciesValid(store, envelope.dependencies, { selfId: id });
+        }
         return commitNewWork(store, id, envelope);
       });
     }
@@ -674,6 +785,12 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
 
   async function getWork(id) {
     return loadEnvelopeStrict(store, id);
+  }
+
+  async function findExecutionGoal(goalKey) {
+    if (typeof goalKey !== "string" || !/^[a-f0-9]{64}$/.test(goalKey)) return null;
+    const envs = await loadAllEnvelopes(store);
+    return envs.find((env) => env.executionCharter?.goalKey === goalKey) ?? null;
   }
 
   async function listWorks({ limit = LIST_DEFAULT_LIMIT } = {}) {
@@ -686,7 +803,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
     return { works: envs.slice(0, bounded), total: envs.length, limit: bounded };
   }
 
-  async function reviseWork(id, patch, { expectedRevision } = {}) {
+  async function reviseWork(id, patch, { expectedRevision, executionCharter } = {}) {
     assertPlainObject(patch, "revise patch");
     for (const key of Object.keys(patch)) {
       if (!MUTABLE_FIELDS.includes(key)) {
@@ -742,6 +859,23 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
         }
       }
       const next = { ...env, ...patch, updatedAt: now() };
+      if (executionCharter !== undefined) {
+        validateExecutionCharter(executionCharter);
+        const prior = env.executionCharter;
+        const approval = executionCharter.scopeApprovals?.at(-1);
+        const stableAuthority = prior && executionCharter.version === prior.version &&
+          executionCharter.revision === prior.revision + 1 &&
+          executionCharter.status === prior.status && executionCharter.goalKey === prior.goalKey &&
+          executionCharter.acceptedAt === prior.acceptedAt &&
+          canonicalJson(executionCharter.source) === canonicalJson(prior.source) &&
+          canonicalJson(executionCharter.permissions) === canonicalJson(prior.permissions) &&
+          canonicalJson(executionCharter.limits) === canonicalJson(prior.limits);
+        if (!stableAuthority || !approval || approval.revision !== executionCharter.revision ||
+            approval.scopeHash !== executionScopeHash(next)) {
+          throw workError("policy_blocked", "execution charter revision must preserve the accepted authority and carry a matching server-approved scope change");
+        }
+        next.executionCharter = structuredClone(executionCharter);
+      }
       if (next.state === "waiting" && !next.waitingReason) {
         throw workError("unsupported", "state \"waiting\" requires a waitingReason");
       }
@@ -1043,6 +1177,7 @@ export function createCtoWork({ store = workStore, now = () => Date.now(), newId
   return {
     createWork,
     getWork,
+    findExecutionGoal,
     listWorks,
     reviseWork,
     reserveOperation,

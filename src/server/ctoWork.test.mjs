@@ -16,6 +16,7 @@ import "./ctoTestGuard.mjs";
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile, readFile, chmod, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -147,6 +148,40 @@ test("createWork stores a valid envelope with revision 1 and default state/stage
   const fetched = await work.getWork("w_basic");
   assert.equal(fetched.revision, 1);
   assert.equal(fetched.objective, "ship the thing");
+});
+
+test("execution goal source uniqueness is atomic across concurrent work creations", async () => {
+  const work = createCtoWork({ store: sandboxStore() });
+  const base = makeWork();
+  const goalKey = "a".repeat(64);
+  const charter = {
+    version: 1,
+    revision: 1,
+    status: "active",
+    goalKey,
+    source: { kind: "ceo_instruction", sessionId: base.origin.conversationId, messageId: base.origin.messageId },
+    acceptedAt: 123,
+    scope: {
+      workspaceId: base.project.workspaceId,
+      repositoryId: base.project.repositoryId,
+      objectiveHash: createHash("sha256").update(base.objective).digest("hex"),
+      specHash: base.spec.hash,
+      deliveryTargetHash: createHash("sha256").update(canonicalJson(base.deliveryTarget)).digest("hex"),
+    },
+    limits: { maxAttemptsPerStage: 3 },
+    permissions: ["dispatch", "retry", "handoff", "review", "verify", "complete"],
+  };
+  const inputs = [
+    { ...base, id: "w_goal_a", executionCharter: charter },
+    { ...base, id: "w_goal_b", executionCharter: charter },
+  ];
+  const settled = await Promise.allSettled(inputs.map((input) => work.createWork(input)));
+  assert.equal(settled.filter((r) => r.status === "fulfilled").length, 1);
+  const rejected = settled.find((r) => r.status === "rejected");
+  assert.equal(rejected.reason.code, "duplicate_execution_goal");
+  const found = await work.findExecutionGoal(goalKey);
+  assert.ok(found);
+  assert.equal(found.id, settled.find((r) => r.status === "fulfilled").value.id);
 });
 
 test("getWork returns null for a missing work and never a fabricated envelope", async () => {

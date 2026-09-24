@@ -77,7 +77,7 @@ import {
   argsSnapshot,
   MANTA_CONTROL_LEASE_TTL_MS,
 } from "./ctoMantaTools.mjs";
-import { canonicalArgsHash } from "./ctoWork.mjs";
+import { canonicalArgsHash, canonicalJson, validateExecutionCharter } from "./ctoWork.mjs";
 import {
   createCtoWork as createCtoWorkService,
   validateSpec as validateSpecRef,
@@ -581,6 +581,7 @@ export function createCtoWorkControl({
   delegateOps = null, // { startJob, stopJob, pauseJob, resumeJob, deleteJob } — the bound engine
   resolveCwd = resolveCwdOrThrow,
   getConversationId = readConversationSessionId,
+  getAcceptedHumanTurn = async () => null,
   // §4.1 identity WRITE dep — applies `{upserts, removes}` to the
   // `~/.manta/config.json` projects[] records in one read-modify-write.
   persistProjectIdentity = lazyLocalPersist(),
@@ -617,6 +618,103 @@ export function createCtoWorkControl({
     newId,
     owner: CREATE_RECEIPT_OWNER,
   });
+
+  function hasExplicitExecutionIntent(text) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    if (/\b(plan|spec|research|brainstorm)\s+only\b|\bjust\s+(plan|spec|research|brainstorm)\b|\b(do not|don't|dont)\s+(execute|implement|make changes|change files)\b|\bwithout\s+(executing|implementing|making changes)\b|\bno code changes\b|\bwhat would it take\b|\bshould (i|we)\b|\bdo you think\b|\bwould it be better\b|\b(why did|why does|why is|what is|what was|how did|how does|how was|what if|is it|are we|did we|do we|can we|could we)\b|\b(?:make|write|draft|create|prepare|give|show|outline)\s+(?:me\s+)?(?:a|the)?\s*(?:plan|proposal|approach|outline)\b|\bjust\s+(?:tell|explain|describe|outline|discuss)\b/i.test(text)) return false;
+    return /\b(implement|build|fix|create|add|remove|update|change|refactor|migrate|ship|release|merge|deploy|execute|run|complete|deliver|write|make|open|close|delete|archive|spec|specify|research|investigate|audit|analyze|analyse|review|check|verify|test|inspect)\b/i.test(text);
+  }
+
+  function hasExplicitControlIntent(text, verb) {
+    if (typeof text !== "string" || !text.trim()) return false;
+    if (/\b(do not|don't|dont|never)\s+(pause|hold|stop|cancel|abort|resume|continue|unpause)\b|\b(maybe|perhaps|consider|should i|should we|do you think|would it be better)\b/i.test(text)) return false;
+    if (verb === "pause") return /\b(pause|hold|stop for now)\b/i.test(text);
+    if (verb === "cancel") return /\b(cancel|abort|stop|abandon)\b/i.test(text);
+    if (verb === "resume") return /\b(resume|unpause|continue|pick up again)\b/i.test(text);
+    return false;
+  }
+
+  async function getAcceptedTurnForSession(sessionId) {
+    if (typeof sessionId !== "string" || !sessionId) return null;
+    const boundId = await getConversationId();
+    if (boundId !== sessionId) return null;
+    const turn = await getAcceptedHumanTurn(sessionId);
+    return turn?.sessionId === sessionId && turn.messageID ? turn : null;
+  }
+
+  async function getTrustedExecutionTurn(sessionId) {
+    const turn = await getAcceptedTurnForSession(sessionId);
+    if (!turn || !hasExplicitExecutionIntent(turn.text)) return null;
+    return turn;
+  }
+
+  async function authorizeGoalCreation(sessionId) {
+    return !!(await getTrustedExecutionTurn(sessionId));
+  }
+
+  async function authorizeGoalMutation(toolName, args, sessionId) {
+    if (typeof sessionId !== "string" || !sessionId || typeof args?.work !== "string") return false;
+    let envelope;
+    try {
+      envelope = await work.getWork(args.work);
+    } catch {
+      return false;
+    }
+    if (!envelope) return false;
+    const grant = () => {
+      if (args.expectedRevision !== undefined && args.expectedRevision !== envelope.revision) return false;
+      return {
+        allowed: true,
+        workRevision: envelope.revision,
+        charterRevision: envelope.executionCharter?.revision,
+      };
+    };
+    const currentTurn = await getAcceptedTurnForSession(sessionId);
+    if (["work_pause", "work_cancel"].includes(toolName)) {
+      const requestedAction = toolName === "work_pause" ? "pause" : "cancel";
+      return currentTurn && hasExplicitControlIntent(currentTurn.text, requestedAction) ? grant() : false;
+    }
+    const charter = envelope?.executionCharter;
+    try {
+      validateExecutionCharter(charter);
+    } catch {
+      return false;
+    }
+    if (charter.status !== "active" || charter.source.sessionId !== sessionId ||
+        charter.scope.workspaceId !== envelope.project.workspaceId ||
+        charter.scope.repositoryId !== envelope.project.repositoryId ||
+        charter.scope.objectiveHash !== createHash("sha256").update(envelope.objective).digest("hex") ||
+        charter.scope.specHash !== envelope.spec.hash ||
+        charter.scope.deliveryTargetHash !== createHash("sha256").update(canonicalJson(envelope.deliveryTarget)).digest("hex")) return false;
+    if (toolName === "work_resume") {
+      return currentTurn && envelope.state === "paused" && hasExplicitControlIntent(currentTurn.text, "resume")
+        ? grant()
+        : false;
+    }
+
+    const permissionByTool = {
+      work_dispatch: "dispatch",
+      work_retry: "retry",
+      work_handoff: "handoff",
+      work_review: "review",
+      work_verify: "verify",
+      work_complete: "complete",
+    };
+    if (toolName === "work_merge" && envelope.deliveryTarget.kind === "merged") permissionByTool.work_merge = "merge";
+    if (toolName === "work_release" && ["published", "deployed"].includes(envelope.deliveryTarget.kind)) permissionByTool.work_release = "release";
+    if (toolName === "work_revise") {
+      const patch = args?.patch;
+      const keys = patch && typeof patch === "object" && !Array.isArray(patch) ? Object.keys(patch) : [];
+      const allowed = keys.length > 0 && keys.every((key) => ["state", "stage", "waitingReason"].includes(key)) &&
+        (patch.state === undefined || ["ready", "waiting"].includes(patch.state)) &&
+        (patch.stage === undefined || WORK_STAGES.includes(patch.stage)) &&
+        !["completed", "cancelled", "archived"].includes(envelope.state);
+      return allowed ? grant() : false;
+    }
+    const permission = permissionByTool[toolName];
+    const allowed = !!permission && charter.permissions.includes(permission) && !["completed", "cancelled", "archived"].includes(envelope.state);
+    return allowed ? grant() : false;
+  }
 
   // THE identity adapter (§4.1) — one composition; work_create and the
   // revalidation paths all resolve through it. Writes persist the reconcile
@@ -717,7 +815,7 @@ export function createCtoWorkControl({
       key: input.key,
       op: opName,
       args: argsSnapshot(input),
-      expectedRevision: input.expectedRevision,
+      expectedRevision: input.expectedRevision ?? input[GOAL_AUTH_REVISION],
       leaseOwner: RECEIPT_OWNER,
       leaseTtlMs,
     });
@@ -1149,12 +1247,13 @@ export function createCtoWorkControl({
   // maxStageAttempts the dispatch pipeline uses (§8.2).
   function assertStageAttemptBudget(env, stage) {
     const used = (env.attempts ?? []).filter((a) => a?.stage === stage).length;
-    if (used >= maxStageAttempts) {
+    const limit = env.executionCharter?.limits?.maxAttemptsPerStage ?? maxStageAttempts;
+    if (used >= limit) {
       throw controlError(
         "policy_blocked",
-        `attempt limit reached for work "${env.id}" stage "${stage}" (${used}/${maxStageAttempts}) — ` +
+        `attempt limit reached for work "${env.id}" stage "${stage}" (${used}/${limit}) — ` +
           `escalate rather than looping (§8.2: bounded human-facing behavior)`,
-        { retrySafe: false, details: { stage, attemptsUsed: used, limit: maxStageAttempts } },
+        { retrySafe: false, details: { stage, attemptsUsed: used, limit } },
       );
     }
   }
@@ -1839,7 +1938,11 @@ export function createCtoWorkControl({
   // the shared §7 control ledger (createOperationRunner over mantaControlStore).
   // ---------------------------------------------------------------------------
 
-  async function workCreate(input) {
+  async function workCreate(input, invocation = {}) {
+    const conversationId = await getConversationId();
+    const acceptedTurn = invocation?.sessionID === conversationId
+      ? await getTrustedExecutionTurn(invocation.sessionID)
+      : null;
     return createReceipts.runOperation({
       key: input?.key,
       op: "work.create",
@@ -1934,36 +2037,82 @@ export function createCtoWorkControl({
             repositoryRoot: resolved.defaultCwd,
           };
           validateProjectRefRef(projectRef);
+          const goalKey = acceptedTurn
+            ? canonicalArgsHash("work.goal", {
+                sourceSessionId: acceptedTurn.sessionId,
+                sourceMessageId: acceptedTurn.messageID,
+                workspaceId: projectRef.workspaceId,
+                objective: input.objective.trim().replace(/\s+/g, " ").toLowerCase(),
+                deliveryTarget: input.deliveryTarget,
+              })
+            : null;
 
-          let env;
-          try {
-            env = await work.createWork({
-              id: input.id,
-              origin: { conversationId, messageId: input.originMessageId ?? "unattributed" },
-              project: projectRef,
-              spec: { ...spec },
-              objective: input.objective,
-              deliveryTarget: { ...input.deliveryTarget },
-              dependencies: input.dependencies ?? [],
-              priority: input.priority ?? 0,
-              priorityReason: input.priorityReason ?? "",
-              schedulingClass: input.schedulingClass ?? "background",
-              stage: "specify",
-              state: input.state ?? "draft",
-              decisions: input.decisions ?? [],
-            });
-          } catch (error) {
-            throw toWorkToolError(error);
+          // A charter's provenance comes from the server's accepted human
+          // admission record, never the model-supplied originMessageId. The
+          // central role/session and an explicit execution instruction are
+          // both required; plan/spec/research-only turns create ordinary work
+          // without execution authority.
+          const originMessageId = acceptedTurn?.messageID ?? input.originMessageId ?? "unattributed";
+          const executionCharter = acceptedTurn ? {
+            version: 1,
+            revision: 1,
+            status: "active",
+            goalKey,
+            source: { kind: "ceo_instruction", sessionId: conversationId, messageId: acceptedTurn.messageID },
+            acceptedAt: acceptedTurn.acceptedAt,
+            scope: {
+              workspaceId: projectRef.workspaceId,
+              repositoryId: projectRef.repositoryId,
+              objectiveHash: createHash("sha256").update(input.objective).digest("hex"),
+              specHash: spec.hash,
+              deliveryTargetHash: createHash("sha256").update(canonicalJson(input.deliveryTarget)).digest("hex"),
+            },
+            limits: { maxAttemptsPerStage: maxStageAttempts },
+            scopeApprovals: [],
+            permissions: [
+              "dispatch", "retry", "handoff", "review", "verify", "complete",
+              ...(input.deliveryTarget.kind === "merged" ? ["merge"] : []),
+              ...(["published", "deployed"].includes(input.deliveryTarget.kind) ? ["release"] : []),
+            ],
+          } : undefined;
+
+          let env = goalKey ? await work.findExecutionGoal(goalKey) : null;
+          const created = !env;
+          if (!env) {
+            try {
+              env = await work.createWork({
+                id: input.id,
+                origin: { conversationId, messageId: originMessageId },
+                project: projectRef,
+                spec: { ...spec },
+                objective: input.objective,
+                deliveryTarget: { ...input.deliveryTarget },
+                ...(executionCharter ? { executionCharter } : {}),
+                dependencies: input.dependencies ?? [],
+                priority: input.priority ?? 0,
+                priorityReason: input.priorityReason ?? "",
+                schedulingClass: input.schedulingClass ?? "background",
+                stage: "specify",
+                state: input.state ?? "draft",
+                decisions: input.decisions ?? [],
+              });
+            } catch (error) {
+              if (goalKey && error?.code === "duplicate_execution_goal") {
+                env = await work.findExecutionGoal(goalKey);
+              }
+              if (!env) throw toWorkToolError(error);
+            }
           }
           return {
             workId: env.id,
             resourceId: `work:${env.id}`,
             revision: env.revision,
             state: env.state,
-            changed: true,
+            reused: !created,
+            changed: created,
             project: projectRef,
             summary:
-              `created work "${env.id}" (state ${env.state}, stage ${env.stage}) targeting project ` +
+              `${created ? "created" : "reused"} work "${env.id}" (state ${env.state}, stage ${env.stage}) targeting project ` +
               `"${resolved.tmuxSession}" at ${resolved.defaultCwd}; delivery target ${describeDeliveryTarget(env.deliveryTarget)}`,
           };
         } catch (error) {
@@ -1981,7 +2130,7 @@ export function createCtoWorkControl({
 
   const REVISE_FORBIDDEN_STATES = Object.freeze(["completed", "running", "archived", "cancelled"]);
 
-  async function workRevise(input) {
+  async function workRevise(input, invocation = {}) {
     assertPlainObject(input, "revise input");
     assertNonEmptyString(input.key, "idempotency key");
     assertNonEmptyString(input.work, "work");
@@ -2027,7 +2176,47 @@ export function createCtoWorkControl({
         const { specText, specRevision, ...rest } = patch;
         patch = { ...rest, spec: inlineWorkSpec(specText, specRevision) };
       }
-      const env = await work.reviseWork(input.work, patch, { expectedRevision: input.expectedRevision });
+      let executionCharter;
+      const scopeChanged = envBefore.executionCharter && (
+        (patch.objective !== undefined && patch.objective !== envBefore.objective) ||
+        (patch.project !== undefined && canonicalJson(patch.project) !== canonicalJson(envBefore.project)) ||
+        (patch.spec !== undefined && patch.spec.hash !== envBefore.spec.hash) ||
+        (patch.deliveryTarget !== undefined && canonicalJson(patch.deliveryTarget) !== canonicalJson(envBefore.deliveryTarget))
+      );
+      if (scopeChanged) {
+        const approval = invocation?.approvedConfirmation;
+        if (!approval || approval.tool !== "work_revise" || typeof approval.id !== "string") {
+          throw controlError("policy_blocked", "this edit changes the accepted goal scope; approve this exact revision before it can proceed", { retrySafe: false });
+        }
+        const project = patch.project ?? envBefore.project;
+        const objective = patch.objective ?? envBefore.objective;
+        const spec = patch.spec ?? envBefore.spec;
+        const deliveryTarget = patch.deliveryTarget ?? envBefore.deliveryTarget;
+        const nextRevision = envBefore.executionCharter.revision + 1;
+        const objectiveHash = createHash("sha256").update(objective).digest("hex");
+        const deliveryTargetHash = createHash("sha256").update(canonicalJson(deliveryTarget)).digest("hex");
+        const scope = {
+          workspaceId: project.workspaceId,
+          repositoryId: project.repositoryId,
+          objectiveHash,
+          specHash: spec.hash,
+          deliveryTargetHash,
+        };
+        const scopeHash = createHash("sha256").update(canonicalJson(scope)).digest("hex");
+        executionCharter = {
+          ...envBefore.executionCharter,
+          revision: nextRevision,
+          scope,
+          scopeApprovals: [
+            ...(envBefore.executionCharter.scopeApprovals ?? []),
+            { revision: nextRevision, confirmationId: approval.id, approvedAt: now(), scopeHash },
+          ].slice(-20),
+        };
+      }
+      const env = await work.reviseWork(input.work, patch, {
+        expectedRevision: input.expectedRevision ?? input[GOAL_AUTH_REVISION],
+        ...(executionCharter ? { executionCharter } : {}),
+      });
       // §5.2: a spec revision pauses advancement — a running worker was
       // pinned to the OLD spec; the envelope already marked its receipts
       // superseded, and the attempt is now marked so a late completion event
@@ -3845,6 +4034,8 @@ export function createCtoWorkControl({
     workCapacity,
     // mutations
     workCreate,
+    authorizeGoalCreation,
+    authorizeGoalMutation,
     workRevise,
     workPrioritize,
     workDispatch,
@@ -3872,21 +4063,57 @@ export function createCtoWorkControl({
 // ---------------------------------------------------------------------------
 // Tool registration — the production composition boundary. Each operation is
 // ONE tool with an ACTION-SPECIFIC params schema (no shared unvalidated args
-// bag). Reads are mode "auto"; every mutation is mode "confirm".
+// bag). Reads are mode "auto"; ordinary mutations are "confirm"; routine
+// workflow actions are "goal" and are auto-authorized only by a live charter.
 // ---------------------------------------------------------------------------
 
 const READ_TOOLS = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
+const GOAL_SCOPED_TOOLS = new Set([
+  "work_create", "work_revise", "work_dispatch", "work_pause", "work_resume", "work_cancel", "work_retry", "work_handoff",
+  "work_review", "work_merge", "work_release", "work_verify", "work_complete",
+]);
+const GOAL_AUTH_REVISION = Symbol("server-goal-authorized-work-revision");
 
 export function registerCtoWorkTools(register, workControl) {
   const def = (name, description, params, run) =>
     register({
       name,
-      description,
+      description: GOAL_SCOPED_TOOLS.has(name)
+        ? `${description} Runs autonomously only when a server-validated execution charter covers this exact work and target; otherwise requires user confirmation.`
+        : description,
       params,
-      mode: READ_TOOLS.has(name) ? "auto" : "confirm",
+      mode: READ_TOOLS.has(name) ? "auto" : GOAL_SCOPED_TOOLS.has(name) ? "goal" : "confirm",
       run: async (_ctx, args) => {
         try {
-          return await run(args ?? {});
+          if (_ctx?.goalScopedAuthorization === true) {
+            const grant = name === "work_create"
+              ? await workControl.authorizeGoalCreation?.(_ctx.sessionID)
+              : name.startsWith("work_")
+                ? await workControl.authorizeGoalMutation?.(name, args ?? {}, _ctx.sessionID)
+                : false;
+            const stillAuthorized = grant === true || grant?.allowed === true;
+            if (!stillAuthorized) {
+              return {
+                ok: false,
+                code: "policy_blocked",
+                retrySafe: false,
+                error: "execution charter changed or no longer covers this action; reconcile the work and request only the new authority that is missing",
+              };
+            }
+            if (name !== "work_create" && Number.isInteger(grant?.workRevision)) {
+              if (_ctx.goalAuthorizationRevision !== grant.workRevision) {
+                return {
+                  ok: false,
+                  code: "revision_conflict",
+                  retrySafe: true,
+                  error: "the work changed after its execution charter was checked; inspect the latest revision and re-authorize the action",
+                };
+              }
+              args = { ...(args ?? {}) };
+              Object.defineProperty(args, GOAL_AUTH_REVISION, { value: grant.workRevision, enumerable: false });
+            }
+          }
+          return await run(args ?? {}, _ctx ?? {});
         } catch (error) {
           const err = toWorkToolError(error);
           return { ok: false, code: err.code, retrySafe: err.retrySafe === true, error: err.message };
@@ -3960,7 +4187,7 @@ export function registerCtoWorkTools(register, workControl) {
       decisions: { type: "array", description: "Initial decision records (usually empty)." },
       originMessageId: { type: "string", description: "Optional originating CTO message id." },
     },
-    (args) => workControl.workCreate(args),
+    (args, invocation) => workControl.workCreate(args, invocation),
   );
 
   def(
@@ -3976,7 +4203,7 @@ export function registerCtoWorkTools(register, workControl) {
       patch: { type: "object", description: "The fields to change (objective, spec, deliveryTarget, dependencies, stage, state, waitingReason, priority, priorityReason, schedulingClass). To revise an inline brief instead of spec, provide specText plus specRevision (a higher integer); the server computes the hash." },
       reason: { type: "string", description: "Why the revision (recorded in the summary)." },
     },
-    (args) => workControl.workRevise(args),
+    (args, invocation) => workControl.workRevise(args, invocation),
   );
 
   def(

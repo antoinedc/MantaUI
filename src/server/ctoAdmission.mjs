@@ -1787,6 +1787,31 @@ async function claimAndAttemptAbort(record) {
     }
   }
 
+  // Trusted execution-goal provenance is available only to the in-process
+  // work coordinator. Unlike list(), this returns the accepted human turn's
+  // source id and text so work_create can bind a charter to the CEO instruction
+  // that caused the current CTO turn and suppress explicitly plan-only turns.
+  // This method is never exposed through an RPC or returned to the model.
+  async function currentAcceptedHumanTurn(sessionId) {
+    if (typeof sessionId !== "string" || !sessionId) return null;
+    try {
+      const fresh = await loadStore();
+      const record = [...fresh.submissions].reverse().find((r) =>
+        r.origin === "human" && r.status === "accepted" && r.sessionId === sessionId &&
+        typeof r.messageID === "string" && r.messageID.length > 0,
+      );
+      return record ? {
+        id: record.id,
+        sessionId: record.sessionId,
+        messageID: record.messageID,
+        acceptedAt: record.acceptedAt ?? record.updatedAt ?? record.createdAt,
+        text: record.text,
+      } : null;
+    } catch (err) {
+      wrapStoreError(err, "currentAcceptedHumanTurn");
+    }
+  }
+
   // -------------------------------------------------------------------------
   // interrupt — the EXPLICIT interruption operation (blockers 1+2). submit
   // never aborts. A request is VISIBLE immediately (cancel_requested /
@@ -1918,5 +1943,5 @@ async function claimAndAttemptAbort(record) {
     }
   }
 
-  return { submit, list, tick, reconcile, interrupt, observeEvent, trimTerminal };
+  return { submit, list, currentAcceptedHumanTurn, tick, reconcile, interrupt, observeEvent, trimTerminal };
 }

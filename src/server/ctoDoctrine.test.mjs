@@ -60,6 +60,14 @@ describe("composeCtoPrompt", () => {
     assert.notEqual(texts.executive, texts.handson);
   });
 
+  it("hands-on style confirms only at authority boundaries, not each chartered step", () => {
+    const doctrine = CTO_STYLE_DOCTRINES.handson;
+    assert.match(doctrine, /accepted work charter/i);
+    assert.match(doctrine, /without\s+asking permission for each side effect/i);
+    assert.match(doctrine, /outside\s+that authority/i);
+    assert.doesNotMatch(CTO_STYLE_SUMMARIES.handson, /confirms before acting/i);
+  });
+
   it("an unknown style falls back to the default preset's doctrine", () => {
     const out = composeCtoPrompt({ basePrompt: BASE, style: "bogus" });
     assert.match(out, /Operating doctrine: Executive/);

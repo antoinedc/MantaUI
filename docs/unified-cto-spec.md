@@ -268,6 +268,12 @@ Pause stops new stage admission and requests a safe checkpoint from running work
 
 ### 6.1 One policy path
 
+Outcome-based authorization and routine recovery are specified in the supplement
+[`cto-outcome-autonomy-spec.md`](cto-outcome-autonomy-spec.md). Its implementation
+status identifies the bounded-autonomy behavior now enforced by the server and
+the target-specific integrations still deferred; this document remains
+authoritative for requirements the supplement does not extend.
+
 Every side-effect operation is associated with either a specific CEO instruction or an existing autonomous plan-policy decision. The work coordinator orchestrates stages; it does not implement a competing confidence classifier. Existing budget, provider availability, target integrity and explicit standing instructions apply at dispatch time.
 
 The intended central CTO has full Manta management capabilities. At the supported tool boundary, management tools are withheld from workers, caller session identity comes from runtime tool context rather than model arguments, and the server checks the registered role binding. Supplying `role:"cto"` or copying a work ID in tool arguments does not confer the role.
