@@ -22,6 +22,7 @@ export function reconcileSubagents(input?: {
   existingAgents?: SubagentDefLike[];
   deactivated?: string[];
   optIn?: string[];
+  reservedNames?: string[];
 } | null): {
   upsert: SubagentDefLike[];
   remove: string[];

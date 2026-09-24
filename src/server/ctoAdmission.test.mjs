@@ -299,6 +299,21 @@ test("dispatch resolves the CURRENT binding at dispatch time and persists receip
   assert.equal(record.messageID, oc.sends[0].messageID);
 });
 
+test("currentAcceptedHumanTurn exposes only the trusted active source required to bind a work charter", async () => {
+  const { svc, oc } = buildService();
+  await svc.submit({ id: "ceo-origin-1", text: "Implement the export fix.", origin: "human" });
+  await svc.tick();
+  const current = await svc.currentAcceptedHumanTurn("ses_cto");
+  assert.equal(current.sessionId, "ses_cto");
+  assert.equal(current.messageID, oc.sends[0].messageID);
+  assert.equal(current.text, "Implement the export fix.");
+  assert.equal((await svc.list()).submissions[0].text, undefined, "user text is not added to the API-facing queue projection");
+  assert.equal(await svc.currentAcceptedHumanTurn("ses_other"), null);
+  oc.completeTurn(current.messageID);
+  await svc.reconcile();
+  assert.equal(await svc.currentAcceptedHumanTurn("ses_cto"), null, "completed turns no longer grant creation authority");
+});
+
 test("unbound role: submissions stay queued and nothing is sent", async () => {
   const { svc, oc } = buildService({ binding: fakeBinding({ currentSessionId: null }) });
   await svc.submit({ text: "hi", origin: "human" });

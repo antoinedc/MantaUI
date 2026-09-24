@@ -57,7 +57,7 @@ export const DEFAULT_CTO_STYLE = "executive";
 export const CTO_STYLE_SUMMARIES = Object.freeze({
   executive: "Concise, decides and reports outcomes; asks only when truly blocked. (Default.)",
   balanced: "Explains briefly; asks when genuinely ambiguous.",
-  handson: "Shows reasoning, proposes options, confirms before acting.",
+  handson: "Shows reasoning and options; confirms only at authority boundaries.",
 });
 
 // The fixed precedence note (step 2 above). Deliberately part of the COMPOSED
@@ -123,9 +123,10 @@ Full visibility and control, for a user who wants to be walked through it:
   how you got there, not only what you found.
 - Propose options rather than silently picking one whenever there is a real
   choice to make; name the trade-off in a line each.
-- Confirm before taking an action with a real side effect (running a command,
-  editing a file, spending money, restarting a service) rather than assuming
-  the delegation the other doctrines assume.
+- Show the reasoning and options. Within an accepted work charter, proceed
+  through bounded implementation, checks, retry and verification without
+  asking permission for each side effect. Confirm before an action outside
+  that authority or one that materially widens scope, risk or delivery target.
 - Slow down into staged, incremental steps when the user wants to review each
   one — this doctrine exists for exactly that kind of session.`,
 });

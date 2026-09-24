@@ -122,8 +122,9 @@ process.env.MANTA_OPENCODE_DB =
 
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { readFile, writeFile, mkdir, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   createCtoWorkControl,
@@ -147,7 +148,7 @@ import { MAX_RUNNING_JOBS, CAP_ERROR } from "./delegate.mjs";
 import { ctoPath, lockForStore, workStore, mantaControlStore } from "./ctoStores.mjs";
 import { stateHome } from "../shared/paths.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
-import { makeJsonStoreFixture } from "./ctoTestJsonStore.mjs";
+import { makeJsonStoreFixture, makeWorkStoreFixture } from "./ctoTestJsonStore.mjs";
 
 // ---------------------------------------------------------------------------
 // Fixtures — what the real server produces. Project cwds are REAL directories
@@ -177,16 +178,7 @@ let testSeq = 0;
 
 function workStoreFixture() {
   testSeq += 1;
-  const dir = ctoPath("work-tools-test", `work-${testSeq}`);
-  return {
-    name: "work",
-    dir,
-    pathFor: (id) => join(dir, `${id}.json`),
-    save: async (id, data) => {
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, `${id}.json`), JSON.stringify({ ...data, v: 1 }, null, 2));
-    },
-  };
+  return makeWorkStoreFixture("work-tools-test", `work-${testSeq}`);
 }
 
 function ledgerFixture() {
@@ -318,6 +310,7 @@ function makeWorkControl({
   store,
   ledger,
   conversationId = "ses_cto",
+  acceptedTurn = null,
   maxStageAttempts,
   cap,
   // §12 cleanup classification: path → porcelain status ("" = clean). A
@@ -356,6 +349,7 @@ function makeWorkControl({
     delegateOps: spy.engine,
     resolveCwd: resolveCwdOrThrow,
     getConversationId: async () => conversationId,
+    getAcceptedHumanTurn: async (sessionId) => acceptedTurn?.sessionId === sessionId ? acceptedTurn : null,
     configGet: async () => ({ projects: configState.projects.map((r) => ({ ...r })) }),
     persistProjectIdentity: async (plan) => {
       identityWrites.push(plan);
@@ -524,6 +518,139 @@ test("work_create fails closed on a renamed or ambiguous project", async () => {
       return true;
     },
   );
+});
+
+test("an explicit accepted CEO instruction creates a charter from server admission, not model-supplied provenance", async () => {
+  const acceptedTurn = {
+    id: "adm_1", sessionId: "ses_cto", messageID: "msg_ceo_1", acceptedAt: 1234,
+    text: "Implement the export fix and get its pull request verified.",
+  };
+  const { control, workStore } = makeWorkControl({ acceptedTurn });
+  const result = await control.workCreate({
+    key: "charter-create-1",
+    id: "chartered-export",
+    project: "manta",
+    objective: "Implement export fix",
+    specText: "# Outcome\nFix export behavior and verify the pull request.",
+    deliveryTarget: { kind: "pr" },
+    originMessageId: "msg_forged_by_model",
+    state: "draft",
+  }, { sessionID: "ses_cto" });
+  assert.equal(result.ok, true);
+  const saved = await workStore.load("chartered-export");
+  assert.equal(saved.origin.messageId, "msg_ceo_1");
+  assert.deepEqual(saved.executionCharter.source, {
+    kind: "ceo_instruction", sessionId: "ses_cto", messageId: "msg_ceo_1",
+  });
+  assert.equal(saved.executionCharter.revision, 1);
+  assert.equal(saved.executionCharter.scope.workspaceId, MANTA_PROJECT_ID);
+  assert.equal(saved.executionCharter.scope.repositoryId, "unmapped");
+  assert.equal(saved.executionCharter.scope.objectiveHash, createHash("sha256").update("Implement export fix").digest("hex"));
+  assert.equal(saved.executionCharter.scope.specHash, saved.spec.hash);
+  assert.deepEqual(saved.executionCharter.permissions, ["dispatch", "retry", "handoff", "review", "verify", "complete"]);
+  assert.deepEqual(saved.executionCharter.limits, { maxAttemptsPerStage: DEFAULT_MAX_STAGE_ATTEMPTS });
+  assert.equal((await control.authorizeGoalMutation("work_dispatch", { work: result.workId, expectedRevision: saved.revision }, "ses_cto")).workRevision, saved.revision);
+  assert.equal(await control.authorizeGoalMutation("work_dispatch", { work: result.workId, expectedRevision: saved.revision - 1 }, "ses_cto"), false);
+  assert.equal((await control.authorizeGoalMutation("work_dispatch", { work: result.workId }, "ses_cto")).allowed, true);
+  assert.equal(await control.authorizeGoalMutation("work_cancel", { work: result.workId }, "ses_cto"), false,
+    "an implementation request does not imply a request to cancel");
+  assert.equal(await control.authorizeGoalMutation("work_retry", { work: result.workId }, "ses_other"), false);
+  assert.equal(await control.authorizeGoalMutation("work_merge", { work: result.workId }, "ses_cto"), false,
+    "a PR-delivery charter must not silently authorize merging");
+  assert.equal((await control.authorizeGoalMutation("work_revise", { work: result.workId, patch: { state: "ready" } }, "ses_cto")).allowed, true);
+  assert.equal(await control.authorizeGoalMutation("work_revise", { work: result.workId, patch: { objective: "widen scope" } }, "ses_cto"), false);
+  const replay = await control.workCreate({
+    key: "model-generated-different-key",
+    id: "duplicate-export-goal",
+    project: "manta",
+    objective: "Implement export fix",
+    specText: "# Regenerated brief\nDifferent model phrasing must not create a second goal.",
+    deliveryTarget: { kind: "pr" },
+    state: "draft",
+  }, { sessionID: "ses_cto" });
+  assert.equal(replay.workId, result.workId, "source-goal uniqueness survives a changed idempotency key and model-generated spec wording");
+  assert.equal(replay.reused, true);
+  assert.equal(await workStore.load("duplicate-export-goal"), null);
+  acceptedTurn.text = "Pause this work while I check the release plan.";
+  assert.equal((await control.authorizeGoalMutation("work_pause", { work: result.workId }, "ses_cto")).allowed, true);
+  acceptedTurn.text = "Should I stop this work?";
+  assert.equal(await control.authorizeGoalMutation("work_pause", { work: result.workId }, "ses_cto"), false);
+  acceptedTurn.text = "Cancel this work; stop the attempt.";
+  assert.equal((await control.authorizeGoalMutation("work_cancel", { work: result.workId }, "ses_cto")).allowed, true);
+});
+
+test("plan-only, ambiguous, and off-session work creation do not mint execution charters", async () => {
+  for (const [text, invocation, shouldCreate, shouldAuthorize] of [
+    ["Plan only: show how we might fix this.", { sessionID: "ses_cto" }, false, false],
+    ["Make a plan to fix this; do not implement yet.", { sessionID: "ses_cto" }, false, false],
+    ["What would it take to fix this?", { sessionID: "ses_cto" }, false, false],
+    ["Should we implement this now?", { sessionID: "ses_cto" }, false, false],
+    ["Why did we build this?", { sessionID: "ses_cto" }, false, false],
+    ["Implement this change.", { sessionID: "ses_other" }, false, true],
+  ]) {
+    const acceptedTurn = { id: `adm-${text}`, sessionId: "ses_cto", messageID: "msg_real", acceptedAt: 9, text };
+    const { control, workStore } = makeWorkControl({ acceptedTurn });
+    const id = `no-charter-${Buffer.from(text).toString("hex").slice(0, 12)}`;
+    const result = await control.workCreate({
+      key: `${id}-receipt`, id, project: "manta", objective: "Explore the outcome",
+      specText: "# Outcome\nDescribe the requested work.", deliveryTarget: { kind: "pr" }, state: "draft",
+    }, invocation);
+    assert.equal(result.ok, true);
+    assert.equal(!!(await workStore.load(id)).executionCharter, shouldCreate, text);
+    assert.equal(await control.authorizeGoalCreation("ses_cto"), shouldAuthorize, text);
+  }
+});
+
+test("an explicit specification request can autonomously create a charter bounded to the specification target", async () => {
+  const { control, workStore } = makeWorkControl({
+    acceptedTurn: {
+      id: "adm-spec", sessionId: "ses_cto", messageID: "msg_spec", acceptedAt: 55,
+      text: "Spec this change and stop at the settled specification.",
+    },
+  });
+  const result = await control.workCreate({
+    key: "spec-charter", id: "spec-only", project: "manta", objective: "Write the specification",
+    specText: "# Outcome\nCreate and verify a settled specification.", deliveryTarget: { kind: "spec" }, state: "draft",
+  }, { sessionID: "ses_cto" });
+  assert.equal(result.ok, true);
+  const saved = await workStore.load("spec-only");
+  assert.ok(saved.executionCharter);
+  assert.deepEqual(saved.executionCharter.permissions, ["dispatch", "retry", "handoff", "review", "verify", "complete"]);
+  assert.equal(await control.authorizeGoalMutation("work_merge", { work: "spec-only" }, "ses_cto"), false);
+  assert.equal(await control.authorizeGoalMutation("work_release", { work: "spec-only" }, "ses_cto"), false);
+});
+
+test("scope edits require a one-shot confirmation and mint a new audited charter revision", async () => {
+  const { control, workStore } = makeWorkControl({
+    acceptedTurn: {
+      id: "adm-scope", sessionId: "ses_cto", messageID: "msg_scope", acceptedAt: 99,
+      text: "Implement the export fix.",
+    },
+  });
+  const created = await control.workCreate({
+    key: "scope-base", id: "scope-goal", project: "manta", objective: "Implement export fix",
+    specText: "# Outcome\nFix the export behavior.", deliveryTarget: { kind: "pr" }, state: "draft",
+  }, { sessionID: "ses_cto" });
+  await assert.rejects(control.workRevise({
+    key: "scope-denied", work: created.workId,
+    patch: { objective: "Also redesign all exports" },
+  }), /changes the accepted goal scope/);
+  const revised = await control.workRevise({
+    key: "scope-approved", work: created.workId,
+    patch: { objective: "Also redesign all exports" },
+    reason: "CEO approved scope expansion",
+  }, { approvedConfirmation: { id: "confirm-scope-123", tool: "work_revise" } });
+  assert.equal(revised.ok, true);
+  const saved = await workStore.load(created.workId);
+  assert.equal(saved.executionCharter.revision, 2);
+  assert.equal(saved.executionCharter.scope.objectiveHash, createHash("sha256").update(saved.objective).digest("hex"));
+  assert.deepEqual(saved.executionCharter.scopeApprovals, [{
+    revision: 2,
+    confirmationId: "confirm-scope-123",
+    approvedAt: saved.executionCharter.scopeApprovals[0].approvedAt,
+    scopeHash: saved.executionCharter.scopeApprovals[0].scopeHash,
+  }]);
+  assert.equal((await control.authorizeGoalMutation("work_dispatch", { work: created.workId }, "ses_cto")).allowed, true);
 });
 
 test("counterfactual: a valid target resolves and the envelope carries the explicit ProjectRef", async () => {
@@ -1486,7 +1613,7 @@ test("sandbox canary: the production work and control stores resolve under MANTA
 // W18 — tool registration
 // ---------------------------------------------------------------------------
 
-test("tool registration: 22 family tools, reads auto, mutations confirm, params action-specific", () => {
+test("tool registration: reads auto, charter-scoped workflow actions goal-mode, other mutations confirm", () => {
   const { control } = makeWorkControl();
   const tools = [];
   registerCtoWorkTools((def) => tools.push(def), control);
@@ -1502,9 +1629,14 @@ test("tool registration: 22 family tools, reads auto, mutations confirm, params 
     );
   }
   const reads = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
+  const goalScoped = new Set([
+    "work_create", "work_revise", "work_dispatch", "work_pause", "work_resume", "work_cancel", "work_retry", "work_handoff",
+    "work_review", "work_merge", "work_release", "work_verify", "work_complete",
+  ]);
   for (const t of tools) {
     assert.ok(t.name.startsWith("work_"));
-    assert.equal(t.mode, reads.has(t.name) ? "auto" : "confirm");
+    assert.equal(t.mode, reads.has(t.name) ? "auto" : goalScoped.has(t.name) ? "goal" : "confirm");
+    if (goalScoped.has(t.name)) assert.match(t.description, /server-validated execution charter/);
     assert.ok(t.description.length > 20);
     assert.ok(t.params && typeof t.params === "object");
   }
@@ -1522,6 +1654,40 @@ test("tool registration: 22 family tools, reads auto, mutations confirm, params 
   assert.ok(!cleanupParams.includes("model"), "cleanup does not accept a model");
   assert.ok(cleanupParams.includes("overrideDirty"), "cleanup carries the §12 override flag");
   assert.ok(handoffParams.includes("constraints"), "the handoff carries the §10 constraint list");
+});
+
+test("goal-mode tool rechecks the charter at execution immediately before invoking its mutation", async () => {
+  const registered = new Map();
+  const calls = [];
+  let authorized = false;
+  let currentRevision = 2;
+  registerCtoWorkTools((definition) => { registered.set(definition.name, definition); return definition; }, {
+    authorizeGoalMutation: async (name, args, sessionID) => {
+      calls.push(["authorize", name, args.work, sessionID]);
+      return authorized ? { allowed: true, workRevision: currentRevision } : false;
+    },
+    workDispatch: async (args) => {
+      const revision = Object.getOwnPropertySymbols(args).map((symbol) => args[symbol]).find(Number.isInteger);
+      calls.push(["dispatch", args.work, revision]);
+      return { ok: true };
+    },
+  });
+  const run = registered.get("work_dispatch").run;
+  const denied = await run({ sessionID: "ses_cto", goalScopedAuthorization: true }, { work: "w1" });
+  assert.equal(denied.code, "policy_blocked");
+  assert.equal(calls.some((call) => call[0] === "dispatch"), false);
+  authorized = true;
+  const stale = await run({ sessionID: "ses_cto", goalScopedAuthorization: true, goalAuthorizationRevision: 1 }, { work: "w1" });
+  assert.equal(stale.code, "revision_conflict");
+  assert.equal(calls.some((call) => call[0] === "dispatch"), false, "a grant for an older revision cannot act on a newer scope");
+  const allowed = await run({ sessionID: "ses_cto", goalScopedAuthorization: true, goalAuthorizationRevision: 2 }, { work: "w1" });
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(calls, [
+    ["authorize", "work_dispatch", "w1", "ses_cto"],
+    ["authorize", "work_dispatch", "w1", "ses_cto"],
+    ["authorize", "work_dispatch", "w1", "ses_cto"],
+    ["dispatch", "w1", 2],
+  ]);
 });
 
 // ---------------------------------------------------------------------------

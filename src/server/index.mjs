@@ -157,6 +157,7 @@ import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
 import { createCtoWorkControl } from "./ctoWorkTools.mjs";
+import { createCtoWorkReconciler } from "./ctoWorkReconcile.mjs";
 import * as ctoBudget from "./ctoBudget.mjs";
 import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
@@ -884,8 +885,14 @@ delegateEngine.reconcileJobsOnBoot().catch((e) =>
 const ctoWorkControl = createCtoWorkControl({
   listProjects: () => tmux.listProjects(),
   delegateOps: delegateEngine,
+  getAcceptedHumanTurn: (sessionId) => ctoAdmissionEngine.currentAcceptedHumanTurn(sessionId),
 });
 workOutcomeSink = (job) => ctoWorkControl.recordWorkerOutcome(job);
+const ctoWorkReconciler = createCtoWorkReconciler({
+  listJobs: () => delegateEngine.listJobs(),
+  recordWorkerOutcome: (job) => workOutcomeSink(job),
+});
+ctoWorkReconciler.start();
 // eslint-disable-next-line no-unused-vars
 const { stop: stopDelegateSweeper } = delegateEngine.startSweeper();
 // eslint-disable-next-line no-unused-vars
@@ -5401,11 +5408,25 @@ const handleRequest = async (req, res) => {
         const body = await readJsonBody(req);
         const engine = getCtoEngine();
         const definition = engine.listTools().find((t) => t.name === body?.tool);
-        if (definition?.mode === "confirm" && /^(projects|sessions|work)_/.test(definition.name)) {
+        let goalScopedAuthorization = false;
+        let goalAuthorizationRevision;
+        if (["confirm", "goal"].includes(definition?.mode) && /^(projects|sessions|work)_/.test(definition.name)) {
           const authorization = authorizeCtoProjectMutation(definition, body?.sessionID, await ctoConversation.state(), CTO_AGENT_NAME);
           if (!authorization.ok) {
             respondJson(res, 403, authorization);
             return;
+          }
+          if (definition.name === "work_create") {
+            goalScopedAuthorization = typeof engine.authorizeGoalCreation === "function" &&
+              await engine.authorizeGoalCreation(body?.sessionID);
+          } else if (definition.name.startsWith("work_")) {
+            const grant = typeof engine.authorizeGoalMutation === "function"
+              ? await engine.authorizeGoalMutation(definition.name, body?.args ?? {}, body?.sessionID)
+              : false;
+            goalScopedAuthorization = grant === true || grant?.allowed === true;
+            if (goalScopedAuthorization && Number.isInteger(grant?.workRevision)) {
+              goalAuthorizationRevision = grant.workRevision;
+            }
           }
         }
         // Text-loop gate (Issue 2): an `approve` id re-authorizes the previously
@@ -5424,10 +5445,22 @@ const handleRequest = async (req, res) => {
         // (handled inside dispatch via trustedActions / the approve loop).
         const toolModes = new Map(engine.listTools().map((t) => [t.name, t.mode]));
         const gate = (toolName) => (toolModes.get(toolName) === "confirm" ? "confirm" : "allow");
+        const configuredTrustedActions = Array.isArray(cfg?.cto?.trustedActions) ? cfg.cto.trustedActions : [];
+        // Goal-mode tools deliberately ignore the global trustedActions list:
+        // only the per-work charter check above can authorize routine work.
+        // The user can still approve one exact unchartered operation through
+        // the normal pending-confirmation path.
+        const trustedActions = definition?.mode === "goal"
+          ? goalScopedAuthorization ? [definition.name] : []
+          : goalScopedAuthorization
+            ? [...new Set([...configuredTrustedActions, definition.name])]
+            : configuredTrustedActions;
         const result = await engine.dispatch(body?.tool, body?.args ?? {}, {
           sessionID: body?.sessionID,
           cwd: body?.directory,
-          trustedActions: Array.isArray(cfg?.cto?.trustedActions) ? cfg.cto.trustedActions : [],
+          goalScopedAuthorization,
+          goalAuthorizationRevision,
+          trustedActions,
           gate,
         });
         respondJson(res, result.ok ? 200 : 400, result);

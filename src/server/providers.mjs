@@ -236,10 +236,12 @@ export function upsertAgentBlock(cfg, input) {
 // Project the config's agent map down to SubagentDef[]. ONLY blocks with a
 // `model` string are projected — this filters out opencode's built-in agents
 // (which have no model in config) so the UI never renders/clobbers them.
+// Primary roles are not subagents: disabling their model for task workers
+// must never delete the CTO (or a user's primary agent).
 export function readAgentBlocks(cfg) {
   const agents = getAgentMap(cfg);
   return Object.entries(agents)
-    .filter(([, block]) => typeof block.model === "string" && block.model)
+    .filter(([, block]) => block.mode !== "primary" && typeof block.model === "string" && block.model)
     .map(([name, block]) => ({
       name,
       model: block.model,
@@ -600,7 +602,8 @@ export async function syncSubagents(
     return [];
   }
   const existingAgents = readAgentBlocks(cfg);
-  const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated, optIn });
+  const reservedNames = Object.keys(getAgentMap(cfg));
+  const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated, optIn, reservedNames });
   if (upsert.length === 0 && remove.length === 0) return existingAgents;
 
   const result = await applySubagents({ upsert, remove });

@@ -90,14 +90,14 @@ function modelKey(providerID, modelID) {
  *   remove: string[],
  * }}
  */
-export function reconcileSubagents({ models = [], existingAgents = [], deactivated = [], optIn = [] } = {}) {
+export function reconcileSubagents({ models = [], existingAgents = [], deactivated = [], optIn = [], reservedNames = [] } = {}) {
   const deactivatedSet = new Set(deactivated);
   const optInSet = new Set(optIn);
   const existingByModel = new Map();
   for (const agent of existingAgents) {
     if (!existingByModel.has(agent.model)) existingByModel.set(agent.model, agent);
   }
-  const takenNames = new Set(existingAgents.map((a) => a.name.toLowerCase()));
+  const takenNames = new Set([...existingAgents.map((a) => a.name), ...reservedNames].map(name => name.toLowerCase()));
 
   const upsert = [];
   for (const m of models) {

@@ -5,7 +5,7 @@ import { authorizeCtoProjectMutation as authorize } from "./ctoConversation.mjs"
 
 const authorizeCtoProjectMutation = (tool, sessionID, state) => authorize(tool, sessionID, state, "cto");
 
-const mutation = { name: "work_dispatch", mode: "confirm" };
+const mutation = { name: "work_dispatch", mode: "goal" };
 const state = (agent = "cto", status = "accepted") => ({
   binding: { sessionId: "ses_cto" },
   submissions: [{ sessionId: "ses_cto", agent, status }],
@@ -37,7 +37,15 @@ test("production route authorizes before processing approval ids or dispatch", a
   const route = source.split('if (path === "/api/cto")')[1].split('// ---------- Inline media')[0];
   const guard = route.indexOf("authorizeCtoProjectMutation(");
   assert.ok(guard >= 0);
+  const goalCreationGrant = route.indexOf("engine.authorizeGoalCreation(");
+  const goalMutationGrant = route.indexOf("engine.authorizeGoalMutation(");
   assert.ok(guard < route.indexOf("engine.approveConfirm("));
   assert.ok(guard < route.indexOf("engine.dispatch("));
+  assert.ok(goalCreationGrant > guard && goalCreationGrant < route.indexOf("engine.dispatch("));
+  assert.ok(goalMutationGrant > guard && goalMutationGrant < route.indexOf("engine.dispatch("));
+  assert.match(route, /definition\?\.mode === "goal"\s*\?\s*goalScopedAuthorization\s*\?\s*\[definition\.name\]\s*:\s*\[\]/);
+  assert.match(route, /Goal-mode tools deliberately ignore the global trustedActions list/);
+  assert.match(route, /grant\?\.workRevision/);
+  assert.match(route, /goalAuthorizationRevision,/);
   assert.match(route, /respondJson\(res, 403, authorization\);\s*return;/);
 });
