@@ -1051,6 +1051,81 @@ test("BET-1275 11b: a named Sub-ticked model runs on it, skip routing, and emits
   );
 });
 
+test("model hint: routing is NOT switched off — the hint is the router's incumbent and the router's pick runs", async () => {
+  const h = startHarness("child_hint_routed");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } }); // routing ON
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  let seenIncumbent;
+  h.deps.chooseSubagentModel = ({ incumbent }) => {
+    seenIncumbent = incumbent;
+    return { providerID: "deepseek", modelID: "deepseek-chat" }; // the router overrides the hint
+  };
+  const out = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", modelHint: "opus" },
+    h.deps,
+  );
+  assert.equal(out.ok, true);
+  assert.deepEqual(seenIncumbent, { providerID: "anthropic", modelID: "claude-opus-4-5" }, "the hint reaches the router as its incumbent");
+  assert.deepEqual(h.delivered[0].model, { providerID: "deepseek", modelID: "deepseek-chat" }, "the router's choice wins over a hint");
+  assert.equal(out.job.requestedModel, null, "a hint is not a named (pinned) request");
+});
+
+test("model hint: with routing OFF the job runs on the hint, exactly like a named model", async () => {
+  const h = startHarness("child_hint_off");
+  h.deps.configGet = async () => ({}); // no preset → routing off
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  const out = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", modelHint: "opus" },
+    h.deps,
+  );
+  assert.equal(out.ok, true);
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+});
+
+test("model hint: an unmatchable hint is dropped (routing proceeds), never fails the spawn", async () => {
+  const h = startHarness("child_hint_bad");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  let seenIncumbent = "unset";
+  h.deps.chooseSubagentModel = ({ incumbent }) => {
+    seenIncumbent = incumbent;
+    return { providerID: "deepseek", modelID: "deepseek-chat" };
+  };
+  const out = await startJob(
+    { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", modelHint: "zzz-no-such-model" },
+    h.deps,
+  );
+  assert.equal(out.ok, true);
+  assert.equal(seenIncumbent, null);
+  assert.deepEqual(h.delivered[0].model, { providerID: "deepseek", modelID: "deepseek-chat" });
+});
+
+test("model hint: a routing exception falls back to the hint, not the box default", async () => {
+  const h = startHarness("child_hint_throw");
+  h.deps.configGet = async () => ({ modelRouting: { preset: "economy" } });
+  h.deps.listSnapshots = () => [];
+  h.deps.listModels = async () => mockModels();
+  h.deps.chooseSubagentModel = () => {
+    throw new Error("router exploded");
+  };
+  const origErr = console.error;
+  console.error = () => {};
+  let out;
+  try {
+    out = await startJob(
+      { prompt: "do it", parentSessionID: "parent", parentDirectory: "/repo", modelHint: "opus" },
+      h.deps,
+    );
+  } finally {
+    console.error = origErr;
+  }
+  assert.equal(out.ok, true);
+  assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
+});
+
 test("BET-1275 rule 3: a named UN-ticked model fails loudly naming close candidates", async () => {
   const h = harness([]);
   h.deps.listModels = async () => mockModels();

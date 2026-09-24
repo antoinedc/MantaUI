@@ -753,7 +753,7 @@ export function chooseSubagentModel({
 }
 
 /**
- * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, subagent_type?:string, parentSessionID:string, parentDirectory:string,
+ * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, modelHint?:string|{providerID:string, modelID:string, variant?:string}, subagent_type?:string, parentSessionID:string, parentDirectory:string,
  *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
  *        `model` (BET-947, BET-1275 11b) — optional model for the job's session:
  *        free text resolved via the shared fuzzy matcher, or a structured
@@ -761,6 +761,10 @@ export function chooseSubagentModel({
  *        SWITCH for Auto routing (never routed over) and must still be in the
  *        user's Sub-ticked (routable) set — an un-ticked / deactivated /
  *        unmatchable value fails the delegation loudly naming candidates.
+ *        `modelHint` — optional SUGGESTED model (same forms as `model`). Unlike
+ *        `model` it does NOT switch Auto off: it is the router's incumbent, so
+ *        usage-aware routing may replace it. Used by the CTO for models it
+ *        chose itself (only a user-named model is passed as `model`).
  *        `subagent_type` (BET-1275 11a) — the job's own intent declaration; Auto
  *        routing applies this agent's tier floor instead of a hardcoded
  *        "general". Absent/blank maps to "general".
@@ -839,6 +843,24 @@ export async function startJob(input, deps = {}) {
     requestedModel = `${deliverModel.providerID}/${deliverModel.modelID}`;
   }
 
+  // A model HINT (distinct from a named model): a caller's own suggestion —
+  // e.g. the CTO picking a worker model on its own initiative — that Auto
+  // routing may override. It is NOT the off switch. It becomes the router's
+  // incumbent, so with routing off (or no survivor) the job runs on it exactly
+  // as a named model would, and with routing on the usage-aware router decides
+  // (a nearly-depleted provider loses to one with headroom). An unmatchable /
+  // unticked hint is dropped with a log rather than failing the spawn — it was
+  // only ever a suggestion. Ignored when a named `model` is also present.
+  let hintModel = null;
+  if (!input?.model && input?.modelHint) {
+    try {
+      hintModel = resolveNamedModel(input.modelHint, catalog);
+    } catch (e) {
+      console.warn(`[delegate] model hint ignored (${e?.message ?? e}); routing without it`);
+      hintModel = null;
+    }
+  }
+
   // BET-1535 (S3): the ROUTING decision also happens BEFORE a window is
   // created, so a no-healthy-endpoint verdict refuses the spawn cleanly and
   // orphans nothing (the same principle as the 11b named-model rejection
@@ -879,7 +901,7 @@ export async function startJob(input, deps = {}) {
         }
       }
       return route({
-        incumbent: null,
+        incumbent: hintModel,
         catalog,
         policy,
         agent: resolveSubagentAgent(input?.subagent_type),
@@ -923,6 +945,10 @@ export async function startJob(input, deps = {}) {
         }
       }
     }
+    // A routing exception (not the health verdict) degrades to the hint when
+    // one was given — the same "fall back to the incumbent" contract
+    // chooseSubagentModel applies internally — rather than the box default.
+    if (!routedModel && !verdictErr && hintModel) routedModel = hintModel;
     // Final fail-closed + the W8 self-doubt alarm: a verdict where EVERY drop
     // was a health drop means the health model may simply be wrong — fail
     // closed AND say so (ledger row).

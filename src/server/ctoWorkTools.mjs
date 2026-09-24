@@ -182,6 +182,27 @@ export const DEFAULT_MAX_STAGE_ATTEMPTS = 3;
 // before CEO requests". Interactive dispatch itself never yields.
 export const DEFAULT_INTERACTIVE_RESERVE = 1;
 
+// Which model argument a worker spawn carries. Only a model the USER named is a
+// hard pin (`modelPinned: true` → the delegate `model`, the off switch for Auto
+// routing, honoured verbatim). A model the CTO picked on its own is a HINT: the
+// usage-aware router may replace it (a provider at 99% that resets in days
+// loses to one with headroom that resets tonight). The default is the hint, so
+// forgetting the flag can only ever let routing decide — never lock a choice in.
+function assertWorkerStartInput(input, label) {
+  assertPlainObject(input, label);
+  assertNonEmptyString(input.key, "idempotency key");
+  assertNonEmptyString(input.work, "work");
+  if (input.modelPinned !== undefined && typeof input.modelPinned !== "boolean") {
+    throw controlError("unsupported", "modelPinned must be a boolean when present");
+  }
+}
+
+export function workerModelArgs(input) {
+  const model = input?.model;
+  if (model === undefined || model === null || model === "") return {};
+  return input?.modelPinned === true ? { model } : { modelHint: model };
+}
+
 // P6 checkpoint handoffs (spec §10). Bounded: at most HANDOFF_KEEP records per
 // envelope (oldest trimmed, count reported), string fields clipped with a
 // visible marker at NOTE_MAX_CHARS (the file's shared bounded-text rule),
@@ -2431,7 +2452,7 @@ export function createCtoWorkControl({
         isolationRequired: true,
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op },
         actor: "cto",
-        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...workerModelArgs(input),
         ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
       });
       if (!started?.ok || !started.job) {
@@ -2474,9 +2495,7 @@ export function createCtoWorkControl({
   }
 
   async function workDispatch(input) {
-    assertPlainObject(input, "dispatch input");
-    assertNonEmptyString(input.key, "idempotency key");
-    assertNonEmptyString(input.work, "work");
+    assertWorkerStartInput(input, "dispatch input");
     // The completion parent (§8.1) — resolved at admission so an unbound
     // conversation fails BEFORE any reservation or external effect.
     const completionParentSessionId = input.completionParentSessionId ?? (await getConversationId());
@@ -2571,9 +2590,7 @@ export function createCtoWorkControl({
   }
 
   async function workRetry(input) {
-    assertPlainObject(input, "retry input");
-    assertNonEmptyString(input.key, "idempotency key");
-    assertNonEmptyString(input.work, "work");
+    assertWorkerStartInput(input, "retry input");
     const completionParentSessionId = input.completionParentSessionId ?? (await getConversationId());
     if (typeof completionParentSessionId !== "string" || !completionParentSessionId) {
       throw controlError(
@@ -4254,7 +4271,8 @@ export function registerCtoWorkTools(register, workControl) {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id (must be ready)." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
-      model: { type: "string", description: "Optional model for the worker (validated against the box's routable set)." },
+      model: { type: "string", description: "Optional model for the worker. Leave it OUT unless the user named a model: omitted, usage-aware Auto routing picks the worker model (plan headroom, reset times, health). When given without modelPinned it is only a hint the router may override." },
+      modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model — then it is used verbatim and Auto routing is off. Default false: `model` is a routing hint." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the worker." },
     },
     (args) => workControl.workDispatch(args),
@@ -4308,7 +4326,8 @@ export function registerCtoWorkTools(register, workControl) {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id (failed, or reported-complete awaiting next stages)." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
-      model: { type: "string", description: "Optional model for the new worker." },
+      model: { type: "string", description: "Optional model for the new worker. Leave it OUT unless the user named a model (usage-aware Auto routing picks otherwise); without modelPinned it is only a routing hint." },
+      modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model (used verbatim, Auto off). Default false." },
       subagentType: { type: "string", description: "Optional subagent type / intent." },
     },
     (args) => workControl.workRetry(args),
@@ -4392,7 +4411,7 @@ export function registerCtoWorkTools(register, workControl) {
       key: { type: "string", description: "Stable idempotency key." },
       work: { type: "string", description: "The work id (ready, or reported-complete awaiting its next stages)." },
       headSha: { type: "string", description: "The exact candidate head SHA to review." },
-      reviewerModel: { type: "string", description: "The requested reviewer model — used verbatim, never substituted." },
+      reviewerModel: { type: "string", description: "The requested reviewer model — used verbatim, never substituted. Choose one with plan headroom (get_usage): avoid a provider that is nearly depleted with a distant reset." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the reviewer." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
     },
