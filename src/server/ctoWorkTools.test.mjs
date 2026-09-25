@@ -553,13 +553,14 @@ test("an explicit accepted CEO instruction creates a charter from server admissi
   assert.equal((await control.authorizeGoalMutation("work_dispatch", { work: result.workId, expectedRevision: saved.revision }, "ses_cto")).workRevision, saved.revision);
   assert.equal(await control.authorizeGoalMutation("work_dispatch", { work: result.workId, expectedRevision: saved.revision - 1 }, "ses_cto"), false);
   assert.equal((await control.authorizeGoalMutation("work_dispatch", { work: result.workId }, "ses_cto")).allowed, true);
-  assert.equal(await control.authorizeGoalMutation("work_cancel", { work: result.workId }, "ses_cto"), false,
-    "an implementation request does not imply a request to cancel");
+  assert.equal((await control.authorizeGoalMutation("work_cancel", { work: result.workId }, "ses_cto")).allowed, true,
+    "autonomy default: cancelling is routine and needs no specific wording");
   assert.equal(await control.authorizeGoalMutation("work_retry", { work: result.workId }, "ses_other"), false);
   assert.equal(await control.authorizeGoalMutation("work_merge", { work: result.workId }, "ses_cto"), false,
     "a PR-delivery charter must not silently authorize merging");
   assert.equal((await control.authorizeGoalMutation("work_revise", { work: result.workId, patch: { state: "ready" } }, "ses_cto")).allowed, true);
-  assert.equal(await control.authorizeGoalMutation("work_revise", { work: result.workId, patch: { objective: "widen scope" } }, "ses_cto"), false);
+  assert.equal((await control.authorizeGoalMutation("work_revise", { work: result.workId, patch: { objective: "widen scope" } }, "ses_cto")).allowed, true,
+    "autonomy default: the CTO may revise scope itself");
   const replay = await control.workCreate({
     key: "model-generated-different-key",
     id: "duplicate-export-goal",
@@ -575,31 +576,46 @@ test("an explicit accepted CEO instruction creates a charter from server admissi
   acceptedTurn.text = "Pause this work while I check the release plan.";
   assert.equal((await control.authorizeGoalMutation("work_pause", { work: result.workId }, "ses_cto")).allowed, true);
   acceptedTurn.text = "Should I stop this work?";
-  assert.equal(await control.authorizeGoalMutation("work_pause", { work: result.workId }, "ses_cto"), false);
+  assert.equal((await control.authorizeGoalMutation("work_pause", { work: result.workId }, "ses_cto")).allowed, true,
+    "authorization never depends on the wording of the user's message");
   acceptedTurn.text = "Cancel this work; stop the attempt.";
   assert.equal((await control.authorizeGoalMutation("work_cancel", { work: result.workId }, "ses_cto")).allowed, true);
 });
 
-test("plan-only, ambiguous, and off-session work creation do not mint execution charters", async () => {
-  for (const [text, invocation, shouldCreate, shouldAuthorize] of [
-    ["Plan only: show how we might fix this.", { sessionID: "ses_cto" }, false, false],
-    ["Make a plan to fix this; do not implement yet.", { sessionID: "ses_cto" }, false, false],
-    ["What would it take to fix this?", { sessionID: "ses_cto" }, false, false],
-    ["Should we implement this now?", { sessionID: "ses_cto" }, false, false],
-    ["Why did we build this?", { sessionID: "ses_cto" }, false, false],
-    ["Implement this change.", { sessionID: "ses_other" }, false, true],
+test("autonomy default: work creation is authorized for the CTO conversation regardless of wording; never off-session", async () => {
+  for (const text of [
+    "work autonomously, wrap up the work and clear the cards",
+    "still looks fucked",
+    "status?",
+    "Plan only: show how we might fix this.",
   ]) {
     const acceptedTurn = { id: `adm-${text}`, sessionId: "ses_cto", messageID: "msg_real", acceptedAt: 9, text };
-    const { control, workStore } = makeWorkControl({ acceptedTurn });
-    const id = `no-charter-${Buffer.from(text).toString("hex").slice(0, 12)}`;
-    const result = await control.workCreate({
-      key: `${id}-receipt`, id, project: "manta", objective: "Explore the outcome",
-      specText: "# Outcome\nDescribe the requested work.", deliveryTarget: { kind: "pr" }, state: "draft",
-    }, invocation);
-    assert.equal(result.ok, true);
-    assert.equal(!!(await workStore.load(id)).executionCharter, shouldCreate, text);
-    assert.equal(await control.authorizeGoalCreation("ses_cto"), shouldAuthorize, text);
+    const { control } = makeWorkControl({ acceptedTurn });
+    assert.equal(await control.authorizeGoalCreation("ses_cto"), true, text);
+    assert.equal(await control.authorizeGoalCreation("ses_other"), false, text);
+    assert.equal(await control.authorizeGoalCreation(""), false, text);
   }
+  // Background turns (scheduled check-ins, worker notices) have no accepted
+  // human turn at all — the CTO is still autonomous.
+  const { control } = makeWorkControl({ acceptedTurn: null });
+  assert.equal(await control.authorizeGoalCreation("ses_cto"), true);
+});
+
+test("autonomy default: charter-less work is fully drivable; merge/release beyond target and destructive cleanup are not", async () => {
+  const { control, workStore } = makeWorkControl({ acceptedTurn: null });
+  const created = await seedReadyWork(control, { id: "no-charter-drive" });
+  const saved = await workStore.load(created.workId);
+  assert.equal(saved.executionCharter, undefined);
+  for (const tool of ["work_dispatch", "work_retry", "work_handoff", "work_review", "work_verify", "work_complete",
+    "work_cancel", "work_pause", "work_prioritize", "work_archive", "work_cleanup"]) {
+    assert.equal((await control.authorizeGoalMutation(tool, { work: created.workId }, "ses_cto")).allowed, true, tool);
+  }
+  assert.equal(await control.authorizeGoalMutation("work_merge", { work: created.workId }, "ses_cto"), false,
+    "a PR-delivery target never implies merging");
+  assert.equal(await control.authorizeGoalMutation("work_release", { work: created.workId }, "ses_cto"), false);
+  assert.equal(await control.authorizeGoalMutation("work_cleanup", { work: created.workId, overrideDirty: true }, "ses_cto"), false,
+    "destroying uncommitted work still needs the user");
+  assert.equal(await control.authorizeGoalMutation("work_dispatch", { work: created.workId }, "ses_other"), false);
 });
 
 test("an explicit specification request can autonomously create a charter bounded to the specification target", async () => {
@@ -621,7 +637,7 @@ test("an explicit specification request can autonomously create a charter bounde
   assert.equal(await control.authorizeGoalMutation("work_release", { work: "spec-only" }, "ses_cto"), false);
 });
 
-test("scope edits require a one-shot confirmation and mint a new audited charter revision", async () => {
+test("scope edits are autonomous and mint a new audited charter revision", async () => {
   const { control, workStore } = makeWorkControl({
     acceptedTurn: {
       id: "adm-scope", sessionId: "ses_cto", messageID: "msg_scope", acceptedAt: 99,
@@ -632,10 +648,6 @@ test("scope edits require a one-shot confirmation and mint a new audited charter
     key: "scope-base", id: "scope-goal", project: "manta", objective: "Implement export fix",
     specText: "# Outcome\nFix the export behavior.", deliveryTarget: { kind: "pr" }, state: "draft",
   }, { sessionID: "ses_cto" });
-  await assert.rejects(control.workRevise({
-    key: "scope-denied", work: created.workId,
-    patch: { objective: "Also redesign all exports" },
-  }), /changes the accepted goal scope/);
   const revised = await control.workRevise({
     key: "scope-approved", work: created.workId,
     patch: { objective: "Also redesign all exports" },
@@ -1648,7 +1660,7 @@ test("sandbox canary: the production work and control stores resolve under MANTA
 // W18 — tool registration
 // ---------------------------------------------------------------------------
 
-test("tool registration: reads auto, charter-scoped workflow actions goal-mode, other mutations confirm", () => {
+test("tool registration: reads auto, autonomous workflow actions goal-mode, other mutations confirm", () => {
   const { control } = makeWorkControl();
   const tools = [];
   registerCtoWorkTools((def) => tools.push(def), control);
@@ -1666,12 +1678,13 @@ test("tool registration: reads auto, charter-scoped workflow actions goal-mode, 
   const reads = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
   const goalScoped = new Set([
     "work_create", "work_revise", "work_dispatch", "work_pause", "work_resume", "work_cancel", "work_retry", "work_handoff",
-    "work_review", "work_merge", "work_release", "work_verify", "work_complete",
+    "work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_prioritize", "work_archive",
+    "work_cleanup",
   ]);
   for (const t of tools) {
     assert.ok(t.name.startsWith("work_"));
     assert.equal(t.mode, reads.has(t.name) ? "auto" : goalScoped.has(t.name) ? "goal" : "confirm");
-    if (goalScoped.has(t.name)) assert.match(t.description, /server-validated execution charter/);
+    if (goalScoped.has(t.name)) assert.match(t.description, /Runs autonomously from the CTO conversation/);
     assert.ok(t.description.length > 20);
     assert.ok(t.params && typeof t.params === "object");
   }
@@ -1819,7 +1832,7 @@ test("resume recovers a card stuck at running whose worker was paused outside wo
   await assert.rejects(control.workResume({ key: "w20s-r2", work: created.workId }), /not paused/);
 });
 
-test("CEO imperatives without an implementation verb still mint a charter; resume is charter-authorized", async () => {
+test("any CEO wording mints a provenance charter; resume of a parked worker is autonomous", async () => {
   for (const text of [
     "wtf i'm telling you to fucking do it so do it and use gpt 5.6 sol",
     "just fucking use another model if chutes doesn't work",
