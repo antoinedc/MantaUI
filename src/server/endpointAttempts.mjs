@@ -341,6 +341,44 @@ export function createEndpointAttemptRecorder({
   };
 }
 
+// An ordinary session's failed assistant turn → a provider attempt for the
+// health registers (2026-09-25: a CTO turn 429'd 37 times on an exhausted
+// plan, and the registers — fed only by the server's own internal runs —
+// still reported the endpoint healthy). Only account-level refusals (402
+// out of credit, 429 usage/rate limit) are folded; anything else is left to
+// the existing paths. Idempotent per assistant message id. The retry hint
+// comes from Retry-After / the provider's reset headers when present. Pure.
+export function attemptFromAssistantError(info, nowMs = Date.now()) {
+  const err = info?.error;
+  const status = err?.data?.statusCode;
+  if (info?.role !== "assistant" || !err || (status !== 429 && status !== 402)) return null;
+  const providerID = info.providerID;
+  const modelID = info.modelID;
+  if (typeof providerID !== "string" || !providerID || typeof modelID !== "string" || !modelID) return null;
+  if (typeof info.id !== "string" || !info.id) return null;
+  const h = err?.data?.responseHeaders && typeof err.data.responseHeaders === "object" ? err.data.responseHeaders : {};
+  let retryAfterMs;
+  const ra = Number(h["retry-after"]);
+  if (Number.isFinite(ra) && ra > 0) retryAfterMs = ra * 1000;
+  for (const k of ["x-codex-primary-reset-after-seconds", "x-ratelimit-reset-requests", "anthropic-ratelimit-unified-reset"]) {
+    const v = Number(h[k]);
+    if (retryAfterMs === undefined && Number.isFinite(v) && v > 0 && v < 1e8) retryAfterMs = v * 1000;
+  }
+  return {
+    attemptId: `observed:${info.id}`,
+    endpointKey: `${providerID}/${modelID}`,
+    accountKey: providerID,
+    at: nowMs,
+    attribution: "observed",
+    outcome: "failure",
+    errorName: typeof err.name === "string" ? err.name : null,
+    httpStatus: status,
+    retryable: err?.data?.isRetryable ?? null,
+    finish: null,
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
+}
+
 // The singleton's LATE-BOUND health hook: the health engine is composed in
 // index.mjs AFTER this module loads, so the composition root registers the
 // fold here. One setter, one wiring point; a test recorder injects `onAttempt`

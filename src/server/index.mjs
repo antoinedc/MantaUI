@@ -163,7 +163,7 @@ import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
 import { SURFACES_READER_CODES, settleSurface } from "./ctoToolScan.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
-import { endpointAttempts, setOnProviderAttempt } from "./endpointAttempts.mjs";
+import { endpointAttempts, setOnProviderAttempt, attemptFromAssistantError } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
@@ -3027,6 +3027,13 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
       evt.properties.error,
       refusal?.retryAfterMs,
     );
+  }
+  // Ordinary sessions' account-level refusals (429 usage limit / 402 out of
+  // credit) feed the health registers too, so the router and the CTO's
+  // usable-model check stop choosing a plan that is refusing turns.
+  if (evt && evt.type === "message.updated") {
+    const observed = attemptFromAssistantError(evt.properties?.info);
+    if (observed) void endpointAttempts.recordProviderAttempt(observed).catch(() => {});
   }
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second

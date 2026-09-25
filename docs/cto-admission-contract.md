@@ -181,6 +181,21 @@ accepted ──interrupt──▶ interrupt_pending (NONTERMINAL barrier)
   request (deadline) does NOT prove the server didn't accept → stays unknown. Only a definitive
   4xx observed live proves non-acceptance (`failed`). There is deliberately NO resend/resubmit
   op; a caller that decides otherwise submits a NEW id.
+- **A lost message is given up on, not waited on forever (2026-09-25).** An `unknown` record
+  whose message is still ABSENT from a transcript that reads fine, after
+  `UNKNOWN_GIVE_UP_MS` (5 min) and `UNKNOWN_GIVE_UP_MIN_CHECKS` receipt checks, provably never
+  landed. It is re-queued ONCE; the redispatch mints a fresh messageID, so a duplicate is
+  impossible (the old id is not in the transcript). A second loss → `failed` with the reason.
+  A `cancel_requested` record in the same state → `cancelled`. An unreadable transcript
+  never counts as absence — the barrier holds.
+- **A provider refusal is not completion (2026-09-25).** A turn whose last linked assistant
+  row carries an account-level error (401/402/403/429) is not `completed`: a background turn
+  is re-queued once (dispatch routes it to a usable model), a human turn or a second refusal
+  is `failed` naming the model and the provider's message.
+- **Dispatch routes to a usable model.** `resolveTurnModel(claimed)` runs before the send: a
+  model-less turn gets the cto default if usable, else the router's pick; a pinned unusable
+  model or "nothing usable" fails the turn visibly instead of sending into a certain refusal.
+  The stored record is never rewritten (the model is part of the dedupe hash).
 - **Reconcile never races an in-flight send**: each dispatch holds an active-operation lease
   taken BEFORE its store claim; reconcile skips leased records.
 - **Binding generations**: dispatch resolves the CURRENT binding (P3a1 `getBinding()`), so
@@ -211,8 +226,9 @@ opencode await.
 ## Known limitations (honest scope)
 
 1. **Nonterminal request markers hold the gate**: an `unknown` / `cancel_requested` /
-   `interrupt_pending` record blocks admission until reconcile resolves it (receipt found, or
-   the abort settles + the turn is proven ended). A caller cancel does NOT release an
+   `interrupt_pending` record blocks admission until reconcile resolves it (receipt found,
+   the give-up window proves the message lost, or the abort settles + the turn is proven
+   ended). The give-up bounds an `unknown`/`cancel_requested` hold to ~5 minutes. A caller cancel does NOT release an
    `unknown` — interrupting it only converts it to `cancel_requested`, which is still a
    nonterminal barrier that reconcile must prove out of (Operations table above). This
    is the conservative no-duplicate/no-late-abort trade; surface `list()` state, don't work
