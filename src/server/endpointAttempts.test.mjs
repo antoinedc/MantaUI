@@ -418,3 +418,30 @@ test("sweepAbandoned emits ONE weighted row for the batch it closed", async () =
   await rec.sweepAbandoned();
   assert.equal(ledger.rows.filter((r) => r.kind === "cto.operations_abandoned").length, 1);
 });
+
+// 2026-09-25: an ordinary session's 429 now feeds the health registers.
+import { attemptFromAssistantError } from "./endpointAttempts.mjs";
+
+test("attemptFromAssistantError: a 429 usage-limit assistant error becomes an observed failure with the reset hint", () => {
+  const info = {
+    id: "msg_a1", role: "assistant", providerID: "openai", modelID: "gpt-6-astra",
+    error: { name: "APIError", data: { message: "The usage limit has been reached", statusCode: 429, isRetryable: true,
+      responseHeaders: { "x-codex-primary-reset-after-seconds": "222591" } } },
+  };
+  const a = attemptFromAssistantError(info, 1000);
+  assert.equal(a.attemptId, "observed:msg_a1", "idempotent per message");
+  assert.equal(a.endpointKey, "openai/gpt-6-astra");
+  assert.equal(a.accountKey, "openai");
+  assert.equal(a.httpStatus, 429);
+  assert.equal(a.outcome, "failure");
+  assert.equal(a.retryAfterMs, 222591000);
+});
+
+test("attemptFromAssistantError: only account-level refusals on assistant rows count", () => {
+  const base = { id: "m", role: "assistant", providerID: "p", modelID: "m" };
+  assert.equal(attemptFromAssistantError({ ...base, error: { data: { statusCode: 500 } } }), null);
+  assert.equal(attemptFromAssistantError({ ...base }), null);
+  assert.equal(attemptFromAssistantError({ ...base, role: "user", error: { data: { statusCode: 429 } } }), null);
+  assert.equal(attemptFromAssistantError({ ...base, providerID: undefined, error: { data: { statusCode: 429 } } }), null);
+  assert.equal(attemptFromAssistantError({ ...base, error: { data: { statusCode: 402 } } }).httpStatus, 402);
+});

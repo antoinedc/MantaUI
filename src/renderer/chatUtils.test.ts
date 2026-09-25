@@ -6198,3 +6198,13 @@ describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
     expect(endpointStateLabel("nonexistent-state")).toBeNull();
   });
 });
+
+import { isReadOnlyJob } from "./chatUtils";
+describe("isReadOnlyJob", () => {
+  it("plain delegate jobs are read-only; CTO work workers are writable sessions", () => {
+    expect(isReadOnlyJob({ correlation: null })).toBe(true);
+    expect(isReadOnlyJob({})).toBe(true);
+    expect(isReadOnlyJob({ correlation: { kind: "work" } })).toBe(false);
+    expect(isReadOnlyJob(null)).toBe(false);
+  });
+});

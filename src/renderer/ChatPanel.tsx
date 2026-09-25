@@ -110,7 +110,7 @@ import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
-import { buildVoiceNoteMap } from "./chatUtils";
+import { buildVoiceNoteMap, isReadOnlyJob } from "./chatUtils";
 import type { VoiceNoteRecord } from "../shared/types";
 import type { PendingVoiceNote } from "./VoiceNote";
 
@@ -329,10 +329,13 @@ export function ChatPanel({
   // 30s delegateList poll + real-time `delegate.updated` refetch) — the panel
   // no longer runs its own 10s delegateList poll.
   const jobs = useStore((s) => s.jobs);
-  const jobOwnership = useMemo(
-    () => jobs[sessionId] ?? null,
-    [jobs, sessionId],
-  );
+  // A CTO work worker (correlation.kind === "work") is a normal, writable
+  // session — the user can steer it like any other; only plain delegate jobs
+  // are read-only.
+  const jobOwnership = useMemo(() => {
+    const job = jobs[sessionId] ?? null;
+    return isReadOnlyJob(job) ? job : null;
+  }, [jobs, sessionId]);
 
   const projects = useStore((s) => s.projects);
   const setActive = useStore((s) => s.setActive);

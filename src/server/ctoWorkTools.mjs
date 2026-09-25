@@ -103,6 +103,18 @@ import { rollupChecks } from "../shared/forge.mjs";
 // worktree + window + prompt delivery (seconds, occasionally a slow box), not
 // the worker's run — the dispatch receipt records success the moment the
 // worker EXISTS. A 2-minute window matches the other §7 families.
+
+// CTO workers get a longer leash than an ad-hoc background job: every 30-min
+// attempt on 2026-09-25 timed out mid-work, spending the stage's attempt
+// budget. A work dispatch may pass `timeoutMinutes` (bounded) to override.
+export const WORK_WORKER_DEFAULT_TIMEOUT_MS = 90 * 60_000;
+export const WORK_WORKER_MAX_TIMEOUT_MS = 4 * 60 * 60_000;
+export function workerTimeoutMs(input) {
+  const m = Number(input?.timeoutMinutes);
+  if (!Number.isFinite(m) || m <= 0) return WORK_WORKER_DEFAULT_TIMEOUT_MS;
+  return Math.min(WORK_WORKER_MAX_TIMEOUT_MS, Math.max(10 * 60_000, Math.round(m * 60_000)));
+}
+
 export const WORK_LEASE_TTL_MS = MANTA_CONTROL_LEASE_TTL_MS;
 const RECEIPT_OWNER = "cto-work-tools";
 const CREATE_RECEIPT_OWNER = "cto-work-create";
@@ -640,46 +652,40 @@ export function createCtoWorkControl({
     owner: CREATE_RECEIPT_OWNER,
   });
 
-  function hasExplicitExecutionIntent(text) {
-    if (typeof text !== "string" || !text.trim()) return false;
-    if (/\b(plan|spec|research|brainstorm)\s+only\b|\bjust\s+(plan|spec|research|brainstorm)\b|\b(do not|don't|dont)\s+(execute|implement|make changes|change files)\b|\bwithout\s+(executing|implementing|making changes)\b|\bno code changes\b|\bwhat would it take\b|\bshould (i|we)\b|\bdo you think\b|\bwould it be better\b|\b(why did|why does|why is|what is|what was|how did|how does|how was|what if|is it|are we|did we|do we|can we|could we)\b|\b(?:make|write|draft|create|prepare|give|show|outline)\s+(?:me\s+)?(?:a|the)?\s*(?:plan|proposal|approach|outline)\b|\bjust\s+(?:tell|explain|describe|outline|discuss)\b/i.test(text)) return false;
-    if (/\b(implement|build|fix|create|add|remove|update|change|refactor|migrate|ship|release|merge|deploy|execute|run|complete|deliver|write|make|open|close|delete|archive|spec|specify|research|investigate|audit|analyze|analyse|review|check|verify|test|inspect)\b/i.test(text)) return true;
-    // The CEO's ordinary imperatives ("do it", "use gpt 5.6 sol", "just
-    // retry it", "get it done") are as explicit as "implement". Missing them
-    // left CEO-requested work without a charter, so every routine step
-    // after creation stalled on a confirmation only the UI could grant.
-    return /\b(do\s+it|go\s+ahead|proceed|continue|use|try|retry|restart|resume|finish|start|dispatch|unstick|handle|get\s+(?:it|this|that)\s+done)\b/i.test(text);
+  // AUTONOMY IS THE DEFAULT (the CEO directive, 2026-09-25). The CTO drives
+  // its work to the declared delivery target without asking. The security
+  // boundary is enforced upstream by authorizeCtoProjectMutation (the caller
+  // must be THE bound CTO conversation, inside an active CTO turn); here we
+  // only require the session to be that conversation. No wording of the
+  // user's message is inspected — a regex over "action words" used to gate
+  // this and silently turned "work autonomously" into a confirmation loop.
+  // What still needs the user: merging/releasing beyond the work's declared
+  // delivery target, and destroying uncommitted work (cleanup overrideDirty).
+  async function isConversationSession(sessionId) {
+    if (typeof sessionId !== "string" || !sessionId) return false;
+    return (await getConversationId()) === sessionId;
   }
 
-  function hasExplicitControlIntent(text, verb) {
-    if (typeof text !== "string" || !text.trim()) return false;
-    if (/\b(do not|don't|dont|never)\s+(pause|hold|stop|cancel|abort|resume|continue|unpause)\b|\b(maybe|perhaps|consider|should i|should we|do you think|would it be better)\b/i.test(text)) return false;
-    if (verb === "pause") return /\b(pause|hold|stop for now)\b/i.test(text);
-    if (verb === "cancel") return /\b(cancel|abort|stop|abandon)\b/i.test(text);
-    if (verb === "resume") return /\b(resume|unpause|continue|pick up again)\b/i.test(text);
-    return false;
-  }
-
+  // Provenance only: the accepted human turn (when there is one) is recorded
+  // as a charter's source. Background turns (scheduled check-ins, worker
+  // completion notices) have none and need none.
   async function getAcceptedTurnForSession(sessionId) {
-    if (typeof sessionId !== "string" || !sessionId) return null;
-    const boundId = await getConversationId();
-    if (boundId !== sessionId) return null;
+    if (!(await isConversationSession(sessionId))) return null;
     const turn = await getAcceptedHumanTurn(sessionId);
     return turn?.sessionId === sessionId && turn.messageID ? turn : null;
   }
 
-  async function getTrustedExecutionTurn(sessionId) {
-    const turn = await getAcceptedTurnForSession(sessionId);
-    if (!turn || !hasExplicitExecutionIntent(turn.text)) return null;
-    return turn;
+  async function authorizeGoalCreation(sessionId) {
+    return isConversationSession(sessionId);
   }
 
-  async function authorizeGoalCreation(sessionId) {
-    return !!(await getTrustedExecutionTurn(sessionId));
-  }
+  const TERMINAL_WORK_STATES = ["completed", "cancelled", "archived"];
+  // Tools that act on already-finished work (tidying up) — allowed on
+  // completed/cancelled items; everything else refuses terminal work.
+  const TIDY_TOOLS = new Set(["work_archive", "work_cleanup"]);
 
   async function authorizeGoalMutation(toolName, args, sessionId) {
-    if (typeof sessionId !== "string" || !sessionId || typeof args?.work !== "string") return false;
+    if (typeof args?.work !== "string" || !(await isConversationSession(sessionId))) return false;
     let envelope;
     try {
       envelope = await work.getWork(args.work);
@@ -687,59 +693,23 @@ export function createCtoWorkControl({
       return false;
     }
     if (!envelope) return false;
-    const grant = () => {
-      if (args.expectedRevision !== undefined && args.expectedRevision !== envelope.revision) return false;
-      return {
-        allowed: true,
-        workRevision: envelope.revision,
-        charterRevision: envelope.executionCharter?.revision,
-      };
-    };
-    const currentTurn = await getAcceptedTurnForSession(sessionId);
-    if (["work_pause", "work_cancel"].includes(toolName)) {
-      const requestedAction = toolName === "work_pause" ? "pause" : "cancel";
-      return currentTurn && hasExplicitControlIntent(currentTurn.text, requestedAction) ? grant() : false;
-    }
-    const charter = envelope?.executionCharter;
-    try {
-      validateExecutionCharter(charter);
-    } catch {
+    if (args.expectedRevision !== undefined && args.expectedRevision !== envelope.revision) return false;
+    if (TIDY_TOOLS.has(toolName)) {
+      if (envelope.state === "archived") return false;
+      if (toolName === "work_cleanup" && args.overrideDirty === true) return false;
+    } else if (TERMINAL_WORK_STATES.includes(envelope.state)) {
       return false;
     }
-    if (charter.status !== "active" || charter.source.sessionId !== sessionId ||
-        charter.scope.workspaceId !== envelope.project.workspaceId ||
-        charter.scope.repositoryId !== envelope.project.repositoryId ||
-        charter.scope.objectiveHash !== createHash("sha256").update(envelope.objective).digest("hex") ||
-        charter.scope.specHash !== envelope.spec.hash ||
-        charter.scope.deliveryTargetHash !== createHash("sha256").update(canonicalJson(envelope.deliveryTarget)).digest("hex")) return false;
-    if (toolName === "work_resume") {
-      // Resuming a chartered worker is routine recovery (the charter already
-      // authorizes retry, which is strictly stronger) — no second CEO ask.
-      return envelope.state === "paused" || (await isStrandedRunning(envelope)) ? grant() : false;
-    }
-
-    const permissionByTool = {
-      work_dispatch: "dispatch",
-      work_retry: "retry",
-      work_handoff: "handoff",
-      work_review: "review",
-      work_verify: "verify",
-      work_complete: "complete",
+    // Resume only a parked (or stranded) worker; a live one is not resumable.
+    if (toolName === "work_resume" && envelope.state !== "paused" && !(await isStrandedRunning(envelope))) return false;
+    const kind = envelope.deliveryTarget?.kind;
+    if (toolName === "work_merge" && kind !== "merged" && !["published", "deployed"].includes(kind)) return false;
+    if (toolName === "work_release" && !["published", "deployed"].includes(kind)) return false;
+    return {
+      allowed: true,
+      workRevision: envelope.revision,
+      charterRevision: envelope.executionCharter?.revision,
     };
-    if (toolName === "work_merge" && envelope.deliveryTarget.kind === "merged") permissionByTool.work_merge = "merge";
-    if (toolName === "work_release" && ["published", "deployed"].includes(envelope.deliveryTarget.kind)) permissionByTool.work_release = "release";
-    if (toolName === "work_revise") {
-      const patch = args?.patch;
-      const keys = patch && typeof patch === "object" && !Array.isArray(patch) ? Object.keys(patch) : [];
-      const allowed = keys.length > 0 && keys.every((key) => ["state", "stage", "waitingReason"].includes(key)) &&
-        (patch.state === undefined || ["ready", "waiting"].includes(patch.state)) &&
-        (patch.stage === undefined || WORK_STAGES.includes(patch.stage)) &&
-        !["completed", "cancelled", "archived"].includes(envelope.state);
-      return allowed ? grant() : false;
-    }
-    const permission = permissionByTool[toolName];
-    const allowed = !!permission && charter.permissions.includes(permission) && !["completed", "cancelled", "archived"].includes(envelope.state);
-    return allowed ? grant() : false;
   }
 
   // THE identity adapter (§4.1) — one composition; work_create and the
@@ -1983,7 +1953,7 @@ export function createCtoWorkControl({
   async function workCreate(input, invocation = {}) {
     const conversationId = await getConversationId();
     const acceptedTurn = invocation?.sessionID === conversationId
-      ? await getTrustedExecutionTurn(invocation.sessionID)
+      ? await getAcceptedTurnForSession(invocation.sessionID)
       : null;
     return createReceipts.runOperation({
       key: input?.key,
@@ -2226,10 +2196,9 @@ export function createCtoWorkControl({
         (patch.deliveryTarget !== undefined && canonicalJson(patch.deliveryTarget) !== canonicalJson(envBefore.deliveryTarget))
       );
       if (scopeChanged) {
+        // Scope edits are the CTO's call (autonomy default); the audit trail
+        // records whether an explicit confirmation accompanied it.
         const approval = invocation?.approvedConfirmation;
-        if (!approval || approval.tool !== "work_revise" || typeof approval.id !== "string") {
-          throw controlError("policy_blocked", "this edit changes the accepted goal scope; approve this exact revision before it can proceed", { retrySafe: false });
-        }
         const project = patch.project ?? envBefore.project;
         const objective = patch.objective ?? envBefore.objective;
         const spec = patch.spec ?? envBefore.spec;
@@ -2251,7 +2220,7 @@ export function createCtoWorkControl({
           scope,
           scopeApprovals: [
             ...(envBefore.executionCharter.scopeApprovals ?? []),
-            { revision: nextRevision, confirmationId: approval.id, approvedAt: now(), scopeHash },
+            { revision: nextRevision, confirmationId: approval?.tool === "work_revise" && typeof approval.id === "string" ? approval.id : "autonomous", approvedAt: now(), scopeHash },
           ].slice(-20),
         };
       }
@@ -2452,6 +2421,8 @@ export function createCtoWorkControl({
         isolationRequired: true,
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op },
         actor: "cto",
+        name: envBefore.objective,
+        sweepAllowanceMs: workerTimeoutMs(input),
         ...workerModelArgs(input),
         ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
       });
@@ -2825,12 +2796,10 @@ export function createCtoWorkControl({
         return { save: withState(env, "cancelled"), value: null };
       });
       for (const { attempt, job } of live) {
-        if (job.status === "paused") {
-          // Parked, not in flight — left intact (its worktree is preserved);
-          // reported rather than silently dropped.
-          leftIntact.push(job.id);
-          continue;
-        }
+        // A PAUSED worker is stopped too (no turn in flight, nothing to
+        // abort): cancelling the work ends its workers. Its worktree is
+        // removed only when clean — uncommitted work is kept — and the branch
+        // always survives.
         try {
           const res = await stopJob(job.id);
           if (res?.ok) stopped.push(job.id);
@@ -3056,12 +3025,25 @@ export function createCtoWorkControl({
     const receipt = reserved.receipt;
     try {
       const jobs = await readJobsOrThrow(`archiving work "${input.work}"`);
-      const live = await liveAttempts(envBefore, jobs);
+      let live = await liveAttempts(envBefore, jobs);
+      // A PAUSED worker left on finished (cancelled/completed) work is a
+      // leftover, not live work: archiving stops it (clean worktree removed,
+      // dirty one kept, branch kept) instead of refusing forever — a paused
+      // job never ends on its own.
+      if (["cancelled", "completed"].includes(envBefore.state) && live.some((l) => l.job.status === "paused")) {
+        const stopJob = requireDelegateAction("stopJob");
+        for (const { job } of live.filter((l) => l.job.status === "paused")) {
+          try {
+            await stopJob(job.id);
+          } catch { /* reported below if it is still live */ }
+        }
+        live = await liveAttempts(envBefore, await readJobsOrThrow(`archiving work "${input.work}"`));
+      }
       if (live.length > 0) {
         throw controlError(
           "active_resource",
           `work "${input.work}" still has live worker(s) (${live.map((l) => l.job.id).join(", ")}) — ` +
-            `pause or cancel before archiving`,
+            `cancel the work before archiving`,
           { retrySafe: false },
         );
       }
@@ -3518,6 +3500,8 @@ export function createCtoWorkControl({
         isolationRequired: true, // review is independent of implementation context (§11)
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op: "work.review" },
         actor: "cto",
+        name: `review ${envBefore.objective}`,
+        sweepAllowanceMs: workerTimeoutMs(input),
         model: input.reviewerModel, // the requested reviewer — never substituted (§11/U15)
         ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
       });
@@ -4108,7 +4092,8 @@ export function createCtoWorkControl({
 const READ_TOOLS = new Set(["work_list", "work_inspect", "work_evidence", "work_capacity"]);
 const GOAL_SCOPED_TOOLS = new Set([
   "work_create", "work_revise", "work_dispatch", "work_pause", "work_resume", "work_cancel", "work_retry", "work_handoff",
-  "work_review", "work_merge", "work_release", "work_verify", "work_complete",
+  "work_review", "work_merge", "work_release", "work_verify", "work_complete", "work_prioritize", "work_archive",
+  "work_cleanup",
 ]);
 const GOAL_AUTH_REVISION = Symbol("server-goal-authorized-work-revision");
 
@@ -4117,7 +4102,7 @@ export function registerCtoWorkTools(register, workControl) {
     register({
       name,
       description: GOAL_SCOPED_TOOLS.has(name)
-        ? `${description} Runs autonomously only when a server-validated execution charter covers this exact work and target; otherwise requires user confirmation.`
+        ? `${description} Runs autonomously from the CTO conversation (no user confirmation); merging/releasing beyond the declared delivery target and cleanup with overrideDirty still require the user.`
         : description,
       params,
       mode: READ_TOOLS.has(name) ? "auto" : GOAL_SCOPED_TOOLS.has(name) ? "goal" : "confirm",
@@ -4135,7 +4120,7 @@ export function registerCtoWorkTools(register, workControl) {
                 ok: false,
                 code: "policy_blocked",
                 retrySafe: false,
-                error: "execution charter changed or no longer covers this action; reconcile the work and request only the new authority that is missing",
+                error: "this action is outside the work's declared delivery target (or would destroy uncommitted work, or the work is finished); it needs the user's go-ahead",
               };
             }
             if (name !== "work_create" && Number.isInteger(grant?.workRevision)) {
@@ -4274,6 +4259,7 @@ export function registerCtoWorkTools(register, workControl) {
       model: { type: "string", description: "Optional model for the worker. Leave it OUT unless the user named a model: omitted, usage-aware Auto routing picks the worker model (plan headroom, reset times, health). When given without modelPinned it is only a hint the router may override." },
       modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model — then it is used verbatim and Auto routing is off. Default false: `model` is a routing hint." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the worker." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
     },
     (args) => workControl.workDispatch(args),
   );
@@ -4329,6 +4315,7 @@ export function registerCtoWorkTools(register, workControl) {
       model: { type: "string", description: "Optional model for the new worker. Leave it OUT unless the user named a model (usage-aware Auto routing picks otherwise); without modelPinned it is only a routing hint." },
       modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model (used verbatim, Auto off). Default false." },
       subagentType: { type: "string", description: "Optional subagent type / intent." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
     },
     (args) => workControl.workRetry(args),
   );
@@ -4413,6 +4400,7 @@ export function registerCtoWorkTools(register, workControl) {
       headSha: { type: "string", description: "The exact candidate head SHA to review." },
       reviewerModel: { type: "string", description: "The requested reviewer model — used verbatim, never substituted. Choose one with plan headroom (get_usage): avoid a provider that is nearly depleted with a distant reset." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the reviewer." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
     },
     (args) => workControl.workReview(args),

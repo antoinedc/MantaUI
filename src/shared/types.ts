@@ -2296,6 +2296,10 @@ export type DelegateJob = {
   // worktree; false when a dirty worktree kept both (record is retained so
   // the window stays recognisable as a job). Undefined for pre-§B records.
   cleanedUp?: boolean;
+  // §8.1: present on jobs started by the CTO's work tools ({kind:"work", ...}).
+  // Those workers open as ordinary, writable sessions (the user can talk to
+  // them); plain delegate jobs stay read-only.
+  correlation?: { kind?: string; workId?: string } | null;
 };
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF

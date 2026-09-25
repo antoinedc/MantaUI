@@ -1154,6 +1154,14 @@ export function buildHandlers({
     // the incumbent unchanged with reason "routing unavailable", so a routing
     // failure can never fail a turn (the same guarantee chooseSubagentModel
     // makes).
+    // "Which of these models can take a turn right now?" — per candidate
+    // {model, usable, reason, resetsAt}; omitted candidates → the routable
+    // catalogue. Same checks as the router's hard exclusions.
+    "routing:usable-models": async (input) => {
+      const { usableModelsNow } = await import("./ctoSessions.mjs");
+      const candidates = Array.isArray(input?.candidates) ? input.candidates : undefined;
+      return usableModelsNow({ candidates, configGet: () => local.configGet() });
+    },
     "routing:choose": async (input) => {
       const incumbent = input?.incumbent ?? null;
       const agent = input?.agent ?? "general";

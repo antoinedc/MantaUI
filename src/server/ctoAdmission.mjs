@@ -270,6 +270,19 @@ export const TURN_RECHECK_INTERVAL_MS = 10_000;
 // wedge. 15 minutes covers cold provider starts and per-session queueing
 // many times over.
 export const ACCEPTED_NO_ROW_GRACE_MS = 15 * 60_000;
+// An "unknown" submission (opencode answered 204 but the message never showed
+// up — e.g. opencode restarted mid-accept) whose message is STILL absent from
+// a transcript that reads fine after this long provably never landed. It is
+// re-queued ONCE under a fresh messageID (so no duplicate is possible: the old
+// id is not in the transcript), then failed visibly. Before this, one lost
+// message held the one-turn-at-a-time barrier forever and every later turn —
+// human ones included — sat queued (2026-09-25: 2 hours, 170+ receipt checks).
+export const UNKNOWN_GIVE_UP_MS = 5 * 60_000;
+export const UNKNOWN_GIVE_UP_MIN_CHECKS = 3;
+// A turn that ENDED on an account-level provider refusal (usage limit, out of
+// credit, auth) is not "completed": a background turn is re-queued once so the
+// dispatcher routes it to another usable model; a human turn fails visibly.
+const PROVIDER_REFUSAL_STATUSES = new Set([401, 402, 403, 429]);
 // INTERRUPT_NO_ROW_GRACE_MS (gap 2): measured from abortSettledAt — the
 // abort's definitive ok already proves nothing is running, so this grace only
 // covers a post-abort assistant row landing late (transcript read latency is
@@ -595,6 +608,22 @@ function lastLinkedAssistantRow(messages, userMessageId) {
 }
 
 /**
+ * The provider refusal that ended OUR turn, if any: the last linked assistant
+ * row carries an error with an account-level HTTP status. Returns
+ * { status, model: "provider/model"|null, message } or null. Pure.
+ */
+export function providerRefusalFromTranscript(messages, userMessageId) {
+  const { row } = lastLinkedAssistantRow(messages, userMessageId);
+  const info = row ? rowInfo(row) : null;
+  const status = info?.error?.data?.statusCode;
+  if (!PROVIDER_REFUSAL_STATUSES.has(status)) return null;
+  const model = typeof info.providerID === "string" && typeof info.modelID === "string"
+    ? `${info.providerID}/${info.modelID}` : null;
+  const message = typeof info.error?.data?.message === "string" ? info.error.data.message : String(info.error?.name ?? "provider error");
+  return { status, model, message };
+}
+
+/**
  * Transcript proof that OUR turn FINISHED (blocker 1): the LAST assistant row
  * LINKED to our user message via parentID == the submitted messageID whose
  * finish classifies terminal via the shared `assistantCompletion` helper.
@@ -720,6 +749,10 @@ export function createCtoAdmission({
   abortSession = null,
   isBusy = null,
   fileExists = null,
+  // (claimed) => { model } | { fail } | { model: null } — picks a USABLE model
+  // for the turn (index.mjs wires ctoSessions.resolveCtoTurnModel). Absent or
+  // throwing → the turn goes out exactly as submitted.
+  resolveTurnModel = null,
   store = admissionStore,
   now = () => Date.now(),
   newId = () => randomUUID(),
@@ -728,6 +761,8 @@ export function createCtoAdmission({
   receiptReadAttempts = RECEIPT_READ_ATTEMPTS,
   receiptReadBackoffMs = RECEIPT_READ_BACKOFF_MS,
   unknownStaleMs = UNKNOWN_STALE_MS,
+  unknownGiveUpMs = UNKNOWN_GIVE_UP_MS,
+  unknownGiveUpMinChecks = UNKNOWN_GIVE_UP_MIN_CHECKS,
   turnRecheckIntervalMs = TURN_RECHECK_INTERVAL_MS,
   maxEntries = MAX_ENTRIES,
   maxTerminalBackground = MAX_TERMINAL_BACKGROUND,
@@ -1314,6 +1349,29 @@ export function createCtoAdmission({
         return;
       }
     }
+    // Route the turn to a usable model (never mutates the stored record — the
+    // model is part of the dedupe hash). A pinned model that is out of quota
+    // fails visibly instead of being swapped; nothing usable fails visibly
+    // instead of being sent into a certain 429.
+    let turnModel = claimed.model;
+    if (typeof resolveTurnModel === "function") {
+      let routed = null;
+      try {
+        routed = await resolveTurnModel(claimed);
+      } catch {
+        routed = null;
+      }
+      if (routed && typeof routed.fail === "string" && routed.fail) {
+        activeOps.delete(claimed.id);
+        acceptedBySession.delete(sessionId);
+        await markTransition(claimed.id, "dispatching", "failed", {
+          failedAt: now(),
+          error: `Not sent: ${routed.fail}. Pick another model and send again.`,
+        });
+        return;
+      }
+      if (routed?.model?.providerID && routed.model.modelID) turnModel = routed.model;
+    }
     let sendError = null;
     try {
       await bounded(
@@ -1324,7 +1382,7 @@ export function createCtoAdmission({
                 command: claimed.command,
                 arguments: claimed.args ?? "",
                 attachments: claimed.attachments,
-                model: claimed.model,
+                model: turnModel,
                 agent: claimed.agent,
                 messageID: claimed.messageID,
                 signal,
@@ -1332,7 +1390,7 @@ export function createCtoAdmission({
             : sendPrompt({
                 sessionId,
                 text: claimed.text,
-                model: claimed.model,
+                model: turnModel,
                 agent: claimed.agent,
                 attachments: claimed.attachments,
                 mentions: claimed.mentions,
@@ -1485,7 +1543,12 @@ export function createCtoAdmission({
       }
       if (record.status === "accepted") {
         // Strict: only the transcript proves OUR turn finished.
-        const proof = await transcriptTurnState(record);
+        const messages = await transcriptRows(record);
+        const proof = messages === null ? null : turnCompletionFromTranscript(messages, record.messageID);
+        if (proof?.completed && proof.outcome === "model-error" && (await settleProviderRefusal(record, messages, kind))) {
+          acceptedBySession.delete(sessionId);
+          return;
+        }
         if (proof?.completed) {
           await markTransition(record.id, "accepted", "completed", {
             completedAt: now(),
@@ -1614,6 +1677,86 @@ async function claimAndAttemptAbort(record) {
   }
 }
 
+  // A turn that ended on a provider refusal: background → re-queue once (the
+  // dispatcher then routes it to a usable model — the health registers have
+  // just learned about the refusal); human, or a second refusal → failed
+  // with the provider's reason. Returns true when it handled the record.
+  async function settleProviderRefusal(record, messages, via) {
+    const refusal = providerRefusalFromTranscript(messages, record.messageID);
+    if (!refusal) return false;
+    const reason = `${refusal.model ?? "the model"} refused the turn (${refusal.status}: ${refusal.message})`;
+    const retried = record.refusalRetries ?? 0;
+    if (record.origin !== "human" && retried < 1) {
+      const requeued = await markTransition(record.id, "accepted", "queued", {
+        refusalRetries: retried + 1,
+        lastRefusal: { at: now(), status: refusal.status, model: refusal.model, via },
+        sessionId: undefined,
+        messageID: undefined,
+        acceptedAt: undefined,
+        dispatchStartedAt: undefined,
+        receiptChecks: undefined,
+        lastReceiptCheckAt: undefined,
+      });
+      if (requeued) {
+        acceptedBySession.delete(record.sessionId);
+        turnCheckedAt.delete(record.id);
+        console.warn(`[ctoAdmission] ${record.id}: ${reason} — re-queued once for another model`);
+        void pump();
+      }
+      return true;
+    }
+    await markTransition(record.id, "accepted", "failed", {
+      failedAt: now(),
+      error: `${reason}. Pick another model and send again.`,
+      outcome: { kind: "provider-refusal", status: refusal.status, model: refusal.model, via, at: now() },
+    });
+    return true;
+  }
+
+  // The receipt is still absent. Once the record has been unresolved past the
+  // give-up window with enough checks AND the transcript itself reads fine
+  // (so absence is real, not a transport outage), the message provably never
+  // landed: re-queue it once under a fresh id (unknown), or cancel it
+  // (cancel_requested — the user already asked for that). A second loss
+  // fails visibly. Either way the barrier is released.
+  async function giveUpOnLostSubmission(record) {
+    if (record.status === "dispatching") return false; // a live dispatch elsewhere; unknown first
+    const since = record.unknownAt ?? record.dispatchStartedAt ?? record.createdAt;
+    if (now() - since < unknownGiveUpMs) return false;
+    if ((record.receiptChecks ?? 0) + 1 < unknownGiveUpMinChecks) return false;
+    const messages = await transcriptRows(record);
+    if (!Array.isArray(messages)) return false; // can't prove absence
+    if (messages.some((m) => rowId(m) === record.messageID)) return false; // it did land; next check advances it
+    const lost = `message never reached the conversation (opencode accepted it but did not persist it; checked ${(record.receiptChecks ?? 0) + 1} times over ${Math.round((now() - since) / 60_000)} min)`;
+    if (record.status === "cancel_requested") {
+      const done = await markTransition(record.id, "cancel_requested", "cancelled", { cancelledAt: now(), error: lost });
+      if (done) acceptedBySession.delete(record.sessionId);
+      return !!done;
+    }
+    if ((record.lostRetries ?? 0) < 1) {
+      const requeued = await markTransition(record.id, "unknown", "queued", {
+        lostRetries: (record.lostRetries ?? 0) + 1,
+        lastLost: { at: now(), messageID: record.messageID, reason: lost },
+        sessionId: undefined,
+        messageID: undefined,
+        unknownAt: undefined,
+        unknownReason: undefined,
+        dispatchStartedAt: undefined,
+        receiptChecks: undefined,
+        lastReceiptCheckAt: undefined,
+      });
+      if (requeued) {
+        acceptedBySession.delete(record.sessionId);
+        console.warn(`[ctoAdmission] ${record.id}: ${lost} — re-queued once under a new message id`);
+        void pump();
+      }
+      return !!requeued;
+    }
+    const failed = await markTransition(record.id, "unknown", "failed", { failedAt: now(), error: `${lost}. Send it again.` });
+    if (failed) acceptedBySession.delete(record.sessionId);
+    return !!failed;
+  }
+
   // -------------------------------------------------------------------------
   // reconcile — restart + uncertainty recovery. Joinable single-flight.
   // Records with an active operation (dispatch/abort this instance is
@@ -1638,6 +1781,8 @@ async function claimAndAttemptAbort(record) {
               cancelRequested: record.status === "cancel_requested" || undefined,
             });
             acceptedBySession.set(record.sessionId, record.id);
+          } else if (await giveUpOnLostSubmission(record)) {
+            continue;
           } else {
             await markTransition(record.id, record.status, record.status === "cancel_requested" ? "cancel_requested" : "unknown", {
               unknownAt: record.unknownAt ?? now(),
@@ -1726,6 +1871,9 @@ async function claimAndAttemptAbort(record) {
             continue;
           }
           const proof = turnCompletionFromTranscript(messages, record.messageID);
+          if (proof?.completed && proof.outcome === "model-error" && (await settleProviderRefusal(record, messages, "reconciled"))) {
+            continue;
+          }
           if (proof?.completed) {
             await markTransition(record.id, "accepted", "completed", {
               completedAt: now(),

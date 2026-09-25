@@ -163,11 +163,11 @@ import { createFactSurfaces } from "./ctoFactSurfaces.mjs";
 import { isIssueToolGranted } from "./ctoToolRegistry.mjs";
 import { SURFACES_READER_CODES, settleSurface } from "./ctoToolScan.mjs";
 import { ledgerStore, engineStateStore, budgetStore, segmentsStore, verdictsStore, digestsStore, factsStore, resolveStore, calibrationStore, plansStore, bindingStore, startCtoStoreSweeper, CTO_STORE_SWEEP_INTERVAL_MS } from "./ctoStores.mjs";
-import { endpointAttempts, setOnProviderAttempt } from "./endpointAttempts.mjs";
+import { endpointAttempts, setOnProviderAttempt, attemptFromAssistantError } from "./endpointAttempts.mjs";
 import * as ctoOvernight from "./ctoOvernight.mjs";
 import { computeHealthStats } from "./ctoHealth.mjs";
 import { composeProfileRender } from "./ctoProfile.mjs";
-import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders } from "./ctoSessions.mjs";
+import { runEphemeral, createEphemeralReaper, setDefaultResolveReaders as ctoSetDefaultResolveReaders, resolveCtoTurnModel, usableModelsNow } from "./ctoSessions.mjs";
 import { createCtoDigest, STALE_MS } from "./ctoDigest.mjs";
 import { createCtoSuggest } from "./ctoSuggest.mjs";
 // BET-1519: the per-class act executors are retired — ctoAct.mjs is now the
@@ -457,8 +457,34 @@ const promptDelivery = createPromptDelivery({
 // redirected background delivery cannot recurse: promptDelivery.deliver →
 // admission.submit → raw oc.sendPrompt, one hop each way.
 const ctoBindingEngine = createCtoBinding({ oc });
+// The cto agent's configured default model — the incumbent a model-less CTO
+// turn keeps when it is usable. Cached briefly; a failed read → no incumbent.
+let ctoAgentModelCache = { at: 0, model: null };
+async function ctoAgentModel() {
+  if (Date.now() - ctoAgentModelCache.at < 60_000) return ctoAgentModelCache.model;
+  let model = null;
+  try {
+    model = (await oc.listAgents()).find((a) => a.name === CTO_AGENT_NAME)?.model ?? null;
+  } catch {
+    model = null;
+  }
+  ctoAgentModelCache = { at: Date.now(), model };
+  return model;
+}
 const ctoAdmissionEngine = createCtoAdmission({
   binding: ctoBindingEngine,
+  resolveTurnModel: async (claimed) => {
+    const routed = await resolveCtoTurnModel({
+      pinned: claimed.model ?? null,
+      incumbent: await ctoAgentModel(),
+      configGet: () => local.configGet(),
+    });
+    if (routed?.model && !claimed.model) {
+      console.log(`[cto-admission] ${claimed.id} → ${routed.model.providerID}/${routed.model.modelID} (usable-model routing)`);
+    }
+    if (routed?.fail) console.warn(`[cto-admission] ${claimed.id} not sent: ${routed.fail}`);
+    return routed;
+  },
   sendPrompt: (args) => oc.sendPrompt(args),
   // P3a3 full-parity widening: a slash command aimed at the CTO role session
   // dispatches through opencode.mjs runCommand — a different endpoint than
@@ -1864,6 +1890,7 @@ function getCtoEngine() {
       // transient → assume alive).
       hasSession: (sid) => oc.sessionExists(sid),
       listSnapshots,
+      usableModels: ({ candidates } = {}) => usableModelsNow({ candidates, configGet: () => local.configGet() }),
       listStopped,
       searchMessages,
       configGet: () => local.configGet(),
@@ -3000,6 +3027,13 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
       evt.properties.error,
       refusal?.retryAfterMs,
     );
+  }
+  // Ordinary sessions' account-level refusals (429 usage limit / 402 out of
+  // credit) feed the health registers too, so the router and the CTO's
+  // usable-model check stop choosing a plan that is refusing turns.
+  if (evt && evt.type === "message.updated") {
+    const observed = attemptFromAssistantError(evt.properties?.info);
+    if (observed) void endpointAttempts.recordProviderAttempt(observed).catch(() => {});
   }
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second

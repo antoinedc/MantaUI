@@ -2552,3 +2552,163 @@ test("CAPO-352 gap 2 control: abortState ok with the receipt ABSENT from the tra
   const rec = await recordOf(svc, "evt_absent");
   assert.equal(rec.status, "interrupt_pending", "without the receipt nothing is proven — barrier held");
 });
+
+// ---------------------------------------------------------------------------
+// Usable-model routing at dispatch (2026-09-25: 37 background turns 429'd on
+// an exhausted plan the usage poller already knew about).
+// ---------------------------------------------------------------------------
+
+test("usable-model routing: a model-less background turn goes out on the routed model; the stored record is unchanged", async () => {
+  const seen = [];
+  const { svc, oc } = buildService({
+    resolveTurnModel: async (claimed) => {
+      seen.push(claimed.model ?? null);
+      return { model: { providerID: "anthropic", modelID: "claude-opus-5-5" } };
+    },
+  });
+  const res = await svc.submit({ text: "scheduled check-in", origin: "background", agent: "cto" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.deepEqual(oc.sends[0].model, { providerID: "anthropic", modelID: "claude-opus-5-5" });
+  assert.deepEqual(seen, [null]);
+  assert.equal((await recordOf(svc, res.id)).model, undefined, "routing never rewrites the deduped record");
+});
+
+test("usable-model routing: an unusable (pinned or nothing-usable) turn fails visibly and is NOT sent; the queue moves on", async () => {
+  const { svc, oc } = buildService({
+    resolveTurnModel: async (claimed) =>
+      claimed.text === "first" ? { fail: "openai/gpt-6-astra is unavailable (plan usage limit reached) until 2026-09-27T00:00:00.000Z" } : { model: null },
+  });
+  const a = await svc.submit({ text: "first", origin: "human", model: { providerID: "openai", modelID: "gpt-6-astra" } });
+  const b = await svc.submit({ text: "second", origin: "human" });
+  await svc.tick();
+  const rec = await recordOf(svc, a.id);
+  assert.equal(rec.status, "failed");
+  assert.match(rec.error, /plan usage limit reached.*2026-09-27/);
+  assert.equal(oc.sends.filter((s) => s.text === "first").length, 0, "never sent into a certain 429");
+  await svc.tick();
+  assert.equal(oc.sends.filter((s) => s.text === "second").length, 1, "the failure does not hold the queue");
+  assert.equal(oc.sends.find((s) => s.text === "second").model, undefined, "{model:null} leaves the turn as submitted");
+  void b;
+});
+
+test("usable-model routing: a throwing resolver degrades to sending the turn as submitted", async () => {
+  const { svc, oc } = buildService({ resolveTurnModel: async () => { throw new Error("router down"); } });
+  await svc.submit({ text: "status?", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The queue can no longer wedge on a lost message (2026-09-25: one message
+// opencode accepted and then lost during a restart held every later turn —
+// human ones too — for 2 hours).
+// ---------------------------------------------------------------------------
+
+test("a lost 'unknown' message is re-queued once under a NEW message id after the give-up window; later turns flow", async () => {
+  const oc = fakeOc({ receiptLands: false });
+  const { svc, clock } = buildService({ oc, unknownGiveUpMs: 60_000, unknownGiveUpMinChecks: 2 });
+  const lost = await svc.submit({ text: "worker finished", origin: "background" });
+  await svc.tick();
+  assert.equal(await statusOf(svc, lost.id), "unknown");
+  const firstId = oc.sends[0].messageID;
+  const human = await svc.submit({ text: "hello?", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1, "inside the window the barrier still holds (no blind resend)");
+  clock.t += 30_000;
+  await svc.reconcile();
+  assert.equal(await statusOf(svc, lost.id), "unknown", "not yet past the window");
+  clock.t += 60_000;
+  await svc.reconcile();
+  await flush();
+  await svc.tick();
+  assert.equal(oc.sends[1].text, "hello?", "the waiting human turn is released first (humans go first)");
+  assert.equal((await recordOf(svc, lost.id)).status, "queued", "the lost message is re-queued, not dropped");
+  assert.equal((await recordOf(svc, lost.id)).lostRetries, 1);
+  const resent = oc.sends.filter((x) => x.text === "worker finished");
+  assert.ok(resent.every((x, i) => i === 0 || x.messageID !== firstId), "any re-send uses a fresh message id — a duplicate is impossible");
+  void human;
+});
+
+test("a message lost TWICE fails visibly and releases the barrier for the human turn behind it", async () => {
+  const oc = fakeOc({ receiptLands: false });
+  const { svc, clock } = buildService({ oc, unknownGiveUpMs: 60_000, unknownGiveUpMinChecks: 1 });
+  const lost = await svc.submit({ text: "worker finished", origin: "background" });
+  await svc.tick();
+  clock.t += 120_000;
+  await svc.reconcile(); // lost #1 → re-queued, re-sent, lost again
+  await flush();
+  await svc.tick();
+  clock.t += 120_000;
+  await svc.reconcile(); // lost #2 → failed
+  await flush();
+  const rec = await recordOf(svc, lost.id);
+  assert.equal(rec.status, "failed");
+  assert.match(rec.error, /never reached the conversation/);
+  const human = await svc.submit({ text: "are you there?", origin: "human" });
+  await svc.tick();
+  assert.ok(oc.sends.some((s) => s.text === "are you there?"), "the human turn is no longer stuck");
+  void human;
+});
+
+test("absence is never assumed when the transcript can't be read — the barrier holds", async () => {
+  const oc = fakeOc({ receiptLands: false });
+  oc.listMessages = async () => { throw new Error("opencode down"); };
+  const { svc, clock } = buildService({ oc, unknownGiveUpMs: 60_000, unknownGiveUpMinChecks: 1 });
+  const lost = await svc.submit({ text: "x", origin: "background" });
+  await svc.tick();
+  clock.t += 600_000;
+  await svc.reconcile();
+  assert.equal(await statusOf(svc, lost.id), "unknown");
+  assert.equal(oc.sends.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// A provider refusal is not "completed" (2026-09-25: 37 overnight turns ended
+// on a 429 usage limit and were recorded as completed).
+// ---------------------------------------------------------------------------
+
+const usageLimit = { name: "APIError", data: { message: "The usage limit has been reached", statusCode: 429 } };
+
+test("a background turn refused with 429 is re-queued once (for another model), then fails; never 'completed'", async () => {
+  const { svc, oc, clock } = buildService();
+  const bg = await svc.submit({ text: "scheduled check-in", origin: "background" });
+  await svc.tick();
+  oc.rows.push({ info: { id: "asst_x1", role: "assistant", parentID: oc.sends[0].messageID, providerID: "openai", modelID: "gpt-6-astra", time: { created: 2 }, error: usageLimit }, parts: [] });
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  clock.t += 20_000;
+  await svc.tick();
+  assert.equal(oc.sends.length, 2, "re-dispatched once");
+  assert.notEqual(oc.sends[1].messageID, oc.sends[0].messageID);
+  const mid = await recordOf(svc, bg.id);
+  assert.equal(mid.refusalRetries, 1);
+  oc.rows.push({ info: { id: "asst_x2", role: "assistant", parentID: oc.sends[1].messageID, providerID: "openai", modelID: "gpt-6-astra", time: { created: 3 }, error: usageLimit }, parts: [] });
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  const rec = await recordOf(svc, bg.id);
+  assert.equal(rec.status, "failed");
+  assert.match(rec.error, /openai\/gpt-6-astra refused the turn \(429/);
+});
+
+test("a human turn refused with 429 fails visibly (never silently re-run on another model)", async () => {
+  const { svc, oc } = buildService();
+  const h = await svc.submit({ text: "status?", origin: "human" });
+  await svc.tick();
+  oc.rows.push({ info: { id: "asst_h1", role: "assistant", parentID: oc.sends[0].messageID, providerID: "openai", modelID: "gpt-6-astra", time: { created: 2 }, error: usageLimit }, parts: [] });
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  const rec = await recordOf(svc, h.id);
+  assert.equal(rec.status, "failed");
+  assert.equal(oc.sends.length, 1);
+});
+
+test("a non-refusal model error still completes as before", async () => {
+  const { svc, oc } = buildService();
+  const h = await svc.submit({ text: "status?", origin: "human" });
+  await svc.tick();
+  oc.completeTurn(oc.sends[0].messageID, { finish: "content_filter" });
+  svc.observeEvent({ type: "session.idle", properties: { sessionID: "ses_cto" } });
+  await flush();
+  assert.equal(await statusOf(svc, h.id), "completed");
+});

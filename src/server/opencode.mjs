@@ -2417,6 +2417,10 @@ export async function listAgents() {
     mode: typeof a.mode === "string" ? a.mode : undefined,
     native: typeof a.native === "boolean" ? a.native : undefined,
     builtIn: typeof a.builtIn === "boolean" ? a.builtIn : undefined,
+    model:
+      a.model && typeof a.model.providerID === "string" && typeof a.model.modelID === "string"
+        ? { providerID: a.model.providerID, modelID: a.model.modelID }
+        : undefined,
   }));
 }
 

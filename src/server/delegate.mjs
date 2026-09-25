@@ -999,8 +999,11 @@ export async function startJob(input, deps = {}) {
       }
     }
 
-    // 3. Derive the name.
-    const name = deriveName(prompt);
+    // 3. Derive the name — an explicit `name` (e.g. the work item's objective,
+    // so CTO workers aren't all "you-are-the-implementation") wins over the
+    // first words of the prompt.
+    const name = (typeof input?.name === "string" && slugifyProjectName(input.name.trim().split(/\s+/).slice(0, 6).join(" "))) ||
+      deriveName(prompt);
 
     // 4. Create the worktree. On throw, catch and continue with
     //    worktree = branch = baseSha = null and cwd = parentDirectory —
@@ -1779,14 +1782,14 @@ export function startSweeper(deps = {}, { intervalMs = SWEEP_INTERVAL_MS } = {})
 // Shared lock + lookup + running-guard for the job-lifecycle controls (stop,
 // pause). The callback runs INSIDE the jobs-store lock and performs its own
 // save — the read-check-mutate sequence stays atomic against other writers.
-async function withRunningJob(id, deps, fn) {
+async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
   const { load = loadJobs } = deps;
   return jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return { ok: false, error: "not found" };
     const job = jobs[idx];
-    if (job.status !== "running") {
+    if (job.status !== "running" && !(allowPaused && job.status === "paused")) {
       return { ok: false, error: "job not running", status: job.status };
     }
     return fn(jobs, idx, job);
@@ -1795,7 +1798,14 @@ async function withRunningJob(id, deps, fn) {
 
 /**
  * stopJob aborts the child session with oc.abortSession, marks the job
- * `stopped`, and sends a completion message. Window and worktree are kept.
+ * `stopped`, and sends a completion message, then cleans up the window +
+ * worktree (a dirty worktree keeps both; the branch always survives).
+ *
+ * A PAUSED job can be stopped too (2026-09-25: nine workers frozen by an old
+ * dispatch bug could not be stopped by any tool, so their cancelled cards
+ * could never be archived). A paused job has no turn in flight, so there is
+ * nothing to abort and no completion notice is sent — the caller already
+ * knows it is ending it.
  */
 export async function stopJob(id, deps = {}) {
   const {
@@ -1810,7 +1820,8 @@ export async function stopJob(id, deps = {}) {
   // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
   // atomic, so a stop cannot race another writer into a half-state.
   return withRunningJob(id, deps, async (jobs, idx, job) => {
-    if (abortSession && job.childSessionID) {
+    const wasPaused = job.status === "paused";
+    if (!wasPaused && abortSession && job.childSessionID) {
       try {
         await abortSession(job.childSessionID);
       } catch (e) {
@@ -1830,7 +1841,7 @@ export async function stopJob(id, deps = {}) {
       kind: "delegate.updated",
       payload: { id: updated.id, status: updated.status, activity: updated.activity },
     });
-    if (deliver && job.parentSessionID) {
+    if (!wasPaused && deliver && job.parentSessionID) {
       try {
         await deliver({
           sessionId: job.parentSessionID,
@@ -1860,7 +1871,7 @@ export async function stopJob(id, deps = {}) {
     }
     void listMessages;
     return { ok: true };
-  });
+  }, { allowPaused: true });
 }
 
 /**

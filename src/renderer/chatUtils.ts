@@ -1877,6 +1877,15 @@ function isAuthErrorName(
 // A window is a job row when the jobs map has an entry for its opencode
 // session id. False for ordinary chat/terminal windows and when the window
 // has no opencode session id (a claude-TUI window).
+// A background job's session is read-only (ReadOnlyJobBar replaces the
+// composer) — EXCEPT a CTO work worker (correlation.kind "work"), which opens
+// as an ordinary, writable session the user can steer.
+export function isReadOnlyJob(
+  job: { correlation?: { kind?: string } | null } | null | undefined,
+): boolean {
+  return !!job && job.correlation?.kind !== "work";
+}
+
 export function isJobRow(
   jobs: Record<string, { name: string; status: string; activity: string | null }>,
   opencodeSessionId: string | null | undefined,

@@ -15,6 +15,7 @@ import { lookupModel, matchModel, allModels } from "./modelCatalog.mjs";
 import { chooseSubagentModel } from "./delegate.mjs";
 import { safeSummaryCode, runFailureClass, canFailover } from "./ctoRunOutcome.mjs";
 import { endpointKey } from "../shared/endpointKey.mjs";
+import { modelUsability } from "../shared/modelRouter.mjs";
 
 // ---------------------------------------------------------------------------
 // Task classes (§12.3) — a literal table in code. NEVER a model id.
@@ -702,4 +703,130 @@ export function createEphemeralReaper({
 /** Convenience: build + start the reaper; returns the poller handle ({ stop }). */
 export function startEphemeralReaper(deps) {
   return createEphemeralReaper(deps).start();
+}
+
+
+// ---------------------------------------------------------------------------
+// Usable models + CTO turn routing (2026-09-25 audit). The CTO conversation's
+// background turns used to go out with NO model, so opencode fell back to the
+// cto agent's default — which sat on an exhausted plan for 11 hours while the
+// usage poller already knew. These two helpers answer "which of these can take
+// a turn right now?" from the SAME live readers the router uses.
+// ---------------------------------------------------------------------------
+
+async function buildLiveRouting(configGet, nowMs) {
+  let cfg = {};
+  if (typeof configGet === "function") {
+    try {
+      cfg = (await configGet()) ?? {};
+    } catch {
+      cfg = {};
+    }
+  }
+  let catalog = [];
+  try {
+    catalog = (await listRoutableModels("sub", cfg)) ?? [];
+  } catch {
+    catalog = [];
+  }
+  const quota = await readSnapshotsForRouting(defaultResolveReaders.snapshots);
+  let services = {};
+  try {
+    services = (await buildRoutingServices(cfg, {
+      catalogIndex: { lookupModel, matchModel, allModels },
+      endpoints: catalog,
+      snapshots: quota,
+      providerHealthState: defaultResolveReaders.providerHealthState,
+      endpointHealthSnapshot: defaultResolveReaders.endpointHealthSnapshot,
+      endpointSummary: defaultResolveReaders.endpointSummary,
+      pacing: defaultResolveReaders.pacing,
+    }, nowMs)) ?? {};
+  } catch {
+    services = {};
+  }
+  return { cfg, catalog, services };
+}
+
+function parseModelRef(ref) {
+  if (ref && typeof ref === "object" && typeof ref.providerID === "string") {
+    const modelID = ref.modelID ?? ref.id;
+    return typeof modelID === "string" && modelID ? { providerID: ref.providerID, id: modelID } : null;
+  }
+  if (typeof ref !== "string") return null;
+  const i = ref.indexOf("/");
+  return i > 0 && i < ref.length - 1 ? { providerID: ref.slice(0, i), id: ref.slice(i + 1) } : null;
+}
+
+/**
+ * Usability of each candidate right now. `candidates` = "provider/model"
+ * strings or {providerID, modelID}; omitted → the whole routable catalogue.
+ * Each row: { model, usable, reason, resetsAt } (resetsAt epoch ms or null).
+ */
+export async function usableModelsNow({ candidates, configGet, nowMs = Date.now(), live } = {}) {
+  const { catalog, services } = live ?? (await buildLiveRouting(configGet, nowMs));
+  const list = Array.isArray(candidates) && candidates.length > 0
+    ? candidates.map(parseModelRef).filter(Boolean).map((c) =>
+      catalog.find((m) => m?.providerID === c.providerID && m?.id === c.id) ?? c)
+    : catalog;
+  return list.map((c) => modelUsability(c, services, nowMs));
+}
+
+export function describeUnusable(row) {
+  const when = typeof row?.resetsAt === "number" && Number.isFinite(row.resetsAt)
+    ? ` until ${new Date(row.resetsAt).toISOString()}`
+    : "";
+  return `${row?.model ?? "model"} is unavailable (${row?.reason ?? "unusable"})${when}`;
+}
+
+/**
+ * The model a CTO conversation turn should run on.
+ *  - `pinned` (the user picked it): usable → keep; unusable → {fail} naming
+ *    the reason + reset time. Never silently swapped.
+ *  - otherwise: the cto agent's configured default if usable, else the
+ *    router's pick among usable models; nothing usable → {fail}.
+ * Returns { model: {providerID, modelID} } | { fail: string } | { model: null }
+ * (routing unavailable → leave the turn exactly as before).
+ */
+export async function resolveCtoTurnModel({ pinned = null, incumbent = null, configGet, nowMs = Date.now(), live, exclude = [] } = {}) {
+  let ctx;
+  try {
+    ctx = live ?? (await buildLiveRouting(configGet, nowMs));
+  } catch {
+    return { model: null };
+  }
+  const { cfg, catalog, services } = ctx;
+  const excluded = new Set((Array.isArray(exclude) ? exclude : []).map((e) => {
+    const p = parseModelRef(e);
+    return p ? `${p.providerID}/${p.id}` : null;
+  }).filter(Boolean));
+  const pin = parseModelRef(pinned);
+  if (pin) {
+    const row = modelUsability(pin, services, nowMs);
+    return row.usable ? { model: { providerID: pin.providerID, modelID: pin.id } } : { fail: describeUnusable(row) };
+  }
+  const inc = parseModelRef(incumbent);
+  if (inc && !excluded.has(`${inc.providerID}/${inc.id}`) && modelUsability(inc, services, nowMs).usable) {
+    return { model: { providerID: inc.providerID, modelID: inc.id } };
+  }
+  const usable = catalog.filter((m) => !excluded.has(endpointKey(m)) && modelUsability(m, services, nowMs).usable);
+  if (usable.length === 0) {
+    return { fail: inc ? `no usable model: ${describeUnusable(modelUsability(inc, services, nowMs))}, and no other model is usable` : "no usable model right now" };
+  }
+  let chosen = null;
+  try {
+    chosen = chooseSubagentModel({
+      incumbent: null,
+      catalog: usable,
+      policy: { ...(cfg?.modelRouting ?? {}), preset: cfg?.modelRouting?.preset || "balanced" },
+      agent: "plan",
+      nowMs,
+      services,
+    });
+  } catch {
+    chosen = null;
+  }
+  const pid = chosen?.providerID;
+  const mid = chosen?.modelID ?? chosen?.id;
+  if (pid && mid && usable.some((m) => m.providerID === pid && m.id === mid)) return { model: { providerID: pid, modelID: mid } };
+  return { model: { providerID: usable[0].providerID, modelID: usable[0].id } };
 }
