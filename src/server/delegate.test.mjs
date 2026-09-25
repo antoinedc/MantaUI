@@ -2415,6 +2415,34 @@ test("resumeJob starts a fresh session in the SAME worktree with resume context"
   assert.ok(h.delivered[0].text.includes("step 3 of 5"));
 });
 
+test("resumeJob reuses the persisted target workspace when the parent CTO session is windowless", async () => {
+  const job = {
+    ...runningObserverJob(), id: "paused-cto", status: "paused", pausedAt: 1,
+    parentSessionID: "windowless-cto", tmuxSession: "target-project",
+    worktree: "/repo/tracked-work", branch: "tracked-work",
+  };
+  const h = harness([job]);
+  let listedProjects = false;
+  h.deps.listProjects = async () => {
+    listedProjects = true;
+    return [];
+  };
+  const newWindows = [];
+  h.deps.newWindow = async (input) => {
+    newWindows.push(input);
+    return { sessionId: "resumed-child", windowIndex: 7 };
+  };
+
+  const res = await resumeJob("paused-cto", h.deps);
+
+  assert.equal(res.ok, true);
+  assert.equal(listedProjects, false, "the windowless parent is not re-resolved through tmux");
+  assert.equal(newWindows[0].sessionName, "target-project");
+  assert.equal(newWindows[0].cwd, "/repo/tracked-work");
+  assert.equal(res.job.tmuxSession, "target-project");
+  assert.equal(res.job.status, "running");
+});
+
 test("sweeper uses the job's sweepAllowanceMs (CTO overnight), not the 30-min default", async () => {
   const started = 1_700_000_000_000;
   const h = harness([{
