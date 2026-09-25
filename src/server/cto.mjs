@@ -131,6 +131,7 @@ export function createCtoEngine(deps = {}) {
     listModels = async () => [],
     getSessionAgent = async () => null,
     listSnapshots = () => [],
+    usableModels = null, // ({ candidates }) => [{ model, usable, reason, resetsAt }]
     listStopped = async () => ({ records: [], lastLooked: null }),
     searchMessages = async () => ({ supported: false, hits: [] }),
     configGet = async () => ({}),
@@ -613,6 +614,27 @@ export function createCtoEngine(deps = {}) {
         return { ok: false, error: `usage read failed: ${e?.message ?? e}` };
       }
       return { ok: true, data: { snapshots: (Array.isArray(snaps) ? snaps : []).map((s) => ({ ...s })) } };
+    },
+  });
+
+  register({
+    name: "usable_models",
+    description:
+      "Which models can take a turn RIGHT NOW. For each candidate returns {model, usable, reason, " +
+      "resetsAt}: unusable when its plan usage limit is reached, its account is rate-limited/out of " +
+      "credit/unauthorized, or its endpoint is dead — the same checks the router applies. `resetsAt` " +
+      "(epoch ms) is when an exhausted plan recovers, when known. `candidates` = optional list of " +
+      "\"provider/model\" ids; omitted → every routable model. Read-only.",
+    params: { candidates: null },
+    run: async (_ctx, args) => {
+      if (typeof usableModels !== "function") return { ok: false, error: "usable_models is not wired" };
+      const candidates = Array.isArray(args?.candidates) ? args.candidates.filter((c) => typeof c === "string" && c) : undefined;
+      try {
+        const rows = await usableModels({ candidates });
+        return { ok: true, data: { models: rows, usable: rows.filter((r) => r.usable).map((r) => r.model) } };
+      } catch (e) {
+        return { ok: false, error: `usable_models failed: ${e?.message ?? e}` };
+      }
     },
   });
 

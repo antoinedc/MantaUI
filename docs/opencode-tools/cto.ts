@@ -25,7 +25,7 @@ const MANTA_SERVER = process.env.MANTA_SERVER_URL || "http://127.0.0.1:8787";
 // src/server/cto.mjs's registry (listTools).
 const CTO_TOOLS =
   "list_sessions, list_projects, read_transcript, search_messages, git_status, " +
-  "git_branch, git_log, list_models, get_usage, usage_stopped, session_usage, " +
+  "git_branch, git_log, list_models, get_usage, usable_models, usage_stopped, session_usage, " +
   "context_state, session_plan_mode, get_config, read_rollups, read_ledger, read_inbox, watch, unwatch, " +
   "list_watches, read_facts, read_profile, read_toolregistry, " +
   "context_projects, context_search, context_around, describe_tools, " +

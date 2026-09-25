@@ -720,6 +720,10 @@ export function createCtoAdmission({
   abortSession = null,
   isBusy = null,
   fileExists = null,
+  // (claimed) => { model } | { fail } | { model: null } — picks a USABLE model
+  // for the turn (index.mjs wires ctoSessions.resolveCtoTurnModel). Absent or
+  // throwing → the turn goes out exactly as submitted.
+  resolveTurnModel = null,
   store = admissionStore,
   now = () => Date.now(),
   newId = () => randomUUID(),
@@ -1314,6 +1318,29 @@ export function createCtoAdmission({
         return;
       }
     }
+    // Route the turn to a usable model (never mutates the stored record — the
+    // model is part of the dedupe hash). A pinned model that is out of quota
+    // fails visibly instead of being swapped; nothing usable fails visibly
+    // instead of being sent into a certain 429.
+    let turnModel = claimed.model;
+    if (typeof resolveTurnModel === "function") {
+      let routed = null;
+      try {
+        routed = await resolveTurnModel(claimed);
+      } catch {
+        routed = null;
+      }
+      if (routed && typeof routed.fail === "string" && routed.fail) {
+        activeOps.delete(claimed.id);
+        acceptedBySession.delete(sessionId);
+        await markTransition(claimed.id, "dispatching", "failed", {
+          failedAt: now(),
+          error: `Not sent: ${routed.fail}. Pick another model and send again.`,
+        });
+        return;
+      }
+      if (routed?.model?.providerID && routed.model.modelID) turnModel = routed.model;
+    }
     let sendError = null;
     try {
       await bounded(
@@ -1324,7 +1351,7 @@ export function createCtoAdmission({
                 command: claimed.command,
                 arguments: claimed.args ?? "",
                 attachments: claimed.attachments,
-                model: claimed.model,
+                model: turnModel,
                 agent: claimed.agent,
                 messageID: claimed.messageID,
                 signal,
@@ -1332,7 +1359,7 @@ export function createCtoAdmission({
             : sendPrompt({
                 sessionId,
                 text: claimed.text,
-                model: claimed.model,
+                model: turnModel,
                 agent: claimed.agent,
                 attachments: claimed.attachments,
                 mentions: claimed.mentions,

@@ -2552,3 +2552,49 @@ test("CAPO-352 gap 2 control: abortState ok with the receipt ABSENT from the tra
   const rec = await recordOf(svc, "evt_absent");
   assert.equal(rec.status, "interrupt_pending", "without the receipt nothing is proven — barrier held");
 });
+
+// ---------------------------------------------------------------------------
+// Usable-model routing at dispatch (2026-09-25: 37 background turns 429'd on
+// an exhausted plan the usage poller already knew about).
+// ---------------------------------------------------------------------------
+
+test("usable-model routing: a model-less background turn goes out on the routed model; the stored record is unchanged", async () => {
+  const seen = [];
+  const { svc, oc } = buildService({
+    resolveTurnModel: async (claimed) => {
+      seen.push(claimed.model ?? null);
+      return { model: { providerID: "anthropic", modelID: "claude-opus-5-5" } };
+    },
+  });
+  const res = await svc.submit({ text: "scheduled check-in", origin: "background", agent: "cto" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+  assert.deepEqual(oc.sends[0].model, { providerID: "anthropic", modelID: "claude-opus-5-5" });
+  assert.deepEqual(seen, [null]);
+  assert.equal((await recordOf(svc, res.id)).model, undefined, "routing never rewrites the deduped record");
+});
+
+test("usable-model routing: an unusable (pinned or nothing-usable) turn fails visibly and is NOT sent; the queue moves on", async () => {
+  const { svc, oc } = buildService({
+    resolveTurnModel: async (claimed) =>
+      claimed.text === "first" ? { fail: "openai/gpt-6-astra is unavailable (plan usage limit reached) until 2026-09-27T00:00:00.000Z" } : { model: null },
+  });
+  const a = await svc.submit({ text: "first", origin: "human", model: { providerID: "openai", modelID: "gpt-6-astra" } });
+  const b = await svc.submit({ text: "second", origin: "human" });
+  await svc.tick();
+  const rec = await recordOf(svc, a.id);
+  assert.equal(rec.status, "failed");
+  assert.match(rec.error, /plan usage limit reached.*2026-09-27/);
+  assert.equal(oc.sends.filter((s) => s.text === "first").length, 0, "never sent into a certain 429");
+  await svc.tick();
+  assert.equal(oc.sends.filter((s) => s.text === "second").length, 1, "the failure does not hold the queue");
+  assert.equal(oc.sends.find((s) => s.text === "second").model, undefined, "{model:null} leaves the turn as submitted");
+  void b;
+});
+
+test("usable-model routing: a throwing resolver degrades to sending the turn as submitted", async () => {
+  const { svc, oc } = buildService({ resolveTurnModel: async () => { throw new Error("router down"); } });
+  await svc.submit({ text: "status?", origin: "human" });
+  await svc.tick();
+  assert.equal(oc.sends.length, 1);
+});

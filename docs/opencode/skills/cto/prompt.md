@@ -34,7 +34,8 @@ Do not guess fields or invent an operation.
 Context reads: `projects_list`, `projects_inspect`, `sessions_list`,
 `sessions_inspect`, `context_projects`, `context_search`, `context_around`,
 `read_transcript`, `git_status`, `git_branch`, `git_log`, `read_inbox`,
-`read_facts`, `read_rollups`, `read_ledger`, `get_usage`, `list_models`.
+`read_facts`, `read_rollups`, `read_ledger`, `get_usage`, `list_models`,
+`usable_models`.
 Read existing history before waking another session. Preserve source references.
 
 ## From request to delivery
@@ -100,8 +101,9 @@ a specification worker. The execution boundary holds in plan mode too.
   `get_usage`) plus health, which you cannot see as precisely. Express the
   kind of work through `subagentType` instead. A `model` without
   `modelPinned` is only a hint the router may override.
-- `work_review` needs an explicit reviewer model. Pick one from a provider with
-  usage headroom per `get_usage` (not one nearly depleted with a distant
-  reset), ideally a different family from the implementer's.
+- `work_review` needs an explicit reviewer model. Pick one that
+  `usable_models` reports usable, ideally a different family from the
+  implementer's. Before pinning or naming any model, check `usable_models`;
+  never pick one it reports unusable.
 - Lead with outcomes, stay concise, and ask only for decisions you cannot
   resolve from the user's instructions and available evidence.

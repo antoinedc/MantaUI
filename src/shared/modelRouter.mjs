@@ -153,6 +153,33 @@ function isHealthExcluded(state) {
   );
 }
 
+// "Is this model usable RIGHT NOW?" — the deterministic answer to "of X, Y,
+// Z, which can take a turn?". Uses exactly the router's HARD exclusions (the
+// account/endpoint health registers and subscription exhaustion via
+// marginalCost), never its soft preferences, so a model this reports usable
+// is one chooseModel would not drop for health or quota. `resetsAt` (epoch
+// ms) is the earliest instant an exhausted/rate-limited account recovers,
+// when known. Pure.
+export function modelUsability(candidate, services = {}, nowMs = 0) {
+  const key = endpointKey(candidate);
+  const pid = candidate?.providerID;
+  const account = services.accounts?.[pid];
+  const accountHealth = HEALTH_EXCLUDED[services.health?.[pid]];
+  if (accountHealth) {
+    return { model: key, usable: false, reason: `account ${accountHealth}`, resetsAt: services.healthUntil?.[pid] ?? null };
+  }
+  const endpointHealth = ENDPOINT_HEALTH_EXCLUDED[services.endpointHealth?.[key]];
+  if (endpointHealth) return { model: key, usable: false, reason: `endpoint ${endpointHealth}`, resetsAt: null };
+  if (account && marginalCost({ model: candidate, account, nowMs }).exhausted) {
+    const full = (Array.isArray(account.windows) ? account.windows : [])
+      .filter((w) => w?.stale !== true && isNum(w?.pct) && w.pct >= 100 && isNum(w?.resetsAt));
+    // Usable again only once EVERY exhausted window has reset.
+    const resetsAt = full.length ? Math.max(...full.map((w) => w.resetsAt)) : null;
+    return { model: key, usable: false, reason: "plan usage limit reached", resetsAt };
+  }
+  return { model: key, usable: true, reason: null, resetsAt: null };
+}
+
 // The self-doubt condition (W8 #3): a no-healthy-endpoint verdict where
 // EVERY drop was a health drop — health excluded everything the tier had.
 export function isHealthOnlyVerdict(dropped) {
