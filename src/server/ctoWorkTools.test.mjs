@@ -253,7 +253,7 @@ function makeDelegateSpy({ jobs = [], worktreeOk = true, stopFails = false, cap 
       if (stopFails) throw new Error("stop transport down");
       const job = find(id);
       if (!job) return { ok: false, error: "not found" };
-      if (job.status !== "running") return { ok: false, error: "job not running", status: job.status };
+      if (job.status !== "running" && job.status !== "paused") return { ok: false, error: "job not running", status: job.status };
       job.status = "stopped";
       job.error = "stopped by user";
       job.finishedAt = 2;
@@ -1182,20 +1182,33 @@ test("cancel persists intent, stops running workers, and reports a stop that FAI
   assert.equal(calls.filter((c) => c.name === "stopJob").length, 1);
 });
 
-test("counterfactual: cancel leaves a PAUSED worker intact and names it (never pretends it stopped)", async () => {
+test("cancel STOPS a paused worker too (a paused job never ends on its own)", async () => {
   const { control, jobs } = makeWorkControl();
   const created = await seedReadyWork(control, { id: "w8-pz" });
   const dispatched = await control.workDispatch({ key: "w8-pzd", work: created.workId });
   await control.workPause({ key: "w8-pzp", work: created.workId });
-  // The pause boundary landed: the job actually flipped to paused.
   const job = jobs.jobs.find((j) => j.id === dispatched.jobId);
   job.status = "paused";
   job.pauseRequested = false;
   const cancelled = await control.workCancel({ key: "w8-pzc", work: created.workId });
   assert.equal(cancelled.ok, true);
-  assert.deepEqual(cancelled.stopped, [], "a paused worker is not 'stopped'");
-  assert.deepEqual(cancelled.leftIntact, [dispatched.jobId], "it is reported as left intact");
-  assert.ok(cancelled.summary.includes("left intact"));
+  assert.deepEqual(cancelled.stopped, [dispatched.jobId]);
+  assert.deepEqual(cancelled.leftIntact, []);
+  assert.equal(job.status, "stopped");
+});
+
+test("archive of cancelled work stops a leftover paused worker instead of refusing forever", async () => {
+  const { control, jobs } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w8-arch" });
+  const dispatched = await control.workDispatch({ key: "w8-archd", work: created.workId });
+  const job = jobs.jobs.find((j) => j.id === dispatched.jobId);
+  await control.workCancel({ key: "w8-archc", work: created.workId });
+  // A worker left paused on the cancelled card (the pre-fix shape).
+  job.status = "paused";
+  const archived = await control.workArchive({ key: "w8-archa", work: created.workId });
+  assert.equal(archived.ok, true);
+  assert.equal(archived.state, "archived");
+  assert.equal(job.status, "stopped");
 });
 
 // ---------------------------------------------------------------------------
@@ -3293,4 +3306,18 @@ test("§12 still-referenced: a worktree another live work still references is PR
   const cleaned = await control.workCleanup({ key: "p6-ref-hx2", work: holder.workId });
   assert.equal(cleaned.ok, true, "a cleared reference unblocks the cleanup");
   assert.deepEqual(cleaned.removed, [holderDispatch.jobId]);
+});
+
+test("dispatch names the worker after the work and gives it the work-worker time limit", async () => {
+  const { control, calls } = makeWorkControl();
+  const created = await seedReadyWork(control, { id: "w-name" });
+  await control.workDispatch({ key: "w-name-d", work: created.workId });
+  const start = calls.find((c) => c.name === "startJob").input;
+  assert.equal(typeof start.name, "string");
+  assert.ok(start.name.length > 0);
+  assert.equal(start.sweepAllowanceMs, 90 * 60_000);
+  const created2 = await seedReadyWork(control, { id: "w-name2" });
+  await control.workDispatch({ key: "w-name2-d", work: created2.workId, timeoutMinutes: 999 });
+  const start2 = calls.filter((c) => c.name === "startJob").at(-1).input;
+  assert.equal(start2.sweepAllowanceMs, 4 * 60 * 60_000, "bounded to the max");
 });

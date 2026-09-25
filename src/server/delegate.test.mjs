@@ -406,6 +406,28 @@ test("stopJob runs terminal cleanup and stamps cleanedUp", async () => {
   assert.equal(c.killWindowCalls.length, 1);
 });
 
+test("stopJob stops a PAUSED job: no abort, no completion notice, clean-up as usual", async () => {
+  const c = cleanupHarness();
+  const job = { ...runningObserverJob(), status: "paused", id: "stop-paused", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const h = harness([job], 1_700_000_000_000);
+  const aborts = [];
+  const delivered = [];
+  const deps = { ...h.deps, ...c, abortSession: async (sid) => aborts.push(sid), deliver: async (d) => delivered.push(d) };
+  const res = await stopJob("stop-paused", deps);
+  assert.equal(res.ok, true);
+  const stored = h.jobs.find((j) => j.id === "stop-paused");
+  assert.equal(stored.status, "stopped");
+  assert.equal(stored.cleanedUp, true);
+  assert.deepEqual(aborts, [], "nothing in flight to abort");
+  assert.deepEqual(delivered, [], "no completion notice for a job the caller is ending");
+});
+
+test("stopJob still refuses a terminal job", async () => {
+  const h = harness([{ ...runningObserverJob(), status: "done", id: "stop-done" }], 1_700_000_000_000);
+  const res = await stopJob("stop-done", h.deps);
+  assert.equal(res.ok, false);
+});
+
 // ----------------------------------------------------------------------------
 // Retention skips dirty-kept terminal jobs (BET-418 §B)
 // ----------------------------------------------------------------------------
@@ -2462,4 +2484,18 @@ test("reconcileJobsOnBoot is a no-op without a sessionExists dep", async () => {
   const res = await reconcileJobsOnBoot(h.deps);
   assert.equal(res.reconciled, 0);
   assert.equal(h.jobs[0].status, "running");
+});
+
+test("startJob uses an explicit name (the work objective) instead of the prompt's first words", async () => {
+  const h = startHarness("child_named");
+  const res = await startJob(
+    { prompt: "You are the implementation worker for …", name: "Restore GitHub Actions CI on airtranscript today", parentSessionID: "parent", parentDirectory: "/repo" },
+    h.deps,
+  );
+  assert.equal(res.ok, true);
+  const job = h.jobs.find((j) => j.childSessionID === "child_named");
+  assert.match(job.name, /^restore-github-actions-ci/);
+  const h2 = startHarness("child_unnamed");
+  await startJob({ prompt: "You are the implementation worker", parentSessionID: "parent", parentDirectory: "/repo" }, h2.deps);
+  assert.match(h2.jobs.find((j) => j.childSessionID === "child_unnamed").name, /^you-are-the/);
 });

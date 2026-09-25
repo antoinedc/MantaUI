@@ -103,6 +103,18 @@ import { rollupChecks } from "../shared/forge.mjs";
 // worktree + window + prompt delivery (seconds, occasionally a slow box), not
 // the worker's run — the dispatch receipt records success the moment the
 // worker EXISTS. A 2-minute window matches the other §7 families.
+
+// CTO workers get a longer leash than an ad-hoc background job: every 30-min
+// attempt on 2026-09-25 timed out mid-work, spending the stage's attempt
+// budget. A work dispatch may pass `timeoutMinutes` (bounded) to override.
+export const WORK_WORKER_DEFAULT_TIMEOUT_MS = 90 * 60_000;
+export const WORK_WORKER_MAX_TIMEOUT_MS = 4 * 60 * 60_000;
+export function workerTimeoutMs(input) {
+  const m = Number(input?.timeoutMinutes);
+  if (!Number.isFinite(m) || m <= 0) return WORK_WORKER_DEFAULT_TIMEOUT_MS;
+  return Math.min(WORK_WORKER_MAX_TIMEOUT_MS, Math.max(10 * 60_000, Math.round(m * 60_000)));
+}
+
 export const WORK_LEASE_TTL_MS = MANTA_CONTROL_LEASE_TTL_MS;
 const RECEIPT_OWNER = "cto-work-tools";
 const CREATE_RECEIPT_OWNER = "cto-work-create";
@@ -2409,6 +2421,8 @@ export function createCtoWorkControl({
         isolationRequired: true,
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op },
         actor: "cto",
+        name: envBefore.objective,
+        sweepAllowanceMs: workerTimeoutMs(input),
         ...workerModelArgs(input),
         ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
       });
@@ -2782,12 +2796,10 @@ export function createCtoWorkControl({
         return { save: withState(env, "cancelled"), value: null };
       });
       for (const { attempt, job } of live) {
-        if (job.status === "paused") {
-          // Parked, not in flight — left intact (its worktree is preserved);
-          // reported rather than silently dropped.
-          leftIntact.push(job.id);
-          continue;
-        }
+        // A PAUSED worker is stopped too (no turn in flight, nothing to
+        // abort): cancelling the work ends its workers. Its worktree is
+        // removed only when clean — uncommitted work is kept — and the branch
+        // always survives.
         try {
           const res = await stopJob(job.id);
           if (res?.ok) stopped.push(job.id);
@@ -3013,12 +3025,25 @@ export function createCtoWorkControl({
     const receipt = reserved.receipt;
     try {
       const jobs = await readJobsOrThrow(`archiving work "${input.work}"`);
-      const live = await liveAttempts(envBefore, jobs);
+      let live = await liveAttempts(envBefore, jobs);
+      // A PAUSED worker left on finished (cancelled/completed) work is a
+      // leftover, not live work: archiving stops it (clean worktree removed,
+      // dirty one kept, branch kept) instead of refusing forever — a paused
+      // job never ends on its own.
+      if (["cancelled", "completed"].includes(envBefore.state) && live.some((l) => l.job.status === "paused")) {
+        const stopJob = requireDelegateAction("stopJob");
+        for (const { job } of live.filter((l) => l.job.status === "paused")) {
+          try {
+            await stopJob(job.id);
+          } catch { /* reported below if it is still live */ }
+        }
+        live = await liveAttempts(envBefore, await readJobsOrThrow(`archiving work "${input.work}"`));
+      }
       if (live.length > 0) {
         throw controlError(
           "active_resource",
           `work "${input.work}" still has live worker(s) (${live.map((l) => l.job.id).join(", ")}) — ` +
-            `pause or cancel before archiving`,
+            `cancel the work before archiving`,
           { retrySafe: false },
         );
       }
@@ -3475,6 +3500,8 @@ export function createCtoWorkControl({
         isolationRequired: true, // review is independent of implementation context (§11)
         correlation: { kind: "work", workId: input.work, receiptId: receipt.id, op: "work.review" },
         actor: "cto",
+        name: `review ${envBefore.objective}`,
+        sweepAllowanceMs: workerTimeoutMs(input),
         model: input.reviewerModel, // the requested reviewer — never substituted (§11/U15)
         ...(input.subagentType !== undefined ? { subagent_type: input.subagentType } : {}),
       });
@@ -4232,6 +4259,7 @@ export function registerCtoWorkTools(register, workControl) {
       model: { type: "string", description: "Optional model for the worker. Leave it OUT unless the user named a model: omitted, usage-aware Auto routing picks the worker model (plan headroom, reset times, health). When given without modelPinned it is only a hint the router may override." },
       modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model — then it is used verbatim and Auto routing is off. Default false: `model` is a routing hint." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the worker." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
     },
     (args) => workControl.workDispatch(args),
   );
@@ -4287,6 +4315,7 @@ export function registerCtoWorkTools(register, workControl) {
       model: { type: "string", description: "Optional model for the new worker. Leave it OUT unless the user named a model (usage-aware Auto routing picks otherwise); without modelPinned it is only a routing hint." },
       modelPinned: { type: "boolean", description: "true ONLY when the user explicitly named this model (used verbatim, Auto off). Default false." },
       subagentType: { type: "string", description: "Optional subagent type / intent." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
     },
     (args) => workControl.workRetry(args),
   );
@@ -4371,6 +4400,7 @@ export function registerCtoWorkTools(register, workControl) {
       headSha: { type: "string", description: "The exact candidate head SHA to review." },
       reviewerModel: { type: "string", description: "The requested reviewer model — used verbatim, never substituted. Choose one with plan headroom (get_usage): avoid a provider that is nearly depleted with a distant reset." },
       subagentType: { type: "string", description: "Optional subagent type / intent for the reviewer." },
+      timeoutMinutes: { type: "number", description: "Worker time limit in minutes (default 90, max 240). Raise it for large work instead of retrying after a timeout." },
       expectedRevision: { type: "number", description: "The work revision you read (omit to skip the CAS)." },
     },
     (args) => workControl.workReview(args),
