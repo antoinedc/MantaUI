@@ -2111,11 +2111,17 @@ export async function resumeJob(id, deps = {}) {
     const oldWindow = { sessionName: job.tmuxSession, windowIndex: job.windowIndex };
     let newChildSessionID = null;
     let newWindowIndex = null;
-    let ownerSession = null;
+    let ownerSession = job.tmuxSession ?? null;
     try {
-      const owner = resolveOwner(await listProjects(), job.parentSessionID);
-      if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
-      ownerSession = owner.tmuxSession;
+      // A tracked-work parent may be the windowless CTO conversation. Resume
+      // into the target workspace persisted on the job instead of requiring
+      // that parent to acquire a tmux holder after dispatch. The fallback is
+      // only for older persisted records that predate tmuxSession.
+      if (!ownerSession) {
+        const owner = resolveOwner(await listProjects(), job.parentSessionID);
+        if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
+        ownerSession = owner.tmuxSession;
+      }
       const cwd = job.worktree || job.parentDirectory;
       const created = await newWindow({
         sessionName: ownerSession,
