@@ -1793,9 +1793,26 @@ async function withRunningJob(id, deps, fn) {
   });
 }
 
+async function withStoppableJob(id, deps, fn) {
+  const { load = loadJobs } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return { ok: false, error: "not found" };
+    const job = jobs[idx];
+    if (job.status !== "running" && job.status !== "paused") {
+      return { ok: false, error: `job not running or paused (status ${job.status})`, status: job.status };
+    }
+    return fn(jobs, idx, job);
+  });
+}
+
 /**
  * stopJob aborts the child session with oc.abortSession, marks the job
  * `stopped`, and sends a completion message. Window and worktree are kept.
+ * Paused jobs are also stoppable — a paused job's session is already aborted
+ * and its worktree is preserved, but the job record must transition to
+ * `stopped` so cancelled work can be archived without waiting 7 days.
  */
 export async function stopJob(id, deps = {}) {
   const {
@@ -1809,7 +1826,7 @@ export async function stopJob(id, deps = {}) {
   } = deps;
   // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
   // atomic, so a stop cannot race another writer into a half-state.
-  return withRunningJob(id, deps, async (jobs, idx, job) => {
+  return withStoppableJob(id, deps, async (jobs, idx, job) => {
     if (abortSession && job.childSessionID) {
       try {
         await abortSession(job.childSessionID);
@@ -2100,11 +2117,17 @@ export async function resumeJob(id, deps = {}) {
     const oldWindow = { sessionName: job.tmuxSession, windowIndex: job.windowIndex };
     let newChildSessionID = null;
     let newWindowIndex = null;
-    let ownerSession = null;
+    let ownerSession = job.tmuxSession ?? null;
     try {
-      const owner = resolveOwner(await listProjects(), job.parentSessionID);
-      if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
-      ownerSession = owner.tmuxSession;
+      // A tracked-work parent may be the windowless CTO conversation. Resume
+      // into the target workspace persisted on the job instead of requiring
+      // that parent to acquire a tmux holder after dispatch. The fallback is
+      // only for older persisted records that predate tmuxSession.
+      if (!ownerSession) {
+        const owner = resolveOwner(await listProjects(), job.parentSessionID);
+        if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
+        ownerSession = owner.tmuxSession;
+      }
       const cwd = job.worktree || job.parentDirectory;
       const created = await newWindow({
         sessionName: ownerSession,
