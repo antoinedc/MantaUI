@@ -7,3 +7,6 @@
 // the server's needs-you count (BET-1476). Defensive: null/undefined or a
 // non-object card carries no content.
 export function cardHasContent(card: unknown): boolean;
+
+// The closed set of option-action types a blocker card may carry.
+export const BLOCKER_ACTION_TYPES: readonly ["resume-cto", "dismiss-card"];

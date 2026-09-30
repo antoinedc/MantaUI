@@ -56,6 +56,7 @@ import {
   evidenceExpansion,
   calibrationTableDisplay,
   type BlockerCard,
+  type BlockerOption,
   type CtoState,
   type CtoHealthStat,
   type CtoCalibrationTable,
@@ -346,6 +347,29 @@ export function CtoPanel({
   }, [projects, status, onOpenSession]);
 
   // --- routing ------------------------------------------------------------
+  // A health card's own buttons. Every type in BLOCKER_ACTION_TYPES has a
+  // branch here (ctoView.test pins it); both report success or failure.
+  const handleBlockerOption = async (card: BlockerCard, option: BlockerOption) => {
+    try {
+      if (option.type === "resume-cto") {
+        const r = await window.api.ctoResume();
+        if (!r.ok) throw new Error(r.error ?? "resume failed");
+        pushToast({ id: `blocker-${card.id}-${Date.now()}`, message: "CTO resumed." });
+      } else if (option.type === "dismiss-card") {
+        const r = await window.api.ctoCardDismiss(card.id);
+        if (!r.ok) throw new Error(r.error ?? "dismiss failed");
+        pushToast({ id: `blocker-${card.id}-${Date.now()}`, message: "Card dismissed." });
+      }
+    } catch (e) {
+      pushToast({
+        id: `blocker-err-${Date.now()}`,
+        message: `Couldn't ${option.label.toLowerCase()}: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    } finally {
+      refreshCards();
+    }
+  };
+
   const handleAnswer = (card: BlockerCard) => {
     const target = blockerTarget(card, knownSessions);
     if (target.action === "session") {
@@ -785,7 +809,7 @@ export function CtoPanel({
           {/* Learning card (§10.6-4): cold-start backfill progress (BET-1387).
               Informational — never counts into the sidebar badge. */}
           <BackfillCard state={state} />
-          <BlockerSection cards={blockerCardList} now={Date.now()} onAnswer={handleAnswer} />
+          <BlockerSection cards={blockerCardList} now={Date.now()} onAnswer={handleAnswer} onOption={handleBlockerOption} />
           <VetoSection cards={vetoList} now={Date.now()} onCancel={handleVetoCancel} onEditPlan={handleVetoEditPlan} onRunNow={handleVetoRunNow} />
           <SuggestionSection cards={suggestionCards} onAction={handleSuggestionAction} onDismiss={handleSuggestionDismiss} />
           <WorkSection cards={work.cards} error={work.error} />

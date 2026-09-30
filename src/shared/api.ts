@@ -1587,6 +1587,8 @@ export interface Api {
   ctoWorkRun(tool: string, args?: Record<string, unknown>): Promise<{ ok: boolean; error?: string; data?: unknown }>;
   // POST /api/cto/resume — lift the kill switch. Idempotent.
   ctoResume(): Promise<{ ok: boolean; error?: string }>;
+  // POST /api/cto/cards/dismiss {id} — dismiss one open card (blocker "Dismiss").
+  ctoCardDismiss(id: string): Promise<{ ok: boolean; error?: string }>;
   // GET /api/cto/digest — the view read of the latest stored digest (§5.5);
   // `{digest, stale}`. The digest section renders from this.
   ctoDigestGet(): Promise<{ digest: CtoDigest | null; stale: boolean }>;

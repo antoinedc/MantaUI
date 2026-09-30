@@ -18,6 +18,7 @@ import {
   nowRailMeta,
   runnableSuggestionOption,
   type BlockerCard,
+  type BlockerOption,
   type DecisionCardRow,
   type FinishedVariant,
   type VetoCardRow,
@@ -32,10 +33,14 @@ export const BlockerSection = memo(function BlockerSection({
   cards,
   now,
   onAnswer,
+  onOption,
 }: {
   cards: BlockerCard[];
   now: number;
   onAnswer: (card: BlockerCard) => void;
+  // A card that carries real options (health cards) renders those buttons
+  // INSTEAD of "Answer now" — there is no session to answer in.
+  onOption: (card: BlockerCard, option: BlockerOption) => void;
 }) {
   if (cards.length === 0) return null;
   return (
@@ -87,14 +92,30 @@ export const BlockerSection = memo(function BlockerSection({
                 </p>
               ) : null}
             </div>
-            <button
-              type="button"
-              onClick={() => onAnswer(card)}
-              className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-text hover:bg-fill-hover"
-              aria-label={`Answer now: ${card.title}`}
-            >
-              Answer now <span aria-hidden>→</span>
-            </button>
+            {card.options.length > 0 ? (
+              <div className="flex shrink-0 gap-1">
+                {card.options.map((o) => (
+                  <button
+                    key={o.type}
+                    type="button"
+                    onClick={() => onOption(card, o)}
+                    className="rounded-md px-2 py-1 text-sm font-medium text-text hover:bg-fill-hover"
+                    aria-label={`${o.label}: ${card.title}`}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onAnswer(card)}
+                className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-text hover:bg-fill-hover"
+                aria-label={`Answer now: ${card.title}`}
+              >
+                Answer now <span aria-hidden>→</span>
+              </button>
+            )}
           </div>
         ))}
       </div>
