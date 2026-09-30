@@ -2601,6 +2601,83 @@ export function isStreamDeaf(lastByteAt, now, timeoutMs = LIVENESS_TIMEOUT_MS) {
   return now - lastByteAt > timeoutMs;
 }
 
+/**
+ * Incremental SSE framer, linear in bytes received. Events are separated by a
+ * double newline ("\n\n" only — same as the loop it replaced). `push(text)`
+ * takes the next decoded piece and returns the `data:` payload (lines joined
+ * with "\n") of every event completed by it; event:/id:/retry:/comment lines
+ * are ignored and events with no data are dropped.
+ *
+ * Why not `buf += piece; buf.indexOf("\n\n")`: opencode can emit single
+ * events of 14 MB, delivered in ~64 KB reads. Concatenating onto a growing
+ * string and rescanning from 0 on every read is quadratic (gigabytes copied
+ * per event). Here pieces accumulate in an array, only NEW text is searched
+ * (plus a one-char carry for a separator split across reads), and the pieces
+ * are joined once when an event completes.
+ */
+export function createSseFramer() {
+  let pieces = [];
+  let endsWithNewline = false;
+
+  const payloadOf = (chunk) => {
+    let data = "";
+    for (const line of chunk.split("\n")) {
+      if (line.startsWith("data:")) {
+        data += (data ? "\n" : "") + line.slice(5).trimStart();
+      }
+    }
+    return data;
+  };
+
+  return {
+    push(text) {
+      const out = [];
+      if (!text) return out;
+      let start = 0;
+      // Separator split across reads: pending ends "\n" and this piece starts "\n".
+      if (endsWithNewline && text.charCodeAt(0) === 10) {
+        const data = payloadOf(pieces.join("").slice(0, -1));
+        if (data) out.push(data);
+        pieces = [];
+        endsWithNewline = false;
+        start = 1;
+      }
+      let idx;
+      while ((idx = text.indexOf("\n\n", start)) >= 0) {
+        pieces.push(start === 0 && idx === text.length ? text : text.slice(start, idx));
+        const data = payloadOf(pieces.join(""));
+        pieces = [];
+        if (data) out.push(data);
+        start = idx + 2;
+      }
+      if (start < text.length) {
+        const rest = start === 0 ? text : text.slice(start);
+        pieces.push(rest);
+        endsWithNewline = rest.charCodeAt(rest.length - 1) === 10;
+      } else if (start > 0) {
+        endsWithNewline = false;
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * opencode's `message.updated` for a user message carries
+ * `info.summary.diffs` — the session's full file diffs, up to ~14 MB, re-sent
+ * ~1.5x/s. Nothing consumes it, so drop that one key (counts etc. in `summary`
+ * stay) before the event reaches the bus. Mutates and returns `ev`; tolerates
+ * any shape.
+ */
+export function stripMessageSummaryDiffs(ev) {
+  if (ev?.type !== "message.updated") return ev;
+  const summary = ev.properties?.info?.summary;
+  if (summary && typeof summary === "object" && Array.isArray(summary.diffs)) {
+    delete summary.diffs;
+  }
+  return ev;
+}
+
 // One long-lived SSE connection to opencode's /event endpoint, optionally
 // scoped to a project `?directory=`. Auto-reconnects on drop with 1.5 s
 // delay; returns stop() that flips stopped=true AND aborts the in-flight
@@ -2666,28 +2743,15 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
         }
         const reader = res.body.getReader();
         const dec = new TextDecoder();
-        let buf = "";
+        const framer = createSseFramer();
         try {
           while (!stopped) {
             const { value, done } = await reader.read();
             if (done) break;
             lastByteAt = Date.now(); // any byte (heartbeat or real) = alive
-            buf += dec.decode(value, { stream: true });
-            let idx;
-            // Events are separated by double-newline (SSE spec)
-            while ((idx = buf.indexOf("\n\n")) >= 0) {
-              const chunk = buf.slice(0, idx);
-              buf = buf.slice(idx + 2);
-              let data = "";
-              for (const line of chunk.split("\n")) {
-                if (line.startsWith("data:")) {
-                  data += (data ? "\n" : "") + line.slice(5).trimStart();
-                }
-                // ignore event: / id: / retry: lines — type is inside the JSON
-              }
-              if (!data) continue;
+            for (const data of framer.push(dec.decode(value, { stream: true }))) {
               try {
-                onEvent(JSON.parse(data));
+                onEvent(stripMessageSummaryDiffs(JSON.parse(data)));
               } catch {
                 // skip malformed event
               }
