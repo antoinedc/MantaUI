@@ -3794,7 +3794,9 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Push a file as a workspace artifact (send_file tool) ----------
-  // POST /api/outbox/push { filePath, sessionID, ttlHours?, messageID? }
+  // POST /api/outbox/push { filePath, sessionID, ttlHours?, messageID?, notify? }
+  // `notify: true` (only when the user explicitly asked for the file) makes the
+  // outbox scanner toast it once; otherwise it lands silently in the panel.
   // Copies the AI-generated file into ~/.manta-outbox/<sessionID>/ so it shows
   // in the artifacts panel's Files tab (workspace-linked, TTL'd, not deleted
   // on download) and announces it via the outbox scanner's agentFile toast.
@@ -3809,6 +3811,7 @@ const handleRequest = async (req, res) => {
     }
     const result = await pushArtifact(body?.filePath, body?.sessionID, {
       ttlHours: body?.ttlHours,
+      announce: body?.notify === true,
       messageID:
         typeof body?.messageID === "string" && body.messageID.trim()
           ? body.messageID

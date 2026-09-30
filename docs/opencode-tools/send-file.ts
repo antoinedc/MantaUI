@@ -9,8 +9,9 @@
 // This tool is a THIN registrar. It validates the request and POSTs it to
 // manta-server (127.0.0.1:8787, same box — no SSH hop). manta-server copies
 // the file into ~/.manta-outbox/<sessionID>/ (the workspace-linked artifact
-// mailbox) and the box's outbox scanner announces it with an "AI sent you a
-// file" toast. The tool does NOT move or transform the file itself — the AI
+// mailbox). The box's outbox scanner shows an "AI sent you a file" toast ONLY
+// when `notify: true` (the user explicitly asked for the file), and only once.
+// The tool does NOT move or transform the file itself — the AI
 // keeps its working copy; execute() must return promptly.
 //
 // Durable artifact semantics (reconciled with the old one-shot mailbox):
@@ -60,9 +61,13 @@ export const send_file = tool({
     "Send a file from this box to the user's machine and record it as a",
     "durable artifact. Use when you generated or produced a file for the user",
     "to keep (a CSV export, a report, a generated image/document). The file is",
-    "copied (your working copy is kept) into the workspace-linked mailbox,",
-    "announced with a toast, and shows up in the app's Artifacts panel Files",
-    "tab for this conversation. It is NOT deleted when the user downloads it —",
+    "copied (your working copy is kept) into the workspace-linked mailbox and",
+    "shows up in the app's Artifacts panel Files tab for this conversation.",
+    "It is NOT announced to the user unless you set notify:true — do that ONLY",
+    "when the user explicitly asked you to send / share / give them this file.",
+    "Files you save on your own initiative (reports, notes, specs) must NOT",
+    "notify; the user finds them in the Artifacts panel. It is NOT deleted",
+    "when the user downloads it —",
     "it stays retrievable until it expires (default 7 days, which the user can",
     "override per call), then the box's sweep removes it. Pass the absolute",
     "path to an existing file.",
@@ -82,6 +87,15 @@ export const send_file = tool({
         "Hours until the artifact expires (default 168 = 7 days). " +
           "Set to a higher value for longer-lived artifacts, or 0 to disable expiry.",
       ),
+    notify: z
+      .boolean()
+      .optional()
+      .describe(
+        "Pop an 'AI sent you a file' notification on the user's devices. " +
+          "Default false. Set true ONLY when the user explicitly asked for this " +
+          "file in this conversation (e.g. 'send me the CSV'). Never for files " +
+          "you decided to produce yourself.",
+      ),
   },
   async execute(args, context) {
     const result = await call("POST", "/api/outbox/push", {
@@ -89,6 +103,7 @@ export const send_file = tool({
       sessionID: context.sessionID,
       ttlHours: args.ttlHours,
       messageID: context.messageID,
+      notify: args.notify === true,
     });
     const ttl =
       result.row?.expiresAt == null

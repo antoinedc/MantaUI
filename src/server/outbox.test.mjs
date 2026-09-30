@@ -96,10 +96,17 @@ function fakeBus() {
 
 const fileEvents = (bus) => bus.events.filter((e) => e.kind === "agentFile");
 
+// A file the user asked for: the sidecar carries `announce: true`, exactly
+// what pushArtifact writes for `send_file` with `notify: true`.
+async function writeRequested(path, body) {
+  await writeFile(path, body);
+  await writeFile(`${path}.manta.json`, JSON.stringify({ announce: true }));
+}
+
 test("scanner publishes one agentFile event for a present file", async () => {
   const root = await makeOutbox();
   const bus = fakeBus();
-  await writeFile(join(root, "a.txt"), "hi");
+  await writeRequested(join(root, "a.txt"), "hi");
   const { tick } = createOutboxScanner(bus, root);
   try {
     await tick();
@@ -116,7 +123,7 @@ test("scanner publishes one agentFile event for a present file", async () => {
 test("scanner does not re-announce the same file across ticks", async () => {
   const root = await makeOutbox();
   const bus = fakeBus();
-  await writeFile(join(root, "a.txt"), "hi");
+  await writeRequested(join(root, "a.txt"), "hi");
   const { tick } = createOutboxScanner(bus, root);
   try {
     await tick();
@@ -131,13 +138,14 @@ test("scanner does not re-announce the same file across ticks", async () => {
 test("scanner re-announces a same-named file after the prior one is removed", async () => {
   const root = await makeOutbox();
   const bus = fakeBus();
-  await writeFile(join(root, "a.txt"), "hi");
+  await writeRequested(join(root, "a.txt"), "hi");
   const { tick } = createOutboxScanner(bus, root);
   try {
     await tick(); // announce #1
     await rm(join(root, "a.txt"));
+    await rm(join(root, "a.txt.manta.json"));
     await tick(); // sees it gone → prunes seen-set
-    await writeFile(join(root, "a.txt"), "again");
+    await writeRequested(join(root, "a.txt"), "again");
     await tick(); // announce #2
     assert.equal(fileEvents(bus).length, 2, "announced again after removal");
   } finally {
@@ -388,7 +396,7 @@ test("scanner announces an untagged row alongside a media-tagged one", async () 
   await writeFile(srcPlain, "pdf\n");
   try {
     await pushArtifact(srcMedia, "ses_m", { root, media: true, messageID: "m1" });
-    await pushArtifact(srcPlain, "ses_p", { root });
+    await pushArtifact(srcPlain, "ses_p", { root, announce: true });
     const { tick } = createOutboxScanner(bus, root);
     await tick();
     const evs = fileEvents(bus);
@@ -398,5 +406,48 @@ test("scanner announces an untagged row alongside a media-tagged one", async () 
     await rm(root, { recursive: true, force: true });
     await rm(srcMedia, { force: true });
     await rm(srcPlain, { force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// Announce only requested files, once, across restarts
+// ----------------------------------------------------------------------------
+
+test("scanner: a push without notify is never announced", async () => {
+  const root = await makeOutbox();
+  const src = join(root, "..", `quiet-${Date.now()}.md`);
+  await writeFile(src, "x");
+  const bus = fakeBus();
+  try {
+    await pushArtifact(src, "ses_q", { root });
+    const { tick } = createOutboxScanner(bus, root);
+    await tick();
+    assert.equal(fileEvents(bus).length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(src, { force: true });
+  }
+});
+
+test("scanner: a requested push is announced once, and not again after a restart", async () => {
+  const root = await makeOutbox();
+  const src = join(root, "..", `asked-${Date.now()}.csv`);
+  await writeFile(src, "a,b");
+  try {
+    await pushArtifact(src, "ses_r", { root, announce: true });
+    const bus1 = fakeBus();
+    await createOutboxScanner(bus1, root).tick();
+    assert.equal(fileEvents(bus1).length, 1);
+    // A fresh scanner = a server restart (empty in-memory seen-set).
+    const bus2 = fakeBus();
+    await createOutboxScanner(bus2, root).tick();
+    assert.equal(fileEvents(bus2).length, 0, "not re-announced after restart");
+    // Re-pushing the same name is a new artifact and is announced again.
+    await pushArtifact(src, "ses_r", { root, announce: true });
+    await createOutboxScanner(bus2, root).tick();
+    assert.equal(fileEvents(bus2).length, 1, "a fresh push announces again");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(src, { force: true });
   }
 });

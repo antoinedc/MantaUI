@@ -417,7 +417,10 @@ file the user should keep — a CSV export, a report, a generated image/document
 It is NOT a one-shot mailbox:
 
 - The file is copied into `~/.manta-outbox/<sessionID>/` (your working copy is
-  kept) and announced with an "AI sent you a file" toast.
+  kept). It is **silent by default**: pass `notify: true` ONLY when the user
+  explicitly asked you to send/share/give them that file — that pops a single
+  "AI sent you a file" toast. Files you save on your own initiative (reports,
+  specs, notes) must not notify; the user finds them in the Artifacts panel.
 - It appears in the app's Artifacts panel Files tab **for this conversation**
   (workspace-linked by the session id).
 - It is **not deleted on download** — it stays retrievable until it expires
