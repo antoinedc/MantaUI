@@ -796,19 +796,30 @@ export function ctoAgentBlock(promptPath, model) {
 }
 
 /**
- * Best-effort installer/ensurer for the box-side `cto` primary agent block in
- * opencode.jsonc. Reconciles the managed role boundary on existing agents and
+ * Best-effort installer/ensurer for the box-side `cto` / `cto-plan` primary
+ * agent blocks in opencode.jsonc. Reconciles the managed role boundary and
  * never throws — I/O/restart failures log and return `{ ok:false }` so the
- * startup wire-in can fire-and-forget. Injected deps default to the real box
- * (readRemoteConfig / setSubagents / restartOpencode) exactly like
- * ensureMantaPlanAgent.
+ * startup wire-in can fire-and-forget.
  *
- * Gated by `cto.enabled`: with the feature off (the default until shipped)
- * the caller simply does not invoke this.
+ * WHY THIS WRITES THE FILE DIRECTLY (not PATCH /global/config): a `permission`
+ * object is evaluated by opencode as an ORDERED rule list, last match wins, so
+ * `{"*":"deny", question:"allow"}` allows `question` while the reverse order
+ * denies it — the comparison below is therefore deliberately order-sensitive.
+ * opencode's PATCH endpoint decodes the body with its permission schema, which
+ * emits the KNOWN keys (read, edit, ..., question, todowrite) first and the
+ * rest (`"*"`, custom tools) after — so a PATCH can never persist the desired
+ * order, the next boot sees a difference again, and the box restarts opencode
+ * on every boot forever. The file loader preserves the file's key order, so a
+ * block written straight into opencode.jsonc in the desired order is honoured
+ * and stable.
+ *
+ * All changed agents are folded into ONE text edit, ONE file write and ONE
+ * opencode restart. When nothing differs it is a pure read (no write, no
+ * restart).
  *
  * @param {object} [deps]
- * @param {() => Promise<object>} [deps.readConfig]
- * @param {(ops) => Promise<{ok: boolean, error?: string}>} [deps.applySubagents]
+ * @param {() => Promise<string>} [deps.readText]  opencode.jsonc text ("" / "{}" when absent)
+ * @param {(text: string) => Promise<void>} [deps.writeText]  atomic write of the file
  * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
  * @param {string} [deps.promptPath]
  * @param {string} [deps.model]
@@ -817,10 +828,13 @@ export function ctoAgentBlock(promptPath, model) {
  */
 export async function ensureCtoAgent(deps = {}) {
   const {
-    readConfig = readRemoteConfig,
-    applySubagents = setSubagents,
-    remove = removeConfigKeys,
-    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    readText = async () => (existsSync(OPENCODE_JSONC) ? readFile(OPENCODE_JSONC, "utf-8") : "{}"),
+    writeText = async (text) => {
+      await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
+      await writeFile(`${OPENCODE_JSONC}.tmp`, text, "utf-8");
+      await rename(`${OPENCODE_JSONC}.tmp`, OPENCODE_JSONC);
+    },
+    restart = restartOpencode,
     // The agent block points at the MATERIALIZED prompt (this doctrine work),
     // not the committed file directly — see "CTO operating doctrine" below.
     // `materializeCtoPrompt` guarantees this fixed path always holds SOME
@@ -831,24 +845,16 @@ export async function ensureCtoAgent(deps = {}) {
     model,
     log = console,
   } = deps;
-  const apply = async (ops) => {
-    // systemctl/launchctl returning does not mean opencode is listening yet.
-    // Same idempotent upsert, bounded ~31s backoff; deterministic 4xx errors
-    // are not retried. The startup recovery timer covers a longer outage.
-    const delays = [250, 500, 1000, 2000, 4000, 8000, 15000];
-    let result = await applySubagents(ops);
-    for (const ms of delays) {
-      if (result.ok || !/unreachable|ECONNREFUSED|fetch failed|config update failed \(5\d\d\)/i.test(result.error ?? "")) break;
-      await sleep(ms);
-      result = await applySubagents(ops);
-    }
-    return result;
-  };
   // Reconcile both role variants. Planning retains the local capability
   // boundary; the gateway separately refuses project mutations in plan turns.
   try {
-    const cfg = await readConfig();
-    let changed = false;
+    const input = await readText();
+    const errors = [];
+    const cfg = parse(input, errors, { allowTrailingComma: true });
+    if (errors.length > 0 || !cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+      throw new Error(UNPARSEABLE_CONFIG_MSG);
+    }
+    let text = input;
     for (const name of [CTO_AGENT_NAME, `${CTO_AGENT_NAME}-plan`]) {
       const existing = cfg?.agent?.[name];
       const desired = ctoAgentBlock(promptPath, existing?.model ?? model);
@@ -862,26 +868,26 @@ export async function ensureCtoAgent(deps = {}) {
       if (existing && Object.entries(managed).every(([key, value]) => JSON.stringify(existing[key]) === JSON.stringify(value))) {
         continue;
       }
-      // JSONC PATCH writes leaves, not objects: scalar -> object throws, and
-      // object updates preserve stale rule order. Disable the role, remove the
-      // permission block via the supported deletion/restart path, then install
-      // it afresh. Any partial failure leaves the role disabled; retry recovers.
-      if (existing && existing.permission !== undefined &&
-          JSON.stringify(existing.permission) !== JSON.stringify(desired.permission)) {
-        const { permission: _permission, ...disabled } = desired;
-        const locked = await apply({ upsert: [{ ...disabled, disable: true }] });
-        if (!locked.ok) return { ok: false, changed, error: locked.error };
-        changed = true;
-        const removed = await remove([["agent", name, "permission"]]);
-        if (!removed.ok) return { ok: false, changed, error: removed.error };
+      // Replace the WHOLE block so key order in the file equals desired order.
+      // Unmanaged keys of an existing block (e.g. options) are carried over.
+      const value = { ...managed };
+      for (const [key, v] of Object.entries(existing ?? {})) {
+        if (!(key in value)) value[key] = v;
       }
-      const result = await apply({ upsert: [desired] });
-      if (!result.ok) return { ok: false, changed, error: result.error };
-      changed = true;
+      text = applyEdits(text, modify(text, ["agent", name], value, {
+        formattingOptions: { insertSpaces: true, tabSize: 2 },
+      }));
     }
-    // Changed global PATCHes dispose opencode instances. This belongs in the
-    // startup/upgrade lifecycle, never as a side effect of a read.
-    return { ok: true, changed };
+    if (text === input) return { ok: true, changed: false };
+    await writeText(text);
+    // opencode only reads agent blocks at startup; one restart covers all edits.
+    // It belongs in the startup/upgrade lifecycle, never as a side effect of a read.
+    const restarted = await restart();
+    if (!restarted?.ok) {
+      log.warn?.("[providers] ensureCtoAgent: restart after write failed:", restarted?.error);
+      return { ok: false, changed: true, error: restarted?.error };
+    }
+    return { ok: true, changed: true };
   } catch (error) {
     log.warn?.("[providers] ensureCtoAgent: reconciliation failed:", error);
     return { ok: false, changed: false, reason: "unreadable", error: String(error?.message ?? error) };

@@ -5,7 +5,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parse as parseJsonc, modify as modifyJsonc, applyEdits as applyJsoncEdits } from "jsonc-parser";
+import { parse as parseJsonc } from "jsonc-parser";
 import {
   parseModelsResponse,
   upsertProviderBlock,
@@ -31,6 +31,7 @@ import {
   syncCacheTtl,
   readCacheTtl,
   ensureCtoAgent,
+  ctoAgentBlock,
   startCtoAgentRecovery,
   ctoPromptPath,
   ctoMaterializedPromptPath,
@@ -1210,133 +1211,142 @@ describe("ensureMantaPlanAgent", () => {
 // doctrine work), not the committed source doc directly.
 // ---------------------------------------------------------------------------
 
-function jsoncCtoFixture(permission) {
-  let text = JSON.stringify({ agent: { cto: { mode: "primary", model: "user/model", permission, options: { preserve: true } } } });
-  const state = { patches: 0, restarts: 0, config: () => parseJsonc(text) };
-  // Actual .jsonc PATCH semantics: recursively modify EACH LEAF at its full
-  // path. In particular scalar -> object throws instead of replacing it.
-  const patch = async (value) => {
-    state.patches++;
-    const visit = (value, path = []) => {
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        for (const [key, child] of Object.entries(value)) visit(child, [...path, key]);
-      } else if (value !== undefined) text = applyJsoncEdits(text, modifyJsonc(text, path, value, {}));
-    };
-    visit(value);
-    return { ok: true };
-  };
+const CTO_TEST_PROMPT = "/box/cto-prompt.md";
+
+// In-memory opencode.jsonc: ensureCtoAgent reads/writes text, never a real file.
+function ctoFileFixture(initial) {
+  const state = { text: initial, writes: 0, restarts: 0, config: () => parseJsonc(state.text) };
   const deps = {
-    readConfig: async () => state.config(),
-    applySubagents: (ops) => setSubagents(ops, { patch }),
-    remove: (paths) => removeConfigKeys(paths, {
-      readText: async () => text,
-      writeText: async (next) => { text = next; },
-      restart: async () => {
-        assert.equal(state.config().agent.cto.disable, true, "role remains disabled across removal restart");
-        state.restarts++;
-        return { ok: true };
-      },
-    }),
-    promptPath: "/box/cto-prompt.md",
+    readText: async () => state.text,
+    writeText: async (next) => { state.writes++; state.text = next; },
+    restart: async () => { state.restarts++; return { ok: true }; },
+    promptPath: CTO_TEST_PROMPT,
   };
-  return { deps, state, patch };
+  return { deps, state };
+}
+
+// What opencode's PATCH /global/config persists: known permission keys first,
+// the rest ("*", custom tools) after — i.e. `"*":"deny"` lands LAST and, with
+// last-match-wins evaluation, overrides every earlier allow.
+function reorderedCtoPermission() {
+  const desired = ctoAgentBlock(CTO_TEST_PROMPT).permission;
+  const known = ["read", "edit", "glob", "grep", "list", "bash", "task", "external_directory", "todowrite", "question", "webfetch", "websearch", "lsp", "doom_loop", "skill"];
+  const out = {};
+  for (const k of known) if (k in desired) out[k] = desired[k];
+  for (const k of Object.keys(desired)) if (!(k in out)) out[k] = desired[k];
+  return out;
 }
 
 describe("ensureCtoAgent", () => {
-  for (const permission of [{ read: "allow", cto_cto: "allow", bash: "allow", task: "allow", custom_mutator: "allow" }, "deny"]) {
-  it(`recovers ${typeof permission} permissions through real JSONC removal semantics and stays idempotent`, async () => {
-    const { deps, state } = jsoncCtoFixture(permission);
+  it("regression: repairs the PATCH-reordered permission shape with ONE write and ONE restart, in desired order", async () => {
+    const wrong = reorderedCtoPermission();
+    assert.equal(Object.keys(wrong)[0], "read", "fixture must reproduce the reordered shape");
+    const stale = { mode: "primary", model: "user/model", permission: wrong, options: { preserve: true } };
+    const { deps, state } = ctoFileFixture(JSON.stringify({ agent: { cto: stale, "cto-plan": stale } }));
     const result = await ensureCtoAgent(deps);
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.equal(state.patches, 3); // disable + executive allowlist + planner
-    const updated = state.config().agent.cto;
-    assert.equal(updated.model, "user/model");
-    assert.equal(updated.permission["*"], "deny");
-    assert.equal(Object.keys(updated.permission)[0], "*");
-    assert.equal(updated.permission.bash, undefined);
-    assert.equal(updated.permission.task, undefined);
-    assert.equal(updated.permission.custom_mutator, undefined);
-    assert.equal(updated.permission.cto_cto, "allow");
-    assert.equal(updated.permission.read["*"], "deny");
-    assert.equal(updated.permission.external_directory["*"], "deny");
-    assert.equal(updated.permission.webfetch, undefined);
-    assert.deepEqual(state.config().agent["cto-plan"].permission, updated.permission);
-    assert.deepEqual(updated.options, { preserve: true });
-    assert.equal(updated.disable, false);
-    assert.equal((await ensureCtoAgent(deps)).changed, false);
-    assert.equal(state.patches, 3);
+    assert.equal(state.writes, 1);
     assert.equal(state.restarts, 1);
+    const cfg = state.config();
+    const want = Object.keys(ctoAgentBlock(CTO_TEST_PROMPT).permission);
+    for (const name of ["cto", "cto-plan"]) {
+      const block = cfg.agent[name];
+      assert.deepEqual(Object.keys(block.permission), want);
+      assert.equal(Object.keys(block.permission)[0], "*");
+      assert.equal(block.model, "user/model");
+      assert.deepEqual(block.options, { preserve: true });
+      assert.equal(block.disable, false);
+    }
+    assert.match(cfg.agent["cto-plan"].description, /planning/);
+    assert.match(cfg.agent["cto-plan"].prompt, /PLAN ONLY/);
   });
+
+  it("converges: feeding the written text back performs no write and no restart", async () => {
+    const stale = { mode: "primary", permission: reorderedCtoPermission() };
+    const first = ctoFileFixture(JSON.stringify({ agent: { cto: stale } }));
+    await ensureCtoAgent(first.deps);
+    const second = ctoFileFixture(first.state.text);
+    const result = await ensureCtoAgent(second.deps);
+    assert.deepEqual([result.ok, result.changed], [true, false]);
+    assert.equal(second.state.writes, 0);
+    assert.equal(second.state.restarts, 0);
+    assert.equal(second.state.text, first.state.text);
+  });
+
+  it("steady state from a correct file is a pure read", async () => {
+    const seed = ctoFileFixture("{}");
+    await ensureCtoAgent(seed.deps);
+    const { deps, state } = ctoFileFixture(seed.state.text);
+    const result = await ensureCtoAgent(deps);
+    assert.equal(result.changed, false);
+    assert.equal(state.writes, 0);
+    assert.equal(state.restarts, 0);
+  });
+
+  it("only rewrites the agent that differs, still one write + one restart", async () => {
+    const seed = ctoFileFixture("{}");
+    await ensureCtoAgent(seed.deps);
+    const cfg = seed.state.config();
+    cfg.agent.cto.permission = reorderedCtoPermission();
+    const { deps, state } = ctoFileFixture(JSON.stringify(cfg));
+    await ensureCtoAgent(deps);
+    assert.equal(state.writes, 1);
+    assert.equal(state.restarts, 1);
+    assert.equal(Object.keys(state.config().agent.cto.permission)[0], "*");
+  });
+
+  it("preserves comments and unrelated config around the edit", async () => {
+    const input = `{
+  // keep me
+  "provider": { "x": { "name": "X" } }, /* and me */
+  "agent": {
+    // the cto block
+    "cto": { "mode": "primary", "permission": "deny" },
+    "other": { "mode": "subagent" }
   }
-
-  it("fixture reproduces the rejected scalar-to-object PATCH and migration recovers a partial failure", async () => {
-    const { deps, state, patch } = jsoncCtoFixture("deny");
-    await assert.rejects(patch({ agent: { cto: { permission: { "*": "deny" } } } }), /parent of type string/);
-    const apply = deps.applySubagents;
-    deps.applySubagents = (ops) => typeof ops.upsert[0].permission === "object"
-      ? Promise.resolve({ ok: false, error: "temporary PATCH failure" }) : apply(ops);
-    assert.equal((await ensureCtoAgent(deps)).ok, false);
-    assert.equal(state.config().agent.cto.disable, true);
-    assert.equal(state.config().agent.cto.permission, undefined);
-    deps.applySubagents = apply;
-    assert.equal((await ensureCtoAgent(deps)).ok, true);
-    assert.equal(state.config().agent.cto.disable, false);
-    assert.equal(state.restarts, 1, "recovery must not restart when the permission block is already absent");
+}
+`;
+    const { deps, state } = ctoFileFixture(input);
+    const result = await ensureCtoAgent(deps);
+    assert.equal(result.ok, true);
+    for (const c of ["// keep me", "/* and me */", "// the cto block"]) assert.ok(state.text.includes(c), c);
+    const cfg = state.config();
+    assert.deepEqual(cfg.provider, { x: { name: "X" } });
+    assert.deepEqual(cfg.agent.other, { mode: "subagent" });
+    assert.equal(Object.keys(cfg.agent.cto.permission)[0], "*");
   });
 
-  it("waits through an unreachable post-restart endpoint before re-enabling the CTO", async () => {
-    const { deps, state } = jsoncCtoFixture({ cto: "allow" });
-    const apply = deps.applySubagents;
-    let misses = 0;
-    const sleeps = [];
-    deps.sleep = async (ms) => { sleeps.push(ms); };
-    deps.applySubagents = async (ops) => {
-      if (state.restarts && ops.upsert[0].name === "cto" && misses++ < 2) {
-        assert.equal(state.config().agent.cto.disable, true);
-        return { ok: false, error: "opencode /global/config unreachable: fetch failed" };
-      }
-      return apply(ops);
-    };
-    assert.equal((await ensureCtoAgent(deps)).ok, true);
-    assert.deepEqual(sleeps, [250, 500]);
-    assert.equal(state.config().agent.cto.disable, false);
-    assert.equal(state.restarts, 1);
-  });
-
-  it("bounds the initial outage retries and leaves a recoverable disabled role", async () => {
-    const { deps, state } = jsoncCtoFixture("deny");
-    const apply = deps.applySubagents;
-    const sleeps = [];
-    deps.sleep = async (ms) => { sleeps.push(ms); };
-    deps.applySubagents = (ops) => state.restarts
-      ? Promise.resolve({ ok: false, error: "opencode /global/config unreachable" }) : apply(ops);
-    assert.equal((await ensureCtoAgent(deps)).ok, false);
-    assert.equal(sleeps.length, 7);
-    assert.equal(state.config().agent.cto.disable, true);
-    deps.applySubagents = apply;
-    assert.equal((await ensureCtoAgent(deps)).ok, true);
-    assert.equal(state.restarts, 1);
-  });
-
-  it("upserts both role variants through global PATCH when absent", async () => {
-    const applied = [];
-    const restarts = [];
-    const result = await ensureCtoAgent({
-      readConfig: async () => ({}),
-      applySubagents: async (ops) => { applied.push(ops); return { ok: true }; },
-      restart: async () => { restarts.push(1); return { ok: true }; },
-      promptPath: "/box/cto-prompt.md",
-    });
+  it("installs both role variants into an absent/empty config with one write and one restart", async () => {
+    const { deps, state } = ctoFileFixture("{}");
+    const result = await ensureCtoAgent({ ...deps, model: "p/m" });
     assert.equal(result.ok, true);
     assert.equal(result.changed, true);
-    assert.equal(restarts.length, 0);
-    assert.equal(applied.length, 2);
-    const upsert = applied[0].upsert[0];
-    assert.equal(upsert.name, "cto");
-    assert.equal(upsert.mode, "primary");
-    assert.equal(upsert.permission.cto_cto, "allow");
-    assert.equal(upsert.prompt, "{file:/box/cto-prompt.md}");
+    assert.equal(state.writes, 1);
+    assert.equal(state.restarts, 1);
+    const cfg = state.config();
+    assert.equal(cfg.agent.cto.mode, "primary");
+    assert.equal(cfg.agent.cto.model, "p/m");
+    assert.equal(cfg.agent.cto.permission.cto_cto, "allow");
+    assert.equal(cfg.agent.cto.prompt, `{file:${CTO_TEST_PROMPT}}`);
+    assert.ok(cfg.agent["cto-plan"]);
+  });
+
+  it("refuses to overwrite an unparseable file and never throws", async () => {
+    const { deps, state } = ctoFileFixture("{ not json");
+    const result = await ensureCtoAgent({ ...deps, log: { warn() {} } });
+    assert.equal(result.ok, false);
+    assert.equal(state.writes, 0);
+    assert.equal(state.restarts, 0);
+  });
+
+  it("reports a failed restart as not-ok (file already written) and a read failure as not-ok", async () => {
+    const { deps, state } = ctoFileFixture("{}");
+    const r = await ensureCtoAgent({ ...deps, restart: async () => ({ ok: false, error: "boom" }), log: { warn() {} } });
+    assert.deepEqual([r.ok, r.changed, r.error], [false, true, "boom"]);
+    assert.equal(state.writes, 1);
+    const r2 = await ensureCtoAgent({ ...deps, readText: async () => { throw new Error("nope"); }, log: { warn() {} } });
+    assert.equal(r2.ok, false);
   });
 
   it("defaults promptPath to the materialized doctrine file, not the committed source doc", () => {
