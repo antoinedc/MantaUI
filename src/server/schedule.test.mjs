@@ -299,6 +299,7 @@ test("tick fires a job with no kind as prompt (regression for legacy store jobs)
     sessionId: "ses_abc",
     text: "check the deploy",
     ctoKey: "sched:legacy1:2026-08-18T09:01",
+    coalesceKey: "sched:legacy1",
   });
   assert.equal(h.notifySent.length, 0);
 });
@@ -365,9 +366,19 @@ test("tick fires a due recurring job and stamps lastFiredMinute", async () => {
     sessionId: "ses_abc",
     text: "check the deploy",
     ctoKey: "sched:job1:2026-06-20T15:05",
+    coalesceKey: "sched:job1",
   });
   assert.equal(h.jobs.length, 1, "recurring job survives");
   assert.equal(h.jobs[0].lastFiredMinute, "2026-06-20T15:05");
+});
+
+test("fired prompt carries coalesceKey sched:<jobId> alongside the unchanged ctoKey", async () => {
+  const now = localDate(2026, 6, 20, 15, 5);
+  const h = harness([baseJob], now);
+  const { tick } = createScheduler(h.deps);
+  await tick();
+  assert.equal(h.sent[0].coalesceKey, "sched:job1");
+  assert.equal(h.sent[0].ctoKey, "sched:job1:2026-06-20T15:05");
 });
 
 test("each firing minute carries a NEW ctoKey occurrence identity (same text never dedupes recurring fires)", async () => {
@@ -504,6 +515,7 @@ test("tick fires a job whose directory exists (regression)", async () => {
     sessionId: "ses_abc",
     text: "check the deploy",
     ctoKey: "sched:job1:2026-06-20T15:05",
+    coalesceKey: "sched:job1",
   });
 });
 
@@ -559,6 +571,7 @@ test("tick processes a mix of live and dead-cwd jobs correctly", async () => {
     sessionId: "ses_abc",
     text: "check the deploy",
     ctoKey: "sched:live1:2026-06-20T15:05",
+    coalesceKey: "sched:live1",
   });
   // Both jobs survive: live with stamped minute, dead auto-disabled.
   assert.equal(h.jobs.length, 2);
