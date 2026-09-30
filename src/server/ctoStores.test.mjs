@@ -43,6 +43,7 @@ import {
   patchStore,
   createLedgerStore,
   startCtoStoreSweeper,
+  sweepStaleTmpFiles,
 } from "./ctoStores.mjs";
 import { createStandingQueryEngine, WATCHER_MIGRATION_KEY } from "./ctoWatchers.mjs";
 
@@ -742,4 +743,41 @@ test("BET-1516: the findings store resolves under the sandbox and the retention 
   });
   await sweepAllStores(Date.now() + RETENTION_MS.findings + 10);
   assert.equal((await findingsStore.load()).findings.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Stale atomic-write temp files
+// ---------------------------------------------------------------------------
+
+test("sweepStaleTmpFiles removes old *.tmp-* files, keeps fresh tmp files and real json", async () => {
+  const { mkdir, writeFile, utimes, readdir, rm } = await import("node:fs/promises");
+  // A private dir under the sandboxed cto root (ctoPath honors MANTA_STATE_HOME).
+  const dir = ctoPath(`tmp-sweep-test-${process.pid}-${Date.now()}`);
+  await mkdir(dir, { recursive: true });
+  try {
+    const now = Date.now();
+    const hourAgo = (h) => new Date(now - h * 3_600_000);
+    const files = {
+      "tool-registry.json": 2, // real file, old — must stay
+      "tool-registry.json.tmp-1-2-a": 3, // stale tmp — removed
+      "budget.json.tmp-9-8-z": 1.5, // stale tmp — removed
+      "engine-state.json.tmp-5-6-b": 0.1, // fresh tmp — kept
+      "notes.txt": 5, // unrelated old file — kept
+    };
+    for (const [name, ageH] of Object.entries(files)) {
+      const f = `${dir}/${name}`;
+      await writeFile(f, "{}");
+      await utimes(f, hourAgo(ageH), hourAgo(ageH));
+    }
+    await mkdir(`${dir}/x.tmp-dir`); // a directory named like a tmp file — never touched
+    const removed = await sweepStaleTmpFiles({ dir, nowMs: now });
+    assert.equal(removed, 2);
+    assert.deepEqual((await readdir(dir)).sort(), ["engine-state.json.tmp-5-6-b", "notes.txt", "tool-registry.json", "x.tmp-dir"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("sweepStaleTmpFiles never throws on a missing directory", async () => {
+  assert.equal(await sweepStaleTmpFiles({ dir: ctoPath("does-not-exist-tmp-sweep") }), 0);
 });

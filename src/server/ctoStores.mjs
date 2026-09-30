@@ -958,7 +958,40 @@ export function createCtoStoreSweep({ now = () => Date.now(), hooks = [] } = {})
   return { sweep };
 }
 
+// Stale atomic-write leftovers. writeJsonAtomic writes `<file>.tmp-<pid>-<ts>-<n>`
+// then renames; a write interrupted by a crash/restart leaves the temp behind
+// (tool-registry.json.tmp-* files of 5-25 MB piled up). Best-effort: removes
+// top-level `*.tmp-*` regular files in the cto state dir whose mtime is older
+// than `maxAgeMs` (default 1h, comfortably longer than any live write). Never
+// throws, never touches a file without `.tmp-` in its name. Returns the number
+// removed.
+export const STALE_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+export async function sweepStaleTmpFiles({ dir = ctoPath(), nowMs = Date.now(), maxAgeMs = STALE_TMP_MAX_AGE_MS } = {}) {
+  let removed = 0;
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isFile() || !/\.tmp-[^/]+$/.test(e.name)) continue;
+      try {
+        const file = join(dir, e.name);
+        const st = await stat(file);
+        if (nowMs - st.mtimeMs <= maxAgeMs) continue;
+        await rm(file, { force: true });
+        removed++;
+      } catch {
+        /* best-effort per file */
+      }
+    }
+  } catch {
+    /* dir missing / unreadable: nothing to sweep */
+  }
+  return removed;
+}
+
 export function startCtoStoreSweeper({ intervalMs = SWEEP_INTERVAL_MS, ...opts } = {}) {
+  // Startup pass: clear temp files an earlier crashed writer left behind.
+  void sweepStaleTmpFiles().catch(() => {});
   const { sweep } = createCtoStoreSweep(opts);
   return startPoller(sweep, { intervalMs, label: "cto-stores" });
 }
