@@ -305,7 +305,9 @@ function tokensSent(row) {
 }
 
 /**
- * I/O. The ONE ledger row query. Extracts the flat ledger row shape (the
+ * I/O. The ONE ledger row read. Served from the incremental in-memory cache
+ * below (see "Incremental ledger row cache") — it no longer runs a SQL scan per
+ * call. Extracts the flat ledger row shape (the
  * `aggregate`/aggregate* fold inputs) from assistant messages over `sinceMs`.
  * Projected query: the role filter + JSON parsing run in SQLite via
  * `json_extract`, so the SELECT streams only the fields the flat shape needs
@@ -327,46 +329,355 @@ function tokensSent(row) {
  * the callers.
  */
 export async function fetchLedgerRows(db, sinceMs) {
-  const since = num(sinceMs);
-  const sql = `
-    SELECT m.id AS msg_id,
-           s.id AS session_id,
-           s.parent_id AS parent_id, s.agent AS agent, s.directory AS directory,
-           json_extract(m.data,'$.providerID')           AS providerID,
-           json_extract(m.data,'$.modelID')              AS modelID,
-           json_extract(m.data,'$.cost')                 AS cost,
-           json_extract(m.data,'$.tokens.input')         AS input,
-           json_extract(m.data,'$.tokens.output')        AS output,
-           json_extract(m.data,'$.tokens.reasoning')     AS reasoning,
-           json_extract(m.data,'$.tokens.cache.read')    AS cacheRead,
-           json_extract(m.data,'$.tokens.cache.write')   AS cacheWrite,
-           json_extract(m.data,'$.time.created')         AS startedMs,
-           json_extract(m.data,'$.time.completed')       AS completedMs
-    FROM message m JOIN session s ON s.id = m.session_id
-    WHERE m.time_created >= ?
-      AND json_valid(m.data) = 1
-      AND json_extract(m.data,'$.role') = 'assistant'`;
-  const stmt = db.prepare(sql);
-  const rows = [];
-  for (const row of stmt.all(since)) {
-    rows.push({
-      providerID: row.providerID ?? null,
-      modelID: row.modelID ?? null,
-      sessionID: row.session_id != null ? String(row.session_id) : null,
-      agent: row.agent ?? null,
-      parentId: row.parent_id != null ? String(row.parent_id) : null,
-      directory: row.directory ?? null,
-      cost: row.cost,
-      input: row.input,
-      output: row.output,
-      reasoning: row.reasoning,
-      cacheRead: row.cacheRead,
-      cacheWrite: row.cacheWrite,
-      startedMs: row.startedMs,
-      completedMs: row.completedMs,
-    });
+  return defaultLedgerCache.fetchRows(db, sinceMs);
+}
+
+// ---------------------------------------------------------------------------
+// Incremental ledger row cache.
+//
+// node:sqlite's DatabaseSync is SYNCHRONOUS: every `stmt.all()` freezes the
+// whole server. `message.time_created` has no index, so the old windowed query
+// scanned (and json_extract-ed) the entire message table on every call — 0.8 s
+// for a 1-day window, 3 s for full history — from several periodic pollers.
+// That starved the event loop, HTTP stopped answering and the watchdog
+// restarted the server.
+//
+// The fix is to never ask SQLite the same question twice:
+//   • warm load — walk the (small) session table and read each session's
+//     assistant rows through the (session_id, time_created, id) index in small
+//     keyset pages, yielding to the event loop between pages, so no single
+//     synchronous call runs longer than a few tens of ms;
+//   • refresh — at most once per TTL, re-read only sessions whose
+//     `time_updated` moved (or that still hold an unfinished row), and within
+//     them only messages newer than the previous refresh minus an overlap;
+//   • serve — every call filters the cached rows in memory.
+// Callers during a warm-up / refresh await the SAME in-flight promise.
+//
+// Known, accepted limitation: a message deleted from opencode lingers in the
+// cache until its session is re-scanned over that time range (deleted rows in a
+// re-scanned range ARE dropped); a deleted SESSION is dropped on the next
+// refresh.
+// ---------------------------------------------------------------------------
+
+export const LEDGER_CACHE_TTL_MS = 25_000;
+// Re-scan messages this far behind the previous refresh: rows change until
+// they complete, and clocks/commits are not perfectly ordered.
+export const LEDGER_REFRESH_OVERLAP_MS = 60 * 60 * 1000;
+// An unfinished row older than this is treated as abandoned (an aborted turn
+// never completes) and stops forcing re-scans of its session.
+export const LEDGER_ABANDONED_MS = 24 * 60 * 60 * 1000;
+export const LEDGER_PAGE_ROWS = 100;
+export const LEDGER_YIELD_BUDGET_MS = 30;
+
+/**
+ * PURE. The message-created floor to re-scan a session from. A never-seen
+ * session is read from 0; a known one from the earlier of (previous refresh −
+ * overlap) and its oldest still-unfinished row.
+ */
+export function ledgerRescanFloor({ known, lastRefreshMs, incompleteFromMs, overlapMs = LEDGER_REFRESH_OVERLAP_MS }) {
+  if (!known) return 0;
+  const base = Math.max(0, num(lastRefreshMs) - overlapMs);
+  return typeof incompleteFromMs === "number" ? Math.min(base, incompleteFromMs) : base;
+}
+
+/**
+ * PURE. Which sessions need (re-)reading, and from where. `sessionList` is
+ * Array<{ id, timeUpdated }>, `cached` a Map<id, { timeUpdated, incompleteFromMs }>.
+ * A session is re-read when it is new, its `time_updated` moved (or is unknown),
+ * or it still holds a recent unfinished row. Returns Array<{ id, floor }>.
+ */
+export function selectSessionsToScan({ sessionList, cached, lastRefreshMs, nowMs, overlapMs = LEDGER_REFRESH_OVERLAP_MS, abandonedMs = LEDGER_ABANDONED_MS }) {
+  const out = [];
+  for (const s of sessionList) {
+    const c = cached.get(s.id);
+    if (!c) {
+      out.push({ id: s.id, floor: 0 });
+      continue;
+    }
+    const live = typeof c.incompleteFromMs === "number" && c.incompleteFromMs > nowMs - abandonedMs;
+    const moved = typeof s.timeUpdated !== "number" || typeof c.timeUpdated !== "number" || s.timeUpdated > c.timeUpdated;
+    if (!moved && !live) continue;
+    out.push({ id: s.id, floor: ledgerRescanFloor({ known: true, lastRefreshMs, incompleteFromMs: live ? c.incompleteFromMs : undefined, overlapMs }) });
   }
-  return rows;
+  return out;
+}
+
+/**
+ * PURE. Merge freshly-read entries into a session's cached rows. `rows` is a
+ * Map<msgId, { createdMs, row }>; `fetched` the entries read for messages with
+ * created >= `floor`. Upserts by id, and drops cached rows inside the re-read
+ * range that no longer exist (deleted upstream). Returns the oldest created
+ * time among still-unfinished rows (undefined when none).
+ */
+export function mergeLedgerEntries(rows, fetched, floor) {
+  const seen = new Set();
+  for (const e of fetched) {
+    seen.add(e.id);
+    rows.set(e.id, { createdMs: e.createdMs, row: e.row });
+  }
+  for (const [id, e] of rows) {
+    if (!seen.has(id) && typeof e.createdMs === "number" && e.createdMs >= floor) rows.delete(id);
+  }
+  let incompleteFromMs;
+  for (const e of rows.values()) {
+    if (typeof e.row.completedMs === "number" && e.row.completedMs > 0) continue;
+    if (typeof e.createdMs !== "number") continue;
+    if (incompleteFromMs === undefined || e.createdMs < incompleteFromMs) incompleteFromMs = e.createdMs;
+  }
+  return incompleteFromMs;
+}
+
+// Skip message rows whose serialized `data` is larger than this. Assistant
+// messages are tiny (live box: 78k of them, max 28 KB, avg 0.5 KB), but USER
+// messages can carry pasted files/images — 220 rows over 100 KB, one of 103 MB,
+// 680 MB in total. Parsing those blobs is what made a 10-row page take 2 s, and
+// they can never be ledger rows. `octet_length(data)` (SQLite >= 3.43) is
+// answered from the record header without loading the payload, so guarding on it
+// keeps the blob unread (measured: 0 ms vs 200 ms for `length()`, which must
+// read a TEXT value to count characters; older SQLite falls back to `length`).
+// Accepted limitation: an assistant row larger than this would be skipped.
+export const LEDGER_MAX_ROW_BYTES = 131_072;
+
+// One keyset page of a session's messages. The inner SELECT is bounded by
+// LIMIT so a page never scans more than `limit` message rows through the
+// (session_id, time_created, id) index; malformed JSON yields d = NULL (role
+// NULL → skipped in JS) but still advances the cursor. Non-assistant rows come
+// back with role != 'assistant' and are filtered in JS for the same reason.
+const ledgerPageSql = (sizeFn) => `
+  SELECT id AS msg_id, time_created AS created_at,
+         json_extract(d,'$.role')                    AS role,
+         json_extract(d,'$.providerID')              AS providerID,
+         json_extract(d,'$.modelID')                 AS modelID,
+         json_extract(d,'$.cost')                    AS cost,
+         json_extract(d,'$.tokens.input')            AS input,
+         json_extract(d,'$.tokens.output')           AS output,
+         json_extract(d,'$.tokens.reasoning')        AS reasoning,
+         json_extract(d,'$.tokens.cache.read')       AS cacheRead,
+         json_extract(d,'$.tokens.cache.write')      AS cacheWrite,
+         json_extract(d,'$.time.created')            AS startedMs,
+         json_extract(d,'$.time.completed')          AS completedMs
+  FROM (SELECT id, time_created, CASE WHEN ${sizeFn}(data) <= ${LEDGER_MAX_ROW_BYTES} AND json_valid(data) = 1 THEN data END AS d
+        FROM message
+        WHERE session_id = ? AND time_created >= ?
+          AND (time_created > ? OR (time_created = ? AND id > ?))
+        ORDER BY time_created, id
+        LIMIT ?)
+  ORDER BY created_at, msg_id`;
+
+function ledgerRowFrom(r, sessionId, meta) {
+  return {
+    providerID: r.providerID ?? null,
+    modelID: r.modelID ?? null,
+    sessionID: sessionId,
+    agent: meta.agent ?? null,
+    parentId: meta.parentId ?? null,
+    directory: meta.directory ?? null,
+    cost: r.cost,
+    input: r.input,
+    output: r.output,
+    reasoning: r.reasoning,
+    cacheRead: r.cacheRead,
+    cacheWrite: r.cacheWrite,
+    startedMs: r.startedMs,
+    completedMs: r.completedMs,
+  };
+}
+
+function readSessionList(db) {
+  let rows;
+  let hasUpdated = true;
+  try {
+    rows = db.prepare("SELECT id, parent_id, agent, directory, time_updated FROM session").all();
+  } catch {
+    // Older/foreign schema without session.time_updated: every session is then
+    // treated as changed (bounded by the message-time floor).
+    hasUpdated = false;
+    rows = db.prepare("SELECT id, parent_id, agent, directory FROM session").all();
+  }
+  return rows.map((r) => ({
+    id: String(r.id),
+    meta: {
+      parentId: r.parent_id != null ? String(r.parent_id) : null,
+      agent: r.agent ?? null,
+      directory: r.directory ?? null,
+    },
+    timeUpdated: hasUpdated && typeof r.time_updated === "number" ? r.time_updated : null,
+  }));
+}
+
+/**
+ * Build a ledger row cache. One instance per process in production
+ * (`defaultLedgerCache`); tests build their own with a fake clock / small
+ * pages. State is keyed by db HANDLE, so a reopened handle (query-error
+ * recovery) starts from a fresh warm load and the old cache is collectable.
+ */
+export function createLedgerRowCache({
+  ttlMs = LEDGER_CACHE_TTL_MS,
+  now = Date.now,
+  pageRows = LEDGER_PAGE_ROWS,
+  yieldBudgetMs = LEDGER_YIELD_BUDGET_MS,
+  clock = () => performance.now(),
+  yieldFn = () => new Promise((r) => setImmediate(r)),
+} = {}) {
+  const states = new WeakMap();
+
+  function stateFor(db) {
+    let st = states.get(db);
+    if (!st) {
+      st = { sessions: new Map(), warmed: false, refreshedAt: 0, checkedAt: 0, inflight: null };
+      states.set(db, st);
+    }
+    return st;
+  }
+
+  async function scanSession(db, sid, meta, floor, pacer) {
+    let stmt;
+    try {
+      stmt = db.prepare(ledgerPageSql("octet_length"));
+    } catch {
+      stmt = db.prepare(ledgerPageSql("length")); // SQLite < 3.43: no octet_length
+    }
+    const entries = [];
+    let curT = Number.MIN_SAFE_INTEGER;
+    let curId = "";
+    for (;;) {
+      const page = stmt.all(sid, floor, curT, curT, curId, pageRows);
+      for (const r of page) {
+        if (r.role !== "assistant") continue;
+        entries.push({
+          id: String(r.msg_id),
+          createdMs: typeof r.created_at === "number" ? r.created_at : null,
+          row: ledgerRowFrom(r, sid, meta),
+        });
+      }
+      if (page.length < pageRows) break;
+      const last = page[page.length - 1];
+      curT = last.created_at;
+      curId = String(last.msg_id);
+      await pacer();
+    }
+    return entries;
+  }
+
+  async function refresh(db, st) {
+    const startedAt = now();
+    let lastYield = clock();
+    const pacer = async () => {
+      if (clock() - lastYield >= yieldBudgetMs) {
+        await yieldFn();
+        lastYield = clock();
+      }
+    };
+    const list = readSessionList(db);
+    await pacer();
+    const present = new Set(list.map((s) => s.id));
+    for (const sid of [...st.sessions.keys()]) if (!present.has(sid)) st.sessions.delete(sid);
+    const todo = selectSessionsToScan({
+      sessionList: list.map((s) => ({ id: s.id, timeUpdated: s.timeUpdated })),
+      cached: st.sessions,
+      lastRefreshMs: st.refreshedAt,
+      nowMs: startedAt,
+    });
+    const byId = new Map(list.map((s) => [s.id, s]));
+    for (const { id, floor } of todo) {
+      const s = byId.get(id);
+      const entries = await scanSession(db, id, s.meta, floor, pacer);
+      let c = st.sessions.get(id);
+      if (!c) {
+        c = { meta: s.meta, timeUpdated: s.timeUpdated, incompleteFromMs: undefined, rows: new Map() };
+        st.sessions.set(id, c);
+      } else {
+        c.meta = s.meta;
+        c.timeUpdated = s.timeUpdated;
+        for (const e of c.rows.values()) {
+          e.row.agent = s.meta.agent;
+          e.row.parentId = s.meta.parentId;
+          e.row.directory = s.meta.directory;
+        }
+      }
+      c.incompleteFromMs = mergeLedgerEntries(c.rows, entries, floor);
+      await pacer();
+    }
+    st.refreshedAt = startedAt;
+  }
+
+  async function ensureFresh(db) {
+    const st = stateFor(db);
+    if (st.inflight) return st.inflight;
+    if (st.warmed && now() - st.checkedAt < ttlMs) return undefined;
+    const wasWarm = st.warmed;
+    st.inflight = (async () => {
+      try {
+        await refresh(db, st);
+        st.warmed = true;
+      } catch (e) {
+        if (!wasWarm) {
+          // Half-loaded cache would serve a silently truncated ledger — drop
+          // it and let the caller see the failure; the next call retries.
+          st.sessions = new Map();
+          st.refreshedAt = 0;
+          throw e;
+        }
+        // A failed refresh keeps serving the (slightly stale) cache; the TTL
+        // below stops it from retrying on every call.
+        console.warn("[modelLedger] ledger cache refresh failed:", e?.message ?? e);
+      } finally {
+        st.checkedAt = now();
+        st.inflight = null;
+      }
+    })();
+    return st.inflight;
+  }
+
+  return {
+    /** Same contract as the old query: flat rows with message time_created >= sinceMs. */
+    async fetchRows(db, sinceMs) {
+      const since = num(sinceMs);
+      await ensureFresh(db);
+      const out = [];
+      for (const c of stateFor(db).sessions.values()) {
+        for (const e of c.rows.values()) {
+          if (typeof e.createdMs === "number" && e.createdMs >= since) out.push({ ...e.row });
+        }
+      }
+      return out;
+    },
+    /**
+     * The newest row per session (highest completedMs, later row wins ties) for
+     * a small set of session ids, at ANY age. Map<sessionId, row>.
+     */
+    async latestBySession(db, sessionIds) {
+      await ensureFresh(db);
+      const st = stateFor(db);
+      const out = new Map();
+      for (const sid of sessionIds ?? []) {
+        const c = st.sessions.get(sid);
+        if (!c) continue;
+        let best = null;
+        let bestCompleted = 0;
+        for (const e of c.rows.values()) {
+          const completed = typeof e.row.completedMs === "number" ? e.row.completedMs : 0;
+          if (best === null || completed >= bestCompleted) {
+            best = e.row;
+            bestCompleted = completed;
+          }
+        }
+        if (best) out.set(sid, { ...best });
+      }
+      return out;
+    },
+  };
+}
+
+const defaultLedgerCache = createLedgerRowCache();
+
+/**
+ * I/O. Latest ledger row per session for `sessionIds`, from the cache (no
+ * full-history scan). Used by the compaction poller. Throws like
+ * fetchLedgerRows on a failed warm load; callers already catch.
+ */
+export async function latestLedgerRowsBySession(db, sessionIds) {
+  return defaultLedgerCache.latestBySession(db, sessionIds);
 }
 
 // Collect the parsed `tool`-type parts for a set of message ids from the

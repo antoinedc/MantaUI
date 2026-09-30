@@ -164,16 +164,13 @@ test("createOptimizerSummary returns { supported:false } when getDb resolves nul
 
 test("createOptimizerSummary memoizes: two calls within 60s trigger one DB query", async () => {
   let prepares = 0;
-  const stubDb = {
-    prepare() {
-      prepares += 1;
-      return { all: () => [] };
-    },
-    close() {},
+  const getDb = async () => ({});
+  const fetchRows = async () => {
+    prepares += 1;
+    return [];
   };
-  const getDb = async () => stubDb;
   const now = () => 1_000_000; // fixed clock → both calls within the TTL
-  const summary = createOptimizerSummary({ getDb, now });
+  const summary = createOptimizerSummary({ getDb, now, fetchRows });
 
   const first = await summary();
   const second = await summary();
@@ -331,7 +328,8 @@ test("BET-1359: meteredEndpoints that reads its injected ctx resolves (no self-a
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   let received = null;
   const summary = createOptimizerSummary({
-    getDb: async () => ({ prepare() { return { all: () => [row({ startedMs: now }) ] }; }, close() {} }),
+    getDb: async () => ({}),
+    fetchRows: async () => [row({ startedMs: now })],
     now: () => 3_000_000,
     meteredEndpoints: async (ctx) => {
       received = ctx;
@@ -350,7 +348,8 @@ test("BET-1359: meteredEndpoints is handed a ctx object, never the summary funct
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   let arg = "unset";
   const summary = createOptimizerSummary({
-    getDb: async () => ({ prepare() { return { all: () => [row({ startedMs: now }) ] }; }, close() {} }),
+    getDb: async () => ({}),
+    fetchRows: async () => [row({ startedMs: now })],
     now: () => 4_000_000,
     meteredEndpoints: async (ctx) => {
       arg = ctx;
@@ -382,7 +381,8 @@ test("BET-1359: meteredEndpoints receives the SAME windows + cacheShare the summ
   const rows = [row({ cost: 5, input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
   let ctx = null;
   const summary = createOptimizerSummary({
-    getDb: async () => ({ prepare() { return { all: () => rows }; }, close() {} }),
+    getDb: async () => ({}),
+    fetchRows: async () => rows,
     now: () => now,
     usageSnapshots: () => snapshots,
     usageHistory: () => ({}),
@@ -441,14 +441,14 @@ test("BET-1359: metered degradation unchanged (throw / non-array / not-a-functio
 test("BET-1359: _resetSummaryMemo clears the cache so the next build re-queries", async () => {
   _resetSummaryMemo();
   let prepares = 0;
-  const stubDb = {
-    prepare() {
+  const summary = createOptimizerSummary({
+    getDb: async () => ({}),
+    fetchRows: async () => {
       prepares += 1;
-      return { all: () => [] };
+      return [];
     },
-    close() {},
-  };
-  const summary = createOptimizerSummary({ getDb: async () => stubDb, now: () => 9_000_000 });
+    now: () => 9_000_000,
+  });
 
   const first = await summary();
   assert.equal(prepares, 1);
@@ -504,7 +504,8 @@ test("BET-1360: self-heal — a build that finishes after the budget still popul
   const nowDate = new Date(2026, 7, 24, 12, 0, 0).getTime();
   const late = deferred();
   const summary = createOptimizerSummary({
-    getDb: () => late.promise.then(() => ({ prepare() { return { all: () => [row({ startedMs: nowDate }) ] }; }, close() {} })),
+    getDb: () => late.promise.then(() => ({})),
+    fetchRows: async () => [row({ startedMs: nowDate })],
     now: () => t,
   });
   const first = summary();
@@ -557,7 +558,8 @@ test("BET-1360: fast path unchanged — normal build memoizes for TTL_MS with on
   let prepares = 0;
   const nowDate = new Date(2026, 7, 24, 12, 0, 0).getTime();
   const summary = createOptimizerSummary({
-    getDb: async () => ({ prepare() { prepares += 1; return { all: () => [row({ startedMs: nowDate }) ] }; }, close() {} }),
+    getDb: async () => ({}),
+    fetchRows: async () => { prepares += 1; return [row({ startedMs: nowDate })]; },
     now: () => t,
   });
   const first = await withTimeout(summary(), 2000);
