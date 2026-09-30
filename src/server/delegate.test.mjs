@@ -2527,3 +2527,14 @@ test("startJob uses an explicit name (the work objective) instead of the prompt'
   await startJob({ prompt: "You are the implementation worker", parentSessionID: "parent", parentDirectory: "/repo" }, h2.deps);
   assert.match(h2.jobs.find((j) => j.childSessionID === "child_unnamed").name, /^you-are-the/);
 });
+
+test("observeEvent: token-stream events return before loading the job store", async () => {
+  let loads = 0;
+  const load = async () => { loads++; return []; };
+  for (const type of ["message.part.delta", "message.updated", "session.updated", "session.diff"]) {
+    await observeEvent({ type, properties: { sessionID: "ses_x" } }, { load });
+  }
+  assert.equal(loads, 0);
+  await observeEvent({ type: "session.idle", properties: { sessionID: "ses_x" } }, { load });
+  assert.equal(loads, 1);
+});

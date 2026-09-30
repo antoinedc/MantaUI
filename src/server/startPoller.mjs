@@ -7,7 +7,14 @@
 // The caller's `run` owns its I/O + its clock (injected deps); this wrapper
 // owns only the timer discipline: run once immediately, then on a cadence,
 // never re-entering an in-flight tick, never keeping the process alive.
-export function startPoller(run, { intervalMs, label = "poller", immediate = true } = {}) {
+// setInterval/setTimeout store the delay as a signed 32-bit int: anything above
+// ~24.8 days is silently clamped to 1 ms (Node prints a TimeoutOverflowWarning).
+// A "monthly" 30-day poller therefore fired ~1000×/s and pinned the CPU. Long
+// cadences are run off a short check timer against an absolute due time.
+export const MAX_TIMER_MS = 2 ** 31 - 1;
+export const LONG_INTERVAL_CHECK_MS = 60 * 60 * 1000;
+
+export function startPoller(run, { intervalMs, label = "poller", immediate = true, now = Date.now } = {}) {
   let inFlight = false;
   const tick = async () => {
     if (inFlight) return;
@@ -21,7 +28,17 @@ export function startPoller(run, { intervalMs, label = "poller", immediate = tru
     }
   };
   if (immediate) void tick();
-  const timer = setInterval(() => void tick(), intervalMs);
+  let timer;
+  if (Number(intervalMs) > MAX_TIMER_MS) {
+    let dueAt = now() + intervalMs;
+    timer = setInterval(() => {
+      if (now() < dueAt) return;
+      dueAt = now() + intervalMs;
+      void tick();
+    }, LONG_INTERVAL_CHECK_MS);
+  } else {
+    timer = setInterval(() => void tick(), intervalMs);
+  }
   timer.unref();
   return {
     stop() {
