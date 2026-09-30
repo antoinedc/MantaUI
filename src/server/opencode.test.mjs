@@ -2765,3 +2765,22 @@ test("getSessionStatus throws on a non-2xx response", async () => {
     },
   );
 });
+
+test("getSessionStatus: unresolvable directory throws and never hits the unscoped /session/status", async () => {
+  _resetSessionDirectoryCache();
+  const urls = [];
+  await withMockFetch(
+    async (url) => {
+      urls.push(String(url));
+      // Directory lookup fails; an unscoped status call would answer `{}` (→ "idle").
+      if (String(url).includes("/session/status")) {
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("nope", { status: 404 });
+    },
+    async () => {
+      await assert.rejects(() => getSessionStatus("ses_unknown"), /no directory for ses_unknown/);
+    },
+  );
+  assert.equal(urls.filter((u) => u.includes("/session/status")).length, 0, urls.join(","));
+});

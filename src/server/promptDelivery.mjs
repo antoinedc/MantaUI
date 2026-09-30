@@ -135,11 +135,12 @@ export function createPromptDelivery({
         pending.delete(sessionId);
         return;
       }
-      const { text, model } = queue.shift();
+      const item = queue.shift();
+      const { text, model } = item;
       if (queue.length === 0) pending.delete(sessionId);
       busy.add(sessionId);
       lastEventAt.set(sessionId, now());
-      const mark = { timer: null };
+      const mark = { timer: null, text, model };
       awaitingStart.set(sessionId, mark);
       try {
         await sendPrompt(withModel(sessionId, text, model));
@@ -150,6 +151,7 @@ export function createPromptDelivery({
           `[promptDelivery] deferred send for ${sessionId} failed:`,
           e?.message ?? e,
         );
+        item.failed = true;
         if (awaitingStart.get(sessionId) === mark) {
           clearAwaiting(sessionId);
           busy.delete(sessionId);
@@ -157,6 +159,7 @@ export function createPromptDelivery({
         }
         return; // a busy event arrived meanwhile: the session is really running
       }
+      item.sent = true;
       // Sent. If the turn has not been seen to start yet, give it a bounded
       // time to do so, then treat the send as finished and release the next.
       if (awaitingStart.get(sessionId) === mark) {
@@ -172,19 +175,34 @@ export function createPromptDelivery({
     }
   }
 
+  // A deleted session can never go idle: drop every trace of it so the sweep
+  // stops polling it and anyBusy() stops blocking the restart manager.
+  function forget(sid) {
+    clearAwaiting(sid);
+    busy.delete(sid);
+    pending.delete(sid);
+    lastEventAt.delete(sid);
+  }
+
   // Observe the opencode event firehose to know which sessions are busy.
   // Mirrors the renderer's running derivation:
   //   session.status{status.type:"busy"|"retry"} → busy
   //   session.status{status.type:"idle"} / session.idle / session.error → idle (drain)
   // Every other event type is ignored.
   function observeEvent(evt) {
+    if (evt?.type === "session.deleted") {
+      // opencode carries the deleted session's id at properties.info.id; the
+      // rest of the codebase also reads properties.sessionID / info.sessionID.
+      const p = evt.properties;
+      const did = [p?.sessionID, p?.info?.sessionID, p?.info?.id].find(
+        (v) => typeof v === "string" && v,
+      );
+      if (did) forget(did);
+      return;
+    }
     const sid = evt?.properties?.sessionID;
     if (typeof sid !== "string" || !sid) return;
     lastEventAt.set(sid, now());
-    if (evt.type === "session.deleted") {
-      lastEventAt.delete(sid);
-      return;
-    }
     if (evt.type === "session.idle" || evt.type === "session.error") {
       // A drained item was just sent and its turn hasn't started: this is the
       // late idle/error of the PREVIOUS turn. Ignore it.
@@ -290,48 +308,54 @@ export function createPromptDelivery({
         );
       }
     }
-    if (busy.has(sessionId)) {
-      const q = pending.get(sessionId) ?? [];
-      // A recurring sender's newer firing supersedes its own waiting one
-      // (keeps the queue position); identical text+model is never queued twice.
-      // Neither counts against the cap.
-      const same = coalesceKey
-        ? q.find((it) => it.coalesceKey === coalesceKey)
-        : undefined;
-      if (same) {
-        same.text = text;
-        same.model = model;
-        return { delivered: false, queued: true, coalesced: true };
-      }
-      if (q.some((it) => it.text === text && sameModel(it.model, model))) {
-        return { delivered: false, queued: true, coalesced: true };
-      }
-      if (q.length >= MAX_PENDING_PER_SESSION) {
-        // Queue is at the cap (BET-772). Reject + surface rather than grow
-        // the queue unboundedly: the caller learns this delivery was not
-        // queued and must be surfaced/handled, instead of assuming a drain
-        // will deliver it.
-        console.warn(
-          `[promptDelivery] deferred delivery queue for ${sessionId} is full (${MAX_PENDING_PER_SESSION}); rejecting`,
-        );
-        return { delivered: false, queued: false, rejected: true };
-      }
-      q.push({ text, model, ...(coalesceKey ? { coalesceKey } : {}) });
-      pending.set(sessionId, q);
-      return { delivered: false, queued: true };
+    // Idle and busy sessions share ONE path: enqueue (coalesce / cap rules),
+    // then drain. drain claims the session (busy + awaiting-start) before its
+    // first await, so a second delivery a few ms later sees busy and queues or
+    // merges instead of also sending immediately.
+    const q = pending.get(sessionId) ?? [];
+    // A recurring sender's newer firing supersedes its own waiting one
+    // (keeps the queue position); identical text+model is never queued twice.
+    // Neither counts against the cap.
+    const same = coalesceKey
+      ? q.find((it) => it.coalesceKey === coalesceKey)
+      : undefined;
+    if (same) {
+      same.text = text;
+      same.model = model;
+      void drain(sessionId);
+      return { delivered: false, queued: true, coalesced: true };
     }
-    try {
-      await sendPrompt(withModel(sessionId, text, model));
-      return { delivered: true, queued: false };
-    } catch (e) {
-      // Never reject: callers swallow errors and a rejection would surface as
-      // an unhandled promise in timer-driven loops. Log and report not-delivered.
+    // Also identical to the item drain just sent whose turn has not been seen
+    // to start yet (the send is in flight): the same prompt twice in that
+    // window is a duplicate, not a new request.
+    const inflight = awaitingStart.get(sessionId);
+    if (
+      q.some((it) => it.text === text && sameModel(it.model, model)) ||
+      (inflight && inflight.text === text && sameModel(inflight.model, model))
+    ) {
+      void drain(sessionId);
+      return { delivered: false, queued: true, coalesced: true };
+    }
+    if (q.length >= MAX_PENDING_PER_SESSION) {
+      // Queue is at the cap (BET-772). Reject + surface rather than grow
+      // the queue unboundedly: the caller learns this delivery was not
+      // queued and must be surfaced/handled, instead of assuming a drain
+      // will deliver it.
       console.warn(
-        `[promptDelivery] sendPrompt for ${sessionId} failed:`,
-        e?.message ?? e,
+        `[promptDelivery] deferred delivery queue for ${sessionId} is full (${MAX_PENDING_PER_SESSION}); rejecting`,
       );
-      return { delivered: false, queued: false };
+      return { delivered: false, queued: false, rejected: true };
     }
+    const item = { text, model, ...(coalesceKey ? { coalesceKey } : {}) };
+    q.push(item);
+    pending.set(sessionId, q);
+    // drain never rejects (sendPrompt failures are caught inside it).
+    await drain(sessionId);
+    // Report what happened to THIS call's item. drain marks an item it sent
+    // (or failed to send); otherwise the item is still waiting.
+    if (item.sent) return { delivered: true, queued: false };
+    if (item.failed) return { delivered: false, queued: false };
+    return { delivered: false, queued: true };
   }
 
   return { deliver, observeEvent, isBusy, anyBusy, startStaleSweep, sweepStale };

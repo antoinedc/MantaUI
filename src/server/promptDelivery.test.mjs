@@ -531,3 +531,65 @@ test("24. the factory starts no timers (only startStaleSweep does)", () => {
   assert.equal(time.intervalCount(), 0);
   assert.equal(time.pendingTimeouts(), 0);
 });
+
+test("25. F2: two idle-path delivers without awaiting → one send, second queued; sent after the turn boundary", async () => {
+  const { engine, calls } = makeEngine();
+  const p1 = engine.deliver({ sessionId: "s1", text: "one" });
+  const p2 = engine.deliver({ sessionId: "s1", text: "two" });
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.deepEqual(calls.map((c) => c.text), ["one"]);
+  assert.deepEqual(r1, { delivered: true, queued: false });
+  assert.deepEqual(r2, { delivered: false, queued: true });
+  engine.observeEvent(status("s1", "busy"));
+  boundary(engine, "s1");
+  await tick();
+  assert.deepEqual(calls.map((c) => c.text), ["one", "two"]);
+});
+
+test("25b. F2: two identical idle-path delivers → one send, second coalesced", async () => {
+  const { engine, calls } = makeEngine();
+  const [r1, r2] = await Promise.all([
+    engine.deliver({ sessionId: "s1", text: "same" }),
+    engine.deliver({ sessionId: "s1", text: "same" }),
+  ]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(r1, { delivered: true, queued: false });
+  assert.deepEqual(r2, { delivered: false, queued: true, coalesced: true });
+  engine.observeEvent(status("s1", "busy"));
+  boundary(engine, "s1");
+  await tick();
+  assert.equal(calls.length, 1, "nothing left to send");
+});
+
+test("25c. F2: idle-path send failure reports delivered:false, queued:false and never rejects", async () => {
+  const { engine, calls } = makeEngine({ rejectTexts: new Set(["boom"]) });
+  const r = await engine.deliver({ sessionId: "s1", text: "boom" });
+  assert.deepEqual(r, { delivered: false, queued: false });
+  assert.equal(calls.length, 1);
+  assert.equal(engine.isBusy("s1"), false);
+});
+
+test("26. F3: session.deleted clears busy, queue, awaiting-start and its timer", async () => {
+  for (const shape of [
+    { sessionID: "s1" },
+    { info: { id: "s1" } },
+    { info: { sessionID: "s1" } },
+  ]) {
+    const time = makeFakeTime();
+    const { engine, calls } = makeEngine({ now: time.now, timers: time.timers });
+    engine.observeEvent(status("s1", "busy"));
+    await engine.deliver({ sessionId: "s1", text: "one" });
+    await engine.deliver({ sessionId: "s1", text: "two" });
+    boundary(engine, "s1"); // "one" sent → awaiting start, timer armed, "two" queued
+    await tick();
+    assert.equal(calls.length, 1);
+    assert.equal(time.pendingTimeouts(), 1);
+    engine.observeEvent({ type: "session.deleted", properties: shape });
+    assert.equal(engine.isBusy("s1"), false);
+    assert.equal(engine.anyBusy(), false);
+    assert.equal(time.pendingTimeouts(), 0);
+    boundary(engine, "s1");
+    await tick();
+    assert.equal(calls.length, 1, "queued item was dropped with the session");
+  }
+});

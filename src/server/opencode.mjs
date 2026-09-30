@@ -794,6 +794,10 @@ export async function abortSession(sessionId, { signal } = {}) {
  */
 export async function getSessionStatus(sessionId) {
   const dirQ = await getSessionDirectoryQuery(sessionId, { awaitReady: false });
+  // Never fall back to the UNSCOPED /session/status: it always answers `{}`,
+  // which would read as "idle" for a session that is really mid-turn and let
+  // the stale-busy sweep release it. An unresolvable directory is "unknown".
+  if (!dirQ) throw new Error(`no directory for ${sessionId}`);
   const res = await ocFetch(apiUrl(`/session/status${dirQ}`));
   if (!res.ok) {
     throw new Error(`opencode getSessionStatus ${res.status}: ${await res.text()}`);
