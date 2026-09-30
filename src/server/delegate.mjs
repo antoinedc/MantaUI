@@ -1176,9 +1176,21 @@ export async function adoptSubagentJob(
  * @param {object} deps { load, save, publish, deliver, listMessages, gitRun, now }
  * @param {Map<string,boolean>} sawBusy per-childSessionID busy flag (engine-owned)
  */
+// The only event types observeEvent acts on. Everything else (notably the
+// per-token `message.part.delta` stream) is a no-op, so it must return BEFORE
+// loading the job store — that load is a synchronous read + parse of
+// delegate-jobs.json, and doing it per streamed token ran it ~40×/s.
+const OBSERVED_EVENT_TYPES = new Set([
+  "message.part.updated",
+  "session.error",
+  "session.idle",
+  "session.status",
+]);
+
 export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
   const sid = evt?.properties?.sessionID;
   if (typeof sid !== "string" || !sid) return;
+  if (!OBSERVED_EVENT_TYPES.has(evt?.type)) return;
   const { load = loadJobs } = deps;
   const jobs = await load();
 
