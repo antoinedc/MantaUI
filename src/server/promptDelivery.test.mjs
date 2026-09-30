@@ -61,6 +61,28 @@ function makeFakeTime() {
   };
 }
 
+// Timed engine, session busy, "one" + "two" queued, then a boundary drains
+// "one" (awaiting start, timer armed) with "two" still waiting.
+async function drainedOneOfTwo() {
+  const time = makeFakeTime();
+  const { engine, calls } = makeEngine({ now: time.now, timers: time.timers });
+  engine.observeEvent(status("s1", "busy"));
+  await engine.deliver({ sessionId: "s1", text: "one" });
+  await engine.deliver({ sessionId: "s1", text: "two" });
+  boundary(engine, "s1");
+  await tick();
+  return { time, engine, calls };
+}
+
+// Busy session with one waiting item, silent past the stale threshold, swept once.
+async function sweepSilentBusy(engine, time) {
+  engine.observeEvent(status("s1", "busy"));
+  await engine.deliver({ sessionId: "s1", text: "waiting" });
+  time.advance(601_000);
+  await engine.sweepStale();
+  await tick();
+}
+
 test("1. idle session → deliver calls sendPrompt once and reports delivered:true", async () => {
   const { engine, calls } = makeEngine();
   const res = await engine.deliver({ sessionId: "s1", text: "hi" });
@@ -393,13 +415,7 @@ test("19. awaiting-start timeout: no busy ever arrives → next item goes out af
 });
 
 test("19b. a busy event cancels the start timeout", async () => {
-  const time = makeFakeTime();
-  const { engine, calls } = makeEngine({ now: time.now, timers: time.timers });
-  engine.observeEvent(status("s1", "busy"));
-  await engine.deliver({ sessionId: "s1", text: "one" });
-  await engine.deliver({ sessionId: "s1", text: "two" });
-  boundary(engine, "s1");
-  await tick();
+  const { time, engine, calls } = await drainedOneOfTwo();
   engine.observeEvent(status("s1", "busy"));
   assert.equal(time.pendingTimeouts(), 0);
   await time.elapse(300_000);
@@ -458,11 +474,7 @@ test("22. stale sweep: silent busy session that opencode reports idle → drains
 test("22b. stale sweep: opencode says busy or retry → untouched", async () => {
   for (const answer of ["busy", "retry"]) {
     const { engine, calls, time } = makeStaleEngine(async () => answer);
-    engine.observeEvent(status("s1", "busy"));
-    await engine.deliver({ sessionId: "s1", text: "waiting" });
-    time.advance(601_000);
-    await engine.sweepStale();
-    await tick();
+    await sweepSilentBusy(engine, time);
     assert.equal(calls.length, 0);
     assert.equal(engine.isBusy("s1"), true);
   }
@@ -474,11 +486,7 @@ test("22c. stale sweep: status check rejects → untouched, retried on the next 
     if (mode === "throw") throw new Error("opencode down");
     return "idle";
   });
-  engine.observeEvent(status("s1", "busy"));
-  await engine.deliver({ sessionId: "s1", text: "waiting" });
-  time.advance(601_000);
-  await engine.sweepStale();
-  await tick();
+  await sweepSilentBusy(engine, time);
   assert.equal(calls.length, 0);
   assert.equal(engine.isBusy("s1"), true);
   mode = "ok";
@@ -575,13 +583,8 @@ test("26. F3: session.deleted clears busy, queue, awaiting-start and its timer",
     { info: { id: "s1" } },
     { info: { sessionID: "s1" } },
   ]) {
-    const time = makeFakeTime();
-    const { engine, calls } = makeEngine({ now: time.now, timers: time.timers });
-    engine.observeEvent(status("s1", "busy"));
-    await engine.deliver({ sessionId: "s1", text: "one" });
-    await engine.deliver({ sessionId: "s1", text: "two" });
-    boundary(engine, "s1"); // "one" sent → awaiting start, timer armed, "two" queued
-    await tick();
+    // "one" sent → awaiting start, timer armed, "two" queued
+    const { time, engine, calls } = await drainedOneOfTwo();
     assert.equal(calls.length, 1);
     assert.equal(time.pendingTimeouts(), 1);
     engine.observeEvent({ type: "session.deleted", properties: shape });
