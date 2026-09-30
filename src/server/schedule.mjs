@@ -438,6 +438,9 @@ export function createScheduler({
               sessionId: job.sessionID,
               text: job.prompt,
               ctoKey: `sched:${job.id}:${key}`,
+              // Recurring firings of one job coalesce while the session is busy
+              // (promptDelivery) instead of stacking into a burst.
+              coalesceKey: `sched:${job.id}`,
             });
           }
         } catch (e) {

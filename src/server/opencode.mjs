@@ -785,6 +785,28 @@ export async function abortSession(sessionId, { signal } = {}) {
   }
 }
 
+/** Ask opencode for a session's real status. `GET /session/status` is scoped to
+ *  a directory instance (unscoped it returns `{}` even while busy), and an idle
+ *  session is simply absent from the map. Throws on non-2xx / network error so
+ *  callers can leave their state untouched.
+ *  @param {string} sessionId
+ *  @returns {Promise<"busy"|"retry"|"idle">}
+ */
+export async function getSessionStatus(sessionId) {
+  const dirQ = await getSessionDirectoryQuery(sessionId, { awaitReady: false });
+  // Never fall back to the UNSCOPED /session/status: it always answers `{}`,
+  // which would read as "idle" for a session that is really mid-turn and let
+  // the stale-busy sweep release it. An unresolvable directory is "unknown".
+  if (!dirQ) throw new Error(`no directory for ${sessionId}`);
+  const res = await ocFetch(apiUrl(`/session/status${dirQ}`));
+  if (!res.ok) {
+    throw new Error(`opencode getSessionStatus ${res.status}: ${await res.text()}`);
+  }
+  const map = await res.json();
+  const t = map?.[sessionId]?.type;
+  return t === "busy" || t === "retry" ? t : "idle";
+}
+
 /** List sessions scoped to a project directory.
  *  @param {string} [directory]
  */

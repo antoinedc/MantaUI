@@ -442,7 +442,10 @@ const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
 const promptDelivery = createPromptDelivery({
   sendPrompt: (args) => oc.sendPrompt(args),
   redirect: (args) => ctoConversation.redirectDelivery(args),
+  getSessionStatus: (sid) => oc.getSessionStatus(sid),
 });
+// Re-check sessions that have been "busy" and silent for a long time.
+promptDelivery.startStaleSweep();
 
 // ----- CTO conversation runtime (P3a3, spec §3.1 + §8.3) -----
 // The ONE composition: exactly ONE binding engine + ONE admission engine for

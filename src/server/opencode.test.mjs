@@ -15,6 +15,7 @@ import {
   forkSession,
   compactSession,
   abortSession,
+  getSessionStatus,
   sessionExists,
   listPermissions,
   listQuestions,
@@ -2718,4 +2719,68 @@ test("estimateMessageListTokens: sums part text with ~4 chars/token", () => {
 
 test("estimateMessageListTokens: a single empty text message yields 0 not a tiny-to-inflate artifact", () => {
   assert.equal(estimateMessageListTokens([{ info: { role: "user" }, parts: [{ type: "text", text: "" }] }]), 0);
+});
+
+test("getSessionStatus: directory-scoped URL; absent → idle, busy/retry passed through", async () => {
+  _resetSessionDirectoryCache();
+  const urls = [];
+  const map = { ses_b: { type: "busy" }, ses_r: { type: "retry" } };
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      urls.push(u);
+      if (u.startsWith("http://127.0.0.1:4096/session/status")) {
+        return new Response(JSON.stringify(map), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      const id = u.split("/session/")[1];
+      return new Response(JSON.stringify({ id, directory: "/proj/x" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      assert.equal(await getSessionStatus("ses_b"), "busy");
+      assert.equal(await getSessionStatus("ses_r"), "retry");
+      assert.equal(await getSessionStatus("ses_idle"), "idle");
+    },
+  );
+  const statusUrls = urls.filter((u) => u.includes("/session/status"));
+  assert.equal(statusUrls.length, 3);
+  assert.ok(statusUrls.every((u) => u.endsWith("/session/status?directory=%2Fproj%2Fx")), statusUrls.join(","));
+});
+
+test("getSessionStatus throws on a non-2xx response", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.includes("/session/status")) return new Response("boom", { status: 500 });
+      return new Response(JSON.stringify({ id: "ses_e", directory: "/p" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      await assert.rejects(() => getSessionStatus("ses_e"), /getSessionStatus 500/);
+    },
+  );
+});
+
+test("getSessionStatus: unresolvable directory throws and never hits the unscoped /session/status", async () => {
+  _resetSessionDirectoryCache();
+  const urls = [];
+  await withMockFetch(
+    async (url) => {
+      urls.push(String(url));
+      // Directory lookup fails; an unscoped status call would answer `{}` (→ "idle").
+      if (String(url).includes("/session/status")) {
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("nope", { status: 404 });
+    },
+    async () => {
+      await assert.rejects(() => getSessionStatus("ses_unknown"), /no directory for ses_unknown/);
+    },
+  );
+  assert.equal(urls.filter((u) => u.includes("/session/status")).length, 0, urls.join(","));
 });
