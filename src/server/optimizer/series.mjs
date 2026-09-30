@@ -195,7 +195,7 @@ export function _resetSeriesMemo() {
  * takes a range and memoizes the built series per range for TTL_MS with an
  * in-flight guard.
  */
-export function createOptimizerSeries({ getDb, counterfactualStore = null, modelRates, now }) {
+export function createOptimizerSeries({ getDb, counterfactualStore = null, modelRates, now, fetchRows: fetchRowsDep = fetchLedgerRows }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return function optimizerSeries(range) {
     const r = normalizeRange(range);
@@ -212,7 +212,7 @@ export function createOptimizerSeries({ getDb, counterfactualStore = null, model
       try {
         const value = await buildOptimizerSeries({
           range: r,
-          fetchRows: (since) => fetchLedgerRows(db, since),
+          fetchRows: (since) => fetchRowsDep(db, since),
           counterfactualStore,
           modelRates,
           now: t,

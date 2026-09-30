@@ -152,7 +152,7 @@ import { createProviderHealth } from "./providerHealth.mjs";
 import {
   startModelCatalogPoller as startRoutingModelCatalog,
 } from "./modelCatalog.mjs";
-import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS, fetchLedgerRows } from "./modelLedger.mjs";
+import { endpointSummary as routingEndpointSummary, providerTokenTotals, ROUTING_LEDGER_WINDOW_MS, fetchLedgerRows, latestLedgerRowsBySession } from "./modelLedger.mjs";
 import * as appControl from "./appControl.mjs";
 import * as cto from "./cto.mjs";
 import * as ctoEngine from "./ctoEngine.mjs";
@@ -1433,6 +1433,10 @@ async function extractAndStoreConstraints(sessionID) {
   }
 }
 
+// Cold-start candidate window: how far back the ledger fallback looks for
+// sessions when tmux reported no chat windows.
+const COMPACT_COLD_START_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+
 // Enumerate the compaction candidates: the sessions the box already knows
 // about — the SAME source the pump uses (tmux projects' windows, each chat
 // window stamped with `@manta-session-id` → opencodeSessionId). This is
@@ -1483,7 +1487,9 @@ async function compactionCandidates() {
     try {
       const db = await getDb();
       if (db) {
-        const rows = await fetchLedgerRows(db, 0);
+        // Bounded: sessions with ledger activity in the last few days, served
+        // from the incremental cache — never a full-history scan.
+        const rows = await fetchLedgerRows(db, Date.now() - COMPACT_COLD_START_WINDOW_MS);
         const seen = new Set();
         for (const r of rows) {
           if (typeof r.sessionID !== "string" || !r.sessionID || seen.has(r.sessionID)) continue;
@@ -1505,25 +1511,21 @@ async function compactionCandidates() {
   const latest = new Map(); // sessionID -> { tokens, completedMs, providerID, modelID }
   if (want.size > 0) {
     const db = await getDb();
-    let rows = [];
     if (db) {
       try {
-        rows = await fetchLedgerRows(db, 0);
-      } catch (e) {
-        rows = [];
-      }
-    }
-    for (const r of rows) {
-      if (!r.sessionID || !want.has(r.sessionID)) continue;
-      const prev = latest.get(r.sessionID);
-      const completed = typeof r.completedMs === "number" ? r.completedMs : 0;
-      if (!prev || completed >= (prev.completedMs ?? 0)) {
-        latest.set(r.sessionID, {
-          tokens: (r.input ?? 0) + (r.cacheRead ?? 0) + (r.cacheWrite ?? 0),
-          completedMs: completed,
-          providerID: r.providerID ?? null,
-          modelID: r.modelID ?? null,
-        });
+        // Latest row per candidate session at ANY age, from the incremental
+        // cache (no full-history synchronous scan on the poller's hot path).
+        const rows = await latestLedgerRowsBySession(db, [...want]);
+        for (const [sid, r] of rows) {
+          latest.set(sid, {
+            tokens: (r.input ?? 0) + (r.cacheRead ?? 0) + (r.cacheWrite ?? 0),
+            completedMs: typeof r.completedMs === "number" ? r.completedMs : 0,
+            providerID: r.providerID ?? null,
+            modelID: r.modelID ?? null,
+          });
+        }
+      } catch {
+        /* ledger unavailable — contexts stay 0, as before */
       }
     }
   }

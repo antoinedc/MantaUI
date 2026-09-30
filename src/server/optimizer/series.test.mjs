@@ -283,15 +283,12 @@ test("createOptimizerSeries returns { supported:false } when getDb resolves null
 test("createOptimizerSeries memoizes PER RANGE: a 7d call is a separate slot, not a 24h hit", async () => {
   _resetSeriesMemo();
   let prepares = 0;
-  const stubDb = {
-    prepare() {
-      prepares += 1;
-      return { all: () => [] };
-    },
-    close() {},
+  const getDb = async () => ({});
+  const fetchRows = async () => {
+    prepares += 1;
+    return [];
   };
-  const getDb = async () => stubDb;
-  const s = createOptimizerSeries({ getDb, now: () => 1_000_000 });
+  const s = createOptimizerSeries({ getDb, now: () => 1_000_000, fetchRows });
 
   const a1 = await s("24h");
   const a2 = await s("24h"); // memo hit
@@ -332,15 +329,12 @@ test("createOptimizerSeries in-flight guard shares one build across concurrent c
 test("_resetSeriesMemo clears both slots so the next build re-queries", async () => {
   _resetSeriesMemo();
   let prepares = 0;
-  const stubDb = {
-    prepare() {
-      prepares += 1;
-      return { all: () => [] };
-    },
-    close() {},
+  const getDb = async () => ({});
+  const fetchRows = async () => {
+    prepares += 1;
+    return [];
   };
-  const getDb = async () => stubDb;
-  const s = createOptimizerSeries({ getDb, now: () => 1_000_000 });
+  const s = createOptimizerSeries({ getDb, now: () => 1_000_000, fetchRows });
 
   await s("24h");
   await s("24h"); // memo hit

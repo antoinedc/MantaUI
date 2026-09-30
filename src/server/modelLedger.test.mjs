@@ -606,3 +606,319 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- incremental ledger row cache ----
+//
+// fetchLedgerRows is served from an in-memory cache that is warmed in small
+// yielding pages and refreshed incrementally. These tests use a real in-memory
+// SQLite with opencode's shape (incl. the (session_id,time_created,id) index and
+// session.time_updated) and count queries by wrapping db.prepare.
+{
+  const { createLedgerRowCache, ledgerRescanFloor, selectSessionsToScan, mergeLedgerEntries } = await import("./modelLedger.mjs");
+  let SqliteMod = null;
+  try {
+    SqliteMod = await import("node:sqlite");
+  } catch {
+    SqliteMod = null;
+  }
+
+  const asst = (o = {}) => JSON.stringify({ role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", cost: 0.1, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 20, write: 30 } }, time: { created: o.created ?? 1, completed: o.completed }, ...(o.extra ?? {}) });
+
+  function memDb() {
+    const db = new SqliteMod.DatabaseSync(":memory:");
+    db.exec(`
+      CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, time_updated INTEGER);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+      CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
+    `);
+    const api = {
+      db,
+      session(id, { parentId = null, agent = "build", directory = "/w", updated = 1 } = {}) {
+        db.prepare("INSERT OR REPLACE INTO session VALUES (?,?,?,?,?)").run(id, parentId, agent, directory, updated);
+      },
+      touch(id, updated) {
+        db.prepare("UPDATE session SET time_updated=? WHERE id=?").run(updated, id);
+      },
+      msg(id, sid, ts, data) {
+        db.prepare("INSERT OR REPLACE INTO message VALUES (?,?,?,?,?)").run(id, sid, ts, ts, data);
+      },
+    };
+    return api;
+  }
+
+  // Wrap prepare() so a test can count message-table page queries.
+  function spy(db) {
+    const counts = { pages: 0, sessions: 0 };
+    const orig = db.prepare.bind(db);
+    db.prepare = (sql) => {
+      const st = orig(sql);
+      const kind = /FROM message/.test(sql) ? "pages" : /FROM session/.test(sql) ? "sessions" : null;
+      if (!kind) return st;
+      const all = st.all.bind(st);
+      st.all = (...a) => {
+        counts[kind]++;
+        return all(...a);
+      };
+      return st;
+    };
+    return counts;
+  }
+
+  const skip = (t) => {
+    if (!SqliteMod) {
+      t.skip("node:sqlite unavailable on this runtime");
+      return true;
+    }
+    return false;
+  };
+  const clockNow = () => {
+    const c = { t: 1_000_000 };
+    c.now = () => c.t;
+    return c;
+  };
+  // The SQL json_extract projection (old and new) yields null for absent fields
+  // where the legacy JS path yielded undefined; compare on the SQL convention.
+  const nullify = (rows) => rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v === undefined ? null : v])));
+  const sortRows = (rows) => nullify([...rows]).sort((a, b) => String(a.sessionID + a.startedMs).localeCompare(String(b.sessionID + b.startedMs)));
+
+  test("ledger cache: warm load returns the same rows as the legacy query (multi-page)", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    f.session("s1", { agent: "build", directory: "/w1" });
+    f.session("s2", { parentId: "s1", agent: "plan", directory: "/w2" });
+    for (let i = 0; i < 25; i++) f.msg(`a${i}`, "s1", 1000 + i, asst({ created: 1000 + i, completed: 1100 + i }));
+    for (let i = 0; i < 7; i++) f.msg(`b${i}`, "s2", 2000 + i, asst({ created: 2000 + i, completed: 2100 + i }));
+    f.msg("u1", "s1", 1500, JSON.stringify({ role: "user" }));
+    f.msg("bad", "s1", 1501, "{not json");
+    f.msg("orphan", "ghost", 1502, asst({ created: 1502 }));
+    const clk = clockNow();
+    const cache = createLedgerRowCache({ pageRows: 4, now: clk.now });
+    const got = await cache.fetchRows(f.db, 0);
+    const legacy = await legacyFetchLedgerRows(f.db, 0);
+    assert.equal(got.length, 32);
+    assert.deepEqual(sortRows(got), sortRows(legacy));
+  });
+
+  test("ledger cache: sinceMs filters on message time_created like the old query", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    f.session("s1");
+    f.msg("m1", "s1", 100, asst({ created: 5000 })); // data.time.created deliberately unrelated
+    f.msg("m2", "s1", 200, asst({ created: 1 }));
+    f.msg("m3", "s1", 300, asst({ created: 2 }));
+    const cache = createLedgerRowCache({ now: clockNow().now });
+    for (const since of [0, 100, 101, 200, 300, 301]) {
+      assert.deepEqual(sortRows(await cache.fetchRows(f.db, since)), sortRows(await legacyFetchLedgerRows(f.db, since)), `since=${since}`);
+    }
+  });
+
+  test("ledger cache: TTL prevents re-querying inside the window; refresh after it picks up new + completed rows", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const clk = clockNow();
+    f.session("s1", { updated: 10 });
+    f.msg("m1", "s1", clk.t - 5000, asst({ created: clk.t - 5000, completed: clk.t - 4000 }));
+    f.msg("m2", "s1", clk.t - 100, asst({ created: clk.t - 100 })); // still running
+    const counts = spy(f.db);
+    const cache = createLedgerRowCache({ ttlMs: 25_000, now: clk.now });
+    let rows = await cache.fetchRows(f.db, 0);
+    assert.equal(rows.length, 2);
+    assert.equal(rows.find((r) => r.startedMs === clk.t - 100).completedMs, null);
+    const warmPages = counts.pages;
+    const warmSessions = counts.sessions;
+    assert.ok(warmPages >= 1);
+
+    // Data changes, but inside the TTL nothing is re-read.
+    f.msg("m2", "s1", clk.t - 100, asst({ created: clk.t - 100, completed: clk.t + 500 }));
+    f.msg("m3", "s1", clk.t + 10, asst({ created: clk.t + 10, completed: clk.t + 20 }));
+    clk.t += 10_000;
+    rows = await cache.fetchRows(f.db, 0);
+    assert.equal(rows.length, 2);
+    assert.equal(counts.pages, warmPages);
+    assert.equal(counts.sessions, warmSessions);
+
+    // Past the TTL the session (still holding an unfinished row) is re-scanned.
+    clk.t += 20_000;
+    rows = await cache.fetchRows(f.db, 0);
+    assert.equal(rows.length, 3);
+    assert.ok(rows.every((r) => typeof r.completedMs === "number"), "the previously-incomplete row picked up its completion");
+    assert.ok(counts.pages > warmPages);
+  });
+
+  test("ledger cache: refresh only re-reads sessions whose time_updated moved (no unfinished rows)", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const clk = clockNow();
+    f.session("s1", { updated: 10 });
+    f.session("s2", { updated: 10 });
+    f.msg("a", "s1", clk.t - 1000, asst({ created: 1, completed: 2 }));
+    f.msg("b", "s2", clk.t - 1000, asst({ created: 1, completed: 2 }));
+    const counts = spy(f.db);
+    const cache = createLedgerRowCache({ ttlMs: 1000, now: clk.now });
+    await cache.fetchRows(f.db, 0);
+    const afterWarm = counts.pages;
+    assert.equal(afterWarm, 2, "one page per session on warm");
+
+    clk.t += 5000;
+    await cache.fetchRows(f.db, 0);
+    assert.equal(counts.pages, afterWarm, "nothing moved → no message queries");
+
+    f.msg("c", "s2", clk.t - 10, asst({ created: 3, completed: 4 }));
+    f.touch("s2", 20);
+    clk.t += 5000;
+    const rows = await cache.fetchRows(f.db, 0);
+    assert.equal(rows.length, 3);
+    assert.equal(counts.pages, afterWarm + 1, "only s2 re-scanned");
+  });
+
+  test("ledger cache: single-flight — concurrent callers during warm-up share one load", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    f.session("s1");
+    f.session("s2");
+    f.msg("a", "s1", 10, asst({ created: 1, completed: 2 }));
+    f.msg("b", "s2", 10, asst({ created: 1, completed: 2 }));
+    const counts = spy(f.db);
+    const cache = createLedgerRowCache({ now: clockNow().now });
+    const [r1, r2, r3] = await Promise.all([cache.fetchRows(f.db, 0), cache.fetchRows(f.db, 0), cache.latestBySession(f.db, ["s1"])]);
+    assert.equal(r1.length, 2);
+    assert.equal(r2.length, 2);
+    assert.equal(r3.size, 1);
+    assert.equal(counts.sessions, 1, "one session listing");
+    assert.equal(counts.pages, 2, "each session paged once, not once per caller");
+  });
+
+  test("ledger cache: warm load yields to the event loop between pages", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    f.session("s1");
+    for (let i = 0; i < 40; i++) f.msg(`a${i}`, "s1", 100 + i, asst({ created: i, completed: i + 1 }));
+    let yields = 0;
+    let tick = 0;
+    const cache = createLedgerRowCache({
+      pageRows: 5,
+      yieldBudgetMs: 0,
+      now: clockNow().now,
+      clock: () => ++tick,
+      yieldFn: async () => {
+        yields++;
+      },
+    });
+    const rows = await cache.fetchRows(f.db, 0);
+    assert.equal(rows.length, 40);
+    assert.ok(yields >= 7, `expected a yield per page, got ${yields}`);
+  });
+
+  test("ledger cache: deleted session and deleted message drop out after refresh; failed cold load throws then retries", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const clk = clockNow();
+    f.session("s1", { updated: 1 });
+    f.session("s2", { updated: 1 });
+    f.msg("a", "s1", clk.t - 10, asst({ created: 1, completed: 2 }));
+    f.msg("b", "s1", clk.t - 5, asst({ created: 1, completed: 2 }));
+    f.msg("c", "s2", clk.t - 10, asst({ created: 1, completed: 2 }));
+    const cache = createLedgerRowCache({ ttlMs: 1000, now: clk.now });
+    assert.equal((await cache.fetchRows(f.db, 0)).length, 3);
+    f.db.prepare("DELETE FROM session WHERE id='s2'").run();
+    f.db.prepare("DELETE FROM message WHERE id='b'").run();
+    f.touch("s1", 5);
+    clk.t += 5000;
+    assert.deepEqual((await cache.fetchRows(f.db, 0)).map((r) => r.sessionID), ["s1"]);
+
+    // Failed cold load: throws (callers' degrade path), leaves nothing half-loaded.
+    const g = memDb();
+    g.session("s1");
+    g.msg("a", "s1", 10, asst({ created: 1, completed: 2 }));
+    const origPrepare = g.db.prepare.bind(g.db);
+    let fail = true;
+    g.db.prepare = (sql) => {
+      if (fail && /FROM message/.test(sql)) throw new Error("boom");
+      return origPrepare(sql);
+    };
+    const c2 = createLedgerRowCache({ now: clockNow().now });
+    await assert.rejects(() => c2.fetchRows(g.db, 0), /boom/);
+    fail = false;
+    assert.equal((await c2.fetchRows(g.db, 0)).length, 1);
+  });
+
+  test("ledger cache: a failed refresh keeps serving the cache", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const clk = clockNow();
+    f.session("s1", { updated: 1 });
+    f.msg("a", "s1", 10, asst({ created: 1, completed: 2 }));
+    const cache = createLedgerRowCache({ ttlMs: 1000, now: clk.now });
+    assert.equal((await cache.fetchRows(f.db, 0)).length, 1);
+    const orig = f.db.prepare.bind(f.db);
+    f.db.prepare = () => {
+      throw new Error("db gone");
+    };
+    clk.t += 5000;
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      assert.equal((await cache.fetchRows(f.db, 0)).length, 1);
+    } finally {
+      console.warn = warn;
+      f.db.prepare = orig;
+    }
+  });
+
+  test("ledger cache: latestBySession picks the newest completed row per session at any age", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    f.session("s1");
+    f.session("s2");
+    f.msg("a", "s1", 10, asst({ created: 1, completed: 500, extra: { modelID: "old" } }));
+    f.msg("b", "s1", 20, asst({ created: 2, completed: 900, extra: { modelID: "new" } }));
+    f.msg("c", "s1", 30, asst({ created: 3, completed: 700, extra: { modelID: "mid" } }));
+    f.msg("d", "s2", 40, asst({ created: 4, completed: 10 }));
+    const cache = createLedgerRowCache({ now: clockNow().now });
+    const m = await cache.latestBySession(f.db, ["s1", "nope"]);
+    assert.equal(m.size, 1);
+    assert.equal(m.get("s1").modelID, "new");
+    assert.equal(m.get("s1").completedMs, 900);
+  });
+
+  test("ledger cache pure helpers: floor, selection, merge", () => {
+    assert.equal(ledgerRescanFloor({ known: false, lastRefreshMs: 9e9 }), 0);
+    assert.equal(ledgerRescanFloor({ known: true, lastRefreshMs: 10_000_000, overlapMs: 1000 }), 9_999_000);
+    assert.equal(ledgerRescanFloor({ known: true, lastRefreshMs: 10_000_000, overlapMs: 1000, incompleteFromMs: 5 }), 5);
+    assert.equal(ledgerRescanFloor({ known: true, lastRefreshMs: 100, overlapMs: 1000 }), 0);
+
+    const cached = new Map([
+      ["still", { timeUpdated: 5, incompleteFromMs: undefined }],
+      ["moved", { timeUpdated: 5, incompleteFromMs: undefined }],
+      ["live", { timeUpdated: 5, incompleteFromMs: 90_000 }],
+      ["stale", { timeUpdated: 5, incompleteFromMs: 1 }],
+    ]);
+    const sel = selectSessionsToScan({
+      sessionList: [
+        { id: "still", timeUpdated: 5 },
+        { id: "moved", timeUpdated: 6 },
+        { id: "live", timeUpdated: 5 },
+        { id: "stale", timeUpdated: 5 },
+        { id: "new", timeUpdated: 1 },
+      ],
+      cached,
+      lastRefreshMs: 100_000,
+      nowMs: 100_000,
+      overlapMs: 1000,
+      abandonedMs: 50_000,
+    });
+    assert.deepEqual(sel.map((s) => s.id).sort(), ["live", "moved", "new"]);
+    assert.equal(sel.find((s) => s.id === "new").floor, 0);
+    assert.equal(sel.find((s) => s.id === "moved").floor, 99_000);
+    assert.equal(sel.find((s) => s.id === "live").floor, 90_000);
+
+    const rows = new Map([
+      ["old", { createdMs: 1, row: { completedMs: 5 } }],
+      ["gone", { createdMs: 50, row: { completedMs: 5 } }],
+      ["run", { createdMs: 60, row: { completedMs: undefined } }],
+    ]);
+    const inc = mergeLedgerEntries(rows, [{ id: "run", createdMs: 60, row: { completedMs: 70 } }, { id: "new", createdMs: 80, row: {} }], 40);
+    assert.deepEqual([...rows.keys()].sort(), ["new", "old", "run"], "deleted row in re-read range dropped; older row kept");
+    assert.equal(inc, 80, "the only unfinished row is `new`");
+  });
+}

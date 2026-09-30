@@ -255,7 +255,7 @@ export function _resetSummaryMemo() {
   building = null;
 }
 
-export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null, pressureWindows, compactionStat, meteredEndpoints }) {
+export function createOptimizerSummary({ getDb, now, counterfactualStore = null, usageSnapshots, usageHistory, readCacheTtl, activityStore = null, pressureWindows, compactionStat, meteredEndpoints, fetchRows: fetchRowsDep = fetchLedgerRows }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return async function optimizerSummary() {
     const t = nowMs();
@@ -268,7 +268,7 @@ export function createOptimizerSummary({ getDb, now, counterfactualStore = null,
       if (!db) return { supported: false };
       try {
         const value = await buildOptimizerSummary({
-          fetchRows: (since) => fetchLedgerRows(db, since),
+          fetchRows: (since) => fetchRowsDep(db, since),
           now: t,
           counterfactualStore,
           usageSnapshots,
