@@ -125,6 +125,8 @@ async function statRow(path, name, sessionID, now) {
       messageID:
         typeof meta.messageID === "string" && meta.messageID ? meta.messageID : null,
       media: meta.media === true,
+      announce: meta.announce === true,
+      announcedAt: typeof meta.announcedAt === "number" ? meta.announcedAt : null,
     };
   } catch {
     return {
@@ -136,6 +138,8 @@ async function statRow(path, name, sessionID, now) {
       expiresAt: null,
       messageID: null,
       media: false,
+      announce: false,
+      announcedAt: null,
     };
   }
 }
@@ -146,7 +150,7 @@ async function statRow(path, name, sessionID, now) {
 export async function pushArtifact(
   filePath,
   sessionID,
-  { root = defaultOutboxRoot(), ttlHours, messageID, media } = {},
+  { root = defaultOutboxRoot(), ttlHours, messageID, media, announce } = {},
 ) {
   if (!sessionID || typeof sessionID !== "string" || !sessionID.trim()) {
     return { ok: false, error: "sessionID is required" };
@@ -165,12 +169,18 @@ export async function pushArtifact(
   await copyFile(filePath, dest);
   const msgId =
     typeof messageID === "string" && messageID.trim() ? messageID : null;
-  if (msgId || ttlHours != null) {
+  // Always (re)write the sidecar: a re-push of a same-named file is a new
+  // artifact, so stale metadata from the previous one (notably `announcedAt`)
+  // must not carry over.
+  {
     const st = await stat(dest);
     const meta = {};
     if (msgId) meta.messageID = msgId;
     if (ttlHours != null) meta.expiresAt = resolveExpiry(ttlHours, st.mtimeMs);
     if (media) meta.media = true;
+    // Announce (toast) ONLY when the sender says the user asked for this file.
+    // Everything else lands silently in the Artifacts panel.
+    if (announce === true) meta.announce = true;
     await writeSidecar(sidecarPath(dest), meta);
   }
   const row = await statRow(dest, safe, sessionID, Date.now());
@@ -263,6 +273,13 @@ export function createArtifactSweep({
  * @param {string} root - mailbox dir
  * @returns {{ tick: () => Promise<void> }}
  */
+// Record that a file has been announced (best-effort; the in-memory seen-set
+// still prevents a repeat within this run if the write fails).
+export async function markAnnounced(filePath, nowMs = Date.now()) {
+  const meta = await readSidecar(sidecarPath(filePath));
+  await writeSidecar(sidecarPath(filePath), { ...meta, announcedAt: nowMs });
+}
+
 export function createOutboxScanner(bus, root) {
   // Paths already announced this run, so the same file isn't re-toasted every
   // tick while it waits for the user to tap Save.
@@ -281,7 +298,13 @@ export function createOutboxScanner(bus, root) {
       for (const entry of entries) {
         if (seen.has(entry.path)) continue;
         if (entry.media === true) continue;
+        // Only files the user explicitly asked for are announced, and each is
+        // announced once EVER: the announcement is recorded in the file's
+        // sidecar, so a server restart (which empties `seen`) never re-toasts
+        // files that are already in the mailbox.
+        if (entry.announce !== true || entry.announcedAt != null) continue;
         seen.add(entry.path);
+        await markAnnounced(entry.path);
         bus.publish({
           kind: "agentFile",
           payload: {

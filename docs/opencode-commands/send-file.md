@@ -5,9 +5,10 @@ description: Send a file from this remote box down to the user's machine as a du
 # /send-file
 
 Deliver a file from this machine to the user's machine. manta keeps a durable,
-workspace-linked mailbox on this box (`~/.manta-outbox/<sessionID>/`) and
-announces anything that appears there as an "AI sent you a file" toast; the
-file also shows up in the app's Artifacts panel Files tab for this conversation.
+workspace-linked mailbox on this box (`~/.manta-outbox/<sessionID>/`); the
+file shows up in the app's Artifacts panel Files tab for this conversation.
+The user invoked this command, so they explicitly asked for the file: call
+`send_file` with `notify: true` so they get an "AI sent you a file" toast.
 
 ## Preferred: the `send_file` tool
 

@@ -404,6 +404,16 @@ their TTL elapses (default 7 days). The poller keeps a `seenOutboxPaths` set
 (cleared on host change) reconciled against the live listing each tick so a
 require-confirm toast the user hasn't answered isn't re-offered every 3s.
 
+- **Only requested files are announced, and only once (2026-09-30).** A pushed
+  file toasts ONLY when `send_file` was called with `notify: true`, which the
+  tool reserves for files the user explicitly asked for; everything else lands
+  silently in the Artifacts panel. The announcement is recorded as
+  `announcedAt` in the file's `.manta.json` sidecar, so a server restart (which
+  empties the scanner's in-memory seen-set) never re-toasts the mailbox. Before
+  this, every restart re-announced every file from the last 7 days — during the
+  Sep 28-29 watchdog-restart storm that meant the same week-old report popping
+  up dozens of times. Files with no sidecar flag (older pushes, a bare `cp`
+  into the outbox) are never announced.
 - **Trust flag `allowAgentPush`** (AppConfig, default OFF, Settings UI). ON =
   download immediately + informational toast ("↓ name · saved to Downloads ·
   Reveal"). OFF = a confirm toast ("AI sent you a file · Save / ×"); the
