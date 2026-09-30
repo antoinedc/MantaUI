@@ -11,6 +11,8 @@ import {
   grantedKeyForName,
   resolveIdentities,
   fuseRow,
+  pruneRawTools,
+  RAW_TOOLS_CAP,
   weekKey,
   barCrossed,
   engagementBarMet,
@@ -125,6 +127,75 @@ test("raw evidence without a catalog identity becomes a raw entry (LLM-classifia
   // Free-text labels (webhooks/schedules) are not tool tokens — log-only.
   tools = fuseRow(tools, { channel: "config", identity: null, detail: "webhook:some label", ts: W0 });
   assert.equal(tools.length, 1);
+});
+
+test("fuseRow never creates a raw entry from a cli: token that fails the shape check", () => {
+  for (const junk of ['"', "d=json.load(x)", "print(d['s'],", "next_owner`", "42", "{"]) {
+    const tools = fuseRow([], { channel: "transcript", identity: null, detail: `cli:${junk}`, ts: W0, source: "raw" });
+    assert.equal(tools.length, 0, junk);
+  }
+  // a path reduces to its basename
+  const t = fuseRow([], { channel: "transcript", identity: null, detail: "cli:/opt/bin/weirdtool", ts: W0, source: "raw" });
+  assert.equal(t[0].tool, "weirdtool");
+});
+
+function rawEntry(tool, lastUsed, extra = {}) {
+  return {
+    tool,
+    source: "raw",
+    raw: true,
+    status: "observed",
+    uses: 1,
+    engagement: { ewma_per_week: 1, last_used: lastUsed, per_project: {} },
+    evidence: [{ channel: "transcript", detail: `cli:${tool}`, ts: lastUsed }],
+    ...extra,
+  };
+}
+
+test("pruneRawTools drops junk raw entries, caps by recency, keeps catalog and acted-on entries", () => {
+  const catalog = { tool: "github", source: "catalog", raw: false, status: "candidate", uses: 9, evidence: [] };
+  const junk = Array.from({ length: 1000 }, (_, i) => rawEntry(`d${i}=json.load(x)`, W0 + i));
+  const validOld = rawEntry("oldcli", W0 - 1000);
+  // user-acted entries survive shape failure AND the cap
+  const consented = rawEntry("we!rd", W0 - 5000, { consent: { metadata: "yes", deep_read: null, write: null } });
+  const classified = rawEntry("(x)", W0 - 6000, { llmAt: W0, unclassifiable: true });
+  const secretBacked = rawEntry("we@ird", W0 - 7000, { evidence: [{ channel: "secret", detail: "secret:X", ts: W0 }] });
+  const many = Array.from({ length: RAW_TOOLS_CAP + 50 }, (_, i) => rawEntry(`cli${i}`, W0 + i));
+  const out = pruneRawTools([catalog, ...junk, validOld, consented, classified, secretBacked, ...many]);
+  const names = new Set(out.map((t) => t.tool));
+  assert.ok(names.has("github"));
+  for (const k of ["we!rd", "(x)", "we@ird"]) assert.ok(names.has(k), k);
+  assert.ok(!out.some((t) => t.tool.includes("json.load")));
+  // cap applies to un-acted-on raw entries only; most recent survive
+  const cappedRaw = out.filter((t) => t.source === "raw" && !["we!rd", "(x)", "we@ird"].includes(t.tool));
+  assert.equal(cappedRaw.length, RAW_TOOLS_CAP);
+  assert.ok(names.has(`cli${RAW_TOOLS_CAP + 49}`));
+  assert.ok(!names.has("cli0"));
+  assert.ok(!names.has("oldcli"));
+});
+
+test("pruneRawTools returns the same array when nothing needs pruning", () => {
+  const tools = [{ tool: "github", source: "catalog" }, rawEntry("ok", W0)];
+  assert.equal(pruneRawTools(tools), tools);
+});
+
+test("registry load prunes junk without writing; the next mutation persists the pruned set", async () => {
+  const junk = Array.from({ length: 300 }, (_, i) => rawEntry(`x${i}=y`, W0 + i));
+  const good = rawEntry("goodcli", W0);
+  const registryStore = memStore({ v: 1, tools: [...junk, good] });
+  let saves = 0;
+  const origSave = registryStore.save;
+  registryStore.save = async (n) => {
+    saves++;
+    return origSave(n);
+  };
+  const registry = nextDay(registryStore, W0 + DAY, []);
+  const listed = await registry.listTools();
+  assert.deepEqual(listed.map((t) => t.tool), ["goodcli"]);
+  assert.equal(saves, 0, "a load must not write");
+  await registry.dailyScan();
+  const persisted = registryStore._state().tools;
+  assert.ok(persisted.length <= 1 && !persisted.some((t) => t.tool.includes("=")));
 });
 
 test("engagement bar needs uses AND distinct weeks", () => {

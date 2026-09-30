@@ -40,6 +40,8 @@ import {
   collectConfigEvidence,
   firstSurfacesCode,
   SCAN_ROW_CAP,
+  cliNameFrom,
+  isCliNameShape,
 } from "./ctoToolScan.mjs";
 // One-way dep (ctoProbes never imports this module): the §7.2 well-known
 // vitality pair {last_event, inflow_rate} pulled from a probe's extract map.
@@ -56,7 +58,7 @@ function payloadFrom(raw) {
   const p = raw && typeof raw === "object" ? raw : {};
   return {
     v: TOOL_REGISTRY_VERSION,
-    tools: (Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
+    tools: pruneRawTools(Array.isArray(p?.tools) ? p.tools : []).map((t) => ({
       asSourceDecayed: false,
       decayedAtUses: 0,
       ...(t ?? {}),
@@ -69,6 +71,89 @@ function payloadFrom(raw) {
     scanFailures: Number.isFinite(p.scanFailures) ? p.scanFailures : 0,
     lastFusedTs: Number.isFinite(p?.lastFusedTs) ? p.lastFusedTs : null,
   };
+}
+
+// Raw (unclassified) entries are bounded: at most this many un-acted-on raw
+// entries survive a load, most recently used first. A registry that grew to
+// 43 MB / 40k "tools" (shell fragments registered as CLIs) took ~0.9 s of
+// synchronous JSON.parse per load and stalled the server's event loop.
+export const RAW_TOOLS_CAP = 500;
+
+// True when anything beyond passive observation has happened to this entry:
+// the user or the CTO acted on it (a grant/consent answer, an ask, a probe, an
+// LLM classification or its outcome, an alias fold, a lifecycle promotion,
+// tool-as-source/workflow verdicts, a blackboard relevance match) or its
+// evidence came from a deliberate channel (secret, config, probe), not just
+// transcript sightings. Such entries are never pruned or capped.
+export function isActedOn(t) {
+  if (!t || typeof t !== "object") return false;
+  const nonEmpty = (o) => o && typeof o === "object" && Object.keys(o).length > 0;
+  if (t.source && t.source !== "raw" && t.source !== "catalog") return true;
+  if (t.status && t.status !== "observed" && t.status !== "candidate") return true;
+  if (t.llmAt || t.classificationOutcome || t.classificationRecovery || t.retryAfter) return true;
+  if (t.unclassifiable === true) return true;
+  if (Array.isArray(t.aliases) && t.aliases.length > 0) return true;
+  if (t.role) return true;
+  if (t.consent && typeof t.consent === "object" && Object.values(t.consent).some((v) => v != null)) return true;
+  if ((t.askRound ?? 0) > 0 || (t.askAtUses ?? 0) > 0 || t.reArmAt || (t.unneverAtUses ?? 0) > 0) return true;
+  if ((t.deepAskRound ?? 0) > 0 || (t.deepAskAtUses ?? 0) > 0 || t.deepReArmAt || t.lastDeepAskDay || t.deepAskBarMet) return true;
+  if (t.asSourceDecayed === true || (t.decayedAtUses ?? 0) > 0) return true;
+  if ((t.as_source?.reports ?? 0) > 0 || (t.as_workflow?.suggestions ?? 0) > 0) return true;
+  if (t.vitality && (t.vitality.last_probed != null || t.vitality.last_event != null)) return true;
+  if (nonEmpty(t.relevance)) return true;
+  const ev = Array.isArray(t.evidence) ? t.evidence : [];
+  if (ev.some((e) => e && e.channel !== CHANNEL_TRANSCRIPT)) return true;
+  return false;
+}
+
+// Load-time prune of the raw tail (pure; returns the input array untouched when
+// nothing needs to go, so a healthy registry costs one scan and no copy).
+//   1. drop raw entries that are shell-fragment junk: identity fails the shared
+//      shape check AND every sighting was a transcript `cli:` token;
+//   2. cap what is left of the un-acted-on raw entries at RAW_TOOLS_CAP by
+//      recency (`engagement.last_used`, then `uses`).
+// Catalog entries and acted-on entries are never touched. This only reshapes
+// the in-memory view: the file is rewritten by the next mutation that saves
+// `tools` (patchRegistry), never by a load — so no write storm.
+export function pruneRawTools(tools, { cap = RAW_TOOLS_CAP } = {}) {
+  const isRaw = (t) => t && typeof t === "object" && t.source === "raw";
+  const isCliOnly = (t) => {
+    const ev = Array.isArray(t.evidence) ? t.evidence : [];
+    return ev.every((e) => e && e.channel === CHANNEL_TRANSCRIPT && typeof e.detail === "string" && e.detail.startsWith("cli:"));
+  };
+  let rawCount = 0;
+  for (const t of tools) if (isRaw(t)) rawCount++;
+  if (rawCount === 0) return tools;
+  const keep = [];
+  const capped = []; // raw, un-acted-on, valid: candidates for the cap
+  let changed = false;
+  for (const t of tools) {
+    if (!isRaw(t)) {
+      keep.push(t);
+      continue;
+    }
+    if (isActedOn(t)) {
+      keep.push(t);
+      continue;
+    }
+    if (!isCliNameShape(t.tool) && isCliOnly(t)) {
+      changed = true;
+      continue;
+    }
+    keep.push(t);
+    capped.push(t);
+  }
+  if (capped.length > cap) {
+    const rank = (t) => [Number(t.engagement?.last_used) || 0, Number(t.uses) || 0];
+    const sorted = [...capped].sort((a, b) => {
+      const [al, au] = rank(a);
+      const [bl, bu] = rank(b);
+      return bl - al || bu - au;
+    });
+    const drop = new Set(sorted.slice(cap));
+    return keep.filter((t) => !drop.has(t));
+  }
+  return changed ? keep : tools;
 }
 export const ACTOR = "cto";
 
@@ -422,7 +507,9 @@ export function findHostParent(tools, host) {
 const RAW_HOST_PREFIX = /^(?:www|api|app|mcp|hooks|gateway)\./;
 
 function rawIdentityFromDetail(detail) {
-  if (detail.startsWith("cli:")) return detail.slice(4);
+  // A CLI token must pass the scanner's own shape check (one shared validator):
+  // shell fragments never become registry entries.
+  if (detail.startsWith("cli:")) return cliNameFrom(detail.slice(4));
   if (detail.startsWith("domain:")) return detail.slice(7).replace(RAW_HOST_PREFIX, "");
   if (detail.startsWith("mcp:")) return detail.slice(4);
   if (detail.startsWith("secret:")) return detail.slice(7).toLowerCase();

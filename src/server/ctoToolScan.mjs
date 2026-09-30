@@ -111,19 +111,127 @@ export function parseToolPart(data) {
   return { tool, input };
 }
 
-// Command-string → first tokens of each segment. A bash command is usually
-// one pipeline, but compounds (`a && b`, `a; b`, `a | b`, newlines) carry
-// several invocations — each segment's first token is the CLI that ran.
-const SEGMENT_SPLIT = /(?:&&|\|\||;|\||\n)+/;
+// ---------------------------------------------------------------------------
+// CLI-name shape — the ONE validator shared by the scanner (cliTokens) and the
+// registry (fuseRow / payloadFrom prune). A bash command carries heredocs,
+// inline python/node scripts and multi-line strings whose "first word of each
+// line" is not a command; without a shape gate those fragments (`by`, `const`,
+// `d=json.load(x)`, `print(d['status'],`) became registry tools (40k of them).
+// ---------------------------------------------------------------------------
+
+// A bare command name, after basename.
+export const CLI_NAME_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_.+-]*$/;
+// What a raw token may be made of before basename: a name or a path to one
+// (`gh`, `/usr/bin/gh`, `./scripts/x.sh`, `~/bin/x`). Everything else —
+// quotes, brackets, parens, `$`, `=`, `{`, `\`, `:` — is script, not a command.
+const CLI_PATH_CHARS = /^[A-Za-z0-9._+~/_-]+$/;
+// Shell reserved words open/close compound statements; they are syntax, never
+// a program.
+const SHELL_RESERVED = new Set([
+  "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done",
+  "case", "esac", "in", "select", "function", "time", "coproc",
+]);
+
+const LEADING_KEYWORDS = new Set(["do", "then", "else", "elif", "if", "while", "until", "time", "!"]);
+
+// A raw token → the bare command name, or null when it does not look like one.
+// Paths reduce to their basename. Pure.
+export function cliNameFrom(token) {
+  const raw = String(token ?? "");
+  if (!raw || !CLI_PATH_CHARS.test(raw)) return null;
+  const name = raw.includes("/") ? raw.slice(raw.lastIndexOf("/") + 1) : raw;
+  if (!CLI_NAME_SHAPE.test(name)) return null;
+  if (/^[0-9]+$/.test(name)) return null; // pure numbers
+  if (SHELL_RESERVED.has(name.toLowerCase())) return null;
+  return name;
+}
+
+// Identity shape for a registry entry (tool ids are lowercased names).
+export function isCliNameShape(token) {
+  return cliNameFrom(token) !== null;
+}
+
+// Command-string → first token of each real invocation. A bash command is
+// usually one pipeline, but compounds (`a && b`, `a; b`, `a | b`, newlines)
+// carry several invocations — each segment's first token is the CLI that ran.
+// The scan is quote-aware (separators inside quotes do not split), skips
+// comments, and skips heredoc bodies (`<<EOF` … `EOF`).
+const HEREDOC_START = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([A-Za-z_][A-Za-z0-9_.-]*))/;
 
 export function cliTokens(command) {
   const text = String(command ?? "");
   if (!text) return [];
+  const segments = [];
+  let seg = "";
+  let quote = "";
+  const pending = []; // heredoc terminators awaiting the next newline
+  const flush = () => {
+    if (seg.trim()) segments.push(seg);
+    seg = "";
+  };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      seg += ch;
+      if (ch === "\\" && quote === '"' && i + 1 < text.length) seg += text[++i];
+      else if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "\\" && i + 1 < text.length) {
+      seg += ch + text[++i];
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      seg += ch;
+      continue;
+    }
+    if (ch === "#" && (seg === "" || /\s/.test(seg[seg.length - 1]))) {
+      while (i + 1 < text.length && text[i + 1] !== "\n") i++; // comment: skip to EOL
+      continue;
+    }
+    if (ch === "<" && text[i + 1] === "<" && text[i + 2] !== "<" && text[i - 1] !== "<") {
+      const m = HEREDOC_START.exec(text.slice(i));
+      if (m) {
+        pending.push({ dash: m[1] === "-", term: m[2] ?? m[3] ?? m[4] ?? "" });
+        seg += m[0];
+        i += m[0].length - 1;
+        continue;
+      }
+    }
+    if (ch === "\n") {
+      flush();
+      // Consume heredoc bodies: every line up to (and including) its terminator.
+      while (pending.length) {
+        const { dash, term } = pending.shift();
+        for (i++; i < text.length; i++) {
+          const nl = text.indexOf("\n", i);
+          const line = nl === -1 ? text.slice(i) : text.slice(i, nl);
+          i = nl === -1 ? text.length : nl;
+          if ((dash ? line.replace(/^\t+/, "") : line) === term) break;
+        }
+      }
+      continue;
+    }
+    if (ch === ";" || ch === "|" || (ch === "&" && text[i + 1] === "&")) {
+      if (ch === "&" || (ch === "|" && text[i + 1] === "|")) i++;
+      flush();
+      continue;
+    }
+    seg += ch;
+  }
+  flush();
   const out = [];
-  for (const seg of text.split(SEGMENT_SPLIT)) {
-    const token = seg.trim().split(/\s+/)[0] ?? "";
-    const cleaned = token.replace(/^\$\(\)?/, "").replace(/^\-+/, "");
-    if (cleaned) out.push(cleaned);
+  for (const s of segments) {
+    // Compound-statement keywords that introduce a command (`do echo x`,
+    // `then git add`) are skipped so the real command is what gets named.
+    const words = s.trim().split(/\s+/);
+    let w = 0;
+    while (w < words.length - 1 && LEADING_KEYWORDS.has(words[w])) w++;
+    const token = words[w] ?? "";
+    const cleaned = token.replace(/^\$\(\)?/, "").replace(/^-+/, "");
+    const name = cliNameFrom(cleaned);
+    if (name) out.push(name);
   }
   return out;
 }

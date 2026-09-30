@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import {
   parseToolPart,
   cliTokens,
+  cliNameFrom,
+  isCliNameShape,
   extractUrlHosts,
   extractFromToolPart,
   extractFromDbRows,
@@ -38,6 +40,62 @@ test("parseToolPart reads a tool-call part and rejects other shapes", () => {
   assert.equal(parseToolPart(JSON.stringify({ type: "text", text: "hi" })), null);
   assert.equal(parseToolPart("not json"), null);
   assert.equal(parseToolPart(null), null);
+});
+
+test("cliTokens: shell fragments from scripts/heredocs/strings are not commands", () => {
+  const junk = [
+    '"',
+    "by",
+    "const",
+    "next_owner`",
+    'metadata"',
+    "d=json.load(sys.stdin)",
+    "print(d['status'],",
+    "st=j.get('startedat')",
+    'f="$wt/unit_$u.md"',
+    "want={'b2b4489a':'u7',...}",
+  ];
+  // Each fragment on its own line/segment: only shape-valid words may survive.
+  const got = cliTokens(junk.join("\n"));
+  assert.deepEqual(got.filter((t) => !isCliNameShape(t)), []);
+  for (const j of junk.filter((x) => /[="'`(){}]/.test(x))) assert.deepEqual(cliTokens(j), [], j);
+  assert.deepEqual(cliTokens("  x=1 y"), []);
+  assert.deepEqual(cliTokens("123"), []);
+  assert.deepEqual(cliTokens("$(git status)"), ["git"]);
+});
+
+test("cliTokens: pipelines, paths and quoting", () => {
+  assert.deepEqual(cliTokens("gh pr list && jq .x | head"), ["gh", "jq", "head"]);
+  assert.deepEqual(cliTokens("/usr/bin/git status"), ["git"]);
+  assert.deepEqual(cliTokens("./scripts/x.sh --flag"), ["x.sh"]);
+  // separators inside quotes do not start a new command
+  assert.deepEqual(cliTokens('echo "a; b && c" | wc'), ["echo", "wc"]);
+  // comments are not commands
+  assert.deepEqual(cliTokens("# don't run\nls"), ["ls"]);
+  // shell reserved words are syntax
+  assert.deepEqual(cliTokens("for f in a b; do echo $f; done"), ["echo"]);
+});
+
+test("cliTokens: heredoc bodies are skipped up to the terminator", () => {
+  assert.deepEqual(cliTokens("cat > f <<'EOF'\nprint(1)\nd=json.load(x)\nEOF\nnode f.js"), ["cat", "node"]);
+  assert.deepEqual(cliTokens('cat <<-"X"\n\tfoo bar\n\tX\nls'), ["cat", "ls"]);
+  assert.deepEqual(cliTokens("cat <<EOF | grep x\nimport os\nEOF\nwc -l"), ["cat", "grep", "wc"]);
+  // two heredocs on one line
+  assert.deepEqual(cliTokens("cmd <<A <<B\nhello\nA\nworld\nB\nzip"), ["cmd", "zip"]);
+  // here-string is not a heredoc
+  assert.deepEqual(cliTokens("cat <<< hi\nls"), ["cat", "ls"]);
+  // unterminated heredoc swallows the rest, never throws
+  assert.deepEqual(cliTokens("cat <<EOF\nfoo\nbar"), ["cat"]);
+});
+
+test("cliNameFrom: basename of paths, rejects script syntax", () => {
+  assert.equal(cliNameFrom("/usr/bin/gh"), "gh");
+  assert.equal(cliNameFrom("gh"), "gh");
+  assert.equal(cliNameFrom("x=1"), null);
+  assert.equal(cliNameFrom("a\\b"), null);
+  assert.equal(cliNameFrom("42"), null);
+  assert.equal(cliNameFrom("{"), null);
+  assert.equal(cliNameFrom(""), null);
 });
 
 test("cliTokens takes the first token of every command segment", () => {
