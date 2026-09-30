@@ -151,8 +151,7 @@ export function pruneRawTools(tools, { cap = RAW_TOOLS_CAP } = {}) {
       return bl - al || bu - au;
     });
     const drop = new Set(sorted.slice(cap));
-    for (let i = keep.length - 1; i >= 0; i--) if (drop.has(keep[i])) keep.splice(i, 1);
-    changed = true;
+    return keep.filter((t) => !drop.has(t));
   }
   return changed ? keep : tools;
 }
