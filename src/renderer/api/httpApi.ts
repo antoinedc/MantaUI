@@ -1685,6 +1685,20 @@ export const httpApi: Api = {
     return { ok: true };
   },
 
+  // POST /api/cto/cards/dismiss {id} — dismiss one open card.
+  ctoCardDismiss: async (id: string): Promise<{ ok: boolean; error?: string }> => {
+    const res = await fetch(`${serverBase()}/api/cto/cards/dismiss`, {
+      method: "POST",
+      headers: authHeaders(clientToken(), { "content-type": "application/json" }),
+      body: JSON.stringify({ id }),
+    });
+    if (res.status === 401) throw new AuthRequiredError();
+    let json: { error?: string } = {};
+    try { json = (await res.json()) as typeof json; } catch { /* non-JSON */ }
+    if (!res.ok) return { ok: false, error: json.error ?? `HTTP ${res.status}` };
+    return { ok: true };
+  },
+
   // POST /api/cto/resume — lift the kill switch. Idempotent.
   ctoResume: async (): Promise<{ ok: boolean; error?: string }> => {
     const res = await fetch(`${serverBase()}/api/cto/resume`, {

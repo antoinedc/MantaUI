@@ -460,6 +460,9 @@ export function createCtoEngine(deps = {}) {
       // §6.7 matcher + factVerify (both destructured later in this binding).
       hasSession: (sid) => hasSession(sid),
       conditionGone: async (condition) => conditionGoneFromCondition(condition, factVerify),
+      // A provider outage is a user card ONLY for the provider of the user's
+      // explicitly pinned default model (ctoCards.healthNeedsUser).
+      getDefaultModel: async () => (await configGet())?.defaultModel ?? null,
       // The engine's clock is authoritative for the cards module too — one
       // now for promoteDue thresholds AND the BET-1407 seed's retention
       // bound (a test's fake clock must not make every persisted ask look
@@ -1421,6 +1424,9 @@ export function createCtoEngine(deps = {}) {
         }
       },
       conditionGone: async (condition) => conditionGoneFromCondition(condition, factVerify),
+      // A provider outage is a user card ONLY for the provider of the user's
+      // explicitly pinned default model (ctoCards.healthNeedsUser).
+      getDefaultModel: async () => (await configGet())?.defaultModel ?? null,
       ...(ex.runnerDeps ?? {}),
     });
     executorDriver = createCtoExecutorDriver({
@@ -1721,6 +1727,17 @@ export function createCtoEngine(deps = {}) {
   // (subject, incidentGeneration); re-arming only after recovery). No new
   // notification mechanism, no new bus kind, no new config flag, no new store.
   // Paced to at most one ledger read per interval (the read is O(file)).
+  // A health alarm recovered on its own → close its open card. Best-effort.
+  async function closeHealthCard(source) {
+    try {
+      if (typeof cards?.resolveHealthSource === "function") {
+        await cards.resolveHealthSource(source, "health recovered");
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
   async function opClassWatcherTick() {
     const t = now();
     if (t - lastOpClassWatchAt < opClassWatchIntervalMs) return;
@@ -1742,6 +1759,10 @@ export function createCtoEngine(deps = {}) {
       }
       if (raised.length > 0 || recovered.length > 0) {
         await patchEngineState(() => ({ opClassAlarms: next }), { engineState });
+      }
+      // A class that recovered closes its card (if one was ever carded).
+      for (const cls of recovered) {
+        await closeHealthCard(`op-class:${cls}`);
       }
       if (raised.length > 0) {
         await ledgerLog({ kind: "cto.opclass_blocked", count: raised.length, classes: raised.map((a) => a.taskClass) });
@@ -1770,6 +1791,8 @@ export function createCtoEngine(deps = {}) {
       if (ep.raised.length > 0 || infra.raised.length > 0 || ep.recovered.length > 0 || infra.recovered.length > 0) {
         await patchEngineState(() => ({ healthAlarms: infra.alarms }), { engineState });
       }
+      for (const a of ep.recovered) await closeHealthCard(`endpoint:${a?.subject}`);
+      for (const a of infra.recovered) await closeHealthCard(`infra:${a?.subject}`);
       // §W7.2: the closing notification — the same ledger-row shape S1 uses
       // for recovered class incidents.
       if (ep.recovered.length > 0 || infra.recovered.length > 0) {
@@ -2943,6 +2966,15 @@ export function createCtoEngine(deps = {}) {
     if (typeof cards?.pruneOrphanedShedCards === "function") {
       try {
         await cards.pruneOrphanedShedCards();
+      } catch {
+        /* best-effort */
+      }
+    }
+    // One-time cleanup of health cards that predate healthNeedsUser (stale,
+    // recovered, or not the user's decision). Same marker-guarded contract.
+    if (typeof cards?.pruneStaleHealthCards === "function") {
+      try {
+        await cards.pruneStaleHealthCards();
       } catch {
         /* best-effort */
       }

@@ -12,3 +12,12 @@ export function cardHasContent(card) {
   if (!card || typeof card !== "object") return false;
   return String(card.title ?? "") !== "" || String(card.body ?? "") !== "";
 }
+
+// The closed set of option-action types a BLOCKER card may carry. The server
+// (ctoCards healthCardCopy) only ever writes these, and the renderer's
+// dispatcher (ctoView BLOCKER_OPTION_HANDLERS) must handle exactly these — a
+// test on each side pins that, so a card can never render a button nothing
+// handles (AGENTS.md: NEVER STUB A CONTROL TO DO NOTHING).
+//   resume-cto   → POST /api/cto/resume (also resolves the health cards)
+//   dismiss-card → POST /api/cto/cards/dismiss {id}
+export const BLOCKER_ACTION_TYPES = Object.freeze(["resume-cto", "dismiss-card"]);

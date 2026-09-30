@@ -5312,6 +5312,39 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  // POST /api/cto/cards/dismiss {id} → dismiss one open card (the blocker
+  // card's "Dismiss" option). Same ledger discipline as every card close.
+  if (path === "/api/cto/cards/dismiss") {
+    try {
+      if (req.method !== "POST") {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      let body;
+      try {
+        body = await readBody(req);
+      } catch {
+        respondJson(res, 400, { error: "invalid JSON body" });
+        return;
+      }
+      const id = typeof body?.id === "string" ? body.id : "";
+      if (!id) {
+        respondJson(res, 400, { error: "id is required" });
+        return;
+      }
+      const r = await adaptiveCto.cards?.dismissById?.(id, { reason: "dismissed by user" });
+      if (!r?.changed) {
+        respondJson(res, 404, { error: "card not found or already closed" });
+        return;
+      }
+      void bus.publish({ kind: "ctoState" });
+      respondJson(res, 200, { ok: true });
+    } catch (e) {
+      respondSafe500(res, "cto/cards/dismiss", CTO_SAFE_500_MESSAGE, e);
+    }
+    return;
+  }
+
   // GET /api/cto/finished → {items} — the Just-finished rail (§10.4): latest
   // completed turns (A6 cached one-liners) + finished CTO jobs (delegate store,
   // D21), capped 6, 24h window, most recent first. Abort exclusion is inherent:

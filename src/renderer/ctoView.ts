@@ -17,7 +17,7 @@ import type {
 // afford.
 export type { CtoCalibrationRow, CtoCalibrationTable, CtoHealthStat };
 import type { DelegateStartInput } from "../shared/types";
-import { cardHasContent } from "../shared/ctoCard.mjs";
+import { BLOCKER_ACTION_TYPES, cardHasContent } from "../shared/ctoCard.mjs";
 
 export type CtoDot = "active" | "disabled" | "thrifty" | "paused";
 
@@ -336,7 +336,25 @@ export type BlockerCard = {
   refs: string[];
   // >= 1. How many times this condition has been reported (see CtoCard).
   repeatCount: number;
+  // Real, handled action buttons (health cards). Only types in
+  // BLOCKER_ACTION_TYPES survive — the renderer handles exactly that set.
+  options: BlockerOption[];
 };
+
+export type BlockerOption = { label: string; type: (typeof BLOCKER_ACTION_TYPES)[number] };
+
+export function blockerOptions(raw: unknown): BlockerOption[] {
+  if (!Array.isArray(raw)) return [];
+  const out: BlockerOption[] = [];
+  for (const o of raw) {
+    const type = (o as { action?: { type?: unknown } })?.action?.type;
+    const label = (o as { label?: unknown })?.label;
+    if (typeof label === "string" && label && (BLOCKER_ACTION_TYPES as readonly unknown[]).includes(type)) {
+      out.push({ label, type: type as BlockerOption["type"] });
+    }
+  }
+  return out;
+}
 
 // Selector: the open blocker cards among the wire cards (§10.3). Selected
 // POSITIVELY (`variant === "blocker"`) rather than by excluding the other
@@ -363,6 +381,7 @@ export function blockerCards(cards: ReadonlyArray<CtoCard>): BlockerCard[] {
       repeatCount: Number.isFinite(c.repeatCount) && (c.repeatCount as number) > 0
         ? (c.repeatCount as number)
         : 1,
+      options: blockerOptions((c as { options?: unknown }).options),
     }));
 }
 

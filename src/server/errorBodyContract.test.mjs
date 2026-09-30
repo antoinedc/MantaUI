@@ -46,13 +46,13 @@ test("wiring: class-1 CTO routes write their 500 through respondSafe500 (BET-146
     /import \{ CTO_SAFE_500_MESSAGE, (?:HOOK_SAFE_500_MESSAGE, )?respondSafe500 \} from "\.\/safeApiError\.mjs"/,
     "index.mjs must import the safe-500 writer",
   );
-  // 19 CTO-family conversions in index.mjs (the 20th — upload — lives in
-  // uploadRoute.mjs and is asserted in its own test).
+  // 20 CTO-family routes in index.mjs (19 conversions + /api/cto/cards/dismiss;
+  // upload lives in uploadRoute.mjs and is asserted in its own test).
   const uses = indexSource.match(/respondSafe500\(res, "cto\//g) ?? [];
   assert.equal(
     uses.length,
-    19,
-    "expected exactly the 19 CTO-family class-1 conversions through respondSafe500",
+    20,
+    "expected exactly the 20 CTO-family class-1 routes through respondSafe500",
   );
   assert.ok(
     !indexSource.includes('respondSafe500(res, "upload"'),

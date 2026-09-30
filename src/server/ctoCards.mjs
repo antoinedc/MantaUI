@@ -43,7 +43,7 @@
 // ctoPath() (test-sandbox rule).
 
 import { createHash } from "node:crypto";
-import { cardHasContent } from "../shared/ctoCard.mjs";
+import { BLOCKER_ACTION_TYPES, cardHasContent } from "../shared/ctoCard.mjs";
 import {
   INBOX_TTL_MS,
   cardsStore,
@@ -128,6 +128,30 @@ export function splitContentlessOpenCards(cards) {
 // tick forever, never closable by hand without folding the whole rate_limit
 // group. Same idempotency contract as CONTENTLESS_CARD_PRUNE_KEY.
 export const SHED_CARD_PRUNE_KEY = "shedCardPrune";
+
+// Marker for the one-time prune of health cards that predate healthNeedsUser
+// (stale-recovered alarms, provider outages nobody pinned, persistence
+// failures). Same idempotency contract as the two prunes above.
+export const HEALTH_CARD_PRUNE_KEY = "healthCardPrune";
+
+// Is the alarm behind a health card's source still active in engine-state?
+// `op-class:<class>` → opClassAlarms[class]; `endpoint:<acct>` (any model under
+// it) / `infra:<subject>` → healthAlarms. Sources with no alarm latch (the hard
+// pauses) are "active" by definition — only a resume closes those. Pure.
+export function healthAlarmActive(source, meta) {
+  if (typeof source !== "string") return true;
+  if (source.startsWith("op-class:")) {
+    return meta?.opClassAlarms?.[source.slice("op-class:".length)]?.active === true;
+  }
+  if (source.startsWith("infra:")) return meta?.healthAlarms?.[source]?.active === true;
+  if (source.startsWith("endpoint:")) {
+    const alarms = meta?.healthAlarms ?? {};
+    return Object.entries(alarms).some(
+      ([k, v]) => v?.active === true && healthGroupKey({ source: k }) === healthGroupKey({ source }),
+    );
+  }
+  return true;
+}
 export const SHED_RATE_LIMIT_REASONS = Object.freeze([
   "concurrentEphemeral",
   "concurrentDelegate",
@@ -502,8 +526,119 @@ function askKeyOf(a) {
 // entry — every entry from the same underlying trip source (`recordBlocker`'s
 // `source` param, e.g. "watchdog" | "rate_limit") is the SAME ongoing
 // condition and folds into ONE card, never one card per entry.
-function healthGroupKey(b) {
-  return typeof b?.source === "string" && b.source ? b.source : "unknown";
+//
+// A model-level endpoint incident (`endpoint:<account>/<model>`) folds into its
+// ACCOUNT's key (`endpoint:<account>`): the model card used to duplicate the
+// account card when the whole account was out of credit, and the account is the
+// thing a human can act on. Account ids never contain "/"; model ids may.
+export function healthGroupKey(b) {
+  const source = typeof b?.source === "string" && b.source ? b.source : "unknown";
+  if (source.startsWith("endpoint:")) {
+    const account = source.slice("endpoint:".length).split("/")[0];
+    if (account) return `endpoint:${account}`;
+  }
+  return source;
+}
+
+// The account an `endpoint:*` source names ("chutes" for both
+// `endpoint:chutes` and `endpoint:chutes/Qwen/Qwen3.6-27B-TEE`), else null.
+export function endpointAccountOf(source) {
+  if (typeof source !== "string" || !source.startsWith("endpoint:")) return null;
+  return source.slice("endpoint:".length).split("/")[0] || null;
+}
+
+// The health escalations that are NOT the user's decision: background-task
+// failures (`op-class:*`) and persistence failures (`infra:*`) are the CTO's
+// own triage's job, and a provider being out of credit / dead (`endpoint:*`)
+// is informational — routing already excludes it automatically — UNLESS the
+// user explicitly pinned that provider as their default model, in which case
+// the fallback is a change they didn't ask for and they should hear about it.
+// Everything else (watchdog / rate_limit / cto-executor / overnight_queue hard
+// pauses) needs a human. Pure. `entry` is a pendingBlockers row (or any
+// `{source}`); `defaultModel` is `{providerID, modelID}` from the config.
+export function healthNeedsUser(entry, { defaultModel = null } = {}) {
+  const source = typeof entry?.source === "string" ? entry.source : "";
+  if (source.startsWith("op-class:") || source.startsWith("infra:")) return false;
+  if (source.startsWith("endpoint:")) {
+    const account = endpointAccountOf(source);
+    const pinned = typeof defaultModel?.providerID === "string" ? defaultModel.providerID.trim().toLowerCase() : "";
+    return !!account && pinned !== "" && account.toLowerCase() === pinned;
+  }
+  return true;
+}
+
+// Plain-language copy + real actions for a health card that DOES need the
+// user. `source` is the healthGroupKey, `reason` the raw watchdog string (kept
+// out of the headline; only parsed for a couple of numbers). Every option's
+// action type is in BLOCKER_ACTION_TYPES — the renderer dispatches exactly that
+// set. Pure.
+const DISMISS_OPTION = Object.freeze({ label: "Dismiss", action: Object.freeze({ type: "dismiss-card", payload: Object.freeze({}) }) });
+const RESUME_OPTION = Object.freeze({ label: "Resume CTO", action: Object.freeze({ type: "resume-cto", payload: Object.freeze({}) }) });
+
+function prettyProvider(id) {
+  const known = { openrouter: "OpenRouter", chutes: "Chutes", anthropic: "Anthropic", openai: "OpenAI", google: "Google" };
+  const key = String(id ?? "").toLowerCase();
+  return known[key] ?? (String(id ?? "") || "your provider");
+}
+
+export function healthCardCopy(source, reason) {
+  const r = typeof reason === "string" ? reason : "";
+  const dismiss = { ...DISMISS_OPTION };
+  const resume = { ...RESUME_OPTION };
+  if (source === "watchdog") {
+    const m = r.match(/\$([\d.]+)\/hr\s*>\s*4x expected\s*\$([\d.]+)\/hr/);
+    const detail = m ? ` (about $${m[1]}/hr against the usual $${m[2]}/hr)` : "";
+    return {
+      title: "CTO paused itself: spending was over its limit",
+      body: `The CTO stopped its background work because its spending ran far above normal${detail}. Nothing else is affected. Resume it once you're comfortable with the spend.`,
+      options: [resume, dismiss],
+    };
+  }
+  if (source === "rate_limit") {
+    return {
+      title: "CTO paused itself: it started too many sessions",
+      body: "The CTO started sessions much faster than they finished, which looks like a runaway loop, so it paused. It retries on its own after a short cooldown; you can also resume it now.",
+      options: [resume, dismiss],
+    };
+  }
+  if (source === "overnight_queue") {
+    return {
+      title: "A task queued for tonight was dropped",
+      body: r || "A task queued for tonight could not run and was removed from the queue.",
+      options: [dismiss],
+    };
+  }
+  if (source === "cto-executor") {
+    return {
+      title: "A CTO action failed and needs a look",
+      body: r || "The CTO tried to carry out a plan and could not finish it.",
+      options: [dismiss],
+    };
+  }
+  const account = endpointAccountOf(source);
+  if (account) {
+    const name = prettyProvider(account);
+    const credit = /credit|402/i.test(r);
+    return {
+      title: credit
+        ? `Your default model's provider (${name}) is out of credits`
+        : `Your default model's provider (${name}) isn't responding`,
+      body: `New work is falling back to other providers automatically. To use ${name} again, ${credit ? "top up the account" : "wait for it to recover"}, or pick a different default model in Settings.`,
+      options: [dismiss],
+    };
+  }
+  return {
+    title: "The CTO needs your attention",
+    body: r || "The CTO paused itself — review the health state.",
+    options: [dismiss],
+  };
+}
+
+// Belt-and-braces for the never-render-a-dead-control rule: strip any option
+// whose action type has no renderer handler. healthCardCopy never emits one
+// (a test pins it); this keeps a future edit from shipping a dead button.
+function liveOptions(options) {
+  return (Array.isArray(options) ? options : []).filter((o) => BLOCKER_ACTION_TYPES.includes(o?.action?.type));
 }
 
 // BET-1463 (defect 2): compare a freshly-built card against the existing open
@@ -579,6 +714,11 @@ export function createCtoCards(deps = {}) {
     // Returns true (gone) / false (holds) / null (no opinion). The engine
     // injects the §6.7 matcher + surface verify. Default null — skipped.
     conditionGone = null,
+    // The user's explicitly pinned default model (`{providerID, modelID}`) — the
+    // engine injects a thunk over the manta config. Only the health-escalation
+    // path reads it (a provider outage is a user card ONLY for the pinned
+    // provider). Default null → nothing is pinned → provider outages never card.
+    getDefaultModel = null,
   } = deps;
 
   // In-flight worker asks: key (sessionID, or sourceId for sessionless inbox
@@ -769,7 +909,7 @@ export function createCtoCards(deps = {}) {
     };
   }
 
-  function buildBlockerCard({ id, sourceKind, sourceId, sessionID, title, body, refs, pendingSince, created, noteId, noteExpires, noteSessionID, noteCondition }) {
+  function buildBlockerCard({ id, sourceKind, sourceId, sessionID, title, body, refs, pendingSince, created, noteId, noteExpires, noteSessionID, noteCondition, options }) {
     // §10.3 liveness inputs (BET-1516): set ONLY when present so a card that
     // lacks them (worker-ask sourced, or a pre-1516 legacy rebuild) converges
     // byte-identically instead of churning on undefined keys.
@@ -778,6 +918,10 @@ export function createCtoCards(deps = {}) {
     if (Number.isFinite(noteExpires)) noteFields.noteExpires = noteExpires;
     if (noteSessionID != null) noteFields.noteSessionID = noteSessionID;
     if (noteCondition != null) noteFields.noteCondition = noteCondition;
+    // Real, handled actions (BLOCKER_ACTION_TYPES) — only when there are any,
+    // so a card without them keeps its byte-identical shape.
+    const opts = liveOptions(options);
+    if (opts.length > 0) noteFields.options = opts;
     return {
       id,
       variant: "blocker",
@@ -807,7 +951,7 @@ export function createCtoCards(deps = {}) {
   // patchStore mutex, so a writer derived from a stale snapshot can no longer
   // erase a concurrent writer's card (reached from fire-and-forget call
   // sites — promoteDue timers, bus handlers — which used to race).
-  async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts, noteId, noteExpires, noteSessionID, noteCondition }) {
+  async function upsertBlocker({ sourceKind, sourceId, sessionID, title, body, refs, ts = now(), pendingSince = ts, noteId, noteExpires, noteSessionID, noteCondition, options }) {
     const id = stableCardId(sourceKind, sourceId);
     let changed = false;
     let isNew = false;
@@ -836,6 +980,7 @@ export function createCtoCards(deps = {}) {
         noteExpires,
         noteSessionID,
         noteCondition,
+        options,
       });
       cardRefs = card.refs;
       // BET-1463 (defect 2): a byte-identical rebuild is not a change — an
@@ -1243,31 +1388,41 @@ export function createCtoCards(deps = {}) {
     let changed = false;
     const consumedIds = [];
     if (unresolved.length) {
+      const defaultModel = await readDefaultModel();
       const groups = new Map();
       for (const b of unresolved) {
         const key = healthGroupKey(b);
         const bts = typeof b?.ts === "number" ? b.ts : ts;
-        const group = groups.get(key) ?? { minTs: bts, latest: b, latestTs: bts, ids: [] };
+        const group = groups.get(key) ?? { minTs: bts, latest: b, latestTs: bts, ids: [], needsUser: false };
         if (bts < group.minTs) group.minTs = bts;
         if (bts >= group.latestTs) {
           group.latest = b;
           group.latestTs = bts;
         }
         if (b?.id !== undefined) group.ids.push(b.id);
+        if (healthNeedsUser(b, { defaultModel })) group.needsUser = true;
         groups.set(key, group);
       }
       for (const [key, group] of groups) {
-        const r = await upsertBlocker({
-          sourceKind: HEALTH_SOURCE_KIND,
-          sourceId: key,
-          sessionID: undefined,
-          title: blockerTitle(HEALTH_SOURCE_KIND),
-          body: blockerBody(HEALTH_SOURCE_KIND, group.latest?.reason),
-          refs: [],
-          ts,
-          pendingSince: group.minTs,
-        });
-        changed = changed || r.changed;
+        // Not the user's decision (background-task / persistence failures, a
+        // provider outage on a provider they didn't pin): NO card. The entry
+        // is still consumed below and still becomes a finding, so the CTO's
+        // own triage handles it.
+        if (group.needsUser) {
+          const copy = healthCardCopy(key, group.latest?.reason);
+          const r = await upsertBlocker({
+            sourceKind: HEALTH_SOURCE_KIND,
+            sourceId: key,
+            sessionID: undefined,
+            title: copy.title,
+            body: copy.body,
+            options: copy.options,
+            refs: [],
+            ts,
+            pendingSince: group.minTs,
+          });
+          changed = changed || r.changed;
+        }
         consumedIds.push(...group.ids);
         // BET-1516 (§9.1): the third blocker source enters the pipeline too —
         // one normalized finding per escalation event. Each pendingBlockers
@@ -1282,6 +1437,94 @@ export function createCtoCards(deps = {}) {
     // `resolved !== true` filter above live instead of dead code.
     await markPendingBlockersConsumed(consumedIds);
     return { changed };
+  }
+
+  // The pinned default model, read fresh per ingest (the user can change it at
+  // any time). Best-effort: an unreadable config means "nothing pinned".
+  async function readDefaultModel() {
+    if (typeof getDefaultModel !== "function") return null;
+    try {
+      return (await getDefaultModel()) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // A health alarm recovered on its own (op-class ok again, endpoint back,
+  // persistence healthy) → resolve the open health card for that source, with
+  // the same ledger discipline as every other resolution (resolveById). The
+  // key is normalised through healthGroupKey, so a model-level source resolves
+  // its account's card. `{changed}` for diagnostics/tests.
+  async function resolveHealthSource(source, reason = "health recovered", { ts = now() } = {}) {
+    if (typeof source !== "string" || !source) return { changed: false };
+    const key = healthGroupKey({ source });
+    const { cards } = await openCards();
+    const open = cards.filter(
+      (c) => c?.state === "open" && c?.sourceKind === HEALTH_SOURCE_KIND && c?.sourceId === key,
+    );
+    let changed = false;
+    for (const card of open) {
+      changed = (await resolveById(card.id, { reason, ts })).changed || changed;
+    }
+    return { changed };
+  }
+
+  // One-time cleanup of the health cards that predate healthNeedsUser: resolve
+  // every open health card that is not the user's decision, or whose alarm has
+  // since recovered (nothing closed those — only an engine resume did), with a
+  // card.resolved ledger row each; then rewrite the cards that remain into the
+  // plain-language copy with real options. Marker-guarded like
+  // pruneOrphanedShedCards: the stamp lands only after the writes succeeded.
+  // `{resolved, rewritten, marked}` for tests.
+  async function pruneStaleHealthCards({ ts = now() } = {}) {
+    let meta = {};
+    try {
+      meta = (await engineState.load()) ?? {};
+    } catch {
+      meta = {};
+    }
+    if (meta?.[HEALTH_CARD_PRUNE_KEY]?.pruned === true) {
+      return { resolved: 0, rewritten: 0, marked: false };
+    }
+    const defaultModel = await readDefaultModel();
+    const { cards } = await openCards();
+    const open = cards.filter((c) => c?.state === "open" && c?.sourceKind === HEALTH_SOURCE_KIND);
+    let resolved = 0;
+    let rewritten = 0;
+    for (const card of open) {
+      const source = typeof card.sourceId === "string" ? card.sourceId : "";
+      let gone = null;
+      if (!healthNeedsUser({ source }, { defaultModel })) gone = "not a user decision — handled by the CTO's own triage";
+      else if (!healthAlarmActive(source, meta)) gone = "health recovered";
+      if (gone) {
+        resolved += (await resolveById(card.id, { reason: gone, ts })).changed ? 1 : 0;
+        continue;
+      }
+      if (Array.isArray(card.options) && card.options.length > 0) continue;
+      const copy = healthCardCopy(healthGroupKey({ source }), card.body);
+      await patchStore(cardStore, (fresh) => {
+        const all = Array.isArray(fresh?.cards) ? fresh.cards : [];
+        const idx = all.findIndex((c) => c?.id === card.id && c?.state === "open");
+        if (idx < 0) return {};
+        rewritten += 1;
+        const next = all.map((c, i) =>
+          i === idx ? { ...c, title: copy.title, body: copy.body, options: liveOptions(copy.options), updatedAt: ts } : c,
+        );
+        return { cards: next };
+      });
+    }
+    let marked = false;
+    if (typeof patchEngineStatePatch === "function") {
+      try {
+        await patchEngineStatePatch((fresh) => ({
+          [HEALTH_CARD_PRUNE_KEY]: { ...(fresh?.[HEALTH_CARD_PRUNE_KEY] || {}), pruned: true, at: ts },
+        }));
+        marked = true;
+      } catch {
+        /* best-effort — an unstamped marker just re-prunes a clean store next boot */
+      }
+    }
+    return { resolved, rewritten, marked };
   }
 
   // Health recovered (e.g. the user resumed the engine) → resolve every open
@@ -1433,6 +1676,8 @@ export function createCtoCards(deps = {}) {
     promoteDue,
     ingestHealthEscalations,
     onHealthRecovered,
+    resolveHealthSource,
+    pruneStaleHealthCards,
     checkInboxLiveness,
     upsertBlocker,
     resolveById,

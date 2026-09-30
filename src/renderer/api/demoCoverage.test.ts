@@ -46,6 +46,7 @@ export const DEMO_UNIMPLEMENTED = [
   "clipboardWriteText",
   "configUpdate",
   "connectionRetryNow",
+  "ctoCardDismiss",
   "ctoCardsGet",
   "ctoConversationInterrupt",
   "ctoConversationOpen",

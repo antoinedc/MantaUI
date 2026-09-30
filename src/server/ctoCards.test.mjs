@@ -30,7 +30,7 @@ import { INBOX_TTL_MS } from "./ctoStores.mjs";
 // (a static patch object, or a `(fresh) => patch` function; a key set to
 // `undefined` deletes it) but without its mutex — fine for these
 // single-threaded, sequential-await tests.
-function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo = null, hasSession = null, conditionGone = null } = {}) {
+function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo = null, hasSession = null, conditionGone = null, getDefaultModel = null } = {}) {
   const clock = { ms: 1_000_000 };
   let cardPayload = { v: 1, cards: [] };
   const ledgerRows = [];
@@ -59,6 +59,7 @@ function makeHarness({ pendingBlockers = [], fireNotify = false, getSessionInfo 
     ...(getSessionInfo ? { getSessionInfo } : {}),
     ...(hasSession ? { hasSession } : {}),
     ...(conditionGone ? { conditionGone } : {}),
+    ...(getDefaultModel ? { getDefaultModel } : {}),
     // The engine wires queueFinding on the live box; here every harness
     // captures (the queue path is core behavior now, not optional).
     queueFinding: async (row) => findings.push(row),
@@ -256,7 +257,8 @@ test("health escalation: watchdog pendingBlockers become health cards; recovery 
   assert.equal(open.length, 1);
   assert.equal(open[0].sourceKind, HEALTH_SOURCE_KIND);
   assert.equal(open[0].variant, "blocker");
-  assert.ok(open[0].body.includes("ambient spend"), "body carries the watchdog reason");
+  assert.equal(open[0].title, "CTO paused itself: spending was over its limit");
+  assert.deepEqual(open[0].options.map((o) => o.action.type), ["resume-cto", "dismiss-card"]);
 
   // BET-1463 (defect 1): ingesting the entry stamps it consumed on its own —
   // no manual setPendingBlockers needed to simulate this any more.
@@ -388,7 +390,7 @@ test("BET-1463: 82 pendingBlockers entries from the SAME watchdog trip source fo
   const open1 = h.store().cards.filter((c) => c.state === "open");
   assert.equal(open1.length, 1, "at most one card after the first tick");
   assert.equal(open1[0].pendingSince, 1_000_000, "pendingSince is the EARLIEST outstanding trip");
-  assert.ok(open1[0].body.includes("81"), "body carries the MOST RECENT reason");
+  assert.match(open1[0].title, /CTO paused itself/, "one plain-language card for the whole trip source");
 
   const r2 = await h.cards.ingestHealthEscalations();
   assert.equal(r2.changed, false, "second tick produces no new card / no new write");
@@ -1057,4 +1059,43 @@ test("BET-1516: pruneOrphanedShedCards removes the orphaned card + shed entries,
   // A second run is a pure no-op (marker-guarded).
   const r2 = await h.cards.pruneOrphanedShedCards();
   assert.deepEqual(r2, { pruned: 0, droppedEntries: 0, marked: false });
+});
+
+test("health: non-user escalations are consumed and triaged but never carded; pinned provider outage cards once per account", async () => {
+  const h = makeHarness({
+    pendingBlockers: [
+      { id: "b1", source: "op-class:segment-summary", reason: "9/20 ok", ts: 500, resolved: false },
+      { id: "b2", source: "infra:persist", reason: "persist failing", ts: 510, resolved: false },
+      { id: "b3", source: "endpoint:chutes", reason: "out-of-credit", ts: 520, resolved: false },
+      { id: "b4", source: "endpoint:openrouter", reason: "out-of-credit (HTTP 402)", ts: 530, resolved: false },
+      { id: "b5", source: "endpoint:openrouter/x/y", reason: "dead (HTTP 402)", ts: 540, resolved: false },
+    ],
+    getDefaultModel: async () => ({ providerID: "openrouter", modelID: "x/y" }),
+  });
+  await h.cards.ingestHealthEscalations();
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.deepEqual(open.map((c) => c.sourceId), ["endpoint:openrouter"]);
+  assert.match(open[0].title, /OpenRouter/);
+  assert.ok(h.engineStateSnapshot().pendingBlockers.every((b) => b.resolved === true));
+  // Recovery of the account closes its card.
+  await h.cards.resolveHealthSource("endpoint:openrouter/x/y");
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 0);
+});
+
+test("health: the one-time prune resolves stale / non-user cards once, then is a no-op", async () => {
+  const h = makeHarness({
+    pendingBlockers: [
+      { id: "w", source: "watchdog", reason: "burn", ts: 500, resolved: false },
+    ],
+  });
+  await h.cards.ingestHealthEscalations();
+  // Simulate a legacy card from before healthNeedsUser.
+  await h.cards.upsertBlocker({ sourceKind: HEALTH_SOURCE_KIND, sourceId: "op-class:tool-scan", title: "Health check", body: "x", refs: [] });
+  assert.equal(h.store().cards.filter((c) => c.state === "open").length, 2);
+  const r1 = await h.cards.pruneStaleHealthCards();
+  assert.equal(r1.resolved, 1);
+  const open = h.store().cards.filter((c) => c.state === "open");
+  assert.deepEqual(open.map((c) => c.sourceId), ["watchdog"]);
+  const r2 = await h.cards.pruneStaleHealthCards();
+  assert.equal(r2.resolved, 0);
 });

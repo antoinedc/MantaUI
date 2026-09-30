@@ -263,6 +263,7 @@ const card = (over = {}) => ({
   pendingSince: 1000,
   refs: [] as string[],
   repeatCount: 1,
+  options: [],
   ...over,
 });
 
@@ -894,3 +895,32 @@ describe("evidenceExpansion (BET-1442 — probe/statement refs fall back to inli
 });
 
 
+
+describe("blocker options (health cards)", () => {
+  it("keeps only handled action types and carries them onto BlockerCard", async () => {
+    const { blockerCards, blockerOptions } = await import("./ctoView");
+    expect(
+      blockerOptions([
+        { label: "Resume CTO", action: { type: "resume-cto", payload: {} } },
+        { label: "Dismiss", action: { type: "dismiss-card", payload: {} } },
+        { label: "Dead", action: { type: "no-such-action", payload: {} } },
+        { label: "", action: { type: "dismiss-card" } },
+        null,
+      ]),
+    ).toEqual([
+      { label: "Resume CTO", type: "resume-cto" },
+      { label: "Dismiss", type: "dismiss-card" },
+    ]);
+    const [c] = blockerCards([
+      { id: "x", variant: "blocker", title: "t", body: "b", options: [{ label: "Dismiss", action: { type: "dismiss-card", payload: {} } }] } as never,
+    ]);
+    expect(c.options).toEqual([{ label: "Dismiss", type: "dismiss-card" }]);
+  });
+
+  it("every blocker action type has a branch in CtoPanel's handler", async () => {
+    const { BLOCKER_ACTION_TYPES } = await import("../shared/ctoCard.mjs");
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./CtoPanel.tsx", import.meta.url), "utf8");
+    for (const t of BLOCKER_ACTION_TYPES) expect(src).toContain(`option.type === "${t}"`);
+  });
+});
