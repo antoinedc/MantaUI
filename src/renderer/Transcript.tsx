@@ -18,7 +18,7 @@
 // provider VALUE is memoized by ChatPanel (`taskContextValue`) for keystroke
 // stability, so passing it through as a prop keeps that identity intact.
 
-import { forwardRef, useCallback, useEffect, useMemo, useState } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { Virtuoso, type ListProps, type VirtuosoHandle } from "react-virtuoso";
 import { TaskContext, type TaskContextValue, presentVerbFor } from "./chatShared";
@@ -26,6 +26,18 @@ import { ActiveTodos, MessageRow } from "./MessageRow";
 import { MantaLoader } from "./MantaLoader";
 import { MOTION_FAST } from "./chatMotion";
 import { CardMount } from "./components/CardMount";
+import { DisclosureChevron, ToolActivityList } from "./ToolGroup";
+import {
+  isRenderableRow,
+  layoutTranscript,
+  locateVisibleRow,
+  stabilizeLayout,
+  summarizeToolGroup,
+  type Block,
+  type RowLocation,
+  type ToolGroup,
+  type TranscriptLayout,
+} from "./toolActivity";
 import { WORKING_TICK_MS, nowMs, useClockTick } from "./clock";
 import { QuestionCard } from "./Cards";
 import { Button } from "./Button";
@@ -34,10 +46,11 @@ import { PendingVoiceRow, type PendingVoiceNote } from "./VoiceNote";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
 import {
+  computeTurnInfo,
   createEntryMotionState,
-  isRenderableMessage,
   updateEntryMotion,
   formatDuration,
+  formatTokens,
   scrollElementToTail,
   classifyFollowOnScroll,
   createUserScrollIntent,
@@ -61,6 +74,10 @@ export type TranscriptContext = {
   liveTurn: LiveTurn | null;
   /** Live session-progress record (BET-790/791), if any. */
   progress?: ProgressRecord | null;
+  /** The run of tool calls at the very tail of a running turn, shown (and
+   *  expandable) in the working line rather than inline. */
+  toolGroup?: ToolGroup | null;
+  showThinking?: boolean;
   showLoadEarlier: boolean;
   loadingEarlier: boolean;
   onLoadEarlier: () => void;
@@ -94,6 +111,29 @@ export type TranscriptContext = {
 // not on a Virtuoso root. The inset therefore lives on the IN-FLOW children —
 // List, Header, Footer — where padding behaves normally, and where it also
 // gives the hover timestamp its gutter instead of letting it overflow.
+// Shared empty block list: a message absorbed into an earlier tool run draws
+// nothing, and a stable reference keeps its memo'd MessageRow still.
+const NO_BLOCKS: Block[] = [];
+
+// The inputs `isRenderableRow` needs for one message. Pure, so both the live
+// `visibleMessages` memo and the load-earlier prediction (which runs it over a
+// FRESH layout / turn map) can share it and list their real dependencies.
+function rowContext(
+  m: OpencodeMessage,
+  blocksByMessage: Map<string, Block[]>,
+  turns: TranscriptProps["turnInfo"],
+  finishes: TranscriptProps["finishByMessageId"],
+  media: TranscriptProps["mediaByMessageId"],
+  widgets: TranscriptProps["widgetsByMessageId"],
+) {
+  return {
+    blocks: blocksByMessage.get(m.info.id),
+    hasMedia: media.has(m.info.id),
+    hasWidget: widgets.has(m.info.id),
+    hasFooter: turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null,
+  };
+}
+
 const TRANSCRIPT_INSET: React.CSSProperties = {
   paddingInline: "var(--transcript-inset)",
 };
@@ -199,16 +239,27 @@ export function WorkingIndicator({
   running,
   liveTurn,
   progress,
+  toolGroup = null,
+  showThinking = false,
 }: {
   running: boolean;
   liveTurn: LiveTurn | null;
   progress?: ProgressRecord | null;
+  /** The tool run at the tail of the running turn, if any. When set the line
+   *  reports it (live tool headline / run summary) and expands its cards. */
+  toolGroup?: ToolGroup | null;
+  showThinking?: boolean;
 }) {
   // Re-render (and thus re-read the clock during render) once per second so
   // the elapsed label advances on its own. The component is only mounted
   // while running — CardMount unmounts it when idle — so no ticker runs
   // between turns.
   useClockTick(WORKING_TICK_MS);
+  const [expanded, setExpanded] = useState(false);
+  // The run settles inline (or the turn ends) → the expansion goes with it.
+  useEffect(() => {
+    if (!toolGroup) setExpanded(false);
+  }, [toolGroup]);
   const hasTurn = liveTurn != null;
   // presentVerbFor returns the bare present tense (no ellipsis); the "…" is
   // appended by workingIndicatorLabel, exactly as before BET-791.
@@ -222,20 +273,70 @@ export function WorkingIndicator({
   // this: `blocked` yields to its card, `done`/`failed` to the turn ending.
   const useModelLabel =
     progress?.state === "working" && !!progress.label && progress.label.trim().length > 0;
-  const meta = hasTurn
-    ? workingIndicatorLabel({ progress, fallbackVerb: verb, elapsed, tokens })
-    : "Working…";
+
+  // What the line says. `headline` is the emphasised part (text-text), `meta`
+  // the faint run after it; `failed` is the red count of failed tool calls.
+  let headline: string | null = null;
+  let meta: string;
+  let failed = 0;
+  const clock = [elapsed, tokens > 0 ? formatTokens(tokens) : ""].filter(Boolean);
+  const summary = toolGroup ? summarizeToolGroup(toolGroup.items) : null;
+  if (summary) failed = summary.failed;
+  if (summary?.live) {
+    // A tool is executing: it IS the headline ("Editing Transcript.tsx…"). A
+    // model progress label yields the headline to it and moves into the meta.
+    headline = `${summary.live.running}…`;
+    const parts = [
+      useModelLabel ? progress.label : "",
+      summary.calls > 1 ? `${summary.calls} tools` : "",
+      ...clock,
+    ].filter(Boolean);
+    meta = parts.length > 0 ? `· ${parts.join(" · ")}` : "";
+  } else if (summary && !useModelLabel) {
+    // Thinking between tools: today's verb, plus what the run did so far.
+    meta = [`${verb}…`, summary.label, ...clock].join(" · ");
+  } else if (useModelLabel) {
+    // Today's progress rendering, unchanged (a tool run, if any, is idle).
+    headline = progress.label;
+    meta = workingIndicatorLabel({ progress, fallbackVerb: verb, elapsed, tokens });
+  } else {
+    meta = hasTurn
+      ? workingIndicatorLabel({ progress, fallbackVerb: verb, elapsed, tokens })
+      : "Working…";
+  }
+
+  const content = (
+    <>
+      <MantaLoader />
+      {headline != null && (
+        <span className="text-text font-medium truncate min-w-0">{headline}</span>
+      )}
+      {meta && <span className="text-text-faint text-meta">{meta}</span>}
+      {failed > 0 && <span className="text-danger text-meta whitespace-nowrap">· {failed} failed</span>}
+      {toolGroup && <DisclosureChevron open={expanded} />}
+    </>
+  );
+
   return (
     <CardMount show={running} k="working">
-      <div className="manta-working-indicator flex items-center gap-2 shrink-0">
-        <MantaLoader />
-        {useModelLabel ? (
-          <>
-            <span className="text-text font-medium">{progress.label}</span>
-            <span className="text-text-faint text-meta">{meta}</span>
-          </>
+      <div className="manta-working-indicator shrink-0">
+        {toolGroup ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            title={expanded ? "Hide tool calls" : "Show tool calls"}
+            className="flex items-center gap-2 max-w-full text-left"
+          >
+            {content}
+          </button>
         ) : (
-          <span className="text-text-faint text-meta">{meta}</span>
+          <div className="flex items-center gap-2">{content}</div>
+        )}
+        {toolGroup && (
+          <CardMount show={expanded} k="working-tools">
+            <ToolActivityList group={toolGroup} showThinking={showThinking} />
+          </CardMount>
         )}
       </div>
     </CardMount>
@@ -288,6 +389,8 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         running={context.running}
         liveTurn={context.liveTurn}
         progress={context.progress}
+        toolGroup={context.toolGroup}
+        showThinking={context.showThinking}
       />
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
@@ -381,6 +484,11 @@ export type TranscriptProps = {
   // to useTranscriptState's reconcile path). Using the parent's ref keeps the
   // reconcile registration and the render fold on the SAME state object.
   motionStateRef: React.MutableRefObject<EntryMotionState | null>;
+  // Filled by Transcript with a message-id → visible-row locator (see
+  // locateVisibleRow). ChatPanel's jump-to-message paths read it; null until
+  // the first render. Optional: surfaces with no jump-to-message (the CTO
+  // chat) don't pass one.
+  rowLocatorRef?: React.MutableRefObject<((messageId: string) => RowLocation | null) | null>;
 };
 
 export function Transcript({
@@ -413,6 +521,7 @@ export function Transcript({
   followingRef,
   onFollowingChange,
   motionStateRef,
+  rowLocatorRef,
 }: TranscriptProps) {
   // Entry motion (transcript-motion). A message that arrives while the user is
   // watching animates in; a transcript they merely LOADED does not. The whole
@@ -436,10 +545,49 @@ export function Transcript({
   // bad scrollToIndex). Filter the list ONCE so every delivered item is one
   // that MessageRow actually draws. `isRenderableMessage` is the single source
   // of truth, shared with MessageRow's own guard.
+  //
+  // The predicate is `isRenderableRow` — the SAME one MessageRow guards with —
+  // over the tool-run layout: an assistant row is drawn only when it owns
+  // blocks (text, or the collapsed line of a run that STARTS in it), media, a
+  // widget, or a turn footer / truncation badge. A message a run spilled into
+  // owns nothing and must not occupy a slot.
+  const layoutRef = useRef<TranscriptLayout | null>(null);
+  const layout = useMemo(() => {
+    const next = layoutTranscript(messages, { running, showThinking });
+    // Stabilized so unchanged messages keep the SAME block arrays: MessageRow
+    // is React.memo'd and fresh arrays per streaming delta would re-render
+    // every row (AGENTS.md "Transcript row memoization").
+    layoutRef.current = stabilizeLayout(layoutRef.current, next);
+    return layoutRef.current;
+  }, [messages, running, showThinking]);
+
   const visibleMessages = useMemo(
-    () => messages.filter(isRenderableMessage),
-    [messages],
+    () =>
+      messages.filter((m) =>
+        isRenderableRow(
+          m,
+          rowContext(
+            m,
+            layout.blocksByMessage,
+            turnInfo,
+            finishByMessageId,
+            mediaByMessageId,
+            widgetsByMessageId,
+          ),
+        ),
+      ),
+    [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
   );
+
+  // Hand ChatPanel a way to turn a message id into the row that draws it. The
+  // jump-to-message paths (artifacts panel, ⌘F) address MESSAGES, but Virtuoso's
+  // data is `visibleMessages`, which drops every tool-only message absorbed into
+  // a run. Re-pointed on every render so it always closes over the current
+  // layout and list; ChatPanel only calls it from event handlers.
+  if (rowLocatorRef) {
+    rowLocatorRef.current = (messageId: string): RowLocation | null =>
+      locateVisibleRow(messageId, messages, visibleMessages, layout);
+  }
 
   // Load earlier (tail → full history) via Virtuoso's firstItemIndex. Prepending
   // is Virtual's anchor-preservation mechanism: lowering firstItemIndex by the
@@ -457,9 +605,41 @@ export function Transcript({
         // Anchor the scroll shift on VISIBLE rows: prepended rows that render
         // nothing must not count toward the firstItemIndex shift, or the
         // anchor is off by the number of hidden prepended rows (BET-874).
+        // "Visible" means the same row predicate as above, applied to a fresh
+        // layout of the full history (a tool run can now start in a prepended
+        // message and absorb rows that were visible before).
+        const nextLayout = layoutTranscript(newMessages, { running, showThinking });
+        const nextTurns = computeTurnInfo(newMessages, running);
+        // NOTE: the media / widget / finish maps used below only cover the
+        // messages loaded SO FAR, so a prepended message's media or widget row
+        // can't be predicted here. That is why the shift is anchored on the id
+        // of the row that was first on screen (its index in the new visible
+        // list) and NOT on a count difference between the two visible lists:
+        // a run starting in a prepended message can absorb rows that were
+        // visible before, so the two lists differ in more than the prepended
+        // rows. Do not "simplify" this back to `next.length - current.length`.
+        const nextVisible = newMessages.filter((m) =>
+          isRenderableRow(
+            m,
+            rowContext(
+              m,
+              nextLayout.blocksByMessage,
+              nextTurns,
+              finishByMessageId,
+              mediaByMessageId,
+              widgetsByMessageId,
+            ),
+          ),
+        );
+        // Rows prepended = how many now sit before the row that was first on
+        // screen. Falls back to the count difference if that row got absorbed
+        // into a run that now starts earlier.
+        const anchorId = visibleMessages[0]?.info.id;
+        const anchorIdx = anchorId
+          ? nextVisible.findIndex((m) => m.info.id === anchorId)
+          : -1;
         const prepended =
-          newMessages.filter(isRenderableMessage).length -
-          visibleMessages.length;
+          anchorIdx >= 0 ? anchorIdx : nextVisible.length - visibleMessages.length;
         // Same state-update batch (React 18 auto-batches in promise callbacks):
         // the data and the firstItemIndex shift must land together so Virtuoso
         // treats the new rows as pre-pended, not appended.
@@ -474,6 +654,8 @@ export function Transcript({
     running,
     liveTurn,
     progress,
+    toolGroup: layout.trailing,
+    showThinking,
     showLoadEarlier:
       !loadedAllRef.current && messages.length >= TRANSCRIPT_TAIL_LIMIT,
     loadingEarlier,
@@ -690,6 +872,7 @@ export function Transcript({
                         : widgetsByMessageId.get(m.info.id) ?? null
                     }
                     entering={entryMotion.entering.has(m.info.id)}
+                    blocks={layout.blocksByMessage.get(m.info.id) ?? NO_BLOCKS}
                   />
                 );
               }}

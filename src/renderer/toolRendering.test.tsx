@@ -350,6 +350,20 @@ describe("TaskBody subagent row", () => {
   });
 });
 
+// An expanded "ses_child" TaskContext holding `msgs`, with inert callbacks.
+function childTaskContext(msgs: OpencodeMessage[]): TaskContextValue {
+  return {
+    expanded: new Set(["ses_child"]),
+    toggle: () => {},
+    childMessages: new Map([["ses_child", msgs]]),
+    childLoadedAllRef: { current: new Map<string, boolean>() },
+    loadEarlierChild: () => {},
+    loadingChildEarlier: new Set(),
+    liveStatus: new Map(),
+    showThinking: false,
+  };
+}
+
 // ===== TaskCard child-transcript "Load earlier" header (BET-683) =====
 //
 // Once a child's tail-first fetch fills the expanded card (>= TRANSCRIPT_TAIL_LIMIT)
@@ -441,16 +455,7 @@ describe("TaskCard child 'Load earlier' header", () => {
     // A sub-tail child transcript (no "Load earlier" affordance).
     function UnderLimitHarness() {
       const msgs = Array.from({ length: 3 }, (_, i) => childMsg(i));
-      const ctx: TaskContextValue = {
-        expanded: new Set(["ses_child"]),
-        toggle: () => {},
-        childMessages: new Map([["ses_child", msgs]]),
-        childLoadedAllRef: { current: new Map<string, boolean>() },
-        loadEarlierChild: () => {},
-        loadingChildEarlier: new Set(),
-        liveStatus: new Map(),
-        showThinking: false,
-      };
+      const ctx = childTaskContext(msgs);
       return (
         <TaskContext.Provider value={ctx}>
           <TaskCard state={taskPart({ description: "subagent", subagent_type: "explore" }).state as ToolState} />
@@ -461,5 +466,44 @@ describe("TaskCard child 'Load earlier' header", () => {
     h = mount(<UnderLimitHarness />);
     await h.flush();
     expect(h.text()).not.toContain("Load earlier messages");
+  });
+});
+
+describe("TaskCard child transcript groups tool runs", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const child = (id: string, parts: Array<Record<string, unknown>>): OpencodeMessage =>
+    ({
+      info: { id, sessionID: "ses_child", role: "assistant", time: { created: 1 } },
+      parts: parts.map((p, i) => ({ id: `${id}_p${i}`, messageID: id, ...p })),
+    }) as unknown as OpencodeMessage;
+  const readTool = (file: string) => ({
+    type: "tool",
+    tool: "read",
+    state: { status: "completed", input: { filePath: file }, output: "x" },
+  });
+
+  it("collapses a run spanning child messages into ONE line, drawn once", () => {
+    const msgs = [
+      child("c1", [{ type: "text", text: "Searching." }, readTool("/a.ts")]),
+      child("c2", [readTool("/b.ts")]),
+      child("c3", [{ type: "text", text: "Found." }]),
+    ];
+    const ctx = childTaskContext(msgs);
+    installMockApi();
+    h = mount(
+      <TaskContext.Provider value={ctx}>
+        <TaskCard state={taskPart({ description: "subagent", subagent_type: "explore" }).state as ToolState} />
+      </TaskContext.Provider>,
+    );
+    expect(h.text()).toContain("Searching.");
+    expect(h.text()).toContain("Found.");
+    const lines = h.container.querySelectorAll(".manta-tool-group");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toContain("Read 2 files");
   });
 });

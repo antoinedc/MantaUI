@@ -13,6 +13,8 @@ import { presentVerbFor } from "./chatShared";
 import type { LiveTurn } from "./chatUtils";
 import { pinDemoClock } from "./clock";
 import { useStore } from "./store";
+import type { ToolGroup } from "./toolActivity";
+import type { OpencodePart } from "../shared/types";
 
 // A fixed clock anchor; the elapsed label is a function of this, not the wall
 // clock. startedAt is 103s before the anchor so formatDuration renders "1m43s".
@@ -108,5 +110,100 @@ describe("WorkingIndicator", () => {
     expect(h!.container.querySelector(".text-text.font-medium")).toBeNull();
     const meta = h!.container.querySelector(".text-text-faint.text-meta");
     expect(meta?.textContent).toBe(`${presentVerbFor(liveTurn.verbSeedId)}… · 1m43s · 432 tokens`);
+  });
+
+  // ----- Tool run at the tail (collapsed tool activity) -----
+
+  let n = 0;
+  const tool = (name: string, input: Record<string, unknown>, status = "completed") =>
+    ({ id: `t${++n}`, messageID: "m", type: "tool", tool: name, state: { status, input } }) as OpencodePart;
+  const group = (...items: OpencodePart[]): ToolGroup => ({ id: items[0].id, items });
+  const headline = () => h!.container.querySelector(".text-text.font-medium")?.textContent;
+  const meta = () => h!.container.querySelector(".text-text-faint.text-meta")?.textContent;
+  const workingProgress = {
+    sessionID: "s1",
+    label: "Step 3/5: wiring the handler",
+    step: 3,
+    total: 5,
+    state: "working" as const,
+    detail: "",
+    updatedAt: 0,
+  };
+
+  it("headlines the LIVE tool with its meta run (count, elapsed, tokens)", () => {
+    pinDemoClock(T0);
+    const g = group(
+      tool("read", { filePath: "/a/x.ts" }),
+      tool("read", { filePath: "/a/y.ts" }),
+      tool("edit", { filePath: "/src/Transcript.tsx" }, "running"),
+    );
+    h = mount(<WorkingIndicator running liveTurn={makeLiveTurn()} toolGroup={g} />);
+    expect(headline()).toBe("Editing Transcript.tsx…");
+    expect(meta()).toBe("· 3 tools · 1m43s · 432 tokens");
+    expect(h.container.querySelector("button")).toBeTruthy(); // clickable
+  });
+
+  it("omits 'N tools' for a single tool, and treats a pending tool as live", () => {
+    pinDemoClock(T0);
+    const g = group(tool("bash", { description: "Run the tests" }, "pending"));
+    h = mount(<WorkingIndicator running liveTurn={makeLiveTurn()} toolGroup={g} />);
+    expect(headline()).toBe("Run the tests…");
+    expect(meta()).toBe("· 1m43s · 432 tokens");
+  });
+
+  it("shows the red failed count after the meta", () => {
+    pinDemoClock(T0);
+    const g = group(
+      tool("bash", { description: "a" }, "error"),
+      tool("bash", { description: "b" }, "running"),
+    );
+    h = mount(<WorkingIndicator running liveTurn={makeLiveTurn()} toolGroup={g} />);
+    const failed = h.container.querySelector(".text-danger");
+    expect(failed?.textContent).toBe("· 1 failed");
+  });
+
+  it("between tools: keeps today's verb and moves the run summary into the meta", () => {
+    pinDemoClock(T0);
+    const liveTurn = makeLiveTurn();
+    const g = group(
+      tool("read", { filePath: "/a/x.ts" }),
+      tool("read", { filePath: "/a/y.ts" }),
+      tool("bash", { command: "ls" }),
+    );
+    h = mount(<WorkingIndicator running liveTurn={liveTurn} toolGroup={g} />);
+    expect(headline()).toBeUndefined();
+    expect(meta()).toBe(
+      `${presentVerbFor(liveTurn.verbSeedId)}… · Read 2 files, ran a command · 1m43s · 432 tokens`,
+    );
+  });
+
+  it("progress label + live tool: the tool wins the headline, the label moves into the meta", () => {
+    pinDemoClock(T0);
+    const g = group(
+      tool("write", { filePath: "/a/h.mjs" }),
+      tool("edit", { filePath: "/a/i.mjs" }),
+      tool("bash", { description: "Typecheck" }, "running"),
+    );
+    h = mount(
+      <WorkingIndicator running liveTurn={makeLiveTurn()} progress={workingProgress} toolGroup={g} />,
+    );
+    expect(headline()).toBe("Typecheck…");
+    expect(meta()).toBe("· Step 3/5: wiring the handler · 3 tools · 1m43s · 432 tokens");
+  });
+
+  it("progress label, no running tool: today's progress rendering is kept", () => {
+    pinDemoClock(T0);
+    const g = group(tool("read", { filePath: "/a/x.ts" }));
+    h = mount(
+      <WorkingIndicator running liveTurn={makeLiveTurn()} progress={workingProgress} toolGroup={g} />,
+    );
+    expect(headline()).toBe("Step 3/5: wiring the handler");
+    expect(meta()).toBe("· 3/5 · 1m43s · 432 tokens");
+  });
+
+  it("no tail run: no button, no chevron — exactly today's line", () => {
+    pinDemoClock(T0);
+    h = mount(<WorkingIndicator running liveTurn={makeLiveTurn()} toolGroup={null} />);
+    expect(h.container.querySelector("button")).toBeNull();
   });
 });
