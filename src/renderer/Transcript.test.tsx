@@ -24,6 +24,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { act, createRef } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
 import { mount, installMockApi, type Harness } from "./testHarness";
+import { resetGroupExpansion } from "./toolGroupExpansion";
 import { Transcript, TranscriptList, type TranscriptProps } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage } from "../shared/types";
@@ -292,26 +293,32 @@ describe("Transcript follow state", () => {
     return { h, el: scrollerElRef.current!, changes };
   }
 
+  // Move the scroller to `top` (2000px content, 500px viewport) and fire the
+  // scroll event the follow logic listens to.
+  function scrollTo(el: HTMLElement, top: number) {
+    measure(el, { scrollTop: top, scrollHeight: 2000, clientHeight: 500 });
+    act(() => el.dispatchEvent(new Event("scroll")));
+  }
+  function fire(target: EventTarget, ev: Event) {
+    act(() => target.dispatchEvent(ev));
+  }
+
   it("REGRESSION: a scroll-up with no user gesture keeps the transcript following", () => {
     const { h, el, changes } = mountFollowing();
     expect(el).not.toBeNull();
     // Pinned at the tail.
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1500);
     // Virtuoso compensates for a re-measured row: 500px up, no input event.
-    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1000);
     expect(changes).not.toContain(false);
     h.unmount();
   });
 
   it("still detaches when the same scroll follows a wheel gesture", () => {
     const { h, el, changes } = mountFollowing();
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
-    act(() => el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })));
-    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1500);
+    fire(el, new WheelEvent("wheel", { deltaY: -400 }));
+    scrollTo(el, 1000);
     expect(changes.at(-1)).toBe(false);
     h.unmount();
   });
@@ -322,11 +329,9 @@ describe("Transcript follow state", () => {
     // distinguishes it from a click. Measured in headed Chromium: every scroll
     // of a thumb drag fires with the button down.
     const { h, el, changes } = mountFollowing();
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
-    act(() => el.dispatchEvent(new Event("pointerdown")));
-    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1500);
+    fire(el, new Event("pointerdown"));
+    scrollTo(el, 1000);
     expect(changes.at(-1)).toBe(false);
     h.unmount();
   });
@@ -336,26 +341,21 @@ describe("Transcript follow state", () => {
     // Virtuoso compensates a few ms LATER. That compensation must not inherit
     // intent from the click that caused it.
     const { h, el, changes } = mountFollowing();
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
-    act(() => el.dispatchEvent(new Event("pointerdown")));
+    scrollTo(el, 1500);
+    fire(el, new Event("pointerdown"));
     act(() => window.dispatchEvent(new Event("pointerup")));
-    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1000);
     expect(changes).not.toContain(false);
     h.unmount();
   });
 
   it("re-attaches when a scroll lands back at the bottom, gesture or not", () => {
     const { h, el, changes } = mountFollowing();
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
-    act(() => el.dispatchEvent(new WheelEvent("wheel", { deltaY: -400 })));
-    measure(el, { scrollTop: 1000, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1500);
+    fire(el, new WheelEvent("wheel", { deltaY: -400 }));
+    scrollTo(el, 1000);
     expect(changes.at(-1)).toBe(false);
-    measure(el, { scrollTop: 1500, scrollHeight: 2000, clientHeight: 500 });
-    act(() => el.dispatchEvent(new Event("scroll")));
+    scrollTo(el, 1500);
     expect(changes.at(-1)).toBe(true);
     h.unmount();
   });
@@ -468,6 +468,7 @@ describe("Transcript collapsed tool activity", () => {
   afterEach(() => {
     h?.unmount();
     h = null;
+    resetGroupExpansion();
   });
 
   const part = (id: string, mid: string, p: Record<string, unknown>) =>
@@ -591,6 +592,32 @@ describe("Transcript collapsed tool activity", () => {
     expect(cards(h)).toHaveLength(0);
     act(() => (working.querySelector("button") as HTMLElement).click());
     expect(cards(h)).toHaveLength(2);
+  });
+
+  it("a run opened on the working line stays open once it settles inline", () => {
+    motionStateRef = { current: null };
+    const running = [
+      msg("u1", "user", "go"),
+      asst("a1", [text("a1t", "a1", "Looking.")]),
+      asst("a2", [read("a2r", "a2", "b.ts", "running")]),
+    ];
+    h = mount(<Transcript {...props(running, true)} />);
+    const working = h.container.querySelector(".manta-working-indicator button") as HTMLElement;
+    act(() => working.click());
+    expect(cards(h)).toHaveLength(1);
+    // The tool finishes and the model writes text: the run moves inline.
+    const settled = [
+      ...running.slice(0, 2),
+      asst("a2", [read("a2r", "a2", "b.ts")]),
+      asst("a3", [text("a3t", "a3", "Done.")]),
+    ];
+    h.rerender(<Transcript {...props(settled, false)} />);
+    expect(lines(h)).toHaveLength(1);
+    expect(lines(h)[0].getAttribute("aria-expanded")).toBe("true");
+    // The settled line's own list is open (the working line may still be
+    // playing its exit animation, so count inside the line, not the panel).
+    const settledList = lines(h)[0].parentElement!;
+    expect(settledList.querySelectorAll('button[aria-expanded]:not([title$="tool calls"])')).toHaveLength(1);
   });
 
   it("publishes a locator that maps absorbed messages onto the row that draws them", () => {

@@ -27,6 +27,7 @@ import { MantaLoader } from "./MantaLoader";
 import { MOTION_FAST } from "./chatMotion";
 import { CardMount } from "./components/CardMount";
 import { DisclosureChevron, ToolActivityList } from "./ToolGroup";
+import { useGroupExpanded } from "./toolGroupExpansion";
 import {
   isRenderableRow,
   layoutTranscript,
@@ -255,11 +256,9 @@ export function WorkingIndicator({
   // while running — CardMount unmounts it when idle — so no ticker runs
   // between turns.
   useClockTick(WORKING_TICK_MS);
-  const [expanded, setExpanded] = useState(false);
-  // The run settles inline (or the turn ends) → the expansion goes with it.
-  useEffect(() => {
-    if (!toolGroup) setExpanded(false);
-  }, [toolGroup]);
+  // Keyed by the run's id and shared with ToolGroupRow: when the run settles
+  // inline, the list the user opened here stays open there.
+  const [expanded, toggleExpanded] = useGroupExpanded(toolGroup?.id ?? null);
   const hasTurn = liveTurn != null;
   // presentVerbFor returns the bare present tense (no ellipsis); the "…" is
   // appended by workingIndicatorLabel, exactly as before BET-791.
@@ -323,7 +322,7 @@ export function WorkingIndicator({
         {toolGroup ? (
           <button
             type="button"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={toggleExpanded}
             aria-expanded={expanded}
             title={expanded ? "Hide tool calls" : "Show tool calls"}
             className="flex items-center gap-2 max-w-full text-left"

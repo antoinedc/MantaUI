@@ -9,13 +9,14 @@
 // shows the run at the tail of a running turn and expands the very same list.
 // The grouping itself is decided by toolActivity.ts; this file only draws it.
 
-import { memo, useState } from "react";
+import { memo } from "react";
 import { motion } from "framer-motion";
 import { ChevronRight } from "lucide-react";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import { AssistantPart } from "./ToolCall";
 import { StatusDot } from "./StatusDot";
 import { CardMount } from "./components/CardMount";
+import { useGroupExpanded } from "./toolGroupExpansion";
 import { groupTone, summarizeToolGroup, type ToolGroup } from "./toolActivity";
 
 /** The expanded list: the run's cards behind a thin left rule. */
@@ -65,7 +66,8 @@ export const ToolGroupRow = memo(function ToolGroupRow({
   // line pops in like every other part of a live message (see AssistantPart).
   entering?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // Shared with the working line, so a run opened there stays open here.
+  const [expanded, toggle] = useGroupExpanded(group.id);
   const summary = summarizeToolGroup(group.items);
   const tone = groupTone(summary);
   return (
@@ -77,7 +79,7 @@ export const ToolGroupRow = memo(function ToolGroupRow({
     >
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggle}
         aria-expanded={expanded}
         title={expanded ? "Hide tool calls" : "Show tool calls"}
         className="manta-tool-group inline-flex items-center gap-2 max-w-full text-left text-label text-text-muted hover:text-text transition-colors"
