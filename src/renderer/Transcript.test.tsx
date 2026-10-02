@@ -35,6 +35,8 @@ import type { EntryMotionState } from "./chatUtils";
 // (the prime/sticky contract). Passing a fresh object per re-render would
 // reset the gate and break the sticky/prime assertions.
 let motionStateRef: React.MutableRefObject<EntryMotionState | null> = { current: null };
+// Transcript re-points this on every render; shared across tests, never replaced.
+const rowLocatorRef: NonNullable<TranscriptProps["rowLocatorRef"]> = { current: null };
 
 function msg(id: string, role: "user" | "assistant", text: string): OpencodeMessage {
   return {
@@ -96,6 +98,7 @@ function props(messages: OpencodeMessage[], running = false): TranscriptProps {
     onReplyQuestion: () => {},
     onRejectQuestion: () => {},
     motionStateRef,
+    rowLocatorRef,
   };
 }
 
@@ -588,6 +591,33 @@ describe("Transcript collapsed tool activity", () => {
     expect(cards(h)).toHaveLength(0);
     act(() => (working.querySelector("button") as HTMLElement).click());
     expect(cards(h)).toHaveLength(2);
+  });
+
+  it("publishes a locator that maps absorbed messages onto the row that draws them", () => {
+    motionStateRef = { current: null };
+    h = mount(<Transcript {...props(FINISHED)} />);
+    const locate = rowLocatorRef.current!;
+    expect(locate).toBeTypeOf("function");
+    // a2 / a3 were absorbed into the run a1 starts: they resolve to a1's slot
+    // in the VISIBLE list (u1, a1, a4), and a1 is a real element to flash.
+    expect(locate("a3")).toEqual({ index: 1, rowId: "a1" });
+    expect(h.container.querySelector('[data-message-id="a1"]')).toBeTruthy();
+    expect(h.container.querySelector('[data-message-id="a3"]')).toBeNull();
+    expect(locate("a4")).toEqual({ index: 2, rowId: "a4" });
+    expect(locate("nope")).toBeNull();
+  });
+
+  it("the locator follows the live layout: a tail run in the working line maps to the last row", () => {
+    motionStateRef = { current: null };
+    const running = [
+      msg("u1", "user", "go"),
+      asst("a1", [text("a1t", "a1", "Looking.")]),
+      asst("a2", [read("a2r", "a2", "b.ts", "running")]),
+    ];
+    h = mount(<Transcript {...props(running, true)} />);
+    expect(rowLocatorRef.current!("a2")).toEqual({ index: 1, rowId: "a1" });
+    h.rerender(<Transcript {...props(running, false)} />);
+    expect(rowLocatorRef.current!("a2")).toEqual({ index: 2, rowId: "a2" });
   });
 
   it("once text follows the run it settles inline as a normal collapsed line", () => {

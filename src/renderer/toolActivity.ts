@@ -471,3 +471,67 @@ export function isRenderableRow(
     (ctx.blocks?.length ?? 0) > 0 || ctx.hasMedia || ctx.hasWidget || ctx.hasFooter
   );
 }
+
+// ===== Jump targets =====
+
+/**
+ * Where a message lives in the virtualized list.
+ *  - `index`: 0-based index into the visible (Virtuoso data) list — the
+ *    argument `scrollToIndex` takes, independent of `firstItemIndex`.
+ *  - `rowId`: id of the visible row that actually DRAWS the message, i.e. the
+ *    element carrying `data-message-id` to flash.
+ */
+export type RowLocation = { index: number; rowId: string };
+
+/**
+ * Resolve a message id to the visible row that draws it.
+ *
+ * Rows that draw nothing never reach Virtuoso, so a message id is not always a
+ * row id. Tool-only assistant messages a run spilled into are absorbed into
+ * the run's owning row, and artifacts produced by tool calls point at exactly
+ * those messages. Resolution order:
+ *  1. the message itself, if it is a visible row;
+ *  2. an absorbed message → the row owning the run that holds its parts (a run
+ *     still in the working line, i.e. the trailing one, → the last visible row);
+ *  3. hidden for any other reason → the nearest preceding visible row (the
+ *     first visible row when nothing precedes it).
+ * Unknown ids, and an empty visible list, give null.
+ */
+export function locateVisibleRow(
+  messageId: string,
+  messages: readonly OpencodeMessage[],
+  visible: readonly OpencodeMessage[],
+  layout: TranscriptLayout,
+): RowLocation | null {
+  const target = messages.findIndex((m) => m.info.id === messageId);
+  if (target < 0 || visible.length === 0) return null;
+
+  const indexOfVisible = new Map<string, number>();
+  visible.forEach((m, i) => indexOfVisible.set(m.info.id, i));
+  const at = (id: string): RowLocation | null => {
+    const index = indexOfVisible.get(id);
+    return index === undefined ? null : { index, rowId: id };
+  };
+
+  const own = at(messageId);
+  if (own) return own;
+
+  const partIds = new Set(messages[target].parts.map((p) => p.id));
+  const holdsPart = (g: ToolGroup) => g.items.some((p) => partIds.has(p.id));
+
+  if (layout.trailing && holdsPart(layout.trailing)) {
+    return at(visible[visible.length - 1].info.id);
+  }
+  for (const [ownerId, blocks] of layout.blocksByMessage) {
+    if (blocks.some((b) => b.kind === "tools" && holdsPart(b.group))) {
+      const owner = at(ownerId);
+      if (owner) return owner;
+    }
+  }
+
+  for (let i = target - 1; i >= 0; i--) {
+    const prev = at(messages[i].info.id);
+    if (prev) return prev;
+  }
+  return at(visible[0].info.id);
+}

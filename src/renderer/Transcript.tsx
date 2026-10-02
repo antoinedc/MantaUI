@@ -30,9 +30,11 @@ import { DisclosureChevron, ToolActivityList } from "./ToolGroup";
 import {
   isRenderableRow,
   layoutTranscript,
+  locateVisibleRow,
   stabilizeLayout,
   summarizeToolGroup,
   type Block,
+  type RowLocation,
   type ToolGroup,
   type TranscriptLayout,
 } from "./toolActivity";
@@ -112,6 +114,25 @@ export type TranscriptContext = {
 // Shared empty block list: a message absorbed into an earlier tool run draws
 // nothing, and a stable reference keeps its memo'd MessageRow still.
 const NO_BLOCKS: Block[] = [];
+
+// The inputs `isRenderableRow` needs for one message. Pure, so both the live
+// `visibleMessages` memo and the load-earlier prediction (which runs it over a
+// FRESH layout / turn map) can share it and list their real dependencies.
+function rowContext(
+  m: OpencodeMessage,
+  blocksByMessage: Map<string, Block[]>,
+  turns: TranscriptProps["turnInfo"],
+  finishes: TranscriptProps["finishByMessageId"],
+  media: TranscriptProps["mediaByMessageId"],
+  widgets: TranscriptProps["widgetsByMessageId"],
+) {
+  return {
+    blocks: blocksByMessage.get(m.info.id),
+    hasMedia: media.has(m.info.id),
+    hasWidget: widgets.has(m.info.id),
+    hasFooter: turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null,
+  };
+}
 
 const TRANSCRIPT_INSET: React.CSSProperties = {
   paddingInline: "var(--transcript-inset)",
@@ -463,6 +484,11 @@ export type TranscriptProps = {
   // to useTranscriptState's reconcile path). Using the parent's ref keeps the
   // reconcile registration and the render fold on the SAME state object.
   motionStateRef: React.MutableRefObject<EntryMotionState | null>;
+  // Filled by Transcript with a message-id → visible-row locator (see
+  // locateVisibleRow). ChatPanel's jump-to-message paths read it; null until
+  // the first render. Optional: surfaces with no jump-to-message (the CTO
+  // chat) don't pass one.
+  rowLocatorRef?: React.MutableRefObject<((messageId: string) => RowLocation | null) | null>;
 };
 
 export function Transcript({
@@ -495,6 +521,7 @@ export function Transcript({
   followingRef,
   onFollowingChange,
   motionStateRef,
+  rowLocatorRef,
 }: TranscriptProps) {
   // Entry motion (transcript-motion). A message that arrives while the user is
   // watching animates in; a transcript they merely LOADED does not. The whole
@@ -534,27 +561,33 @@ export function Transcript({
     return layoutRef.current;
   }, [messages, running, showThinking]);
 
-  const rowContext = (
-    m: OpencodeMessage,
-    blocksByMessage: Map<string, Block[]>,
-    turns: typeof turnInfo,
-  ) => ({
-    blocks: blocksByMessage.get(m.info.id),
-    hasMedia: mediaByMessageId.has(m.info.id),
-    hasWidget: widgetsByMessageId.has(m.info.id),
-    hasFooter:
-      turns.get(m.info.id)?.turnDurationMs != null ||
-      finishByMessageId.get(m.info.id) != null,
-  });
-
   const visibleMessages = useMemo(
     () =>
       messages.filter((m) =>
-        isRenderableRow(m, rowContext(m, layout.blocksByMessage, turnInfo)),
+        isRenderableRow(
+          m,
+          rowContext(
+            m,
+            layout.blocksByMessage,
+            turnInfo,
+            finishByMessageId,
+            mediaByMessageId,
+            widgetsByMessageId,
+          ),
+        ),
       ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
   );
+
+  // Hand ChatPanel a way to turn a message id into the row that draws it. The
+  // jump-to-message paths (artifacts panel, ⌘F) address MESSAGES, but Virtuoso's
+  // data is `visibleMessages`, which drops every tool-only message absorbed into
+  // a run. Re-pointed on every render so it always closes over the current
+  // layout and list; ChatPanel only calls it from event handlers.
+  if (rowLocatorRef) {
+    rowLocatorRef.current = (messageId: string): RowLocation | null =>
+      locateVisibleRow(messageId, messages, visibleMessages, layout);
+  }
 
   // Load earlier (tail → full history) via Virtuoso's firstItemIndex. Prepending
   // is Virtual's anchor-preservation mechanism: lowering firstItemIndex by the
@@ -577,8 +610,26 @@ export function Transcript({
         // message and absorb rows that were visible before).
         const nextLayout = layoutTranscript(newMessages, { running, showThinking });
         const nextTurns = computeTurnInfo(newMessages, running);
+        // NOTE: the media / widget / finish maps used below only cover the
+        // messages loaded SO FAR, so a prepended message's media or widget row
+        // can't be predicted here. That is why the shift is anchored on the id
+        // of the row that was first on screen (its index in the new visible
+        // list) and NOT on a count difference between the two visible lists:
+        // a run starting in a prepended message can absorb rows that were
+        // visible before, so the two lists differ in more than the prepended
+        // rows. Do not "simplify" this back to `next.length - current.length`.
         const nextVisible = newMessages.filter((m) =>
-          isRenderableRow(m, rowContext(m, nextLayout.blocksByMessage, nextTurns)),
+          isRenderableRow(
+            m,
+            rowContext(
+              m,
+              nextLayout.blocksByMessage,
+              nextTurns,
+              finishByMessageId,
+              mediaByMessageId,
+              widgetsByMessageId,
+            ),
+          ),
         );
         // Rows prepended = how many now sit before the row that was first on
         // screen. Falls back to the count difference if that row got absorbed

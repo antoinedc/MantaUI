@@ -111,6 +111,7 @@ import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, isReadOnlyJob } from "./chatUtils";
+import type { RowLocation } from "./toolActivity";
 import type { VoiceNoteRecord } from "../shared/types";
 import type { PendingVoiceNote } from "./VoiceNote";
 
@@ -553,9 +554,20 @@ export function ChatPanel({
   // current list without re-registering on every message update.
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-  const scrollToMessage = useCallback((messageId: string, behavior: "smooth" | "auto" = "smooth") => {
-    const idx = (messagesRef.current ?? []).findIndex((m) => m.info.id === messageId);
-    if (idx < 0) return;
+  // Filled by Transcript: message id → the VISIBLE row that draws it. A message
+  // id is not always a row id — tool-only messages absorbed into a run have no
+  // row of their own, and Virtuoso's indices count visible rows only.
+  const rowLocatorRef = useRef<((messageId: string) => RowLocation | null) | null>(null);
+  // Scrolls to the row that draws `messageId` and returns that row's message id
+  // (the one to flash), or null when the message isn't in the loaded transcript.
+  const scrollToMessage = useCallback((messageId: string, behavior: "smooth" | "auto" = "smooth"): string | null => {
+    const located = rowLocatorRef.current?.(messageId) ?? null;
+    // No locator yet (Transcript hasn't rendered): the full-list index is the
+    // old behaviour, right whenever nothing has been absorbed.
+    const idx = located
+      ? located.index
+      : (messagesRef.current ?? []).findIndex((m) => m.info.id === messageId);
+    if (idx < 0) return null;
     // Detach EXPLICITLY. A jump to an old row is a deliberate "take me there",
     // so the next streamed chunk must not yank the user back to the tail — and
     // it can no longer detach itself as a side effect, because the follow state
@@ -563,6 +575,7 @@ export function ChatPanel({
     // near the bottom re-attaches on its own via the scroll listener.
     setFollowing(false);
     virtuosoRef.current?.scrollToIndex({ index: idx, align: "center", behavior });
+    return located?.rowId ?? messageId;
   }, [setFollowing]);
 
   // ===== Boundary-routing refs (submit reads these; owned by ChatPanel) =====
@@ -1042,11 +1055,15 @@ export function ChatPanel({
   // single immediate lookup.
   const scrollFlashMessage = useCallback(
     (messageId: string, query?: string): boolean => {
-      scrollToMessage(messageId);
+      // Flash the row that DRAWS the message, which for a tool-only message
+      // absorbed into a run is the run's owner, not the message itself.
+      const rowId = scrollToMessage(messageId);
       // Cancel any pending wait from a previous jump so it can't flash against
       // a row the user has already scrolled past or a transcript they've left.
       messageFlashCancelRef.current?.();
-      messageFlashCancelRef.current = flashMessageRow(messageId, document, query);
+      messageFlashCancelRef.current = flashMessageRow(rowId ?? messageId, document, query);
+      // "Loaded" is judged against the FULL list, not the visible one: the ⌘F
+      // cross-session retry keys off this, and an absorbed message is loaded.
       return (messagesRef.current ?? []).some((m) => m.info.id === messageId);
     },
     [scrollToMessage],
@@ -3024,6 +3041,7 @@ export function ChatPanel({
             followingRef={followingRef}
             onFollowingChange={setFollowing}
             motionStateRef={motionStateRef}
+            rowLocatorRef={rowLocatorRef}
           />
         </VoicePlaybackProvider>
         <button

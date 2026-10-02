@@ -8,6 +8,7 @@ import {
   groupTone,
   isRenderableRow,
   layoutTranscript,
+  locateVisibleRow,
   stabilizeLayout,
   summarizeToolGroup,
   type Block,
@@ -463,5 +464,71 @@ describe("isRenderableRow", () => {
   it("a user row is renderable as before", () => {
     expect(isRenderableRow(user("u", "hello"), none)).toBe(true);
     expect(isRenderableRow(user("u", ""), none)).toBe(false);
+  });
+});
+
+describe("locateVisibleRow", () => {
+  // Visible = what Transcript hands Virtuoso (no media / widgets / footers here).
+  const locate = (messages: OpencodeMessage[], id: string, running = false) => {
+    const layout = layoutTranscript(messages, { running, showThinking: false });
+    const visible = messages.filter((m) =>
+      isRenderableRow(m, {
+        blocks: layout.blocksByMessage.get(m.info.id),
+        hasMedia: false,
+        hasWidget: false,
+        hasFooter: false,
+      }),
+    );
+    return { loc: locateVisibleRow(id, messages, visible, layout), visible };
+  };
+
+  // a1 starts the run and keeps its text; a2 / a3 are absorbed into it.
+  const RUN = [
+    user("u1"),
+    asst("a1", [text("Looking."), tool("read", { filePath: "a" })]),
+    asst("a2", [tool("read", { filePath: "b" })]),
+    asst("a3", [tool("bash", { command: "ls" })]),
+    asst("a4", [text("Done.")]),
+  ];
+
+  it("a visible message resolves to itself, at its index in the visible list", () => {
+    expect(locate(RUN, "a4").loc).toEqual({ index: 2, rowId: "a4" });
+    expect(locate(RUN, "u1").loc).toEqual({ index: 0, rowId: "u1" });
+  });
+
+  it("an absorbed message resolves to the row owning its run", () => {
+    // Visible rows are u1, a1, a4 — a2 / a3 have no row of their own.
+    expect(locate(RUN, "a2").loc).toEqual({ index: 1, rowId: "a1" });
+    expect(locate(RUN, "a3").loc).toEqual({ index: 1, rowId: "a1" });
+  });
+
+  it("a message in the trailing run of a running turn resolves to the last visible row", () => {
+    // The run starts in a2 (tool-only) and is withheld for the working line, so
+    // a2 / a3 draw nothing; the last visible row is a1.
+    const running = [
+      user("u1"),
+      asst("a1", [text("Looking.")]),
+      asst("a2", [tool("read", { filePath: "a" }, "running")]),
+      asst("a3", [tool("read", { filePath: "b" }, "running")]),
+    ];
+    expect(locate(running, "a2", true).loc).toEqual({ index: 1, rowId: "a1" });
+    expect(locate(running, "a3", true).loc).toEqual({ index: 1, rowId: "a1" });
+    // Once the turn settles, the run is drawn inline by its owner, a2.
+    expect(locate(running, "a3", false).loc).toEqual({ index: 2, rowId: "a2" });
+  });
+
+  it("a message hidden for another reason falls back to the nearest preceding visible row", () => {
+    const msgs = [user("u1"), asst("a1", [text("Hi.")]), asst("a2", [reasoning("")]), asst("a3", [text("Bye.")])];
+    expect(locate(msgs, "a2").loc).toEqual({ index: 1, rowId: "a1" });
+  });
+
+  it("falls back to the first visible row when nothing visible precedes the message", () => {
+    const msgs = [asst("a0", [reasoning("")]), user("u1"), asst("a1", [text("Hi.")])];
+    expect(locate(msgs, "a0").loc).toEqual({ index: 0, rowId: "u1" });
+  });
+
+  it("unknown ids give null", () => {
+    expect(locate(RUN, "nope").loc).toBeNull();
+    expect(locateVisibleRow("a1", RUN, [], layoutTranscript(RUN, OPTS))).toBeNull();
   });
 });
