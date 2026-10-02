@@ -159,21 +159,24 @@ describe("Transcript entry motion", () => {
     expect(bubblesIn(h)).toBe(0);
   });
 
-  it("pops in a tool card that arrives live, immediately at mount", () => {
-    // A tool card is ALWAYS the last (streaming) part at the instant it
-    // appears. `entering` is frozen at mount: once a part is marked, the
-    // framer-motion wrapper keeps `initial`/`animate` through the re-render
-    // storm (motion plays once on mount), and settling the turn never
-    // re-derives it onto a remounted wrapper — the always-present motion.div
-    // avoids the unmount/remount that would replay the pop.
+  it("pops the collapsed tool line once, when the run settles inline", () => {
+    // While the turn runs, the tail run lives in the WORKING LINE, so nothing
+    // inline animates. When the turn settles the run becomes one collapsed
+    // line on its owning message; that line (not a stack of cards) pops, and
+    // exactly once — the always-present motion wrapper never remounts.
     h = open();
     render(h, [...HISTORY, OPTIMISTIC], true);
 
     const streaming = [...HISTORY, OPTIMISTIC, toolMsg("a_new", "bash")];
     render(h, streaming, true);
-    expect(partsIn(h)).toBe(1); // popped immediately, mid-stream
+    expect(partsIn(h)).toBe(0); // withheld: the working line shows it
+    expect(h.container.querySelector(".manta-tool-group")).toBeNull();
 
-    render(h, streaming, false); // turn settles — still exactly one, no remount
+    render(h, streaming, false); // turn settles → one line, popping in
+    expect(partsIn(h)).toBe(1);
+    expect(h.container.querySelectorAll(".manta-tool-group").length).toBe(1);
+
+    render(h, streaming, false); // re-render storm — still exactly one
     expect(partsIn(h)).toBe(1);
   });
 
@@ -450,5 +453,153 @@ describe("Transcript LoadEarlier (tail-first loading)", () => {
     expect(fetchCalls).toEqual([["s1", {}]]);
     expect(loadedAllRef.current).toBe(true);
     h.unmount();
+  });
+});
+
+// ===== Collapsed tool activity =====
+//
+// The transcript shows text; each run of consecutive tool calls is ONE quiet
+// line. The tail run of a RUNNING turn lives in the working line instead.
+describe("Transcript collapsed tool activity", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const part = (id: string, mid: string, p: Record<string, unknown>) =>
+    ({ id, messageID: mid, ...p }) as unknown as OpencodeMessage["parts"][number];
+  const asst = (id: string, parts: OpencodeMessage["parts"]): OpencodeMessage =>
+    ({
+      info: { id, sessionID: "s1", role: "assistant", time: { created: 1_700_000_000_000 } },
+      parts,
+    }) as unknown as OpencodeMessage;
+  const text = (id: string, mid: string, t: string) => part(id, mid, { type: "text", text: t });
+  const read = (id: string, mid: string, file: string, status = "completed") =>
+    part(id, mid, {
+      type: "tool",
+      tool: "read",
+      state: { status, input: { filePath: `/src/${file}` }, title: file, output: "contents" },
+    });
+  const bash = (id: string, mid: string, status = "completed") =>
+    part(id, mid, {
+      type: "tool",
+      tool: "bash",
+      state: {
+        status,
+        input: { description: "Run the tests", command: "npm test" },
+        output: "SENTINEL-OUTPUT",
+      },
+    });
+
+  const lines = (hh: Harness | null) => hh!.container.querySelectorAll(".manta-tool-group");
+  // Tool-card disclosure buttons (the group line / working line are excluded).
+  const cards = (hh: Harness | null) =>
+    hh!.container.querySelectorAll('button[aria-expanded]:not([title$="tool calls"])');
+  const rowIds = (hh: Harness | null) =>
+    Array.from(hh!.container.querySelectorAll("[data-message-id]")).map((e) =>
+      e.getAttribute("data-message-id"),
+    );
+
+  // A burst spread over three assistant messages (one per model step), then
+  // the closing text and its footer.
+  const FINISHED = [
+    msg("u1", "user", "go"),
+    asst("a1", [text("a1t", "a1", "Looking."), read("a1r", "a1", "a.ts")]),
+    asst("a2", [read("a2r", "a2", "b.ts")]),
+    asst("a3", [bash("a3b", "a3")]),
+    asst("a4", [text("a4t", "a4", "All done.")]),
+  ];
+
+  it("renders text plus ONE collapsed line per run, and no tool cards until clicked", () => {
+    motionStateRef = { current: null };
+    h = mount(<Transcript {...props(FINISHED)} />);
+    expect(h.text()).toContain("Looking.");
+    expect(h.text()).toContain("All done.");
+    expect(lines(h)).toHaveLength(1);
+    expect(lines(h)[0].textContent).toContain("Read 2 files, ran a command");
+    expect(cards(h)).toHaveLength(0);
+    // The messages the run spilled into draw nothing and get no Virtuoso row.
+    expect(rowIds(h)).toEqual(["u1", "a1", "a4"]);
+  });
+
+  it("clicking the line expands the run's tool cards, and again collapses it", () => {
+    motionStateRef = { current: null };
+    h = mount(<Transcript {...props(FINISHED)} />);
+    act(() => (lines(h)[0] as HTMLElement).click());
+    expect(cards(h)).toHaveLength(3);
+    // Each card keeps its own disclosure: the output is still hidden.
+    expect(h.text()).not.toContain("SENTINEL-OUTPUT");
+    expect(lines(h)[0].getAttribute("aria-expanded")).toBe("true");
+    // (The cards leave on CardMount's exit animation, so assert the line's
+    // own state rather than racing the unmount.)
+    act(() => (lines(h)[0] as HTMLElement).click());
+    expect(lines(h)[0].getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("a run with exactly one tool call opens with its card expanded", () => {
+    motionStateRef = { current: null };
+    h = mount(
+      <Transcript
+        {...props([msg("u1", "user", "go"), asst("a1", [bash("a1b", "a1")]), asst("a2", [text("a2t", "a2", "ok")])])}
+      />,
+    );
+    expect(lines(h)[0].textContent).toContain("Run the tests");
+    expect(h.text()).not.toContain("SENTINEL-OUTPUT");
+    act(() => (lines(h)[0] as HTMLElement).click());
+    expect(cards(h)).toHaveLength(1);
+    expect(h.text()).toContain("SENTINEL-OUTPUT");
+  });
+
+  it("a failed call turns the count red and the line reports it", () => {
+    motionStateRef = { current: null };
+    h = mount(
+      <Transcript
+        {...props([
+          msg("u1", "user", "go"),
+          asst("a1", [read("r1", "a1", "a.ts"), read("r2", "a1", "b.ts", "error")]),
+          asst("a2", [text("a2t", "a2", "hm")]),
+        ])}
+      />,
+    );
+    expect(lines(h)[0].textContent).toContain("1 failed");
+    expect(lines(h)[0].querySelector(".text-danger")).toBeTruthy();
+  });
+
+  it("while the turn runs, the tail run is NOT drawn inline — the working line shows it", () => {
+    motionStateRef = { current: null };
+    const running = [
+      msg("u1", "user", "go"),
+      asst("a1", [text("a1t", "a1", "Looking."), read("a1r", "a1", "a.ts")]),
+      asst("a2", [read("a2r", "a2", "b.ts", "running")]),
+    ];
+    h = mount(
+      <Transcript
+        {...props(running, true)}
+        liveTurn={{ startedAt: Date.now() - 5_000, tokens: 300, verbSeedId: "a1" }}
+      />,
+    );
+    expect(lines(h)).toHaveLength(0);
+    expect(rowIds(h)).toEqual(["u1", "a1"]); // the tool-only rows are withheld too
+    const working = h.container.querySelector(".manta-working-indicator")!;
+    expect(working.textContent).toContain("Reading b.ts…");
+    expect(working.textContent).toContain("2 tools");
+    // Clicking it expands the same tool list.
+    expect(cards(h)).toHaveLength(0);
+    act(() => (working.querySelector("button") as HTMLElement).click());
+    expect(cards(h)).toHaveLength(2);
+  });
+
+  it("once text follows the run it settles inline as a normal collapsed line", () => {
+    motionStateRef = { current: null };
+    const base = [
+      msg("u1", "user", "go"),
+      asst("a1", [read("a1r", "a1", "a.ts")]),
+    ];
+    h = mount(<Transcript {...props(base, true)} />);
+    expect(lines(h)).toHaveLength(0);
+    h.rerender(<Transcript {...props([...base, asst("a2", [text("a2t", "a2", "Found it.")])], true)} />);
+    expect(lines(h)).toHaveLength(1);
+    expect(lines(h)[0].textContent).toContain("Read a.ts");
   });
 });
