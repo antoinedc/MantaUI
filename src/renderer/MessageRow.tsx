@@ -12,7 +12,7 @@
 // there for subagent transcripts) forms an intentional, render-time-only
 // module cycle.
 
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
 import type { OpencodeMessage, VoiceNoteRecord } from "../shared/types";
 import {
@@ -22,16 +22,16 @@ import {
   formatDuration,
   formatTokens,
   formatHiddenTodosSummary,
-  isRenderableMessage,
   selectVisibleTodos,
   summarizeTodoProgress,
   todoStatusOf,
-  visibleAssistantParts,
   type TodoStatus,
   type TruncationKind,
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
+import { ToolGroupRow } from "./ToolGroup";
+import { isRenderableRow, layoutTranscript, type Block } from "./toolActivity";
 import { MediaBody } from "./MediaBody";
 import { WidgetBody } from "./WidgetBody";
 import type { MediaEntry, WidgetEntry } from "./chatUtils";
@@ -259,6 +259,7 @@ export const MessageRow = memo(function MessageRow({
   media = null,
   widget = null,
   entering = false,
+  blocks,
 }: {
   msg: OpencodeMessage;
   showThinking: boolean;
@@ -315,21 +316,47 @@ export const MessageRow = memo(function MessageRow({
   // would mean animating a box that is already on screen. Primitive prop, so
   // the MessageRow memo chain is untouched.
   entering?: boolean;
+  // What this assistant message draws, from `layoutTranscript`: text and other
+  // parts, plus ONE collapsed line per run of tool calls. A run spans several
+  // assistant messages and belongs to the one where it starts, so a message it
+  // absorbed gets `[]`. Stable arrays from Transcript's stabilized layout keep
+  // the memo effective. Omitted (TaskCard, tests): the row lays itself out
+  // alone.
+  blocks?: readonly Block[];
 }) {
   const isUser = msg.info.role === "user";
 
+  // HOOK ORDER: this hook must run BEFORE the not-renderable early return
+  // below. A subagent transcript streams in, so a child message can flip from
+  // non-renderable to renderable across renders; a hook after the return would
+  // change the hook count and trip "Rendered more hooks than during the
+  // previous render".
+  const ownBlocks = useMemo(
+    () =>
+      blocks === undefined && !isUser
+        ? (layoutTranscript([msg], { running: false, showThinking }).blocksByMessage.get(
+            msg.info.id,
+          ) ?? [])
+        : null,
+    [blocks, isUser, msg, showThinking],
+  );
+  const rowBlocks: readonly Block[] = blocks ?? ownBlocks ?? [];
+
   // A row that renders nothing must never be drawn — MessageRow is rendered
-  // both inside Virtuoso (whose data is pre-filtered by Transcript, so this is
-  // a no-op there) and OUTSIDE it (TaskCard renders the child transcript with
-  // a plain .map), so the guard lives here on the shared predicate.
-  //
-  // Placed AFTER the useState on purpose (reviewer finding): a subagent
-  // transcript streams via debounced refetches, so a child message can grow
-  // from non-renderable to renderable across renders. A guard before the hook
-  // would flip the hook count and trip React's "Rendered more hooks than
-  // during the previous render". This return only ever happens after the
-  // identical-before-the-conditional hook, keeping hook order stable.
-  if (!isRenderableMessage(msg)) return null;
+  // both inside Virtuoso (whose data is pre-filtered by Transcript with the
+  // SAME predicate, so this is a no-op there) and OUTSIDE it (TaskCard renders
+  // the child transcript with a plain .map), so the guard lives here on the
+  // shared predicate. All hooks above this line; see the HOOK ORDER note.
+  if (
+    !isRenderableRow(msg, {
+      blocks: rowBlocks,
+      hasMedia: media != null,
+      hasWidget: widget != null,
+      hasFooter: turnDurationMs != null || truncation != null,
+    })
+  ) {
+    return null;
+  }
 
   // Subtle wall-clock timestamp for each message/action. Sourced from the
   // message's own time.created — no new prop, so the MessageRow memo chain is
@@ -439,22 +466,31 @@ export const MessageRow = memo(function MessageRow({
   // the latest checklist already renders once as the ActiveTodos card at the
   // tail of the transcript, so inlining each call too would repeat the same
   // list for every turn that touches todos.
-  const visibleParts = visibleAssistantParts(msg);
-
   return stampedRow(
     <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
       {media != null && !isUser && <MediaBody entry={media} />}
       {widget != null && !isUser && <WidgetBody entry={widget} />}
-      {visibleParts.map((p) => (
-        <AssistantPart
-          key={p.id}
-          part={p}
-          showThinking={showThinking}
-          // Slide this part in only when the whole message is new to the user.
-          // A loaded transcript passes `entering=false`, so history is still.
-          entering={entering}
-        />
-      ))}
+      {rowBlocks.map((b) =>
+        b.kind === "tools" ? (
+          <ToolGroupRow
+            key={b.group.id}
+            group={b.group}
+            showThinking={showThinking}
+            // Same rule as the parts below: pop only when the message is new.
+            entering={entering}
+          />
+        ) : (
+          <AssistantPart
+            key={b.part.id}
+            part={b.part}
+            showThinking={showThinking}
+            // Slide this part in only when the whole message is new to the
+            // user. A loaded transcript passes `entering=false`, so history is
+            // still.
+            entering={entering}
+          />
+        ),
+      )}
       {/* Turn-level duration footer — only on the FINAL assistant message */}
       {/* of a turn. Vertical spacing is owned by the turn wrapper's */}
       {/* `gap: var(--block-gap)` (BET-411) — no per-child mt/mb. The old */}

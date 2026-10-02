@@ -57,9 +57,13 @@ export const AssistantPart = memo(function AssistantPart({
   part,
   showThinking,
   entering = false,
+  defaultExpanded = false,
 }: {
   part: OpencodePart;
   showThinking: boolean;
+  // Open the tool card's body on first render. Used for a run with exactly one
+  // tool call, whose card should be one click away from its output/diff.
+  defaultExpanded?: boolean;
   // True when the parent message ARRIVED while the user was watching, so this
   // part pops in as it appears. Every part of a live message does the SAME
   // animation (MESSAGE_IN) — a streaming text reply pops like the prompt,
@@ -68,7 +72,7 @@ export const AssistantPart = memo(function AssistantPart({
   // still (`initial={false}` → nothing moves).
   entering?: boolean;
 }) {
-  const body = renderAssistantPart(part, showThinking);
+  const body = renderAssistantPart(part, showThinking, defaultExpanded);
   if (body == null) return null;
   // The motion goes on an ALWAYS-PRESENT wrapper rather than the part's own
   // root because the roots are shared primitives (ToolCard, OutputWell) that
@@ -93,6 +97,7 @@ export const AssistantPart = memo(function AssistantPart({
 function renderAssistantPart(
   part: OpencodePart,
   showThinking: boolean,
+  defaultExpanded = false,
 ): React.ReactElement | null {
   if (part.type === "text") {
     const text = (part.text ?? "").replace(/^\n+|\n+$/g, "");
@@ -126,7 +131,7 @@ function renderAssistantPart(
   }
 
   if (part.type === "tool") {
-    return <ToolCall part={part} verbose={showThinking} />;
+    return <ToolCall part={part} verbose={showThinking} defaultExpanded={defaultExpanded} />;
   }
 
   // Patch (savepoint after one or more file edits): show the files touched.
@@ -203,7 +208,16 @@ const PatchCard = memo(function PatchCard({ part }: { part: OpencodePart }) {
 // Add a new tool: write a `<ToolnameBody>` function, add a case in the switch.
 // Falls back to GenericBody when the tool is unrecognized.
 
-export const ToolCall = memo(function ToolCall({ part, verbose }: { part: OpencodePart; verbose: boolean }) {
+export const ToolCall = memo(function ToolCall({
+  part,
+  verbose,
+  defaultExpanded = false,
+}: {
+  part: OpencodePart;
+  verbose: boolean;
+  // Initial disclosure state. Only read on mount; the user's clicks own it after.
+  defaultExpanded?: boolean;
+}) {
   const rawTool = String((part as Record<string, unknown>).tool ?? "tool");
   // Title-case: "edit" → "Edit", "todo_write" → "TodoWrite".
   const toolName = rawTool
@@ -249,7 +263,7 @@ export const ToolCall = memo(function ToolCall({ part, verbose }: { part: Openco
 
   // Tool-call cards are collapsible and start collapsed: the body (diff /
   // output) is hidden behind the disclosure header until the user expands it.
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const toggle = () => setExpanded((v) => !v);
 
   return (

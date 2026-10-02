@@ -23,7 +23,7 @@
 // but might in a future test harness), renders the static header + final
 // output only, no expand affordance.
 
-import { useContext, useMemo } from "react";
+import { useContext, useMemo, useRef } from "react";
 import {
   extractSubagentInfo,
   formatDuration,
@@ -37,6 +37,9 @@ import { StatusDot } from "./StatusDot";
 import { ToolCard } from "./ToolCard";
 import { LoadEarlierHeader } from "./Transcript";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
+import { layoutTranscript, stabilizeLayout, type TranscriptLayout } from "./toolActivity";
+
+const NO_BLOCKS: never[] = [];
 
 export function TaskCard({ state }: { state: ToolState }) {
   const ctx = useContext(TaskContext);
@@ -58,6 +61,20 @@ export function TaskCard({ state }: { state: ToolState }) {
     () => summarizeChildSession(childMsgsForSummary),
     [childMsgsForSummary],
   );
+  // The child transcript gets the same tool-run grouping as the main one. It
+  // streams, so the layout is stabilized through a ref to keep each memo'd
+  // MessageRow from re-rendering on every refetch. (Hook: before the early
+  // return below, like the memos above.)
+  const childLayoutRef = useRef<TranscriptLayout | null>(null);
+  const childLayout = useMemo(() => {
+    if (!childMsgsForSummary) return null;
+    const next = layoutTranscript(childMsgsForSummary, {
+      running: false,
+      showThinking: ctx?.showThinking ?? false,
+    });
+    childLayoutRef.current = stabilizeLayout(childLayoutRef.current, next);
+    return childLayoutRef.current;
+  }, [childMsgsForSummary, ctx?.showThinking]);
   if (!info) {
     // No child id yet (very brief window between tool-input.started and the
     // first metadata write). Fall back to whatever output is present.
@@ -156,6 +173,7 @@ export function TaskCard({ state }: { state: ToolState }) {
                   verbSeedId={null}
                   truncation={null}
                   commandInfo={null}
+                  blocks={childLayout?.blocksByMessage.get(m.info.id) ?? NO_BLOCKS}
                 />
               ))}
             </div>
