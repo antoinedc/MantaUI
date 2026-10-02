@@ -496,6 +496,13 @@ describe("Transcript collapsed tool activity", () => {
       },
     });
 
+  // A running turn: one line of text, then a tool still reading b.ts.
+  const runningTail = () => [
+    msg("u1", "user", "go"),
+    asst("a1", [text("a1t", "a1", "Looking.")]),
+    asst("a2", [read("a2r", "a2", "b.ts", "running")]),
+  ];
+
   const lines = (hh: Harness | null) => hh!.container.querySelectorAll(".manta-tool-group");
   // Tool-card disclosure buttons (the group line / working line are excluded).
   const cards = (hh: Harness | null) =>
@@ -596,11 +603,7 @@ describe("Transcript collapsed tool activity", () => {
 
   it("a run opened on the working line stays open once it settles inline", () => {
     motionStateRef = { current: null };
-    const running = [
-      msg("u1", "user", "go"),
-      asst("a1", [text("a1t", "a1", "Looking.")]),
-      asst("a2", [read("a2r", "a2", "b.ts", "running")]),
-    ];
+    const running = runningTail();
     h = mount(<Transcript {...props(running, true)} />);
     const working = h.container.querySelector(".manta-working-indicator button") as HTMLElement;
     act(() => working.click());
@@ -636,11 +639,7 @@ describe("Transcript collapsed tool activity", () => {
 
   it("the locator follows the live layout: a tail run in the working line maps to the last row", () => {
     motionStateRef = { current: null };
-    const running = [
-      msg("u1", "user", "go"),
-      asst("a1", [text("a1t", "a1", "Looking.")]),
-      asst("a2", [read("a2r", "a2", "b.ts", "running")]),
-    ];
+    const running = runningTail();
     h = mount(<Transcript {...props(running, true)} />);
     expect(rowLocatorRef.current!("a2")).toEqual({ index: 1, rowId: "a1" });
     h.rerender(<Transcript {...props(running, false)} />);
