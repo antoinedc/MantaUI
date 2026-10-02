@@ -350,6 +350,20 @@ describe("TaskBody subagent row", () => {
   });
 });
 
+// An expanded "ses_child" TaskContext holding `msgs`, with inert callbacks.
+function childTaskContext(msgs: OpencodeMessage[]): TaskContextValue {
+  return {
+    expanded: new Set(["ses_child"]),
+    toggle: () => {},
+    childMessages: new Map([["ses_child", msgs]]),
+    childLoadedAllRef: { current: new Map<string, boolean>() },
+    loadEarlierChild: () => {},
+    loadingChildEarlier: new Set(),
+    liveStatus: new Map(),
+    showThinking: false,
+  };
+}
+
 // ===== TaskCard child-transcript "Load earlier" header (BET-683) =====
 //
 // Once a child's tail-first fetch fills the expanded card (>= TRANSCRIPT_TAIL_LIMIT)
@@ -441,16 +455,7 @@ describe("TaskCard child 'Load earlier' header", () => {
     // A sub-tail child transcript (no "Load earlier" affordance).
     function UnderLimitHarness() {
       const msgs = Array.from({ length: 3 }, (_, i) => childMsg(i));
-      const ctx: TaskContextValue = {
-        expanded: new Set(["ses_child"]),
-        toggle: () => {},
-        childMessages: new Map([["ses_child", msgs]]),
-        childLoadedAllRef: { current: new Map<string, boolean>() },
-        loadEarlierChild: () => {},
-        loadingChildEarlier: new Set(),
-        liveStatus: new Map(),
-        showThinking: false,
-      };
+      const ctx = childTaskContext(msgs);
       return (
         <TaskContext.Provider value={ctx}>
           <TaskCard state={taskPart({ description: "subagent", subagent_type: "explore" }).state as ToolState} />
@@ -488,16 +493,7 @@ describe("TaskCard child transcript groups tool runs", () => {
       child("c2", [readTool("/b.ts")]),
       child("c3", [{ type: "text", text: "Found." }]),
     ];
-    const ctx: TaskContextValue = {
-      expanded: new Set(["ses_child"]),
-      toggle: () => {},
-      childMessages: new Map([["ses_child", msgs]]),
-      childLoadedAllRef: { current: new Map<string, boolean>() },
-      loadEarlierChild: () => {},
-      loadingChildEarlier: new Set(),
-      liveStatus: new Map(),
-      showThinking: false,
-    };
+    const ctx = childTaskContext(msgs);
     installMockApi();
     h = mount(
       <TaskContext.Provider value={ctx}>
