@@ -284,18 +284,23 @@ const MAX_SUMMARY_CATEGORIES = 3;
 export function summarizeToolGroup(items: OpencodePart[]): GroupSummary {
   const activities = items.map(describeActivity);
   const tools = activities.filter((a) => a.counted);
+  // Patches are file-save checkpoints that trail an edit, not separate
+  // activities: once the run has any tool call they stay out of the wording
+  // AND out of the one-vs-many decision ("Edited X", not "Edited a file, saved
+  // a change"). A run made only of patches is the one place they speak.
+  const described = tools.length > 0 ? tools : activities;
   const failed = tools.filter((a) => a.status === "error").length;
   const unfinished = tools.filter((a) => a.status !== "completed" && a.status !== "error");
   const live = unfinished.length > 0 ? unfinished[unfinished.length - 1] : null;
 
   let label: string;
-  if (activities.length === 1) {
-    const only = activities[0];
+  if (described.length === 1) {
+    const only = described[0];
     label = only.status === "error" ? only.failed : only.done;
   } else {
     const order: ActivityKind[] = [];
     const tally = new Map<ActivityKind, { n: number; plural: Activity["plural"] }>();
-    for (const a of activities) {
+    for (const a of described) {
       const t = tally.get(a.kind);
       if (t) t.n++;
       else {

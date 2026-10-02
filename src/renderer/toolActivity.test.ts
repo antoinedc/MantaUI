@@ -204,11 +204,23 @@ describe("summarizeToolGroup", () => {
     expect(groupTone(summarizeToolGroup([tool("read", { filePath: "a" })]))).toBe("ok");
   });
 
-  it("patch parts join the summary but not the tool total", () => {
+  it("patch parts are left out of the summary whenever the run has a tool call", () => {
     const s = summarizeToolGroup([tool("edit", { filePath: "a.ts" }), patch(["a.ts"])]);
     expect(s.calls).toBe(1);
-    expect(s.label).toBe("Edited a file, saved a change");
-    expect(summarizeToolGroup([patch(["a.ts"])]).label).toBe("Saved changes to a.ts");
+    // One tool + its checkpoint is a SINGLE activity, so it gets the detailed label.
+    expect(s.label).toBe("Edited a.ts");
+    expect(
+      summarizeToolGroup([
+        tool("read", { filePath: "a.ts" }),
+        tool("edit", { filePath: "a.ts" }),
+        patch(["a.ts"]),
+      ]).label,
+    ).toBe("Read a file, edited a file");
+  });
+
+  it("a patch-only run keeps the patch wording", () => {
+    expect(summarizeToolGroup([patch(["/src/a.ts"])]).label).toBe("Saved changes to a.ts");
+    expect(summarizeToolGroup([patch(["a.ts"]), patch(["b.ts"])]).label).toBe("Saved 2 changes");
   });
 });
 
