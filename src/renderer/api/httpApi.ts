@@ -13,6 +13,7 @@ import {
   type ServerUpdateAvailablePayload,
   type ServerUpdateCheck,
   type StreamEnvelope,
+  type RunningSetPayload,
   type UsageSnapshot,
   type StoppedListResult,
   type ModelPrefsState,
@@ -402,6 +403,7 @@ type Kind =
   | "media"
   | "widget"
   | "stream"
+  | "runningSet"
   | "sync"
   | "ctoState";
 
@@ -427,6 +429,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   media: new Set(),
   widget: new Set(),
   stream: new Set(),
+  runningSet: new Set(),
   sync: new Set(),
   ctoState: new Set(),
 };
@@ -1066,6 +1069,7 @@ export const httpApi: Api = {
   // (see the comment there); useSseBus scopes by `sessionId` and demuxes the
   // derivative by `sub`.
   onStreamEvent: (cb) => on<StreamEnvelope>("stream", cb),
+  onRunningSet: (cb) => on<RunningSetPayload>("runningSet", cb),
 
   /**
    * The preload packs opencodePrompt args into a single object before invoking:

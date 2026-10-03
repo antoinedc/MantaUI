@@ -126,6 +126,7 @@ export const DEMO_UNIMPLEMENTED = [
   "onModelPrefsUpdated",
   "onProgressUpdated",
   "onPtyEvent",
+  "onRunningSet",
   "onScreenshotDetected",
   "onServerUpdateAvailable",
   "onServerUpdateProgress",

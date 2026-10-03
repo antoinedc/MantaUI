@@ -78,6 +78,7 @@ import {
   projectForNavKey,
   fuzzySessionScore,
   computeJobNesting,
+  sessionsWithActiveWork,
   shouldResyncWindowsForJobs,
   globCovers,
   isApprovalCoveredByAlways,
@@ -2740,6 +2741,44 @@ describe("shouldResyncWindowsForJobs", () => {
     ];
     const jobs = { child1: { status: "running", childSessionID: "child1" } };
     expect(shouldResyncWindowsForJobs(projects, jobs)).toBe(false);
+  });
+});
+
+describe("sessionsWithActiveWork", () => {
+  it("includes running sessions and every ancestor", () => {
+    const out = sessionsWithActiveWork(["grandchild"], { grandchild: "child", child: "root" }, {});
+    expect([...out].sort()).toEqual(["child", "grandchild", "root"]);
+  });
+
+  it("is empty when nothing runs", () => {
+    expect(sessionsWithActiveWork([], { c: "p" }, {}).size).toBe(0);
+  });
+
+  it("a running background job marks its child and its parent", () => {
+    const out = sessionsWithActiveWork([], {}, {
+      j: { status: "running", parentSessionID: "parent", childSessionID: "jobChild" },
+    });
+    expect(out.has("jobChild")).toBe(true);
+    expect(out.has("parent")).toBe(true);
+  });
+
+  it("finished jobs do not count", () => {
+    const out = sessionsWithActiveWork([], {}, {
+      j: { status: "done", parentSessionID: "parent", childSessionID: "jobChild" },
+    });
+    expect(out.size).toBe(0);
+  });
+
+  it("a mid-start job (no child yet) keeps the parent busy", () => {
+    const out = sessionsWithActiveWork([], {}, {
+      j: { status: "running", parentSessionID: "parent", childSessionID: null },
+    });
+    expect([...out]).toEqual(["parent"]);
+  });
+
+  it("terminates on a parent cycle", () => {
+    const out = sessionsWithActiveWork(["a"], { a: "b", b: "a" }, {});
+    expect([...out].sort()).toEqual(["a", "b"]);
   });
 });
 

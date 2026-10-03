@@ -469,6 +469,17 @@ type State = {
   // sidebar's per-row activity second line (desktop + mobile). Fed by the
   // single app-level 10s poll — see JobRow comment above.
   jobs: Record<string, DelegateJob>;
+  // Every opencode session currently running a turn, keyed by session id —
+  // INCLUDING sessions with no sidebar window of their own (an inline or
+  // backgrounded `task` subagent). `status[...]` can only hold sessions that
+  // own a window, so without this a parent whose turn ended while its
+  // background child kept working showed as idle in the rail. Fed by the same
+  // App-level opencode-event subscription as `setChatRunning`.
+  liveRunning: Record<string, true>;
+  // child session id → parent session id, learned from `session.created`
+  // (properties.info.parentID) and from the session list backfill. Lets the
+  // sidebar roll a running descendant up onto its ancestor's row.
+  sessionParents: Record<string, string>;
   // BET-738: subscription plan usage snapshots (one per connected provider),
   // fed by the composer's UsageDial. Primed once with window.api.usageList()
   // on mount and kept live by the `usage.updated` bus event — App.tsx does
@@ -684,6 +695,15 @@ type State = {
   // same UI; just a different update path. Owning window is resolved
   // from `sessionId` via the active projects tree.
   setChatRunning: (sessionId: string, running: boolean) => void;
+  // Record a child → parent session link (see `sessionParents`). No-op when
+  // already known.
+  setSessionParent: (childId: string, parentId: string) => void;
+  // Apply the box's authoritative `runningSet` (replayed on every events
+  // (re)connect): every listed session is running, every other session we
+  // believed was running is not. Corrects a rail latched on a turn whose
+  // edge was missed while disconnected, and lights a turn that was already
+  // underway when the app connected.
+  reconcileRunningSet: (sessionIds: string[]) => void;
   // Chat-mode attention signals driven by opencode SSE. `question.asked`
   // (AI is blocked waiting for the user to pick an answer) and
   // `permission.asked` (AI is blocked waiting for tool-use approval)
@@ -839,6 +859,8 @@ export const useStore = create<State>((set, get) => ({
   status: {},
   sessionCost: {},
   jobs: {},
+  liveRunning: {},
+  sessionParents: {},
   usage: [],
   usageStopped: [],
   lastLookedStopped: null,
@@ -1262,8 +1284,17 @@ export const useStore = create<State>((set, get) => ({
 
   setChatRunning: (sessionId, running) =>
     set((prev) => {
+      // Track the session's running state even when it owns no window (a
+      // subagent child) — the sidebar rolls it up onto its ancestor's row.
+      const wasLive = prev.liveRunning[sessionId] === true;
+      let liveRunning = prev.liveRunning;
+      if (running && !wasLive) liveRunning = { ...prev.liveRunning, [sessionId]: true };
+      else if (!running && wasLive) {
+        liveRunning = { ...prev.liveRunning };
+        delete liveRunning[sessionId];
+      }
       const owner = resolveSessionOwner(prev.projects, sessionId);
-      if (!owner) return prev;
+      if (!owner) return liveRunning === prev.liveRunning ? prev : { liveRunning };
       const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
       const wasRunning = old?.running === true;
       const isActiveHere =
@@ -1317,6 +1348,7 @@ export const useStore = create<State>((set, get) => ({
         progressLabel: old?.progressLabel,
       };
       return {
+        liveRunning,
         status: {
           ...prev.status,
           [owner.tmuxSession]: {
@@ -1326,6 +1358,30 @@ export const useStore = create<State>((set, get) => ({
         },
       };
     }),
+
+  setSessionParent: (childId, parentId) =>
+    set((prev) => {
+      if (!childId || !parentId || childId === parentId) return prev;
+      if (prev.sessionParents[childId] === parentId) return prev;
+      return { sessionParents: { ...prev.sessionParents, [childId]: parentId } };
+    }),
+
+  reconcileRunningSet: (sessionIds) => {
+    const want = new Set(sessionIds);
+    const { liveRunning, projects, status, setChatRunning } = get();
+    const believed = new Set(Object.keys(liveRunning));
+    for (const p of projects) {
+      for (const w of p.windows) {
+        if (w.opencodeSessionId && status[p.tmuxSession]?.[w.index]?.running) {
+          believed.add(w.opencodeSessionId);
+        }
+      }
+    }
+    for (const sid of believed) {
+      if (!want.has(sid)) setChatRunning(sid, false);
+    }
+    for (const sid of want) setChatRunning(sid, true);
+  },
 
   setChatAttention: (sessionId, kind) =>
     set((prev) => {
@@ -1558,6 +1614,9 @@ export const useStore = create<State>((set, get) => ({
         try {
           const sessions = await window.api.opencodeListSessions!(dir);
           for (const s of sessions) {
+            // Same listing carries the subagent → parent link; seed it so a
+            // child already running at connect rolls up onto its parent row.
+            if (s.parentID) get().setSessionParent(s.id, s.parentID);
             const updated = s.time?.updated;
             if (typeof updated === "number" && updated > 0) {
               updatedBySessionId.set(s.id, updated);

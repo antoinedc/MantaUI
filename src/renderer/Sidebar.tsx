@@ -16,6 +16,7 @@ import type { Project, TmuxWindow } from "../shared/types";
 import {
   classifyCacheAge,
   computeJobNesting,
+  sessionsWithActiveWork,
   formatAge,
   fuzzySessionScore,
   isJobRow,
@@ -95,6 +96,15 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
   const status = useStore((s) => s.status);
   const jobs = useStore((s) => s.jobs);
+  const liveRunning = useStore((s) => s.liveRunning);
+  const sessionParents = useStore((s) => s.sessionParents);
+  // Sessions with work in flight anywhere beneath them (own turn, subagent
+  // children at any depth, background jobs). A row reads "running" while
+  // ANY of it is going — see sessionsWithActiveWork.
+  const activeWork = useMemo(
+    () => sessionsWithActiveWork(Object.keys(liveRunning), sessionParents, jobs),
+    [liveRunning, sessionParents, jobs],
+  );
   const usageStopped = useStore((s) => s.usageStopped);
   // BET-1049: the conversations currently stopped by a provider limit (the
   // box-side record). Conversation ids → the set for O(1) row-marker lookups;
@@ -606,8 +616,22 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   }, [paletteResults.length, paletteSel]);
 
   // Row-indexed status lookup helper.
-  const statusFor = (session: string, idx: number): WindowStatusUI | undefined =>
-    status[session]?.[idx];
+  // A chat window also reads as running while a subagent or background job it
+  // started is still working, even after its own turn ended.
+  const statusFor = (session: string, idx: number): WindowStatusUI | undefined => {
+    const own = status[session]?.[idx];
+    if (own?.running) return own;
+    const sid = projects
+      .find((p) => p.tmuxSession === session)
+      ?.windows.find((w) => w.index === idx)?.opencodeSessionId;
+    const busyBeneath = (sid != null && activeWork.has(sid)) || (own?.subagents ?? 0) > 0;
+    if (!busyBeneath) return own;
+    return {
+      ...(own ?? { subagents: 0, attention: false }),
+      running: true,
+      progressLabel: own?.progressLabel?.trim() ? own.progressLabel : "background work",
+    };
+  };
 
   // Title tooltip for a window row: rename hint + job activity (the activity
   // formerly rendered as a second line now lives here, per BET-414 one-line rule).
