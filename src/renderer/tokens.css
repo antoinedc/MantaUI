@@ -55,6 +55,10 @@
      correct spacing and cannot opt out. */
   --block-gap: var(--sp-3);
   --turn-gap: var(--sp-6);
+  /* The collapsed tool-activity line is one quiet row of metadata, not a
+     content block: it sits closer to its neighbours than --block-gap so a
+     turn with many tool runs reads as prose with annotations, not a stack. */
+  --tool-line-gap: var(--sp-1);
 
   /* Transcript gutter. The composer column keeps the spec's 28px inset; the
      TRANSCRIPT column is wider because its left/right margin is not empty

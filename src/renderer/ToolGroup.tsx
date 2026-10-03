@@ -55,6 +55,10 @@ export function DisclosureChevron({ open }: { open: boolean }) {
   );
 }
 
+const TOOL_LINE_MARGIN: React.CSSProperties = {
+  marginBlock: "calc(var(--tool-line-gap) - var(--block-gap))",
+};
+
 export const ToolGroupRow = memo(function ToolGroupRow({
   group,
   showThinking,
@@ -76,6 +80,12 @@ export const ToolGroupRow = memo(function ToolGroupRow({
     <motion.div
       data-motion={entering ? "part" : undefined}
       {...(entering ? MESSAGE_IN_ENTER : MESSAGE_IN_IDLE)}
+      // The one sanctioned exception to "spacing is the container's gap": the
+      // line pulls its neighbours in from --block-gap to --tool-line-gap. A
+      // margin (not a container change) because every container that holds
+      // the line — the message row, the transcript list, a subagent card —
+      // would otherwise need to know which of its children is a tool line.
+      style={TOOL_LINE_MARGIN}
     >
       <button
         type="button"

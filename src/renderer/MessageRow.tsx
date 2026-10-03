@@ -393,7 +393,14 @@ export const MessageRow = memo(function MessageRow({
             // box → centre ≈ 23px), while an assistant row opens with prose
             // (centre ≈ 12px) or a tool-card header (centre ≈ 16px). One
             // number cannot serve both, so each side gets its own.
-            (isUser ? "left-full ml-2 top-[18px]" : "right-full mr-2 top-[8px]")
+            // A row that opens with a collapsed tool line starts ABOVE its box
+            // (the line's negative --tool-line-gap margin), so its first-line
+            // centre sits near 0, not 12px.
+            (isUser
+              ? "left-full ml-2 top-[18px]"
+              : rowBlocks[0]?.kind === "tools"
+                ? "right-full mr-2 top-[-4px]"
+                : "right-full mr-2 top-[8px]")
           }
           aria-hidden
         >

@@ -135,6 +135,12 @@ function rowContext(
   };
 }
 
+// Padding (not margin: Virtuoso measures item boxes, margins would desync its
+// size cache) that tops a row up from the list's --block-gap to --turn-gap.
+const TURN_START_PAD: React.CSSProperties = {
+  paddingTop: "calc(var(--turn-gap) - var(--block-gap))",
+};
+
 const TRANSCRIPT_INSET: React.CSSProperties = {
   paddingInline: "var(--transcript-inset)",
 };
@@ -142,7 +148,11 @@ const TRANSCRIPT_INSET: React.CSSProperties = {
 // ===== List (spacing) =====
 //
 // Preserves the reading-column layout: messages laid out as a flex column with
-// `--turn-gap` between rows, plus the reading inset.
+// `--block-gap` between rows, plus the reading inset. A turn is usually
+// SEVERAL rows (opencode writes one assistant message per step), so the
+// between-turns `--turn-gap` cannot be the list's gap — it would push apart
+// the steps of one reply as if they were separate turns. Rows that open a new
+// turn add the difference themselves (TURN_START_PAD, below).
 //
 // NEVER set paddingTop / paddingBottom / paddingBlock / padding here.
 // react-virtuoso writes the virtualization offsets into THIS element's inline
@@ -164,7 +174,7 @@ export const TranscriptList = forwardRef<HTMLDivElement, ListProps>(function Tra
         ...style,
         display: "flex",
         flexDirection: "column",
-        gap: "var(--turn-gap)",
+        gap: "var(--block-gap)",
         maxWidth: "100%",
         ...TRANSCRIPT_INSET,
       }}
@@ -360,7 +370,7 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         ...TRANSCRIPT_INSET,
         // The tail is a stacked column and owns the spacing between its own
         // children — the working row, the todo checklist and the question
-        // cards — exactly like TranscriptList owns --turn-gap between message
+        // cards — exactly like TranscriptList owns the gap between message
         // rows. Do NOT push this back onto a child as a margin: a child-owned
         // gap disappears with that child (the working row unmounts when the
         // turn ends, and its margin used to take the whole tail's spacing with
@@ -577,6 +587,19 @@ export function Transcript({
       ),
     [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
   );
+
+  // Rows that open a new turn: the role changes from the row above (prompt →
+  // reply, reply → next prompt). Consecutive assistant rows are steps of ONE
+  // reply and sit at --block-gap, like blocks inside a single message.
+  const turnStartIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (let i = 1; i < visibleMessages.length; i++) {
+      if (visibleMessages[i].info.role !== visibleMessages[i - 1].info.role) {
+        ids.add(visibleMessages[i].info.id);
+      }
+    }
+    return ids;
+  }, [visibleMessages]);
 
   // Hand ChatPanel a way to turn a message id into the row that draws it. The
   // jump-to-message paths (artifacts panel, ⌘F) address MESSAGES, but Virtuoso's
@@ -850,7 +873,7 @@ export function Transcript({
                   m.info.role === "user"
                     ? voiceNoteByMessageId.get(m.info.id) ?? null
                     : null;
-                return (
+                const row = (
                   <MessageRow
                     msg={m}
                     showThinking={showThinking}
@@ -873,6 +896,13 @@ export function Transcript({
                     entering={entryMotion.entering.has(m.info.id)}
                     blocks={layout.blocksByMessage.get(m.info.id) ?? NO_BLOCKS}
                   />
+                );
+                // Always wrapped, so a row whose turn-start status flips (an
+                // earlier row loads or settles) restyles instead of remounting.
+                return (
+                  <div style={turnStartIds.has(m.info.id) ? TURN_START_PAD : undefined}>
+                    {row}
+                  </div>
                 );
               }}
               scrollerRef={(el) => {
