@@ -110,8 +110,45 @@ describe("setChatRunning / setChatAttention", () => {
         }),
       ],
       status: {},
+      liveRunning: {},
+      sessionParents: {},
       activeProjectName: null,
       activeWindowByProject: {},
+    });
+  });
+
+  describe("liveRunning / reconcileRunningSet / setSessionParent", () => {
+    it("tracks a windowless (subagent) session as running", () => {
+      useStore.getState().setChatRunning("ses_child", true);
+      expect(useStore.getState().liveRunning).toEqual({ ses_child: true });
+      expect(useStore.getState().status).toEqual({});
+      useStore.getState().setChatRunning("ses_child", false);
+      expect(useStore.getState().liveRunning).toEqual({});
+    });
+
+    it("tracks a windowed session alongside its window status", () => {
+      useStore.getState().setChatRunning("ses_chat", true);
+      expect(useStore.getState().liveRunning).toEqual({ ses_chat: true });
+      expect(useStore.getState().status.manta[0].running).toBe(true);
+    });
+
+    it("reconcileRunningSet lights listed sessions and clears unlisted ones", () => {
+      useStore.getState().setChatRunning("ses_stale", true);
+      useStore.getState().reconcileRunningSet(["ses_chat"]);
+      expect(useStore.getState().liveRunning).toEqual({ ses_chat: true });
+      expect(useStore.getState().status.manta[0].running).toBe(true);
+      useStore.getState().reconcileRunningSet([]);
+      expect(useStore.getState().liveRunning).toEqual({});
+      expect(useStore.getState().status.manta[0].running).toBe(false);
+    });
+
+    it("setSessionParent records a link and ignores self/duplicate links", () => {
+      useStore.getState().setSessionParent("c", "p");
+      const first = useStore.getState().sessionParents;
+      useStore.getState().setSessionParent("c", "p");
+      useStore.getState().setSessionParent("x", "x");
+      expect(useStore.getState().sessionParents).toBe(first);
+      expect(first).toEqual({ c: "p" });
     });
   });
 

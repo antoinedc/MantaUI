@@ -2132,6 +2132,52 @@ export function computeJobNesting(
   return { hidden, children };
 }
 
+// Which sessions have work in flight ANYWHERE beneath them — their own turn,
+// a subagent child (inline or backgrounded, any depth), or a background job
+// they started. A session's sidebar row should read "running" for as long as
+// any of that is going, not just while its own turn is: a parent whose turn
+// ended while its background child keeps working is still busy from the
+// user's point of view.
+//
+// `running`  — session ids currently running a turn (incl. windowless ones)
+// `parents`  — child session id → parent session id
+// `jobs`     — background-job records; a `running` job counts as work in its
+//              child session AND (via parentSessionID) its parent
+//
+// Returns every running session plus all of its ancestors. Cycle-safe.
+export function sessionsWithActiveWork(
+  running: Iterable<string>,
+  parents: Record<string, string>,
+  jobs: Record<
+    string,
+    { status: string; parentSessionID: string | null; childSessionID: string | null }
+  >,
+): Set<string> {
+  const links = new Map<string, string>(Object.entries(parents));
+  const seeds: string[] = [...running];
+  for (const job of Object.values(jobs)) {
+    if (job.status !== "running") continue;
+    if (job.childSessionID) {
+      seeds.push(job.childSessionID);
+      if (job.parentSessionID && !links.has(job.childSessionID)) {
+        links.set(job.childSessionID, job.parentSessionID);
+      }
+    } else if (job.parentSessionID) {
+      // Mid-start record (no child session yet) — the parent is still busy.
+      seeds.push(job.parentSessionID);
+    }
+  }
+  const out = new Set<string>();
+  for (const seed of seeds) {
+    let cur: string | undefined = seed;
+    while (cur && !out.has(cur)) {
+      out.add(cur);
+      cur = links.get(cur);
+    }
+  }
+  return out;
+}
+
 // Does the window tree disagree with the jobs slice, so the tree needs a
 // re-list?
 //

@@ -2539,6 +2539,13 @@ export type StreamSubagentChildPayload = { childSessionId: string };
 
 export type StreamSubagentPayload = Record<string, unknown>;
 
+// The box's authoritative "what is running right now" frame, replayed to every
+// new /events subscriber (BET-922). A session absent from `sessions` is NOT
+// running.
+export type RunningSetPayload = {
+  sessions: Array<{ sessionId: string; since?: number | null; type?: string | null }>;
+};
+
 export type StreamEnvelope = {
   sub:
     | "flush"

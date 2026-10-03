@@ -1158,6 +1158,15 @@ function Shell() {
     if (!window.api.onOpencodeEvent) return;
     const off = window.api.onOpencodeEvent((ev) => {
       const props = (ev.properties ?? {}) as Record<string, unknown>;
+      // Subagent child sessions: remember child → parent so a child still
+      // working after the parent's turn ends keeps the parent row "running".
+      if (ev.type === "session.created") {
+        const info = props.info as { id?: string; parentID?: string } | undefined;
+        if (info?.id && info.parentID) {
+          useStore.getState().setSessionParent(info.id, info.parentID);
+        }
+        return;
+      }
       // Running / idle / error transitions.
       if (ev.type === "session.idle" || ev.type === "session.error") {
         const sid = typeof props.sessionID === "string" ? props.sessionID : "";
@@ -1169,7 +1178,8 @@ function Shell() {
         if (!sid) return;
         const status = props.status as { type?: string } | undefined;
         const t = status?.type;
-        if (t === "busy" || t === "retry") {
+        // Same set the box treats as a live turn (streamInterp session.status).
+        if (t === "busy" || t === "working" || t === "retry") {
           useStore.getState().setChatRunning(sid, true);
         } else if (t === "idle") {
           useStore.getState().setChatRunning(sid, false);
@@ -1200,6 +1210,21 @@ function Shell() {
         if (sid)         useStore.getState().setChatAttention(sid, null);
         return;
       }
+    });
+    return off;
+  }, [apiGeneration]);
+
+  // The box replays its authoritative running set on every events
+  // (re)connect. Without it, a turn already underway when the app connected
+  // never lit the rail (opencode only emits `busy` on the edge), and a turn
+  // that ended while disconnected stayed lit forever.
+  useEffect(() => {
+    if (!window.api.onRunningSet) return;
+    const off = window.api.onRunningSet((payload) => {
+      const ids = (payload?.sessions ?? [])
+        .map((s) => s?.sessionId)
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      useStore.getState().reconcileRunningSet(ids);
     });
     return off;
   }, [apiGeneration]);

@@ -14,6 +14,7 @@ import type {
   OpencodeReference,
   OpencodeReferenceUpsert,
   StreamEnvelope,
+  RunningSetPayload,
   OpencodeModel,
   OpencodeProviderAuthRequest,
   OpencodeProviderAuthResult,
@@ -993,6 +994,9 @@ export interface Api {
   // derived `stream.*` events on the same /events bus; this subscription
   // receives each `StreamEnvelope` for the transport-routed `stream` kind.
   onStreamEvent(cb: (ev: StreamEnvelope) => void): () => void;
+  // The box's `runningSet` frame (replayed on every events (re)connect) —
+  // the complete set of sessions running a turn right now.
+  onRunningSet(cb: (p: RunningSetPayload) => void): () => void;
   opencodePrompt(
     sessionId: string,
     text: string,
