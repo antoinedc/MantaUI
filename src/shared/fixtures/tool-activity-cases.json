@@ -1,0 +1,2503 @@
+{
+  "_comment": "Parity fixture for tool-activity wording and run grouping. ASSERTED by src/renderer/toolActivity.fixture.test.ts (against toolActivity.ts) and by mobile/native/MantaUITests/ToolActivityTests.swift (against the Swift port). Both suites read this file and generate nothing. To change wording, change toolActivity.ts, regenerate the expectations from it, and update the Swift port in the same commit.",
+  "describe": [
+    {
+      "name": "read: basename of filePath",
+      "part": {
+        "type": "tool",
+        "id": "t1",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "/a/b/Transcript.tsx"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "completed",
+        "running": "Reading Transcript.tsx",
+        "done": "Read Transcript.tsx",
+        "failed": "Failed to read Transcript.tsx",
+        "label": "Read Transcript.tsx",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: file_path spelling, running",
+      "part": {
+        "type": "tool",
+        "id": "t2",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "running",
+          "input": {
+            "file_path": "src/x/Chat.tsx"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "running",
+        "running": "Reading Chat.tsx",
+        "done": "Read Chat.tsx",
+        "failed": "Failed to read Chat.tsx",
+        "label": "Reading Chat.tsx",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: path spelling, windows separators",
+      "part": {
+        "type": "tool",
+        "id": "t3",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "completed",
+          "input": {
+            "path": "C:\\proj\\src\\main.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "completed",
+        "running": "Reading main.ts",
+        "done": "Read main.ts",
+        "failed": "Failed to read main.ts",
+        "label": "Read main.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: no path falls back to title",
+      "part": {
+        "type": "tool",
+        "id": "t4",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "completed",
+          "input": {},
+          "title": "src/foo.ts"
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "completed",
+        "running": "Reading src/foo.ts",
+        "done": "Read src/foo.ts",
+        "failed": "Failed to read src/foo.ts",
+        "label": "Read src/foo.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: nothing at all is a bare verb",
+      "part": {
+        "type": "tool",
+        "id": "t5",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "pending",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "pending",
+        "running": "Reading",
+        "done": "Read",
+        "failed": "Failed to read",
+        "label": "Reading",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: whitespace around the path is trimmed",
+      "part": {
+        "type": "tool",
+        "id": "t6",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "  /a/b.ts  "
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "completed",
+        "running": "Reading b.ts",
+        "done": "Read b.ts",
+        "failed": "Failed to read b.ts",
+        "label": "Read b.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: failed label",
+      "part": {
+        "type": "tool",
+        "id": "t7",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "error",
+          "input": {
+            "filePath": "a.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "error",
+        "running": "Reading a.ts",
+        "done": "Read a.ts",
+        "failed": "Failed to read a.ts",
+        "label": "Failed to read a.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "read: tool name is case-insensitive",
+      "part": {
+        "type": "tool",
+        "id": "t8",
+        "messageID": "m",
+        "tool": "Read",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "a.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "completed",
+        "running": "Reading a.ts",
+        "done": "Read a.ts",
+        "failed": "Failed to read a.ts",
+        "label": "Read a.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "edit: completed",
+      "part": {
+        "type": "tool",
+        "id": "t9",
+        "messageID": "m",
+        "tool": "edit",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "/r/ChatScreen.swift"
+          }
+        }
+      },
+      "expect": {
+        "kind": "edit",
+        "status": "completed",
+        "running": "Editing ChatScreen.swift",
+        "done": "Edited ChatScreen.swift",
+        "failed": "Failed to edit ChatScreen.swift",
+        "label": "Edited ChatScreen.swift",
+        "counted": true
+      }
+    },
+    {
+      "name": "multiedit: running",
+      "part": {
+        "type": "tool",
+        "id": "t10",
+        "messageID": "m",
+        "tool": "MultiEdit",
+        "state": {
+          "status": "running",
+          "input": {
+            "filePath": "x/y.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "edit",
+        "status": "running",
+        "running": "Editing y.ts",
+        "done": "Edited y.ts",
+        "failed": "Failed to edit y.ts",
+        "label": "Editing y.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "apply_patch: completed",
+      "part": {
+        "type": "tool",
+        "id": "t11",
+        "messageID": "m",
+        "tool": "apply_patch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "q.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "edit",
+        "status": "completed",
+        "running": "Editing q.ts",
+        "done": "Edited q.ts",
+        "failed": "Failed to edit q.ts",
+        "label": "Edited q.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "write: completed",
+      "part": {
+        "type": "tool",
+        "id": "t12",
+        "messageID": "m",
+        "tool": "write",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "/r/new.md"
+          }
+        }
+      },
+      "expect": {
+        "kind": "write",
+        "status": "completed",
+        "running": "Writing new.md",
+        "done": "Wrote new.md",
+        "failed": "Failed to write new.md",
+        "label": "Wrote new.md",
+        "counted": true
+      }
+    },
+    {
+      "name": "write: failed",
+      "part": {
+        "type": "tool",
+        "id": "t13",
+        "messageID": "m",
+        "tool": "write",
+        "state": {
+          "status": "error",
+          "input": {
+            "filePath": "/r/new.md"
+          }
+        }
+      },
+      "expect": {
+        "kind": "write",
+        "status": "error",
+        "running": "Writing new.md",
+        "done": "Wrote new.md",
+        "failed": "Failed to write new.md",
+        "label": "Failed to write new.md",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: description is the label",
+      "part": {
+        "type": "tool",
+        "id": "t14",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "running",
+          "input": {
+            "description": "Run the tests",
+            "command": "npm test"
+          }
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "running",
+        "running": "Run the tests",
+        "done": "Run the tests",
+        "failed": "Failed: Run the tests",
+        "label": "Run the tests",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: first line of a multi-line command",
+      "part": {
+        "type": "tool",
+        "id": "t15",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "completed",
+          "input": {
+            "command": "git status\ngit diff"
+          }
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "completed",
+        "running": "git status",
+        "done": "git status",
+        "failed": "Failed: git status",
+        "label": "git status",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: description over 60 characters is cut",
+      "part": {
+        "type": "tool",
+        "id": "t16",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "completed",
+          "input": {
+            "description": "Run the complete integration suite against the staging cluster now!"
+          }
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "completed",
+        "running": "Run the complete integration suite against the staging clus…",
+        "done": "Run the complete integration suite against the staging clus…",
+        "failed": "Failed: Run the complete integration suite against the staging clus…",
+        "label": "Run the complete integration suite against the staging clus…",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: description of exactly 60 characters is kept",
+      "part": {
+        "type": "tool",
+        "id": "t17",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "completed",
+          "input": {
+            "description": "Run the complete integration suite against the staging clust"
+          }
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "completed",
+        "running": "Run the complete integration suite against the staging clust",
+        "done": "Run the complete integration suite against the staging clust",
+        "failed": "Failed: Run the complete integration suite against the staging clust",
+        "label": "Run the complete integration suite against the staging clust",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: falls back to the title",
+      "part": {
+        "type": "tool",
+        "id": "t18",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "completed",
+          "input": {},
+          "title": "Run: ls -la"
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "completed",
+        "running": "Run: ls -la",
+        "done": "Run: ls -la",
+        "failed": "Failed: Run: ls -la",
+        "label": "Run: ls -la",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: nothing but a pending part",
+      "part": {
+        "type": "tool",
+        "id": "t19",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "pending",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "pending",
+        "running": "Running a command",
+        "done": "Ran a command",
+        "failed": "Failed to run a command",
+        "label": "Running a command",
+        "counted": true
+      }
+    },
+    {
+      "name": "bash: failed prefixes the detail",
+      "part": {
+        "type": "tool",
+        "id": "t20",
+        "messageID": "m",
+        "tool": "bash",
+        "state": {
+          "status": "error",
+          "input": {
+            "description": "Run the tests"
+          }
+        }
+      },
+      "expect": {
+        "kind": "bash",
+        "status": "error",
+        "running": "Run the tests",
+        "done": "Run the tests",
+        "failed": "Failed: Run the tests",
+        "label": "Failed: Run the tests",
+        "counted": true
+      }
+    },
+    {
+      "name": "grep: pattern",
+      "part": {
+        "type": "tool",
+        "id": "t21",
+        "messageID": "m",
+        "tool": "grep",
+        "state": {
+          "status": "completed",
+          "input": {
+            "pattern": "TODO\\("
+          }
+        }
+      },
+      "expect": {
+        "kind": "search",
+        "status": "completed",
+        "running": "Searching TODO\\(",
+        "done": "Searched TODO\\(",
+        "failed": "Failed to search TODO\\(",
+        "label": "Searched TODO\\(",
+        "counted": true
+      }
+    },
+    {
+      "name": "codesearch: query",
+      "part": {
+        "type": "tool",
+        "id": "t22",
+        "messageID": "m",
+        "tool": "codesearch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "query": "how is auth wired"
+          }
+        }
+      },
+      "expect": {
+        "kind": "search",
+        "status": "completed",
+        "running": "Searching how is auth wired",
+        "done": "Searched how is auth wired",
+        "failed": "Failed to search how is auth wired",
+        "label": "Searched how is auth wired",
+        "counted": true
+      }
+    },
+    {
+      "name": "glob: pattern, failed",
+      "part": {
+        "type": "tool",
+        "id": "t23",
+        "messageID": "m",
+        "tool": "glob",
+        "state": {
+          "status": "error",
+          "input": {
+            "pattern": "**/*.swift"
+          }
+        }
+      },
+      "expect": {
+        "kind": "search",
+        "status": "error",
+        "running": "Searching **/*.swift",
+        "done": "Searched **/*.swift",
+        "failed": "Failed to search **/*.swift",
+        "label": "Failed to search **/*.swift",
+        "counted": true
+      }
+    },
+    {
+      "name": "list: basename of path",
+      "part": {
+        "type": "tool",
+        "id": "t24",
+        "messageID": "m",
+        "tool": "list",
+        "state": {
+          "status": "completed",
+          "input": {
+            "path": "/r/src/server"
+          }
+        }
+      },
+      "expect": {
+        "kind": "list",
+        "status": "completed",
+        "running": "Listing server",
+        "done": "Listed server",
+        "failed": "Failed to list server",
+        "label": "Listed server",
+        "counted": true
+      }
+    },
+    {
+      "name": "ls: title when there is no path",
+      "part": {
+        "type": "tool",
+        "id": "t25",
+        "messageID": "m",
+        "tool": "ls",
+        "state": {
+          "status": "completed",
+          "input": {},
+          "title": "src"
+        }
+      },
+      "expect": {
+        "kind": "list",
+        "status": "completed",
+        "running": "Listing src",
+        "done": "Listed src",
+        "failed": "Failed to list src",
+        "label": "Listed src",
+        "counted": true
+      }
+    },
+    {
+      "name": "webfetch: host of the url",
+      "part": {
+        "type": "tool",
+        "id": "t26",
+        "messageID": "m",
+        "tool": "webfetch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "url": "https://docs.example.com/guide/start?x=1"
+          }
+        }
+      },
+      "expect": {
+        "kind": "fetch",
+        "status": "completed",
+        "running": "Fetching docs.example.com",
+        "done": "Fetched docs.example.com",
+        "failed": "Failed to fetch docs.example.com",
+        "label": "Fetched docs.example.com",
+        "counted": true
+      }
+    },
+    {
+      "name": "web_fetch: non-default port and upper-case host",
+      "part": {
+        "type": "tool",
+        "id": "t27",
+        "messageID": "m",
+        "tool": "web_fetch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "url": "https://Example.COM:8443/a"
+          }
+        }
+      },
+      "expect": {
+        "kind": "fetch",
+        "status": "completed",
+        "running": "Fetching example.com:8443",
+        "done": "Fetched example.com:8443",
+        "failed": "Failed to fetch example.com:8443",
+        "label": "Fetched example.com:8443",
+        "counted": true
+      }
+    },
+    {
+      "name": "webfetch: default port is dropped",
+      "part": {
+        "type": "tool",
+        "id": "t28",
+        "messageID": "m",
+        "tool": "webfetch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "url": "https://example.com:443/a"
+          }
+        }
+      },
+      "expect": {
+        "kind": "fetch",
+        "status": "completed",
+        "running": "Fetching example.com",
+        "done": "Fetched example.com",
+        "failed": "Failed to fetch example.com",
+        "label": "Fetched example.com",
+        "counted": true
+      }
+    },
+    {
+      "name": "webfetch: not a url stays as written",
+      "part": {
+        "type": "tool",
+        "id": "t29",
+        "messageID": "m",
+        "tool": "webfetch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "url": "example.com/page"
+          }
+        }
+      },
+      "expect": {
+        "kind": "fetch",
+        "status": "completed",
+        "running": "Fetching example.com/page",
+        "done": "Fetched example.com/page",
+        "failed": "Failed to fetch example.com/page",
+        "label": "Fetched example.com/page",
+        "counted": true
+      }
+    },
+    {
+      "name": "websearch: with a query",
+      "part": {
+        "type": "tool",
+        "id": "t30",
+        "messageID": "m",
+        "tool": "websearch",
+        "state": {
+          "status": "completed",
+          "input": {
+            "query": "swift 6 strict concurrency"
+          }
+        }
+      },
+      "expect": {
+        "kind": "websearch",
+        "status": "completed",
+        "running": "Searching the web for swift 6 strict concurrency",
+        "done": "Searched the web for swift 6 strict concurrency",
+        "failed": "Failed to search the web for swift 6 strict concurrency",
+        "label": "Searched the web for swift 6 strict concurrency",
+        "counted": true
+      }
+    },
+    {
+      "name": "web_search: no query",
+      "part": {
+        "type": "tool",
+        "id": "t31",
+        "messageID": "m",
+        "tool": "web_search",
+        "state": {
+          "status": "completed",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "websearch",
+        "status": "completed",
+        "running": "Searching the web",
+        "done": "Searched the web",
+        "failed": "Failed to search the web",
+        "label": "Searched the web",
+        "counted": true
+      }
+    },
+    {
+      "name": "task: description",
+      "part": {
+        "type": "tool",
+        "id": "t32",
+        "messageID": "m",
+        "tool": "task",
+        "state": {
+          "status": "completed",
+          "input": {
+            "description": "unblock sweep"
+          }
+        }
+      },
+      "expect": {
+        "kind": "task",
+        "status": "completed",
+        "running": "Running agent unblock sweep",
+        "done": "Ran agent unblock sweep",
+        "failed": "Agent failed: unblock sweep",
+        "label": "Ran agent unblock sweep",
+        "counted": true
+      }
+    },
+    {
+      "name": "task: failed",
+      "part": {
+        "type": "tool",
+        "id": "t33",
+        "messageID": "m",
+        "tool": "task",
+        "state": {
+          "status": "error",
+          "input": {
+            "description": "unblock sweep"
+          }
+        }
+      },
+      "expect": {
+        "kind": "task",
+        "status": "error",
+        "running": "Running agent unblock sweep",
+        "done": "Ran agent unblock sweep",
+        "failed": "Agent failed: unblock sweep",
+        "label": "Agent failed: unblock sweep",
+        "counted": true
+      }
+    },
+    {
+      "name": "skill: name",
+      "part": {
+        "type": "tool",
+        "id": "t34",
+        "messageID": "m",
+        "tool": "skill",
+        "state": {
+          "status": "completed",
+          "input": {
+            "name": "gsd-quick"
+          }
+        }
+      },
+      "expect": {
+        "kind": "skill",
+        "status": "completed",
+        "running": "Loading skill gsd-quick",
+        "done": "Loaded skill gsd-quick",
+        "failed": "Failed to load skill gsd-quick",
+        "label": "Loaded skill gsd-quick",
+        "counted": true
+      }
+    },
+    {
+      "name": "question",
+      "part": {
+        "type": "tool",
+        "id": "t35",
+        "messageID": "m",
+        "tool": "question",
+        "state": {
+          "status": "completed",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "question",
+        "status": "completed",
+        "running": "Asking",
+        "done": "Asked",
+        "failed": "Failed to ask",
+        "label": "Asked",
+        "counted": true
+      }
+    },
+    {
+      "name": "unknown tool: mcp prefix and camel case are humanized",
+      "part": {
+        "type": "tool",
+        "id": "t36",
+        "messageID": "m",
+        "tool": "mcp_Axiom_queryApl",
+        "state": {
+          "status": "running",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "other",
+        "status": "running",
+        "running": "Using Axiom queryApl",
+        "done": "Used Axiom queryApl",
+        "failed": "Failed: Axiom queryApl",
+        "label": "Using Axiom queryApl",
+        "counted": true
+      }
+    },
+    {
+      "name": "unknown tool: dashes",
+      "part": {
+        "type": "tool",
+        "id": "t37",
+        "messageID": "m",
+        "tool": "custom-thing_do",
+        "state": {
+          "status": "completed",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "other",
+        "status": "completed",
+        "running": "Using custom thing do",
+        "done": "Used custom thing do",
+        "failed": "Failed: custom thing do",
+        "label": "Used custom thing do",
+        "counted": true
+      }
+    },
+    {
+      "name": "unknown tool: prefix is case-insensitive, repeated separators collapse",
+      "part": {
+        "type": "tool",
+        "id": "t38",
+        "messageID": "m",
+        "tool": "MCP_Foo__bar",
+        "state": {
+          "status": "error",
+          "input": {}
+        }
+      },
+      "expect": {
+        "kind": "other",
+        "status": "error",
+        "running": "Using Foo bar",
+        "done": "Used Foo bar",
+        "failed": "Failed: Foo bar",
+        "label": "Failed: Foo bar",
+        "counted": true
+      }
+    },
+    {
+      "name": "unrecognised status reads as pending",
+      "part": {
+        "type": "tool",
+        "id": "t39",
+        "messageID": "m",
+        "tool": "read",
+        "state": {
+          "status": "weird",
+          "input": {
+            "filePath": "a.ts"
+          }
+        }
+      },
+      "expect": {
+        "kind": "read",
+        "status": "pending",
+        "running": "Reading a.ts",
+        "done": "Read a.ts",
+        "failed": "Failed to read a.ts",
+        "label": "Reading a.ts",
+        "counted": true
+      }
+    },
+    {
+      "name": "patch: one file",
+      "part": {
+        "type": "patch",
+        "id": "p40",
+        "messageID": "m",
+        "files": [
+          "/r/src/a.ts"
+        ]
+      },
+      "expect": {
+        "kind": "patch",
+        "status": "completed",
+        "running": "Saving a.ts",
+        "done": "Saved changes to a.ts",
+        "failed": "Saved changes to a.ts",
+        "label": "Saved changes to a.ts",
+        "counted": false
+      }
+    },
+    {
+      "name": "patch: several files",
+      "part": {
+        "type": "patch",
+        "id": "p41",
+        "messageID": "m",
+        "files": [
+          "a.ts",
+          "b.ts",
+          "c.ts"
+        ]
+      },
+      "expect": {
+        "kind": "patch",
+        "status": "completed",
+        "running": "Saving 3 files",
+        "done": "Saved changes to 3 files",
+        "failed": "Saved changes to 3 files",
+        "label": "Saved changes to 3 files",
+        "counted": false
+      }
+    },
+    {
+      "name": "patch: no files",
+      "part": {
+        "type": "patch",
+        "id": "p42",
+        "messageID": "m",
+        "files": []
+      },
+      "expect": {
+        "kind": "patch",
+        "status": "completed",
+        "running": "Saving",
+        "done": "Saved changes",
+        "failed": "Saved changes",
+        "label": "Saved changes",
+        "counted": false
+      }
+    }
+  ],
+  "summarize": [
+    {
+      "name": "a single completed call is its done label",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t43",
+          "messageID": "m",
+          "tool": "edit",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "/r/ChatScreen.swift"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Edited ChatScreen.swift",
+        "calls": 1,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "a single failed call is its failed label",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t44",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "error",
+            "input": {
+              "filePath": "a.ts"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Failed to read a.ts",
+        "calls": 1,
+        "failed": 1,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "a single running call still reads as its done label",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t45",
+          "messageID": "m",
+          "tool": "bash",
+          "state": {
+            "status": "running",
+            "input": {
+              "description": "Run the tests"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Run the tests",
+        "calls": 1,
+        "failed": 0,
+        "running": true,
+        "live": "Run the tests"
+      }
+    },
+    {
+      "name": "calls of one category are counted",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t46",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t47",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "b"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t48",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "c"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read 3 files",
+        "calls": 3,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "categories appear in first-seen order",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t49",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t50",
+          "messageID": "m",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t51",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "b"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t52",
+          "messageID": "m",
+          "tool": "edit",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "x.ts"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read 2 files, ran a command, edited a file",
+        "calls": 4,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "more than three categories collapse to a count",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t53",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t54",
+          "messageID": "m",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t55",
+          "messageID": "m",
+          "tool": "edit",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "x"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t56",
+          "messageID": "m",
+          "tool": "grep",
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "p"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Used 4 tools",
+        "calls": 4,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "exactly three categories are listed",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t57",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t58",
+          "messageID": "m",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "ls"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t59",
+          "messageID": "m",
+          "tool": "write",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "x"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read a file, ran a command, wrote a file",
+        "calls": 3,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "grep, glob and codesearch share one category",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t60",
+          "messageID": "m",
+          "tool": "grep",
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t61",
+          "messageID": "m",
+          "tool": "glob",
+          "state": {
+            "status": "completed",
+            "input": {
+              "pattern": "b"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Ran 2 searches",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "web searches say how many times",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t62",
+          "messageID": "m",
+          "tool": "websearch",
+          "state": {
+            "status": "completed",
+            "input": {
+              "query": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t63",
+          "messageID": "m",
+          "tool": "websearch",
+          "state": {
+            "status": "completed",
+            "input": {
+              "query": "b"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t64",
+          "messageID": "m",
+          "tool": "websearch",
+          "state": {
+            "status": "completed",
+            "input": {
+              "query": "c"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Searched the web 3 times",
+        "calls": 3,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "directories, pages, agents and skills pluralise",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t65",
+          "messageID": "m",
+          "tool": "list",
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t66",
+          "messageID": "m",
+          "tool": "list",
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "b"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Listed 2 directories",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "two pages",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t67",
+          "messageID": "m",
+          "tool": "webfetch",
+          "state": {
+            "status": "completed",
+            "input": {
+              "url": "https://a.com"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t68",
+          "messageID": "m",
+          "tool": "webfetch",
+          "state": {
+            "status": "completed",
+            "input": {
+              "url": "https://b.com"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Fetched 2 pages",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "two agents",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t69",
+          "messageID": "m",
+          "tool": "task",
+          "state": {
+            "status": "completed",
+            "input": {
+              "description": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t70",
+          "messageID": "m",
+          "tool": "task",
+          "state": {
+            "status": "completed",
+            "input": {
+              "description": "b"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Ran 2 agents",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "two skills",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t71",
+          "messageID": "m",
+          "tool": "skill",
+          "state": {
+            "status": "completed",
+            "input": {
+              "name": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t72",
+          "messageID": "m",
+          "tool": "skill",
+          "state": {
+            "status": "completed",
+            "input": {
+              "name": "b"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Loaded 2 skills",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "two questions",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t73",
+          "messageID": "m",
+          "tool": "question",
+          "state": {
+            "status": "completed",
+            "input": {}
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t74",
+          "messageID": "m",
+          "tool": "question",
+          "state": {
+            "status": "completed",
+            "input": {}
+          }
+        }
+      ],
+      "expect": {
+        "label": "Asked 2 questions",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "two unknown tools",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t75",
+          "messageID": "m",
+          "tool": "mystery_a",
+          "state": {
+            "status": "completed",
+            "input": {}
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t76",
+          "messageID": "m",
+          "tool": "mystery_b",
+          "state": {
+            "status": "completed",
+            "input": {}
+          }
+        }
+      ],
+      "expect": {
+        "label": "Used 2 tools",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "a patch alone speaks for itself",
+      "parts": [
+        {
+          "type": "patch",
+          "id": "p77",
+          "messageID": "m",
+          "files": [
+            "/r/a.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "label": "Saved changes to a.ts",
+        "calls": 0,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "patches alone are counted",
+      "parts": [
+        {
+          "type": "patch",
+          "id": "p78",
+          "messageID": "m",
+          "files": [
+            "a.ts"
+          ]
+        },
+        {
+          "type": "patch",
+          "id": "p79",
+          "messageID": "m",
+          "files": [
+            "b.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "label": "Saved 2 changes",
+        "calls": 0,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "a patch next to a tool call is not counted",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t80",
+          "messageID": "m",
+          "tool": "edit",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a.ts"
+            }
+          }
+        },
+        {
+          "type": "patch",
+          "id": "p81",
+          "messageID": "m",
+          "files": [
+            "a.ts"
+          ]
+        }
+      ],
+      "expect": {
+        "label": "Edited a.ts",
+        "calls": 1,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "only failed calls are counted as failed",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t82",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t83",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "error",
+            "input": {
+              "filePath": "b"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t84",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "error",
+            "input": {
+              "filePath": "c"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read 3 files",
+        "calls": 3,
+        "failed": 2,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "the live call is the latest unfinished one (pending or running)",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t85",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t86",
+          "messageID": "m",
+          "tool": "bash",
+          "state": {
+            "status": "running",
+            "input": {
+              "description": "Run the tests"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t87",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "pending",
+            "input": {
+              "filePath": "c"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read 2 files, ran a command",
+        "calls": 3,
+        "failed": 0,
+        "running": true,
+        "live": "Reading c"
+      }
+    },
+    {
+      "name": "a finished run has no live call",
+      "parts": [
+        {
+          "type": "tool",
+          "id": "t88",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "a"
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "id": "t89",
+          "messageID": "m",
+          "tool": "read",
+          "state": {
+            "status": "completed",
+            "input": {
+              "filePath": "b"
+            }
+          }
+        }
+      ],
+      "expect": {
+        "label": "Read 2 files",
+        "calls": 2,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    },
+    {
+      "name": "no calls at all",
+      "parts": [],
+      "expect": {
+        "label": "",
+        "calls": 0,
+        "failed": 0,
+        "running": false,
+        "live": null
+      }
+    }
+  ],
+  "layout": [
+    {
+      "name": "consecutive calls in one message are one run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "ls"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1,t2"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "a run spans assistant messages; absorbed messages draw nothing",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "a2",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a2",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "ls"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "a3",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t3",
+              "messageID": "a3",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "c"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "id": "x1",
+              "messageID": "a3",
+              "text": "Done."
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1,t2,t3"
+          ],
+          "a2": [],
+          "a3": [
+            "part:x1"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "text ends a run and a new one starts after it",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "id": "x1",
+              "messageID": "a1",
+              "text": "Now the second."
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1",
+            "part:x1",
+            "tools:t2"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "a user message that draws ends the run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "u1",
+            "sessionID": "s",
+            "role": "user",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "id": "x9",
+              "messageID": "u1",
+              "text": "next"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "a2",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a2",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1"
+          ],
+          "a2": [
+            "tools:t2"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "while running, the run at the very end is withheld as trailing",
+      "running": true,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "text",
+              "id": "x1",
+              "messageID": "a1",
+              "text": "Looking."
+            },
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "a2",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a2",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "ls"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "part:x1"
+          ],
+          "a2": []
+        },
+        "trailing": "t1,t2"
+      }
+    },
+    {
+      "name": "while running, a run followed by text is not trailing",
+      "running": true,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "id": "x1",
+              "messageID": "a1",
+              "text": "Found it."
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1",
+            "part:x1"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "hidden reasoning is transparent to a run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "reasoning",
+              "id": "r1",
+              "messageID": "a1",
+              "text": "hmm"
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1,t2"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "shown reasoning ends a run",
+      "running": false,
+      "showThinking": true,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "reasoning",
+              "id": "r1",
+              "messageID": "a1",
+              "text": "hmm"
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1",
+            "part:r1",
+            "tools:t2"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "todo writes and step markers are not calls and do not end a run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "step-start",
+              "id": "s1",
+              "messageID": "a1"
+            },
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "todowrite",
+              "state": {
+                "status": "completed",
+                "input": {}
+              }
+            },
+            {
+              "type": "tool",
+              "id": "t3",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1,t3"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "patches join a run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "edit",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "patch",
+              "id": "p1",
+              "messageID": "a1",
+              "files": [
+                "a"
+              ]
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1,p1"
+          ]
+        },
+        "trailing": null
+      }
+    },
+    {
+      "name": "a file part ends a run",
+      "running": false,
+      "showThinking": false,
+      "messages": [
+        {
+          "info": {
+            "id": "a1",
+            "sessionID": "s",
+            "role": "assistant",
+            "time": {
+              "created": 1,
+              "completed": 2
+            }
+          },
+          "parts": [
+            {
+              "type": "tool",
+              "id": "t1",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "a"
+                }
+              }
+            },
+            {
+              "type": "file",
+              "id": "f1",
+              "messageID": "a1",
+              "mime": "image/png"
+            },
+            {
+              "type": "tool",
+              "id": "t2",
+              "messageID": "a1",
+              "tool": "read",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "b"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "expect": {
+        "blocks": {
+          "a1": [
+            "tools:t1",
+            "part:f1",
+            "tools:t2"
+          ]
+        },
+        "trailing": null
+      }
+    }
+  ]
+}

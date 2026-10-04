@@ -81,6 +81,15 @@ final class SessionListStore: ObservableObject {
     /// 3_600_000, anything else/absent → 300_000). Drives the age chip cutoff
     /// and the Recent filter (BET-1349).
     @Published private(set) var cacheTtlMs: Double = SessionCacheTtl.defaultMs
+    /// opencodeSessionID → the last running/idle TRANSITION the event stream
+    /// reported for it (spec §3). Only feeds the Latest-activity ordering, where
+    /// it is combined with the box's `time.updated` (`lastActivity(for:)`) so a
+    /// turn that just started or ended sorts to the top before the next fetch
+    /// lands. It never feeds the age chip — that keeps reading the box's own
+    /// `time.updated`, never the device clock. Published, but written only on
+    /// an actual transition, so the per-frame stream cannot re-render the list
+    /// through it.
+    @Published private(set) var liveActivity: [String: Date] = [:]
 
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
@@ -117,6 +126,10 @@ final class SessionListStore: ObservableObject {
     /// only; one source per window type, no merging.
     private(set) var terminalStatus: [String: WindowPollStatus] = [:]
     private var cancellables: Set<AnyCancellable> = []
+    /// A job-list refetch (driven by `delegate.updated`) in flight, and one
+    /// asked for meanwhile — coalesced the same way `refresh()` is.
+    private var jobsRefreshing = false
+    private var jobsRefreshQueued = false
 
     init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil) {
         self.api = api
@@ -126,12 +139,14 @@ final class SessionListStore: ObservableObject {
         self.eventStore.addRawFrameHandler { [weak self] frame in
             self?.trackProgress(frame: frame)
             self?.trackStatus(frame: frame)
+            self?.trackDelegate(frame: frame)
         }
         // A turn completing is the moment the age chip becomes eligible
         // (`!running`), and it is precisely when the cached `lastActivity` is
-        // stale. This sink diffs only a small running-id set — it never calls
-        // `objectWillChange.send()` and never mutates published state, so the
-        // hot per-frame `$sessionStates` stream cannot re-render the whole list.
+        // stale. This sink diffs only a small running-id set and touches
+        // published state ONLY on an actual running↔idle edge (`liveActivity`),
+        // so the hot per-frame `$sessionStates` stream cannot re-render the
+        // whole list.
         self.eventStore.$sessionStates
             .receive(on: DispatchQueue.main)
             .sink { [weak self] states in
@@ -147,8 +162,22 @@ final class SessionListStore: ObservableObject {
     /// `MantaEventStore.swift:260-272`).
     private func trackRunningTransitions(_ states: [String: MantaSessionStreamState]) {
         let runningNow = Set(states.filter { $0.value.running == true }.map(\.key))
+        let started = runningNow.subtracting(previouslyRunning)
         let stopped = previouslyRunning.subtracting(runningNow)
         previouslyRunning = runningNow
+        guard !started.isEmpty || !stopped.isEmpty else { return }
+        // Latest-activity ordering (spec §3): stamp the edge. A turn that
+        // started keeps the box's own start time; one that ended (or whose
+        // start the box did not report) uses the device clock, so it sorts to
+        // the top at once instead of after the refresh below brings back the
+        // box's `time.updated`. `lastActivity(for:)` takes whichever is later,
+        // so clock skew can at worst leave a just-ended turn marginally ahead
+        // of another that ended in the same moment.
+        let now = Date()
+        var next = liveActivity
+        for sid in started { next[sid] = states[sid]?.runningSince ?? now }
+        for sid in stopped { next[sid] = now }
+        if next != liveActivity { liveActivity = next }
         guard !stopped.isEmpty else { return }
         Task { await refresh() }
     }
@@ -182,6 +211,11 @@ final class SessionListStore: ObservableObject {
             projects = list
             loadedOnce = true
             loadError = nil
+            // Re-derive which windows are job windows against the NEW project
+            // list before anything awaits: a window the box tagged `owner:
+            // "job"` is hidden by that tag alone, so it must not flash as a row
+            // for the duration of the session-meta and job fetches below.
+            recomputeNesting()
             await refreshSessionMeta()
             // The job list is decoration: if `delegate:list` fails (an older
             // box errors on the unknown channel), every window stays visible
@@ -232,6 +266,14 @@ final class SessionListStore: ObservableObject {
         return project.windows.filter { !hidden.contains($0.index) }
     }
 
+    /// The projects that actually render: background-job windows removed
+    /// (spec §2), and a project whose only windows were jobs dropped. Search,
+    /// the Recent filter and both orderings all start from this, so a job
+    /// window can never surface through any of them.
+    var visibleProjects: [MantaProject] {
+        SessionJobWindows.visible(projects, hidden: hiddenByProject)
+    }
+
     /// Adopt the fetched job list, keyed by childSessionID, and re-derive
     /// nesting (hidden windows + per-parent counts) against the current
     /// projects.
@@ -252,7 +294,9 @@ final class SessionListStore: ObservableObject {
         let jobs = Array(delegateJobs.values)
         for p in projects {
             let nesting = SessionJobNesting.compute(project: p, jobs: jobs)
-            hidden[p.tmuxSession] = nesting.hidden
+            // Spec §2: a job window is hidden by its box-side `owner` tag OR by
+            // the job-record nesting rule (windows that predate the tag).
+            hidden[p.tmuxSession] = SessionJobWindows.hiddenIndices(project: p, nesting: nesting)
             for (index, count) in nesting.activeChildCounts {
                 if let w = p.windows.first(where: { $0.index == index }),
                    let sid = w.opencodeSessionId, !sid.isEmpty {
@@ -264,28 +308,68 @@ final class SessionListStore: ObservableObject {
         backgroundJobsBySession = counts
     }
 
+    /// How many per-directory session lists are fetched at once (desktop's
+    /// `OPENCODE_FANOUT_CONCURRENCY` plays the same role).
+    private static let sessionFetchConcurrency = 4
+
     private func refreshSessionMeta() async {
-        guard let sessions = try? await api.listSessions() else { return }
+        // Spec §3: the unscoped list stops at 100 sessions, so an older window
+        // never learned its model or last activity. Ask per DISTINCT window
+        // directory as well and merge — the unscoped list stays as a fallback
+        // for a window whose pane cwd differs from its session's directory.
+        let unscoped = try? await api.listSessions()
+        let scoped = await listSessions(inDirectories: SessionActivityOrder.chatDirectories(projects))
+        // Every fetch failed: keep whatever was resolved before, exactly as a
+        // failed unscoped fetch always has.
+        guard unscoped != nil || !scoped.isEmpty else { return }
         var meta: [String: SessionMeta] = [:]
-        for s in sessions {
+        for s in (unscoped ?? []) + scoped.flatMap({ $0 }) {
             meta[s.id] = SessionMeta(
                 modelLabel: s.model.map { ModelLabel.text(providerID: $0.providerID, modelID: $0.id) },
                 lastActivity: s.time?.updated.map { Date(timeIntervalSince1970: $0 / 1000) }
             )
         }
         sessionMeta = meta
-        // BET-791: backfill the working progress label for every session so
-        // the subtitle is right even when the app (re)connected after a
-        // progress_report but before any live `progress.updated` frame. The
-        // record fetched for a session that has none (or whose turn isn't
-        // `working`) clears any stale label — authoritative to the box.
+        // BET-791: backfill the working progress label for every WINDOW's
+        // session so the subtitle is right even when the app (re)connected
+        // after a progress_report but before any live `progress.updated`
+        // frame. The record fetched for a session that has none (or whose turn
+        // isn't `working`) clears any stale label — authoritative to the box.
+        // Window sessions only: a session with no row has no subtitle to show.
         var progress: [String: String] = [:]
-        for s in sessions {
-            if let label = await workingProgressLabel(sessionID: s.id) {
-                progress[s.id] = label
+        var seen = Set<String>()
+        for window in projects.flatMap(\.windows) {
+            guard let sid = window.opencodeSessionId, !sid.isEmpty, seen.insert(sid).inserted else { continue }
+            if let label = await workingProgressLabel(sessionID: sid) {
+                progress[sid] = label
             }
         }
         progressBySession = progress
+    }
+
+    /// One `opencode:list-sessions(directory)` per directory, a few at a time.
+    /// A directory whose fetch fails is simply absent from the result (its
+    /// windows keep whatever the unscoped list knew) — never fatal.
+    private func listSessions(inDirectories directories: [String]) async -> [[OpencodeSessionListItem]] {
+        guard !directories.isEmpty else { return [] }
+        let api = self.api
+        let limit = Self.sessionFetchConcurrency
+        return await withTaskGroup(of: [OpencodeSessionListItem]?.self) { group in
+            var pending = directories.makeIterator()
+            var started = 0
+            while started < limit, let dir = pending.next() {
+                group.addTask { try? await api.listSessions(directory: dir) }
+                started += 1
+            }
+            var results: [[OpencodeSessionListItem]] = []
+            while let result = await group.next() {
+                if let result { results.append(result) }
+                if let dir = pending.next() {
+                    group.addTask { try? await api.listSessions(directory: dir) }
+                }
+            }
+            return results
+        }
     }
 
     // MARK: - Row status (reads the S1b store)
@@ -322,6 +406,15 @@ final class SessionListStore: ObservableObject {
         )
     }
 
+    /// The instant to order this window by in the Latest-activity list: the
+    /// later of the box's `time.updated` and the last running↔idle transition
+    /// seen live. Nil for a terminal window (it has no session) and for a chat
+    /// window whose session has not been listed yet.
+    func lastActivity(for window: MantaWindow) -> Date? {
+        guard let sid = window.opencodeSessionId, !sid.isEmpty else { return nil }
+        return SessionActivityOrder.latest(sessionMeta[sid]?.lastActivity, liveActivity[sid])
+    }
+
     /// How many of a project's visible windows are mid-turn (drives the group
     /// header chip). Hidden background-job windows are excluded — a job is
     /// represented by its parent's count, not by a running row of its own.
@@ -353,6 +446,45 @@ final class SessionListStore: ObservableObject {
     private func workingProgressLabel(sessionID: String) async -> String? {
         guard let record = try? await api.progressGet(sessionID: sessionID) else { return nil }
         return record.workingLabel
+    }
+
+    // MARK: - Background jobs (spec §2)
+
+    /// `delegate.updated` frames: a job started, progressed, finished or was
+    /// stopped. Refetch the job list so the parent row's count and the set of
+    /// hidden job windows follow it instead of waiting for the next pull,
+    /// foreground or reconnect.
+    private func trackDelegate(frame: MantaStreamFrame) {
+        guard frame.kind == "delegate.updated" else { return }
+        Task { await refreshJobs() }
+    }
+
+    /// Refetch just the job list (not the projects). Coalesced like `refresh()`.
+    /// A job that is live but whose window is not in the project list yet means
+    /// the list is behind — a new job window was created — and nesting needs
+    /// that window to count the job under its parent, so one full refresh is
+    /// requested. That check lives HERE, not in `fetchOnce`, so a job whose
+    /// window never appears cannot make every refresh trigger another.
+    private func refreshJobs() async {
+        if jobsRefreshing {
+            jobsRefreshQueued = true
+            return
+        }
+        jobsRefreshing = true
+        defer { jobsRefreshing = false }
+        repeat {
+            jobsRefreshQueued = false
+            // Decoration, like the fetch in `fetchOnce`: a failure keeps what
+            // we had.
+            guard let jobs = try? await api.delegateList() else { continue }
+            applyJobs(jobs)
+            let windowSessions = Set(projects.flatMap(\.windows).compactMap(\.opencodeSessionId))
+            let listIsBehind = jobs.contains { job in
+                guard job.isActive, let child = job.childSessionID, !child.isEmpty else { return false }
+                return !windowSessions.contains(child)
+            }
+            if listIsBehind { Task { await refresh() } }
+        } while jobsRefreshQueued
     }
 
     // MARK: - Terminal-window status (BET-1350)
@@ -572,6 +704,7 @@ final class SessionListStore: ObservableObject {
         pinnedWindows = []
         hapticsEnabled = true
         previouslyRunning = []
+        liveActivity = [:]
         terminalStatus = [:]
     }
 }

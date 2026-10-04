@@ -89,8 +89,26 @@ private enum OverflowDestination: String, Identifiable {
     case schedules
     case secrets
     case artifacts
+    case backgroundJobs
 
     var id: String { rawValue }
+}
+
+/// A navigation push waiting for the sheet that triggered it to finish
+/// dismissing. The tap handler records the destination here and dismisses the
+/// sheet; the push itself runs from that sheet's `onDismiss:` — the one point
+/// at which the dismissal is guaranteed complete, so the push can neither be
+/// swallowed by the transition nor need a timed delay.
+private enum PendingPush {
+    case subagent(SubagentSession)
+    case session(SessionOpenTarget)
+
+    func perform(on path: Binding<NavigationPath>) {
+        switch self {
+        case .subagent(let agent): path.wrappedValue.append(agent)
+        case .session(let target): path.wrappedValue.append(target)
+        }
+    }
 }
 
 /// Thin wrapper that owns WHICH opencode session the screen is showing.
@@ -148,6 +166,10 @@ private struct ChatScreenContent: View {
     /// destroyed by scrolling; this one survives it and plays one note at a
     /// time. Injected into the transcript via `Environment`.
     @StateObject private var voicePlayer: VoicePlaybackEngine
+    /// This session's background jobs: feeds the overflow sheet's "Background
+    /// jobs" entry + sheet, and the task rows' status (a job record that says
+    /// running keeps its task row running — spec §5).
+    @StateObject private var jobsStore: BackgroundJobsStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -171,6 +193,13 @@ private struct ChatScreenContent: View {
     @State private var sessionWindow: (name: String, index: Int, cwd: String)?
     /// Which overflow-sheet item's card is presented (BET-627).
     @State private var overflowDestination: OverflowDestination?
+    /// The run the Activity sheet is showing (spec §1.5). One sheet at a time:
+    /// this is its own `.sheet(item:)`, presented only from a tap on the
+    /// transcript (never while the overflow sheet is up).
+    @State private var activityTarget: ActivityTarget?
+    /// A push to perform once the sheet that requested it has dismissed (see
+    /// `PendingPush`); flushed from both sheets' `onDismiss:`.
+    @State private var pendingPush: PendingPush?
     /// Live scheduled-task count for the overflow sheet's badge (BET-627).
     @State private var scheduleCount = 0
     /// Drives MessagingUI's `TiledView` scroll layer: stays on the newest
@@ -249,6 +278,7 @@ private struct ChatScreenContent: View {
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
         _usageStore = StateObject(wrappedValue: UsageStore(api: api))
         _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: api))
+        _jobsStore = StateObject(wrappedValue: BackgroundJobsStore(api: api, sessionId: sessionId, eventStore: eventStore))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -288,6 +318,8 @@ private struct ChatScreenContent: View {
                 seedPlanModeFromBox()
                 Task { await settingsStore.load() }
                 usageStore.start()
+                jobsStore.startAutoRefresh()
+                Task { await jobsStore.refresh() }
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
@@ -296,6 +328,7 @@ private struct ChatScreenContent: View {
             .onDisappear {
                 store.stop()
                 usageStore.stop()
+                jobsStore.stopAutoRefresh()
                 MantaPushRouter.shared.visibleSessionID = nil
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
             }
@@ -307,6 +340,16 @@ private struct ChatScreenContent: View {
             // fires once per actual plan-mode switch.
             .onReceive(store.$planOn) { on in
                 if let on { modelStore.setPlan(on) }
+            }
+            // Spec §5: a job record for a task's child session says whether that
+            // task is still running, even when the child's own events were never
+            // seen on this device. Feed the statuses into the transcript store.
+            .onReceive(jobsStore.$jobs) { jobs in
+                var statuses: [String: String] = [:]
+                for job in jobs {
+                    if let child = job.childSessionID, !child.isEmpty { statuses[child] = job.status }
+                }
+                store.updateJobStatuses(statuses)
             }
             // 5s branch poll (desktop cadence) so a terminal-side checkout
             // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
@@ -482,7 +525,8 @@ private struct ChatScreenContent: View {
                 subtitle: agent.subtitle,
                 eventStore: eventStore,
                 api: MantaAPIClient.live(),
-                tokens: tokens
+                tokens: tokens,
+                path: $path
             )
             .id(agent.childSessionId)
         }
@@ -507,8 +551,18 @@ private struct ChatScreenContent: View {
             }
         }
         .sheet(isPresented: $showOverflow) { overflowSheet }
-        .sheet(item: $overflowDestination) { destination in
+        .sheet(item: $overflowDestination, onDismiss: flushPendingPush) { destination in
             destinationCard(destination)
+        }
+        // The Activity sheet for a tool run — tapped from a run row, or from the
+        // working line while the run is still the tail of a running turn.
+        .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
+            ActivitySheet(
+                store: store,
+                runID: target.runID,
+                tokens: tokens,
+                onOpenSubagent: { openSubagent($0) }
+            )
         }
         // BET-824 — each meter opens the sheet for what it represents: the
         // strip opens context, the dot opens the plan.
@@ -529,6 +583,7 @@ private struct ChatScreenContent: View {
             onSchedules: { overflowDestination = .schedules },
             onSecrets: { overflowDestination = .secrets },
             onArtifacts: { overflowDestination = .artifacts },
+            onBackgroundJobs: { overflowDestination = .backgroundJobs },
             onCompact: { store.compact() },
             onClear: { Task { await clearSession() } },
             onFork: { Task { await forkSession() } },
@@ -536,9 +591,13 @@ private struct ChatScreenContent: View {
             onDelete: { Task { await deleteSession() } },
             settingsStore: settingsStore,
             onToggleTrust: { _ in flipTrustMode() },
-            scheduleCount: scheduleCount
+            scheduleCount: scheduleCount,
+            backgroundJobs: (total: jobsStore.jobs.count, running: jobsStore.runningCount)
         )
-        .task { await refreshScheduleCount() }
+        .task {
+            await refreshScheduleCount()
+            await jobsStore.refresh()
+        }
     }
 
     // MARK: - Trust mode (BET-748 gap #14)
@@ -582,7 +641,49 @@ private struct ChatScreenContent: View {
                 sessionId: store.sessionId,
                 onClose: { overflowDestination = nil }
             )
+        case .backgroundJobs:
+            BackgroundJobsSheet(
+                store: jobsStore,
+                onOpenSession: { childSessionID in openJobSession(childSessionID) }
+            )
         }
+    }
+
+    /// A background job's own session, opened as a normal chat screen: the sheet
+    /// dismisses first (a sheet is not for content navigation), then the session
+    /// is pushed onto this screen's stack. Resolving the window can fail (the
+    /// job's window closed, or the box is unreachable) — say so instead of doing
+    /// nothing.
+    private func openJobSession(_ childSessionID: String) {
+        guard let window = jobsStore.window(forChild: childSessionID) else {
+            overflowDestination = nil
+            store.actionHint = "That background job's window is closed"
+            return
+        }
+        pendingPush = .session(SessionOpenTarget(
+            project: window.project,
+            windowIndex: window.index,
+            name: window.name,
+            sessionId: childSessionID
+        ))
+        overflowDestination = nil
+    }
+
+    /// A task row tapped inside the Activity sheet: dismiss the sheet, then push
+    /// the subagent as a full screen on this stack (a subagent's transcript is
+    /// content navigation, which does not belong inside a sheet). The push runs
+    /// from the sheet's `onDismiss:`.
+    private func openSubagent(_ agent: SubagentSession) {
+        pendingPush = .subagent(agent)
+        activityTarget = nil
+    }
+
+    /// Run the push a just-dismissed sheet asked for. A sheet closed any other
+    /// way (swipe, Done) leaves nothing pending, so this is a no-op then.
+    private func flushPendingPush() {
+        guard let push = pendingPush else { return }
+        pendingPush = nil
+        push.perform(on: $path)
     }
 
     /// (Re)load the scheduled-task count backing the sheet's live badge.
@@ -805,6 +906,7 @@ private struct ChatScreenContent: View {
             bottomInset: bottomBarHeight,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: { showScrollToBottom = $0 > Self.scrollToBottomThreshold },
+            onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
             header: { sessionHeaderBlock }
         )
         // Deliver the blocking-card actions to the transcript cells via the
@@ -1075,14 +1177,12 @@ private struct ChatScreenContent: View {
                 weeklyBanner
             }
             // Only things that BLOCK the turn and need a tap stay here. Live
-            // running tools now render INSIDE the transcript (in the turn that
-            // spawned them); sessionError / truncation / queued prompts AND the
-            // blocking cards (permission / plan / question) all moved into the
-            // transcript tail too (BET-1214). Todos stay, collapsed to a single
-            // line while a turn runs.
-            if let todos = store.todos, !(todos.visible?.visible ?? todos.active ?? []).isEmpty {
-                TodosCard(payload: todos, tokens: tokens, compact: store.running)
-            }
+            // running tools render INSIDE the transcript (in the run they belong
+            // to); sessionError / truncation / queued prompts AND the blocking
+            // cards (permission / plan / question) all moved into the transcript
+            // tail too (BET-1214), and so did the todo checklist — it is now the
+            // transcript's last row, so it scrolls away instead of floating over
+            // the conversation (spec §6).
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.top, Metrics.spacing.sp2)
@@ -1115,7 +1215,9 @@ private struct ChatScreenContent: View {
             onOpenPage: { openPlanPage() },
             onQuote: { selection, destination in
                 Task { await quote(selection, into: destination) }
-            }
+            },
+            onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
+            onToggleTodos: { store.toggleTodos() }
         )
     }
 
@@ -1212,12 +1314,21 @@ struct ChatSubagentScreen: View {
     /// screen to a different, empty store. The parent owns nothing about it.
     @StateObject private var store: ChatSessionStore
     let tokens: Tokens
+    /// The enclosing navigation stack's path, so a nested subagent opened from
+    /// this screen's Activity sheet can be pushed next to this one.
+    @Binding var path: NavigationPath
+    /// The run this screen's Activity sheet is showing, if open.
+    @State private var activityTarget: ActivityTarget?
+    /// A nested subagent to push once the Activity sheet has finished
+    /// dismissing (flushed from the sheet's `onDismiss:`).
+    @State private var pendingPush: PendingPush?
 
-    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens) {
+    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
         self.childSessionId = childSessionId
         self.title = title
         self.subtitle = subtitle
         self.tokens = tokens
+        self._path = path
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: childSessionId ?? "",
             eventStore: eventStore,
@@ -1265,6 +1376,7 @@ struct ChatSubagentScreen: View {
             bottomInset: 0,
             scrollPosition: $scrollPosition,
             onPointsFromBottom: nil,
+            onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
             // BET-1257 — a literally-empty `EmptyView()` header broke touch
             // delivery to the transcript on THIS screen specifically: the
             // child is reached via `NavigationStack.navigationDestination`
@@ -1282,8 +1394,35 @@ struct ChatSubagentScreen: View {
             header: { Color.clear.frame(height: 0.5) }
         )
         .background(tokens.canvas.ignoresSafeArea())
+        // A read-only surface: the blocking cards stay inert, but opening a run's
+        // Activity sheet and expanding the checklist only READ, so those work.
+        .environment(\.transcriptCardActions, TranscriptCardActions.readOnly(
+            onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
+            onToggleTodos: { store.toggleTodos() }
+        ))
+        .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
+            ActivitySheet(
+                store: store,
+                runID: target.runID,
+                tokens: tokens,
+                onOpenSubagent: { openSubagent($0) }
+            )
+        }
         .onAppear { store.start() }
         .onDisappear { store.stop() }
+    }
+
+    /// A nested subagent tapped inside this screen's Activity sheet: dismiss the
+    /// sheet, then push it as a full screen next to this one (from `onDismiss:`).
+    private func openSubagent(_ agent: SubagentSession) {
+        pendingPush = .subagent(agent)
+        activityTarget = nil
+    }
+
+    private func flushPendingPush() {
+        guard let push = pendingPush else { return }
+        pendingPush = nil
+        push.perform(on: $path)
     }
 
     private var emptyState: some View {
@@ -1314,6 +1453,9 @@ struct TranscriptListView<Header: View>: View {
     let bottomInset: CGFloat
     @Binding var scrollPosition: TiledScrollPosition
     var onPointsFromBottom: ((CGFloat) -> Void)? = nil
+    /// Open the Activity sheet for the trailing run, from the working line. nil
+    /// leaves the line plain.
+    var onOpenActivity: ((String) -> Void)? = nil
     @ViewBuilder var header: () -> Header
 
     var body: some View {
@@ -1332,7 +1474,7 @@ struct TranscriptListView<Header: View>: View {
             LoadEarlierRow(loading: store.loadingEarlier, tokens: tokens) {}
         })
         .typingIndicator(.indicator(isVisible: store.running) {
-            RunningIndicator(store: store)
+            RunningIndicator(store: store, onOpenActivity: onOpenActivity)
         })
         .additionalContentInset(
             EdgeInsets(top: 0, leading: 0, bottom: bottomInset, trailing: 0)
@@ -1353,143 +1495,6 @@ struct TranscriptListView<Header: View>: View {
     private func resignKeyboard() {
         UIApplication.shared.sendAction(
             #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-    }
-}
-
-// MARK: - Todos card (scope item 4)
-
-private struct TodosCard: View {
-    let payload: StreamTodosPayload
-    let tokens: Tokens
-    /// True while a turn runs: the card collapses to a single summary line so
-    /// the pinned area reads quiet during work (BET-823).
-    let compact: Bool
-
-    /// The rows to draw: the box already computes the "top 5 + hidden counts"
-    /// window (`visible`), so prefer it and fall back to the raw active list.
-    private var rows: [StreamTodoItem] {
-        payload.visible?.visible ?? payload.active ?? []
-    }
-
-    /// The one overflow summary line, or nil when nothing is hidden. Mirrors
-    /// the desktop's formatHiddenTodosSummary: "+ 2 pending & 1 done" /
-    /// "+ 2 pending" / "+ 1 done", omitting a zero side. Singular/plural is
-    /// not varied — the desktop prints "pending"/"done" unchanged.
-    private var overflowSummary: String? {
-        guard let v = payload.visible else { return nil }
-        var parts: [String] = []
-        if v.hiddenPending > 0 { parts.append("\(Int(v.hiddenPending)) pending") }
-        if v.hiddenDone > 0 { parts.append("\(Int(v.hiddenDone)) done") }
-        guard !parts.isEmpty else { return nil }
-        return "+ \(parts.joined(separator: " & "))"
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            if compact {
-                compactRow
-            } else {
-                // The box's todo items carry NO id field, ever, so every item's
-                // `id` is nil and keying on it gives every row the SAME identity —
-                // SwiftUI then renders one row's content repeated N times. Key on
-                // array POSITION instead: position IS the identity here, exactly as
-                // the desktop card does (src/renderer/MessageRow.tsx, ActiveTodos).
-                ForEach(Array(rows.enumerated()), id: \.offset) { pair in
-                    todoRow(pair.element)
-                }
-                if let overflowSummary {
-                    Text(overflowSummary)
-                        .font(.manta(size: Metrics.type.xs))
-                        .foregroundColor(tokens.tx4)
-                }
-            }
-        }
-        .padding(.horizontal, Metrics.spacing.sp3)
-        .padding(.vertical, Metrics.spacing.sp2)
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("todos-card")
-    }
-
-    /// The single-line collapse shown during a running turn — a count summary
-    /// with the in-progress figure, so the user still knows work is pending
-    /// without a full checklist pinning the composer.
-    private var compactRow: some View {
-        HStack(spacing: Metrics.spacing.sp2) {
-            Image(systemName: "checklist")
-                .font(.system(size: Metrics.type.xs))
-                .foregroundColor(tokens.tx4)
-            Text(compactSummary)
-                .font(.manta(size: Metrics.type.small))
-                .foregroundColor(tokens.tx2)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private var compactSummary: String {
-        let total = rows.count
-        let inProgress = rows.filter { ($0.status ?? "").lowercased() == "in_progress" }.count
-        if total <= 1 { return "1 todo" }
-        if inProgress == 0 { return "\(total) todos" }
-        return "\(total) todos · \(inProgress) in progress"
-    }
-
-    /// One todo row. Status styling matches the desktop; `status` is compared
-    /// case-INSENSITIVELY (the desktop lowercases before comparing, iOS did
-    /// not). The mark aligns to the FIRST line so a two-line item keeps the
-    /// icon beside its opening words rather than centred against both.
-    // `@MainActor` because this reads `mantaFontWeight`, which is main-actor
-    // isolated. Only `View.body` carries that isolation implicitly, and this is
-    // a plain helper — every other call site in the app happens to sit directly
-    // in a `body`, so the annotation has never been needed before. Harmless if
-    // the isolation is inferred anyway; a build error if it is not.
-    @MainActor
-    @ViewBuilder
-    private func todoRow(_ item: StreamTodoItem) -> some View {
-        let status = (item.status ?? "").lowercased()
-        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
-            Image(systemName: markName(status))
-                .font(.system(size: Metrics.type.xs))
-                .foregroundColor(markColor(status))
-            Text(item.content ?? "")
-                .font(.manta(size: Metrics.type.small, weight: status == "in_progress" ? mantaFontWeight(Metrics.type.semibold) : .regular))
-                .foregroundColor(textColor(status))
-                .strikethrough(status == "cancelled")
-                // A todo's text must not be silently clipped to one line.
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func markName(_ status: String) -> String {
-        switch status {
-        case "completed": return "checkmark.circle.fill"
-        case "cancelled": return "xmark.circle"
-        case "in_progress": return "circle.dotted"
-        default: return "circle"
-        }
-    }
-
-    private func markColor(_ status: String) -> Color {
-        switch status {
-        case "completed": return tokens.ok
-        case "in_progress": return tokens.accent
-        default: return tokens.tx4
-        }
-    }
-
-    private func textColor(_ status: String) -> Color {
-        switch status {
-        case "completed", "cancelled": return tokens.tx4
-        case "in_progress": return tokens.tx1
-        default: return tokens.tx2
-        }
     }
 }
 

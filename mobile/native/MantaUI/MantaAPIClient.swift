@@ -160,20 +160,30 @@ final class MantaAPIClient: Sendable {
 
     /// `delegate:list` — the box's background-delegation jobs (BET-1213).
     /// No-arg returns ALL jobs, so a single fetch covers a `delegate` job and a
-    /// `task` subagent the job store adopted. The engine returns a bare
-    /// `DelegateJob[]`; a no-engine fallback returns `{jobs: []}`, which we
-    /// normalize (mirrors desktop httpApi.delegateList). A box that predates
+    /// `task` subagent the job store adopted; `sessionId` narrows it to the jobs
+    /// that session started (matched on the PARENT session id). The engine
+    /// returns a bare `DelegateJob[]`; a no-engine fallback returns
+    /// `{jobs: []}` — `LenientDelegateJobs` accepts both, and skips a single
+    /// malformed record instead of failing the whole list. A box that predates
     /// delegation answers with an unknown-channel error — that THROWS, and the
     /// caller decides whether it is fatal (it is not for the session list).
-    func delegateList() async throws -> [DelegateJob] {
-        let data = try await transport(channel: "delegate:list", args: [])
-        if let jobs = try? Self.decode(data, as: [DelegateJob].self) {
-            return jobs
+    func delegateList(sessionId: String? = nil) async throws -> [DelegateJob] {
+        let args: [Any] = sessionId.map { [$0] } ?? []
+        let data = try await transport(channel: "delegate:list", args: args)
+        return try Self.decode(data, as: LenientDelegateJobs.self)?.jobs ?? []
+    }
+
+    /// `delegate:stop` — stop a running or paused background job. The box
+    /// answers `{ok: true}`, or `{ok: false, error}` when the job is gone or
+    /// already finished; a refusal THROWS so the caller can say why, instead of
+    /// the tap reading as a success.
+    func delegateStop(id: String) async throws {
+        guard let result = try await call("delegate:stop", args: [id], as: DelegateStopResult.self) else {
+            throw MantaError.transport("delegate:stop returned no result")
         }
-        if let envelope = try Self.decode(data, as: DelegateJobsEnvelope.self) {
-            return envelope.jobs
+        if result.ok != true {
+            throw MantaError.server(result.error ?? "the job could not be stopped")
         }
-        return []
     }
 
     /// `tmux:new-session` — create a new project (tmux session).
@@ -789,10 +799,10 @@ final class MantaAPIClient: Sendable {
 
 private struct VoidResult: Decodable {}
 
-/// `delegate:list` can answer `{jobs: [...]}` on a no-engine fallback; the
-/// normalize path in `delegateList()` decodes that shape.
-private struct DelegateJobsEnvelope: Decodable {
-    let jobs: [DelegateJob]
+/// The `delegate:stop` reply: `{ok: true}`, or `{ok: false, error, status?}`.
+private struct DelegateStopResult: Decodable {
+    let ok: Bool?
+    let error: String?
 }
 
 /// The `opencode:fork-session` reply is `{ newSessionId, projects }`; only the

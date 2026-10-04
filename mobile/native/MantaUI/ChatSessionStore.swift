@@ -135,6 +135,26 @@ enum ChatStreamDelta {
     }
 }
 
+/// Which sessions' todo cards the user has expanded, for the life of the app.
+/// A chat screen (and its store) is rebuilt on every push, so the choice cannot
+/// live there; a transcript cell is recycled on scroll, so it cannot live in
+/// the cell either. A main-actor singleton (`static let`, the sanctioned shape
+/// for one — mobile/native/AGENTS.md §5) holds it.
+@MainActor
+final class TodoCardExpansion {
+    static let shared = TodoCardExpansion()
+
+    private var expanded: Set<String> = []
+
+    func isExpanded(_ sessionId: String) -> Bool {
+        expanded.contains(sessionId)
+    }
+
+    func set(_ isExpanded: Bool, for sessionId: String) {
+        if isExpanded { expanded.insert(sessionId) } else { expanded.remove(sessionId) }
+    }
+}
+
 @MainActor
 final class ChatSessionStore: ObservableObject {
 
@@ -168,6 +188,15 @@ final class ChatSessionStore: ObservableObject {
     /// invalid-batch-updates / deque-out-of-bounds crash pair.
     @Published private(set) var rows: [TranscriptRow] = []
     @Published private(set) var running = false
+    /// The run of tool calls at the very tail of the transcript while a turn
+    /// runs. It is NOT a transcript row: the working line draws it (spec §1.1) and
+    /// opens the Activity sheet from it. When the turn settles it becomes an
+    /// ordinary row with the same id.
+    @Published private(set) var trailingRun: ToolRun?
+    /// Whether the transcript's todo card is expanded. Kept per session for the
+    /// life of the app (`TodoCardExpansion`), so leaving and re-opening a chat
+    /// does not collapse a list the user opened.
+    @Published private(set) var todosExpanded = false
     @Published private(set) var turnComplete = false
     @Published private(set) var context: StreamContextPayload?
     @Published private(set) var cache: StreamCachePayload?
@@ -315,6 +344,22 @@ final class ChatSessionStore: ObservableObject {
     /// this the store fired a "reconnect" refetch before `start()` had even run.
     /// Only a genuine drop→connect transition is a resync.
     private var wasConnected: Bool?
+    /// The most recent non-empty `todowrite` in the fetched transcript — the todo
+    /// card's fallback when no live todo frame has arrived (a reopened session).
+    private var transcriptTodos: [StreamTodoItem]?
+    /// The todo list the user dismissed by sending a prompt while it was all
+    /// terminal. The card stays hidden until the list changes.
+    private var todosDismissed: [StreamTodoItem]?
+    /// Child sessions the transcript's task calls / the live subagent frames
+    /// name. Their busy state decides a task row's status (spec §5).
+    private var transcriptChildIDs: Set<String> = []
+    private var liveChildIDs: Set<String> = []
+    /// Child session id → busy, as the event store last reported it. A missing
+    /// key means unknown.
+    private(set) var childRunning: [String: Bool] = [:]
+    /// Child session id → background-job status, fed in by the chat screen from
+    /// its job list.
+    private(set) var jobStatusByChild: [String: String] = [:]
 
     init(
         sessionId: String,
@@ -348,6 +393,17 @@ final class ChatSessionStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in self?.handleConnection(state) }
             .store(in: &cancellables)
+
+        // A task row's status depends on whether its CHILD session is busy, and
+        // the per-session sink above only wakes for THIS session. This one wakes
+        // for any session's state change but does nothing unless a child this
+        // transcript names changed (`refreshChildRunning` compares first).
+        eventStore.$sessionStates
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] states in self?.refreshChildRunning(states) }
+            .store(in: &cancellables)
+
+        todosExpanded = TodoCardExpansion.shared.isExpanded(sessionId)
 
         // Degraded state feeds the chat banner; distinct values only, so a
         // republished identical value does not re-render the banner.
@@ -488,6 +544,8 @@ final class ChatSessionStore: ObservableObject {
         sessionError = s.sessionError
         todos = s.todos
         subagents = s.subagents
+        liveChildIDs = Set(s.subagents.map(\.childSessionId))
+        updateChildRunning(eventStore.sessionStates)
         planOn = s.planOn
 
         // Which frame (if any) just changed this session's stream state. The
@@ -637,6 +695,88 @@ final class ChatSessionStore: ObservableObject {
         if connected && wasDisconnected { scheduleRefetch() }
     }
 
+    // MARK: - Task status inputs (spec §5)
+
+    /// Which of `known` child sessions are busy, from the event store's
+    /// per-session state. A child with no state is UNKNOWN — except once the box
+    /// has restated its authoritative running set (`authoritative`), when a
+    /// session absent from it is, by that set's own definition, not running.
+    /// Without that, a background task started long ago (no job record left, no
+    /// frame ever seen for its child) would read "running" for ever.
+    /// `nonisolated`: pure (value-in, value-out), so it is unit-testable.
+    nonisolated static func childRunningSnapshot(
+        known: Set<String>,
+        states: [String: MantaSessionStreamState],
+        authoritative: Bool
+    ) -> [String: Bool] {
+        var out: [String: Bool] = [:]
+        for id in known {
+            if let running = states[id]?.running {
+                out[id] = running
+            } else if authoritative {
+                out[id] = false
+            }
+        }
+        return out
+    }
+
+    /// Recompute the busy map for the children this transcript names. When one
+    /// that was busy has gone idle, its task row's result has just arrived in the
+    /// parent transcript: refetch so the row flips to done promptly. Returns
+    /// whether the map changed (the caller rebuilds if it has not already).
+    @discardableResult
+    private func updateChildRunning(_ states: [String: MantaSessionStreamState]) -> Bool {
+        let known = transcriptChildIDs.union(liveChildIDs)
+        guard !known.isEmpty || !childRunning.isEmpty else { return false }
+        let next = Self.childRunningSnapshot(
+            known: known,
+            states: states,
+            authoritative: eventStore.runningSetSeq > 0
+        )
+        guard next != childRunning else { return false }
+        let previous = childRunning
+        childRunning = next
+        if next.contains(where: { $0.value == false && previous[$0.key] == true }) {
+            scheduleRefetch()
+        }
+        return true
+    }
+
+    private func refreshChildRunning(_ states: [String: MantaSessionStreamState]) {
+        if updateChildRunning(states) { rebuildBlocks() }
+    }
+
+    /// Feed the background-job list in (child session id → job status) so a task
+    /// row whose job record says running/paused reads as running (spec §5, rule
+    /// 3). The chat screen owns the job list (it also drives the Background jobs
+    /// sheet); the store only needs the statuses.
+    func updateJobStatuses(_ statuses: [String: String]) {
+        guard statuses != jobStatusByChild else { return }
+        jobStatusByChild = statuses
+        rebuildBlocks()
+    }
+
+    // MARK: - Activity + todo card
+
+    /// The run with this id — the live trailing run (drawn by the working line)
+    /// or one of the transcript's rows. nil when the transcript no longer
+    /// holds it.
+    func activityRun(id: String) -> ToolRun? {
+        if let trailingRun, trailingRun.id == id { return trailingRun }
+        for block in blocks {
+            if case .activity(let run) = block, run.id == id { return run }
+        }
+        return nil
+    }
+
+    /// Expand / collapse the todo card. The choice outlives this store (see
+    /// `TodoCardExpansion`) and is not reset by running/idle.
+    func toggleTodos() {
+        todosExpanded.toggle()
+        TodoCardExpansion.shared.set(todosExpanded, for: sessionId)
+        rebuildBlocks()
+    }
+
     // MARK: - Block assembly
 
     /// The rendered transcript = canonical blocks + the live in-progress prose
@@ -648,22 +788,46 @@ final class ChatSessionStore: ObservableObject {
     /// visible duplicate, not a harmless overlap. The tail is emptied by the
     /// retirement step in `fetchTranscript`; nothing else may append to it.
     private func rebuildBlocks() {
-        // LIVE running tools, appended into THIS turn's step rail. They are not
-        // canonical content, so they merge here (on every stream frame) rather
-        // than in the mapper that feeds `transcript` — that keeps `transcript`
-        // pristine while the live rows tail their output and vanish on
-        // turnComplete (when the canonical refetch takes them over as steps).
+        // Task rows resolve their status against what is known RIGHT NOW (the
+        // child session's busy state, the job list) — not at fetch time — so a
+        // finished subagent flips to done without a refetch (spec §5).
+        let taskContext = TaskStatusContext(childRunning: childRunning, jobStatus: jobStatusByChild)
+        let resolved = ChatTranscriptMapper.resolvingTaskStatuses(transcript, context: taskContext)
+
+        // LIVE running tools and subagents join the run at the tail of THIS turn.
+        // They are not canonical content, so they merge here (on every stream
+        // frame) rather than in the mapper that feeds `transcript` — that keeps
+        // `transcript` pristine while live calls appear and then vanish when the
+        // canonical refetch takes them over. While the turn runs, the run at the
+        // very tail is withheld from the rows: the working line draws it.
         let liveTools = eventStore.sessionStates[sessionId]?.runningTools ?? []
-        let liveTranscript = ChatTranscriptMapper.appendingLive(tools: liveTools, subagents: subagents, to: transcript)
+        let hasTailContent = !inProgressText.isEmpty || pendingPrompts.contains { $0.state == .sending }
+        let merge = ChatTranscriptMapper.mergingLive(
+            tools: liveTools,
+            subagents: subagents,
+            context: taskContext,
+            running: running,
+            hasTailContent: hasTailContent,
+            to: resolved
+        )
+        let liveTranscript = merge.blocks
+        // @Published fires on EVERY assignment, and this runs on every stream
+        // frame: only publish a real change so the working line is not re-drawn
+        // for nothing.
+        if trailingRun != merge.trailing { trailingRun = merge.trailing }
+
+        // The todo card: the LAST row of the transcript (after the queued
+        // prompts), present at most once.
+        let todoItems = TodoCardLogic.select(live: todos, transcript: transcriptTodos, dismissed: todosDismissed)
+        let todoContent = todoItems.map { TodoCardContent(items: $0, expanded: todosExpanded) }
 
         // Terminal state of the current turn, MOVED out of the pinned area into
         // the transcript, at the end of the turn it belongs to: session errors
         // and truncations scroll WITH their turn rather than hovering over the
         // composer. The blocking cards (permission / plan / question) join the
         // tail here too, in the agreed fixed order — notices first, then
-        // permission, plan-exit, generic question, and the queued prompts LAST
-        // (they represent what happens next). See `trailingBlocks` for the
-        // pinned order.
+        // permission, plan-exit, generic question, the queued prompts, and the
+        // todo card last. See `trailingBlocks` for the pinned order.
         let trailing = Self.trailingBlocks(
             sessionError: sessionError,
             truncation: truncation,
@@ -671,7 +835,8 @@ final class ChatSessionStore: ObservableObject {
             permission: newestPermission,
             planExitQuestion: newestPlanQuestion,
             question: newestQuestion,
-            pendingPrompts: pendingPrompts
+            pendingPrompts: pendingPrompts,
+            todos: todoContent
         )
 
         let newRows: [TranscriptRow]
@@ -712,8 +877,8 @@ final class ChatSessionStore: ObservableObject {
 
     /// Build the transcript-TAIL block array in the ONE fixed order: system
     /// notices (session error, then truncation), the blocking cards (permission
-    /// → plan-exit → generic question), then the queued prompts LAST — they
-    /// represent what happens next and must stay at the very end. Pure and
+    /// → plan-exit → generic question), the queued prompts — they represent what
+    /// happens next — and finally the todo card, the very last row. Pure and
     /// unit-tested so the ordering cannot drift between the two rebuild
     /// branches (BET-1214).
     /// `nonisolated`: pure (value-in, value-out, no main-actor state), so it is
@@ -725,7 +890,8 @@ final class ChatSessionStore: ObservableObject {
         permission: PermissionRequest?,
         planExitQuestion: QuestionRequest?,
         question: QuestionRequest?,
-        pendingPrompts: [PendingPrompt]
+        pendingPrompts: [PendingPrompt],
+        todos: TodoCardContent? = nil
     ) -> [TranscriptBlock] {
         var trailing: [TranscriptBlock] = []
         if let err = sessionError {
@@ -746,6 +912,11 @@ final class ChatSessionStore: ObservableObject {
         // Prompts accepted mid-turn render as dim ghost bubbles at the very
         // tail — where they will actually land once the current turn finishes.
         trailing.append(contentsOf: pendingPrompts.map { .queuedPrompt($0) })
+        // The todo card is the LAST row of the transcript, after everything that
+        // represents "what happens next" (spec §6).
+        if let todos {
+            trailing.append(.todos(todos))
+        }
         return trailing
     }
 
@@ -827,6 +998,12 @@ final class ChatSessionStore: ObservableObject {
                     // just-hydrated transcript to blank. Assign to the PROPERTY
                     // (self.messages), not the shadowed local.
                     self.messages = loaded
+                    // Everything the todo card and the task rows derive from the
+                    // raw transcript is recomputed HERE, once per fetch, rather
+                    // than on every stream frame.
+                    transcriptTodos = TodoCardLogic.fromTranscript(loaded)
+                    transcriptChildIDs = TaskStatusResolver.childSessionIDs(in: loaded)
+                    updateChildRunning(eventStore.sessionStates)
                     voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
                     transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes, widgets: widgets)
                     // The transcript now carries these messages, so any live
@@ -1012,6 +1189,13 @@ final class ChatSessionStore: ObservableObject {
     /// drain if a turn is running). Failure is surfaced by the pending row in
     /// the transcript with its own tap-to-retry — never retried automatically.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil, agent: String? = nil) async {
+        // A finished checklist is dismissed by the user's next prompt, like the
+        // desktop: it stays hidden until the list changes.
+        if let items = TodoCardLogic.select(live: todos, transcript: transcriptTodos, dismissed: nil),
+           TodoCardLogic.allTerminal(items) {
+            todosDismissed = items
+            rebuildBlocks()
+        }
         let prompt = PendingPrompt(
             id: UUID().uuidString,
             sessionId: sessionId,

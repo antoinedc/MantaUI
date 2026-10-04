@@ -312,9 +312,10 @@ enum StepStatus: Hashable {
 }
 
 struct ToolStep: Identifiable, Hashable {
-    /// STABLE across rebuilds — the mapper derives it deterministically from
-    /// the wire data (see `ChatTranscriptMapper.step(from:...)`), so a step's
-    /// identity survives a canonical refetch. It used to be a fresh random id
+    /// STABLE across rebuilds — it was derived deterministically from the wire
+    /// data (the tool callID), so a step's identity survived a canonical refetch.
+    /// (Legacy: the mapper no longer builds steps — runs replaced them; only the
+    /// capture fixtures construct `ToolStep` now.) It used to be a fresh random id
     /// minted on every mapping pass, which made the diffing list see every
     /// step as removed+reinserted at each turn boundary and made the rows
     /// flash/jump (same bug the subagent rows already fixed).
@@ -533,7 +534,8 @@ struct StepGroupView: View {
     /// The roll-up summary rendered as a row of the same container: 44pt min
     /// height, full-width `contentShape` and a trailing chevron, so its tap
     /// affordance matches its expanded step siblings. The summary COPY (with
-    /// its leading `▸`) is unchanged (ChatRollup.summary).
+    /// its leading `▸`) is unchanged. (Legacy `.steps` surface: only the capture
+    /// fixtures build it now — the transcript draws runs via `ActivityRunRowView`.)
     private func rollupHeader(_ summary: String) -> some View {
         Button(action: { rollupExpanded.toggle() }) {
             HStack(spacing: Metrics.spacing.sp2) {
@@ -601,6 +603,20 @@ struct StepGroupView: View {
 enum SubagentStatus: Hashable {
     case running
     case done
+    /// The task's tool call errored. It used to read as `.running`.
+    case failed
+
+    /// A task part's wire `state.status`: `completed` is done, `error` is
+    /// failed, everything else (pending, running, unknown) is still running.
+    /// By the time a part reaches a row its status has already been resolved
+    /// against the child session / job record (`TaskStatusResolver`).
+    static func fromWire(_ raw: String?) -> SubagentStatus {
+        switch (raw ?? "").lowercased() {
+        case "completed": return .done
+        case "error": return .failed
+        default: return .running
+        }
+    }
 }
 
 struct SubagentSession: Identifiable, Hashable {
@@ -662,6 +678,7 @@ struct SubagentSession: Identifiable, Hashable {
         switch status {
         case .running: return duration ?? ""
         case .done: return "done"
+        case .failed: return "failed"
         }
     }
 
@@ -671,6 +688,7 @@ struct SubagentSession: Identifiable, Hashable {
         switch status {
         case .running: return "subagent · running \(duration ?? "")"
         case .done: return "subagent · done"
+        case .failed: return "subagent · failed"
         }
     }
 }
@@ -808,12 +826,20 @@ enum TranscriptBlock: Equatable {
     /// A generic pending question rendered as a card in the transcript tail
     /// (BET-1214).
     case question(QuestionRequest)
+    /// One RUN of tool calls (and file-save patches), drawn as a single quiet
+    /// line that opens the Activity sheet (spec §1). A run can span assistant
+    /// messages; its `id` is its first part's id. The legacy `.steps` case is
+    /// no longer produced by the mapper — only the capture fixtures build it.
+    case activity(ToolRun)
+    /// The todo checklist card — always the LAST row of the transcript, id
+    /// `"todos"`, present at most once (spec §6).
+    case todos(TodoCardContent)
 
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question: return nil
+        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos: return nil
         }
     }
 }
@@ -949,4 +975,151 @@ struct SubagentScreen: View {
 @MainActor
 private func pointsFor(multiplier: CGFloat, size: CGFloat) -> CGFloat {
     max(0, (multiplier - 1) * size)
+}
+
+// MARK: - Todo card (the transcript's last row — spec §6)
+
+/// The todo checklist, drawn as the LAST row of the transcript so it scrolls
+/// with the conversation instead of floating over it. Collapsed by default:
+/// header ("Todo" · "3/7" · chevron), a two-colour progress rail, and one line
+/// naming the current (else next) item. Tapping the header expands it to EVERY
+/// item, each allowed three lines. The expanded state is data (`content.expanded`,
+/// kept per session by the store), not view state: a transcript cell is recycled
+/// on scroll and would forget a `@State`.
+struct TodoCardView: View {
+    let content: TodoCardContent
+    let tokens: Tokens
+    /// nil on a surface that cannot toggle: the header is then a plain, inert
+    /// block rather than a button that does nothing.
+    let onToggle: (() -> Void)?
+
+    var body: some View {
+        let progress = TodoCardLogic.progress(content.items)
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            Group {
+                if let onToggle {
+                    Button(action: onToggle) { header(progress) }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(content.expanded ? "Collapse the todo list" : "Expand the todo list")
+                } else {
+                    header(progress)
+                }
+            }
+            .accessibilityLabel("Todo \(progress.label)")
+            .accessibilityIdentifier("todos-card-header")
+
+            if content.expanded {
+                // The box's todo items carry NO id field, ever, so every item's
+                // `id` is nil and keying on it gives every row the SAME identity —
+                // SwiftUI then renders one row's content repeated N times. Key on
+                // array POSITION instead: position IS the identity here, exactly
+                // as the desktop card does (MessageRow.tsx, ActiveTodos).
+                ForEach(Array(content.items.enumerated()), id: \.offset) { pair in
+                    todoRow(pair.element, lineLimit: 3)
+                }
+            }
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.vertical, Metrics.spacing.sp2)
+        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("todos-card")
+    }
+
+    @MainActor
+    private func header(_ progress: TodoProgress) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text("Todo")
+                    .font(.manta(size: Metrics.type.twoXS, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx4)
+                    .textCase(.uppercase)
+                Spacer(minLength: 0)
+                Text(progress.label)
+                    .font(.manta(size: Metrics.type.xs))
+                    .monospacedDigit()
+                    .foregroundColor(progress.allSettled ? tokens.ok : tokens.tx4)
+                if onToggle != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                        .rotationEffect(.degrees(content.expanded ? 90 : 0))
+                }
+            }
+            progressRail(progress)
+            if !content.expanded, let current = TodoCardLogic.headline(content.items) {
+                todoRow(current, lineLimit: 1)
+            }
+        }
+        .frame(minHeight: 44, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// Two-segment rail: settled runs green, the in-flight item runs amber, the
+    /// rest is the track showing through.
+    @MainActor
+    private func progressRail(_ progress: TodoProgress) -> some View {
+        GeometryReader { geo in
+            HStack(spacing: 0) {
+                Rectangle().fill(tokens.ok)
+                    .frame(width: geo.size.width * progress.settledPct / 100)
+                Rectangle().fill(tokens.warn)
+                    .frame(width: geo.size.width * progress.activePct / 100)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(height: Metrics.spacing.spPx * 2)
+        .background(tokens.borderSubtle)
+        .clipShape(Capsule())
+        .accessibilityHidden(true)
+    }
+
+    /// One todo row. `status` is compared case-INSENSITIVELY. The mark aligns to
+    /// the FIRST line so a wrapping item keeps the icon beside its opening words.
+    @MainActor
+    @ViewBuilder
+    private func todoRow(_ item: StreamTodoItem, lineLimit: Int) -> some View {
+        let status = TodoCardLogic.status(item)
+        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
+            Image(systemName: markName(status))
+                .font(.system(size: Metrics.type.xs))
+                .foregroundColor(markColor(status))
+            Text(item.content ?? "")
+                .font(.manta(size: Metrics.type.small, weight: status == "in_progress" ? mantaFontWeight(Metrics.type.semibold) : .regular))
+                .foregroundColor(textColor(status))
+                .strikethrough(status == "cancelled")
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func markName(_ status: String) -> String {
+        switch status {
+        case "completed": return "checkmark.circle.fill"
+        case "cancelled": return "xmark.circle"
+        case "in_progress": return "circle.dotted"
+        default: return "circle"
+        }
+    }
+
+    private func markColor(_ status: String) -> Color {
+        switch status {
+        case "completed": return tokens.ok
+        case "in_progress": return tokens.accent
+        default: return tokens.tx4
+        }
+    }
+
+    private func textColor(_ status: String) -> Color {
+        switch status {
+        case "completed", "cancelled": return tokens.tx4
+        case "in_progress": return tokens.tx1
+        default: return tokens.tx2
+        }
+    }
 }

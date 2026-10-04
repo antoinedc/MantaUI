@@ -67,6 +67,9 @@ struct SessionListView: View {
     /// The All / Recent filter (BET-1349). Not persisted — resets to All on
     /// launch.
     @State private var filter: SessionFilter = .all
+    /// How the list is ordered (spec §3). Device-local; an unrecognised stored
+    /// value falls back to `.created`.
+    @AppStorage("sessionListOrder") private var listOrder: SessionListOrdering = .created
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -85,7 +88,10 @@ struct SessionListView: View {
                     loadingState
                 } else if !store.loadedOnce {
                     unreachableState
-                } else if store.projects.isEmpty {
+                } else if store.visibleProjects.isEmpty {
+                    // Visible, not raw: a box whose only windows are background
+                    // jobs has no sessions to list, and "nothing named …" below
+                    // would be the wrong message for it.
                     emptyState
                 } else if filteredProjects.isEmpty {
                     noMatchState
@@ -106,6 +112,9 @@ struct SessionListView: View {
                             .foregroundColor(tokens.tx2)
                     }
                     .accessibilityLabel("Settings")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    orderMenu
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -233,12 +242,42 @@ struct SessionListView: View {
 
     // MARK: - List
 
+    @ViewBuilder
     private var list: some View {
+        switch listOrder {
+        case .created: groupedList
+        case .activity: activityList
+        }
+    }
+
+    /// The order toggle (spec §3), in the navigation bar's own menu rather than
+    /// a floating control. A `Picker` inside a `Menu` renders as a checkmarked
+    /// choice, so the current mode is always visible when it opens.
+    private var orderMenu: some View {
+        Menu {
+            Picker("Order", selection: $listOrder) {
+                ForEach(SessionListOrdering.allCases, id: \.self) { order in
+                    Label(order.label, systemImage: order.systemImage).tag(order)
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .foregroundColor(tokens.tx2)
+        }
+        .accessibilityLabel("Order sessions")
+        .accessibilityValue(listOrder.label)
+        .accessibilityIdentifier("session-order-menu")
+        .onChange(of: listOrder) { _, _ in
+            SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+        }
+    }
+
+    private var groupedList: some View {
         List {
             ForEach(filteredProjects) { project in
                 Section {
                     ForEach(rowEntries(project)) { entry in
-                        row(project: project, entry: entry)
+                        row(projectName: project.tmuxSession, entry: entry, showsProject: false)
                             .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
                                                       bottom: 0, trailing: Metrics.spacing.sp3))
                             .listRowSeparator(.hidden)
@@ -262,6 +301,48 @@ struct SessionListView: View {
         .environment(\.defaultMinListRowHeight, Metrics.type.listRowMinH)
     }
 
+    /// Latest-activity ordering (spec §3): ONE flat card across every project,
+    /// newest activity first, with the project named on each row's subtitle
+    /// because there are no group headers to say it. Pins are not lifted.
+    private var activityList: some View {
+        let entries = activityEntries
+        return List {
+            Section {
+                ForEach(entries) { entry in
+                    row(projectName: entry.project, entry: entry, showsProject: true)
+                        .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
+                                                  bottom: 0, trailing: Metrics.spacing.sp3))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(
+                            SessionCardBackground(
+                                position: entry.position,
+                                open: openRow == entry.id,
+                                tokens: tokens
+                            )
+                        )
+                }
+            }
+        }
+        .listStyle(.plain)
+        .listSectionSpacing(Metrics.spacing.sp6)
+        .scrollContentBackground(.hidden)
+        .background(tokens.canvas)
+        .environment(\.defaultMinListRowHeight, Metrics.type.listRowMinH)
+    }
+
+    /// The flat list's rows. Search and the Recent filter have already run
+    /// (`filteredProjects`), and job windows were removed before either.
+    private var activityEntries: [SessionRowEntry] {
+        let flat = SessionActivityOrder.flatten(filteredProjects) { _, window in
+            store.lastActivity(for: window)
+        }
+        let count = flat.count
+        return flat.enumerated().map { idx, item in
+            SessionRowEntry(project: item.project, window: item.window,
+                            position: .at(index: idx, count: count))
+        }
+    }
+
     private func rowEntries(_ project: MantaProject) -> [SessionRowEntry] {
         // BET-1213: a background job's child window gets no row of its own on
         // mobile — it is hidden here and represented by the count on its
@@ -276,7 +357,7 @@ struct SessionListView: View {
     }
 
     private var filteredProjects: [MantaProject] {
-        let searched = searchFiltered(store.projects)
+        let searched = searchFiltered(store.visibleProjects)
         let recencyFiltered = applyRecencyFilter(searched)
         return sorted(recencyFiltered)
     }
@@ -363,61 +444,66 @@ struct SessionListView: View {
     }
 
     @ViewBuilder
-    private func row(project: MantaProject, entry: SessionRowEntry) -> some View {
+    private func row(projectName: String, entry: SessionRowEntry, showsProject: Bool) -> some View {
         let window = entry.window
+        // The same display form the grouped list's headers use, so a project
+        // reads identically in both orderings (the raw tmux name stays the
+        // row's identity for open/pin/delete below).
+        let caption = showsProject ? titleCased(projectName) : nil
         Button {
-            openRow = SessionRowEntry.id(project: project.tmuxSession, windowIndex: window.index)
-            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
+            openRow = SessionRowEntry.id(project: projectName, windowIndex: window.index)
+            path.append(SessionOpenTarget(project: projectName, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
                 status: store.rowStatus(for: window),
                 age: ageText(window, now: now),
                 position: entry.position,
-                pinned: store.isPinned(session: project.tmuxSession, index: window.index),
+                pinned: store.isPinned(session: projectName, index: window.index),
+                projectCaption: caption,
                 tokens: tokens
             )
         }
         .buttonStyle(.plain)
         .contextMenu {
-            let id = SessionPinID.window(project.tmuxSession, index: window.index)
+            let id = SessionPinID.window(projectName, index: window.index)
             Button("Rename") {
-                renameProject = project.tmuxSession
+                renameProject = projectName
                 renameValue = window.name
-                sheetRoute = .rename(window: window, project: project.tmuxSession)
+                sheetRoute = .rename(window: window, project: projectName)
             }
-            Button(store.isPinned(session: project.tmuxSession, index: window.index) ? "Unpin" : "Pin") {
-                store.togglePin(session: project.tmuxSession, index: window.index)
+            Button(store.isPinned(session: projectName, index: window.index) ? "Unpin" : "Pin") {
+                store.togglePin(session: projectName, index: window.index)
                 SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
             }
             Button("Fork") {
-                fork(window: window, project: project)
+                fork(window: window, projectName: projectName)
                 SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
             }
             Divider()
             Button("Delete", role: .destructive) {
-                requestDelete(window: window, project: project)
+                requestDelete(window: window, projectName: projectName)
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
             Button(role: .destructive) {
-                requestDelete(window: window, project: project)
+                requestDelete(window: window, projectName: projectName)
             } label: {
                 Label("Delete", systemImage: "trash")
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             Button {
-                store.togglePin(session: project.tmuxSession, index: window.index)
+                store.togglePin(session: projectName, index: window.index)
                 SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
             } label: {
-                Label(store.isPinned(session: project.tmuxSession, index: window.index) ? "Unpin" : "Pin",
-                      systemImage: store.isPinned(session: project.tmuxSession, index: window.index) ? "pin.slash" : "pin")
+                Label(store.isPinned(session: projectName, index: window.index) ? "Unpin" : "Pin",
+                      systemImage: store.isPinned(session: projectName, index: window.index) ? "pin.slash" : "pin")
             }
-            .tint(store.isPinned(session: project.tmuxSession, index: window.index) ? tokens.tx4 : tokens.accent)
+            .tint(store.isPinned(session: projectName, index: window.index) ? tokens.tx4 : tokens.accent)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(window.name), \(subtitle(for: window))")
+        .accessibilityLabel("\(window.name), \(subtitle(for: window, projectCaption: caption))")
         .accessibilityHint("Opens the session. Swipe or long-press for actions.")
     }
 
@@ -425,22 +511,22 @@ struct SessionListView: View {
         SessionRowAge.text(for: store.rowStatus(for: window), now: now, ttlMs: store.cacheTtlMs)
     }
 
-    private func subtitle(for window: MantaWindow) -> String {
-        SessionRowSubtitle.text(for: store.rowStatus(for: window)) ?? ""
+    private func subtitle(for window: MantaWindow, projectCaption: String? = nil) -> String {
+        SessionRowSubtitle.text(for: store.rowStatus(for: window), projectName: projectCaption) ?? ""
     }
 
     // MARK: - Delete (§7.3)
 
-    private func requestDelete(window: MantaWindow, project: MantaProject) {
+    private func requestDelete(window: MantaWindow, projectName: String) {
         let status = store.rowStatus(for: window)
         if status.running {
             let durationText = runningDuration(of: window)
             deleteRunningText = durationText
-            confirmDeleteProject = project.tmuxSession
+            confirmDeleteProject = projectName
             sheetRoute = .confirmDelete(window: window)
             SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
         } else {
-            store.beginIdleDelete(session: project.tmuxSession, index: window.index)
+            store.beginIdleDelete(session: projectName, index: window.index)
         }
     }
 
@@ -676,10 +762,10 @@ struct SessionListView: View {
 
     // MARK: - Fork
 
-    private func fork(window: MantaWindow, project: MantaProject) {
+    private func fork(window: MantaWindow, projectName: String) {
         let sid = window.opencodeSessionId ?? ""
         let newName = "\(window.name) fork"
-        Task { await store.forkSession(sessionId: sid, project: project.tmuxSession, newName: newName) }
+        Task { await store.forkSession(sessionId: sid, project: projectName, newName: newName) }
     }
 
     // MARK: - Empty / error
@@ -813,6 +899,9 @@ private struct SessionRowContent: View {
     let age: String?
     let position: SessionCardPosition
     let pinned: Bool
+    /// The project's name as a leading caption on the subtitle — set only by
+    /// the flat Latest-activity list, which has no group headers to carry it.
+    let projectCaption: String?
     let tokens: Tokens
 
     var body: some View {
@@ -831,7 +920,7 @@ private struct SessionRowContent: View {
                             .foregroundColor(tokens.tx3)
                     }
                 }
-                if let subtitle = SessionRowSubtitle.text(for: status) {
+                if let subtitle = SessionRowSubtitle.text(for: status, projectName: projectCaption) {
                     Text(subtitle)
                         .font(.manta(size: Metrics.type.xs, weight: .medium))
                         .foregroundColor(subtitleColor)

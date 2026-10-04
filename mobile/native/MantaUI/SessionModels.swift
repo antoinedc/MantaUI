@@ -37,8 +37,21 @@ struct MantaWindow: Codable, Equatable, Sendable, Identifiable {
     var paneCurrentPath: String
     var opencodeSessionId: String?
     var worktreePath: String?
+    /// Who owns the window, from the tmux `@manta-owner` stamp: `"user"`,
+    /// `"cto"` or `"job"` (src/server/tmux.mjs). Absent on a box that predates
+    /// the stamp, which reads as a plain user window.
+    var owner: String? = nil
 
     var id: Int { index }
+
+    /// The box tagged this window as a background job's own window. This is the
+    /// primary job-window signal; the job-record nesting rule only backstops
+    /// windows created before the tag existed.
+    var isJobWindow: Bool { owner == "job" }
+
+    /// A chat-mode window — one backed by an opencode session. A window with no
+    /// session is a terminal window.
+    var hasChatSession: Bool { !(opencodeSessionId ?? "").isEmpty }
 }
 
 struct MantaProject: Codable, Equatable, Sendable, Identifiable {
@@ -67,17 +80,161 @@ struct MantaWorktree: Codable, Equatable, Sendable {
 /// (src/server/delegate.mjs). `parentSessionID` is the session that started the
 /// job; `childSessionID` is the job's own opencode session (null until created).
 /// Unknown fields are ignored by Codable.
-struct DelegateJob: Codable, Equatable, Sendable {
+///
+/// Only `id` and `status` are required. Everything else is optional AND decoded
+/// leniently (`init(from:)` in the extension below): a field of an unexpected
+/// type becomes nil instead of failing the record, because a record that fails
+/// to decode is dropped from the list and its job vanishes from the UI.
+struct DelegateJob: Codable, Equatable, Sendable, Identifiable {
     var id: String
     var parentSessionID: String?
     var childSessionID: String?
     var status: String
+    /// Display name the box gave the job (the delegate prompt's title, or the
+    /// task's description).
+    var name: String? = nil
+    /// `"delegate"` for a `delegate` job, `"subagent"` for a `task` subagent the
+    /// job store adopted.
+    var origin: String? = nil
+    var branch: String? = nil
+    /// One line describing what the job is doing now (box-generated).
+    var activity: String? = nil
+    /// Epoch milliseconds, as the box stores them.
+    var createdAt: Double? = nil
+    var startedAt: Double? = nil
+    var finishedAt: Double? = nil
+
+    fileprivate enum CodingKeys: String, CodingKey {
+        case id, parentSessionID, childSessionID, status
+        case name, origin, branch, activity
+        case createdAt, startedAt, finishedAt
+    }
 
     /// Whether the job is still live. `done`/`failed`/`stopped` are terminal;
     /// anything else (a running job, or a status a newer box added) counts as
     /// active so the count never under-reports a live job.
     var isActive: Bool {
         status != "done" && status != "failed" && status != "stopped"
+    }
+
+    /// Whether the job can be stopped: the box's `stopJob` accepts a running
+    /// job and a paused one, and nothing else.
+    var isStoppable: Bool { status == "running" || status == "paused" }
+}
+
+extension DelegateJob {
+    // In an extension so the synthesized memberwise initializer survives — the
+    // existing call sites build jobs with `DelegateJob(id:parentSessionID:…)`.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        status = try c.decode(String.self, forKey: .status)
+        parentSessionID = Self.lenientString(c, .parentSessionID)
+        childSessionID = Self.lenientString(c, .childSessionID)
+        name = Self.lenientString(c, .name)
+        origin = Self.lenientString(c, .origin)
+        branch = Self.lenientString(c, .branch)
+        activity = Self.lenientString(c, .activity)
+        createdAt = Self.lenientMillis(c, .createdAt)
+        startedAt = Self.lenientMillis(c, .startedAt)
+        finishedAt = Self.lenientMillis(c, .finishedAt)
+    }
+
+    private static func lenientString(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {
+        (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil
+    }
+
+    /// A number (the box's shape), or a numeric string from a looser writer.
+    private static func lenientMillis(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Double? {
+        if let n = (try? c.decodeIfPresent(Double.self, forKey: key)) ?? nil { return n }
+        if let s = (try? c.decodeIfPresent(String.self, forKey: key)) ?? nil { return Double(s) }
+        return nil
+    }
+}
+
+/// The `delegate:list` result, decoded one record at a time.
+///
+/// Accepts both shapes the box answers with — a bare `DelegateJob[]`, and the
+/// no-engine fallback `{ jobs: [] }` — and SKIPS a record that will not decode
+/// rather than failing the whole list. A single malformed job used to throw out
+/// every job, which un-hid every background-job window in the session list.
+struct LenientDelegateJobs: Decodable, Sendable {
+    let jobs: [DelegateJob]
+
+    private enum Keys: String, CodingKey { case jobs }
+
+    /// Decodes anything and consumes exactly one element, which is how a
+    /// failed element is stepped over: an unkeyed container's index only
+    /// advances on a SUCCESSFUL decode, so a throwing element would otherwise
+    /// be retried forever.
+    private struct Skip: Decodable {}
+
+    init(from decoder: Decoder) throws {
+        if var bare = try? decoder.unkeyedContainer() {
+            jobs = Self.records(from: &bare)
+            return
+        }
+        let keyed = try decoder.container(keyedBy: Keys.self)
+        guard keyed.contains(.jobs), var nested = try? keyed.nestedUnkeyedContainer(forKey: .jobs) else {
+            jobs = []
+            return
+        }
+        jobs = Self.records(from: &nested)
+    }
+
+    private static func records(from container: inout UnkeyedDecodingContainer) -> [DelegateJob] {
+        var out: [DelegateJob] = []
+        while !container.isAtEnd {
+            if let job = try? container.decode(DelegateJob.self) {
+                out.append(job)
+                continue
+            }
+            // Step over the bad record. If even that fails, stop rather than
+            // spin: the container did not advance.
+            do { _ = try container.decode(Skip.self) } catch { break }
+        }
+        return out
+    }
+}
+
+/// Which windows are background-job windows, and what the session list should
+/// therefore render (spec §2).
+///
+/// A window is a job window when the box tagged it `owner == "job"` OR the
+/// job-record nesting rule hides it (covers windows created before the tag
+/// existed). Job windows are never top-level rows. A job window whose parent is
+/// visible is represented by its parent's count; one with NO visible parent
+/// (parent closed, in another project, headless, or the job record pruned) is
+/// hidden entirely — it is reachable only from the parent's Background jobs
+/// sheet, never from the list.
+enum SessionJobWindows {
+    /// Indices of a project's windows to REMOVE from the list.
+    static func hiddenIndices(project: MantaProject, jobs: [DelegateJob]) -> Set<Int> {
+        hiddenIndices(project: project, nesting: SessionJobNesting.compute(project: project, jobs: jobs))
+    }
+
+    /// Same, for a caller that already computed the nesting (it also needs the
+    /// per-parent counts) and should not compute it twice.
+    static func hiddenIndices(project: MantaProject, nesting: DelegateNesting) -> Set<Int> {
+        var hidden = nesting.hidden
+        for w in project.windows where w.isJobWindow {
+            hidden.insert(w.index)
+        }
+        return hidden
+    }
+
+    /// `projects` with each project's hidden windows removed. A project left
+    /// with no windows because ALL of them were job windows is dropped (its
+    /// header would head an empty card); a project that never had windows is
+    /// kept as it was.
+    static func visible(_ projects: [MantaProject], hidden: [String: Set<Int>]) -> [MantaProject] {
+        projects.compactMap { project in
+            guard let drop = hidden[project.tmuxSession], !drop.isEmpty else { return project }
+            var copy = project
+            copy.windows = project.windows.filter { !drop.contains($0.index) }
+            if copy.windows.isEmpty && !project.windows.isEmpty { return nil }
+            return copy
+        }
     }
 }
 
@@ -251,6 +408,18 @@ enum SessionRowSubtitle {
         // Recency lives in the trailing age chip (BET-1084); the subtitle is model-only.
         return s.modelLabel.flatMap { $0.isEmpty ? nil : $0 }
     }
+
+    /// The subtitle with the project name as a leading caption — used by the
+    /// flat Latest-activity ordering, where rows are no longer grouped under a
+    /// project header ("better-ui · running · opus 4.8"). A row with nothing to
+    /// say after the caption shows the caption alone, so the project is still
+    /// readable.
+    static func text(for s: SessionRowStatus, projectName: String?) -> String? {
+        let base = text(for: s)
+        guard let projectName, !projectName.isEmpty else { return base }
+        guard let base, !base.isEmpty else { return projectName }
+        return "\(projectName) · \(base)"
+    }
 }
 
 /// The single definition of "recent" (BET-1349) — the age chip and the Recent
@@ -406,6 +575,185 @@ enum SessionOrder {
     static func sorted(_ windows: [MantaWindow], project: String, pinned: Set<String>) -> [MantaWindow] {
         let isPinned = { (w: MantaWindow) in pinned.contains(SessionPinID.window(project, index: w.index)) }
         return windows.filter(isPinned) + windows.filter { !isPinned($0) }
+    }
+}
+
+// MARK: - Session list ordering (spec §3)
+
+/// How the session list is ordered. Device-local, persisted through
+/// `@AppStorage("sessionListOrder")` by its raw value.
+enum SessionListOrdering: String, CaseIterable, Sendable {
+    /// Grouped by project in tmux order; inside a project pinned windows first,
+    /// then window index (≈ creation order). The long-standing behaviour.
+    case created
+    /// One flat list across projects, newest activity first. Pins are not
+    /// lifted.
+    case activity
+
+    var label: String {
+        switch self {
+        case .created: return "Created"
+        case .activity: return "Latest activity"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .created: return "folder"
+        case .activity: return "clock"
+        }
+    }
+}
+
+/// One row of the flat Latest-activity list: a window plus the project it
+/// lives in (a window index is only unique within its project).
+struct SessionFlatEntry: Equatable, Sendable {
+    let project: String
+    let window: MantaWindow
+}
+
+enum SessionActivityOrder {
+    /// The directories to ask opencode for sessions in — one per DISTINCT
+    /// directory that holds a chat window, in first-seen order. A window's
+    /// directory is its pane's cwd, falling back to its project's default cwd
+    /// (desktop `backfillLastMessageTimes`). The unscoped session list is
+    /// capped at 100 sessions, so anything older never got a last activity;
+    /// listing per directory is what covers every window.
+    static func chatDirectories(_ projects: [MantaProject]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for project in projects {
+            for window in project.windows where window.hasChatSession {
+                let dir = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
+                if !dir.isEmpty, seen.insert(dir).inserted { out.append(dir) }
+            }
+        }
+        return out
+    }
+
+    /// The later of two optional instants — how a window's last activity is
+    /// composed from the box's `time.updated` and the live running/idle
+    /// transitions the event stream reported since.
+    static func latest(_ a: Date?, _ b: Date?) -> Date? {
+        switch (a, b) {
+        case let (a?, b?): return max(a, b)
+        case let (a?, nil): return a
+        case let (nil, b?): return b
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Flatten `projects` into one list, newest activity first.
+    ///
+    /// Three tiers, in this order:
+    /// 1. chat windows with a known last activity, newest first;
+    /// 2. chat windows whose activity is unknown (not fetched yet);
+    /// 3. terminal windows, which have no opencode session and so no activity
+    ///    at all — by window index.
+    /// Ties break on project order, then window index. Pins are deliberately
+    /// ignored: this ordering answers "what did I touch last", and a pinned
+    /// window you haven't touched in a week would otherwise sit on top of it.
+    ///
+    /// Every comparator below is a TOTAL order — `(project order, window
+    /// index)` is unique per window — so the result is deterministic and an
+    /// unstable `sort` cannot make rows jump between refreshes.
+    static func flatten(
+        _ projects: [MantaProject],
+        lastActivity: (_ project: String, _ window: MantaWindow) -> Date?
+    ) -> [SessionFlatEntry] {
+        struct Item {
+            let entry: SessionFlatEntry
+            let projectOrder: Int
+            let date: Date?
+        }
+        var dated: [Item] = []
+        var undated: [Item] = []
+        var terminals: [Item] = []
+        for (projectOrder, project) in projects.enumerated() {
+            for window in project.windows {
+                let entry = SessionFlatEntry(project: project.tmuxSession, window: window)
+                if !window.hasChatSession {
+                    terminals.append(Item(entry: entry, projectOrder: projectOrder, date: nil))
+                } else if let date = lastActivity(project.tmuxSession, window) {
+                    dated.append(Item(entry: entry, projectOrder: projectOrder, date: date))
+                } else {
+                    undated.append(Item(entry: entry, projectOrder: projectOrder, date: nil))
+                }
+            }
+        }
+        dated.sort { l, r in
+            if let ld = l.date, let rd = r.date, ld != rd { return ld > rd }
+            if l.projectOrder != r.projectOrder { return l.projectOrder < r.projectOrder }
+            return l.entry.window.index < r.entry.window.index
+        }
+        undated.sort { l, r in
+            if l.projectOrder != r.projectOrder { return l.projectOrder < r.projectOrder }
+            return l.entry.window.index < r.entry.window.index
+        }
+        terminals.sort { l, r in
+            if l.entry.window.index != r.entry.window.index { return l.entry.window.index < r.entry.window.index }
+            return l.projectOrder < r.projectOrder
+        }
+        return (dated + undated + terminals).map(\.entry)
+    }
+}
+
+// MARK: - Background job presentation (spec §4)
+
+enum BackgroundJobFormat {
+    /// The status word shown beside the dot. A status a newer box invented is
+    /// shown as the box wrote it rather than hidden.
+    static func statusLabel(_ job: DelegateJob) -> String {
+        switch job.status {
+        case "running", "paused", "done", "failed", "stopped": return job.status
+        default: return job.status.isEmpty ? "unknown" : job.status
+        }
+    }
+
+    /// Elapsed time for a live job, the finish time for a finished one.
+    ///
+    /// Running/paused: "4m" since it started. Finished: "finished 12m ago", or
+    /// "finished just now" inside the first minute. Nil when the box gave no
+    /// timestamp to count from — nothing is fabricated from the device clock.
+    static func timing(_ job: DelegateJob, now: Date) -> String? {
+        func date(_ ms: Double?) -> Date? {
+            guard let ms, ms > 0 else { return nil }
+            return Date(timeIntervalSince1970: ms / 1000)
+        }
+        if job.isActive {
+            guard let start = date(job.startedAt) ?? date(job.createdAt) else { return nil }
+            return SessionTimerFormat.compact(max(0, now.timeIntervalSince(start)))
+        }
+        guard let end = date(job.finishedAt) else { return nil }
+        let age = SessionTimerFormat.age(max(0, now.timeIntervalSince(end)))
+        return age == "now" ? "finished just now" : "finished \(age) ago"
+    }
+
+    /// Why a job operation failed, in words a person can act on. Only a message
+    /// the box wrote for a human is passed through; anything else (a decoding
+    /// failure, a URLError) is reduced to the one thing the user can do.
+    static func failureReason(_ error: Error) -> String {
+        switch error {
+        case MantaError.authRequired:
+            return "this device isn't signed in to the box"
+        case MantaError.server(let text) where !text.isEmpty:
+            return text
+        case MantaError.transport(let text) where !text.isEmpty:
+            return text
+        default:
+            return "check the connection"
+        }
+    }
+
+    /// Newest first: live jobs above finished ones, then by when they began.
+    static func sorted(_ jobs: [DelegateJob]) -> [DelegateJob] {
+        func began(_ j: DelegateJob) -> Double { j.startedAt ?? j.createdAt ?? 0 }
+        return jobs.sorted { l, r in
+            if l.isActive != r.isActive { return l.isActive }
+            let lb = began(l), rb = began(r)
+            if lb != rb { return lb > rb }
+            return l.id < r.id
+        }
     }
 }
 
