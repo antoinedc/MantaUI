@@ -732,6 +732,22 @@ final class ChatStreamMergeTests: XCTestCase {
         XCTAssertEqual(snap, ["c3": false])
     }
 
+    /// A child named by a live subagent frame with no state yet has just started:
+    /// the running set was restated before it existed, so its absence says nothing.
+    /// Only a child known solely from the canonical transcript reads idle.
+    func testAnUnseenLiveChildIsUnknownButATranscriptOnlyChildIsIdle() {
+        let snap = ChatSessionStore.childRunningSnapshot(
+            known: ["live", "old"], states: [:], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(snap, ["old": false], "live-frame child with no state → unknown (absent); transcript-only → false")
+        // A live child that DOES have state is read like any other.
+        let withState = ChatSessionStore.childRunningSnapshot(
+            known: ["live"], states: ["live": childState("live", running: true)], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(withState, ["live": true])
+        let idle = ChatSessionStore.childRunningSnapshot(
+            known: ["live"], states: ["live": childState("live", running: false)], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(idle, ["live": false])
+    }
+
     // MARK: - Compact feedback (BET-747 task 1)
 
     /// A failed `compact()` surfaces the composer `actionHint` instead of being

@@ -458,6 +458,126 @@ final class TaskStatusResolverTests: XCTestCase {
     }
 }
 
+// MARK: - Delegate calls (iOS-only wording + job linking)
+
+final class DelegateCallTests: XCTestCase {
+
+    private let started = "Started background job \"you-are-the-ship-gate\" (id 198262c2). It runs in its own session and reports back."
+
+    private func delegate(
+        status: String = "completed", output: String? = nil, input: [String: JSONValue] = [:],
+        name: String = "delegate_delegate", metadataOutput: String? = nil
+    ) -> OpencodePart {
+        tool("d1", name, status: status, input: input, output: output,
+             metadata: metadataOutput.map { ["output": jstr($0)] } ?? [:])
+    }
+
+    func testDelegateToolNames() {
+        XCTAssertTrue(TaskStatusResolver.isDelegateToolName("delegate_delegate"))
+        XCTAssertTrue(TaskStatusResolver.isDelegateToolName("delegate"))
+        XCTAssertTrue(TaskStatusResolver.isDelegateToolName("mcp_delegate_delegate"))
+        XCTAssertFalse(TaskStatusResolver.isDelegateToolName("delegate_list"))
+        XCTAssertFalse(TaskStatusResolver.isDelegateToolName("delegate_stop"))
+        XCTAssertFalse(TaskStatusResolver.isDelegateToolName("task"))
+        XCTAssertTrue(TaskStatusResolver.isDelegateTool(delegate()))
+        XCTAssertFalse(TaskStatusResolver.isDelegateTool(tool("b", "bash")))
+    }
+
+    func testJobIDParsing() {
+        XCTAssertEqual(TaskStatusResolver.delegateJobID(fromOutput: started), "198262c2")
+        XCTAssertEqual(TaskStatusResolver.delegateJobID(fromOutput: "x (id 0a1b) y"), "0a1b")
+        // No match.
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: nil))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: ""))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "Error: the cap of five jobs is reached"))
+        // Malformed: empty, non-hex, uppercase, unclosed, wrong keyword.
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (id )"))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (id xyz)"))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (id 198262C2)"))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (id 198262c2"))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job id 198262c2"))
+        XCTAssertNil(TaskStatusResolver.delegateJobID(fromOutput: "job (ID 198262c2)"))
+    }
+
+    func testWordingReadsAsABackgroundJobNotAsDelegateDelegate() {
+        let done = ToolActivity.describe(delegate(output: started))
+        XCTAssertEqual(done.kind, .delegate)
+        XCTAssertEqual(done.label, "Started background job you-are-the-ship-gate")
+        XCTAssertEqual(done.running, "Running background job you-are-the-ship-gate")
+        XCTAssertEqual(done.failed, "Failed to start background job you-are-the-ship-gate")
+
+        let failed = ToolActivity.describe(delegate(status: "error", input: ["prompt": jstr("Fix the build")]))
+        XCTAssertEqual(failed.label, "Failed to start background job Fix the build")
+
+        XCTAssertEqual(ToolActivity.describe(delegate(status: "running", name: "delegate")).label,
+                       "Running background job")
+    }
+
+    func testNameFallsBackToTheInputAndIsClipped() {
+        let long = String(repeating: "a", count: 90)
+        let byDescription = delegate(input: ["description": jstr("  sweep the board \nsecond line"), "prompt": jstr("ignored")])
+        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: byDescription), "sweep the board")
+        let byPrompt = delegate(input: ["prompt": jstr("\n\nFirst real line\nmore")])
+        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: byPrompt), "First real line")
+        let clipped = TaskStatusResolver.delegateJobName(of: delegate(input: ["prompt": jstr(long)]))
+        XCTAssertEqual(clipped.utf16.count, TaskStatusResolver.delegateNameMax)
+        XCTAssertTrue(clipped.hasSuffix("…"))
+        XCTAssertEqual(TaskStatusResolver.delegateJobName(of: delegate()), "")
+    }
+
+    func testARunningJobMakesTheFinishedCallReadRunning() {
+        let part = delegate(output: started)
+        for status in ["running", "paused", "Running"] {
+            let ctx = TaskStatusContext(jobStatusByID: ["198262c2": status])
+            let resolved = TaskStatusResolver.applying(ctx, to: part)
+            XCTAssertEqual(ToolActivity.describe(resolved).status, .running, status)
+            XCTAssertEqual(ToolActivity.describe(resolved).label, "Running background job you-are-the-ship-gate")
+        }
+        let run = ToolRun(id: "d1", parts: [part])
+        XCTAssertEqual(run.resolvingTasks(TaskStatusContext(jobStatusByID: ["198262c2": "running"])).summary.tone, .running)
+    }
+
+    func testAJobThatIsDoneFailedOrUnknownLeavesTheCallAlone() {
+        let part = delegate(output: started)
+        for status in ["done", "failed", "stopped"] {
+            let ctx = TaskStatusContext(jobStatusByID: ["198262c2": status])
+            XCTAssertEqual(TaskStatusResolver.applying(ctx, to: part), part,
+                           "a \(status) job is not a failed tool call — its status lives in the jobs sheet")
+        }
+        XCTAssertEqual(TaskStatusResolver.applying(TaskStatusContext(jobStatusByID: ["other": "running"]), to: part), part,
+                       "an unknown job leaves the call as it is")
+        XCTAssertEqual(TaskStatusResolver.applying(.empty, to: part), part)
+        // Keyed by CHILD session, not job id, must not link.
+        XCTAssertEqual(TaskStatusResolver.applying(TaskStatusContext(jobStatus: ["198262c2": "running"]), to: part), part)
+    }
+
+    func testAnErroredOrOutputlessCallIsNeverRewritten() {
+        let ctx = TaskStatusContext(jobStatusByID: ["198262c2": "running"])
+        let errored = delegate(status: "error", output: started)
+        XCTAssertEqual(TaskStatusResolver.applying(ctx, to: errored), errored)
+        let noOutput = delegate()
+        XCTAssertEqual(TaskStatusResolver.applying(ctx, to: noOutput), noOutput)
+        let list = tool("l", "delegate_list", output: started)
+        XCTAssertEqual(TaskStatusResolver.applying(ctx, to: list), list)
+    }
+
+    /// A LIVE delegate part has no `state.output`: its final output rides the
+    /// stdout tail (`state.metadata.output`).
+    func testTheJobIDIsReadFromTheLiveTailToo() {
+        let part = delegate(metadataOutput: started)
+        let ctx = TaskStatusContext(jobStatusByID: ["198262c2": "running"])
+        XCTAssertEqual(ToolActivity.describe(TaskStatusResolver.applying(ctx, to: part)).status, .running)
+        XCTAssertEqual(ToolActivity.describe(part).label, "Started background job you-are-the-ship-gate")
+    }
+
+    func testRunSummaryCountsBackgroundJobs() {
+        XCTAssertEqual(ToolActivity.summarize([delegate(output: started)]).label,
+                       "Started background job you-are-the-ship-gate")
+        let two = ToolActivity.summarize([delegate(output: started), tool("d2", "delegate_delegate")])
+        XCTAssertEqual(two.label, "Started 2 background jobs")
+    }
+}
+
 // MARK: - Todo card (spec §6)
 
 final class TodoCardLogicTests: XCTestCase {

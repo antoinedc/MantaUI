@@ -50,8 +50,9 @@ struct LiveTool: Equatable, Sendable {
     var status: String?
     /// Accumulated incremental stdout tail, concatenated in arrival order.
     var tail: String = ""
-    /// True once the `toolEnded` frame lands; an ended tool no longer renders
-    /// as a running row (the record is kept so the outcome can be reflected).
+    /// True once the `toolEnded` frame lands; an ended tool is no longer
+    /// running, but the record is kept for the rest of the turn so the call
+    /// still shows (completed, or failed when `ok` is false).
     var ended: Bool = false
     var ok: Bool = true
     var truncated: Bool = false
@@ -82,23 +83,36 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// so the Plan chip turns itself off the moment the model exits planning.
     var planOn: Bool?
     var subagents: [StreamSubagentPayload] = []
-    /// Live tools in flight keyed by their stable tool part id (`idx`), and
-    /// the order they started in. A `toolEnded` removes the idx from the order
-    /// (so `runningTools` yields only still-running tools) but keeps the record
-    /// so the outcome can be reflected; the whole map is cleared on
-    /// `turnComplete`, when the turn's canonical refetch has taken the tools
-    /// over as step rows (BET-753).
+    /// This TURN's live tools keyed by their stable tool part id (`idx`, which
+    /// is the opencode part id), and the order they started in. A `toolEnded`
+    /// keeps both the record (so the outcome can be reflected) and its place in
+    /// the order: the canonical transcript is not refetched mid-turn and skips
+    /// the in-progress step message, so until the turn completes these records
+    /// are the ONLY source of the turn's finished calls. Both are cleared on
+    /// `turnComplete`, when the turn's canonical refetch takes the tools over
+    /// as step rows (BET-753).
     var tools: [String: LiveTool] = [:]
     var toolStartOrder: [String] = []
+    /// Child session ids whose `subagent` frames arrived this turn, in arrival
+    /// order. Lets the transcript keep a subagent that FINISHED this turn until
+    /// the canonical refetch owns it, without resurrecting frames from earlier
+    /// turns (the loaded transcript window is short, so an old child's task
+    /// part may not be in it). Cleared on `turnComplete`, like the tools.
+    var turnSubagentIDs: [String] = []
 
     init(sessionId: String) {
         self.sessionId = sessionId
     }
 
-    /// The still-running tools, in start order. Ended tools are already gone
-    /// from `toolStartOrder`, so this is exactly what the running-tool rows
-    /// render (BET-753).
+    /// The still-running tools, in start order — what a running-tool row
+    /// renders (BET-753). Ended tools stay in `toolStartOrder` (see `turnTools`)
+    /// but are not running.
     var runningTools: [LiveTool] {
+        turnTools.filter { !$0.ended }
+    }
+
+    /// Every tool of the turn in flight — running AND ended — in start order.
+    var turnTools: [LiveTool] {
         toolStartOrder.compactMap { tools[$0] }
     }
 
@@ -192,6 +206,7 @@ enum MantaStreamRouter {
             // (BET-753).
             s.tools.removeAll()
             s.toolStartOrder.removeAll()
+            s.turnSubagentIDs.removeAll()
         case "toolStarted":
             if let p = try? frame.decodedPayload(StreamToolStartedPayload.self) {
                 let callID = p.callID.flatMap { $0.isEmpty ? nil : $0 } ?? p.idx
@@ -218,7 +233,8 @@ enum MantaStreamRouter {
                 t.ok = p.ok
                 t.truncated = p.truncated ?? false
                 s.tools[p.idx] = t
-                s.toolStartOrder.removeAll { $0 == p.idx }
+                // Stays in `toolStartOrder`: an ended call is still this turn's
+                // (`runningTools` filters on `ended`).
             }
         case "truncation":
             s.truncation = try? frame.decodedPayload(StreamTruncationPayload.self)
@@ -248,6 +264,7 @@ enum MantaStreamRouter {
                 } else {
                     s.subagents.append(p)
                 }
+                if !s.turnSubagentIDs.contains(p.childSessionId) { s.turnSubagentIDs.append(p.childSessionId) }
             }
         case "subagent.child", "autoRename":
             break // registration / rename triggers consumed by later stages

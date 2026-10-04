@@ -264,9 +264,16 @@ enum ChatTranscriptMapper {
     /// A live tool frame as a tool part. The frame carries only a name, opencode's
     /// title for the part (the "hint") and a stdout tail, so that is all the part
     /// has: the title stands in for the input the label would otherwise be
-    /// built from.
+    /// built from. A tool whose `toolEnded` has landed reads completed (failed
+    /// when the frame says it did not succeed); the tail then holds its final
+    /// output, which is where a `delegate` call's job id comes from.
     static func livePart(from tool: LiveTool) -> OpencodePart {
-        let status = (tool.status ?? "running").lowercased() == "pending" ? "pending" : "running"
+        let status: String
+        if tool.ended {
+            status = tool.ok ? "completed" : "error"
+        } else {
+            status = (tool.status ?? "running").lowercased() == "pending" ? "pending" : "running"
+        }
         var metadata: [String: JSONValue] = [:]
         if !tool.tail.isEmpty { metadata["output"] = .string(tool.tail) }
         return ToolActivity.makeToolPart(
@@ -279,40 +286,51 @@ enum ChatTranscriptMapper {
         )
     }
 
-    /// A live subagent frame as a task part. The id is derived from the child
-    /// session (the frame carries no part id); the canonical part takes over —
-    /// and this one is dropped — once the transcript names the same child.
-    static func livePart(from subagent: StreamSubagentPayload) -> OpencodePart {
+    /// A live subagent frame as a task part, carrying the status it resolved to.
+    /// The id is derived from the child session (the frame carries no part id);
+    /// the canonical part takes over — and this one is dropped — once the
+    /// transcript names the same child.
+    static func livePart(from subagent: StreamSubagentPayload, status: TaskRunStatus = .running) -> OpencodePart {
         var input: [String: JSONValue] = [:]
         if let d = subagent.description, !d.isEmpty { input["description"] = .string(d) }
         if let a = subagent.agent, !a.isEmpty { input["subagent_type"] = .string(a) }
         return ToolActivity.makeToolPart(
             id: "live-task-\(subagent.childSessionId)",
             tool: "task",
-            status: "running",
+            status: status.wireStatus,
             title: subagent.title,
             input: input,
             metadata: ["sessionId": .string(subagent.childSessionId)]
         )
     }
 
-    /// Fold the still-running LIVE tools and live subagents into the transcript
+    /// Fold the LIVE tools and live subagents of this turn into the transcript
     /// as part of the run they belong to.
     ///
     /// - Live tools (`toolStarted`..`toolEnded`) and live subagents extend the run
     ///   at the very end of the transcript, or open a new one. While a turn
     ///   runs that run is the `trailing` one, drawn by the working line;
     ///   otherwise it is an ordinary row.
+    /// - `tools` is EVERY call of the turn, ended ones included. The canonical
+    ///   transcript is not refetched mid-turn and skips the in-progress step
+    ///   message, so the stream is the only source of the turn's finished calls:
+    ///   dropping a call when it ends made the run lose it (and its id, which is
+    ///   its first part's). An ended call reads completed, or failed.
     /// - When live prose follows the transcript's last run, that run is not at
     ///   the tail any more: it stays an inline row and the live calls open a new
     ///   run after the prose.
     /// - A live call the transcript already owns (same part id, same call id, or
     ///   — for a task — same child session) is skipped: the canonical one has
     ///   taken over, so appending again would duplicate it.
-    /// - A live task row is kept only while its status resolves to running
-    ///   (spec §5). That includes a task whose tool call already reads
-    ///   "completed" because the work was started in the background — such a
-    ///   row used to be dropped, so the card vanished mid-turn.
+    /// - A live subagent is kept whatever it resolves to (spec §5), a finished
+    ///   one reading done/failed, until the canonical transcript names its child.
+    ///   That includes a task whose tool call already reads "completed" because
+    ///   the work was started in the background — such a row used to be dropped,
+    ///   so the card vanished mid-turn. `thisTurnChildren` narrows that for the
+    ///   store: when non-nil, a FINISHED subagent is kept only if it is in the
+    ///   set (frames of earlier turns whose task part has scrolled out of the
+    ///   loaded window must not resurface); a running one is always kept.
+    /// - A `delegate` call whose job is still running reads as running.
     ///
     /// `hasTailContent` is true when something draws after the transcript's last
     /// run (live prose, or a prompt being sent), which keeps that run inline.
@@ -322,13 +340,18 @@ enum ChatTranscriptMapper {
         context: TaskStatusContext,
         running: Bool,
         hasTailContent: Bool,
+        thisTurnChildren: Set<String>? = nil,
         to blocks: [TranscriptBlock]
     ) -> LiveActivityMerge {
         // A task part streams as an ordinary tool AND as the richer `subagent`
         // frame (src/server/streamInterp.mjs documents the tool triple as
-        // redundant). The subagent frame is the only source.
+        // redundant). The subagent frame is the only source. A todo-list write is
+        // not a call the transcript draws either (`visibleAssistantParts`), so it
+        // must not appear live only to vanish when the canonical turn lands.
         var live: [OpencodePart] = tools.compactMap { tool in
-            tool.name?.lowercased() == "task" ? nil : livePart(from: tool)
+            let name = tool.name?.lowercased()
+            if name == "task" || name == "todowrite" || name == "todo_write" { return nil }
+            return TaskStatusResolver.applying(context, to: livePart(from: tool))
         }
         live += subagents.compactMap { payload in
             let status = TaskStatusResolver.resolve(
@@ -337,7 +360,10 @@ enum ChatTranscriptMapper {
                 output: payload.output,
                 context: context
             )
-            return status.isRunning ? livePart(from: payload) : nil
+            if !status.isRunning, let thisTurnChildren, !thisTurnChildren.contains(payload.childSessionId) {
+                return nil
+            }
+            return livePart(from: payload, status: status)
         }
 
         // Drop what the canonical transcript already owns.

@@ -49,7 +49,7 @@ enum ChatDuration {
 // MARK: - Wording
 
 enum ActivityKind: String, Equatable, Sendable {
-    case read, edit, write, bash, search, list, fetch, websearch, task, skill, question, other, patch
+    case read, edit, write, bash, search, list, fetch, websearch, task, delegate, skill, question, other, patch
 
     /// Run-summary phrase for `n` calls of this kind ("edited 3 files").
     func plural(_ n: Int) -> String {
@@ -66,6 +66,7 @@ enum ActivityKind: String, Equatable, Sendable {
         case .fetch: return pick("fetched a page", "fetched {n} pages")
         case .websearch: return n == 1 ? "searched the web" : "searched the web \(n) times"
         case .task: return pick("ran an agent", "ran {n} agents")
+        case .delegate: return pick("started a background job", "started {n} background jobs")
         case .skill: return pick("loaded a skill", "loaded {n} skills")
         case .question: return pick("asked a question", "asked {n} questions")
         case .other: return pick("used a tool", "used {n} tools")
@@ -242,6 +243,14 @@ enum ToolActivity {
         }
         func verbs(_ kind: ActivityKind, _ run: String, _ done: String, _ fail: String, _ detail: String) -> Activity {
             make(kind, withDetail(run, detail), withDetail(done, detail), withDetail(fail, detail))
+        }
+
+        // iOS-only (desktop has no such kind): the `delegate` tool, whose MCP-
+        // prefixed id would otherwise read "Using delegate delegate".
+        if TaskStatusResolver.isDelegateToolName(tool) {
+            let name = TaskStatusResolver.delegateJobName(of: part)
+            return verbs(.delegate, "Running background job", "Started background job",
+                         "Failed to start background job", name)
         }
 
         switch tool {
@@ -733,10 +742,18 @@ struct TaskStatusContext: Equatable, Sendable {
     /// Child session id → the background-job record's status
     /// ("running", "paused", "done", "failed", "stopped", ...).
     var jobStatus: [String: String]
+    /// Background-job id → status. A `delegate` call links to its job by the id
+    /// printed in its output, not by a child session.
+    var jobStatusByID: [String: String]
 
-    init(childRunning: [String: Bool] = [:], jobStatus: [String: String] = [:]) {
+    init(
+        childRunning: [String: Bool] = [:],
+        jobStatus: [String: String] = [:],
+        jobStatusByID: [String: String] = [:]
+    ) {
         self.childRunning = childRunning
         self.jobStatus = jobStatus
+        self.jobStatusByID = jobStatusByID
     }
 
     static let empty = TaskStatusContext()
@@ -810,9 +827,11 @@ enum TaskStatusResolver {
     }
 
     /// The part with `state.status` rewritten to the resolved status, so every
-    /// consumer (wording, tone, the working line, the sheet) agrees. Non-task
-    /// parts, and task parts whose status already matches, come back unchanged.
+    /// consumer (wording, tone, the working line, the sheet) agrees. Parts that
+    /// are neither a task nor a `delegate` call, and parts whose status already
+    /// matches, come back unchanged.
     static func applying(_ context: TaskStatusContext, to part: OpencodePart) -> OpencodePart {
+        if isDelegateTool(part) { return applyingDelegate(context, to: part) }
         guard childTaskLike(part) else { return part }
         let resolved = resolve(part, context: context)
         var state = ToolActivity.state(of: part)
@@ -836,11 +855,85 @@ enum TaskStatusResolver {
     private static func childTaskLike(_ part: OpencodePart) -> Bool {
         part.type == "tool" && ToolActivity.toolName(of: part).lowercased() == "task"
     }
+
+    // MARK: Delegate calls (iOS-only)
+    //
+    // The `delegate` tool completes the instant the job is queued, so its call
+    // always reads done while the job it started may run for many minutes. The
+    // output names the job (`… (id 198262c2). …`); the job record says whether
+    // it is still going.
+
+    /// `delegate` as the model sees it: the tool id arrives MCP-prefixed
+    /// (`delegate_delegate`), plain `delegate` is accepted too. `delegate_list`
+    /// / `delegate_stop` are different tools and do not match. `lowercased` is
+    /// the tool id already lowercased.
+    static func isDelegateToolName(_ lowercased: String) -> Bool {
+        let name = lowercased.replacingOccurrences(of: "^mcp[_-]", with: "", options: .regularExpression)
+        return name == "delegate" || name == "delegate_delegate"
+    }
+
+    static func isDelegateTool(_ part: OpencodePart) -> Bool {
+        part.type == "tool" && isDelegateToolName(ToolActivity.toolName(of: part).lowercased())
+    }
+
+    /// The job id in a delegate call's output — `(id <lowercase hex>)`, exactly.
+    /// nil for anything else (no output yet, an error message, a changed wording).
+    static func delegateJobID(fromOutput output: String?) -> String? {
+        guard let output else { return nil }
+        return firstCapture(#"\(id ([0-9a-f]+)\)"#, in: output)
+    }
+
+    static let delegateNameMax = 60
+
+    /// The job's display name for the call's label: the quoted name in the
+    /// output, else the first line of the input's description / prompt (at most
+    /// 60 characters), else "".
+    static func delegateJobName(of part: OpencodePart) -> String {
+        let st = ToolActivity.state(of: part)
+        if let name = firstCapture(#"job "(.+?)" \(id [0-9a-f]+\)"#, in: ToolActivity.resolvedOutput(st)) {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return ToolActivity.clip(trimmed, delegateNameMax) }
+        }
+        let input = ChatJSON.object(st["input"]) ?? [:]
+        for key in ["description", "prompt"] {
+            let line = (ChatJSON.string(input[key]) ?? "")
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first { !$0.isEmpty } ?? ""
+            if !line.isEmpty { return ToolActivity.clip(line, delegateNameMax) }
+        }
+        return ""
+    }
+
+    /// A finished delegate call whose job is still running or paused reads as
+    /// running. Nothing else changes it: a call that errored stays failed, a job
+    /// that itself FAILED is not a failed tool call (the Background jobs sheet
+    /// carries the job's own status), and a job the list does not know yet (or a
+    /// call with no output to link by) is left as it is.
+    static func applyingDelegate(_ context: TaskStatusContext, to part: OpencodePart) -> OpencodePart {
+        var state = ToolActivity.state(of: part)
+        guard ActivityStatus.normalize(ChatJSON.string(state["status"])) == .completed,
+              let jobID = delegateJobID(fromOutput: ToolActivity.resolvedOutput(state)),
+              let job = context.jobStatusByID[jobID]?.lowercased(),
+              job == "running" || job == "paused" else { return part }
+        state["status"] = .string(TaskRunStatus.running.wireStatus)
+        var copy = part
+        copy.extra["state"] = .object(state)
+        return copy
+    }
+
+    private static func firstCapture(_ pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1,
+              let r = Range(match.range(at: 1), in: text) else { return nil }
+        return String(text[r])
+    }
 }
 
 extension ToolRun {
-    /// The run with its task parts' statuses resolved (spec §5). Returns `self`
-    /// untouched when it has no task part, which is the common case.
+    /// The run with its task parts' (and `delegate` calls') statuses resolved
+    /// (spec §5). Returns `self` untouched when it has none, the common case.
     func resolvingTasks(_ context: TaskStatusContext) -> ToolRun {
         var changed = false
         let next = parts.map { part -> OpencodePart in
