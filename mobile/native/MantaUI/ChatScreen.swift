@@ -343,13 +343,16 @@ private struct ChatScreenContent: View {
             }
             // Spec §5: a job record for a task's child session says whether that
             // task is still running, even when the child's own events were never
-            // seen on this device. Feed the statuses into the transcript store.
+            // seen on this device; the job id links a `delegate` call to its job.
+            // Feed both into the transcript store.
             .onReceive(jobsStore.$jobs) { jobs in
-                var statuses: [String: String] = [:]
+                var byChild: [String: String] = [:]
+                var byID: [String: String] = [:]
                 for job in jobs {
-                    if let child = job.childSessionID, !child.isEmpty { statuses[child] = job.status }
+                    if let child = job.childSessionID, !child.isEmpty { byChild[child] = job.status }
+                    byID[job.id] = job.status
                 }
-                store.updateJobStatuses(statuses)
+                store.updateJobStatuses(byChild: byChild, byID: byID)
             }
             // 5s branch poll (desktop cadence) so a terminal-side checkout
             // reflects within one tick (BET-747 gap #13). Cancelled on disappear.

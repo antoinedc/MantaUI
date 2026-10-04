@@ -721,6 +721,60 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertEqual(state.runningTools.count, 0)
     }
 
+    // MARK: - This turn's ended tools stay (activity-parity live fix)
+
+    /// An ended tool leaves `runningTools` but stays in `turnTools`, in start
+    /// order, with its outcome: the stream is the only source of a turn's finished
+    /// calls until the canonical refetch lands.
+    func testEndedToolsStayInTheTurnsToolsInStartOrder() throws {
+        func start(_ idx: String) throws -> MantaStreamFrame {
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"\#(idx)","toolName":"bash","status":"running"}}"#)
+        }
+        func end(_ idx: String, ok: Bool) throws -> MantaStreamFrame {
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"\#(idx)","ok":\#(ok)}}"#)
+        }
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        for frame in [try start("a"), try start("b"), try start("c"), try end("a", ok: true), try end("b", ok: false)] {
+            state = MantaStreamRouter.applying(frame, to: state)
+        }
+        XCTAssertEqual(state.runningTools.map(\.idx), ["c"], "only the still-running tool")
+        XCTAssertEqual(state.turnTools.map(\.idx), ["a", "b", "c"], "every tool of the turn, in start order")
+        XCTAssertEqual(state.turnTools.map(\.ended), [true, true, false])
+        XCTAssertEqual(state.turnTools.map(\.ok), [true, false, true])
+        // A repeated start for a known idx must not reorder it.
+        state = MantaStreamRouter.applying(try start("a"), to: state)
+        XCTAssertEqual(state.turnTools.map(\.idx), ["a", "b", "c"])
+    }
+
+    /// turnComplete clears the tools (running and ended alike) and the turn's
+    /// subagent ids; the subagent frames themselves persist (background tasks
+    /// outlive the turn).
+    func testTurnCompleteClearsTurnToolsAndTurnSubagentIDs() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        for json in [
+            #"{"kind":"stream","sub":"toolStarted","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","toolName":"bash","status":"running"}}"#,
+            #"{"kind":"stream","sub":"toolEnded","sessionId":"ses_1","payload":{"sessionId":"ses_1","idx":"a","ok":true}}"#,
+            #"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_child","status":"running"}}"#,
+            #"{"kind":"stream","sub":"subagent","sessionId":"ses_1","payload":{"childSessionId":"ses_child","status":"completed"}}"#,
+        ] {
+            state = MantaStreamRouter.applying(try MantaStreamFrame.parse(json), to: state)
+        }
+        XCTAssertEqual(state.turnTools.count, 1)
+        XCTAssertEqual(state.runningTools.count, 0)
+        XCTAssertEqual(state.turnSubagentIDs, ["ses_child"], "recorded once per child")
+
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#),
+            to: state
+        )
+        XCTAssertTrue(state.tools.isEmpty)
+        XCTAssertTrue(state.toolStartOrder.isEmpty)
+        XCTAssertTrue(state.turnTools.isEmpty)
+        XCTAssertTrue(state.runningTools.isEmpty)
+        XCTAssertTrue(state.turnSubagentIDs.isEmpty)
+        XCTAssertEqual(state.subagents.count, 1, "a background task outlives the turn")
+    }
+
     // MARK: - Retiring covered text (BET-655)
 
     private func flush(_ messageID: String, _ partID: String, _ text: String, field: String = "text") throws -> MantaStreamFrame {

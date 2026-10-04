@@ -622,7 +622,11 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
         await Task.yield()
 
-        XCTAssertEqual(Self.activityParts(in: store.blocks).count, 0, "an ended tool leaves the transcript's live calls")
+        // An ended call stays in this turn's run (the canonical transcript is not
+        // refetched mid-turn), now reading failed.
+        let parts = Self.activityParts(in: store.blocks)
+        XCTAssertEqual(parts.map(\.id), ["toolu_1"], "an ended tool stays in the run until the canonical refetch")
+        XCTAssertEqual(parts.first.map { ToolActivity.describe($0).status }, .error)
         let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
         XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
         XCTAssertEqual(reflected?.ok, false)
@@ -730,6 +734,22 @@ final class ChatStreamMergeTests: XCTestCase {
     func testAnUnseenChildIsIdleOnceTheRunningSetIsAuthoritative() {
         let snap = ChatSessionStore.childRunningSnapshot(known: ["c3"], states: [:], authoritative: true)
         XCTAssertEqual(snap, ["c3": false])
+    }
+
+    /// A child named by a live subagent frame with no state yet has just started:
+    /// the running set was restated before it existed, so its absence says nothing.
+    /// Only a child known solely from the canonical transcript reads idle.
+    func testAnUnseenLiveChildIsUnknownButATranscriptOnlyChildIsIdle() {
+        let snap = ChatSessionStore.childRunningSnapshot(
+            known: ["live", "old"], states: [:], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(snap, ["old": false], "live-frame child with no state → unknown (absent); transcript-only → false")
+        // A live child that DOES have state is read like any other.
+        let withState = ChatSessionStore.childRunningSnapshot(
+            known: ["live"], states: ["live": childState("live", running: true)], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(withState, ["live": true])
+        let idle = ChatSessionStore.childRunningSnapshot(
+            known: ["live"], states: ["live": childState("live", running: false)], authoritative: true, liveSeen: ["live"])
+        XCTAssertEqual(idle, ["live": false])
     }
 
     // MARK: - Compact feedback (BET-747 task 1)

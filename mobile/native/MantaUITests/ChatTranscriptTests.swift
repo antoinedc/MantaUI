@@ -306,32 +306,37 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(agent.status, .running)
     }
 
-    /// A finished subagent belongs to the canonical transcript.
-    func testLiveSubagentCompletedIsNotAppendedWhenItIsReallyDone() {
+    /// A finished live subagent is no longer dropped for resolving done: it stays in
+    /// its run, as a done call, until the canonical transcript names its child.
+    func testLiveSubagentCompletedStaysInTheRunAsDone() {
         let done = StreamSubagentPayload(
             childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
             status: "completed", title: "sweep", output: "all good", truncated: nil,
             durationMs: nil, runningCount: nil, model: nil
         )
-        XCTAssertTrue(merge(subagents: [done]).blocks.isEmpty,
-                      "a finished subagent belongs to the canonical transcript, not the live feed")
+        guard case .activity(let run)? = merge(subagents: [done]).blocks.last,
+              let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
+            return XCTFail("a finished live subagent must stay until the canonical transcript owns it")
+        }
+        XCTAssertEqual(agent.status, .done)
     }
 
     /// Spec §5: a task whose tool call reads COMPLETED because the work was started
-    /// in the background is kept while it is still running. It used to be dropped,
-    /// so the card vanished mid-turn.
-    func testLiveBackgroundTaskThatReadsCompletedIsKeptWhileItRuns() {
+    /// in the background is kept while it runs — and, once the child says idle,
+    /// stays as a DONE call (it used to be dropped, so the card vanished mid-turn).
+    func testLiveBackgroundTaskThatReadsCompletedIsKeptRunningThenDone() {
         let started = StreamSubagentPayload(
             childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
             status: "completed", title: "sweep", output: "<task id=\"1\" state=\"running\">started</task>",
             truncated: nil, durationMs: nil, runningCount: nil, model: nil
         )
-        // The child is busy → kept.
-        let busy = merge(subagents: [started], context: TaskStatusContext(childRunning: ["ses_child": true]))
-        XCTAssertEqual(busy.blocks.count, 1, "a background task that is still running keeps its live row")
-        // The child says idle → dropped (canonical owns the finished row).
-        let idle = merge(subagents: [started], context: TaskStatusContext(childRunning: ["ses_child": false]))
-        XCTAssertTrue(idle.blocks.isEmpty)
+        func status(_ context: TaskStatusContext) -> SubagentStatus? {
+            guard case .activity(let run)? = merge(subagents: [started], context: context).blocks.last else { return nil }
+            return ChatSubagentMapper.session(from: run.parts[0])?.status
+        }
+        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": true])), .running)
+        XCTAssertEqual(status(TaskStatusContext(childRunning: [:])), .running, "no state yet: unknown, still running")
+        XCTAssertEqual(status(TaskStatusContext(childRunning: ["ses_child": false])), .done)
     }
 
     func testLiveSubagentDedupedAgainstCanonicalTaskCall() {
@@ -409,6 +414,130 @@ final class ChatTranscriptTests: XCTestCase {
                        "two stores for the same child session id must be independent objects, not shared parent-registry state")
         XCTAssertEqual(a.sessionId, "ses_child")
         XCTAssertEqual(b.sessionId, "ses_child")
+    }
+
+    // MARK: - This turn's finished live calls (activity-parity live fix)
+
+    private func liveTool(
+        _ idx: String, _ name: String = "bash", hint: String? = nil, status: String = "running",
+        ended: Bool = false, ok: Bool = true, tail: String = ""
+    ) -> LiveTool {
+        var t = LiveTool(idx: idx, callID: idx, name: name, presentationHint: hint, status: status)
+        t.ended = ended
+        t.ok = ok
+        t.tail = tail
+        return t
+    }
+
+    func testAnEndedLiveToolStaysInTheRunAsCompletedOrFailed() {
+        let result = merge(tools: [
+            liveTool("t1", hint: "ls", ended: true),
+            liveTool("t2", hint: "make", ended: true, ok: false),
+            liveTool("t3", "read", hint: "a.ts"),
+        ])
+        guard case .activity(let run)? = result.blocks.last else { return XCTFail("expected a run") }
+        XCTAssertEqual(run.parts.map(\.id), ["t1", "t2", "t3"], "start order, ended calls included")
+        XCTAssertEqual(run.parts.map { ToolActivity.describe($0).status }, [.completed, .error, .running])
+    }
+
+    /// The trailing run's id is its first part's id; it must not change as tools end,
+    /// or an open Activity sheet loses its run.
+    func testTheTrailingRunKeepsItsIdAsToolsEnd() {
+        func trailingID(_ tools: [LiveTool]) -> String? {
+            merge(tools: tools, running: true).trailing?.id
+        }
+        XCTAssertEqual(trailingID([liveTool("t1")]), "t1")
+        XCTAssertEqual(trailingID([liveTool("t1", ended: true), liveTool("t2")]), "t1")
+        let allEnded = merge(tools: [liveTool("t1", ended: true), liveTool("t2", ended: true)], running: true)
+        XCTAssertEqual(allEnded.trailing?.id, "t1")
+        XCTAssertEqual(allEnded.trailing?.parts.count, 2, "between tools the run still holds both finished calls")
+        XCTAssertEqual(allEnded.trailing?.summary.running, false)
+    }
+
+    func testACanonicalCallReplacesItsEndedLiveSibling() {
+        // A real canonical tool part always carries its callID.
+        var canonicalPart = toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")])
+        canonicalPart.extra["callID"] = str("t1")
+        let canonical = [message(id: "m1", role: "assistant", parts: [canonicalPart])]
+        let blocks = ChatTranscriptMapper.blocks(from: canonical)
+        var byCallID = liveTool("t2", ended: true)
+        byCallID.callID = "t1"
+        let live = [
+            liveTool("t1", ended: true),   // owned by part id
+            byCallID,                      // owned by call id
+            liveTool("t3"),
+        ]
+        let merged = merge(tools: live, to: blocks)
+        guard case .activity(let run)? = merged.blocks.last else { return XCTFail("expected a run") }
+        XCTAssertEqual(run.parts.map(\.id), ["t1", "t3"], "the canonical call stays, its ended live twins are dropped")
+        XCTAssertEqual(run.id, "t1")
+    }
+
+    func testALiveTodoWriteIsNotACall() {
+        let merged = merge(tools: [liveTool("t1", "todowrite", ended: true), liveTool("t2", "todo_write")])
+        XCTAssertTrue(merged.blocks.isEmpty, "the transcript never draws a todo write, so neither does the live merge")
+    }
+
+    func testALiveDelegateCallReadsRunningWhileItsJobRuns() {
+        let started = "Started background job \"ship-gate\" (id 198262c2). It runs in its own session."
+        let call = liveTool("d1", "delegate_delegate", ended: true, tail: started)
+        func status(_ ctx: TaskStatusContext) -> ActivityStatus? {
+            guard case .activity(let run)? = merge(tools: [call], context: ctx).blocks.last else { return nil }
+            return ToolActivity.describe(run.parts[0]).status
+        }
+        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "running"])), .running)
+        XCTAssertEqual(status(TaskStatusContext(jobStatusByID: ["198262c2": "done"])), .completed)
+        XCTAssertEqual(status(.empty), .completed, "an unknown job leaves the call as it is")
+    }
+
+    /// A background task's call completes instantly. With the child not yet in the
+    /// running set it still resolves running (see the store's child snapshot);
+    /// once finished it stays as a DONE call in the run instead of vanishing.
+    func testALiveSubagentThatResolvesDoneIsStillInTheRun() {
+        let finished = StreamSubagentPayload(
+            childSessionId: "ses_child", agent: nil, description: nil, prompt: nil,
+            status: "completed", title: "sweep", output: "all good", truncated: nil,
+            durationMs: nil, runningCount: nil, model: nil
+        )
+        guard case .activity(let run)? = merge(subagents: [finished]).blocks.last,
+              let agent = ChatSubagentMapper.session(from: run.parts[0]) else {
+            return XCTFail("a finished live subagent must still show")
+        }
+        XCTAssertEqual(agent.status, .done)
+
+        let failed = StreamSubagentPayload(
+            childSessionId: "ses_bad", agent: nil, description: nil, prompt: nil,
+            status: "error", title: "sweep", output: nil, truncated: nil,
+            durationMs: nil, runningCount: nil, model: nil
+        )
+        guard case .activity(let failedRun)? = merge(subagents: [failed]).blocks.last,
+              let failedAgent = ChatSubagentMapper.session(from: failedRun.parts[0]) else {
+            return XCTFail("a failed live subagent must still show")
+        }
+        XCTAssertEqual(failedAgent.status, .failed)
+    }
+
+    /// The store narrows that to this turn's children: a finished frame from an
+    /// earlier turn whose task part has scrolled out of the loaded window must not
+    /// resurface; a running one always shows.
+    func testAFinishedSubagentFromAnEarlierTurnIsDroppedWhenTheTurnSetExcludesIt() {
+        let finished = StreamSubagentPayload(
+            childSessionId: "ses_old", agent: nil, description: nil, prompt: nil,
+            status: "completed", title: "old", output: "x", truncated: nil,
+            durationMs: nil, runningCount: nil, model: nil
+        )
+        let outsideTurn = ChatTranscriptMapper.mergingLive(
+            tools: [], subagents: [finished], context: .empty, running: false, hasTailContent: false,
+            thisTurnChildren: [], to: [])
+        XCTAssertTrue(outsideTurn.blocks.isEmpty)
+        let insideTurn = ChatTranscriptMapper.mergingLive(
+            tools: [], subagents: [finished], context: .empty, running: false, hasTailContent: false,
+            thisTurnChildren: ["ses_old"], to: [])
+        XCTAssertEqual(insideTurn.blocks.count, 1)
+        let stillRunning = ChatTranscriptMapper.mergingLive(
+            tools: [], subagents: [runningPayload("ses_old")], context: .empty, running: true, hasTailContent: false,
+            thisTurnChildren: [], to: [])
+        XCTAssertEqual(stillRunning.trailing?.parts.count, 1, "a running subagent is kept whatever turn it started in")
     }
 
     // MARK: - Run grouping (spec §1.1; the rules are the desktop's layoutTranscript)

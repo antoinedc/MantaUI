@@ -360,6 +360,9 @@ final class ChatSessionStore: ObservableObject {
     /// Child session id → background-job status, fed in by the chat screen from
     /// its job list.
     private(set) var jobStatusByChild: [String: String] = [:]
+    /// Background-job id → status, so a `delegate` call can be linked to its job
+    /// by the id in its output.
+    private(set) var jobStatusByID: [String: String] = [:]
 
     init(
         sessionId: String,
@@ -703,17 +706,24 @@ final class ChatSessionStore: ObservableObject {
     /// session absent from it is, by that set's own definition, not running.
     /// Without that, a background task started long ago (no job record left, no
     /// frame ever seen for its child) would read "running" for ever.
+    ///
+    /// That fallback is for children known ONLY from the canonical transcript.
+    /// A child named by a live subagent frame (`liveSeen`) with no state yet is
+    /// one that just started: the running set was restated before it existed, so
+    /// its absence says nothing, and reading it idle made a freshly started
+    /// background task resolve done and vanish.
     /// `nonisolated`: pure (value-in, value-out), so it is unit-testable.
     nonisolated static func childRunningSnapshot(
         known: Set<String>,
         states: [String: MantaSessionStreamState],
-        authoritative: Bool
+        authoritative: Bool,
+        liveSeen: Set<String> = []
     ) -> [String: Bool] {
         var out: [String: Bool] = [:]
         for id in known {
             if let running = states[id]?.running {
                 out[id] = running
-            } else if authoritative {
+            } else if authoritative, !liveSeen.contains(id) {
                 out[id] = false
             }
         }
@@ -731,7 +741,8 @@ final class ChatSessionStore: ObservableObject {
         let next = Self.childRunningSnapshot(
             known: known,
             states: states,
-            authoritative: eventStore.runningSetSeq > 0
+            authoritative: eventStore.runningSetSeq > 0,
+            liveSeen: liveChildIDs
         )
         guard next != childRunning else { return false }
         let previous = childRunning
@@ -746,13 +757,16 @@ final class ChatSessionStore: ObservableObject {
         if updateChildRunning(states) { rebuildBlocks() }
     }
 
-    /// Feed the background-job list in (child session id → job status) so a task
-    /// row whose job record says running/paused reads as running (spec §5, rule
-    /// 3). The chat screen owns the job list (it also drives the Background jobs
-    /// sheet); the store only needs the statuses.
-    func updateJobStatuses(_ statuses: [String: String]) {
-        guard statuses != jobStatusByChild else { return }
-        jobStatusByChild = statuses
+    /// Feed the background-job list in so a task row whose job record says
+    /// running/paused reads as running (spec §5, rule 3), and so a `delegate`
+    /// call reads as running while the job it started does. `byChild` is keyed by
+    /// the job's child session id, `byID` by the job id. The chat screen owns the
+    /// job list (it also drives the Background jobs sheet); the store only needs
+    /// the statuses.
+    func updateJobStatuses(byChild: [String: String], byID: [String: String]) {
+        guard byChild != jobStatusByChild || byID != jobStatusByID else { return }
+        jobStatusByChild = byChild
+        jobStatusByID = byID
         rebuildBlocks()
     }
 
@@ -791,7 +805,8 @@ final class ChatSessionStore: ObservableObject {
         // Task rows resolve their status against what is known RIGHT NOW (the
         // child session's busy state, the job list) — not at fetch time — so a
         // finished subagent flips to done without a refetch (spec §5).
-        let taskContext = TaskStatusContext(childRunning: childRunning, jobStatus: jobStatusByChild)
+        let taskContext = TaskStatusContext(
+            childRunning: childRunning, jobStatus: jobStatusByChild, jobStatusByID: jobStatusByID)
         let resolved = ChatTranscriptMapper.resolvingTaskStatuses(transcript, context: taskContext)
 
         // LIVE running tools and subagents join the run at the tail of THIS turn.
@@ -800,7 +815,11 @@ final class ChatSessionStore: ObservableObject {
         // `transcript` pristine while live calls appear and then vanish when the
         // canonical refetch takes them over. While the turn runs, the run at the
         // very tail is withheld from the rows: the working line draws it.
-        let liveTools = eventStore.sessionStates[sessionId]?.runningTools ?? []
+        // EVERY call of this turn, ended ones included: the transcript is not
+        // refetched mid-turn, so the stream is the only source of the finished
+        // ones until the turn completes.
+        let streamState = eventStore.sessionStates[sessionId]
+        let liveTools = streamState?.turnTools ?? []
         let hasTailContent = !inProgressText.isEmpty || pendingPrompts.contains { $0.state == .sending }
         let merge = ChatTranscriptMapper.mergingLive(
             tools: liveTools,
@@ -808,6 +827,7 @@ final class ChatSessionStore: ObservableObject {
             context: taskContext,
             running: running,
             hasTailContent: hasTailContent,
+            thisTurnChildren: Set(streamState?.turnSubagentIDs ?? []),
             to: resolved
         )
         let liveTranscript = merge.blocks
