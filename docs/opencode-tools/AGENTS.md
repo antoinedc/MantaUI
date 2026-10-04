@@ -159,6 +159,43 @@ message — that defeats the whole point and leaks the secret. If the user asks
 secrets (add / edit / delete) in the manta Secrets card — you cannot store
 secrets yourself (that would route the value through the transcript).
 
+## manta resource snapshot
+
+You have a `resource_snapshot` tool that returns a fresh, **read-only** view of
+the box's resource headroom: host memory (total/available), **opencode's own
+cgroup memory budget** (current / limit / available — often tighter than the
+host, because opencode runs as a memory-capped service), CPU count + load, free
+disk on your work directory's filesystem, the top memory-consuming processes
+(PID, name, RSS only — never command lines or environment), and Docker
+container CPU/memory when Docker is available. It also returns a `status`
+(`ok` / `constrained` / `critical`) and a conservative suggested memory
+allowance for ONE new heavy job (never more than 20% of the *lower* of host and
+opencode-cgroup available memory). `status` accounts for host memory, the
+cgroup budget and disk — if the cgroup is the tight one, the host numbers will
+look healthy while `status` does not; trust `status` and the suggested allowance.
+
+- **Call it before expensive work** — large builds, full test suites, container
+  launches — instead of guessing how loaded the box is.
+- **When `constrained` or `critical`:** run heavy work one at a time, reduce
+  parallelism (fewer workers / jobs / containers), and stay inside the suggested
+  allowance.
+- **Re-check before launching additional concurrent heavy work** — other
+  sessions share this box, and the numbers are a point-in-time measurement, not
+  a guarantee.
+- A missing source (e.g. no Docker, a probe timeout) shows up under `warnings`
+  and does not hide the other readings. The call itself gives up after 10s with
+  an error — treat headroom as unknown then and run heavy work serially.
+- It is advisory and changes nothing: it does not start, limit, or stop
+  anything. Don't call it in a loop or for trivial commands.
+
+Install/update is a COPY, never a symlink: `cp
+<repo>/docs/opencode-tools/resource-snapshot.ts
+~/.config/opencode/tools/resource-snapshot.ts` and `cp
+<repo>/docs/opencode-tools/manta-auth.ts
+~/.config/opencode/tools/manta-auth.ts` (the shared `./manta-auth` import),
+then `systemctl --user restart opencode-serve`. A symlink fails to resolve
+`@opencode-ai/plugin` and the tool silently never registers.
+
 ## manta inbound webhooks
 
 You have `webhook_create`, `webhook_list`, and `webhook_remove` tools to let an
