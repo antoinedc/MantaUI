@@ -622,7 +622,11 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
         await Task.yield()
 
-        XCTAssertEqual(Self.activityParts(in: store.blocks).count, 0, "an ended tool leaves the transcript's live calls")
+        // An ended call stays in this turn's run (the canonical transcript is not
+        // refetched mid-turn), now reading failed.
+        let parts = Self.activityParts(in: store.blocks)
+        XCTAssertEqual(parts.map(\.id), ["toolu_1"], "an ended tool stays in the run until the canonical refetch")
+        XCTAssertEqual(parts.first.map { ToolActivity.describe($0).status }, .error)
         let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
         XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
         XCTAssertEqual(reflected?.ok, false)

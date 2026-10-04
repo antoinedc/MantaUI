@@ -455,9 +455,10 @@ final class ChatTranscriptTests: XCTestCase {
     }
 
     func testACanonicalCallReplacesItsEndedLiveSibling() {
-        let canonical = [message(id: "m1", role: "assistant", parts: [
-            toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")]),
-        ])]
+        // A real canonical tool part always carries its callID.
+        var canonicalPart = toolPart("t1", "m1", tool: "bash", status: "completed", input: ["command": str("ls")])
+        canonicalPart.extra["callID"] = str("t1")
+        let canonical = [message(id: "m1", role: "assistant", parts: [canonicalPart])]
         let blocks = ChatTranscriptMapper.blocks(from: canonical)
         var byCallID = liveTool("t2", ended: true)
         byCallID.callID = "t1"
