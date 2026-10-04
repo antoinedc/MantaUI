@@ -186,6 +186,7 @@ import {
   createMediaSweep,
 } from "./media.mjs";
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
+import { resourceSnapshot } from "./resourceSnapshot.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
@@ -5723,6 +5724,34 @@ const handleRequest = async (req, res) => {
     } catch (e) {
       // class-2 (BET-1460): secrets opencode tool — relays the message to the model.
       respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Resource snapshot (read-only headroom view) ----------
+  // GET /api/resource-snapshot?directory=<optional absolute path>
+  //                  → {ok, capturedAt, memory{…, opencodeCgroup}, cpu, disk, topProcesses,
+  //                     containers, status, suggestedJobMemoryBytes, warnings}
+  //                    (400 {ok:false,error} for a bad directory)
+  // Called by the remote AI's global opencode `resource_snapshot` tool. Advisory
+  // and read-only; partial results when a source fails. See
+  // src/server/resourceSnapshot.mjs.
+  if (path === "/api/resource-snapshot") {
+    try {
+      if (req.method === "GET") {
+        const directory = url.searchParams.get("directory") || undefined;
+        const result = await resourceSnapshot({ directory });
+        if (!result.ok) {
+          respondJson(res, 400, result);
+          return;
+        }
+        respondJson(res, 200, result);
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      // class-2 (BET-1460): resource_snapshot opencode tool — relays the message to the model.
+      respondJson(res, 500, { ok: false, error: String(e?.message ?? e) });
     }
     return;
   }
