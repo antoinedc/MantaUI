@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-04
 **Branch:** `feat/ios-activity-parity`
-**Status:** Draft. Waiting for user approval.
+**Status:** Approved 2026-10-04.
 **Scope:** native iOS app (`mobile/native`) only. No server changes are needed: every signal used below is already sent by the box.
 
 ## Problems
@@ -89,7 +89,7 @@ Tapping a run row, or the working line, opens the **Activity sheet**. It has med
 
 A run with **exactly one call** opens with that call expanded (desktop's `defaultExpanded`).
 
-**Subagent (task) rows** inside the sheet push the child transcript *within the sheet's own navigation stack*, using the existing `ChatSubagentScreen`. This is the one change to DECISIONS.md §8a (subagents push a full screen). Subagent rows that appear in a run outside the sheet are reached through the sheet too.
+**Subagent (task) rows** inside the sheet **dismiss the sheet and push the existing `ChatSubagentScreen` as a full screen** on the chat screen's own navigation stack (DECISIONS.md §8a unchanged). Rationale: Apple HIG, *Sheets*: "Avoid using a sheet to help people navigate your app's content" and "For complex or prolonged user flows, consider alternatives to sheets." A subagent transcript is content navigation, not a brief task.
 
 **Live updates:** while open, the sheet follows the live run. New calls append, running rows flip to done, and the sheet does not close when the run settles. The sheet is keyed by run id, so it survives the transcript re-rendering.
 
@@ -109,7 +109,7 @@ Placement:
 
 - **Job windows are never top-level rows** under any ordering.
 - A job window whose parent window is visible is counted in that parent's subtitle ("N background jobs"), as today, and listed in the parent's Background jobs sheet (§4).
-- A job window with **no visible parent** goes into one collapsed group, **"Background jobs (N)"**, at the bottom of the list (both orderings). This covers a parent that is closed, in another project, headless (CTO), or a pruned job record. The group's rows behave like normal session rows: tap opens, and swipe gives the existing actions. Without this group those windows would be unreachable from the phone.
+- A job window with **no visible parent** is **hidden entirely** from the main list (user decision). This covers a parent that is closed, in another project, headless (CTO), or a pruned job record. It is not shown anywhere on the session list.
 - If the job list fails to load or decode, rule 1 alone still hides tagged windows. A single bad job record must no longer drop the whole list: decode records leniently and skip only the bad one.
 - The store listens for the `delegate.updated` event and refetches the job list. Today it only refreshes on pull, foreground, and so on.
 
@@ -125,7 +125,7 @@ A two-state toggle in the session list's navigation bar menu (the existing toolb
 Details:
 
 - **Persistence:** the choice is device-local (`@AppStorage("sessionListOrder")`), values `created` | `activity`.
-- **Interaction with other features:** search and the Recent filter still apply in both modes. The job group from §2 stays at the bottom in both modes.
+- **Interaction with other features:** search and the Recent filter still apply in both modes. Job windows (§2) are excluded in both modes.
 - **Last activity** for a window is the latest of:
   - the opencode session's `time.updated`, fetched **per window directory** (one `opencode:list-sessions(directory)` per distinct directory, as desktop's `backfillLastMessageTimes` does). This fixes the 100-session cap.
   - the live running→idle and idle→running transitions from the event stream (`runningSince` / idle time).
@@ -151,7 +151,7 @@ Row actions:
 
 | Action | Behaviour |
 |---|---|
-| **Tap** | Opens the job's own session (`childSessionID`) in a normal chat screen. If the job's window is gone, the row is not tappable and shows "window closed" (no dead tap) |
+| **Tap** | Dismisses the sheet, then pushes the job's own session (`childSessionID`) as a normal chat screen (per HIG: sheets are not for content navigation). If the job's window is gone, the row is not tappable and shows "window closed" (no dead tap) |
 | **Stop** (swipe or context menu, running jobs only) | Calls `delegate:stop(id)` with a confirmation. Success and failure are both shown as a toast |
 
 Freshness: the sheet refetches when it opens, on `delegate.updated`, and every 10s while open (the same pattern as the Scheduled tasks card).
@@ -178,7 +178,7 @@ Plumbing this needs:
 
 **Placement.** The card moves out of the composer overlay and becomes the **last row of the transcript** (after queued prompts). It scrolls with the content, so the user can scroll away from it. The composer overlay's bottom padding no longer includes it.
 
-**Collapsed** (default while a turn runs):
+**Collapsed** (always the default, running or idle):
 - header "Todo" · "3/7" · two-colour progress bar · chevron
 - one line underneath: the current in-progress item, or else the next pending one
 
@@ -186,7 +186,7 @@ Plumbing this needs:
 - **every** item, with no 5-item cap
 - the existing glyphs: in progress, pending, done struck through, cancelled
 - each item may wrap to 3 lines
-- the expanded/collapsed choice persists per session for the app's lifetime; it is not reset by running/idle
+- the card stays collapsed until tapped; once expanded, the choice persists per session for the app's lifetime and is not reset by running/idle
 
 **Auto-dismiss**, matching desktop: when the user sends a prompt while every item is completed or cancelled, the card hides until the next todo update. It also falls back to the transcript's last todo write when no live todo frame has arrived (for example, after reopening a session).
 
@@ -218,10 +218,10 @@ Both must pass `uniqueTranscriptRows`, and the existing crash regression tests m
 
 **The one seam.** Wiring the Background jobs destination into `ChatScreen.swift`'s sheet switch, and passing the job list to the mapper for §5. Agent B exposes a `BackgroundJobsStore`. Agent A consumes it in `ChatScreen.swift`. B does not edit `ChatScreen.swift`.
 
-## 9. Decisions to confirm
+## 9. Decisions (confirmed 2026-10-04)
 
-1. **Latest-activity mode ignores pins.** Alternative: keep pinned windows on top.
-2. **Orphaned job windows go in a collapsed group at the bottom** instead of disappearing. Alternative: hide them entirely.
-3. **Subagents open inside the activity sheet** (pushed within it), rather than pushing a full screen from the transcript.
-4. **Todo card is collapsed by default while running and expanded by default when idle.** Alternative: always collapsed until tapped.
-5. **Background jobs sheet includes Stop.** Alternative: read-only plus open.
+1. Latest-activity mode ignores pins.
+2. Job windows with no visible parent are hidden entirely.
+3. Subagents open as a full pushed screen (sheet dismisses first), per Apple HIG on sheets.
+4. Todo card is always collapsed until tapped.
+5. Background jobs sheet includes Stop.
