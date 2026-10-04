@@ -38,6 +38,10 @@ struct ChatOverflowSheet: View {
     var onSchedules: () -> Void
     var onSecrets: () -> Void
     var onArtifacts: () -> Void
+    /// Opens the Background jobs sheet. Required (no default) on purpose: the
+    /// entry below is shown whenever `backgroundJobs.total > 0`, and a default
+    /// no-op here would let a caller ship a row that does nothing when tapped.
+    var onBackgroundJobs: () -> Void
     var onCompact: () -> Void
     var onClear: () -> Void
     var onFork: () -> Void
@@ -54,6 +58,11 @@ struct ChatOverflowSheet: View {
 
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
+
+    /// Background jobs this session has started: `total` is every job on record
+    /// (the row is hidden at 0 — a session that never had one has nothing to
+    /// show), `running` the live ones, shown as the row's count.
+    var backgroundJobs: (total: Int, running: Int) = (total: 0, running: 0)
 
     /// Clear/Delete/Compact confirmations. Presented as a compact native
     /// bottom sheet (`ConfirmActionSheet`) from within this sheet, so it layers
@@ -76,6 +85,10 @@ struct ChatOverflowSheet: View {
                     row("Scheduled tasks", systemImage: "clock", badge: scheduleCount, action: onSchedules)
                     row("Secrets", systemImage: "key", action: onSecrets)
                     row("Artifacts", systemImage: "doc", action: onArtifacts)
+                    if backgroundJobs.total > 0 {
+                        row("Background jobs", systemImage: "square.stack.3d.up",
+                            badge: backgroundJobs.running, action: onBackgroundJobs)
+                    }
                 }
                 Section {
                     Button {

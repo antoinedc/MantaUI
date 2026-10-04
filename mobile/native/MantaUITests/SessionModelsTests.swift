@@ -746,6 +746,68 @@ final class SessionListJobToleranceTests: XCTestCase {
         }
         XCTAssertNil(store.loadError)
     }
+
+    // MARK: - Spec §2: job windows hidden by the box's own `owner` tag
+
+    private let taggedProjectJSON = #"""
+    {"result":[{"tmuxSession":"proj","defaultCwd":"/tmp","windows":[
+      {"index":0,"name":"a","active":false,"paneCurrentPath":"/p","opencodeSessionId":"ses_a"},
+      {"index":1,"name":"job","active":false,"paneCurrentPath":"/p","opencodeSessionId":"ses_job","owner":"job"}
+    ],"attached":false},
+    {"tmuxSession":"onlyjobs","defaultCwd":"/tmp","windows":[
+      {"index":0,"name":"orphan","active":false,"paneCurrentPath":"/q","opencodeSessionId":"ses_orphan","owner":"job"}
+    ],"attached":false}]}
+    """#
+
+    func testOwnerTaggedJobWindowIsHiddenEvenWhenTheJobListFails() async {
+        StubChannelURLProtocol.responseBySubstring = [
+            "default": #"{"error":"unknown rpc channel: delegate:list"}"#,
+            "tmux:list": taggedProjectJSON,
+        ]
+        let store = SessionListStore(api: makeAPI(), eventStore: MantaEventStore())
+
+        await store.refresh()
+
+        // The tag alone hides the window — no job record was ever loaded.
+        let visible = store.visibleProjects
+        XCTAssertEqual(visible.map(\.tmuxSession), ["proj"], "a project holding only job windows is not listed")
+        XCTAssertEqual(visible[0].windows.map(\.index), [0])
+        XCTAssertEqual(store.visibleWindows(in: store.projects[0]).map(\.index), [0])
+        // The raw list still has the window (a push deep-link can open it).
+        XCTAssertEqual(store.projects.first?.windows.count, 2)
+    }
+
+    // MARK: - Spec §3: last activity from per-directory session lists
+
+    func testLastActivityComesFromTheListedSessionAndRespectsLiveTransitions() async {
+        StubChannelURLProtocol.responseBySubstring = [
+            "default": #"{"error":"unknown rpc channel"}"#,
+            "tmux:list": projectJSON,
+            "opencode:list-sessions": #"{"result":[{"id":"ses_a","time":{"updated":1000000}},{"id":"ses_b","time":{"updated":2000000}}]}"#,
+        ]
+        let store = SessionListStore(api: makeAPI(), eventStore: MantaEventStore())
+
+        await store.refresh()
+
+        let a = store.projects[0].windows[0]
+        let b = store.projects[0].windows[1]
+        XCTAssertEqual(store.lastActivity(for: a), Date(timeIntervalSince1970: 1000))
+        XCTAssertEqual(store.lastActivity(for: b), Date(timeIntervalSince1970: 2000))
+        // The age chip's own data is untouched by the ordering signal.
+        XCTAssertEqual(store.rowStatus(for: a).lastActivity, Date(timeIntervalSince1970: 1000))
+    }
+
+    func testTerminalWindowHasNoLastActivity() async {
+        StubChannelURLProtocol.responseBySubstring = [
+            "default": #"{"error":"unknown rpc channel"}"#,
+            "tmux:list": #"{"result":[{"tmuxSession":"proj","defaultCwd":"/tmp","windows":[{"index":0,"name":"sh","active":false,"paneCurrentPath":"/p"}],"attached":false}]}"#,
+        ]
+        let store = SessionListStore(api: makeAPI(), eventStore: MantaEventStore())
+
+        await store.refresh()
+
+        XCTAssertNil(store.lastActivity(for: store.projects[0].windows[0]))
+    }
 }
 
 // MARK: - BET-1350 terminal-window running status (tmux poller frames)

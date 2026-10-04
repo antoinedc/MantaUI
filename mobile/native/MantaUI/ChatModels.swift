@@ -19,59 +19,6 @@ import Foundation
 
 // MARK: - Step-row presentation (§8)
 
-/// The §8 step-row verb. opencode names a tool by its id; the design shows a
-/// short verb (Ran / Read / Edit / Search). Unknown tools fall back to the
-/// tool id itself — honest, never invented.
-enum StepVerb {
-    static func text(for tool: String) -> String {
-        switch tool.lowercased() {
-        case "bash", "exec", "powershell", "deno", "bun": return "Ran"
-        case "read", "glance", "write_file": return "Read"
-        case "write", "edit", "str_replace_editor", "patch": return "Edit"
-        case "grep", "directory_search", "web_search", "search": return "Search"
-        case "list": return "List"
-        case "webfetch", "fetch", "browse": return "Fetched"
-        default: return tool
-        }
-    }
-}
-
-/// The §8 step-row target: the mono string the tool acted on. Drawn from the
-/// tool's `input` (command / filePath / pattern); falls back to the tool id.
-enum ToolTarget {
-    static func text(tool: String, input: JSONValue?) -> String? {
-        guard let inputObject = ChatJSON.object(input) else { return nil }
-        for key in ["command", "filePath", "file_path", "pattern", "url", "path"] {
-            if let s = ChatJSON.string(inputObject[key]), !s.isEmpty {
-                return singleLine(s)
-            }
-        }
-        // A string-literal input ("grep foo" style) is a target on its own.
-        if case .string(let s) = input, !s.isEmpty {
-            return singleLine(s)
-        }
-        return nil
-    }
-
-    private static func singleLine(_ s: String) -> String {
-        s.components(separatedBy: .newlines).first?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? s
-    }
-}
-
-/// The §8 step-row duration ("0.4s", "1m12s"). nil when timeless.
-enum ChatDuration {
-    static func text(seconds: Double?) -> String? {
-        guard let seconds, seconds >= 0 else { return nil }
-        if seconds < 60 {
-            return String(format: "%0.1fs", seconds)
-        }
-        let m = Int(seconds) / 60
-        let s = Int(seconds) % 60
-        return "\(m)m\(s)s"
-    }
-}
-
 /// Wall-clock time for the swipe-to-reveal timestamp gutter (§8).
 ///
 /// opencode stamps `time.created` / `time.completed` in epoch MILLISECONDS —
@@ -144,9 +91,15 @@ enum ChatSubagentMapper {
         let childSessionId = ChatJSON.string(metadata?["sessionId"])
         let statusRaw = ChatJSON.string(state["status"])
         let title = ChatJSON.string(state["title"])
-        let taskName = title ?? "subagent"
+        // opencode titles a task part from its description; a live frame may carry
+        // only the description, so fall back to it before the generic name.
+        let description = ChatJSON.string(ChatJSON.object(state["input"])?["description"])
+        let taskName = [title, description].compactMap { $0 }.first { !$0.isEmpty } ?? "subagent"
 
-        let status: SubagentStatus = statusRaw?.lowercased() == "completed" ? .done : .running
+        // The part's wire status (already resolved by `resolvingTaskStatuses`
+        // when it came out of the store): an error is FAILED — it used to read
+        // as "running" (spec §5).
+        let status = SubagentStatus.fromWire(statusRaw)
         let time = ChatJSON.object(state["time"])
         let duration: String?
         if let start = ChatJSON.number(time?["start"]),
@@ -175,82 +128,32 @@ enum ChatSubagentMapper {
             fallbackId: (callID?.isEmpty == false) ? callID : nil
         )
     }
-
-    /// The LIVE-subagent path: map the box's `stream/subagent` frame onto the
-    /// same SubagentSession the canonical mapper produces, so a running card
-    /// renders immediately from the live feed. `childSessionId` is always
-    /// present here — the box only emits the frame once opencode has stamped
-    /// the child session id.
-    static func session(from payload: StreamSubagentPayload) -> SubagentSession {
-        // Task name: the box's title first, then the description, then the
-        // agent id — a published subagent always carries at least a title.
-        let taskName: String
-        if let t = payload.title, !t.isEmpty {
-            taskName = t
-        } else if let d = payload.description, !d.isEmpty {
-            taskName = d
-        } else if let a = payload.agent, !a.isEmpty {
-            taskName = a
-        } else {
-            taskName = "subagent"
-        }
-
-        return SubagentSession(
-            taskName: taskName,
-            status: .running,
-            // `durationMs` is MILLISECONDS on the wire (the desktop reference
-            // renders it via ms/1000); ChatDuration.text takes seconds, so
-            // convert before the helper — 1200 → 1.2 → "1.2s".
-            duration: ChatDuration.text(seconds: payload.durationMs.map { $0 / 1000 }),
-            transcript: [],
-            childSessionId: payload.childSessionId
-        )
-    }
-}
-
-// MARK: - Transcript rollup (§8 "consecutive steps roll up")
-
-/// Decide whether a run of consecutive step rows should collapse to a single
-/// summary line. §8: three or more = roll up. Groups containing an agent row
-/// are never rolled (a subagent is a session, not a step, §8a).
-enum ChatRollup {
-    static func shouldRoll(rows: [StepGroupRow]) -> Bool {
-        rows.count >= 3 && rows.allSatisfy { if case .step = $0 { return true } else { return false } }
-    }
-
-    /// "▸ 4 steps · Ran 3, Search 1" — verb counts, in first-seen order.
-    static func summary(rows: [StepGroupRow]) -> String {
-        var counts: [(verb: String, n: Int)] = []
-        var order: [String] = []
-        for row in rows {
-            guard case .step(let step) = row else { continue }
-            let verb = step.verb
-            if order.contains(verb) {
-                if let i = order.firstIndex(of: verb) { counts[i].n += 1 }
-            } else {
-                order.append(verb)
-                counts.append((verb, 1))
-            }
-        }
-        let parts = counts.map { "\($0.verb) \($0.n)" }
-        return "▸ \(rows.count) steps · " + parts.joined(separator: ", ")
-    }
 }
 
 // MARK: - The mapper: `opencode:messages` → `[TranscriptBlock]`
 
-/// Maps the canonical transcript (and a live stream "in progress" payload)
-/// onto the existing block types.
+/// The result of folding the stream's live state into the canonical blocks.
+struct LiveActivityMerge: Equatable {
+    /// The blocks to render as rows.
+    var blocks: [TranscriptBlock]
+    /// The run at the very tail while a turn runs. It is drawn by the working
+    /// line instead of inline (spec §1.1), so it is NOT in `blocks`.
+    var trailing: ToolRun?
+}
+
+/// Maps the canonical transcript (and the live stream state) onto the block
+/// types.
 ///
 /// Block-type provenance (the S4 mapping — see FINDINGS):
 ///   - `.user`      — from canonical user text parts. No stream event produces
 ///                    one; it comes from the transcript fetch.
 ///   - `.prose`     — from canonical assistant text parts AND, live, from the
 ///                    box's `stream:flush` (the running assistant turn).
-///   - `.steps`     — from canonical assistant tool parts (step rows) and
-///                    `stream:subagent` / task-tool parts (agent rows).
+///   - `.activity`  — from canonical tool/patch parts (a RUN of them, which can
+///                    span assistant messages) and the live tool / subagent
+///                    frames.
 ///
-/// The stream alone cannot produce `.user` or completed `.steps`/`.prose`;
+/// The stream alone cannot produce `.user` or completed `.activity`/`.prose`;
 /// those are canonical-transcript material. This is a finding, not an
 /// invented event — the box interprets, the transcript persists, the stream
 /// augments. See mobile/native/FINDINGS.md.
@@ -270,18 +173,30 @@ enum ChatTranscriptMapper {
     /// claimed onto the message that produced them, so a widget renders as a
     /// `.file` attachment right where its turn landed without inventing any
     /// new row identity.
+    ///
+    /// Tool calls are grouped by `ToolActivity.layout` — the same rules as the
+    /// desktop. A run belongs to the message it STARTS in; the assistant
+    /// messages it absorbs draw no block of their own.
     static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote], widgets: [WidgetRef]) -> [TranscriptBlock] {
         let voiceMap = buildVoiceNoteMap(messages: messages, notes: voiceNotes)
         let widgetMap = buildWidgetMap(widgets)
+        // An assistant message still streaming (time.completed == nil) is
+        // skipped whole: its text arrives live via `stream.flush` and its
+        // still-moving tool calls via the live frames. Emitting it now would
+        // duplicate the in-progress text. The box itself keys turn completion on
+        // time.completed. It is left out of the layout too, so a run never
+        // "continues" into a message that is not drawn.
+        let settled = messages.filter {
+            $0.info.role.rawValue != "assistant" || $0.info.time?.completed != nil
+        }
+        let layout = ToolActivity.layout(messages: settled, running: false, showThinking: false)
         var blocks: [TranscriptBlock] = []
-        var pending: [StepGroupRow] = []
 
-        for msg in messages {
+        for msg in settled {
             switch msg.info.role.rawValue {
             case "user":
                 let text = textParts(of: msg)
                 if !text.isEmpty {
-                    flush(&pending, into: &blocks)
                     // A prompt is timestamped when it was WRITTEN; a reply when
                     // it finished. Both are what the reader means by "when did
                     // this happen".
@@ -294,25 +209,22 @@ enum ChatTranscriptMapper {
                     appendWidgets(widgetMap[msg.info.id], into: &blocks)
                 }
             case "assistant":
-                // An assistant message still streaming (time.completed == nil)
-                // is skipped whole: its text arrives live via `stream.flush`
-                // and its still-moving steps come in on the turn-boundary
-                // refetch. Emitting it now would duplicate the in-progress
-                // text. The box itself keys turn completion on time.completed.
-                guard msg.info.time?.completed != nil else { continue }
                 let at = ChatClock.date(epochMs: msg.info.time?.completed)
-                for (index, part) in msg.parts.enumerated() {
-                    process(part, index: index, at: at, pending: &pending, blocks: &blocks)
+                for block in layout.blocksByMessage[msg.info.id] ?? [] {
+                    switch block {
+                    case .tools(let run):
+                        blocks.append(.activity(run))
+                    case .part(let part):
+                        process(part, at: at, into: &blocks)
+                    }
                 }
-                flush(&pending, into: &blocks)
-                // A turn's widgets follow its steps/prose: the model rendered
+                // A turn's widgets follow its tools/prose: the model rendered
                 // them as part of that assistant message.
                 appendWidgets(widgetMap[msg.info.id], into: &blocks)
             default:
                 break
             }
         }
-        flush(&pending, into: &blocks)
         return blocks
     }
 
@@ -336,126 +248,161 @@ enum ChatTranscriptMapper {
         }
     }
 
-    /// Append the still-running LIVE tools AND live subagents (streamed mid-turn
-    /// by the box) to the transcript, in the turn that spawned them.
+    // MARK: Task status (spec §5)
+
+    /// Resolve every task call's status against what the event store and the
+    /// job list know right now. Runs without a task come back untouched.
+    static func resolvingTaskStatuses(_ blocks: [TranscriptBlock], context: TaskStatusContext) -> [TranscriptBlock] {
+        blocks.map { block in
+            guard case .activity(let run) = block else { return block }
+            return .activity(run.resolvingTasks(context))
+        }
+    }
+
+    // MARK: Live merge
+
+    /// A live tool frame as a tool part. The frame carries only a name, opencode's
+    /// title for the part (the "hint") and a stdout tail, so that is all the part
+    /// has: the title stands in for the input the label would otherwise be
+    /// built from.
+    static func livePart(from tool: LiveTool) -> OpencodePart {
+        let status = (tool.status ?? "running").lowercased() == "pending" ? "pending" : "running"
+        var metadata: [String: JSONValue] = [:]
+        if !tool.tail.isEmpty { metadata["output"] = .string(tool.tail) }
+        return ToolActivity.makeToolPart(
+            id: tool.idx,
+            callID: tool.callID.isEmpty ? nil : tool.callID,
+            tool: tool.name ?? "tool",
+            status: status,
+            title: tool.presentationHint,
+            metadata: metadata
+        )
+    }
+
+    /// A live subagent frame as a task part. The id is derived from the child
+    /// session (the frame carries no part id); the canonical part takes over —
+    /// and this one is dropped — once the transcript names the same child.
+    static func livePart(from subagent: StreamSubagentPayload) -> OpencodePart {
+        var input: [String: JSONValue] = [:]
+        if let d = subagent.description, !d.isEmpty { input["description"] = .string(d) }
+        if let a = subagent.agent, !a.isEmpty { input["subagent_type"] = .string(a) }
+        return ToolActivity.makeToolPart(
+            id: "live-task-\(subagent.childSessionId)",
+            tool: "task",
+            status: "running",
+            title: subagent.title,
+            input: input,
+            metadata: ["sessionId": .string(subagent.childSessionId)]
+        )
+    }
+
+    /// Fold the still-running LIVE tools and live subagents into the transcript
+    /// as part of the run they belong to.
     ///
-    /// This is the replacement for the deleted pinned running-tool overlay:
-    /// a tool call renders inside the transcript (tailing its output as a live
-    /// step) instead of floating above the composer. Each live tool becomes a
-    /// `.running` step keyed by the SAME `callID` the canonical `stepIdentity`
-    /// uses, so a live row and its completed canonical sibling share one
-    /// identity and the turn-boundary refetch replaces the row IN PLACE — no
-    /// remove-and-reinsert flash (the whole point of this issue). A live
-    /// subagent becomes a `.subagent` card sourced from the box's `subagent`
-    /// frame, so the card renders while the subagent runs instead of arriving
-    /// only once it finishes.
+    /// - Live tools (`toolStarted`..`toolEnded`) and live subagents extend the run
+    ///   at the very end of the transcript, or open a new one. While a turn
+    ///   runs that run is the `trailing` one, drawn by the working line;
+    ///   otherwise it is an ordinary row.
+    /// - When live prose follows the transcript's last run, that run is not at
+    ///   the tail any more: it stays an inline row and the live calls open a new
+    ///   run after the prose.
+    /// - A live call the transcript already owns (same part id, same call id, or
+    ///   — for a task — same child session) is skipped: the canonical one has
+    ///   taken over, so appending again would duplicate it.
+    /// - A live task row is kept only while its status resolves to running
+    ///   (spec §5). That includes a task whose tool call already reads
+    ///   "completed" because the work was started in the background — such a
+    ///   row used to be dropped, so the card vanished mid-turn.
     ///
-    /// A live tool whose `callID` the transcript already owns is skipped: the
-    /// canonical step has taken over, so appending again would duplicate it.
-    /// Live tools append to the LAST unrolled `.steps` group (continuing the
-    /// turn's rail); if the last step block is a rolled-up summary — completed
-    /// content a running tool does not belong to — or there is none, a fresh
-    /// group is opened at the end.
-    static func appendingLive(
+    /// `hasTailContent` is true when something draws after the transcript's last
+    /// run (live prose, or a prompt being sent), which keeps that run inline.
+    static func mergingLive(
         tools: [LiveTool],
         subagents: [StreamSubagentPayload],
+        context: TaskStatusContext,
+        running: Bool,
+        hasTailContent: Bool,
         to blocks: [TranscriptBlock]
-    ) -> [TranscriptBlock] {
+    ) -> LiveActivityMerge {
         // A task part streams as an ordinary tool AND as the richer `subagent`
         // frame (src/server/streamInterp.mjs documents the tool triple as
-        // redundant). Rendering both gives a bare "task" row next to the real
-        // card — and the tool row is the one that dumps the subagent's whole
-        // result into an unbounded view. The subagent frame is the only source.
-        let liveSteps: [ToolStep] = tools.compactMap { tool in
-            guard tool.name?.lowercased() != "task" else { return nil }
-            return ToolStep(
-                id: tool.callID.isEmpty ? tool.idx : tool.callID,
-                verb: StepVerb.text(for: tool.name ?? "tool"),
-                target: tool.presentationHint.flatMap { $0.isEmpty ? nil : $0 } ?? tool.name ?? "tool",
-                duration: "",
-                status: .running,
-                output: tool.tail.isEmpty ? nil : tool.tail
+        // redundant). The subagent frame is the only source.
+        var live: [OpencodePart] = tools.compactMap { tool in
+            tool.name?.lowercased() == "task" ? nil : livePart(from: tool)
+        }
+        live += subagents.compactMap { payload in
+            let status = TaskStatusResolver.resolve(
+                toolStatus: payload.status,
+                childSessionID: payload.childSessionId,
+                output: payload.output,
+                context: context
             )
+            return status.isRunning ? livePart(from: payload) : nil
         }
 
-        // A finished subagent belongs to the canonical transcript, which owns it
-        // after the turn-boundary refetch; keeping the live copy too would
-        // double the row. Only pending/running payloads become live cards.
-        let liveSubagents: [SubagentSession] = subagents.compactMap { payload in
-            switch (payload.status ?? "").lowercased() {
-            case "pending", "running":
-                return ChatSubagentMapper.session(from: payload)
-            default:
-                return nil
+        // Drop what the canonical transcript already owns.
+        var ids = Set<String>()
+        var calls = Set<String>()
+        var children = Set<String>()
+        for block in blocks {
+            guard case .activity(let run) = block else { continue }
+            for part in run.parts {
+                ids.insert(part.id)
+                if let c = ChatJSON.string(part.extra["callID"]), !c.isEmpty { calls.insert(c) }
+                if let child = TaskStatusResolver.childSessionID(of: part) { children.insert(child) }
             }
         }
-
-        guard !(liveSteps.isEmpty && liveSubagents.isEmpty) else { return blocks }
-
-        var liveRows: [StepGroupRow] = liveSteps.map { .step($0) }
-        liveRows.append(contentsOf: liveSubagents.map { .subagent($0) })
-
-        // Dedup against ids the canonical transcript already owns — STEP rows
-        // and SUBAGENT rows alike — so a live card disappears the instant the
-        // canonical one lands rather than briefly showing twice.
-        let existingIDs = Set(blocks.flatMap { block -> [String] in
-            guard case .steps(let content) = block else { return [] }
-            return content.rows.map(\.id)
-        })
-        let toAppend = liveRows.filter { !existingIDs.contains($0.id) }
-        guard !toAppend.isEmpty else { return blocks }
+        live = live.filter { part in
+            if ids.contains(part.id) { return false }
+            if let c = ChatJSON.string(part.extra["callID"]), calls.contains(c) { return false }
+            if let child = TaskStatusResolver.childSessionID(of: part), children.contains(child) { return false }
+            return true
+        }
 
         var result = blocks
-        if let last = result.indices.last, case .steps(.rows(let rows)) = result[last] {
-            result[last] = .steps(.rows(rows + toAppend))
-        } else {
-            result.append(.steps(.rows(toAppend)))
+        var lastRun: ToolRun? {
+            if case .activity(let run)? = result.last { return run }
+            return nil
         }
-        return result
+
+        if live.isEmpty {
+            // Nothing live: while a turn runs, the run at the very end of the
+            // transcript is shown by the working line.
+            if running, !hasTailContent, let run = lastRun {
+                result.removeLast()
+                return LiveActivityMerge(blocks: result, trailing: run)
+            }
+            return LiveActivityMerge(blocks: result, trailing: nil)
+        }
+
+        var base: ToolRun?
+        if !hasTailContent, let run = lastRun {
+            base = run
+            result.removeLast()
+        }
+        let merged = base.map { $0.appending(live) } ?? ToolRun(id: live[0].id, parts: live)
+        if running {
+            return LiveActivityMerge(blocks: result, trailing: merged)
+        }
+        result.append(.activity(merged))
+        return LiveActivityMerge(blocks: result, trailing: nil)
     }
 
-    private static func flush(_ pending: inout [StepGroupRow], into blocks: inout [TranscriptBlock]) {
-        guard !pending.isEmpty else { return }
-        if ChatRollup.shouldRoll(rows: pending) {
-            blocks.append(.steps(.rollup(summary: ChatRollup.summary(rows: pending), rows: pending)))
-        } else {
-            blocks.append(.steps(.rows(pending)))
-        }
-        pending = []
-    }
-
-    private static func process(_ part: OpencodePart, index: Int, at: Date?, pending: inout [StepGroupRow], blocks: inout [TranscriptBlock]) {
+    /// A non-blank text part becomes prose. Everything else draws nothing here:
+    /// tool/patch parts are claimed by the layout as runs, reasoning is not
+    /// shown on iOS, and a file part that is not a voice note renders nothing
+    /// (voice notes attach at the USER-message level — `buildVoiceNoteMap` — and
+    /// image / generic-file rendering is deliberately not implemented yet,
+    /// BET-1029, so do not fold `file` into a catch-all).
+    private static func process(_ part: OpencodePart, at: Date?, into blocks: inout [TranscriptBlock]) {
         if part.ignored == true || part.synthetic == true { return }
-        switch part.type {
-        case "text":
-            // Prose does not collapse, but a blank/whitespace-only text part is
-            // paragraph noise — opencode routinely emits a newline-only text
-            // part after a tool run. Rendering it as a prose block would stack
-            // another `--sp-3` (+ line box) and inflate the step-group gap above
-            // the next block (BET-632). Same rule as `textParts(of:)`.
-            if let t = part.text, !ChatTranscriptMapper.isBlank(t) {
-                flush(&pending, into: &blocks)
-                blocks.append(.prose(t, at: at))
-            }
-        case "tool":
-            let tool = ChatJSON.string(part.extra["tool"]) ?? ""
-            if tool.lowercased() == "task" {
-                if let agent = ChatSubagentMapper.session(from: part) {
-                    pending.append(.subagent(agent))
-                }
-            } else {
-                pending.append(.step(step(from: part, tool: tool, indexWithinMessage: index)))
-            }
-        case "file":
-            // A file part that is not a voice note renders nothing. Voice
-            // notes attach at the USER-message level (buildVoiceNoteMap), not
-            // here; image and generic-file rendering are deliberately not
-            // implemented yet (BET-1029), so do not silently reuse the
-            // `default: break` for them — this case is where they will land.
-            break
-        default:
-            // reasoning / etc. — no §8 block type renders it; skip.
-            break
+        // A blank/whitespace-only text part is paragraph noise — opencode
+        // routinely emits a newline-only text part after a tool run. Rendering
+        // it as a prose block would stack another `--sp-3` (+ line box) and
+        // inflate the gap above the next block (BET-632). Same rule as
+        // `textParts(of:)`.
+        if part.type == "text", let t = part.text, !isBlank(t) {
+            blocks.append(.prose(t, at: at))
         }
     }
 
@@ -531,53 +478,6 @@ enum ChatTranscriptMapper {
     /// must never become a `.prose` block, which would stack gap spacing.
     private static func isBlank(_ text: String) -> Bool {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private static func step(from part: OpencodePart, tool: String, indexWithinMessage: Int) -> ToolStep {
-        let id = stepIdentity(part: part, indexWithinMessage: indexWithinMessage)
-        let state = ChatJSON.object(part.extra["state"])
-        let statusRaw = ChatJSON.string(state?["status"])
-        let status = StepStatusFromTool.status(statusRaw)
-        let verb = StepVerb.text(for: tool)
-        let target = ToolTarget.text(tool: tool, input: state?["input"])
-            ?? ToolTarget.text(tool: tool, input: part.extra["input"])
-            ?? tool
-        let time = ChatJSON.object(state?["time"])
-        let duration: String
-        if let t = ChatDuration.text(seconds: durationSeconds(state: state, time: time)) {
-            duration = t
-        } else {
-            duration = ""
-        }
-        let output = ChatJSON.string(state?["output"])
-        return ToolStep(id: id, verb: verb, target: target, duration: duration, status: status, output: output)
-    }
-
-    /// Deterministic step identity derived from the wire data so a step's id
-    /// survives a canonical refetch (the turn-boundary flash fix, BET-666).
-    /// Priority: the tool part's `callID` when present → the part's own id →
-    /// `\(messageID)-step-\(indexWithinMessage)` as a last resort. No freshly
-    /// minted random id anywhere on this mapping path.
-    private static func stepIdentity(part: OpencodePart, indexWithinMessage: Int) -> String {
-        if let callID = ChatJSON.string(part.extra["callID"]), !callID.isEmpty {
-            return callID
-        }
-        if !part.id.isEmpty {
-            return part.id
-        }
-        return "\(part.messageID)-step-\(indexWithinMessage)"
-    }
-
-    /// Tool-part `state.time.start/end` are MILLISECONDS on the wire (opencode
-    /// stamps tool time in ms — see `ChatDuration.text`); `ChatDuration.text`
-    /// takes seconds, so convert before the helper — a step that ran 0.4s must
-    /// not render as "6m40s". Mirrors the subagent paths.
-    private static func durationSeconds(state: [String: JSONValue]?, time: [String: JSONValue]?) -> Double? {
-        if let start = ChatJSON.number(time?["start"]),
-           let end = ChatJSON.number(time?["end"]) {
-            return (end - start) / 1000
-        }
-        return nil
     }
 }
 

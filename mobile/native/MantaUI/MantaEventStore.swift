@@ -412,6 +412,13 @@ final class MantaEventStore: ObservableObject {
     /// would let the second clobber the first (BET-1282).
     private var rawFrameHandlers: [(MantaStreamFrame) -> Void] = []
 
+    /// Fires once for every `delegate.updated` frame — a background job
+    /// started, progressed, finished or was stopped. A `Subject` rather than
+    /// another raw handler because its observers come and go (a Background jobs
+    /// sheet lives only while it is on screen) and a handler list has no way to
+    /// unsubscribe. The frame still reaches the raw handlers too.
+    let delegateUpdates = PassthroughSubject<Void, Never>()
+
     /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
     func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
         rawFrameHandlers.append(handler)
@@ -522,6 +529,7 @@ final class MantaEventStore: ObservableObject {
         } else if frame.kind == "stream" {
             routeStream(frame)
         } else {
+            if frame.kind == "delegate.updated" { delegateUpdates.send() }
             for handler in rawFrameHandlers { handler(frame) }
         }
     }

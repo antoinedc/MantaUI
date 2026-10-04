@@ -32,6 +32,7 @@ struct ChatOverflowCaptureScene: View {
                     onSchedules: {},
                     onSecrets: {},
                     onArtifacts: {},
+                    onBackgroundJobs: {},
                     onCompact: {},
                     onClear: {},
                     onFork: {},

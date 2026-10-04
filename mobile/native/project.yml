@@ -171,6 +171,11 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - path: MantaUITests
+      # The shared tool-activity parity fixture: the same file the desktop's
+      # vitest suite asserts against toolActivity.ts. ToolActivityTests reads it
+      # from the test bundle to assert the Swift port against it.
+      - path: ../../src/shared/fixtures/tool-activity-cases.json
+        buildPhase: resources
     dependencies:
       - target: MantaUI
     settings:

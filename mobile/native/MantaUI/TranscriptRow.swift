@@ -65,8 +65,20 @@ extension TranscriptBlock {
         case .permission(let p): return "pm" + p.id
         case .planExit(let q): return "px" + q.id
         case .question(let q): return "qq" + q.id
+        // A run's id is its FIRST part's id (the same first-id rule as the step
+        // group above): a run grows by APPENDING calls — and can absorb whole
+        // later assistant messages — so the first part's id is fixed for the life
+        // of the run, while anything derived from all its parts would change on
+        // every new call and make the diff delete + re-insert the row.
+        case .activity(let run): return "run-" + run.id
+        // ONE todo row per transcript, so its id is a constant — which also keeps
+        // it stable while the list inside changes.
+        case .todos: return TranscriptBlock.todosRowID
         }
     }
+
+    /// The fixed id of the transcript's todo row.
+    static let todosRowID = "todos"
 }
 
 /// A content-stable identity for an attachment block, unique across the
@@ -147,6 +159,12 @@ final class TranscriptCardActions {
     let onOpenPage: () -> Void
     /// Invoked from the system text-selection edit menu with the user's SELECTED text, not a whole block (BET-1364).
     let onQuote: (String, QuoteDestination) -> Void
+    /// Open the Activity sheet for a run (by run id). nil → the run rows draw as
+    /// plain, inert lines: a control that cannot act is not rendered as one.
+    let onOpenActivity: ((String) -> Void)?
+    /// Expand / collapse the todo card. nil → the card draws without a header
+    /// button.
+    let onToggleTodos: (() -> Void)?
 
     init(
         messages: [OpencodeMessage],
@@ -158,7 +176,9 @@ final class TranscriptCardActions {
         onBuildHere: @escaping (QuestionRequest, String) -> Void,
         onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
         onOpenPage: @escaping () -> Void,
-        onQuote: @escaping (String, QuoteDestination) -> Void
+        onQuote: @escaping (String, QuoteDestination) -> Void,
+        onOpenActivity: ((String) -> Void)? = nil,
+        onToggleTodos: (() -> Void)? = nil
     ) {
         self.messages = messages
         self.buildModelName = buildModelName
@@ -170,6 +190,36 @@ final class TranscriptCardActions {
         self.onKeepPlanning = onKeepPlanning
         self.onOpenPage = onOpenPage
         self.onQuote = onQuote
+        self.onOpenActivity = onOpenActivity
+        self.onToggleTodos = onToggleTodos
+    }
+}
+
+extension TranscriptCardActions {
+    /// The action set of a READ-ONLY surface (the subagent drill-in, the capture
+    /// fixture): every blocking card renders harmlessly and no closure reaches a
+    /// live store. The activity and todo callbacks are the exception — opening a
+    /// run's detail sheet and expanding the checklist are read-only actions, so
+    /// a surface that can present them passes them in; one that cannot leaves
+    /// them nil and the rows draw as plain lines instead of dead buttons.
+    static func readOnly(
+        onOpenActivity: ((String) -> Void)? = nil,
+        onToggleTodos: (() -> Void)? = nil
+    ) -> TranscriptCardActions {
+        TranscriptCardActions(
+            messages: [],
+            buildModelName: "",
+            planURL: nil,
+            onPermissionReply: { _, _ in },
+            onQuestionSubmit: { _, _ in },
+            onQuestionReject: { _ in },
+            onBuildHere: { _, _ in },
+            onKeepPlanning: { _, _ in },
+            onOpenPage: {},
+            onQuote: { _, _ in },
+            onOpenActivity: onOpenActivity,
+            onToggleTodos: onToggleTodos
+        )
     }
 }
 
@@ -303,18 +353,7 @@ private struct TranscriptCellReveal: View {
 func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: TranscriptCardActions? = nil, onRetry: @escaping @MainActor (String) -> Void = { _ in }) -> some View {
     // The inert action set a read-only surface falls back to: every card
     // renders harmlessly but no closure reaches a live store.
-    let actions = cards ?? TranscriptCardActions(
-        messages: [],
-        buildModelName: "",
-        planURL: nil,
-        onPermissionReply: { _, _ in },
-        onQuestionSubmit: { _, _ in },
-        onQuestionReject: { _ in },
-        onBuildHere: { _, _ in },
-        onKeepPlanning: { _, _ in },
-        onOpenPage: {},
-        onQuote: { _, _ in }
-    )
+    let actions = cards ?? TranscriptCardActions.readOnly()
     switch block {
     case .user(let text, _):
         UserBand(text: text, tokens: tokens)
@@ -333,6 +372,19 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         // marks a turn boundary, so letting tool cards share it made every
         // step group read as a message.
         StepGroupView(content: content, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+    case .activity(let run):
+        // One quiet line per run. Inset to the same margin as prose; only the
+        // USER band is full-bleed.
+        ActivityRunRowView(
+            run: run,
+            tokens: tokens,
+            onOpen: actions.onOpenActivity.map { open in { open(run.id) } }
+        )
+        .padding(.bottom, Metrics.spacing.sp1)
+    case .todos(let content):
+        TodoCardView(content: content, tokens: tokens, onToggle: actions.onToggleTodos)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
     case .notice(let text, let kind):

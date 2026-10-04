@@ -525,21 +525,18 @@ final class ChatStreamMergeTests: XCTestCase {
 
     // MARK: - Live tools (BET-753)
 
-    /// The step rows across all blocks in order, for asserting the live-tool
-    /// merge (BET-823).
-    private static func stepRows(in blocks: [TranscriptBlock]) -> [ToolStep] {
-        blocks.flatMap { block -> [ToolStep] in
-            guard case .steps(let content) = block else { return [] }
-            return content.rows.compactMap { row in
-                guard case .step(let step) = row else { return nil }
-                return step
-            }
+    /// The tool parts across every activity run in the rendered blocks, in order,
+    /// for asserting the live-tool merge (BET-823, spec §1).
+    private static func activityParts(in blocks: [TranscriptBlock]) -> [OpencodePart] {
+        blocks.flatMap { block -> [OpencodePart] in
+            guard case .activity(let run) = block else { return [] }
+            return run.parts
         }
     }
 
-    /// A `toolStarted` frame surfaces the live tool as a step row INSIDE the
-    /// transcript (merged into a step group keyed by its callID), not as a
-    /// pinned overlay above the composer.
+    /// A `toolStarted` frame surfaces the live tool as a call inside a run in the
+    /// transcript, not as a pinned overlay above the composer. (Changed from the
+    /// step-row expectation: tool calls are now runs — spec §1.)
     func testToolStartedMergesLiveToolIntoTranscript() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
@@ -552,17 +549,40 @@ final class ChatStreamMergeTests: XCTestCase {
         )
         await Task.yield()
 
-        let steps = Self.stepRows(in: store.blocks)
-        XCTAssertEqual(steps.count, 1, "the live tool renders as a step row in the transcript")
-        XCTAssertEqual(steps[0].id, "toolu_1", "the live step is keyed by the callID so it replaces in place on completion")
-        XCTAssertEqual(steps[0].verb, "Ran")
-        XCTAssertEqual(steps[0].target, "Run: npm test")
-        XCTAssertEqual(steps[0].status, .running)
+        let parts = Self.activityParts(in: store.blocks)
+        XCTAssertEqual(parts.count, 1, "the live tool renders as a call in a run in the transcript")
+        XCTAssertEqual(parts[0].id, "toolu_1", "the live call keeps the tool part id so the canonical call replaces it in place")
+        let activity = ToolActivity.describe(parts[0])
+        XCTAssertEqual(activity.label, "Run: npm test")
+        XCTAssertEqual(activity.status, .running)
+    }
+
+    /// While a turn RUNS, the run at the tail is not a row: the working line
+    /// draws it (spec §1.1).
+    func testTrailingRunIsWithheldFromRowsWhileTurnRuns() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+
+        stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
+        stream.inject(#"{"kind":"stream","sub":"toolStarted","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","callID":"toolu_1","toolName":"read","toolPresentationHint":"a.ts","status":"running"}}"#)
+        await Task.yield()
+
+        XCTAssertEqual(store.trailingRun?.id, "toolu_1", "the live run is the trailing run of the working line")
+        XCTAssertTrue(Self.activityParts(in: store.blocks).isEmpty,
+                      "a trailing run must not also be a transcript row")
+        XCTAssertEqual(store.activityRun(id: "toolu_1")?.parts.count, 1,
+                       "the Activity sheet can still find the trailing run by id")
     }
 
     /// Appended `toolOutput` deltas for the same `idx` concatenate onto the live
-    /// step's tail in order; a new `idx` starts a fresh tail.
-    func testToolOutputTailConcatenatesOnLiveStep() async {
+    /// call's tail in order; a new `idx` starts a fresh tail.
+    func testToolOutputTailConcatenatesOnLiveCall() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -579,15 +599,15 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolOutput","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_2","text":"file.txt"}}"#)
         await Task.yield()
 
-        let steps = Self.stepRows(in: store.blocks)
-        XCTAssertEqual(steps.map(\.id), ["toolu_1", "toolu_2"], "live tools render in start order")
-        XCTAssertEqual(steps[0].output, "one\ntwo\n", "deltas for the same idx concatenate in order")
-        XCTAssertEqual(steps[1].output, "file.txt", "a new idx starts a fresh tail")
+        let parts = Self.activityParts(in: store.blocks)
+        XCTAssertEqual(parts.map(\.id), ["toolu_1", "toolu_2"], "live calls render in start order")
+        XCTAssertEqual(ToolActivity.detail(of: parts[0]).output, "one\ntwo\n", "deltas for the same idx concatenate in order")
+        XCTAssertEqual(ToolActivity.detail(of: parts[1]).output, "file.txt", "a new idx starts a fresh tail")
     }
 
-    /// `toolEnded` removes the live step from the transcript; the event store
+    /// `toolEnded` removes the live call from the transcript; the event store
     /// retains the outcome (`ok:false`/`truncated`) for the canonical refetch.
-    func testToolEndedRemovesLiveStepAndRetainsOutcome() async {
+    func testToolEndedRemovesLiveCallAndRetainsOutcome() async {
         let stream = TestStreamControl()
         let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
         let store = ChatSessionStore(
@@ -602,11 +622,114 @@ final class ChatStreamMergeTests: XCTestCase {
         stream.inject(#"{"kind":"stream","sub":"toolEnded","sessionId":"ses","payload":{"sessionId":"ses","idx":"toolu_1","ok":false,"truncated":true}}"#)
         await Task.yield()
 
-        XCTAssertEqual(Self.stepRows(in: store.blocks).count, 0, "an ended tool leaves the transcript's live steps")
+        XCTAssertEqual(Self.activityParts(in: store.blocks).count, 0, "an ended tool leaves the transcript's live calls")
         let reflected = eventStore.sessionStates["ses"]?.tools["toolu_1"]
         XCTAssertEqual(reflected?.ended, true, "the outcome is reflected on the retained record")
         XCTAssertEqual(reflected?.ok, false)
         XCTAssertEqual(reflected?.truncated, true)
+    }
+
+    // MARK: - Todo card in the transcript (spec §6)
+
+    private static let allDoneTodos = #"{"kind":"stream","sub":"todos","sessionId":"ses-todo","payload":{"active":[{"content":"a","status":"completed"},{"content":"b","status":"cancelled"}],"visible":{"visible":[{"content":"a","status":"completed"},{"content":"b","status":"cancelled"}],"hiddenPending":0,"hiddenDone":0},"allTerminal":true,"anyTerminal":true}}"#
+    private static let moreTodos = #"{"kind":"stream","sub":"todos","sessionId":"ses-todo","payload":{"active":[{"content":"a","status":"completed"},{"content":"b","status":"cancelled"},{"content":"c","status":"pending"}],"visible":{"visible":[],"hiddenPending":0,"hiddenDone":0},"allTerminal":false,"anyTerminal":true}}"#
+
+    private func todoBlock(in blocks: [TranscriptBlock]) -> TodoCardContent? {
+        for block in blocks {
+            if case .todos(let content) = block { return content }
+        }
+        return nil
+    }
+
+    /// The todo card is a transcript row — the LAST one — not a composer overlay,
+    /// and it is collapsed until tapped. Sending a prompt while every item is
+    /// terminal hides it until the list changes (spec §6, matching the desktop).
+    func testTodoCardIsTheLastRowAndDismissesOnSubmitWhenAllTerminal() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses-todo",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        stream.inject(Self.allDoneTodos)
+        await Task.yield()
+
+        guard case .todos(let content)? = store.blocks.last else {
+            return XCTFail("the todo card must be the last block, got \(String(describing: store.blocks.last))")
+        }
+        XCTAssertEqual(content.items.count, 2)
+        XCTAssertFalse(content.expanded, "collapsed until tapped")
+        XCTAssertEqual(store.rows.last?.id, "todos", "a fixed row id")
+        XCTAssertEqual(store.rows.filter { $0.id == "todos" }.count, 1, "present at most once")
+
+        await store.send(text: "next", attachments: [], model: nil)
+        XCTAssertNil(todoBlock(in: store.blocks), "a prompt sent while every item is terminal dismisses the card")
+
+        stream.inject(Self.moreTodos)
+        await Task.yield()
+        XCTAssertEqual(todoBlock(in: store.blocks)?.items.count, 3, "the next todo update brings the card back")
+    }
+
+    /// A list that still has work in it is NOT dismissed by a prompt.
+    func testTodoCardSurvivesASubmitWhileWorkRemains() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let store = ChatSessionStore(
+            sessionId: "ses-todo",
+            eventStore: eventStore,
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+        )
+        await Task.yield()
+        stream.inject(Self.moreTodos)
+        await Task.yield()
+        await store.send(text: "next", attachments: [], model: nil)
+        XCTAssertNotNil(todoBlock(in: store.blocks))
+    }
+
+    /// Expanding the card is remembered per session for the life of the app: a
+    /// freshly built store for the same session starts expanded.
+    @MainActor
+    func testTodoCardExpansionIsRememberedPerSession() async {
+        let stream = TestStreamControl()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        func makeStore() -> ChatSessionStore {
+            ChatSessionStore(
+                sessionId: "ses-todo-expansion",
+                eventStore: eventStore,
+                api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            )
+        }
+        let first = makeStore()
+        XCTAssertFalse(first.todosExpanded)
+        first.toggleTodos()
+        XCTAssertTrue(first.todosExpanded)
+        XCTAssertTrue(makeStore().todosExpanded, "the choice outlives the store (and is not reset by running/idle)")
+        first.toggleTodos()  // restore the process-wide singleton for other tests
+        XCTAssertFalse(makeStore().todosExpanded)
+    }
+
+    // MARK: - Child busy state for task rows (spec §5)
+
+    private func childState(_ id: String, running: Bool?) -> MantaSessionStreamState {
+        var s = MantaSessionStreamState(sessionId: id)
+        s.running = running
+        return s
+    }
+
+    func testChildRunningSnapshotReadsOnlyTheKnownChildren() {
+        let states = ["c1": childState("c1", running: true), "c2": childState("c2", running: false), "other": childState("other", running: true)]
+        let snap = ChatSessionStore.childRunningSnapshot(known: ["c1", "c2", "c3"], states: states, authoritative: false)
+        XCTAssertEqual(snap, ["c1": true, "c2": false], "an unseen child is unknown, not idle, until the box restates its running set")
+    }
+
+    /// Once the box has restated its authoritative running set, a child absent
+    /// from it is not running — otherwise a background task started long ago
+    /// (no job record, no frame ever seen) would read "running" for ever.
+    func testAnUnseenChildIsIdleOnceTheRunningSetIsAuthoritative() {
+        let snap = ChatSessionStore.childRunningSnapshot(known: ["c3"], states: [:], authoritative: true)
+        XCTAssertEqual(snap, ["c3": false])
     }
 
     // MARK: - Compact feedback (BET-747 task 1)
@@ -845,6 +968,7 @@ final class TrailingCardsTests: XCTestCase {
         case .planExit: return "planExit"
         case .question: return "question"
         case .queuedPrompt: return "queuedPrompt"
+        case .todos: return "todos"
         default: return "other"
         }
     }
@@ -890,6 +1014,43 @@ final class TrailingCardsTests: XCTestCase {
         XCTAssertEqual(kinds.last, "queuedPrompt",
                        "queued prompts represent what happens next and must stay at the very end")
         XCTAssertEqual(kinds.filter { $0 == "queuedPrompt" }.count, 2)
+    }
+
+    // MARK: - Todo card is the last row (spec §6)
+
+    private func todoContent(expanded: Bool = false) -> TodoCardContent {
+        TodoCardContent(items: [StreamTodoItem(content: "ship it", status: "pending")], expanded: expanded)
+    }
+
+    func testTodoCardIsTheVeryLastRowAfterQueuedPrompts() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: nil, truncation: nil, running: false,
+            permission: cardPermission("p"), planExitQuestion: nil, question: nil,
+            pendingPrompts: [queued("a"), queued("b")],
+            todos: todoContent())
+        XCTAssertEqual(blocks.map(kind), ["permission", "queuedPrompt", "queuedPrompt", "todos"],
+                       "the todo card is the last row, after the queued prompts")
+    }
+
+    func testNoTodoContentProducesNoTodoRow() {
+        let blocks = ChatSessionStore.trailingBlocks(
+            sessionError: nil, truncation: nil, running: false,
+            permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [queued("a")])
+        XCTAssertFalse(blocks.map(kind).contains("todos"))
+    }
+
+    /// Row identity (spec §7): the todo row has a FIXED id, so it is the same row
+    /// whether collapsed or expanded, and a transcript holds at most one.
+    func testTodoRowHasAFixedIDAndSurvivesUniqueRows() {
+        let collapsed = TranscriptBlock.todos(todoContent(expanded: false))
+        let expanded = TranscriptBlock.todos(todoContent(expanded: true))
+        XCTAssertEqual(collapsed.stableScrollID, "todos")
+        XCTAssertEqual(collapsed.stableScrollID, expanded.stableScrollID,
+                       "expanding the card is an in-place update, not a remove + insert")
+        let blocks: [TranscriptBlock] = [.prose("Done.", at: nil), .queuedPrompt(queued("a")), collapsed]
+        let rows = uniqueTranscriptRows(blocks)
+        XCTAssertEqual(Set(rows.map(\.id)).count, rows.count)
+        XCTAssertEqual(rows.last?.id, "todos")
     }
 
     // MARK: - splitQuestions (plan card never coexists with generic question card)
