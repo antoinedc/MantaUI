@@ -446,7 +446,10 @@ struct SessionListView: View {
     @ViewBuilder
     private func row(projectName: String, entry: SessionRowEntry, showsProject: Bool) -> some View {
         let window = entry.window
-        let caption = showsProject ? projectName : nil
+        // The same display form the grouped list's headers use, so a project
+        // reads identically in both orderings (the raw tmux name stays the
+        // row's identity for open/pin/delete below).
+        let caption = showsProject ? titleCased(projectName) : nil
         Button {
             openRow = SessionRowEntry.id(project: projectName, windowIndex: window.index)
             path.append(SessionOpenTarget(project: projectName, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))

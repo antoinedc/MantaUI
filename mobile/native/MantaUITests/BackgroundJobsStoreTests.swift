@@ -154,4 +154,29 @@ final class BackgroundJobsStoreTests: XCTestCase {
         store.startAutoRefresh()   // and it can be restarted after a stop
         store.stopAutoRefresh()
     }
+
+    /// The chat screen and the Background jobs sheet share ONE store. Closing
+    /// the sheet (its stop) must not silence the chat screen's polling.
+    func testAutoRefreshIsReferenceCountedAcrossSharedHolders() async {
+        StubChannelURLProtocol.responses = ["delegate:list": jobsJSON, "tmux:list": projectsJSON]
+        let store = makeStore()
+        XCTAssertFalse(store.isAutoRefreshing)
+
+        store.startAutoRefresh()   // chat screen appears
+        store.startAutoRefresh()   // sheet opens
+        XCTAssertTrue(store.isAutoRefreshing)
+
+        store.stopAutoRefresh()    // sheet closes
+        XCTAssertTrue(store.isAutoRefreshing, "closing the sheet must leave the chat screen's polling running")
+
+        store.stopAutoRefresh()    // chat screen disappears
+        XCTAssertFalse(store.isAutoRefreshing)
+
+        store.stopAutoRefresh()    // an unbalanced extra stop is harmless...
+        XCTAssertFalse(store.isAutoRefreshing)
+        store.startAutoRefresh()   // ...and does not leave a negative count behind
+        XCTAssertTrue(store.isAutoRefreshing)
+        store.stopAutoRefresh()
+        XCTAssertFalse(store.isAutoRefreshing)
+    }
 }

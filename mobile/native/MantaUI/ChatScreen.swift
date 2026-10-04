@@ -94,6 +94,23 @@ private enum OverflowDestination: String, Identifiable {
     var id: String { rawValue }
 }
 
+/// A navigation push waiting for the sheet that triggered it to finish
+/// dismissing. The tap handler records the destination here and dismisses the
+/// sheet; the push itself runs from that sheet's `onDismiss:` — the one point
+/// at which the dismissal is guaranteed complete, so the push can neither be
+/// swallowed by the transition nor need a timed delay.
+private enum PendingPush {
+    case subagent(SubagentSession)
+    case session(SessionOpenTarget)
+
+    func perform(on path: Binding<NavigationPath>) {
+        switch self {
+        case .subagent(let agent): path.wrappedValue.append(agent)
+        case .session(let target): path.wrappedValue.append(target)
+        }
+    }
+}
+
 /// Thin wrapper that owns WHICH opencode session the screen is showing.
 ///
 /// Clearing a session does not end the conversation on screen — it starts a new
@@ -180,6 +197,9 @@ private struct ChatScreenContent: View {
     /// this is its own `.sheet(item:)`, presented only from a tap on the
     /// transcript (never while the overflow sheet is up).
     @State private var activityTarget: ActivityTarget?
+    /// A push to perform once the sheet that requested it has dismissed (see
+    /// `PendingPush`); flushed from both sheets' `onDismiss:`.
+    @State private var pendingPush: PendingPush?
     /// Live scheduled-task count for the overflow sheet's badge (BET-627).
     @State private var scheduleCount = 0
     /// Drives MessagingUI's `TiledView` scroll layer: stays on the newest
@@ -531,12 +551,12 @@ private struct ChatScreenContent: View {
             }
         }
         .sheet(isPresented: $showOverflow) { overflowSheet }
-        .sheet(item: $overflowDestination) { destination in
+        .sheet(item: $overflowDestination, onDismiss: flushPendingPush) { destination in
             destinationCard(destination)
         }
         // The Activity sheet for a tool run — tapped from a run row, or from the
         // working line while the run is still the tail of a running turn.
-        .sheet(item: $activityTarget) { target in
+        .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
             ActivitySheet(
                 store: store,
                 runID: target.runID,
@@ -635,30 +655,35 @@ private struct ChatScreenContent: View {
     /// job's window closed, or the box is unreachable) — say so instead of doing
     /// nothing.
     private func openJobSession(_ childSessionID: String) {
-        overflowDestination = nil
         guard let window = jobsStore.window(forChild: childSessionID) else {
+            overflowDestination = nil
             store.actionHint = "That background job's window is closed"
             return
         }
-        path.append(SessionOpenTarget(
+        pendingPush = .session(SessionOpenTarget(
             project: window.project,
             windowIndex: window.index,
             name: window.name,
             sessionId: childSessionID
         ))
+        overflowDestination = nil
     }
 
     /// A task row tapped inside the Activity sheet: dismiss the sheet, then push
     /// the subagent as a full screen on this stack (a subagent's transcript is
-    /// content navigation, which does not belong inside a sheet).
+    /// content navigation, which does not belong inside a sheet). The push runs
+    /// from the sheet's `onDismiss:`.
     private func openSubagent(_ agent: SubagentSession) {
+        pendingPush = .subagent(agent)
         activityTarget = nil
-        Task { @MainActor in
-            // Let the sheet finish dismissing before the push, or the push is
-            // swallowed by the dismissal transition.
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            path.append(agent)
-        }
+    }
+
+    /// Run the push a just-dismissed sheet asked for. A sheet closed any other
+    /// way (swipe, Done) leaves nothing pending, so this is a no-op then.
+    private func flushPendingPush() {
+        guard let push = pendingPush else { return }
+        pendingPush = nil
+        push.perform(on: $path)
     }
 
     /// (Re)load the scheduled-task count backing the sheet's live badge.
@@ -1294,6 +1319,9 @@ struct ChatSubagentScreen: View {
     @Binding var path: NavigationPath
     /// The run this screen's Activity sheet is showing, if open.
     @State private var activityTarget: ActivityTarget?
+    /// A nested subagent to push once the Activity sheet has finished
+    /// dismissing (flushed from the sheet's `onDismiss:`).
+    @State private var pendingPush: PendingPush?
 
     init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
         self.childSessionId = childSessionId
@@ -1372,7 +1400,7 @@ struct ChatSubagentScreen: View {
             onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
             onToggleTodos: { store.toggleTodos() }
         ))
-        .sheet(item: $activityTarget) { target in
+        .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
             ActivitySheet(
                 store: store,
                 runID: target.runID,
@@ -1385,13 +1413,16 @@ struct ChatSubagentScreen: View {
     }
 
     /// A nested subagent tapped inside this screen's Activity sheet: dismiss the
-    /// sheet, then push it as a full screen next to this one.
+    /// sheet, then push it as a full screen next to this one (from `onDismiss:`).
     private func openSubagent(_ agent: SubagentSession) {
+        pendingPush = .subagent(agent)
         activityTarget = nil
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            path.append(agent)
-        }
+    }
+
+    private func flushPendingPush() {
+        guard let push = pendingPush else { return }
+        pendingPush = nil
+        push.perform(on: $path)
     }
 
     private var emptyState: some View {

@@ -54,6 +54,7 @@ final class BackgroundJobsStore: ObservableObject {
     private var updatesSubscription: AnyCancellable?
     private var refreshing = false
     private var refreshQueued = false
+    private var autoRefreshHolders = 0
 
     /// How often the sheet re-reads the list while it is on screen.
     private static let pollIntervalNanoseconds: UInt64 = 10_000_000_000
@@ -133,10 +134,17 @@ final class BackgroundJobsStore: ObservableObject {
         windowsKnown = true
     }
 
-    /// Start the 10 s poll and the `delegate.updated` refetch. Idempotent: a
-    /// second call while running changes nothing.
+    /// True while at least one holder has asked for auto-refresh.
+    var isAutoRefreshing: Bool { autoRefreshHolders > 0 }
+
+    /// Take a hold on the 10 s poll and the `delegate.updated` refetch. The
+    /// store is shared (the chat screen holds it for task-row status, the
+    /// Background jobs sheet holds it while open), so this is reference-counted:
+    /// the poll starts on the first hold and runs until the last is released.
+    /// Every call must be balanced by one `stopAutoRefresh()`.
     func startAutoRefresh() {
-        guard pollTask == nil else { return }
+        autoRefreshHolders += 1
+        guard autoRefreshHolders == 1 else { return }
         updatesSubscription = eventStore?.delegateUpdates
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in
@@ -153,7 +161,12 @@ final class BackgroundJobsStore: ObservableObject {
         }
     }
 
+    /// Release one hold; the poll is torn down when the last one goes. Extra
+    /// calls never take the count below zero.
     func stopAutoRefresh() {
+        guard autoRefreshHolders > 0 else { return }
+        autoRefreshHolders -= 1
+        guard autoRefreshHolders == 0 else { return }
         pollTask?.cancel()
         pollTask = nil
         updatesSubscription?.cancel()
