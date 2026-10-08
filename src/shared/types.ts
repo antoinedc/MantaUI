@@ -1639,6 +1639,8 @@ export const IPC = {
   // poller (src/server/usage.mjs). NOT the context-window indicator — see
   // the UsageSnapshot/UsageWindow doc comment above for that boundary.
   usageList: "usage:list", // () → UsageSnapshot[]
+  // Multi-account: the per-seat snapshots behind the provider aggregate above.
+  usageListSeats: "usage:list-seats", // () → UsageSnapshot[] (each with seatId/accountId/…)
 
   // ---- usage-limit stopped conversations (manta-server owned; BET-1047) ----
   // Durable box-side record of conversations stopped by a plan-usage limit
@@ -2157,6 +2159,14 @@ export type UsageWindow = {
   startedAt?: number; // epoch ms — when this window opened; absent when the
   // provider does not report one (never guess it from resetsAt minus a window length)
   binding?: boolean; // the provider says this window bites first
+  // A model-scoped window (Team plans): the model display name it applies to
+  // ("Fable"). Absent for account-wide windows. `kind` is then
+  // "weekly_scoped:<name lowercased>".
+  scope?: string;
+  // `false` when the provider says this window is not in force. It is shown
+  // greyed ("not active") and must never drive exhaustion, seat load, or the
+  // dial. Absent means active.
+  active?: boolean;
   // True when this reading describes a window whose reset instant has already
   // passed: the provider has not published the new window's numbers yet, so
   // `pct` still belongs to the window that just ended. Set by the poller
@@ -2183,6 +2193,13 @@ export type UsageSnapshot = {
   overagePrice?: number; // $ per unit beyond the included allowance, when published
   exhausted?: boolean; // the provider will refuse work now
   fetchedAt: number; // epoch ms of the successful fetch
+  // Multi-account: set on PER-SEAT snapshots only (`usage:list-seats` and the
+  // `seatSnapshots` field of the `usage.updated` bus payload). The provider
+  // aggregate in `snapshots` / `usage:list` never carries them.
+  accountId?: string;
+  accountLabel?: string;
+  seatId?: string;
+  seatLabel?: string;
 };
 
 // One row of the durable box-side record of conversations stopped by a

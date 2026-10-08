@@ -3368,7 +3368,10 @@ export function usageDialState(
   snapshot: UsageSnapshot | null | undefined,
   alwaysShow: boolean,
 ): UsageDialState {
-  const windows = snapshot?.windows ?? [];
+  // A window the provider says is not in force (e.g. a model-scoped weekly cap)
+  // is listed in the popover but never drives the dial: not its value, not its
+  // visibility.
+  const windows = (snapshot?.windows ?? []).filter((w) => w.active !== false);
   if (windows.length === 0) {
     return { visible: false, pct: 0, tone: "under", awaitingReset: false, window: null };
   }
