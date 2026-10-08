@@ -6,7 +6,10 @@ import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  PER_CONVERSATION_ROUTING,
+  PLUGIN_SEEN_WINDOW_MS,
+  perConversationRoutingActive,
+  notePluginSeen,
+  resetPluginSeen,
   aggregationPolicy,
   shouldMirror,
   createAccountsService,
@@ -47,8 +50,15 @@ const TWO = { "tok-A": profileOf("u-A"), "tok-B": profileOf("u-B"), "tok-B-live"
 
 // ---- aggregationPolicy ------------------------------------------------------
 
-test("PER_CONVERSATION_ROUTING is off in phase 1", () => {
-  assert.equal(PER_CONVERSATION_ROUTING, false);
+test("per-conversation routing is off until the plugin has called resolve, and fades 10 minutes after the last call", () => {
+  resetPluginSeen();
+  assert.equal(perConversationRoutingActive(1_000_000), false, "no plugin seen → phase-1 behaviour");
+  notePluginSeen(1_000_000);
+  assert.equal(perConversationRoutingActive(1_000_000), true);
+  assert.equal(perConversationRoutingActive(1_000_000 + PLUGIN_SEEN_WINDOW_MS), true);
+  assert.equal(perConversationRoutingActive(1_000_000 + PLUGIN_SEEN_WINDOW_MS + 1), false, "plugin gone → back to the serving seat");
+  assert.equal(PLUGIN_SEEN_WINDOW_MS, 10 * 60_000);
+  resetPluginSeen();
 });
 
 test("aggregationPolicy: no per-conversation routing → manual on the serving seat, whatever the store says", () => {
@@ -123,6 +133,12 @@ test("with per-conversation routing ON the aggregate is the least-loaded seat ag
   const agg = await aggregateOf(readings, planOf(), true);
   assert.equal(agg.windows[0].pct, 29);
   assert.equal("exhausted" in agg, false);
+});
+
+test("the routing flag may be a clock function (the plugin-seen check): evaluated per tick", async () => {
+  const readings = { "tok-1": { pct: 97 }, "tok-2": { pct: 29 } };
+  assert.equal((await aggregateOf(readings, planOf(), () => false)).windows[0].pct, 97);
+  assert.equal((await aggregateOf(readings, planOf(), () => true)).windows[0].pct, 29);
 });
 
 test("no serving seat known → the store's mode applies even with the flag off", async () => {
