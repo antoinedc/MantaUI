@@ -158,7 +158,7 @@ describe("SeatsPanel", () => {
     await click(buttonByText(h!, "Add Claude account"));
     expect(h!.text()).toContain("may breach the provider's terms");
     expect(m.api.calls.accountsAddSeat).toBeUndefined();
-    await click(buttonByText(h!, "Continue"));
+    await click(buttonByText(h!, "I understand"));
     expect(m.api.calls.accountsAddSeat).toHaveLength(1);
     expect(window.localStorage.getItem("manta:accounts:tosAck")).toBe("1");
   });
@@ -204,6 +204,7 @@ describe("AddSeatFlow", () => {
     await tick();
     await tick();
     expect(onDone).toHaveBeenCalledWith("Added Seat 2 to OpenAI.");
+    expect(h!.container.querySelector("[role=status]")?.textContent).toContain("Added Seat 2");
   });
 
   it("duplicate-login: a clear message and Try again restarts", async () => {
@@ -218,7 +219,8 @@ describe("AddSeatFlow", () => {
   it("login-failed: says the sign-in didn't complete", async () => {
     await flow({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "login-failed" }) });
     await tick();
-    expect(h!.text()).toContain("didn't complete");
+    expect(h!.text()).toContain("sign-in failed");
+    expect(h!.text()).not.toContain("15 minutes");
   });
 
   it("different-org: offers 'Create new account' → add-seat-confirm", async () => {
@@ -268,5 +270,104 @@ describe("AddSeatFlow", () => {
     });
     expect(h!.text()).toContain("can't be started from here");
     expect(cancelSeat).toHaveBeenCalledWith({ seatId: "n9" });
+  });
+});
+
+describe("AddSeatFlow wait limit and failure reasons", () => {
+  // Real clock faked so a 15-minute wait runs in milliseconds.
+  async function timed(api: Record<string, unknown>) {
+    if (!vi.isFakeTimers()) vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const onDone = vi.fn();
+    const cancelSeat = vi.fn(() => Promise.resolve({ ok: true }));
+    installMockApi({
+      accountsAddSeat: () => Promise.resolve({ seatId: "n1", connect: { shape: "oauth-auto", url: "https://login.example", instructions: "code ABCD-1234" } }),
+      accountsCancelSeat: cancelSeat,
+      accountsList: () => Promise.resolve({ providers: [] }),
+      ...api,
+    });
+    resetStore({ appToasts: [] } as never);
+    h = mount(<AddSeatFlow provider="claude" accountId="a1" accountLabel="Work" onDone={onDone} onCancel={() => {}} />);
+    await h.flush();
+    return { onDone, cancelSeat };
+  }
+  const advance = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
+
+  it("keeps waiting well past the old 5-minute limit and never cancels the seat early", async () => {
+    const status = vi.fn(() => Promise.resolve({ state: "pending" }));
+    const { cancelSeat } = await timed({ accountsSeatStatus: status });
+    await advance(6 * 60_000);
+    expect(h!.text()).not.toContain("didn't");
+    expect(h!.text()).not.toContain("wasn't finished");
+    expect(cancelSeat).not.toHaveBeenCalled();
+    await advance(8 * 60_000); // 14 minutes in
+    expect(cancelSeat).not.toHaveBeenCalled();
+    expect(h!.container.querySelector('[data-testid="add-seat-flow"]')).toBeTruthy();
+  });
+
+  it("a login finished late in the wait (14 min) is still placed", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const t0 = Date.now();
+    const { onDone } = await timed({
+      accountsSeatStatus: () =>
+        Promise.resolve(Date.now() - t0 >= 14 * 60_000 ? { state: "ok", seat: { id: "n1", label: "Seat 2" } } : { state: "pending" }),
+    });
+    await advance(14 * 60_000 + 4_000);
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up only AFTER the box's own 15 minutes, asks the box one last time, then says it timed out", async () => {
+    const status = vi.fn(() => Promise.resolve({ state: "pending" }));
+    const { cancelSeat } = await timed({ accountsSeatStatus: status });
+    await advance(15 * 60_000 + 20_000);
+    expect(cancelSeat).not.toHaveBeenCalled(); // inside the grace
+    await advance(20_000);
+    expect(cancelSeat).toHaveBeenCalledWith({ seatId: "n1" });
+    expect(h!.text()).toContain("wasn't finished within 15 minutes");
+    expect(buttonByText(h!, "Try again")).toBeTruthy();
+  });
+
+  it("when the box says login-failed after its own 15 minutes the reason is 'timed out', not 'wrong code'", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const t0 = Date.now();
+    await timed({
+      accountsSeatStatus: () =>
+        Promise.resolve(Date.now() - t0 >= 15 * 60_000 ? { state: "failed", error: "login-failed" } : { state: "pending" }),
+    });
+    await advance(15 * 60_000 + 4_000);
+    expect(h!.text()).toContain("wasn't finished within 15 minutes");
+  });
+
+  it("a box that cannot be reached at the end says so instead of blaming the sign-in", async () => {
+    await timed({ accountsSeatStatus: () => Promise.reject(new Error("offline")) });
+    await advance(16 * 60_000);
+    expect(h!.text()).toContain("Couldn't reach the server");
+  });
+
+  it("duplicate-login names the reason; different-org keeps its create-account prompt", async () => {
+    await timed({ accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login" }) });
+    await advance(2100);
+    expect(h!.text()).toContain("already added as a seat");
+  });
+
+  it("done is reported once even if the parent re-renders with a new callback", async () => {
+    const onDone = vi.fn();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    installMockApi({
+      accountsAddSeat: () => Promise.resolve({ seatId: "n1", connect: { shape: "oauth-auto", url: "https://l", instructions: "" } }),
+      accountsSeatStatus: () => Promise.resolve({ state: "ok", seat: { id: "n1", label: "Seat 2" } }),
+      accountsList: () => Promise.resolve({ providers: [] }),
+    });
+    resetStore({ appToasts: [] } as never);
+    h = mount(<AddSeatFlow provider="claude" accountId="a1" onDone={(m) => onDone(m)} onCancel={() => {}} />);
+    await h.flush();
+    await advance(2100);
+    await act(async () => {
+      h!.rerender?.(<AddSeatFlow provider="claude" accountId="a1" onDone={(m) => onDone(m)} onCancel={() => {}} />);
+    });
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });

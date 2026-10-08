@@ -25,6 +25,42 @@ export async function refreshAccounts(): Promise<boolean> {
   }
 }
 
+/** Refetch the usage slice (`usage:list`). Same passive rules as above: a failure
+ *  leaves the previous readings in place. */
+async function refreshUsage(): Promise<boolean> {
+  const api = window.api;
+  if (!api?.usageList) return false;
+  try {
+    const list = await api.usageList();
+    useStore.getState().setUsage(Array.isArray(list) ? list : []);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** After an account/seat was added: bring EVERY slice the Accounts list and the
+ *  usage popover read up to date, and only resolve once they have landed — so
+ *  the caller can close its panel knowing the new seat is already on screen and
+ *  nobody has to refresh by hand. */
+export async function refreshAccountsAndUsage(): Promise<boolean> {
+  const [accounts] = await Promise.all([refreshAccounts(), refreshUsage()]);
+  return accounts;
+}
+
+/** Where a seat now lives, read back from the store after a refresh. */
+export function findSeatLabels(
+  provider: SeatProviderId,
+  seatId: string,
+): { seatLabel: string; accountLabel: string; email: string | null } | null {
+  const view = useStore.getState().accounts.find((p) => p.provider === provider);
+  for (const account of view?.accounts ?? []) {
+    const seat = account.seats.find((x) => x.id === seatId);
+    if (seat) return { seatLabel: seat.label, accountLabel: account.label, email: seat.email };
+  }
+  return null;
+}
+
 /** Refetch one conversation's seat into the cache. `null` from the box (no
  *  assignment yet) is cached as null so the dial stops asking. */
 export async function refreshSessionSeat(sessionId: string | null | undefined): Promise<void> {

@@ -11,7 +11,15 @@
 //   starting → signin ─┬─ ok ............ done        (seat placed)
 //                      ├─ different-org . asks        ("create a new account?")
 //                      ├─ duplicate ..... failed      (already added)
+//                      ├─ timed out ..... failed      (the box's 15-minute wait ran out)
 //                      └─ login-failed .. failed      (Try again)
+//
+// A finished sign-in is never thrown away by this card. The box resolves a
+// login from its credentials file (not from our polling) and waits 15 minutes,
+// so this card waits at least as long, and when its own limit is reached it
+// asks the box ONE last time before it gives up — it never cancels a seat the
+// box could still place. On success the card awaits the list refresh before it
+// reports done, so the new seat is already on screen when the panel closes.
 //
 // Every press ends in one of the three legal outcomes (AGENTS.md): it does the
 // thing and says so, it fails and says why, or the control is not there.
@@ -19,27 +27,56 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import type { SeatConnect, SeatProviderId } from "../shared/types";
-import { accountsErrorMessage, formatRemaining, isPollExpired, providerViewOrError } from "./chatUtils";
+import type { ProviderView, SeatConnect, SeatProviderId } from "../shared/types";
+import {
+  accountsErrorMessage,
+  formatRemaining,
+  isPollExpired,
+  needsSecondAccountNote,
+  providerViewOrError,
+  SEAT_TOS_NOTE,
+} from "./chatUtils";
 import { providerLabel } from "./UsageDial";
 import { ClaudeLoginBlock, WaitingBlockBody } from "./ConnectProvider";
 import { ProcessPanel } from "./ProcessPanel";
 import { Callout } from "./Callout";
 import { useStore } from "./store";
-import { refreshAccounts } from "./accountsData";
+import { findSeatLabels, refreshAccountsAndUsage } from "./accountsData";
 
 const SEAT_POLL_INTERVAL_MS = 2_000;
-// Matches the connect flow's caps: the Claude paste-back and the device-code
-// wait. The box owns the real deadline; this only stops an unbounded poll.
-const CLAUDE_LIMIT_MS = 5 * 60 * 1_000;
-const DEVICE_LIMIT_MS = 15 * 60 * 1_000;
+// The box waits this long for a sign-in to finish (LOGIN_TIMEOUT_MS in
+// src/server/accountsManager.mjs) — one limit for the Claude paste-back and the
+// device-code wait alike. Keep the two in step.
+export const SERVER_LOGIN_LIMIT_MS = 15 * 60 * 1_000;
+// This card gives up only AFTER the box would have, plus a little slack for the
+// clocks starting at slightly different moments; the final ask below settles it.
+const CLIENT_LIMIT_MS = SERVER_LOGIN_LIMIT_MS + 30_000;
+
+export const TOS_ACK_KEY = "manta:accounts:tosAck";
+
+export function readTosAck(): boolean {
+  try {
+    return window.localStorage.getItem(TOS_ACK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Why a seat sign-in failed, in words that say what to do next. */
+export function seatFailureMessage(error: string | undefined, timedOut: boolean): string {
+  if (error === "duplicate-login") return "That login is already added as a seat. Sign in with a different account.";
+  if (timedOut) {
+    return "The sign-in wasn't finished within 15 minutes, so the box stopped waiting. Try again and finish it in the browser.";
+  }
+  return "The sign-in failed — the code may have been wrong or expired. Try again.";
+}
 
 type Phase =
   | { kind: "starting" }
   | { kind: "claude"; seatId: string; sessionKey: string; cwd: string; url: string; inputError?: string }
   | { kind: "device"; seatId: string; url: string; instructions: string }
   | { kind: "different-org"; seatId: string; orgName?: string; busy: boolean }
-  | { kind: "done"; label: string }
+  | { kind: "done"; message: string }
   | { kind: "failed"; message: string };
 
 export function AddSeatFlow({
@@ -63,6 +100,8 @@ export function AddSeatFlow({
   const mounted = useRef(true);
   // The half-made seat the box is holding, until the flow settles it.
   const openSeatRef = useRef<string | null>(null);
+  // done is reported exactly once, whatever the parent does with onDone's identity.
+  const reportedRef = useRef(false);
   const label = providerLabel(provider);
 
   const set = useCallback((p: Phase) => {
@@ -84,6 +123,7 @@ export function AddSeatFlow({
   // 1. Ask the box to start a sign-in for a new seat.
   useEffect(() => {
     let cancelled = false;
+    reportedRef.current = false;
     setPhase({ kind: "starting" });
     (async () => {
       let res;
@@ -113,7 +153,21 @@ export function AddSeatFlow({
   }, [provider, accountId, epoch, set]);
 
   const seatId = phase.kind === "claude" || phase.kind === "device" ? phase.seatId : null;
-  const limit = phase.kind === "claude" ? CLAUDE_LIMIT_MS : DEVICE_LIMIT_MS;
+
+  // The seat is on the box and in the list: read where it landed (after the
+  // refresh) and finish. Awaited, so the panel never closes before the list shows it.
+  const finishAdded = useCallback(
+    async (sid: string, fallbackLabel: string, opts: { newAccount?: boolean; accountName?: string } = {}) => {
+      await refreshAccountsAndUsage();
+      const found = findSeatLabels(provider, sid);
+      let text: string;
+      if (accountId && !opts.newAccount) text = `Added ${found?.seatLabel ?? fallbackLabel} to ${found?.accountLabel ?? label}.`;
+      else if (found) text = `Added the account “${found.accountLabel}” — ${found.email ?? found.seatLabel} is signed in.`;
+      else text = `Added ${opts.accountName ?? fallbackLabel} to ${label}.`;
+      set({ kind: "done", message: text });
+    },
+    [accountId, label, provider, set],
+  );
 
   // 2. While signing in, poll the box for the verdict.
   useEffect(() => {
@@ -121,56 +175,69 @@ export function AddSeatFlow({
     const startedWall = Date.now();
     setElapsed(0);
     const tick = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedWall) / 1000)), 1000);
+    let inFlight = false;
+    let unreachable = false;
     const handle = window.setInterval(async () => {
-      if (!mounted.current) return;
-      if (isPollExpired(startedWall, Date.now(), limit)) {
-        window.clearInterval(handle);
-        openSeatRef.current = null;
-        void window.api.accountsCancelSeat({ seatId }).catch(() => {});
-        set({ kind: "failed", message: "The sign-in didn't complete in time. Try again." });
-        return;
-      }
-      let st;
+      if (!mounted.current || inFlight) return;
+      inFlight = true;
       try {
-        st = await window.api.accountsSeatStatus({ seatId });
-      } catch {
-        return; // box transiently unreachable — keep polling
+        const expired = isPollExpired(startedWall, Date.now(), CLIENT_LIMIT_MS);
+        let st;
+        try {
+          st = await window.api.accountsSeatStatus({ seatId });
+          unreachable = false;
+        } catch {
+          unreachable = true;
+          if (!expired) return; // box transiently unreachable — keep polling
+        }
+        if (!mounted.current) return;
+        if (!st || st.state === "pending") {
+          if (!expired) return;
+          // Past the box's own deadline and it still has nothing: only now is
+          // the sign-in abandoned (the box dropped it too, or this releases it).
+          window.clearInterval(handle);
+          openSeatRef.current = null;
+          void window.api.accountsCancelSeat({ seatId }).catch(() => {});
+          set({
+            kind: "failed",
+            message: unreachable
+              ? "Couldn't reach the server to check the sign-in. If you finished it, the seat will appear in the list once the box is reachable."
+              : seatFailureMessage(undefined, true),
+          });
+          return;
+        }
+        window.clearInterval(handle);
+        if (st.state === "ok") {
+          openSeatRef.current = null;
+          await finishAdded(st.seat?.id ?? seatId, st.seat?.label ?? "the new seat");
+          return;
+        }
+        // failed
+        if (st.error === "different-org") {
+          set({ kind: "different-org", seatId, orgName: st.orgName, busy: false });
+          return;
+        }
+        openSeatRef.current = null; // the box already dropped it
+        set({
+          kind: "failed",
+          message: seatFailureMessage(st.error, Date.now() - startedWall >= SERVER_LOGIN_LIMIT_MS),
+        });
+      } finally {
+        inFlight = false;
       }
-      if (!mounted.current || !st) return;
-      if (st.state === "pending") return;
-      window.clearInterval(handle);
-      if (st.state === "ok") {
-        openSeatRef.current = null;
-        void refreshAccounts();
-        const name = st.seat?.label ?? "the new seat";
-        set({ kind: "done", label: name });
-        return;
-      }
-      // failed
-      if (st.error === "different-org") {
-        set({ kind: "different-org", seatId, orgName: st.orgName, busy: false });
-        return;
-      }
-      openSeatRef.current = null; // the box already dropped it
-      set({
-        kind: "failed",
-        message:
-          st.error === "duplicate-login"
-            ? "That login is already added as a seat. Sign in with a different account."
-            : "The sign-in didn't complete. Try again.",
-      });
     }, SEAT_POLL_INTERVAL_MS);
     return () => {
       window.clearInterval(handle);
       window.clearInterval(tick);
     };
-  }, [seatId, limit, set]);
+  }, [seatId, set, finishAdded]);
 
   // done is terminal — report once.
   useEffect(() => {
-    if (phase.kind !== "done") return;
-    onDone(`Added ${phase.label} to ${label}.`);
-  }, [phase, label, onDone]);
+    if (phase.kind !== "done" || reportedRef.current) return;
+    reportedRef.current = true;
+    onDone(phase.message);
+  }, [phase, onDone]);
 
   // The explicit Cancel / ×: abort on the box, say so if that fails, close.
   const cancel = useCallback(async () => {
@@ -202,7 +269,7 @@ export function AddSeatFlow({
       }
       openSeatRef.current = null;
       useStore.getState().upsertProviderView(res.view);
-      set({ kind: "done", label: orgName ?? "the new account" });
+      await finishAdded(sid, orgName ?? "the new account", { newAccount: true, accountName: orgName ?? undefined });
     } catch {
       set({ kind: "different-org", seatId: sid, orgName, busy: false });
       useStore.getState().pushAppToast({
@@ -210,7 +277,7 @@ export function AddSeatFlow({
         tone: "error",
       });
     }
-  }, [phase, set]);
+  }, [phase, set, finishAdded]);
 
   const title = accountId ? `Add a seat to ${accountLabel ?? "this account"}` : `Add a ${label} account`;
 
@@ -259,7 +326,7 @@ export function AddSeatFlow({
           status="running"
           elapsedSeconds={elapsed}
           logLines={[]}
-          remainingLabel={formatRemaining(0, elapsed * 1000, DEVICE_LIMIT_MS)}
+          remainingLabel={formatRemaining(0, elapsed * 1000, SERVER_LOGIN_LIMIT_MS)}
           onCancel={() => void cancel()}
         >
           <WaitingBlockBody url={phase.url} instructions={phase.instructions} />
@@ -294,7 +361,7 @@ export function AddSeatFlow({
         </div>
       )}
 
-      {phase.kind === "done" && <div className="text-ok">Added {phase.label}.</div>}
+      {phase.kind === "done" && <div className="text-ok" role="status">{phase.message}</div>}
 
       {phase.kind === "failed" && (
         <div className="space-y-2">
@@ -328,4 +395,55 @@ export function phaseFromConnect(seatId: string, c: SeatConnect): Phase {
     };
   }
   return { kind: "failed", message: "This provider's sign-in can't be started from here yet." };
+}
+
+/**
+ * "Add an account / a seat" as ONE control, used by the seats panel and by the
+ * subscription row's Connect: the terms note (shown once, when a SECOND account
+ * is added — spec §0) sits inline with the action and proceeds straight into the
+ * sign-in; there is no state in which the action is hidden behind the note.
+ */
+export function AddSeatGate({
+  provider,
+  view,
+  accountId,
+  accountLabel,
+  onDone,
+  onCancel,
+}: {
+  provider: SeatProviderId;
+  view: ProviderView | null;
+  accountId?: string;
+  accountLabel?: string;
+  onDone: (message: string) => void;
+  onCancel: () => void;
+}) {
+  const [noteShown, setNoteShown] = useState(() => !accountId && needsSecondAccountNote(view, readTosAck()));
+  if (noteShown) {
+    return (
+      <div className="space-y-2" data-testid="add-seat-tos">
+        <Callout tone="warn">{SEAT_TOS_NOTE}</Callout>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text"
+            onClick={() => {
+              try {
+                window.localStorage.setItem(TOS_ACK_KEY, "1");
+              } catch {
+                /* the note simply shows again next time */
+              }
+              setNoteShown(false);
+            }}
+          >
+            I understand
+          </button>
+          <button type="button" className="text-meta text-text-faint hover:text-text" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return <AddSeatFlow provider={provider} accountId={accountId} accountLabel={accountLabel} onDone={onDone} onCancel={onCancel} />;
 }
