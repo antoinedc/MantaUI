@@ -175,17 +175,63 @@ does.
 - The Claude adapter parses `limits[]` (fixes §1.1) and emits `windows` with
   `kind: "session" | "weekly" | "weekly_scoped"`, `scope` and `active`.
 
-## 7. UI (Settings → Accounts, desktop; iOS later)
+## 7. UI — Settings → Accounts (desktop + iOS, phase 3)
 - Provider row expands to accounts → seats. Each seat shows: label (editable), email,
   plan, 5h + weekly bars, and "used by N conversations".
 - With ≥2 seats: a **Manual / Automatic** toggle. In manual mode each seat has a
   "Use this seat" radio.
 - Actions: Add account, Add seat (runs sign-in), Rename, Remove seat (its
   conversations are re-placed on their next turn).
-- Session header: the context pill popover shows "Seat: Work · Seat 2". The usage
-  dial shows **this conversation's seat**, not the provider.
+- Session header: the context pill popover shows "Seat: Work · Seat 2".
 - Every control follows the "never a dead control" rule: success and failure are
   both shown.
+
+## 7a. Usage dial + popover (composer, desktop + iOS)
+
+Today the dial shows one provider snapshot, and the popover lists its windows. With
+seats:
+
+**Dial (the ring).** It shows **this conversation's seat**: its load (§5.1) and tone.
+Visibility follows today's threshold rule, applied to that seat. One addition: in
+automatic mode, when the seat is above the move line (90%) and another seat has
+room, the ring keeps its tone but shows a small "↷" badge (a move is coming).
+
+**Popover, top to bottom** (width stays 320px):
+1. **Header:** provider name + plan, and on the right a mode chip, `Automatic` or
+   `Manual`. The chip only appears with ≥2 seats.
+2. **This conversation:** "Work · Seat 2" (account · seat; just the account label
+   when it has one seat), then today's window rows (5h, weekly, active model-scoped
+   weeklies; inactive scoped ones greyed with "not active"), and today's extras.
+3. **Last move** (only if this conversation moved in the last 5h): one line, e.g.
+   "Moved from Seat 1 at 91% of 5h · 2h ago", plus "history re-sent: 84k" for a
+   cross-org move.
+4. **Other seats** (only with ≥2 seats). One compact row per seat, grouped by
+   account with a small account heading only when there are ≥2 accounts:
+   - label · two thin bars (5h, weekly) with % · a reset hint when ≥90% ("resets
+     14:10") · "N chats" when in use;
+   - signed-out / expired seats show that state and a "Fix" link to Settings;
+   - **Manual mode:** each row has a **Use** button. It sets the provider's active
+     seat. Same-org: immediate, and the toast says "All conversations now use Seat 3".
+     Cross-org: confirm first ("conversations will re-send their history once").
+   - **Automatic mode:** rows are read-only. The best next seat carries a "next"
+     tag, so the user can see where a move would go.
+   - The list scrolls inside the popover past 5 rows; the popover never grows past
+     its max height.
+5. **Other subscriptions** (only if another subscription provider is connected):
+   one line each, "Codex · best seat 12% of 5h", clicking opens that provider in
+   Settings → Accounts. This replaces having to open another conversation to see it.
+6. **Footer:** "Manage seats" (opens Settings → Accounts) on the left, today's
+   "updated Xs ago" on the right.
+
+**One seat, one subscription:** looks exactly like today, plus the weekly fix.
+No empty sections are rendered.
+
+**Data:** the popover needs the conversation's seat and every seat's windows. It
+uses `accounts:list` plus `accounts:session-seat` (§8), refreshed on open and on
+`accounts.updated` / `accounts.moved`. Pure selectors (`seatLoad`,
+`selectConversationSeat`, `orderOtherSeats`, `nextSeatHint`) live in `chatUtils.ts`
+with tests; the "next" tag must use the **same** function the server uses for rule 3
+(`src/shared/seatChoice.mjs`), so the hint can never disagree with the actual move.
 
 ## 8. Contract (pinned for parallel implementers)
 
@@ -201,6 +247,8 @@ RPC (`/rpc/<channel>`, renderer):
   After login, a profile/org mismatch returns `{warning:"different-org", orgName}`
   and offers to create a new account.
 - `accounts:remove-seat` `{seatId}`
+- `accounts:session-seat` `{sessionId}` → `{provider, seatId, accountId, lastMove?:
+  {from, at, reason, resentTokens}}` (null when the conversation has no subscription seat)
 - Errors: `{error: "duplicate-login"|"unknown-seat"|"invalid-label"|"login-failed"}`
   (class-1: safe literal text).
 
