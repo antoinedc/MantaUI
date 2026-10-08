@@ -15,6 +15,8 @@ import {
   type StreamEnvelope,
   type RunningSetPayload,
   type UsageSnapshot,
+  type AccountsUpdatedPayload,
+  type AccountsMovedPayload,
   type StoppedListResult,
   type ModelPrefsState,
   type ModelPrefsSetInput,
@@ -396,6 +398,8 @@ type Kind =
   | "serverUpdateProgress"
   | "delegate.updated"
   | "usage.updated"
+  | "accounts.updated"
+  | "accounts.moved"
   | "usage-stopped.updated"
   | "model-prefs.updated"
   | "progress.updated"
@@ -422,6 +426,8 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   serverUpdateProgress: new Set(),
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
+  "accounts.updated": new Set(),
+  "accounts.moved": new Set(),
   "usage-stopped.updated": new Set(),
   "model-prefs.updated": new Set(),
   "progress.updated": new Set(),
@@ -1110,6 +1116,16 @@ export const httpApi: Api = {
   accountsRetry: (providerID) => rpc(IPC.accountsRetry, { providerID }),
   accountHealth: () => rpc(IPC.accountsHealth),
   accountsEndpointProbe: (endpointKey) => rpc(IPC.accountsEndpointProbe, { endpointKey }),
+  accountsList: () => rpc(IPC.accountsList, {}),
+  accountsSetMode: (input) => rpc(IPC.accountsSetMode, input),
+  accountsSetActive: (input) => rpc(IPC.accountsSetActive, input),
+  accountsRename: (input) => rpc(IPC.accountsRename, input),
+  accountsAddSeat: (input) => rpc(IPC.accountsAddSeat, input),
+  accountsSeatStatus: (input) => rpc(IPC.accountsSeatStatus, input),
+  accountsAddSeatConfirm: (input) => rpc(IPC.accountsAddSeatConfirm, input),
+  accountsCancelSeat: (input) => rpc(IPC.accountsCancelSeat, input),
+  accountsRemoveSeat: (input) => rpc(IPC.accountsRemoveSeat, input),
+  accountsSessionSeat: (input) => rpc(IPC.accountsSessionSeat, input),
   opencodeModelCatalog: () => rpc(IPC.opencodeModelCatalog),
   opencodeGetProviders: () => rpc(IPC.opencodeGetProviders),
   opencodeSetProviders: (ops) => rpc(IPC.opencodeSetProviders, ops),
@@ -1218,6 +1234,12 @@ export const httpApi: Api = {
   // the store's `usage` slice via setUsage, no refetch needed.
   onUsageUpdated: (cb) =>
     on<{ snapshots: UsageSnapshot[] }>("usage.updated", cb),
+
+  // Multi-account: `accounts.updated` ({provider}) on any list change and
+  // `accounts.moved` ({sessionId, …}) when the resolver moves a conversation.
+  // Both are hints — subscribers refetch accountsList() / accountsSessionSeat().
+  onAccountsUpdated: (cb) => on<AccountsUpdatedPayload>("accounts.updated", cb),
+  onAccountsMoved: (cb) => on<AccountsMovedPayload>("accounts.moved", cb),
 
   // BET-1047: the box publishes `usage-stopped.updated` ({conversation}) on
   // the bus whenever the stopped record changes. The payload is a hint only —

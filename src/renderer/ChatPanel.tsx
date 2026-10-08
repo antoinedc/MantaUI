@@ -2947,6 +2947,7 @@ export function ChatPanel({
           usage pill + popover, and the session menu (fork / compact / clear /
           delete). The composer below owns only composing. */}
       <SessionHeader
+        sessionId={sessionId}
         branch={branch}
         ctxBreakdown={ctxBreakdown}
         ctxLimit={ctxLimit}

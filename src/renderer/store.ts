@@ -7,6 +7,8 @@ import type {
   Project,
   TmuxWindow,
   UsageSnapshot,
+  ProviderView,
+  SessionSeat,
   StoppedRecord,
   WindowStatus,
   UpdateTarget,
@@ -486,6 +488,17 @@ type State = {
   // NOT poll this; the box's usage poller (src/server/usage.mjs) is the only
   // timer. Empty array = no snapshots yet (or no provider connected).
   usage: UsageSnapshot[];
+  // Multi-account & seats: every subscription provider that has >=1 seat
+  // (window.api.accountsList), primed on connect and refetched on the
+  // `accounts.updated` bus event and when the usage popover / Settings →
+  // Accounts opens. Empty = no seat info (older box, or nothing connected) —
+  // every consumer then falls back to the plain provider snapshot above.
+  accounts: ProviderView[];
+  // Per-conversation seat cache (window.api.accountsSessionSeat), keyed by the
+  // opencode session id. `null` = fetched, the conversation has no assignment;
+  // a missing key = not fetched yet. Refreshed on `accounts.moved` for that
+  // session and whenever the usage popover opens.
+  sessionSeats: Record<string, SessionSeat | null>;
   // BET-1049: the durable box-side record of conversations stopped by a
   // plan-usage limit (window.api.usageStoppedList), kept live by the
   // `usage-stopped.updated` bus event. The single source the sidebar pill,
@@ -682,6 +695,11 @@ type State = {
   // this is a straight replace, not a merge (the poller's contract is "the
   // current cache", not a diff).
   setUsage: (usage: UsageSnapshot[]) => void;
+  // Replace the accounts slice from accountsList() or a mutation's answer.
+  setAccounts: (accounts: ProviderView[]) => void;
+  // Swap ONE provider's view in (a mutation answers the refreshed ProviderView).
+  upsertProviderView: (view: ProviderView) => void;
+  setSessionSeat: (sessionId: string, seat: SessionSeat | null) => void;
   // Replace the stopped-conversation record (BET-1049) from
   // window.api.usageStoppedList() or a `usage-stopped.updated` refetch. Both
   // hand over the full {records, lastLooked} — a straight replace, not a
@@ -862,6 +880,8 @@ export const useStore = create<State>((set, get) => ({
   liveRunning: {},
   sessionParents: {},
   usage: [],
+  accounts: [],
+  sessionSeats: {},
   usageStopped: [],
   lastLookedStopped: null,
   chatMessages: {},
@@ -1278,6 +1298,17 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   setUsage: (usage) => set({ usage }),
+  setAccounts: (accounts) => set({ accounts: Array.isArray(accounts) ? accounts : [] }),
+  upsertProviderView: (view) =>
+    set((prev) => {
+      const i = prev.accounts.findIndex((p) => p.provider === view.provider);
+      if (i < 0) return { accounts: [...prev.accounts, view] };
+      const next = prev.accounts.slice();
+      next[i] = view;
+      return { accounts: next };
+    }),
+  setSessionSeat: (sessionId, seat) =>
+    set((prev) => ({ sessionSeats: { ...prev.sessionSeats, [sessionId]: seat } })),
 
   setUsageStopped: ({ records, lastLooked }) =>
     set({ usageStopped: Array.isArray(records) ? records : [], lastLookedStopped: lastLooked ?? null }),

@@ -481,6 +481,14 @@ struct UsageWindow: Codable, Equatable, Sendable {
     /// poller (src/server/usage.mjs). Never raise a warning from a stale window;
     /// carry the last reading forward and label it.
     var stale: Bool? = nil
+    /// Multi-account (phase 3): the model display name a model-scoped weekly
+    /// window applies to ("Fable"); absent for account-wide windows. Such a
+    /// window's `kind` is `weekly_scoped:<name>`, so it never matches the plain
+    /// `weekly` lookup in `UsageMeters`.
+    var scope: String? = nil
+    /// `false` when the provider says this window is not in force — shown
+    /// greyed and never drives the dot or a warning. Absent means active.
+    var active: Bool? = nil
 }
 
 /// One provider's full `usage:list` snapshot.

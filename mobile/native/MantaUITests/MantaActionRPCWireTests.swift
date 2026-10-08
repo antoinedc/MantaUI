@@ -474,6 +474,136 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(state?.recents.first?.modelID, "sonnet")
         XCTAssertEqual(state?.recents.first?.fast, false)
     }
+
+    // MARK: - Accounts / seats (multi-account phase 3)
+
+    private let providerReply = #"{"result": {"provider":"claude","mode":"auto","activeSeatId":"s1","routingActive":true,"accounts":[{"id":"a","label":"Work","seats":[{"id":"s1","label":"Seat 1"}]}]}}"#
+
+    /// `accounts:list` takes the contract's `{}` as its single argument and
+    /// decodes `{ providers }`.
+    func testAccountsListSendsAnEmptyObjectAndDecodes() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"providers": [{"provider":"claude","mode":"manual","accounts":[]}]}}"#
+        let providers = try await client.accountsList()
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:list")
+        assertSingleWrapped()
+        XCTAssertEqual(providers.map(\.provider), ["claude"])
+    }
+
+    func testAccountsListAbsentResultIsNoProviders() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        let providers = try await client.accountsList()
+        XCTAssertEqual(providers, [])
+    }
+
+    func testAccountsSessionSeatSingleWrapsAndNullMeansNoAssignment() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": null}"#
+        let none = try await client.accountsSessionSeat(sessionId: "ses_1")
+        XCTAssertNil(none)
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:session-seat")
+        assertSingleWrapped()
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["sessionId"] as? String, "ses_1")
+
+        CapturingURLProtocol.result = #"{"result": {"provider":"claude","seatId":"s1","seatLabel":"Seat 1","accountLabel":"Work"}}"#
+        let seat = try await client.accountsSessionSeat(sessionId: "ses_1")
+        XCTAssertEqual(seat?.seatId, "s1")
+        XCTAssertEqual(seat?.accountLabel, "Work")
+    }
+
+    func testAccountsSetModeCarriesProviderAndModeAndReturnsTheProvider() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = providerReply
+        let updated = try await client.accountsSetMode(provider: "claude", mode: .auto)
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:set-mode")
+        assertSingleWrapped()
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["provider"] as? String, "claude")
+        XCTAssertEqual(payload?["mode"] as? String, "auto")
+        XCTAssertEqual(updated.mode, .auto)
+        XCTAssertEqual(updated.accounts.first?.seats.first?.id, "s1")
+    }
+
+    func testAccountsSetActiveRenameRemoveCarryTheirFields() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = providerReply
+
+        _ = try await client.accountsSetActive(provider: "claude", seatId: "s2")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:set-active")
+        assertSingleWrapped()
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["seatId"] as? String, "s2")
+
+        _ = try await client.accountsRename(provider: "claude", kind: "seat", id: "s2", label: "Home")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:rename")
+        assertSingleWrapped()
+        let rename = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(rename?["kind"] as? String, "seat")
+        XCTAssertEqual(rename?["id"] as? String, "s2")
+        XCTAssertEqual(rename?["label"] as? String, "Home")
+
+        _ = try await client.accountsRemoveSeat(provider: "claude", seatId: "s2")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:remove-seat")
+        assertSingleWrapped()
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["seatId"] as? String, "s2")
+    }
+
+    /// The contract's `{error: "live-seat"}` refusal must THROW, whichever way
+    /// it reaches the client — as the rpc envelope's `error`, or as the result
+    /// body. A refusal read as a success would tell the user the seat was gone.
+    func testAccountsRefusalThrowsFromEitherEnvelopeShape() async {
+        let client = makeClient()
+        for reply in [#"{"error": "live-seat"}"#, #"{"result": {"error": "live-seat"}}"#] {
+            CapturingURLProtocol.result = reply
+            do {
+                _ = try await client.accountsRemoveSeat(provider: "claude", seatId: "s1")
+                XCTFail("expected a throw for \(reply)")
+            } catch {
+                XCTAssertEqual(error as? MantaError, .server("live-seat"), reply)
+            }
+        }
+    }
+
+    func testAccountsAddSeatStatusConfirmCancel() async throws {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"seatId": "seat-9", "connect": {"shape": "claude-login", "sessionKey": "k"}}}"#
+        let added = try await client.accountsAddSeat(provider: "claude", accountId: "a", label: "New")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:add-seat")
+        assertSingleWrapped()
+        XCTAssertEqual(added.seatId, "seat-9")
+        XCTAssertNotNil(added.connect)
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["accountId"] as? String, "a")
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["label"] as? String, "New")
+
+        CapturingURLProtocol.result = #"{"result": {"state": "failed", "error": "different-org", "orgName": "Acme"}}"#
+        let status = try await client.accountsSeatStatus(seatId: "seat-9")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:seat-status")
+        assertSingleWrapped()
+        XCTAssertEqual(status.state, .failed)
+        XCTAssertEqual(status.error, "different-org")
+
+        CapturingURLProtocol.result = providerReply
+        _ = try await client.accountsAddSeatConfirm(seatId: "seat-9", newAccount: true)
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:add-seat-confirm")
+        assertSingleWrapped()
+        XCTAssertEqual(CapturingURLProtocol.lastPayload()?["newAccount"] as? Bool, true)
+
+        CapturingURLProtocol.result = #"{"result": {"ok": true}}"#
+        try await client.accountsCancelSeat(seatId: "seat-9")
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/accounts:cancel-seat")
+        assertSingleWrapped()
+    }
+
+    func testAccountsAddSeatRefusalThrows() async {
+        let client = makeClient()
+        CapturingURLProtocol.result = #"{"result": {"error": "unknown-provider"}}"#
+        do {
+            _ = try await client.accountsAddSeat(provider: "nope")
+            XCTFail("expected a throw")
+        } catch {
+            XCTAssertEqual(error as? MantaError, .server("unknown-provider"))
+        }
+    }
 }
 
 // MARK: - Capturing URLProtocol

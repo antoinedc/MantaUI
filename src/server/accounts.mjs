@@ -32,10 +32,10 @@
 // uses lives in seatAssignment.mjs; this module only reports seat state to it.
 
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve as resolvePath, sep } from "node:path";
 import { secretsRoot, statePath } from "../shared/paths.mjs";
-import { writeJsonAtomic } from "./jsonStore.mjs";
+import { writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { CREDENTIALS_PATH, parseCredentials } from "./claudeAuth.mjs";
 import { opencodeAuthPath } from "./opencode.mjs";
 
@@ -284,7 +284,7 @@ export function aggregationPolicy({ plan, perConversationRouting = false }) {
 // Pure: merging discovery findings into a provider's state
 // ---------------------------------------------------------------------------
 
-function findSeat(prov, pred) {
+export function findSeat(prov, pred) {
   for (const a of prov.accounts) for (const s of a.seats) if (pred(s, a)) return { seat: s, account: a };
   return null;
 }
@@ -480,6 +480,112 @@ export function settleProvider(before, after, liveSeatId) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure: store mutations behind the accounts:* channels (phase 3)
+// ---------------------------------------------------------------------------
+
+const MAX_LABEL_LEN = 40;
+
+/** A label the user typed: trimmed, 1–40 chars, no control characters. Returns
+ *  the cleaned label, or null when it is not acceptable. */
+export function cleanLabel(raw) {
+  if (typeof raw !== "string") return null;
+  const label = raw.trim();
+  if (label.length < 1 || label.length > MAX_LABEL_LEN) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(label)) return null;
+  return label;
+}
+
+/** Rename an account or a seat. Pure; null when the id does not exist. */
+export function renameInState(state, { kind, id, label }) {
+  const next = structuredClone(state);
+  if (kind === "account") {
+    const a = next.accounts.find((x) => x.id === id);
+    if (!a) return null;
+    a.label = label;
+    return next;
+  }
+  if (kind === "seat") {
+    const hit = findSeat(next, (s) => s.id === id);
+    if (!hit) return null;
+    hit.seat.label = label;
+    return next;
+  }
+  return null;
+}
+
+/** The state without one seat (an emptied account goes with it) and the seat
+ *  that was removed. `activeSeatId` is re-pointed when it was the removed seat.
+ *  Pure; `seat: null` when the id does not exist. */
+export function removeSeatInState(state, seatId, liveSeatId = null) {
+  const hit = findSeat(state, (s) => s.id === seatId);
+  if (!hit) return { state, seat: null };
+  const next = structuredClone(state);
+  removeSeat(next, seatId);
+  if (next.activeSeatId === seatId) {
+    const seats = allSeats(next);
+    next.activeSeatId = (liveSeatId && seats.some((s) => s.id === liveSeatId) ? liveSeatId : seats[0]?.id) ?? null;
+  }
+  return { state: next, seat: hit.seat };
+}
+
+/**
+ * Where a freshly signed-in seat goes. Pure.
+ *   • the same login as a seat we already have → duplicate (never a second seat);
+ *   • a target account was chosen and the login belongs to ANOTHER org (Claude,
+ *     both orgs known) → different-org (the caller parks it until confirmed);
+ *   • otherwise place.
+ * @returns {{kind:"duplicate", seat: Seat}|{kind:"different-org", orgName: string|null}|{kind:"place"}}
+ */
+export function planSeatPlacement({ state, provider, identity, accountId = null }) {
+  const twin = identity?.accountUuid ? findSeat(state, (s) => s.accountUuid === identity.accountUuid)?.seat ?? null : null;
+  if (twin) return { kind: "duplicate", seat: twin };
+  if (accountId && provider === "claude") {
+    const target = state.accounts.find((a) => a.id === accountId);
+    if (target?.orgId && identity?.orgId && target.orgId !== identity.orgId) {
+      return { kind: "different-org", orgName: identity.orgName ?? null };
+    }
+  }
+  return { kind: "place" };
+}
+
+/**
+ * Put a new seat into the provider state.
+ *   • `accountId` → that account (it must exist);
+ *   • Claude, no account → grouped by org id (an existing account with the same
+ *     org, else a new one) — spec §2;
+ *   • Codex, no account → always a NEW account: ChatGPT logins carry no org to
+ *     group by, and two logins are two plans.
+ * Then the usual bookkeeping (`settleProvider`: auto mode once a SECOND seat
+ * exists). Pure.
+ */
+export function addSeatToState(state, { provider, seat, identity, accountId = null, defaultAccountLabel }) {
+  const next = structuredClone(state);
+  const target = accountId ? next.accounts.find((a) => a.id === accountId) : null;
+  if (accountId && !target) return null;
+  if (target) {
+    if (identity) {
+      target.orgName = identity.orgName ?? target.orgName;
+      target.plan = identity.plan ?? target.plan;
+    }
+    target.seats.push(seat);
+    target.seats.sort((a, b) => compareIds(a.id, b.id));
+  } else if (provider === "codex") {
+    next.accounts.push({
+      id: nextId("acct", next.accounts.map((a) => a.id)),
+      label: next.accounts.length === 0 ? defaultAccountLabel : `${defaultAccountLabel} ${next.accounts.length + 1}`,
+      orgId: null,
+      orgName: null,
+      plan: null,
+      seats: [seat],
+    });
+  } else {
+    placeSeat(next, seat, identity, defaultAccountLabel);
+  }
+  return settleProvider(state, next, null);
+}
+
+// ---------------------------------------------------------------------------
 // IO helpers
 // ---------------------------------------------------------------------------
 
@@ -569,6 +675,17 @@ export function createAccountsService({
 
   /** @type {AccountsStore|null} */
   let store = null;
+  // Writers of the store serialize here. Discovery computes from a snapshot over
+  // seconds (network calls), so a mutation landing meanwhile makes that run's
+  // result stale: `storeVersion` lets discovery notice and drop it instead of
+  // overwriting the user's change (it is idempotent — the next run redoes it).
+  const writeLock = createMutex();
+  let storeVersion = 0;
+  const listeners = new Set();
+  // Seat ids a sign-in flow is holding (provider → Set). Discovery must not
+  // adopt their directories: the flow decides whether the new login is a
+  // duplicate / a different org BEFORE it becomes a seat.
+  const reserved = { claude: new Set(), codex: new Set() };
   let discovering = null;
   let lastDiscoveryAt = 0;
   let liveCache = { key: null, at: 0, identity: null };
@@ -579,8 +696,20 @@ export function createAccountsService({
   }
 
   async function saveStore(next) {
+    const before = store;
     await writeJsonAtomic(storePath, JSON.stringify(next, null, 2), { mode: 0o600 });
     store = next;
+    // Tell listeners WHICH providers changed (the accounts.updated bus event).
+    for (const provider of ACCOUNT_PROVIDERS) {
+      if (JSON.stringify(before?.providers?.[provider]) === JSON.stringify(next.providers[provider])) continue;
+      for (const fn of [...listeners]) {
+        try {
+          fn({ provider });
+        } catch {
+          // a listener must never break a save
+        }
+      }
+    }
   }
 
   /** The live Claude login's identity, cached per live token (see top of file). */
@@ -621,6 +750,7 @@ export function createAccountsService({
       const dir = join(root, id);
       const creds = await readClaudeCredentialsFile(join(dir, ".credentials.json"));
       if (!creds?.accessToken) continue; // an empty/odd directory is not a seat
+      if (reserved.claude.has(id)) continue; // a sign-in is still deciding what this is
       // Matched by id OR by directory: a seat that adopted this directory
       // under a different id (the same login was first found via the live file)
       // is just as identified.
@@ -665,6 +795,7 @@ export function createAccountsService({
 
   async function discoverNow() {
     const before = store ?? (await loadStore());
+    const versionAtStart = storeVersion;
     const next = structuredClone(before);
     for (const provider of ACCOUNT_PROVIDERS) {
       const prov = next.providers[provider];
@@ -682,7 +813,17 @@ export function createAccountsService({
         : null;
       next.providers[provider] = settleProvider(before.providers[provider], found, liveSeat);
     }
-    if (JSON.stringify(next) !== JSON.stringify(before)) await saveStore(next);
+    if (JSON.stringify(next) !== JSON.stringify(before)) {
+      const kept = await writeLock.runExclusive(async () => {
+        if (storeVersion !== versionAtStart) return false; // a mutation landed meanwhile
+        await saveStore(next);
+        return true;
+      });
+      if (!kept) {
+        lastDiscoveryAt = 0; // redo soon, from the new store
+        return store ?? next;
+      }
+    }
     // Keep each live login's seat directory in step with it (see mirrorLive).
     for (const provider of ACCOUNT_PROVIDERS) {
       await resolveSeats(provider, next.providers[provider]).catch(() => {});
@@ -777,6 +918,75 @@ export function createAccountsService({
 
   return {
     discover,
+
+    /** Be told when a provider's stored state changes: `fn({provider})`.
+     *  Returns the unsubscribe function. */
+    onChange(fn) {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+
+    /** Where seats of a provider keep their credentials. */
+    seatDir(provider, seatId) {
+      return join(seatsRoot, provider, seatId);
+    },
+
+    /** Every id a NEW seat must not take: stored seats, held ids, and seat
+     *  directories already on disk (a leftover directory must never be reused). */
+    async takenSeatIds(provider) {
+      const prov = (store ?? (await loadStore())).providers[provider];
+      return [
+        ...allSeats(prov).map((s) => s.id),
+        ...(reserved[provider] ?? []),
+        ...(await listSeatDirs(join(seatsRoot, provider))),
+      ];
+    },
+
+    /** Hold / release a seat id while its sign-in runs (see `reserved`). */
+    reserveSeat(provider, seatId) {
+      reserved[provider]?.add(seatId);
+    },
+    releaseSeat(provider, seatId) {
+      reserved[provider]?.delete(seatId);
+    },
+
+    /**
+     * Change ONE provider's state atomically: `fn(state)` returns the next state
+     * (or null to refuse — nothing is written). The whole read-modify-write is
+     * serialized against other mutations and against discovery's save. Returns
+     * `{ok:true, state}` or `{ok:false}`.
+     * @param {string} provider
+     * @param {(state: ProviderState) => ProviderState|null|Promise<ProviderState|null>} fn
+     */
+    async mutate(provider, fn) {
+      if (!ACCOUNT_PROVIDERS.includes(provider)) return { ok: false };
+      return writeLock.runExclusive(async () => {
+        const current = store ?? (await loadStore());
+        const next = await fn(structuredClone(current.providers[provider]));
+        if (!next) return { ok: false };
+        const nextStore = structuredClone(current);
+        nextStore.providers[provider] = next;
+        storeVersion++;
+        await saveStore(nextStore);
+        return { ok: true, state: structuredClone(next) };
+      });
+    },
+
+    /** Delete a seat's directory — only ever one that lies INSIDE the seats
+     *  root (a corrupt store must not turn a remove into `rm -rf` elsewhere). */
+    async deleteSeatDir(dir) {
+      if (typeof dir !== "string" || !dir) return false;
+      const root = resolvePath(seatsRoot) + sep;
+      const target = resolvePath(dir);
+      // Exactly one seat directory — <root>/<provider>/<seat> — never a provider
+      // directory (which would take every seat of that provider with it).
+      if (!target.startsWith(root)) return false;
+      const parts = target.slice(root.length).split(sep);
+      if (parts.length !== 2 || !ACCOUNT_PROVIDERS.includes(parts[0]) || !parts[1] || parts[1].startsWith(".")) return false;
+      await rm(target, { recursive: true, force: true });
+      return true;
+    },
+
     /** A copy of the current store (after loading it if needed). */
     async getStore() {
       return structuredClone(store ?? (await loadStore()));
@@ -875,10 +1085,14 @@ export function createAccountsService({
     async noteRefreshOutcome(provider, seatId, outcome) {
       try {
         if (!ACCOUNT_PROVIDERS.includes(provider)) return false;
-        const next = applyRefreshOutcome(store ?? (await loadStore()), provider, seatId, outcome);
-        if (next === (store ?? null)) return false;
-        await saveStore(next);
-        return true;
+        return await writeLock.runExclusive(async () => {
+          const current = store ?? (await loadStore());
+          const next = applyRefreshOutcome(current, provider, seatId, outcome);
+          if (next === current) return false;
+          storeVersion++;
+          await saveStore(next);
+          return true;
+        });
       } catch (e) {
         log.warn?.("[accounts] recording a refresh outcome failed:", e?.message ?? e);
         return false;

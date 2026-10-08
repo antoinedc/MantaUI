@@ -15,6 +15,11 @@ import {
   compareIds,
   allSeats,
   createAccountsService,
+  cleanLabel,
+  renameInState,
+  removeSeatInState,
+  planSeatPlacement,
+  addSeatToState,
 } from "./accounts.mjs";
 
 const quiet = { warn() {}, log() {} };
@@ -571,6 +576,224 @@ test("service: no openai entry → no codex seat, nothing written", async () => 
     await svc.discover({ force: true });
     assert.equal(allSeats((await svc.getStore()).providers.codex).length, 0);
     await assert.rejects(stat(join(paths.seatsRoot, "codex")));
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+// ---- phase 3: pure store mutations behind accounts:* ------------------------
+
+const provOf = (over = {}) => ({
+  mode: "manual",
+  activeSeatId: "seat-1",
+  accounts: [
+    {
+      id: "acct-1",
+      label: "Work",
+      orgId: "org-A",
+      orgName: "Useronda",
+      plan: "Team",
+      seats: [seatOf({ id: "seat-1", accountUuid: "u-1" }), seatOf({ id: "seat-2", label: "Seat 2", accountUuid: "u-2" })],
+    },
+    { id: "acct-2", label: "Home", orgId: "org-B", orgName: "Home", plan: "Pro", seats: [seatOf({ id: "seat-3", label: "Seat 3", accountUuid: "u-3" })] },
+  ],
+  ...over,
+});
+
+test("cleanLabel: trims, 1-40 chars, no control characters", () => {
+  assert.equal(cleanLabel("  Work  "), "Work");
+  assert.equal(cleanLabel("x".repeat(40)), "x".repeat(40));
+  assert.equal(cleanLabel("x".repeat(41)), null);
+  assert.equal(cleanLabel("   "), null);
+  assert.equal(cleanLabel(""), null);
+  assert.equal(cleanLabel("a\nb"), null);
+  assert.equal(cleanLabel("a\u0007b"), null);
+  assert.equal(cleanLabel(42), null);
+  assert.equal(cleanLabel(undefined), null);
+  assert.equal(cleanLabel("Café · Seat 2"), "Café · Seat 2");
+});
+
+test("renameInState: renames a seat or an account, null for an unknown id, input not mutated", () => {
+  const before = provOf();
+  const snapshot = JSON.stringify(before);
+  assert.equal(renameInState(before, { kind: "seat", id: "seat-2", label: "Boss" }).accounts[0].seats[1].label, "Boss");
+  assert.equal(renameInState(before, { kind: "account", id: "acct-2", label: "Mine" }).accounts[1].label, "Mine");
+  assert.equal(renameInState(before, { kind: "seat", id: "nope", label: "x" }), null);
+  assert.equal(renameInState(before, { kind: "account", id: "seat-1", label: "x" }), null);
+  assert.equal(renameInState(before, { kind: "bogus", id: "seat-1", label: "x" }), null);
+  assert.equal(JSON.stringify(before), snapshot);
+});
+
+test("removeSeatInState: drops the seat, an emptied account goes with it, active seat is re-pointed", () => {
+  const { state, seat } = removeSeatInState(provOf(), "seat-3");
+  assert.equal(seat.id, "seat-3");
+  assert.deepEqual(state.accounts.map((a) => a.id), ["acct-1"]);
+  const r = removeSeatInState(provOf({ activeSeatId: "seat-2" }), "seat-2", "seat-1");
+  assert.equal(r.state.activeSeatId, "seat-1", "active falls back to the live seat");
+  const r2 = removeSeatInState(provOf({ activeSeatId: "seat-2" }), "seat-2");
+  assert.equal(r2.state.activeSeatId, "seat-1", "...else the first remaining seat");
+  const r3 = removeSeatInState(provOf({ activeSeatId: "seat-1" }), "seat-3");
+  assert.equal(r3.state.activeSeatId, "seat-1", "an unrelated removal leaves the active seat");
+  assert.equal(removeSeatInState(provOf(), "nope").seat, null);
+});
+
+test("planSeatPlacement: duplicate login, different org (only with a chosen Claude account), else place", () => {
+  const state = provOf();
+  assert.equal(planSeatPlacement({ state, provider: "claude", identity: idOf("u-2", "b@e.com") }).kind, "duplicate");
+  assert.equal(planSeatPlacement({ state, provider: "claude", identity: idOf("u-9", "z@e.com") }).kind, "place");
+  const other = idOf("u-9", "z@e.com", { uuid: "org-Z", name: "Zeta", organization_type: "claude_pro" });
+  assert.equal(planSeatPlacement({ state, provider: "claude", identity: other }).kind, "place", "no account chosen: grouped by org later");
+  const diff = planSeatPlacement({ state, provider: "claude", identity: other, accountId: "acct-1" });
+  assert.deepEqual(diff, { kind: "different-org", orgName: "Zeta" });
+  assert.equal(planSeatPlacement({ state, provider: "claude", identity: idOf("u-9", "z@e.com"), accountId: "acct-1" }).kind, "place", "same org");
+  assert.equal(planSeatPlacement({ state, provider: "codex", identity: { accountUuid: "u-9", orgId: "other" }, accountId: "acct-1" }).kind, "place", "codex has no org to compare");
+  assert.equal(planSeatPlacement({ state, provider: "codex", identity: { accountUuid: "u-1" } }).kind, "duplicate");
+  assert.equal(planSeatPlacement({ state, provider: "codex", identity: { accountUuid: null } }).kind, "place", "an unidentified login cannot be a duplicate");
+});
+
+test("addSeatToState: a chosen account; Claude groups by org; Codex always opens a new account; second seat flips auto", () => {
+  const seat4 = { id: "seat-4", label: "Seat 4", email: null, accountUuid: "u-4", credentialDir: "/d/4", status: "ok" };
+  const into = addSeatToState(provOf(), { provider: "claude", seat: seat4, identity: idOf("u-4", "d@e.com"), accountId: "acct-2", defaultAccountLabel: "Claude" });
+  assert.deepEqual(into.accounts[1].seats.map((s) => s.id), ["seat-3", "seat-4"]);
+  assert.equal(addSeatToState(provOf(), { provider: "claude", seat: seat4, identity: null, accountId: "nope", defaultAccountLabel: "Claude" }), null);
+
+  const byOrg = addSeatToState(provOf(), { provider: "claude", seat: seat4, identity: idOf("u-4", "d@e.com"), defaultAccountLabel: "Claude" });
+  assert.deepEqual(byOrg.accounts[0].seats.map((s) => s.id), ["seat-1", "seat-2", "seat-4"], "same org → same account");
+  const newOrg = addSeatToState(provOf(), { provider: "claude", seat: seat4, identity: idOf("u-4", "d@e.com", { uuid: "org-N", name: "Neo", organization_type: "claude_pro" }), defaultAccountLabel: "Claude" });
+  assert.equal(newOrg.accounts.length, 3);
+  assert.equal(newOrg.accounts[2].label, "Neo");
+
+  const codexOne = { mode: "manual", activeSeatId: "seat-1", accounts: [{ id: "acct-1", label: "ChatGPT", orgId: null, orgName: null, plan: null, seats: [seatOf({ id: "seat-1", accountUuid: "c-1" })] }] };
+  const codex = addSeatToState(codexOne, { provider: "codex", seat: { ...seat4, accountUuid: "c-2" }, identity: { accountUuid: "c-2", email: null, orgId: null, orgName: null, plan: null }, defaultAccountLabel: "ChatGPT" });
+  assert.equal(codex.accounts.length, 2, "a Codex login is its own account");
+  assert.equal(codex.accounts[1].label, "ChatGPT 2");
+  assert.equal(codex.mode, "auto", "the second seat turns automatic mode on");
+  const third = addSeatToState(provOf({ mode: "manual" }), { provider: "claude", seat: seat4, identity: idOf("u-4", "d@e.com"), accountId: "acct-1", defaultAccountLabel: "Claude" });
+  assert.equal(third.mode, "manual", "mode is only defaulted when going 1 → 2 seats");
+});
+
+// ---- phase 3: the service's write path --------------------------------------
+
+test("service.mutate: atomic write, change listener fires for the changed provider only, refusal writes nothing", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    const svc = createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({ "tok-A": profileOf("u-A", "a@e.com") }) });
+    await svc.discover({ force: true });
+    const seen = [];
+    const off = svc.onChange((e) => seen.push(e.provider));
+    const ok = await svc.mutate("claude", (st) => ({ ...st, mode: "auto" }));
+    assert.equal(ok.ok, true);
+    assert.deepEqual(seen, ["claude"]);
+    assert.equal((await svc.getStore()).providers.claude.mode, "auto");
+    assert.equal(JSON.parse(await readFile(paths.storePath, "utf-8")).providers.claude.mode, "auto");
+    assert.equal(((await stat(paths.storePath)).mode & 0o777).toString(8), "600");
+    const before = await readFile(paths.storePath, "utf-8");
+    assert.deepEqual(await svc.mutate("claude", () => null), { ok: false });
+    assert.equal(await readFile(paths.storePath, "utf-8"), before, "a refused mutation writes nothing");
+    assert.deepEqual(await svc.mutate("bogus", (s) => s), { ok: false });
+    off();
+    await svc.mutate("claude", (st) => ({ ...st, mode: "manual" }));
+    assert.deepEqual(seen, ["claude"], "unsubscribed");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service.mutate: concurrent mutations serialize (no lost update)", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    const svc = createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({ "tok-A": profileOf("u-A", "a@e.com") }) });
+    await svc.discover({ force: true });
+    await Promise.all([
+      svc.mutate("claude", async (st) => {
+        await new Promise((r) => setTimeout(r, 15));
+        return { ...st, mode: "manual" };
+      }),
+      svc.mutate("claude", (st) => ({ ...st, accounts: st.accounts.map((a) => ({ ...a, label: "Renamed" })) })),
+    ]);
+    const claude = (await svc.getStore()).providers.claude;
+    assert.equal(claude.mode, "manual");
+    assert.equal(claude.accounts[0].label, "Renamed");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service: a mutation landing DURING discovery wins — discovery's stale result is dropped, not written over it", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    let release;
+    const gate = new Promise((r) => (release = r));
+    let held = false;
+    const svc = createAccountsService({
+      ...paths,
+      log: quiet,
+      fetchImpl: async (url, init) => {
+        if (!held) {
+          held = true;
+          await gate; // discovery is mid-flight (waiting on the profile call)
+        }
+        return fakeFetch({ "tok-A": profileOf("u-A", "a@e.com") })(url, init);
+      },
+    });
+    const first = svc.discover({ force: true });
+    await new Promise((r) => setTimeout(r, 10));
+    await svc.mutate("claude", (st) => ({ ...st, mode: "manual", activeSeatId: "keep-me" }));
+    release();
+    await first;
+    const claude = (await svc.getStore()).providers.claude;
+    assert.equal(claude.activeSeatId, "keep-me", "the user's change survived");
+    assert.equal(claude.mode, "manual");
+    await svc.discover({ force: true });
+    assert.equal(allSeats((await svc.getStore()).providers.claude).length, 1, "discovery catches up on the next run");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service: a RESERVED seat id is not adopted by discovery (the sign-in decides first), and is taken for new ids", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    await putSeatDir(paths, "seat-2", "tok-B");
+    const svc = createAccountsService({
+      ...paths,
+      log: quiet,
+      fetchImpl: fakeFetch({ "tok-A": profileOf("u-A", "a@e.com"), "tok-B": profileOf("u-B", "b@e.com") }),
+    });
+    svc.reserveSeat("claude", "seat-2");
+    await svc.discover({ force: true });
+    assert.deepEqual(allSeats((await svc.getStore()).providers.claude).map((s) => s.id), ["seat-1"]);
+    assert.ok((await svc.takenSeatIds("claude")).includes("seat-2"));
+    svc.releaseSeat("claude", "seat-2");
+    await svc.discover({ force: true });
+    assert.deepEqual(allSeats((await svc.getStore()).providers.claude).map((s) => s.id), ["seat-1", "seat-2"]);
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service.deleteSeatDir: removes a directory under the seats root and REFUSES anything outside it", async () => {
+  const paths = await sandbox();
+  try {
+    const dir = await putSeatDir(paths, "seat-7", "tok");
+    const svc = createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({}) });
+    assert.equal(await svc.deleteSeatDir(dir), true);
+    await assert.rejects(stat(dir));
+    const outside = join(paths.root, "home");
+    assert.equal(await svc.deleteSeatDir(outside), false);
+    assert.equal(await svc.deleteSeatDir(paths.seatsRoot), false, "the root itself");
+    assert.equal(await svc.deleteSeatDir(join(paths.seatsRoot, "..", "home")), false, "a traversal");
+    assert.equal(await svc.deleteSeatDir(""), false);
+    assert.ok((await stat(outside)).isDirectory());
+    // Never a whole provider directory (every seat of it), nor a nested path.
+    const other = await putSeatDir(paths, "seat-8", "tok");
+    assert.equal(await svc.deleteSeatDir(join(paths.seatsRoot, "claude")), false, "a provider dir");
+    assert.equal(await svc.deleteSeatDir(join(other, "sub")), false, "below a seat dir");
+    assert.ok((await stat(other)).isDirectory());
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }

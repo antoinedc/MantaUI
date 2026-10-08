@@ -425,6 +425,94 @@ final class MantaAPIClient: Sendable {
         try await call("usage:list", args: [], as: [UsageSnapshot].self) ?? []
     }
 
+    // MARK: - Accounts / seats (multi-account phase 3)
+    //
+    // The `accounts:*` channels of the contract in
+    // docs/superpowers/specs/2026-10-08-multi-account-subscriptions-design.md §8.
+    // Every call sends its payload as a SINGLE object (`args: [dict]`), the wire
+    // rule pinned by MantaActionRPCWireTests. A refusal arrives either as the
+    // rpc envelope's `error` (thrown by `transport`/`decode`) or as a `{error}`
+    // result body; both surface as `MantaError.server(code)`.
+
+    /// `accounts:list` — every provider with at least one seat: accounts →
+    /// seats with their latest windows, the mode, the active seat and the
+    /// seat a new conversation would go to. An absent result is "no
+    /// providers", the box's honest empty answer.
+    func accountsList() async throws -> [AccountsProvider] {
+        let reply = try await call("accounts:list", args: [[String: Any]()], as: AccountsListReply.self)
+        return reply?.providers ?? []
+    }
+
+    /// `accounts:session-seat` — the seat a conversation is on, or nil when it
+    /// has no assignment (the box answers null).
+    func accountsSessionSeat(sessionId: String) async throws -> SessionSeat? {
+        try await call("accounts:session-seat", args: [["sessionId": sessionId]], as: SessionSeat.self)
+    }
+
+    /// `accounts:set-mode` — Manual / Automatic for a provider.
+    func accountsSetMode(provider: String, mode: AccountsMode) async throws -> AccountsProvider {
+        try await accountsAction("accounts:set-mode", ["provider": provider, "mode": mode.rawValue])
+    }
+
+    /// `accounts:set-active` — manual mode: every conversation of the provider
+    /// uses this seat from its next request.
+    func accountsSetActive(provider: String, seatId: String) async throws -> AccountsProvider {
+        try await accountsAction("accounts:set-active", ["provider": provider, "seatId": seatId])
+    }
+
+    /// `accounts:rename` — relabel an account or a seat (`kind` is "account" or
+    /// "seat"). The box validates the label (trimmed, 1–40 chars).
+    func accountsRename(provider: String, kind: String, id: String, label: String) async throws -> AccountsProvider {
+        try await accountsAction("accounts:rename", ["provider": provider, "kind": kind, "id": id, "label": label])
+    }
+
+    /// `accounts:remove-seat` — the box refuses the live seat with `live-seat`.
+    func accountsRemoveSeat(provider: String, seatId: String) async throws -> AccountsProvider {
+        try await accountsAction("accounts:remove-seat", ["provider": provider, "seatId": seatId])
+    }
+
+    /// `accounts:add-seat` — start signing a new seat in. The `connect` it
+    /// returns is the desktop's connect-flow shape, which this client has no
+    /// flow for (no screen calls this yet — iOS points the user at the
+    /// desktop); it is exposed so the channel set is complete.
+    func accountsAddSeat(provider: String, accountId: String? = nil, label: String? = nil) async throws -> AddSeatReply {
+        var payload: [String: Any] = ["provider": provider]
+        if let accountId { payload["accountId"] = accountId }
+        if let label { payload["label"] = label }
+        let object = try await callRequired("accounts:add-seat", args: [payload], as: [String: JSONValue].self)
+        if case .string(let code)? = object["error"], !code.isEmpty { throw MantaError.server(code) }
+        guard case .string(let seatId)? = object["seatId"], !seatId.isEmpty else {
+            throw MantaError.transport("accounts:add-seat returned no seat")
+        }
+        return AddSeatReply(seatId: seatId, connect: object["connect"])
+    }
+
+    /// `accounts:seat-status` — poll a sign-in started by `accountsAddSeat`.
+    func accountsSeatStatus(seatId: String) async throws -> SeatStatusReply {
+        try await callRequired("accounts:seat-status", args: [["seatId": seatId]], as: SeatStatusReply.self)
+    }
+
+    /// `accounts:add-seat-confirm` — place a seat the box held back as
+    /// "different-org", as a new account or in the requested one.
+    func accountsAddSeatConfirm(seatId: String, newAccount: Bool) async throws -> AccountsProvider {
+        try await accountsAction("accounts:add-seat-confirm", ["seatId": seatId, "newAccount": newAccount])
+    }
+
+    /// `accounts:cancel-seat` — abort a sign-in and delete its directory.
+    func accountsCancelSeat(seatId: String) async throws {
+        _ = try await callVoid("accounts:cancel-seat", args: [["seatId": seatId]])
+    }
+
+    /// One mutating channel that answers the changed `ProviderView`.
+    private func accountsAction(_ channel: String, _ payload: [String: Any]) async throws -> AccountsProvider {
+        let reply = try await callRequired(channel, args: [payload], as: AccountsActionReply.self)
+        if let code = reply.error { throw MantaError.server(code) }
+        guard let provider = reply.provider else {
+            throw MantaError.transport("\(channel) returned no provider")
+        }
+        return provider
+    }
+
     /// Fetch a file's bytes via `GET {serverURL}/api/peek?path=<box path>` with
     /// the bearer token. The box resolves `~` and path-traversal-guards the
     /// result to the home dir, so it serves BOTH transcript file parts (the

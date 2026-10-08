@@ -25,6 +25,14 @@ import type {
   TmuxCreateResult,
   ScheduledJob,
   UsageSnapshot,
+  ProviderView,
+  ProviderViewResult,
+  AddSeatResult,
+  SeatStatusResult,
+  SessionSeat,
+  SeatProviderId,
+  AccountsUpdatedPayload,
+  AccountsMovedPayload,
   StoppedListResult,
   ModelPrefsState,
   ModelPrefsSetInput,
@@ -1086,6 +1094,33 @@ export interface Api {
     outcome: string | null;
     message: string;
   }>;
+  // ---- Multi-account & seats (spec 2026-10-08 §8, contract v2) ----
+  // Views only — no credential ever crosses these. A mutation answers the
+  // refreshed ProviderView, or `{error}` carrying a class-1 safe code (the
+  // renderer maps each code to a sentence; see accountsErrorMessage).
+  accountsList(): Promise<{ providers: ProviderView[] }>;
+  accountsSetMode(input: { provider: SeatProviderId; mode: "auto" | "manual" }): Promise<ProviderViewResult>;
+  accountsSetActive(input: { provider: SeatProviderId; seatId: string }): Promise<ProviderViewResult>;
+  accountsRename(input: {
+    provider: SeatProviderId;
+    kind: "account" | "seat";
+    id: string;
+    label: string;
+  }): Promise<ProviderViewResult>;
+  accountsAddSeat(input: {
+    provider: SeatProviderId;
+    accountId?: string;
+    label?: string;
+  }): Promise<AddSeatResult>;
+  accountsSeatStatus(input: { seatId: string }): Promise<SeatStatusResult>;
+  accountsAddSeatConfirm(input: { seatId: string; newAccount: boolean }): Promise<ProviderViewResult>;
+  accountsCancelSeat(input: { seatId: string }): Promise<{ ok: boolean }>;
+  accountsRemoveSeat(input: { provider: SeatProviderId; seatId: string }): Promise<ProviderViewResult>;
+  accountsSessionSeat(input: { sessionId: string }): Promise<SessionSeat | null>;
+  // `accounts.updated` / `accounts.moved` bus events (hints; refetch the views).
+  // No-op on the preload bridge and on demoApi (Proxy fallback).
+  onAccountsUpdated(cb: (payload: AccountsUpdatedPayload) => void): () => void;
+  onAccountsMoved(cb: (payload: AccountsMovedPayload) => void): () => void;
   // BET-1249: the provider-agnostic model catalogue for the "Models we
   // couldn't identify" block — resolve opaque endpoint ids and typeahead over
   // every known model. `supported:false` when the box has no catalogue yet

@@ -30,6 +30,10 @@
 //      does not return to a seat it left within 5 hours unless that seat is the
 //      only one with room. The move is recorded (`movedFrom`/`movedAt`/`reason`)
 //      for phase 4 to surface.
+//   MANUAL MODE (phase 3): every conversation uses the active seat. The stored
+//      assignment is still kept up to date (so `sessionAssignment` answers what
+//      the NEXT request will use) and a switch is recorded as a move with reason
+//      "manual" — but no `moved` event: the user did it on purpose.
 //   NOT here (phase 4): the 90%/70% proactive thresholds, same-org preference,
 //   the once-per-5h cross-org cap, move notices.
 //
@@ -189,9 +193,25 @@ export function chooseMoveTarget({ existing, seats, seatSnapshots = [], nowMs, a
 
 /**
  * Rules 1–2 (+ the exhausted-seat floor) for one request, with no I/O.
- * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string}}
+ * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string, why?: "manual"|"exhausted"}}
  */
 export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0 }) {
+  if (mode === "manual") {
+    // MANUAL MODE (spec §5.2): every conversation uses the active seat, whatever
+    // its stored assignment says — picking a seat applies to ALL conversations
+    // from their next request. A conversation that was on another (still
+    // existing) seat is MOVED, recorded as a manual move; one whose seat is
+    // gone is simply placed. The active seat falls back exactly as `chooseSeat`
+    // does when it cannot serve, so a request never fails on it.
+    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots });
+    if (!seatId) return { seatId: null, reason: "none" };
+    if (!existing) return { seatId, reason: "assigned" };
+    if (existing.seatId === seatId) return { seatId, reason: "kept" };
+    if (seats.some((s) => s.seatId === existing.seatId)) {
+      return { seatId, reason: "moved", from: existing.seatId, why: "manual" };
+    }
+    return { seatId, reason: "assigned" };
+  }
   if (existing) {
     const seat = seats.find((s) => s.seatId === existing.seatId);
     if (seat?.usable) {
@@ -240,6 +260,11 @@ export function createSeatAssigner({
   save = (data) => writeJsonAtomic(statePath("seat-assignments.json"), JSON.stringify(data), { mode: 0o600 }),
   now = () => Date.now(),
   notePluginSeen: markPluginSeen = notePluginSeen,
+  // Phase 3 hooks (both optional): `onChange(provider)` after assignments of a
+  // provider changed (a conversation placed / moved / forgotten); `onMoved(evt)`
+  // when the resolver moved a conversation off an exhausted seat.
+  onChange = null,
+  onMoved = null,
   log = console,
 } = {}) {
   /** @type {ReturnType<typeof emptyAssignments>|null} */
@@ -256,6 +281,14 @@ export function createSeatAssigner({
       // Losing a write only means a conversation may be re-placed after a
       // restart; it must never fail a model request.
       log.warn?.("[accounts] saving seat assignments failed:", e?.message ?? e);
+    }
+  }
+
+  function tell(fn) {
+    try {
+      fn();
+    } catch (e) {
+      log.warn?.("[accounts] seat-assignment listener failed:", e?.message ?? e);
     }
   }
 
@@ -303,9 +336,12 @@ export function createSeatAssigner({
       });
       if (!decision.seatId) return { seatId: null, live: true };
 
+      let assignmentsChanged = false;
+      let movedEvent = null;
       if (decision.reason === "assigned") {
         s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t };
         dirty = true;
+        assignmentsChanged = true;
       } else if (decision.reason === "moved") {
         // Remember where it came from (phase 4 surfaces it) and every seat it
         // left in the last 5 h (so it cannot bounce back).
@@ -318,10 +354,14 @@ export function createSeatAssigner({
           lastUsedAt: t,
           movedFrom: decision.from,
           movedAt: t,
-          reason: "exhausted",
+          reason: decision.why ?? "exhausted",
           left,
         };
         dirty = true;
+        assignmentsChanged = true;
+        if ((decision.why ?? "exhausted") === "exhausted") {
+          movedEvent = { sessionId: root, provider, from: decision.from, to: decision.seatId, reason: "exhausted" };
+        }
       } else if (existing && t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
         existing.lastUsedAt = t;
         dirty = true;
@@ -330,6 +370,9 @@ export function createSeatAssigner({
         store = pruneAssignments(s, t);
         await persist();
       }
+      // After the write, and never allowed to fail the request.
+      if (assignmentsChanged) tell(() => onChange?.(provider));
+      if (movedEvent) tell(() => onMoved?.(movedEvent));
       return seatResult(provider, states.seats.find((x) => x.seatId === decision.seatId));
     });
   }
@@ -363,5 +406,47 @@ export function createSeatAssigner({
     return run;
   }
 
-  return { resolve, refreshSeat, _store: () => ensure() };
+  /** A copy of one provider's assignments: `{[conversation]: assignment}`. */
+  function assignments(provider) {
+    return structuredClone(ensure().providers[provider] ?? {});
+  }
+
+  /**
+   * The assignment a conversation (or one of its sub-agents) has, across
+   * providers — the most recently used one when it has several. `null` when it
+   * has none.
+   * @returns {{provider: string, conversation: string, assignment: object}|null}
+   */
+  function sessionAssignment(sessionId) {
+    const s = ensure();
+    const conversation = s.children[sessionId]?.root ?? sessionId;
+    let best = null;
+    for (const provider of ACCOUNT_PROVIDERS) {
+      const a = s.providers[provider]?.[conversation];
+      if (a && (!best || a.lastUsedAt > best.assignment.lastUsedAt)) best = { provider, conversation, assignment: structuredClone(a) };
+    }
+    return best;
+  }
+
+  /** A seat was removed: its conversations lose the assignment (the next request
+   *  places them again, rule 1). Serialized with `resolve`. */
+  function forgetSeat(provider, seatId) {
+    return mutex.runExclusive(async () => {
+      const s = ensure();
+      let changed = false;
+      for (const [conv, a] of Object.entries(s.providers[provider] ?? {})) {
+        if (a.seatId === seatId) {
+          delete s.providers[provider][conv];
+          changed = true;
+        }
+      }
+      if (changed) {
+        await persist();
+        tell(() => onChange?.(provider));
+      }
+      return changed;
+    });
+  }
+
+  return { resolve, refreshSeat, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
 }

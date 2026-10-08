@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload } from "../shared/types";
+import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -18,6 +18,7 @@ import { isClientTooOld } from "../shared/versionCompare.mjs";
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
+import { leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
 // BET-1537 (S5, §W9): the shared endpoint/provider state labels — the same
 // words the router's verdict copy and the Accounts/Models surfaces use.
 import { endpointStateLabel, providerStateLabel } from "../shared/providerHealthLabel.mjs";
@@ -3493,6 +3494,343 @@ export function formatUpdatedAgo(fetchedAt: number, nowMs: number): string {
 // holding on to visibly ages into a warning before it is dropped.
 export function usageStale(fetchedAt: number, nowMs: number): boolean {
   return nowMs - fetchedAt > 25 * 60_000;
+}
+
+// ===== Multi-account & seats — pure selectors (spec 2026-10-08 §7a) =====
+//
+// The usage dial + popover and Settings → Accounts read the SAME selectors.
+// Every "which seat" decision goes through src/shared/seatChoice.mjs (the file
+// the server's seat resolver uses), so a hint on screen can never disagree
+// with an actual move. Nothing here knows a provider NAME: the provider a
+// conversation's model belongs to is found through the usage snapshot that
+// lists the model's opencode providerID.
+
+/** Rule 3 of §5.3: a conversation starts moving at this load… */
+export const SEAT_MOVE_LOAD_PCT = 90;
+/** …and goes to a seat that is under this one (or, at 100%, any seat with room). */
+export const SEAT_TARGET_LOAD_PCT = 70;
+/** A "last move" line stays on screen this long (§7a item 3). */
+export const SEAT_LAST_MOVE_WINDOW_MS = 5 * 60 * 60_000;
+/** The "Other seats" list scrolls inside the popover past this many rows. */
+export const OTHER_SEATS_VISIBLE_ROWS = 5;
+
+export { seatLoad };
+
+/** A seat is usable by a move only when it is signed in (an unknown status is
+ *  given the benefit of the doubt: the box has simply not probed it yet). */
+function seatUsable(s: SeatView): boolean {
+  return s.status === "ok" || s.status === "unknown";
+}
+
+/** SeatView → the "seat snapshot" shape seatChoice.mjs consumes. */
+function asSeatSnapshot(s: SeatView) {
+  return { seatId: s.id, windows: s.windows, exhausted: (seatLoad(s) ?? 0) >= 100 };
+}
+
+export function allSeats(view: ProviderView | null | undefined): SeatView[] {
+  return (view?.accounts ?? []).flatMap((a) => a.seats);
+}
+
+export function findSeat(
+  view: ProviderView | null | undefined,
+  seatId: string | null | undefined,
+): { seat: SeatView; account: AccountView } | null {
+  if (!view || !seatId) return null;
+  for (const account of view.accounts) {
+    const seat = account.seats.find((s) => s.id === seatId);
+    if (seat) return { seat, account };
+  }
+  return null;
+}
+
+/** The provider (seat view) a conversation's model belongs to — via the usage
+ *  snapshot that lists the model's opencode providerID. Null when the box has
+ *  no seat info for it (older box / provider not seat-capable): callers then
+ *  fall back to the plain provider snapshot. */
+export function selectProviderView(
+  providers: ProviderView[] | null | undefined,
+  snapshots: UsageSnapshot[] | null | undefined,
+  providerID: string | null | undefined,
+): ProviderView | null {
+  if (!providers || !providerID) return null;
+  const snap = selectUsageSnapshot(snapshots, providerID);
+  if (snap) return providers.find((p) => p.provider === snap.provider) ?? null;
+  // No usage reading yet (first poll failed / not run): the seat list must not
+  // vanish with it, so fall back to the seat-capable adapters' opencode ids.
+  return providers.find((p) => SEAT_PROVIDER_OPENCODE_IDS[p.provider]?.includes(providerID)) ?? null;
+}
+
+// The ONE adapter-id → opencode-providerID table the renderer needs for seats
+// (the two namespaces differ on purpose — see UsageSnapshot.providerIDs). Only
+// consulted when no usage snapshot can answer the question.
+const SEAT_PROVIDER_OPENCODE_IDS: Record<string, string[]> = {
+  claude: ["anthropic"],
+  codex: ["openai"],
+};
+
+/** More than one seat in the whole provider — the only case where any seat UI
+ *  (mode chip, seat name, other seats, move badge) is rendered at all. */
+export function hasSeatChoice(view: ProviderView | null | undefined): boolean {
+  return allSeats(view).length >= 2;
+}
+
+/**
+ * The seat THIS conversation is on. In manual mode the resolver ignores stored
+ * assignments and every conversation uses the active seat, so that wins; in
+ * auto mode it is the assignment. Null = no seat info (no assignment yet, or
+ * the seat is gone): the dial falls back to the provider snapshot.
+ */
+export function selectConversationSeat(
+  view: ProviderView | null | undefined,
+  sessionSeat: SessionSeat | null | undefined,
+): { seat: SeatView; account: AccountView } | null {
+  if (!view) return null;
+  if (view.mode === "manual") {
+    const active = findSeat(view, view.activeSeatId);
+    if (active) return active;
+  }
+  if (sessionSeat && sessionSeat.provider === view.provider) return findSeat(view, sessionSeat.seatId);
+  return null;
+}
+
+/**
+ * Where a NEW conversation / a move would go, as a seat id other than
+ * `currentSeatId`. Prefers the server-provided `nextSeatId`; when that is the
+ * current seat itself (or absent on an older box) it asks seatChoice's
+ * leastLoadedSeat over the other usable seats — the function the server's own
+ * rule 3 uses. Null when there is no other usable seat.
+ */
+export function nextSeatHint(
+  view: ProviderView | null | undefined,
+  currentSeatId: string | null | undefined,
+): string | null {
+  if (!view) return null;
+  const others = allSeats(view).filter((s) => s.id !== currentSeatId && seatUsable(s));
+  if (others.length === 0) return null;
+  const served = view.nextSeatId ? others.find((s) => s.id === view.nextSeatId) : undefined;
+  if (served) return served.id;
+  return leastLoadedSeat(others.map(asSeatSnapshot), { activeSeatId: view.activeSeatId })?.seatId ?? null;
+}
+
+/** Auto mode only: the conversation's seat is past the move line AND rule 3
+ *  would actually move it — to a seat under 70%, or at 100% to any seat with
+ *  room. (Between 90 and 99% with nowhere under 70, it stays.) */
+export function isMoveComing(
+  view: ProviderView | null | undefined,
+  current: { seat: SeatView } | null | undefined,
+): boolean {
+  if (!view || view.mode !== "auto" || !current) return false;
+  const load = seatLoad(current.seat);
+  if (load == null || load < SEAT_MOVE_LOAD_PCT) return false;
+  const targetId = nextSeatHint(view, current.seat.id);
+  const target = targetId ? findSeat(view, targetId)?.seat : null;
+  if (!target) return false;
+  const targetLoad = seatLoad(target) ?? 0;
+  return targetLoad < SEAT_TARGET_LOAD_PCT || (load >= 100 && targetLoad < 100);
+}
+
+/** The snapshot the ring + popover windows read: the provider's own snapshot
+ *  (its extras, plan, balance) carrying THIS seat's windows and freshness. A
+ *  seat with no reading yet yields the base snapshot untouched. */
+export function seatDialSnapshot(
+  base: UsageSnapshot,
+  current: { seat: SeatView; account: AccountView } | null | undefined,
+): UsageSnapshot {
+  if (!current || current.seat.windows.length === 0) return base;
+  return {
+    ...base,
+    planLabel: current.account.plan ?? base.planLabel,
+    windows: current.seat.windows,
+    fetchedAt: current.seat.fetchedAt ?? base.fetchedAt,
+  };
+}
+
+export type OtherSeatGroup = {
+  accountId: string;
+  label: string;
+  /** Account heading only when the provider has >=2 accounts (§7a item 4). */
+  showHeading: boolean;
+  seats: SeatView[];
+};
+
+/**
+ * The popover's "Other seats": every seat but the conversation's own, grouped
+ * by account in the server's order; a signed-out / expired seat sinks to the
+ * end of its group so the usable ones read first. Empty groups are dropped.
+ */
+export function orderOtherSeats(
+  view: ProviderView | null | undefined,
+  currentSeatId: string | null | undefined,
+): OtherSeatGroup[] {
+  if (!view) return [];
+  const showHeading = view.accounts.length >= 2;
+  const groups: OtherSeatGroup[] = [];
+  for (const a of view.accounts) {
+    const rest = a.seats.filter((s) => s.id !== currentSeatId);
+    if (rest.length === 0) continue;
+    const seats = [...rest.filter(seatUsable), ...rest.filter((s) => !seatUsable(s))];
+    groups.push({ accountId: a.id, label: a.label, showHeading, seats });
+  }
+  return groups;
+}
+
+/** A move between these two seats is free when they share an account (an
+ *  account is one org, and the prompt cache is per org — §1.5). */
+export function isSameOrgMove(
+  view: ProviderView | null | undefined,
+  fromSeatId: string | null | undefined,
+  toSeatId: string,
+): boolean {
+  const from = findSeat(view, fromSeatId);
+  const to = findSeat(view, toSeatId);
+  // No known origin (nothing active yet): nothing is being re-sent from it.
+  if (!from || !to) return true;
+  return from.account.id === to.account.id;
+}
+
+/** "Moved from Seat 1 · <reason> · 2h ago" (+ the re-sent history for a
+ *  cross-org move), or null once the move is older than 5h. */
+export function formatLastMove(
+  move: SessionSeat["lastMove"] | null | undefined,
+  nowMs: number,
+): { line: string; resent: string | null } | null {
+  if (!move || !Number.isFinite(move.at)) return null;
+  const age = nowMs - move.at;
+  if (age > SEAT_LAST_MOVE_WINDOW_MS) return null;
+  const ago = formatAge(Math.max(0, age));
+  const when = ago === "now" ? "just now" : `${ago} ago`;
+  const reason = move.reason ? ` · ${move.reason}` : "";
+  const resent =
+    move.crossOrg && typeof move.resentTokens === "number"
+      ? `history re-sent: ${formatTokensCompact(move.resentTokens)}`
+      : null;
+  return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
+}
+
+/** One "Other subscriptions" line per OTHER provider that has seats:
+ *  "<provider> · best seat 12% of 5h" — best = the seat the aggregate would
+ *  read (auto: least loaded; manual: the active one), via seatChoice. */
+export function otherSubscriptionLines(
+  providers: ProviderView[] | null | undefined,
+  currentProvider: string | null | undefined,
+): { provider: ProviderView["provider"]; text: string }[] {
+  const out: { provider: ProviderView["provider"]; text: string }[] = [];
+  for (const p of providers ?? []) {
+    if (p.provider === currentProvider) continue;
+    const seats = allSeats(p);
+    if (seats.length === 0) continue;
+    // Same pick the provider aggregate makes (§5.4): auto → least loaded,
+    // manual → the active seat (least loaded when it has no reading).
+    const bySnap = new Map(seats.map((s) => [s.id, s]));
+    const pickedId = (
+      p.mode === "manual" && bySnap.has(p.activeSeatId ?? "")
+        ? p.activeSeatId
+        : leastLoadedSeat(seats.map(asSeatSnapshot), { activeSeatId: p.activeSeatId })?.seatId
+    ) as string | undefined;
+    const chosen = (pickedId ? bySnap.get(pickedId) : null) ?? null;
+    const load = chosen ? seatLoad(chosen) : null;
+    if (!chosen || load == null) {
+      out.push({ provider: p.provider, text: "no usage reading yet" });
+      continue;
+    }
+    const driver = chosen.windows
+      .filter((w) => w.active !== false && w.stale !== true)
+      .reduce<UsageWindow | null>((m, w) => (!m || w.pct > m.pct ? w : m), null);
+    const label = driver?.label ? ` of ${driver.label}` : "";
+    out.push({
+      provider: p.provider,
+      text: `${seats.length > 1 ? "best seat " : ""}${Math.round(load)}%${label}`,
+    });
+  }
+  return out;
+}
+
+/** "Seat: Work · Seat 2" — the session header's context-popover line. Names come
+ *  from the live view when it still has the seat (a rename shows at once), else
+ *  from what the box last said. An account with one seat reads as its label
+ *  alone. Null when the conversation has no seat. */
+export function describeSeatLine(
+  providers: ProviderView[] | null | undefined,
+  sessionSeat: SessionSeat | null | undefined,
+): string | null {
+  if (!sessionSeat) return null;
+  const found = findSeat(providers?.find((p) => p.provider === sessionSeat.provider), sessionSeat.seatId);
+  const accountLabel = found?.account.label ?? sessionSeat.accountLabel;
+  const seatLabel = found?.seat.label ?? sessionSeat.seatLabel;
+  const single = found ? found.account.seats.length <= 1 : false;
+  return `Seat: ${single || !seatLabel ? accountLabel : `${accountLabel} · ${seatLabel}`}`;
+}
+
+/** The (up to) two windows a compact seat row draws as bars: the session (5h)
+ *  window and the unscoped weekly one. Falls back to the first two windows for
+ *  a provider whose windows are named differently. */
+export function seatBarWindows(windows: UsageWindow[] | null | undefined): UsageWindow[] {
+  const list = (windows ?? []).filter((w) => w && w.active !== false);
+  if (list.length === 0) return [];
+  const session = list.find((w) => w.kind === "session") ?? list[0];
+  const weekly =
+    list.find((w) => w !== session && w.kind === "weekly") ??
+    list.find((w) => w !== session && !w.scope);
+  return weekly ? [session, weekly] : [session];
+}
+
+/** The reset hint for a seat at/over the move line ("resets 14:10"), taken from
+ *  the window that drives its load. Null below the line or with no reset time. */
+export function seatResetHint(seat: SeatView, nowMs: number): string | null {
+  const load = seatLoad(seat);
+  if (load == null || load < SEAT_MOVE_LOAD_PCT) return null;
+  const driver = seat.windows
+    .filter((w) => w.active !== false && w.stale !== true)
+    .reduce<UsageWindow | null>((m, w) => (!m || w.pct > m.pct ? w : m), null);
+  const at = formatResetAt(driver?.resetsAt, nowMs);
+  return at ? `resets ${at}` : null;
+}
+
+/** The sentence for a class-1 `accounts:*` error code — never the raw code. */
+export function accountsErrorMessage(code: AccountsError | string | undefined): string {
+  switch (code) {
+    case "unknown-seat":
+      return "That seat no longer exists. The list has been refreshed.";
+    case "invalid-label":
+      return "Names must be 1–40 characters, with no control characters.";
+    case "live-seat":
+      return "This is the login the box is using right now, so it can't be removed.";
+    case "unknown-provider":
+      return "That provider doesn't support several accounts.";
+    case "login-failed":
+      return "Sign-in failed. Try again.";
+    default:
+      return "That didn't work. Try again.";
+  }
+}
+
+/** A seat that cannot serve requests says why, in two words; a healthy one
+ *  says nothing. */
+export function seatStateText(status: SeatView["status"]): string | null {
+  if (status === "expired") return "sign-in expired";
+  if (status === "signed-out") return "signed out";
+  return null;
+}
+
+/** Narrow an `accounts:*` mutation answer: the refreshed view, or an error. */
+export function providerViewOrError(
+  res: ProviderView | { error: AccountsError } | null | undefined,
+): { view: ProviderView } | { error: string } {
+  if (res && typeof res === "object" && "error" in res) return { error: accountsErrorMessage(res.error) };
+  if (res && typeof res === "object" && "provider" in res) return { view: res };
+  return { error: accountsErrorMessage(undefined) };
+}
+
+// The ToS note (§0) is shown ONCE, when a second ACCOUNT (not a second seat of
+// an account the user already has) is about to be added.
+export const SEAT_TOS_NOTE =
+  "Rotating several personal subscriptions to get around one plan's limits may breach the provider's terms. Team and Enterprise seats are each licensed to a person.";
+
+export function needsSecondAccountNote(
+  view: ProviderView | null | undefined,
+  acknowledged: boolean,
+): boolean {
+  return !acknowledged && (view?.accounts.length ?? 0) >= 1;
 }
 
 // M6/BET-730: given the set of "visited" chat session ids (panels kept

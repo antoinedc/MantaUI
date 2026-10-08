@@ -159,6 +159,7 @@ export function InputArea({
   plan,
   onTogglePlan,
   activeProviderID,
+  activeSessionId,
   deactivatedMainModels,
   optInModels,
   onOptInModel,
@@ -245,6 +246,8 @@ export function InputArea({
   // passed straight through to UsageDial, which never re-resolves the model
   // itself.
   activeProviderID: string | null;
+  // Optional: absent on the pre-session composer (no conversation yet).
+  activeSessionId?: string | null;
   deactivatedMainModels: string[];
   // BET-1139: "providerID/modelID" deprecated-model opt-ins (shared set) + the
   // persisting callback — passed to ModelPicker for its disabled rows.
@@ -646,7 +649,7 @@ export function InputArea({
             icons — so the dial + clock + key + webhook read as one evenly
             spaced run instead of a detached dial 12px off the group. */}
         <span className="shrink-0 flex items-center gap-2 flex-wrap">
-          <UsageDial providerID={activeProviderID} />
+          <UsageDial providerID={activeProviderID} sessionId={activeSessionId ?? null} />
           {typeof optSavingPct === "number" && optSavingPct > 0 && (
             <span className="composer-saving-pill">
               ↓ {Math.round(optSavingPct)}% <span className="tx-faint">this conversation</span>

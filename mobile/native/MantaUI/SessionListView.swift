@@ -155,7 +155,7 @@ struct SessionListView: View {
         .overlay(alignment: .bottom) { undoToast }
         .overlay(alignment: .bottom) { feedbackToast }
         .fullScreenCover(isPresented: $showSettings) {
-            SettingsScreen()
+            SettingsScreen(eventStore: eventStore)
         }
         // The age chip advances on its own, like the desktop rail's 10s tick
         // (src/renderer/clock.ts, AGE_TICK_MS). Ungated: an idle list is exactly

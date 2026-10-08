@@ -21,6 +21,7 @@ import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal
 import {
   ctxStageColor,
   cssVar,
+  describeSeatLine,
   moveMenuHighlight,
   selectStatusItems,
   checksChipDescriptor,
@@ -50,6 +51,7 @@ import { Callout } from "./Callout";
 import { ForgeMark, hasForgeMark } from "./ForgeMark";
 import { Dropdown, MenuItem } from "./MenuItem";
 import { Popover } from "./Popover";
+import { useStore } from "./store";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
 
@@ -76,6 +78,7 @@ function formatIdleDuration(ms: number): string {
 }
 
 export function SessionHeader({
+  sessionId,
   branch,
   ctxBreakdown,
   ctxLimit,
@@ -119,6 +122,9 @@ export function SessionHeader({
   onCreatePr,
   onEnsureShipPreview,
 }: {
+  // The conversation this header belongs to — the context popover names its
+  // seat (multi-account). Absent: no seat line.
+  sessionId?: string | null;
   branch: string | null;
   ctxBreakdown: ContextBreakdown;
   ctxLimit: number | null;
@@ -324,6 +330,7 @@ export function SessionHeader({
       priority: 60,
       render: () => (
         <ContextPill
+          sessionId={sessionId ?? null}
           pct={pct}
           hasLimit={hasLimit}
           segments={segments}
@@ -580,6 +587,7 @@ function SegmentedBar({
 // ===== Context pill + popover =====
 
 function ContextPill({
+  sessionId,
   pct,
   hasLimit,
   segments,
@@ -594,6 +602,7 @@ function ContextPill({
   staleCache,
   onRequestClear,
 }: {
+  sessionId: string | null;
   pct: number | null;
   hasLimit: boolean;
   segments: ContextBreakdown["segments"];
@@ -610,6 +619,9 @@ function ContextPill({
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const sessionSeat = useStore((s) => (sessionId ? s.sessionSeats[sessionId] ?? null : null));
+  const accounts = useStore((s) => s.accounts);
+  const seatLine = describeSeatLine(accounts, sessionSeat);
 
   const segColor = (kind: ContextBreakdown["segments"][number]["kind"]) => {
     if (kind === "fresh") return fill;
@@ -755,6 +767,16 @@ function ContextPill({
           {modelName && (
             <div className="text-meta text-text-faint truncate" title={modelName}>
               Model window · {modelName}
+            </div>
+          )}
+
+          {seatLine && (
+            <div
+              className="manta-ctx-seat text-meta text-text-faint truncate"
+              title={seatLine}
+              data-testid="ctx-seat-line"
+            >
+              {seatLine}
             </div>
           )}
 

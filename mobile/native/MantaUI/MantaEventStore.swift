@@ -436,6 +436,14 @@ final class MantaEventStore: ObservableObject {
     /// unsubscribe. The frame still reaches the raw handlers too.
     let delegateUpdates = PassthroughSubject<Void, Never>()
 
+    /// Fires once for every `accounts.updated` / `accounts.moved` frame — a seat
+    /// list, mode, active seat, status or assignment changed, or the box moved
+    /// a conversation to another seat. A `Subject` for the same reason as
+    /// `delegateUpdates`: its observers (the Accounts screen, a chat's seat
+    /// view) come and go, and a handler list cannot unsubscribe. The frame still
+    /// reaches the raw handlers too.
+    let accountsUpdates = PassthroughSubject<AccountsBusEvent, Never>()
+
     /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
     func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
         rawFrameHandlers.append(handler)
@@ -547,6 +555,7 @@ final class MantaEventStore: ObservableObject {
             routeStream(frame)
         } else {
             if frame.kind == "delegate.updated" { delegateUpdates.send() }
+            if let accountsEvent = AccountsBusEvent.from(frame) { accountsUpdates.send(accountsEvent) }
             for handler in rawFrameHandlers { handler(frame) }
         }
     }

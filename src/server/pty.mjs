@@ -88,7 +88,7 @@ export function resolvePtyCommand({ launcher, tmuxTarget, shell }) {
 //   killWindow/selectWindow/renameWindow in src/server/tmux.mjs already use.
 // Unknown launcher ids fall through to a plain shell (defensive — e.g. a
 // stale localStorage mode referencing a launcher that no longer exists).
-export function spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget }) {
+export function spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget, extraEnv }) {
   const dir = expandTilde(cwd && cwd.trim() ? cwd : "~");
   const size = {
     name: "xterm-256color",
@@ -111,10 +111,13 @@ export function spawnShellPty({ cwd, cols, rows, launcher, tmuxTarget }) {
   //  - plain interactive login shell: MANTA_TERMINAL=1 so a user's rc
   //    file can skip a tmux auto-attach block that would otherwise hijack
   //    this shell into a blank tmux alternate-screen.
+  // `extraEnv` is SERVER-supplied only (rpc.mjs derives it from a registered
+  // sign-in session — e.g. CLAUDE_CONFIG_DIR for a multi-account seat login); a
+  // renderer-sent value never reaches here. It applies to launchers alone.
   const env = tmuxTarget
     ? { ...tmuxSpawnEnv(), TERM: "xterm-256color" }
     : launcher && launcher.id && findLauncher(launcher.id)
-      ? size.env
+      ? { ...size.env, ...(extraEnv ?? {}) }
       : { ...size.env, MANTA_TERMINAL: "1" };
 
   return ptySpawnNative(file, args, { ...size, env });
@@ -135,11 +138,11 @@ const ptys = new Map(); // sessionKey → IPty
 
 /**
  * Spawn (or silently reuse) a shell/launcher pty for opts.sessionKey.
- * @param {{ sessionKey: string, cwd: string, cols: number, rows: number, launcher?: { id: string, flags?: Record<string, boolean> }, tmuxTarget?: string }} opts
+ * @param {{ sessionKey: string, cwd: string, cols: number, rows: number, launcher?: { id: string, flags?: Record<string, boolean> }, tmuxTarget?: string, extraEnv?: Record<string,string> }} opts
  * @param {(e) => void} onEvent
  */
 export function spawn(opts, onEvent) {
-  const { sessionKey, cwd, cols, rows, launcher, tmuxTarget } = opts;
+  const { sessionKey, cwd, cols, rows, launcher, tmuxTarget, extraEnv } = opts;
   if (!sessionKey) throw new Error("pty:spawn — sessionKey required");
 
   // Mirror desktop: if already exists, do not respawn (avoids disconnect
@@ -148,7 +151,7 @@ export function spawn(opts, onEvent) {
   // (bus.publish, a module singleton).
   if (ptys.has(sessionKey)) return;
 
-  const pty = spawnShellPtyImpl({ cwd, cols, rows, launcher, tmuxTarget });
+  const pty = spawnShellPtyImpl({ cwd, cols, rows, launcher, tmuxTarget, extraEnv });
   ptys.set(sessionKey, pty);
 
   pty.onData((data) => {

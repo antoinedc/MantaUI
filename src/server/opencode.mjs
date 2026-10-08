@@ -1853,6 +1853,42 @@ export async function setProviderApiKey(providerID, key) {
 }
 
 /**
+ * Write a whole auth ENTRY into opencode's auth store (PUT /auth/{id}) — the
+ * general form of `setProviderApiKey`, used to put a previous OAuth login back
+ * (`{type:"oauth", access, refresh, expires, accountId?}`) when a seat sign-in
+ * borrowed the live slot. Only the fields opencode's auth schema knows are
+ * forwarded, so a stray property of a hand-edited file cannot be rejected or
+ * smuggled in.
+ *
+ * SECURITY: like `setProviderApiKey`, the entry is NEVER echoed back and NEVER
+ * logged; the result is `{ok}` / `{ok:false, error}` only.
+ * @param {string} providerID
+ * @param {{type:string, access?:string, refresh?:string, expires?:number, accountId?:string, enterpriseUrl?:string, key?:string}} entry
+ */
+export async function setProviderAuthEntry(providerID, entry) {
+  const body = {};
+  for (const k of ["type", "access", "refresh", "expires", "accountId", "enterpriseUrl", "key"]) {
+    if (entry?.[k] !== undefined) body[k] = entry[k];
+  }
+  try {
+    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      await discardBody(res);
+      return { ok: false, error: res.status === 401 || res.status === 403 ? "unauthorized" : "bad_response", detail: detail.slice(0, 200) };
+    }
+    await discardBody(res);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
+  }
+}
+
+/**
  * Remove a provider's auth from opencode's store (DELETE /auth/{id}).
  * Idempotent — a missing entry returns 404 from opencode, which we surface
  * as `{ok:true}` (the user's intent is satisfied: the auth is gone).
@@ -3184,16 +3220,31 @@ export async function pollClaudeLogin({
   now = Date.now(),
   backupPath = null,
   validator = defaultCredentialsValidator,
+  // Multi-account seat sign-in: the login ran with CLAUDE_CONFIG_DIR pointing at
+  // the new seat's own directory, so progress is read from THAT file and the
+  // live login is not involved at all — nothing to roll back and nothing to
+  // restart (opencode keeps serving the live login untouched).
+  credentialsPath = CREDENTIALS_PATH,
+  isolated = false,
 } = {}) {
   let stat;
   try {
-    stat = await fsStat(CREDENTIALS_PATH);
+    stat = await fsStat(credentialsPath);
   } catch {
     stat = { mtimeMs: null };
   }
   const progress = classifyClaudeLoginProgress(stat, startedAt);
   if (progress !== "completed") {
     return { state: progress };
+  }
+  if (isolated) {
+    return {
+      state: "completed",
+      restart: { ok: true },
+      connected: true,
+      restartAttempts: 0,
+      restore: { restored: false, reason: "isolated" },
+    };
   }
 
   // BET-359: validate the freshly-written file BEFORE bouncing opencode.

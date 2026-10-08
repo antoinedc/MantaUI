@@ -78,7 +78,15 @@ import { blendedPrice } from "../shared/blendedPrice.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { attachCallWs, createCallRegistry } from "./callWs.mjs";
-import { buildHandlers, handleRpcRequest } from "./rpc.mjs";
+import {
+  buildHandlers,
+  handleRpcRequest,
+  providerAuthStart,
+  startClaudeLogin,
+  cancelClaudeLogin,
+  onProviderOauthLanded,
+  oauthEpochFor,
+} from "./rpc.mjs";
 import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
@@ -108,7 +116,9 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
-import { createAccountsService } from "./accounts.mjs";
+import { createAccountsService, ACCOUNT_PROVIDERS } from "./accounts.mjs";
+import { createAccountsEvents } from "./accountsEvents.mjs";
+import { createAccountsManager } from "./accountsManager.mjs";
 import { createSeatAssigner } from "./seatAssignment.mjs";
 import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
@@ -619,6 +629,17 @@ const optimizerPacing = createPacingState({
 const accountsService = createAccountsService();
 void accountsService.discover({ force: true });
 
+// Multi-account phase 3: the bus events (`accounts.updated`, throttled to one per
+// provider per second, and `accounts.moved`). A store change, a conversation
+// being placed or moved, and every fresh usage reading all mean "the list a
+// client holds may be stale".
+const accountsEvents = createAccountsEvents({ publish: (evt) => bus.publish(evt) });
+accountsService.onChange(({ provider }) => accountsEvents.updated(provider));
+// eslint-disable-next-line no-unused-vars
+const stopAccountsUsageEvents = bus.subscribe((evt) => {
+  if (evt?.kind === "usage.updated") for (const p of ACCOUNT_PROVIDERS) accountsEvents.updated(p);
+});
+
 // Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
 // plugins). self-update.sh does this too, but an installed box runs the script it
 // ALREADY had, so the first update that ships a plugin would not install it; the
@@ -635,11 +656,36 @@ void runStartupPluginSync();
 const seatAssigner = createSeatAssigner({
   accounts: accountsService,
   listSeatSnapshots,
+  onChange: (provider) => accountsEvents.updated(provider),
+  onMoved: (evt) => accountsEvents.moved(evt),
   refreshSeatCredentials: (provider, t) =>
     provider === "claude"
       ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })
       : oc.refreshCodexSeatAndNote(accountsService, { seatId: t.seatId, file: t.file }),
 });
+// Multi-account phase 3: the `accounts:*` RPC surface (list, mode, active seat,
+// rename, remove, add-a-seat sign-in). The sign-in flows are the EXISTING ones —
+// the claude-login launcher (pointed at the seat's own directory) and opencode's
+// OpenAI OAuth — started through the same code the connect card uses.
+const accountsManager = createAccountsManager({
+  accounts: accountsService,
+  seatAssigner,
+  listSeatSnapshots,
+  claudeLogin: {
+    start: (configDir, seatId) => startClaudeLogin("anthropic", { configDir, seatId }),
+    cancel: (sessionKey) => {
+      cancelClaudeLogin(sessionKey);
+      pty.kill(sessionKey);
+    },
+  },
+  codex: {
+    startConnect: () => providerAuthStart(oc, "openai"),
+    oauthEpoch: () => oauthEpochFor("openai"),
+    livePath: () => oc.opencodeAuthPath(),
+    restoreEntry: (entry) => oc.setProviderAuthEntry("openai", entry),
+  },
+});
+onProviderOauthLanded((evt) => accountsManager.onProviderLoginLanded(evt));
 const handleAccountsRoute = createAccountsRouteHandler({
   seatAssigner,
   readJson: (req) => readJsonBody(req),
@@ -1753,6 +1799,7 @@ rpcHandlers = buildHandlers({
   oc,
   pty,
   bus,
+  accountsManager,
   local,
   syncState,
   authPair: () => authEngine.pair(),
