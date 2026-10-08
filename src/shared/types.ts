@@ -2004,7 +2004,7 @@ export type OptimizerSummary = {
     entries: {
       id: string;
       ts: number;
-      kind: "tune" | "eco" | "compaction" | "guardrail";
+      kind: "tune" | "eco" | "compaction" | "guardrail" | "seat-move";
       subject: string;
       from?: string | number;
       to?: string | number;
