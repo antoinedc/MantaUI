@@ -339,8 +339,14 @@ id and its credential FILE, never a token.
 Bus (`/events`):
 - `accounts.updated {provider}` on any list change (mode, active, rename, add/remove,
   status, assignment counts).
-- `accounts.moved {sessionId, provider, from, to, reason}` when the resolver moves a
-  conversation (the exhausted floor today; phase 4 later).
+- `accounts.moved {sessionId, provider, from, to, fromLabel, toLabel, reason:
+  "load"|"exhausted"|"unusable", trigger: {kind, pct}|null, crossOrg}` on every
+  AUTOMATIC move (manual switches publish only `accounts.updated`).
+  `accounts:session-seat` → `lastMove` carries the same optional `trigger` / `crossOrg`.
+  The provider view gains `moveTargetSeatId` (where a conversation on the most-loaded
+  in-use seat ≥90% would go; null in manual mode / when it would stay).
+- Every automatic move is also appended to the optimizer activity log as kind
+  `seat-move`, whatever the optimizer switch says.
 
 ## 9. Phases
 0. **Spike leftovers** (needs a second Claude seat login):
@@ -352,7 +358,8 @@ Bus (`/events`):
 2. `manta-accounts` fetch-wrapper plugin, resolve + refresh routes, sticky
    assignment + exhausted floor, self-installing plugins. (Done, #1564.)
 3. Manual mode + Accounts UI + session seat display.
-4. Automatic mode (§5.3) + move notices + activity log.
+4. Automatic moves (§5.3 rules 3–4: 90/70, same org first, cross-org once per 5h,
+   no move back within 5h), move notices on desktop + iOS, activity log.
 
 Implementer ownership: server (`src/server/accounts*.mjs`, usage adapters, rpc
 wiring) · plugins (fork + `manta-accounts`) · renderer (`AccountsCard`, header,
