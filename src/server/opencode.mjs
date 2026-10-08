@@ -20,6 +20,7 @@ import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { endpointAttempts, newAttemptId } from "./endpointAttempts.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
+import { readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -2390,6 +2391,30 @@ export function refreshClaudeSeatCredentials({ seatId, dir }, deps = {}) {
   return run;
 }
 
+/** Refresh a Codex seat and fold the outcome into its status (same contract as
+ *  refreshClaudeSeatAndNote). */
+export async function refreshCodexSeatAndNote(seats, target, refresh = refreshCodexSeat) {
+  const result = await refresh(target);
+  try {
+    await seats?.noteRefreshOutcome?.("codex", target.seatId, result);
+  } catch {
+    // status bookkeeping must never fail (or hide) the refresh itself
+  }
+  return result;
+}
+
+/** Refresh a Claude seat and fold the outcome into its status. Never throws on
+ *  the bookkeeping; returns the refresh result unchanged. */
+export async function refreshClaudeSeatAndNote(seats, target, refresh = refreshClaudeSeatCredentials) {
+  const result = await refresh(target);
+  try {
+    await seats?.noteRefreshOutcome?.("claude", target.seatId, result);
+  } catch {
+    // status bookkeeping must never fail (or hide) the refresh itself
+  }
+  return result;
+}
+
 function logAndReturn(result) {
   console.log(
     "[claude-auth] refresh ok=%s reason=%s expiresAt=%s",
@@ -2434,6 +2459,13 @@ export function createCredentialRefreshSweep({
   listSeatTargets = async () => [],
   readSeatCreds = (dir) => readCredsSnapshotAt(path.join(dir, ".credentials.json")),
   refreshSeat = refreshClaudeSeatCredentials,
+  // Codex seats that are NOT opencode's live login: each `{seatId, file}` is
+  // refreshed when its access token is within the 5-minute margin of expiry
+  // (the refresh token rotates, so this must run before it is needed, not after
+  // a 401). No seats (the default) → nothing happens.
+  listCodexTargets = async () => [],
+  readCodexExpiresAt = readCodexExpiry,
+  refreshCodex = refreshCodexSeat,
 } = {}) {
   let inFlight = false;
 
@@ -2462,6 +2494,19 @@ export function createCredentialRefreshSweep({
           // one seat failing must not stop the next
         }
       }
+      let codexTargets = [];
+      try {
+        codexTargets = (await listCodexTargets()) ?? [];
+      } catch {
+        // as above: never take the other refreshes down
+      }
+      for (const target of codexTargets) {
+        try {
+          if (shouldRefreshCodexAhead(await readCodexExpiresAt(target.file), now())) await refreshCodex(target);
+        } catch {
+          // one seat failing must not stop the next
+        }
+      }
     } finally {
       inFlight = false;
     }
@@ -2473,6 +2518,11 @@ export function createCredentialRefreshSweep({
 export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS, seats = null } = {}) {
   const { sweep } = createCredentialRefreshSweep({
     listSeatTargets: seats ? () => seats.claudeRefreshTargets() : undefined,
+    // A refresh whose refresh token is known-expired marks the seat "expired"
+    // (and a later success clears it) — see accounts.noteRefreshOutcome.
+    refreshSeat: seats ? (target) => refreshClaudeSeatAndNote(seats, target) : undefined,
+    listCodexTargets: seats ? () => seats.codexRefreshTargets() : undefined,
+    refreshCodex: seats ? (target) => refreshCodexSeatAndNote(seats, target) : undefined,
   });
   return startPoller(sweep, { intervalMs, label: "opencode-credentials" });
 }

@@ -32,6 +32,9 @@
 //                                    node's ABI on Linux, or taken from the
 //                                    prebuilds node-pty ships for darwin/win32
 //     docs/opencode-tools/           manta-native opencode tool bundle
+//     docs/opencode-plugins/         manta-native opencode PLUGINS (installed to
+//                                    ~/.config/opencode/plugins/ by install /
+//                                    self-update; tools/ never gets them)
 //     docs/opencode/skills/          primary-agent prompts (manta-plan) referenced
 //                                    by opencode.jsonc `{file:…}` — BET-984
 //     RELEASE.json                   { name, version, built_at, includes,
@@ -144,6 +147,7 @@ const INCLUDE = [
   "src",
   "scripts",
   "docs/opencode-tools",
+  "docs/opencode-plugins",
   "docs/opencode/skills",
   "package.json",
   "package-lock.json",

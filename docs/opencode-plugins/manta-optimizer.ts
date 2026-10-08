@@ -7,10 +7,11 @@
  * mutates the history. Fail-open everywhere — any throw hands the history on
  * unmodified.
  *
- * INSTALL (maintainer, post-merge — NOT during an agent run):
- *   cp docs/opencode-tools/manta-optimizer-plugin.ts ~/.config/opencode/plugins/manta-optimizer.ts
- *   systemctl --user restart opencode-serve
- * COPY, never symlink (same @opencode-ai/plugin resolution gotcha as the tools).
+ * INSTALLED AUTOMATICALLY: install.sh and self-update.sh copy this file (a real
+ * copy, never a symlink) to ~/.config/opencode/plugins/manta-optimizer.ts and
+ * restart opencode when it changes — see sync_opencode_plugins in
+ * scripts/lib/release.sh. Nothing to do by hand. It stays observe-only until the
+ * user turns the optimizer switch on.
  */
 import type { Plugin } from "@opencode-ai/plugin"
 
