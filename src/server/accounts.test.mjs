@@ -789,6 +789,11 @@ test("service.deleteSeatDir: removes a directory under the seats root and REFUSE
     assert.equal(await svc.deleteSeatDir(join(paths.seatsRoot, "..", "home")), false, "a traversal");
     assert.equal(await svc.deleteSeatDir(""), false);
     assert.ok((await stat(outside)).isDirectory());
+    // Never a whole provider directory (every seat of it), nor a nested path.
+    const other = await putSeatDir(paths, "seat-8", "tok");
+    assert.equal(await svc.deleteSeatDir(join(paths.seatsRoot, "claude")), false, "a provider dir");
+    assert.equal(await svc.deleteSeatDir(join(other, "sub")), false, "below a seat dir");
+    assert.ok((await stat(other)).isDirectory());
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }

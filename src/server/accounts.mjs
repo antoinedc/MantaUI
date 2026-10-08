@@ -978,7 +978,11 @@ export function createAccountsService({
       if (typeof dir !== "string" || !dir) return false;
       const root = resolvePath(seatsRoot) + sep;
       const target = resolvePath(dir);
-      if (!target.startsWith(root) || target === root) return false;
+      // Exactly one seat directory — <root>/<provider>/<seat> — never a provider
+      // directory (which would take every seat of that provider with it).
+      if (!target.startsWith(root)) return false;
+      const parts = target.slice(root.length).split(sep);
+      if (parts.length !== 2 || !ACCOUNT_PROVIDERS.includes(parts[0]) || !parts[1] || parts[1].startsWith(".")) return false;
       await rm(target, { recursive: true, force: true });
       return true;
     },
