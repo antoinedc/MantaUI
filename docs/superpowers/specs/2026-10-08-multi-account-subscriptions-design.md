@@ -233,38 +233,77 @@ uses `accounts:list` plus `accounts:session-seat` (§8), refreshed on open and o
 with tests; the "next" tag must use the **same** function the server uses for rule 3
 (`src/shared/seatChoice.mjs`), so the hint can never disagree with the actual move.
 
-## 8. Contract (pinned for parallel implementers)
+## 8. Contract (pinned for parallel implementers) — v2, phase 3
 
-RPC (`/rpc/<channel>`, renderer):
-- `accounts:list` → `{ providers: [{ provider, mode, activeSeatId, accounts: [{ id,
-  label, orgName, plan, seats: [{ id, label, email, status:
-  "ok"|"expired"|"signed-out", windows: UsageWindow[], conversations: number }] }] }] }`
-- `accounts:set-mode` `{provider, mode}` · `accounts:set-active` `{provider, seatId}`
-- `accounts:rename` `{kind: "account"|"seat", id, label}` (1–40 chars)
-- `accounts:add-account` `{provider, label}` → `{accountId}`
-- `accounts:add-seat` `{provider, accountId?, label?}` → existing connect shape
-  (`claude-login` / OAuth) + `seatId`; `accounts:seat-status` `{seatId}` polls it.
-  After login, a profile/org mismatch returns `{warning:"different-org", orgName}`
-  and offers to create a new account.
-- `accounts:remove-seat` `{seatId}`
-- `accounts:session-seat` `{sessionId}` → `{provider, seatId, accountId, lastMove?:
-  {from, at, reason, resentTokens}}` (null when the conversation has no subscription seat)
-- Errors: `{error: "duplicate-login"|"unknown-seat"|"invalid-label"|"login-failed"}`
-  (class-1: safe literal text).
+All RPC channels are `POST /rpc/<channel>` (desktop `window.api`, iOS `MantaAPIClient`).
+Credentials and emails' tokens never appear in any response.
 
-REST (plugins, Bearer box token): `GET /api/accounts/resolve` (§4).
+Types:
+```
+SeatView = { id, label, email|null, status: "ok"|"expired"|"signed-out"|"unknown",
+             live: boolean,               // this seat is the box's current login
+             windows: UsageWindow[],      // latest per-seat reading ([] if none)
+             load: number|null,           // seatLoad() (§5.1)
+             fetchedAt: number|null,
+             conversations: number }      // assignments currently on this seat
+AccountView = { id, label, orgName|null, plan|null, seats: SeatView[] }
+ProviderView = { provider: "claude"|"codex", mode: "auto"|"manual",
+                 activeSeatId|null, routingActive: boolean,   // plugin seen (§4)
+                 nextSeatId|null,          // auto: seat a new conversation / a move goes to
+                 accounts: AccountView[] }
+```
+Channels:
+- `accounts:list` `{}` → `{ providers: ProviderView[] }` (providers with ≥1 seat).
+- `accounts:set-mode` `{provider, mode}` → `ProviderView`.
+- `accounts:set-active` `{provider, seatId}` → `ProviderView`. Manual mode: EVERY
+  conversation of that provider uses the active seat from its next request (the
+  resolver ignores stored assignments in manual mode). Auto mode: only the
+  tie-break / default.
+- `accounts:rename` `{provider, kind:"account"|"seat", id, label}` → `ProviderView`
+  (label trimmed, 1–40 chars, no control chars).
+- `accounts:add-seat` `{provider, accountId?: string, label?: string}` →
+  `{ seatId, connect }` where `connect` is the SAME shape the existing connect flow
+  uses (`claude-login` with sessionKey for Claude; the opencode OAuth shape for
+  Codex). Claude: the `claude auth login` launcher runs with
+  `CLAUDE_CONFIG_DIR=<new seat dir>`. Codex: opencode's OAuth flow runs; on success
+  the new `openai` entry is moved into the seat dir and the previous live entry is
+  restored (the live login never changes).
+- `accounts:seat-status` `{seatId}` → `{ state: "pending"|"ok"|"failed",
+  error?: "duplicate-login"|"login-failed"|"different-org", seat?: SeatView,
+  orgName?: string }`. On `ok` the seat is identified (profile) and placed:
+  - with `accountId`, a different org → `failed` / `different-org`, and the seat is
+    kept unplaced until `accounts:add-seat-confirm {seatId, newAccount:true}`;
+  - the same login as an existing seat → `failed` / `duplicate-login`, and the new
+    directory is deleted.
+- `accounts:add-seat-confirm` `{seatId, newAccount: boolean}` → `ProviderView`.
+- `accounts:cancel-seat` `{seatId}` → `{ok:true}` (aborts the login, deletes the dir).
+- `accounts:remove-seat` `{provider, seatId}` → `ProviderView`. Refused
+  (`{error:"live-seat"}`) for the live seat. Its conversations are re-placed on their
+  next request; its directory is deleted.
+- `accounts:session-seat` `{sessionId}` → `{ provider, seatId, seatLabel,
+  accountLabel, lastMove?: {from, fromLabel, at, reason} } | null`.
+  Null when the conversation has no assignment.
+- Errors (class-1, safe literal text): `{error: "unknown-seat"|"invalid-label"|
+  "live-seat"|"unknown-provider"|"login-failed"}`.
 
-Bus: `accounts.updated` (list changed), `accounts.moved {sessionId, provider, from,
-to, reason, resentTokens}`.
+REST (plugin only, direct loopback + Bearer): `GET /api/accounts/resolve`,
+`POST /api/accounts/refresh` (§4).
+
+Bus (`/events`):
+- `accounts.updated {provider}` on any list change (mode, active, rename, add/remove,
+  status, assignment counts).
+- `accounts.moved {sessionId, provider, from, to, reason}` when the resolver moves a
+  conversation (the exhausted floor today; phase 4 later).
 
 ## 9. Phases
 0. **Spike leftovers** (needs a second Claude seat login):
    (a) `CLAUDE_CONFIG_DIR` login writes a separate credential;
    (b) measure the cache across two seats of the same org (does a move re-send?);
    (c) diff the built-in Codex fetch to copy it faithfully.
-   (a) and (b) are done (see §10). (c) remains.
-1. Weekly fix (`limits[]`) + seat store + migration + per-seat usage polling + aggregate.
-2. Plugins: Claude fork resolver, `manta-accounts` Codex plugin, resolve route, fail-safe.
+   All three done (see §10).
+1. Weekly fix (`limits[]`) + seat store + migration + per-seat usage polling + aggregate. (Done, #1563.)
+2. `manta-accounts` fetch-wrapper plugin, resolve + refresh routes, sticky
+   assignment + exhausted floor, self-installing plugins. (Done, #1564.)
 3. Manual mode + Accounts UI + session seat display.
 4. Automatic mode (§5.3) + move notices + activity log.
 
