@@ -522,7 +522,13 @@ export function createUsagePoller({
       for (const e of entries) {
         if (e.perSeat) {
           seatResults.push(...e.perSeat);
-          const agg = aggregateSnapshot(e.perSeat, aggregationPolicy({ plan: e.plan, perConversationRouting }));
+          const policy = aggregationPolicy({ plan: e.plan, perConversationRouting });
+          // Until requests are routed per conversation, the provider IS the
+          // serving seat: with no reading for it, publish nothing for the
+          // provider rather than another seat's headroom it cannot use.
+          const pinned = !perConversationRouting && e.plan?.servingSeatId;
+          if (pinned && !e.perSeat.some((s) => s.seatId === e.plan.servingSeatId)) continue;
+          const agg = aggregateSnapshot(e.perSeat, policy);
           if (agg) results.push(agg);
         } else {
           results.push(e.snap);
