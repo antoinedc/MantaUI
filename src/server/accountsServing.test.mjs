@@ -141,6 +141,38 @@ test("the routing flag may be a clock function (the plugin-seen check): evaluate
   assert.equal((await aggregateOf(readings, planOf(), () => true)).windows[0].pct, 29);
 });
 
+test("routing off + the serving seat has NO reading → no provider aggregate is published (not another seat's headroom)", async () => {
+  // seat-1 is the serving (live) seat but its usage call fails; seat-2 reads fine.
+  const failing = {
+    id: "claude",
+    providerIDs: ["anthropic"],
+    detect: async () => true,
+    async fetch(deps) {
+      if (deps.token === "tok-1") throw new Error("usage endpoint down");
+      return { provider: "claude", kind: "subscription", windows: win(29) };
+    },
+  };
+  const run = async (routing, plan) => {
+    const published = [];
+    const poller = createUsagePoller({
+      adapters: [failing],
+      seats: { seatsFor: async () => plan },
+      perConversationRouting: routing,
+      now: () => 1_800_000_000_000,
+      publish: (e) => published.push(e),
+    });
+    await poller.tick();
+    return { snapshots: poller.snapshots, seatSnapshots: poller.seatSnapshots, published };
+  };
+  const off = await run(false, planOf());
+  assert.deepEqual(off.snapshots, [], "nothing published for the provider while its serving seat cannot be read");
+  assert.deepEqual(off.seatSnapshots.map((s) => s.seatId), ["seat-2"], "the per-seat reading is still there");
+  const on = await run(true, planOf());
+  assert.equal(on.snapshots[0].windows[0].pct, 29, "with routing on the aggregate may use any seat");
+  const noServing = await run(false, planOf({ servingSeatId: null }));
+  assert.equal(noServing.snapshots[0].windows[0].pct, 29, "no serving seat known → the store's mode applies");
+});
+
 test("no serving seat known → the store's mode applies even with the flag off", async () => {
   const agg = await aggregateOf({ "tok-1": { pct: 97 }, "tok-2": { pct: 29 } }, planOf({ servingSeatId: null }), false);
   assert.equal(agg.windows[0].pct, 29);

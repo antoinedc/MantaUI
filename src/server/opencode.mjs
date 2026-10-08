@@ -2391,6 +2391,18 @@ export function refreshClaudeSeatCredentials({ seatId, dir }, deps = {}) {
   return run;
 }
 
+/** Refresh a Claude seat and fold the outcome into its status. Never throws on
+ *  the bookkeeping; returns the refresh result unchanged. */
+export async function refreshClaudeSeatAndNote(seats, target, refresh = refreshClaudeSeatCredentials) {
+  const result = await refresh(target);
+  try {
+    await seats?.noteRefreshOutcome?.("claude", target.seatId, result);
+  } catch {
+    // status bookkeeping must never fail (or hide) the refresh itself
+  }
+  return result;
+}
+
 function logAndReturn(result) {
   console.log(
     "[claude-auth] refresh ok=%s reason=%s expiresAt=%s",
@@ -2494,6 +2506,9 @@ export function createCredentialRefreshSweep({
 export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS, seats = null } = {}) {
   const { sweep } = createCredentialRefreshSweep({
     listSeatTargets: seats ? () => seats.claudeRefreshTargets() : undefined,
+    // A refresh whose refresh token is known-expired marks the seat "expired"
+    // (and a later success clears it) — see accounts.noteRefreshOutcome.
+    refreshSeat: seats ? (target) => refreshClaudeSeatAndNote(seats, target) : undefined,
     listCodexTargets: seats ? () => seats.codexRefreshTargets() : undefined,
   });
   return startPoller(sweep, { intervalMs, label: "opencode-credentials" });

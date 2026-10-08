@@ -28,8 +28,8 @@ const seat = (n, over = {}) => ({
   live: false,
   usable: true,
   dir: `/d/${n}`,
-  file: `/d/${n}/f`,
-  credential: { accessToken: `TOKEN-${n}`, expiresAt: 5_000_000, accountId: `chatgpt-${n}` },
+  file: `/d/${n}/.credentials.json`,
+  credential: { expiresAt: 5_000_000 },
   ...over,
 });
 const snap = (n, pct, extra = {}) => ({ provider: "claude", seatId: `seat-${n}`, windows: [{ kind: "session", pct }], ...extra });
@@ -102,10 +102,15 @@ test("decideSeat: a vanished or unusable seat releases the conversation to a fre
 
 // ---- seatResult -------------------------------------------------------------
 
-test("seatResult: a live seat carries NO credential; a directory seat carries token, account id, expiry", () => {
-  assert.deepEqual(seatResult(seat(1, { live: true, dir: null, credential: null })), { seatId: "seat-1", live: true });
-  assert.deepEqual(seatResult(seat(2)), { seatId: "seat-2", live: false, accessToken: "TOKEN-2", accountId: "chatgpt-2", expiresAt: 5_000_000 });
-  assert.deepEqual(seatResult(seat(3, { credential: { accessToken: "T", expiresAt: null } })), { seatId: "seat-3", live: false, accessToken: "T" });
+test("seatResult: a live seat carries NO credential; a directory seat names its FILE — never a token", () => {
+  assert.deepEqual(seatResult("claude", seat(1, { live: true, dir: null, file: null, credential: null })), { seatId: "seat-1", live: true });
+  assert.deepEqual(seatResult("claude", seat(2)), { seatId: "seat-2", live: false, provider: "claude", credentialFile: "/d/2/.credentials.json", expiresAt: 5_000_000 });
+  assert.deepEqual(seatResult("codex", seat(3, { credential: { expiresAt: null } })), { seatId: "seat-3", live: false, provider: "codex", credentialFile: "/d/3/.credentials.json" });
+  // a seat with nothing readable falls back to live
+  assert.deepEqual(seatResult("claude", seat(4, { credential: null })), { seatId: "seat-4", live: true });
+  for (const r of [seatResult("claude", seat(2)), seatResult("codex", seat(3))]) {
+    assert.doesNotMatch(JSON.stringify(r), /token/i, "no token field or value in an answer");
+  }
 });
 
 // ---- store hygiene ----------------------------------------------------------
@@ -179,7 +184,7 @@ test("rule 1+2: first request picks least-loaded; later requests keep it even wh
   const first = await a.svc.resolve("claude", "conv-1");
   assert.equal(first.seatId, "seat-2");
   assert.equal(first.live, false);
-  assert.equal(first.accessToken, "TOKEN-2");
+  assert.equal(first.credentialFile, "/d/2/.credentials.json");
   snaps.splice(0, 2, snap(1, 5), snap(2, 99));
   assert.equal((await a.svc.resolve("claude", "conv-1")).seatId, "seat-2", "sticky");
   assert.equal((await a.svc.resolve("claude", "conv-2")).seatId, "seat-1", "a NEW conversation uses the new loads");
@@ -254,7 +259,7 @@ test("a failing save never fails the request", async () => {
   });
   const r = await svc.resolve("claude", "c");
   assert.equal(r.seatId, "seat-2");
-  assert.equal(r.accessToken, "TOKEN-2");
+  assert.equal(r.credentialFile, "/d/2/.credentials.json");
 });
 
 test("bad input is rejected; every resolve and nothing else stamps plugin presence", async () => {
@@ -278,7 +283,7 @@ test("refreshSeat: refreshes a non-live seat, returns the re-read state; single-
       calls++;
       assert.deepEqual([provider, t.seatId, t.dir], ["claude", "seat-2", "/d/2"]);
       await gate;
-      acc.state.claude = two({ seats: [two().seats[0], seat(2, { credential: { accessToken: "TOKEN-2-NEW", expiresAt: 9_000_000 } })] });
+      acc.state.claude = two({ seats: [two().seats[0], seat(2, { credential: { expiresAt: 9_000_000 } })] });
     },
   });
   const p1 = a.svc.refreshSeat("claude", "seat-2");
@@ -287,7 +292,7 @@ test("refreshSeat: refreshes a non-live seat, returns the re-read state; single-
   const [r1, r2] = await Promise.all([p1, p2]);
   assert.equal(calls, 1);
   assert.deepEqual(r1, r2);
-  assert.equal(r1.accessToken, "TOKEN-2-NEW");
+  assert.equal(r1.expiresAt, 9_000_000, "the re-read state after the refresh");
 });
 
 test("refreshSeat: a live seat is never refreshed here; an unknown seat is null", async () => {
@@ -300,7 +305,7 @@ test("refreshSeat: a live seat is never refreshed here; an unknown seat is null"
 
 test("refreshSeat: a refresh that throws still answers with the current state", async () => {
   const a = assigner(fakeAccounts(two()), { refresh: async () => { throw new Error("cli missing"); } });
-  assert.equal((await a.svc.refreshSeat("claude", "seat-2")).accessToken, "TOKEN-2");
+  assert.equal((await a.svc.refreshSeat("claude", "seat-2")).credentialFile, "/d/2/.credentials.json");
 });
 
 // ---- real accounts service: seatStates --------------------------------------
@@ -312,7 +317,7 @@ const fakeFetch = (byToken) => async (_u, init) => {
   return { ok: Boolean(p), status: p ? 200 : 401, json: async () => p };
 };
 
-test("seatStates (real accounts service): live seat has no credential; a directory seat exposes its token; assignment follows", async () => {
+test("seatStates (real accounts service): a live seat has no credential; a directory seat exposes its FILE and expiry, never a token", async () => {
   const root = await mkdtemp(join(tmpdir(), "seat-assign-"));
   try {
     const paths = {
@@ -336,10 +341,12 @@ test("seatStates (real accounts service): live seat has no credential; a directo
     const states = await accounts.seatStates("claude");
     const byId = Object.fromEntries(states.seats.map((s) => [s.seatId, s]));
     assert.equal(byId["seat-1"].live, true);
-    assert.equal(byId["seat-1"].credential, null, "a live seat never carries a token");
+    assert.equal(byId["seat-1"].credential, null, "a live seat never carries a credential");
     assert.equal(byId["seat-2"].live, false);
-    assert.equal(byId["seat-2"].credential.accessToken, "tok-B");
+    assert.deepEqual(byId["seat-2"].credential, { expiresAt: 9e12 }, "expiry only — the service never hands out a token");
+    assert.equal(byId["seat-2"].file, join(paths.seatsRoot, "claude", "seat-2", ".credentials.json"));
     assert.equal(byId["seat-2"].usable, true);
+    assert.doesNotMatch(JSON.stringify(states), /tok-[AB]/);
 
     const svc = createSeatAssigner({
       accounts,
@@ -352,8 +359,9 @@ test("seatStates (real accounts service): live seat has no credential; a directo
     });
     const r = await svc.resolve("claude", "conv");
     assert.equal(r.seatId, "seat-2");
-    assert.equal(r.accessToken, "tok-B");
+    assert.equal(r.credentialFile, join(paths.seatsRoot, "claude", "seat-2", ".credentials.json"));
     assert.equal(r.expiresAt, 9e12);
+    assert.doesNotMatch(JSON.stringify(r), /tok-/);
     assert.equal(await accounts.seatStates("kimi"), null);
     const targets = await accounts.codexRefreshTargets();
     assert.deepEqual(targets, []);
@@ -392,4 +400,86 @@ test("seatStates (real): a seat whose credentials are unreadable is not usable a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+// ---- the exhausted-seat floor (rule 3, minimal) ------------------------------
+
+import { MOVE_BACK_BLOCK_MS, chooseMoveTarget, isSeatFull } from "./seatAssignment.mjs";
+
+const HOUR = 3_600_000;
+const full = (n) => snap(n, 100, { exhausted: true });
+
+test("isSeatFull: provider-flagged exhausted, or an ACTIVE FRESH window at 100%; unknown/inactive/stale is not full", () => {
+  assert.equal(isSeatFull(snap(1, 100, { exhausted: true })), true);
+  assert.equal(isSeatFull(snap(1, 100)), true);
+  assert.equal(isSeatFull(snap(1, 99)), false);
+  assert.equal(isSeatFull({ seatId: "s", windows: [{ pct: 100, active: false }, { pct: 20 }] }), false, "an inactive scoped window does not count");
+  assert.equal(isSeatFull({ seatId: "s", windows: [{ pct: 100, stale: true }] }), false, "a stale reading is the window that just reset");
+  assert.equal(isSeatFull(null), false);
+  assert.equal(isSeatFull({ seatId: "s" }), false);
+});
+
+test("decideSeat: an existing seat that is FULL is released to a seat with room (auto mode)", () => {
+  const out = decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: "seat-1", seats: [seat(1), seat(2), seat(3)], seatSnapshots: [full(1), snap(2, 60), snap(3, 20)], nowMs: 10 * HOUR });
+  assert.deepEqual(out, { seatId: "seat-3", reason: "moved", from: "seat-1" });
+});
+
+test("decideSeat: a seat at 99% is kept (that is phase 4's 90% rule, not this floor)", () => {
+  const out = decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats: [seat(1), seat(2)], seatSnapshots: [snap(1, 99), snap(2, 0)], nowMs: 0 });
+  assert.equal(out.reason, "kept");
+});
+
+test("decideSeat: when NO other usable seat has room, the conversation stays", () => {
+  const seats = [seat(1), seat(2), seat(3, { usable: false })];
+  assert.equal(decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats, seatSnapshots: [full(1), full(2), snap(3, 0)], nowMs: 0 }).reason, "kept");
+  assert.equal(decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats: [seat(1), seat(2, { usable: false })], seatSnapshots: [full(1), snap(2, 0)], nowMs: 0 }).reason, "kept", "an unusable seat is not 'room'");
+});
+
+test("decideSeat: manual mode never moves on its own", () => {
+  const out = decideSeat({ existing: { seatId: "seat-1" }, mode: "manual", activeSeatId: "seat-1", seats: [seat(1), seat(2)], seatSnapshots: [full(1), snap(2, 0)], nowMs: 0 });
+  assert.equal(out.reason, "kept");
+});
+
+test("chooseMoveTarget: a seat left within 5h is skipped while another has room, used when it is the only one", () => {
+  const nowMs = 20 * HOUR;
+  const seats = [seat(1), seat(2), seat(3)];
+  const existing = { seatId: "seat-2", left: { "seat-1": nowMs - HOUR } };
+  const snaps = [snap(1, 5), full(2), snap(3, 70)];
+  assert.equal(chooseMoveTarget({ existing, seats, seatSnapshots: snaps, nowMs }), "seat-3", "seat-1 is emptier but was left an hour ago");
+  assert.equal(chooseMoveTarget({ existing, seats: [seat(1), seat(2)], seatSnapshots: snaps, nowMs }), "seat-1", "the only one with room");
+  const old = { seatId: "seat-2", left: { "seat-1": nowMs - MOVE_BACK_BLOCK_MS - 1 } };
+  assert.equal(chooseMoveTarget({ existing: old, seats, seatSnapshots: snaps, nowMs }), "seat-1", "after 5h it is eligible again");
+});
+
+test("the service records the move and then does not bounce back", async () => {
+  const snaps = [snap(1, 20), snap(2, 50)];
+  const a = assigner(fakeAccounts(two({ seats: [seat(1), seat(2)] })), { snaps });
+  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
+  snaps.splice(0, 2, full(1), snap(2, 50)); // seat-1 fills up
+  const moved = await a.svc.resolve("claude", "c");
+  assert.equal(moved.seatId, "seat-2");
+  const rec = a.saved.providers.claude.c;
+  assert.equal(rec.seatId, "seat-2");
+  assert.equal(rec.movedFrom, "seat-1");
+  assert.equal(rec.reason, "exhausted");
+  assert.equal(typeof rec.movedAt, "number");
+  // Now seat-1 has room again and seat-2 fills up: seat-1 was left < 5h ago, but is the ONLY one with room.
+  a.tick(HOUR);
+  snaps.splice(0, 2, snap(1, 10), full(2));
+  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1", "the only seat with room wins over the 5h block");
+});
+
+test("the service: a full seat with nowhere to go keeps its conversation (no record change)", async () => {
+  const snaps = [snap(1, 20), snap(2, 20)];
+  const a = assigner(fakeAccounts(two({ seats: [seat(1), seat(2)] })), { snaps });
+  const first = await a.svc.resolve("claude", "c");
+  snaps.splice(0, 2, full(1), full(2));
+  const again = await a.svc.resolve("claude", "c");
+  assert.equal(again.seatId, first.seatId);
+  assert.equal(a.saved.providers.claude.c.movedFrom, undefined);
+});
+
+test("move bookkeeping survives a save/load round trip", () => {
+  const out = normalizeAssignments({ providers: { claude: { c: { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted", left: { "seat-1": 5, bad: "x" } } } } });
+  assert.deepEqual(out.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted", left: { "seat-1": 5 } });
 });

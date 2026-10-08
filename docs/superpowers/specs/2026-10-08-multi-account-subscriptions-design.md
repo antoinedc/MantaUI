@@ -91,9 +91,20 @@ Storage (server-only, never sent to the renderer):
 One authority, the server:
 
 ```
-GET /api/accounts/resolve?provider=claude|codex&sessionID=&parentSessionID=&model=
-→ { seatId, credentialsPath }
+GET /api/accounts/resolve?provider=claude|codex&sessionID=&parentSessionID=
+→ { seatId, live: true }                                       (use the live login)
+→ { seatId, live: false, provider, credentialFile, expiresAt? } (use this seat)
 ```
+**The response never carries a credential.** The box's HTTP surface is reachable
+from the internet through the gateway hostname and every paired device holds the
+bearer token, so a token in a response body would let any of them pull Claude/Codex
+credentials. `credentialFile` is the absolute path of the seat's file under
+`~/.manta-secrets/accounts/`; the plugin (same OS user) reads the token from it,
+after checking the real path is inside that directory. Both routes also refuse any
+caller that is not DIRECTLY on loopback (a loopback socket and none of
+`x-forwarded-for`, `x-forwarded-host`, `x-real-ip`, `forwarded`, `cf-connecting-ip`,
+`cdn-loop`, which proxied public traffic always carries) with a 403.
+
 **REVISED 2026-10-08 (spike-verified): one Manta plugin, no fork change, no auth
 override.** `manta-accounts` (a plain opencode plugin at
 `~/.config/opencode/plugins/manta-accounts.ts`) wraps the process-global `fetch` once
@@ -108,13 +119,14 @@ finished request and only swaps the identity:
   then to Manta's own sub-agent → root map) and asks `resolve`.
 - When the seat is the **live** login, the request passes through unchanged. This
   is the zero-risk default.
-- Otherwise it replaces `authorization` with the seat's access token. For Codex it
+- Otherwise it replaces `authorization` with the seat's access token, read from the
+  seat's credential file (cached by mtime, re-read after a refresh). For Codex it
   also sets `ChatGPT-Account-Id`, and recomputes `x-openai-internal-codex-residency`
   from the seat's token (removed when the seat has none).
 - Nothing else in the request changes. The Claude billing header is derived from
   the messages, not the account.
-- Seat tokens are kept fresh **server-side** (the §3 sweep). The plugin never
-  refreshes. A seat token within 60 s of expiry triggers
+- Seat tokens are kept fresh **server-side** (the §3 sweep); the plugin never talks
+  to the provider's OAuth endpoints itself. A seat token within 60 s of expiry triggers
   `POST /api/accounts/refresh {seatId}` (single-flight on the server) before sending.
   A 401 from a non-live seat triggers one refresh + one retry; if that fails, the
   401 is returned as-is.
@@ -286,7 +298,9 @@ RPC (`/rpc/<channel>`, renderer):
 - Errors: `{error: "duplicate-login"|"unknown-seat"|"invalid-label"|"login-failed"}`
   (class-1: safe literal text).
 
-REST (plugins, Bearer box token): `GET /api/accounts/resolve` (§4).
+REST (plugins, Bearer box token, direct-loopback callers only): `GET
+/api/accounts/resolve` and `POST /api/accounts/refresh` (§4) — they return a seat
+id and its credential FILE, never a token.
 
 Bus: `accounts.updated` (list changed), `accounts.moved {sessionId, provider, from,
 to, reason, resentTokens}`.

@@ -11,6 +11,11 @@
  * residency header) with the seat's token. The URL, body and every other header
  * are untouched, so opencode's own behaviour keeps running.
  *
+ * NO TOKEN TRAVELS OVER HTTP. manta-server's answer names the seat's credential
+ * FILE (under ~/.manta-secrets/accounts/); this plugin reads the token from it
+ * itself, as the same OS user. The path is validated (absolute, real path inside
+ * that directory) before it is read; anything else is treated as "live".
+ *
  *   - Intercepts ONLY `POST api.anthropic.com/v1/messages*` and
  *     `POST chatgpt.com/backend-api/codex/*`. Everything else — token refreshes,
  *     profile and usage calls — is the original fetch, untouched.
@@ -19,8 +24,8 @@
  *     last result seen for that conversation, else passes the request through
  *     untouched. This plugin never throws into opencode and never logs a token.
  *   - A seat token within 60 s of expiry is refreshed first
- *     (`POST /api/accounts/refresh`); a 401 from a non-live seat is refreshed
- *     once and retried once.
+ *     (`POST /api/accounts/refresh`, then the file is re-read); a 401 from a
+ *     non-live seat is refreshed once and retried once.
  *
  * INSTALLED AUTOMATICALLY: install.sh and self-update.sh copy this file (a real
  * copy, never a symlink) to ~/.config/opencode/plugins/manta-accounts.ts and
@@ -30,15 +35,17 @@
  *
  * TEST SEAMS (env, ignored when unset; both only ever accept a loopback URL so a
  * token can never be sent off the box):
+ *   MANTA_STATE_HOME               state home (as manta-server honours it); the
+ *                                  seat credential directory is <it>/.manta-secrets
  *   MANTA_ACCOUNTS_SERVER          override manta-server's base URL
  *   MANTA_ACCOUNTS_TEST_UPSTREAM   send intercepted model requests to a local stub
  *                                  instead of the real provider host
  */
 import type { Plugin } from "@opencode-ai/plugin"
 
-import { readFileSync } from "node:fs"
+import { readFileSync, realpathSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { isAbsolute, join, sep } from "node:path"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -62,10 +69,16 @@ const MAX_CACHE_ENTRIES = 500
 
 type Provider = "claude" | "codex"
 
+/** manta-server's answer: which seat, and where its credential file is. */
 interface Resolved {
   seatId: string | null
   live: boolean
-  accessToken?: string
+  credentialFile?: string
+}
+
+/** What the seat's credential file holds that a request needs. */
+interface SeatCredentials {
+  accessToken: string
   accountId?: string
   expiresAt?: number
 }
@@ -161,13 +174,97 @@ function rewriteHeaders(
 function parseResolved(json: any): Resolved | null {
   if (!json || typeof json !== "object") return null
   const seatId = typeof json.seatId === "string" ? json.seatId : null
-  if (json.live === false && typeof json.accessToken === "string" && json.accessToken) {
-    const out: Resolved = { seatId, live: false, accessToken: json.accessToken }
-    if (typeof json.accountId === "string" && json.accountId) out.accountId = json.accountId
-    if (typeof json.expiresAt === "number" && Number.isFinite(json.expiresAt)) out.expiresAt = json.expiresAt
-    return out
+  if (json.live === false && typeof json.credentialFile === "string" && json.credentialFile) {
+    return { seatId, live: false, credentialFile: json.credentialFile }
   }
   return { seatId, live: true }
+}
+
+/** The one directory seat credentials may be read from. */
+function seatsRootDir(): string {
+  const override = process.env.MANTA_STATE_HOME
+  const home = typeof override === "string" && override.trim() !== "" ? override : homedir()
+  return join(home, ".manta-secrets", "accounts")
+}
+
+/**
+ * The real path of a credential file, or null unless it is absolute and — after
+ * resolving every symlink — inside `root`. A path the server named is still
+ * treated as untrusted input.
+ */
+function allowedCredentialPath(file: unknown, root: string): string | null {
+  if (typeof file !== "string" || !file || !isAbsolute(file)) return null
+  try {
+    const realRoot = realpathSync(root)
+    const real = realpathSync(file)
+    if (!real.startsWith(realRoot + sep)) return null
+    if (!statSync(real).isFile()) return null
+    return real
+  } catch {
+    return null
+  }
+}
+
+/** A seat credential file's contents for a provider, or null. Pure parse. */
+function parseSeatCredentials(provider: Provider, raw: string): SeatCredentials | null {
+  let j: any
+  try {
+    j = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (provider === "claude") {
+    const o = j?.claudeAiOauth
+    if (typeof o?.accessToken !== "string" || !o.accessToken) return null
+    const out: SeatCredentials = { accessToken: o.accessToken }
+    if (typeof o.expiresAt === "number" && Number.isFinite(o.expiresAt)) out.expiresAt = o.expiresAt
+    return out
+  }
+  const e = j?.openai ?? (j?.access ? j : null)
+  if (e?.type !== "oauth" || typeof e.access !== "string" || !e.access) return null
+  const out: SeatCredentials = { accessToken: e.access }
+  if (typeof e.accountId === "string" && e.accountId) out.accountId = e.accountId
+  if (typeof e.expires === "number" && Number.isFinite(e.expires)) out.expiresAt = e.expires
+  return out
+}
+
+interface CredentialReader {
+  read(provider: Provider, file: string | undefined): SeatCredentials | null
+  /** Forget a file's cached contents (after a refresh rewrote it). */
+  invalidate(file: string | undefined): void
+}
+
+/** Reads seat credential files, cached per file and keyed by mtime + size. */
+function createCredentialReader(rootDir: () => string = seatsRootDir): CredentialReader {
+  const cache = new Map<string, { sig: string; creds: SeatCredentials | null }>()
+  return {
+    read(provider, file) {
+      const real = allowedCredentialPath(file, rootDir())
+      if (!real) return null
+      try {
+        const st = statSync(real)
+        const sig = `${provider}|${st.mtimeMs}|${st.size}`
+        const hit = cache.get(real)
+        if (hit && hit.sig === sig) return hit.creds
+        const creds = parseSeatCredentials(provider, readFileSync(real, "utf-8"))
+        cache.delete(real)
+        cache.set(real, { sig, creds })
+        if (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value as string)
+        return creds
+      } catch {
+        return null
+      }
+    },
+    invalidate(file) {
+      if (typeof file !== "string") return
+      cache.delete(file)
+      try {
+        cache.delete(realpathSync(file))
+      } catch {
+        /* file gone — nothing cached under a real path either */
+      }
+    },
+  }
 }
 
 /** Is a token with this expiry too close to it to send? Unknown expiry → no. */
@@ -257,6 +354,8 @@ async function callServer(
 
 interface WrapperDeps {
   origFetch: typeof fetch
+  /** Reads the seat's token from its credential file (never from HTTP). */
+  credentials: CredentialReader
   /** manta-server round trips; `null` = unreachable / refused. */
   resolve: (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }) => Promise<Resolved | null>
   refresh: (provider: Provider, seatId: string) => Promise<Resolved | null>
@@ -265,12 +364,11 @@ interface WrapperDeps {
 }
 
 function createAccountsFetch(deps: WrapperDeps): typeof fetch {
-  const { origFetch, resolve, refresh } = deps
+  const { origFetch, resolve, refresh, credentials } = deps
   const now = deps.now ?? (() => Date.now())
   const testUpstream = deps.testUpstream ?? null
 
   const byConversation = new Map<string, { result: Resolved; at: number }>()
-  const bySeat = new Map<string, Resolved & { at: number }>()
   const resolving = new Map<string, Promise<Resolved | null>>()
   const refreshing = new Map<string, Promise<Resolved | null>>()
 
@@ -278,17 +376,6 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     map.delete(key)
     map.set(key, value)
     if (map.size > MAX_CACHE_ENTRIES) map.delete(map.keys().next().value as string)
-  }
-
-  // A resolve answer never replaces a token we hold that outlives it (a slower
-  // answer from before a refresh must not bring the old token back); a refresh
-  // answer always does — it is the server's latest word on the seat.
-  const noteSeat = (provider: Provider, r: Resolved | null, authoritative = false) => {
-    if (!r || r.live || !r.seatId) return
-    const key = `${provider}|${r.seatId}`
-    const have = bySeat.get(key)
-    if (!authoritative && have?.accessToken && typeof have.expiresAt === "number" && typeof r.expiresAt === "number" && have.expiresAt > r.expiresAt) return
-    remember(bySeat, key, { ...r, at: now() })
   }
 
   async function seatFor(provider: Provider, ids: { sessionID: string; parentSessionID: string | null }): Promise<Resolved | null> {
@@ -305,7 +392,6 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     const fresh = await run
     if (fresh) {
       remember(byConversation, key, { result: fresh, at: now() })
-      noteSeat(provider, fresh)
       return fresh
     }
     // FAIL-SAFE: the last answer for this conversation, however old; else none.
@@ -321,10 +407,7 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
         .finally(() => refreshing.delete(key))
       refreshing.set(key, run)
     }
-    return run.then((r) => {
-      noteSeat(provider, r, true)
-      return r
-    })
+    return run
   }
 
   /** Perform the call. `headers`/`body` override what the caller passed; the
@@ -374,18 +457,25 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     if (!provider || !ids || !base) return origFetch(input, init)
     if (!seat || seat.live || !seat.seatId) return send(input, init, {})
 
-    // ---- non-live seat: make sure the token is good, then swap identity ----
-    let creds: Resolved = bySeat.get(`${provider}|${seat.seatId}`) ?? seat
+    // ---- non-live seat: read its token FROM THE FILE, make sure it is good,
+    // then swap identity ----
+    let file: string | undefined = seat.credentialFile
+    let creds: SeatCredentials | null
     let headers: Headers
     let body: BodyInit | null | undefined
     try {
+      creds = credentials.read(provider, file)
+      if (!creds) return send(input, init, {}) // unreadable / outside the seats dir → live login
       if (expiresSoon(creds.expiresAt, now())) {
         const fresh = await refreshSeat(provider, seat.seatId)
-        if (fresh && !fresh.live && fresh.accessToken) creds = fresh
-        else if (fresh?.live) return send(input, init, {}) // the seat became the live login
+        if (fresh?.live) return send(input, init, {}) // the seat became the live login
+        if (fresh && !fresh.live) {
+          credentials.invalidate(file)
+          file = fresh.credentialFile ?? file
+          creds = credentials.read(provider, file) ?? creds
+        }
       }
-      if (!creds.accessToken) return send(input, init, {})
-      headers = rewriteHeaders(base, provider, { accessToken: creds.accessToken, accountId: creds.accountId })
+      headers = rewriteHeaders(base, provider, creds)
       body = await bodyFor(input, init)
     } catch {
       return origFetch(input, init)
@@ -400,8 +490,11 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     let retryHeaders: Headers | null = null
     try {
       const fresh = await refreshSeat(provider, seat.seatId)
-      if (fresh && !fresh.live && fresh.accessToken && fresh.accessToken !== creds.accessToken) {
-        retryHeaders = rewriteHeaders(base, provider, { accessToken: fresh.accessToken, accountId: fresh.accountId })
+      if (fresh && !fresh.live) {
+        credentials.invalidate(file)
+        file = fresh.credentialFile ?? file
+        const next = credentials.read(provider, file)
+        if (next && next.accessToken !== creds.accessToken) retryHeaders = rewriteHeaders(base, provider, next)
       }
     } catch {
       /* fall through: return the 401 as-is */
@@ -430,6 +523,7 @@ function install(): void {
   const server = loopbackBase(process.env.MANTA_ACCOUNTS_SERVER) ?? DEFAULT_SERVER
   const wrapped = createAccountsFetch({
     origFetch,
+    credentials: createCredentialReader(),
     resolve: (provider, ids) => {
       const q = new URLSearchParams({ provider, sessionID: ids.sessionID })
       if (ids.parentSessionID) q.set("parentSessionID", ids.parentSessionID)
@@ -469,6 +563,10 @@ export const MantaAccounts: Plugin = async () => {
   residencyFromToken,
   rewriteHeaders,
   parseResolved,
+  parseSeatCredentials,
+  allowedCredentialPath,
+  createCredentialReader,
+  seatsRootDir,
   expiresSoon,
   isReplayableBody,
   loopbackBase,

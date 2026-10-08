@@ -3,6 +3,9 @@
 // tokens only). The test file is never installed
 // (sync_opencode_plugins skips *.test.ts).
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, utimesSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MantaAccounts } from "./manta-accounts";
 
 const t: any = (MantaAccounts as any).__test;
@@ -92,9 +95,10 @@ describe("residencyFromToken / jwtClaims", () => {
 });
 
 describe("small helpers", () => {
-  it("parseResolved: a non-live answer needs a token, anything else is live", () => {
-    expect(t.parseResolved({ seatId: "seat-2", live: false, accessToken: "T", accountId: "a", expiresAt: 5 })).toEqual({ seatId: "seat-2", live: false, accessToken: "T", accountId: "a", expiresAt: 5 });
+  it("parseResolved: a non-live answer needs a credential FILE (never a token); anything else is live", () => {
+    expect(t.parseResolved({ seatId: "seat-2", live: false, provider: "claude", credentialFile: "/x/.credentials.json", expiresAt: 5 })).toEqual({ seatId: "seat-2", live: false, credentialFile: "/x/.credentials.json" });
     expect(t.parseResolved({ seatId: "seat-2", live: false })).toEqual({ seatId: "seat-2", live: true });
+    expect(t.parseResolved({ seatId: "seat-2", live: false, accessToken: "T" })).toEqual({ seatId: "seat-2", live: true });
     expect(t.parseResolved({ seatId: null, live: true })).toEqual({ seatId: null, live: true });
     expect(t.parseResolved(null)).toBeNull();
   });
@@ -124,10 +128,98 @@ describe("small helpers", () => {
   });
 });
 
+// ---- seat credential files ---------------------------------------------------
+
+const claudeFile = (access: string, expiresAt = 9_000_000) => JSON.stringify({ claudeAiOauth: { accessToken: access, refreshToken: "r", expiresAt } });
+const codexFile = (access: string, accountId = "seat-acct", expires = 9_000_000) => JSON.stringify({ openai: { type: "oauth", refresh: "r", access, expires, accountId } });
+
+function seatsDir() {
+  const base = mkdtempSync(join(tmpdir(), "manta-acct-plugin-"));
+  const root = join(base, ".manta-secrets", "accounts");
+  mkdirSync(join(root, "claude", "seat-2"), { recursive: true });
+  mkdirSync(join(root, "codex", "seat-2"), { recursive: true });
+  return { base, root, claude: join(root, "claude", "seat-2", ".credentials.json"), codex: join(root, "codex", "seat-2", "auth.json") };
+}
+
+describe("seat credential files", () => {
+  it("parseSeatCredentials: claude and codex shapes; garbage → null", () => {
+    expect(t.parseSeatCredentials("claude", claudeFile("SEAT2-TOKEN", 123))).toEqual({ accessToken: "SEAT2-TOKEN", expiresAt: 123 });
+    expect(t.parseSeatCredentials("codex", codexFile("CX", "acct-2", 456))).toEqual({ accessToken: "CX", accountId: "acct-2", expiresAt: 456 });
+    expect(t.parseSeatCredentials("codex", JSON.stringify({ type: "oauth", access: "BARE", expires: 1 }))).toEqual({ accessToken: "BARE", expiresAt: 1 });
+    expect(t.parseSeatCredentials("claude", "{}")).toBeNull();
+    expect(t.parseSeatCredentials("codex", claudeFile("x"))).toBeNull();
+    expect(t.parseSeatCredentials("claude", "not json")).toBeNull();
+  });
+
+  it("allowedCredentialPath: absolute + real path inside the seats dir only", () => {
+    const d = seatsDir();
+    try {
+      writeFileSync(d.claude, claudeFile("T"));
+      expect(t.allowedCredentialPath(d.claude, d.root)).toContain("seat-2");
+      expect(t.allowedCredentialPath("relative/.credentials.json", d.root)).toBeNull();
+      expect(t.allowedCredentialPath(join(d.root, "..", "..", "elsewhere.json"), d.root)).toBeNull();
+      expect(t.allowedCredentialPath(join(d.root, "claude", "seat-2"), d.root)).toBeNull(); // a directory
+      expect(t.allowedCredentialPath(join(d.root, "claude", "seat-2", "missing.json"), d.root)).toBeNull();
+      expect(t.allowedCredentialPath(undefined, d.root)).toBeNull();
+      expect(t.allowedCredentialPath("/etc/passwd", d.root)).toBeNull();
+      // a symlink INSIDE the dir that points OUT of it is rejected (realpath)
+      const outside = join(d.base, "outside.json");
+      writeFileSync(outside, claudeFile("STOLEN"));
+      const link = join(d.root, "claude", "seat-2", "link.json");
+      symlinkSync(outside, link);
+      expect(t.allowedCredentialPath(link, d.root)).toBeNull();
+      // a sibling dir that merely shares the prefix is not inside
+      mkdirSync(join(d.base, ".manta-secrets", "accounts-evil"), { recursive: true });
+      writeFileSync(join(d.base, ".manta-secrets", "accounts-evil", "x.json"), "{}");
+      expect(t.allowedCredentialPath(join(d.base, ".manta-secrets", "accounts-evil", "x.json"), d.root)).toBeNull();
+    } finally {
+      rmSync(d.base, { recursive: true, force: true });
+    }
+  });
+
+  it("the reader serves the file's token, re-reads when the file changes (mtime) or is invalidated, and refuses outside paths", () => {
+    const d = seatsDir();
+    try {
+      writeFileSync(d.claude, claudeFile("TOKEN-A"));
+      const r = t.createCredentialReader(() => d.root);
+      expect(r.read("claude", d.claude)?.accessToken).toBe("TOKEN-A");
+      writeFileSync(d.claude, claudeFile("TOKEN-B"));
+      const future = new Date(Date.now() + 5000);
+      utimesSync(d.claude, future, future);
+      expect(r.read("claude", d.claude)?.accessToken).toBe("TOKEN-B");
+      // same size + same mtime → served from cache until invalidated
+      const st = new Date(future.getTime());
+      writeFileSync(d.claude, claudeFile("TOKEN-C"));
+      utimesSync(d.claude, st, st);
+      expect(r.read("claude", d.claude)?.accessToken).toBe("TOKEN-B");
+      r.invalidate(d.claude);
+      expect(r.read("claude", d.claude)?.accessToken).toBe("TOKEN-C");
+      const outside = join(d.base, "o.json");
+      writeFileSync(outside, claudeFile("NOPE"));
+      expect(r.read("claude", outside)).toBeNull();
+      expect(r.read("claude", undefined)).toBeNull();
+    } finally {
+      rmSync(d.base, { recursive: true, force: true });
+    }
+  });
+
+  it("seatsRootDir honours MANTA_STATE_HOME", () => {
+    const prev = process.env.MANTA_STATE_HOME;
+    try {
+      process.env.MANTA_STATE_HOME = "/tmp/some-state";
+      expect(t.seatsRootDir()).toBe("/tmp/some-state/.manta-secrets/accounts");
+    } finally {
+      if (prev === undefined) delete process.env.MANTA_STATE_HOME;
+      else process.env.MANTA_STATE_HOME = prev;
+    }
+  });
+});
+
 // ---- the wrapper against a stub fetch --------------------------------------
 
 type Call = { url: string; init: any };
-function rig(opts: { resolve: any; refresh?: any; now?: () => number; respond?: (c: Call, n: number) => Response; testUpstream?: string | null }) {
+// `files` is the stand-in for the seat credential files: path → creds (null = unreadable).
+function rig(opts: { resolve: any; refresh?: any; files?: Record<string, any>; now?: () => number; respond?: (c: Call, n: number) => Response; testUpstream?: string | null }) {
   const calls: Call[] = [];
   const origFetch = (async (input: any, init: any) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -136,8 +228,14 @@ function rig(opts: { resolve: any; refresh?: any; now?: () => number; respond?: 
   }) as any;
   const resolveCalls: any[] = [];
   const refreshCalls: any[] = [];
+  const files = opts.files ?? {};
+  const invalidated: string[] = [];
   const f = t.createAccountsFetch({
     origFetch,
+    credentials: {
+      read: (_p: string, file: string) => files[file] ?? null,
+      invalidate: (file: string) => void invalidated.push(file),
+    },
     resolve: async (p: string, ids: any) => {
       resolveCalls.push([p, ids]);
       return opts.resolve(p, ids);
@@ -149,18 +247,21 @@ function rig(opts: { resolve: any; refresh?: any; now?: () => number; respond?: 
     now: opts.now ?? (() => 1_000_000),
     testUpstream: opts.testUpstream ?? null,
   });
-  return { f, calls, resolveCalls, refreshCalls };
+  return { f, calls, resolveCalls, refreshCalls, files, invalidated };
 }
 const sessionInit = (extra: Record<string, string> = {}) => ({
   method: "POST",
   headers: { authorization: "Bearer LIVE", "x-opencode-session-id": "ses_1", ...extra },
   body: JSON.stringify({ m: 1 }),
 });
-const seat2 = { seatId: "seat-2", live: false, accessToken: "SEAT2-TOKEN", expiresAt: 9_000_000 };
+const F2 = "/seats/claude/seat-2/.credentials.json";
+const seat2 = { seatId: "seat-2", live: false, credentialFile: F2 };
+const files2 = (over: any = {}) => ({ [F2]: { accessToken: "SEAT2-TOKEN", expiresAt: 9_000_000, ...over } });
+const authOf = (c: Call) => new Headers(c.init.headers).get("authorization");
 
 describe("wrapper", () => {
   it("never touches a non-model request", async () => {
-    const r = rig({ resolve: async () => seat2 });
+    const r = rig({ resolve: async () => seat2, files: files2() });
     await r.f("https://auth.openai.com/oauth/token", { method: "POST", body: "x" });
     await r.f(CLAUDE, { method: "GET" });
     expect(r.resolveCalls).toHaveLength(0);
@@ -168,10 +269,10 @@ describe("wrapper", () => {
   });
 
   it("passes through when the request carries no session id", async () => {
-    const r = rig({ resolve: async () => seat2 });
+    const r = rig({ resolve: async () => seat2, files: files2() });
     await r.f(CLAUDE, { method: "POST", headers: { authorization: "Bearer LIVE" }, body: "{}" });
     expect(r.resolveCalls).toHaveLength(0);
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer LIVE");
+    expect(authOf(r.calls[0])).toBe("Bearer LIVE");
   });
 
   it("live seat → the request is passed through byte for byte (same init object)", async () => {
@@ -182,8 +283,8 @@ describe("wrapper", () => {
     expect(r.calls[0].url).toBe(CLAUDE);
   });
 
-  it("non-live seat → authorization swapped, URL/method/body/other headers kept", async () => {
-    const r = rig({ resolve: async () => seat2 });
+  it("non-live seat → the token is read from the FILE and swapped in; URL/method/body/other headers kept", async () => {
+    const r = rig({ resolve: async () => seat2, files: files2() });
     await r.f(CLAUDE, sessionInit({ "anthropic-beta": "b" }));
     const h = new Headers(r.calls[0].init.headers);
     expect(h.get("authorization")).toBe("Bearer SEAT2-TOKEN");
@@ -194,9 +295,18 @@ describe("wrapper", () => {
     expect(r.calls[0].init.body).toBe(JSON.stringify({ m: 1 }));
   });
 
-  it("codex: account id and residency come from the seat", async () => {
+  it("a credential file that cannot be read (or is outside the seats dir) → live pass-through", async () => {
+    const r = rig({ resolve: async () => seat2, files: {} });
+    const init = sessionInit();
+    await r.f(CLAUDE, init);
+    expect(r.calls[0].init).toBe(init);
+    expect(authOf(r.calls[0])).toBe("Bearer LIVE");
+  });
+
+  it("codex: account id and residency come from the seat's file", async () => {
     const token = jwt({ "https://api.openai.com/auth": { chatgpt_compute_residency: "us" } });
-    const r = rig({ resolve: async () => ({ seatId: "seat-2", live: false, accessToken: token, accountId: "seat-acct", expiresAt: 9_000_000 }) });
+    const F = "/seats/codex/seat-2/auth.json";
+    const r = rig({ resolve: async () => ({ seatId: "seat-2", live: false, credentialFile: F }), files: { [F]: { accessToken: token, accountId: "seat-acct", expiresAt: 9_000_000 } } });
     await r.f(CODEX, sessionInit({ "ChatGPT-Account-Id": "live-acct" }));
     const h = new Headers(r.calls[0].init.headers);
     expect(h.get("chatgpt-account-id")).toBe("seat-acct");
@@ -206,7 +316,7 @@ describe("wrapper", () => {
 
   it("sends the sub-agent's parent id to resolve and caches per conversation for 30 s", async () => {
     let now = 1_000_000;
-    const r = rig({ resolve: async () => seat2, now: () => now });
+    const r = rig({ resolve: async () => seat2, files: files2(), now: () => now });
     const sub = { method: "POST", headers: { "x-opencode-session-id": "c", "x-opencode-parent-session-id": "p" }, body: "{}" };
     await r.f(CLAUDE, sub);
     expect(r.resolveCalls[0][1]).toEqual({ sessionID: "c", parentSessionID: "p" });
@@ -217,61 +327,70 @@ describe("wrapper", () => {
     expect(r.resolveCalls).toHaveLength(2);
   });
 
-  it("resolve down → the last answer for the conversation is used; none yet → untouched", async () => {
+  it("resolve down → the last answer for the conversation (and its FILE) is used; none yet → untouched", async () => {
     let now = 1_000_000;
     let up = true;
-    const r = rig({ resolve: async () => (up ? seat2 : null), now: () => now });
+    const r = rig({ resolve: async () => (up ? seat2 : null), files: files2(), now: () => now });
     const first = rig({ resolve: async () => null });
     await first.f(CLAUDE, sessionInit());
-    expect(new Headers(first.calls[0].init.headers).get("authorization")).toBe("Bearer LIVE");
+    expect(authOf(first.calls[0])).toBe("Bearer LIVE");
 
     await r.f(CLAUDE, sessionInit());
     up = false;
     now += 120_000;
     await r.f(CLAUDE, sessionInit());
-    expect(new Headers(r.calls[1].init.headers).get("authorization")).toBe("Bearer SEAT2-TOKEN");
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT2-TOKEN");
   });
 
   it("a resolver that THROWS is the same as one that is down", async () => {
     const r = rig({ resolve: async () => { throw new Error("boom"); } });
     await r.f(CLAUDE, sessionInit());
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer LIVE");
+    expect(authOf(r.calls[0])).toBe("Bearer LIVE");
   });
 
-  it("a token within 60 s of expiry is refreshed BEFORE sending", async () => {
+  it("a token within 60 s of expiry is refreshed BEFORE sending, then the file is re-read", async () => {
     const r = rig({
-      resolve: async () => ({ ...seat2, expiresAt: 1_030_000 }),
-      refresh: async () => ({ seatId: "seat-2", live: false, accessToken: "SEAT2-FRESH", expiresAt: 9_000_000 }),
+      resolve: async () => seat2,
+      files: files2({ expiresAt: 1_030_000 }),
+      refresh: async () => {
+        r.files[F2] = { accessToken: "SEAT2-FRESH", expiresAt: 9_000_000 }; // the server rewrote the file
+        return seat2;
+      },
     });
     await r.f(CLAUDE, sessionInit());
     expect(r.refreshCalls).toEqual([["claude", "seat-2"]]);
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer SEAT2-FRESH");
-    // The refreshed token is remembered for the seat: no second refresh.
+    expect(r.invalidated).toContain(F2);
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-FRESH");
+    // The fresh file is not near expiry: no second refresh.
     await r.f(CLAUDE, sessionInit({ "x-opencode-session-id": "ses_other" }));
     expect(r.refreshCalls).toHaveLength(1);
   });
 
-  it("a failed pre-send refresh still sends with the token we have", async () => {
-    const r = rig({ resolve: async () => ({ ...seat2, expiresAt: 1_030_000 }), refresh: async () => null });
+  it("a failed pre-send refresh still sends with the token in the file", async () => {
+    const r = rig({ resolve: async () => seat2, files: files2({ expiresAt: 1_030_000 }), refresh: async () => null });
     await r.f(CLAUDE, sessionInit());
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer SEAT2-TOKEN");
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-TOKEN");
   });
 
-  it("401 from a non-live seat → refresh once, retry once with the new token", async () => {
+  it("401 from a non-live seat → refresh once, re-read the file, retry once with the new token", async () => {
     const r = rig({
       resolve: async () => seat2,
-      refresh: async () => ({ seatId: "seat-2", live: false, accessToken: "SEAT2-NEW", expiresAt: 9_000_000 }),
+      files: files2(),
+      refresh: async () => {
+        r.files[F2] = { accessToken: "SEAT2-NEW", expiresAt: 9_000_000 };
+        return seat2;
+      },
       respond: (_c, n) => new Response("{}", { status: n === 1 ? 401 : 200 }),
     });
     const res = await r.f(CLAUDE, sessionInit());
     expect(res.status).toBe(200);
     expect(r.calls).toHaveLength(2);
-    expect(new Headers(r.calls[1].init.headers).get("authorization")).toBe("Bearer SEAT2-NEW");
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT2-NEW");
     expect(r.calls[1].init.body).toBe(JSON.stringify({ m: 1 }));
   });
 
-  it("401 and the refresh gives nothing new → the 401 is returned, no second send", async () => {
-    const r = rig({ resolve: async () => seat2, refresh: async () => ({ ...seat2 }), respond: () => new Response("no", { status: 401 }) });
+  it("401 and the file still holds the same token → the 401 is returned, no second send", async () => {
+    const r = rig({ resolve: async () => seat2, files: files2(), refresh: async () => seat2, respond: () => new Response("no", { status: 401 }) });
     const res = await r.f(CLAUDE, sessionInit());
     expect(res.status).toBe(401);
     expect(r.calls).toHaveLength(1);
@@ -287,7 +406,11 @@ describe("wrapper", () => {
   it("a Request input: body read once and passed explicitly, so the retry can resend it", async () => {
     const r = rig({
       resolve: async () => seat2,
-      refresh: async () => ({ seatId: "seat-2", live: false, accessToken: "SEAT2-NEW", expiresAt: 9_000_000 }),
+      files: files2(),
+      refresh: async () => {
+        r.files[F2] = { accessToken: "SEAT2-NEW", expiresAt: 9_000_000 };
+        return seat2;
+      },
       respond: (_c, n) => new Response("{}", { status: n === 1 ? 401 : 200 }),
     });
     const req = new Request(CLAUDE, { method: "POST", headers: { authorization: "Bearer LIVE", "x-opencode-session-id": "ses_1" }, body: '{"hello":true}' });
@@ -299,27 +422,26 @@ describe("wrapper", () => {
       expect(c.init.method).toBe("POST");
       expect(Buffer.from(c.init.body).toString()).toBe('{"hello":true}');
     }
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer SEAT2-TOKEN");
-    expect(new Headers(r.calls[1].init.headers).get("authorization")).toBe("Bearer SEAT2-NEW");
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-TOKEN");
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT2-NEW");
   });
 
   it("a streaming body is swapped but never retried", async () => {
-    const r = rig({ resolve: async () => seat2, refresh: async () => ({ seatId: "seat-2", live: false, accessToken: "N" }), respond: () => new Response("no", { status: 401 }) });
+    const r = rig({ resolve: async () => seat2, files: files2(), refresh: async () => seat2, respond: () => new Response("no", { status: 401 }) });
     const res = await r.f(CLAUDE, { ...sessionInit(), body: new ReadableStream() });
     expect(res.status).toBe(401);
     expect(r.calls).toHaveLength(1);
   });
 
   it("test upstream: intercepted requests go to the stub, path and query kept, identity still swapped", async () => {
-    const r = rig({ resolve: async () => seat2, testUpstream: "http://127.0.0.1:4555" });
+    const r = rig({ resolve: async () => seat2, files: files2(), testUpstream: "http://127.0.0.1:4555" });
     await r.f(CLAUDE, sessionInit());
     expect(r.calls[0].url).toBe("http://127.0.0.1:4555/v1/messages?beta=true");
-    expect(new Headers(r.calls[0].init.headers).get("authorization")).toBe("Bearer SEAT2-TOKEN");
-    // …and a pass-through is redirected too, but carries the live token.
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-TOKEN");
     const live = rig({ resolve: async () => ({ seatId: "s", live: true }), testUpstream: "http://127.0.0.1:4555" });
     await live.f(CODEX, sessionInit());
     expect(live.calls[0].url).toBe("http://127.0.0.1:4555/backend-api/codex/responses");
-    expect(new Headers(live.calls[0].init.headers).get("authorization")).toBe("Bearer LIVE");
+    expect(authOf(live.calls[0])).toBe("Bearer LIVE");
   });
 });
 

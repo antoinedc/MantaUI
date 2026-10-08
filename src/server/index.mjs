@@ -628,7 +628,7 @@ const seatAssigner = createSeatAssigner({
   listSeatSnapshots,
   refreshSeatCredentials: (provider, t) =>
     provider === "claude"
-      ? oc.refreshClaudeSeatCredentials({ seatId: t.seatId, dir: t.dir })
+      ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })
       : refreshCodexSeat({ seatId: t.seatId, file: t.file }),
 });
 const handleAccountsRoute = createAccountsRouteHandler({

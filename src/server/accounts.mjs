@@ -330,7 +330,11 @@ function placeSeat(prov, seat, identity, defaultAccountLabel) {
 function applyIdentity(seat, identity) {
   seat.accountUuid = identity.accountUuid;
   seat.email = identity.email ?? seat.email;
-  seat.status = "ok";
+  // An "expired" seat (its refresh token is dead) keeps that status through
+  // re-identification: its access token may still be good for hours, and
+  // identifying it is not evidence the login works. A refresh success, or a new
+  // sign-in, is what clears it.
+  if (seat.status !== "expired") seat.status = "ok";
 }
 
 /**
@@ -429,6 +433,29 @@ export function mergeFindings(state, findings, { defaultAccountLabel }) {
 }
 
 /**
+ * The store after a seat refresh outcome (see `noteRefreshOutcome`). Pure.
+ * Returns the SAME object when nothing changes.
+ * @param {AccountsStore} store
+ * @param {string} provider
+ * @param {string} seatId
+ * @param {{ok?: boolean, reason?: string}|null|undefined} outcome
+ */
+export function applyRefreshOutcome(store, provider, seatId, outcome) {
+  const seat = findSeat(store?.providers?.[provider] ?? emptyProviderState(), (s) => s.id === seatId)?.seat;
+  if (!seat) return store;
+  let status = null;
+  if (outcome?.ok === true) {
+    if (seat.status === "expired") status = "ok";
+  } else if (provider === "claude" && outcome?.reason === "refresh-token-expired") {
+    if (seat.status !== "expired" && seat.status !== "signed-out") status = "expired";
+  }
+  if (!status) return store;
+  const next = structuredClone(store);
+  findSeat(next.providers[provider], (s) => s.id === seatId).seat.status = status;
+  return next;
+}
+
+/**
  * Post-discovery bookkeeping on a provider: default mode (auto once a SECOND
  * seat appears — never flipped again afterwards, so a user's manual choice
  * sticks) and a valid active seat (the live login's seat when known).
@@ -475,21 +502,17 @@ export async function readCodexEntryFile(path) {
   return entry?.type === "oauth" && typeof entry.access === "string" && entry.access ? entry : null;
 }
 
-/** What a request needs out of a seat's credential file — never logged, never
- *  leaves the server except through the loopback-only resolve route. */
+/** What the router needs to know about a seat's credential file — that it holds
+ *  a usable access token, and when it expires. The token itself is deliberately
+ *  NOT returned: nothing outside the credential reader (and the plugin, from the
+ *  file) ever holds one. */
 async function readSeatCredential(provider, file) {
   if (provider === "claude") {
     const c = await readClaudeCredentialsFile(file);
-    return c?.accessToken ? { accessToken: c.accessToken, expiresAt: typeof c.expiresAt === "number" ? c.expiresAt : null } : null;
+    return c?.accessToken ? { expiresAt: typeof c.expiresAt === "number" ? c.expiresAt : null } : null;
   }
   const e = await readCodexEntryFile(file);
-  return e
-    ? {
-        accessToken: e.access,
-        expiresAt: typeof e.expires === "number" ? e.expires : null,
-        accountId: typeof e.accountId === "string" && e.accountId ? e.accountId : null,
-      }
-    : null;
+  return e?.access ? { expiresAt: typeof e.expires === "number" ? e.expires : null } : null;
 }
 
 const shortHash = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
@@ -596,7 +619,7 @@ export function createAccountsService({
       // under a different id (the same login was first found via the live file)
       // is just as identified.
       const known = findSeat(prov, (s) => s.id === id || s.credentialDir === dir)?.seat;
-      if (known?.status === "ok" && known.accountUuid && known.credentialDir) continue; // identified: no call
+      if ((known?.status === "ok" || known?.status === "expired") && known.accountUuid && known.credentialDir) continue; // identified: no call
       dirs.push({ id, dir, identity: await fetchClaudeProfile(creds.accessToken, fetchImpl) });
     }
     const live = await claudeLiveIdentity();
@@ -795,14 +818,14 @@ export function createAccountsService({
     /**
      * Everything the per-conversation router needs about one provider's seats
      * (seatAssignment.mjs): mode, active seat, and per seat whether the request
-     * path can use it and — for a seat NOT read from the live file — its current
-     * token. `live` seats carry no credential (the plugin lets them through
-     * untouched). INTERNAL: `credential` is a token, so this never goes to a
-     * renderer. `null` = unknown provider.
+     * path can use it, plus — for a seat NOT read from the live file — where its
+     * credential file is and when its token expires (never the token). `live`
+     * seats carry no credential (the plugin lets them through untouched).
+     * INTERNAL: not for a renderer. `null` = unknown provider.
      * @returns {Promise<null|{mode:string, activeSeatId:string|null, seats:Array<{
      *   seatId:string, accountId:string, live:boolean, usable:boolean,
      *   dir:string|null, file:string|null,
-     *   credential:null|{accessToken:string, expiresAt:number|null, accountId?:string|null}}>}>}
+     *   credential:null|{expiresAt:number|null}}>}>}
      */
     async seatStates(provider) {
       if (!ACCOUNT_PROVIDERS.includes(provider)) return null;
@@ -821,13 +844,35 @@ export function createAccountsService({
           // A live seat is usable by construction (the source resolver only
           // says "live" when the live login exists); a directory seat needs a
           // readable token; a signed-out seat ("none") is never usable.
-          usable: seat.status !== "signed-out" && seat.status !== "expired" && (live || Boolean(credential?.accessToken)),
+          usable: seat.status !== "signed-out" && seat.status !== "expired" && (live || Boolean(credential)),
           dir: source.kind === "dir" ? source.dir : null,
           file,
           credential,
         });
       }
       return { mode: prov.mode, activeSeatId: prov.activeSeatId, seats };
+    },
+
+    /**
+     * Fold a seat refresh's outcome into the seat's status: a Claude seat whose
+     * REFRESH TOKEN is known-expired becomes "expired" (the router never picks
+     * it — the user must sign it in again); any later success makes it "ok"
+     * again. Anything else (a network blip, the CLI failing) changes nothing.
+     * Only a seat that is "ok"/"unknown"/"expired" is touched, so a status set
+     * by something else is never overwritten. Best-effort; never throws.
+     * @returns {Promise<boolean>} whether the store changed
+     */
+    async noteRefreshOutcome(provider, seatId, outcome) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider)) return false;
+        const next = applyRefreshOutcome(store ?? (await loadStore()), provider, seatId, outcome);
+        if (next === (store ?? null)) return false;
+        await saveStore(next);
+        return true;
+      } catch (e) {
+        log.warn?.("[accounts] recording a refresh outcome failed:", e?.message ?? e);
+        return false;
+      }
     },
 
     /**
