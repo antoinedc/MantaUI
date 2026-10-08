@@ -28,7 +28,8 @@
 // identified costs no network call. Only new / unidentified seats hit the
 // profile endpoint, and the live login's identity is cached.
 //
-// Phase boundaries: no RPC channels, no sign-in, no assignment, no plugins here.
+// Phase boundaries: no RPC channels and no sign-in here. Which seat a CONVERSATION
+// uses lives in seatAssignment.mjs; this module only reports seat state to it.
 
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -40,10 +41,31 @@ import { opencodeAuthPath } from "./opencode.mjs";
 
 export const ACCOUNT_PROVIDERS = ["claude", "codex"];
 
-// Does each CONVERSATION get its own seat (spec §4, the request-path plugins)?
-// Not yet: until phase 2 lands the plugins, every Claude/Codex request goes
-// through the LIVE login, whatever the store says. Phase 2 flips this to true.
-export const PER_CONVERSATION_ROUTING = false;
+// Does each CONVERSATION get its own seat (spec §4, the request-path plugin)?
+// Only while the `manta-accounts` plugin is demonstrably in the request path:
+// without it every Claude/Codex request goes through the LIVE login, whatever
+// the store says. The plugin proves it is there by calling resolve; each call
+// stamps `lastPluginSeenAt`, and routing counts as active for a while after the
+// last one. A plugin that is removed (or opencode restarted without it) fades
+// out on its own — the aggregate goes back to following the serving seat.
+export const PLUGIN_SEEN_WINDOW_MS = 10 * 60_000;
+let lastPluginSeenAt = 0;
+
+/** The plugin just called resolve (in-memory only: a server restart forgets it,
+ *  and the next resolve — seconds away if the plugin is installed — restores it). */
+export function notePluginSeen(at = Date.now()) {
+  lastPluginSeenAt = at;
+}
+
+/** Is each conversation currently being routed to its own seat? */
+export function perConversationRoutingActive(now = Date.now()) {
+  return lastPluginSeenAt > 0 && now - lastPluginSeenAt <= PLUGIN_SEEN_WINDOW_MS;
+}
+
+/** Test seam: forget that the plugin was ever seen. */
+export function resetPluginSeen() {
+  lastPluginSeenAt = 0;
+}
 const STORE_VERSION = 1;
 const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 // How long an identified live login is trusted without re-asking Anthropic. The
@@ -241,8 +263,8 @@ export function shouldMirror({ seat, source, liveUuid }) {
  * How the provider AGGREGATE is built from per-seat readings — the ONE place
  * that decision lives (the usage poller and the at-limit recheck both call it).
  *
- * While requests are not routed per conversation (`PER_CONVERSATION_ROUTING`
- * false) every request is served by the LIVE seat, so the aggregate must be that
+ * While requests are not routed per conversation (`perConversationRouting`
+ * false — the plugin has not been seen, see `perConversationRoutingActive`) every request is served by the LIVE seat, so the aggregate must be that
  * seat's reading (manual mode, active = the serving seat) — reporting the
  * least-loaded seat instead would tell the stopper/resume/routing/pacing there
  * is room while requests hit the wall. With no serving seat known, or once
@@ -251,7 +273,7 @@ export function shouldMirror({ seat, source, liveUuid }) {
  * @param {{plan: {mode: "auto"|"manual", activeSeatId: string|null, servingSeatId?: string|null}, perConversationRouting?: boolean}} args
  * @returns {{mode: "auto"|"manual", activeSeatId: string|null}}
  */
-export function aggregationPolicy({ plan, perConversationRouting = PER_CONVERSATION_ROUTING }) {
+export function aggregationPolicy({ plan, perConversationRouting = false }) {
   if (!perConversationRouting && plan?.servingSeatId) {
     return { mode: "manual", activeSeatId: plan.servingSeatId };
   }
@@ -451,6 +473,23 @@ export async function readCodexEntryFile(path) {
   const j = await readJsonFile(path);
   const entry = j?.openai ?? (j?.access ? j : null);
   return entry?.type === "oauth" && typeof entry.access === "string" && entry.access ? entry : null;
+}
+
+/** What a request needs out of a seat's credential file — never logged, never
+ *  leaves the server except through the loopback-only resolve route. */
+async function readSeatCredential(provider, file) {
+  if (provider === "claude") {
+    const c = await readClaudeCredentialsFile(file);
+    return c?.accessToken ? { accessToken: c.accessToken, expiresAt: typeof c.expiresAt === "number" ? c.expiresAt : null } : null;
+  }
+  const e = await readCodexEntryFile(file);
+  return e
+    ? {
+        accessToken: e.access,
+        expiresAt: typeof e.expires === "number" ? e.expires : null,
+        accountId: typeof e.accountId === "string" && e.accountId ? e.accountId : null,
+      }
+    : null;
 }
 
 const shortHash = (s) => createHash("sha256").update(String(s)).digest("hex").slice(0, 16);
@@ -747,10 +786,62 @@ export function createAccountsService({
         mode: prov.mode,
         activeSeatId: prov.activeSeatId,
         // The seat the live login serves — every request goes through it until
-        // requests are routed per conversation (see PER_CONVERSATION_ROUTING).
+        // requests are routed per conversation (see perConversationRoutingActive).
         servingSeatId: seats.some((x) => x.seatId === servingSeatId) ? servingSeatId : null,
         seats,
       };
+    },
+
+    /**
+     * Everything the per-conversation router needs about one provider's seats
+     * (seatAssignment.mjs): mode, active seat, and per seat whether the request
+     * path can use it and — for a seat NOT read from the live file — its current
+     * token. `live` seats carry no credential (the plugin lets them through
+     * untouched). INTERNAL: `credential` is a token, so this never goes to a
+     * renderer. `null` = unknown provider.
+     * @returns {Promise<null|{mode:string, activeSeatId:string|null, seats:Array<{
+     *   seatId:string, accountId:string, live:boolean, usable:boolean,
+     *   dir:string|null, file:string|null,
+     *   credential:null|{accessToken:string, expiresAt:number|null, accountId?:string|null}}>}>}
+     */
+    async seatStates(provider) {
+      if (!ACCOUNT_PROVIDERS.includes(provider)) return null;
+      await discover();
+      const prov = (store ?? emptyStore()).providers[provider];
+      const { seats: resolved } = await resolveSeats(provider, prov);
+      const seats = [];
+      for (const { account, seat, source } of resolved) {
+        const live = source.kind === "live";
+        const file = source.kind === "dir" ? pathForSource(provider, source) : null;
+        const credential = file ? await readSeatCredential(provider, file) : null;
+        seats.push({
+          seatId: seat.id,
+          accountId: account.id,
+          live,
+          // A live seat is usable by construction (the source resolver only
+          // says "live" when the live login exists); a directory seat needs a
+          // readable token; a signed-out seat ("none") is never usable.
+          usable: seat.status !== "signed-out" && seat.status !== "expired" && (live || Boolean(credential?.accessToken)),
+          dir: source.kind === "dir" ? source.dir : null,
+          file,
+          credential,
+        });
+      }
+      return { mode: prov.mode, activeSeatId: prov.activeSeatId, seats };
+    },
+
+    /**
+     * Codex seats the refresh sweep must refresh itself — the ones NOT read from
+     * opencode's live auth.json (opencode owns that entry and its rotation).
+     * @returns {Promise<Array<{seatId:string, file:string}>>}
+     */
+    async codexRefreshTargets() {
+      await discover();
+      const prov = (store ?? emptyStore()).providers.codex;
+      const { seats } = await resolveSeats("codex", prov);
+      return seats
+        .filter((x) => x.source.kind === "dir")
+        .map((x) => ({ seatId: x.seat.id, file: pathForSource("codex", x.source) }));
     },
 
     /**

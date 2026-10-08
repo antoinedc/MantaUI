@@ -107,8 +107,10 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
-import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, getUsageHistory } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
 import { createAccountsService } from "./accounts.mjs";
+import { createSeatAssigner } from "./seatAssignment.mjs";
+import { refreshCodexSeat } from "./codexRefresh.mjs";
 import {
   createCapJob,
   getJob,
@@ -615,6 +617,19 @@ const optimizerPacing = createPacingState({
 // and a provider with no seats keeps today's single-credential behaviour.
 const accountsService = createAccountsService();
 void accountsService.discover({ force: true });
+
+// Multi-account phase 2: which seat a conversation's requests use. Called by the
+// `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
+// /api/accounts/refresh below); each call also proves the plugin is installed,
+// which is what turns per-conversation routing on (accounts.mjs).
+const seatAssigner = createSeatAssigner({
+  accounts: accountsService,
+  listSeatSnapshots,
+  refreshSeatCredentials: (provider, t) =>
+    provider === "claude"
+      ? oc.refreshClaudeSeatCredentials({ seatId: t.seatId, dir: t.dir })
+      : refreshCodexSeat({ seatId: t.seatId, file: t.file }),
+});
 
 // eslint-disable-next-line no-unused-vars
 const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
@@ -4530,6 +4545,52 @@ const handleRequest = async (req, res) => {
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
       // class-2 (BET-1460): notify opencode tool — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Multi-account seat routing (phase 2) ----------
+  // GET  /api/accounts/resolve?provider=claude|codex&sessionID=&parentSessionID=
+  // POST /api/accounts/refresh  body {provider, seatId}
+  // Both answer `{seatId, live:true}` (the request goes through the live login
+  // untouched) or `{seatId, live:false, accessToken, accountId?, expiresAt?}`.
+  // The ONLY consumer is the manta-accounts opencode plugin (docs/opencode-tools/
+  // manta-accounts-plugin.ts). The token is returned over this Bearer-gated
+  // loopback route and is never logged. 400 on bad input, 404 on an unknown seat.
+  if (path === "/api/accounts/resolve" || path === "/api/accounts/refresh") {
+    try {
+      const isResolve = path === "/api/accounts/resolve";
+      if (req.method !== (isResolve ? "GET" : "POST")) {
+        respondJson(res, 405, { error: "method not allowed" });
+        return;
+      }
+      if (isResolve) {
+        const provider = url.searchParams.get("provider") || "";
+        const sessionID = url.searchParams.get("sessionID") || "";
+        const parentSessionID = url.searchParams.get("parentSessionID") || null;
+        if (!["claude", "codex"].includes(provider) || !sessionID || sessionID.length > 200 || (parentSessionID && parentSessionID.length > 200)) {
+          respondJson(res, 400, { error: "invalid" });
+          return;
+        }
+        respondJson(res, 200, await seatAssigner.resolve(provider, sessionID, parentSessionID));
+        return;
+      }
+      const body = await readJsonBody(req).catch(() => null);
+      const provider = body?.provider;
+      const seatId = body?.seatId;
+      if (!["claude", "codex"].includes(provider) || typeof seatId !== "string" || !seatId || seatId.length > 200) {
+        respondJson(res, 400, { error: "invalid" });
+        return;
+      }
+      const result = await seatAssigner.refreshSeat(provider, seatId);
+      if (!result) {
+        respondJson(res, 404, { error: "unknown seat" });
+        return;
+      }
+      respondJson(res, 200, result);
+    } catch (e) {
+      // class-2 (BET-1460): manta-accounts plugin only — it fails open on any non-200.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;
