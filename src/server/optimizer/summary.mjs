@@ -196,6 +196,7 @@ function windowsFor(snapshots, history, nowMs, pressureMap = {}) {
   const out = [];
   for (const snap of snapshots ?? []) {
     for (const w of snap.windows ?? []) {
+      if (w?.active === false) continue; // not in force: no forecast, no chip
       const key = `${snap.provider}:${w.kind}`;
       const pressure = pressureMap?.[key] ?? null;
       out.push({
