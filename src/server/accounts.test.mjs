@@ -415,7 +415,9 @@ test("service: seatsFor reads the LIVE file for the seat whose login is live, th
     const plan2 = await svc2.seatsFor("claude");
     const by2 = Object.fromEntries(plan2.seats.map((s) => [s.seatId, s]));
     assert.equal((await by2["seat-1"].deps.readCredentials()).accessToken, "tok-A-fresh");
-    assert.equal((await by2["seat-2"].deps.readCredentials()).accessToken, "tok-B-old");
+    // seat-2 was live earlier, so its directory was kept in step with the live
+    // file (tok-B-live) — the swap away reads the FRESH copy, not tok-B-old.
+    assert.equal((await by2["seat-2"].deps.readCredentials()).accessToken, "tok-B-live");
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
@@ -554,7 +556,8 @@ test("service: Codex seatsFor reads auth.json (fresh) when the accountId matches
 
     await writeFile(paths.codexAuthPath, entry("a-other", "chatgpt-2"));
     plan = await svc.seatsFor("codex");
-    assert.equal(await plan.seats[0].deps.readToken(), "a-orig");
+    // The copy was mirrored from the refreshed auth.json while it was live.
+    assert.equal(await plan.seats[0].deps.readToken(), "a-refreshed");
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }

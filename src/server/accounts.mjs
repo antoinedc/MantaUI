@@ -31,7 +31,7 @@
 // Phase boundaries: no RPC channels, no sign-in, no assignment, no plugins here.
 
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { secretsRoot, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
@@ -39,6 +39,11 @@ import { CREDENTIALS_PATH, parseCredentials } from "./claudeAuth.mjs";
 import { opencodeAuthPath } from "./opencode.mjs";
 
 export const ACCOUNT_PROVIDERS = ["claude", "codex"];
+
+// Does each CONVERSATION get its own seat (spec §4, the request-path plugins)?
+// Not yet: until phase 2 lands the plugins, every Claude/Codex request goes
+// through the LIVE login, whatever the store says. Phase 2 flips this to true.
+export const PER_CONVERSATION_ROUTING = false;
 const STORE_VERSION = 1;
 const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 // How long an identified live login is trusted without re-asking Anthropic. The
@@ -211,6 +216,46 @@ export function resolveSeatSource({ seat, liveUuid, liveAvailable, seatCount }) 
   }
   if (liveAvailable && (!seat.accountUuid || !liveUuid)) return { kind: "live" };
   return { kind: "none" };
+}
+
+/**
+ * Should the live credentials be copied into this seat's directory? Only when
+ * the live file really IS this seat's login — a positive identity match, not the
+ * "lone unknown seat" fallback of `resolveSeatSource`. Refresh tokens rotate, so
+ * while a login is live its directory copy goes stale unless it is kept in step
+ * (otherwise a swap away would read a rotated-out refresh token and sign the seat
+ * out). One direction only: live → directory, never the reverse.
+ * @param {{seat: Seat, source: {kind:string}, liveUuid: string|null}} args
+ */
+export function shouldMirror({ seat, source, liveUuid }) {
+  return (
+    source.kind === "live" &&
+    Boolean(seat.credentialDir) &&
+    Boolean(liveUuid) &&
+    Boolean(seat.accountUuid) &&
+    seat.accountUuid === liveUuid
+  );
+}
+
+/**
+ * How the provider AGGREGATE is built from per-seat readings — the ONE place
+ * that decision lives (the usage poller and the at-limit recheck both call it).
+ *
+ * While requests are not routed per conversation (`PER_CONVERSATION_ROUTING`
+ * false) every request is served by the LIVE seat, so the aggregate must be that
+ * seat's reading (manual mode, active = the serving seat) — reporting the
+ * least-loaded seat instead would tell the stopper/resume/routing/pacing there
+ * is room while requests hit the wall. With no serving seat known, or once
+ * routing is per conversation, the store's own mode / active seat apply.
+ *
+ * @param {{plan: {mode: "auto"|"manual", activeSeatId: string|null, servingSeatId?: string|null}, perConversationRouting?: boolean}} args
+ * @returns {{mode: "auto"|"manual", activeSeatId: string|null}}
+ */
+export function aggregationPolicy({ plan, perConversationRouting = PER_CONVERSATION_ROUTING }) {
+  if (!perConversationRouting && plan?.servingSeatId) {
+    return { mode: "manual", activeSeatId: plan.servingSeatId };
+  }
+  return { mode: plan?.mode ?? "auto", activeSeatId: plan?.activeSeatId ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +615,10 @@ export function createAccountsService({
       next.providers[provider] = settleProvider(before.providers[provider], found, liveSeat);
     }
     if (JSON.stringify(next) !== JSON.stringify(before)) await saveStore(next);
+    // Keep each live login's seat directory in step with it (see mirrorLive).
+    for (const provider of ACCOUNT_PROVIDERS) {
+      await resolveSeats(provider, next.providers[provider]).catch(() => {});
+    }
     lastDiscoveryAt = now();
     return next;
   }
@@ -589,15 +638,67 @@ export function createAccountsService({
     return discovering;
   }
 
-  /** @param {string} provider @param {Seat} seat */
-  async function sourceFor(provider, seat, prov) {
+  /**
+   * Keep a seat's directory copy equal to the live login it IS. Writes only when
+   * the content differs; atomic, 0600 (directory 0700); never reads from the
+   * directory into the live file. The content mirrored must be the content that
+   * was identified (Claude: same refresh-token hash as the identity cache;
+   * Codex: same accountId), so a swap landing mid-call cannot copy the wrong
+   * login into this seat. Best-effort: a failure is logged (no secrets) and the
+   * caller carries on.
+   * @returns {Promise<boolean>} whether a write happened
+   */
+  async function mirrorLive(provider, seat) {
+    try {
+      if (!(await stat(seat.credentialDir)).isDirectory()) return false;
+      let want;
+      if (provider === "claude") {
+        const raw = await readFile(claudeLivePath, "utf-8");
+        const creds = parseCredentials(raw);
+        if (!creds?.accessToken) return false;
+        if (shortHash(creds.refreshToken ?? creds.accessToken) !== liveCache.key) return false;
+        want = raw;
+      } else {
+        const entry = await readCodexEntryFile(codexLivePath());
+        if (!entry || entry.accountId !== seat.accountUuid) return false;
+        want = JSON.stringify({ openai: entry });
+      }
+      const dest = join(seat.credentialDir, provider === "claude" ? ".credentials.json" : "auth.json");
+      const have = await readFile(dest, "utf-8").catch(() => null);
+      if (have === want) return false;
+      await writeJsonAtomic(dest, want, { mode: 0o600 });
+      await chmod(seat.credentialDir, 0o700).catch(() => {});
+      return true;
+    } catch (e) {
+      log.warn?.(`[accounts] mirroring the live ${provider} login into ${seat.id} failed:`, e?.message ?? e);
+      return false;
+    }
+  }
+
+  /**
+   * Resolve every seat's credential source for ONE read, mirroring the live
+   * login into its seat's directory on the way. `servingSeatId` is the seat the
+   * live login belongs to (an identity match wins over a fallback), null if none.
+   */
+  async function resolveSeats(provider, prov) {
     const live = await liveIdentityFor(provider).catch(() => ({ present: false, identity: null }));
-    return resolveSeatSource({
-      seat,
-      liveUuid: live.identity?.accountUuid ?? null,
-      liveAvailable: live.present,
-      seatCount: allSeats(prov).length,
-    });
+    const liveUuid = live.identity?.accountUuid ?? null;
+    const seatCount = allSeats(prov).length;
+    const out = [];
+    let matchedId = null;
+    let fallbackId = null;
+    for (const account of prov.accounts) {
+      for (const seat of account.seats) {
+        const source = resolveSeatSource({ seat, liveUuid, liveAvailable: live.present, seatCount });
+        if (shouldMirror({ seat, source, liveUuid })) await mirrorLive(provider, seat);
+        if (source.kind === "live") {
+          if (liveUuid && seat.accountUuid === liveUuid) matchedId ??= seat.id;
+          else fallbackId ??= seat.id;
+        }
+        out.push({ account, seat, source });
+      }
+    }
+    return { seats: out, servingSeatId: matchedId ?? fallbackId };
   }
 
   function pathForSource(provider, source) {
@@ -624,27 +725,32 @@ export function createAccountsService({
       if (!ACCOUNT_PROVIDERS.includes(provider)) return null;
       await discover();
       const prov = (store ?? emptyStore()).providers[provider];
+      const { seats: resolved, servingSeatId } = await resolveSeats(provider, prov);
       const seats = [];
-      for (const account of prov.accounts) {
-        for (const seat of account.seats) {
-          const source = await sourceFor(provider, seat, prov);
-          const file = pathForSource(provider, source);
-          if (!file) continue;
-          const deps =
-            provider === "claude"
-              ? { readCredentials: () => readClaudeCredentialsFile(file) }
-              : { readToken: async () => (await readCodexEntryFile(file))?.access ?? "" };
-          seats.push({
-            accountId: account.id,
-            accountLabel: account.label,
-            seatId: seat.id,
-            seatLabel: seat.label,
-            deps,
-          });
-        }
+      for (const { account, seat, source } of resolved) {
+        const file = pathForSource(provider, source);
+        if (!file) continue;
+        const deps =
+          provider === "claude"
+            ? { readCredentials: () => readClaudeCredentialsFile(file) }
+            : { readToken: async () => (await readCodexEntryFile(file))?.access ?? "" };
+        seats.push({
+          accountId: account.id,
+          accountLabel: account.label,
+          seatId: seat.id,
+          seatLabel: seat.label,
+          deps,
+        });
       }
       if (seats.length === 0) return null;
-      return { mode: prov.mode, activeSeatId: prov.activeSeatId, seats };
+      return {
+        mode: prov.mode,
+        activeSeatId: prov.activeSeatId,
+        // The seat the live login serves — every request goes through it until
+        // requests are routed per conversation (see PER_CONVERSATION_ROUTING).
+        servingSeatId: seats.some((x) => x.seatId === servingSeatId) ? servingSeatId : null,
+        seats,
+      };
     },
 
     /**
@@ -655,12 +761,11 @@ export function createAccountsService({
     async claudeRefreshTargets() {
       await discover();
       const prov = (store ?? emptyStore()).providers.claude;
-      const out = [];
-      for (const seat of allSeats(prov)) {
-        const source = await sourceFor("claude", seat, prov);
-        if (source.kind === "dir") out.push({ seatId: seat.id, dir: source.dir });
-      }
-      return out;
+      const { seats } = await resolveSeats("claude", prov);
+      // A seat read from the LIVE file is never a target: the live refresh owns
+      // it, and refreshing its directory copy would rotate the refresh token the
+      // live login is using.
+      return seats.filter((x) => x.source.kind === "dir").map((x) => ({ seatId: x.seat.id, dir: x.source.dir }));
     },
   };
 }

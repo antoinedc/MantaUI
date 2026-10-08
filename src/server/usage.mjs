@@ -104,6 +104,7 @@ import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { appendObservation } from "./optimizer/forecast.mjs";
 import { aggregateSnapshot } from "../shared/seatChoice.mjs";
+import { aggregationPolicy, PER_CONVERSATION_ROUTING } from "./accounts.mjs";
 
 export { normalizeWindow };
 
@@ -156,7 +157,7 @@ let activeSeatsFor = null;
 // when EVERY seat is; manual → the active seat.
 export async function recheckAdapterAtLimit(
   adapterId,
-  { fetchImpl = fetch, now = () => Date.now(), seatsFor = activeSeatsFor } = {},
+  { fetchImpl = fetch, now = () => Date.now(), seatsFor = activeSeatsFor, perConversationRouting = PER_CONVERSATION_ROUTING } = {},
 ) {
   const adapter = ADAPTERS.find((a) => a.id === adapterId);
   if (!adapter) return false;
@@ -183,7 +184,9 @@ export async function recheckAdapterAtLimit(
       if (limited !== null) seats.push({ seatId: seat.seatId, limited });
     }
     if (seats.length === 0) return false;
-    if (plan.mode === "manual") return seats.find((s) => s.seatId === plan.activeSeatId)?.limited ?? seats.every((s) => s.limited);
+    // The same decision the poller makes for the aggregate (aggregationPolicy).
+    const { mode, activeSeatId } = aggregationPolicy({ plan, perConversationRouting });
+    if (mode === "manual") return seats.find((s) => s.seatId === activeSeatId)?.limited ?? seats.every((s) => s.limited);
     return seats.every((s) => s.limited);
   } catch {
     return false;
@@ -299,7 +302,7 @@ function buildSnapshot(adapter, raw, nowMs) {
  * @param {(evt: {kind:string, payload:object}) => void} [opts.publish]
  * @param {number} [opts.staleRetryMs]
  * @param {{ seatsFor: (adapterId: string) => Promise<null | {
- *   mode: "auto"|"manual", activeSeatId: string|null,
+ *   mode: "auto"|"manual", activeSeatId: string|null, servingSeatId?: string|null,
  *   seats: Array<{accountId:string, accountLabel:string, seatId:string, seatLabel:string, deps:object}>
  * }> }|null} [opts.seats]
  *   Multi-account (spec §6). For a provider with seats the poller makes ONE
@@ -320,6 +323,9 @@ export function createUsagePoller({
   // changes. Null in tests / direct users → no history recording.
   observe = null,
   seats = null,
+  // Phase-1 truth: until requests are routed per conversation the aggregate
+  // follows the SERVING (live) seat. Injectable so tests can pin both modes.
+  perConversationRouting = PER_CONVERSATION_ROUTING,
   staleRetryMs = STALE_RETRY_MS,
   // Retry scheduling is injectable (BET-1485): tests queue armed retries and
   // fire them manually, so the re-poll count doesn't depend on 5ms real
@@ -516,7 +522,7 @@ export function createUsagePoller({
       for (const e of entries) {
         if (e.perSeat) {
           seatResults.push(...e.perSeat);
-          const agg = aggregateSnapshot(e.perSeat, { mode: e.plan.mode, activeSeatId: e.plan.activeSeatId });
+          const agg = aggregateSnapshot(e.perSeat, aggregationPolicy({ plan: e.plan, perConversationRouting }));
           if (agg) results.push(agg);
         } else {
           results.push(e.snap);
