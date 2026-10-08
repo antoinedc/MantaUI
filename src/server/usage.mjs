@@ -104,7 +104,7 @@ import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { appendObservation } from "./optimizer/forecast.mjs";
 import { aggregateSnapshot } from "../shared/seatChoice.mjs";
-import { aggregationPolicy, PER_CONVERSATION_ROUTING } from "./accounts.mjs";
+import { aggregationPolicy, perConversationRoutingActive } from "./accounts.mjs";
 
 export { normalizeWindow };
 
@@ -157,7 +157,7 @@ let activeSeatsFor = null;
 // when EVERY seat is; manual → the active seat.
 export async function recheckAdapterAtLimit(
   adapterId,
-  { fetchImpl = fetch, now = () => Date.now(), seatsFor = activeSeatsFor, perConversationRouting = PER_CONVERSATION_ROUTING } = {},
+  { fetchImpl = fetch, now = () => Date.now(), seatsFor = activeSeatsFor, perConversationRouting = perConversationRoutingActive } = {},
 ) {
   const adapter = ADAPTERS.find((a) => a.id === adapterId);
   if (!adapter) return false;
@@ -185,12 +185,19 @@ export async function recheckAdapterAtLimit(
     }
     if (seats.length === 0) return false;
     // The same decision the poller makes for the aggregate (aggregationPolicy).
-    const { mode, activeSeatId } = aggregationPolicy({ plan, perConversationRouting });
+    const { mode, activeSeatId } = aggregationPolicy({ plan, perConversationRouting: routingFlag(perConversationRouting, now()) });
     if (mode === "manual") return seats.find((s) => s.seatId === activeSeatId)?.limited ?? seats.every((s) => s.limited);
     return seats.every((s) => s.limited);
   } catch {
     return false;
   }
+}
+
+// The routing flag is either a plain boolean (tests pin both modes) or a clock
+// function (production: "has the manta-accounts plugin called resolve lately").
+// The pure aggregationPolicy only ever sees the resulting boolean.
+function routingFlag(flag, nowMs) {
+  return typeof flag === "function" ? Boolean(flag(nowMs)) : Boolean(flag);
 }
 
 // Cache TTL is the poll interval; there is no separate cache layer (per spec).
@@ -323,9 +330,11 @@ export function createUsagePoller({
   // changes. Null in tests / direct users → no history recording.
   observe = null,
   seats = null,
-  // Phase-1 truth: until requests are routed per conversation the aggregate
-  // follows the SERVING (live) seat. Injectable so tests can pin both modes.
-  perConversationRouting = PER_CONVERSATION_ROUTING,
+  // Until requests are routed per conversation (the manta-accounts plugin has
+  // not been seen) the aggregate follows the SERVING (live) seat. A boolean or
+  // `(nowMs) => boolean`, evaluated once per tick; injectable so tests can pin
+  // both modes.
+  perConversationRouting = perConversationRoutingActive,
   staleRetryMs = STALE_RETRY_MS,
   // Retry scheduling is injectable (BET-1485): tests queue armed retries and
   // fire them manually, so the re-poll count doesn't depend on 5ms real
@@ -519,14 +528,15 @@ export function createUsagePoller({
       // as before, or — with seats — the aggregate of its seats (§5.4).
       const results = [];
       const seatResults = [];
+      const routing = routingFlag(perConversationRouting, nowMs);
       for (const e of entries) {
         if (e.perSeat) {
           seatResults.push(...e.perSeat);
-          const policy = aggregationPolicy({ plan: e.plan, perConversationRouting });
+          const policy = aggregationPolicy({ plan: e.plan, perConversationRouting: routing });
           // Until requests are routed per conversation, the provider IS the
           // serving seat: with no reading for it, publish nothing for the
           // provider rather than another seat's headroom it cannot use.
-          const pinned = !perConversationRouting && e.plan?.servingSeatId;
+          const pinned = !routing && e.plan?.servingSeatId;
           if (pinned && !e.perSeat.some((s) => s.seatId === e.plan.servingSeatId)) continue;
           const agg = aggregateSnapshot(e.perSeat, policy);
           if (agg) results.push(agg);

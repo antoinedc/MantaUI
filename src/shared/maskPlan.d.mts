@@ -1,7 +1,7 @@
 // Type declarations for the pure shared maskPlan.mjs (BET-1344). Mirrors
 // optimizerPolicy.d.mts: shared .mjs modules consumed from .ts must ship a
 // hand-written .d.mts (the .mjs itself has no bundled types). The plugin
-// (docs/opencode-tools/manta-optimizer-plugin.ts) inlines a copy of this
+// (docs/opencode-plugins/manta-optimizer.ts) inlines a copy of this
 // module and is not type-checked.
 
 export type OptimizerPolicy = {

@@ -107,8 +107,11 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
-import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, getUsageHistory } from "./usage.mjs";
+import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
 import { createAccountsService } from "./accounts.mjs";
+import { createSeatAssigner } from "./seatAssignment.mjs";
+import { runStartupPluginSync } from "./opencodePlugins.mjs";
+import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import {
   createCapJob,
   getJob,
@@ -615,6 +618,33 @@ const optimizerPacing = createPacingState({
 // and a provider with no seats keeps today's single-credential behaviour.
 const accountsService = createAccountsService();
 void accountsService.discover({ force: true });
+
+// Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
+// plugins). self-update.sh does this too, but an installed box runs the script it
+// ALREADY had, so the first update that ships a plugin would not install it; the
+// NEW server code running here is what closes that gap. Non-blocking, never
+// fatal; restarts opencode only if it was itself just restarted (see
+// opencodePlugins.mjs). index.mjs is never imported by tests, so this cannot
+// touch a developer's real config dir from the suite.
+void runStartupPluginSync();
+
+// Multi-account phase 2: which seat a conversation's requests use. Called by the
+// `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
+// /api/accounts/refresh below); each call also proves the plugin is installed,
+// which is what turns per-conversation routing on (accounts.mjs).
+const seatAssigner = createSeatAssigner({
+  accounts: accountsService,
+  listSeatSnapshots,
+  refreshSeatCredentials: (provider, t) =>
+    provider === "claude"
+      ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })
+      : oc.refreshCodexSeatAndNote(accountsService, { seatId: t.seatId, file: t.file }),
+});
+const handleAccountsRoute = createAccountsRouteHandler({
+  seatAssigner,
+  readJson: (req) => readJsonBody(req),
+  respondJson: (res, status, body) => respondJson(res, status, body),
+});
 
 // eslint-disable-next-line no-unused-vars
 const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
@@ -4535,11 +4565,25 @@ const handleRequest = async (req, res) => {
     return;
   }
 
+  // ---------- Multi-account seat routing (phase 2) ----------
+  // GET /api/accounts/resolve · POST /api/accounts/refresh — consumed only by
+  // the manta-accounts opencode plugin; the route logic and contract live in
+  // accountsRoute.mjs. Behind the /api/* Bearer gate (no exemption).
+  if (ACCOUNTS_ROUTE_PATHS.includes(path)) {
+    try {
+      await handleAccountsRoute(req, res, url);
+    } catch (e) {
+      // class-2 (BET-1460): manta-accounts plugin only — it fails open on any non-200.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
   // ---------- Optimizer counterfactual ingest (OBSERVE-ONLY) ----------
   // POST /api/optimizer/counterfactual  body {sessionID, maskedTokens,
   //   maskedParts, ts} → {ok:true}  (400 {error:"invalid"} on bad shape)
-  // The manta-optimizer opencode plugin (docs/opencode-tools/
-  // manta-optimizer-plugin.ts) reports what manta WOULD trim — read + report
+  // The manta-optimizer opencode plugin (docs/opencode-plugins/
+  // manta-optimizer.ts) reports what manta WOULD trim — read + report
   // only, it never mutates the message history. The store REPLACES the
   // session's latest counterfactual (each report is a full would-mask, not an
   // increment). Behind the /api/* Bearer gate (no exemption). The validator is

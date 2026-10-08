@@ -22,6 +22,7 @@ import {
   readdirSync,
   rmSync,
   symlinkSync,
+  lstatSync,
   statSync,
   mkdirSync,
 } from "node:fs";
@@ -948,4 +949,194 @@ test("drift guard: the shipped opencode template carries the placeholder, and in
   const installer = readFileSync(join(__dirname, "../install.sh"), "utf8");
   assert.match(installer, /--placeholder ANTHROPIC_CLI_VERSION="\$\(resolve_anthropic_cli_version\)"/);
   assert.match(installer, /s\|@@ANTHROPIC_CLI_VERSION@@\|\$\(resolve_anthropic_cli_version\)\|g/);
+});
+
+// --- sync_opencode_plugins + opencode_restart_plan -----------------------------
+// The REAL shell helper against temp dirs: src = a stand-in docs/opencode-plugins,
+// dest = a stand-in ~/.config/opencode/plugins, manifest = the stand-in state file.
+
+function pluginRig() {
+  const root = mkdtempSync(join(tmpdir(), "manta-plugins-"));
+  const rig = {
+    root,
+    src: join(root, "src"),
+    dest: join(root, "cfg", "plugins"),
+    manifest: join(root, "state", ".manta", "opencode-plugins.manifest"),
+  };
+  mkdirSync(rig.src, { recursive: true });
+  return rig;
+}
+function syncPlugins(rig) {
+  // PLUGINS_CHANGED is a global the caller reads, so print it from the same shell.
+  const r = sourceAndRun(`PLUGINS_CHANGED=9; sync_opencode_plugins '${rig.src}' '${rig.dest}' '${rig.manifest}' 2>&1; rc=$?; echo "CHANGED=$PLUGINS_CHANGED RC=$rc"`);
+  return { ...r, changed: /CHANGED=1/.test(r.stdout), rc0: /RC=0/.test(r.stdout) };
+}
+const manifestOf = (rig) => (existsSync(rig.manifest) ? readFileSync(rig.manifest, "utf8").trim().split("\n").filter(Boolean) : null);
+
+test("sync_opencode_plugins: fresh install copies real files (never symlinks), writes the manifest, flags a change", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A1", "manta-optimizer.ts": "O1" });
+    const r = syncPlugins(rig);
+    assert.ok(r.rc0);
+    assert.ok(r.changed);
+    for (const [name, body] of [["manta-accounts.ts", "A1"], ["manta-optimizer.ts", "O1"]]) {
+      assert.equal(readFileSync(join(rig.dest, name), "utf8"), body);
+      assert.equal(lstatSync(join(rig.dest, name)).isSymbolicLink(), false);
+    }
+    assert.deepEqual(manifestOf(rig), ["manta-accounts.ts", "manta-optimizer.ts"]);
+    assert.deepEqual(readdirSync(rig.dest).filter((f) => f.startsWith(".")), [], "no temp files left behind");
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: an unchanged re-run changes nothing and leaves the flag at 0", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A1" });
+    syncPlugins(rig);
+    const inode = statSync(join(rig.dest, "manta-accounts.ts")).ino;
+    const manifestMtime = statSync(rig.manifest).mtimeMs;
+    const r = syncPlugins(rig);
+    assert.equal(r.changed, false);
+    assert.match(r.stdout, /already current/);
+    assert.equal(statSync(join(rig.dest, "manta-accounts.ts")).ino, inode, "no rewrite");
+    assert.equal(statSync(rig.manifest).mtimeMs, manifestMtime, "manifest not rewritten");
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: a changed plugin is rewritten and flagged; a locally edited copy is brought back", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A1" });
+    syncPlugins(rig);
+    writeTree(rig.src, { "manta-accounts.ts": "A2" });
+    const r = syncPlugins(rig);
+    assert.ok(r.changed);
+    assert.equal(readFileSync(join(rig.dest, "manta-accounts.ts"), "utf8"), "A2");
+    writeFileSync(join(rig.dest, "manta-accounts.ts"), "hand edited");
+    assert.ok(syncPlugins(rig).changed);
+    assert.equal(readFileSync(join(rig.dest, "manta-accounts.ts"), "utf8"), "A2");
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: a plugin the release stopped shipping is deleted; the manifest follows", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A", "manta-old.ts": "OLD" });
+    syncPlugins(rig);
+    rmSync(join(rig.src, "manta-old.ts"));
+    const r = syncPlugins(rig);
+    assert.ok(r.changed);
+    assert.equal(existsSync(join(rig.dest, "manta-old.ts")), false);
+    assert.equal(existsSync(join(rig.dest, "manta-accounts.ts")), true);
+    assert.deepEqual(manifestOf(rig), ["manta-accounts.ts"]);
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: the user's own plugins are never touched — not by a sync, not by a removal", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.dest, { "mine.ts": "USER PLUGIN", "also-mine.ts": "USER 2" });
+    writeTree(rig.src, { "manta-accounts.ts": "A" });
+    syncPlugins(rig);
+    assert.equal(readFileSync(join(rig.dest, "mine.ts"), "utf8"), "USER PLUGIN");
+    // Even a manifest line naming the user's file (or a path escape) deletes nothing it shouldn't.
+    writeFileSync(rig.manifest, "manta-accounts.ts\n../escape.ts\n/etc/passwd\n.hidden.ts\n");
+    writeFileSync(join(rig.root, "escape.ts"), "OUTSIDE");
+    rmSync(join(rig.src, "manta-accounts.ts"));
+    syncPlugins(rig);
+    assert.equal(readFileSync(join(rig.dest, "mine.ts"), "utf8"), "USER PLUGIN");
+    assert.equal(readFileSync(join(rig.dest, "also-mine.ts"), "utf8"), "USER 2");
+    assert.equal(readFileSync(join(rig.root, "escape.ts"), "utf8"), "OUTSIDE", "a manifest path cannot escape dest");
+    assert.equal(existsSync(join(rig.dest, "manta-accounts.ts")), false);
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: *.test.ts is skipped, even when it would otherwise be copied", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A", "manta-accounts.test.ts": "import 'vitest'" });
+    syncPlugins(rig);
+    assert.deepEqual(readdirSync(rig.dest), ["manta-accounts.ts"]);
+    assert.deepEqual(manifestOf(rig), ["manta-accounts.ts"]);
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: a shipped name colliding with an existing (manually copied) file takes it over; a symlink there becomes a real file", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-optimizer.ts": "NEW" });
+    writeTree(rig.dest, { "manta-optimizer.ts": "MANUAL COPY" });
+    assert.ok(syncPlugins(rig).changed);
+    assert.equal(readFileSync(join(rig.dest, "manta-optimizer.ts"), "utf8"), "NEW");
+
+    const target = join(rig.root, "elsewhere.ts");
+    writeFileSync(target, "SYMLINK TARGET");
+    rmSync(join(rig.dest, "manta-optimizer.ts"));
+    symlinkSync(target, join(rig.dest, "manta-optimizer.ts"));
+    assert.ok(syncPlugins(rig).changed);
+    assert.equal(lstatSync(join(rig.dest, "manta-optimizer.ts")).isSymbolicLink(), false);
+    assert.equal(readFileSync(target, "utf8"), "SYMLINK TARGET", "the write did not go through the link");
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: a missing source dir changes nothing (it must not delete working plugins) and never fails", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A" });
+    syncPlugins(rig);
+    rmSync(rig.src, { recursive: true, force: true });
+    const r = syncPlugins(rig);
+    assert.ok(r.rc0);
+    assert.equal(r.changed, false);
+    assert.equal(readFileSync(join(rig.dest, "manta-accounts.ts"), "utf8"), "A");
+    assert.match(r.stdout, /source not found/);
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("sync_opencode_plugins: an unwritable destination warns and returns 0 (non-fatal)", () => {
+  const rig = pluginRig();
+  try {
+    writeTree(rig.src, { "manta-accounts.ts": "A" });
+    writeFileSync(join(rig.root, "cfg"), "a FILE where the config dir should be");
+    const r = syncPlugins(rig);
+    assert.ok(r.rc0);
+    assert.equal(r.changed, false);
+    assert.match(r.stdout, /cannot create/);
+  } finally {
+    rmSync(rig.root, { recursive: true, force: true });
+  }
+});
+
+test("opencode_restart_plan: payload → both; opencode OR a plugin change alone → opencode only; else none", () => {
+  const plan = (p, o, g) => sourceAndRun(`opencode_restart_plan ${p} ${o} ${g}`).stdout.trim();
+  assert.equal(plan(1, 0, 0), "both");
+  assert.equal(plan(1, 1, 1), "both");
+  assert.equal(plan(0, 1, 0), "opencode");
+  assert.equal(plan(0, 0, 1), "opencode", "a plugin-only change restarts opencode (it loads plugins at startup)");
+  assert.equal(plan(0, 0, 0), "none");
+});
+
+test("self-update.sh wires the plugin sync into the restart decision", () => {
+  const src = readFileSync(join(__dirname, "..", "self-update.sh"), "utf8");
+  assert.match(src, /sync_opencode_plugins "\$MANTA_HOME\/docs\/opencode-plugins"/);
+  assert.match(src, /opencode_restart_plan "\$PAYLOAD_REPLACED" "\$OPENCODE_CHANGED" "\$PLUGINS_CHANGED"/);
+  const install = readFileSync(join(__dirname, "..", "install.sh"), "utf8");
+  assert.match(install, /sync_opencode_plugins "\$MANTA_HOME\/docs\/opencode-plugins"/);
 });
