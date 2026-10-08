@@ -3506,7 +3506,7 @@ export function usageStale(fetchedAt: number, nowMs: number): boolean {
 // lists the model's opencode providerID.
 
 /** Rule 3 of §5.3: a conversation starts moving at this load… */
-export const SEAT_MOVE_LOAD_PCT = 90;
+export const SEAT_MOVE_LOAD_PCT = 95;
 /** …and goes to a seat that is under this one (or, at 100%, any seat with room). */
 export const SEAT_TARGET_LOAD_PCT = 70;
 /** A "last move" line stays on screen this long (§7a item 3). */
@@ -3614,7 +3614,7 @@ export function nextSeatHint(
 
 /** Auto mode only: the conversation's seat is past the move line AND rule 3
  *  would actually move it — to a seat under 70%, or at 100% to any seat with
- *  room. (Between 90 and 99% with nowhere under 70, it stays.) */
+ *  room. (Between 95 and 99% with nowhere under 70, it stays.) */
 export function isMoveComing(
   view: ProviderView | null | undefined,
   current: { seat: SeatView } | null | undefined,

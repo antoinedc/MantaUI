@@ -403,7 +403,7 @@ test("seatStates (real): a seat whose credentials are unreadable is not usable a
   }
 });
 
-// ---- rules 3–4: 90 / 70 thresholds, same-org preference, cross-org cap ------------
+// ---- rules 3–4: 95 / 70 thresholds, same-org preference, cross-org cap ------------
 
 import { CROSS_ORG_CAP_MS, MOVE_BACK_BLOCK_MS, decideMove, describeSeatMove, isSeatFull, seatMoveActivityEntry, seatOrgKey } from "./seatAssignment.mjs";
 
@@ -429,37 +429,46 @@ test("seatOrgKey: the org when known, else the account — an unidentified accou
   assert.equal(seatOrgKey({ seatId: "s1", accountId: "a1", orgId: null }), seatOrgKey({ seatId: "s2", accountId: "a1", orgId: null }));
 });
 
-test("decideMove: no move below 90 — 85 stays even with an empty seat next door", () => {
+test("decideMove: no move below 95 — 85 stays even with an empty seat next door", () => {
   assert.equal(move({}, [seat(1), seat(2)], [snap(1, 85), snap(2, 0)]), null);
-  assert.equal(move({}, [seat(1), seat(2)], [snap(1, 89.9), snap(2, 0)]), null);
+  assert.equal(move({}, [seat(1), seat(2)], [snap(1, 94.9), snap(2, 0)]), null);
   assert.equal(move({}, [seat(1), seat(2)], [{ seatId: "seat-1" }, snap(2, 0)]), null, "no reading is not a trigger");
 });
 
-test("decideMove: at 90 it moves to a seat under 70 — same org first, then least loaded; reports the window that triggered", () => {
+test("decideMove regression: a seat at 94% does NOT move a conversation, at 95% it does (the move line is 95)", () => {
+  const seats = [seat(1), seat(2)];
+  assert.equal(move({}, seats, [snap(1, 94), snap(2, 0)]), null, "94% stays");
+  assert.equal(move({}, seats, [snap(1, 94.99), snap(2, 0)]), null, "94.99% stays");
+  const out = move({}, seats, [snap(1, 95), snap(2, 0)]);
+  assert.equal(out?.seatId, "seat-2", "95% moves");
+  assert.equal(out?.why, "load");
+});
+
+test("decideMove: at 95 it moves to a seat under 70 — same org first, then least loaded; reports the window that triggered", () => {
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "A"), inOrg(4, "B")];
   const two = (n, windows) => ({ provider: "claude", seatId: `seat-${n}`, windows });
   const snaps = [
-    two(1, [{ kind: "session", pct: 91 }, { kind: "weekly", pct: 30 }]),
+    two(1, [{ kind: "session", pct: 96 }, { kind: "weekly", pct: 30 }]),
     two(2, [{ kind: "session", pct: 40 }]),
     two(3, [{ kind: "session", pct: 20 }]),
     two(4, [{ kind: "session", pct: 0 }]),
   ];
-  assert.deepEqual(move({}, seats, snaps), { seatId: "seat-3", from: "seat-1", why: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false }, "same org beats the emptier other-org seat");
+  assert.deepEqual(move({}, seats, snaps), { seatId: "seat-3", from: "seat-1", why: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false }, "same org beats the emptier other-org seat");
   // the weekly window can be the trigger too
-  const weekly = [two(1, [{ kind: "session", pct: 10 }, { kind: "weekly", pct: 93 }]), ...snaps.slice(1)];
-  assert.deepEqual(move({}, seats, weekly).trigger, { kind: "weekly", pct: 93 });
+  const weekly = [two(1, [{ kind: "session", pct: 10 }, { kind: "weekly", pct: 97 }]), ...snaps.slice(1)];
+  assert.deepEqual(move({}, seats, weekly).trigger, { kind: "weekly", pct: 97 });
 });
 
-test("decideMove: a same-org seat at 70+ is not 'room' for a 90% conversation, an under-70 other-org seat is", () => {
+test("decideMove: a same-org seat at 70+ is not 'room' for a 95% conversation, an under-70 other-org seat is", () => {
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
-  const out = move({}, seats, [snap(1, 92), snap(2, 75), snap(3, 10)]);
+  const out = move({}, seats, [snap(1, 97), snap(2, 75), snap(3, 10)]);
   assert.equal(out.seatId, "seat-3");
   assert.equal(out.crossOrg, true);
 });
 
-test("decideMove: with no seat under 70 a 90–99% conversation STAYS (until its seat is full)", () => {
+test("decideMove: with no seat under 70 a 95–99% conversation STAYS (until its seat is full)", () => {
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
-  for (const pct of [90, 95, 99]) assert.equal(move({}, seats, [snap(1, pct), snap(2, 75), snap(3, 70)]), null, `${pct}%`);
+  for (const pct of [95, 97, 99]) assert.equal(move({}, seats, [snap(1, pct), snap(2, 75), snap(3, 70)]), null, `${pct}%`);
   assert.equal(move({}, seats, [snap(1, 95), snap(2, 99.9), snap(3, 80)]), null);
   assert.equal(move({}, seats, [snap(1, 95), { seatId: "seat-2" }, { seatId: "seat-3" }]), null, "unknown load is not proven room");
 });
@@ -506,11 +515,11 @@ test("decideMove: a seat left within 5h is never a target for a load move; for a
   const nowMs = 100 * HOUR;
   const seats = [seat(1), seat(2), seat(3)];
   const left = { "seat-2": nowMs - HOUR };
-  assert.equal(move({ left }, seats, [snap(1, 92), snap(2, 5), snap(3, 80)], nowMs), null, "soft: seat-2 is blocked, seat-3 is not under 70 → stay");
-  assert.equal(move({ left }, seats, [snap(1, 92), snap(2, 5), snap(3, 60)], nowMs).seatId, "seat-3");
+  assert.equal(move({ left }, seats, [snap(1, 97), snap(2, 5), snap(3, 80)], nowMs), null, "soft: seat-2 is blocked, seat-3 is not under 70 → stay");
+  assert.equal(move({ left }, seats, [snap(1, 97), snap(2, 5), snap(3, 60)], nowMs).seatId, "seat-3");
   assert.equal(move({ left }, seats, [snap(1, 100), snap(2, 5), snap(3, 85)], nowMs).seatId, "seat-3", "hard: a non-blocked seat with room wins over the emptier blocked one");
   assert.equal(move({ left }, [seat(1), seat(2)], [snap(1, 100), snap(2, 5)], nowMs).seatId, "seat-2", "hard: the only one with room");
-  assert.equal(move({ left: { "seat-2": nowMs - MOVE_BACK_BLOCK_MS - 1 } }, seats, [snap(1, 92), snap(2, 5), snap(3, 80)], nowMs).seatId, "seat-2", "after 5h it is eligible again");
+  assert.equal(move({ left: { "seat-2": nowMs - MOVE_BACK_BLOCK_MS - 1 } }, seats, [snap(1, 97), snap(2, 5), snap(3, 80)], nowMs).seatId, "seat-2", "after 5h it is eligible again");
 });
 
 test("decideMove: only the conversation's ACTIVE FRESH windows count (an inactive scoped weekly at 99 or a stale 5h reading is not a trigger)", () => {
@@ -519,15 +528,15 @@ test("decideMove: only the conversation's ACTIVE FRESH windows count (an inactiv
   assert.equal(move({}, seats, [s1, snap(2, 0)]), null);
 });
 
-test("hysteresis: no ping-pong across alternating readings — a conversation that left at 91 does not come back when that seat reads 60", () => {
+test("hysteresis: no ping-pong across alternating readings — a conversation that left at 96 does not come back when that seat reads 60", () => {
   const seats = [seat(1), seat(2)];
   let existing = { seatId: "seat-1" };
   let now = 100 * HOUR;
   const moves = [];
-  // alternating: whichever seat the conversation is on climbs to ≥90 while the other one sits at 60
+  // alternating: whichever seat the conversation is on climbs to ≥95 while the other one sits at 60
   for (let i = 0; i < 12; i++) {
     const onA = existing.seatId === "seat-1";
-    const snaps = [snap(1, onA ? 91 : 60), snap(2, onA ? 60 : 91)];
+    const snaps = [snap(1, onA ? 96 : 60), snap(2, onA ? 60 : 96)];
     const d = decideSeat({ existing, mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps, nowMs: now });
     if (d.reason === "moved") {
       moves.push({ at: now, to: d.seatId });
@@ -538,17 +547,17 @@ test("hysteresis: no ping-pong across alternating readings — a conversation th
   assert.equal(moves.length, 1, `moved ${JSON.stringify(moves)}`);
   assert.equal(moves[0].to, "seat-2");
   // 5h after leaving seat-1 it is eligible again
-  const later = decideSeat({ existing, mode: "auto", activeSeatId: null, seats, seatSnapshots: [snap(1, 60), snap(2, 91)], nowMs: 100 * HOUR + 5 * HOUR + 1 });
+  const later = decideSeat({ existing, mode: "auto", activeSeatId: null, seats, seatSnapshots: [snap(1, 60), snap(2, 96)], nowMs: 100 * HOUR + 5 * HOUR + 1 });
   assert.equal(later.seatId, "seat-1");
 });
 
-test("decideSeat: an existing seat past 90 moves in auto mode with the full record; below 90 it is kept", () => {
+test("decideSeat: an existing seat past 95 moves in auto mode with the full record; below 95 it is kept", () => {
   const out = decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: "seat-1", seats: [seat(1), seat(2), seat(3)], seatSnapshots: [full(1), snap(2, 60), snap(3, 20)], nowMs: 10 * HOUR });
   assert.deepEqual(out, { seatId: "seat-3", reason: "moved", from: "seat-1", why: "exhausted", trigger: { kind: "session", pct: 100 }, crossOrg: false });
   const soft = decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats: [seat(1), seat(2)], seatSnapshots: [snap(1, 99), snap(2, 0)], nowMs: 0 });
   assert.equal(soft.reason, "moved");
   assert.equal(soft.why, "load");
-  assert.equal(decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats: [seat(1), seat(2)], seatSnapshots: [snap(1, 89), snap(2, 0)], nowMs: 0 }).reason, "kept");
+  assert.equal(decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: null, seats: [seat(1), seat(2)], seatSnapshots: [snap(1, 94), snap(2, 0)], nowMs: 0 }).reason, "kept");
 });
 
 test("decideSeat: a signed-out seat that still exists is a MOVE with reason 'unusable' (not a silent re-assignment)", () => {
@@ -570,15 +579,15 @@ test("decideSeat: manual mode never moves on its own", () => {
 });
 
 test("describeSeatMove / seatMoveActivityEntry: a short human line, counts and labels only", () => {
-  const evt = { sessionId: "ses_secret", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Seat 2", reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false };
-  assert.equal(describeSeatMove(evt), "Moved a conversation from Seat 1 (91% of 5h) to Seat 2");
-  assert.match(describeSeatMove({ ...evt, trigger: { kind: "weekly", pct: 93 }, crossOrg: true }), /\(93% of weekly\) to Seat 2 — another org, history re-sent$/);
+  const evt = { sessionId: "ses_secret", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Seat 2", reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false };
+  assert.equal(describeSeatMove(evt), "Moved a conversation from Seat 1 (96% of 5h) to Seat 2");
+  assert.match(describeSeatMove({ ...evt, trigger: { kind: "weekly", pct: 97 }, crossOrg: true }), /\(97% of weekly\) to Seat 2 — another org, history re-sent$/);
   assert.match(describeSeatMove({ ...evt, reason: "exhausted", trigger: { kind: "session", pct: 100 } }), /\(5h limit reached\)/);
   assert.match(describeSeatMove({ ...evt, reason: "unusable", trigger: null }), /\(signed out\)/);
   const entry = seatMoveActivityEntry(evt);
   assert.equal(entry.kind, "seat-move");
   assert.equal(entry.verdict, "applied");
-  assert.deepEqual(entry.evidence, { reason: "load", windowPct: 91, window: "5h" });
+  assert.deepEqual(entry.evidence, { reason: "load", windowPct: 96, window: "5h" });
   assert.doesNotMatch(JSON.stringify(entry), /ses_secret/, "never a session id");
 });
 
@@ -589,18 +598,18 @@ test("the service records an automatic move with its trigger, publishes the even
   const events = [];
   const a = assigner(fakeAccounts(two({ seats: [seat(1, { label: "Seat 1" }), seat(2, { label: "Work · Seat 2" })] })), { snaps, onMoved: (e) => events.push(e) });
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
-  snaps.splice(0, 2, snap(1, 91), snap(2, 50)); // seat-1 reaches 91, seat-2 is under 70
+  snaps.splice(0, 2, snap(1, 96), snap(2, 50)); // seat-1 reaches 96, seat-2 is under 70
   const moved = await a.svc.resolve("claude", "c");
   assert.equal(moved.seatId, "seat-2");
   const rec = a.saved.providers.claude.c;
   assert.equal(rec.seatId, "seat-2");
   assert.equal(rec.movedFrom, "seat-1");
   assert.equal(rec.reason, "load");
-  assert.deepEqual(rec.trigger, { kind: "session", pct: 91 });
+  assert.deepEqual(rec.trigger, { kind: "session", pct: 96 });
   assert.equal(rec.crossOrg, false);
   assert.equal(rec.crossOrgMovedAt, undefined);
   assert.equal(typeof rec.movedAt, "number");
-  assert.deepEqual(events, [{ sessionId: "c", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false }]);
+  assert.deepEqual(events, [{ sessionId: "c", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false }]);
   // seat-2 climbs to 95 while seat-1 recovers to 60 — seat-1 was left an hour ago: stays
   a.tick(HOUR);
   snaps.splice(0, 2, snap(1, 60), snap(2, 95));
@@ -635,15 +644,15 @@ test("the service: a cross-org move stamps crossOrgMovedAt and a second one with
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
   const a = assigner(fakeAccounts(two({ seats })), { snaps, onMoved: (e) => events.push(e) });
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
-  snaps.splice(0, 3, snap(1, 92), snap(2, 80), snap(3, 30)); // only the other org has room under 70
+  snaps.splice(0, 3, snap(1, 97), snap(2, 80), snap(3, 30)); // only the other org has room under 70
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3");
   const rec = a.saved.providers.claude.c;
   assert.equal(rec.crossOrg, true);
   assert.equal(typeof rec.crossOrgMovedAt, "number");
   assert.equal(events[0].crossOrg, true);
-  // 2h later seat-3 (org B) reaches 92; only seat-2 (same org as seat-1, other org than seat-3) is under 70 → cross-org again → refused
+  // 2h later seat-3 (org B) reaches 97; only seat-2 (same org as seat-1, other org than seat-3) is under 70 → cross-org again → refused
   a.tick(2 * HOUR);
-  snaps.splice(0, 3, snap(1, 92), snap(2, 30), snap(3, 92));
+  snaps.splice(0, 3, snap(1, 97), snap(2, 30), snap(3, 97));
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3", "capped: stays");
   assert.equal(events.length, 1);
   // 4h more: 6h since the first cross-org move — allowed (seat-1 was left 6h ago too)
@@ -653,9 +662,9 @@ test("the service: a cross-org move stamps crossOrgMovedAt and a second one with
 });
 
 test("move bookkeeping survives a save/load round trip", () => {
-  const raw = { providers: { claude: { c: { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: true, crossOrgMovedAt: 5, left: { "seat-1": 5, bad: "x" } } } } };
+  const raw = { providers: { claude: { c: { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: true, crossOrgMovedAt: 5, left: { "seat-1": 5, bad: "x" } } } } };
   const out = normalizeAssignments(raw);
-  assert.deepEqual(out.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: true, crossOrgMovedAt: 5, left: { "seat-1": 5 } });
+  assert.deepEqual(out.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: true, crossOrgMovedAt: 5, left: { "seat-1": 5 } });
   const legacy = normalizeAssignments({ providers: { claude: { c: { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted", trigger: { kind: 3 } } } } });
   assert.deepEqual(legacy.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted" });
 });

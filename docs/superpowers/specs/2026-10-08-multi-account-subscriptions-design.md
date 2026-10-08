@@ -180,7 +180,7 @@ Four rules, in this order. Defaults are shown; nothing else is tunable in v1.
 
 1. **New conversation → least-loaded seat.** Ties go to the active seat.
 2. **A conversation stays on its seat.** Its sub-agents use the same seat.
-3. **It moves only when its seat reaches 90%** (5h or weekly), or the seat is blocked
+3. **It moves only when its seat reaches 95%** (5h or weekly), or the seat is blocked
    or signed out. It moves to the least-loaded seat that is under 70%; if none is under
    70%, it stays until 100% and then takes any seat with room.
 4. **Prefer a seat in the same org.** A same-org move is free (the cache is
@@ -239,7 +239,7 @@ seats:
 
 **Dial (the ring).** It shows **this conversation's seat**: its load (§5.1) and tone.
 Visibility follows today's threshold rule, applied to that seat. One addition: in
-automatic mode, when the seat is above the move line (90%) and another seat has
+automatic mode, when the seat is above the move line (95%) and another seat has
 room, the ring keeps its tone but shows a small "↷" badge (a move is coming).
 
 **Popover, top to bottom** (width stays 320px):
@@ -344,7 +344,7 @@ Bus (`/events`):
   AUTOMATIC move (manual switches publish only `accounts.updated`).
   `accounts:session-seat` → `lastMove` carries the same optional `trigger` / `crossOrg`.
   The provider view gains `moveTargetSeatId` (where a conversation on the most-loaded
-  in-use seat ≥90% would go; null in manual mode / when it would stay).
+  in-use seat ≥95% would go; null in manual mode / when it would stay).
 - Every automatic move is also appended to the optimizer activity log as kind
   `seat-move`, whatever the optimizer switch says.
 
@@ -358,7 +358,7 @@ Bus (`/events`):
 2. `manta-accounts` fetch-wrapper plugin, resolve + refresh routes, sticky
    assignment + exhausted floor, self-installing plugins. (Done, #1564.)
 3. Manual mode + Accounts UI + session seat display.
-4. Automatic moves (§5.3 rules 3–4: 90/70, same org first, cross-org once per 5h,
+4. Automatic moves (§5.3 rules 3–4: 95/70, same org first, cross-org once per 5h,
    no move back within 5h), move notices on desktop + iOS, activity log.
 
 Implementer ownership: server (`src/server/accounts*.mjs`, usage adapters, rpc
@@ -368,6 +368,8 @@ parsing, migration).
 
 ## 10. Decisions (2026-10-08)
 - Spec approved as drafted (thresholds 90/70, one move per 5h).
+- 2026-10-08: the move line was raised from 90% to 95% (user decision). The 70%
+  target line and the 90% reset hint in the seat rows are unchanged.
 - ~~Fork release~~ superseded: seat routing is a Manta plugin wrapping `fetch`
   (§4). The fork and the installer pin are untouched.
 - Phase 0 (c) done: the built-in Codex loader was mapped. It no longer needs

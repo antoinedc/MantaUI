@@ -23,10 +23,10 @@
 //      longer serve (signed out / no readable credentials) releases it …
 //   3. (phase 4, spec §5.3 rules 3–4) AUTOMATIC mode only. A conversation MOVES when
 //      its seat's load (`seatLoad`: the highest ACTIVE, FRESH window — 5h, weekly,
-//      a model-scoped weekly in force) reaches 90, OR the seat is full/exhausted,
+//      a model-scoped weekly in force) reaches 95, OR the seat is full/exhausted,
 //      OR it can no longer serve (signed out / expired). ONE pure function,
 //      `decideMove`, decides it:
-//        • load 90–99: move only to a seat under 70 (same org first, then
+//        • load 95–99: move only to a seat under 70 (same org first, then
 //          least-loaded); if none is under 70, STAY until 100;
 //        • exhausted / unusable: any seat with room (<100) — a seat under 70
 //          still first, same org first;
@@ -35,7 +35,7 @@
 //        • a move to ANOTHER org (a cache re-send) happens at most once per
 //          conversation per 5 h (`crossOrgMovedAt`); a same-org move is free and
 //          uncapped. A dead seat (unusable) is exempt from the cap: it cannot serve.
-//      The 90/70 split + the 5 h no-move-back is the hysteresis: a conversation
+//      The 95/70 split + the 5 h no-move-back is the hysteresis: a conversation
 //      that just left a seat at 91 cannot come back when that seat reads 60.
 //      Every automatic move is recorded {movedFrom, movedAt, reason, trigger,
 //      crossOrg} and announced (`onMoved`).
@@ -71,7 +71,7 @@ export const MOVE_BACK_BLOCK_MS = 5 * 60 * 60_000;
 /** A cross-org move (a full history re-send) happens at most once per conversation per this long. */
 export const CROSS_ORG_CAP_MS = 5 * 60 * 60_000;
 /** Spec §5.3 rule 3: a conversation moves when its seat reaches this load… */
-export const MOVE_AT_PCT = 90;
+export const MOVE_AT_PCT = 95;
 /** …to a seat under this load (else it stays until its seat is full). */
 export const MOVE_TARGET_BELOW_PCT = 70;
 const STORE_VERSION = 1;
@@ -270,7 +270,7 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
   };
 
   // A recently-left seat is a last resort, and only when the conversation HAS to
-  // move; a soft (90–99) move never goes back.
+  // move; a soft (95–99) move never goes back.
   let chosen = pick(candidates.filter((c) => !c.blocked));
   if (!chosen && hard) chosen = pick(candidates.filter((c) => c.blocked));
   let seatId = chosen ? chosen.snap.seatId : null;
