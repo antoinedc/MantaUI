@@ -150,6 +150,35 @@ const _oauthCallbacks = new Map();
 // outcome for the code the user is actually looking at.
 let _oauthEpoch = 0;
 
+// Listeners told that opencode STORED a new login for a provider id (a device
+// wait that approved, or a typed code that was accepted). The multi-account
+// "add a Codex seat" flow borrows opencode's live slot for the new login and
+// must act the moment it lands. `epoch` identifies WHICH device wait finished
+// (undefined for the typed-code flow). Never fires on failure.
+const _oauthLandedListeners = new Set();
+
+/** Subscribe to "a login landed in opencode's store"; returns the unsubscribe. */
+export function onProviderOauthLanded(fn) {
+  _oauthLandedListeners.add(fn);
+  return () => _oauthLandedListeners.delete(fn);
+}
+
+function notifyOauthLanded(evt) {
+  for (const fn of [..._oauthLandedListeners]) {
+    try {
+      const r = fn(evt);
+      if (r && typeof r.catch === "function") r.catch((e) => console.warn("[provider-auth] landed listener failed:", e?.message ?? e));
+    } catch (e) {
+      console.warn("[provider-auth] landed listener failed:", e?.message ?? e);
+    }
+  }
+}
+
+/** The attempt id of the device wait currently tracked for a provider id. */
+export function oauthEpochFor(id) {
+  return _oauthCallbacks.get(id)?.epoch;
+}
+
 /** Test-only: peek the in-flight device-flow callbacks. */
 export function _getOauthCallbacks() {
   return new Map(_oauthCallbacks);
@@ -197,8 +226,12 @@ function startOauthCallback(oc, id, methodIndex) {
         r?.ok ? { state: "ok" } : { state: "error", error: r?.error ?? "failed" },
         r?.ok ? "ok" : (r?.error ?? "failed"),
       );
-      if (r?.ok) console.log(`[provider-auth] ${id}: oauth wait succeeded (attempt ${epoch})`);
-      else console.warn(`[provider-auth] ${id}: oauth callback failed (${r?.error ?? "failed"})`);
+      if (r?.ok) {
+        console.log(`[provider-auth] ${id}: oauth wait succeeded (attempt ${epoch})`);
+        // Regardless of slot ownership: opencode DID store a login. A wait whose
+        // card was abandoned still lands if the user approves later.
+        notifyOauthLanded({ id, epoch });
+      } else console.warn(`[provider-auth] ${id}: oauth callback failed (${r?.error ?? "failed"})`);
     })
     .catch((e) => {
       settle({ state: "error", error: "unreachable" }, "unreachable");
@@ -227,10 +260,19 @@ function startOauthCallback(oc, id, methodIndex) {
  * failure is logged so a future operator can see the safety net wasn't
  * in place.
  */
-async function startClaudeLogin(id) {
+export async function startClaudeLogin(id, { configDir = null, seatId = null } = {}) {
   const sessionKey = `claude-login-${randomUUID()}`;
   const startedAt = Date.now();
   const cwd = homedir();
+  // MULTI-ACCOUNT SEAT SIGN-IN: the login runs with CLAUDE_CONFIG_DIR set to the
+  // new seat's own directory (applied by the `pty:spawn` handler below, from
+  // this registry — never from anything the renderer sends), so it writes ITS
+  // credentials there and never touches the live ~/.claude login. Nothing to
+  // back up or roll back, hence no backup here.
+  if (configDir) {
+    _claudeLoginSessions.set(sessionKey, { id, startedAt, cwd, killed: false, backupPath: null, configDir, seatId });
+    return { action: "start", shape: "claude-login", sessionKey, startedAt, cwd };
+  }
   // Backup first — strictly BEFORE the renderer can spawn `claude auth
   // login` via the pty bus. If this throws the connect flow dies (we'd
   // rather crash loudly here than silently leave an unprotected file
@@ -278,13 +320,102 @@ async function startClaudeLogin(id) {
   };
 }
 
-function cancelClaudeLogin(sessionKey) {
+export function cancelClaudeLogin(sessionKey) {
   const entry = _claudeLoginSessions.get(sessionKey);
   if (!entry) return;
   // The renderer's claude:login-cancel is paired with pty:kill(same
   // sessionKey) — pty.kill handles the IPty teardown; here we just drop
   // the metadata so a fresh start can register under the SAME name.
   _claudeLoginSessions.delete(sessionKey);
+}
+
+/**
+ * Start a subscription provider's connect flow (the `opencode:provider-auth`
+ * "start" action): resolve the auth method, start opencode's OAuth, and answer
+ * with the connect SHAPE the renderer drives (`claude-login`, `oauth-auto`,
+ * `oauth-code`, `api-key`). Extracted so the multi-account "add a Codex seat"
+ * flow starts the SAME flow rather than a copy of it.
+ */
+export async function providerAuthStart(oc, id) {
+  const entry = subscriptionProviders.findSubscriptionProvider(id);
+  if (!entry) {
+    console.warn(
+      `[provider-auth] ${id}: not a known subscription provider — falling back to the API-key form`,
+    );
+    return { action: "start", shape: "api-key" };
+  }
+  const auth = await oc.listProviderAuthMethods();
+  const methods =
+    auth?.ok && auth.methods && typeof auth.methods === "object"
+      ? auth.methods[id]
+      : null;
+  const resolved = subscriptionProviders.resolveAuthMethod(entry, methods);
+  if (!resolved) {
+    // No OAuth / no usable method → the renderer switches to the
+    // API-key form (Kimi path). Mirrors the "use the generic API-key
+    // path" contract in resolveAuthMethod's docstring.
+    //
+    // For anthropic this almost always means the opencode-claude-auth
+    // plugin did not load (it is what advertises the "Switch Claude
+    // Code account" oauth method), so say so — this branch used to be
+    // silent and the resulting API-key prompt was undiagnosable.
+    console.warn(
+      `[provider-auth] ${id}: no auth method resolved from ${
+        methods ? `${methods.length} advertised method(s)` : "no /provider/auth entry"
+      } — falling back to the API-key form`,
+    );
+    return { action: "start", shape: "api-key" };
+  }
+  const oauth = await oc.startProviderOauth(id, resolved.index);
+  // A FRESH box has no ~/.claude/.credentials.json yet, and the Claude
+  // auth plugin's authorize() throws when it has no account to switch
+  // to (it indexes accounts[0] on an empty list). That is EXACTLY the
+  // state the claude-login flow exists to resolve — it runs
+  // `claude auth login` ON the box to CREATE those credentials — so
+  // returning the API-key form here was a catch-22: the only path that
+  // can connect a Claude subscription was unreachable until you were
+  // already connected. Every fresh box hit it.
+  //
+  // So do not bail on a failed authorize. Ask describeConnectShape with
+  // a null authorize response: for anthropic + a resolved oauth method
+  // it yields "claude-login" (pinned by
+  // `describeConnectShape(r, null, "anthropic")` in
+  // subscriptionProviders.test.mjs). A provider that genuinely has no
+  // OAuth to offer still falls through to the key form below.
+  const authorize = oauth?.ok ? oauth : null;
+  const shape = subscriptionProviders.describeConnectShape(
+    resolved,
+    authorize,
+    id,
+  );
+  if (!authorize && shape !== "claude-login") {
+    console.warn(
+      `[provider-auth] ${id}: authorize failed (${
+        oauth?.error ?? "no response"
+      }) and shape=${shape} — falling back to the API-key form`,
+    );
+    return { action: "start", shape: "api-key" };
+  }
+  // BET-354: when describeConnectShape returns "claude-login", we
+  // also need to spawn `claude auth login` on the box. The renderer
+  // will drive it via the existing pty bus + the new
+  // `claude:login-status` channel. We return the sessionKey + the
+  // generated startedAt so the renderer can show a live terminal
+  // pane and the poller can detect completion via file mtime.
+  if (shape === "claude-login") {
+    return await startClaudeLogin(id);
+  }
+  // oauth-auto (Codex headless): opencode's callback blocks until the
+  // user approves on the device page. Fire it detached and let the
+  // renderer poll the outcome via `oauth-status`.
+  if (shape === "oauth-auto") startOauthCallback(oc, id, resolved.index);
+  return {
+    action: "start",
+    shape,
+    url: authorize?.url || undefined,
+    instructions: authorize?.instructions || undefined,
+    methodIndex: resolved.index,
+  };
 }
 
 export async function dispatch(handlers, channel, args) {
@@ -450,6 +581,10 @@ export function buildHandlers({
   // state on the config responses. Null when not wired → config:update keeps
   // the pre-fix immediate restart via providers.refreshCtoDoctrine.
   doctrineRestart = null,
+  // Multi-account phase 3: the `accounts:list` / `accounts:set-mode` / … surface
+  // (src/server/accountsManager.mjs). Null when not wired (tests that do not
+  // exercise it) → those channels are simply absent.
+  accountsManager = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -1406,6 +1541,13 @@ export function buildHandlers({
     // optimistically with no traffic. `message` is a short factual sentence the
     // row can display and is NEVER empty: the button reports both outcomes
     // (AGENTS.md: it does the thing and says so / fails and says why).
+    // ---- multi-account seats (spec §8 Contract v2) ----
+    // list / set-mode / set-active / rename / add-seat / seat-status /
+    // add-seat-confirm / cancel-seat / remove-seat / session-seat. A refusal is a
+    // `{error}` RESULT from the contract's closed list; anything unexpected is
+    // one safe literal (class-1). See accountsManager.mjs.
+    ...(accountsManager ? accountsManager.channels : {}),
+
     "accounts:retry": async (input) => {
       const providerID = typeof input?.providerID === "string" ? input.providerID.trim() : "";
       if (!providerID) {
@@ -1860,86 +2002,7 @@ export function buildHandlers({
         };
       }
       if (action === "start") {
-        const id = String(req?.id ?? "");
-        const entry = subscriptionProviders.findSubscriptionProvider(id);
-        if (!entry) {
-          console.warn(
-            `[provider-auth] ${id}: not a known subscription provider — falling back to the API-key form`,
-          );
-          return { action: "start", shape: "api-key" };
-        }
-        const auth = await oc.listProviderAuthMethods();
-        const methods =
-          auth?.ok && auth.methods && typeof auth.methods === "object"
-            ? auth.methods[id]
-            : null;
-        const resolved = subscriptionProviders.resolveAuthMethod(entry, methods);
-        if (!resolved) {
-          // No OAuth / no usable method → the renderer switches to the
-          // API-key form (Kimi path). Mirrors the "use the generic API-key
-          // path" contract in resolveAuthMethod's docstring.
-          //
-          // For anthropic this almost always means the opencode-claude-auth
-          // plugin did not load (it is what advertises the "Switch Claude
-          // Code account" oauth method), so say so — this branch used to be
-          // silent and the resulting API-key prompt was undiagnosable.
-          console.warn(
-            `[provider-auth] ${id}: no auth method resolved from ${
-              methods ? `${methods.length} advertised method(s)` : "no /provider/auth entry"
-            } — falling back to the API-key form`,
-          );
-          return { action: "start", shape: "api-key" };
-        }
-        const oauth = await oc.startProviderOauth(id, resolved.index);
-        // A FRESH box has no ~/.claude/.credentials.json yet, and the Claude
-        // auth plugin's authorize() throws when it has no account to switch
-        // to (it indexes accounts[0] on an empty list). That is EXACTLY the
-        // state the claude-login flow exists to resolve — it runs
-        // `claude auth login` ON the box to CREATE those credentials — so
-        // returning the API-key form here was a catch-22: the only path that
-        // can connect a Claude subscription was unreachable until you were
-        // already connected. Every fresh box hit it.
-        //
-        // So do not bail on a failed authorize. Ask describeConnectShape with
-        // a null authorize response: for anthropic + a resolved oauth method
-        // it yields "claude-login" (pinned by
-        // `describeConnectShape(r, null, "anthropic")` in
-        // subscriptionProviders.test.mjs). A provider that genuinely has no
-        // OAuth to offer still falls through to the key form below.
-        const authorize = oauth?.ok ? oauth : null;
-        const shape = subscriptionProviders.describeConnectShape(
-          resolved,
-          authorize,
-          id,
-        );
-        if (!authorize && shape !== "claude-login") {
-          console.warn(
-            `[provider-auth] ${id}: authorize failed (${
-              oauth?.error ?? "no response"
-            }) and shape=${shape} — falling back to the API-key form`,
-          );
-          return { action: "start", shape: "api-key" };
-        }
-        // BET-354: when describeConnectShape returns "claude-login", we
-        // also need to spawn `claude auth login` on the box. The renderer
-        // will drive it via the existing pty bus + the new
-        // `claude:login-status` channel. We return the sessionKey + the
-        // generated startedAt so the renderer can show a live terminal
-        // pane and the poller can detect completion via file mtime.
-        if (shape === "claude-login") {
-          return await startClaudeLogin(id);
-        }
-        // oauth-auto (Codex headless): opencode's callback blocks until the
-        // user approves on the device page. Fire it detached and let the
-        // renderer poll the outcome via `oauth-status`.
-        if (shape === "oauth-auto") startOauthCallback(oc, id, resolved.index);
-        return {
-          action: "start",
-          shape,
-          url: authorize?.url || undefined,
-          instructions: authorize?.instructions || undefined,
-          methodIndex: resolved.index,
-        };
+        return providerAuthStart(oc, String(req?.id ?? ""));
       }
       if (action === "code") {
         const id = String(req?.id ?? "");
@@ -1949,6 +2012,7 @@ export function buildHandlers({
           return { action: "code", ok: false, error: "bad_response" };
         }
         const r = await oc.completeProviderOauth(id, methodIndex, code);
+        if (r?.ok) notifyOauthLanded({ id, epoch: undefined });
         return { action: "code", ok: !!r?.ok, error: r?.ok ? undefined : r?.error };
       }
       if (action === "oauth-status") {
@@ -2036,6 +2100,11 @@ export function buildHandlers({
         }
         const progress = await pollClaudeLogin({
           startedAt,
+          // A SEAT sign-in (configDir set) reads progress from the seat's own
+          // credentials file and never restarts opencode or rolls anything back.
+          ...(entry?.configDir
+            ? { credentialsPath: join(entry.configDir, ".credentials.json"), isolated: true }
+            : {}),
           restartOpencode,
           getProviders: oc.getProviders,
           // BET-359: plumb the snapshot taken at startClaudeLogin into
@@ -2308,8 +2377,15 @@ export function buildHandlers({
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
     //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
     //   (matches src/shared/types.ts PtyEvent)
-    "pty:spawn": (opts) =>
-      pty.spawn(opts, (e) => bus.publish({ kind: "pty", payload: e })),
+    "pty:spawn": (opts) => {
+      // `extraEnv` is SERVER-owned: whatever the caller sent is dropped, and the
+      // only value ever set comes from a registered multi-account seat sign-in
+      // (CLAUDE_CONFIG_DIR → that seat's own directory), for its own launcher.
+      const { extraEnv: _clientEnv, ...safe } = opts ?? {};
+      const login = safe.launcher?.id === "claude-auth-login" ? _claudeLoginSessions.get(safe.sessionKey) : null;
+      const spawnOpts = login?.configDir ? { ...safe, extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : safe;
+      return pty.spawn(spawnOpts, (e) => bus.publish({ kind: "pty", payload: e }));
+    },
 
     // IPC.ptyWrite   = "pty:write"   preload: ipcRenderer.invoke(IPC.ptyWrite, sessionKey, data)
     //   → args[0] = sessionKey, args[1] = data
