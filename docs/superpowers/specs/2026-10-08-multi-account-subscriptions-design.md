@@ -118,6 +118,21 @@ finished request and only swaps the identity:
   `POST /api/accounts/refresh {seatId}` (single-flight on the server) before sending.
   A 401 from a non-live seat triggers one refresh + one retry; if that fails, the
   401 is returned as-is.
+- **Installed automatically, never by hand.** Plugin sources live in
+  `docs/opencode-plugins/` (a new directory, shipped in the release tarball).
+  `install.sh` and `self-update.sh` both copy every `*.ts` there (excluding tests)
+  into `~/.config/opencode/plugins/` as REAL copies. This is one shared helper in
+  `scripts/lib/release.sh`, also present in install.sh's inline fallback.
+  - Manta-owned plugins are tracked in `~/.manta/opencode-plugins.manifest`. A
+    plugin removed from the repo is deleted on the next update. A user's own files
+    in `plugins/` are never touched.
+  - Any plugin change sets a flag that makes self-update restart opencode. It
+    joins the existing conditional-restart table: payload replaced → both restart
+    anyway; plugin-only change → opencode only.
+  - Non-fatal like the tools refresh: a copy failure warns and never aborts the
+    update.
+  - On a box with one seat per provider the plugin is a pure pass-through, so
+    shipping it to every user is safe.
 - **Why not the fork / an auth override:** no npm release, and no copy of the
   Codex loader to keep in sync. Opencode's own Codex behaviour (URL rewrite, model
   list, `instructions`) keeps running. The live logins in `~/.claude` and `auth.json`
