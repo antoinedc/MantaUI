@@ -2207,14 +2207,19 @@ function resolveClaudeBinExists(existsFn) {
   return { installed: false, path: "claude" };
 }
 
-/** Best-effort read + parse of ~/.claude/.credentials.json. Null on any
+/** Best-effort read + parse of a Claude `.credentials.json`. Null on any
  *  read or parse failure (file missing, permissions, malformed JSON). */
-function readCredsSnapshot() {
+function readCredsSnapshotAt(file) {
   try {
-    return parseCredentials(readFileSync(CREDENTIALS_PATH, "utf-8"));
+    return parseCredentials(readFileSync(file, "utf-8"));
   } catch {
     return null;
   }
+}
+
+/** The LIVE login file (~/.claude/.credentials.json). */
+function readCredsSnapshot() {
+  return readCredsSnapshotAt(CREDENTIALS_PATH);
 }
 
 /**
@@ -2273,20 +2278,45 @@ export async function maybeRecoverCredentials(evt) {
   }
 }
 
-async function doRefresh() {
-  const credsBefore = readCredsSnapshot();
+/**
+ * The environment for a `claude` CLI refresh run. `configDir` (a seat's own
+ * directory) becomes CLAUDE_CONFIG_DIR so the CLI reads — and rewrites — THAT
+ * seat's credentials instead of the live login. Pure; exported for tests.
+ */
+export function claudeRefreshEnv(baseEnv, platform, configDir = null) {
+  const env = {
+    ...baseEnv,
+    PATH: [path.join(homedir(), ".local", "bin"), baseEnv.PATH ?? ""].filter(Boolean).join(path.delimiter),
+    TERM: "dumb",
+  };
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  return patchPath(env, platform);
+}
+
+/**
+ * Re-mint one Claude login's OAuth credentials by running the `claude` CLI (the
+ * "run claude" the user does by hand). `credentialsPath` is the file the CLI is
+ * expected to rewrite: the live file by default, or `<seat dir>/.credentials.json`
+ * when `configDir` points the CLI at a seat. All I/O is injectable.
+ */
+async function runClaudeRefresh({
+  credentialsPath = CREDENTIALS_PATH,
+  configDir = null,
+  spawn = cpSpawn,
+  now = Date.now,
+  resolveBin = resolveClaudeBin,
+} = {}) {
+  const credsBefore = readCredsSnapshotAt(credentialsPath);
 
   // Pre-checks — no point spawning `claude` if we already know it can't work.
-  if (!credsBefore) {
-    return logAndReturn({ ok: false, reason: "no-credentials" });
-  }
+  if (!credsBefore) return { ok: false, reason: "no-credentials" };
   // `refreshTokenExpiresAt` is NOT a reason to skip the refresh: the auth
   // plugin's write-back renews the token without updating that field, so it
   // goes stale while the refresh token is still good. Short-circuiting on it
   // left Anthropic dead for ~20h while a plain `claude` run fixed it at once.
   // Always try; the file after the attempt is the verdict, and the stale
   // expiry only picks the failure reason shown to the user.
-  const refreshLooksExpired = isRefreshTokenExpired(credsBefore, Date.now());
+  const refreshLooksExpired = isRefreshTokenExpired(credsBefore, now());
 
   // Run the CLI refresh (this is the "run claude" the user does by hand).
   // Non-zero exit / spawn error (e.g. ENOENT) doesn't short-circuit — we
@@ -2305,18 +2335,11 @@ async function doRefresh() {
   // other platform. We still need to prepend `~/.local/bin` here because
   // that's the resolver's concern, not the platform helper's — `patchPath`
   // doesn't know about Claude-specific install locations.
-  const claudeBin = resolveClaudeBin();
-  const baseEnv = {
-    ...process.env,
-    PATH: [path.join(homedir(), ".local", "bin"), process.env.PATH ?? ""]
-      .filter(Boolean)
-      .join(path.delimiter),
-    TERM: "dumb",
-  };
+  const claudeBin = resolveBin();
   await new Promise((resolve) => {
-    const proc = cpSpawn(claudeBin, ["-p", ".", "--model", "haiku"], {
+    const proc = spawn(claudeBin, ["-p", ".", "--model", "haiku"], {
       cwd: tmpdir(),
-      env: patchPath(baseEnv, process.platform),
+      env: claudeRefreshEnv(process.env, process.platform, configDir),
       stdio: "ignore",
       timeout: 60_000,
     });
@@ -2324,14 +2347,47 @@ async function doRefresh() {
     proc.on("exit", () => resolve());
   });
 
-  const credsAfter = readCredsSnapshot();
-  const now = Date.now();
-  const outcome = classifyRefreshOutcome({ credsBefore, credsAfter, now });
-  if (outcome === "ok") {
-    _lastRecoverySuccessAt = Math.floor(now / 1000);
-    return logAndReturn({ ok: true, expiresAt: credsAfter.expiresAt });
-  }
-  return logAndReturn({ ok: false, reason: refreshLooksExpired ? "refresh-token-expired" : outcome });
+  const credsAfter = readCredsSnapshotAt(credentialsPath);
+  const at = now();
+  const outcome = classifyRefreshOutcome({ credsBefore, credsAfter, now: at });
+  if (outcome === "ok") return { ok: true, expiresAt: credsAfter.expiresAt, at };
+  return { ok: false, reason: refreshLooksExpired ? "refresh-token-expired" : outcome };
+}
+
+async function doRefresh() {
+  const r = await runClaudeRefresh();
+  if (r.ok) _lastRecoverySuccessAt = Math.floor(r.at / 1000);
+  return logAndReturn(r.ok ? { ok: true, expiresAt: r.expiresAt } : { ok: false, reason: r.reason });
+}
+
+// Per-seat refresh (multi-account §3): a Claude seat that is NOT read from the
+// live file keeps its own directory, and its access token expires like any
+// other. Same CLI run, pointed at the seat with CLAUDE_CONFIG_DIR, single-flight
+// per seat directory so a slow run is never doubled.
+const _seatRefreshInFlight = new Map();
+
+/**
+ * @param {{ seatId: string, dir: string }} target
+ * @param {{ spawn?: Function, now?: () => number, resolveBin?: () => string }} [deps]
+ * @returns {Promise<{ ok: boolean, reason?: string, expiresAt?: number }>}
+ */
+export function refreshClaudeSeatCredentials({ seatId, dir }, deps = {}) {
+  const inFlight = _seatRefreshInFlight.get(dir);
+  if (inFlight) return inFlight;
+  const run = runClaudeRefresh({
+    credentialsPath: path.join(dir, ".credentials.json"),
+    configDir: dir,
+    ...deps,
+  })
+    .then((r) => {
+      console.log("[claude-auth] seat refresh seat=%s ok=%s reason=%s expiresAt=%s", seatId, r.ok, r.reason ?? "-", r.expiresAt ?? "-");
+      return r.ok ? { ok: true, expiresAt: r.expiresAt } : { ok: false, reason: r.reason };
+    })
+    .finally(() => {
+      _seatRefreshInFlight.delete(dir);
+    });
+  _seatRefreshInFlight.set(dir, run);
+  return run;
 }
 
 function logAndReturn(result) {
@@ -2372,6 +2428,12 @@ export function createCredentialRefreshSweep({
   refresh = refreshClaudeCredentials,
   shouldRefresh = shouldRefreshAhead,
   now = Date.now,
+  // Multi-account (§3): the seats the LIVE file does not cover. Each is a
+  // `{seatId, dir}`; the sweep refreshes it ahead of expiry exactly like the
+  // live login. No seats (the default) → the sweep is exactly what it was.
+  listSeatTargets = async () => [],
+  readSeatCreds = (dir) => readCredsSnapshotAt(path.join(dir, ".credentials.json")),
+  refreshSeat = refreshClaudeSeatCredentials,
 } = {}) {
   let inFlight = false;
 
@@ -2387,6 +2449,19 @@ export function createCredentialRefreshSweep({
           // never throw — a refresh failure must not kill the timer
         }
       }
+      let targets = [];
+      try {
+        targets = (await listSeatTargets()) ?? [];
+      } catch {
+        // a seat-store problem must never take the live refresh down with it
+      }
+      for (const target of targets) {
+        try {
+          if (shouldRefresh(readSeatCreds(target.dir), now())) await refreshSeat(target);
+        } catch {
+          // one seat failing must not stop the next
+        }
+      }
     } finally {
       inFlight = false;
     }
@@ -2395,8 +2470,10 @@ export function createCredentialRefreshSweep({
   return { sweep };
 }
 
-export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS } = {}) {
-  const { sweep } = createCredentialRefreshSweep();
+export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS, seats = null } = {}) {
+  const { sweep } = createCredentialRefreshSweep({
+    listSeatTargets: seats ? () => seats.claudeRefreshTargets() : undefined,
+  });
   return startPoller(sweep, { intervalMs, label: "opencode-credentials" });
 }
 
