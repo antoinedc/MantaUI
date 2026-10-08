@@ -33,7 +33,7 @@ type Candidate = {
   fromLabel?: string;
   toLabel?: string;
   reason?: string;
-  trigger?: { kind: string; pct: number };
+  trigger?: { kind: string; pct: number } | null;
   crossOrg?: boolean;
 };
 

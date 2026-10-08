@@ -2326,7 +2326,7 @@ export type SessionSeat = {
     crossOrg?: boolean;
     resentTokens?: number;
     /** Phase 4: the reading that drove an automatic move ("5h at 91%"). */
-    trigger?: SeatMoveTrigger;
+    trigger?: SeatMoveTrigger | null;
   };
 };
 
@@ -2346,7 +2346,7 @@ export type AccountsMovedPayload = {
   reason?: string;
   fromLabel?: string;
   toLabel?: string;
-  trigger?: SeatMoveTrigger;
+  trigger?: SeatMoveTrigger | null;
   /** The move crossed orgs, so the history was re-sent. */
   crossOrg?: boolean;
 };
