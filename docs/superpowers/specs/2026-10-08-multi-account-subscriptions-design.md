@@ -43,10 +43,12 @@ not enforce it.
 4. Claude credentials on Linux are one hard-coded file (`~/.claude/.credentials.json`),
    cached 30 s in the plugin; Codex lives in opencode's `auth.json.openai`, re-read
    per request.
-5. **The prompt cache is per organization.** Moving a conversation to a seat in a
-   *different* org re-sends its whole history once (cache write, 1.25×) and bills it to
-   the new seat. Whether two seats of the *same* Team org share cache is **unverified**
-   (Phase 0).
+5. **The prompt cache is per organization, shared by every seat in it.** Verified on
+   2026-10-08 with two `team_tier_1` seats of one org: seat 2 wrote a 28.8k-token
+   prefix, and seat 1's first identical request read all 28.8k from cache (0 written).
+   So a move between seats of the **same org costs nothing extra**. A move to a
+   *different* org re-sends the whole history once (cache write, 1.25×) and bills it
+   to the new seat.
 
 ## 2. Model
 
@@ -135,19 +137,22 @@ Four rules, in this order. Defaults are shown; nothing else is tunable in v1.
 3. **It moves only when its seat reaches 90%** (5h or weekly), or the seat is blocked
    or signed out. It moves to the least-loaded seat that is under 70%; if none is under
    70%, it stays until 100% and then takes any seat with room.
-4. **At most one move per conversation per 5 hours**, and never back to a seat it
-   left in that period (no flip-flopping).
+4. **Prefer a seat in the same org.** A same-org move is free (the cache is
+   shared), so it is always tried first. A move to **another org** happens at most
+   once per conversation per 5 hours. Either way, a conversation never moves back to a
+   seat it left in the last 5 hours (no flip-flopping).
 
 Why this is cheap:
-- Rules 1–2 mean a conversation normally lives its whole life on one seat, so it
-  keeps its cache.
+- Rules 1–2 mean a conversation normally lives its whole life on one seat.
 - Rule 3 moves before the hard wall, so a turn is never cut mid-way.
-- Rule 4 caps the waste at one history re-send per conversation per 5h, which is
-  roughly what an idle cache expiry already costs.
+- Rule 4 makes the common case (Team seats) free, and caps the cross-org waste at one
+  history re-send per conversation per 5h, roughly what an idle cache expiry already
+  costs.
 - There is no automatic compaction: it loses detail and is a separate decision.
 
 Every move is logged and shown in the conversation as a one-line notice, e.g.
-"Moved to Work · Seat 2 (Seat 1 at 91% of 5h). History re-sent: 84k tokens."
+"Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." A cross-org move adds
+"History re-sent: 84k tokens."
 
 ### 5.4 Interaction with existing systems (minimal change)
 Downstream consumers keep their per-provider shape through a **provider aggregate**
@@ -209,7 +214,7 @@ to, reason, resentTokens}`.
    (a) `CLAUDE_CONFIG_DIR` login writes a separate credential;
    (b) measure the cache across two seats of the same org (does a move re-send?);
    (c) diff the built-in Codex fetch to copy it faithfully.
-   If (b) shows a shared cache, rule 4's cap can be relaxed for same-org moves.
+   (a) and (b) are done (see §10). (c) remains.
 1. Weekly fix (`limits[]`) + seat store + migration + per-seat usage polling + aggregate.
 2. Plugins: Claude fork resolver, `manta-accounts` Codex plugin, resolve route, fail-safe.
 3. Manual mode + Accounts UI + session seat display.
@@ -231,3 +236,6 @@ parsing, migration).
   that member.
 - Phase 0 (a) confirmed: `claude` with `CLAUDE_CONFIG_DIR` set starts logged out,
   with its own config directory.
+- Phase 0 (b) confirmed: seats of the same org share the prompt cache (see §1.5).
+  Seat 2 is signed in at `~/.manta-secrets/accounts/claude/seat-2/`; the migration
+  in phase 1 adopts it.
