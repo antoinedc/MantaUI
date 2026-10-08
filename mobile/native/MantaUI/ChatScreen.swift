@@ -161,6 +161,11 @@ private struct ChatScreenContent: View {
     /// The plan-usage snapshot set (BET-824), polled every 60s while the chat
     /// is open. Feeds the composer dot, the usage sheet and the weekly banner.
     @StateObject private var usageStore: UsageStore
+    /// The multi-account seat list + THIS conversation's seat (spec §7a). Feeds
+    /// the usage sheet's seat layout and, when the conversation's seat is known,
+    /// the composer dot (which then reads that seat's 5h window instead of the
+    /// provider-wide snapshot).
+    @StateObject private var accountsStore: AccountsStore
     /// The conversation-scoped voice-note playback engine (BET-1029). Owned
     /// ABOVE the transcript list — a player owned by a recycled cell would be
     /// destroyed by scrolling; this one survives it and plays one note at a
@@ -277,6 +282,7 @@ private struct ChatScreenContent: View {
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
         _usageStore = StateObject(wrappedValue: UsageStore(api: api))
+        _accountsStore = StateObject(wrappedValue: AccountsStore(api: api, sessionId: sessionId, eventStore: eventStore))
         _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: api))
         _jobsStore = StateObject(wrappedValue: BackgroundJobsStore(api: api, sessionId: sessionId, eventStore: eventStore))
     }
@@ -318,6 +324,7 @@ private struct ChatScreenContent: View {
                 seedPlanModeFromBox()
                 Task { await settingsStore.load() }
                 usageStore.start()
+                accountsStore.start()
                 jobsStore.startAutoRefresh()
                 Task { await jobsStore.refresh() }
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
@@ -328,6 +335,7 @@ private struct ChatScreenContent: View {
             .onDisappear {
                 store.stop()
                 usageStore.stop()
+                accountsStore.stop()
                 jobsStore.stopAutoRefresh()
                 MantaPushRouter.shared.visibleSessionID = nil
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
@@ -495,6 +503,7 @@ private struct ChatScreenContent: View {
                         store: store,
                         modelStore: modelStore,
                         usageStore: usageStore,
+                        seatUsageWindow: AccountsSelectors.dotWindow(accountsStore.conversationSeat),
                         onShowUsage: { showUsageSheet = true },
                         showScrollToBottom: showScrollToBottom,
                         onScrollToBottom: {
@@ -1106,7 +1115,7 @@ private struct ChatScreenContent: View {
     }
 
     private var usageSheet: some View {
-        UsageSheet(snapshots: usageStore.snapshots, lastFetch: usageStore.lastFetch, tokens: tokens)
+        UsageSheet(snapshots: usageStore.snapshots, lastFetch: usageStore.lastFetch, tokens: tokens, accounts: accountsStore)
     }
 
     /// Whether the one-per-session weekly warning banner should render.

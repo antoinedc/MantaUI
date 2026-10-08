@@ -55,6 +55,12 @@ struct ComposerView: View {
     /// reads the 5-hour session window from it; the ring is the dot's only
     /// content — no percentage, no label.
     @ObservedObject var usageStore: UsageStore
+    /// Multi-account: THIS conversation's seat's 5h window, when the box has
+    /// assigned the conversation a seat and has a reading for it. The dot shows
+    /// it in preference to the provider-wide snapshot, so a conversation on a
+    /// busy seat is not painted with another seat's headroom. nil → today's
+    /// behaviour (the provider snapshot).
+    var seatUsageWindow: UsageWindow? = nil
     /// Tapped → the parent presents the usage sheet. Presented from the parent
     /// (not here) because ComposerView already presents the model sheet, and
     /// SwiftUI honours only one presentation per view on some versions.
@@ -585,7 +591,7 @@ struct ComposerView: View {
     /// there is no session window.
     @ViewBuilder
     private var usageDot: some View {
-        if let window = UsageMeters.sessionWindow(usageStore.snapshots) {
+        if let window = seatUsageWindow ?? UsageMeters.sessionWindow(usageStore.snapshots) {
             Button { onShowUsage?() } label: {
                 MeterRing(pct: window.pct,
                           color: MeterRing.tint(UsageMeters.band(window.pct), tokens),

@@ -23,10 +23,19 @@ struct SettingsScreen: View {
     @StateObject private var store = MantaSettingsStore()
     @Environment(\.dismiss) private var dismiss
 
+    /// The seat list behind the Accounts entry. Owned here so it survives
+    /// pushing and popping the screen; it only reads while that screen is up
+    /// (`AccountsScreen(ownsLifecycle: true)`).
+    @StateObject private var accountsStore: AccountsStore
+
     @State private var query = ""
     @State private var confirmReset = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
+
+    init(eventStore: MantaEventStore? = nil) {
+        _accountsStore = StateObject(wrappedValue: AccountsStore(api: MantaAPIClient.live(), eventStore: eventStore))
+    }
 
     private var inSearch: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -101,6 +110,10 @@ struct SettingsScreen: View {
     private var searchResults: some View {
         let hits = SettingsSchema.search(query)
         return VStack(alignment: .leading, spacing: 0) {
+            if accountsMatchesQuery {
+                accountsEntry
+                    .padding(.bottom, Metrics.spacing.sp2)
+            }
             Text(hits.count == 1 ? "1 match" : "\(hits.count) matches")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
@@ -138,9 +151,54 @@ struct SettingsScreen: View {
     // MARK: - Sections
 
     private var sectionList: some View {
-        ForEach(SettingsSchema.sections) { section in
-            sectionView(section)
+        VStack(alignment: .leading, spacing: 0) {
+            accountsEntry
+            ForEach(SettingsSchema.sections) { section in
+                sectionView(section)
+            }
         }
+    }
+
+    // MARK: - Accounts entry
+
+    /// The Accounts screen is not a schema entry (it is a screen, not a value),
+    /// so it is a fixed row above the schema sections — and found by search for
+    /// the words someone would type to look for it.
+    private var accountsMatchesQuery: Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return false }
+        return "accounts seats subscription claude codex openai plan".contains(q)
+    }
+
+    private var accountsEntry: some View {
+        NavigationLink {
+            AccountsScreen(store: accountsStore, ownsLifecycle: true)
+        } label: {
+            HStack(spacing: Metrics.spacing.sp2) {
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+                    Text("Accounts")
+                        .font(.manta(size: Metrics.type.body, weight: .medium))
+                        .foregroundColor(tokens.tx1)
+                    Text("Subscription seats, modes and usage")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx3)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx4)
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp3)
+            .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.radius.md)
+                    .stroke(tokens.border, lineWidth: 1)
+            )
+            .padding(.horizontal, Metrics.spacing.sp3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("settings-accounts")
     }
 
     private func sectionView(_ section: SettingSection) -> some View {

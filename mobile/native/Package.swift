@@ -37,6 +37,7 @@ let package = Package(
             name: "MantaUI",
             path: "MantaUI",
             sources: [
+                "AccountsModels.swift",
                 "ArtifactDerivation.swift",
                 "ChatJSON.swift",
                 "ChatModel.swift",
@@ -57,6 +58,7 @@ let package = Package(
             dependencies: ["MantaUI"],
             path: "MantaUITests",
             sources: [
+                "AccountsTests.swift",
                 "ArtifactDerivationTests.swift",
                 "ComposerTypeaheadTests.swift",
                 "PlanDerivationTests.swift",
