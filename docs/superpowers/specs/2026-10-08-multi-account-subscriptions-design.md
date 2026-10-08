@@ -220,7 +220,14 @@ wiring) · plugins (fork + `manta-accounts`) · renderer (`AccountsCard`, header
 dial). Each phase ships tests for its pure logic (seat choice, aggregate, limit
 parsing, migration).
 
-## 10. Open questions
-- Where does the source of the `opencode-claude-auth-bui` fork live? It is only
-  published to npm; vendor it into this repo?
-- iOS Accounts screen: same phase 3, or later?
+## 10. Decisions (2026-10-08)
+- Spec approved as drafted (thresholds 90/70, one move per 5h).
+- Fork source: `github.com/antoinedc/opencode-claude-auth` (published as
+  `opencode-claude-auth-bui`). Claude seat resolution lands there as a new `-bui`
+  release, and the installer pin is bumped.
+- iOS Accounts screen ships in phase 3, alongside the desktop UI.
+- Seats are not discoverable: OAuth tokens cannot list org members (verified: the
+  members endpoints 404, or reject OAuth tokens). Each seat is added by signing in as
+  that member.
+- Phase 0 (a) confirmed: `claude` with `CLAUDE_CONFIG_DIR` set starts logged out,
+  with its own config directory.
