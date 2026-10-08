@@ -94,15 +94,34 @@ One authority, the server:
 GET /api/accounts/resolve?provider=claude|codex&sessionID=&parentSessionID=&model=
 → { seatId, credentialsPath }
 ```
-- **Claude:** extend our fork `opencode-claude-auth-bui`. Its fetch reads
-  `x-opencode-session-id` and asks resolve (cached per conversation 30 s), then loads
-  that seat's credentials (per-seat 30 s cache, per-seat refresh + write-back).
-  `syncAuthJson` keeps syncing **Seat 1 only** (opencode needs an `oauth` entry to
-  enable the provider).
-- **Codex:** new Manta plugin `manta-accounts` registering `auth.provider:"openai"`.
-  It must reproduce the built-in Codex fetch behaviour (URL rewrite to the ChatGPT
-  Codex endpoint, `ChatGPT-Account-Id`, `originator`, refresh). That is a risk to pin
-  in Phase 0 by diffing against the built-in.
+**REVISED 2026-10-08 (spike-verified): one Manta plugin, no fork change, no auth
+override.** `manta-accounts` (a plain opencode plugin at
+`~/.config/opencode/plugins/manta-accounts.ts`) wraps the process-global `fetch` once
+at load. Both the Claude plugin (fork 1.5.4-bui.1 and upstream 2.2.1) and the
+built-in Codex loader send their final model request through the global `fetch`,
+AFTER they have built every header and the body. The wrapper therefore sees the
+finished request and only swaps the identity:
+- It matches only model calls: `api.anthropic.com` `/v1/messages*` and
+  `chatgpt.com` `/backend-api/codex/*`. Everything else passes through untouched,
+  including token refreshes, profile and usage calls.
+- It reads `x-opencode-session-id` (falling back to `x-opencode-parent-session-id`,
+  then to Manta's own sub-agent → root map) and asks `resolve`.
+- When the seat is the **live** login, the request passes through unchanged. This
+  is the zero-risk default.
+- Otherwise it replaces `authorization` with the seat's access token. For Codex it
+  also sets `ChatGPT-Account-Id`, and recomputes `x-openai-internal-codex-residency`
+  from the seat's token (removed when the seat has none).
+- Nothing else in the request changes. The Claude billing header is derived from
+  the messages, not the account.
+- Seat tokens are kept fresh **server-side** (the §3 sweep). The plugin never
+  refreshes. A seat token within 60 s of expiry triggers
+  `POST /api/accounts/refresh {seatId}` (single-flight on the server) before sending.
+  A 401 from a non-live seat triggers one refresh + one retry; if that fails, the
+  401 is returned as-is.
+- **Why not the fork / an auth override:** no npm release, and no copy of the
+  Codex loader to keep in sync. Opencode's own Codex behaviour (URL rewrite, model
+  list, `instructions`) keeps running. The live logins in `~/.claude` and `auth.json`
+  stay exactly as they are and keep enabling both providers.
 - **Fail-safe:** if manta-server is unreachable, the plugin uses the last assignment
   it saw for that conversation, else the provider's active seat. A model request
   never fails because the resolver is down.
@@ -262,9 +281,12 @@ to, reason, resentTokens}`.
    (a) `CLAUDE_CONFIG_DIR` login writes a separate credential;
    (b) measure the cache across two seats of the same org (does a move re-send?);
    (c) diff the built-in Codex fetch to copy it faithfully.
-   (a) and (b) are done (see §10). (c) remains.
+   All three done (see §10).
 1. Weekly fix (`limits[]`) + seat store + migration + per-seat usage polling + aggregate.
-2. Plugins: Claude fork resolver, `manta-accounts` Codex plugin, resolve route, fail-safe.
+2. `manta-accounts` fetch-wrapper plugin, resolve + refresh routes, sticky
+   per-conversation assignment (rule 1–2 only; moves are phase 4), fail-safe, and
+   `PER_CONVERSATION_ROUTING` turned on automatically once the plugin is seen
+   calling resolve.
 3. Manual mode + Accounts UI + session seat display.
 4. Automatic mode (§5.3) + move notices + activity log.
 
@@ -275,9 +297,10 @@ parsing, migration).
 
 ## 10. Decisions (2026-10-08)
 - Spec approved as drafted (thresholds 90/70, one move per 5h).
-- Fork source: `github.com/antoinedc/opencode-claude-auth` (published as
-  `opencode-claude-auth-bui`). Claude seat resolution lands there as a new `-bui`
-  release, and the installer pin is bumped.
+- ~~Fork release~~ superseded: seat routing is a Manta plugin wrapping `fetch`
+  (§4). The fork and the installer pin are untouched.
+- Phase 0 (c) done: the built-in Codex loader was mapped. It no longer needs
+  copying, because the wrapper sits after it.
 - iOS Accounts screen ships in phase 3, alongside the desktop UI.
 - Seats are not discoverable: OAuth tokens cannot list org members (verified: the
   members endpoints 404, or reject OAuth tokens). Each seat is added by signing in as
