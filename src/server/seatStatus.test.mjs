@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyRefreshOutcome, createAccountsService, emptyStore } from "./accounts.mjs";
 import { createSeatAssigner } from "./seatAssignment.mjs";
-import { refreshClaudeSeatAndNote } from "./opencode.mjs";
+import { createCredentialRefreshSweep, refreshClaudeSeatAndNote, refreshCodexSeatAndNote } from "./opencode.mjs";
 
 const quiet = { warn() {}, log() {} };
 const storeWith = (status, provider = "claude") => {
@@ -40,7 +40,20 @@ test("applyRefreshOutcome: a transient failure, an unrelated status, an unknown 
   assert.equal(applyRefreshOutcome(out, "claude", "seat-2", { ok: false, reason: "refresh-token-expired" }), out, "a status set by something else is not overwritten");
   assert.equal(applyRefreshOutcome(out, "claude", "seat-2", { ok: true }), out);
   const codex = storeWith("ok", "codex");
-  assert.equal(applyRefreshOutcome(codex, "codex", "seat-2", { ok: false, reason: "refresh-token-expired" }), codex, "Claude only");
+  assert.equal(applyRefreshOutcome(codex, "codex", "seat-2", { ok: false, reason: "refresh-token-expired" }), codex, "each provider has its own dead-token reason");
+  assert.equal(applyRefreshOutcome(ok, "claude", "seat-2", { ok: false, reason: "refresh-token-rejected" }), ok);
+  for (const reason of ["network", "http-503", "bad-response", "write-failed", "no-credentials", "no-refresh-token"]) {
+    assert.equal(applyRefreshOutcome(codex, "codex", "seat-2", { ok: false, reason }), codex, `${reason} is transient`);
+  }
+});
+
+test("applyRefreshOutcome: Codex refresh-token-rejected → expired; success → ok again", () => {
+  const ok = storeWith("ok", "codex");
+  const expired = applyRefreshOutcome(ok, "codex", "seat-2", { ok: false, reason: "refresh-token-rejected" });
+  assert.equal(statusOf(expired, "codex"), "expired");
+  assert.equal(statusOf(ok, "codex"), "ok", "the input is not mutated");
+  assert.equal(applyRefreshOutcome(expired, "codex", "seat-2", { ok: false, reason: "refresh-token-rejected" }), expired, "already expired → no change");
+  assert.equal(statusOf(applyRefreshOutcome(expired, "codex", "seat-2", { ok: true, expiresAt: 9 }), "codex"), "ok");
 });
 
 const creds = (access) => JSON.stringify({ claudeAiOauth: { accessToken: access, refreshToken: `r-${access}`, expiresAt: 9e12 } });
@@ -104,4 +117,84 @@ test("refreshClaudeSeatAndNote: records the outcome and returns the refresh resu
   assert.deepEqual(noted, [["claude", "seat-2", result]]);
   const alive = await refreshClaudeSeatAndNote({ noteRefreshOutcome: async () => { throw new Error("x"); } }, { seatId: "s", dir: "/d" }, async () => ({ ok: true }));
   assert.deepEqual(alive, { ok: true });
+});
+
+// ---- Codex ---------------------------------------------------------------------
+
+async function codexRig() {
+  const root = await mkdtemp(join(tmpdir(), "seat-status-codex-"));
+  const paths = {
+    storePath: join(root, "state", "accounts.json"),
+    seatsRoot: join(root, "secrets", "accounts"),
+    claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
+    codexAuthPath: join(root, "home", "opencode-auth.json"),
+  };
+  await mkdir(join(root, "home"), { recursive: true });
+  const entry = (access, id) => ({ type: "oauth", refresh: `r-${id}`, access, expires: 9e12, accountId: id });
+  await writeFile(paths.codexAuthPath, JSON.stringify({ openai: entry("LIVE-A", "acct-A") }));
+  const accounts = createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({}) });
+  await accounts.discover({ force: true }); // seat-1 = the live login, copied into the seat store
+  // a second, non-live Codex seat
+  const dir = join(paths.seatsRoot, "codex", "seat-2");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "auth.json"), JSON.stringify({ openai: entry("SEAT2-B", "acct-B") }));
+  const store = JSON.parse(await (await import("node:fs/promises")).readFile(paths.storePath, "utf-8"));
+  store.providers.codex.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "acct-B", credentialDir: dir, status: "ok" });
+  await writeFile(paths.storePath, JSON.stringify(store));
+  return { root, paths, make: () => createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({}) }), dir };
+}
+
+test("service (codex): a rejected refresh token expires the seat so it is never chosen; success brings it back", async () => {
+  const { root, make } = await codexRig();
+  try {
+    const accounts = make();
+    const find = async () => (await accounts.seatStates("codex")).seats.find((s) => s.seatId === "seat-2");
+    assert.equal((await find()).usable, true);
+    assert.equal(await accounts.noteRefreshOutcome("codex", "seat-2", { ok: false, reason: "refresh-token-rejected" }), true);
+    assert.equal((await find()).usable, false);
+    const snaps = [{ provider: "codex", seatId: "seat-1", windows: [{ pct: 95 }] }, { provider: "codex", seatId: "seat-2", windows: [{ pct: 0 }] }];
+    const svc = createSeatAssigner({ accounts, listSeatSnapshots: () => snaps, refreshSeatCredentials: async () => ({}), load: () => null, save: async () => {}, notePluginSeen: () => {}, log: quiet });
+    assert.equal((await svc.resolve("codex", "conv")).seatId, "seat-1", "the emptier seat is expired, so the other one is chosen");
+    assert.equal(await accounts.noteRefreshOutcome("codex", "seat-2", { ok: true, expiresAt: 1 }), true);
+    assert.equal((await find()).usable, true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("service: an expired seat that becomes the LIVE login (re-signed in) is usable again without waiting for a refresh", async () => {
+  const { root, make, paths } = await codexRig();
+  try {
+    const accounts = make();
+    await accounts.noteRefreshOutcome("codex", "seat-2", { ok: false, reason: "refresh-token-rejected" });
+    // The user signs in as acct-B in opencode: it is now the live login.
+    await writeFile(paths.codexAuthPath, JSON.stringify({ openai: { type: "oauth", refresh: "r-new", access: "LIVE-B", expires: 9e12, accountId: "acct-B" } }));
+    const seat2 = (await make().seatStates("codex")).seats.find((s) => s.seatId === "seat-2");
+    assert.equal(seat2.live, true);
+    assert.equal(seat2.usable, true, "opencode owns and refreshes the live login");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("refreshCodexSeatAndNote: records the outcome, returns the refresh result untouched, survives a bookkeeping failure", async () => {
+  const noted = [];
+  const result = { ok: false, reason: "refresh-token-rejected" };
+  assert.equal(await refreshCodexSeatAndNote({ noteRefreshOutcome: async (...a) => void noted.push(a) }, { seatId: "seat-2", file: "/f" }, async () => result), result);
+  assert.deepEqual(noted, [["codex", "seat-2", result]]);
+  assert.deepEqual(await refreshCodexSeatAndNote({ noteRefreshOutcome: async () => { throw new Error("x"); } }, { seatId: "s", file: "/f" }, async () => ({ ok: true })), { ok: true });
+});
+
+test("the proactive sweep's Codex refresh path notes the outcome when given the noting refresher", async () => {
+  const noted = [];
+  const seats = { noteRefreshOutcome: async (...a) => void noted.push(a) };
+  const sweep = createCredentialRefreshSweep({
+    readCreds: () => null,
+    listCodexTargets: async () => [{ seatId: "seat-2", file: "/f" }],
+    readCodexExpiresAt: async () => 1,
+    refreshCodex: (t) => refreshCodexSeatAndNote(seats, t, async () => ({ ok: false, reason: "refresh-token-rejected" })),
+    now: () => 10 * 60_000,
+  });
+  await sweep.sweep();
+  assert.deepEqual(noted, [["codex", "seat-2", { ok: false, reason: "refresh-token-rejected" }]]);
 });

@@ -310,7 +310,7 @@ sync_opencode_plugins() {
 
   # Rewrite the manifest only when it differs (sorted, so order never churns it).
   local want
-  want="$(printf '%s' "$owned" | sort -u)"
+  want="$(printf '%s' "$owned" | LC_ALL=C sort -u)"
   if [ "$want" != "$( [ -f "$manifest" ] && cat "$manifest" 2>/dev/null )" ]; then
     if mkdir -p "$(dirname "$manifest")" 2>/dev/null \
        && printf '%s\n' "$want" | sed '/^$/d' > "$manifest.tmp.$$" 2>/dev/null \

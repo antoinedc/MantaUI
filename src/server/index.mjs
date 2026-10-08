@@ -110,8 +110,8 @@ import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from ".
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
 import { createAccountsService } from "./accounts.mjs";
 import { createSeatAssigner } from "./seatAssignment.mjs";
+import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
-import { refreshCodexSeat } from "./codexRefresh.mjs";
 import {
   createCapJob,
   getJob,
@@ -619,6 +619,15 @@ const optimizerPacing = createPacingState({
 const accountsService = createAccountsService();
 void accountsService.discover({ force: true });
 
+// Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
+// plugins). self-update.sh does this too, but an installed box runs the script it
+// ALREADY had, so the first update that ships a plugin would not install it; the
+// NEW server code running here is what closes that gap. Non-blocking, never
+// fatal; restarts opencode only if it was itself just restarted (see
+// opencodePlugins.mjs). index.mjs is never imported by tests, so this cannot
+// touch a developer's real config dir from the suite.
+void runStartupPluginSync();
+
 // Multi-account phase 2: which seat a conversation's requests use. Called by the
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
 // /api/accounts/refresh below); each call also proves the plugin is installed,
@@ -629,7 +638,7 @@ const seatAssigner = createSeatAssigner({
   refreshSeatCredentials: (provider, t) =>
     provider === "claude"
       ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })
-      : refreshCodexSeat({ seatId: t.seatId, file: t.file }),
+      : oc.refreshCodexSeatAndNote(accountsService, { seatId: t.seatId, file: t.file }),
 });
 const handleAccountsRoute = createAccountsRouteHandler({
   seatAssigner,

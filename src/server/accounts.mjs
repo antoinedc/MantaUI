@@ -432,6 +432,12 @@ export function mergeFindings(state, findings, { defaultAccountLabel }) {
   return prov;
 }
 
+// The refresh outcome that means "this login's refresh token is dead — the user
+// must sign in again", per provider. Claude: the CLI run found the refresh token
+// expired. Codex: the OAuth endpoint refused it (400/401, e.g. invalid_grant).
+// Every other failure (network, 5xx, CLI missing) is transient and changes nothing.
+const DEAD_REFRESH_REASON = { claude: "refresh-token-expired", codex: "refresh-token-rejected" };
+
 /**
  * The store after a seat refresh outcome (see `noteRefreshOutcome`). Pure.
  * Returns the SAME object when nothing changes.
@@ -446,7 +452,7 @@ export function applyRefreshOutcome(store, provider, seatId, outcome) {
   let status = null;
   if (outcome?.ok === true) {
     if (seat.status === "expired") status = "ok";
-  } else if (provider === "claude" && outcome?.reason === "refresh-token-expired") {
+  } else if (outcome?.reason === DEAD_REFRESH_REASON[provider]) {
     if (seat.status !== "expired" && seat.status !== "signed-out") status = "expired";
   }
   if (!status) return store;
@@ -844,7 +850,11 @@ export function createAccountsService({
           // A live seat is usable by construction (the source resolver only
           // says "live" when the live login exists); a directory seat needs a
           // readable token; a signed-out seat ("none") is never usable.
-          usable: seat.status !== "signed-out" && seat.status !== "expired" && (live || Boolean(credential)),
+          // …and a LIVE seat is usable whatever its stored status: the live login
+          // is opencode's own, refreshed by opencode, so an "expired" mark left
+          // from when this seat was a directory seat is stale the moment the user
+          // signs it in again.
+          usable: live || (seat.status !== "signed-out" && seat.status !== "expired" && Boolean(credential)),
           dir: source.kind === "dir" ? source.dir : null,
           file,
           credential,
@@ -854,8 +864,8 @@ export function createAccountsService({
     },
 
     /**
-     * Fold a seat refresh's outcome into the seat's status: a Claude seat whose
-     * REFRESH TOKEN is known-expired becomes "expired" (the router never picks
+     * Fold a seat refresh's outcome into the seat's status: a seat whose
+     * REFRESH TOKEN is known-dead (Claude: expired; Codex: rejected) becomes "expired" (the router never picks
      * it — the user must sign it in again); any later success makes it "ok"
      * again. Anything else (a network blip, the CLI failing) changes nothing.
      * Only a seat that is "ok"/"unknown"/"expired" is touched, so a status set
