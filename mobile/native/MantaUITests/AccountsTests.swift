@@ -359,7 +359,7 @@ final class AccountsTests: XCTestCase {
     // MARK: - Other subscriptions
 
     func testBestSeatIsTheLeastLoadedUsableOne() {
-        let p = provider(name: "codex", accounts: [account("a", "A", seats: [
+        let p = provider("codex", accounts: [account("a", "A", seats: [
             seat("hot", load: 80),
             seat("cool", windows: [win("session", 12, label: "5h")], load: 12),
             seat("gone", status: .expired, load: 1),
@@ -370,27 +370,27 @@ final class AccountsTests: XCTestCase {
     }
 
     func testOtherSubscriptionLineWithoutAWindowOrAReading() {
-        let loadOnly = provider(name: "codex", accounts: [account("a", "A", seats: [seat("s", load: 30.4)])])
+        let loadOnly = provider("codex", accounts: [account("a", "A", seats: [seat("s", load: 30.4)])])
         XCTAssertEqual(AccountsSelectors.otherSubscriptionLine(loadOnly), "OpenAI · best seat 30% used")
 
-        let unread = provider(name: "codex", accounts: [account("a", "A", seats: [seat("s")])])
+        let unread = provider("codex", accounts: [account("a", "A", seats: [seat("s")])])
         XCTAssertEqual(AccountsSelectors.otherSubscriptionLine(unread), "OpenAI · no usage reading yet")
 
-        let signedOut = provider(name: "codex", accounts: [account("a", "A", seats: [seat("s", status: .signedOut)])])
+        let signedOut = provider("codex", accounts: [account("a", "A", seats: [seat("s", status: .signedOut)])])
         XCTAssertEqual(AccountsSelectors.otherSubscriptionLine(signedOut), "OpenAI · needs sign-in")
     }
 
     func testOtherProvidersExcludeTheConversationsOwn() {
         let claude = twoAccountProvider()
-        let codex = provider(name: "codex", accounts: [account("c", "C", seats: [seat("x")])])
+        let codex = provider("codex", accounts: [account("c", "C", seats: [seat("x")])])
         XCTAssertEqual(AccountsSelectors.otherProviders([claude, codex], than: "claude").map(\.provider), ["codex"])
         // Without a known conversation provider there is no "other".
         XCTAssertEqual(AccountsSelectors.otherProviders([claude, codex], than: nil), [])
     }
 
     func testFocusedProviderMovesToTheTop() {
-        let a = provider(name: "claude", accounts: [])
-        let b = provider(name: "codex", accounts: [])
+        let a = provider("claude", accounts: [])
+        let b = provider("codex", accounts: [])
         XCTAssertEqual(AccountsSelectors.ordered([a, b], focus: "codex").map(\.provider), ["codex", "claude"])
         XCTAssertEqual(AccountsSelectors.ordered([a, b], focus: "nope").map(\.provider), ["claude", "codex"])
         XCTAssertEqual(AccountsSelectors.ordered([a, b], focus: nil).map(\.provider), ["claude", "codex"])
