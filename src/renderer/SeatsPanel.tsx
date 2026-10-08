@@ -318,7 +318,7 @@ export function SeatsPanel({ view }: { view: ProviderView }) {
               />
               <span className="text-meta text-text-faint max-w-[52ch]">
                 {view.mode === "auto"
-                  ? "Manta picks a seat per conversation and moves it before its seat runs out."
+                  ? "Manta picks the least-used seat for each new conversation and moves a conversation when its seat runs out."
                   : "Every conversation uses the seat you choose, from its next message."}
               </span>
             </div>
