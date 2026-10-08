@@ -19,16 +19,13 @@ import type { AccountView, ProviderView, SeatView } from "../shared/types";
 import {
   hasSeatChoice,
   isSameOrgMove,
-  needsSecondAccountNote,
   providerViewOrError,
   seatBarWindows,
   seatLoad,
   seatStateText,
-  SEAT_TOS_NOTE,
 } from "./chatUtils";
 import { providerLabel, UsageWindowRow } from "./UsageDial";
-import { AddSeatFlow } from "./AddSeatFlow";
-import { Callout } from "./Callout";
+import { AddSeatGate } from "./AddSeatFlow";
 import { ChipGroup } from "./Chip";
 import { consumeAccountsFocus, refreshAccounts } from "./accountsData";
 import { CROSS_ORG_CONFIRM_COPY, useSeatSwitch, type SeatActionReport } from "./hooks/useSeatSwitch";
@@ -36,30 +33,25 @@ import { useStore } from "./store";
 
 const BTN =
   "px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40";
-const TOS_ACK_KEY = "manta:accounts:tosAck";
-
-function readTosAck(): boolean {
-  try {
-    return window.localStorage.getItem(TOS_ACK_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
 type Adding = { accountId?: string; accountLabel?: string } | null;
 
-export function SeatsPanel({ view }: { view: ProviderView }) {
+export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSignal?: number }) {
   const [open, setOpen] = useState(() => consumeAccountsFocus(view.provider));
   const [nowMs] = useState(() => Date.now());
   const [notice, setNotice] = useState<SeatActionReport | null>(null);
   const [adding, setAdding] = useState<Adding>(null);
-  const [tosPending, setTosPending] = useState<Adding>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "account" | "seat"; id: string; draft: string } | null>(null);
   const switcher = useSeatSwitch(view, setNotice);
   const multi = hasSeatChoice(view);
   const seatCount = view.accounts.reduce((n, a) => n + a.seats.length, 0);
+
+  // The parent just added an account through the row's Connect: show the list
+  // so the new account is on screen without a click.
+  useEffect(() => {
+    if (openSignal) setOpen(true);
+  }, [openSignal]);
 
   // "Manage seats" while Settings is already open on Accounts.
   useEffect(() => {
@@ -137,12 +129,6 @@ export function SeatsPanel({ view }: { view: ProviderView }) {
       `Couldn't remove ${seat.label}`,
     );
     if (ok) setRemoveConfirm(null);
-  };
-
-  const startAdd = (target: NonNullable<Adding>) => {
-    // §0: the terms note is shown once, when a second ACCOUNT (not a seat) is added.
-    if (!target.accountId && needsSecondAccountNote(view, readTosAck())) setTosPending(target);
-    else setAdding(target);
   };
 
   const label = providerLabel(view.provider);
@@ -340,8 +326,9 @@ export function SeatsPanel({ view }: { view: ProviderView }) {
                 <button
                   type="button"
                   className={BTN}
-                  disabled={adding !== null || tosPending !== null}
-                  onClick={() => startAdd({ accountId: account.id, accountLabel: account.label })}
+                  disabled={adding !== null}
+                  title={adding ? "Finish or cancel the sign-in below first" : undefined}
+                  onClick={() => setAdding({ accountId: account.id, accountLabel: account.label })}
                 >
                   Add seat to {account.label}
                 </button>
@@ -349,35 +336,22 @@ export function SeatsPanel({ view }: { view: ProviderView }) {
             );
           })}
 
-          {tosPending && (
-            <div className="space-y-2">
-              <Callout tone="warn">{SEAT_TOS_NOTE}</Callout>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  className={BTN}
-                  onClick={() => {
-                    try {
-                      window.localStorage.setItem(TOS_ACK_KEY, "1");
-                    } catch {
-                      /* the note simply shows again next time */
-                    }
-                    setAdding(tosPending);
-                    setTosPending(null);
-                  }}
-                >
-                  Continue
-                </button>
-                <button type="button" className="text-meta text-text-faint hover:text-text" onClick={() => setTosPending(null)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+          {/* The action is always here. The terms note (second account only) and
+              the sign-in both open BELOW it, inline — never in its place. */}
+          <button
+            type="button"
+            className={BTN}
+            disabled={adding !== null}
+            title={adding ? "Finish or cancel the sign-in below first" : `Sign in another ${label} account`}
+            onClick={() => setAdding({})}
+          >
+            Add {label} account
+          </button>
 
-          {adding ? (
-            <AddSeatFlow
+          {adding && (
+            <AddSeatGate
               provider={view.provider}
+              view={view}
               accountId={adding.accountId}
               accountLabel={adding.accountLabel}
               onDone={(text) => {
@@ -386,12 +360,6 @@ export function SeatsPanel({ view }: { view: ProviderView }) {
               }}
               onCancel={() => setAdding(null)}
             />
-          ) : (
-            !tosPending && (
-              <button type="button" className={BTN} onClick={() => startAdd({})}>
-                Add {label} account
-              </button>
-            )
           )}
 
           {notice && (

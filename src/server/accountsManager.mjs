@@ -214,14 +214,49 @@ export function createAccountsManager({
     accounts.releaseSeat(rec.provider, rec.seatId);
   }
 
-  /** Forget flows that nobody came back for. */
+  /**
+   * Resolve a pending Claude sign-in ONCE, single-flight (two callers — the
+   * client's poll and the background sweep — must never place the same seat
+   * twice). Codex has nothing to poll: opencode's own login event drives it.
+   */
+  async function resolveFlow(rec) {
+    if (rec.state !== "pending") return;
+    let run = resolving.get(rec.seatId);
+    if (!run) {
+      run = (rec.provider === "claude" ? resolveClaude(rec) : Promise.resolve())
+        .catch((e) => {
+          log.warn?.("[accounts] checking a seat sign-in failed:", e?.message ?? e);
+        })
+        .finally(() => resolving.delete(rec.seatId));
+      resolving.set(rec.seatId, run);
+    }
+    await run;
+  }
+
+  /**
+   * The background pass over the flows (run on a short timer by index.mjs, and
+   * at the start of every add / status call). A sign-in is resolved by looking
+   * at its credentials file, NOT by a client asking: the login can finish after
+   * the panel stopped polling, and "Login successful" on the box must end with
+   * a seat, not a deleted directory.
+   *
+   * ORDER IS THE POINT. A pending Claude flow is always resolved FIRST; the
+   * timeout only ever applies to a flow that still has no credentials (that
+   * rule lives in resolveClaude), so a login that completed just before the
+   * deadline — or while nobody was looking — is placed, never dropped.
+   */
   async function sweep() {
     const at = now();
     for (const rec of [...pending.values()]) {
-      if (rec.state === "pending" && at - rec.startedAt > t.loginTimeoutMs) {
-        if (rec.provider === "codex") rememberCodexGuard(rec);
-        await failFlow(rec, "login-failed");
-      } else if (rec.state !== "pending" && rec.finishedAt !== undefined) {
+      if (rec.state === "pending") {
+        if (rec.provider === "claude") {
+          await resolveFlow(rec);
+        } else if (at - rec.startedAt > t.loginTimeoutMs) {
+          rememberCodexGuard(rec);
+          await failFlow(rec, "login-failed");
+        }
+      }
+      if (rec.state !== "pending" && rec.finishedAt !== undefined) {
         const ttl = rec.parked ? t.parkedTtlMs : t.finishedTtlMs;
         if (at - rec.finishedAt > ttl) {
           if (rec.parked) await failFlow(rec, "login-failed");
@@ -596,18 +631,7 @@ export function createAccountsManager({
       }
       return { state: "failed", error: "login-failed" };
     }
-    if (rec.state === "pending") {
-      let run = resolving.get(seatId);
-      if (!run) {
-        run = (rec.provider === "claude" ? resolveClaude(rec) : Promise.resolve())
-          .catch((e) => {
-            log.warn?.("[accounts] checking a seat sign-in failed:", e?.message ?? e);
-          })
-          .finally(() => resolving.delete(seatId));
-        resolving.set(seatId, run);
-      }
-      await run;
-    }
+    await resolveFlow(rec);
     if (rec.state === "pending") return { state: "pending" };
     if (rec.state === "ok") {
       const seat = findSeatView(await providerView(rec.provider), seatId);
@@ -642,6 +666,13 @@ export function createAccountsManager({
     if (!rec) return { ok: true }; // nothing in flight: already as cancelled as it gets
     if (rec.state === "ok") {
       pending.delete(seatId); // a finished seat is a real seat — leave it be
+      return { ok: true };
+    }
+    // A login that already finished (its credentials are on disk) is placed
+    // before anything is dropped: closing the panel must not throw one away.
+    if (rec.state === "pending" && rec.provider === "claude") await resolveFlow(rec);
+    if (rec.state === "ok") {
+      pending.delete(seatId);
       return { ok: true };
     }
     if (rec.state === "pending" && rec.provider === "codex") rememberCodexGuard(rec);
@@ -700,6 +731,8 @@ export function createAccountsManager({
   return {
     channels,
     onProviderLoginLanded,
+    /** One background pass over the in-flight sign-ins (see `sweep`). */
+    tick: sweep,
     // exposed for tests and the wiring in index.mjs
     list,
     setMode,

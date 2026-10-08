@@ -3770,44 +3770,6 @@ export function seatDisplayName(
   return accountLabel ? `${accountLabel} · ${seatLabel}` : seatLabel;
 }
 
-/** One "Other subscriptions" line per OTHER provider that has seats:
- *  "<provider> · best seat 12% of 5h" — best = the seat the aggregate would
- *  read (auto: least loaded; manual: the active one), via seatChoice. */
-export function otherSubscriptionLines(
-  providers: ProviderView[] | null | undefined,
-  currentProvider: string | null | undefined,
-): { provider: ProviderView["provider"]; text: string }[] {
-  const out: { provider: ProviderView["provider"]; text: string }[] = [];
-  for (const p of providers ?? []) {
-    if (p.provider === currentProvider) continue;
-    const seats = allSeats(p);
-    if (seats.length === 0) continue;
-    // Same pick the provider aggregate makes (§5.4): auto → least loaded,
-    // manual → the active seat (least loaded when it has no reading).
-    const bySnap = new Map(seats.map((s) => [s.id, s]));
-    const pickedId = (
-      p.mode === "manual" && bySnap.has(p.activeSeatId ?? "")
-        ? p.activeSeatId
-        : leastLoadedSeat(seats.map(asSeatSnapshot), { activeSeatId: p.activeSeatId })?.seatId
-    ) as string | undefined;
-    const chosen = (pickedId ? bySnap.get(pickedId) : null) ?? null;
-    const load = chosen ? seatLoad(chosen) : null;
-    if (!chosen || load == null) {
-      out.push({ provider: p.provider, text: "no usage reading yet" });
-      continue;
-    }
-    const driver = chosen.windows
-      .filter((w) => w.active !== false && w.stale !== true)
-      .reduce<UsageWindow | null>((m, w) => (!m || w.pct > m.pct ? w : m), null);
-    const label = driver?.label ? ` of ${driver.label}` : "";
-    out.push({
-      provider: p.provider,
-      text: `${seats.length > 1 ? "best seat " : ""}${Math.round(load)}%${label}`,
-    });
-  }
-  return out;
-}
-
 /** "Seat: Work · Seat 2" — the session header's context-popover line. Names come
  *  from the live view when it still has the seat (a rename shows at once), else
  *  from what the box last said. An account with one seat reads as its label

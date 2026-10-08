@@ -24,7 +24,6 @@ import {
   isSameOrgMove,
   nextSeatHint,
   orderOtherSeats,
-  otherSubscriptionLines,
   OTHER_SEATS_VISIBLE_ROWS,
   seatBarWindows,
   seatDialSnapshot,
@@ -232,7 +231,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         role="dialog"
         ariaLabel="Plan usage"
         hook="manta-usage-popover"
-        surfaceClassName="w-[320px] p-4 max-h-[calc(100vh-24px)] overflow-y-auto"
+        surfaceClassName="w-[420px] p-4 max-h-[calc(100vh-24px)] overflow-y-auto"
       >
         <UsagePopoverBody
           snapshot={snapshot}
@@ -274,13 +273,11 @@ function UsagePopoverBody({
   nowMs: number;
   onNavigate: () => void;
 }) {
-  const accounts = useStore((s) => s.accounts);
   const switcher = useSeatSwitch(view);
   const lastMove = formatLastMove(sessionSeat?.lastMove, nowMs);
   const groups = multi ? orderOtherSeats(view, current?.seat.id ?? null) : [];
   const otherCount = groups.reduce((n, g) => n + g.seats.length, 0);
   const nextId = view && view.mode === "auto" ? nextSeatHint(view, current?.seat.id ?? null) : null;
-  const others = otherSubscriptionLines(accounts, view?.provider ?? snapshot.provider);
   // No assignment yet (a brand-new conversation): the windows above are the
   // aggregate — the seat a new conversation would start on. Say so.
   const startsOn =
@@ -324,9 +321,7 @@ function UsagePopoverBody({
           <span className="min-w-0 truncate font-medium text-text">
             {current ? seatName(current) : startsOn ? seatName(startsOn) : ""}
           </span>
-          <span className="shrink-0 text-text-faint">
-            {current ? "this conversation" : "new conversations start here"}
-          </span>
+          {!current && startsOn && <span className="shrink-0 text-text-faint">new conversations start here</span>}
         </div>
       )}
 
@@ -390,22 +385,6 @@ function UsagePopoverBody({
         </div>
       )}
 
-      {others.length > 0 && (
-        <div className="mt-3 pt-3 border-t border-border-subtle flex flex-col gap-1" data-testid="usage-other-subscriptions">
-          {others.map((o) => (
-            <button
-              key={o.provider}
-              type="button"
-              onClick={() => manage(o.provider)}
-              className="flex items-center justify-between gap-2 text-meta text-left hover:text-text"
-              title={`Open ${providerLabel(o.provider)} in Settings → Accounts`}
-            >
-              <span className="text-text-muted">{providerLabel(o.provider)}</span>
-              <span className="text-text-faint font-mono truncate">{o.text}</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       <div className="mt-3 pt-3 border-t border-border-subtle flex items-center justify-between gap-2">
         {multi ? (
@@ -453,7 +432,6 @@ function OtherSeatRow({
 }) {
   const broken = seatStateText(seat.status);
   const facts = [
-    seat.conversations > 0 ? `${seat.conversations} chat${seat.conversations === 1 ? "" : "s"}` : null,
     seatResetHint(seat, nowMs),
   ].filter(Boolean) as string[];
   const confirming = switcher.confirmId === seat.id;

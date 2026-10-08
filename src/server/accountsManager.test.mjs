@@ -615,3 +615,176 @@ test("add-seat (codex): when opencode offers no OAuth (api-key shape) the add fa
     await r.cleanup();
   }
 });
+
+// ---- a sign-in is resolved by its credentials file, not by a client polling ------
+//
+// The incident: "Login successful" was printed on the box, but the panel had
+// stopped polling (or the 5-minute client limit cancelled the seat), so the new
+// login was never placed and its directory was deleted. These drive the real
+// flow in-process with a fake `claude auth login` (an injected starter that only
+// records the call; the "login" is the test writing the credentials file).
+
+async function timedManager(r, clock) {
+  const calls = { cancel: [] };
+  const mgr = createAccountsManager({
+    accounts: r.accounts,
+    seatAssigner: r.seatAssigner,
+    routingActive: () => true,
+    now: () => clock.t,
+    claudeLogin: {
+      start: async (dir, seatId) => ({ action: "start", shape: "claude-login", sessionKey: `k-${seatId}`, cwd: "/home" }),
+      cancel: (k) => calls.cancel.push(k),
+    },
+    codex: {},
+    fetchProfile: async (token) => identityFromProfile(r.profiles[token]),
+    log: quiet,
+  });
+  return { mgr, calls };
+}
+
+test("(a) credentials appear AFTER the client stopped polling: the background pass places the seat, the directory is kept", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    await mgr.tick(); // nothing yet: still waiting
+    assert.equal(mgr._pending().get(seatId).state, "pending");
+
+    // The panel is gone (no seat-status call from here on). The login finishes.
+    clock.t += 7 * 60_000; // longer than the old 5-minute client limit
+    await writeFile(join(dir, ".credentials.json"), credsJson("tok-C"));
+    await mgr.tick();
+
+    assert.equal(await r.exists(dir), true, "directory kept");
+    const seat = allSeats((await r.accounts.getStore()).providers.claude).find((s) => s.id === seatId);
+    assert.ok(seat, "placed as a seat");
+    assert.equal(seat.email, "c@example.com");
+    assert.equal(seat.credentialDir, dir);
+    // The client that comes back later simply sees the result.
+    assert.equal((await mgr.channels["accounts:seat-status"]({ seatId })).state, "ok");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("(b) credentials written during the wait are placed even when the first look comes after the 15-minute limit", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    await writeFile(join(dir, ".credentials.json"), credsJson("tok-C")); // finished…
+    clock.t += 16 * 60_000; // …and nobody looked until after the deadline
+    await mgr.tick();
+    assert.equal(await r.exists(dir), true);
+    assert.ok(allSeats((await r.accounts.getStore()).providers.claude).some((s) => s.id === seatId), "placed, not timed out");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("(b2) the same through seat-status, and through the client's call after the deadline", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    await writeFile(join(r.paths.seatsRoot, "claude", seatId, ".credentials.json"), credsJson("tok-C"));
+    clock.t += 20 * 60_000;
+    assert.equal((await mgr.channels["accounts:seat-status"]({ seatId })).state, "ok");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("(c) no credentials at the timeout: the flow is dropped, its directory deleted, the login stopped", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr, calls } = await timedManager(r, clock);
+    const { seatId, connect } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    clock.t += 14 * 60_000;
+    await mgr.tick();
+    assert.equal(await r.exists(dir), true, "not before 15 minutes");
+    assert.equal(mgr._pending().get(seatId).state, "pending");
+    clock.t += 2 * 60_000; // 16 minutes
+    await mgr.tick();
+    assert.equal(await r.exists(dir), false);
+    assert.deepEqual(calls.cancel, [connect.sessionKey]);
+    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed" });
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("cancel (the panel closing) after the login already finished places the seat instead of deleting its credentials", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr, calls } = await timedManager(r, clock);
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    await writeFile(join(dir, ".credentials.json"), credsJson("tok-C"));
+    assert.deepEqual(await mgr.channels["accounts:cancel-seat"]({ seatId }), { ok: true });
+    assert.equal(await r.exists(dir), true);
+    assert.deepEqual(calls.cancel, [], "the login process is not killed for a finished seat");
+    assert.ok(allSeats((await r.accounts.getStore()).providers.claude).some((s) => s.id === seatId));
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("cancel with no credentials still deletes the directory (unchanged)", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    await mgr.channels["accounts:cancel-seat"]({ seatId });
+    assert.equal(await r.exists(dir), false);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("a background pass and a client poll landing together place the seat once", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
+    await writeFile(join(r.paths.seatsRoot, "claude", seatId, ".credentials.json"), credsJson("tok-C"));
+    await Promise.all([mgr.tick(), mgr.channels["accounts:seat-status"]({ seatId }), mgr.tick()]);
+    assert.equal(allSeats((await r.accounts.getStore()).providers.claude).filter((s) => s.id === seatId).length, 1);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("a different-org login finished while nobody watched waits for the user's answer (parked, directory kept)", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    r.profiles["tok-Z"] = profileOf("u-Z", "z@example.com", orgZ);
+    const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude", accountId: "acct-1" });
+    const dir = join(r.paths.seatsRoot, "claude", seatId);
+    await writeFile(join(dir, ".credentials.json"), credsJson("tok-Z"));
+    await mgr.tick();
+    assert.equal(await r.exists(dir), true, "kept for the confirmation");
+    const st = await mgr.channels["accounts:seat-status"]({ seatId });
+    assert.deepEqual(st, { state: "failed", error: "different-org", orgName: "Zeta" });
+  } finally {
+    await r.cleanup();
+  }
+});

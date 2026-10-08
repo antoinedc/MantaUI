@@ -347,6 +347,7 @@ function applyIdentity(seat, identity) {
  * @param {{
  *   dirs: Array<{id:string, dir:string, identity: ReturnType<typeof identityFromProfile>}>,
  *   live: {present:boolean, identity: ReturnType<typeof identityFromProfile>} | null,
+ *   takenIds?: string[],
  * }} findings  `identity: null` = the lookup failed or was not possible
  * @param {{defaultAccountLabel: string}} opts
  * @returns {ProviderState}
@@ -404,7 +405,15 @@ export function mergeFindings(state, findings, { defaultAccountLabel }) {
         applyIdentity(placeholder, live.identity);
         placeSeat(prov, placeholder, live.identity, defaultAccountLabel);
       } else {
-        const id = nextId("seat", allSeats(prov).map((s) => s.id).concat((findings.dirs ?? []).map((d) => d.id)));
+        const id = nextId(
+          "seat",
+          allSeats(prov)
+            .map((s) => s.id)
+            .concat((findings.dirs ?? []).map((d) => d.id))
+            // Ids the caller knows are spoken for (a leftover or in-flight
+            // seat directory that is not a seat yet).
+            .concat(findings.takenIds ?? []),
+        );
         const seat = {
           id,
           label: defaultSeatLabel(id, allSeats(prov).length + 1),
@@ -759,7 +768,52 @@ export function createAccountsService({
       dirs.push({ id, dir, identity: await fetchClaudeProfile(creds.accessToken, fetchImpl) });
     }
     const live = await claudeLiveIdentity();
-    return mergeFindings(prov, { dirs, live }, { defaultAccountLabel: "Claude" });
+    // A new seat must not take the id of a directory that exists but is not a
+    // seat yet — a sign-in in flight owns its (still empty) directory.
+    const takenIds = [...(await listSeatDirs(root)), ...reserved.claude];
+    const merged = mergeFindings(prov, { dirs, live, takenIds }, { defaultAccountLabel: "Claude" });
+    return provisionLiveSeatDirs(merged, live);
+  }
+
+  /**
+   * Give every identified Claude seat that is read from the live file — and has
+   * no directory of its own — a directory holding a copy of that login.
+   *
+   * Why: a seat with no directory IS "whatever the live file says". The moment
+   * the live login changes (the box's own `claude` re-signed-in as someone
+   * else, the old connect flow, a manual swap) that seat has no credentials
+   * anywhere and is signed out for good. A directory copy, kept current by
+   * `mirrorLive` while the login is live, is what lets the seat survive.
+   *
+   * Only a positive match (the live file's identity IS the seat's account) is
+   * copied, and only the content that was identified (same refresh-token hash
+   * as the identity cache), so a swap landing mid-call cannot put the wrong
+   * login in this seat. Directory 0700, file 0600, written atomically.
+   * Best-effort: on any failure the seat simply stays directory-less until the
+   * next discovery.
+   */
+  async function provisionLiveSeatDirs(prov, live) {
+    const uuid = live?.present ? live.identity?.accountUuid : null;
+    if (!uuid) return prov;
+    const targets = allSeats(prov).filter((s) => !s.credentialDir && s.accountUuid === uuid);
+    if (targets.length === 0) return prov;
+    try {
+      const raw = await readFile(claudeLivePath, "utf-8");
+      const creds = parseCredentials(raw);
+      if (!creds?.accessToken || shortHash(creds.refreshToken ?? creds.accessToken) !== liveCache.key) return prov;
+      const next = structuredClone(prov);
+      for (const seat of allSeats(next).filter((s) => !s.credentialDir && s.accountUuid === uuid)) {
+        const dir = join(seatsRoot, "claude", seat.id);
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        await chmod(dir, 0o700).catch(() => {});
+        await writeJsonAtomic(join(dir, ".credentials.json"), raw, { mode: 0o600 });
+        seat.credentialDir = dir;
+      }
+      return next;
+    } catch (e) {
+      log.warn?.("[accounts] giving the live Claude login its own directory failed:", e?.message ?? e);
+      return prov;
+    }
   }
 
   async function discoverCodex(prov) {

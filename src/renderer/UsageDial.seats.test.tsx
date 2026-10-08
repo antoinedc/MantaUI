@@ -127,12 +127,15 @@ describe("UsageDial — three seats, automatic", () => {
     expect(lm.textContent).toContain("history re-sent: 128k");
   });
 
-  it("lists other subscriptions and 'Manage seats' opens Settings → Accounts", async () => {
+  it("shows only the current provider (no other subscriptions) and 'Manage seats' opens Settings → Accounts", async () => {
     const codex = { ...threeSeatView(), provider: "codex" as const };
     const opened = vi.fn();
     window.addEventListener("manta-open-settings", opened as EventListener);
     const { popover } = await open([threeSeatView(), codex], { seatId: "s1", usage: [claudeSnapshot, codexSnapshot] });
-    expect(popover.querySelector('[data-testid="usage-other-subscriptions"]')?.textContent).toContain("OpenAI");
+    expect(popover.querySelector('[data-testid="usage-other-subscriptions"]')).toBeNull();
+    expect(popover.textContent).not.toContain("OpenAI");
+    expect(popover.textContent).not.toContain("this conversation");
+    expect(popover.textContent).not.toMatch(/\d+ chats?\b/);
     const manage = Array.from(popover.querySelectorAll("button")).find((b) => b.textContent === "Manage seats")!;
     await act(async () => {
       manage.click();

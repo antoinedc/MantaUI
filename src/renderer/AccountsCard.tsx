@@ -29,7 +29,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { DiscoverResult, ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { formatEndpointStateLine, selectProviderView } from "./chatUtils";
@@ -38,6 +38,7 @@ import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConfirmInline } from "./ConfirmInline";
 import { ConnectProvider } from "./ConnectProvider";
 import { SeatsPanel } from "./SeatsPanel";
+import { AddSeatGate } from "./AddSeatFlow";
 import { refreshAccounts } from "./accountsData";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { ModelChecklist } from "./ModelChecklist";
@@ -332,8 +333,11 @@ export function endpointEligibility(
 
 function AccountRow({
   row,
+  seatView,
   busy,
   connectState,
+  onConnect,
+  onSeatAdded,
   onConnectChange,
   onDisconnect,
   onRetry,
@@ -341,6 +345,10 @@ function AccountRow({
   onRemove,
 }: {
   row: AccountRowModel;
+  /** The provider's accounts/seats when multi-account is in use for it. Then the
+   *  row's Connect adds an ACCOUNT through the seat flow; it must never start a
+   *  live login (that would replace the box's own login and add no seat). */
+  seatView: ProviderView | null;
   busy: string | null;
   connectState: {
     connectingId: string | null;
@@ -350,6 +358,8 @@ function AccountRow({
     setDisconnectConfirmId: (id: string | null) => void;
     setRemoveConfirmId: (id: string | null) => void;
   };
+  onConnect: (id: string) => void;
+  onSeatAdded: (id: string, message: string) => void;
   onConnectChange: (id: string, label: string) => void;
   onDisconnect: (id: string) => void;
   onRetry: (id: string) => void;
@@ -462,8 +472,9 @@ function AccountRow({
           )
         ) : (
           <button
-            onClick={() => setConnectingId(row.id)}
+            onClick={() => onConnect(row.id)}
             disabled={busy !== null || connectingId !== null}
+            title={seatView ? `Sign in another ${row.name} account` : undefined}
             className="px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
           >
             Connect
@@ -481,12 +492,21 @@ function AccountRow({
 
       {connectingId === row.id && (
         <div className="pl-4">
-          <ConnectProvider
-            id={row.id}
-            label={row.name}
-            onDone={() => onConnectChange(row.id, row.name)}
-            onCancel={() => setConnectingId(null)}
-          />
+          {seatView ? (
+            <AddSeatGate
+              provider={seatView.provider}
+              view={seatView}
+              onDone={(message) => onSeatAdded(row.id, message)}
+              onCancel={() => setConnectingId(null)}
+            />
+          ) : (
+            <ConnectProvider
+              id={row.id}
+              label={row.name}
+              onDone={() => onConnectChange(row.id, row.name)}
+              onCancel={() => setConnectingId(null)}
+            />
+          )}
         </div>
       )}
     </div>
@@ -700,6 +720,25 @@ export function AccountsCard() {
     void refresh();
   }, [refresh]);
 
+  // The seat list must be known before Connect decides which flow it opens: a
+  // provider that already has seats must not get a live login started on it.
+  const startConnect = useCallback(async (id: string) => {
+    await refreshAccounts();
+    setConnectingId(id);
+  }, []);
+
+  // A seat/account was added through the row's Connect: the panel closes, the
+  // list (already refreshed by the flow) shows it, and this line names it.
+  const [seatNotice, setSeatNotice] = useState<Record<string, { message: string; n: number }>>({});
+  const onSeatAdded = useCallback(
+    (id: string, message: string) => {
+      setConnectingId(null);
+      setSeatNotice((n) => ({ ...n, [id]: { message, n: (n[id]?.n ?? 0) + 1 } }));
+      void refresh();
+    },
+    [refresh],
+  );
+
   // Try again — reports BOTH outcomes (cleared vs still-refused) per AGENTS.md.
   const retry = useCallback(
     async (id: string) => {
@@ -873,10 +912,14 @@ export function AccountsCard() {
               row.className === "Custom"
                 ? data?.providers.find((p) => p.id === row.id)
                 : undefined;
+            const seatView = row.kind === "subscription" ? selectProviderView(seatViews, snapshots, row.id) : null;
             return (
               <div key={row.id}>
                 <AccountRow
                   row={row}
+                  seatView={seatView}
+                  onConnect={(id) => void startConnect(id)}
+                  onSeatAdded={onSeatAdded}
                   busy={busy}
                   connectState={{
                     connectingId,
@@ -892,10 +935,12 @@ export function AccountsCard() {
                   onDiscover={() => ep && void discover(ep)}
                   onRemove={() => ep && void removeEndpoint(ep)}
                 />
-                {row.kind === "subscription" && row.connected && (() => {
-                  const seatView = selectProviderView(seatViews, snapshots, row.id);
-                  return seatView ? <SeatsPanel view={seatView} /> : null;
-                })()}
+                {seatView && <SeatsPanel view={seatView} openSignal={seatNotice[row.id]?.n} />}
+                {seatNotice[row.id] && (
+                  <div role="status" data-testid={`seat-notice-${row.id}`} className="text-meta text-ok pl-4 break-words">
+                    {seatNotice[row.id].message}
+                  </div>
+                )}
                 {retryResult[row.id] && (
                   <div
                     role="status"

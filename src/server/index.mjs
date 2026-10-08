@@ -692,6 +692,14 @@ const accountsManager = createAccountsManager({
   },
 });
 onProviderOauthLanded((evt) => accountsManager.onProviderLoginLanded(evt));
+// A seat sign-in is resolved by looking at its credentials file, not by a client
+// asking: the login can finish after the panel stopped polling. Short cadence,
+// and a tick with no sign-in in flight does nothing at all.
+// eslint-disable-next-line no-unused-vars
+const { stop: stopAccountsFlowSweep } = startPoller(() => accountsManager.tick(), {
+  intervalMs: 5_000,
+  label: "accounts-flows",
+});
 const handleAccountsRoute = createAccountsRouteHandler({
   seatAssigner,
   readJson: (req) => readJsonBody(req),
