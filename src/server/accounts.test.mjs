@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, stat, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -794,6 +794,97 @@ test("service.deleteSeatDir: removes a directory under the seats root and REFUSE
     assert.equal(await svc.deleteSeatDir(join(paths.seatsRoot, "claude")), false, "a provider dir");
     assert.equal(await svc.deleteSeatDir(join(other, "sub")), false, "below a seat dir");
     assert.ok((await stat(other)).isDirectory());
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+// ---- a live login that is not a seat yet gets its own directory ------------------
+
+test("mergeFindings: ids the caller says are taken are never reused for a live-only seat", () => {
+  const out = mergeFindings(emptyStore().providers.claude, {
+    dirs: [{ id: "seat-1", dir: "/d/1", identity: idOf("u-A", "a@e.com") }],
+    live: { present: true, identity: idOf("u-L", "l@e.com") },
+    takenIds: ["seat-2", "seat-3"],
+  }, defaults);
+  assert.deepEqual(allSeats(out).map((s) => s.id), ["seat-1", "seat-4"]);
+});
+
+test("service: a NEW live identity (the old connect flow replaced the live login) is registered WITH its own 0700/0600 directory, and the seat survives the live login changing again", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    await putLive(paths, "tok-Z-live"); // someone else's login landed in the live file
+    const fetchImpl = fakeFetch({
+      "tok-A": profileOf("u-A", "a@e.com"),
+      "tok-Z-live": profileOf("u-Z", "z@e.com", { ...orgA, uuid: "org-Z", name: "Zeta" }),
+      "tok-A-live": profileOf("u-A", "a@e.com"),
+    });
+    let t = 1_000;
+    const svc = createAccountsService({ ...paths, log: quiet, now: () => t, fetchImpl });
+    await svc.discover({ force: true });
+
+    const store = await svc.getStore();
+    const zeta = allSeats(store.providers.claude).find((x) => x.accountUuid === "u-Z");
+    assert.ok(zeta, "the new live identity is a seat");
+    assert.ok(zeta.credentialDir, "…with a directory of its own");
+    assert.ok(zeta.credentialDir.startsWith(join(paths.seatsRoot, "claude")), "under the seats root");
+    const file = join(zeta.credentialDir, ".credentials.json");
+    assert.equal((await stat(zeta.credentialDir)).mode & 0o777, 0o700);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    assert.equal(await readFile(file, "utf-8"), credsJson("tok-Z-live"), "a copy of the live login");
+    assert.equal(await readFile(paths.claudeLivePath, "utf-8"), credsJson("tok-Z-live"), "the live file is untouched");
+
+    // The live login changes again (the box's own `claude` signs in as seat-1's
+    // account). The new seat keeps working from its directory.
+    await putLive(paths, "tok-A-live");
+    t += 120_000;
+    const plan = await svc.seatsFor("claude");
+    const by = Object.fromEntries(plan.seats.map((x) => [x.seatId, x]));
+    assert.equal((await by[zeta.id].deps.readCredentials()).accessToken, "tok-Z-live", "still signed in");
+    assert.equal((await by["seat-1"].deps.readCredentials()).accessToken, "tok-A-live");
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service: a first-time live login (no seats yet) is registered with a directory copy too, and re-running discovery does not rewrite it", async () => {
+  const paths = await sandbox();
+  try {
+    await putLive(paths, "tok-L");
+    const svc = createAccountsService({ ...paths, log: quiet, fetchImpl: fakeFetch({ "tok-L": profileOf("u-L", "l@e.com") }) });
+    await svc.discover({ force: true });
+    const seat = allSeats((await svc.getStore()).providers.claude)[0];
+    assert.equal(seat.id, "seat-1");
+    const file = join(seat.credentialDir, ".credentials.json");
+    assert.equal(await readFile(file, "utf-8"), credsJson("tok-L"));
+    const before = (await stat(file)).mtimeMs;
+    await svc.discover({ force: true });
+    assert.equal((await stat(file)).mtimeMs, before, "idempotent");
+    assert.equal((await readdir(join(paths.seatsRoot, "claude"))).length, 1);
+    // …and being live it is still read from the live file, never a refresh target.
+    assert.deepEqual(await svc.claudeRefreshTargets(), []);
+  } finally {
+    await rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+test("service: the new live seat never takes the directory of a sign-in that is still in flight", async () => {
+  const paths = await sandbox();
+  try {
+    await putSeatDir(paths, "seat-1", "tok-A");
+    await mkdir(join(paths.seatsRoot, "claude", "seat-2"), { recursive: true }); // a login waiting for its credentials
+    await putLive(paths, "tok-Z-live");
+    const svc = createAccountsService({
+      ...paths,
+      log: quiet,
+      fetchImpl: fakeFetch({ "tok-A": profileOf("u-A", "a@e.com"), "tok-Z-live": profileOf("u-Z", "z@e.com") }),
+    });
+    svc.reserveSeat("claude", "seat-2");
+    await svc.discover({ force: true });
+    const zeta = allSeats((await svc.getStore()).providers.claude).find((x) => x.accountUuid === "u-Z");
+    assert.equal(zeta.id, "seat-3");
+    await assert.rejects(stat(join(paths.seatsRoot, "claude", "seat-2", ".credentials.json")), "the in-flight directory was not written to");
   } finally {
     await rm(paths.root, { recursive: true, force: true });
   }
