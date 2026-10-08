@@ -1039,7 +1039,7 @@ export function createAccountsService({
      * seats carry no credential (the plugin lets them through untouched).
      * INTERNAL: not for a renderer. `null` = unknown provider.
      * @returns {Promise<null|{mode:string, activeSeatId:string|null, seats:Array<{
-     *   seatId:string, accountId:string, live:boolean, usable:boolean,
+     *   seatId:string, accountId:string, orgId:string|null, label:string, live:boolean, usable:boolean,
      *   dir:string|null, file:string|null,
      *   credential:null|{expiresAt:number|null}}>}>}
      */
@@ -1056,6 +1056,11 @@ export function createAccountsService({
         seats.push({
           seatId: seat.id,
           accountId: account.id,
+          // Who owns the subscription: seats of one org share a prompt cache, so
+          // a move between them is free (seatAssignment's same-org preference).
+          // null = not identified yet; such seats are only "same org" by account.
+          orgId: account.orgId ?? null,
+          label: seat.label,
           live,
           // A live seat is usable by construction (the source resolver only
           // says "live" when the live login exists); a directory seat needs a

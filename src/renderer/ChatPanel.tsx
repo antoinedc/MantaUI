@@ -94,7 +94,7 @@ import { acceptsModality } from "../shared/modelGuide.mjs";
 import { setSessionChoice } from "./modelPrefs";
 import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
-import { BlockedProgressCard, CompactionCard, PermissionCard, PlanCard, RetryCard } from "./Cards";
+import { BlockedProgressCard, CompactionCard, PermissionCard, PlanCard, RetryCard, SeatMoveNotice } from "./Cards";
 import { Button } from "./Button";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
@@ -103,6 +103,7 @@ import { useComposerController } from "./hooks/useComposerController";
 import { useTranscriptState } from "./hooks/useTranscriptState";
 import { useTranscriptSelection } from "./hooks/useTranscriptSelection";
 import { useSseBus } from "./hooks/useSseBus";
+import { useSeatMoveNotice } from "./hooks/useSeatMoveNotice";
 import { VoicePlaybackProvider } from "./hooks/useVoicePlayback";
 import { Transcript } from "./Transcript";
 import { QuoteToolbar } from "./QuoteToolbar";
@@ -2513,6 +2514,7 @@ export function ChatPanel({
     "send-error": { order: 5, label: "⚠ error" },
     queued: { order: 4, label: "⏳ queued" },
     "compaction-notice": { order: 3, label: "⟳ compaction" },
+    "seat-move": { order: 3.5, label: "↷ seat moved" },
     schedules: { order: 3, label: "⏰ schedule" },
     secrets: { order: 2, label: "🔑 secret" },
     webhooks: { order: 1, label: "🪝 webhook" },
@@ -2709,6 +2711,8 @@ export function ChatPanel({
     return null;
   }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
 
+  const { text: seatMoveText, dismiss: dismissSeatMove } = useSeatMoveNotice(sessionId);
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
@@ -2785,6 +2789,11 @@ export function ChatPanel({
           <div className="opt-compact-line">{saving === "0" ? base : `${base} · ${saving}`}</div>
         </div>));
     }
+    // Multi-account (§5.3): this conversation changed seat — one dismissible line.
+    if (seatMoveText) list.push(amb("seat-move",
+      <div className="shrink-0 px-4 pt-2">
+        <SeatMoveNotice text={seatMoveText} onDismiss={dismissSeatMove} />
+      </div>));
     if (sendError) list.push(amb("send-error",
       <div className="shrink-0 mx-4 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
         <span className="flex-1">⚠ {sendError}</span>
@@ -2880,7 +2889,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, seatMoveText, dismissSeatMove, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {

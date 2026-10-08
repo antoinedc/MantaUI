@@ -18,6 +18,9 @@ export interface SeatSnapshotLike {
 export function isWindowActive(w: { active?: boolean } | null | undefined): boolean;
 export function activeWindows<W extends { active?: boolean }>(windows: W[] | null | undefined): W[];
 export function seatLoad(snap: { windows?: SeatWindowLike[] } | null | undefined): number | null;
+export function seatLoadWindow(
+  snap: { windows?: Array<SeatWindowLike & { kind?: string }> } | null | undefined,
+): { kind: string; pct: number } | null;
 export function isSeatExhausted(snap: { exhausted?: boolean } | null | undefined): boolean;
 export function leastLoadedSeat<S extends { seatId?: string }>(
   seatSnapshots: S[],

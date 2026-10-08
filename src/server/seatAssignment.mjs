@@ -21,15 +21,24 @@
 //   2. A conversation STAYS on its seat; its sub-agents use the same seat (they
 //      share its cached prefix). Only a seat that no longer exists or can no
 //      longer serve (signed out / no readable credentials) releases it …
-//   3-floor. … and so does an EXHAUSTED seat — in automatic mode only, and only
-//      when another usable seat still has room. Without this a conversation would
-//      sit on a full seat and fail until it resets, while the provider aggregate
-//      (auto: "least-loaded seat") says there is room, so the usage stopper would
-//      never even enrol it. Manual mode never moves on its own (spec §5.2): there
-//      the aggregate IS the active seat and the stopper handles it. A conversation
-//      does not return to a seat it left within 5 hours unless that seat is the
-//      only one with room. The move is recorded (`movedFrom`/`movedAt`/`reason`)
-//      for phase 4 to surface.
+//   3. (phase 4, spec §5.3 rules 3–4) AUTOMATIC mode only. A conversation MOVES when
+//      its seat's load (`seatLoad`: the highest ACTIVE, FRESH window — 5h, weekly,
+//      a model-scoped weekly in force) reaches 90, OR the seat is full/exhausted,
+//      OR it can no longer serve (signed out / expired). ONE pure function,
+//      `decideMove`, decides it:
+//        • load 90–99: move only to a seat under 70 (same org first, then
+//          least-loaded); if none is under 70, STAY until 100;
+//        • exhausted / unusable: any seat with room (<100) — a seat under 70
+//          still first, same org first;
+//        • a seat left within 5 h is never a target for a load move, and for a
+//          forced move only when nothing else has room;
+//        • a move to ANOTHER org (a cache re-send) happens at most once per
+//          conversation per 5 h (`crossOrgMovedAt`); a same-org move is free and
+//          uncapped. A dead seat (unusable) is exempt from the cap: it cannot serve.
+//      The 90/70 split + the 5 h no-move-back is the hysteresis: a conversation
+//      that just left a seat at 91 cannot come back when that seat reads 60.
+//      Every automatic move is recorded {movedFrom, movedAt, reason, trigger,
+//      crossOrg} and announced (`onMoved`).
 //   MANUAL MODE (phase 3): every conversation uses the active seat. The stored
 //      assignment is still kept up to date (so `sessionAssignment` answers what
 //      the NEXT request will use) and a switch is recorded as a move with reason
@@ -48,7 +57,7 @@
 
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { statePath } from "../shared/paths.mjs";
-import { leastLoadedSeat, isSeatExhausted, seatLoad } from "../shared/seatChoice.mjs";
+import { leastLoadedSeat, isSeatExhausted, seatLoad, seatLoadWindow } from "../shared/seatChoice.mjs";
 import { ACCOUNT_PROVIDERS, notePluginSeen } from "./accounts.mjs";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -59,6 +68,12 @@ export const ASSIGNMENT_TTL_MS = 30 * DAY_MS;
 export const TOUCH_INTERVAL_MS = 60 * 60_000;
 /** A conversation does not go back to a seat it left this recently (no flip-flop). */
 export const MOVE_BACK_BLOCK_MS = 5 * 60 * 60_000;
+/** A cross-org move (a full history re-send) happens at most once per conversation per this long. */
+export const CROSS_ORG_CAP_MS = 5 * 60 * 60_000;
+/** Spec §5.3 rule 3: a conversation moves when its seat reaches this load… */
+export const MOVE_AT_PCT = 90;
+/** …to a seat under this load (else it stays until its seat is full). */
+export const MOVE_TARGET_BELOW_PCT = 70;
 const STORE_VERSION = 1;
 const MAX_ID_LEN = 200;
 
@@ -90,7 +105,11 @@ export function normalizeAssignments(raw) {
         kept.movedFrom = a.movedFrom;
         kept.movedAt = a.movedAt;
         kept.reason = typeof a.reason === "string" ? a.reason : "exhausted";
+        const trig = a.trigger;
+        if (trig && typeof trig.kind === "string" && Number.isFinite(trig.pct)) kept.trigger = { kind: trig.kind, pct: trig.pct };
+        if (typeof a.crossOrg === "boolean") kept.crossOrg = a.crossOrg;
       }
+      if (Number.isFinite(a.crossOrgMovedAt)) kept.crossOrgMovedAt = a.crossOrgMovedAt;
       if (a.left && typeof a.left === "object") {
         const left = {};
         for (const [seatId, at] of Object.entries(a.left)) if (isId(seatId) && Number.isFinite(at)) left[seatId] = at;
@@ -176,24 +195,100 @@ export function isSeatFull(snap) {
   return load !== null && load >= 100;
 }
 
-/**
- * The seat an exhausted conversation should move to, or null when it should
- * stay (no other usable seat has room). Seats left within 5 h are used only when
- * nothing else has room. Pure.
- */
-export function chooseMoveTarget({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null }) {
-  const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
-  const roomy = seats.filter((s) => s.usable && s.seatId !== existing.seatId && !isSeatFull(bySeat.get(s.seatId)));
-  if (roomy.length === 0) return null;
-  const left = existing.left ?? {};
-  const fresh = roomy.filter((s) => !(typeof left[s.seatId] === "number" && nowMs - left[s.seatId] < MOVE_BACK_BLOCK_MS));
-  const pool = fresh.length > 0 ? fresh : roomy;
-  return chooseSeat({ mode: "auto", activeSeatId, seats: pool, seatSnapshots });
+/** Which "org" a seat belongs to for the same-org preference: the account's orgId
+ *  when it has one, else the account itself (an unidentified account is only ever
+ *  "the same org" as its own seats). */
+export function seatOrgKey(seat) {
+  return seat?.orgId ? `org:${seat.orgId}` : `acct:${seat?.accountId ?? seat?.seatId}`;
 }
 
 /**
- * Rules 1–2 (+ the exhausted-seat floor) for one request, with no I/O.
- * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string, why?: "manual"|"exhausted"}}
+ * Spec §5.3 rules 3–4 as ONE pure decision: should this conversation leave its
+ * seat, and for which one? `null` = stay.
+ *
+ * @param {object} args
+ * @param {{seatId:string, left?:Record<string,number>, crossOrgMovedAt?:number}} args.existing  the stored assignment
+ * @param {Array<{seatId:string, usable:boolean, accountId?:string, orgId?:string|null}>} args.seats
+ * @param {Array<object>} [args.seatSnapshots]  per-seat usage readings
+ * @param {number} args.nowMs
+ * @param {string|null} [args.activeSeatId]  tie-break between equally loaded seats
+ * @returns {null|{seatId:string, from:string, why:"load"|"exhausted"|"unusable",
+ *                 trigger:{kind:string,pct:number}|null, crossOrg:boolean}}
+ */
+export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null }) {
+  const cur = seats.find((s) => s.seatId === existing.seatId);
+  if (!cur) return null;
+  const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
+  const own = bySeat.get(cur.seatId);
+
+  let why;
+  let trigger;
+  if (!cur.usable) {
+    why = "unusable";
+    trigger = null; // no window: the seat cannot serve at all
+  } else if (isSeatFull(own)) {
+    why = "exhausted";
+    trigger = seatLoadWindow(own) ?? { kind: "exhausted", pct: 100 };
+  } else {
+    const load = seatLoad(own);
+    if (load === null || load < MOVE_AT_PCT) return null;
+    why = "load";
+    trigger = seatLoadWindow(own);
+  }
+  const hard = why !== "load";
+  const left = existing.left ?? {};
+  const crossOrgCapped = why !== "unusable" && typeof existing.crossOrgMovedAt === "number" && nowMs - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS;
+  const curOrg = seatOrgKey(cur);
+
+  const candidates = [];
+  for (const s of seats) {
+    if (!s.usable || s.seatId === cur.seatId) continue;
+    const snap = bySeat.get(s.seatId) ?? { seatId: s.seatId };
+    if (isSeatFull(snap)) continue;
+    const same = seatOrgKey(s) === curOrg;
+    if (!same && crossOrgCapped) continue;
+    candidates.push({
+      snap,
+      same,
+      load: seatLoad(snap),
+      blocked: typeof left[s.seatId] === "number" && nowMs - left[s.seatId] < MOVE_BACK_BLOCK_MS,
+    });
+  }
+
+  const pick = (pool) => {
+    const roomy = (c) => c.load !== null && c.load < MOVE_TARGET_BELOW_PCT;
+    const tiers = [
+      pool.filter((c) => roomy(c) && c.same),
+      pool.filter((c) => roomy(c) && !c.same),
+      ...(hard ? [pool.filter((c) => c.same), pool.filter((c) => !c.same)] : []),
+    ];
+    for (const tier of tiers) {
+      const best = leastLoadedSeat(tier.map((c) => c.snap), { activeSeatId });
+      if (best) return pool.find((c) => c.snap === best);
+    }
+    return null;
+  };
+
+  // A recently-left seat is a last resort, and only when the conversation HAS to
+  // move; a soft (90–99) move never goes back.
+  let chosen = pick(candidates.filter((c) => !c.blocked));
+  if (!chosen && hard) chosen = pick(candidates.filter((c) => c.blocked));
+  let seatId = chosen ? chosen.snap.seatId : null;
+  if (!seatId && why === "unusable") {
+    // A dead seat must release its conversation even when every other seat is
+    // full or capped: serving from a full seat beats failing on a dead one.
+    const usable = seats.filter((s) => s.usable && s.seatId !== cur.seatId);
+    seatId = chooseSeat({ mode: "auto", activeSeatId, seats: usable, seatSnapshots });
+  }
+  if (!seatId) return null;
+  const target = seats.find((s) => s.seatId === seatId);
+  return { seatId, from: cur.seatId, why, trigger, crossOrg: seatOrgKey(target) !== curOrg };
+}
+
+/**
+ * Rules 1–3 for one request, with no I/O.
+ * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string,
+ *            why?: "manual"|"load"|"exhausted"|"unusable", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean}}
  */
 export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0 }) {
   if (mode === "manual") {
@@ -214,19 +309,65 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
   }
   if (existing) {
     const seat = seats.find((s) => s.seatId === existing.seatId);
-    if (seat?.usable) {
+    if (seat) {
       if (mode === "auto") {
-        const own = (seatSnapshots ?? []).find((x) => x?.seatId === existing.seatId);
-        if (isSeatFull(own)) {
-          const target = chooseMoveTarget({ existing, seats, seatSnapshots, nowMs, activeSeatId });
-          if (target) return { seatId: target, reason: "moved", from: existing.seatId };
-        }
+        const move = decideMove({ existing, seats, seatSnapshots, nowMs, activeSeatId });
+        if (move) return { seatId: move.seatId, reason: "moved", from: move.from, why: move.why, trigger: move.trigger, crossOrg: move.crossOrg };
       }
-      return { seatId: existing.seatId, reason: "kept" };
+      if (seat.usable) return { seatId: existing.seatId, reason: "kept" };
     }
   }
   const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots });
   return seatId ? { seatId, reason: "assigned" } : { seatId: null, reason: "none" };
+}
+
+/**
+ * A short human line for an automatic move — the activity-log text and the basis
+ * of the conversation notice: "Moved a conversation from Seat 1 (91% of 5h) to
+ * Seat 2". Pure.
+ * @param {{fromLabel?:string, toLabel?:string, from?:string, to?:string, reason?:string,
+ *          trigger?:{kind:string,pct:number}|null, crossOrg?:boolean}} evt
+ */
+export function describeSeatMove(evt) {
+  const from = evt.fromLabel || evt.from || "a seat";
+  const to = evt.toLabel || evt.to || "another seat";
+  let why = "";
+  if (evt.reason === "unusable") why = " (signed out)";
+  else if (evt.trigger) {
+    const win = windowWord(evt.trigger.kind);
+    const pct = Math.round(evt.trigger.pct);
+    why = evt.reason === "exhausted" ? ` (${win} limit reached)` : ` (${pct}% of ${win})`;
+  } else if (evt.reason === "exhausted") why = " (limit reached)";
+  return `Moved a conversation from ${from}${why} to ${to}${evt.crossOrg ? " — another org, history re-sent" : ""}`;
+}
+
+function windowWord(kind) {
+  if (kind === "session") return "5h";
+  if (typeof kind === "string" && kind.startsWith("weekly_scoped")) return "weekly (model)";
+  if (kind === "weekly") return "weekly";
+  return typeof kind === "string" && kind ? kind : "usage";
+}
+
+/**
+ * The optimizer activity-log entry for an automatic move (see
+ * optimizer/activityLog.mjs): counts and short labels only — never a session id
+ * or any conversation content.
+ */
+export function seatMoveActivityEntry(evt) {
+  const evidence = { reason: String(evt.reason ?? "") };
+  if (evt.trigger) {
+    evidence.windowPct = Math.round(evt.trigger.pct);
+    evidence.window = windowWord(evt.trigger.kind);
+  }
+  if (evt.crossOrg) evidence.crossOrg = "yes";
+  return {
+    kind: "seat-move",
+    verdict: "applied",
+    subject: describeSeatMove(evt),
+    from: evt.fromLabel || evt.from,
+    to: evt.toLabel || evt.to,
+    evidence,
+  };
 }
 
 /**
@@ -262,7 +403,8 @@ export function createSeatAssigner({
   notePluginSeen: markPluginSeen = notePluginSeen,
   // Phase 3 hooks (both optional): `onChange(provider)` after assignments of a
   // provider changed (a conversation placed / moved / forgotten); `onMoved(evt)`
-  // when the resolver moved a conversation off an exhausted seat.
+  // when the resolver moved a conversation automatically (load / exhausted /
+  // unusable — a manual switch is the user's own act and is not announced).
   onChange = null,
   onMoved = null,
   log = console,
@@ -343,24 +485,45 @@ export function createSeatAssigner({
         dirty = true;
         assignmentsChanged = true;
       } else if (decision.reason === "moved") {
-        // Remember where it came from (phase 4 surfaces it) and every seat it
+        // Remember where it came from (the move notice shows it) and every seat it
         // left in the last 5 h (so it cannot bounce back).
         const left = {};
         for (const [seatId, at] of Object.entries(existing.left ?? {})) if (t - at < MOVE_BACK_BLOCK_MS) left[seatId] = at;
         left[decision.from] = t;
-        s.providers[provider][root] = {
+        const why = decision.why ?? "exhausted";
+        const rec = {
           seatId: decision.seatId,
           assignedAt: t,
           lastUsedAt: t,
           movedFrom: decision.from,
           movedAt: t,
-          reason: decision.why ?? "exhausted",
+          reason: why,
           left,
         };
+        if (why !== "manual") {
+          if (decision.trigger) rec.trigger = decision.trigger;
+          rec.crossOrg = decision.crossOrg === true;
+        }
+        // The once-per-5h cross-org cap: stamped on a cross-org move, carried
+        // forward (while it still matters) through any other move.
+        if (why !== "manual" && decision.crossOrg) rec.crossOrgMovedAt = t;
+        else if (typeof existing.crossOrgMovedAt === "number" && t - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS) rec.crossOrgMovedAt = existing.crossOrgMovedAt;
+        s.providers[provider][root] = rec;
         dirty = true;
         assignmentsChanged = true;
-        if ((decision.why ?? "exhausted") === "exhausted") {
-          movedEvent = { sessionId: root, provider, from: decision.from, to: decision.seatId, reason: "exhausted" };
+        if (why !== "manual") {
+          const label = (id) => states.seats.find((x) => x.seatId === id)?.label ?? id;
+          movedEvent = {
+            sessionId: root,
+            provider,
+            from: decision.from,
+            to: decision.seatId,
+            fromLabel: label(decision.from),
+            toLabel: label(decision.seatId),
+            reason: why,
+            trigger: decision.trigger ?? null,
+            crossOrg: decision.crossOrg === true,
+          };
         }
       } else if (existing && t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
         existing.lastUsedAt = t;

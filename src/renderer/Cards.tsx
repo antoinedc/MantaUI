@@ -126,6 +126,29 @@ export function RetryCard({
   );
 }
 
+// ===== Seat-move notice =====
+// One slim line: this conversation moved to another seat (multi-account, spec
+// §5.3). Quiet like the background-compaction line, but dismissible.
+
+export function SeatMoveNotice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
+  return (
+    <div className="opt-compact-line flex items-center gap-2" role="status" data-testid="seat-move-notice">
+      <span aria-hidden="true">↷</span>
+      <span className="flex-1 min-w-0 break-words">{text}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Dismiss"
+        title="Dismiss"
+        data-testid="seat-move-notice-dismiss"
+        className="shrink-0 px-1 leading-none text-text-faint hover:text-text"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 // ===== Compaction card =====
 
 export function CompactionCard({

@@ -2004,7 +2004,7 @@ export type OptimizerSummary = {
     entries: {
       id: string;
       ts: number;
-      kind: "tune" | "eco" | "compaction" | "guardrail";
+      kind: "tune" | "eco" | "compaction" | "guardrail" | "seat-move";
       subject: string;
       from?: string | number;
       to?: string | number;
@@ -2325,17 +2325,30 @@ export type SessionSeat = {
     /** Optional (not in contract v2): a cross-org move re-sent the history. */
     crossOrg?: boolean;
     resentTokens?: number;
+    /** Phase 4: the reading that drove an automatic move ("5h at 91%"). */
+    trigger?: SeatMoveTrigger | null;
   };
 };
 
-/** Bus `accounts.updated` / `accounts.moved` payloads. */
+/** What pushed a conversation off its seat: which window and how full it was
+ *  (`kind` "session" = the 5h window, "weekly"; the server may add others). */
+export type SeatMoveTrigger = { kind: "session" | "weekly" | string; pct: number };
+
+/** Bus `accounts.updated` / `accounts.moved` payloads. Every field after
+ *  `reason` is optional — an older box sends only the first five. */
 export type AccountsUpdatedPayload = { provider?: SeatProviderId };
 export type AccountsMovedPayload = {
   sessionId?: string;
   provider?: SeatProviderId;
   from?: string;
   to?: string;
+  /** "manual" | "load" | "exhausted" | "unusable" (kept open: unknown strings render generically). */
   reason?: string;
+  fromLabel?: string;
+  toLabel?: string;
+  trigger?: SeatMoveTrigger | null;
+  /** The move crossed orgs, so the history was re-sent. */
+  crossOrg?: boolean;
 };
 
 // The list-level read of the stopped record: the records plus the modal's

@@ -9,7 +9,7 @@
 // `credentialDir` (a filesystem path) is deliberately not copied.
 
 import { seatLoad } from "../shared/seatChoice.mjs";
-import { chooseSeat } from "./seatAssignment.mjs";
+import { chooseSeat, decideMove, MOVE_AT_PCT, isSeatFull } from "./seatAssignment.mjs";
 import { allSeats, findSeat } from "./accounts.mjs";
 
 /**
@@ -52,14 +52,43 @@ export function countConversations({ mode, activeSeatId, seats, seatSnapshots, a
 }
 
 /**
- * The seat a NEW conversation would take (and, in auto mode, where a move would
- * go) — the very function the server's resolver uses, so the hint cannot
- * disagree with what then happens. Manual mode: the active seat.
+ * The seat a NEW conversation would take (rule 1) — the very function the
+ * server's resolver uses, so the hint cannot disagree with what then happens.
+ * Manual mode: the active seat. (Where an existing conversation would MOVE is
+ * `moveTargetFor`.)
  * @returns {string|null}
  */
 export function nextSeatFor({ mode, activeSeatId, seats, seatSnapshots }) {
   if (mode === "manual") return activeSeatId ?? null;
   return chooseSeat({ mode: "auto", activeSeatId, seats, seatSnapshots });
+}
+
+/**
+ * Where a conversation sitting on the most loaded seat that is at/over the move
+ * threshold (and carries conversations) would go — the SAME `decideMove` the
+ * resolver runs, applied to a hypothetical conversation with no history of moves.
+ * `null` in manual mode (no automatic moves), when no in-use seat is at the
+ * threshold, or when that conversation would stay.
+ * @param {{mode:string, activeSeatId:string|null, seats:Array<object>, seatSnapshots:Array<object>,
+ *          counts:Record<string,number>, nowMs?:number}} args
+ * @returns {string|null}
+ */
+export function moveTargetFor({ mode, activeSeatId, seats, seatSnapshots, counts, nowMs = 0 }) {
+  if (mode !== "auto") return null;
+  const bySeat = new Map((seatSnapshots ?? []).filter((x) => x?.seatId).map((x) => [x.seatId, x]));
+  let worst = null;
+  let worstLoad = -1;
+  for (const s of seats) {
+    if ((counts?.[s.seatId] ?? 0) === 0) continue;
+    const snap = bySeat.get(s.seatId);
+    const load = isSeatFull(snap) ? 100 : (seatLoad(snap) ?? -1);
+    if (load >= MOVE_AT_PCT && load > worstLoad) {
+      worst = s;
+      worstLoad = load;
+    }
+  }
+  if (!worst) return null;
+  return decideMove({ existing: { seatId: worst.seatId }, seats, seatSnapshots: seatSnapshots ?? [], nowMs, activeSeatId })?.seatId ?? null;
 }
 
 /**
@@ -72,12 +101,13 @@ export function nextSeatFor({ mode, activeSeatId, seats, seatSnapshots }) {
  * @param {boolean} args.routingActive
  * @returns {object|null}  null when the provider has no seat
  */
-export function buildProviderView({ provider, state, states, seatSnapshots, assignments, routingActive }) {
+export function buildProviderView({ provider, state, states, seatSnapshots, assignments, routingActive, nowMs = 0 }) {
   if (allSeats(state).length === 0) return null;
   const stateBySeat = new Map((states?.seats ?? []).map((s) => [s.seatId, s]));
   const snapBySeat = new Map((seatSnapshots ?? []).filter((x) => x?.seatId).map((x) => [x.seatId, x]));
   // The chooser needs `usable` per seat; a seat the state does not know is not usable.
-  const chooserSeats = allSeats(state).map((s) => ({ seatId: s.id, usable: stateBySeat.get(s.id)?.usable ?? false }));
+  const orgBySeat = new Map(state.accounts.flatMap((a) => a.seats.map((x) => [x.id, { accountId: a.id, orgId: a.orgId ?? null }])));
+  const chooserSeats = allSeats(state).map((s) => ({ seatId: s.id, usable: stateBySeat.get(s.id)?.usable ?? false, ...orgBySeat.get(s.id) }));
   const mode = state.mode === "auto" ? "auto" : "manual";
   const counts = countConversations({
     mode,
@@ -116,6 +146,7 @@ export function buildProviderView({ provider, state, states, seatSnapshots, assi
     activeSeatId: state.activeSeatId ?? null,
     routingActive: Boolean(routingActive),
     nextSeatId: nextSeatFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots }),
+    moveTargetSeatId: moveTargetFor({ mode, activeSeatId: state.activeSeatId, seats: chooserSeats, seatSnapshots, counts, nowMs }),
     accounts,
   };
 }
@@ -142,7 +173,7 @@ export function findSeatView(providerView, seatId) {
  * @param {{mode:string, activeSeatId:string|null, accounts:Array<object>}} args.state
  * @param {{seats: Array<{seatId:string, usable:boolean}>}|null} args.states
  * @param {Array<object>} args.seatSnapshots
- * @returns {null|{provider:string, seatId:string, seatLabel:string, accountLabel:string, lastMove?:{from:string, fromLabel:string, at:number, reason:string}}}
+ * @returns {null|{provider:string, seatId:string, seatLabel:string, accountLabel:string, lastMove?:{from:string, fromLabel:string, at:number, reason:string, trigger?:{kind:string,pct:number}, crossOrg?:boolean}}}
  */
 export function buildSessionSeat({ found, state, states, seatSnapshots }) {
   if (!found) return null;
@@ -166,6 +197,11 @@ export function buildSessionSeat({ found, state, states, seatSnapshots }) {
       at: assignment.movedAt,
       reason: typeof assignment.reason === "string" ? assignment.reason : "exhausted",
     };
+    // Phase 4 (additive): what triggered an automatic move, and whether it
+    // crossed orgs (a full history re-send). Absent on manual / older records.
+    const trig = assignment.trigger;
+    if (trig && typeof trig.kind === "string" && Number.isFinite(trig.pct)) out.lastMove.trigger = { kind: trig.kind, pct: trig.pct };
+    if (typeof assignment.crossOrg === "boolean") out.lastMove.crossOrg = assignment.crossOrg;
   }
   return out;
 }

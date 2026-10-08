@@ -52,6 +52,9 @@ final class AccountsStore: ObservableObject {
     /// The outcome of the last user action. Success clears itself; a failure
     /// stays up longer. Either can be dismissed.
     @Published private(set) var feedback: AccountsFeedback?
+    /// The "moved to another seat" line for the bound conversation (spec §5.3,
+    /// phase 4), or nil. Dismissible; hides itself after 5 minutes.
+    @Published private(set) var moveNotice: SeatMoveNotice?
 
     let sessionId: String?
 
@@ -65,12 +68,29 @@ final class AccountsStore: ObservableObject {
     private var refreshQueued = false
     private var feedbackSeq = 0
     private var feedbackClear: Task<Void, Never>?
+    private var moveTracker: SeatMoveTracker
+    private var moveAutoHide: Task<Void, Never>?
+    private var moveAutoHideKey: String?
+    private let defaults: UserDefaults
 
-    init(api: MantaAPIClient, sessionId: String? = nil, eventStore: MantaEventStore? = nil, pollInterval: TimeInterval = 60) {
+    /// Where hidden seat-move notices are remembered, so closing and reopening
+    /// the chat does not resurrect one the user already dismissed.
+    static let hiddenMovesDefaultsKey = "manta.accounts.hiddenSeatMoves"
+
+    init(
+        api: MantaAPIClient,
+        sessionId: String? = nil,
+        eventStore: MantaEventStore? = nil,
+        pollInterval: TimeInterval = 60,
+        defaults: UserDefaults = .standard
+    ) {
         self.api = api
         self.sessionId = sessionId
         self.eventStore = eventStore
         self.pollInterval = pollInterval
+        self.defaults = defaults
+        let saved = defaults.dictionary(forKey: Self.hiddenMovesDefaultsKey) as? [String: Double] ?? [:]
+        self.moveTracker = SeatMoveTracker(hidden: saved)
     }
 
     /// The bound conversation's resolved seat: the box's `session-seat` joined
@@ -92,8 +112,11 @@ final class AccountsStore: ObservableObject {
         if let eventStore {
             eventStore.accountsUpdates
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] _ in
-                    Task { @MainActor in await self?.refresh() }
+                .sink { [weak self] event in
+                    Task { @MainActor in
+                        self?.noteBusEvent(event)
+                        await self?.refresh()
+                    }
                 }
                 .store(in: &subscriptions)
             // The sink replays the current value on subscribe; `dropFirst` skips
@@ -126,6 +149,9 @@ final class AccountsStore: ObservableObject {
         subscriptions.removeAll()
         feedbackClear?.cancel()
         feedbackClear = nil
+        moveAutoHide?.cancel()
+        moveAutoHide = nil
+        moveAutoHideKey = nil
         started = false
     }
 
@@ -172,6 +198,7 @@ final class AccountsStore: ObservableObject {
             }
         }
         refreshError = failure
+        refreshMoveNotice()
     }
 
     // MARK: - Actions
@@ -252,9 +279,58 @@ final class AccountsStore: ObservableObject {
             providers.append(updated)
         }
         phase = .loaded
+        refreshMoveNotice()
         // A fetch already in flight may carry the pre-change state; queue one
         // more so the screen settles on the post-change one.
         if refreshing { refreshQueued = true }
+    }
+
+    // MARK: - Seat-move notice
+
+    /// A bus event arrived. A `moved` for THIS conversation records the move
+    /// at once (the follow-up refetch brings the box's own record of it).
+    private func noteBusEvent(_ event: AccountsBusEvent) {
+        guard let sessionId, case .moved(_, _, let detail?) = event, detail.sessionId == sessionId else { return }
+        moveTracker.noteMoved(detail, sessionId: sessionId, now: Date())
+        persistHiddenMoves()
+        refreshMoveNotice()
+    }
+
+    /// Recompute the notice from what is known now, and (re)arm the 5-minute
+    /// auto-hide when a different notice appears.
+    private func refreshMoveNotice() {
+        guard let sessionId else {
+            if moveNotice != nil { moveNotice = nil }
+            return
+        }
+        let next = moveTracker.notice(sessionId: sessionId, sessionSeat: sessionSeat, providers: providers, now: Date())
+        if next != moveNotice { moveNotice = next }
+        guard next?.key != moveAutoHideKey else { return }
+        moveAutoHide?.cancel()
+        moveAutoHide = nil
+        moveAutoHideKey = next?.key
+        guard let hideKey = next?.key else { return }
+        moveAutoHide = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(AccountsSelectors.moveNoticeAutoHideSeconds))
+            guard !Task.isCancelled else { return }
+            self?.hideMoveNotice(key: hideKey)
+        }
+    }
+
+    /// The × on the banner.
+    func dismissMoveNotice() {
+        guard let key = moveNotice?.key else { return }
+        hideMoveNotice(key: key)
+    }
+
+    private func hideMoveNotice(key: String) {
+        moveTracker.hide(key, now: Date())
+        persistHiddenMoves()
+        refreshMoveNotice()
+    }
+
+    private func persistHiddenMoves() {
+        defaults.set(moveTracker.hidden, forKey: Self.hiddenMovesDefaultsKey)
     }
 
     // MARK: - Feedback

@@ -201,11 +201,167 @@ final class AccountsTests: XCTestCase {
 
         let moved = try MantaStreamFrame.parse(
             #"{"kind":"accounts.moved","payload":{"sessionId":"ses_1","provider":"claude","from":"a","to":"b","reason":"exhausted"}}"#)
-        XCTAssertEqual(AccountsBusEvent.from(moved), .moved(sessionId: "ses_1", provider: "claude"))
+        let movedDetail = SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "a", to: "b", reason: "exhausted")
+        XCTAssertEqual(AccountsBusEvent.from(moved), .moved(sessionId: "ses_1", provider: "claude", detail: movedDetail))
         XCTAssertEqual(AccountsBusEvent.from(moved)?.sessionId, "ses_1")
 
         let other = try MantaStreamFrame.parse(#"{"kind":"delegate.updated","payload":{"id":"j"}}"#)
         XCTAssertNil(AccountsBusEvent.from(other))
+    }
+
+    // MARK: - Seat-move notice (phase 4)
+
+    func testMoveNoticeTextMatchesTheSpecSentences() {
+        func text(_ reason: String?, trigger: SeatMoveTrigger? = nil, crossOrg: Bool? = nil, to: String? = "Work · Seat 2", from: String? = "Seat 1") -> String {
+            AccountsSelectors.moveNoticeText(SeatMoveNoticeInput(reason: reason, fromLabel: from, toLabel: to, trigger: trigger, crossOrg: crossOrg))
+        }
+        XCTAssertEqual(text("load", trigger: SeatMoveTrigger(kind: "session", pct: 91)),
+                       "Moved to Work · Seat 2 (Seat 1 at 91% of 5h).")
+        XCTAssertEqual(text("exhausted", trigger: SeatMoveTrigger(kind: "weekly", pct: 90.6)),
+                       "Moved to Work · Seat 2 (Seat 1 at 91% of the weekly limit).")
+        XCTAssertEqual(text("load", trigger: SeatMoveTrigger(kind: "opus", pct: 92)),
+                       "Moved to Work · Seat 2 (Seat 1 at 92%).")
+        XCTAssertEqual(text("exhausted"), "Moved to Work · Seat 2 (Seat 1 was at its limit).")
+        XCTAssertEqual(text("load"), "Moved to Work · Seat 2 (Seat 1 was near its limit).")
+        XCTAssertEqual(text("unusable"), "Moved to Work · Seat 2 (Seat 1 needed sign-in).")
+        XCTAssertEqual(text("manual", to: "Personal"), "Switched to Personal.")
+    }
+
+    func testMoveNoticeAppendsHistoryResentForACrossOrgMoveAndDegradesGracefully() {
+        func text(_ input: SeatMoveNoticeInput) -> String { AccountsSelectors.moveNoticeText(input) }
+        XCTAssertEqual(
+            text(SeatMoveNoticeInput(reason: "load", fromLabel: "Seat 1", toLabel: "Personal",
+                                     trigger: SeatMoveTrigger(kind: "session", pct: 91), crossOrg: true)),
+            "Moved to Personal (Seat 1 at 91% of 5h). History re-sent.")
+        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "manual", toLabel: "Personal", crossOrg: true)),
+                       "Switched to Personal. History re-sent.")
+        // No labels / unknown reason / empty input: never a guess.
+        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "load", trigger: SeatMoveTrigger(kind: "session", pct: 91))),
+                       "Moved to another seat.")
+        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "weird", fromLabel: "A", toLabel: "B")), "Moved to B.")
+        XCTAssertEqual(text(SeatMoveNoticeInput()), "Moved to another seat.")
+        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "load", fromLabel: "A", toLabel: "  ")), "Moved to another seat (A was near its limit).")
+    }
+
+    func testSeatMoveDecodesTheOptionalPhaseFourFields() throws {
+        let json = """
+        {"provider":"claude","seatId":"seat-2","seatLabel":"Seat 2","accountLabel":"Work",
+         "lastMove":{"from":"seat-1","fromLabel":"Seat 1","at":1750000000000,"reason":"load",
+                     "trigger":{"kind":"session","pct":91},"crossOrg":true}}
+        """
+        let seat = try JSONDecoder().decode(SessionSeat.self, from: Data(json.utf8))
+        XCTAssertEqual(seat.lastMove?.trigger, SeatMoveTrigger(kind: "session", pct: 91))
+        XCTAssertEqual(seat.lastMove?.crossOrg, true)
+
+        // An older box (no trigger / crossOrg), and a malformed trigger, still decode.
+        let old = try JSONDecoder().decode(SessionSeat.self, from: Data(
+            #"{"provider":"claude","seatId":"s","lastMove":{"from":"a","fromLabel":"A","at":1,"reason":"load"}}"#.utf8))
+        XCTAssertNil(old.lastMove?.trigger)
+        XCTAssertNil(old.lastMove?.crossOrg)
+        let bad = try JSONDecoder().decode(SessionSeat.self, from: Data(
+            #"{"provider":"claude","seatId":"s","lastMove":{"from":"a","fromLabel":"A","trigger":"nope","crossOrg":"yes"}}"#.utf8))
+        XCTAssertNotNil(bad.lastMove)
+        XCTAssertNil(bad.lastMove?.trigger)
+    }
+
+    func testMovedEventCarriesItsDetail() throws {
+        let frame = try MantaStreamFrame.parse(
+            #"{"kind":"accounts.moved","payload":{"sessionId":"ses_1","provider":"claude","from":"seat-1","to":"seat-2","reason":"load","fromLabel":"Seat 1","toLabel":"Work · Seat 2","trigger":{"kind":"weekly","pct":90},"crossOrg":true}}"#)
+        guard case .moved(_, _, let detail?)? = AccountsBusEvent.from(frame) else { return XCTFail("expected a moved event with detail") }
+        XCTAssertEqual(detail.sessionId, "ses_1")
+        XCTAssertEqual(detail.to, "seat-2")
+        XCTAssertEqual(detail.toLabel, "Work · Seat 2")
+        XCTAssertEqual(detail.trigger, SeatMoveTrigger(kind: "weekly", pct: 90))
+        XCTAssertEqual(detail.crossOrg, true)
+    }
+
+    private let moveNow = Date(timeIntervalSince1970: 1_750_000_000)
+
+    private func movedSeat(atAgo seconds: Double, trigger: SeatMoveTrigger? = nil, crossOrg: Bool? = nil) -> SessionSeat {
+        let atMs = (moveNow.timeIntervalSince1970 - seconds) * 1000
+        return SessionSeat(
+            provider: "claude", seatId: "seat-2", seatLabel: "Seat 2", accountLabel: "Work",
+            lastMove: SeatMove(from: "seat-1", fromLabel: "Seat 1", at: atMs, reason: "load", trigger: trigger, crossOrg: crossOrg))
+    }
+
+    func testTrackerShowsARecentRecordOnOpenButNotAnOldOne() throws {
+        let providers = try decodeList(listJSON)
+        let tracker = SeatMoveTracker(hidden: [:], now: moveNow)
+        let fresh = tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 10 * 60, trigger: SeatMoveTrigger(kind: "session", pct: 91)),
+                                   providers: providers, now: moveNow)
+        XCTAssertEqual(fresh?.text, "Moved to Work · Seat 2 (Seat 1 at 91% of 5h).")
+        XCTAssertEqual(fresh?.key, "ses_1|seat-1|seat-2")
+
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 31 * 60), providers: providers, now: moveNow))
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: SessionSeat(provider: "claude", seatId: "seat-2"), providers: providers, now: moveNow))
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
+    }
+
+    func testTrackerShowsABusEventForThisConversationOnly() throws {
+        let providers = try decodeList(listJSON)
+        var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
+        let event = SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-3", reason: "exhausted", crossOrg: true)
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_other", from: "seat-1", to: "seat-3", reason: "load"), sessionId: "ses_1", now: moveNow)
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
+
+        tracker.noteMoved(event, sessionId: "ses_1", now: moveNow)
+        // Names come from the live list: to = "Personal" (single-seat account), from = "Seat 1".
+        XCTAssertEqual(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow)?.text,
+                       "Moved to Personal (Seat 1 was at its limit). History re-sent.")
+    }
+
+    func testDismissalIsPerMoveAndSurvivesTheBoxRecordCatchingUp() throws {
+        let providers = try decodeList(listJSON)
+        var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2",
+                                        fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load"), sessionId: "ses_1", now: moveNow)
+        let shown = try XCTUnwrap(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
+        tracker.hide(shown.key, now: moveNow)
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
+
+        // The box's record of the SAME move arrives with its own clock: still hidden, never doubled.
+        let record = movedSeat(atAgo: -1, trigger: SeatMoveTrigger(kind: "session", pct: 91))
+        XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: record, providers: providers, now: moveNow))
+
+        // A DIFFERENT move (seat-2 → seat-3) is a new notice.
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-2", to: "seat-3", reason: "manual"),
+                          sessionId: "ses_1", now: moveNow)
+        XCTAssertEqual(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow)?.text, "Switched to Personal.")
+    }
+
+    func testBusEventAndBoxRecordForOneMoveMergeIntoOneLine() throws {
+        let providers = try decodeList(listJSON)
+        var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
+        // The bus event had no trigger; the box's record (which arrives next) does.
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2", reason: "load"),
+                          sessionId: "ses_1", now: moveNow)
+        let notice = tracker.notice(
+            sessionId: "ses_1",
+            sessionSeat: movedSeat(atAgo: 0, trigger: SeatMoveTrigger(kind: "session", pct: 93)),
+            providers: providers, now: moveNow)
+        XCTAssertEqual(notice?.text, "Moved to Work · Seat 2 (Seat 1 at 93% of 5h).")
+    }
+
+    func testAHiddenMoveStaysHiddenAcrossReopeningButNotForever() throws {
+        let providers = try decodeList(listJSON)
+        let key = AccountsSelectors.moveNoticeKey(sessionId: "ses_1", from: "seat-1", to: "seat-2")
+        var first = SeatMoveTracker(hidden: [:], now: moveNow)
+        first.hide(key, now: moveNow)
+        // "Reopen": a new tracker seeded from what the first persisted.
+        let reopened = SeatMoveTracker(hidden: first.hidden, now: moveNow)
+        XCTAssertNil(reopened.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 60), providers: providers, now: moveNow))
+
+        // A day later the entry is pruned away (it would be past the 30-minute window anyway).
+        let later = moveNow.addingTimeInterval(SeatMoveTracker.hiddenRetentionSeconds + 1)
+        XCTAssertTrue(SeatMoveTracker(hidden: first.hidden, now: later).hidden.isEmpty)
+        XCTAssertEqual(SeatMoveTracker.pruned(["fresh": moveNow.timeIntervalSince1970, "junk": .nan], now: moveNow).keys.sorted(), ["fresh"])
+    }
+
+    func testAnEventForAnotherConversationNeverTouchesTheHiddenSet() {
+        var tracker = SeatMoveTracker(hidden: ["ses_1|seat-1|seat-2": moveNow.timeIntervalSince1970], now: moveNow)
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_2", from: "seat-1", to: "seat-2"), sessionId: "ses_1", now: moveNow)
+        XCTAssertEqual(tracker.hidden.count, 1)
+        XCTAssertNil(tracker.live)
     }
 
     // MARK: - Load

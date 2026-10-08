@@ -42,12 +42,27 @@ export function activeWindows(windows) {
 export function seatLoad(snap) {
   const windows = Array.isArray(snap?.windows) ? snap.windows.filter(Boolean) : [];
   if (windows.length === 0) return null;
-  let max = 0;
+  return Math.max(0, seatLoadWindow(snap)?.pct ?? 0);
+}
+
+/**
+ * The window that DEFINES a seat's load: the highest-pct window among the ACTIVE,
+ * FRESH ones (the same set `seatLoad` maxes over; first one wins a tie). `null`
+ * when there is none (no reading, or everything in force has just reset). This is
+ * the "what triggered it" of a seat move — `{kind: "session", pct: 91}`.
+ *
+ * @param {{windows?: Array<{kind?:string, pct:number, stale?:boolean, active?:boolean}>}|null|undefined} snap
+ * @returns {{kind: string, pct: number}|null}
+ */
+export function seatLoadWindow(snap) {
+  const windows = Array.isArray(snap?.windows) ? snap.windows.filter(Boolean) : [];
+  let best = null;
   for (const w of windows) {
     if (!isWindowActive(w) || w.stale === true) continue;
-    if (typeof w.pct === "number" && Number.isFinite(w.pct) && w.pct > max) max = w.pct;
+    if (typeof w.pct !== "number" || !Number.isFinite(w.pct)) continue;
+    if (best === null || w.pct > best.pct) best = { kind: typeof w.kind === "string" ? w.kind : "unknown", pct: w.pct };
   }
-  return max;
+  return best;
 }
 
 /** @param {{exhausted?: boolean}|null|undefined} snap */

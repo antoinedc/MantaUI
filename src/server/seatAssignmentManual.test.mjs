@@ -112,7 +112,7 @@ test("manual resolve: a sub-agent follows its parent's seat after a switch too",
   assert.equal(h.svc.assignments("claude").parent.seatId, "seat-3");
 });
 
-test("auto resolve: the exhausted-floor move publishes onMoved with the conversation (root) id; onChange fires for placements", async () => {
+test("auto resolve: an automatic move publishes onMoved with the conversation (root) id; onChange fires for placements", async () => {
   const state = three({ mode: "auto", activeSeatId: "seat-1" });
   const snaps = [snap(1, 50), snap(2, 10), snap(3, 90)];
   const h = harness(state, { snaps });
@@ -126,7 +126,7 @@ test("auto resolve: the exhausted-floor move publishes onMoved with the conversa
   h.tick(1000);
   const moved = await h.svc.resolve("claude", "kid", "conv");
   assert.equal(moved.seatId, "seat-1");
-  assert.deepEqual(h.moves, [{ sessionId: "conv", provider: "claude", from: "seat-2", to: "seat-1", reason: "exhausted" }]);
+  assert.deepEqual(h.moves, [{ sessionId: "conv", provider: "claude", from: "seat-2", to: "seat-1", fromLabel: "seat-2", toLabel: "seat-1", reason: "exhausted", trigger: { kind: "session", pct: 100 }, crossOrg: false }]);
   assert.deepEqual(h.changes, ["claude"]);
 });
 

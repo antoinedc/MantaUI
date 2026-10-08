@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   describeSeatLine,
   formatLastMove,
+  formatSeatMoveNotice,
+  seatDisplayName,
+  seatMoveNoticeKey,
   hasSeatChoice,
   isMoveComing,
   isSameOrgMove,
@@ -220,5 +223,52 @@ describe("misc", () => {
     expect(needsSecondAccountNote(oneSeatView(), false)).toBe(true);
     expect(needsSecondAccountNote(oneSeatView(), true)).toBe(false);
     expect(needsSecondAccountNote({ ...oneSeatView(), accounts: [] }, false)).toBe(false);
+  });
+});
+
+describe("formatSeatMoveNotice (spec §5.3 move line)", () => {
+  const base = { fromLabel: "Seat 1", toLabel: "Work · Seat 2" };
+  it("load / exhausted with a 5h trigger", () => {
+    const t = { kind: "session", pct: 91 };
+    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: t })).toBe("Moved to Work · Seat 2 (Seat 1 at 91% of 5h).");
+    expect(formatSeatMoveNotice({ ...base, reason: "exhausted", trigger: { kind: "session", pct: 100 } })).toBe(
+      "Moved to Work · Seat 2 (Seat 1 at 100% of 5h).",
+    );
+  });
+  it("weekly trigger names the weekly limit; rounds the percentage", () => {
+    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "weekly", pct: 90.6 } })).toBe(
+      "Moved to Work · Seat 2 (Seat 1 at 91% of the weekly limit).",
+    );
+  });
+  it("an unknown trigger kind keeps the percentage without inventing a window", () => {
+    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "opus", pct: 92 } })).toBe(
+      "Moved to Work · Seat 2 (Seat 1 at 92%).",
+    );
+  });
+  it("exhausted without a trigger / load without a trigger / unusable / manual", () => {
+    expect(formatSeatMoveNotice({ ...base, reason: "exhausted" })).toBe("Moved to Work · Seat 2 (Seat 1 was at its limit).");
+    expect(formatSeatMoveNotice({ ...base, reason: "load" })).toBe("Moved to Work · Seat 2 (Seat 1 was near its limit).");
+    expect(formatSeatMoveNotice({ ...base, reason: "unusable" })).toBe("Moved to Work · Seat 2 (Seat 1 needed sign-in).");
+    expect(formatSeatMoveNotice({ ...base, reason: "manual" })).toBe("Switched to Work · Seat 2.");
+  });
+  it("a cross-org move appends History re-sent. (no token count), manual too", () => {
+    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: true })).toBe(
+      "Moved to Work · Seat 2 (Seat 1 at 91% of 5h). History re-sent.",
+    );
+    expect(formatSeatMoveNotice({ ...base, reason: "manual", crossOrg: true })).toBe("Switched to Work · Seat 2. History re-sent.");
+  });
+  it("tolerates missing labels and unknown reasons", () => {
+    expect(formatSeatMoveNotice({ reason: "load", trigger: { kind: "session", pct: 91 } })).toBe("Moved to another seat.");
+    expect(formatSeatMoveNotice({ toLabel: "B", reason: "weird", fromLabel: "A" })).toBe("Moved to B.");
+    expect(formatSeatMoveNotice({})).toBe("Moved to another seat.");
+  });
+  it("key ignores the timestamp; display name follows the live view", () => {
+    expect(seatMoveNoticeKey("s", "a", "b")).toBe("s|a|b");
+    expect(seatMoveNoticeKey("s", undefined, null)).toBe("s||");
+    const v = threeSeatView();
+    expect(seatDisplayName([v], "claude", "s2")).toBe("Work · Seat 2");
+    expect(seatDisplayName([v], "claude", "s3")).toBe("Personal");
+    expect(seatDisplayName([], "claude", "s2", "Work", "Seat 2")).toBe("Work · Seat 2");
+    expect(seatDisplayName([], "claude", "s2")).toBe("");
   });
 });

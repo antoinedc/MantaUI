@@ -3707,6 +3707,69 @@ export function formatLastMove(
   return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
 }
 
+/** A move notice is offered on open only while the move is this fresh. */
+export const SEAT_MOVE_NOTICE_FRESH_MS = 30 * 60_000;
+/** ...and hides itself this long after it first appears. */
+export const SEAT_MOVE_NOTICE_AUTOHIDE_MS = 5 * 60_000;
+
+/** What the in-conversation "moved to another seat" line is built from. */
+export type SeatMoveNoticeInput = {
+  reason?: string | null;
+  fromLabel?: string | null;
+  toLabel?: string | null;
+  trigger?: { kind: string; pct: number } | null;
+  crossOrg?: boolean | null;
+};
+
+/** "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." — the one-line notice shown
+ *  in the conversation when it changes seat (spec §5.3). The parenthetical says
+ *  why; a cross-org move appends " History re-sent." (no token count — the box
+ *  does not send one). Unknown reasons / missing labels degrade to the plain
+ *  "Moved to X." rather than guessing. */
+export function formatSeatMoveNotice(input: SeatMoveNoticeInput): string {
+  const to = (input.toLabel ?? "").trim() || "another seat";
+  const from = (input.fromLabel ?? "").trim();
+  const t = input.trigger;
+  const pct = t && Number.isFinite(t.pct) ? Math.round(t.pct) : null;
+  const windowName = t ? (t.kind === "weekly" ? "the weekly limit" : t.kind === "session" ? "5h" : "") : "";
+  let why: string | null = null;
+  if (from) {
+    if (input.reason === "unusable") why = `${from} needed sign-in`;
+    else if (input.reason === "load" || input.reason === "exhausted") {
+      if (pct != null) why = `${from} at ${pct}%${windowName ? ` of ${windowName}` : ""}`;
+      else why = input.reason === "exhausted" ? `${from} was at its limit` : `${from} was near its limit`;
+    }
+  }
+  const head = input.reason === "manual" ? `Switched to ${to}` : `Moved to ${to}`;
+  const sentence = `${head}${why ? ` (${why})` : ""}.`;
+  return input.crossOrg ? `${sentence} History re-sent.` : sentence;
+}
+
+/** The key a notice is dismissed / auto-hidden under: the conversation plus the
+ *  seats it moved between. Deliberately NOT the timestamp — the bus event and the
+ *  box's `lastMove` stamp the same move with different clocks, and a dismissal
+ *  must survive that handover. */
+export function seatMoveNoticeKey(sessionId: string, fromSeatId: string | null | undefined, toSeatId: string | null | undefined): string {
+  return `${sessionId}|${fromSeatId ?? ""}|${toSeatId ?? ""}`;
+}
+
+/** A seat's display name — "Work · Seat 2", or the account label alone for a
+ *  single-seat account. Reads the live view first so a rename shows at once. */
+export function seatDisplayName(
+  providers: ProviderView[] | null | undefined,
+  provider: string,
+  seatId: string,
+  fallbackAccountLabel?: string | null,
+  fallbackSeatLabel?: string | null,
+): string {
+  const found = findSeat(providers?.find((p) => p.provider === provider), seatId);
+  const accountLabel = found?.account.label ?? fallbackAccountLabel ?? "";
+  const seatLabel = found?.seat.label ?? fallbackSeatLabel ?? "";
+  const single = found ? found.account.seats.length <= 1 : false;
+  if (single || !seatLabel) return accountLabel || seatLabel;
+  return accountLabel ? `${accountLabel} · ${seatLabel}` : seatLabel;
+}
+
 /** One "Other subscriptions" line per OTHER provider that has seats:
  *  "<provider> · best seat 12% of 5h" — best = the seat the aggregate would
  *  read (auto: least loaded; manual: the active one), via seatChoice. */

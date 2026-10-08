@@ -179,6 +179,32 @@ struct AccountsListReply: Decodable, Equatable, Sendable {
 
 // MARK: - Conversation seat (accounts:session-seat)
 
+/// What pushed a conversation off its seat (phase 4): which window and how full
+/// it was. `kind` is "session" (the 5h window) or "weekly"; the box may add
+/// others, which render without a window name.
+struct SeatMoveTrigger: Equatable, Sendable {
+    var kind: String
+    var pct: Double
+
+    /// Read a `{kind, pct}` object from a bus payload; nil when it is not one.
+    static func from(_ value: JSONValue?) -> SeatMoveTrigger? {
+        guard case .object(let object)? = value, case .number(let pct)? = object["pct"], pct.isFinite else { return nil }
+        var kind = ""
+        if case .string(let k)? = object["kind"] { kind = k }
+        return SeatMoveTrigger(kind: kind, pct: pct)
+    }
+}
+
+extension SeatMoveTrigger: Decodable {
+    private enum CodingKeys: String, CodingKey { case kind, pct }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        kind = (try? c.decodeIfPresent(String.self, forKey: .kind)) ?? ""
+        pct = try c.decode(Double.self, forKey: .pct)
+    }
+}
+
 /// `lastMove` of a conversation's seat: the box moved it from another seat.
 struct SeatMove: Decodable, Equatable, Sendable {
     var from: String? = nil
@@ -186,16 +212,22 @@ struct SeatMove: Decodable, Equatable, Sendable {
     /// Epoch milliseconds of the move; nil when the box did not say.
     var at: Double? = nil
     var reason: String? = nil
+    /// Phase 4 (optional on the wire): the reading that drove an automatic move.
+    var trigger: SeatMoveTrigger? = nil
+    /// Phase 4 (optional on the wire): the move crossed orgs, so the history was re-sent.
+    var crossOrg: Bool? = nil
 }
 
 extension SeatMove {
-    private enum CodingKeys: String, CodingKey { case from, fromLabel, at, reason }
+    private enum CodingKeys: String, CodingKey { case from, fromLabel, at, reason, trigger, crossOrg }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         from = try? c.decodeIfPresent(String.self, forKey: .from)
         fromLabel = (try? c.decodeIfPresent(String.self, forKey: .fromLabel)) ?? ""
         reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        trigger = try? c.decodeIfPresent(SeatMoveTrigger.self, forKey: .trigger)
+        crossOrg = try? c.decodeIfPresent(Bool.self, forKey: .crossOrg)
         // `at` is an epoch-ms number; an ISO-8601 string is tolerated too.
         if let n = (try? c.decodeIfPresent(Double.self, forKey: .at)) ?? nil {
             at = n
@@ -302,15 +334,55 @@ struct SeatStatusReply: Decodable, Equatable, Sendable {
 
 // MARK: - Bus events (/events)
 
+/// The `accounts.moved` payload (phase 4): which conversation moved, between
+/// which seats, why. Every field is optional — an older box sends fewer.
+struct SeatMoveEvent: Equatable, Sendable {
+    var sessionId: String? = nil
+    var provider: String? = nil
+    var from: String? = nil
+    var to: String? = nil
+    var fromLabel: String? = nil
+    var toLabel: String? = nil
+    /// "manual" | "load" | "exhausted" | "unusable" (open set).
+    var reason: String? = nil
+    var trigger: SeatMoveTrigger? = nil
+    var crossOrg: Bool? = nil
+
+    static func parse(_ frame: MantaStreamFrame) -> SeatMoveEvent {
+        let object: [String: JSONValue] = {
+            if case .object(let o)? = frame.payload { return o }
+            return [:]
+        }()
+        func string(_ key: String) -> String? {
+            if case .string(let s)? = object[key], !s.isEmpty { return s }
+            return nil
+        }
+        var crossOrg: Bool?
+        if case .bool(let b)? = object["crossOrg"] { crossOrg = b }
+        return SeatMoveEvent(
+            sessionId: frame.sessionId,
+            provider: string("provider"),
+            from: string("from"),
+            to: string("to"),
+            fromLabel: string("fromLabel"),
+            toLabel: string("toLabel"),
+            reason: string("reason"),
+            trigger: SeatMoveTrigger.from(object["trigger"]),
+            crossOrg: crossOrg
+        )
+    }
+}
+
 /// `accounts.updated {provider}` and `accounts.moved {sessionId, provider, …}`.
-/// Both mean "re-read"; the payload only narrows who needs to care.
+/// Both mean "re-read"; the payload only narrows who needs to care (and, for a
+/// move, says what to tell the user — see `SeatMoveTracker`).
 enum AccountsBusEvent: Equatable, Sendable {
     case updated(provider: String?)
-    case moved(sessionId: String?, provider: String?)
+    case moved(sessionId: String?, provider: String?, detail: SeatMoveEvent? = nil)
 
     /// The conversation a `moved` event is about (nil for `updated`).
     var sessionId: String? {
-        if case .moved(let sid, _) = self { return sid }
+        if case .moved(let sid, _, _) = self { return sid }
         return nil
     }
 
@@ -321,9 +393,248 @@ enum AccountsBusEvent: Equatable, Sendable {
             provider = p
         }
         if frame.kind == "accounts.moved" {
-            return .moved(sessionId: frame.sessionId, provider: provider)
+            return .moved(sessionId: frame.sessionId, provider: provider, detail: SeatMoveEvent.parse(frame))
         }
         return .updated(provider: provider)
+    }
+}
+
+// MARK: - Seat-move notice (phase 4)
+
+/// The one-line "moved to another seat" notice shown in a conversation (spec
+/// §5.3): the text, and the key a dismissal is remembered under.
+struct SeatMoveNotice: Equatable, Identifiable, Sendable {
+    let key: String
+    let text: String
+    var id: String { key }
+}
+
+/// What the notice's sentence is built from.
+struct SeatMoveNoticeInput: Equatable, Sendable {
+    var reason: String? = nil
+    var fromLabel: String? = nil
+    var toLabel: String? = nil
+    var trigger: SeatMoveTrigger? = nil
+    var crossOrg: Bool? = nil
+}
+
+/// One move as the tracker sees it — from the bus event or the box's record.
+struct SeatMoveCandidate: Equatable, Sendable {
+    var key: String
+    var atMs: Double
+    var from: String?
+    var to: String?
+    var provider: String?
+    var fromLabel: String?
+    var toLabel: String?
+    var reason: String?
+    var trigger: SeatMoveTrigger?
+    var crossOrg: Bool?
+}
+
+extension AccountsSelectors {
+
+    /// A move is offered on open only while it is this fresh.
+    static let moveNoticeFreshSeconds: Double = 30 * 60
+    /// …and the notice hides itself this long after it first shows.
+    static let moveNoticeAutoHideSeconds: Double = 5 * 60
+
+    /// The key a notice is dismissed under: the conversation plus the seats it
+    /// moved between. Deliberately NOT a timestamp — the bus event and the box's
+    /// `lastMove` stamp one move with different clocks, and a dismissal has to
+    /// survive that handover.
+    static func moveNoticeKey(sessionId: String, from: String?, to: String?) -> String {
+        "\(sessionId)|\(from ?? "")|\(to ?? "")"
+    }
+
+    /// "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." — the parenthetical says
+    /// why; a cross-org move appends " History re-sent." (no token count: the box
+    /// does not send one). Unknown reasons and missing labels degrade to the
+    /// plain "Moved to X." instead of guessing.
+    static func moveNoticeText(_ input: SeatMoveNoticeInput) -> String {
+        let target = nonEmptyTrimmed(input.toLabel) ?? "another seat"
+        let origin = nonEmptyTrimmed(input.fromLabel)
+        var percentText: String?
+        var windowName: String?
+        if let trigger = input.trigger, trigger.pct.isFinite {
+            percentText = "\(Int(UsageMeters.clamp(trigger.pct).rounded()))%"
+            switch trigger.kind {
+            case "weekly": windowName = "the weekly limit"
+            case "session": windowName = "5h"
+            default: windowName = nil
+            }
+        }
+        let reasonKey = input.reason ?? ""
+        var why: String?
+        if let origin {
+            switch reasonKey {
+            case "unusable":
+                why = "\(origin) needed sign-in"
+            case "load", "exhausted":
+                if let percentText {
+                    let scope = windowName.map { " of \($0)" } ?? ""
+                    why = "\(origin) at \(percentText)\(scope)"
+                } else {
+                    why = reasonKey == "exhausted" ? "\(origin) was at its limit" : "\(origin) was near its limit"
+                }
+            default:
+                why = nil
+            }
+        }
+        let head = reasonKey == "manual" ? "Switched to \(target)" : "Moved to \(target)"
+        let sentence = why.map { "\(head) (\($0))." } ?? "\(head)."
+        return input.crossOrg == true ? "\(sentence) History re-sent." : sentence
+    }
+
+    fileprivate static func nonEmptyTrimmed(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// A seat's display name by id — "Work · Seat 2" — from the live list first
+    /// (a rename shows at once), else from what the box last said about the
+    /// conversation's own seat. Empty when nothing names it.
+    fileprivate static func moveSeatName(
+        _ seatId: String,
+        provider: String?,
+        sessionSeat: SessionSeat?,
+        providers: [AccountsProvider]
+    ) -> String {
+        let own: SessionSeat? = sessionSeat?.seatId == seatId ? sessionSeat : nil
+        let providerId = provider ?? own?.provider
+        let providerView: AccountsProvider? = providers.first { $0.provider == providerId }
+        let foundSeat: AccountsSeat? = providerView.flatMap { AccountsSelectors.seat(seatId, in: $0) }
+        let foundAccount: AccountsAccount? = providerView.flatMap { AccountsSelectors.account(containing: seatId, in: $0) }
+        let base = own ?? SessionSeat(provider: providerId ?? "", seatId: seatId)
+        return ConversationSeat(sessionSeat: base, provider: providerView, account: foundAccount, seat: foundSeat).displayName
+    }
+
+    /// The short seat label ("Seat 1") of the seat a conversation left, from the
+    /// live list; nil when the list no longer has it.
+    fileprivate static func moveOriginLabel(_ seatId: String?, provider: String?, providers: [AccountsProvider]) -> String? {
+        guard let seatId else { return nil }
+        let providerView: AccountsProvider? = providers.first { $0.provider == provider }
+        let label = providerView.flatMap { AccountsSelectors.seat(seatId, in: $0)?.label }
+        return nonEmptyTrimmed(label)
+    }
+}
+
+/// Which seat-move notice a conversation shows, and which the user already
+/// hid. A value type with no clock of its own (`now` is passed in) so every
+/// decision is unit-testable.
+///
+/// Two sources, one line: the `accounts.moved` bus event for this conversation
+/// (instant) and the `lastMove` in `accounts:session-seat` (so a move made while
+/// the chat was closed still shows on open when it is < 30 min old). They are
+/// matched by (conversation, from-seat, to-seat), never by timestamp.
+struct SeatMoveTracker: Equatable, Sendable {
+    private(set) var live: SeatMoveCandidate?
+    /// key → epoch seconds it was hidden (dismissed, or auto-hidden).
+    private(set) var hidden: [String: Double]
+
+    /// How long a hidden key is remembered — well past the 30 min freshness, so
+    /// reopening the chat cannot resurrect it.
+    static let hiddenRetentionSeconds: Double = 24 * 3600
+
+    init(hidden: [String: Double] = [:], now: Date = Date()) {
+        self.live = nil
+        self.hidden = Self.pruned(hidden, now: now)
+    }
+
+    static func pruned(_ hidden: [String: Double], now: Date) -> [String: Double] {
+        let cutoff = now.timeIntervalSince1970 - hiddenRetentionSeconds
+        return hidden.filter { $0.value.isFinite && $0.value >= cutoff }
+    }
+
+    /// A move event for this conversation arrived. It also un-hides an earlier
+    /// identical hop (a genuine repeat is a new notice).
+    mutating func noteMoved(_ event: SeatMoveEvent, sessionId: String, now: Date) {
+        guard event.sessionId == sessionId else { return }
+        let key = AccountsSelectors.moveNoticeKey(sessionId: sessionId, from: event.from, to: event.to)
+        hidden.removeValue(forKey: key)
+        live = SeatMoveCandidate(
+            key: key,
+            atMs: now.timeIntervalSince1970 * 1000,
+            from: event.from,
+            to: event.to,
+            provider: event.provider,
+            fromLabel: event.fromLabel,
+            toLabel: event.toLabel,
+            reason: event.reason,
+            trigger: event.trigger,
+            crossOrg: event.crossOrg
+        )
+    }
+
+    mutating func hide(_ key: String, now: Date) {
+        hidden[key] = now.timeIntervalSince1970
+    }
+
+    /// The notice to show now, or nil.
+    func notice(sessionId: String, sessionSeat: SessionSeat?, providers: [AccountsProvider], now: Date) -> SeatMoveNotice? {
+        let nowMs = now.timeIntervalSince1970 * 1000
+        let freshMs = AccountsSelectors.moveNoticeFreshSeconds * 1000
+
+        var stored: SeatMoveCandidate?
+        if let sessionSeat, let move = sessionSeat.lastMove, let at = move.at, at.isFinite, nowMs - at < freshMs {
+            stored = SeatMoveCandidate(
+                key: AccountsSelectors.moveNoticeKey(sessionId: sessionId, from: move.from, to: sessionSeat.seatId),
+                atMs: at,
+                from: move.from,
+                to: sessionSeat.seatId,
+                provider: sessionSeat.provider,
+                fromLabel: move.fromLabel.isEmpty ? nil : move.fromLabel,
+                toLabel: nil,
+                reason: move.reason,
+                trigger: move.trigger,
+                crossOrg: move.crossOrg
+            )
+        }
+        var liveFresh: SeatMoveCandidate?
+        if let live, nowMs - live.atMs < freshMs { liveFresh = live }
+
+        let chosen: SeatMoveCandidate?
+        switch (liveFresh, stored) {
+        case (let fromBus?, let fromBox?):
+            chosen = fromBus.key == fromBox.key ? Self.merged(fromBus, fromBox) : (fromBus.atMs >= fromBox.atMs ? fromBus : fromBox)
+        case (let fromBus?, nil):
+            chosen = fromBus
+        case (nil, let fromBox?):
+            chosen = fromBox
+        case (nil, nil):
+            chosen = nil
+        }
+        guard let chosen, hidden[chosen.key] == nil else { return nil }
+
+        var targetName = chosen.toLabel
+        if (targetName ?? "").isEmpty, let toId = chosen.to {
+            targetName = AccountsSelectors.moveSeatName(toId, provider: chosen.provider, sessionSeat: sessionSeat, providers: providers)
+        }
+        var originName = chosen.fromLabel
+        if (originName ?? "").isEmpty {
+            originName = AccountsSelectors.moveOriginLabel(chosen.from, provider: chosen.provider ?? sessionSeat?.provider, providers: providers)
+        }
+        let text = AccountsSelectors.moveNoticeText(SeatMoveNoticeInput(
+            reason: chosen.reason,
+            fromLabel: originName,
+            toLabel: targetName,
+            trigger: chosen.trigger,
+            crossOrg: chosen.crossOrg
+        ))
+        return SeatMoveNotice(key: chosen.key, text: text)
+    }
+
+    /// The same move seen twice: the box's record wins wherever it has a value.
+    private static func merged(_ fromBus: SeatMoveCandidate, _ fromBox: SeatMoveCandidate) -> SeatMoveCandidate {
+        var out = fromBus
+        out.atMs = fromBox.atMs
+        out.from = fromBox.from ?? fromBus.from
+        out.provider = fromBox.provider ?? fromBus.provider
+        out.fromLabel = fromBox.fromLabel ?? fromBus.fromLabel
+        out.reason = fromBox.reason ?? fromBus.reason
+        out.trigger = fromBox.trigger ?? fromBus.trigger
+        out.crossOrg = fromBox.crossOrg ?? fromBus.crossOrg
+        return out
     }
 }
 
