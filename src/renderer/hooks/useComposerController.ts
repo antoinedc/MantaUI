@@ -281,6 +281,9 @@ type ComposerRenderProps = {
   plan: PlanToggleState;
   onTogglePlan: () => void;
   activeProviderID: string | null;
+  // The conversation the composer belongs to — the usage dial shows THIS
+  // conversation's seat (multi-account).
+  activeSessionId: string;
   deactivatedMainModels: string[];
   optInModels: string[];
   onOptInModel: (key: string) => void;
@@ -652,6 +655,7 @@ export function useComposerController(config: ComposerControllerConfig): Compose
     plan,
     onTogglePlan: togglePlan,
     activeProviderID: activeModel?.providerID ?? null,
+    activeSessionId: sessionId,
     deactivatedMainModels,
     optInModels,
     onOptInModel: optInModel,

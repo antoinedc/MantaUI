@@ -32,11 +32,13 @@ import { X } from "lucide-react";
 import type { DiscoverResult, ProviderEndpoint, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
-import { formatEndpointStateLine } from "./chatUtils";
+import { formatEndpointStateLine, selectProviderView } from "./chatUtils";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
 import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConfirmInline } from "./ConfirmInline";
 import { ConnectProvider } from "./ConnectProvider";
+import { SeatsPanel } from "./SeatsPanel";
+import { refreshAccounts } from "./accountsData";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { ModelChecklist } from "./ModelChecklist";
 import { SettingsRow } from "./SettingsRow";
@@ -548,6 +550,7 @@ type AccountsData = {
 
 export function AccountsCard() {
   const snapshots = useStore((s) => s.usage) ?? [];
+  const seatViews = useStore((s) => s.accounts);
   const [nowMs] = useState(() => Date.now());
   const routingCatalog = useRoutingCatalog();
 
@@ -562,6 +565,11 @@ export function AccountsCard() {
   // string renders in text-danger — both branches reported, never discard.
   const [discovered, setDiscovered] = useState<Record<string, { id: string }[]>>({});
   const [discoverError, setDiscoverError] = useState<Record<string, string>>({});
+
+  // Seat data refreshes whenever Settings → Accounts opens (spec §7a).
+  useEffect(() => {
+    void refreshAccounts();
+  }, []);
 
   const {
     data,
@@ -884,6 +892,10 @@ export function AccountsCard() {
                   onDiscover={() => ep && void discover(ep)}
                   onRemove={() => ep && void removeEndpoint(ep)}
                 />
+                {row.kind === "subscription" && row.connected && (() => {
+                  const seatView = selectProviderView(seatViews, snapshots, row.id);
+                  return seatView ? <SeatsPanel view={seatView} /> : null;
+                })()}
                 {retryResult[row.id] && (
                   <div
                     role="status"

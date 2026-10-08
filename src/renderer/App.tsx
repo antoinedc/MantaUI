@@ -58,6 +58,7 @@ import {
 } from "./usageEscalation";
 
 import { providerLabel } from "./UsageDial";
+import { refreshAccounts, refreshSessionSeat } from "./accountsData";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
 // app is, by construction, addressed to THIS channel's URL scheme
@@ -723,6 +724,34 @@ function Shell() {
       useStore.getState().setUsage(Array.isArray(snapshots) ? snapshots : []);
     });
   }, [apiGeneration, pullUsage]);
+
+  // Multi-account & seats: prime the store's `accounts` slice on connect, then
+  // refetch on the box's `accounts.updated` hint (mode / active / rename / add /
+  // remove / status / counts). `accounts.moved` re-reads that ONE conversation's
+  // seat so its ring + popover follow the move. A fresh usage reading also
+  // refetches (the per-seat windows the ring reads ride on the accounts list),
+  // but only on a box that has seat info at all. Not a poll.
+  useEffect(() => {
+    void refreshAccounts();
+    const offs: Array<() => void> = [];
+    if (window.api.onAccountsUpdated) offs.push(window.api.onAccountsUpdated(() => void refreshAccounts()));
+    if (window.api.onAccountsMoved) {
+      offs.push(
+        window.api.onAccountsMoved(({ sessionId }) => {
+          void refreshAccounts();
+          void refreshSessionSeat(sessionId);
+        }),
+      );
+    }
+    if (window.api.onUsageUpdated) {
+      offs.push(
+        window.api.onUsageUpdated(() => {
+          if (useStore.getState().accounts.length > 0) void refreshAccounts();
+        }),
+      );
+    }
+    return () => offs.forEach((off) => off());
+  }, [apiGeneration]);
 
   // Usage-limit stopped conversations (BET-1047): prime the store's
   // `usageStopped` slice on mount (and on api change), then stay live via the

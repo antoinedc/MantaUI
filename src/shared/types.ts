@@ -1478,6 +1478,18 @@ export const IPC = {
   // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
   // probe against one endpoint key now, report both branches.
   accountsEndpointProbe: "accounts:endpoint-probe",
+  // Multi-account & seats (spec 2026-10-08, §8 contract v2). Every channel takes
+  // ONE object argument and answers a view (never a credential).
+  accountsList: "accounts:list", // () → { providers: ProviderView[] }
+  accountsSetMode: "accounts:set-mode", // ({provider, mode}) → ProviderView | {error}
+  accountsSetActive: "accounts:set-active", // ({provider, seatId}) → ProviderView | {error}
+  accountsRename: "accounts:rename", // ({provider, kind, id, label}) → ProviderView | {error}
+  accountsAddSeat: "accounts:add-seat", // ({provider, accountId?, label?}) → {seatId, connect} | {error}
+  accountsSeatStatus: "accounts:seat-status", // ({seatId}) → SeatStatusResult
+  accountsAddSeatConfirm: "accounts:add-seat-confirm", // ({seatId, newAccount}) → ProviderView | {error}
+  accountsCancelSeat: "accounts:cancel-seat", // ({seatId}) → {ok:true}
+  accountsRemoveSeat: "accounts:remove-seat", // ({provider, seatId}) → ProviderView | {error}
+  accountsSessionSeat: "accounts:session-seat", // ({sessionId}) → SessionSeat | null
   // BET-1249: the provider-agnostic model catalogue (models.dev) for the
   // renderer's "Models we couldn't identify" block — resolve opaque endpoint
   // ids and typeahead over every known model. Read-only; entry-level data.
@@ -2220,6 +2232,111 @@ export type StoppedRecord = {
   attempts?: number; // so a permanently-refused conversation stops looping
 };
 export type UsageWindowKind = "session" | "weekly" | "monthly" | string;
+
+// ---- Multi-account & seats (spec 2026-10-08 §8, contract v2) ----
+// What `accounts:*` returns. Server: src/server/accounts*.mjs. These are VIEWS:
+// no credential, token or credential path ever appears in one.
+
+/** The subscription providers that can hold several seats (adapter ids, the
+ *  same namespace as UsageSnapshot.provider — NOT opencode providerIDs). */
+export type SeatProviderId = "claude" | "codex";
+
+export type SeatState = "ok" | "expired" | "signed-out" | "unknown";
+
+export type SeatView = {
+  id: string;
+  label: string;
+  email: string | null;
+  status: SeatState;
+  /** This seat is the box's current login (cannot be removed). */
+  live: boolean;
+  /** Latest per-seat reading; [] when none. */
+  windows: UsageWindow[];
+  /** seatLoad() of the windows (§5.1); null when unknown. */
+  load: number | null;
+  fetchedAt: number | null;
+  /** Conversations currently assigned to this seat. */
+  conversations: number;
+};
+
+export type AccountView = {
+  id: string;
+  label: string;
+  orgName: string | null;
+  plan: string | null;
+  seats: SeatView[];
+};
+
+export type ProviderView = {
+  provider: SeatProviderId;
+  mode: "auto" | "manual";
+  activeSeatId: string | null;
+  /** The seat-routing plugin has been seen on a request (§4). */
+  routingActive: boolean;
+  /** Auto: the seat a new conversation / a move would go to. */
+  nextSeatId: string | null;
+  accounts: AccountView[];
+};
+
+export type AccountsError =
+  | "unknown-seat"
+  | "invalid-label"
+  | "live-seat"
+  | "unknown-provider"
+  | "login-failed";
+
+/** A mutation answers the refreshed provider, or a class-1 safe error code. */
+export type ProviderViewResult = ProviderView | { error: AccountsError };
+
+/** `connect` of accounts:add-seat — the SAME shape the existing connect flow
+ *  (`opencode:provider-auth` start) answers: `claude-login` carries a
+ *  sessionKey for the terminal pane; the OAuth shapes carry url/instructions. */
+export type SeatConnect = {
+  shape: SubscriptionConnectShape;
+  url?: string;
+  instructions?: string;
+  methodIndex?: number;
+  sessionKey?: string;
+  startedAt?: number;
+  cwd?: string;
+};
+
+export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: AccountsError };
+
+export type SeatStatusResult = {
+  state: "pending" | "ok" | "failed";
+  error?: "duplicate-login" | "login-failed" | "different-org";
+  seat?: SeatView;
+  /** The org the new login belongs to (different-org). */
+  orgName?: string;
+};
+
+/** The conversation's current seat (null from the server = no assignment). */
+export type SessionSeat = {
+  provider: SeatProviderId;
+  seatId: string;
+  seatLabel: string;
+  accountLabel: string;
+  lastMove?: {
+    from: string;
+    fromLabel: string;
+    at: number;
+    reason: string;
+    /** Optional (not in contract v2): a cross-org move re-sent the history. */
+    crossOrg?: boolean;
+    resentTokens?: number;
+  };
+};
+
+/** Bus `accounts.updated` / `accounts.moved` payloads. */
+export type AccountsUpdatedPayload = { provider?: SeatProviderId };
+export type AccountsMovedPayload = {
+  sessionId?: string;
+  provider?: SeatProviderId;
+  from?: string;
+  to?: string;
+  reason?: string;
+};
 
 // The list-level read of the stopped record: the records plus the modal's
 // "last looked" timestamp (stamped when the modal closes so "new" badges

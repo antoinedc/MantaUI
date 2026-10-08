@@ -856,7 +856,7 @@ export function ConnectProvider({
 // parseDeviceCode. When nothing parses, deviceCodeFallback points the user
 // at the verbatim instructions instead of rendering an empty code slot.
 // The upstream `instructions` text is demoted to a collapsed disclosure.
-function WaitingBlockBody({
+export function WaitingBlockBody({
   url,
   instructions,
 }: {
@@ -920,7 +920,7 @@ function WaitingBlockBody({
 // would otherwise drift between the two branches. Submission is handled by
 // the parent (which dispatches the right IPC action); the input itself is
 // a controlled value + a Submit click.
-const CredentialInput = memo(function CredentialInput({
+export const CredentialInput = memo(function CredentialInput({
   label,
   type,
   placeholder,
@@ -999,7 +999,7 @@ const CredentialInput = memo(function CredentialInput({
 const CLAUDE_URL_RE =
   /https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s\x07\x1b]+/g;
 
-function ClaudeLoginBlock({
+export function ClaudeLoginBlock({
   ptySessionKey,
   cwd,
   url,

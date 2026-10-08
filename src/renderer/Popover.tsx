@@ -94,9 +94,15 @@ export function Popover({
     compute();
     window.addEventListener("resize", compute);
     window.addEventListener("scroll", compute, true);
+    // A surface whose content grows after it opened (the usage popover's inline
+    // "switch seat?" confirm) must re-clamp, or it spills off the viewport.
+    // jsdom has no ResizeObserver; the open/resize/scroll paths still apply.
+    const ro = typeof ResizeObserver === "function" ? new ResizeObserver(compute) : null;
+    ro?.observe(panel);
     return () => {
       window.removeEventListener("resize", compute);
       window.removeEventListener("scroll", compute, true);
+      ro?.disconnect();
     };
   }, [open, anchorRef, resolvedPanel, placement, align]);
 
