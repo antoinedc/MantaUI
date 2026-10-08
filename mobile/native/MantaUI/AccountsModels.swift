@@ -503,10 +503,13 @@ enum AccountsSelectors {
     /// conversation has no assignment.
     static func conversationSeat(providers: [AccountsProvider], sessionSeat: SessionSeat?) -> ConversationSeat? {
         guard let sessionSeat else { return nil }
-        let provider = providers.first { $0.provider == sessionSeat.provider }
-        let seat = provider.flatMap { seat(sessionSeat.seatId, in: $0) }
-        let account = provider.flatMap { account(containing: sessionSeat.seatId, in: $0) }
-        return ConversationSeat(sessionSeat: sessionSeat, provider: provider, account: account, seat: seat)
+        let provider: AccountsProvider? = providers.first { $0.provider == sessionSeat.provider }
+        // Named apart from the `seat(_:in:)` / `account(containing:in:)` helpers
+        // and called through the type: a local named like the function it calls
+        // shadows it inside the closure, which some Swift compilers reject.
+        let foundSeat: AccountsSeat? = provider.flatMap { AccountsSelectors.seat(sessionSeat.seatId, in: $0) }
+        let foundAccount: AccountsAccount? = provider.flatMap { AccountsSelectors.account(containing: sessionSeat.seatId, in: $0) }
+        return ConversationSeat(sessionSeat: sessionSeat, provider: provider, account: foundAccount, seat: foundSeat)
     }
 
     /// The seat layout (conversation seat + other seats) replaces today's
