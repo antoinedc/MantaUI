@@ -108,6 +108,7 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, getUsageHistory } from "./usage.mjs";
+import { createAccountsService } from "./accounts.mjs";
 import {
   createCapJob,
   getJob,
@@ -606,11 +607,21 @@ const optimizerPacing = createPacingState({
     providerTokenTotals({ sinceMs: Date.now() - ROUTING_LEDGER_WINDOW_MS }),
 });
 
+// Multi-account (spec §2/§6, phase 1): the seat store. Discovery adopts the
+// logins already on the box (the live Claude file, any seat directories under
+// ~/.manta-secrets/accounts/claude, opencode's OpenAI entry) into
+// ~/.manta/accounts.json. It is idempotent and never throws; the usage poller
+// and the credential-refresh sweep below both read seats through this service,
+// and a provider with no seats keeps today's single-credential behaviour.
+const accountsService = createAccountsService();
+void accountsService.discover({ force: true });
+
 // eslint-disable-next-line no-unused-vars
 const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
   // Optimizer P2.3 (BET-1345): the pacing controller observes the SAME publish
   // point as recordWindowObservations — no second poller, no adapter change.
   pacing: optimizerPacing,
+  seats: accountsService,
 });
 
 // Usage-stop resume engine (BET-1048): watches the ARMED entries in the
@@ -2151,7 +2162,7 @@ const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
       for (const s of Array.isArray(snaps) ? snaps : []) {
         if (s?.windowed !== true) continue;
         const win =
-          (Array.isArray(s.windows) ? s.windows : []).find((w) => w && Number.isFinite(w.pct)) ?? null;
+          (Array.isArray(s.windows) ? s.windows : []).find((w) => w && w.active !== false && Number.isFinite(w.pct)) ?? null;
         if (!win) continue;
         if (!best || win.pct > best.pct) best = { provider: s.provider, pct: win.pct, kind: win.kind ?? "session" };
       }
@@ -2964,7 +2975,7 @@ const { stop: stopVoiceSweep } = startVoiceSweep();
 // src/server/opencode.mjs (startCredentialRefreshPoller) — same shape as
 // the other timer pollers above.
 // eslint-disable-next-line no-unused-vars
-const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller();
+const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller({ seats: accountsService });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.

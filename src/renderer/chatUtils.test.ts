@@ -3843,6 +3843,29 @@ describe("selectUsageSnapshot", () => {
 });
 
 describe("usageDialState", () => {
+  it("an inactive window never drives visibility or the reported window", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "5h", pct: 10 },
+        { kind: "weekly_scoped:fable", label: "7d · Fable", pct: 100, scope: "Fable", active: false },
+      ],
+    });
+    const state = usageDialState(snap, false);
+    expect(state.visible).toBe(false);
+    expect(state.window?.kind).toBe("session");
+    expect(state.tone).toBe("under");
+  });
+
+  it("an ACTIVE scoped window still counts toward visibility", () => {
+    const snap = usageSnapshot({
+      windows: [
+        { kind: "session", label: "5h", pct: 10 },
+        { kind: "weekly_scoped:fable", label: "7d · Fable", pct: 95, scope: "Fable" },
+      ],
+    });
+    expect(usageDialState(snap, false).visible).toBe(true);
+  });
+
   it("hidden below 70 with the always-show setting off", () => {
     const snap = usageSnapshot({ windows: [{ kind: "session", label: "s", pct: 69 }] });
     expect(usageDialState(snap, false).visible).toBe(false);

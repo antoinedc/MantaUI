@@ -222,7 +222,7 @@ export function createPacingState({ load, save, now, ledgerTokens, tokenTtlMs = 
     for (const snap of snapshots) {
       const providerIDs = Array.isArray(snap.providerIDs) ? snap.providerIDs.slice() : [];
       for (const w of snap.windows ?? []) {
-        if (!w || typeof w !== "object") continue;
+        if (!w || typeof w !== "object" || w.active === false) continue;
         await observeWindow(s, `${snap.provider}:${w.kind}`, {
           pct: w.pct,
           startedAt: w.startedAt,

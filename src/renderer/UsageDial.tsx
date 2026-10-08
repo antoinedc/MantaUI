@@ -225,17 +225,22 @@ export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWi
   // figure we know is the previous window's. The notice above the list says
   // why, and formatWindowReset already renders "resetting…" below.
   const awaitingReset = w.stale === true;
-  const pctClamped = awaitingReset ? 0 : Math.max(0, Math.min(100, w.pct));
+  // Not in force (a model-scoped cap on a model this plan isn't using): shown
+  // greyed with no figure and no fill, so it can't be mistaken for real usage.
+  const inactive = w.active === false;
+  const pctClamped = awaitingReset || inactive ? 0 : Math.max(0, Math.min(100, w.pct));
   const fill = toneRingColor(usageTone(pctClamped));
-  const value = awaitingReset
-    ? "—"
-    : w.used != null && w.limit != null
-      ? `${w.used.toLocaleString()} / ${w.limit.toLocaleString()} · ${pctClamped}%`
-      : `${pctClamped}%`;
+  const value = inactive
+    ? "not active"
+    : awaitingReset
+      ? "—"
+      : w.used != null && w.limit != null
+        ? `${w.used.toLocaleString()} / ${w.limit.toLocaleString()} · ${pctClamped}%`
+        : `${pctClamped}%`;
   const resetLine = formatWindowReset(w.resetsAt, nowMs);
 
   return (
-    <div>
+    <div className={inactive ? "opacity-50" : undefined} data-inactive={inactive ? "true" : undefined}>
       <div className="flex items-center justify-between text-meta mb-1">
         <span className="text-text-muted">{w.label}</span>
         <span className="font-mono font-medium text-text tabular-nums">{value}</span>

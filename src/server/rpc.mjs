@@ -14,7 +14,7 @@ import {
   selectLatestTokenUsage,
 } from "../shared/streamInterpretation.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
-import { listSnapshots as usageListSnapshots } from "./usage.mjs";
+import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots } from "./usage.mjs";
 import {
   listStopped as usageStoppedList,
   armStopped as usageStoppedArm,
@@ -2086,6 +2086,12 @@ export function buildHandlers({
     // set actually changes — this channel is for the initial paint / refetch.
     // preload: ipcRenderer.invoke(IPC.usageList)  → no args
     "usage:list": () => usageListSnapshots(),
+    // Multi-account (spec §6): the per-seat snapshots behind the provider
+    // aggregate above — one per signed-in seat, each carrying {accountId,
+    // seatId, seatLabel, accountLabel}. `usage:list` keeps its array-of-
+    // aggregates shape; this is the separate read for the seat detail.
+    // Empty on a box without seats.
+    "usage:list-seats": () => usageListSeatSnapshots(),
 
     // ---- usage-stop record (manta-server owned; BET-1047 stage 1) ----
     // Durable box-side record of conversations stopped by a plan-usage limit.

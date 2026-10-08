@@ -38,6 +38,11 @@
  *   the provider does not report a window start — consumers must NOT guess a
  *   start from `resetsAt` minus an assumed window length.
  * @property {boolean} [binding] The provider says this window bites first.
+ * @property {string} [scope]   Model display name a model-scoped window applies
+ *   to ("Fable"); absent for account-wide windows.
+ * @property {boolean} [active]  `false` when the provider says this window is
+ *   not in force (shown greyed; never drives exhaustion, load or the dial).
+ *   Absent means active.
  * @property {boolean} [stale] True when this reading describes a window whose
  *   reset instant has already passed: the provider has not published the new
  *   window's numbers yet, so `pct` still belongs to the window that just
@@ -72,6 +77,10 @@
  *                                 when the plan publishes one.
  * @property {boolean} [exhausted] The provider will refuse work now.
  * @property {number} fetchedAt     Epoch ms of the successful fetch.
+ * @property {string} [accountId]    Multi-account: set on PER-SEAT snapshots only
+ * @property {string} [accountLabel] (`seatSnapshots`); the provider aggregate in
+ * @property {string} [seatId]       `snapshots` never carries them.
+ * @property {string} [seatLabel]
  */
 /**
  * @typedef {Object} UsageAdapter
@@ -94,6 +103,8 @@ import { loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { appendObservation } from "./optimizer/forecast.mjs";
+import { aggregateSnapshot } from "../shared/seatChoice.mjs";
+import { aggregationPolicy, PER_CONVERSATION_ROUTING } from "./accounts.mjs";
 
 export { normalizeWindow };
 
@@ -133,25 +144,50 @@ export function providerIDForAdapter(adapterId) {
   return ADAPTERS.find((a) => a.id === adapterId && Array.isArray(a.providerIDs) && a.providerIDs.length > 0)?.providerIDs[0] ?? null;
 }
 
+// Where `recheckAdapterAtLimit` finds a provider's seats: set by
+// `startUsagePoller`, null otherwise (tests, the harness → single credential).
+let activeSeatsFor = null;
+
 // Re-check ONE adapter's usage immediately (spec §4, signal 2), reusing the
 // existing adapter fetch rather than writing a second fetch. Returns true when
 // that provider is currently at its limit. Best-effort: a missing credential,
 // a failed fetch or an unlisted id all resolve to false (they must never
-// over-enrol from a stale/absent reading).
-export async function recheckAdapterAtLimit(adapterId, { fetchImpl = fetch, now = () => Date.now() } = {}) {
+// over-enrol from a stale/absent reading). With several seats the answer
+// follows the provider aggregate (multi-account §5.4): auto → at its limit only
+// when EVERY seat is; manual → the active seat.
+export async function recheckAdapterAtLimit(
+  adapterId,
+  { fetchImpl = fetch, now = () => Date.now(), seatsFor = activeSeatsFor, perConversationRouting = PER_CONVERSATION_ROUTING } = {},
+) {
   const adapter = ADAPTERS.find((a) => a.id === adapterId);
   if (!adapter) return false;
-  try {
-    let detected = false;
+  const atLimit = async (deps) => {
     try {
-      detected = await adapter.detect({ fetchImpl, now });
+      if (!(await adapter.detect({ fetchImpl, now, ...deps }))) return null;
+      const raw = await adapter.fetch({ fetchImpl, now, ...deps });
+      return isUsageAtLimit(Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : []);
     } catch {
-      detected = false;
+      return null;
     }
-    if (!detected) return false;
-    const raw = await adapter.fetch({ fetchImpl, now });
-    const windows = Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : [];
-    return isUsageAtLimit(windows);
+  };
+  try {
+    let plan = null;
+    try {
+      plan = (await seatsFor?.(adapterId)) ?? null;
+    } catch {
+      plan = null;
+    }
+    if (!plan) return (await atLimit({})) === true;
+    const seats = [];
+    for (const seat of plan.seats) {
+      const limited = await atLimit(seat.deps);
+      if (limited !== null) seats.push({ seatId: seat.seatId, limited });
+    }
+    if (seats.length === 0) return false;
+    // The same decision the poller makes for the aggregate (aggregationPolicy).
+    const { mode, activeSeatId } = aggregationPolicy({ plan, perConversationRouting });
+    if (mode === "manual") return seats.find((s) => s.seatId === activeSeatId)?.limited ?? seats.every((s) => s.limited);
+    return seats.every((s) => s.limited);
   } catch {
     return false;
   }
@@ -217,10 +253,45 @@ export function rateLimitBackoffMs(retryAfterMs) {
  * @param {number} [maxAgeMs]
  * @returns {UsageSnapshot | null}
  */
-export function carryForward(prevSnapshots, adapterId, nowMs, maxAgeMs = MAX_CARRY_FORWARD_MS) {
-  const prev = (prevSnapshots ?? []).find((s) => s.provider === adapterId);
+export function carryForward(prevSnapshots, adapterId, nowMs, maxAgeMs = MAX_CARRY_FORWARD_MS, seatId = null) {
+  const prev = (prevSnapshots ?? []).find((s) => s.provider === adapterId && (seatId === null || s.seatId === seatId));
   if (!prev) return null;
   return nowMs - prev.fetchedAt > maxAgeMs ? null : prev;
+}
+
+/**
+ * Build the published UsageSnapshot out of an adapter's raw fetch result. ONE
+ * constructor for both the single-credential path and the per-seat path, so a
+ * seat's snapshot has exactly the shape the provider's snapshot always had.
+ */
+function buildSnapshot(adapter, raw, nowMs) {
+  const windows = Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : [];
+  const hasBalance = typeof raw?.balance === "number";
+  // A snapshot carrying a balance and no windows is VALID — an unfunded
+  // credit account (e.g. OpenRouter with total_credits: 0) must be
+  // distinguishable from "not connected", and a balance-only snapshot is
+  // exactly the shape `accountDescriptor` was written to support
+  // (BET-1269 5g). The throw applies only to a snapshot with neither.
+  if (windows.length === 0 && !hasBalance) {
+    throw new Error("adapter returned zero usable windows");
+  }
+  return {
+    provider: adapter.id,
+    providerIDs: adapter.providerIDs,
+    ...(typeof raw.kind === "string" ? { kind: raw.kind } : {}),
+    ...(raw.planLabel ? { planLabel: raw.planLabel } : {}),
+    windows,
+    ...(Array.isArray(raw.extras) && raw.extras.length > 0 ? { extras: raw.extras } : {}),
+    // Carry the account-level fields through so a changed balance /
+    // overage / exhausted flag lands in contentKey and actually
+    // surfaces a usage.updated. (BET-1238: dropping these here would
+    // make the balance read as frozen — the dial never learns it
+    // moved because results is rebuilt each tick, not passed through.)
+    ...(raw.balance !== undefined ? { balance: raw.balance } : {}),
+    ...(raw.overagePrice !== undefined ? { overagePrice: raw.overagePrice } : {}),
+    ...(raw.exhausted === true ? { exhausted: true } : {}),
+    fetchedAt: nowMs,
+  };
 }
 
 /**
@@ -230,7 +301,17 @@ export function carryForward(prevSnapshots, adapterId, nowMs, maxAgeMs = MAX_CAR
  * @param {() => number} [opts.now]
  * @param {(evt: {kind:string, payload:object}) => void} [opts.publish]
  * @param {number} [opts.staleRetryMs]
- * @returns {{ tick: () => Promise<void>, stop: () => void, snapshots: UsageSnapshot[] }}
+ * @param {{ seatsFor: (adapterId: string) => Promise<null | {
+ *   mode: "auto"|"manual", activeSeatId: string|null, servingSeatId?: string|null,
+ *   seats: Array<{accountId:string, accountLabel:string, seatId:string, seatLabel:string, deps:object}>
+ * }> }|null} [opts.seats]
+ *   Multi-account (spec §6). For a provider with seats the poller makes ONE
+ *   usage call per seat (the seat's `deps` are spread into the adapter's
+ *   detect/fetch, so the adapter itself stays seat-unaware), publishes the
+ *   per-seat snapshots as `seatSnapshots`, and reduces them to the provider
+ *   AGGREGATE that `snapshots` has always carried. A provider with no seats
+ *   (or no `seats` option) is polled exactly as before.
+ * @returns {{ tick: () => Promise<void>, stop: () => void, snapshots: UsageSnapshot[], seatSnapshots: UsageSnapshot[] }}
  */
 export function createUsagePoller({
   adapters = ADAPTERS,
@@ -238,9 +319,13 @@ export function createUsagePoller({
   now = () => Date.now(),
   publish,
   // BET-1336: observation tap at the publish point — called with the published
-  // UsageSnapshot[] whenever the content actually changes. Null in tests /
-  // direct users → no history recording.
+  // UsageSnapshot[] (and the per-seat snapshots) whenever the content actually
+  // changes. Null in tests / direct users → no history recording.
   observe = null,
+  seats = null,
+  // Phase-1 truth: until requests are routed per conversation the aggregate
+  // follows the SERVING (live) seat. Injectable so tests can pin both modes.
+  perConversationRouting = PER_CONVERSATION_ROUTING,
   staleRetryMs = STALE_RETRY_MS,
   // Retry scheduling is injectable (BET-1485): tests queue armed retries and
   // fire them manually, so the re-poll count doesn't depend on 5ms real
@@ -248,11 +333,13 @@ export function createUsagePoller({
   timers = { setTimeout, clearTimeout },
 } = {}) {
   let snapshots = [];
+  let seatSnapshots = [];
   let lastContentKey = null;
   let inFlight = false;
   let stopped = false;
   // Per-adapter 429 backoff state — NOT global. adapterId -> epoch ms until
-  // which this adapter's fetch is skipped entirely.
+  // which this adapter's fetch is skipped entirely. Per-SEAT polls key it
+  // `<adapterId>:<seatId>` so one seat's 429 never silences its sibling.
   const backoffUntil = new Map();
   // Which adapters are CURRENTLY in a failing streak, so we warn once per
   // failure TRANSITION rather than once per tick while a provider stays
@@ -270,18 +357,83 @@ export function createUsagePoller({
     console.warn(`[usage] adapter "${adapterId}" failed:`, e?.message ?? e);
   }
 
+  // One seat's usage call, with the same detect / backoff / carry-forward
+  // discipline as a whole adapter. Returns the seat's snapshot or null.
+  async function pollSeat(adapter, seat, nowMs) {
+    const key = `${adapter.id}:${seat.seatId}`;
+    const identity = {
+      accountId: seat.accountId,
+      accountLabel: seat.accountLabel,
+      seatId: seat.seatId,
+      seatLabel: seat.seatLabel,
+    };
+    const carried = () => {
+      const prev = carryForward(seatSnapshots, adapter.id, nowMs, undefined, seat.seatId);
+      // Re-label: the user may have renamed the seat since the carried reading.
+      return prev ? { ...prev, ...identity, windows: prev.windows } : null;
+    };
+    const until = backoffUntil.get(key);
+    if (until != null && nowMs < until) return carried();
+
+    const deps = { fetchImpl, now, ...seat.deps };
+    let detected = false;
+    try {
+      detected = await adapter.detect(deps);
+    } catch (e) {
+      warnOnce(key, e);
+      return null;
+    }
+    if (!detected) {
+      failing.delete(key);
+      backoffUntil.delete(key);
+      return null;
+    }
+    try {
+      const snap = { ...buildSnapshot(adapter, await adapter.fetch(deps), nowMs), ...identity };
+      backoffUntil.delete(key);
+      failing.delete(key);
+      return snap;
+    } catch (e) {
+      if (e?.status === 429) backoffUntil.set(key, nowMs + rateLimitBackoffMs(e.retryAfterMs));
+      warnOnce(key, e);
+      return carried();
+    }
+  }
+
   async function tick() {
     if (inFlight || stopped) return;
     inFlight = true;
     try {
       const nowMs = now();
-      const results = [];
+      // One entry per adapter, in adapter order. Either a single-credential
+      // snapshot (`snap`) or, for a provider with seats, its per-seat snapshots.
+      const entries = [];
 
       for (const adapter of adapters) {
+        let plan = null;
+        if (seats) {
+          try {
+            plan = await seats.seatsFor(adapter.id);
+          } catch (e) {
+            // Seat lookup must never take the provider down: fall back to the
+            // single-credential path below.
+            warnOnce(`${adapter.id}:seats`, e);
+          }
+        }
+        if (plan && Array.isArray(plan.seats) && plan.seats.length > 0) {
+          const perSeat = [];
+          for (const seat of plan.seats) {
+            const snap = await pollSeat(adapter, seat, nowMs);
+            if (snap) perSeat.push(snap);
+          }
+          if (perSeat.length > 0) entries.push({ plan, perSeat });
+          continue;
+        }
+
         const until = backoffUntil.get(adapter.id);
         if (until != null && nowMs < until) {
           const carried = carryForward(snapshots, adapter.id, nowMs);
-          if (carried) results.push(carried);
+          if (carried) entries.push({ snap: carried });
           continue; // still backed off
         }
 
@@ -301,34 +453,7 @@ export function createUsagePoller({
         }
 
         try {
-          const raw = await adapter.fetch({ fetchImpl, now });
-          const windows = Array.isArray(raw?.windows) ? raw.windows.filter(Boolean) : [];
-          const hasBalance = typeof raw?.balance === "number";
-          // A snapshot carrying a balance and no windows is VALID — an unfunded
-          // credit account (e.g. OpenRouter with total_credits: 0) must be
-          // distinguishable from "not connected", and a balance-only snapshot is
-          // exactly the shape `accountDescriptor` was written to support
-          // (BET-1269 5g). The throw applies only to a snapshot with neither.
-          if (windows.length === 0 && !hasBalance) {
-            throw new Error("adapter returned zero usable windows");
-          }
-          results.push({
-            provider: adapter.id,
-            providerIDs: adapter.providerIDs,
-            ...(typeof raw.kind === "string" ? { kind: raw.kind } : {}),
-            ...(raw.planLabel ? { planLabel: raw.planLabel } : {}),
-            windows,
-            ...(Array.isArray(raw.extras) && raw.extras.length > 0 ? { extras: raw.extras } : {}),
-            // Carry the account-level fields through so a changed balance /
-            // overage / exhausted flag lands in contentKey and actually
-            // surfaces a usage.updated. (BET-1238: dropping these here would
-            // make the balance read as frozen — the dial never learns it
-            // moved because results is rebuilt each tick, not passed through.)
-            ...(raw.balance !== undefined ? { balance: raw.balance } : {}),
-            ...(raw.overagePrice !== undefined ? { overagePrice: raw.overagePrice } : {}),
-            ...(raw.exhausted === true ? { exhausted: true } : {}),
-            fetchedAt: nowMs,
-          });
+          entries.push({ snap: buildSnapshot(adapter, await adapter.fetch({ fetchImpl, now }), nowMs) });
           backoffUntil.delete(adapter.id);
           failing.delete(adapter.id);
         } catch (e) {
@@ -342,7 +467,7 @@ export function createUsagePoller({
           }
           warnOnce(adapter.id, e);
           const carried = carryForward(snapshots, adapter.id, nowMs);
-          if (carried) results.push(carried);
+          if (carried) entries.push({ snap: carried });
         }
       }
 
@@ -362,13 +487,17 @@ export function createUsagePoller({
       // the publish call below satisfies both with no trade-off.
       // A window whose reset instant has passed is reporting the OLD window's
       // numbers. Flag it rather than dropping it — the dial carries the last
-      // reading forward — and never let it drive an alert downstream.
+      // reading forward — and never let it drive an alert downstream. This
+      // runs BEFORE the seat aggregate is chosen, so a stale reading never
+      // counts toward a seat's load.
       let anyStale = false;
-      for (const snap of results) {
-        for (const w of snap.windows) {
-          if (w.resetsAt != null && w.resetsAt <= nowMs) {
-            w.stale = true;
-            anyStale = true;
+      for (const e of entries) {
+        for (const snap of e.perSeat ?? [e.snap]) {
+          for (const w of snap.windows) {
+            if (w.resetsAt != null && w.resetsAt <= nowMs) {
+              w.stale = true;
+              anyStale = true;
+            }
           }
         }
       }
@@ -386,12 +515,35 @@ export function createUsagePoller({
         staleRetry?.unref?.();
       }
 
+      // The provider-level snapshot downstream consumers read: a plain snapshot
+      // as before, or — with seats — the aggregate of its seats (§5.4).
+      const results = [];
+      const seatResults = [];
+      for (const e of entries) {
+        if (e.perSeat) {
+          seatResults.push(...e.perSeat);
+          const policy = aggregationPolicy({ plan: e.plan, perConversationRouting });
+          // Until requests are routed per conversation, the provider IS the
+          // serving seat: with no reading for it, publish nothing for the
+          // provider rather than another seat's headroom it cannot use.
+          const pinned = !perConversationRouting && e.plan?.servingSeatId;
+          if (pinned && !e.perSeat.some((s) => s.seatId === e.plan.servingSeatId)) continue;
+          const agg = aggregateSnapshot(e.perSeat, policy);
+          if (agg) results.push(agg);
+        } else {
+          results.push(e.snap);
+        }
+      }
+
       snapshots = results;
-      const key = contentKey(results);
+      seatSnapshots = seatResults;
+      // The per-seat set only widens the key when there are seats, so a box
+      // without seats dedupes exactly as it always did.
+      const key = seatResults.length > 0 ? `${contentKey(results)}|${contentKey(seatResults)}` : contentKey(results);
       if (key !== lastContentKey) {
         lastContentKey = key;
-        observe?.(results);
-        publish?.({ kind: "usage.updated", payload: { snapshots: results } });
+        observe?.(results, seatResults);
+        publish?.({ kind: "usage.updated", payload: { snapshots: results, seatSnapshots: seatResults } });
       }
     } finally {
       inFlight = false;
@@ -406,6 +558,9 @@ export function createUsagePoller({
     },
     get snapshots() {
       return snapshots;
+    },
+    get seatSnapshots() {
+      return seatSnapshots;
     },
   };
 }
@@ -431,21 +586,26 @@ let activePoller = null;
  *   no adapter change.
  * @returns {{ stop: () => void }}
  */
-export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null } = {}) {
+export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null, seats = null } = {}) {
   const poller = createUsagePoller({
     publish: (evt) => bus.publish(evt),
-    observe: (results) => {
-      recordWindowObservations(results);
+    seats,
+    observe: (results, seatResults) => {
+      recordWindowObservations(results, seatResults);
       pacing?.observe?.(results);
     },
   });
   activePoller = poller;
+  activeSeatsFor = seats ? (id) => seats.seatsFor(id) : null;
   const p = startPoller(() => poller.tick(), { intervalMs, label: "usage" });
   return {
     stop() {
       p.stop();
       poller.stop();
-      if (activePoller === poller) activePoller = null;
+      if (activePoller === poller) {
+        activePoller = null;
+        activeSeatsFor = null;
+      }
     },
     // The resume engine reuses THIS poller to force one immediate re-check at
     // a provider's expected reset instant (BET-1048) instead of running a
@@ -458,6 +618,17 @@ export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null } = 
 /** @returns {UsageSnapshot[]} */
 export function listSnapshots() {
   return activePoller ? activePoller.snapshots : [];
+}
+
+/**
+ * Per-seat snapshots (multi-account §6) — one per signed-in seat of every
+ * provider that has seats, each carrying `{accountId, seatId, seatLabel,
+ * accountLabel}`. Empty on a box without seats. `usage:list` keeps returning the
+ * provider aggregates only; this is the separate read for the seat detail.
+ * @returns {UsageSnapshot[]}
+ */
+export function listSeatSnapshots() {
+  return activePoller ? activePoller.seatSnapshots : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -502,23 +673,26 @@ function scheduleHistorySave() {
 
 /**
  * Tap the poller's publish point: record one observation per snapshot window
- * with `key = "<provider>:<window.kind>"`. Pure appendObservation handles the
- * min-interval dedupe + max-age prune; this is only the iteration + persistence
- * glue. `snapshots` is the published UsageSnapshot[].
+ * with `key = "<provider>:<window.kind>"` (the provider aggregate — today's
+ * keys, unchanged) and, per seat, `"<provider>:<seatId>:<window.kind>"`. Pure
+ * appendObservation handles the min-interval dedupe + max-age prune; this is
+ * only the iteration + persistence glue. Inactive windows are not history.
  * @param {UsageSnapshot[]} snapshots
+ * @param {UsageSnapshot[]} [seatSnapshots]
  */
-export function recordWindowObservations(snapshots) {
-  if (!Array.isArray(snapshots) || snapshots.length === 0) return;
+export function recordWindowObservations(snapshots, seatSnapshots = []) {
+  const aggregates = Array.isArray(snapshots) ? snapshots : [];
+  const perSeat = Array.isArray(seatSnapshots) ? seatSnapshots : [];
+  if (aggregates.length === 0 && perSeat.length === 0) return;
   const history = getUsageHistory();
-  for (const snap of snapshots) {
+  const record = (snap, prefix) => {
     for (const w of snap.windows ?? []) {
-      appendObservation(history, {
-        ts: snap.fetchedAt,
-        key: `${snap.provider}:${w.kind}`,
-        pct: w.pct,
-      });
+      if (w?.active === false) continue;
+      appendObservation(history, { ts: snap.fetchedAt, key: `${prefix}:${w.kind}`, pct: w.pct });
     }
-  }
+  };
+  for (const snap of aggregates) record(snap, snap.provider);
+  for (const snap of perSeat) record(snap, `${snap.provider}:${snap.seatId}`);
   scheduleHistorySave();
 }
 

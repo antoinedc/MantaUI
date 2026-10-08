@@ -45,6 +45,8 @@ export function usageWindowLabel(seconds) {
  * @param {number|string} [raw.remaining]  used when `used` is absent
  * @param {number|string} [raw.resetsAt]   epoch seconds, epoch ms, or an ISO string
  * @param {boolean} [raw.binding]
+ * @param {string} [raw.scope]   model display name a scoped window applies to
+ * @param {boolean} [raw.active] `false` when the provider says the window is not in force
  * @returns {import("../usage.mjs").UsageWindow | null}
  */
 export function normalizeWindow(raw) {
@@ -100,6 +102,11 @@ export function normalizeWindow(raw) {
   }
 
   if (raw.binding === true) window.binding = true;
+  // Model-scoped windows (Team plans): which model, and whether it is in force.
+  // `active` is only ever written as `false`; absent means active, so every
+  // pre-existing window keeps its exact shape.
+  if (typeof raw.scope === "string" && raw.scope) window.scope = raw.scope;
+  if (raw.active === false) window.active = false;
 
   return window;
 }
