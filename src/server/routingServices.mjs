@@ -112,7 +112,8 @@ export function accountsFromSnapshots(snapshots) {
     if (!isObj(s)) continue;
     const providerIDs = Array.isArray(s.providerIDs) ? s.providerIDs : [];
     if (providerIDs.length === 0) continue;
-    const windows = Array.isArray(s.windows) ? s.windows : [];
+    // Inactive windows (a model-scoped cap not in force) never price routing.
+    const windows = Array.isArray(s.windows) ? s.windows.filter((w) => w?.active !== false) : [];
     // The account kind is DECLARED by the adapter/descriptor, never inferred
     // from `balance` (BET-1269 5e): a subscription that also reports a credit
     // balance (codex) must not be priced as prepaid credit. A snapshot with no

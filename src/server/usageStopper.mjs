@@ -194,10 +194,13 @@ export function classifyUsageStopped({ provider, errorName, errorMessage, error 
  */
 export function isUsageAtLimit(windows) {
   if (!Array.isArray(windows)) return false;
+  // An inactive window (a model-scoped cap on a model not in force) never
+  // makes the provider refuse work.
   return windows.some(
     (w) =>
-      (typeof w?.pct === "number" && w.pct >= 100) ||
-      (typeof w?.used === "number" && typeof w?.limit === "number" && w.limit > 0 && w.used >= w.limit),
+      w?.active !== false &&
+      ((typeof w?.pct === "number" && w.pct >= 100) ||
+      (typeof w?.used === "number" && typeof w?.limit === "number" && w.limit > 0 && w.used >= w.limit)),
   );
 }
 

@@ -72,7 +72,7 @@ export function windowsFromSnapshots(snapshots) {
   const out = {};
   for (const s of snapshots ?? []) {
     if (!s || typeof s?.provider !== "string") continue;
-    const windows = Array.isArray(s.windows) ? s.windows.filter(Boolean) : [];
+    const windows = Array.isArray(s.windows) ? s.windows.filter((w) => w && w.active !== false) : [];
     // Only key providers we actually have a usable reading for. A provider
     // with no windows is ABSENT, and an absent reading must HOLD a resume up
     // (providerState waits) — never resume on a reading we do not have.

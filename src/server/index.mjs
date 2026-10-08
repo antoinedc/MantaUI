@@ -2151,7 +2151,7 @@ const adaptiveCtoOvernight = ctoOvernight.createOvernightScheduler({
       for (const s of Array.isArray(snaps) ? snaps : []) {
         if (s?.windowed !== true) continue;
         const win =
-          (Array.isArray(s.windows) ? s.windows : []).find((w) => w && Number.isFinite(w.pct)) ?? null;
+          (Array.isArray(s.windows) ? s.windows : []).find((w) => w && w.active !== false && Number.isFinite(w.pct)) ?? null;
         if (!win) continue;
         if (!best || win.pct > best.pct) best = { provider: s.provider, pct: win.pct, kind: win.kind ?? "session" };
       }
