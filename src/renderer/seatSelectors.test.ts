@@ -11,7 +11,6 @@ import {
   needsSecondAccountNote,
   nextSeatHint,
   orderOtherSeats,
-  otherSubscriptionLines,
   providerViewOrError,
   seatBarWindows,
   seatDialSnapshot,
@@ -187,21 +186,6 @@ describe("formatLastMove", () => {
       NOW,
     );
     expect(r?.resent).toBe("history re-sent: 128k");
-  });
-});
-
-describe("otherSubscriptionLines", () => {
-  it("one line per OTHER provider with seats", () => {
-    const codex = { ...threeSeatView(), provider: "codex" as const, mode: "auto" as const };
-    const lines = otherSubscriptionLines([threeSeatView(), codex], "claude");
-    expect(lines).toHaveLength(1);
-    expect(lines[0].provider).toBe("codex");
-    expect(lines[0].text).toMatch(/^best seat 20% of /);
-  });
-  it("a single-seat provider reads without 'best seat'; none for the current provider alone", () => {
-    const one = { ...oneSeatView(), provider: "codex" as const };
-    expect(otherSubscriptionLines([one], "claude")[0].text).toMatch(/^42%/);
-    expect(otherSubscriptionLines([oneSeatView()], "claude")).toEqual([]);
   });
 });
 
