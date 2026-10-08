@@ -77,10 +77,10 @@ describe("UsageDial — one seat (unchanged)", () => {
 describe("UsageDial — three seats, automatic", () => {
   it("shows the conversation's seat on the ring and popover, next tag, mode chip, ↷ badge", async () => {
     const { popover } = await open([threeSeatView()], { seatId: "s1" });
-    // The ring reports THIS conversation's seat (s1 = 93%), not the aggregate (42%).
+    // The ring reports THIS conversation's seat (s1 = 96%), not the aggregate (42%).
     const trigger = h!.container.querySelector("button") as HTMLButtonElement;
     expect(trigger.getAttribute("title")).toContain("Work · Seat 1");
-    expect(trigger.getAttribute("title")).toContain("93%");
+    expect(trigger.getAttribute("title")).toContain("96%");
     expect(h!.container.querySelector('[data-move-coming="true"]')).toBeTruthy();
 
     expect(popover.textContent).toContain("Automatic");
@@ -103,13 +103,27 @@ describe("UsageDial — three seats, automatic", () => {
     expect(h!.container.querySelector("[data-move-coming]")).toBeNull();
   });
 
+  it("↷ badge: absent at 94% (just under the 95% move line), shown at 95%", async () => {
+    const at = (pct: number) => {
+      const v = threeSeatView();
+      v.accounts[0].seats[0] = seat("s1", "Seat 1", pct, 40, { live: true, conversations: 2 });
+      return v;
+    };
+    await open([at(94)], { seatId: "s1" });
+    expect(h!.container.querySelector("[data-move-coming]")).toBeNull();
+    h?.unmount();
+    h = null;
+    await open([at(95)], { seatId: "s1" });
+    expect(h!.container.querySelector('[data-move-coming="true"]')).toBeTruthy();
+  });
+
   it("shows the last move (and the re-sent history for a cross-org move)", async () => {
     const { popover } = await open([threeSeatView()], {
       seatId: "s2",
-      lastMove: { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "was at 93%", crossOrg: true, resentTokens: 128_000 },
+      lastMove: { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "was at 96%", crossOrg: true, resentTokens: 128_000 },
     });
     const lm = popover.querySelector('[data-testid="usage-last-move"]') as HTMLElement;
-    expect(lm.textContent).toContain("Moved from Seat 1 · was at 93% · 2h ago");
+    expect(lm.textContent).toContain("Moved from Seat 1 · was at 96% · 2h ago");
     expect(lm.textContent).toContain("history re-sent: 128k");
   });
 
@@ -153,7 +167,7 @@ describe("UsageDial — manual mode", () => {
   it("the ring follows the active seat, no next tag / badge, Use buttons present", async () => {
     const { popover } = await open([manual()], { seatId: "s3" });
     const trigger = h!.container.querySelector("button") as HTMLButtonElement;
-    expect(trigger.getAttribute("title")).toContain("93%"); // active seat s1, not the stored s3
+    expect(trigger.getAttribute("title")).toContain("96%"); // active seat s1, not the stored s3
     expect(h!.container.querySelector("[data-move-coming]")).toBeNull();
     expect(popover.textContent).toContain("Manual");
     expect(popover.querySelector(".manta-seat-next")).toBeNull();

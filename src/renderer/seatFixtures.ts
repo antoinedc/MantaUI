@@ -38,7 +38,7 @@ export function threeSeatView(over: Partial<ProviderView> = {}): ProviderView {
         label: "Work",
         orgName: "Acme",
         plan: "Max 20x",
-        seats: [seat("s1", "Seat 1", 93, 40, { live: true, conversations: 2 }), seat("s2", "Seat 2", 20, 15, { conversations: 1 })],
+        seats: [seat("s1", "Seat 1", 96, 40, { live: true, conversations: 2 }), seat("s2", "Seat 2", 20, 15, { conversations: 1 })],
       },
       { id: "a2", label: "Personal", orgName: null, plan: "Pro", seats: [seat("s3", "Seat 1", 55, 30)] },
     ],

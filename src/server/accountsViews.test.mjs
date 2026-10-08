@@ -158,21 +158,31 @@ test("buildSessionSeat (manual): answers with the seat the NEXT request will use
 
 // ---- phase 4: moveTargetSeatId + lastMove detail ------------------------------
 
-test("moveTargetFor: where a conversation on the most loaded in-use seat (≥90) would go — the resolver's own decision", () => {
+test("moveTargetFor: where a conversation on the most loaded in-use seat (≥95) would go — the resolver's own decision", () => {
   const seats = [
     { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
     { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
     { seatId: "seat-3", usable: true, accountId: "acct-2", orgId: "org-B" },
   ];
-  const snaps = [snap(1, [win("session", 93)]), snap(2, [win("session", 40)]), snap(3, [win("session", 5)])];
+  const snaps = [snap(1, [win("session", 97)]), snap(2, [win("session", 40)]), snap(3, [win("session", 5)])];
   const counts = { "seat-1": 2 };
   assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts }), "seat-2", "same org first");
   assert.equal(moveTargetFor({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts }), null, "manual mode never moves");
   assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts: {} }), null, "nobody on it");
-  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 85)]), snap(2, []), snap(3, [])], counts }), null, "below 90");
-  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 93)]), snap(2, [win("session", 80)]), snap(3, [win("session", 75)])], counts }), null, "no seat under 70 → it would stay");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 94)]), snap(2, []), snap(3, [])], counts }), null, "below 95");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 97)]), snap(2, [win("session", 80)]), snap(3, [win("session", 75)])], counts }), null, "no seat under 70 → it would stay");
   // the MOST loaded one is the one asked about
-  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 91)]), snap(2, [win("session", 96)]), snap(3, [win("session", 5)])], counts: { "seat-1": 1, "seat-2": 1 } }), "seat-3");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 96)]), snap(2, [win("session", 98)]), snap(3, [win("session", 5)])], counts: { "seat-1": 1, "seat-2": 1 } }), "seat-3");
+});
+
+test("moveTargetFor regression: 94% has no move target, 95% does (the move line is 95)", () => {
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+  ];
+  const at = (pct) => moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", pct)]), snap(2, [win("session", 5)])], counts: { "seat-1": 1 } });
+  assert.equal(at(94), null);
+  assert.equal(at(95), "seat-2");
 });
 
 test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 1 (a NEW conversation)", () => {
@@ -180,7 +190,7 @@ test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 
     provider: "claude",
     state: state(),
     states: states(),
-    seatSnapshots: [snap(1, [win("session", 92)]), snap(2, [win("session", 30)]), snap(3, [win("session", 2)])],
+    seatSnapshots: [snap(1, [win("session", 97)]), snap(2, [win("session", 30)]), snap(3, [win("session", 2)])],
     assignments: { a: asg("seat-1") },
     routingActive: true,
   });
@@ -191,8 +201,8 @@ test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 
 });
 
 test("buildSessionSeat: lastMove carries trigger + crossOrg when recorded, and omits them otherwise", () => {
-  const auto = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false }) }, state: state(), states: states(), seatSnapshots: [] });
-  assert.deepEqual(auto.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false });
+  const auto = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false }) }, state: state(), states: states(), seatSnapshots: [] });
+  assert.deepEqual(auto.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false });
   const old = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "exhausted" }) }, state: state(), states: states(), seatSnapshots: [] });
   assert.deepEqual(old.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "exhausted" });
 });
