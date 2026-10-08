@@ -1258,6 +1258,9 @@ main() {
     for _tool in "$OPENCODE_TOOLS_SRC"/*.ts; do
       case "$_tool" in
         *.test.ts) continue ;;
+        # A PLUGIN, not a tool: it wraps fetch and belongs in plugins/, which is
+        # installed deliberately by the maintainer (see the file's header).
+        */manta-accounts-plugin.ts) continue ;;
       esac
       [ -e "$_tool" ] || continue
       cp -f "$_tool" "$OPENCODE_TOOLS_DIR/" \

@@ -402,6 +402,9 @@ refresh_opencode_tools() {
   for tool in "$src"/*.ts; do
     case "$tool" in
       *.test.ts) continue ;;
+      # A PLUGIN, not a tool (it wraps fetch): it belongs in plugins/, which the
+      # maintainer installs deliberately — never into tools/.
+      */manta-accounts-plugin.ts) continue ;;
     esac
     [ -e "$tool" ] || continue
     base="$(basename "$tool")"
