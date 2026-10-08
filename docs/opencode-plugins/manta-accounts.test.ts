@@ -1,9 +1,9 @@
-// Tests for docs/opencode-tools/manta-accounts-plugin.ts — the pure rewrite
+// Tests for docs/opencode-plugins/manta-accounts.ts — the pure rewrite
 // logic AND the wrapper end to end against a stub `fetch` (no network, fake
-// tokens only). The file is excluded from tools/ installs by install.sh and
-// self-update.sh (`*.test.ts`), like the other tool tests.
+// tokens only). The test file is never installed
+// (sync_opencode_plugins skips *.test.ts).
 import { describe, it, expect } from "vitest";
-import { MantaAccounts } from "./manta-accounts-plugin";
+import { MantaAccounts } from "./manta-accounts";
 
 const t: any = (MantaAccounts as any).__test;
 
@@ -119,7 +119,7 @@ describe("small helpers", () => {
     expect(t.forwardUrl(CLAUDE, "http://127.0.0.1:9")).toBe("http://127.0.0.1:9/v1/messages?beta=true");
   });
   it("exports exactly one function (opencode calls every export of a plugin file as a plugin)", async () => {
-    const mod = await import("./manta-accounts-plugin");
+    const mod = await import("./manta-accounts");
     expect(Object.keys(mod)).toEqual(["MantaAccounts"]);
   });
 });

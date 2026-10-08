@@ -5417,23 +5417,6 @@ test("self-update.sh refresh_opencode_tools never copies *.test.ts into tools/",
   }
 });
 
-test("manta-accounts-plugin.ts is a PLUGIN: neither self-update nor install copies it into tools/", () => {
-  const box = makeFakeBox();
-  try {
-    writeFileSync(join(box.srcDir, "serve-page.ts"), "tool\n");
-    writeFileSync(join(box.srcDir, "manta-accounts-plugin.ts"), "plugin\n");
-    runRefreshOpencodeTools(box);
-    const installed = readdirSync(box.toolsDir);
-    assert.ok(installed.includes("serve-page.ts"));
-    assert.ok(!installed.includes("manta-accounts-plugin.ts"), "a fetch-wrapping plugin must not be installed as a tool");
-  } finally {
-    rmSync(box.root, { recursive: true, force: true });
-  }
-  // install.sh's copy loop is inline (it cannot be run in isolation), so pin its exclusion by source.
-  const install = readFileSync(join(__dirname, "install.sh"), "utf8");
-  assert.match(install, /\*\/manta-accounts-plugin\.ts\) continue ;;/);
-});
-
 test("self-update.sh refresh_opencode_tools is idempotent — a second run reports no change", () => {
   const box = makeFakeBox();
   try {

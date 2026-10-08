@@ -402,9 +402,6 @@ refresh_opencode_tools() {
   for tool in "$src"/*.ts; do
     case "$tool" in
       *.test.ts) continue ;;
-      # A PLUGIN, not a tool (it wraps fetch): it belongs in plugins/, which the
-      # maintainer installs deliberately — never into tools/.
-      */manta-accounts-plugin.ts) continue ;;
     esac
     [ -e "$tool" ] || continue
     base="$(basename "$tool")"
@@ -432,6 +429,20 @@ refresh_opencode_tools() {
 echo "MANTA_PROGRESS 5/7 Refreshing AI tools"
 refresh_opencode_tools
 
+# --- Sync the manta-native opencode PLUGINS ------------------------------------
+# docs/opencode-plugins/*.ts → ~/.config/opencode/plugins/ (real copies; a
+# plugin the release stopped shipping is deleted, a user's own files never are —
+# see sync_opencode_plugins in scripts/lib/release.sh). Sets PLUGINS_CHANGED,
+# which the conditional-restart block below treats like OPENCODE_CHANGED:
+# opencode loads plugins only at startup, so a changed plugin is inert until it
+# restarts. Non-fatal, and guarded on the function existing (an old lib).
+PLUGINS_CHANGED=0
+if declare -F sync_opencode_plugins >/dev/null 2>&1; then
+  sync_opencode_plugins "$MANTA_HOME/docs/opencode-plugins" \
+    "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/plugins" \
+    "$STATE_HOME/.manta/opencode-plugins.manifest" || true
+fi
+
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
 # Appends any top-level `## ` guidance section that is missing from the user's
 # AGENTS.md (replaces install.sh's old all-or-nothing marker check). Same lib
@@ -448,10 +459,13 @@ sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_C
 #   |-----------------------------------------------|------------------------|
 #   | box payload was replaced (git reset / tarball)| opencode AND server   |
 #   | opencode changed, payload did not             | opencode only         |
+#   | a manta opencode plugin changed, payload did not | opencode only      |
 #   | only other CLIs changed                       | NOTHING               |
 #
 # `PAYLOAD_REPLACED` is the single flag set at the one place each install kind
 # swaps its payload. `OPENCODE_CHANGED` comes from the upgrade-clis state file.
+# `PLUGINS_CHANGED` comes from sync_opencode_plugins above. The decision itself
+# is `opencode_restart_plan` in scripts/lib/release.sh (unit-tested).
 # A skipped step emits no MANTA_PROGRESS line; the bar jumps forward (the
 # progress parser requires strictly-increasing steps).
 
@@ -528,20 +542,24 @@ wait_server_healthy() {
   die "server did not become healthy after the update — re-run install.sh to restore a matching prebuilt tree"
 }
 
-if [ "$PAYLOAD_REPLACED" = "1" ]; then
-  echo "MANTA_PROGRESS 6/7 Restarting opencode"
-  restart_opencode
-  echo "MANTA_PROGRESS 7/7 Restarting box server"
-  restart_server
-  # Confirm the new payload actually boots before reporting success.
-  wait_server_healthy
-elif [ "$OPENCODE_CHANGED" = "1" ]; then
-  echo "MANTA_PROGRESS 6/7 Restarting opencode"
-  restart_opencode
-else
-  # Only other CLIs changed → restart nothing. Replacing a CLI binary does not
-  # disturb a running process, so there is nothing to restart.
-  echo "✓ self-update: CLI(s) updated; no restart needed (payload untouched, opencode unchanged)"
-fi
+case "$(opencode_restart_plan "$PAYLOAD_REPLACED" "$OPENCODE_CHANGED" "$PLUGINS_CHANGED")" in
+  both)
+    echo "MANTA_PROGRESS 6/7 Restarting opencode"
+    restart_opencode
+    echo "MANTA_PROGRESS 7/7 Restarting box server"
+    restart_server
+    # Confirm the new payload actually boots before reporting success.
+    wait_server_healthy
+    ;;
+  opencode)
+    echo "MANTA_PROGRESS 6/7 Restarting opencode"
+    restart_opencode
+    ;;
+  *)
+    # Only other CLIs changed → restart nothing. Replacing a CLI binary does not
+    # disturb a running process, so there is nothing to restart.
+    echo "✓ self-update: CLI(s) updated; no restart needed (payload untouched, opencode and plugins unchanged)"
+    ;;
+esac
 
 echo "✓ self-update: complete"

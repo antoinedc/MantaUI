@@ -1258,9 +1258,6 @@ main() {
     for _tool in "$OPENCODE_TOOLS_SRC"/*.ts; do
       case "$_tool" in
         *.test.ts) continue ;;
-        # A PLUGIN, not a tool: it wraps fetch and belongs in plugins/, which is
-        # installed deliberately by the maintainer (see the file's header).
-        */manta-accounts-plugin.ts) continue ;;
       esac
       [ -e "$_tool" ] || continue
       cp -f "$_tool" "$OPENCODE_TOOLS_DIR/" \
@@ -1272,6 +1269,18 @@ main() {
   else
     warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
   fi
+  # --- C2. manta opencode PLUGINS (docs/opencode-plugins/*.ts → plugins/).
+  # Same real-copy rule as the tools. The helper lives only in the lib, which is
+  # sourced from MANTA_HOME here (the tarball is extracted by now, exactly like
+  # sync_opencode_guidance below) — so, unlike the four release-resolution
+  # helpers, it is NOT part of the inline `curl | bash` fallback: piped mode
+  # never needs it before extraction. Non-fatal: a plugin copy failing must not
+  # fail an install. The opencode service is (re)started further down, so the
+  # plugins are loaded without a separate restart here.
+  if ! declare -F sync_opencode_plugins >/dev/null 2>&1; then
+    . "$MANTA_HOME/scripts/lib/release.sh"
+  fi
+  sync_opencode_plugins "$MANTA_HOME/docs/opencode-plugins" "$OPENCODE_CONFIG_DIR/plugins" "$AUTH_DIR/opencode-plugins.manifest" || true
   # AGENTS.md section-sync (BET-640): append any top-level `## ` guidance
   # section from docs/opencode-tools/AGENTS.md that is not already present, so
   # a section added after a box was installed lands on the NEXT install/update.

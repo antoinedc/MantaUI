@@ -1,6 +1,6 @@
 // Tests for src/shared/maskPlan.mjs — the pure masking decision (BET-1344).
 // Vitest, like the sibling shared tests: no DOM, no fs, no network. The
-// plugin (docs/opencode-tools/manta-optimizer-plugin.ts) inlines a copy of
+// plugin (docs/opencode-plugins/manta-optimizer.ts) inlines a copy of
 // this module; the behavior pinned here is what the actuating transform must
 // reproduce against a real opencode history.
 

@@ -5,7 +5,7 @@
 //     → { seatId, live: true }                                   pass-through
 //     → { seatId, live: false, accessToken, accountId?, expiresAt? }   swap
 //
-// The `manta-accounts` opencode plugin (docs/opencode-tools/manta-accounts-plugin.ts)
+// The `manta-accounts` opencode plugin (docs/opencode-plugins/manta-accounts.ts)
 // calls this on every model request. It is the only consumer, and the token it
 // gets back travels over the loopback, bearer-gated /api only — never to a
 // renderer, never into a log.

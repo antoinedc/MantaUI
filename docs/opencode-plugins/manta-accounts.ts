@@ -22,12 +22,11 @@
  *     (`POST /api/accounts/refresh`); a 401 from a non-live seat is refreshed
  *     once and retried once.
  *
- * INSTALL (maintainer, post-merge — NOT during an agent run):
- *   cp docs/opencode-tools/manta-accounts-plugin.ts ~/.config/opencode/plugins/manta-accounts.ts
- *   systemctl --user restart opencode-serve
- * COPY, never symlink (same @opencode-ai/plugin resolution gotcha as the tools).
- * It is a PLUGIN: install.sh / self-update.sh deliberately do NOT copy it into
- * tools/.
+ * INSTALLED AUTOMATICALLY: install.sh and self-update.sh copy this file (a real
+ * copy, never a symlink) to ~/.config/opencode/plugins/manta-accounts.ts and
+ * restart opencode when it changes — see sync_opencode_plugins in
+ * scripts/lib/release.sh. Nothing to do by hand. On a box with one seat per
+ * provider it is a pure pass-through.
  *
  * TEST SEAMS (env, ignored when unset; both only ever accept a loopback URL so a
  * token can never be sent off the box):

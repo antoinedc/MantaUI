@@ -1,6 +1,6 @@
 // maskPlan.mjs — PURE masking decision for the opencode optimizer plugin
 // (BET-1344, Optimizer P2.2 "act"). This is the shared, testable copy of the
-// decision logic that the plugin at docs/opencode-tools/manta-optimizer-plugin.ts
+// decision logic that the plugin at docs/opencode-plugins/manta-optimizer.ts
 // INLINES (the plugin lives at ~/.config/opencode/plugins/ and cannot resolve
 // this repo, exactly like the boxToken() helper). Keep the two copies in sync —
 // each names the other as its source.

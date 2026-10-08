@@ -4573,8 +4573,8 @@ const handleRequest = async (req, res) => {
   // ---------- Optimizer counterfactual ingest (OBSERVE-ONLY) ----------
   // POST /api/optimizer/counterfactual  body {sessionID, maskedTokens,
   //   maskedParts, ts} → {ok:true}  (400 {error:"invalid"} on bad shape)
-  // The manta-optimizer opencode plugin (docs/opencode-tools/
-  // manta-optimizer-plugin.ts) reports what manta WOULD trim — read + report
+  // The manta-optimizer opencode plugin (docs/opencode-plugins/
+  // manta-optimizer.ts) reports what manta WOULD trim — read + report
   // only, it never mutates the message history. The store REPLACES the
   // session's latest counterfactual (each report is a full would-mask, not an
   // increment). Behind the /api/* Bearer gate (no exemption). The validator is
