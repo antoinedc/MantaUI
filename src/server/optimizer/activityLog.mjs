@@ -33,7 +33,10 @@ export const SUMMARY_ACTIVITY_CAP = 50;
 
 const DAY_MS = 86_400_000;
 
-const KINDS = new Set(["tune", "eco", "compaction", "guardrail"]);
+// "seat-move" (multi-account phase 4): an automatic seat move of a conversation —
+// not an optimizer parameter, but it is the same kind of "Manta did this on its own
+// and here is why" record, so it shares the trust surface.
+const KINDS = new Set(["tune", "eco", "compaction", "guardrail", "seat-move"]);
 const VERDICTS = new Set(["kept", "rolled-back", "applied"]);
 // The ONLY fields an entry may carry; anything else is dropped on append.
 const ENTRY_KEYS = new Set(["id", "ts", "kind", "subject", "from", "to", "verdict", "evidence", "revertedAt"]);

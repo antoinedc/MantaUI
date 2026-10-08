@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   seatLoad,
+  seatLoadWindow,
   isWindowActive,
   activeWindows,
   leastLoadedSeat,
@@ -133,4 +134,14 @@ test("aggregateSnapshot: empty input → null; does not mutate its input", () =>
   aggregateSnapshot([a], { mode: "auto" });
   assert.equal(a.seatId, "a");
   assert.equal(a.exhausted, true);
+});
+
+test("seatLoadWindow: the active, fresh window that defines the load; null when none counts", () => {
+  assert.deepEqual(seatLoadWindow(seat("a", [win("session", 91), win("weekly", 62)])), { kind: "session", pct: 91 });
+  assert.deepEqual(seatLoadWindow(seat("a", [win("session", 15), win("weekly", 62)])), { kind: "weekly", pct: 62 });
+  assert.deepEqual(seatLoadWindow(seat("a", [win("session", 15), win("weekly_scoped:fable", 100, { active: false })])), { kind: "session", pct: 15 });
+  assert.deepEqual(seatLoadWindow(seat("a", [win("session", 99, { stale: true })])), null);
+  assert.equal(seatLoadWindow(seat("a", [])), null);
+  assert.equal(seatLoadWindow(null), null);
+  assert.equal(seatLoad(seat("a", [win("session", 99, { stale: true })])), 0, "seatLoad is unchanged: windows reported, none in force → 0");
 });

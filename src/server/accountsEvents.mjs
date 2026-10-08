@@ -1,7 +1,9 @@
 // accountsEvents.mjs — the accounts bus events (multi-account spec §8, "Bus").
 //
 //   accounts.updated {provider}                               — the list changed
-//   accounts.moved   {sessionId, provider, from, to, reason}  — the resolver moved a conversation
+//   accounts.moved   {sessionId, provider, from, to, fromLabel, toLabel, reason,
+//                     trigger, crossOrg}                       — the resolver moved a conversation
+//                     (reason "load"|"exhausted"|"unusable"; trigger {kind,pct}|null)
 //
 // `accounts.updated` fires from many places (a store write, an assignment being
 // placed, a usage reading landing), and a burst of new conversations would
@@ -73,6 +75,10 @@ export function createAccountsEvents({
           from: evt.from,
           to: evt.to,
           reason: evt.reason,
+          fromLabel: evt.fromLabel ?? evt.from,
+          toLabel: evt.toLabel ?? evt.to,
+          trigger: evt.trigger ?? null,
+          crossOrg: evt.crossOrg === true,
         },
       });
     } catch {

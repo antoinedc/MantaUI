@@ -85,6 +85,14 @@ test("accounts.moved: immediate, never throttled, exactly the contract's fields"
   assert.equal(r.published.length, 2);
   assert.deepEqual(r.published[0], {
     kind: "accounts.moved",
-    payload: { sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2", reason: "exhausted" },
+    payload: { sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "seat-1", toLabel: "seat-2", reason: "exhausted", trigger: null, crossOrg: false },
+  });
+  r.events.moved({
+    sessionId: "ses_3", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Work · Seat 2",
+    reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: true,
+  });
+  assert.deepEqual(r.published[2].payload, {
+    sessionId: "ses_3", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Work · Seat 2",
+    reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: true,
   });
 });

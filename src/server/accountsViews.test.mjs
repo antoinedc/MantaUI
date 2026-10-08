@@ -2,7 +2,7 @@
 // the guarantee that nothing secret is carried.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildProviderView, buildSessionSeat, countConversations, findSeatView, nextSeatFor, seatViewStatus } from "./accountsViews.mjs";
+import { buildProviderView, buildSessionSeat, countConversations, findSeatView, moveTargetFor, nextSeatFor, seatViewStatus } from "./accountsViews.mjs";
 
 const seat = (n, over = {}) => ({ id: `seat-${n}`, label: `Seat ${n}`, email: `s${n}@example.com`, accountUuid: `u-${n}`, credentialDir: `/secret/dir/${n}`, status: "ok", ...over });
 const state = (over = {}) => ({
@@ -154,4 +154,45 @@ test("buildSessionSeat (manual): answers with the seat the NEXT request will use
   assert.equal(r.lastMove, undefined);
   const settled = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-3", { movedFrom: "seat-2", movedAt: 12, reason: "manual" }) }, state: manual, states: states(), seatSnapshots: [] });
   assert.deepEqual(settled.lastMove, { from: "seat-2", fromLabel: "Seat 2", at: 12, reason: "manual" });
+});
+
+// ---- phase 4: moveTargetSeatId + lastMove detail ------------------------------
+
+test("moveTargetFor: where a conversation on the most loaded in-use seat (≥90) would go — the resolver's own decision", () => {
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-1", orgId: "org-A" },
+    { seatId: "seat-3", usable: true, accountId: "acct-2", orgId: "org-B" },
+  ];
+  const snaps = [snap(1, [win("session", 93)]), snap(2, [win("session", 40)]), snap(3, [win("session", 5)])];
+  const counts = { "seat-1": 2 };
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts }), "seat-2", "same org first");
+  assert.equal(moveTargetFor({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts }), null, "manual mode never moves");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts: {} }), null, "nobody on it");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 85)]), snap(2, []), snap(3, [])], counts }), null, "below 90");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 93)]), snap(2, [win("session", 80)]), snap(3, [win("session", 75)])], counts }), null, "no seat under 70 → it would stay");
+  // the MOST loaded one is the one asked about
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 91)]), snap(2, [win("session", 96)]), snap(3, [win("session", 5)])], counts: { "seat-1": 1, "seat-2": 1 } }), "seat-3");
+});
+
+test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 1 (a NEW conversation)", () => {
+  const v = buildProviderView({
+    provider: "claude",
+    state: state(),
+    states: states(),
+    seatSnapshots: [snap(1, [win("session", 92)]), snap(2, [win("session", 30)]), snap(3, [win("session", 2)])],
+    assignments: { a: asg("seat-1") },
+    routingActive: true,
+  });
+  assert.equal(v.nextSeatId, "seat-3", "the least-loaded seat for a new conversation");
+  assert.equal(v.moveTargetSeatId, "seat-2", "org-A seats share a cache: same org first");
+  const quiet = buildProviderView({ provider: "claude", state: state(), states: states(), seatSnapshots: [snap(1, [win("session", 10)])], assignments: { a: asg("seat-1") }, routingActive: true });
+  assert.equal(quiet.moveTargetSeatId, null);
+});
+
+test("buildSessionSeat: lastMove carries trigger + crossOrg when recorded, and omits them otherwise", () => {
+  const auto = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false }) }, state: state(), states: states(), seatSnapshots: [] });
+  assert.deepEqual(auto.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "load", trigger: { kind: "session", pct: 91 }, crossOrg: false });
+  const old = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "exhausted" }) }, state: state(), states: states(), seatSnapshots: [] });
+  assert.deepEqual(old.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "exhausted" });
 });

@@ -119,7 +119,7 @@ import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterF
 import { createAccountsService, ACCOUNT_PROVIDERS } from "./accounts.mjs";
 import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
-import { createSeatAssigner } from "./seatAssignment.mjs";
+import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
 import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import {
@@ -657,7 +657,13 @@ const seatAssigner = createSeatAssigner({
   accounts: accountsService,
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
-  onMoved: (evt) => accountsEvents.moved(evt),
+  onMoved: (evt) => {
+    accountsEvents.moved(evt);
+    // Phase 4: every automatic move is also a line in the activity log — the
+    // same trust surface the optimizer uses ("Moved a conversation from …").
+    // `optimizerActivity` is declared further down; this runs long after startup.
+    optimizerActivity.append(seatMoveActivityEntry(evt)).catch((e) => console.warn("[accounts] logging a seat move failed:", e?.message ?? e));
+  },
   refreshSeatCredentials: (provider, t) =>
     provider === "claude"
       ? oc.refreshClaudeSeatAndNote(accountsService, { seatId: t.seatId, dir: t.dir })

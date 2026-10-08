@@ -140,3 +140,18 @@ test("concurrent appends do not lose an entry (mutex serializes)", async () => {
   const ids = new Set(get().map((e) => e.id));
   assert.equal(ids.size, 50);
 });
+
+test("append: a seat-move entry (multi-account phase 4) is accepted; evidence stays flat counts/labels", async () => {
+  const { log } = makeLog({ now: fixed(T0) });
+  const r = await log.append({
+    kind: "seat-move",
+    verdict: "applied",
+    subject: "Moved a conversation from Seat 1 (91% of 5h) to Seat 2",
+    from: "Seat 1",
+    to: "Seat 2",
+    evidence: { reason: "load", windowPct: 91, window: "5h", nested: { no: 1 }, flag: true },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.entry.kind, "seat-move");
+  assert.deepEqual(r.entry.evidence, { reason: "load", windowPct: 91, window: "5h" });
+});
