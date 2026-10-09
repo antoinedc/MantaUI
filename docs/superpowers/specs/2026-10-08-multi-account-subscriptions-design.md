@@ -323,14 +323,17 @@ Channels:
     directory is deleted.
 - `accounts:add-seat-confirm` `{seatId, newAccount: boolean}` → `ProviderView`.
 - `accounts:cancel-seat` `{seatId}` → `{ok:true}` (aborts the login, deletes the dir).
-- `accounts:remove-seat` `{provider, seatId}` → `ProviderView`. Refused
-  (`{error:"live-seat"}`) for the live seat. Its conversations are re-placed on their
-  next request; its directory is deleted.
+- `accounts:remove-seat` `{provider, seatId}` → `ProviderView`. Removing the LIVE seat
+  first makes another usable seat the box's live login (the active seat, else the
+  least-loaded; its credentials are written to the live slot, and any failure aborts
+  with nothing changed); a provider's only seat is refused (`{error:"last-seat"}`),
+  as is a live seat with no usable replacement (`no-replacement`). Its conversations
+  are re-placed on their next request; its directory is deleted.
 - `accounts:session-seat` `{sessionId}` → `{ provider, seatId, seatLabel,
   accountLabel, lastMove?: {from, fromLabel, at, reason} } | null`.
   Null when the conversation has no assignment.
 - Errors (class-1, safe literal text): `{error: "unknown-seat"|"invalid-label"|
-  "live-seat"|"unknown-provider"|"login-failed"}`.
+  "unknown-provider"|"login-failed"|"last-seat"|"no-replacement"}` (`live-seat` is no longer returned).
 
 REST (plugins, Bearer box token, direct-loopback callers only): `GET
 /api/accounts/resolve` and `POST /api/accounts/refresh` (§4) — they return a seat

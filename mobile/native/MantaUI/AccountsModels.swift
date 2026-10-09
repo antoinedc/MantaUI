@@ -661,6 +661,30 @@ enum AccountsCopy {
     static let routingInactive = "Seat routing isn't active on this box yet, so conversations keep using the live login for now."
     static let staleBox = "This box doesn't support multiple accounts yet — update it to manage seats here."
 
+    /// Why Remove is unavailable for the only login of a provider (the box's
+    /// `last-seat` literal, so the menu item and the refusal read the same).
+    static let lastSeatRemoveReason = "This is the only login on this box — use Disconnect instead."
+    static let noReplacementRemoveReason = "No other login is signed in and ready to take over"
+
+    /// The confirmation text for removing `seat`. Removing the live login first
+    /// switches the box to `replacement`, so that is named up front.
+    static func removeConfirmMessage(replacement: AccountsSeat?) -> String {
+        if let replacement {
+            let name = replacement.label.isEmpty ? "another seat" : "“\(replacement.label)”"
+            return "The box will switch to \(name), and this seat's conversations move to other seats on their next message. You can add it again by signing in from the desktop app."
+        }
+        return "Its conversations move to another seat on their next message. You can add it again by signing in from the desktop app."
+    }
+
+    /// "Removed Seat 1. The box now uses Seat 2; …".
+    static func removedMessage(name: String, replacement: AccountsSeat?) -> String {
+        if let replacement {
+            let used = replacement.label.isEmpty ? "another seat" : "“\(replacement.label)”"
+            return "Removed \(name). The box now uses \(used); its conversations move to other seats on their next message."
+        }
+        return "Removed \(name). Its conversations move to another seat on their next message."
+    }
+
     /// "All conversations now use Seat 3".
     static func usingSeat(_ label: String) -> String {
         "All conversations now use \(label)"
@@ -692,6 +716,8 @@ enum AccountsCopy {
         case "unknown-seat": return "that seat no longer exists — pull to refresh"
         case "invalid-label": return "names must be 1–40 characters"
         case "live-seat": return "that is the box's live login — switch to another seat before removing it"
+        case "last-seat": return "this is the only login on this box — use Disconnect instead"
+        case "no-replacement": return "no other login is signed in and ready to take over"
         case "unknown-provider": return "that provider isn't set up on this box"
         case "login-failed": return "sign-in failed — try again"
         case "duplicate-login": return "that login is already added"
@@ -793,6 +819,39 @@ enum AccountsSelectors {
     static func seat(_ seatId: String?, in provider: AccountsProvider) -> AccountsSeat? {
         guard let seatId else { return nil }
         return allSeats(provider).first { $0.id == seatId }
+    }
+
+    // MARK: Removing a seat
+
+    /// The seat that takes over as the box's login when the live seat `seatId`
+    /// is removed — the box's own rule: the provider's active seat when it is
+    /// another usable seat, else the least-loaded usable one (a seat with no
+    /// reading ranks after every seat with one; ties keep the box's order).
+    /// nil when there is none (the box then refuses with `no-replacement`).
+    static func liveSeatReplacement(_ provider: AccountsProvider, removing seatId: String) -> AccountsSeat? {
+        let others = allSeats(provider).filter { $0.id != seatId && ($0.status == .ok || $0.status == .unknown) }
+        if let active = others.first(where: { $0.id == provider.activeSeatId }) { return active }
+        var best: AccountsSeat?
+        var bestLoad = Double.infinity
+        for candidate in others {
+            let candidateLoad = load(candidate) ?? 1_000
+            if candidateLoad < bestLoad {
+                best = candidate
+                bestLoad = candidateLoad
+            }
+        }
+        return best
+    }
+
+    /// Why Remove cannot be offered for `seat`, or nil when it can: the only
+    /// login of a provider stays, and the live login needs a usable seat to
+    /// hand the box over to.
+    static func removeBlockReason(_ provider: AccountsProvider, seat: AccountsSeat) -> String? {
+        if seatCount(provider) < 2 { return AccountsCopy.lastSeatRemoveReason }
+        if seat.live && liveSeatReplacement(provider, removing: seat.id) == nil {
+            return AccountsCopy.noReplacementRemoveReason
+        }
+        return nil
     }
 
     // MARK: Load

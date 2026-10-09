@@ -548,18 +548,18 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(CapturingURLProtocol.lastPayload()?["seatId"] as? String, "s2")
     }
 
-    /// The contract's `{error: "live-seat"}` refusal must THROW, whichever way
+    /// The contract's `{error: "last-seat"}` refusal must THROW, whichever way
     /// it reaches the client — as the rpc envelope's `error`, or as the result
     /// body. A refusal read as a success would tell the user the seat was gone.
     func testAccountsRefusalThrowsFromEitherEnvelopeShape() async {
         let client = makeClient()
-        for reply in [#"{"error": "live-seat"}"#, #"{"result": {"error": "live-seat"}}"#] {
+        for reply in [#"{"error": "last-seat"}"#, #"{"result": {"error": "last-seat"}}"#] {
             CapturingURLProtocol.result = reply
             do {
                 _ = try await client.accountsRemoveSeat(provider: "claude", seatId: "s1")
                 XCTFail("expected a throw for \(reply)")
             } catch {
-                XCTAssertEqual(error as? MantaError, .server("live-seat"), reply)
+                XCTAssertEqual(error as? MantaError, .server("last-seat"), reply)
             }
         }
     }

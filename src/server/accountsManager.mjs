@@ -33,6 +33,7 @@
 
 import { join } from "node:path";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { leastLoadedSeat } from "../shared/seatChoice.mjs";
 import {
   ACCOUNT_PROVIDERS,
   addSeatToState,
@@ -52,7 +53,11 @@ import {
 import { buildProviderView, buildSessionSeat, findSeatView } from "./accountsViews.mjs";
 
 /** The closed list of refusals the contract names (§8). */
-export const ACCOUNTS_ERRORS = ["unknown-seat", "invalid-label", "live-seat", "unknown-provider", "login-failed"];
+// `live-seat` is kept for compatibility but is no longer returned: the live
+// seat can be removed (another login is promoted first). `last-seat` = the only
+// login of that provider; `no-replacement` = other seats exist but none can
+// take over as the live login right now.
+export const ACCOUNTS_ERRORS = ["unknown-seat", "invalid-label", "live-seat", "unknown-provider", "login-failed", "last-seat", "no-replacement"];
 
 /** What a person sees when something unexpected breaks (class-1 safe literal). */
 export const ACCOUNTS_SAFE_ERROR_MESSAGE = "The box couldn't complete that accounts request.";
@@ -516,13 +521,45 @@ export function createAccountsManager({
     return requireView(provider);
   }
 
+  /**
+   * The seat that takes over as the box's live login when the live one goes: the
+   * provider's active seat if it is another usable seat, else the least-loaded
+   * usable one (same ranking as seat assignment). Needs its own directory — only
+   * a directory seat has a login to promote. Null when there is none.
+   */
+  function pickReplacement(provider, states, seatId) {
+    const candidates = states.seats.filter((s) => s.seatId !== seatId && !s.live && s.usable && s.dir);
+    if (candidates.length === 0) return null;
+    if (candidates.some((s) => s.seatId === states.activeSeatId)) return states.activeSeatId;
+    const snaps = listSeatSnapshots().filter((x) => x?.provider === provider);
+    const bySeat = new Map(snaps.filter((x) => x?.seatId).map((x) => [x.seatId, x]));
+    const ranked = candidates.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId });
+    return leastLoadedSeat(ranked, { activeSeatId: states.activeSeatId })?.seatId ?? candidates[0].seatId;
+  }
+
   async function removeSeat({ provider, seatId } = {}) {
     requireProvider(provider);
     const states = await accounts.seatStates(provider);
     const entry = states?.seats.find((s) => s.seatId === seatId);
     if (!entry) throw new AccountsError("unknown-seat");
-    if (entry.live) throw new AccountsError("live-seat");
-    const liveSeatId = states.seats.find((s) => s.live)?.seatId ?? null;
+    let liveSeatId = states.seats.find((s) => s.live)?.seatId ?? null;
+    // The only login of a provider is never removed here (the provider would be
+    // left with no seat and no live login) — Disconnect is the way to drop it.
+    if (states.seats.length < 2) throw new AccountsError("last-seat");
+    if (entry.live) {
+      // The live login is about to disappear: make another seat the live one
+      // FIRST (otherwise discovery would re-adopt whatever the live slot still
+      // holds, straight after the removal). Any failure aborts with nothing
+      // changed — the live slot is only overwritten once the replacement's
+      // credentials were read successfully.
+      const replacement = pickReplacement(provider, states, seatId);
+      if (!replacement) throw new AccountsError("no-replacement");
+      const made = await accounts.makeSeatLive(provider, replacement, {
+        writeCodexEntry: provider === "codex" ? (e) => codex.restoreEntry(e) : undefined,
+      });
+      if (!made?.ok) throw new Error("promoting a replacement login failed");
+      liveSeatId = replacement;
+    }
     let removed = null;
     const res = await accounts.mutate(provider, (state) => {
       const out = removeSeatInState(state, seatId, liveSeatId);

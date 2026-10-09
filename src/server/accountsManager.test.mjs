@@ -233,10 +233,9 @@ test("auto mode view: nextSeatId is the least-loaded seat; conversations counted
 
 // ---- remove ---------------------------------------------------------------------
 
-test("remove-seat: refused for the live seat; otherwise the seat, its directory and its conversations' assignments go", async () => {
+test("remove-seat: the seat, its directory and its conversations' assignments go", async () => {
   const r = await rig();
   try {
-    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "live-seat" });
     assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat" });
     assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider" });
     r.setSnaps([{ provider: "claude", seatId: "seat-1", windows: [{ kind: "session", pct: 1 }] }, { provider: "claude", seatId: "seat-2", windows: [{ kind: "session", pct: 50 }] }]);
@@ -255,6 +254,165 @@ test("remove-seat: refused for the live seat; otherwise the seat, its directory 
     // Discovery does not bring it back.
     await r.accounts.discover({ force: true });
     assert.deepEqual(allSeats((await r.accounts.getStore()).providers.claude).map((s) => s.id), ["seat-2"]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+const modeOf = async (p) => (await stat(p)).mode & 0o777;
+
+test("remove-seat (live, claude): the active seat becomes the live login, the removed seat is gone and its conversations re-placed; discovery does not bring it back", async () => {
+  const r = await rig(); // seat-2 (tok-B) is live
+  try {
+    r.setSnaps([{ provider: "claude", seatId: "seat-1", windows: [{ kind: "session", pct: 40 }] }, { provider: "claude", seatId: "seat-2", windows: [{ kind: "session", pct: 1 }] }]);
+    await r.seatAssigner.resolve("claude", "ses_live");
+    assert.equal(r.seatAssigner.assignments("claude").ses_live.seatId, "seat-2");
+    await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-1" });
+    const dir2 = join(r.paths.seatsRoot, "claude", "seat-2");
+    assert.equal(await r.exists(dir2), true);
+
+    const v = await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" });
+    assert.equal(v.error, undefined);
+    assert.deepEqual(allViewSeats(v).map((s) => [s.id, s.live]), [["seat-1", true]]);
+    assert.equal(v.activeSeatId, "seat-1");
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), credsJson("tok-A"), "the live file now holds the replacement's login");
+    assert.equal((await modeOf(r.paths.claudeLivePath)).toString(8), "600");
+    assert.equal(await r.exists(dir2), false, "removed seat's directory deleted");
+    assert.deepEqual(r.seatAssigner.assignments("claude"), {}, "its conversations are re-placed");
+
+    await r.accounts.discover({ force: true });
+    const store = await r.accounts.getStore();
+    assert.deepEqual(allSeats(store.providers.claude).map((s) => s.id), ["seat-1"], "discovery did not re-add the removed login");
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), credsJson("tok-A"));
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("remove-seat (live, claude): without an active replacement the least-loaded usable seat is promoted", async () => {
+  const r = await rig();
+  try {
+    // seat-3 (tok-C, org Z): usable, lightly loaded; seat-1 is heavier; seat-2 live and active.
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com", orgZ);
+    await mkdir(join(r.paths.seatsRoot, "claude", "seat-3"), { recursive: true });
+    await writeFile(join(r.paths.seatsRoot, "claude", "seat-3", ".credentials.json"), credsJson("tok-C"));
+    await r.accounts.discover({ force: true });
+    await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-2" });
+    r.setSnaps([
+      { provider: "claude", seatId: "seat-1", windows: [{ kind: "session", pct: 80 }] },
+      { provider: "claude", seatId: "seat-2", windows: [{ kind: "session", pct: 10 }] },
+      { provider: "claude", seatId: "seat-3", windows: [{ kind: "session", pct: 5 }] },
+    ]);
+    const v = await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" });
+    assert.equal(v.error, undefined);
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), credsJson("tok-C"));
+    assert.equal(v.activeSeatId, "seat-3", "active follows the new live login");
+    assert.deepEqual(allViewSeats(v).map((s) => [s.id, s.live]), [["seat-1", false], ["seat-3", true]]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("remove-seat (live, claude): a promotion failure aborts with nothing changed", async () => {
+  const r = await rig();
+  try {
+    await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-1" });
+    // seat-1 is usable, but promoting it fails (the live slot cannot be written).
+    const before = await readFile(r.paths.claudeLivePath, "utf-8");
+    const storeBefore = JSON.stringify(await r.accounts.getStore());
+    const orig = r.accounts.makeSeatLive;
+    r.accounts.makeSeatLive = async () => ({ ok: false });
+    await assert.rejects(ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), new RegExp(ACCOUNTS_SAFE_ERROR_MESSAGE.slice(0, 20)));
+    r.accounts.makeSeatLive = orig;
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), before);
+    assert.equal(JSON.stringify(await r.accounts.getStore()), storeBefore);
+    assert.equal(await r.exists(join(r.paths.seatsRoot, "claude", "seat-2")), true);
+    assert.equal(await r.exists(join(r.paths.seatsRoot, "claude", "seat-1")), true);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("remove-seat (live, claude): a replacement whose credentials are unreadable aborts for real, live file untouched", async () => {
+  const r = await rig();
+  try {
+    await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-1" });
+    const before = await readFile(r.paths.claudeLivePath, "utf-8");
+    // Corrupt the directory login of the only other seat AFTER the seat table was built.
+    const states = await r.accounts.seatStates("claude");
+    assert.equal(states.seats.find((x) => x.seatId === "seat-1").usable, true);
+    const orig = r.accounts.seatStates;
+    r.accounts.seatStates = async (p) => {
+      const st = await orig(p);
+      await writeFile(join(r.paths.seatsRoot, "claude", "seat-1", ".credentials.json"), "not json");
+      return st;
+    };
+    await assert.rejects(ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }));
+    r.accounts.seatStates = orig;
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), before, "live login untouched");
+    assert.deepEqual(allSeats((await r.accounts.getStore()).providers.claude).map((s) => s.id), ["seat-1", "seat-2"]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("remove-seat: the only seat is refused with last-seat; other seats with no usable one → no-replacement", async () => {
+  const r = await rig();
+  try {
+    await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-1" });
+    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "last-seat" });
+    assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), credsJson("tok-B"));
+    assert.deepEqual(allSeats((await r.accounts.getStore()).providers.claude).map((s) => s.id), ["seat-2"]);
+  } finally {
+    await r.cleanup();
+  }
+  const r2 = await rig();
+  try {
+    await rm(join(r2.paths.seatsRoot, "claude", "seat-1", ".credentials.json")); // seat-1 can no longer serve
+    assert.deepEqual(await ch(r2, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "no-replacement" });
+    assert.equal(await readFile(r2.paths.claudeLivePath, "utf-8"), credsJson("tok-B"));
+  } finally {
+    await r2.cleanup();
+  }
+});
+
+test("remove-seat (live, codex): the replacement's entry is written through opencode's auth store", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    // seat-1 = cx-A (live). Add seat-2 = cx-B as a directory seat.
+    const dir = join(r.paths.seatsRoot, "codex", "seat-2");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    await r.accounts.mutate("codex", (st) => {
+      st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir, status: "ok" });
+      return st;
+    });
+    await ch(r, "accounts:set-active", { provider: "codex", seatId: "seat-2" });
+    const v = await ch(r, "accounts:remove-seat", { provider: "codex", seatId: "seat-1" });
+    assert.equal(v.error, undefined);
+    assert.deepEqual(r.calls.restore, ["cx-B"]);
+    assert.deepEqual(allViewSeats(v).map((s) => [s.id, s.live]), [["seat-2", true]]);
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-B");
+    await r.accounts.discover({ force: true });
+    assert.deepEqual(allSeats((await r.accounts.getStore()).providers.codex).map((s) => s.id), ["seat-2"]);
+
+    // a failed write leaves everything in place
+    const r2 = await rig({ codex: true, claude: false });
+    try {
+      const dir2 = join(r2.paths.seatsRoot, "codex", "seat-2");
+      await mkdir(dir2, { recursive: true });
+      await writeFile(join(dir2, "auth.json"), JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+      await r2.accounts.mutate("codex", (st) => {
+        st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir2, status: "ok" });
+        return st;
+      });
+      r2.state.restoreOk = false;
+      await assert.rejects(ch(r2, "accounts:remove-seat", { provider: "codex", seatId: "seat-1" }));
+      assert.equal(JSON.parse(await readFile(r2.paths.codexAuthPath, "utf-8")).openai.access, "cx-A");
+      assert.deepEqual(allSeats((await r2.accounts.getStore()).providers.codex).map((s) => s.id), ["seat-1", "seat-2"]);
+    } finally {
+      await r2.cleanup();
+    }
   } finally {
     await r.cleanup();
   }

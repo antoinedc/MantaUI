@@ -11,6 +11,7 @@ import {
   needsSecondAccountNote,
   nextSeatHint,
   orderOtherSeats,
+  liveSeatReplacement,
   providerViewOrError,
   seatBarWindows,
   seatDialSnapshot,
@@ -209,8 +210,21 @@ describe("misc", () => {
   });
   it("providerViewOrError maps codes to sentences", () => {
     expect(providerViewOrError({ error: "live-seat" })).toEqual({ error: expect.stringContaining("can't be removed") });
+    expect(providerViewOrError({ error: "last-seat" })).toEqual({ error: "This is the only login on this box — use Disconnect instead." });
+    expect(providerViewOrError({ error: "no-replacement" })).toEqual({ error: expect.stringContaining("ready to take over") });
     expect("view" in providerViewOrError(oneSeatView())).toBe(true);
     expect("error" in providerViewOrError(undefined)).toBe(true);
+  });
+  it("liveSeatReplacement: the active seat if usable, else the least-loaded usable one, else null", () => {
+    const v = threeSeatView(); // s1 live+active (96%), s2 20%, s3 55%
+    expect(liveSeatReplacement(v, "s1")?.id).toBe("s2");
+    expect(liveSeatReplacement({ ...v, activeSeatId: "s3" }, "s1")?.id).toBe("s3");
+    const down = threeSeatView();
+    down.accounts[0].seats[1].status = "expired";
+    expect(liveSeatReplacement(down, "s1")?.id).toBe("s3");
+    down.accounts[1].seats[0].status = "signed-out";
+    expect(liveSeatReplacement(down, "s1")).toBeNull();
+    expect(liveSeatReplacement(oneSeatView(), "s1")).toBeNull();
   });
   it("second-account note: once, only when an account already exists", () => {
     expect(needsSecondAccountNote(oneSeatView(), false)).toBe(true);

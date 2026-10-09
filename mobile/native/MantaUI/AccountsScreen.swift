@@ -7,7 +7,8 @@ import SwiftUI
 // weekly meters, how many conversations are on it, whether it is the box's live
 // login, and its sign-in state. With two or more seats a provider gets a
 // Manual / Automatic switch; in manual mode a seat can be made the one every
-// conversation uses. Seats can be renamed, and removed (never the live one).
+// conversation uses. Seats can be renamed, and removed — the live one too (the box
+// switches to another seat first); a provider's only seat stays.
 //
 // Every control does something and SAYS so: a success or a specific failure
 // lands in the feedback banner (`AccountsFeedbackBanner`). There is no "add a
@@ -34,6 +35,8 @@ struct SeatRenameRequest: Identifiable, Equatable {
 struct SeatRemoveRequest: Equatable {
     let provider: String
     let seat: AccountsSeat
+    /// For the live seat: the seat the box switches to (named in the confirmation).
+    let replacement: AccountsSeat?
 }
 
 /// A switch to a seat of ANOTHER account, waiting on its confirmation (it makes
@@ -144,13 +147,13 @@ struct AccountsScreen: View {
         .confirmActionSheet(
             isPresented: $confirmRemove,
             title: removeTitle,
-            message: "Its conversations move to another seat on their next message. You can add it again by signing in from the desktop app.",
+            message: AccountsCopy.removeConfirmMessage(replacement: removeTarget?.replacement),
             destructiveTitle: "Remove seat",
             destructiveAction: {
                 // Read the target at the moment of the tap, not when the sheet
                 // was armed: dismissing the sheet must not have cleared it.
                 if let target = removeTarget {
-                    Task { await store.removeSeat(provider: target.provider, seat: target.seat) }
+                    Task { await store.removeSeat(provider: target.provider, seat: target.seat, replacement: target.replacement) }
                 }
             }
         )
@@ -215,11 +218,7 @@ struct AccountsScreen: View {
     }
 
     private func providerFooter(_ provider: AccountsProvider) -> some View {
-        let hasLive = AccountsSelectors.allSeats(provider).contains { $0.live }
-        let live = hasLive && AccountsSelectors.hasChoice(provider)
-            ? " The live seat is the box's own login and can't be removed here."
-            : ""
-        return Text(AccountsCopy.addSeatOnDesktop + live)
+        Text(AccountsCopy.addSeatOnDesktop)
     }
 
     private func modeControl(_ provider: AccountsProvider) -> some View {
@@ -380,14 +379,17 @@ struct AccountsScreen: View {
                                                   targetId: seat.id, current: seat.label))
                 }
             }
-            // The live seat is the box's own login: it is not offered here, and
-            // the box refuses it too.
-            if !seat.live {
-                Button("Remove seat…", systemImage: "trash", role: .destructive) {
-                    removeTarget = SeatRemoveRequest(provider: provider.provider, seat: seat)
-                    confirmRemove = true
-                }
+            // Removing the live seat is allowed: the box switches to another
+            // seat first. The provider's only seat stays — disabled, with the
+            // reason in the item's own title.
+            let blocked = AccountsSelectors.removeBlockReason(provider, seat: seat)
+            let menuTitle = blocked.map { "Remove seat — \($0)" } ?? "Remove seat…"
+            Button(menuTitle, systemImage: "trash", role: .destructive) {
+                let replacement = seat.live ? AccountsSelectors.liveSeatReplacement(provider, removing: seat.id) : nil
+                removeTarget = SeatRemoveRequest(provider: provider.provider, seat: seat, replacement: replacement)
+                confirmRemove = true
             }
+            .disabled(blocked != nil)
         } label: {
             Image(systemName: "ellipsis.circle").font(.title3)
         }

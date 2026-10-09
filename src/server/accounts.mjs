@@ -1026,6 +1026,58 @@ export function createAccountsService({
       });
     },
 
+    /**
+     * Make a seat's login the box's LIVE login (the one the `claude` CLI /
+     * opencode use), by copying the seat's directory credentials over the live
+     * slot. Used before removing the seat that currently holds it, so there is
+     * always a live login afterwards and discovery has nothing stale to re-adopt.
+     *
+     *   Claude: the seat's `.credentials.json` content, written atomically
+     *     (temp + rename) at 0600 to the live path.
+     *   Codex:  the seat's `openai` entry, handed to `writeCodexEntry` (opencode's
+     *     own auth API — it owns that file) and then verified by reading the live
+     *     file back.
+     *
+     * The seat must have its own directory with a readable login. Returns
+     * `{ok:true}` or `{ok:false}`; nothing about the credentials leaves here, and
+     * on failure the live slot is left as it was. The live-identity cache is
+     * dropped on success so the next read sees the new identity.
+     * @param {"claude"|"codex"} provider
+     * @param {string} seatId
+     * @param {{writeCodexEntry?: (entry: object) => Promise<{ok:boolean}>}} [io]
+     */
+    async makeSeatLive(provider, seatId, { writeCodexEntry } = {}) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider)) return { ok: false };
+        const prov = (store ?? (await loadStore())).providers[provider];
+        const seat = findSeat(prov, (s) => s.id === seatId)?.seat;
+        if (!seat?.credentialDir) return { ok: false };
+        if (provider === "claude") {
+          const file = join(seat.credentialDir, ".credentials.json");
+          const raw = await readFile(file, "utf-8");
+          if (!parseCredentials(raw)?.accessToken) return { ok: false };
+          await writeJsonAtomic(claudeLivePath, raw, { mode: 0o600 });
+        } else {
+          const entry = await readCodexEntryFile(join(seat.credentialDir, "auth.json"));
+          if (!entry || typeof writeCodexEntry !== "function") return { ok: false };
+          const prev = await readCodexEntryFile(codexLivePath());
+          const r = await writeCodexEntry(entry);
+          const now_ = r?.ok ? await readCodexEntryFile(codexLivePath()) : null;
+          if (!now_ || now_.access !== entry.access) {
+            // Did not take: put the previous login back (best effort) so the box
+            // is not left on a half-applied one.
+            if (r?.ok && prev) await writeCodexEntry(prev).catch(() => {});
+            return { ok: false };
+          }
+        }
+        liveCache = { key: null, at: 0, identity: null };
+        return { ok: true };
+      } catch (e) {
+        log.warn?.(`[accounts] making ${seatId} the live ${provider} login failed:`, e?.message ?? e);
+        return { ok: false };
+      }
+    },
+
     /** Delete a seat's directory — only ever one that lies INSIDE the seats
      *  root (a corrupt store must not turn a remove into `rm -rf` elsewhere). */
     async deleteSeatDir(dir) {
