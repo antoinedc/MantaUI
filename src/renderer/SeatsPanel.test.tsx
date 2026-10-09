@@ -237,6 +237,59 @@ describe("AddSeatFlow", () => {
     expect(h!.container.querySelector("[role=status]")?.textContent).toContain("Added Seat 2");
   });
 
+  // The Claude sign-in: Submit stays busy ("Saving…") from the moment the code
+  // is pasted until the seat is filed AND the list is refreshed — then the
+  // panel reports done. A sign-in that exits with an error fails at once.
+  async function claudeFlow(status: () => Promise<unknown>) {
+    let ptyCb: ((e: unknown) => void) | null = null;
+    const r = await flow(
+      {
+        accountsAddSeat: () =>
+          Promise.resolve({ seatId: "n1", connect: { action: "start", shape: "claude-login", sessionKey: "claude-login-k", startedAt: 1, cwd: "/home" } }),
+        accountsSeatStatus: status,
+        ptyWrite: () => Promise.resolve(),
+        onPtyEvent: (cb: (e: unknown) => void) => {
+          ptyCb = cb;
+          return () => {};
+        },
+      },
+      { provider: "claude" },
+    );
+    const input = h!.container.querySelector('input[placeholder="paste the code"]') as HTMLInputElement;
+    await act(async () => {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      set.call(input, "CODE#STATE");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      buttonByText(h!, "Submit")!.click();
+    });
+    await h!.flush();
+    return { ...r, emitPty: (e: unknown) => ptyCb?.(e) };
+  }
+
+  it("Claude: Submit stays busy until the new seat is listed, then the panel reports done", async () => {
+    let n = 0;
+    const { onDone } = await claudeFlow(() => Promise.resolve(n++ < 2 ? { state: "pending" } : { state: "ok", seat: { id: "n1", label: "Seat 9" } }));
+    expect(h!.text()).toContain("Saving…");
+    await tick();
+    expect(h!.text()).toContain("Saving…"); // still pending on the box
+    expect(onDone).not.toHaveBeenCalled();
+    await tick();
+    await tick();
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(h!.text()).not.toContain("Saving…");
+  });
+
+  it("Claude: a sign-in that exits with an error fails at once instead of spinning", async () => {
+    const { emitPty } = await claudeFlow(() => Promise.resolve({ state: "pending" }));
+    expect(h!.text()).toContain("Saving…");
+    await act(async () => emitPty({ kind: "exit", sessionKey: "claude-login-k", code: 1 }));
+    await h!.flush();
+    expect(h!.text()).toContain("That code didn't work");
+    expect(h!.text()).not.toContain("Saving…");
+  });
+
   it("duplicate-login: a clear message and Try again restarts", async () => {
     const add = vi.fn(() => Promise.resolve({ seatId: "n1", connect: { shape: "oauth-auto", url: "https://l", instructions: "" } }));
     await flow({ accountsAddSeat: add, accountsSeatStatus: () => Promise.resolve({ state: "failed", error: "duplicate-login" }) });
