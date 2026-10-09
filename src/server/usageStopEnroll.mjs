@@ -24,7 +24,7 @@
 // is synchronous and testable; the async work (re-check + store write) is
 // injected.
 
-import { classifyUsageStopped, decideUsageEnrolment } from "./usageStopper.mjs";
+import { classifyUsageStopped, classifyLimitSignal, isOverloadFailure, decideUsageEnrolment } from "./usageStopper.mjs";
 import { adapterForProviderID } from "./usage.mjs";
 
 /**
@@ -52,10 +52,13 @@ function freshModel(sessionId) {
  * @param {(input: object) => Promise<void>} deps.upsert       wire to upsertStopped(input, {publish})
  * @param {(adapterId: string) => Promise<boolean>|boolean} deps.recheckAtLimit  wire to recheckAdapterAtLimit
  * @param {(sessionId: string) => Promise<string|undefined>|string|undefined} [deps.resolveWorkspace]  best-effort project label
+ * @param {(signal: {sessionId: string, adapterId: string, kind: "refusal"|"rate-limit"|"at-limit"}) => unknown} [deps.onLimitSignal]
+ *        called (fire-and-forget) when a failed turn hit a limit: a refusal match, a rate limit (429 …;
+ *        never overload), or the meter at its limit. Wire to the seat re-placement.
  * @param {() => number} [deps.now]
  * @returns {{ observeEvent: (evt: object) => void }}
  */
-export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace = () => "", now = () => Date.now() } = {}) {
+export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace = () => "", onLimitSignal = null, now = () => Date.now() } = {}) {
   const sessionModel = new Map(); // sessionId -> {conversation, adapterId, model?, cachedTokens}
 
   function applyStep(sessionId, props) {
@@ -92,12 +95,33 @@ export function createUsageStopEngine({ upsert, recheckAtLimit, resolveWorkspace
     // so no separate exclusion gate is needed here.
     const match = classifyUsageStopped({ provider: adapterId, errorName, errorMessage, error: err });
 
+    // The seat-level signal: broader than enrolment (a momentary rate limit
+    // counts; overload never does). Fired BEFORE the meter re-check (a network
+    // fetch) so re-placement is not delayed by it; never awaited and never
+    // allowed to throw — it must not delay or break enrolment.
+    let signalled = false;
+    const signal = (kind) => {
+      if (!onLimitSignal || signalled) return;
+      signalled = true;
+      try {
+        Promise.resolve(onLimitSignal({ sessionId, adapterId, kind })).catch((e) =>
+          console.warn("[usage-stop] limit signal failed:", e?.message ?? e),
+        );
+      } catch (e) {
+        console.warn("[usage-stop] limit signal failed:", e?.message ?? e);
+      }
+    };
+    const limit = classifyLimitSignal({ provider: adapterId, errorName, errorMessage, error: err });
+    if (limit) signal(limit.kind);
+
     let atLimit = false;
     try {
       atLimit = !!(await recheckAtLimit(adapterId));
     } catch {
       atLimit = false; // a failed re-check must never over-enrol
     }
+
+    if (atLimit && !match.neverEnrol && !isOverloadFailure({ errorName, errorMessage, error: err })) signal("at-limit");
 
     const decision = decideUsageEnrolment({ match, atLimit });
     if (!decision.enrol) return;

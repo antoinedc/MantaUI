@@ -119,6 +119,7 @@ import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterF
 import { createAccountsService, ACCOUNT_PROVIDERS } from "./accounts.mjs";
 import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
+import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
 import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
@@ -680,7 +681,7 @@ const accountsManager = createAccountsManager({
   claudeLogin: {
     start: (configDir, seatId) => startClaudeLogin("anthropic", { configDir, seatId }),
     cancel: (sessionKey) => {
-      cancelClaudeLogin(sessionKey);
+      cancelClaudeLogin(sessionKey, { force: true });
       pty.kill(sessionKey);
     },
   },
@@ -760,6 +761,9 @@ void resumeEngine.deliverSnapshots(listSnapshots()).catch((e) =>
 const usageStopEngine = createUsageStopEngine({
   upsert: (input) => upsertStopped(input, { publish: (evt) => bus.publish(evt) }),
   recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
+  // Multi-account: a turn that hit a rate/usage limit forces a fresh usage poll
+  // and re-places the conversation on a seat with room (seatLimitSignal.mjs).
+  onLimitSignal: createLimitSignalHandler({ refreshUsage: () => usagePollerTick(), assigner: seatAssigner }),
   resolveWorkspace: async (sessionId) => {
     try {
       const dir = await oc.getSessionDirectory(sessionId);
