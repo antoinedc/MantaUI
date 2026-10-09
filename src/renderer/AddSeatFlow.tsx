@@ -102,6 +102,10 @@ export function AddSeatFlow({
   const openSeatRef = useRef<string | null>(null);
   // done is reported exactly once, whatever the parent does with onDone's identity.
   const reportedRef = useRef(false);
+  // Submit keeps its spinner until the flow SETTLES (seat listed / failed /
+  // different-org / cancelled), not just until the code was typed into the
+  // sign-in. Resolved by the phase effect below.
+  const settleRef = useRef<(() => void) | null>(null);
   const label = providerLabel(provider);
 
   const set = useCallback((p: Phase) => {
@@ -232,6 +236,30 @@ export function AddSeatFlow({
     };
   }, [seatId, set, finishAdded]);
 
+  // A sign-in that EXITS with an error (a wrong or expired code) will never
+  // produce credentials: fail now instead of leaving Submit spinning until the
+  // 15-minute deadline. A clean exit is a successful login — keep waiting for
+  // the box to file the seat.
+  const sessionKey = phase.kind === "claude" ? phase.sessionKey : null;
+  useEffect(() => {
+    if (!sessionKey) return;
+    return window.api.onPtyEvent((ev) => {
+      if (ev.sessionKey !== sessionKey || ev.kind !== "exit" || ev.code === 0) return;
+      const open = openSeatRef.current;
+      openSeatRef.current = null;
+      if (open) void window.api.accountsCancelSeat({ seatId: open }).catch(() => {});
+      set({ kind: "failed", message: "That code didn't work (it may have expired). Start the sign-in again." });
+    });
+  }, [sessionKey, set]);
+
+  // Any phase other than "claude" (or unmount) ends a pending Submit.
+  useEffect(() => {
+    if (phase.kind === "claude" && !phase.inputError) return;
+    settleRef.current?.();
+    settleRef.current = null;
+  }, [phase]);
+  useEffect(() => () => settleRef.current?.(), []);
+
   // done is terminal — report once.
   useEffect(() => {
     if (phase.kind !== "done" || reportedRef.current) return;
@@ -314,7 +342,15 @@ export function AddSeatFlow({
               if (phase.inputError) set({ ...phase, inputError: undefined });
             } catch {
               set({ ...phase, inputError: "Couldn't reach the server. Try again." });
+              return;
             }
+            // Stay "Saving…" until the box has filed the seat AND the list has
+            // refreshed to show it (or the sign-in failed) — the poll above
+            // drives the phase; the effect resolves this.
+            await new Promise<void>((resolve) => {
+              settleRef.current?.();
+              settleRef.current = resolve;
+            });
           }}
         />
       )}
