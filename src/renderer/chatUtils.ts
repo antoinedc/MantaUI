@@ -3828,8 +3828,9 @@ export function seatResetHint(seat: SeatView, nowMs: number): string | null {
   const driver = seat.windows
     .filter((w) => w.active !== false && w.stale !== true)
     .reduce<UsageWindow | null>((m, w) => (!m || w.pct > m.pct ? w : m), null);
-  const at = formatResetAt(driver?.resetsAt, nowMs);
-  return at ? `resets ${at}` : null;
+  // Time remaining, like the popover's own window rows ("resets in 2h10m");
+  // the local date/time is appended only when the reset isn't today.
+  return formatWindowReset(driver?.resetsAt, nowMs);
 }
 
 /** The sentence for a class-1 `accounts:*` error code — never the raw code. */
