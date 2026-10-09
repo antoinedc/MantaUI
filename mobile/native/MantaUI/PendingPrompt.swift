@@ -2,7 +2,7 @@ import Foundation
 
 /// A prompt the user has committed but the box has not yet acknowledged.
 /// Durable: it outlives the session screen, backgrounding and app termination.
-struct PendingPrompt: Equatable, Codable, Identifiable {
+struct PendingPrompt: Equatable, Codable, Identifiable, Sendable {
     enum State: String, Codable {
         /// Accepted, not yet POSTed — a turn is running, or the app relaunched.
         case waiting

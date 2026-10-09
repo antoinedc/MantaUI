@@ -22,7 +22,7 @@ import MessagingUI
 /// follow the tail without jumping. `ChatSessionStore` recomputes its blocks at
 /// every turn boundary — the canonical blocks from a refetch plus a streaming
 /// `.prose` tail — so the id must survive that recompute.
-struct TranscriptRow: Identifiable, Equatable {
+struct TranscriptRow: Identifiable, Equatable, Sendable {
     let id: String
     let block: TranscriptBlock
 }
