@@ -114,6 +114,35 @@ workflows:
             --certificate-key=@file:/tmp/dist_key \
             --save
 
+          # 2b. Make sure the App Store profile carries the app's capabilities.
+          #     fetch-signing-files REUSES any existing App Store profile for the
+          #     bundle id, even one minted before the app declared Push
+          #     Notifications + Associated Domains (MantaUI.entitlements). Such a
+          #     profile makes the archive fail with "requires a provisioning
+          #     profile with the Associated Domains and Push Notifications
+          #     features" (ios-v1.0.25). So: enable both capabilities on the
+          #     bundle id, then delete every App Store profile for it; step 3's
+          #     --create then mints a fresh one that includes them. Profiles are
+          #     regenerated per build by design — nothing else depends on them.
+          BUNDLE_RES_ID=$(app-store-connect bundle-ids list \
+            --bundle-id-identifier "$BUNDLE_ID" --strict-match-identifier \
+            --platform IOS --json \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["id"] if d else "")')
+          if [ -z "$BUNDLE_RES_ID" ]; then
+            echo "Bundle id $BUNDLE_ID not found in the developer portal"; exit 1
+          fi
+          echo "bundle id resource: $BUNDLE_RES_ID"
+          # Already-enabled capabilities make this call fail; that is fine.
+          app-store-connect bundle-ids enable-capabilities "$BUNDLE_RES_ID" \
+            --capability "Push Notifications" "Associated Domains" \
+            || echo "enable-capabilities: already enabled (or not changeable) — continuing"
+          STALE=$(app-store-connect bundle-ids profiles --bundle-ids "$BUNDLE_RES_ID" --json \
+            | python3 -c 'import json,sys; [print(p["id"]) for p in json.load(sys.stdin) if p.get("attributes",{}).get("profileType")=="IOS_APP_STORE"]')
+          for PROFILE_ID in $STALE; do
+            echo "deleting App Store profile $PROFILE_ID so a fresh one is created"
+            app-store-connect profiles delete "$PROFILE_ID"
+          done
+
           # 3. Fetch signing files, passing the SAME private key so Codemagic can
           #    match the cert to its key and build a usable p12 + create the
           #    App Store provisioning profile for the bundle id.

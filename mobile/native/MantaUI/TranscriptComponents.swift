@@ -302,7 +302,7 @@ struct MantaStepRowsCaptureScene: View {
 /// FIRST-CLASS states, not error variants — a coding agent with a permission
 /// gate needs to tell "waiting for the user" from "failed", and folding either
 /// into `.error` would lose that.
-enum StepStatus: Hashable {
+enum StepStatus: Hashable, Sendable {
     case pending           // queued, not started
     case awaitingApproval  // blocked on a permission request
     case running
@@ -311,7 +311,7 @@ enum StepStatus: Hashable {
     case denied            // permission refused
 }
 
-struct ToolStep: Identifiable, Hashable {
+struct ToolStep: Identifiable, Hashable, Sendable {
     /// STABLE across rebuilds — it was derived deterministically from the wire
     /// data (the tool callID), so a step's identity survived a canonical refetch.
     /// (Legacy: the mapper no longer builds steps — runs replaced them; only the
@@ -470,7 +470,7 @@ struct StepRowView: View {
 // as one" — it is a session, so it lives in the same grouped container as the
 // step rows (so a turn reads as one sequence) but is rendered as a
 // navigation row, not a step.
-enum StepGroupRow: Identifiable, Equatable {
+enum StepGroupRow: Identifiable, Equatable, Sendable {
     case step(ToolStep)
     case subagent(SubagentSession)
 
@@ -482,7 +482,7 @@ enum StepGroupRow: Identifiable, Equatable {
     }
 }
 
-enum StepGroupContent: Equatable {
+enum StepGroupContent: Equatable, Sendable {
     case rows([StepGroupRow])
     case rollup(summary: String, rows: [StepGroupRow])
 }
@@ -600,7 +600,7 @@ struct StepGroupView: View {
 // transcript, rendered with exactly the parent's components), never an inline
 // expansion or a sheet. The child screen is read-only in v1.
 
-enum SubagentStatus: Hashable {
+enum SubagentStatus: Hashable, Sendable {
     case running
     case done
     /// The task's tool call errored. It used to read as `.running`.
@@ -619,7 +619,7 @@ enum SubagentStatus: Hashable {
     }
 }
 
-struct SubagentSession: Identifiable, Hashable {
+struct SubagentSession: Identifiable, Hashable, Sendable {
     /// STABLE across rebuilds — the child opencode session id when there is
     /// one. It used to be a fresh `UUID()` minted in `init`, and the transcript
     /// is re-derived from scratch on every streamed event, so the value pushed
@@ -790,12 +790,12 @@ struct TimestampGutterLabel: View {
 /// A system notice (session error / truncation) rendered inline in the
 /// transcript at the end of the turn it belongs to — NOT pinned above the
 /// composer. `error` is a failed turn; `warn` is a truncation.
-enum SystemNotice: Equatable {
+enum SystemNotice: Equatable, Sendable {
     case error
     case warn
 }
 
-enum TranscriptBlock: Equatable {
+enum TranscriptBlock: Equatable, Sendable {
     // The date is the block's wall-clock time, shown only in the swipe-to-reveal
     // gutter. Machinery (`.steps`) carries none: a step row already states how
     // long it took, and a second time reading next to it is noise, not detail.
@@ -848,8 +848,8 @@ enum TranscriptBlock: Equatable {
 /// `.voiceNote` and `.widget` flavours render today; image and generic-file
 /// rendering are deliberately not implemented yet (BET-1029) — a file part
 /// that is not one of those renders nothing, exactly as it did before.
-struct TranscriptAttachment: Equatable {
-    enum Kinds: Equatable {
+struct TranscriptAttachment: Equatable, Sendable {
+    enum Kinds: Equatable, Sendable {
         case voiceNote(VoiceNote)
         /// A referenced, rendered-inline widget (BET-1326). A widget is an
         /// artifact referenced by the transcript, which is exactly what `.file`
