@@ -335,6 +335,10 @@ export function createUsagePoller({
   // `(nowMs) => boolean`, evaluated once per tick; injectable so tests can pin
   // both modes.
   perConversationRouting = perConversationRoutingActive,
+  // A usage fetch that answers 401 asks this to refresh the login and, when it
+  // says `{ok:true}`, the fetch is retried ONCE in the same tick. Receives
+  // `{adapterId, seatId, rejectedToken}`; null (tests, harness) = no recovery.
+  onUnauthorized = null,
   staleRetryMs = STALE_RETRY_MS,
   // Retry scheduling is injectable (BET-1485): tests queue armed retries and
   // fire them manually, so the re-poll count doesn't depend on 5ms real
@@ -364,6 +368,37 @@ export function createUsagePoller({
     if (failing.has(adapterId)) return;
     failing.add(adapterId);
     console.warn(`[usage] adapter "${adapterId}" failed:`, e?.message ?? e);
+  }
+
+  // One adapter fetch with a single refresh-and-retry on 401. The token the
+  // provider refused is read off the request's Authorization header (the adapter
+  // owns the credential), so a recovery can tell "my token was rejected" from
+  // "somebody already refreshed it".
+  async function fetchWithRefresh(adapter, deps, seatId) {
+    let sent = "";
+    const real = deps.fetchImpl;
+    const tracked = {
+      ...deps,
+      fetchImpl: (url, init) => {
+        const h = init?.headers;
+        const auth = h?.Authorization ?? h?.authorization;
+        if (typeof auth === "string") sent = auth.replace(/^Bearer\s+/i, "");
+        return real(url, init);
+      },
+    };
+    try {
+      return await adapter.fetch(tracked);
+    } catch (e) {
+      if (e?.status !== 401 || typeof onUnauthorized !== "function") throw e;
+      let r = null;
+      try {
+        r = await onUnauthorized({ adapterId: adapter.id, seatId, rejectedToken: sent });
+      } catch {
+        r = null;
+      }
+      if (!r?.ok) throw e;
+      return adapter.fetch(tracked);
+    }
   }
 
   // One seat's usage call, with the same detect / backoff / carry-forward
@@ -398,7 +433,7 @@ export function createUsagePoller({
       return null;
     }
     try {
-      const snap = { ...buildSnapshot(adapter, await adapter.fetch(deps), nowMs), ...identity };
+      const snap = { ...buildSnapshot(adapter, await fetchWithRefresh(adapter, deps, seat.seatId), nowMs), ...identity };
       backoffUntil.delete(key);
       failing.delete(key);
       return snap;
@@ -462,7 +497,7 @@ export function createUsagePoller({
         }
 
         try {
-          entries.push({ snap: buildSnapshot(adapter, await adapter.fetch({ fetchImpl, now }), nowMs) });
+          entries.push({ snap: buildSnapshot(adapter, await fetchWithRefresh(adapter, { fetchImpl, now }, null), nowMs) });
           backoffUntil.delete(adapter.id);
           failing.delete(adapter.id);
         } catch (e) {
@@ -596,10 +631,11 @@ let activePoller = null;
  *   no adapter change.
  * @returns {{ stop: () => void }}
  */
-export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null, seats = null } = {}) {
+export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null } = {}) {
   const poller = createUsagePoller({
     publish: (evt) => bus.publish(evt),
     seats,
+    onUnauthorized,
     observe: (results, seatResults) => {
       recordWindowObservations(results, seatResults);
       pacing?.observe?.(results);
