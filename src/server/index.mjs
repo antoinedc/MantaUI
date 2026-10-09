@@ -115,6 +115,8 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // completed — the failure looked like an unavailable config surface rather
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
+import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
+import { readCodexEntry } from "./codexRefresh.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
 import { createAccountsService, ACCOUNT_PROVIDERS } from "./accounts.mjs";
 import { createAccountsEvents } from "./accountsEvents.mjs";
@@ -630,6 +632,19 @@ const optimizerPacing = createPacingState({
 const accountsService = createAccountsService();
 void accountsService.discover({ force: true });
 
+// The LIVE ChatGPT (Codex) login is opencode's own and opencode only refreshes it
+// on a model request, so while Codex sits idle it expires and the usage dial
+// vanishes (every usage call 401s). One refresher, shared by the proactive sweep
+// and the usage poller's 401 recovery, so the two can never spend the same
+// rotating refresh token twice.
+const liveCodexRefresher = oc.createLiveCodexRefresher(accountsService);
+const usageOnUnauthorized = createUnauthorizedHandler({
+  live: liveCodexRefresher,
+  seatStates: (provider) => accountsService.seatStates(provider),
+  refreshSeat: (t) => oc.refreshCodexSeatAndNote(accountsService, t),
+  readSeatEntry: readCodexEntry,
+});
+
 // Multi-account phase 3: the bus events (`accounts.updated`, throttled to one per
 // provider per second, and `accounts.moved`). A store change, a conversation
 // being placed or moved, and every fresh usage reading all mean "the list a
@@ -713,6 +728,7 @@ const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
   // point as recordWindowObservations — no second poller, no adapter change.
   pacing: optimizerPacing,
   seats: accountsService,
+  onUnauthorized: usageOnUnauthorized,
 });
 
 // Usage-stop resume engine (BET-1048): watches the ARMED entries in the
@@ -3070,7 +3086,7 @@ const { stop: stopVoiceSweep } = startVoiceSweep();
 // src/server/opencode.mjs (startCredentialRefreshPoller) — same shape as
 // the other timer pollers above.
 // eslint-disable-next-line no-unused-vars
-const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller({ seats: accountsService });
+const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller({ seats: accountsService, liveCodex: liveCodexRefresher });
 
 // Forward every opencode SSE event into the bus so mobile clients
 // subscribed to /events receive live chat updates.

@@ -100,28 +100,31 @@ export async function readCodexExpiry(file) {
   return typeof f?.entry?.expires === "number" ? f.entry.expires : null;
 }
 
+/** The openai oauth entry of an auth.json-shaped file, or null. */
+export async function readCodexEntry(file) {
+  return (await readAuthFile(file))?.entry ?? null;
+}
+
 const inFlight = new Map();
 
 /**
- * Refresh one seat file. Single-flight per file (a rotating refresh token must
- * never be spent twice). Never throws.
- * @param {{seatId?: string, file: string}} target
- * @param {{fetchImpl?: typeof fetch, now?: () => number, log?: {log?:Function}}} [deps]
- * @returns {Promise<{ok:true, expiresAt:number}|{ok:false, reason:string}>}
+ * Run `fn` at most once at a time per key; a caller arriving meanwhile gets the
+ * SAME promise. Every refresh of one login goes through here (a rotating refresh
+ * token must never be spent twice), keyed by the file that holds the login.
  */
-export function refreshCodexSeat({ seatId, file }, deps = {}) {
-  const existing = inFlight.get(file);
+export function singleFlight(key, fn) {
+  const existing = inFlight.get(key);
   if (existing) return existing;
-  const run = doRefresh({ seatId, file }, deps).finally(() => inFlight.delete(file));
-  inFlight.set(file, run);
+  const run = (async () => fn())().finally(() => inFlight.delete(key));
+  inFlight.set(key, run);
   return run;
 }
 
-async function doRefresh({ seatId, file }, { fetchImpl = fetch, now = Date.now, log = console } = {}) {
-  const f = await readAuthFile(file);
-  if (!f) return { ok: false, reason: "no-credentials" };
-  if (typeof f.entry.refresh !== "string" || !f.entry.refresh) return { ok: false, reason: "no-refresh-token" };
-
+/**
+ * ONE token-endpoint call. Never throws; reasons carry no secrets.
+ * @returns {Promise<{ok:true, tokens:object}|{ok:false, reason:string}>}
+ */
+export async function requestCodexTokens(refreshToken, { fetchImpl = fetch, log = console, label = "refresh" } = {}) {
   let res;
   try {
     res = await fetchImpl(CODEX_OAUTH_TOKEN_URL, {
@@ -129,7 +132,7 @@ async function doRefresh({ seatId, file }, { fetchImpl = fetch, now = Date.now, 
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "refresh_token",
-        refresh_token: f.entry.refresh,
+        refresh_token: refreshToken,
         client_id: CODEX_CLIENT_ID,
       }).toString(),
       signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
@@ -140,16 +143,35 @@ async function doRefresh({ seatId, file }, { fetchImpl = fetch, now = Date.now, 
   if (!res?.ok) {
     // 400/401 from the token endpoint = the refresh token itself was refused.
     const reason = res?.status === 400 || res?.status === 401 ? "refresh-token-rejected" : `http-${res?.status ?? "unknown"}`;
-    log.log?.("[codex-auth] seat refresh seat=%s ok=false reason=%s", seatId ?? "-", reason);
+    log.log?.("[codex-auth] %s ok=false reason=%s", label, reason);
     return { ok: false, reason };
   }
-  let tokens;
   try {
-    tokens = await res.json();
+    return { ok: true, tokens: await res.json() };
   } catch {
     return { ok: false, reason: "bad-response" };
   }
-  const next = applyTokenResponse(f.entry, tokens, now());
+}
+
+/**
+ * Refresh one seat file. Single-flight per file (a rotating refresh token must
+ * never be spent twice). Never throws.
+ * @param {{seatId?: string, file: string}} target
+ * @param {{fetchImpl?: typeof fetch, now?: () => number, log?: {log?:Function}}} [deps]
+ * @returns {Promise<{ok:true, expiresAt:number}|{ok:false, reason:string}>}
+ */
+export function refreshCodexSeat({ seatId, file }, deps = {}) {
+  return singleFlight(file, () => doRefresh({ seatId, file }, deps));
+}
+
+async function doRefresh({ seatId, file }, { fetchImpl = fetch, now = Date.now, log = console } = {}) {
+  const f = await readAuthFile(file);
+  if (!f) return { ok: false, reason: "no-credentials" };
+  if (typeof f.entry.refresh !== "string" || !f.entry.refresh) return { ok: false, reason: "no-refresh-token" };
+
+  const r = await requestCodexTokens(f.entry.refresh, { fetchImpl, log, label: `seat refresh seat=${seatId ?? "-"}` });
+  if (!r.ok) return r;
+  const next = applyTokenResponse(f.entry, r.tokens, now());
   if (!next) return { ok: false, reason: "bad-response" };
 
   // Persist the ROTATED refresh token before reporting success.

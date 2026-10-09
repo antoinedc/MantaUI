@@ -196,9 +196,21 @@ describe("misc", () => {
     expect(seatBarWindows([win("session", 9)])).toHaveLength(1);
     expect(seatBarWindows([])).toEqual([]);
   });
+  it("seatResetHint shows the time remaining, with the local date/time only when not today", () => {
+    const base = new Date(2026, 9, 9, 10, 0, 0).getTime(); // local 10:00
+    const at = (ms: number) => seat("a", "A", 96, 10, {
+      windows: [{ kind: "session", label: "5h", pct: 96, resetsAt: base + ms }, { kind: "weekly", label: "7d", pct: 10, resetsAt: null }],
+    } as never);
+    expect(seatResetHint(at(2 * 3_600_000 + 10 * 60_000), base)).toBe("resets in 2h10m");
+    expect(seatResetHint(at(45 * 60_000), base)).toBe("resets in 45m");
+    // Tomorrow (local): the remaining time plus the local anchor.
+    expect(seatResetHint(at(20 * 3_600_000), base)).toMatch(/^resets in 20h0?m? \(.+\)$/);
+    expect(seatResetHint(at(-1000), base)).toBe("resetting…");
+  });
+
   it("seatResetHint only at/over the move line", () => {
     expect(seatResetHint(seat("a", "A", 50), NOW)).toBeNull();
-    expect(seatResetHint(seat("a", "A", 95), NOW)).toMatch(/^resets /);
+    expect(seatResetHint(seat("a", "A", 95), NOW)).toMatch(/^resets in \d/);
   });
   it("describeSeatLine prefers the live view's names", () => {
     const v = threeSeatView();
