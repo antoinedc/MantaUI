@@ -2248,7 +2248,7 @@ export type SeatView = {
   label: string;
   email: string | null;
   status: SeatState;
-  /** This seat is the box's current login (cannot be removed). */
+  /** This seat is the box's current login (removing it switches the box to another seat first). */
   live: boolean;
   /** Latest per-seat reading; [] when none. */
   windows: UsageWindow[];
@@ -2283,7 +2283,9 @@ export type AccountsError =
   | "invalid-label"
   | "live-seat"
   | "unknown-provider"
-  | "login-failed";
+  | "login-failed"
+  | "last-seat"
+  | "no-replacement";
 
 /** A mutation answers the refreshed provider, or a class-1 safe error code. */
 export type ProviderViewResult = ProviderView | { error: AccountsError };

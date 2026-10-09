@@ -17,8 +17,10 @@ import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Pencil } from "lucide-react";
 import type { AccountView, ProviderView, SeatView } from "../shared/types";
 import {
+  LAST_SEAT_REMOVE_REASON,
   hasSeatChoice,
   isSameOrgMove,
+  liveSeatReplacement,
   providerViewOrError,
   seatBarWindows,
   seatLoad,
@@ -34,6 +36,13 @@ import { useStore } from "./store";
 const BTN =
   "px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40";
 type Adding = { accountId?: string; accountLabel?: string } | null;
+
+function removeConfirmText(seat: SeatView, replacement: SeatView | null): string {
+  const n = `${seat.conversations} conversation${seat.conversations === 1 ? "" : "s"}`;
+  return replacement
+    ? `Remove ${seat.label}? The box will switch to “${replacement.label}”, and its ${n} move to other seats on their next message.`
+    : `Remove ${seat.label}? Its ${n} move to another seat on their next message.`;
+}
 
 export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSignal?: number }) {
   const [open, setOpen] = useState(() => consumeAccountsFocus(view.provider));
@@ -121,11 +130,13 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
     if (ok) setRenaming(null);
   };
 
-  const removeSeat = async (seat: SeatView) => {
+  const removeSeat = async (seat: SeatView, replacement: SeatView | null) => {
     const ok = await run(
       `remove:${seat.id}`,
       () => window.api.accountsRemoveSeat({ provider: view.provider, seatId: seat.id }),
-      `Removed ${seat.label}. Its conversations move to another seat on their next message.`,
+      replacement
+        ? `Removed ${seat.label}. The box now uses “${replacement.label}”; its conversations move to other seats on their next message.`
+        : `Removed ${seat.label}. Its conversations move to another seat on their next message.`,
       `Couldn't remove ${seat.label}`,
     );
     if (ok) setRemoveConfirm(null);
@@ -173,6 +184,14 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
     const bars = seatBarWindows(seat.windows);
     const load = seatLoad(seat);
     const confirming = switcher.confirmId === seat.id;
+    // Removing the live login first hands the box over to another seat.
+    const replacement = seat.live ? liveSeatReplacement(view, seat.id) : null;
+    const removeBlock =
+      seatCount < 2
+        ? LAST_SEAT_REMOVE_REASON
+        : seat.live && !replacement
+          ? "No other login is signed in and ready to take over — sign one in first"
+          : null;
     const crossOrg = !isSameOrgMove(view, view.activeSeatId, seat.id);
     return (
       <div key={seat.id} data-seat-id={seat.id} className="rounded-sm border border-border-subtle px-3 py-2 space-y-2">
@@ -224,7 +243,7 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
                   type="button"
                   className="px-2 py-1 text-meta bg-danger-bg border border-danger rounded-xs text-danger disabled:opacity-40"
                   disabled={busy !== null}
-                  onClick={() => void removeSeat(seat)}
+                  onClick={() => void removeSeat(seat, replacement)}
                 >
                   {busy === `remove:${seat.id}` ? "…" : "Remove"}
                 </button>
@@ -236,8 +255,8 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
               <button
                 type="button"
                 className={BTN}
-                disabled={seat.live || busy !== null}
-                title={seat.live ? "This is the login the box is using now, so it can't be removed" : `Remove ${seat.label}`}
+                disabled={removeBlock !== null || busy !== null}
+                title={removeBlock ?? `Remove ${seat.label}`}
                 onClick={() => setRemoveConfirm(seat.id)}
               >
                 Remove
@@ -247,7 +266,7 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
         </div>
         {removeConfirm === seat.id && (
           <div className="text-meta text-text-muted">
-            Remove {seat.label}? Its {seat.conversations} conversation{seat.conversations === 1 ? "" : "s"} move to another seat on their next message.
+            {removeConfirmText(seat, replacement)}
           </div>
         )}
         {confirming && (

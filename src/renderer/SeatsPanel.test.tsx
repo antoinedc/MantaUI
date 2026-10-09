@@ -55,7 +55,7 @@ const click = async (el: Element | null | undefined) => {
 };
 
 describe("SeatsPanel", () => {
-  it("one seat: no mode toggle, the single seat reads as its account, live marker, no remove", async () => {
+  it("one seat: no mode toggle, the single seat reads as its account, live marker, Remove disabled (last seat)", async () => {
     await openPanel(oneSeatView());
     expect(h!.text()).not.toContain("Automatic");
     expect(h!.text()).toContain("Work");
@@ -64,7 +64,7 @@ describe("SeatsPanel", () => {
     expect(h!.text()).toContain("7d");
     const remove = buttonByText(h!, "Remove")!;
     expect(remove.disabled).toBe(true);
-    expect(remove.title).toMatch(/can't be removed/);
+    expect(remove.title).toMatch(/only login on this box.*Disconnect/);
   });
 
   it("shows accounts → seats with email, plan, conversations", async () => {
@@ -137,17 +137,47 @@ describe("SeatsPanel", () => {
     expect(h!.container.querySelector('[role="status"]')?.textContent).toContain("Renamed to “Desk”");
   });
 
-  it("remove asks, then removes, reports; the live seat's Remove is disabled with a reason", async () => {
+  it("remove asks, then removes, reports", async () => {
     const after = threeSeatView();
     after.accounts[0].seats = [after.accounts[0].seats[0]];
     const m = await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve(after) });
-    const live = h!.container.querySelector('[data-seat-id="s1"]')!.querySelector('button[title*="can\'t be removed"]') as HTMLButtonElement;
-    expect(live.disabled).toBe(true);
     await click(rowButton("s2", "Remove"));
     expect(h!.text()).toContain("move to another seat on their next message");
+    expect(h!.text()).not.toContain("The box will switch");
     await click(Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Remove" && !b.disabled && b.className.includes("danger")));
     expect(m.api.calls.accountsRemoveSeat[0][0]).toEqual({ provider: "claude", seatId: "s2" });
     expect(h!.container.querySelector('[role="status"]')?.textContent).toContain("Removed Seat 2");
+  });
+
+  it("the live seat can be removed: the confirm names the seat the box switches to, then reports it", async () => {
+    const after = threeSeatView({ activeSeatId: "s2" });
+    after.accounts[0].seats = [{ ...after.accounts[0].seats[1], live: true }];
+    const m = await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve(after) });
+    const live = rowButton("s1", "Remove") as HTMLButtonElement;
+    expect(live.disabled).toBe(false);
+    await click(live);
+    expect(h!.text()).toContain("The box will switch to “Seat 2”");
+    expect(h!.text()).toContain("its 2 conversations move to other seats");
+    await click(Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Remove" && !b.disabled && b.className.includes("danger")));
+    expect(m.api.calls.accountsRemoveSeat[0][0]).toEqual({ provider: "claude", seatId: "s1" });
+    expect(h!.container.querySelector('[role="status"]')?.textContent).toContain("The box now uses “Seat 2”");
+  });
+
+  it("the live seat's Remove is disabled with a reason when no other seat is usable", async () => {
+    const v = threeSeatView();
+    v.accounts[0].seats[1].status = "expired";
+    v.accounts[1].seats[0].status = "signed-out";
+    await openPanel(v);
+    const live = rowButton("s1", "Remove") as HTMLButtonElement;
+    expect(live.disabled).toBe(true);
+    expect(live.title).toMatch(/No other login is signed in/);
+  });
+
+  it("a refused removal reports the server's reason", async () => {
+    await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve({ error: "last-seat" }) });
+    await click(rowButton("s2", "Remove"));
+    await click(Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Remove" && !b.disabled && b.className.includes("danger")));
+    expect(h!.container.querySelector('[role="alert"]')?.textContent).toContain("only login on this box");
   });
 
   it("shows the ToS note once, when a second account is added", async () => {

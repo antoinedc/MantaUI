@@ -241,12 +241,14 @@ final class AccountsStore: ObservableObject {
         }
     }
 
-    /// Remove a seat (never offered for the live one — the box refuses it too).
-    func removeSeat(provider: String, seat: AccountsSeat) async {
+    /// Remove a seat. Removing the live seat makes the box switch to another
+    /// first (`replacement` — the seat the screen named in its confirmation);
+    /// the box refuses the provider's only seat (`last-seat`).
+    func removeSeat(provider: String, seat: AccountsSeat, replacement: AccountsSeat? = nil) async {
         let name = seat.label.isEmpty ? "The seat" : seat.label
         await perform("remove the seat") { [api] in
             let updated = try await api.accountsRemoveSeat(provider: provider, seatId: seat.id)
-            return (updated, "Removed \(name). Its conversations move to another seat on their next message.")
+            return (updated, AccountsCopy.removedMessage(name: name, replacement: replacement))
         }
     }
 

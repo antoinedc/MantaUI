@@ -466,7 +466,8 @@ final class MantaAPIClient: Sendable {
         try await accountsAction("accounts:rename", ["provider": provider, "kind": kind, "id": id, "label": label])
     }
 
-    /// `accounts:remove-seat` — the box refuses the live seat with `live-seat`.
+    /// `accounts:remove-seat` — removing the live seat switches the box to another seat
+    /// first; a provider's only seat is refused with `last-seat`.
     func accountsRemoveSeat(provider: String, seatId: String) async throws -> AccountsProvider {
         try await accountsAction("accounts:remove-seat", ["provider": provider, "seatId": seatId])
     }

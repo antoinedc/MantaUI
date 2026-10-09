@@ -3574,6 +3574,27 @@ export function hasSeatChoice(view: ProviderView | null | undefined): boolean {
   return allSeats(view).length >= 2;
 }
 
+/** Shown wherever removing a provider's only login is refused (also the server's
+ *  `last-seat` text), so a button's reason and the error read the same. */
+export const LAST_SEAT_REMOVE_REASON = "This is the only login on this box — use Disconnect instead.";
+
+/**
+ * The seat that takes over as the box's live login when the live seat `seatId` is
+ * removed — mirrors the server's pick: the provider's active seat when it is
+ * another usable seat, else the least-loaded usable one. Null when there is none
+ * (the server then refuses with `no-replacement`). Used only to NAME the
+ * replacement in the confirm text; the server decides.
+ */
+export function liveSeatReplacement(view: ProviderView | null | undefined, seatId: string): SeatView | null {
+  if (!view) return null;
+  const others = allSeats(view).filter((s) => s.id !== seatId && seatUsable(s));
+  if (others.length === 0) return null;
+  const active = others.find((s) => s.id === view.activeSeatId);
+  if (active) return active;
+  const id = leastLoadedSeat(others.map(asSeatSnapshot), { activeSeatId: view.activeSeatId })?.seatId;
+  return others.find((s) => s.id === id) ?? others[0];
+}
+
 /**
  * The seat THIS conversation is on. In manual mode the resolver ignores stored
  * assignments and every conversation uses the active seat, so that wins; in
@@ -3820,6 +3841,10 @@ export function accountsErrorMessage(code: AccountsError | string | undefined): 
       return "Names must be 1–40 characters, with no control characters.";
     case "live-seat":
       return "This is the login the box is using right now, so it can't be removed.";
+    case "last-seat":
+      return "This is the only login on this box — use Disconnect instead.";
+    case "no-replacement":
+      return "No other login is signed in and ready to take over, so this one can't be removed yet.";
     case "unknown-provider":
       return "That provider doesn't support several accounts.";
     case "login-failed":

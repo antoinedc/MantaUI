@@ -165,8 +165,8 @@ final class AccountsTests: XCTestCase {
         XCTAssertNil(ok.error)
         XCTAssertEqual(ok.provider?.mode, .auto)
 
-        let refused = try JSONDecoder().decode(AccountsActionReply.self, from: Data(#"{"error":"live-seat"}"#.utf8))
-        XCTAssertEqual(refused.error, "live-seat")
+        let refused = try JSONDecoder().decode(AccountsActionReply.self, from: Data(#"{"error":"last-seat"}"#.utf8))
+        XCTAssertEqual(refused.error, "last-seat")
         XCTAssertNil(refused.provider)
     }
 
@@ -605,6 +605,64 @@ final class AccountsTests: XCTestCase {
         // Anything else is shown as the box sent it, never swallowed.
         XCTAssertEqual(AccountsCopy.reason(forCode: "disk on fire"), "disk on fire")
         XCTAssertEqual(AccountsCopy.reason(forCode: "  "), "something went wrong — try again")
+    }
+
+    // MARK: - Removing the live seat
+
+    func testLastSeatAndNoReplacementCopy() {
+        XCTAssertEqual(AccountsCopy.failure("remove the seat", MantaError.server("last-seat")),
+                       "Couldn't remove the seat — this is the only login on this box — use Disconnect instead")
+        XCTAssertEqual(AccountsCopy.reason(forCode: "no-replacement"), "no other login is signed in and ready to take over")
+    }
+
+    func testLiveSeatReplacementPrefersTheActiveSeatThenTheLeastLoaded() {
+        // s1 is live and active; s2 (20%) is lighter than s3 (55%).
+        let p = provider(mode: .auto, active: "s1", accounts: [
+            account("work", "Work", seats: [seat("s1", live: true, load: 96), seat("s2", load: 20)]),
+            account("me", "Personal", seats: [seat("s3", load: 55)]),
+        ])
+        XCTAssertEqual(AccountsSelectors.liveSeatReplacement(p, removing: "s1")?.id, "s2")
+
+        // The active seat wins when it is another usable seat, whatever the load.
+        let activeElsewhere = provider(mode: .manual, active: "s3", accounts: p.accounts)
+        XCTAssertEqual(AccountsSelectors.liveSeatReplacement(activeElsewhere, removing: "s1")?.id, "s3")
+
+        // A seat with no reading ranks after every seat with one.
+        let unread = provider(mode: .auto, active: "s1", accounts: [
+            account("work", "Work", seats: [seat("s1", live: true, load: 10), seat("s2"), seat("s3", load: 90)]),
+        ])
+        XCTAssertEqual(AccountsSelectors.liveSeatReplacement(unread, removing: "s1")?.id, "s3")
+
+        // Signed-out / expired seats never take over; with none left there is no replacement.
+        let broken = provider(mode: .auto, active: "s1", accounts: [
+            account("work", "Work", seats: [seat("s1", live: true), seat("s2", status: .expired), seat("s3", status: .signedOut)]),
+        ])
+        XCTAssertNil(AccountsSelectors.liveSeatReplacement(broken, removing: "s1"))
+    }
+
+    func testRemoveBlockReason() {
+        let live = seat("s1", live: true)
+        let two = provider(mode: .auto, active: "s1", accounts: [account("a", "A", seats: [live, seat("s2")])])
+        XCTAssertNil(AccountsSelectors.removeBlockReason(two, seat: live), "the live seat can be removed when another can take over")
+        XCTAssertNil(AccountsSelectors.removeBlockReason(two, seat: seat("s2")))
+
+        let only = provider(mode: .auto, active: "s1", accounts: [account("a", "A", seats: [live])])
+        XCTAssertEqual(AccountsSelectors.removeBlockReason(only, seat: live), AccountsCopy.lastSeatRemoveReason)
+
+        let nobody = provider(mode: .auto, active: "s1", accounts: [account("a", "A", seats: [live, seat("s2", status: .expired)])])
+        XCTAssertEqual(AccountsSelectors.removeBlockReason(nobody, seat: live), AccountsCopy.noReplacementRemoveReason)
+        XCTAssertNil(AccountsSelectors.removeBlockReason(nobody, seat: seat("s2", status: .expired)),
+                     "a non-live seat needs no replacement")
+    }
+
+    func testRemoveCopyNamesTheSeatTheBoxSwitchesTo() {
+        let next = seat("s2", label: "Seat 2")
+        XCTAssertTrue(AccountsCopy.removeConfirmMessage(replacement: next).hasPrefix("The box will switch to “Seat 2”"))
+        XCTAssertTrue(AccountsCopy.removeConfirmMessage(replacement: nil).hasPrefix("Its conversations move"))
+        XCTAssertEqual(AccountsCopy.removedMessage(name: "Seat 1", replacement: next),
+                       "Removed Seat 1. The box now uses “Seat 2”; its conversations move to other seats on their next message.")
+        XCTAssertEqual(AccountsCopy.removedMessage(name: "Seat 1", replacement: nil),
+                       "Removed Seat 1. Its conversations move to another seat on their next message.")
     }
 
     func testSmallFormatters() {
