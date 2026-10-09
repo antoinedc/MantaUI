@@ -20,7 +20,8 @@ import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { endpointAttempts, newAttemptId } from "./endpointAttempts.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
-import { readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
+import { readCodexEntry, readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
+import { createLiveCodexRefresher as createLiveCodexRefresherCore } from "./codexLiveRefresh.mjs";
 import {
   CREDENTIALS_PATH,
   parseCredentials,
@@ -2439,6 +2440,23 @@ export async function refreshCodexSeatAndNote(seats, target, refresh = refreshCo
   return result;
 }
 
+/**
+ * The refresher for the LIVE ChatGPT (Codex) login: reads opencode's `openai`
+ * entry, writes the rotated one back through opencode's own API
+ * (`setProviderAuthEntry`, verified by reading it back), then mirrors it into
+ * the seat directory it belongs to. See codexLiveRefresh.mjs for the rules.
+ * @param {{mirrorLiveLogin?: (provider: string) => Promise<void>}|null} [seats]
+ */
+export function createLiveCodexRefresher(seats = null, overrides = {}) {
+  return createLiveCodexRefresherCore({
+    readEntry: () => readCodexEntry(opencodeAuthPath()),
+    persist: (entry) => setProviderAuthEntry("openai", entry),
+    afterPersist: () => seats?.mirrorLiveLogin?.("codex"),
+    flightKey: opencodeAuthPath(),
+    ...overrides,
+  });
+}
+
 /** Refresh a Claude seat and fold the outcome into its status. Never throws on
  *  the bookkeeping; returns the refresh result unchanged. */
 export async function refreshClaudeSeatAndNote(seats, target, refresh = refreshClaudeSeatCredentials) {
@@ -2502,6 +2520,11 @@ export function createCredentialRefreshSweep({
   listCodexTargets = async () => [],
   readCodexExpiresAt = readCodexExpiry,
   refreshCodex = refreshCodexSeat,
+  // The LIVE Codex login (opencode's own `openai` entry). opencode only
+  // refreshes it on a model request, so an idle box lets it expire and the usage
+  // poll 401s forever; this refreshes it ahead of expiry. The callback decides
+  // for itself whether a refresh is due (it re-reads the entry). Null → nothing.
+  refreshLiveCodex = null,
 } = {}) {
   let inFlight = false;
 
@@ -2530,6 +2553,13 @@ export function createCredentialRefreshSweep({
           // one seat failing must not stop the next
         }
       }
+      if (refreshLiveCodex) {
+        try {
+          await refreshLiveCodex();
+        } catch {
+          // never throw — and never stop the seat refreshes below
+        }
+      }
       let codexTargets = [];
       try {
         codexTargets = (await listCodexTargets()) ?? [];
@@ -2551,8 +2581,9 @@ export function createCredentialRefreshSweep({
   return { sweep };
 }
 
-export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS, seats = null } = {}) {
+export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_MS, seats = null, liveCodex = createLiveCodexRefresher(seats) } = {}) {
   const { sweep } = createCredentialRefreshSweep({
+    refreshLiveCodex: liveCodex ? () => liveCodex.refresh() : undefined,
     listSeatTargets: seats ? () => seats.claudeRefreshTargets() : undefined,
     // A refresh whose refresh token is known-expired marks the seat "expired"
     // (and a later success clears it) — see accounts.noteRefreshOutcome.

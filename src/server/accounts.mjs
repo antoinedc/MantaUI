@@ -980,6 +980,20 @@ export function createAccountsService({
       return () => listeners.delete(fn);
     },
 
+    /**
+     * Copy the live login into the directory of the seat it IS (a no-op when no
+     * seat matches). Called right after the live login was refreshed, so the
+     * seat's copy never keeps the rotated-out refresh token. Never throws.
+     */
+    async mirrorLiveLogin(provider) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider)) return;
+        await resolveSeats(provider, (store ?? (await loadStore())).providers[provider]);
+      } catch (e) {
+        log.warn?.(`[accounts] mirroring the live ${provider} login failed:`, e?.message ?? e);
+      }
+    },
+
     /** Where seats of a provider keep their credentials. */
     seatDir(provider, seatId) {
       return join(seatsRoot, provider, seatId);
