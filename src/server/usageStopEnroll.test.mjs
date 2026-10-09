@@ -138,3 +138,62 @@ test("non-error and non-step events are ignored", async () => {
   engine.observeEvent({ type: "message.part.updated", properties: {} });
   assert.equal(upserts.length, 0);
 });
+
+// ---- onLimitSignal (multi-account seat re-placement) -------------------------
+
+function signalHarness({ atLimit = false } = {}) {
+  const signals = [];
+  const engine = createUsageStopEngine({
+    upsert: async () => {},
+    recheckAtLimit: async () => atLimit,
+    onLimitSignal: (s) => signals.push(s),
+  });
+  return { engine, signals };
+}
+
+test("limit signal: a 429 rate-limit error signals even when it does not enrol", async () => {
+  const { engine, signals } = signalHarness();
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent({
+    type: "session.error",
+    properties: { sessionID: "s1", error: { name: "ApiError", httpStatus: 429, data: { message: "Too Many Requests: rate_limit_error" } } },
+  });
+  assert.deepEqual(signals, [{ sessionId: "s1", adapterId: "claude", kind: "rate-limit" }]);
+});
+
+test("limit signal: a refusal match signals once (kind refusal), at-limit adds nothing extra", async () => {
+  const { engine, signals } = signalHarness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1"));
+  assert.deepEqual(signals, [{ sessionId: "s1", adapterId: "claude", kind: "refusal" }]);
+});
+
+test("limit signal: an unmatched failure with the meter at its limit signals as at-limit", async () => {
+  const { engine, signals } = signalHarness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1", "openai", "gpt-5"));
+  await engine.observeEvent(errorEvent("s1", "Error", "some completely unrelated failure"));
+  assert.deepEqual(signals, [{ sessionId: "s1", adapterId: "codex", kind: "at-limit" }]);
+});
+
+test("limit signal: overloaded, aborts and auth failures never signal (even with the meter at its limit)", async () => {
+  const { engine, signals } = signalHarness({ atLimit: true });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent({ type: "session.error", properties: { sessionID: "s1", error: { name: "ApiError", httpStatus: 529, data: { message: "Overloaded: busy" } } } });
+  await engine.observeEvent(errorEvent("s1", "MessageAbortedError", "aborted"));
+  await engine.observeEvent(errorEvent("s1", "ProviderAuthError", "bad key"));
+  assert.deepEqual(signals, []);
+});
+
+test("limit signal: a throwing callback never breaks enrolment", async () => {
+  const upserts = [];
+  const engine = createUsageStopEngine({
+    upsert: async (i) => upserts.push(i),
+    recheckAtLimit: async () => false,
+    onLimitSignal: () => {
+      throw new Error("boom");
+    },
+  });
+  engine.observeEvent(stepEvent("s1"));
+  await engine.observeEvent(errorEvent("s1"));
+  assert.equal(upserts.length, 1);
+});

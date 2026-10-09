@@ -74,6 +74,9 @@ export const CROSS_ORG_CAP_MS = 5 * 60 * 60_000;
 export const MOVE_AT_PCT = 95;
 /** …to a seat under this load (else it stays until its seat is full). */
 export const MOVE_TARGET_BELOW_PCT = 70;
+/** A seat a failed turn reported as limited is treated as full for this long,
+ *  even when the usage reading (up to a poll interval old) still says otherwise. */
+export const LIMITED_MARK_MS = 5 * 60_000;
 const STORE_VERSION = 1;
 const MAX_ID_LEN = 200;
 
@@ -416,6 +419,29 @@ export function createSeatAssigner({
 
   const ensure = () => (store ??= pruneAssignments(normalizeAssignments(load()), now()));
 
+  // Seats a failed turn reported as limited: `${provider}:${seatId}` → expiry.
+  const limitedUntil = new Map();
+
+  /** The per-seat readings every decision uses: the poller's, with any seat
+   *  currently marked limited forced to exhausted (a reading can lag the limit
+   *  by a whole poll interval). A marked seat with no reading is synthesized. */
+  function snapshotsFor(provider) {
+    const t = now();
+    const snaps = listSeatSnapshots().filter((x) => x?.provider === provider);
+    const marked = [];
+    for (const [key, until] of limitedUntil) {
+      if (until <= t) {
+        limitedUntil.delete(key);
+        continue;
+      }
+      if (key.startsWith(`${provider}:`)) marked.push(key.slice(provider.length + 1));
+    }
+    if (marked.length === 0) return snaps;
+    const out = snaps.map((x) => (marked.includes(x.seatId) ? { ...x, exhausted: true } : x));
+    for (const seatId of marked) if (!out.some((x) => x.seatId === seatId)) out.push({ provider, seatId, exhausted: true });
+    return out;
+  }
+
   async function persist() {
     try {
       await save(store);
@@ -458,86 +484,99 @@ export function createSeatAssigner({
       // choose between, and whatever login is live keeps serving.
       if (!states) return { seatId: null, live: true };
       if (states.seats.length === 1) return { seatId: states.seats[0].seatId, live: true };
-
-      const s = ensure();
-      const t = now();
-      const { root, link } = resolveRoot({ sessionID, parentSessionID, children: s.children });
-      let dirty = false;
-      if (link) {
-        s.children[link.child] = { root: link.root, at: t };
-        dirty = true;
-      }
-      const existing = s.providers[provider][root] ?? null;
-      const decision = decideSeat({
-        existing,
-        mode: states.mode,
-        activeSeatId: states.activeSeatId,
-        seats: states.seats,
-        seatSnapshots: listSeatSnapshots().filter((x) => x?.provider === provider),
-        nowMs: t,
-      });
-      if (!decision.seatId) return { seatId: null, live: true };
-
-      let assignmentsChanged = false;
-      let movedEvent = null;
-      if (decision.reason === "assigned") {
-        s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t };
-        dirty = true;
-        assignmentsChanged = true;
-      } else if (decision.reason === "moved") {
-        // Remember where it came from (the move notice shows it) and every seat it
-        // left in the last 5 h (so it cannot bounce back).
-        const left = {};
-        for (const [seatId, at] of Object.entries(existing.left ?? {})) if (t - at < MOVE_BACK_BLOCK_MS) left[seatId] = at;
-        left[decision.from] = t;
-        const why = decision.why ?? "exhausted";
-        const rec = {
-          seatId: decision.seatId,
-          assignedAt: t,
-          lastUsedAt: t,
-          movedFrom: decision.from,
-          movedAt: t,
-          reason: why,
-          left,
-        };
-        if (why !== "manual") {
-          if (decision.trigger) rec.trigger = decision.trigger;
-          rec.crossOrg = decision.crossOrg === true;
-        }
-        // The once-per-5h cross-org cap: stamped on a cross-org move, carried
-        // forward (while it still matters) through any other move.
-        if (why !== "manual" && decision.crossOrg) rec.crossOrgMovedAt = t;
-        else if (typeof existing.crossOrgMovedAt === "number" && t - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS) rec.crossOrgMovedAt = existing.crossOrgMovedAt;
-        s.providers[provider][root] = rec;
-        dirty = true;
-        assignmentsChanged = true;
-        if (why !== "manual") {
-          const label = (id) => states.seats.find((x) => x.seatId === id)?.label ?? id;
-          movedEvent = {
-            sessionId: root,
-            provider,
-            from: decision.from,
-            to: decision.seatId,
-            fromLabel: label(decision.from),
-            toLabel: label(decision.seatId),
-            reason: why,
-            trigger: decision.trigger ?? null,
-            crossOrg: decision.crossOrg === true,
-          };
-        }
-      } else if (existing && t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
-        existing.lastUsedAt = t;
-        dirty = true;
-      }
-      if (dirty) {
-        store = pruneAssignments(s, t);
-        await persist();
-      }
-      // After the write, and never allowed to fail the request.
-      if (assignmentsChanged) tell(() => onChange?.(provider));
-      if (movedEvent) tell(() => onMoved?.(movedEvent));
-      return seatResult(provider, states.seats.find((x) => x.seatId === decision.seatId));
+      return (await place(provider, states, sessionID, parentSessionID)).result;
     });
+  }
+
+  /**
+   * The placement core shared by `resolve` (a request) and `reconsider` (a limit
+   * signal). Runs inside the mutex, with `states` of a multi-seat provider. With
+   * `onlyMove`, a conversation that is not assigned, or whose decision is
+   * anything but an automatic move, is left completely untouched.
+   * @returns {Promise<{result: object, decision: object|null}>}
+   */
+  async function place(provider, states, sessionID, parentSessionID, { onlyMove = false } = {}) {
+    const s = ensure();
+    const t = now();
+    const { root, link } = resolveRoot({ sessionID, parentSessionID, children: s.children });
+    const existing = s.providers[provider][root] ?? null;
+    const untouched = { result: { seatId: null, live: true }, decision: null };
+    if (onlyMove && (!existing || states.mode !== "auto")) return untouched;
+    const decision = decideSeat({
+      existing,
+      mode: states.mode,
+      activeSeatId: states.activeSeatId,
+      seats: states.seats,
+      seatSnapshots: snapshotsFor(provider),
+      nowMs: t,
+    });
+    if (onlyMove && decision.reason !== "moved") return untouched;
+    let dirty = false;
+    if (link) {
+      s.children[link.child] = { root: link.root, at: t };
+      dirty = true;
+    }
+    if (!decision.seatId) return { result: { seatId: null, live: true }, decision };
+
+    let assignmentsChanged = false;
+    let movedEvent = null;
+    if (decision.reason === "assigned") {
+      s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t };
+      dirty = true;
+      assignmentsChanged = true;
+    } else if (decision.reason === "moved") {
+      // Remember where it came from (the move notice shows it) and every seat it
+      // left in the last 5 h (so it cannot bounce back).
+      const left = {};
+      for (const [seatId, at] of Object.entries(existing.left ?? {})) if (t - at < MOVE_BACK_BLOCK_MS) left[seatId] = at;
+      left[decision.from] = t;
+      const why = decision.why ?? "exhausted";
+      const rec = {
+        seatId: decision.seatId,
+        assignedAt: t,
+        lastUsedAt: t,
+        movedFrom: decision.from,
+        movedAt: t,
+        reason: why,
+        left,
+      };
+      if (why !== "manual") {
+        if (decision.trigger) rec.trigger = decision.trigger;
+        rec.crossOrg = decision.crossOrg === true;
+      }
+      // The once-per-5h cross-org cap: stamped on a cross-org move, carried
+      // forward (while it still matters) through any other move.
+      if (why !== "manual" && decision.crossOrg) rec.crossOrgMovedAt = t;
+      else if (typeof existing.crossOrgMovedAt === "number" && t - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS) rec.crossOrgMovedAt = existing.crossOrgMovedAt;
+      s.providers[provider][root] = rec;
+      dirty = true;
+      assignmentsChanged = true;
+      if (why !== "manual") {
+        const label = (id) => states.seats.find((x) => x.seatId === id)?.label ?? id;
+        movedEvent = {
+          sessionId: root,
+          provider,
+          from: decision.from,
+          to: decision.seatId,
+          fromLabel: label(decision.from),
+          toLabel: label(decision.seatId),
+          reason: why,
+          trigger: decision.trigger ?? null,
+          crossOrg: decision.crossOrg === true,
+        };
+      }
+    } else if (existing && t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
+      existing.lastUsedAt = t;
+      dirty = true;
+    }
+    if (dirty) {
+      store = pruneAssignments(s, t);
+      await persist();
+    }
+    // After the write, and never allowed to fail the request.
+    if (assignmentsChanged) tell(() => onChange?.(provider));
+    if (movedEvent) tell(() => onMoved?.(movedEvent));
+    return { result: seatResult(provider, states.seats.find((x) => x.seatId === decision.seatId)), decision };
   }
 
   /**
@@ -611,5 +650,38 @@ export function createSeatAssigner({
     });
   }
 
-  return { resolve, refreshSeat, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
+  /**
+   * A turn of this conversation failed with a limit-type error: treat the seat it
+   * is on as full for LIMITED_MARK_MS, whatever the (possibly lagging) usage
+   * reading says. Synchronous; the next decision for ANY conversation sees it.
+   * @returns {string|null} the seat marked, or null (no assignment)
+   */
+  function markLimited(provider, sessionId) {
+    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return null;
+    const s = ensure();
+    const root = s.children[sessionId]?.root ?? sessionId;
+    const seatId = s.providers[provider]?.[root]?.seatId;
+    if (!seatId) return null;
+    limitedUntil.set(`${provider}:${seatId}`, now() + LIMITED_MARK_MS);
+    return seatId;
+  }
+
+  /**
+   * Re-decide one conversation NOW (after a limit signal and a fresh usage
+   * poll), through the same decision + recording + announcing path as a request.
+   * Only an automatic move changes anything: manual mode, an unassigned
+   * conversation, a single-seat provider, or no seat with room all leave it be.
+   * @returns {Promise<{moved: boolean, from?: string, to?: string, reason?: string}>}
+   */
+  function reconsider(provider, sessionId) {
+    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return Promise.resolve({ moved: false });
+    return mutex.runExclusive(async () => {
+      const states = await stateOf(provider);
+      if (!states || states.seats.length < 2) return { moved: false };
+      const { decision } = await place(provider, states, sessionId, null, { onlyMove: true });
+      return decision ? { moved: true, from: decision.from, to: decision.seatId, reason: decision.why } : { moved: false };
+    });
+  }
+
+  return { resolve, refreshSeat, markLimited, reconsider, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
 }

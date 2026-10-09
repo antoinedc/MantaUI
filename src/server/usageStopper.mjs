@@ -233,3 +233,45 @@ export function decideUsageEnrolment({ match, atLimit }) {
   }
   return { enrol: false };
 }
+
+// ---------------------------------------------------------------------------
+// Limit SIGNAL (multi-account): "did this failed turn hit a rate/usage limit?"
+// ---------------------------------------------------------------------------
+//
+// Broader and cheaper than the stop classifier above: it does not decide whether
+// to ENROL a conversation, only whether the seat the conversation is on should
+// be treated as limited right now (so it is re-placed before its next request).
+// A momentary rate limit counts — the 429 is the provider saying "not this
+// seat, not now". Overload (529 / "overloaded") is the provider being busy for
+// everyone: moving seats cannot help and must never trigger.
+
+const RATE_LIMIT_WORDS = ["rate_limit", "rate limit", "ratelimit", "too many requests", "usage_limit", "usage limit", "insufficient_quota"];
+const OVERLOAD_WORDS = ["overloaded", "server_is_overloaded", "slow_down"];
+
+/** Is a failed turn the provider being overloaded (529 / "overloaded")? Never a limit signal. */
+export function isOverloadFailure({ errorName, errorMessage, error } = {}) {
+  if (error?.httpStatus === 529) return true;
+  const hay = (asString(errorName) + "\n" + asString(errorMessage)).toLowerCase();
+  return OVERLOAD_WORDS.some((w) => hay.includes(w));
+}
+
+/**
+ * @param {object} input
+ * @param {string|undefined} input.provider  usage-engine adapter id
+ * @param {unknown} [input.errorName]
+ * @param {unknown} [input.errorMessage]
+ * @param {object} [input.error]  the (enriched) error object; its `httpStatus` is honoured
+ * @returns {null | { kind: "refusal" | "rate-limit" }}
+ */
+export function classifyLimitSignal({ provider, errorName, errorMessage, error }) {
+  if (!isStoppedProvider(provider)) return null;
+  if (isNonLimitFailure(errorName)) return null;
+  const status = Number.isFinite(error?.httpStatus) ? error.httpStatus : null;
+  if (status === 401 || status === 403 || (status !== null && status >= 500)) return null;
+  if (isClaudeCredentialError(error ?? { name: errorName, data: { message: errorMessage } })) return null;
+  if (isOverloadFailure({ errorName, errorMessage, error })) return null;
+  const hay = (asString(errorName) + "\n" + asString(errorMessage)).toLowerCase();
+  if (classifyUsageStopped({ provider, errorName, errorMessage, error }).enrolled) return { kind: "refusal" };
+  if (status === 429 || RATE_LIMIT_WORDS.some((w) => hay.includes(w))) return { kind: "rate-limit" };
+  return null;
+}
