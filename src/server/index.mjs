@@ -680,7 +680,7 @@ const accountsManager = createAccountsManager({
   claudeLogin: {
     start: (configDir, seatId) => startClaudeLogin("anthropic", { configDir, seatId }),
     cancel: (sessionKey) => {
-      cancelClaudeLogin(sessionKey);
+      cancelClaudeLogin(sessionKey, { force: true });
       pty.kill(sessionKey);
     },
   },

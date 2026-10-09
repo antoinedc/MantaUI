@@ -320,9 +320,14 @@ export async function startClaudeLogin(id, { configDir = null, seatId = null } =
   };
 }
 
-export function cancelClaudeLogin(sessionKey) {
+export function cancelClaudeLogin(sessionKey, { force = false } = {}) {
   const entry = _claudeLoginSessions.get(sessionKey);
   if (!entry) return;
+  // A SEAT sign-in (configDir set) belongs to the accounts manager, which ends
+  // it through accounts:cancel-seat (force). A client-side card teardown must
+  // not drop it: without its record a later spawn of the same session would
+  // have no seat directory to write into (see pty:spawn).
+  if (entry.configDir && !force) return;
   // The renderer's claude:login-cancel is paired with pty:kill(same
   // sessionKey) — pty.kill handles the IPty teardown; here we just drop
   // the metadata so a fresh start can register under the SAME name.
@@ -2383,6 +2388,13 @@ export function buildHandlers({
       // (CLAUDE_CONFIG_DIR → that seat's own directory), for its own launcher.
       const { extraEnv: _clientEnv, ...safe } = opts ?? {};
       const login = safe.launcher?.id === "claude-auth-login" ? _claudeLoginSessions.get(safe.sessionKey) : null;
+      // Never run an UNREGISTERED Claude sign-in: with no record the login would
+      // fall back to the box's live credentials and silently replace them
+      // (seen live: a seat sign-in whose record had been dropped overwrote the
+      // main login). Every legitimate sign-in registers first.
+      if (safe.launcher?.id === "claude-auth-login" && !login) {
+        throw new Error("This sign-in has expired. Close it and start again.");
+      }
       const spawnOpts = login?.configDir ? { ...safe, extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : safe;
       return pty.spawn(spawnOpts, (e) => bus.publish({ kind: "pty", payload: e }));
     },

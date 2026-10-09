@@ -39,8 +39,29 @@ test("startClaudeLogin(configDir): registers the seat directory on the session, 
   assert.equal(entry.configDir, "/seat/dir");
   assert.equal(entry.seatId, "seat-3");
   assert.equal(entry.backupPath, null);
+  // A client-side card teardown does NOT drop a seat sign-in; only the
+  // accounts manager (force) does.
   cancelClaudeLogin(out.sessionKey);
+  assert.equal(_getClaudeLoginSessions().size, 1);
+  cancelClaudeLogin(out.sessionKey, { force: true });
   assert.equal(_getClaudeLoginSessions().size, 0);
+});
+
+test("pty:spawn: a Claude sign-in with no registered session is refused (it would overwrite the live login)", async () => {
+  _resetClaudeLoginSessions();
+  const { deps: d, spawned } = deps();
+  const handlers = buildHandlers(d);
+  // StrictMode-style sequence: register, client teardown, respawn.
+  const { sessionKey } = await startClaudeLogin("anthropic", { configDir: "/seat/dir", seatId: "seat-9" });
+  cancelClaudeLogin(sessionKey); // card unmount — must not drop the seat record
+  await handlers["pty:spawn"]({ sessionKey, cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude-auth-login" } });
+  assert.deepEqual(spawned[0].extraEnv, { CLAUDE_CONFIG_DIR: "/seat/dir" });
+  cancelClaudeLogin(sessionKey, { force: true });
+  await assert.rejects(
+    async () => handlers["pty:spawn"]({ sessionKey, cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude-auth-login" } }),
+    /expired/,
+  );
+  assert.equal(spawned.length, 1);
 });
 
 // ---- pty:spawn applies CLAUDE_CONFIG_DIR — from the SERVER registry only ------
@@ -53,7 +74,7 @@ test("pty:spawn: a seat sign-in's launcher gets CLAUDE_CONFIG_DIR from the regis
   await handlers["pty:spawn"]({ sessionKey, cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude-auth-login" }, extraEnv: { EVIL: "1", CLAUDE_CONFIG_DIR: "/etc" } });
   assert.deepEqual(spawned[0].extraEnv, { CLAUDE_CONFIG_DIR: "/seat/dir" });
   assert.equal(spawned[0].sessionKey, sessionKey);
-  cancelClaudeLogin(sessionKey);
+  cancelClaudeLogin(sessionKey, { force: true });
 });
 
 test("pty:spawn: an ordinary spawn gets NO extraEnv, even when the client sends one; a regular (non-seat) claude login gets none either", async () => {
@@ -61,14 +82,16 @@ test("pty:spawn: an ordinary spawn gets NO extraEnv, even when the client sends 
   const { deps: d, spawned } = deps();
   const handlers = buildHandlers(d);
   await handlers["pty:spawn"]({ sessionKey: "k1", cwd: "/home", cols: 80, rows: 24, extraEnv: { EVIL: "1" } });
-  await handlers["pty:spawn"]({ sessionKey: "k2", cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude-auth-login" }, extraEnv: { EVIL: "1" } });
+  const regular = await startClaudeLogin("anthropic");
+  await handlers["pty:spawn"]({ sessionKey: regular.sessionKey, cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude-auth-login" }, extraEnv: { EVIL: "1" } });
   assert.equal("extraEnv" in spawned[0], false);
   assert.equal("extraEnv" in spawned[1], false);
+  cancelClaudeLogin(regular.sessionKey);
   // A seat session key used with a DIFFERENT launcher does not leak the env.
   const { sessionKey } = await startClaudeLogin("anthropic", { configDir: "/seat/dir" });
   await handlers["pty:spawn"]({ sessionKey, cwd: "/home", cols: 80, rows: 24, launcher: { id: "claude" } });
   assert.equal("extraEnv" in spawned[2], false);
-  cancelClaudeLogin(sessionKey);
+  cancelClaudeLogin(sessionKey, { force: true });
 });
 
 test("pty.spawn forwards extraEnv to spawnShellPty (and spawnShellPty only applies it to launchers)", () => {
