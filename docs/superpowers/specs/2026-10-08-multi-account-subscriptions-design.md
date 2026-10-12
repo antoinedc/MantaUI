@@ -178,15 +178,20 @@ the conversation's model). This one number drives every decision.
 ### 5.3 Automatic mode — the simple default
 Four rules, in this order. Defaults are shown; nothing else is tunable in v1.
 
-1. **New conversation → least-loaded seat.** Ties go to the active seat.
+1. **New conversation → least-loaded seat, preferring one with a same-org escape
+   route.** A seat under 70% whose org has another seat under 70% comes first (its
+   later move can stay free); else any seat under 70%; else the least-loaded seat.
+   Ties go to the active seat.
 2. **A conversation stays on its seat.** Its sub-agents use the same seat.
 3. **It moves only when its seat reaches 95%** (5h or weekly), or the seat is blocked
-   or signed out. It moves to the least-loaded seat that is under 70%; if none is under
-   70%, it stays until 100% and then takes any seat with room.
+   or signed out. Every seat in the same org is tried before any seat in another org:
+   at 95–99% it moves to a same-org seat under 95%, else an other-org seat under 70%,
+   else it stays; once the seat is full (or dead) it takes a same-org seat with room,
+   else an other-org seat under 70%, else any other-org seat with room.
 4. **Prefer a seat in the same org.** A same-org move is free (the cache is
-   shared), so it is always tried first. A move to **another org** happens at most
-   once per conversation per 5 hours. Either way, a conversation never moves back to a
-   seat it left in the last 5 hours (no flip-flopping).
+   shared), so it is always tried first (rule 3). A move to **another org** happens
+   at most once per conversation per 5 hours. Either way, a conversation never moves
+   back to a seat it left in the last 5 hours (no flip-flopping).
 
 Why this is cheap:
 - Rules 1–2 mean a conversation normally lives its whole life on one seat.

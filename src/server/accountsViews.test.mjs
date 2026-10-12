@@ -61,6 +61,20 @@ test("nextSeatFor: auto = the seat a NEW conversation takes (least loaded, ties 
   assert.equal(nextSeatFor({ mode: "auto", activeSeatId: null, seats: [{ seatId: "seat-1", usable: false }], seatSnapshots: [] }), null);
 });
 
+test("nextSeatFor: auto prefers a seat whose org has another seat under 70 (org A {10, 90}, org B {30, 30} → B)", () => {
+  const seats = [
+    { seatId: "seat-1", usable: true, accountId: "acct-A", orgId: "org-A" },
+    { seatId: "seat-2", usable: true, accountId: "acct-A", orgId: "org-A" },
+    { seatId: "seat-3", usable: true, accountId: "acct-B", orgId: "org-B" },
+    { seatId: "seat-4", usable: true, accountId: "acct-B", orgId: "org-B" },
+  ];
+  const snaps = [snap(1, [win("session", 10)]), snap(2, [win("session", 90)]), snap(3, [win("session", 30)]), snap(4, [win("session", 30)])];
+  assert.equal(nextSeatFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps }), "seat-3");
+  assert.equal(nextSeatFor({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots: snaps }), "seat-1", "manual is unchanged");
+  const roomy = [snap(1, [win("session", 10)]), snap(2, [win("session", 40)]), snap(3, [win("session", 30)]), snap(4, [win("session", 30)])];
+  assert.equal(nextSeatFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: roomy }), "seat-1");
+});
+
 test("buildProviderView: the contract's shape, end to end", () => {
   const v = buildProviderView({
     provider: "claude",
@@ -170,7 +184,8 @@ test("moveTargetFor: where a conversation on the most loaded in-use seat (≥95)
   assert.equal(moveTargetFor({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts }), null, "manual mode never moves");
   assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: snaps, counts: {} }), null, "nobody on it");
   assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 94)]), snap(2, []), snap(3, [])], counts }), null, "below 95");
-  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 97)]), snap(2, [win("session", 80)]), snap(3, [win("session", 75)])], counts }), null, "no seat under 70 → it would stay");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 97)]), snap(2, [win("session", 96)]), snap(3, [win("session", 75)])], counts }), null, "no same-org seat under 95 and none elsewhere under 70 → it would stay");
+  assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 97)]), snap(2, [win("session", 80)]), snap(3, [win("session", 5)])], counts }), "seat-2", "a same-org seat at 80 is a free move and beats the empty other-org seat");
   // the MOST loaded one is the one asked about
   assert.equal(moveTargetFor({ mode: "auto", activeSeatId: "seat-1", seats, seatSnapshots: [snap(1, [win("session", 96)]), snap(2, [win("session", 98)]), snap(3, [win("session", 5)])], counts: { "seat-1": 1, "seat-2": 1 } }), "seat-3");
 });

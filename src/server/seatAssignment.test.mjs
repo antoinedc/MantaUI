@@ -88,6 +88,55 @@ test("chooseSeat: a seat without usable credentials is never chosen; none usable
   assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats: [seat(1, { usable: false })], seatSnapshots: [] }), null);
 });
 
+// Org affinity (rule 1): a new conversation prefers a seat whose org has ANOTHER seat under 70.
+const orgSeat = (n, org) => seat(n, { accountId: `acct-${org}`, orgId: `org-${org}` });
+const pick = (loads, over = {}) => {
+  const seats = Object.keys(loads).map((n) => orgSeat(n, over.orgs[n]));
+  const seatSnapshots = Object.entries(loads).filter(([, v]) => v !== null).map(([n, v]) => snap(n, v));
+  return chooseSeat({ mode: "auto", activeSeatId: over.active ?? null, seats, seatSnapshots });
+};
+
+test("chooseSeat auto: org A {10, 90}, org B {30, 30} → B·30 (A·10 has no same-org escape route)", () => {
+  assert.equal(pick({ 1: 10, 2: 90, 3: 30, 4: 30 }, { orgs: { 1: "A", 2: "A", 3: "B", 4: "B" } }), "seat-3");
+});
+
+test("chooseSeat auto: org A {10, 40}, org B {30, 30} → A·10 (everyone has a route: plain least-loaded)", () => {
+  assert.equal(pick({ 1: 10, 2: 40, 3: 30, 4: 30 }, { orgs: { 1: "A", 2: "A", 3: "B", 4: "B" } }), "seat-1");
+});
+
+test("chooseSeat auto: a single-seat org {5} next to org B {60, 60} → B·60; once B is past 70 the single seat takes it", () => {
+  assert.equal(pick({ 1: 5, 2: 60, 3: 60 }, { orgs: { 1: "A", 2: "B", 3: "B" } }), "seat-2");
+  assert.equal(pick({ 1: 5, 2: 75, 3: 80 }, { orgs: { 1: "A", 2: "B", 3: "B" } }), "seat-1", "tier 2: under 70, no route anywhere");
+});
+
+test("chooseSeat auto: no seat under 70 → today's least-loaded; unknown-load and full seats are never tier 1/2", () => {
+  assert.equal(pick({ 1: 90, 2: 75, 3: 80 }, { orgs: { 1: "A", 2: "A", 3: "B" } }), "seat-2");
+  // an unreadable same-org sibling is not an escape route, and an unreadable seat is not 'under 70'
+  assert.equal(pick({ 1: 10, 2: null, 3: 40, 4: 40 }, { orgs: { 1: "A", 2: "A", 3: "B", 4: "B" } }), "seat-3", "unknown sibling is no route");
+  assert.equal(pick({ 1: null, 2: 85 }, { orgs: { 1: "A", 2: "A" } }), "seat-2", "known beats unknown");
+  assert.equal(pick({ 1: 10, 2: 10 }, { orgs: { 1: "A", 2: "A" } }), "seat-1");
+  // a full (or limited-marked) sibling is not an escape route either, even if its load reads under 70
+  const seats = [orgSeat(1, "A"), orgSeat(2, "A"), orgSeat(3, "B"), orgSeat(4, "B")];
+  const snaps = [snap(1, 10), snap(2, 30, { exhausted: true }), snap(3, 30), snap(4, 30)];
+  assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps }), "seat-3");
+});
+
+test("chooseSeat auto: ties inside the winning tier go to the active seat; a seat with no org info is its own org (no route)", () => {
+  assert.equal(pick({ 1: 30, 2: 30, 3: 30, 4: 30 }, { orgs: { 1: "A", 2: "A", 3: "B", 4: "B" }, active: "seat-4" }), "seat-4");
+  const seats = [seat(1, { accountId: undefined }), seat(2, { accountId: undefined }), orgSeat(3, "B"), orgSeat(4, "B")];
+  assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: [snap(1, 5), snap(2, 5), snap(3, 40), snap(4, 40)] }), "seat-3", "unidentified seats have no escape route");
+});
+
+test("chooseSeat manual: unchanged — the active seat whatever the org layout", () => {
+  const seats = [orgSeat(1, "A"), orgSeat(2, "A"), orgSeat(3, "B"), orgSeat(4, "B")];
+  const seatSnapshots = [snap(1, 10), snap(2, 90), snap(3, 30), snap(4, 30)];
+  assert.equal(chooseSeat({ mode: "manual", activeSeatId: "seat-1", seats, seatSnapshots }), "seat-1");
+  assert.equal(chooseSeat({ mode: "manual", activeSeatId: "seat-2", seats, seatSnapshots }), "seat-2");
+  // the active seat is dead → plain least-loaded fallback (no escape-route tiering)
+  const dead = seats.map((s) => (s.seatId === "seat-2" ? { ...s, usable: false } : s));
+  assert.equal(chooseSeat({ mode: "manual", activeSeatId: "seat-2", seats: dead, seatSnapshots }), "seat-1");
+});
+
 test("decideSeat: an existing assignment to a usable seat is kept even when another seat is emptier (rule 2)", () => {
   const out = decideSeat({ existing: { seatId: "seat-1" }, mode: "auto", activeSeatId: "seat-2", seats: [seat(1), seat(2)], seatSnapshots: [snap(1, 85), snap(2, 1)] });
   assert.deepEqual(out, { seatId: "seat-1", reason: "kept" });
@@ -459,18 +508,41 @@ test("decideMove: at 95 it moves to a seat under 70 — same org first, then lea
   assert.deepEqual(move({}, seats, weekly).trigger, { kind: "weekly", pct: 97 });
 });
 
-test("decideMove: a same-org seat at 70+ is not 'room' for a 95% conversation, an under-70 other-org seat is", () => {
+test("decideMove: a same-org seat at 70+ IS room for a 95% conversation (a free move beats a cache re-send to an emptier other-org seat)", () => {
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
   const out = move({}, seats, [snap(1, 97), snap(2, 75), snap(3, 10)]);
-  assert.equal(out.seatId, "seat-3");
-  assert.equal(out.crossOrg, true);
+  assert.equal(out.seatId, "seat-2");
+  assert.equal(out.crossOrg, false);
 });
 
-test("decideMove: with no seat under 70 a 95–99% conversation STAYS (until its seat is full)", () => {
+test("decideMove: a 95–99% conversation STAYS when no same-org seat is under 95 and no other-org seat is under 70; a same-org seat at 80 takes it", () => {
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
-  for (const pct of [95, 97, 99]) assert.equal(move({}, seats, [snap(1, pct), snap(2, 75), snap(3, 70)]), null, `${pct}%`);
+  for (const pct of [95, 97, 99]) assert.equal(move({}, seats, [snap(1, pct), snap(2, 95), snap(3, 70)]), null, `${pct}%`);
   assert.equal(move({}, seats, [snap(1, 95), snap(2, 99.9), snap(3, 80)]), null);
   assert.equal(move({}, seats, [snap(1, 95), { seatId: "seat-2" }, { seatId: "seat-3" }]), null, "unknown load is not proven room");
+  for (const pct of [95, 97, 99]) assert.equal(move({}, seats, [snap(1, pct), snap(2, 80), snap(3, 70)])?.seatId, "seat-2", `${pct}% → same org at 80`);
+});
+
+test("decideMove soft move: a same-org seat at 94 is a target, at 95 it is not (falls to other-org under 70, else stays)", () => {
+  const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
+  const at94 = move({}, seats, [snap(1, 97), snap(2, 94), snap(3, 10)]);
+  assert.equal(at94.seatId, "seat-2");
+  assert.equal(at94.crossOrg, false);
+  const at95 = move({}, seats, [snap(1, 97), snap(2, 95), snap(3, 10)]);
+  assert.equal(at95.seatId, "seat-3");
+  assert.equal(at95.crossOrg, true);
+  assert.equal(move({}, seats, [snap(1, 97), snap(2, 95), snap(3, 75)]), null, "nothing qualifies → stays");
+  // the least-loaded same-org seat wins within the tier
+  assert.equal(move({}, [inOrg(1, "A"), inOrg(2, "A"), inOrg(4, "A")], [snap(1, 97), snap(2, 90), snap(4, 80)]).seatId, "seat-4");
+});
+
+test("decideMove hard move: a same-org seat with room beats an emptier other-org seat; other-org under 70 beats other-org fuller; unknown load counts as room", () => {
+  const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B"), inOrg(4, "B")];
+  assert.equal(move({}, seats, [snap(1, 100), snap(2, 92), snap(3, 10), snap(4, 5)]).seatId, "seat-2", "same-org at 92 beats other-org at 5");
+  assert.equal(move({}, seats, [full(1), snap(2, 99), snap(3, 85), snap(4, 40)]).seatId, "seat-2", "same-org at 99 is still room");
+  assert.equal(move({}, seats, [full(1), full(2), snap(3, 85), snap(4, 40)]).seatId, "seat-4", "no same-org room → other-org under 70");
+  assert.equal(move({}, seats, [full(1), full(2), snap(3, 85), snap(4, 90)]).seatId, "seat-3", "no same-org room, none under 70 → least-loaded other-org with room");
+  assert.equal(move({}, seats, [full(1), { seatId: "seat-2" }, snap(3, 10), snap(4, 5)]).seatId, "seat-2", "an unreadable same-org seat is still hard-move room");
 });
 
 test("decideMove: at 100% (or flagged exhausted) it takes ANY seat with room, same org first", () => {
@@ -480,9 +552,9 @@ test("decideMove: at 100% (or flagged exhausted) it takes ANY seat with room, sa
   assert.equal(move({}, seats, [full(1), snap(2, 100), full(3)]), null, "nowhere to go → stay");
   // flagged exhausted with no windows still gets a trigger
   assert.deepEqual(move({}, seats, [{ seatId: "seat-1", exhausted: true }, snap(2, 50), snap(3, 0)]).trigger, { kind: "exhausted", pct: 100 });
-  // an under-70 seat still beats a fuller same-org one, even when hard
+  // a same-org seat with room beats an emptier other-org one, even a fuller one
   const hard = move({}, seats, [snap(1, 100), snap(2, 85), snap(3, 10)]);
-  assert.equal(hard.seatId, "seat-3");
+  assert.equal(hard.seatId, "seat-2");
 });
 
 test("decideMove: an unusable (signed out / expired) seat releases its conversation; no trigger window; cap does not hold it", () => {
@@ -499,7 +571,7 @@ test("decideMove: an unusable (signed out / expired) seat releases its conversat
 test("decideMove: cross-org is capped at once per conversation per 5h; same-org moves are not", () => {
   const nowMs = 100 * HOUR;
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
-  const snaps = [snap(1, 95), snap(2, 80), snap(3, 10)]; // only the other org is under 70
+  const snaps = [snap(1, 95), snap(2, 96), snap(3, 10)]; // the same org has nothing under 95; only the other org is under 70
   assert.equal(move({}, seats, snaps, nowMs).crossOrg, true, "first cross-org move is allowed");
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, snaps, nowMs), null, "a second one within 5h is refused — it stays");
   assert.equal(move({ crossOrgMovedAt: nowMs - CROSS_ORG_CAP_MS - 1 }, seats, snaps, nowMs).seatId, "seat-3", "after 5h it is allowed again");
@@ -508,14 +580,19 @@ test("decideMove: cross-org is capped at once per conversation per 5h; same-org 
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, sameOrg, nowMs).seatId, "seat-2");
   // hard move: capped cross-org excluded, falls back to a same-org seat with room
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 85), snap(3, 10)], nowMs).seatId, "seat-2");
+  // the cap blocks every other-org tier (under 70 AND any room) but never a same-org one, soft or hard
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 100), snap(3, 85)], nowMs), null, "hard, other-org with room but capped → stay");
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 97), snap(2, 90), snap(3, 10)], nowMs).seatId, "seat-2", "soft: same org under 95 is free");
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A"), inOrg(3, "B")], [snap(1, 100), snap(3, 10)], nowMs), null, "full, but the only room is cross-org and capped → stay");
+  // an unusable seat is exempt: it takes the other-org seat even while capped
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A", { usable: false }), inOrg(3, "B")], [snap(3, 85)], nowMs).seatId, "seat-3");
 });
 
 test("decideMove: a seat left within 5h is never a target for a load move; for a forced move only when it is the only one with room", () => {
   const nowMs = 100 * HOUR;
   const seats = [seat(1), seat(2), seat(3)];
   const left = { "seat-2": nowMs - HOUR };
-  assert.equal(move({ left }, seats, [snap(1, 97), snap(2, 5), snap(3, 80)], nowMs), null, "soft: seat-2 is blocked, seat-3 is not under 70 → stay");
+  assert.equal(move({ left }, seats, [snap(1, 97), snap(2, 5), snap(3, 96)], nowMs), null, "soft: seat-2 is blocked, seat-3 is not under 95 → stay");
   assert.equal(move({ left }, seats, [snap(1, 97), snap(2, 5), snap(3, 60)], nowMs).seatId, "seat-3");
   assert.equal(move({ left }, seats, [snap(1, 100), snap(2, 5), snap(3, 85)], nowMs).seatId, "seat-3", "hard: a non-blocked seat with room wins over the emptier blocked one");
   assert.equal(move({ left }, [seat(1), seat(2)], [snap(1, 100), snap(2, 5)], nowMs).seatId, "seat-2", "hard: the only one with room");
@@ -644,7 +721,7 @@ test("the service: a cross-org move stamps crossOrgMovedAt and a second one with
   const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
   const a = assigner(fakeAccounts(two({ seats })), { snaps, onMoved: (e) => events.push(e) });
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
-  snaps.splice(0, 3, snap(1, 97), snap(2, 80), snap(3, 30)); // only the other org has room under 70
+  snaps.splice(0, 3, snap(1, 97), snap(2, 96), snap(3, 30)); // the same org has nothing under 95; only the other org has room under 70
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3");
   const rec = a.saved.providers.claude.c;
   assert.equal(rec.crossOrg, true);
@@ -667,4 +744,27 @@ test("move bookkeeping survives a save/load round trip", () => {
   assert.deepEqual(out.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: true, crossOrgMovedAt: 5, left: { "seat-1": 5 } });
   const legacy = normalizeAssignments({ providers: { claude: { c: { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted", trigger: { kind: 3 } } } } });
   assert.deepEqual(legacy.providers.claude.c, { seatId: "seat-2", assignedAt: 5, lastUsedAt: 6, movedFrom: "seat-1", movedAt: 5, reason: "exhausted" });
+});
+
+test("decideMove: the dead-seat fallback is plain least-loaded over the other usable seats (every other seat is full)", () => {
+  const seats = [inOrg(1, "A", { usable: false }), inOrg(2, "A"), inOrg(3, "B"), inOrg(4, "B")];
+  // Org B has the only same-org pair (an escape route for a NEW conversation) — the fallback must ignore that.
+  const snaps = [snap(2, 10, { exhausted: true }), snap(3, 50, { exhausted: true }), snap(4, 60, { exhausted: true })];
+  const out = move({}, seats, snaps);
+  assert.equal(out.seatId, "seat-2", "the least-loaded seat, whatever its org");
+  assert.equal(out.why, "unusable");
+});
+
+test("the service: a new conversation on org A {10, 90} / org B {30, 30} lands on B — and so does the next-seat hint", async () => {
+  const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B"), inOrg(4, "B")];
+  const snaps = [snap(1, 10), snap(2, 90), snap(3, 30), snap(4, 30)];
+  const a = assigner(fakeAccounts(two({ seats, activeSeatId: "seat-1" })), { snaps });
+  const placed = await a.svc.resolve("claude", "conv-new");
+  assert.equal(placed.seatId, "seat-3");
+  const { nextSeatFor } = await import("./accountsViews.mjs");
+  assert.equal(
+    nextSeatFor({ mode: "auto", activeSeatId: "seat-1", seats: seats.map((s) => ({ seatId: s.seatId, usable: s.usable, accountId: s.accountId, orgId: s.orgId })), seatSnapshots: snaps }),
+    placed.seatId,
+    "the hint names the seat the resolver then picks",
+  );
 });
