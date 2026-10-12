@@ -146,12 +146,20 @@ describe("UsageDial — three seats, automatic", () => {
     expect(h!.docQuery(".manta-usage-popover")).toBeNull(); // popover closed
   });
 
-  it("more than five other seats scroll inside the list", async () => {
+  it("lists every other seat in full; only the window-height last resort can scroll", async () => {
     const v = threeSeatView();
     v.accounts[1].seats = Array.from({ length: 6 }, (_, i) => seat(`x${i}`, `Extra ${i}`, 10 + i));
     const { popover } = await open([v], { seatId: "s1" });
     const list = popover.querySelector(".manta-seat-list") as HTMLElement;
-    expect(list.style.maxHeight).toBe("260px");
+    expect(list.querySelectorAll("[data-seat-id]").length).toBe(7); // 6 extras + the other personal seat
+    expect(list.style.maxHeight).toBe("");
+    // The list itself never scrolls…
+    expect(list.className).not.toMatch(/overflow-(y-|x-)?(auto|scroll)|max-h-/);
+    // …and the card's only height cap is the full window, not a fixed size.
+    expect(popover.className).toContain("max-h-[calc(100vh-16px)]");
+    expect(popover.className).toContain("overflow-y-auto"); // keeps an over-tall card reachable
+    expect(popover.className.split(/\s+/)).not.toContain("w-[420px]");
+    expect(popover.className.split(/\s+/)).toContain("w-max");
   });
 
   it("a signed-out seat says so and points to the fix", async () => {

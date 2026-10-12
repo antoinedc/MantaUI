@@ -91,7 +91,9 @@ export function RecordingRow({
   const paused = phase === "paused";
   const wavePhase: "recording" | "paused" = paused ? "paused" : "recording";
   return (
-    <div className="flex items-center gap-2">
+    // min-h-7 = the text row's reserved height, so switching between typing
+    // and recording never changes the composer's size.
+    <div className="flex items-center gap-2 min-h-7">
       {/* 1 · State dot — pulses while recording (CSS), static red when paused
           is handled elsewhere; paused uses the warn treatment + no animation. */}
       <span
