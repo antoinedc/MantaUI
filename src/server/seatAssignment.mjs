@@ -17,7 +17,9 @@
 //
 // RULES IMPLEMENTED (phase 2)
 //   1. A NEW conversation takes a seat: manual mode → the active seat; auto mode
-//      → the least-loaded seat (ties to the active seat).
+//      → the least-loaded seat under 70 whose org has ANOTHER seat under 70 (a
+//      free same-org escape route for its later move), else the least-loaded seat
+//      under 70, else the least-loaded seat (ties to the active seat).
 //   2. A conversation STAYS on its seat; its sub-agents use the same seat (they
 //      share its cached prefix). Only a seat that no longer exists or can no
 //      longer serve (signed out / no readable credentials) releases it …
@@ -25,11 +27,12 @@
 //      its seat's load (`seatLoad`: the highest ACTIVE, FRESH window — 5h, weekly,
 //      a model-scoped weekly in force) reaches 95, OR the seat is full/exhausted,
 //      OR it can no longer serve (signed out / expired). ONE pure function,
-//      `decideMove`, decides it:
-//        • load 95–99: move only to a seat under 70 (same org first, then
-//          least-loaded); if none is under 70, STAY until 100;
-//        • exhausted / unusable: any seat with room (<100) — a seat under 70
-//          still first, same org first;
+//      `decideMove`, decides it. A same-org move is free (shared prompt cache), so
+//      every same-org seat with room is tried before ANY other-org seat:
+//        • load 95–99: a same-org seat under 95, else an other-org seat under 70,
+//          else STAY until 100;
+//        • exhausted / unusable: a same-org seat with room (<100), else an other-org
+//          seat under 70, else any other-org seat with room;
 //        • a seat left within 5 h is never a target for a load move, and for a
 //          forced move only when nothing else has room;
 //        • a move to ANOTHER org (a cache re-send) happens at most once per
@@ -43,8 +46,6 @@
 //      assignment is still kept up to date (so `sessionAssignment` answers what
 //      the NEXT request will use) and a switch is recorded as a move with reason
 //      "manual" — but no `moved` event: the user did it on purpose.
-//   NOT here (phase 4): the 90%/70% proactive thresholds, same-org preference,
-//   the once-per-5h cross-org cap, move notices.
 //
 // A "conversation" is the ROOT session. opencode sends the sub-agent's
 // `x-opencode-parent-session-id` one level only, so a deeper chain is followed
@@ -168,10 +169,18 @@ export function pruneAssignments(store, nowMs, ttlMs = ASSIGNMENT_TTL_MS) {
  *
  *   manual → the active seat, falling back to the least-loaded usable seat only
  *            when the active one cannot serve (a request must not fail on it);
- *   auto   → the least-loaded usable seat, ties to the active seat. A seat with
- *            no usage reading ranks after every seat with one (seatChoice).
+ *   auto   → the least-loaded seat of the first non-empty tier (ties to the
+ *            active seat):
+ *              1. known load under 70 AND a same-org escape route — another usable
+ *                 seat of the same org (`seatOrgKey`) that is not full and also
+ *                 under 70, so this conversation's later move can stay free;
+ *              2. known load under 70;
+ *              3. every usable seat. A seat with no usage reading ranks after
+ *                 every seat with one, a full seat last (seatChoice).
+ *            A seat with no org info is its own org, so it never has a route.
  *
- * @param {{mode: string, activeSeatId: string|null, seats: Array<{seatId:string, usable:boolean}>,
+ * @param {{mode: string, activeSeatId: string|null,
+ *          seats: Array<{seatId:string, usable:boolean, accountId?:string, orgId?:string|null}>,
  *          seatSnapshots?: Array<{seatId?:string}>}} args
  * @returns {string|null}
  */
@@ -180,8 +189,19 @@ export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [] }) {
   if (usable.length === 0) return null;
   if (mode === "manual" && usable.some((s) => s.seatId === activeSeatId)) return activeSeatId;
   const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
-  const candidates = usable.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId });
-  return leastLoadedSeat(candidates, { activeSeatId })?.seatId ?? usable[0].seatId;
+  const entries = usable.map((s) => ({ snap: bySeat.get(s.seatId) ?? { seatId: s.seatId }, org: seatOrgKey(s) }));
+  const roomy = (e) => {
+    if (isSeatFull(e.snap)) return false;
+    const load = seatLoad(e.snap);
+    return load !== null && load < MOVE_TARGET_BELOW_PCT;
+  };
+  const hasEscapeRoute = (e) => entries.some((o) => o !== e && o.org === e.org && roomy(o));
+  const tiers = mode === "manual" ? [entries] : [entries.filter((e) => roomy(e) && hasEscapeRoute(e)), entries.filter(roomy), entries];
+  for (const tier of tiers) {
+    const best = leastLoadedSeat(tier.map((e) => e.snap), { activeSeatId });
+    if (best) return best.seatId;
+  }
+  return usable[0].seatId;
 }
 
 /**
@@ -258,13 +278,17 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
     });
   }
 
+  // Tiers, first non-empty wins (least-loaded within). A same-org move is free, so
+  // EVERY same-org seat with room is tried before any other-org one:
+  //   soft (load 95–99): same org under 95 (a target that would itself trigger a
+  //                      move is pointless) → other org under 70;
+  //   hard (full / dead): same org with room → other org under 70 → other org with room.
+  // A seat with no reading is never a soft target; it can still take a hard move.
   const pick = (pool) => {
-    const roomy = (c) => c.load !== null && c.load < MOVE_TARGET_BELOW_PCT;
-    const tiers = [
-      pool.filter((c) => roomy(c) && c.same),
-      pool.filter((c) => roomy(c) && !c.same),
-      ...(hard ? [pool.filter((c) => c.same), pool.filter((c) => !c.same)] : []),
-    ];
+    const known = (c, below) => c.load !== null && c.load < below;
+    const tiers = hard
+      ? [pool.filter((c) => c.same), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT)), pool.filter((c) => !c.same)]
+      : [pool.filter((c) => c.same && known(c, MOVE_AT_PCT)), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT))];
     for (const tier of tiers) {
       const best = leastLoadedSeat(tier.map((c) => c.snap), { activeSeatId });
       if (best) return pool.find((c) => c.snap === best);
@@ -279,9 +303,11 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
   let seatId = chosen ? chosen.snap.seatId : null;
   if (!seatId && why === "unusable") {
     // A dead seat must release its conversation even when every other seat is
-    // full or capped: serving from a full seat beats failing on a dead one.
-    const usable = seats.filter((s) => s.usable && s.seatId !== cur.seatId);
-    seatId = chooseSeat({ mode: "auto", activeSeatId, seats: usable, seatSnapshots });
+    // full or capped: serving from a full seat beats failing on a dead one. Plain
+    // least-loaded over what can serve — NOT chooseSeat's escape-route placement,
+    // which is a rule for NEW conversations.
+    const rest = seats.filter((s) => s.usable && s.seatId !== cur.seatId);
+    seatId = leastLoadedSeat(rest.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId }), { activeSeatId })?.seatId ?? null;
   }
   if (!seatId) return null;
   const target = seats.find((s) => s.seatId === seatId);
