@@ -24,7 +24,6 @@ import {
   isSameOrgMove,
   nextSeatHint,
   orderOtherSeats,
-  OTHER_SEATS_VISIBLE_ROWS,
   seatBarWindows,
   seatDialSnapshot,
   seatResetHint,
@@ -231,7 +230,11 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
         role="dialog"
         ariaLabel="Plan usage"
         hook="manta-usage-popover"
-        surfaceClassName="w-[420px] p-4 max-h-[calc(100vh-24px)] overflow-y-auto"
+        // Sized to its content, never scrolled: at least 420px, wider when a
+        // row needs it (long seat/account names, credit lines), capped only by
+        // the window. Free-flowing prose below opts out of driving the width
+        // (`w-0 min-w-full`) so a sentence wraps instead of stretching the card.
+        surfaceClassName="w-max min-w-[420px] max-w-[calc(100vw-16px)] p-4"
       >
         <UsagePopoverBody
           snapshot={snapshot}
@@ -326,7 +329,7 @@ function UsagePopoverBody({
       )}
 
       {state.awaitingReset && (
-        <div className="mb-3 text-meta text-text-faint">
+        <div className="mb-3 w-0 min-w-full text-meta text-text-faint">
           Quota is being reset. Usage numbers might look off for a few minutes.
         </div>
       )}
@@ -349,7 +352,7 @@ function UsagePopoverBody({
       )}
 
       {lastMove && (
-        <div className="mt-3 pt-3 border-t border-border-subtle text-meta text-text-muted" data-testid="usage-last-move">
+        <div className="mt-3 pt-3 w-0 min-w-full border-t border-border-subtle text-meta text-text-muted" data-testid="usage-last-move">
           <div>{lastMove.line}</div>
           {lastMove.resent && <div className="text-text-faint">{lastMove.resent}</div>}
         </div>
@@ -358,11 +361,9 @@ function UsagePopoverBody({
       {otherCount > 0 && view && (
         <div className="mt-3 pt-3 border-t border-border-subtle" data-testid="usage-other-seats">
           <div className="mb-1 text-label font-medium text-text-faint">Other seats</div>
-          <div
-            className="manta-seat-list flex flex-col gap-2 overflow-y-auto"
-            // ~52px a row (two-line row + gap): the list scrolls inside the popover past five.
-            style={otherCount > OTHER_SEATS_VISIBLE_ROWS ? { maxHeight: OTHER_SEATS_VISIBLE_ROWS * 52 } : undefined}
-          >
+          {/* Every seat is listed in full — the popover grows to fit rather
+              than scrolling a nested list. */}
+          <div className="manta-seat-list flex flex-col gap-2">
             {groups.map((g) => (
               <div key={g.accountId} className="flex flex-col gap-2">
                 {g.showHeading && (
@@ -482,7 +483,7 @@ function OtherSeatRow({
         )}
       </div>
       {confirming && (
-        <div role="alert" className="rounded-xs border border-border bg-bg px-2 py-1 text-label text-text-muted">
+        <div role="alert" className="w-0 min-w-full rounded-xs border border-border bg-bg px-2 py-1 text-label text-text-muted">
           <div>{crossOrg ? CROSS_ORG_CONFIRM_COPY : ""} Switch every conversation to {seat.label}?</div>
           <div className="mt-1 flex items-center gap-2">
             <button

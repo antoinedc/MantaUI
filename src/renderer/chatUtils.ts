@@ -3511,8 +3511,6 @@ export const SEAT_MOVE_LOAD_PCT = 95;
 export const SEAT_TARGET_LOAD_PCT = 70;
 /** A "last move" line stays on screen this long (§7a item 3). */
 export const SEAT_LAST_MOVE_WINDOW_MS = 5 * 60 * 60_000;
-/** The "Other seats" list scrolls inside the popover past this many rows. */
-export const OTHER_SEATS_VISIBLE_ROWS = 5;
 
 export { seatLoad };
 

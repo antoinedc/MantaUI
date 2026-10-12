@@ -447,7 +447,12 @@ export function InputArea({
             onSend={voiceSend}
           />
         ) : (
-        <div className="flex items-start gap-2">
+        <div className="flex items-start gap-2 min-h-7">
+        {/* min-h-7 reserves the Send/Stop buttons' 28px up front. A one-line
+            textarea is only ~22.5px tall, so without it the box grew ~5px the
+            moment the first keystroke made Send appear (and never fully shrank
+            back). The textarea is centred in that slot so one line sits level
+            with the button; taller drafts fill the row as before. */}
         <textarea
           ref={inputRef}
           value={input}
@@ -534,7 +539,7 @@ export function InputArea({
           aria-label={textareaAriaLabel}
           rows={1}
           spellCheck={false}
-          className="flex-1 resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
+          className="flex-1 self-center resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
         {/* The desktop mic + attach buttons moved DOWN into the meta row

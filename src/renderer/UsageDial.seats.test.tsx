@@ -146,12 +146,16 @@ describe("UsageDial — three seats, automatic", () => {
     expect(h!.docQuery(".manta-usage-popover")).toBeNull(); // popover closed
   });
 
-  it("more than five other seats scroll inside the list", async () => {
+  it("lists every other seat in full, with no scroll cap on the list or the popover", async () => {
     const v = threeSeatView();
     v.accounts[1].seats = Array.from({ length: 6 }, (_, i) => seat(`x${i}`, `Extra ${i}`, 10 + i));
     const { popover } = await open([v], { seatId: "s1" });
     const list = popover.querySelector(".manta-seat-list") as HTMLElement;
-    expect(list.style.maxHeight).toBe("260px");
+    expect(list.querySelectorAll("[data-seat-id]").length).toBe(7); // 6 extras + the other personal seat
+    expect(list.style.maxHeight).toBe("");
+    for (const el of [popover, list]) {
+      expect(el.className).not.toMatch(/overflow-(y-|x-)?(auto|scroll)|max-h-/);
+    }
   });
 
   it("a signed-out seat says so and points to the fix", async () => {
