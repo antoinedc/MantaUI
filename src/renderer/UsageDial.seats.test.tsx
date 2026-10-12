@@ -157,6 +157,7 @@ describe("UsageDial — three seats, automatic", () => {
     expect(list.className).not.toMatch(/overflow-(y-|x-)?(auto|scroll)|max-h-/);
     // …and the card's only height cap is the full window, not a fixed size.
     expect(popover.className).toContain("max-h-[calc(100vh-16px)]");
+    expect(popover.className).toContain("overflow-y-auto"); // keeps an over-tall card reachable
     expect(popover.className.split(/\s+/)).not.toContain("w-[420px]");
     expect(popover.className.split(/\s+/)).toContain("w-max");
   });
