@@ -125,6 +125,7 @@ import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
 import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
+import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
   createCapJob,
   getJob,
@@ -679,6 +680,10 @@ const seatAssigner = createSeatAssigner({
     // same trust surface the optimizer uses ("Moved a conversation from …").
     // `optimizerActivity` is declared further down; this runs long after startup.
     optimizerActivity.append(seatMoveActivityEntry(evt)).catch((e) => console.warn("[accounts] logging a seat move failed:", e?.message ?? e));
+    // A conversation asleep in an opencode retry (the 429 backoff) is woken by
+    // the move. `seatRetryWatch` is declared further down (late-bound, like
+    // `optimizerActivity`); the event fires long after startup.
+    void seatRetryWatch.onMoved(evt);
   },
   refreshSeatCredentials: (provider, t) =>
     provider === "claude"
@@ -716,10 +721,16 @@ const { stop: stopAccountsFlowSweep } = startPoller(() => accountsManager.tick()
   intervalMs: 5_000,
   label: "accounts-flows",
 });
+// ONE limit handler (mark limited → debounced usage refresh → reconsider) shared
+// by the usage-stop engine's `session.error` path, the retry watch and the
+// plugin's POST /api/accounts/limit, so they share the 30 s refresh debounce.
+// `usagePollerTick` is declared just below; it is only called lazily.
+const seatLimitSignal = createLimitSignalHandler({ refreshUsage: () => usagePollerTick(), assigner: seatAssigner });
 const handleAccountsRoute = createAccountsRouteHandler({
   seatAssigner,
   readJson: (req) => readJsonBody(req),
   respondJson: (res, status, body) => respondJson(res, status, body),
+  refreshUsageInBackground: (provider) => seatLimitSignal.refreshInBackground(provider),
 });
 
 // eslint-disable-next-line no-unused-vars
@@ -779,7 +790,7 @@ const usageStopEngine = createUsageStopEngine({
   recheckAtLimit: (adapterId) => recheckAdapterAtLimit(adapterId),
   // Multi-account: a turn that hit a rate/usage limit forces a fresh usage poll
   // and re-places the conversation on a seat with room (seatLimitSignal.mjs).
-  onLimitSignal: createLimitSignalHandler({ refreshUsage: () => usagePollerTick(), assigner: seatAssigner }),
+  onLimitSignal: seatLimitSignal,
   resolveWorkspace: async (sessionId) => {
     try {
       const dir = await oc.getSessionDirectory(sessionId);
@@ -790,6 +801,24 @@ const usageStopEngine = createUsageStopEngine({
       return "";
     }
   },
+});
+
+// Seat retry watch (docs/superpowers/specs/2026-10-12-seat-switch-mid-turn.md,
+// layer 2): a seat that hits its limit mid-turn makes opencode SLEEP in a 429
+// retry (a `session.status` retry event, never a `session.error`). When that
+// conversation has been moved to another seat, abort the sleep and say "Keep
+// going". Fed by the event pump below and by the seat assigner's `onMoved`.
+const seatRetryWatch = createSeatRetryWatch({
+  sessionAssignment: (sid) => seatAssigner.sessionAssignment(sid),
+  onLimitSignal: seatLimitSignal,
+  abortSession: (sid) => oc.abortSession(sid),
+  // The last user message pins the model "Keep going" goes out on (so the
+  // resumed turn keeps the user's model). A recent window first; the whole
+  // transcript only if a long turn pushed the user message out of it.
+  lastUserModel: async (sid) =>
+    lastUserModelFromMessages(await oc.listMessages(sid, { limit: 100 })) ??
+    lastUserModelFromMessages(await oc.listMessages(sid)),
+  deliver: (args) => promptDelivery.deliver(args),
 });
 
 // Provider health (W4/W5/W8, BET-1536): the TWO health registers — account
@@ -3225,6 +3254,11 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     usageStopEngine.observeEvent(evt);
   } catch (e) {
     console.warn("[usage-stop] observeEvent failed:", e?.message ?? e);
+  }
+  try {
+    void seatRetryWatch.observeEvent(evt);
+  } catch (e) {
+    console.warn("[seat-retry] observeEvent failed:", e?.message ?? e);
   }
   // Resume engine outcome watching: a refused "Keep going" re-queues (or is
   // flagged at the cap); an idle/step without a refusal clears the record.

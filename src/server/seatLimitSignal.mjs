@@ -23,7 +23,9 @@ const SEAT_PROVIDERS = new Set(["claude", "codex"]);
  * @param {() => number} [deps.now]
  * @param {number} [deps.debounceMs]
  * @param {{warn?: Function}} [deps.log]
- * @returns {(signal: {sessionId: string, adapterId: string, kind?: string}) => Promise<{moved:boolean}|null>}
+ * @returns {((signal: {sessionId: string, adapterId: string, kind?: string}) => Promise<{moved:boolean, from?: string, to?: string}|null>) & {refreshInBackground: (provider: string) => void}}
+ *          `refreshInBackground(provider)` kicks the SAME debounced refresh without awaiting it
+ *          (the /api/accounts/limit route must answer inside the plugin's 10 s timeout).
  */
 export function createLimitSignalHandler({ refreshUsage, assigner, now = () => Date.now(), debounceMs = LIMIT_REFRESH_DEBOUNCE_MS, log = console }) {
   /** @type {Map<string, {at: number, run: Promise<unknown>}>} */
@@ -40,7 +42,7 @@ export function createLimitSignalHandler({ refreshUsage, assigner, now = () => D
     return run;
   }
 
-  return async function onLimitSignal({ sessionId, adapterId, kind } = {}) {
+  async function onLimitSignal({ sessionId, adapterId, kind } = {}) {
     if (!SEAT_PROVIDERS.has(adapterId) || !sessionId) return null;
     try {
       // Mark first: requests arriving while the poll is in flight already avoid the seat.
@@ -53,5 +55,11 @@ export function createLimitSignalHandler({ refreshUsage, assigner, now = () => D
       log.warn?.("[seat-limit] re-placement failed:", e?.message ?? e);
       return null;
     }
+  }
+
+  /** Fire-and-forget: shares the per-provider debounce and never rejects. */
+  onLimitSignal.refreshInBackground = (provider) => {
+    if (SEAT_PROVIDERS.has(provider)) void refresh(provider);
   };
+  return onLimitSignal;
 }

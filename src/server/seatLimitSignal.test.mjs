@@ -84,6 +84,29 @@ test("handler: a burst of failures costs ONE refresh per provider per 30s, but e
   assert.equal(calls.filter((c) => c[0] === "tick").length, 3, "window elapsed");
 });
 
+test("handler.refreshInBackground: shares the 30s refresh debounce, never awaits or rejects, ignores unknown providers", async () => {
+  const { h, calls, advance } = handlerHarness();
+  assert.equal(h.refreshInBackground("claude"), undefined);
+  h.refreshInBackground("claude");
+  await h({ sessionId: "s1", adapterId: "claude" }); // joins the refresh already started
+  assert.equal(calls.filter((c) => c[0] === "tick").length, 1);
+  h.refreshInBackground("kimi");
+  assert.equal(calls.filter((c) => c[0] === "tick").length, 1);
+  advance(LIMIT_REFRESH_DEBOUNCE_MS + 1);
+  h.refreshInBackground("claude");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(calls.filter((c) => c[0] === "tick").length, 2);
+
+  let rejected = 0;
+  const failing = createLimitSignalHandler({ refreshUsage: async () => { throw new Error("poll down"); }, assigner: { markLimited() {}, reconsider: async () => ({ moved: false }) }, log: quiet });
+  const onRejection = () => rejected++;
+  process.on("unhandledRejection", onRejection);
+  failing.refreshInBackground("claude");
+  await new Promise((r) => setTimeout(r, 20));
+  process.off("unhandledRejection", onRejection);
+  assert.equal(rejected, 0);
+});
+
 test("handler: out-of-scope providers do nothing; a failing refresh still reconsiders", async () => {
   const { h, calls } = handlerHarness();
   assert.equal(await h({ sessionId: "s", adapterId: "kimi" }), null);

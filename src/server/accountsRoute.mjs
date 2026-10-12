@@ -1,11 +1,11 @@
-// /api/accounts/resolve and /api/accounts/refresh — extracted from index.mjs
+// /api/accounts/resolve, /refresh and /limit — extracted from index.mjs
 // (the projectsRoute.mjs pattern) so the REAL route logic is testable, and so a
 // harness can serve it without booting the whole server.
 //
 // The ONLY consumer is the manta-accounts opencode plugin. Both routes answer
 // `{seatId, live:true}` or `{seatId, live:false, provider, credentialFile,
 // expiresAt?}` — NEVER a token: the plugin reads the seat's credential file
-// itself (same OS user). 400 on bad input, 404 on an unknown seat, 405 on a
+// itself (same OS user). `/limit` answers the resolve shape plus `moved`. 400 on bad input, 404 on an unknown seat, 405 on a
 // wrong method. A thrown error is the caller's to turn into a 500 (index.mjs
 // owns that, with its class-2 marker).
 //
@@ -15,10 +15,12 @@
 // proxied public traffic always carries at least one forwarding header, which a
 // local plugin never does. Anything else is a 403, before any work is done.
 
+import { resolveRoot } from "./seatAssignment.mjs";
+
 const PROVIDERS = ["claude", "codex"];
 const MAX_ID = 200;
 
-export const ACCOUNTS_ROUTE_PATHS = ["/api/accounts/resolve", "/api/accounts/refresh"];
+export const ACCOUNTS_ROUTE_PATHS = ["/api/accounts/resolve", "/api/accounts/refresh", "/api/accounts/limit"];
 
 const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 // Headers a reverse proxy / CDN adds to traffic it forwards (Caddy, cloudflared).
@@ -37,11 +39,33 @@ export function isDirectLoopbackRequest(req) {
 }
 
 /**
- * @param {{ seatAssigner: {resolve: Function, refreshSeat: Function},
+ * @param {{ seatAssigner: {resolve: Function, refreshSeat: Function, markLimited?: Function, reconsider?: Function, _store?: Function},
  *           readJson: (req: any) => Promise<any>,
- *           respondJson: (res: any, status: number, body: object) => void }} deps
+ *           respondJson: (res: any, status: number, body: object) => void,
+ *           refreshUsageInBackground?: (provider: string) => void }} deps
+ *        `refreshUsageInBackground` kicks the (debounced) usage refresh WITHOUT awaiting it:
+ *        /limit is on the plugin's 10 s budget and a usage poll can take longer.
  */
-export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson }) {
+export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson, refreshUsageInBackground = () => {} }) {
+  // A model request got an HTTP 429 on the seat this conversation is on: mark the
+  // seat full, start a fresh usage reading in the background, re-decide the
+  // conversation NOW, and answer where its requests go from here. The
+  // conversation is the ROOT: a sub-agent's id (or, for a child not linked yet,
+  // its parent's) resolves to it, because assignments are per conversation.
+  async function handleLimit(provider, sessionID, parentSessionID) {
+    const children = seatAssigner._store?.()?.children ?? {};
+    const { root } = resolveRoot({ sessionID, parentSessionID, children });
+    seatAssigner.markLimited(provider, root);
+    try {
+      refreshUsageInBackground(provider);
+    } catch {
+      /* a refresh that cannot start must not fail the switch */
+    }
+    const reconsidered = await seatAssigner.reconsider(provider, root);
+    const resolved = await seatAssigner.resolve(provider, sessionID, parentSessionID);
+    return { ...resolved, moved: !!reconsidered?.moved };
+  }
+
   /** @returns {Promise<boolean>} true when the path was one of ours (and answered) */
   return async function handleAccountsRoute(req, res, url) {
     const path = url.pathname;
@@ -51,6 +75,7 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
       return true;
     }
     const isResolve = path === ACCOUNTS_ROUTE_PATHS[0];
+    const isLimit = path === ACCOUNTS_ROUTE_PATHS[2];
     if (req.method !== (isResolve ? "GET" : "POST")) {
       respondJson(res, 405, { error: "method not allowed" });
       return true;
@@ -67,6 +92,21 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
       return true;
     }
     const body = await readJson(req).catch(() => null);
+    if (isLimit) {
+      const sessionID = body?.sessionID;
+      const parent = body?.parentSessionID ?? null;
+      const parentSessionID = parent === "" ? null : parent;
+      if (
+        !PROVIDERS.includes(body?.provider) ||
+        typeof sessionID !== "string" || !sessionID || sessionID.length > MAX_ID ||
+        (parentSessionID !== null && (typeof parentSessionID !== "string" || parentSessionID.length > MAX_ID))
+      ) {
+        respondJson(res, 400, { error: "invalid" });
+        return true;
+      }
+      respondJson(res, 200, await handleLimit(body.provider, sessionID, parentSessionID));
+      return true;
+    }
     const provider = body?.provider;
     const seatId = body?.seatId;
     if (!PROVIDERS.includes(provider) || typeof seatId !== "string" || !seatId || seatId.length > MAX_ID) {
