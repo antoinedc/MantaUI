@@ -245,6 +245,11 @@ const PERMISSION_ALIASES = {
 const FILE_FAMILY = new Set(["bash", "edit", "read"]);
 const isBroadPattern = (p) => p === "*" || p === "**" || p === "**/*" || p === "/**";
 
+// The real opencode permission keys a declared grant name resolves to.
+export function permissionKeysFor(permission) {
+  return PERMISSION_ALIASES[permission] ?? [permission];
+}
+
 export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
   const input = Array.isArray(tools) ? tools : [];
   const rules = [];
@@ -254,7 +259,7 @@ export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
     const pattern = typeof t.pattern === "string" ? t.pattern : null;
     if (!permission || !pattern) continue;
     const action = t.action === "deny" ? "deny" : "allow";
-    const keys = PERMISSION_ALIASES[permission] ?? [permission];
+    const keys = permissionKeysFor(permission);
     for (const key of keys) rules.push({ permission: key, pattern, action });
   }
   // Implied allows, placed BEFORE the declared rules so an explicit deny the
@@ -278,14 +283,12 @@ export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
     implied.push({ permission: "skill", pattern: "*", action: "allow" });
   }
   rules.unshift(...implied);
-  // De-dup identical rules (model may repeat).
-  const seen = new Set();
-  const deduped = rules.filter((r) => {
-    const key = `${r.permission}\u0000${r.pattern}\u0000${r.action}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // De-dup identical rules (model may repeat), keeping the LAST occurrence:
+  // under last-match-wins a later copy may be what overrides an intervening
+  // rule, so dropping it would flip the outcome.
+  const lastIndex = new Map();
+  rules.forEach((r, i) => lastIndex.set(`${r.permission}\u0000${r.pattern}\u0000${r.action}`, i));
+  const deduped = rules.filter((r, i) => lastIndex.get(`${r.permission}\u0000${r.pattern}\u0000${r.action}`) === i);
   // The catch-all deny MUST be FIRST, with the specific allows after it.
   //
   // opencode resolves a tool call against this list LAST-MATCH-WINS, which is

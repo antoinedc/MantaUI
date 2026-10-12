@@ -2076,6 +2076,23 @@ test("buildPermissionRuleset: narrow grants keep the worktree boundary, minus op
   assert.equal(resolvePermission(rs, "external_directory", "/h/.local/share/opencode/tool-output/*"), "allow");
 });
 
+// REGRESSION (review): de-dup must keep the LAST copy of a repeated rule, or
+// a later rule that overrides an intervening one is silently dropped.
+test("buildPermissionRuleset de-dup preserves last-match-wins", () => {
+  const a = buildPermissionRuleset([
+    { permission: "write", pattern: "**", action: "deny" },
+    { permission: "edit", pattern: "/secret/*" },
+    { permission: "edit", pattern: "**", action: "deny" },
+  ]);
+  assert.equal(resolvePermission(a, "edit", "/secret/a"), "deny", "the final deny wins");
+  const b = buildPermissionRuleset([
+    { permission: "bash", pattern: "**" },
+    { permission: "external_directory", pattern: "/etc/*", action: "deny" },
+    { permission: "external_directory", pattern: "*" },
+  ]);
+  assert.equal(resolvePermission(b, "external_directory", "/etc/a"), "allow", "the final allow (duplicate of an implied one) wins");
+});
+
 test("buildPermissionRuleset: an explicit deny still beats an implied allow", () => {
   const rs = buildPermissionRuleset([
     { permission: "bash", pattern: "**" },
