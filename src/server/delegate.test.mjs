@@ -1986,14 +1986,20 @@ test("finishJob is idempotent for an already-terminal job", async () => {
 //   [bash ** allow, * ** deny] → bash DENIED
 //   [* ** deny, bash ** allow] → bash COMPLETED
 test("buildPermissionRuleset puts the catch-all deny FIRST, under the grants", () => {
-  const rs = buildPermissionRuleset([
-    { permission: "bash", pattern: "pytest *" },
-    { permission: "write", pattern: "**/*.ts" },
-  ]);
+  const rs = buildPermissionRuleset(
+    [
+      { permission: "bash", pattern: "pytest *" },
+      { permission: "write", pattern: "**/*.ts" },
+    ],
+    { home: "/h" },
+  );
   assert.deepEqual(rs, [
     { permission: "*", pattern: "**", action: "deny" },
+    { permission: "todowrite", pattern: "*", action: "allow" },
+    { permission: "external_directory", pattern: "/h/.local/share/opencode/tool-output/*", action: "allow" },
+    { permission: "external_directory", pattern: "/tmp/opencode/*", action: "allow" },
     { permission: "bash", pattern: "pytest *", action: "allow" },
-    { permission: "write", pattern: "**/*.ts", action: "allow" },
+    { permission: "edit", pattern: "**/*.ts", action: "allow" },
   ]);
   assert.equal(rs[0].action, "deny", "catch-all deny MUST be FIRST (last-match-wins)");
   assert.ok(
@@ -2013,10 +2019,70 @@ test("buildPermissionRuleset de-dups identical rules and defaults action to allo
     { permission: "bash", pattern: "pytest *" },
     { permission: "bash", pattern: "rm *", action: "deny" },
   ]);
-  assert.equal(rs.length, 3, "catch-all + one de-duped allow + one explicit deny");
+  const bash = rs.filter((r) => r.permission === "bash");
+  assert.equal(bash.length, 2, "one de-duped allow + one explicit deny");
   assert.equal(rs[0].action, "deny", "catch-all first");
-  assert.equal(rs[1].action, "allow");
-  assert.equal(rs[2].action, "deny");
+  assert.equal(bash[0].action, "allow");
+  assert.equal(bash[1].action, "deny");
+  assert.deepEqual(rs.at(-1), { permission: "bash", pattern: "rm *", action: "deny" }, "declared rules come last so they win");
+});
+
+// Resolve a call the way opencode does: last matching rule wins, `*` in a
+// pattern matches any run of characters (including "/").
+function resolvePermission(rules, permission, target) {
+  const re = (p) => new RegExp("^" + p.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*").replace(/\?/g, ".") + "$");
+  let action = "allow"; // opencode's own prepended default
+  for (const r of rules) if (re(r.permission).test(permission) && re(r.pattern).test(target)) action = r.action;
+  return action;
+}
+
+// REGRESSION (live denials, Oct 2026): opencode's write / edit / apply_patch
+// tools all ask under the key "edit" — there is no "write" key — so a job
+// granted only "write" had every file write refused.
+test("buildPermissionRuleset maps write/apply_patch grants onto the edit key", () => {
+  for (const granted of ["write", "apply_patch", "edit"]) {
+    const rs = buildPermissionRuleset([{ permission: granted, pattern: "**" }]);
+    assert.equal(resolvePermission(rs, "edit", "src/a.ts"), "allow", `${granted} → edit allowed`);
+  }
+});
+
+test("buildPermissionRuleset: a read grant also covers glob/grep/lsp (separate opencode keys)", () => {
+  const rs = buildPermissionRuleset([{ permission: "read", pattern: "**" }]);
+  for (const k of ["read", "glob", "grep", "lsp", "skill"]) assert.equal(resolvePermission(rs, k, "x"), "allow", k);
+  assert.equal(resolvePermission(rs, "edit", "x"), "deny", "read does not imply edit");
+});
+
+// REGRESSION: the job runs in its own worktree, but reads the source repo,
+// writes /tmp/opencode scratch files and re-reads truncated tool output — all
+// gated by external_directory, which the catch-all deny shadowed.
+test("buildPermissionRuleset: broad file grants reach outside the worktree", () => {
+  const rs = buildPermissionRuleset(
+    [
+      { permission: "bash", pattern: "**" },
+      { permission: "edit", pattern: "**" },
+    ],
+    { home: "/h" },
+  );
+  assert.equal(resolvePermission(rs, "external_directory", "/home/dev/projects/other/*"), "allow");
+  assert.equal(resolvePermission(rs, "todowrite", "*"), "allow");
+  assert.equal(resolvePermission(rs, "task", "*"), "deny", "ungranted tools still denied");
+  assert.equal(resolvePermission(rs, "question", "*"), "deny", "never asks");
+});
+
+test("buildPermissionRuleset: narrow grants keep the worktree boundary, minus opencode's own scratch dirs", () => {
+  const rs = buildPermissionRuleset([{ permission: "bash", pattern: "pytest *" }], { home: "/h" });
+  assert.equal(resolvePermission(rs, "external_directory", "/home/dev/projects/other/*"), "deny");
+  assert.equal(resolvePermission(rs, "external_directory", "/tmp/opencode/*"), "allow");
+  assert.equal(resolvePermission(rs, "external_directory", "/h/.local/share/opencode/tool-output/*"), "allow");
+});
+
+test("buildPermissionRuleset: an explicit deny still beats an implied allow", () => {
+  const rs = buildPermissionRuleset([
+    { permission: "bash", pattern: "**" },
+    { permission: "external_directory", pattern: "/etc/*", action: "deny" },
+  ]);
+  assert.equal(resolvePermission(rs, "external_directory", "/etc/*"), "deny");
+  assert.equal(resolvePermission(rs, "external_directory", "/srv/*"), "allow");
 });
 
 // BET-418 §A acceptance: a job whose ruleset omits `bash` must FAIL its first
@@ -2159,8 +2225,7 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
   const perm = h.newWindowCalls[0]?.permission;
   assert.ok(Array.isArray(perm));
   assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
-  assert.equal(perm[1].permission, "bash");
-  assert.equal(perm[1].pattern, "pytest * -x");
+  assert.deepEqual(perm.at(-1), { permission: "bash", pattern: "pytest * -x", action: "allow" }, "the EDITED grant is forwarded");
 });
 
 // ----------------------------------------------------------------------------

@@ -26,6 +26,7 @@
 // in-flight turn.
 
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import {
@@ -212,7 +213,39 @@ export function deriveName(prompt) {
 // whether to skip the ruleset entirely (trust mode / no tools) or to still
 // apply the catch-all deny alone.
 // ---------------------------------------------------------------------------
-export function buildPermissionRuleset(tools) {
+// opencode's permission KEYS are not its tool names. Measured against the
+// installed binary (1.18.x): `write`, `edit` and `apply_patch` all ask under
+// the single key "edit" — there is no "write" or "apply_patch" key at all — and
+// `glob` / `grep` / `lsp` each ask under their own key, not "read". A grant
+// spelled by tool name ("write", the example the delegate tool itself gives)
+// therefore matched nothing, and the job's every write fell through to the
+// catch-all deny. Each grant is expanded to the keys that tool family really
+// asks under.
+const PERMISSION_ALIASES = {
+  write: ["edit"],
+  edit: ["edit"],
+  apply_patch: ["edit"],
+  patch: ["edit"],
+  multiedit: ["edit"],
+  read: ["read", "glob", "grep", "lsp"],
+  list: ["read", "glob"],
+  ls: ["read", "glob"],
+};
+
+// Grants broad enough that the job is clearly meant to work on files, so it
+// also needs to reach files OUTSIDE its worktree. opencode gates every path
+// outside the session directory behind `external_directory`, and the
+// catch-all deny (which sits AFTER opencode's own defaults) overrides the
+// box-level `external_directory: allow`. Jobs routinely read the source repo,
+// write scratch files under /tmp/opencode and re-read truncated tool output —
+// all outside the worktree — so every such call was refused. Granting bash or
+// edit/read with an unscoped pattern already lets the job touch any path
+// through the shell; the external_directory check is a path heuristic, not a
+// boundary, so it follows the grant instead of contradicting it.
+const FILE_FAMILY = new Set(["bash", "edit", "read"]);
+const isBroadPattern = (p) => p === "*" || p === "**" || p === "**/*" || p === "/**";
+
+export function buildPermissionRuleset(tools, { home = homedir() } = {}) {
   const input = Array.isArray(tools) ? tools : [];
   const rules = [];
   for (const t of input) {
@@ -221,8 +254,30 @@ export function buildPermissionRuleset(tools) {
     const pattern = typeof t.pattern === "string" ? t.pattern : null;
     if (!permission || !pattern) continue;
     const action = t.action === "deny" ? "deny" : "allow";
-    rules.push({ permission, pattern, action });
+    const keys = PERMISSION_ALIASES[permission] ?? [permission];
+    for (const key of keys) rules.push({ permission: key, pattern, action });
   }
+  // Implied allows, placed BEFORE the declared rules so an explicit deny the
+  // model (or the user, editing the approval card) wrote still wins under
+  // last-match-wins.
+  const implied = [];
+  if (rules.length > 0) {
+    // Internal bookkeeping, never a side effect outside the session: a job
+    // that can't keep a todo list just fails its first planning step.
+    implied.push({ permission: "todowrite", pattern: "*", action: "allow" });
+    // opencode's own defaults, re-stated because the catch-all deny shadows
+    // them: truncated tool output is saved under tool-output/ and the model is
+    // told to read it back from there.
+    implied.push({ permission: "external_directory", pattern: `${home}/.local/share/opencode/tool-output/*`, action: "allow" });
+    implied.push({ permission: "external_directory", pattern: "/tmp/opencode/*", action: "allow" });
+  }
+  if (rules.some((r) => r.action === "allow" && FILE_FAMILY.has(r.permission) && isBroadPattern(r.pattern))) {
+    implied.push({ permission: "external_directory", pattern: "*", action: "allow" });
+  }
+  if (rules.some((r) => r.action === "allow" && r.permission === "read")) {
+    implied.push({ permission: "skill", pattern: "*", action: "allow" });
+  }
+  rules.unshift(...implied);
   // De-dup identical rules (model may repeat).
   const seen = new Set();
   const deduped = rules.filter((r) => {

@@ -157,7 +157,8 @@ test("wantsDelegateSession: write/edit access → delegate job; else ephemeral",
 test("permissionRulesetFor: catch-all deny first, plan grants after (last-match-wins)", () => {
   const rs = permissionRulesetFor([{ permission: "write", pattern: "**" }]);
   assert.deepEqual(rs[0], { permission: "*", pattern: "**", action: "deny" });
-  assert.deepEqual(rs[1], { permission: "write", pattern: "**", action: "allow" });
+  // "write" is not an opencode permission key — the write tool asks under "edit".
+  assert.ok(rs.slice(1).some((r) => r.permission === "edit" && r.pattern === "**" && r.action === "allow"));
 });
 
 // ---------------------------------------------------------------------------
