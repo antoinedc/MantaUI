@@ -26,6 +26,11 @@
  *   - A seat token within 60 s of expiry is refreshed first
  *     (`POST /api/accounts/refresh`, then the file is re-read); a 401 from a
  *     non-live seat is refreshed once and retried once.
+ *   - A 429 (seat hit its usage limit; opencode would otherwise sleep on the
+ *     retry-after for hours) is reported (`POST /api/accounts/limit`, 10 s). If the
+ *     conversation is re-placed on a DIFFERENT seat, the same request is re-sent
+ *     ONCE on it — opencode never sees the 429. Any failure, the same seat, or a
+ *     non-replayable body returns the original 429 untouched.
  *
  * INSTALLED AUTOMATICALLY: install.sh and self-update.sh copy this file (a real
  * copy, never a symlink) to ~/.config/opencode/plugins/manta-accounts.ts and
@@ -64,6 +69,9 @@ const RESOLVE_TIMEOUT_MS = 1_500
 // many seconds; it only ever happens when a request would otherwise go out with
 // a token about to expire.
 const REFRESH_TIMEOUT_MS = 30_000
+// A limit report only re-places a conversation (the usage refresh runs in the
+// background server-side), so it answers quickly; opencode is waiting on it.
+const LIMIT_TIMEOUT_MS = 10_000
 const EXPIRY_MARGIN_MS = 60_000
 const MAX_CACHE_ENTRIES = 500
 
@@ -359,12 +367,15 @@ interface WrapperDeps {
   /** manta-server round trips; `null` = unreachable / refused. */
   resolve: (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }) => Promise<Resolved | null>
   refresh: (provider: Provider, seatId: string) => Promise<Resolved | null>
+  /** A 429 happened: re-place the conversation, answer with its seat now. Optional —
+   *  absent means no seat-switch retry (behaviour as before). */
+  limit?: (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }) => Promise<Resolved | null>
   now?: () => number
   testUpstream?: string | null
 }
 
 function createAccountsFetch(deps: WrapperDeps): typeof fetch {
-  const { origFetch, resolve, refresh, credentials } = deps
+  const { origFetch, resolve, refresh, credentials, limit } = deps
   const now = deps.now ?? (() => Date.now())
   const testUpstream = deps.testUpstream ?? null
 
@@ -438,6 +449,71 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     return undefined
   }
 
+  /**
+   * A 429 means the seat the request went out on hit its usage limit. Ask
+   * manta-server to re-place the conversation and, when it names a DIFFERENT
+   * seat, re-send the same request once on it — so opencode never sees the 429
+   * (and never sleeps on its `retry-after`). Anything short of a clean retry
+   * returns the original 429, body untouched. Never throws.
+   */
+  async function switchSeatOnLimit(
+    res: Response,
+    c: {
+      provider: Provider
+      ids: { sessionID: string; parentSessionID: string | null }
+      base: Headers
+      input: unknown
+      init: any
+      body: BodyInit | null | undefined
+      replayable: boolean
+      usedSeatId: string | null
+    },
+  ): Promise<Response> {
+    try {
+      if (!limit || !c.replayable) return res
+      const key = rootKey(c.provider, c.ids)
+      let answer: Resolved | null = null
+      try {
+        answer = await limit(c.provider, c.ids)
+      } catch {
+        answer = null
+      }
+      // Whatever the answer, the cached placement for this conversation is stale.
+      byConversation.delete(key)
+      if (!answer || answer.seatId === c.usedSeatId) return res
+
+      let headers: Headers = c.base // a live answer: the ORIGINAL identity
+      if (!answer.live) {
+        let file: string | undefined = answer.credentialFile
+        let creds = credentials.read(c.provider, file)
+        if (!creds) return res
+        if (expiresSoon(creds.expiresAt, now()) && answer.seatId) {
+          const fresh = await refreshSeat(c.provider, answer.seatId)
+          if (fresh?.live) {
+            creds = null // the seat became the live login: original headers
+          } else if (fresh) {
+            credentials.invalidate(file)
+            file = fresh.credentialFile ?? file
+            creds = credentials.read(c.provider, file) ?? creds
+          }
+        }
+        if (creds) headers = rewriteHeaders(c.base, c.provider, creds)
+      }
+      remember(byConversation, key, { result: answer, at: now() })
+      // The retry goes out BEFORE the 429 is discarded: if it cannot be sent, the
+      // caller still gets the original response with its body intact.
+      const retried = await send(c.input, c.init, { headers, body: c.body })
+      try {
+        await res.body?.cancel()
+      } catch {
+        /* the first response is discarded either way */
+      }
+      return retried
+    } catch {
+      return res
+    }
+  }
+
   const wrapped = async function mantaAccountsFetch(input: any, init?: any): Promise<Response> {
     // ---- decide (no network to the provider, nothing consumed) ----
     let provider: Provider | null = null
@@ -455,7 +531,33 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
       return origFetch(input, init)
     }
     if (!provider || !ids || !base) return origFetch(input, init)
-    if (!seat || seat.live || !seat.seatId) return send(input, init, {})
+    if (!seat || seat.live || !seat.seatId) {
+      // Live login (or no answer). Without a `limit` dep this is today's
+      // pass-through, untouched. With it, a Request body is captured from a CLONE
+      // first so a 429 can be replayed; the request itself still goes out as the
+      // caller built it.
+      let liveBody: BodyInit | null | undefined
+      let liveReplayable = true
+      if (limit) {
+        try {
+          liveBody = await bodyFor(input, init)
+        } catch {
+          liveReplayable = false
+        }
+      }
+      const liveRes = await send(input, init, {})
+      if (liveRes.status !== 429 || !limit) return liveRes
+      return switchSeatOnLimit(liveRes, {
+        provider,
+        ids,
+        base,
+        input,
+        init,
+        body: liveBody,
+        replayable: liveReplayable && isReplayableBody(liveBody !== undefined ? liveBody : init?.body),
+        usedSeatId: seat?.seatId ?? null,
+      })
+    }
 
     // ---- non-live seat: read its token FROM THE FILE, make sure it is good,
     // then swap identity ----
@@ -482,6 +584,18 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     }
 
     const res = await send(input, init, { headers, body })
+    if (res.status === 429 && limit) {
+      return switchSeatOnLimit(res, {
+        provider,
+        ids,
+        base,
+        input,
+        init,
+        body,
+        replayable: isReplayableBody(body !== undefined ? body : init?.body),
+        usedSeatId: seat.seatId,
+      })
+    }
     if (res.status !== 401) return res
 
     // ---- 401 from a non-live seat: refresh that seat once, retry once ----
@@ -531,6 +645,11 @@ function install(): void {
     },
     refresh: (provider, seatId) =>
       callServer(origFetch, server, "/api/accounts/refresh", { method: "POST", body: { provider, seatId }, timeoutMs: REFRESH_TIMEOUT_MS }),
+    limit: (provider, ids) => {
+      const body: Record<string, string> = { provider, sessionID: ids.sessionID }
+      if (ids.parentSessionID) body.parentSessionID = ids.parentSessionID
+      return callServer(origFetch, server, "/api/accounts/limit", { method: "POST", body, timeoutMs: LIMIT_TIMEOUT_MS })
+    },
     testUpstream: loopbackBase(process.env.MANTA_ACCOUNTS_TEST_UPSTREAM),
   })
   try {

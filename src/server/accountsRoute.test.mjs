@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createAccountsRouteHandler, isDirectLoopbackRequest } from "./accountsRoute.mjs";
 
-function harness(seatAssigner) {
+function harness(seatAssigner, extraDeps = {}) {
   const sent = [];
   const handle = createAccountsRouteHandler({
     seatAssigner,
+    ...extraDeps,
     readJson: async (req) => {
       if (req.badJson) throw new Error("bad json");
       return req.body;
@@ -99,4 +100,107 @@ test("both routes answer 403 to a proxied or non-loopback caller, BEFORE doing a
 test("a path that is not ours is still left alone for a proxied caller (the gate is per-route)", async () => {
   const { call } = harness(assigner);
   assert.equal((await call("GET", "/api/other", { headers: { "x-forwarded-for": "1.2.3.4" } })).handled, false);
+});
+
+// ---- POST /api/accounts/limit ------------------------------------------------
+
+function limitAssigner({ children = {}, moved = true, order = [] } = {}) {
+  return {
+    order,
+    _store: () => ({ children }),
+    markLimited: (p, s) => (order.push(["mark", p, s]), "seat-1"),
+    reconsider: async (p, s) => (order.push(["reconsider", p, s]), moved ? { moved: true, from: "seat-1", to: "seat-2" } : { moved: false }),
+    resolve: async (p, s, parent) => (order.push(["resolve", p, s, parent]), { seatId: moved ? "seat-2" : "seat-1", live: false, provider: p, credentialFile: "/f" }),
+  };
+}
+const limitBody = (over = {}) => ({ body: { provider: "claude", sessionID: "ses_1", ...over } });
+
+test("limit: marks the seat, kicks the refresh, reconsiders, then answers resolve + moved:true", async () => {
+  const a = limitAssigner();
+  const refreshed = [];
+  const { call } = harness(a, { refreshUsageInBackground: (p) => (a.order.push(["refresh", p]), refreshed.push(p)) });
+  const r = await call("POST", "/api/accounts/limit", limitBody({ parentSessionID: "ses_0" }));
+  assert.deepEqual(r.out, [200, { seatId: "seat-2", live: false, provider: "claude", credentialFile: "/f", moved: true }]);
+  assert.deepEqual(a.order, [["mark", "claude", "ses_0"], ["refresh", "claude"], ["reconsider", "claude", "ses_0"], ["resolve", "claude", "ses_1", "ses_0"]]);
+  assert.deepEqual(refreshed, ["claude"]);
+});
+
+test("limit: moved is false when nothing moved", async () => {
+  const { call } = harness(limitAssigner({ moved: false }));
+  const r = await call("POST", "/api/accounts/limit", limitBody());
+  assert.deepEqual(r.out, [200, { seatId: "seat-1", live: false, provider: "claude", credentialFile: "/f", moved: false }]);
+});
+
+test("limit: a linked child is resolved to its conversation root; an unlinked one with a parent uses the parent (and the parent's root)", async () => {
+  const linked = limitAssigner({ children: { kid: { root: "root" } } });
+  await harness(linked).call("POST", "/api/accounts/limit", limitBody({ sessionID: "kid" }));
+  assert.deepEqual(linked.order.slice(0, 2), [["mark", "claude", "root"], ["reconsider", "claude", "root"]]);
+
+  const viaParent = limitAssigner({ children: { mid: { root: "root" } } });
+  await harness(viaParent).call("POST", "/api/accounts/limit", limitBody({ sessionID: "newkid", parentSessionID: "mid" }));
+  assert.deepEqual(viaParent.order.slice(0, 2), [["mark", "claude", "root"], ["reconsider", "claude", "root"]]);
+
+  const own = limitAssigner();
+  await harness(own).call("POST", "/api/accounts/limit", limitBody({ sessionID: "solo" }));
+  assert.deepEqual(own.order[0], ["mark", "claude", "solo"]);
+});
+
+test("limit: the usage refresh is NOT awaited (a never-settling refresh still answers)", async () => {
+  const { call } = harness(limitAssigner(), { refreshUsageInBackground: () => new Promise(() => {}) });
+  const r = await Promise.race([call("POST", "/api/accounts/limit", limitBody()), new Promise((res) => setTimeout(() => res("timeout"), 500))]);
+  assert.notEqual(r, "timeout");
+  assert.equal(r.out[0], 200);
+});
+
+test("limit: a refresh that throws synchronously does not fail the switch", async () => {
+  const { call } = harness(limitAssigner(), { refreshUsageInBackground: () => { throw new Error("nope"); } });
+  assert.equal((await call("POST", "/api/accounts/limit", limitBody())).out[0], 200);
+});
+
+test("limit: 400 on a bad provider, missing / oversized / non-string ids, unparseable JSON", async () => {
+  const a = limitAssigner();
+  const { call } = harness(a);
+  for (const b of [
+    { provider: "kimi", sessionID: "s" },
+    { sessionID: "s" },
+    { provider: "claude" },
+    { provider: "claude", sessionID: "" },
+    { provider: "claude", sessionID: 7 },
+    { provider: "claude", sessionID: "x".repeat(201) },
+    { provider: "claude", sessionID: "s", parentSessionID: "x".repeat(201) },
+    { provider: "claude", sessionID: "s", parentSessionID: 5 },
+  ]) {
+    assert.deepEqual((await call("POST", "/api/accounts/limit", { body: b })).out, [400, { error: "invalid" }], JSON.stringify(b).slice(0, 60));
+  }
+  assert.equal((await call("POST", "/api/accounts/limit", { badJson: true })).out[0], 400);
+  assert.deepEqual(a.order, [], "no work on invalid input");
+});
+
+test("limit: a null / empty parentSessionID is the same as none", async () => {
+  for (const parentSessionID of [null, ""]) {
+    const a = limitAssigner();
+    assert.equal((await harness(a).call("POST", "/api/accounts/limit", limitBody({ parentSessionID }))).out[0], 200);
+    assert.deepEqual(a.order[0], ["mark", "claude", "ses_1"]);
+    assert.deepEqual(a.order.at(-1), ["resolve", "claude", "ses_1", null]);
+  }
+});
+
+test("limit: GET → 405; proxied / non-loopback → 403 before any work", async () => {
+  const a = limitAssigner();
+  const { call } = harness(a);
+  assert.equal((await call("GET", "/api/accounts/limit")).out[0], 405);
+  for (const extra of [{ headers: { "x-forwarded-for": "203.0.113.9" } }, { socket: { remoteAddress: "10.1.2.3" } }]) {
+    assert.deepEqual((await call("POST", "/api/accounts/limit", { ...extra, ...limitBody() })).out, [403, { error: "forbidden" }]);
+  }
+  assert.deepEqual(a.order, []);
+});
+
+test("limit: works against a store-less assigner fake (no _store)", async () => {
+  const { _store, ...bare } = limitAssigner();
+  assert.equal((await harness(bare).call("POST", "/api/accounts/limit", limitBody())).out[0], 200);
+});
+
+test("limit: an assigner failure propagates (index.mjs turns it into the class-2 500)", async () => {
+  const { call } = harness({ ...limitAssigner(), reconsider: async () => { throw new Error("boom"); } });
+  await assert.rejects(call("POST", "/api/accounts/limit", limitBody()), /boom/);
 });

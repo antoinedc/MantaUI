@@ -1123,3 +1123,75 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
     expect(promptModelFor("hi")).toBeUndefined();
   });
 });
+
+// ===== Stale "Aborted" banner clears when the next turn begins =====
+//
+// The box aborts a conversation asleep in a seat-limit retry and then resumes it
+// with "Keep going". The abort surfaces as a MessageAbortedError banner that
+// nothing used to clear, so it sat on screen while work continued.
+describe("useSseBus aborted-error banner clears on the next turn", () => {
+  let bus: ReturnType<typeof installMockApi>["bus"];
+  let h: ReturnType<typeof mount> | null = null;
+
+  beforeEach(() => {
+    ({ bus } = installMockApi());
+    resetStore();
+  });
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const errorEv = (name: string, message: string) => ({
+    type: "session.error",
+    properties: { sessionID: "ses_test", error: { name, data: { message } } },
+  });
+  const statusEv = (type: string) => ({
+    type: "session.status",
+    properties: { sessionID: "ses_test", status: { type } },
+  });
+
+  it("MessageAbortedError shows the banner; a following busy clears it", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    expect(h.text()).toContain("The operation was aborted");
+
+    await emitAndFlush(bus, h, statusEv("busy"));
+    expect(h.text()).not.toContain("The operation was aborted");
+  });
+
+  it("a following retry also clears it", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    expect(h.text()).toContain("The operation was aborted");
+
+    await emitAndFlush(bus, h, statusEv("retry"));
+    expect(h.text()).not.toContain("The operation was aborted");
+  });
+
+  it("a non-abort error is NOT cleared by busy", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, errorEv("ApiError", "Invalid token"));
+    expect(h.text()).toContain("Invalid token");
+
+    await emitAndFlush(bus, h, statusEv("busy"));
+    expect(h.text()).toContain("Invalid token");
+  });
+
+  it("an abort banner replaced by a different error is no longer treated as an abort", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+
+    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    await emitAndFlush(bus, h, errorEv("ApiError", "Invalid token"));
+    await emitAndFlush(bus, h, statusEv("busy"));
+    expect(h.text()).toContain("Invalid token");
+  });
+});

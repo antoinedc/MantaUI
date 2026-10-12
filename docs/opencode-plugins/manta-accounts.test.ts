@@ -219,7 +219,7 @@ describe("seat credential files", () => {
 
 type Call = { url: string; init: any };
 // `files` is the stand-in for the seat credential files: path → creds (null = unreadable).
-function rig(opts: { resolve: any; refresh?: any; files?: Record<string, any>; now?: () => number; respond?: (c: Call, n: number) => Response; testUpstream?: string | null }) {
+function rig(opts: { resolve: any; refresh?: any; limit?: any; files?: Record<string, any>; now?: () => number; respond?: (c: Call, n: number) => Response; testUpstream?: string | null }) {
   const calls: Call[] = [];
   const origFetch = (async (input: any, init: any) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -230,6 +230,7 @@ function rig(opts: { resolve: any; refresh?: any; files?: Record<string, any>; n
   const refreshCalls: any[] = [];
   const files = opts.files ?? {};
   const invalidated: string[] = [];
+  const limitCalls: any[] = [];
   const f = t.createAccountsFetch({
     origFetch,
     credentials: {
@@ -244,10 +245,18 @@ function rig(opts: { resolve: any; refresh?: any; files?: Record<string, any>; n
       refreshCalls.push([p, s]);
       return opts.refresh ? opts.refresh(p, s) : null;
     },
+    ...(opts.limit
+      ? {
+          limit: async (p: string, ids: any) => {
+            limitCalls.push([p, ids]);
+            return opts.limit(p, ids);
+          },
+        }
+      : {}),
     now: opts.now ?? (() => 1_000_000),
     testUpstream: opts.testUpstream ?? null,
   });
-  return { f, calls, resolveCalls, refreshCalls, files, invalidated };
+  return { f, calls, resolveCalls, refreshCalls, limitCalls, files, invalidated };
 }
 const sessionInit = (extra: Record<string, string> = {}) => ({
   method: "POST",
@@ -442,6 +451,235 @@ describe("wrapper", () => {
     await live.f(CODEX, sessionInit());
     expect(live.calls[0].url).toBe("http://127.0.0.1:4555/backend-api/codex/responses");
     expect(authOf(live.calls[0])).toBe("Bearer LIVE");
+  });
+});
+
+describe("429 → seat switch inside the request", () => {
+  const live1 = { seatId: "seat-1", live: true };
+  const status = (n: number) => new Response(n === 429 ? "limit hit" : "ok", { status: n });
+  // first request answers 429, every later one 200 (unless overridden)
+  const first429 = (_c: Call, n: number) => status(n === 1 ? 429 : 200);
+
+  it("429 on the live seat → limit called with provider/ids → retried ONCE on the new non-live seat", async () => {
+    const r = rig({ resolve: async () => live1, limit: async () => ({ ...seat2, moved: true }), files: files2(), respond: first429 });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(200);
+    expect(r.limitCalls).toEqual([["claude", { sessionID: "ses_1", parentSessionID: null }]]);
+    expect(r.calls).toHaveLength(2);
+    expect(authOf(r.calls[0])).toBe("Bearer LIVE");
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT2-TOKEN");
+    expect(r.calls[1].url).toBe(CLAUDE);
+    expect(r.calls[1].init.method).toBe("POST");
+    expect(r.calls[1].init.body).toBe(JSON.stringify({ m: 1 }));
+    expect(new Headers(r.calls[1].init.headers).get("x-opencode-session-id")).toBe("ses_1");
+  });
+
+  it("the sub-agent's parent id reaches limit", async () => {
+    const r = rig({ resolve: async () => live1, limit: async () => seat2, files: files2(), respond: first429 });
+    await r.f(CLAUDE, sessionInit({ "x-opencode-parent-session-id": "ses_parent" }));
+    expect(r.limitCalls[0][1]).toEqual({ sessionID: "ses_1", parentSessionID: "ses_parent" });
+  });
+
+  it("codex: the retry carries the new seat's account id", async () => {
+    const F = "/seats/codex/seat-2/auth.json";
+    const r = rig({
+      resolve: async () => live1,
+      limit: async () => ({ seatId: "seat-2", live: false, credentialFile: F }),
+      files: { [F]: { accessToken: "CX2", accountId: "acct-2", expiresAt: 9_000_000 } },
+      respond: first429,
+    });
+    const res = await r.f(CODEX, sessionInit({ "ChatGPT-Account-Id": "live-acct" }));
+    expect(res.status).toBe(200);
+    expect(r.limitCalls[0][0]).toBe("codex");
+    expect(new Headers(r.calls[1].init.headers).get("chatgpt-account-id")).toBe("acct-2");
+    expect(authOf(r.calls[1])).toBe("Bearer CX2");
+  });
+
+  it("429 on a non-live seat → answer live → retried with the ORIGINAL authorization", async () => {
+    const r = rig({ resolve: async () => seat2, limit: async () => ({ ...live1, moved: true }), files: files2(), respond: first429 });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(200);
+    expect(r.calls).toHaveLength(2);
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-TOKEN");
+    expect(authOf(r.calls[1])).toBe("Bearer LIVE");
+  });
+
+  it("429 on a non-live seat → answer another non-live seat → retried with that seat's token", async () => {
+    const F3 = "/seats/claude/seat-3/.credentials.json";
+    const r = rig({
+      resolve: async () => seat2,
+      limit: async () => ({ seatId: "seat-3", live: false, credentialFile: F3 }),
+      files: { ...files2(), [F3]: { accessToken: "SEAT3-TOKEN", expiresAt: 9_000_000 } },
+      respond: first429,
+    });
+    await r.f(CLAUDE, sessionInit());
+    expect(authOf(r.calls[0])).toBe("Bearer SEAT2-TOKEN");
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT3-TOKEN");
+  });
+
+  it("the new seat's near-expiry token is refreshed before the retry", async () => {
+    const F3 = "/seats/claude/seat-3/.credentials.json";
+    const r = rig({
+      resolve: async () => live1,
+      limit: async () => ({ seatId: "seat-3", live: false, credentialFile: F3 }),
+      files: { [F3]: { accessToken: "SEAT3-OLD", expiresAt: 1_030_000 } },
+      refresh: async () => {
+        r.files[F3] = { accessToken: "SEAT3-FRESH", expiresAt: 9_000_000 };
+        return { seatId: "seat-3", live: false, credentialFile: F3 };
+      },
+      respond: first429,
+    });
+    await r.f(CLAUDE, sessionInit());
+    expect(r.refreshCalls).toEqual([["claude", "seat-3"]]);
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT3-FRESH");
+  });
+
+  it("an unreadable credential file for the new seat → the original 429, no retry", async () => {
+    const r = rig({ resolve: async () => live1, limit: async () => seat2, files: {}, respond: () => status(429) });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(429);
+    expect(await res.text()).toBe("limit hit");
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it("answer names the SAME seat → the original 429, body still readable, no retry", async () => {
+    const r = rig({ resolve: async () => seat2, limit: async () => ({ ...seat2, moved: false }), files: files2(), respond: () => status(429) });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(429);
+    expect(await res.text()).toBe("limit hit");
+    expect(r.calls).toHaveLength(1);
+    expect(r.limitCalls).toHaveLength(1);
+  });
+
+  it("limit returns null or throws → the original 429", async () => {
+    for (const limit of [async () => null, async () => { throw new Error("boom"); }]) {
+      const r = rig({ resolve: async () => live1, limit, files: files2(), respond: () => status(429) });
+      const res = await r.f(CLAUDE, sessionInit());
+      expect(res.status).toBe(429);
+      expect(await res.text()).toBe("limit hit");
+      expect(r.calls).toHaveLength(1);
+    }
+  });
+
+  it("a retry that cannot be sent → the original 429, body intact (never throws)", async () => {
+    let n = 0;
+    const r = rig({
+      resolve: async () => live1,
+      limit: async () => seat2,
+      files: files2(),
+      respond: () => {
+        if (++n === 2) throw new Error("network down");
+        return status(429);
+      },
+    });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(429);
+    expect(await res.text()).toBe("limit hit");
+  });
+
+  it("a non-replayable body (stream) → 429 returned, no retry", async () => {
+    for (const seat of [live1, seat2]) {
+      const r = rig({ resolve: async () => seat, limit: async () => (seat === live1 ? seat2 : live1), files: files2(), respond: () => status(429) });
+      const res = await r.f(CLAUDE, { ...sessionInit(), body: new ReadableStream() });
+      expect(res.status).toBe(429);
+      expect(r.calls).toHaveLength(1);
+      expect(r.limitCalls).toHaveLength(0);
+    }
+  });
+
+  it("exactly one retry: when the retry is ALSO a 429 that response is returned and limit ran once", async () => {
+    const r = rig({ resolve: async () => live1, limit: async () => seat2, files: files2(), respond: () => status(429) });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(429);
+    expect(r.calls).toHaveLength(2);
+    expect(r.limitCalls).toHaveLength(1);
+  });
+
+  it("the 401 refresh retry on a non-live seat does not stack with a seat switch", async () => {
+    const r = rig({
+      resolve: async () => seat2,
+      limit: async () => live1,
+      files: files2(),
+      refresh: async () => {
+        r.files[F2] = { accessToken: "SEAT2-NEW", expiresAt: 9_000_000 };
+        return seat2;
+      },
+      respond: (_c, n) => status(n === 1 ? 401 : 429),
+    });
+    const res = await r.f(CLAUDE, sessionInit());
+    expect(res.status).toBe(429);
+    expect(r.calls).toHaveLength(2);
+    expect(r.limitCalls).toHaveLength(0);
+  });
+
+  it("after a 429 the conversation is re-resolved on its next request (cache dropped), or uses the new answer", async () => {
+    // answer differs from used seat → the new answer is remembered: next request uses it without a resolve
+    const a = rig({ resolve: async () => live1, limit: async () => seat2, files: files2(), respond: first429 });
+    await a.f(CLAUDE, sessionInit());
+    expect(a.resolveCalls).toHaveLength(1);
+    await a.f(CLAUDE, sessionInit());
+    expect(a.resolveCalls).toHaveLength(1);
+    expect(authOf(a.calls[2])).toBe("Bearer SEAT2-TOKEN");
+
+    // no usable answer → cache dropped, next request resolves again
+    const b = rig({ resolve: async () => seat2, limit: async () => null, files: files2(), respond: (_c, n) => status(n === 1 ? 429 : 200) });
+    await b.f(CLAUDE, sessionInit());
+    expect(b.resolveCalls).toHaveLength(1);
+    await b.f(CLAUDE, sessionInit());
+    expect(b.resolveCalls).toHaveLength(2);
+  });
+
+  it("a 200 never calls limit; requests go out exactly as before", async () => {
+    const live = rig({ resolve: async () => live1, limit: async () => seat2, files: files2() });
+    const init = sessionInit();
+    await live.f(CLAUDE, init);
+    expect(live.limitCalls).toHaveLength(0);
+    expect(live.calls[0].init).toBe(init);
+    const non = rig({ resolve: async () => seat2, limit: async () => live1, files: files2() });
+    await non.f(CLAUDE, sessionInit());
+    expect(non.limitCalls).toHaveLength(0);
+    expect(non.calls).toHaveLength(1);
+  });
+
+  it("without a limit dep a 429 is simply returned (behaviour as before)", async () => {
+    const r = rig({ resolve: async () => live1, respond: () => status(429) });
+    const init = sessionInit();
+    const res = await r.f(CLAUDE, init);
+    expect(res.status).toBe(429);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0].init).toBe(init);
+  });
+
+  it("a Request input with a body on the LIVE path: sent as built, and the retry carries the same body bytes", async () => {
+    const r = rig({ resolve: async () => live1, limit: async () => seat2, files: files2(), respond: first429 });
+    const req = new Request(CLAUDE, { method: "POST", headers: { authorization: "Bearer LIVE", "x-opencode-session-id": "ses_1" }, body: '{"hello":true}' });
+    const res = await r.f(req);
+    expect(res.status).toBe(200);
+    expect(r.calls).toHaveLength(2);
+    expect(r.calls[0].url).toBe(CLAUDE); // first attempt: the original Request
+    expect(r.calls[1].url).toBe(CLAUDE);
+    expect(r.calls[1].init.method).toBe("POST");
+    expect(Buffer.from(r.calls[1].init.body).toString()).toBe('{"hello":true}');
+    expect(authOf(r.calls[1])).toBe("Bearer SEAT2-TOKEN");
+  });
+
+  it("a Request input on the live path: the first attempt is still the ORIGINAL Request object", async () => {
+    const seen: any[] = [];
+    const orig = (async (input: any) => {
+      seen.push(input);
+      return new Response("{}", { status: 200 });
+    }) as any;
+    const f = t.createAccountsFetch({
+      origFetch: orig,
+      credentials: { read: () => null, invalidate: () => {} },
+      resolve: async () => live1,
+      refresh: async () => null,
+      limit: async () => null,
+    });
+    const req = new Request(CLAUDE, { method: "POST", headers: { "x-opencode-session-id": "ses_1" }, body: "{}" });
+    await f(req);
+    expect(seen[0]).toBe(req);
+    expect(seen).toHaveLength(1);
   });
 });
 

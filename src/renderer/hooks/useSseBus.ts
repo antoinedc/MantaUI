@@ -216,7 +216,17 @@ export function useSseBus(params: {
   } = params;
 
   const [running, setRunning] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
+  const [sendError, setSendErrorState] = useState<string | null>(null);
+  // True while the banner on screen came from a MessageAbortedError (a user
+  // Stop, or the box aborting a seat-limit retry before it resumes the turn).
+  // That banner is stale the moment a new turn starts, so a later
+  // `session.status busy|retry` clears it. EVERY other write resets this, so a
+  // different error is never swept away by the next busy.
+  const abortedBannerRef = useRef(false);
+  const setSendError = useCallback<React.Dispatch<React.SetStateAction<string | null>>>((v) => {
+    abortedBannerRef.current = false;
+    setSendErrorState(v);
+  }, []);
   // Provider label when `sendError` is an auth-failure banner (BET-316). When
   // non-null, ChatPanel renders a single [Reconnect] button that dispatches
   // `manta-open-subscriptions`. Tied 1:1 with `sendError`: cleared together
@@ -500,6 +510,10 @@ export function useSseBus(params: {
             }
           | undefined;
         const type = status?.type;
+        if ((type === "busy" || type === "retry") && abortedBannerRef.current) {
+          // A new turn began: the "Aborted" banner is stale.
+          setSendError(null);
+        }
         if (type === "retry") {
           // Running on a retry comes from the box's stream.running (the box
           // treats retry as running — see streamInterp session.status). This
@@ -571,6 +585,7 @@ export function useSseBus(params: {
             msg = human;
         }
         setSendError(msg);
+        abortedBannerRef.current = err?.name === "MessageAbortedError";
         setAuthReconnect(null);
         cancelTurnSettle();
         setRunning(false);
