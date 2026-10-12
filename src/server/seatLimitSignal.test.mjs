@@ -182,6 +182,24 @@ test("the limited mark is global to the seat, and expires after 5 minutes", asyn
   assert.equal((await h.svc.resolve("claude", "later")).seatId, "seat-1", "mark gone: least-loaded again");
 });
 
+test("conversationSeatFull: a marked-limited seat is full, one with room is not, no assignment is null; children follow the root", async () => {
+  const h = assignerHarness(two(), [snap(1, 5), snap(2, 10)]);
+  assert.equal(h.svc.conversationSeatFull("claude", "conv"), null, "no assignment yet");
+  await h.svc.resolve("claude", "conv");
+  await h.svc.resolve("claude", "kid", "conv");
+  assert.equal(h.svc.conversationSeatFull("claude", "conv"), false, "seat-1 at 5% has room");
+  h.svc.markLimited("claude", "conv");
+  assert.equal(h.svc.conversationSeatFull("claude", "conv"), true, "a marked seat counts as full");
+  assert.equal(h.svc.conversationSeatFull("claude", "kid"), true, "a sub-agent reads its conversation's seat");
+  h.tick(LIMITED_MARK_MS + 1);
+  assert.equal(h.svc.conversationSeatFull("claude", "conv"), false, "the mark expired");
+  assert.equal(h.svc.conversationSeatFull("codex", "conv"), null, "other provider: no assignment");
+  assert.equal(h.svc.conversationSeatFull("nope", "conv"), null);
+  const full = assignerHarness(two(), [snap(1, 100, { exhausted: true }), snap(2, 10)]);
+  await full.svc.resolve("claude", "c2"); // a new conversation avoids the full seat → seat-2
+  assert.equal(full.svc.conversationSeatFull("claude", "c2"), false);
+});
+
 test("reconsider: manual mode never moves", async () => {
   const h = assignerHarness(two({ mode: "manual" }), [snap(1, 90), snap(2, 10)]);
   await h.svc.resolve("claude", "conv");

@@ -667,6 +667,21 @@ export function createSeatAssigner({
   }
 
   /**
+   * Is the seat this session's conversation is assigned to full right now? Uses
+   * the same readings every decision uses (`snapshotsFor`), so a seat a failed
+   * turn marked limited counts as full. Synchronous, read-only.
+   * @returns {boolean|null} null = the conversation has no assignment for this provider
+   */
+  function conversationSeatFull(provider, sessionId) {
+    if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return null;
+    const s = ensure();
+    const root = s.children[sessionId]?.root ?? sessionId;
+    const seatId = s.providers[provider]?.[root]?.seatId;
+    if (!seatId) return null;
+    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === seatId));
+  }
+
+  /**
    * Re-decide one conversation NOW (after a limit signal and a fresh usage
    * poll), through the same decision + recording + announcing path as a request.
    * Only an automatic move changes anything: manual mode, an unassigned
@@ -683,5 +698,5 @@ export function createSeatAssigner({
     });
   }
 
-  return { resolve, refreshSeat, markLimited, reconsider, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
+  return { resolve, refreshSeat, markLimited, reconsider, conversationSeatFull, assignments, sessionAssignment, forgetSeat, _store: () => ensure() };
 }

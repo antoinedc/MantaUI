@@ -810,6 +810,16 @@ const usageStopEngine = createUsageStopEngine({
 // going". Fed by the event pump below and by the seat assigner's `onMoved`.
 const seatRetryWatch = createSeatRetryWatch({
   sessionAssignment: (sid) => seatAssigner.sessionAssignment(sid),
+  conversationSeatFull: (sid) => {
+    const a = seatAssigner.sessionAssignment(sid);
+    return a ? seatAssigner.conversationSeatFull(a.provider, sid) : null;
+  },
+  reconsider: (provider, sid) => seatAssigner.reconsider(provider, sid),
+  // The sweep asks opencode itself which sessions are asleep in a retry. Only
+  // directories holding a session that has a seat matter (a box can know ~100).
+  listDirectories: () => oc.knownSessionDirectories((sid) => !!seatAssigner.sessionAssignment(sid)),
+  listStatuses: (dir) => oc.listSessionStatuses(dir),
+  sessionDirectory: (sid) => oc.cachedSessionDirectory(sid),
   onLimitSignal: seatLimitSignal,
   abortSession: (sid) => oc.abortSession(sid),
   // The last user message pins the model "Keep going" goes out on (so the
@@ -819,6 +829,17 @@ const seatRetryWatch = createSeatRetryWatch({
     lastUserModelFromMessages(await oc.listMessages(sid, { limit: 100 })) ??
     lastUserModelFromMessages(await oc.listMessages(sid)),
   deliver: (args) => promptDelivery.deliver(args),
+});
+// A retry event fires once per attempt (hours apart for a plan limit) and is
+// lost across a restart, and nothing else moves a sleeping conversation — so the
+// watch also polls opencode. One run shortly after startup, then every minute;
+// `sweep()` carries its own in-flight guard and never rejects.
+setTimeout(() => void seatRetryWatch.sweep(), 10_000).unref();
+// eslint-disable-next-line no-unused-vars
+const { stop: stopSeatRetrySweep } = startPoller(() => seatRetryWatch.sweep(), {
+  intervalMs: 60_000,
+  label: "seat-retry-sweep",
+  immediate: false,
 });
 
 // Provider health (W4/W5/W8, BET-1536): the TWO health registers — account

@@ -16,6 +16,9 @@ import {
   compactSession,
   abortSession,
   getSessionStatus,
+  listSessionStatuses,
+  knownSessionDirectories,
+  cachedSessionDirectory,
   sessionExists,
   listPermissions,
   listQuestions,
@@ -2764,6 +2767,42 @@ test("getSessionStatus throws on a non-2xx response", async () => {
       await assert.rejects(() => getSessionStatus("ses_e"), /getSessionStatus 500/);
     },
   );
+});
+
+test("listSessionStatuses: whole directory-scoped map incl. retry details; non-2xx and a missing directory throw", async () => {
+  const map = { ses_r: { type: "retry", attempt: 1, message: "rate limit", next: 1791811799362 } };
+  const urls = [];
+  await withMockFetch(
+    async (url) => {
+      urls.push(String(url));
+      return String(url).includes("%2Fbad") ? new Response("boom", { status: 500 }) : new Response(JSON.stringify(map), { status: 200 });
+    },
+    async () => {
+      assert.deepEqual(await listSessionStatuses("/proj/x"), map);
+      await assert.rejects(() => listSessionStatuses("/bad"), /listSessionStatuses 500/);
+      await assert.rejects(() => listSessionStatuses(""), /directory required/);
+    },
+  );
+  assert.equal(urls[0], "http://127.0.0.1:4096/session/status?directory=%2Fproj%2Fx");
+});
+
+test("knownSessionDirectories / cachedSessionDirectory read the session→directory cache (distinct dirs, optional filter)", async () => {
+  _resetSessionDirectoryCache();
+  await withMockFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.includes("/session/status")) return new Response("{}", { status: 200 });
+      const id = u.split("/session/")[1];
+      return new Response(JSON.stringify({ id, directory: id === "ses_c" ? "/proj/y" : "/proj/x" }), { status: 200 });
+    },
+    async () => {
+      for (const id of ["ses_a", "ses_b", "ses_c"]) await getSessionStatus(id);
+    },
+  );
+  assert.deepEqual(knownSessionDirectories().sort(), ["/proj/x", "/proj/y"]);
+  assert.deepEqual(knownSessionDirectories((sid) => sid === "ses_c"), ["/proj/y"]);
+  assert.equal(cachedSessionDirectory("ses_a"), "/proj/x");
+  assert.equal(cachedSessionDirectory("nope"), null);
 });
 
 test("getSessionStatus: unresolvable directory throws and never hits the unscoped /session/status", async () => {
