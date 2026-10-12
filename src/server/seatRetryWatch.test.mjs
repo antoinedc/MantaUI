@@ -331,3 +331,253 @@ test("a pending move is forgotten when the session goes busy again", async () =>
   await watch.observeEvent(retryNext("s1", T0 + 3_600_000, "Overloaded"));
   assert.deepEqual(calls.map((c) => c[0]), ["signal"]);
 });
+
+// ---- sweep + "current seat has room" ---------------------------------------------
+
+const HOUR = 3_600_000;
+/**
+ * `dirs` is `{dir: statusMap | Error}`; `seatFull` is a mutable per-session answer
+ * (what the assigner would say), so a test can flip it the way a move would.
+ * `limitMoves` makes the limit handler "move" the conversation (seat now has room).
+ */
+function sweepSetup(over = {}) {
+  const dirs = over.dirs ?? { "/proj": { s1: { type: "retry", attempt: 1, message: LIMIT_MSG, next: T0 + 3 * HOUR } } };
+  const seatFull = over.seatFull ?? { s1: true };
+  const assignments = over.assignments ?? { s1: { provider: "claude", conversation: "s1" } };
+  const calls = [];
+  const logs = [];
+  let t = T0;
+  const watch = createSeatRetryWatch({
+    sessionAssignment: (sid) => assignments[sid] ?? null,
+    conversationSeatFull: (sid) => (sid in seatFull ? seatFull[sid] : null),
+    reconsider: async (provider, sid) => (calls.push(["reconsider", provider, sid]), { moved: false }),
+    onLimitSignal: async (sig) => {
+      calls.push(["signal", sig.sessionId]);
+      if (over.limitMoves) {
+        seatFull[sig.sessionId] = false;
+        return { moved: true, from: "seat-1", to: "seat-2" };
+      }
+      return { moved: false };
+    },
+    listDirectories: async () => Object.keys(dirs),
+    listStatuses: async (d) => {
+      calls.push(["status", d]);
+      if (dirs[d] instanceof Error) throw dirs[d];
+      return dirs[d];
+    },
+    sessionDirectory: over.sessionDirectory,
+    abortSession: async (sid) => void calls.push(["abort", sid]),
+    lastUserModel: async () => null,
+    deliver: async (a) => (calls.push(["deliver", a.sessionId, a.text]), { ok: true }),
+    now: () => t,
+    log: { warn: (...a) => logs.push(a.join(" ")) },
+  });
+  const names = () => calls.map((c) => c[0]).filter((n) => n !== "status");
+  return { watch, calls, logs, dirs, seatFull, assignments, names, advance: (ms) => (t += ms) };
+}
+
+test("sweep: a retry never seen as an event, seat full, limit handler moves it → abort + Keep going", async () => {
+  const h = sweepSetup({ limitMoves: true });
+  const res = await h.watch.sweep();
+  assert.deepEqual(res, { retrying: 1, woken: 1 });
+  assert.deepEqual(h.names(), ["signal", "abort", "deliver"]);
+  assert.deepEqual(h.calls.find((c) => c[0] === "deliver"), ["deliver", "s1", KEEP_GOING_PROMPT]);
+  assert.ok(h.logs.includes("[seat-retry] recovered s1 seat-1 -> seat-2"), h.logs.join("|"));
+  assert.ok(h.logs.includes("[seat-retry] sweep: 1 retrying, 1 woken"), h.logs.join("|"));
+});
+
+test("sweep: the conversation was already moved (current seat has room) → recover WITHOUT the limit handler", async () => {
+  const h = sweepSetup({ seatFull: { s1: false }, assignments: { s1: { provider: "claude", conversation: "s1", assignment: { seatId: "seat-2", movedFrom: "seat-1" } } } });
+  const res = await h.watch.sweep();
+  assert.deepEqual(res, { retrying: 1, woken: 1 });
+  assert.deepEqual(h.names(), ["abort", "deliver"], "no signal, no reconsider");
+  assert.ok(h.logs.includes("[seat-retry] recovered s1 seat-1 -> seat-2"), h.logs.join("|"));
+});
+
+test("sweep: every seat full → handler runs, nothing is aborted (opencode keeps waiting)", async () => {
+  const h = sweepSetup();
+  const res = await h.watch.sweep();
+  assert.deepEqual(res, { retrying: 1, woken: 0 });
+  assert.deepEqual(h.names(), ["signal"]);
+  assert.ok(h.logs.includes("[seat-retry] sweep: 1 retrying, 0 woken"), h.logs.join("|"));
+});
+
+test("sweep: all seats full, repeated sweeps → no abort loop, handler at most every 5 min, plain reconsider in between", async () => {
+  const h = sweepSetup();
+  await h.watch.sweep();
+  for (let i = 0; i < 4; i++) {
+    h.advance(60_000);
+    await h.watch.sweep();
+  }
+  assert.equal(h.names().filter((n) => n === "abort").length, 0);
+  assert.equal(h.names().filter((n) => n === "signal").length, 1, "the heavy handler is not re-run each minute");
+  assert.equal(h.names().filter((n) => n === "reconsider").length, 4);
+  h.advance(60_000); // 5 min after the first signal
+  await h.watch.sweep();
+  assert.equal(h.names().filter((n) => n === "signal").length, 2);
+});
+
+test("sweep: a retry whose next attempt is within 30 s is left alone", async () => {
+  const h = sweepSetup({
+    seatFull: { s1: false },
+    dirs: { "/proj": { s1: { type: "retry", message: LIMIT_MSG, next: T0 + RECOVER_MIN_WAIT_MS } } },
+  });
+  const res = await h.watch.sweep();
+  assert.deepEqual(res, { retrying: 1, woken: 0 });
+  assert.deepEqual(h.names(), []);
+});
+
+test("sweep: a retry with no `next` counts as long and is woken", async () => {
+  const h = sweepSetup({ seatFull: { s1: false }, dirs: { "/proj": { s1: { type: "retry", message: LIMIT_MSG } } } });
+  assert.deepEqual(await h.watch.sweep(), { retrying: 1, woken: 1 });
+});
+
+test("sweep: a non-limit retry message on a seat with room is not woken (overload recovers by itself)", async () => {
+  const h = sweepSetup({
+    seatFull: { s1: false },
+    dirs: { "/proj": { s1: { type: "retry", message: "Overloaded", next: T0 + HOUR } } },
+  });
+  assert.deepEqual(await h.watch.sweep(), { retrying: 1, woken: 0 });
+  assert.deepEqual(h.names(), []);
+});
+
+test("sweep: a failing directory changes nothing for it and never rejects; other directories are still swept", async () => {
+  const h = sweepSetup({
+    dirs: {
+      "/bad": new Error("opencode listSessionStatuses 500"),
+      "/ok": { s2: { type: "retry", message: LIMIT_MSG, next: T0 + HOUR } },
+    },
+    seatFull: { s2: false },
+    assignments: { s2: { provider: "claude", conversation: "s2" } },
+  });
+  let res;
+  await assert.doesNotReject(async () => (res = await h.watch.sweep()));
+  assert.deepEqual(res, { retrying: 1, woken: 1 });
+  assert.ok(h.logs.some((l) => l.includes("status of /bad failed")), h.logs.join("|"));
+  assert.deepEqual(h.names(), ["abort", "deliver"]);
+});
+
+test("sweep: a directory listing that throws is logged, not thrown", async () => {
+  const watch = createSeatRetryWatch({
+    sessionAssignment: () => null,
+    onLimitSignal: async () => null,
+    abortSession: async () => {},
+    deliver: async () => {},
+    listDirectories: async () => {
+      throw new Error("boom");
+    },
+    log: { warn() {} },
+  });
+  assert.deepEqual(await watch.sweep(), { retrying: 0, woken: 0 });
+});
+
+test("sweep: a tracked session the scan no longer shows in retry is dropped (its directory answered)", async () => {
+  const h = sweepSetup({ seatFull: { s1: true }, sessionDirectory: () => "/proj", dirs: { "/proj": {} } });
+  h.seatFull.s1 = true;
+  await h.watch.observeEvent(retryNext("s1", T0 + HOUR)); // tracked from a live event (handler: not moved)
+  h.calls.length = 0;
+  await h.watch.sweep(); // opencode says it is no longer retrying
+  await h.watch.onMoved(moved("s1"));
+  assert.deepEqual(h.names(), [], "forgotten: onMoved finds nothing to wake");
+});
+
+test("sweep: a tracked session is kept when its directory failed to answer", async () => {
+  const h = sweepSetup({ sessionDirectory: () => "/bad", dirs: { "/bad": new Error("down"), "/ok": {} } });
+  await h.watch.observeEvent(retryNext("s1", T0 + HOUR));
+  h.calls.length = 0;
+  await h.watch.sweep();
+  await h.watch.onMoved(moved("s1"));
+  assert.deepEqual(h.names(), ["abort", "deliver"], "still tracked → woken by the move");
+});
+
+test("sweep: a session with no seat assignment is ignored", async () => {
+  const h = sweepSetup({ assignments: {} });
+  assert.deepEqual(await h.watch.sweep(), { retrying: 0, woken: 0 });
+  assert.deepEqual(h.names(), []);
+});
+
+test("sweep: busy sessions in the status map are not retrying", async () => {
+  const h = sweepSetup({ dirs: { "/proj": { s1: { type: "busy" } } }, seatFull: { s1: false } });
+  assert.deepEqual(await h.watch.sweep(), { retrying: 0, woken: 0 });
+  assert.deepEqual(h.logs, [], "nothing logged when idle");
+});
+
+test("sweep: a sub-agent child found asleep is only aborted", async () => {
+  const h = sweepSetup({
+    assignments: { kid: { provider: "claude", conversation: "root" } },
+    seatFull: { kid: false },
+    dirs: { "/proj": { kid: { type: "retry", message: LIMIT_MSG, next: T0 + HOUR } } },
+  });
+  await h.watch.sweep();
+  assert.deepEqual(h.names(), ["abort"]);
+});
+
+test("sweep: an overlapping call is skipped, and a woken session is not woken again inside the debounce", async () => {
+  const h = sweepSetup({ seatFull: { s1: false } });
+  const [a, b] = await Promise.all([h.watch.sweep(), h.watch.sweep()]);
+  assert.equal(a.woken + b.woken, 1);
+  h.advance(60_000);
+  assert.deepEqual(await h.watch.sweep(), { retrying: 1, woken: 0 }, "still listed as retrying, inside the 2-minute recovery debounce");
+  assert.equal(h.names().filter((n) => n === "abort").length, 1);
+  h.advance(RECOVER_DEBOUNCE_MS);
+  assert.deepEqual(await h.watch.sweep(), { retrying: 1, woken: 1 });
+});
+
+test("live retry event: the conversation's seat already has room → recover without the limit handler", async () => {
+  const calls = [];
+  const watch = createSeatRetryWatch({
+    sessionAssignment: () => ({ provider: "claude", conversation: "s1", assignment: { seatId: "seat-2" } }),
+    conversationSeatFull: () => false,
+    onLimitSignal: async () => (calls.push(["signal"]), { moved: false }),
+    abortSession: async (sid) => void calls.push(["abort", sid]),
+    deliver: async (a) => void calls.push(["deliver", a.sessionId]),
+    now: () => T0,
+    log: { warn() {} },
+  });
+  await watch.observeEvent(retryNext("s1", T0 + HOUR));
+  assert.deepEqual(calls, [["abort", "s1"], ["deliver", "s1"]]);
+});
+
+test("live retry event: seat full and the handler leaves it on a full seat → nothing aborted", async () => {
+  const h = sweepSetup({ seatFull: { s1: true } });
+  await h.watch.observeEvent(retryNext("s1", T0 + HOUR));
+  assert.deepEqual(h.names(), ["signal"]);
+});
+
+test("live retry event: non-limit message on a full seat → plain reconsider (no limit handler), moved → recovered", async () => {
+  const seatFull = { s1: true };
+  const calls = [];
+  const watch = createSeatRetryWatch({
+    sessionAssignment: () => ({ provider: "claude", conversation: "s1" }),
+    conversationSeatFull: (sid) => seatFull[sid],
+    reconsider: async (provider, sid) => {
+      calls.push(["reconsider", provider, sid]);
+      seatFull[sid] = false;
+      return { moved: true, from: "seat-1", to: "seat-2" };
+    },
+    onLimitSignal: async () => (calls.push(["signal"]), { moved: false }),
+    abortSession: async (sid) => void calls.push(["abort", sid]),
+    deliver: async (a) => void calls.push(["deliver", a.sessionId]),
+    now: () => T0,
+    log: { warn() {} },
+  });
+  await watch.observeEvent(retryNext("s1", T0 + HOUR, "Overloaded"));
+  assert.deepEqual(calls, [["reconsider", "claude", "s1"], ["abort", "s1"], ["deliver", "s1"]]);
+});
+
+test("seat check that throws is treated as unknown (falls back to the limit handler), never rejects", async () => {
+  const calls = [];
+  const watch = createSeatRetryWatch({
+    sessionAssignment: () => ({ provider: "claude", conversation: "s1" }),
+    conversationSeatFull: () => {
+      throw new Error("store");
+    },
+    onLimitSignal: async () => (calls.push("signal"), { moved: false }),
+    abortSession: async () => calls.push("abort"),
+    deliver: async () => {},
+    now: () => T0,
+    log: { warn() {} },
+  });
+  await assert.doesNotReject(watch.observeEvent(retryNext("s1", T0 + HOUR)));
+  assert.deepEqual(calls, ["signal"]);
+});

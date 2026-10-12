@@ -809,6 +809,42 @@ export async function getSessionStatus(sessionId) {
   return t === "busy" || t === "retry" ? t : "idle";
 }
 
+/** Every session's status in one project directory, as opencode reports it:
+ *  `{[sessionId]: {type: "busy"|"retry"|"idle", ...}}` — an idle session is
+ *  simply absent. Unlike `getSessionStatus` this reads the whole map (a retry
+ *  entry carries `message` / `next` / `attempt`). Bounded, and throws on non-2xx
+ *  or a network error so a caller never mistakes "could not ask" for "nobody is
+ *  retrying".
+ *  @param {string} directory  absolute project directory
+ *  @returns {Promise<Record<string, {type?: string, message?: string, next?: number, attempt?: number}>>}
+ */
+export async function listSessionStatuses(directory) {
+  if (typeof directory !== "string" || directory.length === 0) throw new Error("listSessionStatuses: directory required");
+  const res = await ocFetch(apiUrl(`/session/status?directory=${encodeURIComponent(directory)}`), {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) {
+    throw new Error(`opencode listSessionStatuses ${res.status}: ${await res.text()}`);
+  }
+  const map = await res.json();
+  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+}
+
+/** Distinct directories of the sessions this server knows (the session→directory
+ *  cache). `include(sessionId)` narrows it to the sessions that matter to the caller. */
+export function knownSessionDirectories(include) {
+  const out = new Set();
+  for (const [sessionId, dir] of sessionDirectoryCache) {
+    if (!include || include(sessionId)) out.add(dir);
+  }
+  return [...out];
+}
+
+/** The cached directory of a session, or null (never fetches). */
+export function cachedSessionDirectory(sessionId) {
+  return sessionDirectoryCache.get(sessionId) ?? null;
+}
+
 /** List sessions scoped to a project directory.
  *  @param {string} [directory]
  */
