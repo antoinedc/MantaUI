@@ -115,8 +115,9 @@ export const delegate = tool({
             .string()
             .describe(
               'The opencode permission category the job needs, e.g. "bash", ' +
-                '"write", "edit", "webfetch". Matches the `permission` field on a ' +
-                "PermissionRequest.",
+                '"edit" (covers write/edit/apply_patch), "read" (covers ' +
+                'read/glob/grep), "webfetch". A bash/edit/read grant with pattern ' +
+                '"**" also lets the job reach files outside its worktree.',
             ),
           pattern: z
             .string()

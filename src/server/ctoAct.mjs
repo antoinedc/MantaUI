@@ -35,7 +35,7 @@
 // Pure over injected I/O — testable without a live opencode/tmux/delegate.
 import { beginInternalSession } from "./internalSessions.mjs";
 
-import { buildPermissionRuleset } from "./delegate.mjs";
+import { buildPermissionRuleset, permissionKeysFor } from "./delegate.mjs";
 import { appendLedgerBestEffort, patchStore } from "./ctoStores.mjs";
 
 // §9.4 budgets. A turn runs until done (idle) with a hard 30-minute budget;
@@ -116,7 +116,11 @@ export function validatePlan(plan) {
 // §9.4: "the executor picks a delegate job (worktree, branch, sidebar row)
 // when access includes write or edit, an ephemeral session otherwise."
 export function wantsDelegateSession(access) {
-  return (Array.isArray(access) ? access : []).some((a) => a?.permission === "write" || a?.permission === "edit");
+  // Any grant that resolves to opencode's "edit" key (write, apply_patch,
+  // patch, multiedit, edit) can change files, so it must get a worktree.
+  return (Array.isArray(access) ? access : []).some(
+    (a) => typeof a?.permission === "string" && a.action !== "deny" && permissionKeysFor(a.permission).includes("edit"),
+  );
 }
 
 // The permission ruleset for the session: the plan's access grants with the

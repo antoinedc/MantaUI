@@ -152,12 +152,18 @@ test("wantsDelegateSession: write/edit access → delegate job; else ephemeral",
   assert.equal(wantsDelegateSession([{ permission: "write", pattern: "**" }]), true);
   assert.equal(wantsDelegateSession([{ permission: "edit", pattern: "src/**" }]), true);
   assert.equal(wantsDelegateSession([]), false);
+  // Every alias that opencode resolves to the "edit" key must get a worktree.
+  for (const k of ["apply_patch", "patch", "multiedit"]) {
+    assert.equal(wantsDelegateSession([{ permission: k, pattern: "**" }]), true, k);
+  }
+  assert.equal(wantsDelegateSession([{ permission: "edit", pattern: "**", action: "deny" }]), false);
 });
 
 test("permissionRulesetFor: catch-all deny first, plan grants after (last-match-wins)", () => {
   const rs = permissionRulesetFor([{ permission: "write", pattern: "**" }]);
   assert.deepEqual(rs[0], { permission: "*", pattern: "**", action: "deny" });
-  assert.deepEqual(rs[1], { permission: "write", pattern: "**", action: "allow" });
+  // "write" is not an opencode permission key — the write tool asks under "edit".
+  assert.ok(rs.slice(1).some((r) => r.permission === "edit" && r.pattern === "**" && r.action === "allow"));
 });
 
 // ---------------------------------------------------------------------------
