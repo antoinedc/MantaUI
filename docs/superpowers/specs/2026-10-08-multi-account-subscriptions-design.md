@@ -189,16 +189,18 @@ Four rules, in this order. Defaults are shown; nothing else is tunable in v1.
    else it stays; once the seat is full (or dead) it takes a same-org seat with room,
    else an other-org seat under 70%, else any other-org seat with room.
 4. **Prefer a seat in the same org.** A same-org move is free (the cache is
-   shared), so it is always tried first (rule 3). A move to **another org** happens
-   at most once per conversation per 5 hours. Either way, a conversation never moves
-   back to a seat it left in the last 5 hours (no flip-flopping).
+   shared), so it is always tried first (rule 3). An optional (95–99%) move to
+   **another org** happens at most once per conversation per 5 hours; once the seat
+   is full or dead the cap no longer applies — a history re-send beats a conversation
+   stalled until its reset. A conversation never moves back to a seat it left in the
+   last 5 hours unless it is forced and nothing else has room (no flip-flopping).
 
 Why this is cheap:
 - Rules 1–2 mean a conversation normally lives its whole life on one seat.
 - Rule 3 moves before the hard wall, so a turn is never cut mid-way.
-- Rule 4 makes the common case (Team seats) free, and caps the cross-org waste at one
-  history re-send per conversation per 5h, roughly what an idle cache expiry already
-  costs.
+- Rule 4 makes the common case (Team seats) free, and caps the optional cross-org
+  waste at one history re-send per conversation per 5h, roughly what an idle cache
+  expiry already costs.
 - There is no automatic compaction: it loses detail and is a separate decision.
 
 Every move is logged and shown in the conversation as a one-line notice, e.g.
