@@ -580,10 +580,19 @@ test("decideMove: cross-org is capped at once per conversation per 5h; same-org 
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, sameOrg, nowMs).seatId, "seat-2");
   // hard move: capped cross-org excluded, falls back to a same-org seat with room
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 85), snap(3, 10)], nowMs).seatId, "seat-2");
-  // the cap blocks every other-org tier (under 70 AND any room) but never a same-org one, soft or hard
-  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 100), snap(3, 85)], nowMs), null, "hard, other-org with room but capped → stay");
+  // the cap blocks a SOFT cross-org move; a same-org one is always free
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 97), snap(2, 90), snap(3, 10)], nowMs).seatId, "seat-2", "soft: same org under 95 is free");
-  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A"), inOrg(3, "B")], [snap(1, 100), snap(3, 10)], nowMs), null, "full, but the only room is cross-org and capped → stay");
+  // a FULL seat is exempt: when its own org has nothing left, it crosses orgs even while capped
+  const forced = move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 100), snap(3, 85)], nowMs);
+  assert.equal(forced.seatId, "seat-3", "hard, own org all full, other org has room → moves despite the cap");
+  assert.equal(forced.crossOrg, true);
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A"), inOrg(3, "B")], [snap(1, 100), snap(3, 10)], nowMs).seatId, "seat-3", "full, the only room is cross-org → moves despite the cap");
+  // …and an exhausted-flag seat counts as full too
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A"), inOrg(3, "B")], [full(1), snap(3, 10)], nowMs).seatId, "seat-3");
+  // a recently-left other-org seat is still the last resort for a forced move
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR, left: { "seat-3": nowMs - HOUR } }, [inOrg(1, "A"), inOrg(3, "B")], [snap(1, 100), snap(3, 10)], nowMs).seatId, "seat-3");
+  // nothing anywhere with room → stay
+  assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, seats, [snap(1, 100), snap(2, 100), snap(3, 100)], nowMs), null);
   // an unusable seat is exempt: it takes the other-org seat even while capped
   assert.equal(move({ crossOrgMovedAt: nowMs - HOUR }, [inOrg(1, "A", { usable: false }), inOrg(3, "B")], [snap(3, 85)], nowMs).seatId, "seat-3");
 });
@@ -736,6 +745,21 @@ test("the service: a cross-org move stamps crossOrgMovedAt and a second one with
   a.tick(4 * HOUR);
   assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2");
   assert.equal(events.length, 2);
+});
+
+test("the service: a capped conversation whose whole org is full still crosses orgs (no stall until reset)", async () => {
+  const snaps = [snap(1, 20), snap(2, 80), snap(3, 80)];
+  const events = [];
+  const seats = [inOrg(1, "A"), inOrg(2, "A"), inOrg(3, "B")];
+  const a = assigner(fakeAccounts(two({ seats })), { snaps, onMoved: (e) => events.push(e) });
+  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-1");
+  snaps.splice(0, 3, snap(1, 97), snap(2, 96), snap(3, 30));
+  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-3", "first cross-org move");
+  a.tick(HOUR);
+  snaps.splice(0, 3, snap(1, 20), snap(2, 30), snap(3, 100)); // seat-3 (org B, its only seat) is now full
+  assert.equal((await a.svc.resolve("claude", "c")).seatId, "seat-2", "forced back across orgs within the cap window");
+  assert.equal(events.at(-1).crossOrg, true);
+  assert.equal(events.at(-1).reason, "exhausted");
 });
 
 test("move bookkeeping survives a save/load round trip", () => {

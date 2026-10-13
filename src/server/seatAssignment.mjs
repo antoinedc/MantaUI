@@ -35,9 +35,10 @@
 //          seat under 70, else any other-org seat with room;
 //        • a seat left within 5 h is never a target for a load move, and for a
 //          forced move only when nothing else has room;
-//        • a move to ANOTHER org (a cache re-send) happens at most once per
-//          conversation per 5 h (`crossOrgMovedAt`); a same-org move is free and
-//          uncapped. A dead seat (unusable) is exempt from the cap: it cannot serve.
+//        • an OPTIONAL (load 95–99) move to ANOTHER org (a cache re-send) happens
+//          at most once per conversation per 5 h (`crossOrgMovedAt`); a same-org
+//          move is free and uncapped. A full or dead seat is exempt from the cap:
+//          it cannot serve, and stalling until its reset is worse than a re-send.
 //      The 95/70 split + the 5 h no-move-back is the hysteresis: a conversation
 //      that just left a seat at 91 cannot come back when that seat reads 60.
 //      Every automatic move is recorded {movedFrom, movedAt, reason, trigger,
@@ -260,7 +261,12 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
   }
   const hard = why !== "load";
   const left = existing.left ?? {};
-  const crossOrgCapped = why !== "unusable" && typeof existing.crossOrgMovedAt === "number" && nowMs - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS;
+  // The cross-org cap only holds back an OPTIONAL (soft, 95–99%) move. A full or
+  // dead seat cannot serve the next turn, so staying means the conversation
+  // stalls until a reset hours away; a history re-send beats that. Hard moves
+  // already try every same-org seat first, so lifting the cap here only ever
+  // crosses orgs when the conversation's own org has nothing left.
+  const crossOrgCapped = !hard && typeof existing.crossOrgMovedAt === "number" && nowMs - existing.crossOrgMovedAt < CROSS_ORG_CAP_MS;
   const curOrg = seatOrgKey(cur);
 
   const candidates = [];
