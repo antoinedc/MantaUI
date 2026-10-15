@@ -792,3 +792,130 @@ test("the service: a new conversation on org A {10, 90} / org B {30, 30} lands o
     "the hint names the seat the resolver then picks",
   );
 });
+
+// ---- model-scoped limits: a capped model must not make a seat full for every model ----
+
+const OPUS = "claude-opus-5-5";
+const FABLE = "claude-fable-5";
+// 5h at `pct`, plus a model-scoped Fable weekly at `fablePct`.
+const scoped = (n, pct, fablePct, extra = {}) => ({
+  provider: "claude",
+  seatId: `seat-${n}`,
+  windows: [{ kind: "session", pct }, { kind: "weekly_scoped:fable", scope: "Fable", pct: fablePct }],
+  ...extra,
+});
+
+test("isSeatFull: a 100% model-scoped window fills the seat only for its own model", () => {
+  const s = scoped(1, 0, 100);
+  assert.equal(isSeatFull(s), false, "model unknown → scoped ignored");
+  assert.equal(isSeatFull(s, { model: OPUS }), false);
+  assert.equal(isSeatFull(s, { model: FABLE }), true);
+});
+
+test("decideMove: a conversation on a 5h-full seat moves to a seat whose only 100% window is Fable-scoped — for Opus, not for Fable", () => {
+  const seats = [seat(1), seat(2), seat(3)];
+  const snaps = [snap(1, 100), scoped(2, 0, 100), scoped(3, 0, 100)];
+  const run = (model) => decideMove({ existing: { seatId: "seat-1" }, seats, seatSnapshots: snaps, nowMs: 100 * HOUR, activeSeatId: null, model });
+  const opus = run(OPUS);
+  assert.equal(opus?.why, "exhausted");
+  assert.ok(["seat-2", "seat-3"].includes(opus.seatId));
+  assert.equal(run(null)?.seatId, opus.seatId, "model unknown → scoped ignored → same move");
+  assert.equal(run(FABLE), null, "for Fable every other seat is full");
+  // …and when one seat has Fable room, that is the Fable target.
+  const withRoom = [snap(1, 100), scoped(2, 0, 100), scoped(3, 30, 40)];
+  assert.equal(decideMove({ existing: { seatId: "seat-1" }, seats, seatSnapshots: withRoom, nowMs: 100 * HOUR, model: FABLE }).seatId, "seat-3");
+});
+
+test("decideMove: a conversation on a seat whose only full window is the Fable scope stays put when it is not on Fable", () => {
+  const seats = [seat(1), seat(2)];
+  const snaps = [scoped(1, 10, 100), snap(2, 0)];
+  assert.equal(decideMove({ existing: { seatId: "seat-1" }, seats, seatSnapshots: snaps, nowMs: 100 * HOUR, model: OPUS }), null);
+  assert.equal(decideMove({ existing: { seatId: "seat-1" }, seats, seatSnapshots: snaps, nowMs: 100 * HOUR, model: FABLE })?.seatId, "seat-2");
+});
+
+test("chooseSeat / decideSeat: a Fable-capped seat is a placement target for Opus, never for Fable", () => {
+  const seats = [seat(1), seat(2)];
+  const snaps = [scoped(1, 0, 100), snap(2, 50)];
+  assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps, model: OPUS }), "seat-1");
+  assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps, model: FABLE }), "seat-2");
+  assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps }), "seat-1", "no model → scoped ignored");
+  const d = decideSeat({ existing: { seatId: "seat-2" }, mode: "auto", activeSeatId: null, seats, seatSnapshots: [scoped(1, 0, 100), snap(2, 100)], nowMs: 100 * HOUR, model: OPUS });
+  assert.equal(d.reason, "moved");
+  assert.equal(d.seatId, "seat-1");
+});
+
+test("normalizeAssignments: a valid model is kept, an invalid one dropped", () => {
+  const out = normalizeAssignments({ providers: { claude: {
+    ok: { seatId: "seat-1", assignedAt: 5, model: OPUS },
+    num: { seatId: "seat-1", assignedAt: 5, model: 7 },
+    empty: { seatId: "seat-1", assignedAt: 5, model: "" },
+    long: { seatId: "seat-1", assignedAt: 5, model: "m".repeat(201) },
+  } } });
+  assert.equal(out.providers.claude.ok.model, OPUS);
+  for (const k of ["num", "empty", "long"]) assert.equal("model" in out.providers.claude[k], false, k);
+});
+
+// Today's live scenario: 3 seats, the conversation's seat at 100% of its 5h, the other
+// two at 0% of 5h but 100% of the Fable weekly. An Opus conversation must move.
+const liveSeats = () => two({ seats: [seat(1), seat(2), seat(3)], activeSeatId: "seat-1" });
+const liveSnaps = [snap(1, 100), scoped(2, 0, 100), scoped(3, 0, 100)];
+
+test("the service: resolve records the request's model, only rewriting the store when it changes", async () => {
+  const a = assigner(fakeAccounts(liveSeats()), { snaps: [snap(1, 10), snap(2, 50), snap(3, 50)] });
+  await a.svc.resolve("claude", "c1", null, { model: OPUS });
+  assert.equal(a.svc.assignments("claude").c1.model, OPUS);
+  const saves = a.saves.length;
+  await a.svc.resolve("claude", "c1", null, { model: OPUS });
+  assert.equal(a.saves.length, saves, "same model → no write");
+  await a.svc.resolve("claude", "c1", null, { model: FABLE });
+  assert.equal(a.svc.assignments("claude").c1.model, FABLE);
+  assert.equal(a.saves.length, saves + 1, "a changed model is persisted");
+  assert.equal(a.saved.providers.claude.c1.model, FABLE);
+  await a.svc.resolve("claude", "c1", null, { model: "m".repeat(201) });
+  assert.equal(a.svc.assignments("claude").c1.model, FABLE, "a malformed model is ignored");
+  await a.svc.resolve("claude", "c1");
+  assert.equal(a.svc.assignments("claude").c1.model, FABLE, "no model keeps the stored one");
+});
+
+test("the service: reconsider uses the stored model — an Opus conversation on a 5h-full seat moves past Fable-capped seats", async () => {
+  const snaps = [snap(1, 10), snap(2, 10), snap(3, 10)];
+  const moved = [];
+  const a = assigner(fakeAccounts(liveSeats()), { snaps, onMoved: (e) => moved.push(e) });
+  // The conversation is placed on seat-1 for Opus, then seat-1 hits its 5h limit.
+  const first = await a.svc.resolve("claude", "opus-conv", null, { model: OPUS });
+  assert.equal(first.seatId, "seat-1", "least-loaded tie goes to the active seat");
+  snaps.splice(0, snaps.length, ...liveSnaps);
+  assert.equal(a.svc.conversationSeatFull("claude", "opus-conv"), true);
+  const res = await a.svc.reconsider("claude", "opus-conv");
+  assert.equal(res.moved, true);
+  assert.ok(["seat-2", "seat-3"].includes(res.to));
+  assert.equal(res.reason, "exhausted");
+  assert.equal(a.svc.assignments("claude")["opus-conv"].model, OPUS, "the model survives the move");
+  assert.equal(moved.length, 1);
+});
+
+test("the service: a Fable conversation in the same situation has nowhere to go; a conversation with no stored model is treated as unknown (scoped ignored)", async () => {
+  const snaps = [snap(1, 10), snap(2, 10), snap(3, 10)];
+  const a = assigner(fakeAccounts(liveSeats()), { snaps });
+  await a.svc.resolve("claude", "fable-conv", null, { model: FABLE });
+  await a.svc.resolve("claude", "legacy-conv"); // a plugin that sends no model
+  snaps.splice(0, snaps.length, ...liveSnaps);
+  assert.deepEqual(await a.svc.reconsider("claude", "fable-conv"), { moved: false });
+  assert.equal((await a.svc.reconsider("claude", "legacy-conv")).moved, true);
+  // A model passed to reconsider (the model of the request that just failed) beats the stored one.
+  const c = assigner(fakeAccounts(liveSeats()), { snaps });
+  c.svc._store().providers.claude.x = { seatId: "seat-1", assignedAt: 1, lastUsedAt: 1, model: OPUS };
+  assert.deepEqual(await c.svc.reconsider("claude", "x", { model: FABLE }), { moved: false });
+  assert.equal((await c.svc.reconsider("claude", "x", { model: OPUS })).moved, true);
+});
+
+test("the service: a sub-agent on another model decides with its own model but never overwrites the conversation's stored model", async () => {
+  const a = assigner(fakeAccounts(liveSeats()), { snaps: [snap(1, 10), snap(2, 50), snap(3, 50)] });
+  await a.svc.resolve("claude", "root", null, { model: OPUS });
+  const saves = a.saves.length;
+  await a.svc.resolve("claude", "kid", "root", { model: "claude-sonnet-5-5" });
+  await a.svc.resolve("claude", "root", null, { model: OPUS });
+  await a.svc.resolve("claude", "kid", "root", { model: "claude-sonnet-5-5" });
+  assert.equal(a.svc.assignments("claude").root.model, OPUS);
+  assert.equal(a.saves.length, saves + 1, "only the child link is written, no model flip-flop");
+});

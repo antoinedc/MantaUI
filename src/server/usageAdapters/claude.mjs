@@ -175,7 +175,11 @@ export const claudeAdapter = {
     const sonnetExtra = extraFor(limits?.seven_day_sonnet ?? limits?.["7d_sonnet"], "Sonnet (7d)");
     if (sonnetExtra) extras.push(sonnetExtra);
 
-    const exhausted = isUsageAtLimit(windows);
+    // A model-scoped cap only limits requests for THAT model, so a seat whose only
+    // full window is a scope can still serve every other model: it is not
+    // exhausted. The scoped window stays in `windows` (the UI shows it; the seat
+    // logic applies it per request model).
+    const exhausted = isUsageAtLimit(windows.filter((w) => !w.scope));
 
     return {
       provider: "claude",

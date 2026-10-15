@@ -7,6 +7,7 @@ import {
   activeWindows,
   leastLoadedSeat,
   aggregateSnapshot,
+  windowAppliesToModel,
 } from "./seatChoice.mjs";
 
 const win = (kind, pct, extra = {}) => ({ kind, label: kind, pct, ...extra });
@@ -144,4 +145,55 @@ test("seatLoadWindow: the active, fresh window that defines the load; null when 
   assert.equal(seatLoadWindow(seat("a", [])), null);
   assert.equal(seatLoadWindow(null), null);
   assert.equal(seatLoad(seat("a", [win("session", 99, { stale: true })])), 0, "seatLoad is unchanged: windows reported, none in force → 0");
+});
+
+// ---- model-scoped windows -----------------------------------------------------
+
+const fable = (pct, extra = {}) => win("weekly_scoped:fable", pct, { scope: "Fable", ...extra });
+
+test("windowAppliesToModel: an unscoped window applies to every model, known or not", () => {
+  assert.equal(windowAppliesToModel(win("session", 100), "claude-opus-5-5"), true);
+  assert.equal(windowAppliesToModel(win("weekly", 100), null), true);
+  assert.equal(windowAppliesToModel(win("weekly", 100), undefined), true);
+});
+
+test("windowAppliesToModel: a scope matches a hyphen/dot/slash/colon-separated token of the model id", () => {
+  assert.equal(windowAppliesToModel(fable(100), "claude-fable-5"), true);
+  assert.equal(windowAppliesToModel(fable(100), "claude-fable-5-1"), true);
+  assert.equal(windowAppliesToModel(fable(100), "anthropic/claude-fable-5"), true);
+  assert.equal(windowAppliesToModel(fable(100), "Claude-FABLE-5"), true, "case-insensitive");
+  assert.equal(windowAppliesToModel(win("weekly_scoped:opus", 100, { scope: "Opus" }), "claude-opus-5-5"), true);
+  assert.equal(windowAppliesToModel(fable(100), "claude_fable_5"), true, "underscore separates tokens too");
+  assert.equal(windowAppliesToModel(win("weekly_scoped:opus", 100, { scope: " OPUS! " }), "claude-opus-5-5"), true, "the scope name is normalized");
+});
+
+test("windowAppliesToModel: a scope never matches another model, a substring of a token, or an unknown model", () => {
+  assert.equal(windowAppliesToModel(fable(100), "claude-opus-5-5"), false);
+  assert.equal(windowAppliesToModel(fable(100), "claude-unfabled-5"), false, "token match, not a raw substring");
+  assert.equal(windowAppliesToModel(fable(100), null), false);
+  assert.equal(windowAppliesToModel(fable(100), undefined), false);
+  assert.equal(windowAppliesToModel(fable(100), ""), false);
+  assert.equal(windowAppliesToModel({ kind: "weekly_scoped:fable", pct: 1 }, "claude-fable-5"), true, "scope falls back to the kind suffix");
+});
+
+test("seatLoad: a 100% model-scoped window is ignored with no model or another model, counted for its own model", () => {
+  const s = seat("a", [win("session", 0), win("weekly", 10), fable(100)]);
+  assert.equal(seatLoad(s), 10, "model unknown → scoped ignored");
+  assert.equal(seatLoad(s, { model: null }), 10);
+  assert.equal(seatLoad(s, { model: "claude-opus-5-5" }), 10);
+  assert.equal(seatLoad(s, { model: "claude-fable-5" }), 100);
+  assert.deepEqual(seatLoadWindow(s), { kind: "weekly", pct: 10 });
+  assert.deepEqual(seatLoadWindow(s, { model: "claude-fable-5" }), { kind: "weekly_scoped:fable", pct: 100 });
+});
+
+test("seatLoad: a seat that only reports a scoped window reads 0 for another model (reported, none applicable), not unknown", () => {
+  assert.equal(seatLoad(seat("a", [fable(100)]), { model: "claude-opus-5-5" }), 0);
+});
+
+test("leastLoadedSeat: a seat full only on a scoped window ranks by its other windows for another model, last for that model", () => {
+  const capped = seat("capped", [win("session", 0), fable(100)]);
+  const busy = seat("busy", [win("session", 60)]);
+  assert.equal(leastLoadedSeat([busy, capped], { model: "claude-opus-5-5" }).seatId, "capped");
+  assert.equal(leastLoadedSeat([busy, capped]).seatId, "capped", "no model → scoped ignored");
+  assert.equal(leastLoadedSeat([busy, capped], { model: "claude-fable-5" }).seatId, "busy");
 });

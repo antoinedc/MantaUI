@@ -19,6 +19,11 @@
  *   - Intercepts ONLY `POST api.anthropic.com/v1/messages*` and
  *     `POST chatgpt.com/backend-api/codex/*`. Everything else — token refreshes,
  *     profile and usage calls — is the original fetch, untouched.
+ *   - The request's MODEL (the top-level `model` string of a JSON string body) is
+ *     sent to resolve and limit, because a model-scoped usage window ("7d · Fable")
+ *     limits only that model. Read-only: the body is never altered, any parse
+ *     failure just means "model unknown", and it is parsed only when a call to
+ *     manta-server actually needs it.
  *   - A live seat passes through unchanged (the zero-risk default).
  *   - FAIL-SAFE: any problem talking to manta-server (1.5 s timeout) uses the
  *     last result seen for that conversation, else passes the request through
@@ -76,6 +81,9 @@ const EXPIRY_MARGIN_MS = 60_000
 const MAX_CACHE_ENTRIES = 500
 
 type Provider = "claude" | "codex"
+
+/** The conversation a request belongs to, plus its model when known. */
+type RequestIds = { sessionID: string; parentSessionID: string | null; model?: string | null }
 
 /** manta-server's answer: which seat, and where its credential file is. */
 interface Resolved {
@@ -135,6 +143,42 @@ function sessionIds(headers: Headers): { sessionID: string; parentSessionID: str
   const sessionID = own ?? parent
   if (!sessionID) return null
   return { sessionID, parentSessionID: own && parent && parent !== own ? parent : null }
+}
+
+/**
+ * The model id of a request body: the top-level `model` string of a JSON string
+ * body, else null (any other body type, unparseable JSON, no/non-string model).
+ * Read-only — never touches the body it is given.
+ */
+function modelFromBody(body: unknown): string | null {
+  if (typeof body !== "string" || body === "") return null
+  try {
+    const m = JSON.parse(body)?.model
+    return typeof m === "string" && m ? m : null
+  } catch {
+    return null
+  }
+}
+
+/** `ids` carrying a `model` that is only worked out (once) when first read. It is
+ *  deliberately NOT enumerable: the ids stay `{sessionID, parentSessionID}` to
+ *  anything that copies or compares them. */
+function withLazyModel(
+  ids: { sessionID: string; parentSessionID: string | null },
+  body: unknown,
+): { sessionID: string; parentSessionID: string | null; model?: string | null } {
+  let done = false
+  let value: string | null = null
+  return Object.defineProperty({ ...ids }, "model", {
+    enumerable: false,
+    get() {
+      if (!done) {
+        done = true
+        value = modelFromBody(body)
+      }
+      return value
+    },
+  })
 }
 
 /** The conversation key used for caching: a sub-agent shares its parent's. */
@@ -365,11 +409,11 @@ interface WrapperDeps {
   /** Reads the seat's token from its credential file (never from HTTP). */
   credentials: CredentialReader
   /** manta-server round trips; `null` = unreachable / refused. */
-  resolve: (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }) => Promise<Resolved | null>
+  resolve: (provider: Provider, ids: RequestIds) => Promise<Resolved | null>
   refresh: (provider: Provider, seatId: string) => Promise<Resolved | null>
   /** A 429 happened: re-place the conversation, answer with its seat now. Optional —
    *  absent means no seat-switch retry (behaviour as before). */
-  limit?: (provider: Provider, ids: { sessionID: string; parentSessionID: string | null }) => Promise<Resolved | null>
+  limit?: (provider: Provider, ids: RequestIds) => Promise<Resolved | null>
   now?: () => number
   testUpstream?: string | null
 }
@@ -389,7 +433,7 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     if (map.size > MAX_CACHE_ENTRIES) map.delete(map.keys().next().value as string)
   }
 
-  async function seatFor(provider: Provider, ids: { sessionID: string; parentSessionID: string | null }): Promise<Resolved | null> {
+  async function seatFor(provider: Provider, ids: RequestIds): Promise<Resolved | null> {
     const key = rootKey(provider, ids)
     const cached = byConversation.get(key)
     if (cached && now() - cached.at < RESOLVE_CACHE_MS) return cached.result
@@ -460,7 +504,7 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
     res: Response,
     c: {
       provider: Provider
-      ids: { sessionID: string; parentSessionID: string | null }
+      ids: RequestIds
       base: Headers
       input: unknown
       init: any
@@ -517,15 +561,16 @@ function createAccountsFetch(deps: WrapperDeps): typeof fetch {
   const wrapped = async function mantaAccountsFetch(input: any, init?: any): Promise<Response> {
     // ---- decide (no network to the provider, nothing consumed) ----
     let provider: Provider | null = null
-    let ids: { sessionID: string; parentSessionID: string | null } | null = null
+    let ids: RequestIds | null = null
     let base: Headers | null = null
     let seat: Resolved | null = null
     try {
       provider = matchTarget(input, methodOf(input, init))
       if (!provider) return origFetch(input, init)
       base = collectHeaders(input, init)
-      ids = sessionIds(base)
-      if (!ids) return send(input, init, {})
+      const own = sessionIds(base)
+      if (!own) return send(input, init, {})
+      ids = withLazyModel(own, init?.body)
       seat = await seatFor(provider, ids)
     } catch {
       return origFetch(input, init)
@@ -641,6 +686,7 @@ function install(): void {
     resolve: (provider, ids) => {
       const q = new URLSearchParams({ provider, sessionID: ids.sessionID })
       if (ids.parentSessionID) q.set("parentSessionID", ids.parentSessionID)
+      if (ids.model) q.set("model", ids.model)
       return callServer(origFetch, server, `/api/accounts/resolve?${q}`, { method: "GET", timeoutMs: RESOLVE_TIMEOUT_MS })
     },
     refresh: (provider, seatId) =>
@@ -648,6 +694,7 @@ function install(): void {
     limit: (provider, ids) => {
       const body: Record<string, string> = { provider, sessionID: ids.sessionID }
       if (ids.parentSessionID) body.parentSessionID = ids.parentSessionID
+      if (ids.model) body.model = ids.model
       return callServer(origFetch, server, "/api/accounts/limit", { method: "POST", body, timeoutMs: LIMIT_TIMEOUT_MS })
     },
     testUpstream: loopbackBase(process.env.MANTA_ACCOUNTS_TEST_UPSTREAM),
@@ -677,6 +724,8 @@ export const MantaAccounts: Plugin = async () => {
   matchTarget,
   collectHeaders,
   sessionIds,
+  modelFromBody,
+  withLazyModel,
   rootKey,
   jwtClaims,
   residencyFromToken,

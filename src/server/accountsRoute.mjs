@@ -6,8 +6,10 @@
 // `{seatId, live:true}` or `{seatId, live:false, provider, credentialFile,
 // expiresAt?}` — NEVER a token: the plugin reads the seat's credential file
 // itself (same OS user). `/limit` answers the resolve shape plus `moved`. 400 on bad input, 404 on an unknown seat, 405 on a
-// wrong method. A thrown error is the caller's to turn into a 500 (index.mjs
-// owns that, with its class-2 marker).
+// wrong method. Resolve and limit take an optional `model` (the request's model id)
+// that scopes model-limited usage windows; a malformed one is ignored, never a 400.
+// A thrown error is the caller's to turn into a 500 (index.mjs owns that, with its
+// class-2 marker).
 //
 // DEFENCE IN DEPTH: besides the Bearer gate, both routes insist on a DIRECT
 // loopback caller. The box is reachable from the internet through a reverse
@@ -19,6 +21,14 @@ import { resolveRoot } from "./seatAssignment.mjs";
 
 const PROVIDERS = ["claude", "codex"];
 const MAX_ID = 200;
+
+const MODEL_RE = /^[A-Za-z0-9._:/-]+$/;
+
+/** The request's model id when it is well-formed (1–200 chars of [A-Za-z0-9._:/-]),
+ *  else null. A bad one is "unknown", never an error: an old or odd plugin keeps working. */
+export function validModel(v) {
+  return typeof v === "string" && v.length > 0 && v.length <= MAX_ID && MODEL_RE.test(v) ? v : null;
+}
 
 export const ACCOUNTS_ROUTE_PATHS = ["/api/accounts/resolve", "/api/accounts/refresh", "/api/accounts/limit"];
 
@@ -52,7 +62,7 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
   // conversation NOW, and answer where its requests go from here. The
   // conversation is the ROOT: a sub-agent's id (or, for a child not linked yet,
   // its parent's) resolves to it, because assignments are per conversation.
-  async function handleLimit(provider, sessionID, parentSessionID) {
+  async function handleLimit(provider, sessionID, parentSessionID, model) {
     const children = seatAssigner._store?.()?.children ?? {};
     const { root } = resolveRoot({ sessionID, parentSessionID, children });
     seatAssigner.markLimited(provider, root);
@@ -61,8 +71,8 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
     } catch {
       /* a refresh that cannot start must not fail the switch */
     }
-    const reconsidered = await seatAssigner.reconsider(provider, root);
-    const resolved = await seatAssigner.resolve(provider, sessionID, parentSessionID);
+    const reconsidered = await seatAssigner.reconsider(provider, root, { model });
+    const resolved = await seatAssigner.resolve(provider, sessionID, parentSessionID, { model });
     return { ...resolved, moved: !!reconsidered?.moved };
   }
 
@@ -88,7 +98,7 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
         respondJson(res, 400, { error: "invalid" });
         return true;
       }
-      respondJson(res, 200, await seatAssigner.resolve(provider, sessionID, parentSessionID));
+      respondJson(res, 200, await seatAssigner.resolve(provider, sessionID, parentSessionID, { model: validModel(url.searchParams.get("model")) }));
       return true;
     }
     const body = await readJson(req).catch(() => null);
@@ -104,7 +114,7 @@ export function createAccountsRouteHandler({ seatAssigner, readJson, respondJson
         respondJson(res, 400, { error: "invalid" });
         return true;
       }
-      respondJson(res, 200, await handleLimit(body.provider, sessionID, parentSessionID));
+      respondJson(res, 200, await handleLimit(body.provider, sessionID, parentSessionID, validModel(body?.model)));
       return true;
     }
     const provider = body?.provider;

@@ -204,3 +204,37 @@ test("limit: an assigner failure propagates (index.mjs turns it into the class-2
   const { call } = harness({ ...limitAssigner(), reconsider: async () => { throw new Error("boom"); } });
   await assert.rejects(call("POST", "/api/accounts/limit", limitBody()), /boom/);
 });
+
+// ---- model (scopes model-limited usage windows) -------------------------------
+
+test("resolve: a valid model is passed to the assigner; a malformed or missing one is ignored, never a 400", async () => {
+  const seen = [];
+  const { call } = harness({ ...assigner, resolve: async (p, s, parent, opts) => (seen.push(opts), { seatId: "x", live: true }) });
+  assert.equal((await call("GET", "/api/accounts/resolve?provider=claude&sessionID=s&model=claude-opus-5-5")).out[0], 200);
+  assert.equal((await call("GET", "/api/accounts/resolve?provider=claude&sessionID=s&model=anthropic/claude-fable-5:1.0")).out[0], 200);
+  for (const bad of ["a%20b", "a%3Bb", "%3Cscript%3E", "", "x".repeat(201)]) {
+    assert.equal((await call("GET", `/api/accounts/resolve?provider=claude&sessionID=s&model=${bad}`)).out[0], 200, `model=${bad}`);
+  }
+  assert.equal((await call("GET", "/api/accounts/resolve?provider=claude&sessionID=s")).out[0], 200);
+  assert.deepEqual(seen.map((o) => o.model), ["claude-opus-5-5", "anthropic/claude-fable-5:1.0", null, null, null, null, null, null]);
+});
+
+test("limit: the model reaches both the re-decision and the follow-up resolve; a malformed one is ignored (still 200)", async () => {
+  const log = [];
+  const a = {
+    ...assigner,
+    _store: () => ({ children: {} }),
+    markLimited: () => "seat-1",
+    reconsider: async (p, root, opts) => (log.push(["reconsider", opts.model]), { moved: true }),
+    resolve: async (p, s, parent, opts) => (log.push(["resolve", opts.model]), { seatId: "seat-2", live: true }),
+  };
+  const { call } = harness(a);
+  const ok = await call("POST", "/api/accounts/limit", { body: { provider: "claude", sessionID: "s", model: "claude-opus-5-5" } });
+  assert.deepEqual(ok.out, [200, { seatId: "seat-2", live: true, moved: true }]);
+  assert.deepEqual(log, [["reconsider", "claude-opus-5-5"], ["resolve", "claude-opus-5-5"]]);
+  log.length = 0;
+  for (const model of ["bad model", 42, { a: 1 }, "x".repeat(201), undefined]) {
+    assert.equal((await call("POST", "/api/accounts/limit", { body: { provider: "claude", sessionID: "s", model } })).out[0], 200);
+  }
+  assert.ok(log.every(([, m]) => m === null), "every malformed model became unknown");
+});
