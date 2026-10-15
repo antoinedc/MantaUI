@@ -48,6 +48,16 @@
 //      the NEXT request will use) and a switch is recorded as a move with reason
 //      "manual" — but no `moved` event: the user did it on purpose.
 //
+// MODEL-SCOPED LIMITS. A usage window scoped to one model ("7d · Fable") limits only
+//   requests for that model (seatChoice `windowAppliesToModel`). Every load / full /
+//   least-loaded decision therefore takes the conversation's MODEL: the request's
+//   own on `resolve`, the stored one (`assignment.model`, the model of its most
+//   recent request) for a server-side re-decision (`reconsider`,
+//   `conversationSeatFull`). Model unknown → scoped windows are ignored, so a seat
+//   whose Fable cap is full is still a target for an Opus conversation; the
+//   reactive path (429 → `markLimited` → seat full → move) covers a conversation
+//   that does land on a capped model.
+//
 // A "conversation" is the ROOT session. opencode sends the sub-agent's
 // `x-opencode-parent-session-id` one level only, so a deeper chain is followed
 // through the child → root map recorded on the way in.
@@ -115,6 +125,7 @@ export function normalizeAssignments(raw) {
         if (typeof a.crossOrg === "boolean") kept.crossOrg = a.crossOrg;
       }
       if (Number.isFinite(a.crossOrgMovedAt)) kept.crossOrgMovedAt = a.crossOrgMovedAt;
+      if (isId(a.model)) kept.model = a.model;
       if (a.left && typeof a.left === "object") {
         const left = {};
         for (const [seatId, at] of Object.entries(a.left)) if (isId(seatId) && Number.isFinite(at)) left[seatId] = at;
@@ -180,26 +191,29 @@ export function pruneAssignments(store, nowMs, ttlMs = ASSIGNMENT_TTL_MS) {
  *                 every seat with one, a full seat last (seatChoice).
  *            A seat with no org info is its own org, so it never has a route.
  *
+ * `model` (the conversation's model id, null = unknown) decides which model-scoped
+ * windows count (see the header).
+ *
  * @param {{mode: string, activeSeatId: string|null,
  *          seats: Array<{seatId:string, usable:boolean, accountId?:string, orgId?:string|null}>,
- *          seatSnapshots?: Array<{seatId?:string}>}} args
+ *          seatSnapshots?: Array<{seatId?:string}>, model?: string|null}} args
  * @returns {string|null}
  */
-export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [] }) {
+export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [], model = null }) {
   const usable = seats.filter((s) => s.usable);
   if (usable.length === 0) return null;
   if (mode === "manual" && usable.some((s) => s.seatId === activeSeatId)) return activeSeatId;
   const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
   const entries = usable.map((s) => ({ snap: bySeat.get(s.seatId) ?? { seatId: s.seatId }, org: seatOrgKey(s) }));
   const roomy = (e) => {
-    if (isSeatFull(e.snap)) return false;
-    const load = seatLoad(e.snap);
+    if (isSeatFull(e.snap, { model })) return false;
+    const load = seatLoad(e.snap, { model });
     return load !== null && load < MOVE_TARGET_BELOW_PCT;
   };
   const hasEscapeRoute = (e) => entries.some((o) => o !== e && o.org === e.org && roomy(o));
   const tiers = mode === "manual" ? [entries] : [entries.filter((e) => roomy(e) && hasEscapeRoute(e)), entries.filter(roomy), entries];
   for (const tier of tiers) {
-    const best = leastLoadedSeat(tier.map((e) => e.snap), { activeSeatId });
+    const best = leastLoadedSeat(tier.map((e) => e.snap), { activeSeatId, model });
     if (best) return best.seatId;
   }
   return usable[0].seatId;
@@ -207,15 +221,17 @@ export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [] }) {
 
 /**
  * Has this seat hit its limit? The provider flagged it exhausted, or an ACTIVE,
- * FRESH window is at 100% (an inactive scoped window or a stale reading — the
- * window that just reset — does not count). No reading at all → not exhausted
- * (unknown is not full). Pure.
+ * FRESH window that applies to `model` is at 100% (an inactive window, a stale
+ * reading — the window that just reset — or a model-scoped window for another
+ * model does not count). No reading at all → not exhausted (unknown is not full).
+ * Pure.
  * @param {object|null|undefined} snap  a seat snapshot
+ * @param {{model?: string|null}} [opts]  the conversation's model id (null = unknown)
  */
-export function isSeatFull(snap) {
+export function isSeatFull(snap, { model = null } = {}) {
   if (!snap) return false;
   if (isSeatExhausted(snap)) return true;
-  const load = seatLoad(snap);
+  const load = seatLoad(snap, { model });
   return load !== null && load >= 100;
 }
 
@@ -236,10 +252,11 @@ export function seatOrgKey(seat) {
  * @param {Array<object>} [args.seatSnapshots]  per-seat usage readings
  * @param {number} args.nowMs
  * @param {string|null} [args.activeSeatId]  tie-break between equally loaded seats
+ * @param {string|null} [args.model]  the conversation's model id (null = unknown): which scoped windows count
  * @returns {null|{seatId:string, from:string, why:"load"|"exhausted"|"unusable",
  *                 trigger:{kind:string,pct:number}|null, crossOrg:boolean}}
  */
-export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null }) {
+export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null, model = null }) {
   const cur = seats.find((s) => s.seatId === existing.seatId);
   if (!cur) return null;
   const bySeat = new Map(seatSnapshots.filter((s) => s?.seatId).map((s) => [s.seatId, s]));
@@ -250,14 +267,14 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
   if (!cur.usable) {
     why = "unusable";
     trigger = null; // no window: the seat cannot serve at all
-  } else if (isSeatFull(own)) {
+  } else if (isSeatFull(own, { model })) {
     why = "exhausted";
-    trigger = seatLoadWindow(own) ?? { kind: "exhausted", pct: 100 };
+    trigger = seatLoadWindow(own, { model }) ?? { kind: "exhausted", pct: 100 };
   } else {
-    const load = seatLoad(own);
+    const load = seatLoad(own, { model });
     if (load === null || load < MOVE_AT_PCT) return null;
     why = "load";
-    trigger = seatLoadWindow(own);
+    trigger = seatLoadWindow(own, { model });
   }
   const hard = why !== "load";
   const left = existing.left ?? {};
@@ -273,13 +290,13 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
   for (const s of seats) {
     if (!s.usable || s.seatId === cur.seatId) continue;
     const snap = bySeat.get(s.seatId) ?? { seatId: s.seatId };
-    if (isSeatFull(snap)) continue;
+    if (isSeatFull(snap, { model })) continue;
     const same = seatOrgKey(s) === curOrg;
     if (!same && crossOrgCapped) continue;
     candidates.push({
       snap,
       same,
-      load: seatLoad(snap),
+      load: seatLoad(snap, { model }),
       blocked: typeof left[s.seatId] === "number" && nowMs - left[s.seatId] < MOVE_BACK_BLOCK_MS,
     });
   }
@@ -296,7 +313,7 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
       ? [pool.filter((c) => c.same), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT)), pool.filter((c) => !c.same)]
       : [pool.filter((c) => c.same && known(c, MOVE_AT_PCT)), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT))];
     for (const tier of tiers) {
-      const best = leastLoadedSeat(tier.map((c) => c.snap), { activeSeatId });
+      const best = leastLoadedSeat(tier.map((c) => c.snap), { activeSeatId, model });
       if (best) return pool.find((c) => c.snap === best);
     }
     return null;
@@ -313,7 +330,7 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
     // least-loaded over what can serve — NOT chooseSeat's escape-route placement,
     // which is a rule for NEW conversations.
     const rest = seats.filter((s) => s.usable && s.seatId !== cur.seatId);
-    seatId = leastLoadedSeat(rest.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId }), { activeSeatId })?.seatId ?? null;
+    seatId = leastLoadedSeat(rest.map((s) => bySeat.get(s.seatId) ?? { seatId: s.seatId }), { activeSeatId, model })?.seatId ?? null;
   }
   if (!seatId) return null;
   const target = seats.find((s) => s.seatId === seatId);
@@ -325,7 +342,7 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
  * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string,
  *            why?: "manual"|"load"|"exhausted"|"unusable", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean}}
  */
-export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0 }) {
+export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0, model = null }) {
   if (mode === "manual") {
     // MANUAL MODE (spec §5.2): every conversation uses the active seat, whatever
     // its stored assignment says — picking a seat applies to ALL conversations
@@ -333,7 +350,7 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
     // existing) seat is MOVED, recorded as a manual move; one whose seat is
     // gone is simply placed. The active seat falls back exactly as `chooseSeat`
     // does when it cannot serve, so a request never fails on it.
-    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots });
+    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model });
     if (!seatId) return { seatId: null, reason: "none" };
     if (!existing) return { seatId, reason: "assigned" };
     if (existing.seatId === seatId) return { seatId, reason: "kept" };
@@ -346,13 +363,13 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
     const seat = seats.find((s) => s.seatId === existing.seatId);
     if (seat) {
       if (mode === "auto") {
-        const move = decideMove({ existing, seats, seatSnapshots, nowMs, activeSeatId });
+        const move = decideMove({ existing, seats, seatSnapshots, nowMs, activeSeatId, model });
         if (move) return { seatId: move.seatId, reason: "moved", from: move.from, why: move.why, trigger: move.trigger, crossOrg: move.crossOrg };
       }
       if (seat.usable) return { seatId: existing.seatId, reason: "kept" };
     }
   }
-  const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots });
+  const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model });
   return seatId ? { seatId, reason: "assigned" } : { seatId: null, reason: "none" };
 }
 
@@ -499,9 +516,13 @@ export function createSeatAssigner({
   }
 
   /**
+   * `model` (optional) is the request's model id: it decides which model-scoped
+   * windows count for this decision and is recorded as the conversation's model.
+   * A malformed one is treated as unknown.
+   * @param {{model?: string|null}} [opts]
    * @returns {Promise<{seatId: string|null, live: boolean, provider?: string, credentialFile?: string, expiresAt?: number}>}
    */
-  function resolve(provider, sessionID, parentSessionID = null) {
+  function resolve(provider, sessionID, parentSessionID = null, { model = null } = {}) {
     // Seeing a call at all is what proves the plugin is in the request path.
     markPluginSeen(now());
     if (!ACCOUNT_PROVIDERS.includes(provider)) return Promise.reject(new Error("unknown provider"));
@@ -516,7 +537,7 @@ export function createSeatAssigner({
       // choose between, and whatever login is live keeps serving.
       if (!states) return { seatId: null, live: true };
       if (states.seats.length === 1) return { seatId: states.seats[0].seatId, live: true };
-      return (await place(provider, states, sessionID, parentSessionID)).result;
+      return (await place(provider, states, sessionID, parentSessionID, { model: isId(model) ? model : null })).result;
     });
   }
 
@@ -524,16 +545,24 @@ export function createSeatAssigner({
    * The placement core shared by `resolve` (a request) and `reconsider` (a limit
    * signal). Runs inside the mutex, with `states` of a multi-seat provider. With
    * `onlyMove`, a conversation that is not assigned, or whose decision is
-   * anything but an automatic move, is left completely untouched.
+   * anything but an automatic move, is left completely untouched. `model` is the
+   * request's model; without one the conversation's stored model is used.
    * @returns {Promise<{result: object, decision: object|null}>}
    */
-  async function place(provider, states, sessionID, parentSessionID, { onlyMove = false } = {}) {
+  async function place(provider, states, sessionID, parentSessionID, { onlyMove = false, model: requestModel = null } = {}) {
     const s = ensure();
     const t = now();
     const { root, link } = resolveRoot({ sessionID, parentSessionID, children: s.children });
     const existing = s.providers[provider][root] ?? null;
     const untouched = { result: { seatId: null, live: true }, decision: null };
     if (onlyMove && (!existing || states.mode !== "auto")) return untouched;
+    const model = requestModel ?? existing?.model ?? null;
+    // The model RECORDED for the conversation is its root session's own: a
+    // sub-agent on another model (a Sonnet helper under an Opus conversation)
+    // decides its own request with its model but must not overwrite the stored
+    // one — alternating writes, and a re-decision for the wrong model.
+    const isRootRequest = root === sessionID;
+    const storedModel = (isRootRequest ? requestModel : null) ?? existing?.model ?? null;
     const decision = decideSeat({
       existing,
       mode: states.mode,
@@ -541,6 +570,7 @@ export function createSeatAssigner({
       seats: states.seats,
       seatSnapshots: snapshotsFor(provider),
       nowMs: t,
+      model,
     });
     if (onlyMove && decision.reason !== "moved") return untouched;
     let dirty = false;
@@ -553,7 +583,7 @@ export function createSeatAssigner({
     let assignmentsChanged = false;
     let movedEvent = null;
     if (decision.reason === "assigned") {
-      s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t };
+      s.providers[provider][root] = { seatId: decision.seatId, assignedAt: t, lastUsedAt: t, ...(storedModel ? { model: storedModel } : {}) };
       dirty = true;
       assignmentsChanged = true;
     } else if (decision.reason === "moved") {
@@ -572,6 +602,7 @@ export function createSeatAssigner({
         reason: why,
         left,
       };
+      if (storedModel) rec.model = storedModel;
       if (why !== "manual") {
         if (decision.trigger) rec.trigger = decision.trigger;
         rec.crossOrg = decision.crossOrg === true;
@@ -597,9 +628,17 @@ export function createSeatAssigner({
           crossOrg: decision.crossOrg === true,
         };
       }
-    } else if (existing && t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
-      existing.lastUsedAt = t;
-      dirty = true;
+    } else if (existing) {
+      // Kept: refresh lastUsedAt at most hourly, but record a CHANGED model at once
+      // (a re-decision after a limit signal must see the model it is on now).
+      if (t - existing.lastUsedAt >= TOUCH_INTERVAL_MS) {
+        existing.lastUsedAt = t;
+        dirty = true;
+      }
+      if (isRootRequest && requestModel && existing.model !== requestModel) {
+        existing.model = requestModel;
+        dirty = true;
+      }
     }
     if (dirty) {
       store = pruneAssignments(s, t);
@@ -699,9 +738,9 @@ export function createSeatAssigner({
   }
 
   /**
-   * Is the seat this session's conversation is assigned to full right now? Uses
-   * the same readings every decision uses (`snapshotsFor`), so a seat a failed
-   * turn marked limited counts as full. Synchronous, read-only.
+   * Is the seat this session's conversation is assigned to full right now — for
+   * the conversation's stored model? Uses the same readings every decision uses
+   * (`snapshotsFor`), so a seat a failed turn marked limited counts as full. Synchronous, read-only.
    * @returns {boolean|null} null = the conversation has no assignment for this provider
    */
   function conversationSeatFull(provider, sessionId) {
@@ -710,7 +749,7 @@ export function createSeatAssigner({
     const root = s.children[sessionId]?.root ?? sessionId;
     const seatId = s.providers[provider]?.[root]?.seatId;
     if (!seatId) return null;
-    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === seatId));
+    return isSeatFull(snapshotsFor(provider).find((x) => x?.seatId === seatId), { model: s.providers[provider][root].model ?? null });
   }
 
   /**
@@ -718,14 +757,17 @@ export function createSeatAssigner({
    * poll), through the same decision + recording + announcing path as a request.
    * Only an automatic move changes anything: manual mode, an unassigned
    * conversation, a single-seat provider, or no seat with room all leave it be.
+   * Decides for the conversation's stored model, or `opts.model` when the caller
+   * knows the model of the request that just failed.
+   * @param {{model?: string|null}} [opts]
    * @returns {Promise<{moved: boolean, from?: string, to?: string, reason?: string}>}
    */
-  function reconsider(provider, sessionId) {
+  function reconsider(provider, sessionId, { model = null } = {}) {
     if (!ACCOUNT_PROVIDERS.includes(provider) || !isId(sessionId)) return Promise.resolve({ moved: false });
     return mutex.runExclusive(async () => {
       const states = await stateOf(provider);
       if (!states || states.seats.length < 2) return { moved: false };
-      const { decision } = await place(provider, states, sessionId, null, { onlyMove: true });
+      const { decision } = await place(provider, states, sessionId, null, { onlyMove: true, model: isId(model) ? model : null });
       return decision ? { moved: true, from: decision.from, to: decision.seatId, reason: decision.why } : { moved: false };
     });
   }

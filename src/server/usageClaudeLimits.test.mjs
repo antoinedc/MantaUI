@@ -73,13 +73,26 @@ test("claude adapter (Team): an inactive window never makes the snapshot exhaust
   assert.equal("exhausted" in snap, false);
 });
 
-test("claude adapter (Team): an ACTIVE scoped window at 100% does exhaust", async () => {
+test("claude adapter (Team): an ACTIVE model-scoped window at 100% does NOT exhaust the seat — it only limits that model", async () => {
   const body = structuredClone(TEAM_PAYLOAD);
   body.limits[1].percent = 100;
   body.limits[1].is_active = true;
   const snap = await fetchSnap(body);
   assert.equal("active" in snap.windows[1], false);
+  assert.equal(snap.windows[1].kind, "weekly_scoped:fable");
+  assert.equal(snap.windows[1].pct, 100, "the scoped window stays in windows for the UI");
+  assert.equal("exhausted" in snap, false);
+});
+
+test("claude adapter (Team): the 5h window at 100% exhausts the seat, scoped window or not", async () => {
+  const body = structuredClone(TEAM_PAYLOAD);
+  body.five_hour.utilization = 100;
+  body.limits[0].percent = 100;
+  body.limits[1].is_active = true;
+  const snap = await fetchSnap(body);
   assert.equal(snap.exhausted, true);
+  body.limits[1].percent = 100;
+  assert.equal((await fetchSnap(body)).exhausted, true);
 });
 
 test("claude adapter (Team): an unscoped weekly in limits[] is the account-wide weekly, ordered before scoped ones", async () => {

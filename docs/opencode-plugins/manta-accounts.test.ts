@@ -268,6 +268,43 @@ const seat2 = { seatId: "seat-2", live: false, credentialFile: F2 };
 const files2 = (over: any = {}) => ({ [F2]: { accessToken: "SEAT2-TOKEN", expiresAt: 9_000_000, ...over } });
 const authOf = (c: Call) => new Headers(c.init.headers).get("authorization");
 
+describe("request model", () => {
+  it("modelFromBody: the top-level model of a JSON string body; anything else is null; the body is never touched", () => {
+    expect(t.modelFromBody(JSON.stringify({ model: "claude-opus-5-5", messages: [] }))).toBe("claude-opus-5-5")
+    expect(t.modelFromBody(JSON.stringify({ messages: [{ model: "nested" }] }))).toBeNull()
+    expect(t.modelFromBody(JSON.stringify({ model: 5 }))).toBeNull()
+    expect(t.modelFromBody(JSON.stringify({ model: "" }))).toBeNull()
+    expect(t.modelFromBody("not json")).toBeNull()
+    expect(t.modelFromBody("null")).toBeNull()
+    expect(t.modelFromBody(new Uint8Array([1]))).toBeNull()
+    expect(t.modelFromBody(undefined)).toBeNull()
+  })
+
+  it("sends the body's model to resolve and limit, leaves the ids and the body untouched, and reads it lazily", async () => {
+    const body = JSON.stringify({ model: "claude-opus-5-5", messages: [] })
+    const r = rig({
+      resolve: async () => seat2,
+      limit: async () => ({ seatId: "seat-3", live: true }),
+      files: files2(),
+      respond: (_c, n) => new Response("{}", { status: n === 1 ? 429 : 200 }),
+    })
+    const init = { method: "POST", headers: { authorization: "Bearer LIVE", "x-opencode-session-id": "ses_1" }, body }
+    await r.f(CLAUDE, init)
+    expect(r.resolveCalls[0][1].model).toBe("claude-opus-5-5")
+    expect(r.resolveCalls[0][1]).toEqual({ sessionID: "ses_1", parentSessionID: null })
+    expect(r.limitCalls[0][1].model).toBe("claude-opus-5-5")
+    expect(r.calls[0].init.body).toBe(body)
+    expect(init.body).toBe(body)
+  })
+
+  it("no model when the body is not a JSON string: resolve still happens, with model null", async () => {
+    const r = rig({ resolve: async () => seat2, files: files2() })
+    await r.f(CLAUDE, { method: "POST", headers: { "x-opencode-session-id": "ses_1" }, body: new Uint8Array([1, 2]) })
+    expect(r.resolveCalls).toHaveLength(1)
+    expect(r.resolveCalls[0][1].model).toBeNull()
+  })
+})
+
 describe("wrapper", () => {
   it("never touches a non-model request", async () => {
     const r = rig({ resolve: async () => seat2, files: files2() });
