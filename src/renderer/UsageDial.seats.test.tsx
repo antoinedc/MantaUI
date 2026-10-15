@@ -162,13 +162,13 @@ describe("UsageDial — three seats, automatic", () => {
     expect(popover.className.split(/\s+/)).toContain("w-max");
   });
 
-  it("a signed-out seat says so and points to the fix", async () => {
+  it("a signed-out seat carries the Logged out badge instead of the old Fix link", async () => {
     const v = threeSeatView();
     v.accounts[1].seats[0] = { ...seat("s3", "Seat 1", 55), status: "signed-out" };
     const { popover } = await open([v], { seatId: "s1" });
     const row = popover.querySelector('[data-seat-id="s3"]') as HTMLElement;
-    expect(row.textContent).toContain("signed out");
-    expect(row.textContent).toContain("Fix");
+    expect(row.textContent).toContain("Logged out");
+    expect(row.textContent).not.toContain("Fix");
   });
 });
 

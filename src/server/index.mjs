@@ -116,6 +116,7 @@ import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
 // than a missing import.
 import { startSchedulePoller, createJob, listJobs, deleteJob, loadJobs } from "./schedule.mjs";
 import { createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
+import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
 import { readCodexEntry } from "./codexRefresh.mjs";
 import { startUsagePoller, recheckAdapterAtLimit, providerIDForAdapter, adapterForProviderID, listSnapshots, listSeatSnapshots, getUsageHistory } from "./usage.mjs";
 import { createAccountsService, ACCOUNT_PROVIDERS } from "./accounts.mjs";
@@ -639,12 +640,23 @@ void accountsService.discover({ force: true });
 // and the usage poller's 401 recovery, so the two can never spend the same
 // rotating refresh token twice.
 const liveCodexRefresher = oc.createLiveCodexRefresher(accountsService);
-const usageOnUnauthorized = createUnauthorizedHandler({
+const codexOnUnauthorized = createUnauthorizedHandler({
   live: liveCodexRefresher,
   seatStates: (provider) => accountsService.seatStates(provider),
   refreshSeat: (t) => oc.refreshCodexSeatAndNote(accountsService, t),
   readSeatEntry: readCodexEntry,
 });
+// A Claude SEAT (not the live login) whose usage call answers 401: refresh it once,
+// and if that does not bring it back mark it signed out; a later good reading
+// clears the mark. See claudeSeatHealth.mjs.
+const claudeSeatHealth = createClaudeSeatHealth({
+  seatStates: (provider) => accountsService.seatStates(provider),
+  refreshSeat: (t) => oc.refreshClaudeSeatAndNote(accountsService, t),
+  markSignedOut: (provider, seatId) => accountsService.markSeatSignedOut(provider, seatId),
+  noteReadingOk: (provider, seatId) => accountsService.noteSeatReadingOk(provider, seatId),
+});
+const usageOnUnauthorized = (args) =>
+  args?.adapterId === "claude" ? claudeSeatHealth.onUnauthorized(args) : codexOnUnauthorized(args);
 
 // Multi-account phase 3: the bus events (`accounts.updated`, throttled to one per
 // provider per second, and `accounts.moved`). A store change, a conversation
@@ -711,6 +723,9 @@ const accountsManager = createAccountsManager({
     livePath: () => oc.opencodeAuthPath(),
     restoreEntry: (entry) => oc.setProviderAuthEntry("openai", entry),
   },
+  // A seat that just landed or was re-signed shows its usage straight away.
+  // `usagePollerTick` is declared further down; this only runs long after startup.
+  refreshUsage: () => usagePollerTick(),
 });
 onProviderOauthLanded((evt) => accountsManager.onProviderLoginLanded(evt));
 // A seat sign-in is resolved by looking at its credentials file, not by a client
@@ -740,6 +755,8 @@ const { stop: stopUsagePoller, tick: usagePollerTick } = startUsagePoller(bus, {
   pacing: optimizerPacing,
   seats: accountsService,
   onUnauthorized: usageOnUnauthorized,
+  onSeatSignedOut: (args) => claudeSeatHealth.onSignedOut(args),
+  onSeatOk: (args) => claudeSeatHealth.onSeatOk(args),
 });
 
 // Usage-stop resume engine (BET-1048): watches the ARMED entries in the

@@ -339,6 +339,14 @@ export function createUsagePoller({
   // says `{ok:true}`, the fetch is retried ONCE in the same tick. Receives
   // `{adapterId, seatId, rejectedToken}`; null (tests, harness) = no recovery.
   onUnauthorized = null,
+  // A SEAT whose usage call answered 401 and stayed unrecovered (recovery said
+  // no — other than "debounced" — or the retry answered 401 again) is reported
+  // here as `{adapterId, seatId}`; the owner decides what that means (Claude: the
+  // seat is signed out). `onSeatOk` is the other direction: a seat just produced
+  // a good reading. Both are best-effort — a throw never fails a poll. Null =
+  // no bookkeeping (tests, harness).
+  onSeatSignedOut = null,
+  onSeatOk = null,
   staleRetryMs = STALE_RETRY_MS,
   // Retry scheduling is injectable (BET-1485): tests queue armed retries and
   // fire them manually, so the re-poll count doesn't depend on 5ms real
@@ -374,6 +382,15 @@ export function createUsagePoller({
   // provider refused is read off the request's Authorization header (the adapter
   // owns the credential), so a recovery can tell "my token was rejected" from
   // "somebody already refreshed it".
+  async function reportSignedOut(adapter, seatId) {
+    if (!seatId || typeof onSeatSignedOut !== "function") return;
+    try {
+      await onSeatSignedOut({ adapterId: adapter.id, seatId });
+    } catch (e) {
+      console.warn("[usage] recording a signed-out seat failed:", e?.message ?? e);
+    }
+  }
+
   async function fetchWithRefresh(adapter, deps, seatId) {
     let sent = "";
     const real = deps.fetchImpl;
@@ -391,13 +408,25 @@ export function createUsagePoller({
     } catch (e) {
       if (e?.status !== 401 || typeof onUnauthorized !== "function") throw e;
       let r = null;
+      let handlerThrew = false;
       try {
         r = await onUnauthorized({ adapterId: adapter.id, seatId, rejectedToken: sent });
       } catch {
-        r = null;
+        handlerThrew = true;
       }
-      if (!r?.ok) throw e;
-      return adapter.fetch(tracked);
+      if (!r?.ok) {
+        // "debounced" = recovery was not even attempted this time, and a handler
+        // that threw told us nothing: neither says anything about the login.
+        if (!handlerThrew && r?.reason !== "debounced") await reportSignedOut(adapter, seatId);
+        throw e;
+      }
+      try {
+        return await adapter.fetch(tracked);
+      } catch (e2) {
+        // Refreshed and still refused: the login is dead.
+        if (e2?.status === 401) await reportSignedOut(adapter, seatId);
+        throw e2;
+      }
     }
   }
 
@@ -436,6 +465,13 @@ export function createUsagePoller({
       const snap = { ...buildSnapshot(adapter, await fetchWithRefresh(adapter, deps, seat.seatId), nowMs), ...identity };
       backoffUntil.delete(key);
       failing.delete(key);
+      if (typeof onSeatOk === "function") {
+        try {
+          await onSeatOk({ adapterId: adapter.id, seatId: seat.seatId });
+        } catch (e) {
+          console.warn("[usage] recording a good seat reading failed:", e?.message ?? e);
+        }
+      }
       return snap;
     } catch (e) {
       if (e?.status === 429) backoffUntil.set(key, nowMs + rateLimitBackoffMs(e.retryAfterMs));
@@ -444,7 +480,28 @@ export function createUsagePoller({
     }
   }
 
-  async function tick() {
+  // A tick asked for while one is running (e.g. "a seat just signed back in")
+  // must not be dropped: the running poll may have read that seat before the new
+  // login landed. It runs ONCE more right after the current one (several requests
+  // coalesce), and the caller's promise settles when that re-run has.
+  let current = null;
+  let rerun = null;
+  function tick() {
+    if (stopped) return Promise.resolve();
+    if (current) {
+      rerun ??= current.then(() => {
+        rerun = null;
+        return tick();
+      });
+      return rerun;
+    }
+    current = pollOnce().finally(() => {
+      current = null;
+    });
+    return current;
+  }
+
+  async function pollOnce() {
     if (inFlight || stopped) return;
     inFlight = true;
     try {
@@ -631,11 +688,16 @@ let activePoller = null;
  *   no adapter change.
  * @returns {{ stop: () => void }}
  */
-export function startUsagePoller(bus, { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null } = {}) {
+export function startUsagePoller(
+  bus,
+  { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null, onSeatSignedOut = null, onSeatOk = null } = {},
+) {
   const poller = createUsagePoller({
     publish: (evt) => bus.publish(evt),
     seats,
     onUnauthorized,
+    onSeatSignedOut,
+    onSeatOk,
     observe: (results, seatResults) => {
       recordWindowObservations(results, seatResults);
       pacing?.observe?.(results);

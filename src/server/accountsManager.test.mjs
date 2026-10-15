@@ -64,7 +64,7 @@ async function rig({ codex = false, claude = true } = {}) {
     log: quiet,
   });
 
-  const calls = { claudeStart: [], claudeCancel: [], restore: [], codexStart: 0 };
+  const calls = { claudeStart: [], claudeCancel: [], restore: [], codexStart: 0, usage: 0 };
   const state = { restoreOk: true, codexShape: "oauth-auto", epoch: 7 };
   const mgr = createAccountsManager({
     accounts,
@@ -93,6 +93,10 @@ async function rig({ codex = false, claude = true } = {}) {
       },
     },
     fetchProfile: async (token) => identityFromProfile(profiles[token]),
+    refreshUsage: async () => {
+      calls.usage++;
+      if (state.usageThrows) throw new Error("poll failed");
+    },
     log: quiet,
     timings: state.timings,
   });
@@ -942,6 +946,445 @@ test("a different-org login finished while nobody watched waits for the user's a
     assert.equal(await r.exists(dir), true, "kept for the confirmation");
     const st = await mgr.channels["accounts:seat-status"]({ seatId });
     assert.deepEqual(st, { state: "failed", error: "different-org", orgName: "Zeta" });
+  } finally {
+    await r.cleanup();
+  }
+});
+
+// ---- re-signing an existing seat (accounts:resign-*) -----------------------------
+//
+// Seat-1 (a@example.com, directory seat) is the one signed out; seat-2 is live.
+// The "login" is the test writing the credentials file into the temp directory the
+// launcher was handed; the fake profile endpoint says whose login it is.
+
+const seatDirOf = (r, id) => join(r.paths.seatsRoot, "claude", id);
+const seatCredsFile = (r, id = "seat-1") => join(seatDirOf(r, id), ".credentials.json");
+const mode = async (p) => ((await stat(p)).mode & 0o777).toString(8);
+const dirEntries = async (p) => (await readdirSafe(p)).sort();
+const claudeStored = async (r, id = "seat-1") => allSeats((await r.accounts.getStore()).providers.claude).find((s) => s.id === id);
+
+async function startResign(r, seatId = "seat-1") {
+  const out = await ch(r, "accounts:resign-seat", { provider: "claude", seatId });
+  assert.equal(out.error, undefined);
+  const start = r.calls.claudeStart.at(-1);
+  return { ...out, tempDir: start.dir };
+}
+
+test("resign-seat (claude): the login runs in a temp directory BESIDE the seat (0700); the seat itself is untouched while pending", async () => {
+  const r = await rig();
+  try {
+    const before = await readFile(seatCredsFile(r), "utf-8");
+    const { flowId, connect, tempDir } = await startResign(r);
+    assert.equal(typeof flowId, "string");
+    assert.equal(connect.shape, "claude-login");
+    assert.equal(connect.sessionKey, "claude-login-seat-1");
+    assert.equal(tempDir, join(r.paths.seatsRoot, "claude", `.resign-${flowId}`));
+    assert.equal(await mode(tempDir), "700");
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), before);
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), { state: "pending" });
+    // discovery never adopts the in-progress login as a seat of its own
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-A"));
+    await r.accounts.discover({ force: true });
+    assert.deepEqual(allSeats((await r.accounts.getStore()).providers.claude).map((s) => s.id), ["seat-1", "seat-2"]);
+    assert.equal((await r.accounts.takenSeatIds("claude")).some((id) => id.startsWith(".")), false);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (claude): same account → credentials replaced atomically (0600), status ok, temp dir deleted, login stopped, usage polled; no secret in the answer", async () => {
+  const r = await rig();
+  try {
+    await r.accounts.markSeatSignedOut("claude", "seat-1");
+    assert.equal((await claudeStored(r)).status, "signed-out");
+    const { flowId, tempDir } = await startResign(r);
+    r.profiles["tok-A2"] = profileOf("u-A", "a@example.com");
+    const fresh = credsJson("tok-A2");
+    await writeFile(join(tempDir, ".credentials.json"), fresh);
+
+    const st = await ch(r, "accounts:resign-status", { flowId });
+    assert.equal(st.state, "ok");
+    assert.equal(st.seat.id, "seat-1");
+    assert.equal(st.seat.status, "ok");
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), fresh);
+    assert.equal(await mode(seatCredsFile(r)), "600");
+    assert.equal(await mode(seatDirOf(r, "seat-1")), "700");
+    assert.equal(await r.exists(tempDir), false, "temp directory deleted");
+    assert.deepEqual(r.calls.claudeCancel, ["claude-login-seat-1"], "the login session is stopped");
+    assert.equal((await claudeStored(r)).status, "ok");
+    assert.equal((await claudeStored(r)).accountUuid, "u-A");
+    assert.equal(r.calls.usage, 1, "an immediate usage poll");
+    assert.doesNotMatch(JSON.stringify(st), /tok-|accessToken|refreshToken|credentialDir|u-A/);
+    // the seat is usable again for the router
+    assert.equal((await r.accounts.seatStates("claude")).seats.find((s) => s.seatId === "seat-1").usable, true);
+    // answering again stays ok
+    assert.equal((await ch(r, "accounts:resign-status", { flowId })).state, "ok");
+    assert.equal(r.calls.usage, 1, "not polled again");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (claude): the background pass lands a login nobody polled for", async () => {
+  const r = await rig();
+  try {
+    const { flowId, tempDir } = await startResign(r);
+    r.profiles["tok-A2"] = profileOf("u-A", "a@example.com");
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-A2"));
+    await r.mgr.tick();
+    assert.equal(r.mgr._resigns().get(flowId).state, "ok");
+    assert.equal(JSON.parse(await readFile(seatCredsFile(r), "utf-8")).claudeAiOauth.accessToken, "tok-A2");
+    assert.equal(r.calls.usage, 1);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (claude): a DIFFERENT account → failed/different-account with both emails; the seat directory is byte-identical; nothing polled", async () => {
+  const r = await rig();
+  try {
+    await r.accounts.markSeatSignedOut("claude", "seat-1");
+    const snapshot = async () => {
+      const dir = seatDirOf(r, "seat-1");
+      const files = await dirEntries(dir);
+      const out = { files, dirMode: await mode(dir) };
+      for (const f of files) out[f] = [await readFile(join(dir, f), "utf-8"), await mode(join(dir, f))];
+      return out;
+    };
+    const seatBefore = JSON.stringify(await claudeStored(r));
+    const before = await snapshot();
+    const { flowId, tempDir } = await startResign(r);
+    r.profiles["tok-X"] = profileOf("u-X", "x@example.com");
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-X"));
+
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
+      state: "failed",
+      error: "different-account",
+      expectedEmail: "a@example.com",
+      gotEmail: "x@example.com",
+    });
+    assert.deepEqual(await snapshot(), before, "seat directory byte-identical (content, modes, file list)");
+    assert.equal(JSON.stringify(await claudeStored(r)), seatBefore, "the seat's record is unchanged too (still signed out)");
+    assert.equal(await r.exists(tempDir), false, "temp directory deleted");
+    assert.deepEqual(r.calls.claudeCancel, ["claude-login-seat-1"]);
+    assert.equal(r.calls.usage, 0);
+    // asking again gives the same answer
+    assert.equal((await ch(r, "accounts:resign-status", { flowId })).error, "different-account");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (claude): a seat with no account uuid is matched by email; with neither it cannot be verified → login-failed, seat untouched", async () => {
+  const r = await rig();
+  try {
+    await r.accounts.mutate("claude", (st) => {
+      st.accounts[0].seats.find((s) => s.id === "seat-1").accountUuid = null;
+      return st;
+    });
+    const before = await readFile(seatCredsFile(r), "utf-8");
+    // same email, new uuid (profile lookups differ) → accepted, uuid recorded
+    r.profiles["tok-A3"] = profileOf("u-A-new", "A@Example.com");
+    const a = await startResign(r);
+    await writeFile(join(a.tempDir, ".credentials.json"), credsJson("tok-A3"));
+    assert.equal((await ch(r, "accounts:resign-status", { flowId: a.flowId })).state, "ok");
+    assert.equal((await claudeStored(r)).accountUuid, "u-A-new");
+
+    // a different email on a uuid-less seat → different-account
+    await r.accounts.mutate("claude", (st) => {
+      st.accounts[0].seats.find((s) => s.id === "seat-1").accountUuid = null;
+      return st;
+    });
+    r.profiles["tok-Q"] = profileOf("u-Q", "q@example.com");
+    const b = await startResign(r);
+    await writeFile(join(b.tempDir, ".credentials.json"), credsJson("tok-Q"));
+    assert.equal((await ch(r, "accounts:resign-status", { flowId: b.flowId })).error, "different-account");
+
+    // neither uuid nor email on the seat → nothing to compare → refused
+    await r.accounts.mutate("claude", (st) => {
+      const seat = st.accounts[0].seats.find((s) => s.id === "seat-1");
+      seat.accountUuid = null;
+      seat.email = null;
+      return st;
+    });
+    const keep = await readFile(seatCredsFile(r), "utf-8");
+    const c = await startResign(r);
+    await writeFile(join(c.tempDir, ".credentials.json"), credsJson("tok-Q"));
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: c.flowId }), { state: "failed", error: "login-failed" });
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), keep);
+    assert.notEqual(before, keep);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-cancel: stops the login and deletes ONLY the temp directory — even if the new login already landed, the seat is never rewritten; then the flow is unknown", async () => {
+  const r = await rig();
+  try {
+    const before = await readFile(seatCredsFile(r), "utf-8");
+    const storeBefore = JSON.stringify(await claudeStored(r));
+    const { flowId, tempDir } = await startResign(r);
+    r.profiles["tok-A2"] = profileOf("u-A", "a@example.com");
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-A2")); // landed, but nobody applied it yet
+    assert.deepEqual(await ch(r, "accounts:resign-cancel", { flowId }), { ok: true });
+    assert.equal(await r.exists(tempDir), false);
+    assert.equal(await r.exists(seatDirOf(r, "seat-1")), true, "the seat directory is never deleted");
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), before, "…nor rewritten");
+    assert.equal(JSON.stringify(await claudeStored(r)), storeBefore);
+    assert.deepEqual(r.calls.claudeCancel, ["claude-login-seat-1"]);
+    assert.equal(r.calls.usage, 0);
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), { state: "failed", error: "unknown-flow" });
+    // unknown / repeated / malformed cancel is still ok
+    assert.deepEqual(await ch(r, "accounts:resign-cancel", { flowId }), { ok: true });
+    assert.deepEqual(await ch(r, "accounts:resign-cancel", {}), { ok: true });
+    assert.deepEqual(await ch(r, "accounts:resign-cancel", { flowId: "nope" }), { ok: true });
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat: a second flow for the same seat ends the first one; another seat's flow is left alone", async () => {
+  const r = await rig();
+  try {
+    await r.accounts.mutate("claude", (st) => {
+      st.accounts[0].seats.push({ id: "seat-3", label: "Seat 3", email: "c@example.com", accountUuid: "u-C", credentialDir: seatDirOf(r, "seat-3"), status: "ok" });
+      return st;
+    });
+    await mkdir(seatDirOf(r, "seat-3"), { recursive: true });
+    await writeFile(seatCredsFile(r, "seat-3"), credsJson("tok-C"));
+    const first = await startResign(r, "seat-1");
+    const other = await startResign(r, "seat-3");
+    const second = await startResign(r, "seat-1");
+    assert.notEqual(first.flowId, second.flowId);
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed" });
+    assert.equal(await r.exists(first.tempDir), false, "the old temp directory is gone");
+    assert.equal(r.calls.claudeCancel.filter((k) => k === "claude-login-seat-1").length, 1, "the old login is stopped");
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: other.flowId }), { state: "pending" });
+    assert.equal(await r.exists(other.tempDir), true);
+    // the first flow's late credentials are never applied
+    r.profiles["tok-A2"] = profileOf("u-A", "a@example.com");
+    await writeFile(join(second.tempDir, ".credentials.json"), credsJson("tok-A2"));
+    assert.equal((await ch(r, "accounts:resign-status", { flowId: second.flowId })).state, "ok");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat: validation — unknown provider / seat, the live seat, a launcher that fails; nothing left behind", async () => {
+  const r = await rig();
+  try {
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider" });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat" });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude" }), { error: "unknown-seat" });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-2" }), { error: "live-seat" });
+    assert.equal(r.calls.claudeStart.length, 0);
+    assert.deepEqual(await dirEntries(join(r.paths.seatsRoot, "claude")), ["seat-1", "seat-2"]);
+    assert.deepEqual(await ch(r, "accounts:resign-status", {}), { state: "failed", error: "unknown-flow" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: "nope" }), { state: "failed", error: "unknown-flow" });
+
+    const broken = await rig();
+    try {
+      const mgr = createAccountsManager({
+        accounts: broken.accounts,
+        seatAssigner: broken.seatAssigner,
+        claudeLogin: { start: async () => { throw new Error("/secret/path ENOENT"); }, cancel() {} },
+        codex: {},
+        log: quiet,
+      });
+      assert.deepEqual(await mgr.channels["accounts:resign-seat"]({ provider: "claude", seatId: "seat-1" }), { error: "login-failed" });
+      assert.deepEqual(await dirEntries(join(broken.paths.seatsRoot, "claude")), ["seat-1", "seat-2"], "the temp directory was removed");
+    } finally {
+      await broken.cleanup();
+    }
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat: a login that never produces credentials times out — flow failed, temp dir deleted, seat untouched", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr, calls } = await timedManager(r, clock);
+    const before = await readFile(seatCredsFile(r), "utf-8");
+    const { flowId } = await mgr.channels["accounts:resign-seat"]({ provider: "claude", seatId: "seat-1" });
+    const tempDir = join(r.paths.seatsRoot, "claude", `.resign-${flowId}`);
+    await mgr.tick();
+    assert.equal(mgr._resigns().get(flowId).state, "pending");
+    clock.t += 16 * 60_000;
+    await mgr.tick();
+    assert.deepEqual(await mgr.channels["accounts:resign-status"]({ flowId }), { state: "failed", error: "login-failed" });
+    assert.equal(await r.exists(tempDir), false);
+    assert.deepEqual(calls.cancel, ["k-seat-1"]);
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), before);
+    // a finished flow is forgotten after its time-to-live
+    clock.t += 11 * 60_000;
+    await mgr.tick();
+    assert.equal(mgr._resigns().size, 0);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat: credentials but the profile never answers → login-failed after the grace, seat untouched", async () => {
+  const r = await rig();
+  try {
+    const clock = { t: 1_000 };
+    const { mgr } = await timedManager(r, clock);
+    const before = await readFile(seatCredsFile(r), "utf-8");
+    const { flowId } = await mgr.channels["accounts:resign-seat"]({ provider: "claude", seatId: "seat-1" });
+    const tempDir = join(r.paths.seatsRoot, "claude", `.resign-${flowId}`);
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-unknown")); // no profile for it
+    await mgr.tick();
+    assert.equal(mgr._resigns().get(flowId).state, "pending");
+    clock.t += 61_000;
+    await mgr.tick();
+    assert.equal(mgr._resigns().get(flowId).state, "failed");
+    assert.equal(await readFile(seatCredsFile(r), "utf-8"), before);
+    assert.equal(await r.exists(tempDir), false);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("usage poll after a sign-in: also after add-seat; a failing poll never fails the flow", async () => {
+  const r = await rig();
+  try {
+    r.profiles["tok-C"] = profileOf("u-C", "c@example.com");
+    const { seatId } = await ch(r, "accounts:add-seat", { provider: "claude" });
+    assert.equal(r.calls.usage, 0, "nothing until the seat lands");
+    await writeFile(join(seatDirOf(r, seatId), ".credentials.json"), credsJson("tok-C"));
+    assert.equal((await ch(r, "accounts:seat-status", { seatId })).state, "ok");
+    assert.equal(r.calls.usage, 1);
+
+    r.state.usageThrows = true;
+    const { flowId, tempDir } = await startResign(r);
+    r.profiles["tok-A2"] = profileOf("u-A", "a@example.com");
+    await writeFile(join(tempDir, ".credentials.json"), credsJson("tok-A2"));
+    assert.equal((await ch(r, "accounts:resign-status", { flowId })).state, "ok", "the flow still succeeds");
+    assert.equal(r.calls.usage, 2);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (codex): a login for the SAME account lands on the seat, the borrowed live login is put back", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    const dir = join(r.paths.seatsRoot, "codex", "seat-2");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    await r.accounts.mutate("codex", (st) => {
+      st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir, status: "signed-out" });
+      return st;
+    });
+    const out = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
+    assert.equal(out.connect.shape, "oauth-auto");
+    assert.equal(r.calls.codexStart, 1);
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: out.flowId }), { state: "pending" });
+
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B2", "gpt-B") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
+
+    const st = await ch(r, "accounts:resign-status", { flowId: out.flowId });
+    assert.equal(st.state, "ok");
+    assert.equal(st.seat.status, "ok");
+    assert.equal(JSON.parse(await readFile(join(dir, "auth.json"), "utf-8")).openai.access, "cx-B2");
+    assert.equal(await mode(join(dir, "auth.json")), "600");
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-A", "the previous live login is back");
+    assert.deepEqual(r.calls.restore, ["cx-A"]);
+    assert.equal(r.calls.usage, 1);
+    assert.doesNotMatch(JSON.stringify(st), /cx-|gpt-B/);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (codex): a DIFFERENT account → failed/different-account, the seat's file is untouched, the live login is put back", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    const dir = join(r.paths.seatsRoot, "codex", "seat-2");
+    await mkdir(dir, { recursive: true });
+    const original = JSON.stringify({ openai: oauth("cx-B", "gpt-B") });
+    await writeFile(join(dir, "auth.json"), original);
+    await r.accounts.mutate("codex", (st) => {
+      st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir, status: "signed-out" });
+      return st;
+    });
+    const { flowId } = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-C", "gpt-C") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
+
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
+      state: "failed",
+      error: "different-account",
+      expectedEmail: null,
+      gotEmail: null,
+    });
+    assert.equal(await readFile(join(dir, "auth.json"), "utf-8"), original);
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-A");
+    assert.equal(allSeats((await r.accounts.getStore()).providers.codex).find((s) => s.id === "seat-2").status, "signed-out");
+    assert.equal(r.calls.usage, 0);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (codex): cancel restores nothing it did not take — and a LATE approval is caught by the guard, the live login is put back, the seat untouched", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    const dir = join(r.paths.seatsRoot, "codex", "seat-2");
+    await mkdir(dir, { recursive: true });
+    const original = JSON.stringify({ openai: oauth("cx-B", "gpt-B") });
+    await writeFile(join(dir, "auth.json"), original);
+    await r.accounts.mutate("codex", (st) => {
+      st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir, status: "signed-out" });
+      return st;
+    });
+    const { flowId } = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
+    assert.deepEqual(await ch(r, "accounts:resign-cancel", { flowId }), { ok: true });
+    assert.equal(await r.exists(dir), true);
+    // the user approves the device code anyway: opencode overwrites its slot
+    await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-B2", "gpt-B") }));
+    await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
+    assert.equal(JSON.parse(await readFile(r.paths.codexAuthPath, "utf-8")).openai.access, "cx-A", "the live login is back");
+    assert.equal(await readFile(join(dir, "auth.json"), "utf-8"), original, "the seat was never rewritten");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("resign-seat (codex): one OAuth wait per provider — a second flow (or an add-seat) supersedes the first", async () => {
+  const r = await rig({ codex: true, claude: false });
+  try {
+    const dir = join(r.paths.seatsRoot, "codex", "seat-2");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ openai: oauth("cx-B", "gpt-B") }));
+    await r.accounts.mutate("codex", (st) => {
+      st.accounts[0].seats.push({ id: "seat-2", label: "Seat 2", email: null, accountUuid: "gpt-B", credentialDir: dir, status: "signed-out" });
+      return st;
+    });
+    const first = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
+    const second = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
+    const add = await ch(r, "accounts:add-seat", { provider: "codex" });
+    assert.ok(add.seatId);
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "failed", error: "login-failed" });
+    // the live (borrowed) codex seat is refused
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-1" }), { error: "live-seat" });
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("the resign channels are registered next to the other accounts channels", async () => {
+  const r = await rig();
+  try {
+    for (const name of ["accounts:resign-seat", "accounts:resign-status", "accounts:resign-cancel"]) {
+      assert.equal(typeof r.mgr.channels[name], "function", name);
+    }
   } finally {
     await r.cleanup();
   }
