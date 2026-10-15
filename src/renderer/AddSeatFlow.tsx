@@ -30,27 +30,27 @@ import { X } from "lucide-react";
 import type { ProviderView, SeatConnect, SeatProviderId } from "../shared/types";
 import {
   accountsErrorMessage,
-  formatRemaining,
   isPollExpired,
   needsSecondAccountNote,
   providerViewOrError,
   SEAT_TOS_NOTE,
 } from "./chatUtils";
 import { providerLabel } from "./UsageDial";
-import { ClaudeLoginBlock, WaitingBlockBody } from "./ConnectProvider";
-import { ProcessPanel } from "./ProcessPanel";
+import {
+  CLIENT_LIMIT_MS,
+  SEAT_POLL_INTERVAL_MS,
+  SERVER_LOGIN_LIMIT_MS,
+  SeatSignInBlock,
+  signInFromConnect,
+  useClaudeLoginExit,
+  useElapsedSeconds,
+  useSubmitSettle,
+} from "./SeatSignIn";
 import { Callout } from "./Callout";
 import { useStore } from "./store";
 import { findSeatLabels, refreshAccountsAndUsage } from "./accountsData";
 
-const SEAT_POLL_INTERVAL_MS = 2_000;
-// The box waits this long for a sign-in to finish (LOGIN_TIMEOUT_MS in
-// src/server/accountsManager.mjs) — one limit for the Claude paste-back and the
-// device-code wait alike. Keep the two in step.
-export const SERVER_LOGIN_LIMIT_MS = 15 * 60 * 1_000;
-// This card gives up only AFTER the box would have, plus a little slack for the
-// clocks starting at slightly different moments; the final ask below settles it.
-const CLIENT_LIMIT_MS = SERVER_LOGIN_LIMIT_MS + 30_000;
+export { SERVER_LOGIN_LIMIT_MS };
 
 export const TOS_ACK_KEY = "manta:accounts:tosAck";
 
@@ -96,16 +96,14 @@ export function AddSeatFlow({
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "starting" });
   const [epoch, setEpoch] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
   const mounted = useRef(true);
   // The half-made seat the box is holding, until the flow settles it.
   const openSeatRef = useRef<string | null>(null);
   // done is reported exactly once, whatever the parent does with onDone's identity.
   const reportedRef = useRef(false);
   // Submit keeps its spinner until the flow SETTLES (seat listed / failed /
-  // different-org / cancelled), not just until the code was typed into the
-  // sign-in. Resolved by the phase effect below.
-  const settleRef = useRef<(() => void) | null>(null);
+  // different-org / cancelled), not just until the code was typed into the sign-in.
+  const waitForSettle = useSubmitSettle(phase);
   const label = providerLabel(provider);
 
   const set = useCallback((p: Phase) => {
@@ -177,8 +175,6 @@ export function AddSeatFlow({
   useEffect(() => {
     if (!seatId) return;
     const startedWall = Date.now();
-    setElapsed(0);
-    const tick = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedWall) / 1000)), 1000);
     let inFlight = false;
     let unreachable = false;
     const handle = window.setInterval(async () => {
@@ -232,33 +228,22 @@ export function AddSeatFlow({
     }, SEAT_POLL_INTERVAL_MS);
     return () => {
       window.clearInterval(handle);
-      window.clearInterval(tick);
     };
   }, [seatId, set, finishAdded]);
+
+  const elapsed = useElapsedSeconds(seatId);
 
   // A sign-in that EXITS with an error (a wrong or expired code) will never
   // produce credentials: fail now instead of leaving Submit spinning until the
   // 15-minute deadline. A clean exit is a successful login — keep waiting for
   // the box to file the seat.
   const sessionKey = phase.kind === "claude" ? phase.sessionKey : null;
-  useEffect(() => {
-    if (!sessionKey) return;
-    return window.api.onPtyEvent((ev) => {
-      if (ev.sessionKey !== sessionKey || ev.kind !== "exit" || ev.code === 0) return;
-      const open = openSeatRef.current;
-      openSeatRef.current = null;
-      if (open) void window.api.accountsCancelSeat({ seatId: open }).catch(() => {});
-      set({ kind: "failed", message: "That code didn't work (it may have expired). Start the sign-in again." });
-    });
-  }, [sessionKey, set]);
-
-  // Any phase other than "claude" (or unmount) ends a pending Submit.
-  useEffect(() => {
-    if (phase.kind === "claude" && !phase.inputError) return;
-    settleRef.current?.();
-    settleRef.current = null;
-  }, [phase]);
-  useEffect(() => () => settleRef.current?.(), []);
+  useClaudeLoginExit(sessionKey, () => {
+    const open = openSeatRef.current;
+    openSeatRef.current = null;
+    if (open) void window.api.accountsCancelSeat({ seatId: open }).catch(() => {});
+    set({ kind: "failed", message: "That code didn't work (it may have expired). Start the sign-in again." });
+  });
 
   // done is terminal — report once.
   useEffect(() => {
@@ -326,47 +311,14 @@ export function AddSeatFlow({
 
       {phase.kind === "starting" && <div className="text-text-muted">Preparing sign-in…</div>}
 
-      {phase.kind === "claude" && (
-        <ClaudeLoginBlock
-          ptySessionKey={phase.sessionKey}
-          cwd={phase.cwd}
-          url={phase.url}
-          preExisting={false}
-          inputError={phase.inputError}
-          onUrlDetected={(url) => set({ ...phase, url, inputError: undefined })}
-          onSubmitCode={async (code) => {
-            const trimmed = code.trim();
-            if (!trimmed) return;
-            try {
-              await window.api.ptyWrite(phase.sessionKey, trimmed + "\r");
-              if (phase.inputError) set({ ...phase, inputError: undefined });
-            } catch {
-              set({ ...phase, inputError: "Couldn't reach the server. Try again." });
-              return;
-            }
-            // Stay "Saving…" until the box has filed the seat AND the list has
-            // refreshed to show it (or the sign-in failed) — the poll above
-            // drives the phase; the effect resolves this.
-            await new Promise<void>((resolve) => {
-              settleRef.current?.();
-              settleRef.current = resolve;
-            });
-          }}
-        />
-      )}
-
-      {phase.kind === "device" && (
-        <ProcessPanel
-          stages={["Waiting for sign-in"]}
-          activeIndex={0}
-          status="running"
-          elapsedSeconds={elapsed}
-          logLines={[]}
-          remainingLabel={formatRemaining(0, elapsed * 1000, SERVER_LOGIN_LIMIT_MS)}
+      {(phase.kind === "claude" || phase.kind === "device") && (
+        <SeatSignInBlock
+          phase={phase}
+          elapsed={elapsed}
+          waitForSettle={waitForSettle}
+          onPatch={(patch) => set({ ...phase, ...patch })}
           onCancel={() => void cancel()}
-        >
-          <WaitingBlockBody url={phase.url} instructions={phase.instructions} />
-        </ProcessPanel>
+        />
       )}
 
       {phase.kind === "different-org" && (
@@ -415,21 +367,11 @@ export function AddSeatFlow({
   );
 }
 
-// The box answers the SAME `connect` shape the existing flow does. Claude
-// drives a terminal (`claude auth login` with the seat's config dir); the OAuth
-// device flow shows a link + code. Anything else cannot be driven from here.
+// The box answers the SAME `connect` shape the existing flow does (see
+// signInFromConnect); anything this card can't drive is a failure.
 export function phaseFromConnect(seatId: string, c: SeatConnect): Phase {
-  if (c.shape === "claude-login" && typeof c.sessionKey === "string" && c.sessionKey) {
-    return { kind: "claude", seatId, sessionKey: c.sessionKey, cwd: typeof c.cwd === "string" ? c.cwd : "~", url: "" };
-  }
-  if (c.shape === "oauth-auto") {
-    return {
-      kind: "device",
-      seatId,
-      url: typeof c.url === "string" ? c.url : "",
-      instructions: typeof c.instructions === "string" ? c.instructions : "",
-    };
-  }
+  const signIn = signInFromConnect(c);
+  if (signIn) return { ...signIn, seatId };
   return { kind: "failed", message: "This provider's sign-in can't be started from here yet." };
 }
 

@@ -1488,6 +1488,11 @@ export const IPC = {
   accountsSeatStatus: "accounts:seat-status", // ({seatId}) → SeatStatusResult
   accountsAddSeatConfirm: "accounts:add-seat-confirm", // ({seatId, newAccount}) → ProviderView | {error}
   accountsCancelSeat: "accounts:cancel-seat", // ({seatId}) → {ok:true}
+  // Re-sign an EXISTING seat whose login died (spec 2026-10-15-seat-resign). A
+  // separate flow id so a cancel can never touch the seat itself.
+  accountsResignSeat: "accounts:resign-seat", // ({provider, seatId}) → ResignSeatResult
+  accountsResignStatus: "accounts:resign-status", // ({flowId}) → ResignStatusResult
+  accountsResignCancel: "accounts:resign-cancel", // ({flowId}) → {ok:true}
   accountsRemoveSeat: "accounts:remove-seat", // ({provider, seatId}) → ProviderView | {error}
   accountsSessionSeat: "accounts:session-seat", // ({sessionId}) → SessionSeat | null
   // BET-1249: the provider-agnostic model catalogue (models.dev) for the
@@ -2311,6 +2316,23 @@ export type SeatStatusResult = {
   seat?: SeatView;
   /** The org the new login belongs to (different-org). */
   orgName?: string;
+};
+
+/** accounts:resign-seat — a sign-in flow for an EXISTING seat. `flowId` keys
+ *  resign-status / resign-cancel; the seat keeps its id, label and assignments. */
+export type ResignSeatResult = { flowId: string; connect: SeatConnect } | { error: AccountsError };
+
+export type ResignStatusResult = {
+  state: "pending" | "ok" | "failed";
+  /** different-account: the login belongs to another account than the seat's;
+   *  the seat was left untouched. */
+  error?: "login-failed" | "different-account" | "unknown-flow";
+  /** The seat's own email, for the different-account message. */
+  expectedEmail?: string | null;
+  /** The email the user actually signed in with (different-account). */
+  gotEmail?: string | null;
+  /** The refreshed seat on ok. */
+  seat?: SeatView;
 };
 
 /** The conversation's current seat (null from the server = no assignment). */

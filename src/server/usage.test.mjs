@@ -580,10 +580,13 @@ test("poller: in-flight guard prevents overlapping ticks", async () => {
   });
   const poller = createUsagePoller({ adapters: [adapter], now: () => 1000 });
   const p1 = poller.tick();
-  const p2 = poller.tick(); // must be a same-tick no-op — inFlight is already true
-  await Promise.all([p1, p2]);
+  const p2 = poller.tick(); // queued: never overlaps, runs once after p1
+  const p3 = poller.tick(); // coalesces with p2
+  await Promise.all([p1, p2, p3]);
   assert.equal(maxConcurrent, 1);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2, "a tick asked for mid-poll runs once more afterwards (coalesced), never concurrently");
+  await poller.tick();
+  assert.equal(calls, 3, "an idle tick runs normally");
 });
 
 // ----------------------------------------------------------------------------

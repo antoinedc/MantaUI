@@ -11,8 +11,8 @@
 // placement — the whole point is that the two meters can never be confused.
 // Never share code, colours, or thresholds between them.
 
-import { memo, useEffect, useRef, useState } from "react";
-import type { ProviderView, SeatView, UsageWindow } from "../shared/types";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import type { ProviderView, SeatProviderId, SeatView, UsageWindow } from "../shared/types";
 import {
   cssVar,
   findSeat,
@@ -41,6 +41,13 @@ import { Popover } from "./Popover";
 import { Pill } from "./Pill";
 import { openAccountsSettings, refreshAccounts, refreshSessionSeat } from "./accountsData";
 import { CROSS_ORG_CONFIRM_COPY, useSeatSwitch } from "./hooks/useSeatSwitch";
+
+// The re-sign modal pulls in the Claude terminal (xterm) — load it only when a
+// "Logged out" badge is actually pressed, not with every composer.
+const ResignSeatFlow = lazy(() => import("./ResignSeatFlow").then((m) => ({ default: m.ResignSeatFlow })));
+
+/** The seat a "Logged out" badge was pressed on. */
+type ResignTarget = { provider: SeatProviderId; seat: SeatView; accountLabel: string };
 
 // Lucide icons render a 24-unit viewBox scaled to size. A stroked circle
 // draws r ± strokeWidth/2 (the stroke straddles the path), so at size 16 the
@@ -94,6 +101,10 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
   const accounts = useStore((s) => s.accounts);
   const sessionSeat = useStore((s) => (sessionId ? s.sessionSeats[sessionId] ?? null : null));
   const [open, setOpen] = useState(false);
+  // The re-sign modal is mounted HERE, outside the popover: the popover closes on
+  // any outside click, which would otherwise tear the sign-in down mid-flow.
+  const [resign, setResign] = useState<ResignTarget | null>(null);
+  const closeResign = useCallback(() => setResign(null), []);
   // Snapshotted at open time (not a ticking clock) — cheap, deterministic,
   // and accurate enough for a short-lived popover.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -118,7 +129,22 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
 
   // No data / no matching snapshot / adapter failed / below threshold with
   // the opt-in off → render nothing. Absence is the healthy signal.
-  if (!snapshot || !state.visible) return null;
+  const resignModal = resign ? (
+    <Suspense fallback={null}>
+      <ResignSeatFlow
+        provider={resign.provider}
+        seatId={resign.seat.id}
+        seatLabel={resign.seat.label}
+        accountLabel={resign.accountLabel}
+        email={resign.seat.email}
+        onDone={closeResign}
+        onCancel={closeResign}
+      />
+    </Suspense>
+  ) : null;
+
+  // (A sign-in in progress outlives the dial's own visibility.)
+  if (!snapshot || !state.visible) return resignModal;
 
   const ringColor = toneRingColor(state.tone);
   const trackColor = cssVar("--border-subtle");
@@ -141,6 +167,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
 
   return (
     <>
+      {resignModal}
       <button
         ref={triggerRef}
         type="button"
@@ -249,6 +276,10 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
           sessionSeat={sessionSeat}
           nowMs={nowMs}
           onNavigate={() => setOpen(false)}
+          onResign={(target) => {
+            setOpen(false);
+            setResign(target);
+          }}
         />
       </Popover>
     </>
@@ -268,6 +299,7 @@ function UsagePopoverBody({
   sessionSeat,
   nowMs,
   onNavigate,
+  onResign,
 }: {
   snapshot: UsageSnapshotLike;
   state: ReturnType<typeof usageDialState>;
@@ -278,6 +310,7 @@ function UsagePopoverBody({
   sessionSeat: import("../shared/types").SessionSeat | null;
   nowMs: number;
   onNavigate: () => void;
+  onResign: (target: ResignTarget) => void;
 }) {
   const switcher = useSeatSwitch(view);
   const lastMove = formatLastMove(sessionSeat?.lastMove, nowMs);
@@ -289,8 +322,14 @@ function UsagePopoverBody({
   const startsOn =
     multi && !current && view ? findSeat(view, view.mode === "manual" ? view.activeSeatId : view.nextSeatId) : null;
 
+  // The seat the header names: this conversation's, or where a new one starts.
+  const headerSeat = current ?? startsOn;
+
   const seatName = (c: { seat: SeatView; account: { label: string; seats: SeatView[] } }) =>
     c.account.seats.length > 1 ? `${c.account.label} · ${c.seat.label}` : c.account.label;
+
+  const resignTarget = (seat: SeatView, accountLabel: string): ResignTarget | null =>
+    view ? { provider: view.provider, seat, accountLabel } : null;
 
   const manage = (provider?: ProviderView["provider"]) => {
     onNavigate();
@@ -328,6 +367,15 @@ function UsagePopoverBody({
             {current ? seatName(current) : startsOn ? seatName(startsOn) : ""}
           </span>
           {!current && startsOn && <span className="shrink-0 text-text-faint">new conversations start here</span>}
+          {headerSeat && seatStateText(headerSeat.seat.status) && (
+            <LoggedOutBadge
+              seat={headerSeat.seat}
+              onClick={() => {
+                const t = resignTarget(headerSeat.seat, headerSeat.account.label);
+                if (t) onResign(t);
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -380,7 +428,10 @@ function UsagePopoverBody({
                     isNext={nextId === seat.id}
                     nowMs={nowMs}
                     switcher={switcher}
-                    onFix={() => manage(view.provider)}
+                    onResign={() => {
+                      const t = resignTarget(seat, g.label);
+                      if (t) onResign(t);
+                    }}
                   />
                 ))}
               </div>
@@ -415,6 +466,24 @@ function UsagePopoverBody({
   );
 }
 
+// The warn badge on a seat whose login is dead. It IS the control: pressing it
+// opens the sign-in for that seat. The title says whether it expired or was
+// signed out.
+function LoggedOutBadge({ seat, onClick }: { seat: SeatView; onClick: () => void }) {
+  const why = seatStateText(seat.status);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid="seat-logged-out"
+      title={`${seat.label}: ${why ?? "logged out"} — click to sign it back in`}
+      className="manta-seat-logged-out shrink-0 rounded-full px-2 text-label font-semibold bg-warn-bg text-warn hover:opacity-80"
+    >
+      Logged out
+    </button>
+  );
+}
+
 type UsageSnapshotLike = NonNullable<ReturnType<typeof selectUsageSnapshot>>;
 
 // One compact "Other seats" row: label (+ the "next" tag in automatic mode),
@@ -425,14 +494,14 @@ function OtherSeatRow({
   isNext,
   nowMs,
   switcher,
-  onFix,
+  onResign,
 }: {
   seat: SeatView;
   view: ProviderView;
   isNext: boolean;
   nowMs: number;
   switcher: ReturnType<typeof useSeatSwitch>;
-  onFix: () => void;
+  onResign: () => void;
 }) {
   const broken = seatStateText(seat.status);
   const facts = [
@@ -447,6 +516,7 @@ function OtherSeatRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1 text-meta text-text min-w-0">
             <span className="truncate">{seat.label}</span>
+            {broken && <LoggedOutBadge seat={seat} onClick={onResign} />}
             {isNext && (
               <span
                 className="manta-seat-next shrink-0 rounded-xs px-1 text-label bg-accent-bg text-accent"
@@ -456,21 +526,7 @@ function OtherSeatRow({
               </span>
             )}
           </div>
-          {(broken || facts.length > 0) && (
-            <div className="text-label text-text-faint truncate">
-              {broken && <span className="text-warn">{broken}</span>}
-              {broken && (
-                <>
-                  {" · "}
-                  <button type="button" onClick={onFix} className="underline decoration-dotted hover:text-text">
-                    Fix
-                  </button>
-                </>
-              )}
-              {broken && facts.length > 0 ? " · " : ""}
-              {facts.join(" · ")}
-            </div>
-          )}
+          {facts.length > 0 && <div className="text-label text-text-faint truncate">{facts.join(" · ")}</div>}
         </div>
         <SeatMiniBars seat={seat} nowMs={nowMs} />
         {view.mode === "manual" && (
@@ -478,7 +534,7 @@ function OtherSeatRow({
             type="button"
             onClick={() => switcher.request(seat)}
             disabled={switcher.busyId !== null || broken !== null}
-            title={broken ? `${seat.label} is ${broken} — fix it in Settings first` : `Use ${seat.label} for every conversation`}
+            title={broken ? `${seat.label} is ${broken} — sign it back in first` : `Use ${seat.label} for every conversation`}
             className="shrink-0 px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40"
           >
             {busy ? "…" : "Use"}

@@ -38,7 +38,8 @@ test("applyRefreshOutcome: a transient failure, an unrelated status, an unknown 
   assert.equal(applyRefreshOutcome(ok, "claude", "seat-2", undefined), ok);
   const out = storeWith("signed-out");
   assert.equal(applyRefreshOutcome(out, "claude", "seat-2", { ok: false, reason: "refresh-token-expired" }), out, "a status set by something else is not overwritten");
-  assert.equal(applyRefreshOutcome(out, "claude", "seat-2", { ok: true }), out);
+  // A signed-out seat (its usage call 401'd) is brought back by a refresh success, like an expired one.
+  assert.equal(statusOf(applyRefreshOutcome(out, "claude", "seat-2", { ok: true })), "ok");
   const codex = storeWith("ok", "codex");
   assert.equal(applyRefreshOutcome(codex, "codex", "seat-2", { ok: false, reason: "refresh-token-expired" }), codex, "each provider has its own dead-token reason");
   assert.equal(applyRefreshOutcome(ok, "claude", "seat-2", { ok: false, reason: "refresh-token-rejected" }), ok);

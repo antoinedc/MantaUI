@@ -332,9 +332,10 @@ function applyIdentity(seat, identity) {
   seat.email = identity.email ?? seat.email;
   // An "expired" seat (its refresh token is dead) keeps that status through
   // re-identification: its access token may still be good for hours, and
-  // identifying it is not evidence the login works. A refresh success, or a new
-  // sign-in, is what clears it.
-  if (seat.status !== "expired") seat.status = "ok";
+  // identifying it is not evidence the login works. A "signed-out" seat (its
+  // usage call answered 401) likewise. A refresh success, a good usage reading,
+  // or a new sign-in is what clears them.
+  if (seat.status !== "expired" && seat.status !== "signed-out") seat.status = "ok";
 }
 
 /**
@@ -460,13 +461,45 @@ export function applyRefreshOutcome(store, provider, seatId, outcome) {
   if (!seat) return store;
   let status = null;
   if (outcome?.ok === true) {
-    if (seat.status === "expired") status = "ok";
+    if (seat.status === "expired" || seat.status === "signed-out") status = "ok";
   } else if (outcome?.reason === DEAD_REFRESH_REASON[provider]) {
     if (seat.status !== "expired" && seat.status !== "signed-out") status = "expired";
   }
   if (!status) return store;
   const next = structuredClone(store);
   findSeat(next.providers[provider], (s) => s.id === seatId).seat.status = status;
+  return next;
+}
+
+/**
+ * The store after a seat's usage call answered 401 and could not be recovered
+ * (the refresh failed, or the 401 repeated after a good refresh): the seat is
+ * "signed-out" — the first writer of that status. Only a seat that is "ok" or
+ * "unknown" changes; "expired" (the refresh token is known dead) and an already
+ * signed-out seat stay as they are. Pure; the SAME object when nothing changes.
+ * @param {AccountsStore} store
+ * @param {string} provider
+ * @param {string} seatId
+ */
+export function applySeatSignedOut(store, provider, seatId) {
+  const seat = findSeat(store?.providers?.[provider] ?? emptyProviderState(), (s) => s.id === seatId)?.seat;
+  if (!seat || (seat.status !== "ok" && seat.status !== "unknown")) return store;
+  const next = structuredClone(store);
+  findSeat(next.providers[provider], (s) => s.id === seatId).seat.status = "signed-out";
+  return next;
+}
+
+/**
+ * The store after a seat produced a good usage reading: a "signed-out" seat is
+ * "ok" again. Nothing else changes (an "expired" seat is cleared by a refresh
+ * success or a new sign-in, not by a reading). Pure; the SAME object when
+ * nothing changes.
+ */
+export function applySeatReadingOk(store, provider, seatId) {
+  const seat = findSeat(store?.providers?.[provider] ?? emptyProviderState(), (s) => s.id === seatId)?.seat;
+  if (!seat || seat.status !== "signed-out") return store;
+  const next = structuredClone(store);
+  findSeat(next.providers[provider], (s) => s.id === seatId).seat.status = "ok";
   return next;
 }
 
@@ -655,7 +688,9 @@ export async function fetchClaudeProfile(accessToken, fetchImpl = fetch) {
 async function listSeatDirs(root) {
   try {
     const entries = await readdir(root, { withFileTypes: true });
-    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort(compareIds);
+    // A dot-directory is never a seat (a re-sign keeps its in-progress login in
+    // `.resign-<flow>` beside the seats; discovery must not adopt it).
+    return entries.filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => e.name).sort(compareIds);
   } catch {
     return [];
   }
@@ -764,7 +799,7 @@ export function createAccountsService({
       // under a different id (the same login was first found via the live file)
       // is just as identified.
       const known = findSeat(prov, (s) => s.id === id || s.credentialDir === dir)?.seat;
-      if ((known?.status === "ok" || known?.status === "expired") && known.accountUuid && known.credentialDir) continue; // identified: no call
+      if ((known?.status === "ok" || known?.status === "expired" || known?.status === "signed-out") && known.accountUuid && known.credentialDir) continue; // identified: no call
       dirs.push({ id, dir, identity: await fetchClaudeProfile(creds.accessToken, fetchImpl) });
     }
     const live = await claudeLiveIdentity();
@@ -1107,6 +1142,46 @@ export function createAccountsService({
       return true;
     },
 
+    /**
+     * Replace a seat's credential file with `content` (the whole file, already
+     * serialized) — atomically (temp + rename), 0600, directory 0700. The seat
+     * keeps its own directory, or gets `<seatsRoot>/<provider>/<seatId>` when it
+     * had none. Returns `{ok:true, dir}`; `{ok:false}` for an unknown seat or a
+     * write failure (the old file is then untouched). Never logs `content`.
+     * @param {"claude"|"codex"} provider
+     * @param {string} seatId
+     * @param {string} content
+     */
+    async replaceSeatCredentials(provider, seatId, content) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider) || typeof content !== "string" || !content) return { ok: false };
+        const prov = (store ?? (await loadStore())).providers[provider];
+        const seat = findSeat(prov, (s) => s.id === seatId)?.seat;
+        if (!seat) return { ok: false };
+        const dir = seat.credentialDir ?? join(seatsRoot, provider, seat.id);
+        await mkdir(dir, { recursive: true, mode: 0o700 });
+        await chmod(dir, 0o700).catch(() => {});
+        await writeJsonAtomic(join(dir, provider === "claude" ? ".credentials.json" : "auth.json"), content, { mode: 0o600 });
+        return { ok: true, dir };
+      } catch (e) {
+        log.warn?.(`[accounts] replacing ${seatId}'s ${provider} credentials failed:`, e?.message ?? e);
+        return { ok: false };
+      }
+    },
+
+    /** Delete the temporary directory of a re-sign (`<root>/<provider>/.resign-*`)
+     *  — and nothing else: never a seat directory, never the provider directory. */
+    async deleteResignDir(dir) {
+      if (typeof dir !== "string" || !dir) return false;
+      const root = resolvePath(seatsRoot) + sep;
+      const target = resolvePath(dir);
+      if (!target.startsWith(root)) return false;
+      const parts = target.slice(root.length).split(sep);
+      if (parts.length !== 2 || !ACCOUNT_PROVIDERS.includes(parts[0]) || !/^\.resign-[A-Za-z0-9-]+$/.test(parts[1])) return false;
+      await rm(target, { recursive: true, force: true });
+      return true;
+    },
+
     /** A copy of the current store (after loading it if needed). */
     async getStore() {
       return structuredClone(store ?? (await loadStore()));
@@ -1220,6 +1295,52 @@ export function createAccountsService({
         });
       } catch (e) {
         log.warn?.("[accounts] recording a refresh outcome failed:", e?.message ?? e);
+        return false;
+      }
+    },
+
+    /**
+     * A seat's usage call answered 401 and could not be recovered: its status
+     * becomes "signed-out" (see `applySeatSignedOut`). Best-effort; never throws.
+     * @returns {Promise<boolean>} whether the store changed
+     */
+    async markSeatSignedOut(provider, seatId) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider)) return false;
+        return await writeLock.runExclusive(async () => {
+          const current = store ?? (await loadStore());
+          const next = applySeatSignedOut(current, provider, seatId);
+          if (next === current) return false;
+          storeVersion++;
+          await saveStore(next);
+          return true;
+        });
+      } catch (e) {
+        log.warn?.("[accounts] marking a seat signed out failed:", e?.message ?? e);
+        return false;
+      }
+    },
+
+    /**
+     * A seat produced a good usage reading: a "signed-out" seat is "ok" again.
+     * Called for every seat on every poll, so the common case (nothing to clear)
+     * is answered from the cached store without taking the write lock.
+     * @returns {Promise<boolean>} whether the store changed
+     */
+    async noteSeatReadingOk(provider, seatId) {
+      try {
+        if (!ACCOUNT_PROVIDERS.includes(provider)) return false;
+        if (store && applySeatReadingOk(store, provider, seatId) === store) return false;
+        return await writeLock.runExclusive(async () => {
+          const current = store ?? (await loadStore());
+          const next = applySeatReadingOk(current, provider, seatId);
+          if (next === current) return false;
+          storeVersion++;
+          await saveStore(next);
+          return true;
+        });
+      } catch (e) {
+        log.warn?.("[accounts] clearing a signed-out seat failed:", e?.message ?? e);
         return false;
       }
     },

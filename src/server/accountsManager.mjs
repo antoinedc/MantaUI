@@ -30,9 +30,26 @@
 //
 // A seat is never listed until it is identified and placed; until then it lives
 // only in memory (`pending`), its id held back from discovery.
+//
+// RE-SIGNING AN EXISTING SEAT (`accounts:resign-seat` / `-status` / `-cancel`)
+//   The same sign-in machinery, pointed at a seat that already exists and whose
+//   login died. The seat is NEVER touched until the new login is proven to be the
+//   SAME account:
+//     Claude: the login runs against a temp directory beside the seat
+//       (`<seatsRoot>/claude/.resign-<flowId>`); on landing, the account must
+//       match (uuid, else email) — then the seat's credentials are replaced
+//       atomically and its status set ok; otherwise the temp directory is deleted
+//       and the seat is byte-identical to before.
+//     Codex: the same borrow-the-live-slot mechanics as add-seat; the new login is
+//       written to the seat only after the same account-id check, and the previous
+//       live login is put back either way.
+//   Flows live in memory (`resigns`, by flow id), one per seat, swept and timed
+//   out like add-seat flows. Cancel deletes only the temp directory / gives the
+//   borrowed live login back — it never removes or rewrites the seat.
 
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { leastLoadedSeat } from "../shared/seatChoice.mjs";
 import {
   ACCOUNT_PROVIDERS,
@@ -109,6 +126,11 @@ export function createAccountsManager({
   readClaudeCreds = readClaudeCredentialsFile,
   readCodexEntry = readCodexEntryFile,
   fsOps = { mkdir, chmod, writeFile },
+  readFileText = (path) => readFile(path, "utf-8"),
+  newFlowId = () => randomUUID(),
+  // Run one usage poll now (the usage poller's tick). Fired after a seat landed
+  // or was re-signed so its bars appear without waiting for the next interval.
+  refreshUsage = null,
   timings = {},
   log = console,
 }) {
@@ -137,6 +159,30 @@ export function createAccountsManager({
   const guards = [];
   /** seatId → in-flight status resolution (single-flight, so two polls cannot place twice). */
   const resolving = new Map();
+  /**
+   * In-flight and recently finished re-sign flows, by flow id. Memory only.
+   * @type {Map<string, {
+   *   flowId: string, provider: "claude"|"codex", seatId: string, dir: string|null,
+   *   startedAt: number, state: "pending"|"ok"|"failed", error?: string,
+   *   expectedEmail?: string|null, gotEmail?: string|null, finishedAt?: number,
+   *   sessionKey?: string, credsSeenAt?: number, epoch?: number, prev?: object|null,
+   *   processing?: boolean
+   * }>}
+   */
+  const resigns = new Map();
+  /** flowId → in-flight Claude re-sign resolution (single-flight, like `resolving`). */
+  const resignResolving = new Map();
+
+  /** Poll the usage now, in the background: errors are logged, never thrown, and
+   *  never fail the flow that asked. */
+  function kickUsage() {
+    if (typeof refreshUsage !== "function") return;
+    try {
+      Promise.resolve(refreshUsage()).catch((e) => log.warn?.("[accounts] the usage refresh after a sign-in failed:", e?.message ?? e));
+    } catch (e) {
+      log.warn?.("[accounts] the usage refresh after a sign-in failed:", e?.message ?? e);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // helpers
@@ -217,6 +263,7 @@ export function createAccountsManager({
     rec.parked = false;
     rec.finishedAt = now();
     accounts.releaseSeat(rec.provider, rec.seatId);
+    kickUsage();
   }
 
   /**
@@ -267,6 +314,19 @@ export function createAccountsManager({
           if (rec.parked) await failFlow(rec, "login-failed");
           pending.delete(rec.seatId);
         }
+      }
+    }
+    for (const rec of [...resigns.values()]) {
+      if (rec.state === "pending") {
+        if (rec.provider === "claude") {
+          await resolveResign(rec);
+        } else if (at - rec.startedAt > t.loginTimeoutMs) {
+          rememberCodexGuard(rec);
+          await failResign(rec, "login-failed");
+        }
+      }
+      if (rec.state !== "pending" && rec.finishedAt !== undefined && at - rec.finishedAt > t.finishedTtlMs) {
+        resigns.delete(rec.flowId);
       }
     }
     for (let i = guards.length - 1; i >= 0; i--) if (guards[i].until <= at) guards.splice(i, 1);
@@ -403,6 +463,20 @@ export function createAccountsManager({
     );
   }
 
+  /** Put the login that was live BEFORE a borrowed-slot sign-in back — unless the
+   *  new login is the SAME account (then the fresh entry is the better one to keep
+   *  live, and the old tokens may even have been rotated out). If the restore
+   *  fails the new login stays live and the previous one is kept as its own seat. */
+  async function giveBackLive(prev, newAccountId) {
+    const sameAccount = Boolean(newAccountId) && prev?.accountId === newAccountId;
+    if (!prev || sameAccount) return;
+    const freshest = await freshestPrevious(prev);
+    if (!(await restoreLive(freshest))) {
+      log.warn?.("[accounts] could not restore the previous Codex login; the new one stays live and the old one becomes its own seat");
+      await preservePrevious(freshest);
+    }
+  }
+
   /** opencode stored a new login while a Codex add-seat was waiting. */
   async function processCodexLanding(rec) {
     if (rec.state !== "pending" || rec.processing) return;
@@ -426,14 +500,7 @@ export function createAccountsManager({
       // 2. The previous live login goes back — unless the "new" login is the
       //    SAME account (a duplicate): then the fresh entry is the better one to
       //    keep live, and the old tokens may even have been rotated out.
-      const sameAccount = Boolean(identity.accountUuid) && rec.prev?.accountId === identity.accountUuid;
-      if (rec.prev && !sameAccount) {
-        const prev = await freshestPrevious(rec.prev);
-        if (!(await restoreLive(prev))) {
-          log.warn?.("[accounts] could not restore the previous Codex login; the new one stays live and the old one becomes its own seat");
-          await preservePrevious(prev);
-        }
-      }
+      await giveBackLive(rec.prev, identity.accountUuid);
       // 3. The new login becomes a seat (or is refused as a duplicate).
       await placeFlow(rec, identity);
     } catch (e) {
@@ -464,11 +531,15 @@ export function createAccountsManager({
    */
   async function onProviderLoginLanded({ id, epoch }) {
     if (id !== "openai") return;
-    const rec = [...pending.values()].find(
-      (r) => r.provider === "codex" && r.state === "pending" && (epoch === undefined || r.epoch === undefined || r.epoch === epoch),
-    );
+    const waiting = (r) => r.provider === "codex" && r.state === "pending" && (epoch === undefined || r.epoch === undefined || r.epoch === epoch);
+    const rec = [...pending.values()].find(waiting);
     if (rec) {
       await processCodexLanding(rec);
+      return;
+    }
+    const resign = [...resigns.values()].find(waiting);
+    if (resign) {
+      await processCodexResignLanding(resign);
       return;
     }
     const at = now();
@@ -476,6 +547,197 @@ export function createAccountsManager({
     if (g) {
       guards.splice(guards.indexOf(g), 1);
       await processGuard(g);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // re-signing an existing seat
+  // -------------------------------------------------------------------------
+
+  /** One OAuth wait per provider: a new Codex sign-in (add or re-sign) supersedes
+   *  any older pending one. */
+  async function supersedeCodexWaits() {
+    for (const old of [...pending.values()]) {
+      if (old.provider === "codex" && old.state === "pending") {
+        rememberCodexGuard(old);
+        await failFlow(old, "login-failed");
+      }
+    }
+    for (const old of [...resigns.values()]) {
+      if (old.provider === "codex" && old.state === "pending") {
+        rememberCodexGuard(old);
+        await failResign(old, "login-failed");
+      }
+    }
+  }
+
+  async function dropTempDir(dir) {
+    try {
+      await accounts.deleteResignDir(dir);
+    } catch (e) {
+      log.warn?.("[accounts] deleting a re-sign directory failed:", e?.message ?? e);
+    }
+  }
+
+  /** End a re-sign as failed. The seat itself is never touched here: only the
+   *  login process and the temp directory go. A finished (ok) flow stays ok. */
+  async function failResign(rec, error, extra = {}) {
+    if (rec.state === "ok") return;
+    rec.state = "failed";
+    rec.error = error;
+    rec.finishedAt = now();
+    Object.assign(rec, extra);
+    await endResignLogin(rec);
+  }
+
+  async function endResignLogin(rec) {
+    if (rec.provider !== "claude") return;
+    if (rec.sessionKey) {
+      try {
+        claudeLogin.cancel(rec.sessionKey);
+      } catch {
+        // already gone
+      }
+    }
+    if (rec.dir) await dropTempDir(rec.dir);
+  }
+
+  async function finishResignOk(rec) {
+    rec.state = "ok";
+    rec.error = undefined;
+    rec.finishedAt = now();
+    await endResignLogin(rec);
+    kickUsage();
+  }
+
+  /** Is the login that landed the seat's own account? Claude: account uuid, else
+   *  email. Codex: account id. "unverifiable" = the seat has nothing to compare. */
+  function compareAccount(provider, seat, identity) {
+    if (seat.accountUuid) {
+      if (!identity?.accountUuid) return "unverifiable";
+      return identity.accountUuid === seat.accountUuid ? "same" : "different";
+    }
+    if (provider === "claude" && seat.email && identity?.email) {
+      return seat.email.toLowerCase() === identity.email.toLowerCase() ? "same" : "different";
+    }
+    return "unverifiable";
+  }
+
+  /** The proven-same-account step: replace the seat's credentials atomically, then
+   *  mark it ok (and refresh what identification gave us). False = nothing changed
+   *  in the store (the seat vanished, or the credential write failed). */
+  async function applyResignLogin(rec, identity, content) {
+    const wrote = await accounts.replaceSeatCredentials(rec.provider, rec.seatId, content);
+    if (!wrote.ok) return false;
+    const res = await accounts.mutate(rec.provider, (state) => {
+      const found = findSeat(state, (x) => x.id === rec.seatId);
+      if (!found) return null;
+      found.seat.status = "ok";
+      found.seat.credentialDir ??= wrote.dir;
+      found.seat.accountUuid = identity?.accountUuid ?? found.seat.accountUuid;
+      found.seat.email = identity?.email ?? found.seat.email;
+      return state;
+    });
+    return res.ok;
+  }
+
+  /** A login landed for a re-sign: same account → replace; otherwise leave the seat as it was. */
+  async function landResign(rec, identity, readContent) {
+    const store = await accounts.getStore();
+    const seat = findSeat(store.providers[rec.provider], (x) => x.id === rec.seatId)?.seat;
+    if (!seat) {
+      await failResign(rec, "login-failed"); // the seat was removed meanwhile
+      return false;
+    }
+    const verdict = compareAccount(rec.provider, seat, identity);
+    if (verdict === "different") {
+      await failResign(rec, "different-account", { expectedEmail: seat.email ?? null, gotEmail: identity?.email ?? null });
+      return false;
+    }
+    if (verdict === "unverifiable") {
+      log.warn?.(`[accounts] cannot tell whether the new login is ${rec.seatId}'s account; refusing it`);
+      await failResign(rec, "login-failed");
+      return false;
+    }
+    if (!(await applyResignLogin(rec, identity, await readContent()))) {
+      await failResign(rec, "login-failed");
+      return false;
+    }
+    await finishResignOk(rec);
+    return true;
+  }
+
+  async function resolveResignClaude(rec) {
+    const file = join(rec.dir, ".credentials.json");
+    const creds = await readClaudeCreds(file);
+    if (!creds?.accessToken) {
+      if (now() - rec.startedAt > t.loginTimeoutMs) await failResign(rec, "login-failed");
+      return;
+    }
+    rec.credsSeenAt ??= now();
+    const identity = await fetchProfile(creds.accessToken);
+    if (!identity) {
+      if (now() - rec.credsSeenAt > t.profileGraceMs) await failResign(rec, "login-failed");
+      return;
+    }
+    await landResign(rec, identity, () => readFileText(file));
+  }
+
+  /** Resolve a pending Claude re-sign ONCE, single-flight (the client's poll and the
+   *  background sweep must never land the same login twice). Codex is driven by
+   *  opencode's login event instead. */
+  async function resolveResign(rec) {
+    if (rec.state !== "pending") return;
+    let run = resignResolving.get(rec.flowId);
+    if (!run) {
+      run = (rec.provider === "claude" ? resolveResignClaude(rec) : Promise.resolve())
+        .catch(async (e) => {
+          log.warn?.("[accounts] checking a seat re-sign failed:", e?.message ?? e);
+          await failResign(rec, "login-failed");
+        })
+        .finally(() => resignResolving.delete(rec.flowId));
+      resignResolving.set(rec.flowId, run);
+    }
+    await run;
+  }
+
+  /** opencode stored a new login while a Codex re-sign was waiting. */
+  async function processCodexResignLanding(rec) {
+    if (rec.state !== "pending" || rec.processing) return;
+    rec.processing = true;
+    try {
+      const entry = await readCodexEntry(codex.livePath());
+      const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
+      if (!isNew) {
+        await failResign(rec, "login-failed");
+        return;
+      }
+      const identity = {
+        accountUuid: typeof entry.accountId === "string" && entry.accountId ? entry.accountId : null,
+        email: null,
+        orgId: null,
+        orgName: null,
+        plan: null,
+      };
+      const store = await accounts.getStore();
+      const seat = findSeat(store.providers.codex, (x) => x.id === rec.seatId)?.seat ?? null;
+      const verdict = seat ? compareAccount("codex", seat, identity) : "missing";
+      // The seat gets the new login ONLY when it is proven to be the same account
+      // — and gets it BEFORE the borrowed slot is given back, so it is never lost.
+      const landed = verdict === "same" && (await applyResignLogin(rec, identity, JSON.stringify({ openai: entry })));
+      await giveBackLive(rec.prev, identity.accountUuid);
+      if (landed) {
+        await finishResignOk(rec);
+      } else if (verdict === "different") {
+        await failResign(rec, "different-account", { expectedEmail: seat.email ?? null, gotEmail: null });
+      } else {
+        await failResign(rec, "login-failed");
+      }
+    } catch (e) {
+      log.warn?.("[accounts] finishing a Codex re-sign failed:", e?.message ?? e);
+      await failResign(rec, "login-failed");
+    } finally {
+      rec.processing = false;
     }
   }
 
@@ -622,12 +884,7 @@ export function createAccountsManager({
     await accounts.seatStates("codex");
     const prev = await readCodexEntry(codex.livePath());
     // One OAuth wait per provider: a new add supersedes an older pending one.
-    for (const old of pending.values()) {
-      if (old.provider === "codex" && old.state === "pending") {
-        rememberCodexGuard(old);
-        await failFlow(old, "login-failed");
-      }
-    }
+    await supersedeCodexWaits();
     const seatId = nextId("seat", [...(await accounts.takenSeatIds("codex")), ...pending.keys()]);
     const dir = accounts.seatDir("codex", seatId);
     accounts.reserveSeat("codex", seatId);
@@ -719,6 +976,112 @@ export function createAccountsManager({
     return { ok: true };
   }
 
+  async function resignSeat({ provider, seatId } = {}) {
+    requireProvider(provider);
+    if (!isNonEmptyString(seatId)) throw new AccountsError("unknown-seat");
+    await sweep();
+    const states = await accounts.seatStates(provider);
+    const entry = states?.seats.find((x) => x.seatId === seatId);
+    if (!entry) throw new AccountsError("unknown-seat");
+    // The box's own live login is refreshed by opencode / the CLI itself; signing
+    // it in again is out of scope here (a directory copy would just be re-mirrored).
+    if (entry.live) throw new AccountsError("live-seat");
+    // One flow per seat: an earlier one is ended first.
+    for (const old of [...resigns.values()]) {
+      if (old.provider === provider && old.seatId === seatId && old.state === "pending") {
+        if (provider === "codex") rememberCodexGuard(old);
+        await failResign(old, "login-failed");
+      }
+    }
+    return provider === "claude" ? resignClaudeSeat(seatId) : resignCodexSeat(seatId);
+  }
+
+  async function resignClaudeSeat(seatId) {
+    const flowId = newFlowId();
+    // Beside the seats, never inside the seat's own directory: the existing login
+    // stays exactly as it is until the new one is proven to be the same account.
+    const dir = accounts.seatDir("claude", `.resign-${flowId}`);
+    let connect;
+    try {
+      await makeSeatDir(dir);
+      connect = await claudeLogin.start(dir, seatId);
+    } catch (e) {
+      log.warn?.("[accounts] starting a Claude seat re-sign failed:", e?.message ?? e);
+      await dropTempDir(dir);
+      throw new AccountsError("login-failed");
+    }
+    resigns.set(flowId, {
+      flowId,
+      provider: "claude",
+      seatId,
+      dir,
+      startedAt: now(),
+      state: "pending",
+      sessionKey: connect?.sessionKey,
+    });
+    return { flowId, connect };
+  }
+
+  async function resignCodexSeat(seatId) {
+    // Make sure the live login's own seat copy is fresh BEFORE we borrow the slot.
+    await accounts.seatStates("codex");
+    const prev = await readCodexEntry(codex.livePath());
+    await supersedeCodexWaits();
+    let connect;
+    try {
+      connect = await codex.startConnect();
+    } catch (e) {
+      log.warn?.("[accounts] starting a Codex seat re-sign failed:", e?.message ?? e);
+    }
+    if (!isObj(connect) || connect.shape === "api-key" || !connect.shape) throw new AccountsError("login-failed");
+    const flowId = newFlowId();
+    resigns.set(flowId, {
+      flowId,
+      provider: "codex",
+      seatId,
+      dir: null,
+      startedAt: now(),
+      state: "pending",
+      prev,
+      epoch: connect.shape === "oauth-auto" ? codex.oauthEpoch() : undefined,
+    });
+    return { flowId, connect };
+  }
+
+  async function resignStatus({ flowId } = {}) {
+    if (!isNonEmptyString(flowId)) return { state: "failed", error: "unknown-flow" };
+    await sweep();
+    const rec = resigns.get(flowId);
+    if (!rec) return { state: "failed", error: "unknown-flow" };
+    await resolveResign(rec);
+    if (rec.state === "pending") return { state: "pending" };
+    if (rec.state === "ok") {
+      const seat = findSeatView(await providerView(rec.provider), rec.seatId);
+      return seat ? { state: "ok", seat } : { state: "failed", error: "login-failed" };
+    }
+    const out = { state: "failed", error: rec.error ?? "login-failed" };
+    if (rec.error === "different-account") {
+      out.expectedEmail = rec.expectedEmail ?? null;
+      out.gotEmail = rec.gotEmail ?? null;
+    }
+    return out;
+  }
+
+  async function resignCancel({ flowId } = {}) {
+    const rec = isNonEmptyString(flowId) ? resigns.get(flowId) : null;
+    if (!rec) return { ok: true };
+    // A landing already under way finishes first: cancelling never leaves a
+    // half-applied seat. (If it succeeded the seat is simply re-signed.)
+    const landing = resignResolving.get(flowId);
+    if (landing) await landing;
+    if (rec.state === "pending") {
+      if (rec.provider === "codex") rememberCodexGuard(rec);
+      await failResign(rec, "login-failed");
+    }
+    resigns.delete(flowId);
+    return { ok: true };
+  }
+
   async function sessionSeat({ sessionId } = {}) {
     if (!isNonEmptyString(sessionId)) return null;
     const found = seatAssigner.sessionAssignment(sessionId);
@@ -762,6 +1125,9 @@ export function createAccountsManager({
     "accounts:add-seat-confirm": channel("accounts:add-seat-confirm", confirmSeat),
     "accounts:cancel-seat": channel("accounts:cancel-seat", cancelSeat),
     "accounts:remove-seat": channel("accounts:remove-seat", removeSeat),
+    "accounts:resign-seat": channel("accounts:resign-seat", resignSeat),
+    "accounts:resign-status": channel("accounts:resign-status", resignStatus),
+    "accounts:resign-cancel": channel("accounts:resign-cancel", resignCancel),
     "accounts:session-seat": channel("accounts:session-seat", sessionSeat),
   };
 
@@ -780,8 +1146,12 @@ export function createAccountsManager({
     seatStatus,
     confirmSeat,
     cancelSeat,
+    resignSeat,
+    resignStatus,
+    resignCancel,
     sessionSeat,
     _pending: () => pending,
+    _resigns: () => resigns,
     _guards: () => guards,
   };
 }
