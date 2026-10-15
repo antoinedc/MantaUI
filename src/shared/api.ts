@@ -29,6 +29,8 @@ import type {
   ProviderViewResult,
   AddSeatResult,
   SeatStatusResult,
+  ResignSeatResult,
+  ResignStatusResult,
   SessionSeat,
   SeatProviderId,
   AccountsUpdatedPayload,
@@ -1115,6 +1117,9 @@ export interface Api {
   accountsSeatStatus(input: { seatId: string }): Promise<SeatStatusResult>;
   accountsAddSeatConfirm(input: { seatId: string; newAccount: boolean }): Promise<ProviderViewResult>;
   accountsCancelSeat(input: { seatId: string }): Promise<{ ok: boolean }>;
+  accountsResignSeat(input: { provider: SeatProviderId; seatId: string }): Promise<ResignSeatResult>;
+  accountsResignStatus(input: { flowId: string }): Promise<ResignStatusResult>;
+  accountsResignCancel(input: { flowId: string }): Promise<{ ok: boolean }>;
   accountsRemoveSeat(input: { provider: SeatProviderId; seatId: string }): Promise<ProviderViewResult>;
   accountsSessionSeat(input: { sessionId: string }): Promise<SessionSeat | null>;
   // `accounts.updated` / `accounts.moved` bus events (hints; refetch the views).
