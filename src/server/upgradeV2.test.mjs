@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import {
   createUpgradeRoutes,
+  runSelfUpdateTo,
   COPY_MODE_FACTOR,
   IN_PLACE_FACTOR,
   STEP_IDS,
@@ -42,7 +43,7 @@ function makeBox(opts = {}) {
     claudeLogin: false,
     turns: [0],
     prepare: { migrationNeeded: true, passwordCreated: false },
-    previous: { git_sha: "abc1234" },
+    previous: { git_sha: "abc1234", version: "0.9.0", at: "2026-10-16T00:00:00Z" },
     ...opts,
   };
   const hook = (name) => (o.crashOn === name ? NEVER() : undefined);
@@ -88,7 +89,6 @@ function makeBox(opts = {}) {
     services: {
       pauseBackground: async () => rec("pause"),
       resumeBackground: async () => rec("resume"),
-      restartServer: async () => rec("restartServer"),
       runningTurns: async () => (turnQueue.length > 1 ? turnQueue.shift() : turnQueue[0]),
     },
     dbSizeBytes: async () => o.dbBytes,
@@ -128,9 +128,13 @@ function makeBox(opts = {}) {
         return o.tinyTurn ?? { ok: true };
       },
     },
-    reinstallPreviousRelease: async () => {
-      rec("reinstall");
-      return o.previous ? {} : { skipped: "no record of the previous release" };
+    readPreviousRelease: async () => {
+      rec("readPrevious");
+      return o.previous;
+    },
+    reinstallPreviousRelease: async (prev) => {
+      rec("reinstall", prev.git_sha, prev.version ?? null);
+      return o.reinstallResult ?? {};
     },
   };
   return { deps, store, calls, events, o, names: () => calls.map((c) => c[0]), resetMigrate: () => (migrateIdx = 0) };
@@ -332,13 +336,27 @@ describe("full run", () => {
     assert.equal(box2.calls.length, 0);
   });
 
-  test("when the password was minted at boot (two-hop), manta-server restarts itself at the end", async () => {
+  test("password minted at first boot: no manta-server restart is owed (every reader is lazy) and the run completes", async () => {
     const box = makeBox({ prepare: { migrationNeeded: true, passwordCreated: true } });
     const m = createUpgradeV2(box.deps);
     await m.boot();
     await runToIdle(m);
-    assert.equal(box.names().at(-1), "restartServer");
     assert.equal(m.status().state, "completed");
+    assert.ok(!box.names().includes("restartServer"));
+    assert.equal("restartServer" in box.deps.services, false);
+  });
+
+  test("the release to roll back to is captured when the upgrade STARTS (a later self-update overwrites previous-release.json)", async () => {
+    const box = makeBox({ pluginIds: [] });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "failed");
+    assert.equal(box.store.data.previousRelease.git_sha, "abc1234");
+    box.o.previous = { git_sha: "ffffff0", version: "9.9.9" }; // the file changed afterwards
+    box.calls.length = 0;
+    await m.rollback();
+    assert.deepEqual(box.calls.find((c) => c[0] === "reinstall"), ["reinstall", "abc1234", "0.9.0"]);
   });
 });
 
@@ -515,6 +533,7 @@ describe("rollback", () => {
     assert.deepEqual(box.names(), [
       "opencode.stop", "removeDb", "removeDb", "restoreV1", "opencode.configure", "opencode.start", "resume", "reinstall",
     ]);
+    assert.deepEqual(box.calls.at(-1), ["reinstall", "abc1234", "0.9.0"], "self-update --to gets the recorded sha + version");
     assert.deepEqual(box.calls.filter((c) => c[0] === "removeDb").map((c) => c[1]), [
       "/data/opencode/opencode-v2.db.partial", "/data/opencode/opencode-v2.db",
     ]);
@@ -547,14 +566,23 @@ describe("rollback", () => {
     assert.equal(m.status().state, "rolled_back");
   });
 
-  test("no record of the previous release → still rolled back to V1, with the reason surfaced", async () => {
+  test("previous-release.json missing → still rolled back to V1 (service, assets, DB), with the reason surfaced and no reinstall attempted", async () => {
     const { box, m } = await failedAtVerify({ previous: null });
     assert.deepEqual(await m.rollback(), { ok: true });
     const s = m.status();
     assert.equal(s.state, "rolled_back");
     assert.equal(s.error.step, "rollback");
-    assert.match(s.error.message, /no record of the previous release/);
+    assert.match(s.error.message, /previous-release\.json is missing/);
+    assert.ok(box.names().includes("restoreV1") && box.names().includes("opencode.start"));
+    assert.ok(!box.names().includes("reinstall"));
     assert.equal(box.store.data.state, "rolled_back");
+  });
+
+  test("the re-install itself failing (host lacks the build…) → V1 is back, the failure reason is surfaced", async () => {
+    const { m } = await failedAtVerify({ reinstallResult: { skipped: "self-update.sh --to abc1234 failed (exit 1): release host no longer has commit abc1234" } });
+    assert.deepEqual(await m.rollback(), { ok: true });
+    assert.equal(m.status().state, "rolled_back");
+    assert.match(m.status().error.message, /release host no longer has commit/);
   });
 
   test("a rolled-back box is not auto-upgraded again on the next boot", async () => {
@@ -650,5 +678,46 @@ describe("HTTP surface (real server): upgrade-mode 503 gate + K3 routes", () => 
       assert.equal((await call("GET", "/api/upgrade")).body.state, "rolled_back");
       assert.equal((await call("POST", "/api/upgrade/retry")).body.ok, false);
     });
+  });
+});
+
+describe("runSelfUpdateTo (the real re-install call)", () => {
+  const fakeChild = (exitCode) => {
+    const handlers = {};
+    return {
+      on: (ev, fn) => ((handlers[ev] = fn), undefined),
+      unref: () => {},
+      fire: () => handlers.exit?.(exitCode),
+    };
+  };
+  const run = (opts) =>
+    runSelfUpdateTo({ script: "/s/self-update.sh", logPath: "/l", exists: () => true, readLog: () => "\u001b[32m✓\u001b[0m a\n\u001b[31m✗ self-update: release host no longer has commit abc1234 (manta-0.9.0.txt is now commit c0ffee)\u001b[0m\n", ...opts });
+
+  test("passes --to <sha> and --version, and only when a version is recorded", async () => {
+    for (const [version, want] of [["0.9.0", ["/s/self-update.sh", "--to", "abc1234", "--version", "0.9.0"]], [undefined, ["/s/self-update.sh", "--to", "abc1234"]]]) {
+      let seen;
+      const c = fakeChild(0);
+      const p = run({ sha: "abc1234", version, spawnFn: (cmd, args) => ((seen = [cmd, args]), c) });
+      c.fire();
+      assert.deepEqual(await p, {});
+      assert.deepEqual(seen, ["bash", want]);
+    }
+  });
+  test("an early non-zero exit is a failure carrying the script's last log line (ANSI stripped)", async () => {
+    const c = fakeChild(1);
+    const p = run({ sha: "abc1234", spawnFn: () => c });
+    c.fire();
+    const r = await p;
+    assert.match(r.skipped, /^self-update\.sh --to abc1234 failed \(exit 1\): ✗ self-update: release host no longer has commit/);
+    assert.ok(!r.skipped.includes("\u001b"));
+  });
+  test("still running after the watch window = it reached the server restart = success", async () => {
+    const c = fakeChild(0);
+    assert.deepEqual(await run({ sha: "abc1234", spawnFn: () => c, watchMs: 5 }), {});
+  });
+  test("a missing script or a spawn that throws is reported, never thrown", async () => {
+    assert.match((await runSelfUpdateTo({ script: "/nope/self-update.sh", sha: "abc1234" })).skipped, /self-update\.sh is missing/);
+    const r = await run({ sha: "abc1234", spawnFn: () => { throw new Error("EPERM"); } });
+    assert.match(r.skipped, /could not start self-update\.sh: EPERM/);
   });
 });

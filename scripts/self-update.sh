@@ -54,6 +54,22 @@ set -euo pipefail
 
 MANTA_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
+# --to <sha> [--version <v>]: install EXACTLY that release instead of the latest (the rollback leg of
+# the V1 → V2 upgrade, src/server/upgradeV2.mjs). Git box: fetch + reset to the commit. Packaged box:
+# the release host names releases by VERSION (manta-<version>.txt / manta-<version>-<arch>.tar.gz —
+# see scripts/release/pack.mjs + merge-manifest.mjs), never by commit, so the version is taken from
+# --version, else from ~/.manta/previous-release.json, and the manifest it names must STILL carry
+# that commit; if the host no longer has the build the script fails loudly rather than guess.
+TO_SHA=""
+TO_VERSION="${MANTA_TO_VERSION:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --to) TO_SHA="${2:-}"; shift 2 || shift ;;
+    --version) TO_VERSION="${2:-}"; shift 2 || shift ;;
+    *) printf 'self-update: unknown argument %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
 # --- Own printing helpers (install.sh owns its copies; release.sh needs them) --
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -71,6 +87,12 @@ LOG_FILE="$STATE_HOME/.manta/self-update.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 : > "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
+
+if [ -n "$TO_SHA" ]; then
+  case "$TO_SHA" in *[!0-9a-fA-F]*) die "self-update: --to needs a commit sha (hex), got '$TO_SHA'" ;; esac
+  [ "${#TO_SHA}" -ge 7 ] || die "self-update: --to needs at least 7 hex characters"
+fi
+PREV_RELEASE_FILE="$STATE_HOME/.manta/previous-release.json"
 
 # --- Shared release helpers (arch + manifest + checksum + guidance sync) ------
 # Single copy lives at scripts/lib/release.sh (ships in the release tarball);
@@ -210,16 +232,32 @@ if [ "$INSTALL_KIND" = "git" ]; then
   log "self-update: fetching origin/main into $MANTA_HOME"
   git -C "$MANTA_HOME" fetch origin main -q
 
+  if [ -n "$TO_SHA" ]; then
+    # Rollback / pin: the commit may be older than anything origin/main still points at.
+    if ! git -C "$MANTA_HOME" cat-file -e "${TO_SHA}^{commit}" 2>/dev/null; then
+      git -C "$MANTA_HOME" fetch origin "$TO_SHA" -q 2>/dev/null || true
+    fi
+    git -C "$MANTA_HOME" cat-file -e "${TO_SHA}^{commit}" 2>/dev/null \
+      || die "self-update: commit $TO_SHA is not available from origin — cannot install that release"
+    GIT_TARGET="$(git -C "$MANTA_HOME" rev-parse "${TO_SHA}^{commit}")"
+  else
+    GIT_TARGET="$(git -C "$MANTA_HOME" rev-parse origin/main)"
+  fi
+
   # Only mark the payload replaced when the reset actually moves the checkout.
-  # A git box already on origin/main with only a CLI changed must not restart
+  # A git box already on the target with only a CLI changed must not restart
   # both services (BET-1097 review fix): PAYLOAD_REPLACED reflects whether the
   # payload genuinely changed, not merely that the reset command ran.
-  if [ "$(git -C "$MANTA_HOME" rev-parse HEAD)" != "$(git -C "$MANTA_HOME" rev-parse origin/main)" ]; then
-    log "self-update: resetting to origin/main"
-    git -C "$MANTA_HOME" reset --hard origin/main -q
+  if [ "$(git -C "$MANTA_HOME" rev-parse HEAD)" != "$GIT_TARGET" ]; then
+    # Record what is about to be replaced BEFORE moving HEAD (rollback target).
+    _prev_ver="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||"")}catch{}' "$MANTA_HOME/package.json" 2>/dev/null || true)"
+    write_previous_release "$PREV_RELEASE_FILE" "$(git -C "$MANTA_HOME" rev-parse HEAD)" "$_prev_ver" \
+      || warn "self-update: could not record the previous release (rollback to it will not be automatic)"
+    log "self-update: resetting to ${TO_SHA:+$GIT_TARGET}${TO_SHA:-origin/main}"
+    git -C "$MANTA_HOME" reset --hard "$GIT_TARGET" -q
     PAYLOAD_REPLACED=1
   else
-    log "self-update: already at origin/main"
+    log "self-update: already at ${TO_SHA:+$GIT_TARGET}${TO_SHA:-origin/main}"
   fi
 else
   # packaged install — download + verify + extract the release tarball and
@@ -253,9 +291,23 @@ else
   # before releases carried one — handled by the fallback in the skip check.
   INSTALLED_GIT_SHA="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).git_sha)||"")' "$MANTA_HOME/RELEASE.json" 2>/dev/null || echo "")"
 
-  log "self-update: fetching manifest from $host/releases/manta-latest.txt"
-  manifest="$(curl -fsSL "$host/releases/manta-latest.txt")" \
-    || die "self-update: manifest fetch failed: $host/releases/manta-latest.txt"
+  if [ -n "$TO_SHA" ]; then
+    # Releases are named by version on the host (no per-commit URL exists). Find the version.
+    if [ -z "$TO_VERSION" ] && [ -f "$PREV_RELEASE_FILE" ]; then
+      _rec_sha="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).git_sha||"")}catch{}' "$PREV_RELEASE_FILE" 2>/dev/null || true)"
+      if release_sha_matches "$TO_SHA" "$_rec_sha"; then
+        TO_VERSION="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||"")}catch{}' "$PREV_RELEASE_FILE" 2>/dev/null || true)"
+      fi
+    fi
+    [ -n "$TO_VERSION" ] \
+      || die "self-update: cannot install commit $TO_SHA: the release host names releases by version and no version is recorded for that commit (pass --version)"
+    MANIFEST_URL="$host/releases/manta-${TO_VERSION}.txt"
+  else
+    MANIFEST_URL="$host/releases/manta-latest.txt"
+  fi
+  log "self-update: fetching manifest from $MANIFEST_URL"
+  manifest="$(curl -fsSL "$MANIFEST_URL")" \
+    || die "self-update: manifest fetch failed: $MANIFEST_URL"
 
   resolve_arch
   TARBALL_FILE="$(manifest_get "$manifest" "file_${ARCH_KEY}")"
@@ -266,6 +318,17 @@ else
     die "self-update: manifest is malformed or has no ${ARCH_KEY} build"
   fi
 
+  if [ -n "$TO_SHA" ]; then
+    # The manifest for that VERSION must still be the build we were asked for: a later release
+    # that reused the version number overwrites it, and installing that would not be a rollback.
+    release_sha_matches "$TO_SHA" "$TARBALL_GIT_SHA" \
+      || die "self-update: release host no longer has commit $TO_SHA (manta-${TO_VERSION}.txt is now commit ${TARBALL_GIT_SHA:-unknown}) — cannot roll back to it"
+    if release_sha_matches "$TO_SHA" "$INSTALLED_GIT_SHA"; then
+      ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
+      exit 0
+    fi
+  fi
+
   # Cheap early exit when already current — no download, no reinstall, no
   # restart. The decision itself lives in scripts/lib/release.sh so it can be
   # unit-tested; see release_is_current for why it compares the build's commit
@@ -273,7 +336,7 @@ else
   # being current AND no CLI having changed (BET-1016, generalised in BET-1097)
   # — a CLI-only upgrade must fall through to the restart below, never be
   # swallowed here.
-  if should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$CLIS_CHANGED_FLAG"; then
+  if [ -z "$TO_SHA" ] && should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$CLIS_CHANGED_FLAG"; then
     if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
       ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
     else
@@ -290,7 +353,7 @@ else
   # stale), not merely that the replace function ran. A current box with a
   # CLI-only upgrade must NOT set PAYLOAD_REPLACED — that would restart both
   # services and kill every running agent turn for no reason.
-  if release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
+  if [ -z "$TO_SHA" ] && release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
     # Box is already current; we only got here because a CLI changed. Fall
     # through to deps/tools/restart WITHOUT touching the payload.
     if [ -n "$TARBALL_GIT_SHA" ]; then
@@ -332,6 +395,9 @@ else
     # `<dest>/<rel>.new` and swaps with `mv`, so a failed copy can never leave a
     # half-written tree — most important for `runtime/`, which the running server
     # executes from. It also stamps RELEASE.json so the box records its version.
+    # Record what is about to be replaced BEFORE the swap (rollback target).
+    write_previous_release "$PREV_RELEASE_FILE" "$INSTALLED_GIT_SHA" "$INSTALLED_VERSION" \
+      || warn "self-update: could not record the previous release (rollback to it will not be automatic)"
     replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
     PAYLOAD_REPLACED=1
     # Report the commit alongside the version: two releases legitimately share a

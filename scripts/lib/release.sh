@@ -224,6 +224,37 @@ sync_opencode_guidance() {
   fi
 }
 
+# write_previous_release <file> <git_sha> <version>
+#
+# Record the release a box is ABOUT TO REPLACE, so a failed V1 → V2 upgrade can put it back
+# (`self-update.sh --to <sha>`, driven by src/server/upgradeV2.mjs rollback). Written BEFORE the
+# payload swap — afterwards the old RELEASE.json / HEAD is gone. JSON `{git_sha, version, at}`,
+# temp file + mv, 0600. No sha → writes nothing and returns 1 (a box installed before releases
+# carried a commit cannot be rolled back by commit; the caller says so rather than inventing one).
+# Values are restricted to safe characters, so plain printf JSON is exact.
+write_previous_release() {
+  local file="$1" sha="$2" version="$3" tmp
+  case "$sha" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  case "$version" in *[!0-9A-Za-z.+_-]*) version="" ;; esac
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+  tmp="$file.tmp.$$"
+  printf '{"git_sha":"%s","version":"%s","at":"%s"}\n' "$sha" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null \
+    && chmod 600 "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$file" 2>/dev/null \
+    || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+
+# release_sha_matches <wanted> <actual> — a (possibly abbreviated) commit matches a full one when
+# either is a prefix of the other and both are non-empty hex of >= 7 chars. Pure.
+release_sha_matches() {
+  local want="$1" have="$2"
+  case "$want$have" in *[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#want}" -ge 7 ] && [ "${#have}" -ge 7 ] || return 1
+  case "$have" in "$want"*) return 0 ;; esac
+  case "$want" in "$have"*) return 0 ;; esac
+  return 1
+}
+
 # opencode_restart_plan <payload_replaced> <opencode_changed> <plugins_changed> [migration_pending]
 #
 # The updater's conditional-restart decision, extracted so it is testable.

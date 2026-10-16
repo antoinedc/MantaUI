@@ -22,9 +22,9 @@
 // `createDefaultDeps` is the real thing. NOTHING here talks to the opencode API of a
 // V1 service except the single running-turns probe.
 
-import { copyFile, readFile, rename, rm, stat, statfs } from "node:fs/promises";
+import { copyFile, rename, rm, stat, statfs } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { STATE_DIRNAME, stateHome } from "../shared/paths.mjs";
@@ -38,7 +38,7 @@ import {
   opencodeConfigDir,
   V2_PLUGIN_IDS,
 } from "./upgradeV2Prepare.mjs";
-import { createOpencodeService, passwordFilePath } from "./upgradeV2Service.mjs";
+import { createOpencodeService, readOpencodePassword } from "./upgradeV2Service.mjs";
 
 export const STEP_IDS = Object.freeze(["preflight", "stop", "copy", "migrate", "verify", "cutover"]);
 export const STEP_LABELS = Object.freeze({
@@ -412,10 +412,6 @@ export function createUpgradeV2(deps) {
     state.completedAt = now();
     await commit();
     await deps.services.resumeBackground().catch(() => {});
-    if (state.serverRestartNeeded) {
-      // manta-server cached an empty password before the first-boot prepare created it.
-      await deps.services.restartServer().catch((e) => log(`[upgrade] server restart failed: ${e?.message ?? e}`));
-    }
   }
 
   function launch(fn) {
@@ -448,7 +444,10 @@ export function createUpgradeV2(deps) {
       }
       if (state.state === "failed" || state.state === "rolled_back") return { action: "none" };
       const prep = await deps.prepare();
-      if (prep.passwordCreated) state.serverRestartNeeded = true;
+      // The password may have just been created by prepare; nothing in manta-server caches it
+      // (readOpencodePassword reads the file on every use), so no restart is owed.
+      // Remember the release to roll back to NOW: a later self-update overwrites previous-release.json.
+      state.previousRelease = (await deps.readPreviousRelease().catch(() => null)) ?? null;
       if (!prep.migrationNeeded) return { action: "none" };
       if (!state.v1Db) state.v1Db = deps.v1DbPath();
       launch(runFromFirstPending);
@@ -494,8 +493,15 @@ export function createUpgradeV2(deps) {
         await commit();
         // Last, because it restarts manta-server (and with it this process).
         try {
-          const r = await deps.reinstallPreviousRelease();
-          if (r?.skipped) note = r.skipped;
+          const prev = state.previousRelease ?? (await deps.readPreviousRelease().catch(() => null));
+          if (!prev?.git_sha) {
+            note =
+              "previous-release.json is missing (the update that installed this version predates rollback support), " +
+              "so the earlier Manta release was not re-installed";
+          } else {
+            const r = await deps.reinstallPreviousRelease(prev);
+            if (r?.skipped) note = r.skipped;
+          }
         } catch (e) {
           note = String(e?.message ?? e);
         }
@@ -516,6 +522,46 @@ export function createUpgradeV2(deps) {
       return { ok: true };
     },
   };
+}
+
+// ------------------------------------------------------------ rollback: re-install
+
+/**
+ * Run `self-update.sh --to <sha> [--version <v>]` and report how it went. The script ends by
+ * restarting manta-server (which is THIS process), so success means "still running after
+ * `watchMs`" — it got past every check that can fail (host lacks the build, commit unavailable,
+ * download/verify error) and reached the restart. An early non-zero exit is a failure and its last
+ * log line is returned as the reason. Never throws.
+ */
+export function runSelfUpdateTo({ script, sha, version, spawnFn = spawn, logPath, watchMs = 120_000, exists = existsSync, readLog = (p) => readFileSync(p, "utf8") }) {
+  return new Promise((resolve) => {
+    if (!exists(script)) return resolve({ skipped: `self-update.sh is missing (${script})` });
+    const args = [script, "--to", sha, ...(version ? ["--version", version] : [])];
+    let child;
+    try {
+      child = spawnFn("bash", args, { detached: true, stdio: "ignore" });
+    } catch (e) {
+      return resolve({ skipped: `could not start self-update.sh: ${e?.message ?? e}` });
+    }
+    let done = false;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish({}), watchMs);
+    child.on?.("error", (e) => finish({ skipped: `could not start self-update.sh: ${e?.message ?? e}` }));
+    child.on?.("exit", (code) => {
+      if (code === 0) return finish({});
+      let last = "";
+      try {
+        last = readLog(logPath).split(/\r?\n/).filter((l) => l.trim()).pop() ?? "";
+      } catch { /* no log */ }
+      finish({ skipped: `self-update.sh --to ${sha} failed (exit ${code})${last ? `: ${last.replace(/\x1b\[[0-9;]*m/g, "")}` : ""}` });
+    });
+    child.unref?.();
+  });
 }
 
 // ------------------------------------------------------------------- HTTP surface
@@ -576,6 +622,7 @@ export function createDefaultDeps({
   fetchImpl = globalThis.fetch,
   opencodeUrl = OPENCODE_V2_URL, // overridable ONLY for rehearsals/tests; production is always :4096
   opencodeService = null,
+  spawnFn = spawn,
   log = (m) => console.log(m),
 } = {}) {
   const statePathFile = migrationStatePath();
@@ -594,7 +641,7 @@ export function createDefaultDeps({
       }),
   });
   const configDir = opencodeConfigDir(home);
-  const password = async () => (await readFile(passwordFilePath(), "utf8")).trim();
+  const password = () => readOpencodePassword({ env });
   const v2Fetch = async (path, init = {}) => {
     const res = await fetchImpl(`${opencodeUrl}${path}`, {
       ...init,
@@ -622,7 +669,6 @@ export function createDefaultDeps({
     opencode,
     services: {
       ...services,
-      restartServer: () => opencode.restartServer(),
       // V1's own status endpoint — the only thing here that talks to a V1 service.
       runningTurns: async () => {
         try {
@@ -722,16 +768,11 @@ export function createDefaultDeps({
       },
     },
 
-    /** Re-install the previous release with the script that is on disk now. */
-    reinstallPreviousRelease: async () => {
-      const prev = readJsonSync(statePath("previous-release.json"), null);
-      if (!prev?.git_sha) return { skipped: "no record of the previous release (first update to this version)" };
-      const script = join(mantaHome, "scripts", "self-update.sh");
-      if (!existsSync(script)) return { skipped: "self-update.sh is missing" };
-      const c = spawn("bash", [script, "--to", prev.git_sha], { detached: true, stdio: "ignore" });
-      c.unref();
-      return {};
-    },
+    readPreviousRelease: async () => readJsonSync(statePath("previous-release.json"), null),
+
+    /** Re-install the previous release with the self-update.sh that is on disk now (`--to <sha>`). */
+    reinstallPreviousRelease: (prev) =>
+      runSelfUpdateTo({ script: join(mantaHome, "scripts", "self-update.sh"), sha: prev.git_sha, version: prev.version, spawnFn, logPath: statePath("self-update.log") }),
   };
 }
 

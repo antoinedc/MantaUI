@@ -981,3 +981,42 @@ test("self-update.sh prepares OpenCode V2 once and feeds it into the restart dec
   assert.doesNotMatch(install, /sync_opencode_plugins|opencode\.ai\/install/);
   assert.match(install, /upgradeV2Prepare\.mjs" prepare --home "\$MANTA_HOME"/);
 });
+
+// --- previous-release.json (rollback target) -----------------------------------------------
+
+test("write_previous_release: JSON {git_sha, version, at}, 0600, atomic; refuses an empty/non-hex sha and sanitises the version", () => {
+  const dir = mkdtempSync(join(tmpdir(), "manta-prev-"));
+  try {
+    const f = join(dir, "state", ".manta", "previous-release.json");
+    const r = sourceAndRun(`write_previous_release '${f}' abc1234def '1.2.3-beta.1'; echo rc=$?`);
+    assert.match(r.stdout, /rc=0/);
+    const j = JSON.parse(readFileSync(f, "utf8"));
+    assert.equal(j.git_sha, "abc1234def");
+    assert.equal(j.version, "1.2.3-beta.1");
+    assert.match(j.at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    assert.equal(statSync(f).mode & 0o777, 0o600);
+    assert.deepEqual(readdirSync(dirname(f)), ["previous-release.json"], "no temp file left");
+
+    const before = readFileSync(f, "utf8");
+    assert.match(sourceAndRun(`write_previous_release '${f}' '' '1.0.0'; echo rc=$?`).stdout, /rc=1/);
+    assert.match(sourceAndRun(`write_previous_release '${f}' 'zzzz' '1.0.0'; echo rc=$?`).stdout, /rc=1/);
+    assert.equal(readFileSync(f, "utf8"), before, "a refused write never clobbers the record");
+
+    sourceAndRun(`write_previous_release '${f}' abc1234 '1.0";rm -rf /'`);
+    assert.equal(JSON.parse(readFileSync(f, "utf8")).version, "", "an unsafe version is dropped, not injected");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("release_sha_matches: prefix either way, >=7 hex chars, nothing else", () => {
+  const m = (a, b) => sourceAndRun(`release_sha_matches '${a}' '${b}'; echo $?`).stdout.trim();
+  const full = "0123456789abcdef0123456789abcdef01234567";
+  assert.equal(m(full, full), "0");
+  assert.equal(m(full.slice(0, 7), full), "0");
+  assert.equal(m(full, full.slice(0, 12)), "0");
+  assert.equal(m(full.slice(0, 6), full), "1", "too short");
+  assert.equal(m("fedcba9876", full), "1");
+  assert.equal(m("", full), "1");
+  assert.equal(m("main", full), "1");
+});

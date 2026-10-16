@@ -2,7 +2,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { createOpencodeService, detectSupervisor, patchUnitText, serviceEnvFor, unitEnvValue, unitExecBin } from "./upgradeV2Service.mjs";
+import { readOpencodePassword, createOpencodeService, detectSupervisor, patchUnitText, serviceEnvFor, unitEnvValue, unitExecBin } from "./upgradeV2Service.mjs";
 
 const UNIT = `[Unit]
 Description=opencode
@@ -208,5 +208,26 @@ describe("nohup controller", () => {
     await svc.start();
     assert.deepEqual(spawned[3], ["killed"], "start() is a restart: whatever runs is killed first");
     assert.deepEqual(spawned[4], ["/home/u/.opencode/bin/opencode-v1", ["serve", "--port", "4096", "--hostname", "127.0.0.1"], {}]);
+  });
+});
+
+describe("readOpencodePassword (K1 reader — lazy)", () => {
+  test("a password file created AFTER the first (failed) read is picked up on the next call; nothing is cached as empty", async () => {
+    let content = null;
+    const read = async () => {
+      if (content === null) throw Object.assign(new Error("nope"), { code: "ENOENT" });
+      return content;
+    };
+    const args = { env: {}, file: "/p/opencode-password", read };
+    await assert.rejects(() => readOpencodePassword(args), /not readable.*ENOENT/);
+    content = "\n";
+    await assert.rejects(() => readOpencodePassword(args), /is empty/);
+    content = "deadbeefdeadbeefdeadbeefdeadbeef\n"; // first boot creates it while the process is already running
+    assert.equal(await readOpencodePassword(args), "deadbeefdeadbeefdeadbeefdeadbeef");
+    content = "cafebabecafebabecafebabecafebabe\n"; // …and a rotation is seen too
+    assert.equal(await readOpencodePassword(args), "cafebabecafebabecafebabecafebabe");
+  });
+  test("MANTA_OPENCODE_PASSWORD overrides the file", async () => {
+    assert.equal(await readOpencodePassword({ env: { MANTA_OPENCODE_PASSWORD: " fromenv " }, read: async () => assert.fail("file must not be read") }), "fromenv");
   });
 });

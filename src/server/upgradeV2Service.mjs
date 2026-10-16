@@ -41,6 +41,27 @@ export function passwordFilePath() {
   return join(stateHome(), STATE_DIRNAME, "opencode-password");
 }
 
+/**
+ * K1's password reader — LAZY on purpose. The password file may be created AFTER this process
+ * started (the first boot of a release creates it in the very routine that starts the upgrade),
+ * so nothing may snapshot "no password" for the life of the process: every call reads the file,
+ * an empty/missing file is an error (never cached as ""), and `MANTA_OPENCODE_PASSWORD` wins
+ * (tests). Exported so every part of manta-server that talks to OpenCode shares ONE reader
+ * (slice C1's `opencodeAuthHeader()` should call this instead of caching at import time).
+ */
+export async function readOpencodePassword({ env = process.env, file = passwordFilePath(), read = (p) => readFile(p, "utf8") } = {}) {
+  const fromEnv = typeof env.MANTA_OPENCODE_PASSWORD === "string" ? env.MANTA_OPENCODE_PASSWORD.trim() : "";
+  if (fromEnv) return fromEnv;
+  let text = "";
+  try {
+    text = (await read(file)).trim();
+  } catch (e) {
+    throw new Error(`OpenCode password file is not readable (${file}): ${e?.code ?? e?.message ?? e}`);
+  }
+  if (!text) throw new Error(`OpenCode password file is empty (${file})`);
+  return text;
+}
+
 // ---------------------------------------------------------------- systemd text
 
 const ENV_LINE = (key) => new RegExp(`^Environment=(?:"${key}=.*"|${key}=.*)$`);
@@ -123,7 +144,7 @@ export function createOpencodeService({
   read = (p) => readFile(p, "utf8"),
   write = (p, t, mode) => writeFile(p, t, { mode }),
   exists = (p) => existsSync(p),
-  readPassword = async () => (await readFile(passwordFilePath(), "utf8")).trim(),
+  readPassword = () => readOpencodePassword({ env: {} }),
   spawnDetached = null, // nohup mode: (bin, args, env) => void
   killNohup = null, // nohup mode: () => Promise<void>
   port = OPENCODE_PORT, // overridable ONLY so a rehearsal/test can never bind (or kill) the real :4096
@@ -228,12 +249,6 @@ export function createOpencodeService({
         if (v) env[k] = v;
       }
       spawnDetached(opencodeBinPath(cfg.variant, home), ["serve", "--port", String(port), "--hostname", "127.0.0.1"], env);
-    },
-
-    /** Restart manta-server itself (used once, at the very end, when it must re-read the password). */
-    async restartServer() {
-      if (supervisor === "systemd") return void (await exec("systemctl", ["--user", "restart", "manta-server"]));
-      if (supervisor === "launchd") return void (await exec("launchctl", ["kickstart", "-k", `gui/${uid}/com.mantaui.server`]));
     },
   };
 }
