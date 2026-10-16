@@ -217,7 +217,6 @@ export const DEMO_UNIMPLEMENTED = [
   "tmuxSetupConfig",
   "upgradeRetry",
   "upgradeRollback",
-  "upgradeStatus",
   "uploadBuffer",
   "uploadFiles",
   "usageList",

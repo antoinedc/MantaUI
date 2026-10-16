@@ -19,6 +19,9 @@ struct MantaUIApp: App {
 
     @StateObject private var store: MantaEventStore
     @StateObject private var sessionStore: SessionListStore
+    // C4: what the device knows about the box's upgrade (read-only). Bound to
+    // the event store below so `kind:"upgrade"` frames drive the screen.
+    @StateObject private var upgradeStore: UpgradeStore
 
     init() {
         // Before anything else, so a crash during start-up is captured too.
@@ -30,6 +33,7 @@ struct MantaUIApp: App {
         let event = MantaEventStore()
         _store = StateObject(wrappedValue: event)
         _sessionStore = StateObject(wrappedValue: SessionListStore(eventStore: event))
+        _upgradeStore = StateObject(wrappedValue: UpgradeStore())
         // The box-wide widget live store consumes `kind: "widget"` frames off
         // the same /events stream (registered once, idempotently).
         WidgetLiveStore.shared.bind(eventStore: event)
@@ -43,10 +47,12 @@ struct MantaUIApp: App {
             MantaAppRoot()
                 .environmentObject(store)
                 .environmentObject(sessionStore)
+                .environmentObject(upgradeStore)
                 .environmentObject(MantaPushRouter.shared)
                 .task {
                     store.start()
                     sessionStore.bindResync()
+                    upgradeStore.bind(eventStore: store)
                 }
         }
     }

@@ -300,6 +300,11 @@ export function describeDiskShortfall(error: UpgradeStatus["error"]): string | n
   return `${need}, has ${error.haveBytes === 0 ? "0 B" : formatBytes(error.haveBytes)}`;
 }
 
+/** "needs 31 GB free, has 3 GB" → "Needs 31 GB free, has 3 GB." (a sentence on its own line). */
+export function diskSentence(disk: string): string {
+  return disk === "" ? "" : `${disk[0].toUpperCase()}${disk.slice(1)}.`;
+}
+
 /** "about 4 min left"; null when the box gave no estimate. */
 export function formatEtaSeconds(seconds: number | null): string | null {
   if (seconds === null || !finite(seconds) || seconds < 0) return null;

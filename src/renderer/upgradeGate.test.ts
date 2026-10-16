@@ -10,6 +10,7 @@ import {
   currentStep,
   describeDiskShortfall,
   describeGateDetails,
+  diskSentence,
   formatEtaSeconds,
   gateReducer,
   initialGateState,
@@ -294,6 +295,11 @@ describe("formatting", () => {
     );
     expect(describeDiskShortfall({ step: "migrate", message: "", retryable: true })).toBeNull();
     expect(describeDiskShortfall(null)).toBeNull();
+  });
+
+  it("diskSentence capitalises and terminates", () => {
+    expect(diskSentence("needs 31 GB free, has 3 GB")).toBe("Needs 31 GB free, has 3 GB.");
+    expect(diskSentence("")).toBe("");
   });
 
   it("formatEtaSeconds", () => {

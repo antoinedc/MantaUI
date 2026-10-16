@@ -24,6 +24,7 @@ import mantaMark from "./assets/manta-mark-128.png";
 import {
   DESKTOP_DOWNLOAD_URL,
   describeGateDetails,
+  diskSentence,
   formatEtaSeconds,
   stepFraction,
   type ActionOutcome,
@@ -188,8 +189,10 @@ function GateFrame({ title, titleId, children }: { title: string; titleId: strin
       aria-modal="true"
       aria-labelledby={titleId}
       data-testid="upgrade-gate"
+      // The visual harness's handle on this screen (see scripts/visual/screens.mjs).
+      data-screen="upgrade"
     >
-      <div className="w-full max-w-[560px] px-6 py-8">
+      <div className="w-full max-w-[560px] px-6 py-8" data-upgrade-body>
         <div className="inline-flex items-center gap-3 mb-8">
           <img src={mantaMark} alt="" aria-hidden="true" className="w-9 h-9" draggable={false} />
           <span className="text-title font-semibold tracking-tight">Manta</span>
@@ -297,7 +300,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
         <Callout tone="danger">
           <div role="alert" className="space-y-1">
             <div className="break-words">{view.message}</div>
-            {view.disk && <div className="font-medium">{view.disk}.</div>}
+            {view.disk && <div className="font-medium">{diskSentence(view.disk)}</div>}
             {view.failedStep === "preflight" && (
               <div className="text-text-faint">Nothing was changed — your box is exactly as it was.</div>
             )}

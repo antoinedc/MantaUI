@@ -31,6 +31,9 @@
 //                  failure so the update-failed banner renders.
 // "server-update" — the box is older than the desktop on the same major so
 //                  the "Box needs an upgrade" (server-update) card renders.
+// "upgrade-failed" — the box's V2 migration failed pre-flight on disk space,
+//                  so the blocking upgrade screen renders its failed state with
+//                  the "needs X GB free, has Y GB" numbers (OpenCode V2 C4).
 // "stream"       — the transcript is served incrementally (not whole). The
 //                  demo transport replays demoState.messages a few parts at a
 //                  time and exposes window.__mantaDemoStream so the visual
@@ -50,6 +53,7 @@ export const DEMO_STATES = [
   "incompatible",
   "update-failed",
   "server-update",
+  "upgrade-failed",
   "stream",
   "artifacts",
 ] as const;

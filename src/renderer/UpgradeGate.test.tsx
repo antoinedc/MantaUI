@@ -210,7 +210,7 @@ describe("UpgradeGate — driven by a fake K3 box", () => {
     await h!.flush();
 
     expect(document.body.textContent).toContain("The upgrade couldn't finish");
-    expect(document.body.textContent).toContain("needs 31 GB free, has 3 GB");
+    expect(document.body.textContent).toContain("Needs 31 GB free, has 3 GB.");
     expect(document.body.textContent).toContain("Nothing was changed");
     expect(button("Roll back")).toBeNull();
 
@@ -309,6 +309,12 @@ describe("UpgradeGate — driven by a fake K3 box", () => {
     press(button("Cancel"));
     await h!.flush();
     expect(box.rollback).not.toHaveBeenCalled();
+    // The dialog fades out (Modal exit animation) — wait for it rather than race it.
+    for (let i = 0; i < 40 && document.body.textContent?.includes("Roll the box back?"); i++) {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 25));
+      });
+    }
     expect(document.body.textContent).not.toContain("Roll the box back?");
   });
 

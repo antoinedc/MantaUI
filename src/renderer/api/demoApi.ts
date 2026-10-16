@@ -520,6 +520,36 @@ const getServerVersion = (): Promise<{ version: string; minClient: string; openc
     opencodeVersion: "0.0.0",
   });
 
+// Box upgrade gate (OpenCode V2 cutover C4, contract K3). Every state but
+// "upgrade-failed" is a box with no upgrade in progress (the real transport
+// answers null for a box that predates the API, and idle for one that has none).
+// "upgrade-failed" is a migration that stopped at pre-flight for lack of disk —
+// the blocking screen's failed state, with the disk numbers.
+const upgradeStatus = (): Promise<unknown> => {
+  if (DEMO_STATE !== "upgrade-failed") return Promise.resolve(null);
+  const GiB = 2 ** 30;
+  return Promise.resolve({
+    state: "failed",
+    overall: 0.04,
+    etaSeconds: null,
+    steps: [
+      { id: "preflight", label: "Check disk space", status: "failed", progress: null, error: "Not enough free disk space" },
+      { id: "stop", label: "Stop running agents", status: "pending", progress: null },
+      { id: "copy", label: "Copy history", status: "pending", progress: null },
+      { id: "migrate", label: "Migrate conversations", status: "pending", progress: null },
+      { id: "verify", label: "Verify", status: "pending", progress: null },
+      { id: "cutover", label: "Switch over", status: "pending", progress: null },
+    ],
+    error: {
+      step: "preflight",
+      message: "There isn't enough free disk space to upgrade safely.",
+      retryable: true,
+      needBytes: 31 * GiB,
+      haveBytes: 3 * GiB,
+    },
+  });
+};
+
 // Desktop auto-update failure (BET-226 / shared/updateError.mjs). The real
 // transport forwards only integrity/permission-class failures the user must
 // act on; demo mode has no updater, so the fake transport reports one only for
@@ -576,6 +606,7 @@ const claudeLoginCancel = (_sessionKey: string): Promise<{ ok: boolean }> => {
 // ===========================================================================
 export const explicitMethods = {
   configGet,
+  upgradeStatus,
   syncSnapshot,
   onStatusEvent,
   opencodeMessages,
