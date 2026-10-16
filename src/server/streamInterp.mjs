@@ -24,7 +24,7 @@
 //   session.tool.success / .failed       toolOutput tail, toolEnded, toolBoundary, subagent?, planMode?
 //   session.created {parentID}           childSession (published under the PARENT)
 //   session.agent.selected               planMode
-//   session.compaction.started/delta/ended   compaction (+ transcriptStale at the end)
+//   session.compaction.started/delta/ended   compaction; transcriptStale once the compaction's execution settles
 //   form.created (kind question) / .replied / .cancelled   questions + attention
 //   permission.asked / .replied          permissions + attention
 //   session.inbox.delivered              messageChanged (the user message now exists)
@@ -97,6 +97,7 @@ function newSessionState() {
     contextEmitted: null,      // { totalInput, limit } of the last context emit
     retryActive: false,        // a non-null `retry` frame is outstanding
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
+    compacted: false,          // a compaction ended; the transcript goes stale when its execution settles
   };
 }
 
@@ -452,6 +453,14 @@ export function createStreamInterpreter({
         clearRetry(sid, st);
         emitRunning(sid, st, false);
         emitTurnComplete(sid, st, true);
+        // The compaction rewrote the timeline: tell clients to refetch it, but
+        // only once its execution settles — a client shows the "compacted"
+        // confirmation for the `ended` frame first, and an immediate stale
+        // frame would wipe that card in the same render.
+        if (st.compacted) {
+          st.compacted = false;
+          emit(sid, "transcriptStale", {});
+        }
         return;
       }
       case "session.execution.failed": {
@@ -677,9 +686,13 @@ export function createStreamInterpreter({
         emit(sid, "compaction", { phase: "delta", text: textOf(d.text) });
         return;
       }
-      case "session.compaction.ended":
+      case "session.compaction.ended": {
+        emit(sid, "compaction", { phase: "ended" });
+        st.compacted = true;
+        return;
+      }
       case "session.compacted": {
-        if (evt.type === "session.compaction.ended") emit(sid, "compaction", { phase: "ended" });
+        st.compacted = false;
         emit(sid, "transcriptStale", {});
         return;
       }

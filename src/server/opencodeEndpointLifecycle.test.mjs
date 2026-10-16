@@ -187,7 +187,7 @@ test("every taxonomy code produces exactly one operation record with the right t
     } },
     { name: "model-error-402 (bare providerID/modelID identity)", setup: () => {
       const { rec, store } = makeRecorder();
-      const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "APIError", data: { statusCode: 402 } }, providerID: "p", modelID: "m" } }] });
+      const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "ApiError", data: { statusCode: 402 } }, providerID: "p", modelID: "m" } }] });
       return { rec, store, transport: t, expect: { code: "model-error-402", stage: "model", attribution: "observed" } };
     } },
   ];
@@ -243,19 +243,19 @@ test("an error row wins over a later completed row for both code and attempt", a
   const { rec, store } = makeRecorder();
   const t = happyTransport({ messages: [
     { info: { role: "assistant", time: { created: 1, completed: 2 }, finish: "stop", providerID: "stale", modelID: "stale" }, parts: [{ type: "text", text: "stale" }] },
-    { info: { role: "assistant", time: { created: 3 }, error: { name: "APIError", data: { statusCode: 402, isRetryable: false }, message: "SECRET body" }, providerID: "anthropic", modelID: "claude-x" } },
+    { info: { role: "assistant", time: { created: 3 }, error: { name: "ApiError", data: { statusCode: 402, isRetryable: false }, message: "SECRET body" }, providerID: "anthropic", modelID: "claude-x" } },
   ] });
   const result = await run({ transport: t, recorder: rec, model: PINNED });
   assert.equal(result.code, "model-error-402");
   assert.equal(result.httpStatus, 402);
   assert.equal(result.retryable, false);
-  assert.equal(result.errorName, "APIError");
+  assert.equal(result.errorName, "ApiError");
   assert.ok(!JSON.stringify(result).includes("SECRET"), "no exception text crosses the boundary");
   const p = await store.load();
   const ep = p.endpoints["anthropic/claude-x"];
   assert.equal(ep.attempts.length, 1);
   assert.equal(ep.attempts[0].httpStatus, 402);
-  assert.equal(ep.attempts[0].errorName, "APIError");
+  assert.equal(ep.attempts[0].errorName, "ApiError");
   assert.equal(ep.attempts[0].retryable, false);
   assert.equal(ep.attempts[0].outcome, "failure");
   assert.equal(ep.attempts[0].endpointKey, "anthropic/claude-x");
@@ -267,7 +267,7 @@ test("an error row wins over a later completed row for both code and attempt", a
 
 test("a row without identity yields no provider attempt but the run still records", async () => {
   const { rec, store } = makeRecorder();
-  const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "APIError", data: { statusCode: 402 } } } }] });
+  const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "ApiError", data: { statusCode: 402 } } } }] });
   const result = await run({ transport: t, recorder: rec });
   assert.equal(result.code, "model-error-402");
   const p = await store.load();
@@ -301,7 +301,7 @@ test("the W3 buckets are closed-set codes that survive safeSummaryCode", () => {
 test("5xx and 429 map through the runner as bucketed codes", async () => {
   for (const [status, expected] of [[500, "model-error-5xx"], [429, "model-error-429"]]) {
     const { rec, store } = makeRecorder();
-    const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "APIError", data: { statusCode: status, isRetryable: true } }, providerID: "p", modelID: "m" } }] });
+    const t = happyTransport({ messages: [{ info: { role: "assistant", time: { created: 1 }, error: { name: "ApiError", data: { statusCode: status, isRetryable: true } }, providerID: "p", modelID: "m" } }] });
     const result = await run({ transport: t, recorder: rec });
     assert.equal(result.code, expected);
     const p = await store.load();
@@ -385,7 +385,7 @@ test("cleanup failure leaves the provider attempt a model truth and the operatio
 
 test("a model failure with failing cleanup keeps both truths separate", async () => {
   const { rec, store } = makeRecorder();
-  const errorRow = { info: { role: "assistant", time: { created: 1 }, error: { name: "APIError", data: { statusCode: 402 } }, providerID: "p", modelID: "m" } };
+  const errorRow = { info: { role: "assistant", time: { created: 1 }, error: { name: "ApiError", data: { statusCode: 402 } }, providerID: "p", modelID: "m" } };
   const t = happyTransport({ messages: [errorRow] });
   const inner = t.handler;
   t.handler = async (url, opts) => {

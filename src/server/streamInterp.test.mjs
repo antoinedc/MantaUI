@@ -74,7 +74,7 @@ test("execution.failed -> sessionError (V1 error names) + running false + turnCo
   interp.interpret(ev("session.execution.started"));
   interp.interpret(ev("session.execution.failed", { error: { type: "provider.no-route", message: "Model unavailable: anthropic/x" } }));
   const [err] = subs(events, "sessionError");
-  assert.deepEqual(err.payload, { name: "APIError", message: "Model unavailable: anthropic/x" });
+  assert.deepEqual(err.payload, { name: "ApiError", message: "Model unavailable: anthropic/x" });
   assert.equal(subs(events, "running").at(-1).payload.running, false);
   assert.equal(subs(events, "turnComplete").at(-1).payload.complete, true);
 });
@@ -448,7 +448,7 @@ test("session.agent.selected: plan -> planMode on; build -> off", () => {
   assert.deepEqual(subs(events, "planMode").map((e) => e.payload.on), [true, false]);
 });
 
-test("compaction: started / delta / ended map to frames; the end also marks the transcript stale", () => {
+test("compaction: started / delta / ended map to frames; the transcript goes stale once the compaction's execution settles (not in the same render as `ended`)", () => {
   const { interp, events } = make();
   interp.interpret(ev("session.compaction.started", { reason: "manual" }));
   interp.interpret(ev("session.compaction.delta", { text: "## Objective" }));
@@ -458,7 +458,12 @@ test("compaction: started / delta / ended map to frames; the end also marks the 
     { phase: "delta", text: "## Objective" },
     { phase: "ended" },
   ]);
-  assert.deepEqual(subs(events, "transcriptStale").map((e) => e.payload), [{}]);
+  assert.equal(subs(events, "transcriptStale").length, 0);
+  interp.interpret(ev("session.execution.succeeded"));
+  interp.interpret(ev("session.execution.succeeded"));
+  assert.deepEqual(subs(events, "transcriptStale").map((e) => e.payload), [{}], "exactly once");
+  interp.interpret(ev("session.compacted"));
+  assert.equal(subs(events, "transcriptStale").length, 2);
 });
 
 test("messageChanged: step/tool/text events name their message; coalesced to one frame per 100 ms, trailing edge guaranteed", async () => {

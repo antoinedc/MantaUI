@@ -43,7 +43,7 @@ test("normalizeToolInput adds the V1 spellings without dropping V2's", () => {
 });
 
 test("errorFromV2: typed classes get the V1 names; status → statusCode + isRetryable; response body kept", () => {
-  assert.deepEqual(errorFromV2({ type: "provider.no-route", message: "m" }), { name: "APIError", data: { message: "m", type: "provider.no-route" } });
+  assert.deepEqual(errorFromV2({ type: "provider.no-route", message: "m" }), { name: "ApiError", data: { message: "m", type: "provider.no-route" } });
   assert.equal(errorFromV2({ type: "provider.auth", message: "m" }).name, "ProviderAuthError");
   assert.equal(errorFromV2({ type: "context.length", message: "m" }).name, "ContextOverflowError");
   assert.equal(errorFromV2({ type: "aborted", message: "m" }).name, "MessageAbortedError");

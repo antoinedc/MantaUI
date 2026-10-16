@@ -56,7 +56,7 @@
 {"kind":"stream","sub":"compaction","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"phase":"delta","text":"\n\n## Important Context\n- ("}},
 {"kind":"stream","sub":"compaction","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"phase":"delta","text":"none)"}},
 {"kind":"stream","sub":"compaction","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"phase":"ended"}},
-{"kind":"stream","sub":"transcriptStale","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{}},
 {"kind":"stream","sub":"running","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"running":false,"type":"idle","since":null}},
-{"kind":"stream","sub":"turnComplete","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"complete":true,"running":false,"since":null}}
+{"kind":"stream","sub":"turnComplete","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{"complete":true,"running":false,"since":null}},
+{"kind":"stream","sub":"transcriptStale","sessionId":"ses_eba52d5a8ffegYsnDC1QFEkpow","payload":{}}
 ]

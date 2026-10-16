@@ -59,7 +59,7 @@ export function errorFromV2(err) {
   const type = typeof err.type === "string" ? err.type : "";
   const name =
     ERROR_NAME_FROM_V2[type] ??
-    (type.startsWith("provider.") || type === "" ? "APIError" : "UnknownError");
+    (type.startsWith("provider.") || type === "" ? "ApiError" : "UnknownError");
   const message = typeof err.message === "string" && err.message ? err.message : type || "The turn failed.";
   const data = { message };
   if (typeof err.status === "number") {
