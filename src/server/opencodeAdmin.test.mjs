@@ -7,7 +7,16 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { restartOpencode, runServerSelfUpdate, parseProgressLine } from "./opencodeAdmin.mjs";
+import {
+  restartOpencode,
+  runServerSelfUpdate,
+  parseProgressLine,
+  reloadOpencodeConfig,
+  listOpencodeModels,
+  opencodeBaseUrl,
+  opencodePassword,
+  _resetOpencodePasswordCache,
+} from "./opencodeAdmin.mjs";
 import { statePath } from "../shared/paths.mjs";
 
 // A fake detached child that exits with `code` once the caller has attached
@@ -284,5 +293,88 @@ describe("parseProgressLine", () => {
       total: 6,
       label: "Downloading update",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config reload + model list (OpenCode V2, contract K1)
+// ---------------------------------------------------------------------------
+
+const basic = (pw) => `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}`;
+
+describe("opencodeBaseUrl / opencodePassword", () => {
+  it("defaults to 127.0.0.1:4096; MANTA_OPENCODE_URL overrides (trailing slash trimmed)", () => {
+    assert.equal(opencodeBaseUrl({}), "http://127.0.0.1:4096");
+    assert.equal(opencodeBaseUrl({ MANTA_OPENCODE_URL: "http://127.0.0.1:5000/" }), "http://127.0.0.1:5000");
+  });
+
+  it("MANTA_OPENCODE_PASSWORD wins; otherwise the first line of ~/.manta/opencode-password, cached", () => {
+    _resetOpencodePasswordCache();
+    assert.equal(opencodePassword({ MANTA_OPENCODE_PASSWORD: "env-pw" }, () => { throw new Error("must not read"); }), "env-pw");
+    let reads = 0;
+    const readText = (path) => { reads++; assert.match(path, /opencode-password$/); return "file-pw\nsecond line ignored\n"; };
+    assert.equal(opencodePassword({}, readText), "file-pw");
+    assert.equal(opencodePassword({}, readText), "file-pw");
+    assert.equal(reads, 1, "read once per process, then cached");
+    _resetOpencodePasswordCache();
+  });
+
+  it("a missing password file yields null (the server's own 401 is then the error)", () => {
+    _resetOpencodePasswordCache();
+    assert.equal(opencodePassword({}, () => { throw new Error("ENOENT"); }), null);
+    _resetOpencodePasswordCache();
+  });
+});
+
+describe("reloadOpencodeConfig", () => {
+  const env = { MANTA_OPENCODE_PASSWORD: "pw", MANTA_OPENCODE_URL: "http://127.0.0.1:5999" };
+
+  it("POSTs /api/location/reload with Basic auth and treats 204 as reloaded", async () => {
+    const seen = [];
+    const fetchFn = async (url, init) => { seen.push({ url, init }); return new Response(null, { status: 204 }); };
+    const r = await reloadOpencodeConfig({ fetchFn, env });
+    assert.deepEqual(r, { ok: true, reloaded: true });
+    assert.equal(seen[0].url, "http://127.0.0.1:5999/api/location/reload");
+    assert.equal(seen[0].init.method, "POST");
+    assert.equal(seen[0].init.headers.authorization, basic("pw"));
+    assert.equal(seen[0].init.body, "{}");
+  });
+
+  it("an error status is ok:false — the live config may still be the old one", async () => {
+    const fetchFn = async () => new Response("config invalid", { status: 500 });
+    const r = await reloadOpencodeConfig({ fetchFn, env });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /reload failed \(500\): config invalid/);
+  });
+
+  it("a 401 is ok:false too (never silently treated as 'not running')", async () => {
+    const r = await reloadOpencodeConfig({ fetchFn: async () => new Response("", { status: 401 }), env });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /401/);
+  });
+
+  it("opencode not listening is ok:true reloaded:false — the edit applies at its next start", async () => {
+    const fetchFn = async () => { throw new TypeError("fetch failed: ECONNREFUSED"); };
+    const r = await reloadOpencodeConfig({ fetchFn, env });
+    assert.equal(r.ok, true);
+    assert.equal(r.reloaded, false);
+    assert.match(r.reason, /unreachable/);
+  });
+});
+
+describe("listOpencodeModels", () => {
+  const env = { MANTA_OPENCODE_PASSWORD: "pw", MANTA_OPENCODE_URL: "http://127.0.0.1:5999" };
+
+  it("GETs /api/model with Basic auth and returns data[]", async () => {
+    const seen = [];
+    const fetchFn = async (url, init) => { seen.push({ url, init }); return Response.json({ data: [{ providerID: "a", modelID: "m" }] }); };
+    assert.deepEqual(await listOpencodeModels({ fetchFn, env }), [{ providerID: "a", modelID: "m" }]);
+    assert.equal(seen[0].url, "http://127.0.0.1:5999/api/model");
+    assert.equal(seen[0].init.headers.authorization, basic("pw"));
+  });
+
+  it("an unexpected body is an empty list; an HTTP error throws", async () => {
+    assert.deepEqual(await listOpencodeModels({ fetchFn: async () => Response.json({}), env }), []);
+    await assert.rejects(() => listOpencodeModels({ fetchFn: async () => new Response("", { status: 503 }), env }), /503/);
   });
 });
