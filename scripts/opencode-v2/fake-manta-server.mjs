@@ -188,14 +188,27 @@ export function cannedResponse(req) {
       warnings: ["docker slow"],
     });
 
+  // ---- seat accounts (manta-claude-max). Defaults: everyone is on the live login;
+  // /refresh ALWAYS errors — nothing in a test may ever rotate a real token.
+  if (is("GET", "/api/accounts/resolve")) return json({ seatId: null, live: true });
+  if (is("POST", "/api/accounts/refresh")) return json({ error: "refresh disabled in tests" }, 500);
+  if (is("POST", "/api/accounts/limit")) return json({ seatId: null, live: true, moved: false });
+
+  // ---- optimizer (manta-optimizer). Default policy = observe-only, like a cold cache.
+  if (is("GET", "/api/optimizer/policy")) return json({ enabled: false });
+  if (is("POST", "/api/optimizer/counterfactual")) return json({ ok: true });
+  if (is("GET", "/api/optimizer/constraints")) return json({ constraints: [] });
+
   return json({ error: `fake manta-server: no route ${method} ${p}` }, 404);
 }
 
 /**
- * HTTP server around `cannedResponse`. `requests` records, per call:
+ * HTTP server around `cannedResponse`. `handle(req)` (optional) may answer a
+ * request first — return `{status, body}` or undefined to fall through.
+ * `requests` records, per call:
  * { method, url, pathname, query (object), body, authorization }.
  */
-export async function startFakeMantaServer({ token } = {}) {
+export async function startFakeMantaServer({ token, handle } = {}) {
   const requests = [];
   const srv = createServer((req, res) => {
     const chunks = [];
@@ -220,7 +233,8 @@ export async function startFakeMantaServer({ token } = {}) {
       const out =
         token && req.headers.authorization !== `Bearer ${token}`
           ? json({ error: "unauthorized" }, 401)
-          : cannedResponse({ method: req.method, pathname: url.pathname, query: url.searchParams, body });
+          : (handle?.({ method: req.method, pathname: url.pathname, query: url.searchParams, body }) ??
+            cannedResponse({ method: req.method, pathname: url.pathname, query: url.searchParams, body }));
       res.writeHead(out.status, { "content-type": "application/json" });
       res.end(JSON.stringify(out.body));
     });

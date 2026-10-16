@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -81,11 +81,12 @@ async function waitReady(url, auth, child, timeoutMs) {
  *        plugin files/dirs copied into $XDG_CONFIG_HOME/opencode/plugins/
  *        (under their basename, or `name` when given)
  * @param {Record<string,string>} [opts.env]  extra env for the child (e.g. ANTHROPIC_API_KEY)
+ * @param {object} [opts.config]      written as $XDG_CONFIG_HOME/opencode/opencode.jsonc (plain JSON)
  * @param {string[]} [opts.dirs]      extra empty project dirs to create inside the sandbox
  * @returns {Promise<{url:string,auth:string,password:string,root:string,projectDir:string,
  *   dirs:Record<string,string>,logPath:string,pid:number,stop:()=>Promise<void>}>}
  */
-export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], readyTimeoutMs = 60_000 }) {
+export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], config, readyTimeoutMs = 60_000 }) {
   const root = await mkdtemp(join(tmpdir(), "manta-v2-sandbox-"));
   const password = randomBytes(24).toString("base64url");
   let child;
@@ -99,6 +100,9 @@ export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], 
     }
     const pluginsDir = join(e.XDG_CONFIG_HOME, "opencode", "plugins");
     await mkdir(pluginsDir, { recursive: true });
+    if (config !== undefined) {
+      await writeFile(join(e.XDG_CONFIG_HOME, "opencode", "opencode.jsonc"), JSON.stringify(config, null, 2));
+    }
     for (const p of plugins) {
       const { src, name } = typeof p === "string" ? { src: p, name: basename(p) } : p;
       await cp(src, join(pluginsDir, name), { recursive: true });
@@ -123,6 +127,19 @@ export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], 
     });
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
+
+    // If THIS process dies without reaching stop() (SIGINT/SIGTERM/crash), the
+    // detached server must not be orphaned: reap its process group (our PID only).
+    const reap = () => {
+      if (child.exitCode === null) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    process.once("exit", reap);
 
     const url = `http://127.0.0.1:${port}`;
     const auth = basicAuthHeader(password);
@@ -149,6 +166,7 @@ export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], 
         await exited;
         clearTimeout(timer);
       }
+      process.removeListener("exit", reap);
       log.end();
       await cleanup();
     };
