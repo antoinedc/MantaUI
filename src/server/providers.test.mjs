@@ -59,8 +59,10 @@ function memConfig(initial = "{}", { reload } = {}) {
     readText: async () => state.text,
     writeText: async (t) => { state.writes += 1; state.text = t; },
     reload: reload ?? (async () => { state.reloads += 1; return { ok: true, reloaded: true }; }),
-    // setProviders' catalog source: nothing hidden unless a test says so.
+    // setProviders' catalog source: nothing hidden unless a test says so, and
+    // no settle wait (the loop below has its own test).
     listModelIds: async () => [],
+    settleMs: 0,
   };
   return { state, deps };
 }
@@ -705,6 +707,30 @@ describe("setProviders", () => {
     await setProviders({ upsert: [VOSKA] }, deps);
     assert.equal(state.writes, 1);
     assert.equal(state.config().providers, undefined);
+  });
+
+  it("waits (bounded) for V2's registry to catch up with the reload before reading the catalog", async () => {
+    const { state, deps } = memConfig();
+    let calls = 0;
+    // The first two reads happen before V2 has the new provider; the third has it.
+    deps.listModelIds = async () => (++calls < 3 ? [] : ["m1", "m2", "m3"]);
+    deps.settleMs = 5000;
+    deps.sleep = async () => {};
+    await setProviders({ upsert: [{ id: "openrouter", name: "O", baseURL: "https://o/v1", apiKey: "k", enabledModels: ["m2"] }] }, deps);
+    assert.equal(calls, 3);
+    assert.deepEqual(state.config().providers.openrouter.models, { m1: { disabled: true }, m3: { disabled: true } });
+  });
+
+  it("gives up waiting at the deadline and saves what it has (never hangs the save)", async () => {
+    const { state, deps } = memConfig();
+    let calls = 0;
+    deps.listModelIds = async () => { calls++; return []; };
+    deps.settleMs = 1;
+    deps.sleep = async () => { await new Promise((r) => setTimeout(r, 3)); };
+    const result = await setProviders({ upsert: [VOSKA] }, deps);
+    assert.equal(result.ok, true);
+    assert.ok(calls >= 1);
+    assert.ok(state.config().provider.voska);
   });
 
   it("an unreachable model list does not fail the save (markers just are not extended)", async () => {

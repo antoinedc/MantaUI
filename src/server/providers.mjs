@@ -558,10 +558,25 @@ export async function setProviders(ops, deps = {}) {
 // Reconcile one provider's hidden-model markers with its selection. Non-fatal
 // when V2 cannot list models (opencode down): the markers that already exist
 // are still pruned for re-enabled models, and the next save re-applies.
+//
+// The reload returns before V2's model registry has caught up (measured: the
+// 204 comes back ~2s in and the new provider is listable up to ~0.5s later), so
+// the catalog is read until it contains at least one SELECTED model — the sign
+// the block is live — for at most `settleMs`. Without a selection there is
+// nothing to wait for.
 async function applyModelSelection(providerID, enabledModels, deps) {
+  const list = deps.listModelIds ?? listProviderModelIds;
+  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const settleMs = deps.settleMs ?? 4000;
+  const enabled = new Set(enabledModels);
   let visible = [];
   try {
-    visible = await (deps.listModelIds ?? listProviderModelIds)(providerID);
+    const deadline = Date.now() + settleMs;
+    for (;;) {
+      visible = await list(providerID);
+      if (enabled.size === 0 || visible.some((id) => enabled.has(id)) || Date.now() >= deadline) break;
+      await sleep(200);
+    }
   } catch (e) {
     console.warn(`[providers] could not list ${providerID} models to reconcile the selection:`, e instanceof Error ? e.message : e);
   }
