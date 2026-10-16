@@ -25,6 +25,115 @@ import { statePath } from "../shared/paths.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
+// ---------------------------------------------------------------------------
+// Config reload (OpenCode V2)
+// ---------------------------------------------------------------------------
+//
+// V2 hot-applies config edits: the writer edits ~/.config/opencode/opencode.jsonc
+// and calls `POST /api/location/reload`, which re-reads the config files for the
+// running server WITHOUT touching an in-flight turn (proven on the pinned
+// binary: a turn running during the reload completes, zero session errors).
+// That is what removed every "restart opencode to apply this" path; restartOpencode
+// above remains only for an explicit user action and the upgrade flow.
+//
+// TODO(C1): this is a local copy of the K1 contract (Basic `opencode:<password>`
+// on 127.0.0.1:4096) so this slice does not depend on opencode.mjs landing
+// first. Once opencode.mjs exports `opencodeAuthHeader()` / `apiUrl()` /
+// `ocFetch`, delete `opencodeBaseUrl` / `opencodePassword` / `localAuthHeader`
+// and call those instead.
+
+/** Where the box's opencode listens. `MANTA_OPENCODE_URL` is a test/harness seam only. */
+export function opencodeBaseUrl(env = process.env) {
+  const override = env.MANTA_OPENCODE_URL;
+  if (typeof override === "string" && override.trim()) return override.trim().replace(/\/+$/, "");
+  return "http://127.0.0.1:4096";
+}
+
+let cachedPassword = null;
+
+/**
+ * The opencode server password (K1): `MANTA_OPENCODE_PASSWORD` overrides the
+ * single-line 0600 file `~/.manta/opencode-password`. Cached per process; a
+ * missing file yields null (the request then goes out unauthenticated and the
+ * server's 401 is reported as the error).
+ */
+export function opencodePassword(env = process.env, readText = (p) => readFileSync(p, "utf8")) {
+  const fromEnv = env.MANTA_OPENCODE_PASSWORD;
+  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
+  if (cachedPassword !== null) return cachedPassword;
+  try {
+    const pw = readText(statePath("opencode-password")).split(/\r?\n/)[0].trim();
+    if (pw) cachedPassword = pw;
+    return pw || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Test-only: forget the cached password so the next call re-reads it. */
+export function _resetOpencodePasswordCache() {
+  cachedPassword = null;
+}
+
+function localAuthHeader(env, readText) {
+  const pw = opencodePassword(env, readText);
+  return pw ? { authorization: `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}` } : {};
+}
+
+/**
+ * The models V2 currently lists (`GET /api/model` → `data[]`, each
+ * `{providerID, modelID, package, …}`). Throws on a transport/HTTP error — callers
+ * decide whether a missing list is fatal. `fetchFn` / `env` / `readText` are
+ * injectable for tests.
+ */
+export async function listOpencodeModels({ fetchFn = fetch, env = process.env, readText, timeoutMs = 15_000 } = {}) {
+  const res = await fetchFn(`${opencodeBaseUrl(env)}/api/model`, {
+    headers: localAuthHeader(env, readText),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`opencode model list failed (${res.status})`);
+  const body = await res.json();
+  return Array.isArray(body?.data) ? body.data : [];
+}
+
+/**
+ * Ask the running opencode to re-read its config files (`POST /api/location/reload`,
+ * 204 on success). Never throws.
+ *
+ *   { ok:true,  reloaded:true }                — applied live
+ *   { ok:true,  reloaded:false, reason }       — opencode is not running (connection
+ *        refused/timeout): the edit is already on disk and applies at its next
+ *        start, so there is nothing stale to report
+ *   { ok:false, error }                        — opencode answered with an error:
+ *        the live server may still hold the old config, so this is NOT success
+ *
+ * `fetchFn` / `env` / `readText` are injectable for tests.
+ */
+export async function reloadOpencodeConfig({ fetchFn = fetch, env = process.env, readText, timeoutMs = 15_000 } = {}) {
+  let res;
+  try {
+    res = await fetchFn(`${opencodeBaseUrl(env)}/api/location/reload`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...localAuthHeader(env, readText) },
+      body: "{}",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[opencodeAdmin] config reload: opencode unreachable:", msg);
+    return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
+  }
+  if (res.ok) return { ok: true, reloaded: true };
+  let detail = "";
+  try {
+    detail = await res.text();
+  } catch {
+    /* ignore read error on the error body */
+  }
+  console.warn(`[opencodeAdmin] config reload failed: ${res.status}`, detail);
+  return { ok: false, error: `opencode config reload failed (${res.status}): ${String(detail ?? "").slice(0, 200)}` };
+}
+
 /**
  * Restart the box's opencode service via `systemctl --user restart
  * opencode-serve`. Fixed argv array passed to execFile — never a shell

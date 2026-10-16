@@ -506,10 +506,13 @@ async function writeOpencodeFixture(path, { projectDirectoryRows, sessionRows })
   await rm(path, { force: true });
   const db = new DatabaseSync(path);
   db.exec("CREATE TABLE project_directory (project_id TEXT, directory TEXT, type TEXT, strategy TEXT, time_created INTEGER)");
-  db.exec("CREATE TABLE session (id TEXT, project_id TEXT, directory TEXT, time_created INTEGER)");
+  // OpenCode V2: sessions live in session_v2 (the readers also require session_message to exist).
+  db.exec("CREATE TABLE session_v2 (id TEXT, project_id TEXT, directory TEXT, time_created INTEGER)");
+  db.exec("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)");
+  db.exec("CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT)");
   const insPd = db.prepare("INSERT INTO project_directory VALUES (?, ?, NULL, NULL, ?)");
   for (const [pid, dir, ts] of projectDirectoryRows) insPd.run(pid, dir, ts);
-  const insS = db.prepare("INSERT INTO session VALUES (?, ?, ?, ?)");
+  const insS = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?)");
   for (const [sid, pid, dir, ts] of sessionRows) insS.run(sid, pid, dir, ts);
   db.close();
 }

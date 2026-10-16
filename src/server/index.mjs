@@ -36,7 +36,7 @@ import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAI
 import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { parseTailnetHosts } from "./tailnet.mjs";
-import { getDb } from "./opencodeDb.mjs";
+import { getDb, partExists } from "./opencodeDb.mjs";
 import {
   resolvePolicy,
   validateRepoTable,
@@ -2480,13 +2480,15 @@ const factSurfaces = createFactSurfaces({
     return latest?.conclusion ?? null;
   },
   // §6.6 trace resolver's message-id leg — the read-only opencode db (same
-  // handle the ⌘F search uses). ses_/msg_/part_ ids map to their tables; a
-  // null db (no Node 24 runtime) → null → no opinion.
+  // handle the ⌘F search uses). V2 store: ses_ → session_v2, msg_ → session_message,
+  // part_ → a derived id (opencodeDb.partIdFor: message + content index), resolved
+  // by partExists; a null db (no Node 24 runtime / not migrated) → null → no opinion.
   messageExists: async (id) => {
     const db = await getDb();
     if (!db) return null;
     const key = String(id);
-    const table = key.startsWith("ses_") ? "session" : key.startsWith("part_") ? "part" : "message";
+    if (key.startsWith("part_")) return partExists(db, key);
+    const table = key.startsWith("ses_") ? "session_v2" : "session_message";
     const row = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? LIMIT 1`).get(key);
     return row != null;
   },

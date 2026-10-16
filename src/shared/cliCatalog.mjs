@@ -17,17 +17,6 @@
 
 export const CLI_CATALOG = [
   {
-    id: "opencode",
-    label: "opencode",
-    bin: "opencode",
-    latest: { kind: "github", repo: "anomalyco/opencode" },
-    npmPackage: null,
-    upgrade: ["opencode", "upgrade"],
-    manualUrl: "https://opencode.ai/docs",
-    disruption: "ends-turns",
-  },
-
-  {
     id: "claude",
     label: "Claude Code",
     bin: "claude",

@@ -6,18 +6,19 @@
 //   discoverModels    — fetch <baseURL>/models directly (server IS the box)
 //   setProviders      — read/merge/write opencode.jsonc locally
 //
-// The desktop's src/main/providers.ts SSH runners stay until Stage 2 deletion.
-// This slice only adds the HTTP path. The RPC layer serves both (SSH + HTTP)
-// until SSH is removed.
+// OpenCode V2: every config write is ONE surgical jsonc edit of
+// ~/.config/opencode/opencode.jsonc (comments preserved) followed by
+// `POST /api/location/reload`. V2 re-reads its config live, so a turn that is
+// running during the reload completes untouched — nothing here restarts
+// opencode any more (see opencodeAdmin.reloadOpencodeConfig).
 
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, modify, applyEdits } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
-import { restartOpencode } from "./opencodeAdmin.mjs";
+import { reloadOpencodeConfig, listOpencodeModels } from "./opencodeAdmin.mjs";
 import { statePath, uploadRoot } from "../shared/paths.mjs";
 import { composeCtoPrompt } from "./ctoDoctrine.mjs";
 
@@ -79,58 +80,152 @@ function stripUrlUserinfo(url) {
 // `user:pass@`) still matches the stored, possibly-unscrubbed baseURL.
 const normBaseURL = (u) => stripUrlUserinfo(u).replace(/\/$/, "");
 
-// opencode.jsonc lives at ~/.config/opencode/opencode.jsonc on the box. The
-// mobile server IS the box. WRITES go through opencode's own /global/config
-// endpoint (the single authority that owns both the in-memory config and the
-// file, and edits the .jsonc surgically so comments survive). The READ path
-// below parses the file with jsonc-parser (opencode's own JSONC parser) — the
-// comment-stripping regex that used to live here is deleted.
-const OPENCODE_JSONC = join(homedir(), ".config", "opencode", "opencode.jsonc");
-const OPENCODE_API = "http://127.0.0.1:4096/global/config";
+// opencode.jsonc lives at ~/.config/opencode/opencode.jsonc on the box (opencode
+// honours XDG_CONFIG_HOME, so do we). The READ path parses the file with
+// jsonc-parser (opencode's own JSONC parser). `MANTA_OPENCODE_CONFIG` is a
+// test/harness seam only — production never sets it.
+export function opencodeConfigPath(env = process.env) {
+  if (env.MANTA_OPENCODE_CONFIG) return env.MANTA_OPENCODE_CONFIG;
+  const base = env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(base, "opencode", "opencode.jsonc");
+}
+
+const UNPARSEABLE_CONFIG_MSG =
+  "opencode.jsonc on the box is unparseable — fix it manually first.";
+
+const FORMAT = { insertSpaces: true, tabSize: 2 };
+
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+function parseConfigText(text) {
+  const errors = [];
+  const parsed = parse(text, errors, { allowTrailingComma: true });
+  if (errors.length > 0 || !isPlainObject(parsed)) return null;
+  return parsed;
+}
+
+function valueAt(root, path) {
+  let cur = root;
+  for (const key of path) {
+    if (!isPlainObject(cur) && !Array.isArray(cur)) return undefined;
+    cur = cur[key];
+  }
+  return cur;
+}
+
+// Delete `path`, then prune ancestors the delete left EMPTY ({}), stopping at
+// the top-level key. A TTL removal must not leave a stray
+// `"models": { "x": { "options": {} } }` skeleton behind.
+function removePath(text, path) {
+  // Deleting something that is not there is a success (and jsonc-parser throws
+  // when an ancestor is missing), so check first.
+  const cfg = parseConfigText(text);
+  if (!cfg || valueAt(cfg, path) === undefined) return text;
+  let out = applyEdits(text, modify(text, path, undefined, { formattingOptions: FORMAT }));
+  for (let depth = path.length - 1; depth >= 2; depth--) {
+    const parent = path.slice(0, depth);
+    const cfg = parseConfigText(out);
+    const v = cfg ? valueAt(cfg, parent) : undefined;
+    if (isPlainObject(v) && Object.keys(v).length === 0) {
+      out = applyEdits(out, modify(out, parent, undefined, { formattingOptions: FORMAT }));
+    } else {
+      break;
+    }
+  }
+  return out;
+}
+
+async function defaultReadText(path) {
+  try {
+    return await readFile(path, "utf-8");
+  } catch (e) {
+    if (e?.code === "ENOENT") return "";
+    throw e;
+  }
+}
+
+async function defaultWriteText(path, text) {
+  await mkdir(dirname(path), { recursive: true });
+  // The file can carry provider apiKeys: keep an existing file's mode, create
+  // a new one 0600.
+  let mode = 0o600;
+  try {
+    mode = (await stat(path)).mode & 0o777;
+  } catch {
+    /* new file */
+  }
+  const tmp = `${path}.tmp`;
+  await writeFile(tmp, text, { encoding: "utf-8", mode });
+  await rename(tmp, path);
+}
+
+// The one in-process lock: every edit is a read-modify-write of the same file,
+// so two concurrent writers (a subagent sync racing a cache-TTL change) would
+// otherwise lose one of the edits.
+let editChain = Promise.resolve();
 
 /**
- * THE single direct-write path for opencode.jsonc, used ONLY for deletions
- * (opencode's PATCH /global/config cannot express one — it deep-merges and
- * rejects null). Surgical jsonc-parser edits preserve comments; the mandatory
- * opencode restart is what stops opencode's in-memory config from diverging
- * from a file it no longer owns. NEVER use this for an upsert — upserts go
- * through patchGlobalConfig.
+ * THE single opencode.jsonc writer. Everything that changes the config — provider
+ * endpoints, subagents, references, skill registries, cache TTL, the CTO agents —
+ * goes through here, so there is exactly one place that reads, edits, writes
+ * and reloads.
  *
- * @param {Array<Array<string>>} paths  e.g. [["provider","voska"],["agent","fast"]]
- * @param {object} deps  injectable readText/writeText/restart (defaults hit the real box)
- * @returns {Promise<{ ok: boolean, changed?: boolean, error?: string }>}
+ * `edits` is an array of `{ path: string[], value }` (`value === undefined`
+ * deletes the key and prunes ancestors it leaves empty) — or a function
+ * `(parsedConfig) => edits` evaluated INSIDE the lock against the file as it is
+ * at that moment (read-modify-write without a lost-update window).
+ *
+ * Steps: read (absent file = `{}`) → refuse an unparseable file (never
+ * overwritten) → surgical `jsonc-parser` edits (comments and untouched keys
+ * survive) → no-op when nothing changed (no write, no reload) → atomic write →
+ * `POST /api/location/reload`.
+ *
+ * Returns `{ ok, changed, reloaded, error? }`. A reload that the server REJECTS
+ * is `ok:false` (the live config may still be the old one); opencode simply
+ * not running is `ok:true, reloaded:false` — the edit is on disk and applies
+ * at its next start.
+ *
+ * `readText` / `writeText` / `reload` / `path` are injectable for tests.
  */
-export async function removeConfigKeys(paths, deps = {}) {
-  const readText = deps.readText ?? (async () => readFile(OPENCODE_JSONC, "utf-8"));
-  const writeText = deps.writeText ?? (async (text) => {
-    await writeFile(`${OPENCODE_JSONC}.tmp`, text, "utf-8");
-    await rename(`${OPENCODE_JSONC}.tmp`, OPENCODE_JSONC);
-  });
-  const restart = deps.restart ?? restartOpencode;
+export function editConfig(edits, deps = {}) {
+  const run = editChain.then(() => editConfigNow(edits, deps));
+  editChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
+async function editConfigNow(edits, deps) {
+  const path = deps.path ?? opencodeConfigPath();
+  const readText = deps.readText ?? (() => defaultReadText(path));
+  const writeText = deps.writeText ?? ((text) => defaultWriteText(path, text));
+  const reload = deps.reload ?? reloadOpencodeConfig;
   try {
     const input = await readText();
+    const base = input.trim() === "" ? "{}" : input;
+    const cfg = parseConfigText(base);
+    if (!cfg) return { ok: false, changed: false, reloaded: false, error: UNPARSEABLE_CONFIG_MSG };
 
-    let text = input;
-    for (const path of paths ?? []) {
-      text = applyEdits(text, modify(text, path, undefined, {}));
+    const list = typeof edits === "function" ? await edits(cfg) : edits;
+    let text = base;
+    for (const edit of list ?? []) {
+      if (edit.value === undefined) {
+        text = removePath(text, edit.path);
+      } else {
+        text = applyEdits(text, modify(text, edit.path, edit.value, { formattingOptions: FORMAT }));
+      }
     }
-
-    // Nothing matched — deleting something that is not there is a success, not
-    // a reason to interrupt every running session.
-    if (text === input) return { ok: true, changed: false };
+    // Nothing matched / nothing differs — a no-op is a success, and must not
+    // trigger a reload (or even a write: an untouched file stays untouched).
+    if (text === base) return { ok: true, changed: false, reloaded: false };
 
     await writeText(text);
-
-    // Never report success when a live opencode still holds the deleted key.
-    const restartResult = await restart();
-    if (!restartResult.ok) {
-      return { ok: false, error: restartResult.error };
-    }
-
-    return { ok: true, changed: true };
+    const r = await reload();
+    if (!r.ok) return { ok: false, changed: true, reloaded: false, error: r.error };
+    return { ok: true, changed: true, reloaded: r.reloaded === true };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return { ok: false, changed: false, reloaded: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -152,6 +247,11 @@ function getAgentMap(cfg) {
 // every other key in `cfg` is preserved by spread. If `input.apiKey` is
 // undefined, the existing key (if any) is kept — so the renderer never has to
 // round-trip the secret.
+//
+// The block lists exactly the SELECTED models. For a provider id that matches
+// one in opencode's built-in catalog (e.g. "openrouter", ~385 models) that is
+// not enough on its own — V2 merges the catalog in regardless (and, unlike V1,
+// ignores a `whitelist`); the rest are hidden by `disabledMarkerOps` below.
 export function upsertProviderBlock(cfg, input) {
   const providers = getProviderMap(cfg);
   const prev = providers[input.id];
@@ -163,17 +263,49 @@ export function upsertProviderBlock(cfg, input) {
     npm: "@ai-sdk/openai-compatible",
     name: input.name,
     options: { baseURL: input.baseURL, apiKey },
-    // `whitelist` is what actually RESTRICTS the model list. `models` alone
-    // only adds: when the provider id matches one in opencode's built-in
-    // catalog (e.g. "openrouter"), opencode merges in every catalog model
-    // (~385 for openrouter) regardless of what `models` holds. And because
-    // PATCH /global/config deep-merges objects, a deselected model would also
-    // linger in `models`; arrays are replaced wholesale, so `whitelist` is the
-    // exact selection either way.
-    whitelist: [...input.enabledModels],
     models,
   };
   return { ...cfg, provider: providers };
+}
+
+// Model ids the config hides: `providers.<id>.models.<m>.disabled === true`.
+// This is V2's NATIVE provider key — the V1-format `provider` key's per-model
+// `disabled` is dropped by V2's loader (proven on the pinned binary: 385 → 385),
+// the native one removes the model from the list (385 → 384). It is the V2
+// replacement for V1's `whitelist`.
+export function disabledModelIds(cfg, providerID) {
+  const models = cfg?.providers?.[providerID]?.models;
+  if (!isPlainObject(models)) return [];
+  return Object.entries(models)
+    .filter(([, m]) => isPlainObject(m) && m.disabled === true)
+    .map(([id]) => id);
+}
+
+/**
+ * PURE. The config edit that makes `providers.<id>.models` hide every model in
+ * `visibleIds` (what V2 currently lists for the provider) plus every model
+ * already hidden, EXCEPT the selected ones. Marker-only: other keys under
+ * `providers.<id>` that are not manta's disable markers are left alone, and an
+ * empty result removes the block. Returns null when nothing needs to change.
+ */
+export function disabledMarkerOps(cfg, providerID, enabledModels, visibleIds = []) {
+  const enabled = new Set(enabledModels);
+  const prev = new Set(disabledModelIds(cfg, providerID));
+  const want = new Set([...prev, ...visibleIds].filter((id) => !enabled.has(id)));
+  if (want.size === prev.size && [...want].every((id) => prev.has(id))) return null;
+
+  const existing = cfg?.providers?.[providerID]?.models;
+  const keep = {};
+  if (isPlainObject(existing)) {
+    for (const [id, m] of Object.entries(existing)) {
+      const isMarkerOnly = isPlainObject(m) && m.disabled === true && Object.keys(m).length === 1;
+      if (!isMarkerOnly) keep[id] = m;
+    }
+  }
+  for (const id of want) keep[id] = { disabled: true };
+  const path = ["providers", providerID, "models"];
+  if (Object.keys(keep).length === 0) return [{ path, value: undefined }];
+  return [{ path, value: keep }];
 }
 
 // Project the config's provider map down to renderer-safe metadata. Never
@@ -183,28 +315,34 @@ export function upsertProviderBlock(cfg, input) {
 // ONLY blocks with an options.baseURL are projected: the ProvidersCard is the
 // manager for OpenAI-compatible ENDPOINTS, and a baseURL is definitional for
 // those. Plugin-authed providers (e.g. the `anthropic` block used by
-// opencode-claude-auth) have no baseURL and MUST be excluded — rendering them
+// the Claude Max plugin) have no baseURL and MUST be excluded — rendering them
 // in the card gives them a Refresh button that fetches `"" + "/models"`
 // ("unreachable: could not reach the endpoint"), and worse, a model toggle or
 // ✕ on that row would route the block through upsertProviderBlock, overwriting
 // it with npm:"@ai-sdk/openai-compatible" + empty baseURL and corrupting the
 // plugin auth. They still appear in the model dropdown, which reads the live
-// /provider endpoint instead.
+// model list instead.
 export function readProviderEndpoints(cfg) {
   const providers = getProviderMap(cfg);
   return Object.entries(providers)
     .filter(([, block]) => Boolean(block.options?.baseURL))
-    .map(([id, block]) => ({
-      id,
-      name: typeof block.name === "string" ? block.name : id,
-      baseURL: stripUrlUserinfo(block.options.baseURL),
-      hasApiKey: Boolean(block.options?.apiKey),
-      // whitelist is authoritative when present (see upsertProviderBlock):
-      // `models` can retain deselected entries after a deep-merge PATCH.
-      enabledModels: Array.isArray(block.whitelist)
-        ? block.whitelist.filter((m) => typeof m === "string")
-        : Object.keys(block.models ?? {}),
-    }));
+    .map(([id, block]) => {
+      const hidden = new Set(disabledModelIds(cfg, id));
+      return {
+        id,
+        name: typeof block.name === "string" ? block.name : id,
+        baseURL: stripUrlUserinfo(block.options.baseURL),
+        hasApiKey: Boolean(block.options?.apiKey),
+        // The selection is the block's own `models`, minus anything the
+        // native `providers` key hides. A legacy V1 `whitelist` (written
+        // before the cutover, inert in V2) still wins for DISPLAY so the card
+        // shows what the user chose until the endpoint is re-saved or
+        // migrateLegacyWhitelists() rewrites it.
+        enabledModels: Array.isArray(block.whitelist)
+          ? block.whitelist.filter((m) => typeof m === "string")
+          : Object.keys(block.models ?? {}).filter((m) => !hidden.has(m)),
+      };
+    });
 }
 
 // Find the apiKey stored in opencode.jsonc for the provider whose baseURL
@@ -265,9 +403,6 @@ export function readAgentBlocks(cfg) {
 // I/O-dependent functions (server-side)
 // ---------------------------------------------------------------------------
 
-const UNPARSEABLE_CONFIG_MSG =
-  "opencode.jsonc on the box is unparseable — fix it manually first.";
-
 /**
  * Read opencode.jsonc from the box and parse it with jsonc-parser (opencode's
  * own JSONC parser — no comment-stripping regex). Returns {} if the file is
@@ -275,13 +410,10 @@ const UNPARSEABLE_CONFIG_MSG =
  * overwrite an unparseable config.
  */
 async function readRemoteConfig() {
-  if (!existsSync(OPENCODE_JSONC)) return {};
-  const raw = await readFile(OPENCODE_JSONC, "utf-8");
-  const errors = [];
-  const parsed = parse(raw, errors, { allowTrailingComma: true });
-  if (errors.length > 0 || !parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(UNPARSEABLE_CONFIG_MSG);
-  }
+  const raw = await defaultReadText(opencodeConfigPath());
+  if (raw.trim() === "") return {};
+  const parsed = parseConfigText(raw);
+  if (!parsed) throw new Error(UNPARSEABLE_CONFIG_MSG);
   return parsed;
 }
 
@@ -375,102 +507,124 @@ export async function discoverModelsForEndpoint(baseURL, apiKey, readConfig = re
 }
 
 /**
- * THE single opencode.jsonc write path: PATCH /global/config.
+ * Apply a set of provider mutations. Upserts replace the whole
+ * `provider.<id>` block (keeping the keys manta does not manage — headers and
+ * per-model options such as a cache TTL — of the block that was there), removes
+ * delete it together with any `providers.<id>` disable markers. Everything is
+ * ONE edit, one write and one reload. After the reload, each upserted
+ * endpoint's selection is reconciled against what V2 actually lists for it
+ * (see disabledMarkerOps): a catalog provider such as "openrouter" keeps its
+ * ~385 built-in models unless the unselected ones are hidden.
  *
- * opencode's endpoint is the single authority for what the config should be —
- * it owns both the in-memory config and the file, and edits the .jsonc
- * surgically so comments survive (verified live: a PATCH of one key leaves all
- * other lines byte-identical). Writes therefore go through it, never through a
- * hand-rolled read/merge/write (which is what used to strip comments and
- * silently discard an unparseable config).
- *
- * On ANY failure (network or non-2xx) returns { ok:false, error } with the
- * endpoint's error surfaced to the caller — there is deliberately NO fallback
- * that writes opencode.jsonc itself (a fallback would reintroduce the silent
- * data-loss bug this replaces).
- *
- * `patchGlobalConfig` is injectable so setProviders/setSubagents can be
- * unit-tested against a stub without touching the live opencode endpoint.
- */
-export async function patchGlobalConfig(patch) {
-  let res;
-  try {
-    res = await fetch(OPENCODE_API, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(patch),
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.warn("[providers] patch /global/config unreachable:", msg);
-    return { ok: false, error: `opencode config endpoint unreachable: ${msg}` };
-  }
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = await res.text();
-    } catch {
-      /* ignore read error on the error body */
-    }
-    console.warn(`[providers] patch /global/config failed: ${res.status}`, detail);
-    return {
-      ok: false,
-      error: `opencode config update failed (${res.status}): ${String(detail ?? "").slice(0, 200)}`,
-    };
-  }
-  return { ok: true };
-}
-
-/**
- * Shared core for setProviders / setSubagents. Upserts go through PATCH
- * /global/config (patchGlobalConfig); removes go through removeConfigKeys (the
- * surgical JSONC write + mandatory opencode restart). Fixed, deterministic
- * order: upsert FIRST (and stop if it fails — never delete when the upsert
- * failed), then remove (stop if it fails). `configKey` is "provider" or
- * "agent"; `keyFor(input)` and `build(input)` produce the per-entry key + block.
- */
-async function patchBlocks(ops, deps, configKey, keyFor, build) {
-  const patch = deps?.patch ?? patchGlobalConfig;
-  const remove = deps?.remove ?? removeConfigKeys;
-  const upserts = ops?.upsert ?? [];
-  const removes = ops?.remove ?? [];
-
-  if (upserts.length > 0) {
-    const collected = {};
-    for (const input of upserts) {
-      collected[keyFor(input)] = build(input);
-    }
-    const patchResult = await patch({ [configKey]: collected });
-    if (!patchResult.ok) return patchResult;
-  }
-
-  if (removes.length > 0) {
-    const removeResult = await remove(removes.map((k) => [configKey, k]));
-    if (!removeResult.ok) return removeResult;
-  }
-
-  return { ok: true };
-}
-
-/**
- * Apply a set of provider mutations through opencode's config endpoint.
- * Upserts go through PATCH /global/config — the single authority that owns
- * both the in-memory config and the file. `remove` ops (deleting an endpoint)
- * go through removeConfigKeys: a surgical jsonc-parser edit of opencode.jsonc
- * followed by a mandatory opencode restart, because the PATCH endpoint has no
- * HTTP delete semantics (it deep-merges objects and rejects `null`). The
- * restart is what stops the removed key from resurrecting on a stale
- * in-memory config / the next upsert PATCH.
+ * `deps.listModelIds(providerID)` (default: V2's model list) is the catalog
+ * source; it is injectable so the suite never needs a live opencode.
  */
 export async function setProviders(ops, deps = {}) {
-  return patchBlocks(
-    ops,
+  const upserts = ops?.upsert ?? [];
+  const removes = ops?.remove ?? [];
+  if (upserts.length === 0 && removes.length === 0) return { ok: true };
+
+  const r = await editConfig((cfg) => {
+    const edits = [];
+    for (const input of upserts) {
+      const prev = cfg.provider?.[input.id];
+      const block = upsertProviderBlock({}, input).provider[input.id];
+      if (prev?.options?.apiKey !== undefined && input.apiKey === undefined) block.options.apiKey = prev.options.apiKey;
+      const models = {};
+      for (const [mid, m] of Object.entries(block.models)) {
+        const old = isPlainObject(prev?.models?.[mid]) ? prev.models[mid] : {};
+        models[mid] = { ...old, ...m };
+      }
+      const merged = { ...(isPlainObject(prev) ? prev : {}), ...block, models };
+      delete merged.whitelist; // inert in V2; the native disable markers replace it
+      merged.options = { ...(isPlainObject(prev?.options) ? prev.options : {}), ...block.options };
+      edits.push({ path: ["provider", input.id], value: merged });
+    }
+    for (const id of removes) {
+      edits.push({ path: ["provider", id], value: undefined });
+      edits.push({ path: ["providers", id], value: undefined });
+    }
+    return edits;
+  }, deps);
+  if (!r.ok) return r;
+
+  for (const input of upserts) {
+    const sel = await applyModelSelection(input.id, input.enabledModels ?? [], deps);
+    if (!sel.ok) return sel;
+  }
+  return { ok: true };
+}
+
+// Reconcile one provider's hidden-model markers with its selection. Non-fatal
+// when V2 cannot list models (opencode down): the markers that already exist
+// are still pruned for re-enabled models, and the next save re-applies.
+//
+// The reload returns before V2's model registry has caught up (measured: the
+// 204 comes back ~2s in and the new provider is listable up to ~0.5s later), so
+// the catalog is read until it contains at least one SELECTED model — the sign
+// the block is live — for at most `settleMs`. Without a selection there is
+// nothing to wait for.
+async function applyModelSelection(providerID, enabledModels, deps) {
+  const list = deps.listModelIds ?? listProviderModelIds;
+  const sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const settleMs = deps.settleMs ?? 4000;
+  const enabled = new Set(enabledModels);
+  let visible = [];
+  try {
+    const deadline = Date.now() + settleMs;
+    for (;;) {
+      visible = await list(providerID);
+      if (enabled.size === 0 || visible.some((id) => enabled.has(id)) || Date.now() >= deadline) break;
+      await sleep(200);
+    }
+  } catch (e) {
+    console.warn(`[providers] could not list ${providerID} models to reconcile the selection:`, e instanceof Error ? e.message : e);
+  }
+  return editConfig((cfg) => disabledMarkerOps(cfg, providerID, enabledModels, visible) ?? [], deps);
+}
+
+async function listProviderModelIds(providerID) {
+  const models = await listOpencodeModels();
+  return models.filter((m) => m.providerID === providerID).map((m) => m.modelID ?? m.id);
+}
+
+/**
+ * One-shot cutover helper: rewrite every endpoint still carrying a V1
+ * `whitelist` (inert in V2, where it silently lists the whole catalog) into the
+ * V2 form — the selection stays in `models`, the `whitelist` is dropped and the
+ * unselected catalog models are hidden by native `disabled` markers. Idempotent;
+ * a config with no `whitelist` is a no-op (no write, no reload).
+ */
+export async function migrateLegacyWhitelists(deps = {}) {
+  let cfg;
+  try {
+    cfg = await (deps.readConfig ?? readRemoteConfig)();
+  } catch (e) {
+    return { ok: false, migrated: [], error: e instanceof Error ? e.message : String(e) };
+  }
+  const todo = Object.entries(getProviderMap(cfg)).filter(([, b]) => Array.isArray(b?.whitelist));
+  if (todo.length === 0) return { ok: true, migrated: [] };
+  const r = await editConfig(
+    (live) =>
+      Object.entries(getProviderMap(live))
+        .filter(([, b]) => Array.isArray(b?.whitelist))
+        .flatMap(([id, b]) => {
+          const selected = b.whitelist.filter((m) => typeof m === "string");
+          const models = { ...(isPlainObject(b.models) ? b.models : {}) };
+          for (const m of selected) models[m] = { id: m, name: m, ...(isPlainObject(models[m]) ? models[m] : {}) };
+          return [
+            { path: ["provider", id, "models"], value: models },
+            { path: ["provider", id, "whitelist"], value: undefined },
+          ];
+        }),
     deps,
-    "provider",
-    (input) => input.id,
-    (input) => upsertProviderBlock({}, input).provider[input.id],
   );
+  if (!r.ok) return { ok: false, migrated: [], error: r.error };
+  for (const [id, b] of todo) {
+    const sel = await applyModelSelection(id, b.whitelist.filter((m) => typeof m === "string"), deps);
+    if (!sel.ok) return { ok: false, migrated: [], error: sel.error };
+  }
+  return { ok: true, migrated: todo.map(([id]) => id) };
 }
 
 /**
@@ -494,99 +648,79 @@ export async function getSubagents(readConfig = readRemoteConfig) {
 }
 
 /**
- * Apply a set of subagent mutations through opencode's config endpoint.
- * Upserts go through PATCH /global/config — the single authority that owns
- * both the in-memory config and the file. `remove` ops (deactivating a
- * subagent) go through removeConfigKeys: a surgical jsonc-parser edit of
- * opencode.jsonc followed by a mandatory opencode restart, because the PATCH
- * endpoint has no HTTP delete semantics (it deep-merges objects and rejects
- * `null`). The restart is what stops the removed block from resurrecting on a
- * stale in-memory config / the next upsert PATCH.
+ * Apply a set of subagent mutations: upserts write `agent.<name>` (replacing
+ * the manta-managed keys, keeping any others), removes delete the block — one
+ * edit, one write, one reload. V2 hot-applies the result, so deactivating a
+ * subagent no longer restarts opencode (a restart used to end every running
+ * turn on the box).
  */
 export async function setSubagents(ops, deps = {}) {
-  return patchBlocks(
-    ops,
-    deps,
-    "agent",
-    (input) => input.name,
-    (input) => upsertAgentBlock({}, input).agent[input.name],
-  );
+  const upserts = ops?.upsert ?? [];
+  const removes = ops?.remove ?? [];
+  if (upserts.length === 0 && removes.length === 0) return { ok: true };
+  const r = await editConfig((cfg) => {
+    const edits = [];
+    for (const input of upserts) {
+      const prev = cfg.agent?.[input.name];
+      const block = upsertAgentBlock({}, input).agent[input.name];
+      edits.push({ path: ["agent", input.name], value: { ...(isPlainObject(prev) ? prev : {}), ...block } });
+    }
+    for (const name of removes) edits.push({ path: ["agent", name], value: undefined });
+    return edits;
+  }, deps);
+  return r.ok ? { ok: true } : r;
 }
 
 /**
- * Apply the user's configured skill-registry URLs to opencode's `skills.urls`
- * via PATCH /global/config — the single opencode.jsonc writer (BET-1019).
+ * Apply the user's configured skill-registry URLs to opencode's `skills.urls`.
  * The renderer persists the list to config.json via config:update; this is the
- * server-side half of BET-1031 that actually makes opencode honor it
- * (previously nothing on the server read skillRegistryUrls into opencode, so
- * adding a registry in Settings "saved" but did nothing).
- *
- * The endpoint deep-merges `skills`, so unrelated skills keys (e.g. `command`)
- * are untouched. Does NOT restart opencode; like providers/subagents, opencode
- * only re-reads `skills` at startup and the caller decides whether to restart.
+ * server-side half (BET-1031) that actually makes opencode honor it. Only
+ * `skills.urls` is written, so unrelated `skills` keys are untouched. V2
+ * re-reads `skills` on reload, so the change is live.
  */
 export async function setSkillRegistryUrls(urls = [], deps = {}) {
-  const patch = deps.patch ?? patchGlobalConfig;
-  return patch({ skills: { urls: Array.isArray(urls) ? urls : [] } });
+  const r = await editConfig([{ path: ["skills", "urls"], value: Array.isArray(urls) ? urls : [] }], deps);
+  return r.ok ? { ok: true } : r;
 }
 
 /**
- * Upsert or remove opencode references (BET-1023). Upserts go through THE
- * single opencode.jsonc upsert writer — PATCH /global/config (the same
- * `patchGlobalConfig` used by setProviders/setSubagents; never a second
- * writer). `remove` ops (deleting a reference alias) go through
- * removeConfigKeys against the `references` key — a surgical jsonc-parser edit
- * + mandatory opencode restart — because opencode's PATCH /global/config has
- * no HTTP delete semantics (it deep-merges objects and rejects `null`).
- *
+ * Upsert or remove opencode references (BET-1023) through the single writer.
  * A reference entry is written as an explicit object — either
  *   { path, description? }            for a local directory, or
  *   { repository, branch?, description? }  for a git repository
  * — never as a bare shorthand string, so the config stays unambiguous and
- * keyed by the alias the user declared.
- *
- * `patch`/`remove` are injectable for unit tests; defaults to the real writers.
+ * keyed by the alias the user declared. An upsert REPLACES the alias's entry
+ * (switching it from a path to a repository must not keep the old path).
+ * `remove` deletes the alias.
  */
 export async function setReferences(ops, deps = {}) {
-  const patch = deps.patch ?? patchGlobalConfig;
-  const remove = deps.remove ?? removeConfigKeys;
   const upserts = ops?.upsert ?? [];
   const removes = ops?.remove ?? [];
-
-  if (upserts.length > 0) {
-    const referencesPatch = {};
-    for (const input of upserts) {
-      const { alias } = input;
-      if (!alias) continue;
-      const entry = {};
-      if (input.repository) {
-        entry.repository = input.repository;
-        if (input.branch) entry.branch = input.branch;
-      } else {
-        entry.path = input.path;
-      }
-      if (input.description) entry.description = input.description;
-      referencesPatch[alias] = entry;
+  const edits = [];
+  for (const input of upserts) {
+    const { alias } = input;
+    if (!alias) continue;
+    const entry = {};
+    if (input.repository) {
+      entry.repository = input.repository;
+      if (input.branch) entry.branch = input.branch;
+    } else {
+      entry.path = input.path;
     }
-    if (Object.keys(referencesPatch).length > 0) {
-      const patchResult = await patch({ references: referencesPatch });
-      if (!patchResult.ok) return patchResult;
-    }
+    if (input.description) entry.description = input.description;
+    edits.push({ path: ["references", alias], value: entry });
   }
-
-  if (removes.length > 0) {
-    const removeResult = await remove(removes.map((alias) => ["references", alias]));
-    if (!removeResult.ok) return removeResult;
-  }
-
-  return { ok: true };
+  for (const alias of removes) edits.push({ path: ["references", alias], value: undefined });
+  if (edits.length === 0) return { ok: true };
+  const r = await editConfig(edits, deps);
+  return r.ok ? { ok: true } : r;
 }
 
 /**
  * Reconcile the full model list against opencode.jsonc's configured agent
  * blocks + the caller-supplied deactivated set (BET-123 "auto-register every
- * model" feature), then apply the diff via the EXISTING setSubagents writer
- * (never a second writer — hard constraint). Returns the resulting
+ * model" feature), then apply the diff via setSubagents (the single writer;
+ * V2 reloads live, so no restart follows). Returns the resulting
  * SubagentDef[] projection, computed directly from the applied diff (no
  * re-read needed) so the result is exact even when `applySubagents` is
  * mocked in tests.
@@ -688,21 +822,21 @@ export function mantaPlanAgentBlock(promptPath) {
 /**
  * Shared installer/ensurer core for a box-side opencode agent block.
  * Idempotent (a no-op diff when the named block already exists) and never
- * throws — I/O/restart failures log and return `{ ok:false }` so the startup
+ * throws — I/O failures log and return `{ ok:false }` so the startup
  * wire-in can fire-and-forget. Both ensureMantaPlanAgent and ensureCtoAgent
- * delegate here; keep them thin wrappers.
+ * delegate here; keep them thin wrappers. The write is hot-applied by V2's
+ * config reload — there is no restart to defer or fail.
  *
  * @param {object} o
  * @param {string} o.agentName
  * @param {() => object} o.buildBlock
  * @param {() => Promise<object>} o.readConfig
  * @param {(ops) => Promise<{ok: boolean, error?: string}>} o.applySubagents
- * @param {() => Promise<{ok: boolean, error?: string}>} o.restart
  * @param {string} o.logPrefix
  * @param {{warn?: Function, error?: Function}} o.log
  * @returns {Promise<{ok: boolean, changed: boolean, reason?: string, error?: string}>}
  */
-async function runEnsureAgent({ agentName, buildBlock, readConfig, applySubagents, restart, logPrefix, log }) {
+async function runEnsureAgent({ agentName, buildBlock, readConfig, applySubagents, logPrefix, log }) {
   try {
     let cfg;
     try {
@@ -719,10 +853,6 @@ async function runEnsureAgent({ agentName, buildBlock, readConfig, applySubagent
       log.warn?.(`[providers] ${logPrefix}: write failed:`, result.error);
       return { ok: false, changed: false, error: result.error };
     }
-    const restartResult = await restart();
-    if (!restartResult.ok) {
-      log.warn?.(`[providers] ${logPrefix}: restart after install failed:`, restartResult.error);
-    }
     return { ok: true, changed: true };
   } catch (e) {
     log.error?.(`[providers] ${logPrefix}:`, e);
@@ -734,14 +864,13 @@ async function runEnsureAgent({ agentName, buildBlock, readConfig, applySubagent
  * Best-effort installer/ensurer for the box-side `manta-plan` primary agent
  * block in opencode.jsonc.
  *
- * `readConfig`/`applySubagents`/`restart`/`promptPath` are injectable for
- * tests; defaults hit the real box (readRemoteConfig, setSubagents,
- * restartOpencode) exactly like production.
+ * `readConfig`/`applySubagents`/`promptPath` are injectable for tests;
+ * defaults hit the real box (readRemoteConfig, setSubagents) exactly like
+ * production.
  *
  * @param {object} [deps]
  * @param {() => Promise<object>} [deps.readConfig]
  * @param {(ops) => Promise<{ok: boolean, error?: string}>} [deps.applySubagents]
- * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
  * @param {string} [deps.promptPath]
  * @param {{warn?: Function, error?: Function}} [deps.log]
  * @returns {Promise<{ok: boolean, changed: boolean, reason?: string, error?: string}>}
@@ -750,7 +879,6 @@ export async function ensureMantaPlanAgent(deps = {}) {
   const {
     readConfig = readRemoteConfig,
     applySubagents = setSubagents,
-    restart = restartOpencode,
     promptPath = mantaPlanPromptPath(),
     log = console,
   } = deps;
@@ -759,7 +887,6 @@ export async function ensureMantaPlanAgent(deps = {}) {
     buildBlock: () => mantaPlanAgentBlock(promptPath),
     readConfig,
     applySubagents,
-    restart,
     logPrefix: "ensureMantaPlanAgent",
     log,
   });
@@ -810,29 +937,26 @@ export function ctoAgentBlock(promptPath, model) {
 /**
  * Best-effort installer/ensurer for the box-side `cto` / `cto-plan` primary
  * agent blocks in opencode.jsonc. Reconciles the managed role boundary and
- * never throws — I/O/restart failures log and return `{ ok:false }` so the
- * startup wire-in can fire-and-forget.
+ * never throws — failures log and return `{ ok:false }` so the startup
+ * wire-in can fire-and-forget.
  *
- * WHY THIS WRITES THE FILE DIRECTLY (not PATCH /global/config): a `permission`
- * object is evaluated by opencode as an ORDERED rule list, last match wins, so
+ * WHY EACH BLOCK IS WRITTEN WHOLE: a `permission` object is evaluated by
+ * opencode as an ORDERED rule list, last match wins, so
  * `{"*":"deny", question:"allow"}` allows `question` while the reverse order
  * denies it — the comparison below is therefore deliberately order-sensitive.
- * opencode's PATCH endpoint decodes the body with its permission schema, which
- * emits the KNOWN keys (read, edit, ..., question, todowrite) first and the
- * rest (`"*"`, custom tools) after — so a PATCH can never persist the desired
- * order, the next boot sees a difference again, and the box restarts opencode
- * on every boot forever. The file loader preserves the file's key order, so a
- * block written straight into opencode.jsonc in the desired order is honoured
- * and stable.
+ * A leaf-by-leaf merge cannot repair a block whose keys are in the wrong order,
+ * so a differing block is replaced as a whole, in the desired key order, and
+ * the file loader preserves that order (stable: the next boot sees no
+ * difference).
  *
- * All changed agents are folded into ONE text edit, ONE file write and ONE
- * opencode restart. When nothing differs it is a pure read (no write, no
- * restart).
+ * All changed agents are folded into ONE edit, ONE file write and ONE config
+ * reload (V2 hot-applies it; no opencode restart exists to defer). When
+ * nothing differs it is a pure read (no write, no reload).
  *
  * @param {object} [deps]
  * @param {() => Promise<string>} [deps.readText]  opencode.jsonc text ("" / "{}" when absent)
  * @param {(text: string) => Promise<void>} [deps.writeText]  atomic write of the file
- * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
+ * @param {() => Promise<{ok: boolean, reloaded?: boolean, error?: string}>} [deps.reload]
  * @param {string} [deps.promptPath]
  * @param {string} [deps.model]
  * @param {{warn?: Function, error?: Function}} [deps.log]
@@ -840,13 +964,6 @@ export function ctoAgentBlock(promptPath, model) {
  */
 export async function ensureCtoAgent(deps = {}) {
   const {
-    readText = async () => (existsSync(OPENCODE_JSONC) ? readFile(OPENCODE_JSONC, "utf-8") : "{}"),
-    writeText = async (text) => {
-      await mkdir(dirname(OPENCODE_JSONC), { recursive: true });
-      await writeFile(`${OPENCODE_JSONC}.tmp`, text, "utf-8");
-      await rename(`${OPENCODE_JSONC}.tmp`, OPENCODE_JSONC);
-    },
-    restart = restartOpencode,
     // The agent block points at the MATERIALIZED prompt (this doctrine work),
     // not the committed file directly — see "CTO operating doctrine" below.
     // `materializeCtoPrompt` guarantees this fixed path always holds SOME
@@ -856,17 +973,12 @@ export async function ensureCtoAgent(deps = {}) {
     promptPath = ctoMaterializedPromptPath(),
     model,
     log = console,
+    ...editDeps
   } = deps;
   // Reconcile both role variants. Planning retains the local capability
   // boundary; the gateway separately refuses project mutations in plan turns.
-  try {
-    const input = await readText();
-    const errors = [];
-    const cfg = parse(input, errors, { allowTrailingComma: true });
-    if (errors.length > 0 || !cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
-      throw new Error(UNPARSEABLE_CONFIG_MSG);
-    }
-    let text = input;
+  const r = await editConfig((cfg) => {
+    const edits = [];
     for (const name of [CTO_AGENT_NAME, `${CTO_AGENT_NAME}-plan`]) {
       const existing = cfg?.agent?.[name];
       const desired = ctoAgentBlock(promptPath, existing?.model ?? model);
@@ -886,24 +998,15 @@ export async function ensureCtoAgent(deps = {}) {
       for (const [key, v] of Object.entries(existing ?? {})) {
         if (!(key in value)) value[key] = v;
       }
-      text = applyEdits(text, modify(text, ["agent", name], value, {
-        formattingOptions: { insertSpaces: true, tabSize: 2 },
-      }));
+      edits.push({ path: ["agent", name], value });
     }
-    if (text === input) return { ok: true, changed: false };
-    await writeText(text);
-    // opencode only reads agent blocks at startup; one restart covers all edits.
-    // It belongs in the startup/upgrade lifecycle, never as a side effect of a read.
-    const restarted = await restart();
-    if (!restarted?.ok) {
-      log.warn?.("[providers] ensureCtoAgent: restart after write failed:", restarted?.error);
-      return { ok: false, changed: true, error: restarted?.error };
-    }
-    return { ok: true, changed: true };
-  } catch (error) {
-    log.warn?.("[providers] ensureCtoAgent: reconciliation failed:", error);
-    return { ok: false, changed: false, reason: "unreadable", error: String(error?.message ?? error) };
+    return edits;
+  }, editDeps);
+  if (!r.ok) {
+    log.warn?.("[providers] ensureCtoAgent: reconciliation failed:", r.error);
+    return { ok: false, changed: r.changed === true, reason: r.error === UNPARSEABLE_CONFIG_MSG ? "unreadable" : undefined, error: r.error };
   }
+  return { ok: true, changed: r.changed };
 }
 
 // Startup-only recovery. Stop on convergence (or feature disabled); failed
@@ -941,8 +1044,8 @@ export function startCtoAgentRecovery(ensure, { setTimer = setTimeout, clearTime
 // (`~/.manta/cto/prompt.md`, resolved through the shared `statePath()` used
 // by every other CTO store — see ctoStores.mjs/ctoProbes.mjs), and the agent
 // block references THAT path instead. Editing the doctrine is then just:
-// rewrite this file, restart opencode so its `{file:...}` reference is
-// re-read.
+// rewrite this file, then reload opencode's config so its `{file:...}`
+// reference is re-read (V2 reloads live — no restart, nothing in flight dies).
 //
 // NON-THROWING, BEST-EFFORT, NEVER LEAVE THE AGENT WITHOUT A PROMPT. Like
 // `ensureCtoAgent`/`ensureMantaPlanAgent`, every step here degrades instead
@@ -1019,137 +1122,73 @@ export async function materializeCtoPrompt(deps = {}) {
 }
 
 /**
- * Re-materialize the doctrine prompt AND restart opencode so the CTO agent's
- * `{file:...}` reference is re-read — the seam the task calls "reusing the
- * existing ensureCtoAgent restart plumbing rather than inventing a second
- * path": `restart` defaults to the SAME `restartOpencode` used by
- * `ensureCtoAgent`/`ensureMantaPlanAgent`, never a bespoke second mechanism.
- * Called whenever the user changes `ctoStyle`/`ctoHouseRules` (see rpc.mjs's
- * `config:update`), and once at startup before the agent block is first
- * installed (see index.mjs's `maybeEnsureCtoAgent`) so the fixed prompt path
- * has real content before anything references it.
+ * Re-materialize the doctrine prompt AND reload opencode's config so the CTO
+ * agent's `{file:...}` reference is re-read. Called whenever the user changes
+ * `ctoStyle`/`ctoHouseRules` (see rpc.mjs's `config:update`), and once at
+ * startup before the agent block is first installed (see index.mjs's
+ * `maybeEnsureCtoAgent`) so the fixed prompt path has real content before
+ * anything references it.
  *
  * Best-effort/non-throwing throughout, matching every other ensure* helper:
- * a restart failure is logged, not thrown, and never undoes the file write
- * (the new prompt still takes effect the next time opencode restarts for any
- * other reason).
+ * a failed reload is logged, not thrown, and never undoes the file write
+ * (the new prompt still takes effect at the next config reload or start).
  *
  * @param {object} [deps] forwarded to materializeCtoPrompt, plus:
- * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
- * @returns {Promise<{ok: boolean, fellBack: boolean, path: string, restarted: boolean, error?: string}>}
+ * @param {() => Promise<{ok: boolean, reloaded?: boolean, error?: string}>} [deps.reload]
+ * @returns {Promise<{ok: boolean, fellBack: boolean, path: string, reloaded: boolean, error?: string}>}
  */
 export async function refreshCtoDoctrine(deps = {}) {
-  const { restart = restartOpencode, log = console, ...materializeDeps } = deps;
+  const { reload = reloadOpencodeConfig, log = console, ...materializeDeps } = deps;
   const result = await materializeCtoPrompt({ ...materializeDeps, log });
-  let restarted = false;
+  let reloaded = false;
   try {
-    const r = await restart();
-    restarted = !!r?.ok;
-    if (!restarted) log.warn?.("[cto-doctrine] restart after doctrine change failed:", r?.error);
+    const r = await reload();
+    reloaded = r?.ok === true && r.reloaded !== false;
+    if (!r?.ok) log.warn?.("[cto-doctrine] config reload after doctrine change failed:", r?.error);
   } catch (e) {
-    log.warn?.("[cto-doctrine] restart after doctrine change threw:", e);
+    log.warn?.("[cto-doctrine] config reload after doctrine change threw:", e);
   }
-  return { ...result, restarted };
+  return { ...result, reloaded };
 }
 
 /**
- * The doctrine restarter — the review fix for the SILENT restart. The old
- * refreshCtoDoctrine path restarted opencode synchronously inside
- * `config:update`, i.e. on a style-radio CLICK or a house-rules BLUR: any
- * in-flight opencode turn box-wide died with no user-visible signal
- * (AGENTS.md: a restart "is never triggered automatically as a side effect"
- * of an edit). The manager splits the two halves:
- *
- *   - refresh(): the doctrine FILE is materialized immediately (the edit is
- *     saved, whatever happens next), but the RESTART is applied at once only
- *     when the box is idle. Busy → the restart is deferred: `pending` flips
- *     true and the caller reports it (`ctoDoctrineRestartPending` on the
- *     config:get/config:update responses) so the UI can show "applies when
- *     the box is idle".
- *   - tick(): the poller's beat. While a restart is pending and the box has
- *     gone idle, it applies the restart; a failed apply STAYS pending and
- *     retries on the next tick, so the setting takes effect with no manual
- *     action. Not pending → a cheap no-op.
- *
- * `anyBusy` is the shared busy view (promptDelivery's firehose-derived set —
- * the same truth the admission engine's busy gate trusts). There is an
- * unavoidable ~ms race between the idle check and the restart itself; that is
- * the same window every "restart when idle" mechanism lives with. Without
- * `anyBusy` wiring the manager restarts immediately (the pre-fix behaviour),
- * so a bare construction can never silently defer.
- *
- * Pending state is in-memory for this manta-server life. If manta-server
- * itself restarts while a restart is pending, the doctrine file is already
- * on disk and the change still lands at the next natural opencode restart —
- * nothing is lost, only the auto-apply.
+ * The doctrine applier. It used to be a DEFERRING RESTARTER: a doctrine edit had
+ * to restart opencode, which kills every in-flight turn box-wide, so the restart
+ * was parked until the box was idle and the config responses carried a
+ * "pending" flag. V2 applies a config reload live and a reload never touches a
+ * running turn, so there is nothing to defer: `refresh()` writes the file and
+ * reloads at once, `isPending()` is always false and `tick()` is a no-op. The
+ * `{refresh, tick, isPending}` shape and the `anyBusy` dep are kept only so the
+ * wiring in index.mjs / rpc.mjs (and the `ctoDoctrineRestartPending` field the
+ * UI reads) keep working unchanged until they are cleaned up.
  *
  * @param {object} [deps] materializeCtoPrompt deps (style/houseRules come per
  *        call), plus:
- * @param {() => Promise<{ok: boolean, error?: string}>} [deps.restart]
- * @param {() => boolean} [deps.anyBusy] true while ANY opencode session is
- *        mid-turn. Unwired → never defers.
- * @param {{warn?: Function, error?: Function, info?: Function}} [deps.log]
+ * @param {() => Promise<{ok: boolean, reloaded?: boolean, error?: string}>} [deps.reload]
+ * @param {() => boolean} [deps.anyBusy] ignored (kept for wiring compatibility)
  * @returns {{refresh, tick, isPending}}
  */
 export function createCtoDoctrineRestarter(deps = {}) {
-  const {
-    restart = restartOpencode,
-    anyBusy = null,
-    log = console,
-    ...materializeDeps
-  } = deps;
-  let pending = false;
+  // eslint-disable-next-line no-unused-vars
+  const { reload = reloadOpencodeConfig, anyBusy = null, log = console, ...materializeDeps } = deps;
 
   async function refresh({ style, houseRules } = {}) {
     // The FILE is written first and unconditionally — the edit is saved even
-    // if the restart is deferred or fails (the new prompt still takes effect
-    // at the next natural restart).
+    // if the reload fails (the new prompt then applies at the next reload/start).
     const result = await materializeCtoPrompt({ ...materializeDeps, style, houseRules, log });
-    if (!result.ok) {
-      log.warn?.("[cto-doctrine] materialize failed; restart deferred decision still applies");
-    }
-    const idle = !anyBusy || !anyBusy();
-    if (!idle) {
-      pending = true;
-      log.info?.("[cto-doctrine] box busy — doctrine restart deferred until idle");
-      return { ...result, restarted: false, pending: true };
-    }
-    let restarted = false;
+    if (!result.ok) log.warn?.("[cto-doctrine] materialize failed; reloading config anyway");
+    let reloaded = false;
     try {
-      const r = await restart();
-      restarted = !!r?.ok;
-      if (!restarted) {
-        // An IMMEDIATE (non-deferred) failed restart is not "pending": the
-        // file is written, so the change still applies at the next natural
-        // restart — the same semantics as the pre-fix best-effort path.
-        log.warn?.("[cto-doctrine] immediate restart after doctrine change failed:", r?.error);
-      }
+      const r = await reload();
+      reloaded = r?.ok === true && r.reloaded !== false;
+      if (!r?.ok) log.warn?.("[cto-doctrine] config reload after doctrine change failed:", r?.error);
     } catch (e) {
-      log.warn?.("[cto-doctrine] immediate restart after doctrine change threw:", e);
+      log.warn?.("[cto-doctrine] config reload after doctrine change threw:", e);
     }
-    return { ...result, restarted, pending: false };
+    return { ...result, reloaded, pending: false };
   }
 
-  async function tick() {
-    if (!pending) return { applied: false };
-    if (anyBusy && anyBusy()) return { applied: false, deferred: true };
-    let r = null;
-    try {
-      r = await restart();
-    } catch (e) {
-      log.warn?.("[cto-doctrine] deferred restart threw; still pending, will retry:", e);
-      return { applied: false, error: String(e?.message ?? e) };
-    }
-    if (r?.ok) {
-      pending = false;
-      log.info?.("[cto-doctrine] deferred doctrine restart applied (box idle)");
-      return { applied: true };
-    }
-    log.warn?.("[cto-doctrine] deferred restart failed; still pending, will retry:", r?.error);
-    return { applied: false, error: r?.error };
-  }
-
-  return { refresh, tick, isPending: () => pending };
+  return { refresh, tick: async () => ({ applied: false }), isPending: () => false };
 }
 
 // ---------------------------------------------------------------------------
@@ -1157,174 +1196,151 @@ export function createCtoDoctrineRestarter(deps = {}) {
 // ---------------------------------------------------------------------------
 //
 // Manta's `cacheTtl` setting is REAL: it changes what Anthropic is asked for,
-// not just what the context pill predicts. The mechanism, verified end-to-end
-// against opencode 1.18.22 (a real turn, captured on the wire):
+// not just what the context pill predicts. The mechanism on OpenCode V2.0.30,
+// verified on the wire (a recording proxy in front of a real opencode turn):
 //
 //   provider.<id>.models.<modelID>.options.cacheControl = {type:"ephemeral", ttl:"1h"}
-//     → request body carries a TOP-LEVEL `cache_control` with that ttl
-//     → Anthropic bills the write to `usage.cache_creation.ephemeral_1h_input_tokens`
+//     → V2 loads it as providers.<id>.models.<modelID>.settings.cacheControl
+//       (the V1-format `provider`/`options` spelling is accepted and renamed;
+//        the native `providers`/`settings` spelling resolves identically)
+//     → the request body carries a TOP-LEVEL `cache_control` with that ttl
 //
-// Two consequences of opencode's own logic that shape everything below:
+// What changed from V1, and what did not:
 //
-//  1. Setting `cacheControl` flips opencode into Anthropic's AUTOMATIC caching
-//     (`usesAnthropicAutomaticCaching` in provider/transform.ts) and it stops
-//     writing its own breakpoints — measured: `block_breakpoints=0` on the
-//     wire. So "5m" must be expressed as the key being ABSENT, not as an
-//     explicit ttl:"5m": absent keeps opencode's native breakpoint caching,
-//     which Anthropic already defaults to a 5-minute TTL. Writing ttl:"5m"
-//     would silently change the caching STRATEGY for users who never asked.
+//  1. "5m" is still the key being ABSENT. Absent keeps opencode's own
+//     breakpoint caching, which Anthropic defaults to 5 minutes.
 //
-//  2. The option is per-MODEL. `ProviderTransform.options()` does not pass
-//     provider-level options through to the request, so there is no single
-//     global key — the setting fans out over the Anthropic-SDK models of the
-//     CONNECTED providers (the same set `listModels` walks).
+//  2. In V1 setting the key flipped opencode into Anthropic's AUTOMATIC caching
+//     and it stopped writing its own breakpoints. V2 has no such mode switch:
+//     the top-level `cache_control` is ADDED to opencode's own breakpoints
+//     (tools/system/latest message — up to 4). Anthropic allows at most 4
+//     cache_control blocks per request, so a request that already carries 4
+//     fails with "A maximum of 4 blocks with cache_control may be provided.
+//     Found 5." Measured: on the raw API a tool-bearing request is exactly at 4
+//     and 1h makes it 5; with the manta-claude-max plugin loaded the
+//     tool-bearing request goes 4 → 5 too (title/follow-up requests stay <= 4).
+//     V2.0.30 offers no config path to the request's `cache` policy (the only
+//     place that can set a ttl on the native breakpoints), so a safe 1h needs a
+//     request-body hook that keeps the total <= 4 — see the report for this
+//     slice. The writer below is correct; what it asks of the wire is not yet
+//     safe on tool turns.
 //
-// Only these two SDKs take the option; anything else would be a stray option
-// under the wrong providerOptions namespace, so the target set is exact.
-export const ANTHROPIC_SDK_NPM = Object.freeze([
-  "@ai-sdk/anthropic",
-  "@ai-sdk/google-vertex/anthropic",
-]);
+//  3. The option is still per-MODEL (ProviderTransform does not pass
+//     provider-level settings through), so the setting fans out over the
+//     Anthropic-SDK models V2 lists.
+//
+//  4. Writes AND removals now hot-apply: both are a file edit plus
+//     `POST /api/location/reload`. Removing the key (1h → 5m) no longer
+//     restarts opencode, so it no longer ends in-flight turns and no
+//     confirmation is needed for that reason.
+//
+// Only the Anthropic package takes the option; anything else would be a stray
+// setting, so the target set is exact.
+export const ANTHROPIC_PACKAGE_RE = /(^|[/:@-])anthropic($|[/:@-])/i;
 
 export const CACHE_CONTROL_1H = Object.freeze({ type: "ephemeral", ttl: "1h" });
 
 /**
- * The (providerID, modelID) pairs the TTL applies to: every model of a
- * CONNECTED provider whose SDK actually honours `cacheControl`. Pure — takes
- * the `/provider` payload shape ({ all, connected }).
+ * The (providerID, modelID) pairs the TTL applies to: every model V2 lists
+ * whose provider package is Anthropic's (`@opencode/ai/providers/anthropic`,
+ * the Vertex Anthropic variants, …). Pure — takes `GET /api/model`'s `data`.
  */
-export function selectCacheTtlTargets({ all = [], connected = [] } = {}) {
-  const live = new Set(connected);
+export function selectCacheTtlTargets(models = []) {
   const out = [];
-  for (const p of all) {
-    if (!p?.id || !live.has(p.id)) continue;
-    for (const [modelID, m] of Object.entries(p.models ?? {})) {
-      const npm = m?.api?.npm;
-      if (typeof npm === "string" && ANTHROPIC_SDK_NPM.includes(npm)) {
-        out.push({ providerID: p.id, modelID });
-      }
-    }
+  const seen = new Set();
+  for (const m of Array.isArray(models) ? models : []) {
+    const providerID = m?.providerID;
+    const modelID = m?.modelID ?? m?.id;
+    if (!providerID || !modelID) continue;
+    if (typeof m.package !== "string" || !ANTHROPIC_PACKAGE_RE.test(m.package)) continue;
+    const key = `${providerID}/${modelID}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ providerID, modelID });
   }
   return out;
 }
 
+// The cacheControl configured for one model, whichever spelling the file uses.
+function configuredCacheControl(cfg, providerID, modelID) {
+  return (
+    cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl ??
+    cfg?.providers?.[providerID]?.models?.[modelID]?.settings?.cacheControl
+  );
+}
+
 // The ttl currently configured in opencode, read back from its own config so
-// opencode — not manta's mirror — is the source of truth. Any target carrying
-// a 1h cacheControl means the box is on 1h; absent everywhere means 5m (which
-// is opencode's native, measured behaviour).
+// opencode — not manta's mirror — is the source of truth. Any target carrying a
+// 1h cacheControl means the box is on 1h; absent everywhere means 5m.
 export function resolveCacheTtlFromConfig(cfg, targets = []) {
   for (const { providerID, modelID } of targets) {
-    const ttl =
-      cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl?.ttl;
-    if (ttl === "1h") return "1h";
+    if (configuredCacheControl(cfg, providerID, modelID)?.ttl === "1h") return "1h";
   }
   return "5m";
 }
 
 /**
- * Diff the desired ttl against what opencode's config already says.
- *
- * Returns `{ patch, remove }` where `patch` is a config-shaped object for
- * PATCH /global/config (hot-applies, no restart — verified) and `remove` is a
- * list of key paths for removeConfigKeys (which DOES restart opencode, so it
- * must only be produced when a key genuinely has to go).
- *
- * Both are empty when the config already matches — this is the no-op guard
- * that keeps the setting idempotent and stops a needless restart.
+ * Diff the desired ttl against what the config already says. Returns the
+ * `{ path, value }` edits for editConfig: the 1h value for every target that
+ * lacks it, or (5m) a removal of every spelling that is present. Empty when the
+ * config already matches — the no-op guard that keeps the setting idempotent.
  */
 export function planCacheTtlOps({ targets = [], ttl = "5m", cfg = {} } = {}) {
-  const patch = {};
-  const remove = [];
-
+  const edits = [];
   for (const { providerID, modelID } of targets) {
-    const current =
-      cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl;
+    const current = configuredCacheControl(cfg, providerID, modelID);
     if (ttl === "1h") {
       if (current?.ttl === "1h" && current?.type === "ephemeral") continue;
-      patch.provider ??= {};
-      patch.provider[providerID] ??= { models: {} };
-      patch.provider[providerID].models ??= {};
-      patch.provider[providerID].models[modelID] = {
-        id: modelID,
-        options: { cacheControl: { ...CACHE_CONTROL_1H } },
-      };
-    } else if (current !== undefined) {
+      edits.push({
+        path: ["provider", providerID, "models", modelID, "options", "cacheControl"],
+        value: { ...CACHE_CONTROL_1H },
+      });
+      // A native-spelling value would shadow/duplicate the one just written.
+      if (cfg?.providers?.[providerID]?.models?.[modelID]?.settings?.cacheControl !== undefined) {
+        edits.push({ path: ["providers", providerID, "models", modelID, "settings", "cacheControl"], value: undefined });
+      }
+    } else {
       // Back to 5m = opencode's native breakpoint caching = key absent.
-      remove.push([
-        "provider",
-        providerID,
-        "models",
-        modelID,
-        "options",
-        "cacheControl",
-      ]);
+      if (cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl !== undefined) {
+        edits.push({ path: ["provider", providerID, "models", modelID, "options", "cacheControl"], value: undefined });
+      }
+      if (cfg?.providers?.[providerID]?.models?.[modelID]?.settings?.cacheControl !== undefined) {
+        edits.push({ path: ["providers", providerID, "models", modelID, "settings", "cacheControl"], value: undefined });
+      }
     }
   }
+  return edits;
+}
 
-  return { patch, remove };
+// Where the target models come from: an explicit list (tests / callers that
+// already hold one), an injected V2-shaped model lister, or V2 itself.
+async function resolveCacheTtlTargets({ targets, deps }) {
+  if (targets) return targets;
+  const list = deps.listModels ?? (() => listOpencodeModels());
+  return selectCacheTtlTargets(await list());
 }
 
 /**
- * Apply `ttl` to opencode's config. I/O wrapper over the pure planner, in the
- * shape of syncSubagents: injected deps so the suite never touches a real
- * opencode.
+ * Apply `ttl` to opencode's config. I/O wrapper over the pure planner: one
+ * editConfig call (one write, one reload — no restart, in either direction).
  *
- * Returns `{ ok, ttl, changed, restarted, error? }`. `restarted` is true only
- * when a removal ran — going 1h→5m interrupts every in-flight opencode turn,
- * so the caller is expected to have confirmed with the user first. Going to 1h
- * never restarts.
+ * Returns `{ ok, ttl, changed, restarted, error? }`; `restarted` is kept for
+ * shape stability and is always false now.
  */
 export async function syncCacheTtl({ ttl = "5m", targets } = {}, deps = {}) {
-  const {
-    readConfig = readRemoteConfig,
-    patch = patchGlobalConfig,
-    remove = removeConfigKeys,
-    listProviders,
-  } = deps;
+  const fail = (error) => ({ ok: false, ttl, changed: false, restarted: false, error });
+  if (ttl !== "5m" && ttl !== "1h") return fail(`unknown cacheTtl: ${ttl}`);
 
-  if (ttl !== "5m" && ttl !== "1h") {
-    return { ok: false, ttl, changed: false, restarted: false, error: `unknown cacheTtl: ${ttl}` };
-  }
-
-  let resolvedTargets = targets;
-  if (!resolvedTargets) {
-    if (typeof listProviders !== "function") {
-      return { ok: false, ttl, changed: false, restarted: false, error: "no provider source" };
-    }
-    try {
-      resolvedTargets = selectCacheTtlTargets(await listProviders());
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, ttl, changed: false, restarted: false, error: msg };
-    }
-  }
-
-  let cfg;
+  let resolved;
   try {
-    cfg = await readConfig();
+    resolved = await resolveCacheTtlTargets({ targets, deps });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, ttl, changed: false, restarted: false, error: msg };
+    return fail(e instanceof Error ? e.message : String(e));
   }
 
-  const { patch: body, remove: paths } = planCacheTtlOps({ targets: resolvedTargets, ttl, cfg });
-  if (!body.provider && paths.length === 0) {
-    return { ok: true, ttl, changed: false, restarted: false };
-  }
-
-  // Upsert first, then remove — same fixed order as patchBlocks, so a failed
-  // write never leaves the config half-deleted.
-  if (body.provider) {
-    const r = await patch(body);
-    if (!r.ok) return { ok: false, ttl, changed: false, restarted: false, error: r.error };
-  }
-  if (paths.length > 0) {
-    const r = await remove(paths);
-    if (!r.ok) return { ok: false, ttl, changed: true, restarted: false, error: r.error };
-    return { ok: true, ttl, changed: true, restarted: r.changed !== false };
-  }
-
-  return { ok: true, ttl, changed: true, restarted: false };
+  const r = await editConfig((cfg) => planCacheTtlOps({ targets: resolved, ttl, cfg }), deps);
+  if (!r.ok) return { ok: false, ttl, changed: r.changed === true, restarted: false, error: r.error };
+  return { ok: true, ttl, changed: r.changed, restarted: false };
 }
 
 /**
@@ -1333,12 +1349,9 @@ export async function syncCacheTtl({ ttl = "5m", targets } = {}, deps = {}) {
  * showing the user a wrong value.
  */
 export async function readCacheTtl(deps = {}) {
-  const { readConfig = readRemoteConfig, listProviders } = deps;
+  const { readConfig = readRemoteConfig } = deps;
   try {
-    const targets =
-      typeof listProviders === "function"
-        ? selectCacheTtlTargets(await listProviders())
-        : [];
+    const targets = await resolveCacheTtlTargets({ targets: deps.targets, deps });
     if (targets.length === 0) return null;
     return resolveCacheTtlFromConfig(await readConfig(), targets);
   } catch {

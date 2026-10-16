@@ -82,7 +82,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
-import { getDb, getDbOpenFailure, resolveDbPath } from "./opencodeDb.mjs";
+import { getDb, getDbOpenFailure, resolveDbPath, PART_SQL, MESSAGE_SQL, partExists } from "./opencodeDb.mjs";
 import { internalSessionIds } from "./internalSessions.mjs";
 import { ftsMatchExpression } from "./ftsQuery.mjs";
 
@@ -460,7 +460,9 @@ export function createCtoSearchIndex(deps = {}) {
   // Cycling keyset over (COALESCE(time_updated,0), id) — re-reads EVERY row
   // each cycle: same-timestamp edits and late rows are reflected eventually
   // (bounded, no watermark CDC). Column lists are code-owned constants;
-  // `session` has no `data` column (verified source schema).
+  // `session_v2` has no `data` column (verified V2 schema). The message and part
+  // streams read the V2 projections (MESSAGE_SQL / PART_SQL) — a part's
+  // time_updated is its message's, so editing a message re-indexes its parts.
   function sweepSql(table, cols, withData) {
     return `SELECT id, ${cols} COALESCE(time_updated, 0) AS t, time_updated${withData ? ", data" : ""}
             FROM ${table}
@@ -470,10 +472,10 @@ export function createCtoSearchIndex(deps = {}) {
   }
   const STREAMS = {
     session: {
-      sql: sweepSql("session", "parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived,", false),
+      sql: sweepSql("session_v2", "parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived,", false),
     },
-    message: { sql: sweepSql("message", "session_id,", true) },
-    part: { sql: sweepSql("part", "session_id, message_id,", true) },
+    message: { sql: sweepSql(MESSAGE_SQL, "session_id, role,", false) },
+    part: { sql: sweepSql(PART_SQL, "session_id, message_id,", true) },
   };
   const SWEEP_START = { t: -1, i: "" };
 
@@ -502,13 +504,8 @@ export function createCtoSearchIndex(deps = {}) {
   }
 
   function upsertMessage(row) {
-    let role = null;
-    try {
-      const data = row.data == null ? null : JSON.parse(row.data);
-      if (data && typeof data.role === "string") role = data.role;
-    } catch {
-      role = null;
-    }
+    // V2: the role is derived from the message type by MESSAGE_SQL (user | assistant).
+    const role = typeof row.role === "string" ? row.role : null;
     db.prepare(
       `INSERT INTO indexed_messages (id, session_id, role, source_time) VALUES (?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, role=excluded.role,
@@ -584,12 +581,12 @@ export function createCtoSearchIndex(deps = {}) {
     let removed = 0;
     const verify = verifyPosition();
     const next = {};
-    const livePart = src.prepare("SELECT 1 AS x FROM part WHERE id = ?");
+    
     const pRows = db
       .prepare("SELECT part_id, rowid AS rid FROM indexed_parts WHERE rowid > ? ORDER BY rowid ASC LIMIT ?")
       .all(verify.part, CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax);
     for (const p of pRows) {
-      if (livePart.get(p.part_id) == null) {
+      if (!partExists(src, p.part_id)) {
         db.prepare("DELETE FROM indexed_evidence WHERE part_id = ?").run(p.part_id);
         db.prepare("DELETE FROM indexed_parts WHERE part_id = ?").run(p.part_id);
         removed++;
@@ -597,7 +594,7 @@ export function createCtoSearchIndex(deps = {}) {
     }
     // Full cycle reached (fewer rows than the batch) → wrap to the start.
     next.part = pRows.length < CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax ? 0 : pRows[pRows.length - 1].rid;
-    const liveSession = src.prepare("SELECT 1 AS x FROM session WHERE id = ?");
+    const liveSession = src.prepare("SELECT 1 AS x FROM session_v2 WHERE id = ?");
     const sRows = db
       .prepare("SELECT id, rowid AS rid FROM indexed_sessions WHERE rowid > ? ORDER BY rowid ASC LIMIT ?")
       .all(verify.session, CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax);

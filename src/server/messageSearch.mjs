@@ -19,12 +19,15 @@
 // NEVER throws; DB errors are logged once, the handle is closed so the next
 // call reopens (see opencodeDb.mjs), and we return { supported:true, hits:[] }.
 //
-// The schema (verified live; do not re-derive):
-//   part(id TEXT PK, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)
-//   message(id TEXT PK, session_id TEXT, time_created INTEGER, data TEXT)
-// part.data / message.data are JSON blobs.
+// The schema (OpenCode V2, verified on a real 2.0.30 store; do not re-derive):
+//   session_message(id, session_id, type, seq, time_created, time_updated, data)
+// There is no `part` table: a message's parts are the items of its `data.content`
+// (assistant) or its single `data.text` (user/synthetic/system). PART_SQL
+// (opencodeDb.mjs) presents them as part rows — id, message_id, session_id,
+// time_created, role, V1-shaped JSON `data` — so the match logic below is
+// unchanged: only text parts that are not synthetic are searched.
 
-import { getDb } from "./opencodeDb.mjs";
+import { getDb, PART_SQL } from "./opencodeDb.mjs";
 
 const SNIPPET_PRE_CHARS = 60;
 const SNIPPET_POST_CHARS = 200;
@@ -55,12 +58,11 @@ export async function searchMessages({
     const limit = Math.min(maxTotal * 4, MAX_LIMIT);
     const sql = `
       SELECT p.session_id, p.message_id, p.data AS part_data,
-             m.data AS msg_data, p.time_created
-      FROM part p
-      JOIN message m ON m.id = p.message_id
+             json_object('role', p.role) AS msg_data, p.time_created
+      FROM ${PART_SQL} p
       WHERE p.session_id IN (${placeholders})
-        AND p.data LIKE ? ESCAPE '\\'
-      ORDER BY p.time_created DESC
+        AND json_extract(p.data, '$.text') LIKE ? ESCAPE '\\'
+      ORDER BY p.time_created DESC, p.id DESC
       LIMIT ?`;
     const rows = db.prepare(sql).all(...scope, pattern, limit);
     const hits = buildHits(rows, q, {

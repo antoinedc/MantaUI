@@ -227,13 +227,14 @@ export function createCtoBackfill(deps = {}) {
     const seg = createSegmenter({ segments, engineState, summarize, computeOneLiner, now });
     const rows = db
       .prepare(
-        "SELECT id, time_created, data FROM message WHERE session_id = ? AND time_created < ? ORDER BY time_created ASC",
+        "SELECT id, time_created, type, data FROM session_message WHERE session_id = ? AND type IN ('user', 'assistant') AND time_created < ? ORDER BY time_created ASC, id ASC",
       )
       .all(String(session.id), endTs);
     const msgs = [];
     for (const r of rows || []) {
+      // V2: the message type IS the role; only a user message carries `text`.
       const data = parseData(r.data);
-      const role = data?.role;
+      const role = r.type;
       if (role !== "user" && role !== "assistant") continue;
       msgs.push({
         id: r.id != null ? String(r.id) : null,
@@ -283,17 +284,17 @@ export function createCtoBackfill(deps = {}) {
   async function enumerateRemaining(db, win, processedSet) {
     const out = [];
     if (!db) return out;
-    // Enumerate sessions by their message activity (message.time_created is the
+    // Enumerate sessions by their message activity (session_message.time_created is the
     // canonical INTEGER timestamp the rest of the store uses) rather than by
-    // session.time_created, which is not guaranteed/typed across opencode
+    // session time_created, which is not guaranteed/typed across opencode
     // schemas. Oldest-(message-)first gives the depth-ordered replay order.
     let rows = [];
     try {
       rows = db
         .prepare(
           "SELECT m.session_id AS sid, s.directory AS directory, s.agent AS agent, MIN(m.time_created) AS first_ts " +
-            "FROM message m LEFT JOIN session s ON s.id = m.session_id " +
-            "WHERE m.time_created >= ? AND m.time_created < ? " +
+            "FROM session_message m LEFT JOIN session_v2 s ON s.id = m.session_id " +
+            "WHERE m.type IN ('user', 'assistant') AND m.time_created >= ? AND m.time_created < ? " +
             "GROUP BY m.session_id ORDER BY first_ts ASC",
         )
         .all(win.start, win.end);

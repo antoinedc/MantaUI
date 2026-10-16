@@ -7,6 +7,37 @@ import assert from "node:assert/strict";
 import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 
+// ---- V2 store helpers -----------------------------------------------------
+// The suite's message data was written in V1's flat shape ({role, providerID,
+// modelID, cost, tokens, time}). OpenCode V2 stores the same turn as a
+// `session_message` row: type 'user' | 'assistant', assistant data
+// {model:{providerID,id}, cost, tokens, time, content}. This converts a seeded
+// V1-shaped JSON string into the V2 (type, data) pair; text that is not JSON is
+// kept verbatim as a malformed assistant row.
+function v2Row(dataStr) {
+  let d;
+  try {
+    d = JSON.parse(dataStr);
+  } catch {
+    return { type: "assistant", data: dataStr };
+  }
+  if (!d || typeof d !== "object") return { type: "assistant", data: dataStr };
+  if (d.role === "user") return { type: "user", data: JSON.stringify({ text: d.content ?? "", time: { created: 1 } }) };
+  const { role: _r, providerID, modelID, ...rest } = d;
+  return { type: "assistant", data: JSON.stringify({ ...rest, model: { providerID, id: modelID }, content: rest.content ?? [] }) };
+}
+const V2_LEDGER_SCHEMA = `
+  CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, time_updated INTEGER);
+  CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+  CREATE INDEX session_message_session_time_created_id_idx ON session_message(session_id, time_created, id);
+`;
+let v2Seq = 0;
+function insertV2Message(db, id, sessionId, ts, dataStr) {
+  const { type, data } = v2Row(dataStr);
+  db.prepare("INSERT OR REPLACE INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)").run(id, sessionId, type, ++v2Seq, ts, ts, data);
+}
+
+
 // Fixture builder. Fill only the fields a test cares about.
 function row(over = {}) {
   return {
@@ -387,12 +418,12 @@ test("endpointSummary returns { supported:false } with no zeros when the DB is u
   }
 });
 
-test("endpointSummary reads tool calls from the part table so reliability is measured, not uniformly 0 (BET-1297)", async (t) => {
-  // opencode stores a message's tool parts in the separate `part` table, not
-  // in `message.data` (which has no `parts` array). Before this fix the ledger
-  // read `data.parts`, measured zero tool-call requests on every endpoint, and
-  // every reliability rate came back 0. This seeds a real DB with tool parts
-  // and asserts they reach aggregateReliability. It needs node:sqlite (Node
+test("endpointSummary reads the tool calls inline in the V2 message content so reliability is measured, not uniformly 0 (BET-1297)", async (t) => {
+  // V1 kept a message's tool parts in a separate `part` table; V2 inlines them
+  // in the assistant message's `content`. Reading the wrong place measured zero
+  // tool-call requests on every endpoint and every reliability rate came back
+  // 0. This seeds a real DB with tool content and asserts it reaches
+  // aggregateReliability. It needs node:sqlite (Node
   // 22.5+); on the CI runtime (Node 20) node:sqlite is absent and the ledger
   // correctly degrades to { supported:false } — nothing to assert, so skip.
   let DatabaseSync;
@@ -409,23 +440,19 @@ test("endpointSummary reads tool calls from the part table so reliability is mea
   const dbPath = join(dir, "opencode.db");
   try {
     const seed = new DatabaseSync(dbPath);
-    seed.exec(`
-      CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-      CREATE TABLE session (id TEXT, parent_id TEXT, agent TEXT, directory TEXT);
-      CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-    `);
+    seed.exec(V2_LEDGER_SCHEMA);
     const now = Date.now();
-    seed.prepare("INSERT INTO session (id, parent_id, agent, directory) VALUES (?,?,?,?)").run("s1", null, "build", "/w");
-    const insMsg = seed.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
-    const insPart = seed.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)");
-    const msgMeta = { role: "assistant", providerID: "anthropic", modelID: "claude-sonnet", tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } }, time: { created: now - 2000, completed: now - 1000 } };
-    insMsg.run("a1", "s1", now, now, JSON.stringify({ ...msgMeta }));
-    insMsg.run("a2", "s1", now, now, JSON.stringify({ ...msgMeta }));
+    seed.prepare("INSERT INTO session_v2 (id, parent_id, agent, directory) VALUES (?,?,?,?)").run("s1", null, "build", "/w");
+    const msgMeta = { model: { providerID: "anthropic", id: "claude-sonnet" }, tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } }, time: { created: now - 2000, completed: now - 1000 } };
+    const toolMsg = (id, input) =>
+      seed
+        .prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)")
+        .run(id, "s1", "assistant", ++v2Seq, now, now, JSON.stringify({ ...msgMeta, content: [{ type: "tool", id: `toolu_${id}`, name: "read", state: { status: "completed", input } }] }));
     // Request 1: clean object arguments -> valid.
-    insPart.run("p1", "a1", "s1", now, now, JSON.stringify({ type: "tool", tool: "read", callID: "c1", state: { status: "completed", input: { path: "/a" } } }));
+    toolMsg("a1", { path: "/a" });
     // Request 2: arguments are a string that fails JSON.parse -> invalid-json,
     // an errored request (its whole request errors per aggregateReliability).
-    insPart.run("p2", "a2", "s1", now, now, JSON.stringify({ type: "tool", tool: "read", callID: "c2", state: { status: "completed", input: "{not json}" } }));
+    toolMsg("a2", "{not json}");
     seed.close();
 
     const prev = process.env.MANTA_OPENCODE_DB;
@@ -465,8 +492,8 @@ async function legacyFetchLedgerRows(db, sinceMs) {
     SELECT m.id AS msg_id, m.data AS msg_data,
            s.id AS session_id, s.parent_id AS parent_id,
            s.agent AS agent, s.directory AS directory
-    FROM message m JOIN session s ON s.id = m.session_id
-    WHERE m.time_created >= ?`;
+    FROM session_message m JOIN session_v2 s ON s.id = m.session_id
+    WHERE m.type = 'assistant' AND m.time_created >= ?`;
   const stmt = db.prepare(sql);
   const out = [];
   for (const row of stmt.all(sinceMs)) {
@@ -476,14 +503,14 @@ async function legacyFetchLedgerRows(db, sinceMs) {
     } catch {
       continue;
     }
-    if (!data || typeof data !== "object" || data.role !== "assistant") continue;
+    if (!data || typeof data !== "object") continue;
     const tokens = data.tokens ?? {};
     const cache = tokens.cache ?? {};
     out.push({
-      providerID: data.providerID ?? null,
-      modelID: data.modelID ?? null,
+      providerID: data.model?.providerID ?? null,
+      modelID: data.model?.id ?? null,
       sessionID: row.session_id != null ? String(row.session_id) : null,
-      agent: row.agent ?? null,
+      agent: row.agent ?? data.agent ?? null,
       parentId: row.parent_id != null ? String(row.parent_id) : null,
       directory: row.directory ?? null,
       cost: data.cost,
@@ -503,14 +530,10 @@ async function legacyFetchLedgerRows(db, sinceMs) {
 // (so a test can plant genuinely malformed JSON, not just JSON-encoded values).
 function openLedgerFixture(DatabaseSync, dbPath, messages, sessions) {
   const seed = new DatabaseSync(dbPath);
-  seed.exec(`
-    CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-    CREATE TABLE session (id TEXT, parent_id TEXT, agent TEXT, directory TEXT);
-  `);
-  const insSess = seed.prepare("INSERT INTO session (id, parent_id, agent, directory) VALUES (?,?,?,?)");
+  seed.exec(V2_LEDGER_SCHEMA);
+  const insSess = seed.prepare("INSERT INTO session_v2 (id, parent_id, agent, directory) VALUES (?,?,?,?)");
   for (const s of sessions) insSess.run(s.id, s.parentId ?? null, s.agent ?? null, s.directory ?? null);
-  const insMsg = seed.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
-  for (const m of messages) insMsg.run(m.id, m.sessionId, m.ts, m.ts, m.data);
+  for (const m of messages) insertV2Message(seed, m.id, m.sessionId, m.ts, m.data);
   seed.close();
   return new DatabaseSync(dbPath, { readOnly: true });
 }
@@ -626,21 +649,17 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
 
   function memDb() {
     const db = new SqliteMod.DatabaseSync(":memory:");
-    db.exec(`
-      CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, time_updated INTEGER);
-      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-      CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
-    `);
+    db.exec(V2_LEDGER_SCHEMA);
     const api = {
       db,
       session(id, { parentId = null, agent = "build", directory = "/w", updated = 1 } = {}) {
-        db.prepare("INSERT OR REPLACE INTO session VALUES (?,?,?,?,?)").run(id, parentId, agent, directory, updated);
+        db.prepare("INSERT OR REPLACE INTO session_v2 VALUES (?,?,?,?,?)").run(id, parentId, agent, directory, updated);
       },
       touch(id, updated) {
-        db.prepare("UPDATE session SET time_updated=? WHERE id=?").run(updated, id);
+        db.prepare("UPDATE session_v2 SET time_updated=? WHERE id=?").run(updated, id);
       },
       msg(id, sid, ts, data) {
-        db.prepare("INSERT OR REPLACE INTO message VALUES (?,?,?,?,?)").run(id, sid, ts, ts, data);
+        insertV2Message(db, id, sid, ts, data);
       },
     };
     return api;
@@ -652,7 +671,7 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     const orig = db.prepare.bind(db);
     db.prepare = (sql) => {
       const st = orig(sql);
-      const kind = /FROM message/.test(sql) ? "pages" : /FROM session/.test(sql) ? "sessions" : null;
+      const kind = /FROM session_message/.test(sql) ? "pages" : /FROM session_v2/.test(sql) ? "sessions" : null;
       if (!kind) return st;
       const all = st.all.bind(st);
       st.all = (...a) => {
@@ -820,8 +839,8 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     f.msg("c", "s2", clk.t - 10, asst({ created: 1, completed: 2 }));
     const cache = createLedgerRowCache({ ttlMs: 1000, now: clk.now });
     assert.equal((await cache.fetchRows(f.db, 0)).length, 3);
-    f.db.prepare("DELETE FROM session WHERE id='s2'").run();
-    f.db.prepare("DELETE FROM message WHERE id='b'").run();
+    f.db.prepare("DELETE FROM session_v2 WHERE id='s2'").run();
+    f.db.prepare("DELETE FROM session_message WHERE id='b'").run();
     f.touch("s1", 5);
     clk.t += 5000;
     assert.deepEqual((await cache.fetchRows(f.db, 0)).map((r) => r.sessionID), ["s1"]);
@@ -833,7 +852,7 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     const origPrepare = g.db.prepare.bind(g.db);
     let fail = true;
     g.db.prepare = (sql) => {
-      if (fail && /FROM message/.test(sql)) throw new Error("boom");
+      if (fail && /FROM session_message/.test(sql)) throw new Error("boom");
       return origPrepare(sql);
     };
     const c2 = createLedgerRowCache({ now: clockNow().now });

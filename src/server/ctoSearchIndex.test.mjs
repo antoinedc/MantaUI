@@ -23,7 +23,7 @@
 //
 // Runs under the suite's `MANTA_STATE_HOME` sandbox; every source is a
 // synthetic fixture armed via `MANTA_OPENCODE_DB`
-// (fixtures/opencodeDbFixture.mjs §14 canary).
+// (fixtures/opencodeV2DbFixture.mjs §14 canary).
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -41,7 +41,13 @@ import {
   createFixtureDb,
   sqliteAvailable,
   withFixtureDb,
-} from "./fixtures/opencodeDbFixture.mjs";
+  partId as pid,
+  editPart,
+  addPart,
+  dropTrailingParts,
+  setMessage,
+  deleteSession,
+} from "./fixtures/opencodeV2DbFixture.mjs";
 
 // Guarded dynamic import — the file must LOAD (and skip cleanly) on Node 20.
 let DatabaseSync = null;
@@ -141,8 +147,11 @@ const BASE_SEED = {
   ],
   messages: [
     { id: "m1", sessionId: "s1", timeCreated: NOW - 4000, timeUpdated: NOW - 4000, data: { role: "assistant" } },
-    { id: "m2", sessionId: "s2", timeCreated: NOW - 3000, timeUpdated: NOW - 3000, data: { role: "user" } },
+    // A tool call is assistant content in V2 (a user message holds only text).
+    { id: "m2", sessionId: "s2", timeCreated: NOW - 3000, timeUpdated: NOW - 3000, data: { role: "assistant" } },
     { id: "mArch", sessionId: "sArch", timeCreated: NOW - 9000, timeUpdated: NOW - 9000, data: { role: "assistant" } },
+    // V2 stores injected text as its own `synthetic` message, never as assistant content.
+    { id: "mSynth", sessionId: "sArch", timeCreated: NOW - 8900, timeUpdated: NOW - 8900, data: { role: "assistant" } },
   ],
   parts: [
     {
@@ -158,7 +167,7 @@ const BASE_SEED = {
       data: { type: "text", text: "archived leasebot retro notes from the closed session" },
     },
     {
-      id: "pSynth", messageId: "mArch", sessionId: "sArch", timeCreated: NOW - 8900, timeUpdated: NOW - 8900,
+      id: "pSynth", messageId: "mSynth", sessionId: "sArch", timeCreated: NOW - 8900, timeUpdated: NOW - 8900,
       data: { type: "text", text: "synthetic staging filler", synthetic: true },
     },
     {
@@ -176,7 +185,7 @@ test("default index path resolves under the sandboxed Manta state home", () => {
 test("sync indexes eligible evidence; first-page search ranks, enriches, keeps closed/child sessions, leaves the source untouched, never fetches", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
   await withIndexSource(BASE_SEED, async (fixture, idx) => {
-    const before = { session: fixture.rowCount("session"), message: fixture.rowCount("message"), part: fixture.rowCount("part") };
+    const before = { session: fixture.rowCount("session_v2"), message: fixture.rowCount("session_message") };
     await withFetchSpy(async (calls) => {
       const sync = await idx.sync({ limit: 500 });
       assert.equal(sync.status, "ok");
@@ -189,7 +198,7 @@ test("sync indexes eligible evidence; first-page search ranks, enriches, keeps c
       assert.equal(staging.status, "ok");
       assert.equal(staging.hits.length, 1, "only the eligible text part matches");
       const hit = staging.hits[0];
-      assert.equal(hit.partId, "pText");
+      assert.equal(hit.partId, pid("pText"));
       assert.equal(hit.sessionId, "s1");
       assert.equal(hit.role, "assistant");
       assert.equal(hit.kind, "text");
@@ -200,14 +209,14 @@ test("sync indexes eligible evidence; first-page search ranks, enriches, keeps c
 
       const leasebot = await idx.search({ query: "leasebot" });
       assert.equal(leasebot.status, "ok");
-      assert.equal(leasebot.hits[0].partId, "pText", "bm25 puts the higher-term-frequency part first");
-      assert.ok(leasebot.hits.some((h) => h.partId === "pTool"), "tool input scalars are searchable");
-      assert.equal(leasebot.hits.find((h) => h.partId === "pTool").role, "user");
+      assert.equal(leasebot.hits[0].partId, pid("pText"), "bm25 puts the higher-term-frequency part first");
+      assert.ok(leasebot.hits.some((h) => h.partId === pid("pTool")), "tool input scalars are searchable");
+      assert.equal(leasebot.hits.find((h) => h.partId === pid("pTool")).role, "assistant");
       assert.equal(calls.length, 0, "no fetch calls on sync or search");
 
       const tool = await idx.search({ query: "npm" });
       assert.equal(tool.hits.length, 1);
-      assert.equal(tool.hits[0].partId, "pTool");
+      assert.equal(tool.hits[0].partId, pid("pTool"));
       assert.equal(tool.hits[0].kind, "tool");
 
       // Closed (archived) session evidence stays searchable.
@@ -215,9 +224,8 @@ test("sync indexes eligible evidence; first-page search ranks, enriches, keeps c
       assert.equal(retro.hits.length, 1);
       assert.equal(retro.hits[0].sessionId, "sArch", "archived/closed sessions are kept");
     });
-    assert.equal(fixture.rowCount("session"), before.session, "source untouched");
-    assert.equal(fixture.rowCount("message"), before.message);
-    assert.equal(fixture.rowCount("part"), before.part);
+    assert.equal(fixture.rowCount("session_v2"), before.session, "source untouched");
+    assert.equal(fixture.rowCount("session_message"), before.message);
   });
 });
 
@@ -235,7 +243,7 @@ test("same-timestamp edit and late low-timestamp insert are both reflected by th
     // (a) content edited WITHOUT moving time_updated — the cyclic sweep re-reads it.
     const db = editSource(fixture);
     try {
-      db.prepare("UPDATE part SET data = ? WHERE id = ?").run(JSON.stringify({ type: "text", text: "alpha newterm" }), "p1");
+      editPart(db, "p1", { type: "text", text: "alpha newterm" });
     } finally {
       db.close();
     }
@@ -248,9 +256,7 @@ test("same-timestamp edit and late low-timestamp insert are both reflected by th
     // (b) a row INSERTED with a timestamp OLDER than everything already swept.
     const db2 = editSource(fixture);
     try {
-      db2.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "pEarly", "m1", "s1", 5, 5, JSON.stringify({ type: "text", text: "early backfilled" }),
-      );
+      addPart(db2, { id: "pEarly", messageId: "m1", data: { type: "text", text: "early backfilled" } });
     } finally {
       db2.close();
     }
@@ -293,7 +299,7 @@ test("internal part indexed BEFORE its session mirror row exists is still exclud
 
     const included = await idx.search({ query: "staging", includeInternal: true, provenanceFilter: filter });
     assert.equal(included.hits.length, 1);
-    assert.equal(included.hits[0].partId, "pInt");
+    assert.equal(included.hits[0].partId, pid("pInt"));
     assert.equal(included.hits[0].provenance, "internal", "display provenance follows the authoritative registry too");
 
     // Second batch: the internal session mirror lands and the ordinary part
@@ -301,7 +307,7 @@ test("internal part indexed BEFORE its session mirror row exists is still exclud
     assert.equal((await idx.sync({ limit: 1, provenanceFilter: filter })).status, "ok");
     const ordinary = await idx.search({ query: "staging", provenanceFilter: filter });
     assert.equal(ordinary.hits.length, 1);
-    assert.equal(ordinary.hits[0].partId, "pOther");
+    assert.equal(ordinary.hits[0].partId, pid("pOther"));
     assert.equal(ordinary.hits[0].provenance, "unclassified");
   });
 });
@@ -321,7 +327,7 @@ test("registry failure fails sync AND search closed; deletion reconciles bounded
     assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
     const db = editSource(fixture);
     try {
-      db.prepare("DELETE FROM part WHERE id = ?").run("pText");
+      dropTrailingParts(db, "m1", 1); // pText is m1's only part
     } finally {
       db.close();
     }
@@ -329,7 +335,7 @@ test("registry failure fails sync AND search closed; deletion reconciles bounded
     assert.equal(sync.status, "ok");
     assert.ok(sync.scanned.parts.removed >= 1, "bounded reconcile removed the orphan");
     assert.ok(sync.scanned.verifiedParts <= CTO_SEARCH_INDEX_LIMITS.deleteReconcileMax + CTO_SEARCH_INDEX_LIMITS.sessionVerifyMax, "reconcile is bounded");
-    assert.equal((await idx.search({ query: "leasebot" })).hits.filter((h) => h.partId === "pText").length, 0);
+    assert.equal((await idx.search({ query: "leasebot" })).hits.filter((h) => h.partId === pid("pText")).length, 0);
   });
 });
 
@@ -342,14 +348,12 @@ test("failed batch commits nothing: sweep position and counts unchanged, next sy
 
     const db = editSource(fixture);
     try {
-      db.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "pLater", "m1", "s1", NOW + 100, NOW + 100, JSON.stringify({ type: "text", text: "later addition" }),
-      );
+      addPart(db, { id: "pLater", messageId: "m1", data: { type: "text", text: "later addition" }, timeUpdated: NOW + 100 });
     } finally {
       db.close();
     }
     _setSyncFault(({ row }) => {
-      if (row.id === "pLater") throw new Error("injected fault");
+      if (row.id === pid("pLater")) throw new Error("injected fault");
     });
     const failing = await idx.sync({ provenanceFilter: NO_FILTER });
     assert.equal(failing.status, "index_error");
@@ -544,7 +548,7 @@ test("query policy is literal: metacharacters never act as operators, unicode/pu
 
     const multi = await idx.search({ query: "leasebot verified" });
     assert.equal(multi.status, "ok");
-    assert.ok(multi.hits.some((h) => h.partId === "pText"), "whitespace terms AND together");
+    assert.ok(multi.hits.some((h) => h.partId === pid("pText")), "whitespace terms AND together");
 
     const bad = await idx.search({ query: "   " });
     assert.equal(bad.status, "invalid_input");
@@ -577,13 +581,13 @@ test("message-data edits refresh role enrichment; identity filters constrain hit
 
     const db = editSource(fixture);
     try {
-      db.prepare("UPDATE message SET data = ? WHERE id = ?").run(JSON.stringify({ role: "user" }), "m1");
+      setMessage(db, "m1", { type: "user", data: { text: "leasebot deployed to staging verified v3", time: { created: NOW - 4000 } } });
     } finally {
       db.close();
     }
     assert.equal((await idx.sync({ provenanceFilter: NO_FILTER })).status, "ok");
     const hits = await idx.search({ query: "staging" });
-    assert.equal(hits.hits.find((h) => h.partId === "pText").role, "user", "role enrichment follows the message edit");
+    assert.equal(hits.hits.find((h) => h.partId === pid("pText")).role, "user", "role enrichment follows the message edit");
 
     const bySession = await idx.search({ query: "leasebot", sessionId: "s2" });
     assert.ok(bySession.hits.length >= 1);
@@ -600,15 +604,15 @@ test("message-data edits refresh role enrichment; identity filters constrain hit
 
 test("deletion verification ROTATES: a part deleted past the first 64 is eventually absent (documented cycles)", async (t) => {
   if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
-  const seed = { sessions: BASE_SEED.sessions.slice(0, 1), messages: BASE_SEED.messages.slice(0, 1), parts: linearParts("p", 100, (i) => `term${i} filler text`) };
+  const seed = { sessions: [...BASE_SEED.sessions.slice(0, 1), { id: "sGone", directory: "/repo-a", projectId: "proj-a", timeCreated: 100, timeUpdated: 100 }], messages: BASE_SEED.messages.slice(0, 1), parts: linearParts("p", 100, (i) => `term${i} filler text`) };
   await withIndexSource(seed, async (fixture, idx) => {
     assert.equal((await idx.sync({ limit: 500, provenanceFilter: NO_FILTER })).coverage.indexedParts, 100);
-    // Delete two rows BEYOND the 64-row verification batch (p80, p99) and one session.
+    // Delete two rows BEYOND the 64-row verification batch (p98, p99 — V2
+    // content is append-only, so what can vanish from a message is its tail).
     const db = editSource(fixture);
     try {
-      db.prepare("DELETE FROM part WHERE id = ?").run("p80");
-      db.prepare("DELETE FROM part WHERE id = ?").run("p99");
-      db.prepare("DELETE FROM session WHERE id = ?").run("s1");
+      dropTrailingParts(db, "m1", 2);
+      deleteSession(db, "sGone"); // a message-less session: a V2 session delete cascades its messages
     } finally {
       db.close();
     }
@@ -620,9 +624,10 @@ test("deletion verification ROTATES: a part deleted past the first 64 is eventua
     }
     const status = await idx.status();
     assert.equal(status.counts.parts, 98, "both late-orphan parts reconciled");
-    assert.equal(status.counts.sessions, 0, "the deleted session mirror reconciled too");
-    assert.equal((await idx.search({ query: "term80" })).hits.length, 0);
-    assert.equal((await idx.search({ query: "term99" })).hits.length, 0);
+    assert.equal(status.counts.sessions, 1, "the deleted session mirror reconciled too");
+    // linearParts timestamps descend with i, so content order is p99…p0: the tail is p1, p0.
+    assert.equal((await idx.search({ query: "term1" })).hits.length, 0);
+    assert.equal((await idx.search({ query: "term0" })).hits.length, 0);
     assert.equal((await idx.search({ query: "term42" })).hits.length, 1, "survivors untouched");
   });
 });
@@ -633,8 +638,8 @@ test("source path (or any foreign database) as index path is NEVER written: expl
   try {
     await withFixtureDb(fixture, async () => {
       const before = readFileSync(fixture.dbPath);
-      const beforeRows = { session: fixture.rowCount("session"), message: fixture.rowCount("message"), part: fixture.rowCount("part") };
       const { DatabaseSync: DS } = await import("node:sqlite");
+      const beforeRows = { session: fixture.rowCount("session_v2"), message: fixture.rowCount("session_message") };
       const beforeSchema = new DS(fixture.dbPath).prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
 
       // (a) the SOURCE path itself as the index path
@@ -675,9 +680,8 @@ test("source path (or any foreign database) as index path is NEVER written: expl
 
       // Source untouched: bytes, row counts, and schema identical.
       assert.deepEqual(readFileSync(fixture.dbPath), before, "source bytes preserved");
-      assert.equal(fixture.rowCount("session"), beforeRows.session);
-      assert.equal(fixture.rowCount("message"), beforeRows.message);
-      assert.equal(fixture.rowCount("part"), beforeRows.part);
+      assert.equal(fixture.rowCount("session_v2"), beforeRows.session);
+      assert.equal(fixture.rowCount("session_message"), beforeRows.message);
       const afterSchema = new DS(fixture.dbPath).prepare("SELECT name, sql FROM sqlite_master ORDER BY name").all();
       assert.deepEqual(afterSchema, beforeSchema, "source schema identical (no injected index tables)");
     });
