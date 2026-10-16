@@ -35,6 +35,9 @@ import { SessionHeader } from "./SessionHeader";
 // exactly the frames a live box would publish — no hand-written frame can drift
 // from the mapping.
 import { createStreamInterpreter } from "../server/streamInterp.mjs";
+// The interpreter reads OpenCode V2 events; this harness's tests are written with
+// V1-shaped literals, so each one is re-expressed as V2 first (test support only).
+import { createV1ToV2 } from "../server/fixtures/v1EventsAsV2.mjs";
 
 // React 18's `act` warns unless this global is set. jsdom test env only.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -204,6 +207,7 @@ export function installMockApi(
     clearTimer: () => {},
   });
 
+  const v1ToV2 = createV1ToV2();
   const bus: MockEventBus = {
     emit: (ev) => {
       for (const fn of Array.from(busListeners)) fn(ev);
@@ -212,7 +216,7 @@ export function installMockApi(
         return;
       }
       clock += 1000;
-      interpreter.interpret(ev);
+      for (const v2 of v1ToV2(ev)) interpreter.interpret(v2);
     },
     emitStream: deliverStream,
     listenerCount: () => busListeners.size,

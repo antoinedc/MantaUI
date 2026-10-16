@@ -1,0 +1,56 @@
+[
+ {
+  "id": "msg_145ac87e30013czLwqNBTiCmFg",
+  "time": {
+   "created": 1792170299009
+  },
+  "text": "Reply with exactly these words: The corpus says hello.",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ac8eea001P1u96klw6D6mXV",
+  "time": {
+   "created": 1792170299218,
+   "streamed": 1792170300340,
+   "completed": 1792170300468
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "text",
+    "text": "The corpus says hello."
+   }
+  ],
+  "snapshot": {
+   "start": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "end": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "files": []
+  },
+  "finish": "stop",
+  "rawFinish": "end_turn",
+  "cost": 0.02401925,
+  "tokens": {
+   "input": 3,
+   "output": 8,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 19181
+   }
+  }
+ },
+ {
+  "id": "msg_145ac945b0019fITXOO1leE6TV",
+  "time": {
+   "created": 1792170300507
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ }
+]

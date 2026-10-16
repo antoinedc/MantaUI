@@ -1,0 +1,80 @@
+[
+ {
+  "id": "msg_145ad14e7001xcdHOW7QCzqWFN",
+  "time": {
+   "created": 1792170333470
+  },
+  "text": "Run exactly this shell command and nothing else: for i in 1 2 3 4 5 6 7 8 9 10; do echo tick$i; sleep 1; done . Then reply with the single word done.",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ad1555001b1ZQcKwrUkjptM",
+  "time": {
+   "created": 1792170333583,
+   "streamed": 1792170334823,
+   "completed": 1792170337552
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "tool",
+    "id": "toolu_019GLqEYR7wXVxYBukBdyq19",
+    "name": "shell",
+    "executed": false,
+    "state": {
+     "status": "error",
+     "input": {
+      "command": "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick$i; sleep 1; done"
+     },
+     "error": {
+      "type": "aborted",
+      "message": "Tool execution interrupted"
+     },
+     "metadata": {
+      "shellID": "sh_145ad1a73001iH2PlruYtRoiHR"
+     }
+    },
+    "time": {
+     "created": 1792170334370,
+     "ran": 1792170334790,
+     "completed": 1792170337474
+    }
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "error",
+  "rawFinish": "tool_use",
+  "cost": 0.00278425,
+  "tokens": {
+   "input": 3,
+   "output": 86,
+   "reasoning": 0,
+   "cache": {
+    "read": 18850,
+    "write": 373
+   }
+  },
+  "error": {
+   "type": "aborted",
+   "message": "Step interrupted"
+  }
+ },
+ {
+  "id": "msg_145ad252b001uJrEwo0vnZvf0u",
+  "time": {
+   "created": 1792170337579
+  },
+  "type": "idle",
+  "outcome": "interrupted"
+ }
+]

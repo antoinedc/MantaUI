@@ -93,7 +93,7 @@ export function summarizeTranscript(messages) {
         const name = p.tool || p.name;
         if (name) recentTools.push(name);
         const input = p?.state?.input;
-        if ((name === "todowrite" || name === "TodoWrite") && Array.isArray(input?.todos)) {
+        if ((name === "todowrite" || name === "todo_write" || name === "TodoWrite") && Array.isArray(input?.todos)) {
           todos = input.todos;
         }
       }

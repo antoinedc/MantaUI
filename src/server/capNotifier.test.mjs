@@ -4,7 +4,7 @@
 //
 // Why a live HTTP server: the bug BET-184 review-return flagged was a
 // passthrough `(args) => oc.sendPrompt(args)` that silently dropped the
-// session id, so the request landed at `/session/undefined/prompt_async`
+// session id, so the request landed at `/api/session/undefined/prompt`
 // and the completion turn never reached the originating session. A pure
 // unit test (mock sendPrompt, capture args) would pass even with the bug —
 // the bug is in the field-NAME translation, not in the call-shape. The
@@ -49,10 +49,10 @@ test("notifyCapSession translates sessionID → sessionId in the URL", async () 
   });
   assert.ok(captured, "transport was called");
   // URL must encode the camelCase sessionId — a passthrough would have
-  // built `/session/undefined/prompt_async` (silent drop, the BET-184 bug).
+  // built `/api/session/undefined/prompt` (silent drop, the BET-184 bug).
   assert.match(
     captured.url,
-    /\/session\/ses_abc123\/prompt_async/,
+    /\/api\/session\/ses_abc123\/prompt$/,
     `url must contain the camelCase sessionId, got ${captured.url}`,
   );
   assert.equal(captured.method, "POST");
@@ -65,8 +65,8 @@ test("notifyCapSession embeds the text in the request body as a parts array", as
   });
   assert.ok(captured, "transport was called");
   const parsed = JSON.parse(captured.body);
-  // oc.sendPrompt wraps text in {parts:[{type:"text", text}]}
-  assert.deepEqual(parsed.parts, [{ type: "text", text: "build finished" }]);
+  // V2: oc.sendPrompt posts {text} to /api/session/{id}/prompt
+  assert.deepEqual(parsed, { text: "build finished" });
 });
 
 test("notifyCapSession would have produced /session/undefined before the fix", async () => {
@@ -86,5 +86,5 @@ test("notifyCapSession would have produced /session/undefined before the fix", a
   }
   // The PASSTHROUGH form lands on /session/undefined — this proves the
   // bug-shape the bridge exists to prevent.
-  assert.match(captured.url, /\/session\/undefined\/prompt_async/);
+  assert.match(captured.url, /\/session\/undefined\/prompt$/);
 });

@@ -970,26 +970,26 @@ test("production composition: real opencode.mjs createSession sends the metadata
   let seq = 0;
   let failNextRead = false;
   const { calls, reset } = spyOcWire(({ u, method, body }) => {
-    if (method === "POST" && u.pathname === "/session") {
+    if (method === "POST" && u.pathname === "/api/session") {
       const session = {
         id: `ses_live${++seq}`,
         title: body.title,
-        directory: u.searchParams.get("directory"),
+        location: body.location,
         projectID: "global",
         time: { created: 1, updated: 1 },
         metadata: body.metadata ?? null,
       };
       sessions.set(session.id, session);
-      return new Response(JSON.stringify(session), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ data: session }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (method === "GET" && u.pathname.startsWith("/session/")) {
-      const id = decodeURIComponent(u.pathname.slice("/session/".length));
+    if (method === "GET" && u.pathname.startsWith("/api/session/")) {
+      const id = decodeURIComponent(u.pathname.slice("/api/session/".length));
       if (failNextRead) {
         failNextRead = false;
         return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
       }
       if (sessions.has(id)) {
-        return new Response(JSON.stringify(sessions.get(id)), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ data: sessions.get(id) }), { status: 200, headers: { "content-type": "application/json" } });
       }
       return new Response(JSON.stringify({ error: "not found" }), { status: 404, headers: { "content-type": "application/json" } });
     }
@@ -1013,12 +1013,12 @@ test("production composition: real opencode.mjs createSession sends the metadata
     const result = await svc.ensure();
     assert.equal(result.created, true);
 
-    const post = calls.find((c) => c.method === "POST" && c.path === "/session");
-    assert.ok(post, "the binding create hit POST /session");
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/session");
+    assert.ok(post, "the binding create hit POST /api/session");
     assert.equal(post.body.title, ROLE_SESSION_TITLE);
     assert.equal(post.body.metadata.role, CONVERSATION_ROLE);
     assert.equal(post.body.metadata.bindingOperation, result.binding.currentOperation);
-    assert.equal(post.query.directory, controlDir);
+    assert.equal(post.body.location.directory, controlDir);
 
     const found = await ocModule.readSession(result.binding.currentSessionId);
     assert.equal(found.state, "found");
