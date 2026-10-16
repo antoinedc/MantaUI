@@ -10,8 +10,8 @@
 // Composer / hooks) is the top regression risk flagged by BET-47. Without a
 // way to actually MOUNT the component and drive events, that refactor is
 // blind. This harness is the safety net: it lets a test render <ChatPanel>,
-// push fake opencode events through the same `onOpencodeEvent` path the main
-// process uses, and assert on the resulting DOM — no Electron, no live tmux.
+// push fake opencode events (replayed through the real box interpreter, see
+// MockEventBus), and assert on the resulting DOM — no Electron, no live tmux.
 //
 // It is deliberately dependency-light: it uses `react-dom/client` against
 // jsdom directly rather than @testing-library, so the repo's test tooling
@@ -29,6 +29,12 @@ import { VirtuosoMockContext } from "react-virtuoso";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
 import { SessionHeader } from "./SessionHeader";
+// The REAL box-side interpreter. The renderer reads only interpreted frames
+// (OpenCode V2 slice A2), so a test that wants to say "this V1 opencode event
+// arrives" replays it through the production interpreter and the panel receives
+// exactly the frames a live box would publish — no hand-written frame can drift
+// from the mapping.
+import { createStreamInterpreter } from "../server/streamInterp.mjs";
 
 // React 18's `act` warns unless this global is set. jsdom test env only.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,9 +90,18 @@ type EventListener = (ev: OpencodeEvent) => void;
 type StreamListener = (ev: StreamEnvelope) => void;
 
 // The controllable SSE bus the harness hands back so a test can push events
-// exactly as the main process would broadcast them. `emit` drives the raw
-// opencode listener; `emitStream` drives the box-interpreted stream listener
-// (BET-551 / §17) with a `StreamEnvelope`.
+// exactly as the box would broadcast them.
+//   - `emit(rawEvent)`   replays a raw V1 opencode event through the real box
+//                        interpreter (src/server/streamInterp.mjs) and delivers
+//                        the frames it derives to the `onStreamEvent`
+//                        listeners; the raw event is ALSO offered to any
+//                        `onOpencodeEvent` listener (the renderer registers none
+//                        — `listenerCount()` stays 0). A raw `server.connected`
+//                        becomes the client-synthesised `resync` frame, as in
+//                        httpApi.
+//   - `emitStream(frame)` delivers one `StreamEnvelope` verbatim (frames the
+//                        interpreter cannot derive from a single raw event, or a
+//                        test that pins a frame shape directly).
 export type MockEventBus = {
   emit: (ev: OpencodeEvent) => void;
   emitStream: (ev: StreamEnvelope) => void;
@@ -173,15 +188,33 @@ export function installMockApi(
   streamListeners = new Set<StreamListener>();
   const calls: Record<string, unknown[][]> = {};
 
+  const deliverStream = (ev: StreamEnvelope) => {
+    // Copy so a listener that unsubscribes mid-emit doesn't mutate the set
+    // we're iterating.
+    for (const fn of Array.from(streamListeners)) fn(ev);
+  };
+  // A fresh interpreter per install, on a fake clock that jumps 1s per raw
+  // event: every message change lands outside the 100 ms coalescing window (one
+  // frame per raw event, as the old raw handler saw), with no timers involved.
+  let clock = 1_000_000;
+  const interpreter = createStreamInterpreter({
+    publish: (env: unknown) => deliverStream(env as StreamEnvelope),
+    now: () => clock,
+    setTimer: () => 0,
+    clearTimer: () => {},
+  });
+
   const bus: MockEventBus = {
     emit: (ev) => {
-      // Copy so a listener that unsubscribes mid-emit doesn't mutate the set
-      // we're iterating.
       for (const fn of Array.from(busListeners)) fn(ev);
+      if (ev.type === "server.connected") {
+        deliverStream({ sub: "resync", sessionId: "", payload: {} });
+        return;
+      }
+      clock += 1000;
+      interpreter.interpret(ev);
     },
-    emitStream: (ev) => {
-      for (const fn of Array.from(streamListeners)) fn(ev);
-    },
+    emitStream: deliverStream,
     listenerCount: () => busListeners.size,
     streamListenerCount: () => streamListeners.size,
   };

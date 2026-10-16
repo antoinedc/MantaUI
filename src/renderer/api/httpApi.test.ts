@@ -9,6 +9,7 @@ import {
   httpApi,
   dispatchToListeners,
   dispatchFrame,
+  fireResync,
 } from "./httpApi.js";
 
 // Mock browser APIs for tests that touch the WebSocket stream.
@@ -422,6 +423,50 @@ describe("dispatchFrame demux", () => {
       });
     } finally {
       unsub();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resync on reconnect (OpenCode V2 slice A2): the post-reconnect resync reaches
+// panels as a client-synthesised `resync` stream frame (the renderer reads no
+// raw opencode events).
+// ---------------------------------------------------------------------------
+
+describe("fireResync", () => {
+  it("delivers a session-less `resync` frame to onStreamEvent listeners", () => {
+    vi.useFakeTimers();
+    const stream = vi.fn();
+    const raw = vi.fn();
+    const offStream = httpApi.onStreamEvent(stream);
+    const offRaw = httpApi.onOpencodeEvent(raw);
+    try {
+      fireResync();
+      expect(stream).not.toHaveBeenCalled();
+      vi.runOnlyPendingTimers();
+      expect(stream).toHaveBeenCalledTimes(1);
+      expect(stream.mock.calls[0][0]).toEqual({ sub: "resync", sessionId: "", payload: {} });
+      expect(raw).toHaveBeenCalledWith({ type: "server.connected", properties: {} });
+    } finally {
+      offStream();
+      offRaw();
+      vi.useRealTimers();
+    }
+  });
+
+  it("collapses a burst of reconnect signals into one resync", () => {
+    vi.useFakeTimers();
+    const stream = vi.fn();
+    const off = httpApi.onStreamEvent(stream);
+    try {
+      fireResync();
+      fireResync();
+      fireResync();
+      vi.runOnlyPendingTimers();
+      expect(stream).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+      vi.useRealTimers();
     }
   });
 });

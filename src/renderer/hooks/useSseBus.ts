@@ -1,12 +1,19 @@
 // ===== useSseBus =====
 //
 // Extracted from ChatPanel.tsx (BET-64). Owns the SSE connection/drain/queue
-// state machine. Subscribes to opencode events, routes them to the appropriate
-// state setters, and manages the drain-abort logic for queued prompts.
+// state machine. Subscribes to the box-interpreted `stream` frames, routes them
+// to the appropriate state setters, and manages the drain-abort logic for
+// queued prompts.
+//
+// OpenCode V2 slice A2: this hook no longer reads raw opencode events at all
+// (`onOpencodeEvent` has no renderer subscriber). Every behaviour that used to
+// hang off a raw event is driven by the frame the box derives from it — see the
+// mapping table in docs/superpowers/specs/2026-10-16-opencode-v2-slices-a2-b2.md
+// and the `switch (ev.sub)` below.
 //
 // This hook owns:
-//   - The SSE subscription (window.api.onOpencodeEvent)
-//   - The event handler that routes events to state setters
+//   - The frame subscription (window.api.onStreamEvent)
+//   - The frame handler that routes frames to state setters
 //   - All event-driven state: running, permissions, questions, stepTokens,
 //     compactionState, liveTodos, todosDismissed, retryInfo, finishByMessageId,
 //     commandByMessageId, sendError, messageQueue, drainAbortRef
@@ -48,30 +55,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
-  OpencodeEvent,
   OpencodeMessage,
   PermissionRequest,
   QuestionRequest,
+  StreamChildSessionPayload,
+  StreamCommandExecutedPayload,
+  StreamCompactionPayload,
   StreamEnvelope,
   StreamFlushPayload,
+  StreamMessageChangedPayload,
+  StreamPermissionsPayload,
+  StreamPlanModePayload,
+  StreamRetryPayload,
   StreamRunningPayload,
+  StreamSessionErrorPayload,
+  StreamStepEndedPayload,
   StreamTodosPayload,
   StreamTruncationPayload,
   StreamQuestionsPayload,
   StreamSubagentChildPayload,
 } from "../../shared/types";
 import {
-  shouldDropEventForSessionFilter,
   isDrainAbortError,
   shouldAbortForQueuedDrain,
-  isToolStepBoundary,
   collectChildSessionIds,
   hydrateQuestion,
-  authErrorAdvice,
+  describeSessionError,
+  stepTokensFromFrame,
   fetchTranscriptWithRetry,
-  humanizeProviderError,
 } from "../chatUtils";
-import { planModeFromToolPart, isPlanAgent } from "../../shared/planMode.mjs";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
@@ -255,10 +267,6 @@ export function useSseBus(params: {
   // against the CURRENT session's setter, not the one captured at mount.
   const setPlanOnRef = useRef(setPlanOn);
   setPlanOnRef.current = setPlanOn;
-  // Re-entrancy guard for the plan_enter/plan_exit tool parts: the same tool
-  // part arrives repeatedly as it streams (like the drain abort), so act once
-  // per callID. Mirrors drainAbortRef's guard pattern.
-  const handledPlanCallIdsRef = useRef<Set<string>>(new Set());
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
   const [compactionState, setCompactionState] = useState<{
     reason: string;
@@ -403,7 +411,7 @@ export function useSseBus(params: {
     } catch { /* non-fatal */ }
   }, [sessionId]);
 
-  // SSE effect
+  // Frame subscription effect
   useEffect(() => {
     // Drain-abort helper
     const maybeDrainQueuedPrompt = () => {
@@ -424,309 +432,6 @@ export function useSseBus(params: {
         })
         .then(() => rejectAllPendingQuestions());
     };
-
-    const off = window.api.onOpencodeEvent((ev: OpencodeEvent) => {
-      const props = ev.properties ?? {};
-      const evSessionID = typeof props.sessionID === "string" ? props.sessionID : "";
-
-      if (shouldDropEventForSessionFilter(
-        ev as { type: string; properties?: { sessionID?: string } },
-        sessionId,
-        childSessionIds.current,
-      )) {
-        return;
-      }
-      const isChildEvent =
-        evSessionID.length > 0 &&
-        evSessionID !== sessionId &&
-        childSessionIds.current.has(evSessionID);
-
-      // Subagent child-session event routing
-      if (isChildEvent) {
-        if (
-          ev.type === "message.part.updated" ||
-          ev.type === "message.part.delta" ||
-          ev.type === "message.updated" ||
-          ev.type === "message.part.removed" ||
-          ev.type === "message.removed"
-        ) {
-          if (expandedTasksRef.current.has(evSessionID)) {
-            scheduleChildRefetch(evSessionID);
-          }
-          return;
-        }
-        if (ev.type === "session.idle") {
-          setLiveChildStatus((prev) => {
-            if (prev.get(evSessionID) === "idle") return prev;
-            const next = new Map(prev);
-            next.set(evSessionID, "idle");
-            return next;
-          });
-          scheduleRefetch();
-          return;
-        }
-        if (ev.type === "session.status") {
-          const t = (props.status as { type?: string } | undefined)?.type;
-          if (t === "busy" || t === "retry") {
-            setLiveChildStatus((prev) => {
-              if (prev.get(evSessionID) === "running") return prev;
-              const next = new Map(prev);
-              next.set(evSessionID, "running");
-              return next;
-            });
-          } else if (t === "idle") {
-            setLiveChildStatus((prev) => {
-              if (prev.get(evSessionID) === "idle") return prev;
-              const next = new Map(prev);
-              next.set(evSessionID, "idle");
-              return next;
-            });
-            scheduleRefetch();
-          }
-          return;
-        }
-        return;
-      }
-
-      // NOTE: the viewed session's delta flush, running, todos, truncation and
-      // question interpretation all moved to the box (BET-551 / §17) and are
-      // consumed via the onStreamEvent subscription below — no longer here.
-
-      if (ev.type === "session.status") {
-        const status = props.status as
-          | {
-              type?: string;
-              attempt?: number;
-              message?: string;
-              next?: number;
-              action?: {
-                reason?: string;
-                provider?: string;
-                title?: string;
-                message?: string;
-                label?: string;
-                link?: string;
-              };
-            }
-          | undefined;
-        const type = status?.type;
-        if ((type === "busy" || type === "retry") && abortedBannerRef.current) {
-          // A new turn began: the "Aborted" banner is stale.
-          setSendError(null);
-        }
-        if (type === "retry") {
-          // Running on a retry comes from the box's stream.running (the box
-          // treats retry as running — see streamInterp session.status). This
-          // raw handler only surfaces the retry banner/message; it must not
-          // set running itself, or it would race the box value.
-          setRetryInfo({
-            attempt: status?.attempt ?? 0,
-            message: status?.message ?? "",
-            next: status?.next ?? 0,
-            action:
-              status?.action
-                ? {
-                    title: status.action.title ?? "",
-                    message: status.action.message ?? "",
-                    label: status.action.label ?? "",
-                    link: status.action.link,
-                  }
-                : undefined,
-          });
-        } else if (type === "busy" || type === "idle") {
-          setRetryInfo(null);
-        }
-      }
-
-      if (ev.type === "session.error") {
-        const err = (props.error as { data?: { message?: string }; name?: string } | undefined);
-        const raw = err?.data?.message ?? err?.name ?? "Unknown server error";
-        if (isDrainAbortError(err?.name, drainAbortRef.current)) {
-          cancelTurnSettle();
-          setRunning(false);
-          return;
-        }
-        // Auth-error banner (BET-316). For one of the three subscription
-        // providers, replace the raw message (which often ends with "Run
-        // `claude` to refresh them." for Claude, or arrives with no context
-        // for Codex/Kimi) with a single reconnect nudge. Server-side recovery
-        // (maybeRecoverCredentials + the 10-min pre-expiry poller) keeps
-        // running in parallel for Claude specifically — this banner is
-        // additive, not a replacement. For everything else the existing
-        // switch/default branch handles the message and we fall through.
-        const auth = authErrorAdvice(err?.name, raw, providerIDRef.current);
-        if (auth) {
-          setSendError(`${auth.label} needs to be reconnected.`);
-          setAuthReconnect(auth.label);
-          cancelTurnSettle();
-          setRunning(false);
-          return;
-        }
-        // Unwrap a provider rejection body (e.g. `Bad Request: {"detail":"…"}`)
-        // down to the human sentence for every branch below. `authErrorAdvice`
-        // above keeps reading the ORIGINAL `raw` — its regex matches on message
-        // content and its behaviour must not shift (BET-1131).
-        const human = humanizeProviderError(raw);
-        let msg: string;
-        switch (err?.name) {
-          case "ContextOverflowError":
-            msg = `Context full — try /compact: ${human}`;
-            break;
-          case "MessageOutputLengthError":
-            msg = "Response truncated (hit output limit)";
-            break;
-          case "StructuredOutputError":
-            msg = `Structured output failed: ${human}`;
-            break;
-          case "ApiError":
-            msg = `API error: ${human}`;
-            break;
-          default:
-            msg = human;
-        }
-        setSendError(msg);
-        abortedBannerRef.current = err?.name === "MessageAbortedError";
-        setAuthReconnect(null);
-        cancelTurnSettle();
-        setRunning(false);
-      }
-
-      if (ev.type === "session.next.step.ended") {
-        maybeDrainQueuedPrompt();
-        // Update stepTokens
-        const usage = props.usage as { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } } | undefined;
-        const cost = (props.cost as number | undefined) ?? 0;
-        if (usage) {
-          setStepTokens({
-            input: usage.input ?? 0,
-            output: usage.output ?? 0,
-            reasoning: usage.reasoning ?? 0,
-            cache: {
-              read: usage.cache?.read ?? 0,
-              write: usage.cache?.write ?? 0,
-            },
-            cost,
-          });
-        }
-        // Truncation classification moved to the box → stream.truncation
-        // (consumed below); finishByMessageId is stamped there, not here.
-      }
-
-      // Plan-mode honesty (BET-949). opencode's OWN client does the mode switch
-      // locally (`plan_exit` → build, `plan_enter` → plan); there is no
-      // server-side state doing it, so MantaUI must mirror it or the chip
-      // claims plan mode while the next turn runs as build.
-      if (ev.type === "session.next.agent.switched") {
-        setPlanOnRef.current(isPlanAgent(String(props.agent ?? "")));
-      }
-      if (ev.type === "message.part.updated") {
-        const part = props.part as { callID?: unknown } | undefined;
-        const next = planModeFromToolPart(props.part);
-        if (next !== null) {
-          const callID = String(part?.callID ?? "");
-          if (callID && !handledPlanCallIdsRef.current.has(callID)) {
-            handledPlanCallIdsRef.current.add(callID);
-            setPlanOnRef.current(next);
-          }
-        }
-      }
-
-      if (ev.type.startsWith("session.next.compaction.")) {
-        const phase = ev.type.split(".").pop();
-        if (phase === "started") {
-          setCompactionState({
-            reason: String(props.reason ?? "context"),
-            text: String(props.text ?? ""),
-            phase: "running",
-          });
-        } else if (phase === "delta") {
-          setCompactionState((prev) => prev ? { ...prev, text: prev.text + String(props.delta ?? "") } : null);
-        } else if (phase === "ended") {
-          setCompactionState((prev) => prev ? { ...prev, phase: "done" } : null);
-          if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
-          compactionClearTimer.current = setTimeout(() => {
-            setCompactionState(null);
-          }, 3000);
-        }
-      }
-
-      if (ev.type === "vcs.branch.updated") {
-        // Preserve last-known branch when the event carries no branch, rather
-        // than blanking (or worse, `String(null)` → the truthy string "null").
-        const b = props.branch ? String(props.branch) : null;
-        setBranch((prev) => b ?? prev);
-      }
-
-      // Todo interpretation moved to the box → stream.todos (consumed below).
-
-      if (ev.type === "command.executed") {
-        const messageID = String(props.messageID ?? "");
-        const name = String(props.name ?? "");
-        const arguments_ = String(props.arguments ?? "");
-        setCommandByMessageId((prev) => {
-          const next = new Map(prev);
-          next.set(messageID, { name, arguments: arguments_ });
-          return next;
-        });
-      }
-
-      if (ev.type === "message.part.updated" || ev.type === "message.updated") {
-        // messageID lives at DIFFERENT paths per event type on the deployed
-        // opencode build (verified live against /events):
-        //   - message.part.updated → properties.part.messageID (top-level
-        //     properties.messageID is UNDEFINED)
-        //   - message.updated       → properties.messageID (properties.info.id
-        //     as a fallback)
-        // Reading only props.messageID meant message.part.updated resolved to
-        // "" and fell through to a FULL scheduleRefetch — whose single 300ms
-        // timer is reset on every event. A running bash emits part.updated
-        // every ~20-40ms, so that timer never fired until the turn went idle:
-        // live tool output (metadata.output) never streamed, it dumped all at
-        // once on completion. Resolving the real id routes to the targeted
-        // per-message splice (which has its own max-wait guard).
-        const part = props.part as { messageID?: unknown } | undefined;
-        const info = props.info as { id?: unknown } | undefined;
-        const messageID = String(
-          props.messageID ?? part?.messageID ?? info?.id ?? "",
-        );
-        // First-token-latency instrumentation (BET-553 / §17) — the raw path.
-        // The raw `opencode` stream is the OTHER text source besides the box's
-        // interpreted `stream.flush`; both are timed so the numbers are
-        // comparable (see the interpreted flush case). `markRendered` marks the
-        // splice-invoked commit; true paint timing is captured by the probe.
-        markFirstToken("raw", sessionId);
-        spliceMessage(messageID);
-        markRendered("raw", sessionId);
-      }
-
-      // Primary drain trigger — the real step boundary the deployed opencode
-      // build actually emits (see module doc + BET-131). Only fires for the
-      // main session: `isChildEvent` above already returned early for
-      // subagent child events, so a completed tool part reaching here always
-      // belongs to the session this hook owns.
-      if (ev.type === "message.part.updated" && isToolStepBoundary(props.part)) {
-        maybeDrainQueuedPrompt();
-      }
-
-      if (ev.type === "session.compacted") {
-        setCompactionState(null);
-        scheduleRefetch();
-      }
-
-      if (ev.type === "server.connected") {
-        scheduleRefetch();
-        void refreshPermissions();
-        void refreshQuestions();
-      }
-
-      if (ev.type === "permission.asked" || ev.type === "permission.replied") {
-        void refreshPermissions();
-      }
-
-      // Question interpretation moved to the box → stream.questions (consumed
-      // below). BET-418 semantics follow: a viewed session's own ask applies
-      // live from the payload (no refetch), a foreign/child ask never applies.
-    });
 
     // Initial fetch. Arm `refreshing` here (not just in scheduleRefetch) so the
     // ambient loading divider shows during the REAL transcript load when a
@@ -770,22 +475,56 @@ export function useSseBus(params: {
     initialFetchRef.current = doInitialFetch;
     doInitialFetch();
 
-    // Box-side interpreted stream events (BET-551 / §17). The box derives
-    // running, delta-flush, todos, truncation, questions and subagent/child
-    // state from the raw opencode stream and publishes them as `stream.*` —
-    // the renderer consumes those here instead of re-interpreting.
-    const offStream = window.api.onStreamEvent((ev: StreamEnvelope) => {
-      // A stream event scoped to a subagent child session (not this panel's
-      // own session) still needs the child's live-transcript routing — the
-      // same scheduleChildRefetch the raw-event child block above does.
-      if (ev.sessionId !== sessionId) {
-        if (
-          ev.sessionId &&
-          childSessionIds.current.has(ev.sessionId) &&
-          expandedTasksRef.current.has(ev.sessionId)
-        ) {
-          scheduleChildRefetch(ev.sessionId);
+    // Subagent child-session frames (the child's own transcript card). A child
+    // session's frames carry the CHILD's id; the panel only cares while it is in
+    // the allowlist (seeded from the transcript's task parts and the parent's
+    // `childSession` frame).
+    //   - `flush` / `messageChanged` → refetch the child transcript, only while
+    //     its card is expanded (a closed card burns no fetch traffic). `flush`
+    //     matters because streamed text deltas never produce `messageChanged`.
+    //   - `running` → the card's live running/idle badge; going idle also
+    //     refetches the PARENT so the task part's own state flips.
+    // `turnComplete` is deliberately NOT used for the child badge: the box derives
+    // it from the transcript, so it fires mid-turn at every tool-step boundary
+    // (see TURN_SETTLE_MS) and would flicker the badge. `running` is the hard
+    // signal — the same one the raw child handler used (session.status).
+    const handleChildFrame = (ev: StreamEnvelope) => {
+      const childId = ev.sessionId;
+      switch (ev.sub) {
+        case "flush":
+        case "messageChanged":
+          if (expandedTasksRef.current.has(childId)) scheduleChildRefetch(childId);
+          return;
+        case "running": {
+          const next = (ev.payload as StreamRunningPayload).running ? "running" : "idle";
+          setLiveChildStatus((prev) => {
+            if (prev.get(childId) === next) return prev;
+            const m = new Map(prev);
+            m.set(childId, next);
+            return m;
+          });
+          if (next === "idle") scheduleRefetch();
+          return;
         }
+        default:
+          return;
+      }
+    };
+
+    // Box-interpreted stream frames (BET-551 / §17; OpenCode V2 slice A2). The
+    // box derives every live signal from the raw opencode stream and publishes
+    // it as `stream.*`; this is the panel's ONLY live input.
+    const offStream = window.api.onStreamEvent((ev: StreamEnvelope) => {
+      // Client-synthesised by httpApi when the events socket reconnects (frames
+      // may have been missed): resync this panel. Carries no session id.
+      if (ev.sub === "resync") {
+        scheduleRefetch();
+        void refreshPermissions();
+        void refreshQuestions();
+        return;
+      }
+      if (ev.sessionId !== sessionId) {
+        if (ev.sessionId && childSessionIds.current.has(ev.sessionId)) handleChildFrame(ev);
         return;
       }
 
@@ -808,10 +547,13 @@ export function useSseBus(params: {
           return;
         }
         case "running": {
+          const { running: nowRunning } = ev.payload as StreamRunningPayload;
+          // A new turn began: a stale "Aborted" banner is no longer true.
+          if (nowRunning && abortedBannerRef.current) setSendError(null);
           // Authoritative in both directions: cancel any pending settle so a
           // stale timer can't clobber this value, then apply it immediately.
           cancelTurnSettle();
-          setRunning((ev.payload as StreamRunningPayload).running);
+          setRunning(nowRunning);
           return;
         }
         case "turnComplete": {
@@ -830,6 +572,135 @@ export function useSseBus(params: {
           turnSettleRef.current = setTimeout(() => {
             setRunning(false);
           }, TURN_SETTLE_MS);
+          return;
+        }
+        case "retry": {
+          // Provider is being retried (rate limit, overload, seat limit). `null`
+          // = cleared by the next busy/idle.
+          const r = ev.payload as StreamRetryPayload;
+          setRetryInfo(
+            r === null || r === undefined
+              ? null
+              : {
+                  attempt: r.attempt ?? 0,
+                  message: r.message ?? "",
+                  next: r.next ?? 0,
+                  action: r.action
+                    ? {
+                        title: r.action.title ?? "",
+                        message: r.action.message ?? "",
+                        label: r.action.label ?? "",
+                        link: r.action.link,
+                      }
+                    : undefined,
+                },
+          );
+          return;
+        }
+        case "aborted": {
+          // session.error MessageAbortedError — the box publishes it as its own
+          // frame (never as a `sessionError`, so iOS shows no banner).
+          // Our own queued-drain abort must be invisible: the queued prompt is
+          // submitted on the upcoming idle.
+          if (isDrainAbortError("MessageAbortedError", drainAbortRef.current)) {
+            cancelTurnSettle();
+            setRunning(false);
+            return;
+          }
+          // A user Stop (or the box aborting a seat-limit retry): show the
+          // "Aborted" banner; the next busy/retry clears it (abortedBannerRef).
+          setSendError("Aborted");
+          abortedBannerRef.current = true;
+          setAuthReconnect(null);
+          cancelTurnSettle();
+          setRunning(false);
+          return;
+        }
+        case "sessionError": {
+          const p = ev.payload as StreamSessionErrorPayload;
+          // Auth-error banner (BET-316) or the typed-prefix message. (An abort
+          // never arrives here — see the `aborted` frame above.)
+          const d = describeSessionError(p, providerIDRef.current);
+          setSendError(d.message);
+          setAuthReconnect(d.auth ? d.auth.label : null);
+          cancelTurnSettle();
+          setRunning(false);
+          return;
+        }
+        case "stepEnded": {
+          // Step boundary: drain a queued prompt, and refresh the live token
+          // snapshot so the context pill updates between tool calls.
+          maybeDrainQueuedPrompt();
+          const t = stepTokensFromFrame(ev.payload as StreamStepEndedPayload);
+          if (t) setStepTokens(t);
+          return;
+        }
+        case "toolBoundary": {
+          // Primary drain trigger — the real step boundary the deployed opencode
+          // build actually emits (a tool part reaching a terminal status; see
+          // BET-131). Child sessions never get here (routed above).
+          maybeDrainQueuedPrompt();
+          return;
+        }
+        case "planMode": {
+          // Plan-mode honesty (BET-949): opencode switches its agent locally on
+          // plan_enter/plan_exit, so mirror it or the chip lies. The box
+          // de-dups per callID.
+          setPlanOnRef.current((ev.payload as StreamPlanModePayload).on);
+          return;
+        }
+        case "compaction": {
+          const c = ev.payload as StreamCompactionPayload;
+          if (c.phase === "started") {
+            setCompactionState({
+              reason: String(c.reason ?? "context"),
+              text: String(c.text ?? ""),
+              phase: "running",
+            });
+          } else if (c.phase === "delta") {
+            setCompactionState((prev) => (prev ? { ...prev, text: prev.text + String(c.text ?? "") } : null));
+          } else if (c.phase === "ended") {
+            setCompactionState((prev) => (prev ? { ...prev, phase: "done" } : null));
+            if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
+            compactionClearTimer.current = setTimeout(() => {
+              setCompactionState(null);
+            }, 3000);
+          }
+          return;
+        }
+        case "transcriptStale": {
+          // session.compacted: the canonical transcript changed wholesale.
+          setCompactionState(null);
+          scheduleRefetch();
+          return;
+        }
+        case "commandExecuted": {
+          const c = ev.payload as StreamCommandExecutedPayload;
+          setCommandByMessageId((prev) => {
+            const next = new Map(prev);
+            next.set(c.messageID, { name: c.name, arguments: c.arguments });
+            return next;
+          });
+          return;
+        }
+        case "messageChanged": {
+          // The canonical copy of one message changed → targeted splice (which
+          // keeps its own 300ms debounce + SPLICE_MAX_WAIT_MS guard, so a running
+          // tool streaming output every ~30ms still renders at a steady cap).
+          // The box already resolves the messageID across the three event paths
+          // (AGENTS.md "messageID + debounce-starvation trap") and coalesces to
+          // ≤1 frame per message per 100 ms.
+          const { messageID } = ev.payload as StreamMessageChangedPayload;
+          // First-token-latency instrumentation (BET-553 / §17) — the splice path.
+          markFirstToken("raw", sessionId);
+          spliceMessage(messageID);
+          markRendered("raw", sessionId);
+          return;
+        }
+        case "childSession": {
+          // A subagent session was created under THIS session: admit its frames.
+          const { childSessionId } = ev.payload as StreamChildSessionPayload;
+          if (childSessionId) childSessionIds.current.add(childSessionId);
           return;
         }
         case "todos": {
@@ -858,6 +729,14 @@ export function useSseBus(params: {
           }
           return;
         }
+        case "permissions": {
+          // The box's list of this session's pending asks, used directly (no
+          // refetch). Under trust mode the box never frames an ask it
+          // auto-answers, so a pending list here is one the user must act on.
+          const { permissions: list } = ev.payload as StreamPermissionsPayload;
+          if (Array.isArray(list)) setPermissions(list as PermissionRequest[]);
+          return;
+        }
         case "subagent.child": {
           const { childSessionId } = ev.payload as StreamSubagentChildPayload;
           if (childSessionId) childSessionIds.current.add(childSessionId);
@@ -877,14 +756,16 @@ export function useSseBus(params: {
           return;
         }
         default:
-          // context / cache / subagent / autoRename — consumed by other
-          // surfaces, not this panel's live transcript state.
+          // context / cache / subagent / autoRename / attention / tool* —
+          // consumed by other surfaces (the sidebar, the context pill), not this
+          // panel's live transcript state. vcs.branch.updated has no frame on
+          // purpose: the branch is polled (opencode's event is unreliable —
+          // AGENTS.md "/vcs").
           return;
       }
     });
 
     return () => {
-      off();
       offStream();
       cancelTurnSettle();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);

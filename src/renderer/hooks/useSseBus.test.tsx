@@ -45,11 +45,12 @@ describe("useSseBus via ChatPanel", () => {
     h = null;
   });
 
-  it("mounts and subscribes to SSE events", async () => {
+  it("mounts and subscribes to interpreted stream frames (and to no raw opencode events)", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    // The hook should have registered a listener via onOpencodeEvent.
-    expect(bus.listenerCount()).toBeGreaterThan(0);
+    // The hook registers on onStreamEvent only (OpenCode V2 slice A2).
+    expect(bus.streamListenerCount()).toBeGreaterThan(0);
+    expect(bus.listenerCount()).toBe(0);
   });
 
   it("transitions running state on stream.running events", async () => {
@@ -528,7 +529,7 @@ describe("useSseBus queued-message drain on tool step boundary", () => {
       properties: {
         sessionID: "ses_test",
         messageID: "msg_1",
-        part: { type: "tool", state: { status: "completed" } },
+        part: { id: "prt_tool1", type: "tool", state: { status: "completed" } },
       },
     });
 
@@ -1129,6 +1130,11 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
 // The box aborts a conversation asleep in a seat-limit retry and then resumes it
 // with "Keep going". The abort surfaces as a MessageAbortedError banner that
 // nothing used to clear, so it sat on screen while work continued.
+//
+// OpenCode V2 slice A2: the abort reaches the desktop as the box's `aborted`
+// frame (the interpreter drops it as an ERROR so iOS shows no banner, but
+// announces it separately). Raw V1 events below are replayed through the real
+// interpreter, so the whole path is exercised.
 describe("useSseBus aborted-error banner clears on the next turn", () => {
   let bus: ReturnType<typeof installMockApi>["bus"];
   let h: ReturnType<typeof mount> | null = null;
@@ -1147,31 +1153,43 @@ describe("useSseBus aborted-error banner clears on the next turn", () => {
     type: "session.error",
     properties: { sessionID: "ses_test", error: { name, data: { message } } },
   });
+  const abortFrame = { sub: "aborted" as const, sessionId: "ses_test", payload: {} };
+  const ABORTED = "Aborted";
   const statusEv = (type: string) => ({
     type: "session.status",
     properties: { sessionID: "ses_test", status: { type } },
+  });
+
+  it("a user Stop (raw session.error MessageAbortedError) shows the Aborted banner, and the idle that follows keeps it", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitAndFlush(bus, h, statusEv("busy"));
+    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    expect(h.text()).toContain(ABORTED);
+    await emitAndFlush(bus, h, statusEv("idle"));
+    expect(h.text()).toContain(ABORTED);
   });
 
   it("MessageAbortedError shows the banner; a following busy clears it", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
-    expect(h.text()).toContain("The operation was aborted");
+    await emitStreamAndFlush(bus, h, abortFrame);
+    expect(h.text()).toContain(ABORTED);
 
     await emitAndFlush(bus, h, statusEv("busy"));
-    expect(h.text()).not.toContain("The operation was aborted");
+    expect(h.text()).not.toContain(ABORTED);
   });
 
   it("a following retry also clears it", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
-    expect(h.text()).toContain("The operation was aborted");
+    await emitStreamAndFlush(bus, h, abortFrame);
+    expect(h.text()).toContain(ABORTED);
 
     await emitAndFlush(bus, h, statusEv("retry"));
-    expect(h.text()).not.toContain("The operation was aborted");
+    expect(h.text()).not.toContain(ABORTED);
   });
 
   it("a non-abort error is NOT cleared by busy", async () => {
@@ -1189,7 +1207,7 @@ describe("useSseBus aborted-error banner clears on the next turn", () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    await emitStreamAndFlush(bus, h, abortFrame);
     await emitAndFlush(bus, h, errorEv("ApiError", "Invalid token"));
     await emitAndFlush(bus, h, statusEv("busy"));
     expect(h.text()).toContain("Invalid token");

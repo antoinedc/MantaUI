@@ -53,6 +53,7 @@ const NEW_SUBS = [
   "commandExecuted",
   "childSession",
   "attention",
+  "aborted",
 ];
 
 const corpus = readdirSync(DIR)
@@ -188,6 +189,10 @@ test("running state frames still carry the abort/idle edges (06-abort)", () => {
   // MessageAbortedError is an intentional abort: it must NOT surface as sessionError.
   assert.equal(frames.filter((f) => f.sub === "sessionError").length, 0);
   assert.ok(frames.some((f) => f.sub === "turnComplete" && f.payload.complete === true));
+  // …but the user Stop IS announced, as its own frame, before the idle edge.
+  const aborted = frames.filter((f) => f.sub === "aborted");
+  assert.equal(aborted.length, 1);
+  assert.deepEqual(aborted[0].payload, {});
 });
 
 test("05-question: attention goes question -> null around the reply", () => {
@@ -248,4 +253,33 @@ test("recorder ownership filter reads every place an event can name its session"
   assert.deepEqual([...eventSessionIds({ type: "message.part.updated", properties: { part: { sessionID: "b" } } })], ["b"]);
   assert.deepEqual([...eventSessionIds({ type: "session.created", properties: { sessionID: "c", info: { id: "c", parentID: "p" } } })], ["c"]);
   assert.equal(eventSessionIds({ type: "server.heartbeat", properties: {} }).size, 0);
+});
+
+test("stepEnded: exactly one frame per step-finish part in every recorded stream", () => {
+  let total = 0;
+  for (const name of corpus) {
+    const events = readEvents(name);
+    const parts = new Set();
+    for (const e of events) {
+      const p = e.properties?.part;
+      if (e.type === "message.part.updated" && p?.type === "step-finish") parts.add(p.id);
+    }
+    total += parts.size;
+    const steps = replay(events).filter((f) => f.sub === "stepEnded");
+    // synthetic-legacy announces its steps via the legacy session.next.step.ended event, not parts.
+    if (name !== "synthetic-legacy") assert.equal(steps.length, parts.size, name);
+  }
+  assert.ok(total > 0, "the recorded corpus contains step-finish parts");
+});
+
+test("05-question: the connect-time snapshot taken while the question is pending carries attention", () => {
+  const events = readEvents("05-question");
+  const askedAt = events.findIndex((e) => e.type === "question.asked");
+  assert.ok(askedAt >= 0);
+  const interp = createStreamInterpreter({ publish: () => {}, now: () => T0, setTimer: () => ({}), clearTimer: () => {} });
+  for (const e of events.slice(0, askedAt + 1)) interp.interpret(e);
+  const snap = interp.snapshotState().filter((f) => f.sub === "attention");
+  assert.deepEqual(snap.map((f) => f.payload.kind), ["question"]);
+  for (const e of events.slice(askedAt + 1)) interp.interpret(e);
+  assert.equal(interp.snapshotState().filter((f) => f.sub === "attention").length, 0, "cleared after the reply");
 });

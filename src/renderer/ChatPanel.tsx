@@ -2199,7 +2199,7 @@ export function ChatPanel({
   // reflects in-flight ticks without waiting for the message re-fetch.
   // When todosDismissed is set (user submitted with all items terminal),
   // suppress the card until opencode writes a fresh list — see the send
-  // handler and the todo.updated branch in onOpencodeEvent.
+  // handler and the `todos` frame branch in useSseBus.
   const activeTodos = useMemo<Array<Record<string, unknown>> | null>(() => {
     // Transcript fallback: most recent non-empty TodoWrite input. Only used
     // when no live todo.updated has been seen (liveTodos == null). The

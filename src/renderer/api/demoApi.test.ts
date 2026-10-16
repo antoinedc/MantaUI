@@ -266,7 +266,7 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
   });
 
   it("emits the box-derived interpreted envelopes for the in-flight turn (S1c — demo mirrors streamInterp.mjs)", () => {
-    // The demo owns its stream and, like the fixture, only ever emits raw
+    // The demo owns its stream and, like the fixture, only ever has
     // `message.updated` for the in-flight turn — never a `session.status busy`.
     // A real streamInterp over that sequence keeps `running` false and reports
     // a not-complete turn, so the demo's interpreted envelopes must match:
@@ -283,6 +283,13 @@ describe("demo stream state (BET-560) — stepped transcript reveal", () => {
       (p) => p.type === "text" && typeof (p as { text?: unknown }).text === "string",
     )!;
     expect(envs).toEqual([
+      // The frame the box derives from `message.updated` — what makes the
+      // renderer splice-refetch the grown message (no raw event is emitted).
+      {
+        sub: "messageChanged",
+        sessionId: demoState.activeSessionId,
+        payload: { messageID: assistant.info.id },
+      },
       {
         sub: "flush",
         sessionId: demoState.activeSessionId,

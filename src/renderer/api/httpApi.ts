@@ -462,12 +462,11 @@ let _resyncing = false;
  * WebSocket reconnects (missed a `session.idle`, a permission reply, a new
  * question, etc. while the socket was down/half-open).
  *
- * `useSseBus.ts`'s `ev.type === "server.connected"` branch already does
- * exactly this: `scheduleRefetch()` (→ opencodeMessages re-fetch, debounced)
- * + `refreshPermissions()` + `refreshQuestions()`, and re-derives `running`
- * from the refetched transcript. It carries no `sessionID`, so it passes the
- * `if (props.sessionID && props.sessionID !== sessionId) return` guard in
- * every mounted ChatPanel — each panel resyncs its own session. An inactive
+ * `useSseBus.ts`'s `resync` frame branch (formerly its `server.connected`
+ * branch) does exactly this: `scheduleRefetch()` (→ opencodeMessages re-fetch,
+ * debounced) + `refreshPermissions()` + `refreshQuestions()`, and re-derives
+ * `running` from the refetched transcript. It carries no session id, so every
+ * mounted ChatPanel resyncs its own session. An inactive
  * (unmounted-transcript) panel defers its refetch via the owed-flag path in
  * useTranscriptState and catches up on reactivation.
  *
@@ -480,12 +479,20 @@ let _resyncing = false;
  * looked frozen until Cmd+R. Reuse the existing server.connected branch
  * instead of growing new handler code in useSseBus.
  */
-function fireResync() {
+export function fireResync() {
   if (_resyncing) return;
   _resyncing = true;
   // Use setTimeout(0) so we don't fire synchronously inside onopen.
   setTimeout(() => {
     _resyncing = false;
+    // The renderer reads ONLY interpreted frames (OpenCode V2 slice A2), so the
+    // resync reaches panels as a client-synthesised `resync` stream frame (no
+    // session id — every open panel resyncs its own session). Not an opencode
+    // event and never sent by the box.
+    const resync: StreamEnvelope = { sub: "resync", sessionId: "", payload: {} };
+    for (const fn of listeners.stream) { try { fn(resync); } catch { /* listener error — ignore, see onmessage */ } }
+    // Kept for any external `onOpencodeEvent` subscriber (deprecated; the
+    // renderer has none) — same synthetic event as before.
     const set = listeners.opencode;
     const ev: OpencodeEvent = { type: "server.connected", properties: {} };
     for (const fn of set) { try { fn(ev); } catch { /* listener error — ignore, see onmessage */ } }
@@ -1069,6 +1076,10 @@ export const httpApi: Api = {
     rpcOptional(IPC.opencodeOpenStream, undefined, sessionId),
   opencodeCloseStream: (sessionId) =>
     rpcOptional(IPC.opencodeCloseStream, undefined, sessionId),
+  // @deprecated (OpenCode V2 slice A2): no renderer code subscribes to raw
+  // opencode events any more — every live signal arrives as an interpreted
+  // `stream` frame (`onStreamEvent` below). Kept on the contract for external
+  // consumers; do not add new subscribers.
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
   // Box-side interpreted stream events (BET-551 / §17). The dispatchFrame
   // stream branch hands each listener a `{sub, sessionId, payload}` envelope

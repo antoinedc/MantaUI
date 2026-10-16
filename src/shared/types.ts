@@ -2744,7 +2744,12 @@ export type StreamPlanModePayload = { on: boolean };
 export type StreamPermissionsPayload = { permissions: unknown[] };
 
 /** `session.error`, minus the intentional `MessageAbortedError` (never emitted). `name` is opencode's raw error name, unchanged. */
-export type StreamSessionErrorPayload = { name: string | null; message: string };
+export type StreamSessionErrorPayload = {
+  name: string | null;
+  message: string;
+  /** The original provider message, present only when `message` was humanized (unwrapped) from it. */
+  rawMessage?: string;
+};
 
 // ── Slice A frames (OpenCode V2 migration, phase 1) ──
 // Pinned in docs/superpowers/specs/2026-10-16-opencode-v2-phase1-frames-phase3-plugins.md.
@@ -2798,6 +2803,9 @@ export type StreamCommandExecutedPayload = { messageID: string; name: string; ar
 /** `childSession`: a subagent session was created; published under the PARENT's sessionId. */
 export type StreamChildSessionPayload = { childSessionId: string; parentSessionId: string };
 
+/** `aborted`: session.error MessageAbortedError (user Stop or a queued-drain abort). Not an error — no banner on iOS; the desktop shows its "aborted" banner unless it issued the abort itself. Payload is empty. */
+export type StreamAbortedPayload = Record<string, never>;
+
 /** `attention`: what the turn is blocked on (question wins over permission); `null` when nothing is pending. */
 export type StreamAttentionPayload = { kind: "question" | "permission" | null };
 
@@ -2836,7 +2844,11 @@ export type StreamEnvelope = {
     | "messageChanged"
     | "commandExecuted"
     | "childSession"
-    | "attention";
+    | "attention"
+    | "aborted"
+    // Client-synthesised (never sent by the box): the events socket reconnected,
+    // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".
+    | "resync";
   sessionId: string;
   payload: unknown;
 };
