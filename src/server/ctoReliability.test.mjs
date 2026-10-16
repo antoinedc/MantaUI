@@ -5,7 +5,16 @@ import { beginInternalSession, createInternalSessions } from "./internalSessions
 import { resolvePlanParent, createCtoPlanRunner } from "./ctoAct.mjs";
 import { collectDbRows, extractFromDbRows, SCAN_ROW_CAP } from "./ctoToolScan.mjs";
 import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
+import { partIdFor } from "./opencodeDb.mjs";
 import { createToolRegistry, fuseRow, retainUnresolved, UNRESOLVED_PRUNE_LIMIT, UNRESOLVED_RETENTION_MS, recoverLegacyClassification } from "./ctoToolRegistry.mjs";
+
+const V2_RELIABILITY_SCHEMA =
+  "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT);" +
+  "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)";
+let v2Seq = 0;
+function addV2Message(db, id, sessionId, ts, type, data) {
+  db.prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)").run(id, sessionId, type, ++v2Seq, ts, ts, JSON.stringify(data));
+}
 
 const store = (value = {}) => ({
   load: async () => structuredClone(value),
@@ -65,22 +74,22 @@ test("real SQLite discovery paginates equal timestamps and excludes internal tra
   const db = await openSqlite(t);
   if (!db) return;
   try {
-    db.exec("CREATE TABLE session(id TEXT, title TEXT); CREATE TABLE part(id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
-    db.exec("INSERT INTO session VALUES ('human','work'),('internal','cto:ambient-summarize')");
-    const insert = db.prepare("INSERT INTO part VALUES (?,?,?,?)");
-    for (const id of ["a", "b", "c"]) insert.run(id, "human", 10, "{}");
-    insert.run("d", "internal", 10, "{}");
+    // V2 store: parts are inside session_message rows; ids are derived per message.
+    db.exec(V2_RELIABILITY_SCHEMA);
+    db.exec("INSERT INTO session_v2 VALUES ('human','work'),('internal','cto:ambient-summarize')");
+    const tool = (name) => ({ agent: "build", content: [{ type: "tool", id: `t_${name}`, name: "bash", state: { status: "completed", input: {} } }] });
+    for (const [mid, sid] of [["msg_a", "human"], ["msg_b", "human"], ["msg_c", "human"], ["msg_d", "internal"]]) addV2Message(db, mid, sid, 10, "assistant", tool(mid));
     await beginInternalSession()("internal");
     const first = await collectDbRows(db, { sinceTs: 0, untilTs: 20, cap: 2 });
-    const second = await collectDbRows(db, { sinceTs: 10, afterId: "b", untilTs: 20, cap: 2 });
-    assert.deepEqual(first.map((r) => r.id), ["a", "b"]);
-    assert.deepEqual(second.map((r) => r.id), ["c", "d"]);
+    const second = await collectDbRows(db, { sinceTs: 10, afterId: partIdFor("msg_b", 0), untilTs: 20, cap: 2 });
+    assert.deepEqual(first.map((r) => r.id), ["a", "b"].map((x) => partIdFor(`msg_${x}`, 0)));
+    assert.deepEqual(second.map((r) => r.id), ["c", "d"].map((x) => partIdFor(`msg_${x}`, 0)));
     assert.equal(second[1].internal, true);
     assert.deepEqual(extractFromDbRows([{
       ...second[1], data: JSON.stringify({ type: "tool", tool: "bash", state: { input: { command: "gh pr list" } } }),
     }]), []);
     // A title is not authoritative provenance, even when it resembles ours.
-    db.exec("UPDATE session SET title = 'cto:ambient-summarize' WHERE id = 'human'");
+    db.exec("UPDATE session_v2 SET title = 'cto:ambient-summarize' WHERE id = 'human'");
     assert.equal((await collectDbRows(db, { sinceTs: 0, untilTs: 20 }))[0].internal, false);
   } finally { db.close(); }
 });
@@ -89,16 +98,14 @@ test("real SQLite summary evidence is session/time scoped and bounded", async (t
   const db = await openSqlite(t);
   if (!db) return;
   try {
-    db.exec("CREATE TABLE message(id TEXT, data TEXT); CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)");
-    db.prepare("INSERT INTO message VALUES (?,?)").run("m", JSON.stringify({ role: "assistant" }));
-    const insert = db.prepare("INSERT INTO part VALUES (?,?,?,?,?)");
-    insert.run("p", "m", "s", 10, JSON.stringify({ type: "tool", tool: "bash", state: { status: "completed", output: "Tests passed" } }));
-    insert.run("next", "m", "s", 30, JSON.stringify({ type: "text", text: "NEXT TURN" }));
+    db.exec(V2_RELIABILITY_SCHEMA);
+    addV2Message(db, "msg_p", "s", 10, "assistant", { agent: "build", content: [{ type: "tool", id: "t1", name: "bash", state: { status: "completed", input: {}, content: [{ type: "text", text: "Tests passed" }] } }] });
+    addV2Message(db, "msg_next", "s", 30, "assistant", { agent: "build", content: [{ type: "text", text: "NEXT TURN" }] });
     const evidence = readSegmentEvidence(db, { sessionID: "s", start: 0, end: 20 });
     assert.match(evidence, /Tests passed/);
     assert.ok(!evidence.includes("NEXT TURN"));
     assert.equal(readSegmentEvidence(db, { sessionID: "other", start: 0, end: 20 }), "");
-    for (let n = 0; n < 50; n++) insert.run(`long${n}`, "m", "s", 15, JSON.stringify({ type: "text", text: "x".repeat(10000) }));
+    for (let n = 0; n < 50; n++) addV2Message(db, `msg_long${n}`, "s", 15, "assistant", { agent: "build", content: [{ type: "text", text: "x".repeat(10000) }] });
     assert.ok(readSegmentEvidence(db, { sessionID: "s", start: 0, end: 20 }).length <= 6000);
   } finally { db.close(); }
 });

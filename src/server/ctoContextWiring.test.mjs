@@ -32,7 +32,7 @@ import "./ctoTestGuard.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCtoEngine } from "./cto.mjs";
-import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeV2DbFixture.mjs";
+import { createFixtureDb, sqliteAvailable, withFixtureDb, partId as pid } from "./fixtures/opencodeV2DbFixture.mjs";
 import { _resetDbHandle, _setSqliteModuleOverride } from "./opencodeDb.mjs";
 
 const hasSqlite = await sqliteAvailable();
@@ -84,7 +84,8 @@ function seedRows() {
   ];
   const messages = [
     { id: "mc2", sessionId: "s_child", timeCreated: T + 410, data: { role: "assistant" } },
-    { id: "m1", sessionId: "s_parent", timeCreated: T + 600, data: { role: "user" } },
+    // V2: a user message holds only text, so the message carrying tool output is an assistant one.
+    { id: "m1", sessionId: "s_parent", timeCreated: T + 600, data: { role: "assistant" } },
     { id: "m_b", sessionId: "s_b", timeCreated: T + 610, data: { role: "assistant" } },
     ...Array.from({ length: 7 }, (_, i) => ({ id: `mn${i}`, sessionId: "s_child", timeCreated: T + 700 - i, data: { role: "assistant" } })),
   ];
@@ -156,7 +157,7 @@ test("context_search finds the decision that exists only in the CLOSED child ses
     const res = await engine.dispatch("context_search", { query: "decision" });
     assert.equal(res.ok, true);
     assert.equal(res.data.status, "ok");
-    const hit = res.data.hits.find((h) => h.partId === "p_decision");
+    const hit = res.data.hits.find((h) => h.partId === pid("p_decision"));
     assert.ok(hit, "the closed-child decision must be reachable");
     assert.equal(hit.sessionId, "s_child");
     assert.equal(hit.messageId, "mc2");
@@ -178,9 +179,9 @@ test("context_around returns the anchored neighborhood with stable ids and tool 
     assert.ok(anchor, "the anchor message is flagged");
     assert.equal(anchor.id, "mc2");
     const partIds = anchor.parts.map((p) => p.partId);
-    assert.ok(partIds.includes("p_decision"), "anchor text evidence present");
-    assert.ok(partIds.includes("p_tool"), "anchor tool evidence present");
-    const toolPart = anchor.parts.find((p) => p.partId === "p_tool");
+    assert.ok(partIds.includes(pid("p_decision")), "anchor text evidence present");
+    assert.ok(partIds.includes(pid("p_tool")), "anchor tool evidence present");
+    const toolPart = anchor.parts.find((p) => p.partId === pid("p_tool"));
     assert.equal(toolPart.tool.name, "bash");
   });
 });
@@ -249,7 +250,7 @@ test("truncation metadata propagates: the huge tool output is bounded per part w
     assert.equal(res.ok, true);
     assert.equal(res.data.status, "ok");
     assert.equal(res.data.truncated, true, "the 9000-byte output exceeds the per-part evidence cap");
-    const big = res.data.messages.flatMap((m) => m.parts).find((p) => p.partId === "p_bigid");
+    const big = res.data.messages.flatMap((m) => m.parts).find((p) => p.partId === pid("p_bigid"));
     assert.ok(big);
     assert.equal(big.textTruncated, true);
     assert.equal(big.textSourceBytes, 9000);
@@ -330,7 +331,7 @@ test("U04: context verbs observe zero side effects through the engine seam — f
   try {
     await withFixture(seedRows(), async (fixture) => {
       const beforeTables = await tableNames(fixture.dbPath);
-      const beforeRows = fixture.rowCount("session") + fixture.rowCount("message") + fixture.rowCount("part");
+      const beforeRows = fixture.rowCount("session_v2") + fixture.rowCount("session_message");
       const engine = makeEngine();
       const r1 = await engine.dispatch("context_projects", {});
       const r2 = await engine.dispatch("context_search", { query: "lease" });
@@ -338,7 +339,7 @@ test("U04: context verbs observe zero side effects through the engine seam — f
       assert.equal(r1.data.status, "ok");
       assert.equal(r2.data.status, "ok");
       assert.equal(r3.data.status, "ok");
-      const afterRows = fixture.rowCount("session") + fixture.rowCount("message") + fixture.rowCount("part");
+      const afterRows = fixture.rowCount("session_v2") + fixture.rowCount("session_message");
       assert.equal(afterRows, beforeRows, "a passive read must leave source row counts unchanged");
       assert.deepEqual(await tableNames(fixture.dbPath), beforeTables, "no table/index may be created in the source DB");
       assert.equal(fetchCalls, 0, "the fetch seam observed zero calls — no prompt dispatch, window or job creation on read");

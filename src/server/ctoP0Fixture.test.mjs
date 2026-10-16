@@ -79,7 +79,7 @@ test("fixture: armed MANTA_OPENCODE_DB wins over every fallback and never resolv
       const db = await getDb();
       assert.ok(db, "the production accessor must open the synthetic DB");
       // Belt: the opened handle really reads the fixture's rows.
-      const n = db.prepare("SELECT count(*) AS n FROM message").get().n;
+      const n = db.prepare("SELECT count(*) AS n FROM session_message").get().n;
       assert.equal(n, 2);
     });
   } finally {
@@ -134,7 +134,7 @@ test("U04 (contract-only): the shared handle is read-only — a write through th
       const db = await getDb();
       assert.ok(db);
       assert.throws(
-        () => db.exec("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES ('x','s1',1,1,'{}')"),
+        () => db.exec("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES ('x','s1','user',99,1,1,'{}')"),
         (e) => /readonly/i.test(String(e?.message ?? e)),
         "a write through the production handle must raise SQLITE_READONLY",
       );
@@ -155,11 +155,11 @@ test("U04 (contract-only): a search leaves row counts unchanged and the fetch sp
   };
   try {
     await withFixtureDb(fixture, async () => {
-      const before = fixture.rowCount("message") + fixture.rowCount("part");
+      const before = fixture.rowCount("session_message");
       const res = await searchMessages({ query: "staging", sessionIds: ["s1"] });
       assert.equal(res.supported, true);
       assert.ok(res.hits.length >= 1);
-      const after = fixture.rowCount("message") + fixture.rowCount("part");
+      const after = fixture.rowCount("session_message");
       assert.equal(after, before, "a passive read must leave the source row counts unchanged");
       assert.equal(fetchCalls, 0, "the fetch seam observed zero calls — no prompt dispatch on the read path");
     });
