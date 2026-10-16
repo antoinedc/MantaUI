@@ -4,7 +4,9 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import {
+  createUpgradeRoutes,
   COPY_MODE_FACTOR,
   IN_PLACE_FACTOR,
   STEP_IDS,
@@ -511,6 +513,17 @@ describe("rollback", () => {
     assert.equal(box.store.data.state, "rolled_back");
   });
 
+  test("failed at the disk preflight: V1 was never touched, so rollback only re-installs the previous release", async () => {
+    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 1 * GB });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    box.calls.length = 0;
+    assert.deepEqual(await m.rollback(), { ok: true });
+    assert.deepEqual(box.names(), ["resume", "reinstall"]);
+    assert.equal(m.status().state, "rolled_back");
+  });
+
   test("in-place mode: nothing to delete — V1 tables are intact", async () => {
     const { box, m } = await failedAtVerify({ dbBytes: 10 * GB, freeBytes: 9 * GB });
     await m.rollback();
@@ -557,5 +570,70 @@ describe("computeOverall", () => {
     const copyMode = computeOverall(steps, "copy");
     const inPlace = computeOverall(steps, "in-place");
     assert.ok(inPlace > copyMode);
+  });
+});
+
+describe("HTTP surface (real server): upgrade-mode 503 gate + K3 routes", () => {
+  async function withServer(engine, fn) {
+    const routes = createUpgradeRoutes(engine);
+    const server = createServer(async (req, res) => {
+      const path = new URL(req.url, "http://x").pathname;
+      if (await routes.handle(req, res, path)) return;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ passthrough: path }));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      await fn(async (method, path) => {
+        const res = await fetch(base + path, { method });
+        return { status: res.status, body: await res.json(), headers: res.headers };
+      });
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  }
+
+  test("while running: gated routes 503 with {error,upgrade:true}; exempt routes pass; /api/upgrade answers", async () => {
+    const box = makeBox({ crashOn: "opencode.stop" }); // wedge in `stop` so it stays running
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(m.isUpgradeMode(), true);
+    await withServer(m, async (call) => {
+      for (const [method, p] of [["POST", "/rpc/tmux:list"], ["GET", "/api/schedule"], ["POST", "/api/upload"], ["POST", "/hook/abc"]]) {
+        const r = await call(method, p);
+        assert.equal(r.status, 503, p);
+        assert.deepEqual(r.body, { error: "box upgrading", upgrade: true });
+      }
+      for (const p of ["/api/version", "/events", "/push/focus", "/auth/status"]) {
+        const r = await call(p === "/push/focus" ? "POST" : "GET", p);
+        assert.equal(r.status, 200, p);
+        assert.deepEqual(r.body, { passthrough: p });
+      }
+      const st = await call("GET", "/api/upgrade");
+      assert.equal(st.status, 200);
+      assert.equal(st.body.state, "running");
+      assert.equal(st.body.steps.length, 6);
+      const r1 = await call("POST", "/api/upgrade/retry");
+      assert.deepEqual(r1.body.ok, false, "retry refused while running");
+    });
+  });
+
+  test("failed: no gate, /api/upgrade shows the error, retry + rollback answer {ok}", async () => {
+    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 1 * GB });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await m.whenIdle();
+    await withServer(m, async (call) => {
+      assert.equal((await call("POST", "/rpc/x")).status, 200, "not upgrade mode any more");
+      const st = await call("GET", "/api/upgrade");
+      assert.equal(st.body.state, "failed");
+      assert.equal(st.body.error.needBytes, Math.ceil(10 * GB * 0.8));
+      assert.equal(st.body.error.haveBytes, 1 * GB);
+      assert.deepEqual((await call("POST", "/api/upgrade/rollback")).body, { ok: true });
+      assert.equal((await call("GET", "/api/upgrade")).body.state, "rolled_back");
+      assert.equal((await call("POST", "/api/upgrade/retry")).body.ok, false);
+    });
   });
 });

@@ -449,14 +449,18 @@ export function createUpgradeV2(deps) {
       if (state.state !== "failed") return { ok: false, error: "There is nothing to roll back — the upgrade is not in a failed state." };
       const task = (async () => {
         let note = null;
-        await deps.opencode.stop().catch((e) => log(`[upgrade] rollback: stop failed: ${e?.message ?? e}`));
-        if (state.mode === "copy" && state.targetDb) {
-          await deps.removeDb(`${state.targetDb}.partial`);
-          await deps.removeDb(state.targetDb); // the V1 DB was never written to
+        // A failure BEFORE the stop step (the disk preflight) never touched V1: leave the running
+        // opencode alone and only put the previous release back.
+        if (state.steps.stop.status !== "pending") {
+          await deps.opencode.stop().catch((e) => log(`[upgrade] rollback: stop failed: ${e?.message ?? e}`));
+          if (state.mode === "copy" && state.targetDb) {
+            await deps.removeDb(`${state.targetDb}.partial`);
+            await deps.removeDb(state.targetDb); // the V1 DB was never written to
+          }
+          await deps.restoreV1();
+          await deps.opencode.configure("v1");
+          await deps.opencode.start();
         }
-        await deps.restoreV1();
-        await deps.opencode.configure("v1");
-        await deps.opencode.start();
         await deps.services.resumeBackground().catch(() => {});
         state.state = "rolled_back";
         state.error = null;
@@ -486,6 +490,41 @@ export function createUpgradeV2(deps) {
         return { ok: false, error: `Rollback failed: ${String(e?.message ?? e)}` };
       }
       return { ok: true };
+    },
+  };
+}
+
+// ------------------------------------------------------------------- HTTP surface
+
+const json = (res, status, body, extra = {}) => {
+  res.writeHead(status, { "content-type": "application/json", ...extra });
+  res.end(JSON.stringify(body));
+};
+
+/**
+ * The upgrade-mode gate + the K3 routes, as one handler so the real HTTP behaviour is testable
+ * without importing index.mjs. Call it AFTER the auth gate. Returns true when it answered.
+ *   * upgrade mode, non-exempt path → 503 {"error":"box upgrading","upgrade":true}
+ *   * GET  /api/upgrade          → K3 status
+ *   * POST /api/upgrade/retry    → {ok:true} | {ok:false,error}
+ *   * POST /api/upgrade/rollback → {ok:true} | {ok:false,error}
+ */
+export function createUpgradeRoutes(engine) {
+  return {
+    async handle(req, res, path) {
+      if (engine.isUpgradeMode() && !isUpgradeExemptPath(path)) {
+        json(res, 503, { error: "box upgrading", upgrade: true }, { "retry-after": "5" });
+        return true;
+      }
+      if (req.method === "GET" && path === "/api/upgrade") {
+        json(res, 200, engine.status());
+        return true;
+      }
+      if (req.method === "POST" && (path === "/api/upgrade/retry" || path === "/api/upgrade/rollback")) {
+        json(res, 200, path.endsWith("/retry") ? await engine.retry() : await engine.rollback());
+        return true;
+      }
+      return false;
     },
   };
 }
