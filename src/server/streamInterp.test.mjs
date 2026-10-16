@@ -277,13 +277,13 @@ test("live shell output: polled by cursor every 250 ms until the tool ends, only
   let produced = "";
   const reads = [];
   const { interp, events, advance, pending } = makeTimed({
-    fetchShellOutput: async ({ shellID, cursor }) => {
-      reads.push([shellID, cursor]);
+    fetchShellOutput: async ({ shellID, cursor, directory }) => {
+      reads.push([shellID, cursor, directory]);
       return { output: produced.slice(cursor), cursor: produced.length };
     },
   });
   for (const e of called("toolu_1", "shell", { command: "loop" })) interp.interpret(e);
-  interp.interpret(ev("session.tool.progress", { assistantMessageID: MID, id: "toolu_1", metadata: { shellID: "sh_1" } }));
+  interp.interpret({ ...ev("session.tool.progress", { assistantMessageID: MID, id: "toolu_1", metadata: { shellID: "sh_1" } }), location: { directory: "/w" } });
   assert.equal(pending() >= 1, true);
   produced = "tick1\n";
   await advance(SHELL_POLL_MS);
@@ -292,6 +292,7 @@ test("live shell output: polled by cursor every 250 ms until the tool ends, only
   await advance(SHELL_POLL_MS); // nothing new -> nothing sent
   assert.deepEqual(subs(events, "toolOutput").map((e) => e.payload.text), ["tick1\n", "tick2\n"]);
   assert.deepEqual(reads.map((r) => r[1]), [0, 6, 12]);
+  assert.ok(reads.every((r) => r[0] === "sh_1" && r[2] === "/w"), "the shell is read in the event's location");
   // the final result carries a tail the poll had not yet seen -> only the remainder is added
   interp.interpret(success("toolu_1", "tick1\ntick2\ntick3\n"));
   assert.deepEqual(subs(events, "toolOutput").map((e) => e.payload.text), ["tick1\n", "tick2\n", "tick3\n"]);

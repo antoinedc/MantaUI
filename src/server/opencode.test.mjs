@@ -557,12 +557,13 @@ test("listSessionStatuses narrows to sessions known to live in the directory; a 
 test("readShellOutput reads from a cursor; null once the shell is gone", async () => {
   const calls = await withV2(
     {
-      "GET /api/shell/sh_1/output": ({ query }) => ({ data: { output: query.cursor === "0" ? "tick1\n" : "", cursor: 6, size: 6, truncated: false } }),
+      "GET /api/shell/sh_1/output": ({ query }) => query["location[directory]"] === "/w" ? { data: { output: query.cursor === "0" ? "tick1\n" : "", cursor: 6, size: 6, truncated: false } } : new Response("nf", { status: 404 }),
       "GET /api/shell/sh_gone/output": () => new Response("nf", { status: 404 }),
     },
     async () => {
-      assert.deepEqual(await readShellOutput({ shellID: "sh_1", cursor: 0 }), { output: "tick1\n", cursor: 6, truncated: false });
-      assert.equal((await readShellOutput({ shellID: "sh_1", cursor: 6 })).output, "");
+      assert.deepEqual(await readShellOutput({ shellID: "sh_1", cursor: 0, directory: "/w" }), { output: "tick1\n", cursor: 6, truncated: false });
+      assert.equal((await readShellOutput({ shellID: "sh_1", cursor: 6, directory: "/w" })).output, "");
+      assert.equal(await readShellOutput({ shellID: "sh_1", cursor: 0 }), null, "location-scoped: no directory → the shell is not found");
       assert.equal(await readShellOutput({ shellID: "sh_gone" }), null);
     },
   );
@@ -664,7 +665,7 @@ test("reasoning blocks map to reasoning parts; ids are stable per message+ordina
 test("a RUNNING shell tool's live output is hydrated from GET /api/shell/{id}/output (a refetch keeps the tail)", async () => {
   const timeline = [A("a1", [{ type: "tool", id: "toolu_1", name: "shell", state: { status: "running", input: { command: "loop" }, metadata: { shellID: "sh_1" } }, time: { created: 1 } }], { time: { created: 2 } })];
   await withV2(
-    { "GET /api/session/ses_a/message": { data: timeline, cursor: { next: null } }, "GET /api/shell/sh_1/output": { data: { output: "tick1\ntick2\n", cursor: 12, size: 12, truncated: false } } },
+    { "GET /api/session/ses_a/message": { data: timeline, cursor: { next: null } }, "GET /api/session/ses_a": { data: SESSION() }, "GET /api/shell/sh_1/output": ({ query }) => query["location[directory]"] === "/work/proj" ? { data: { output: "tick1\ntick2\n", cursor: 12, size: 12, truncated: false } } : new Response("nf", { status: 404 }) },
     async () => {
       const part = (await listMessages("ses_a"))[0].parts[0];
       assert.equal(part.state.status, "running");

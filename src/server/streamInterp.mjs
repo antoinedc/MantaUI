@@ -118,7 +118,8 @@ export function createStreamInterpreter({
   // this — the SAME value the desktop SessionHeader pill reads — so the two
   // pills agree on a 1h box instead of the device always assuming 5m.
   readCacheTtl = async () => null,
-  // Reads a running shell's output from `cursor` on: `{ output, cursor }`.
+  // Reads a running shell's output from `cursor` on: `{ output, cursor }`. The
+  // shell resource is scoped to the session's directory (`evt.location`).
   // null disables live shell tailing (the full output still arrives at the end).
   fetchShellOutput = null,
   shellPollMs = SHELL_POLL_MS,
@@ -340,7 +341,7 @@ export function createStreamInterpreter({
   }
 
   // V2 pushes no per-chunk shell event: tail the shell resource by cursor.
-  function startShellPoll(sid, tool, shellID) {
+  function startShellPoll(sid, tool, shellID, directory) {
     if (!fetchShellOutput || tool.poll || !shellID) return;
     let stopped = false;
     let timer = null;
@@ -348,7 +349,7 @@ export function createStreamInterpreter({
     const tick = async () => {
       if (stopped) return;
       try {
-        const r = await fetchShellOutput({ shellID, cursor });
+        const r = await fetchShellOutput({ shellID, cursor, directory });
         if (!stopped && r && typeof r.output === "string" && r.output.length > 0) {
           cursor = Number.isFinite(r.cursor) ? r.cursor : cursor + Buffer.byteLength(r.output);
           emitToolText(sid, tool, r.output);
@@ -545,7 +546,7 @@ export function createStreamInterpreter({
         const md = d.metadata ?? {};
         if (typeof md.shellID === "string") {
           tool.shellID = md.shellID;
-          startShellPoll(sid, tool, md.shellID);
+          startShellPoll(sid, tool, md.shellID, evt.location?.directory);
         }
         if (typeof md.sessionID === "string") {
           // A subagent: the parent learns its child's session id here.

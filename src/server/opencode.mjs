@@ -452,17 +452,18 @@ async function readTimeline(sessionId, { limit } = {}) {
 }
 
 /** A running shell tool's live stdout lives behind GET /api/shell/{id}/output — pull it into `metadata.output` so a refetch keeps the tail. */
-async function hydrateRunningShells(messages) {
+async function hydrateRunningShells(messages, sessionId) {
   const jobs = [];
+  let directory;
+  const dirOf = async () => (directory ??= cachedSessionDirectory(sessionId) ?? (await getSessionInfo(sessionId))?.directory ?? "");
   for (const m of messages) {
     for (const p of m.parts ?? []) {
       const id = p?.type === "tool" && p.state?.status === "running" ? p.state.metadata?.shellID : null;
       if (typeof id === "string" && id) {
         jobs.push(
-          ocFetch(apiUrl(`/api/shell/${encodeURIComponent(id)}/output`))
-            .then(async (res) => {
-              if (!res.ok) return void (await discardBody(res));
-              const out = (await res.json())?.data;
+          dirOf()
+            .then((dir) => readShellOutput({ shellID: id, cursor: 0, directory: dir }))
+            .then((out) => {
               if (typeof out?.output === "string") p.state.metadata = { ...p.state.metadata, output: out.output };
             })
             .catch(() => {}),
@@ -489,7 +490,7 @@ export async function listMessages(sessionId, opts = {}) {
   const timeline = await readTimeline(sessionId, { limit });
   let mapped = mapTimeline(timeline, { sessionID: sessionId });
   if (limit != null && mapped.length > limit) mapped = mapped.slice(mapped.length - limit);
-  await hydrateRunningShells(mapped);
+  await hydrateRunningShells(mapped, sessionId);
   const stripped = mapped.map(stripDuplicateToolOutput);
   return opts.slim ? slimTranscript(stripped) : stripped;
 }
@@ -508,7 +509,7 @@ export async function getMessage(sessionId, messageId) {
       return null;
     }
     const record = (await res.json())?.data;
-    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId }));
+    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId }), sessionId);
     return mapped ? stripDuplicateToolOutput(mapped) : null;
   } catch {
     return null;
@@ -671,11 +672,14 @@ export async function listActiveSessionIds() {
 /**
  * A running shell's output from `cursor` on (V2 pushes no per-chunk event):
  * `GET /api/shell/{id}/output?cursor=N` → only the bytes after N.
- * @param {{ shellID: string, cursor?: number }} a
+ * Shell resources are LOCATION-scoped: without the session's directory the
+ * route answers 404 (ShellNotFound) for a shell that exists.
+ * @param {{ shellID: string, cursor?: number, directory?: string }} a
  * @returns {Promise<{ output: string, cursor: number, truncated: boolean }|null>} null once the shell is gone
  */
-export async function readShellOutput({ shellID, cursor = 0 }) {
-  const res = await ocFetch(apiUrl(`/api/shell/${encodeURIComponent(shellID)}/output?cursor=${Math.max(0, cursor | 0)}`), {
+export async function readShellOutput({ shellID, cursor = 0, directory }) {
+  const loc = directory ? `&location%5Bdirectory%5D=${encodeURIComponent(directory)}` : "";
+  const res = await ocFetch(apiUrl(`/api/shell/${encodeURIComponent(shellID)}/output?cursor=${Math.max(0, cursor | 0)}${loc}`), {
     signal: AbortSignal.timeout(8000),
   });
   if (res.status === 404) {
