@@ -82,6 +82,8 @@ removes that so the backend swap is invisible to every client.
 
 ## 4. Migration path — step by step
 
+> **Update 2026-10-16:** no backend switch. Phases 2–5 are executed as a straight cutover on `main` (V1 deleted as each area moves; `main` may be non-functional between slices). See `docs/superpowers/specs/2026-10-16-opencode-v2-cutover.md`, which supersedes §4's "dev boxes only" / "backend selection" items.
+
 **Development model.** Work merges to `main` continuously, but users can never reach the
 V2 path until the cut-over release: the V2 backend is selectable only on dev boxes
 (`~/.manta/opencode-backend=v2`). The cut-over release (Phase 6) deletes the V1 backend
