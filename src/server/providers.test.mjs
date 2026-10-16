@@ -225,11 +225,37 @@ describe("upsertProviderBlock", () => {
         baseURL: "https://api.example.com/v1",
         apiKey: "sk-test",
       },
+      whitelist: ["model-a", "model-b"],
       models: {
         "model-a": { id: "model-a", name: "model-a" },
         "model-b": { id: "model-b", name: "model-b" },
       },
     });
+  });
+
+  // Regression: a custom provider whose id matches opencode's built-in catalog
+  // (e.g. "openrouter") showed EVERY catalog model, because `models` only adds.
+  // `whitelist` is what restricts the list to the user's selection.
+  it("writes the selection as a whitelist so catalog providers are restricted", () => {
+    const result = upsertProviderBlock({}, {
+      id: "openrouter",
+      name: "Openrouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: "k",
+      enabledModels: ["deepseek/deepseek-v4-flash"],
+    });
+    assert.deepEqual(result.provider.openrouter.whitelist, ["deepseek/deepseek-v4-flash"]);
+  });
+
+  it("writes an empty whitelist when no models are selected", () => {
+    const result = upsertProviderBlock({}, {
+      id: "openrouter",
+      name: "Openrouter",
+      baseURL: "https://openrouter.ai/api/v1",
+      apiKey: "k",
+      enabledModels: [],
+    });
+    assert.deepEqual(result.provider.openrouter.whitelist, []);
   });
 
   it("preserves other config keys when adding a provider", () => {
@@ -341,6 +367,22 @@ describe("readProviderEndpoints", () => {
     assert.equal(endpoints[0].baseURL, "https://api.anthropic.com/");
     assert.equal(endpoints[0].hasApiKey, true);
     assert.deepEqual(endpoints[0].enabledModels, ["claude-sonnet-4-6"]);
+  });
+
+  // Saving deep-merges `models`, so a deselected model lingers there; the
+  // whitelist (replaced wholesale) is the real selection.
+  it("prefers whitelist over models keys for enabledModels", () => {
+    const cfg = {
+      provider: {
+        openrouter: {
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "https://openrouter.ai/api/v1", apiKey: "k" },
+          whitelist: ["a"],
+          models: { a: { id: "a" }, b: { id: "b" } },
+        },
+      },
+    };
+    assert.deepEqual(readProviderEndpoints(cfg)[0].enabledModels, ["a"]);
   });
 
   it("scrubs userinfo from baseURL", () => {

@@ -163,6 +163,14 @@ export function upsertProviderBlock(cfg, input) {
     npm: "@ai-sdk/openai-compatible",
     name: input.name,
     options: { baseURL: input.baseURL, apiKey },
+    // `whitelist` is what actually RESTRICTS the model list. `models` alone
+    // only adds: when the provider id matches one in opencode's built-in
+    // catalog (e.g. "openrouter"), opencode merges in every catalog model
+    // (~385 for openrouter) regardless of what `models` holds. And because
+    // PATCH /global/config deep-merges objects, a deselected model would also
+    // linger in `models`; arrays are replaced wholesale, so `whitelist` is the
+    // exact selection either way.
+    whitelist: [...input.enabledModels],
     models,
   };
   return { ...cfg, provider: providers };
@@ -191,7 +199,11 @@ export function readProviderEndpoints(cfg) {
       name: typeof block.name === "string" ? block.name : id,
       baseURL: stripUrlUserinfo(block.options.baseURL),
       hasApiKey: Boolean(block.options?.apiKey),
-      enabledModels: Object.keys(block.models ?? {}),
+      // whitelist is authoritative when present (see upsertProviderBlock):
+      // `models` can retain deselected entries after a deep-merge PATCH.
+      enabledModels: Array.isArray(block.whitelist)
+        ? block.whitelist.filter((m) => typeof m === "string")
+        : Object.keys(block.models ?? {}),
     }));
 }
 
