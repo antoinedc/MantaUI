@@ -1217,13 +1217,12 @@ export function createCtoDoctrineRestarter(deps = {}) {
 //     cache_control blocks per request, so a request that already carries 4
 //     fails with "A maximum of 4 blocks with cache_control may be provided.
 //     Found 5." Measured: on the raw API a tool-bearing request is exactly at 4
-//     and 1h makes it 5; with the manta-claude-max plugin loaded the
-//     tool-bearing request goes 4 → 5 too (title/follow-up requests stay <= 4).
-//     V2.0.30 offers no config path to the request's `cache` policy (the only
-//     place that can set a ttl on the native breakpoints), so a safe 1h needs a
-//     request-body hook that keeps the total <= 4 — see the report for this
-//     slice. The writer below is correct; what it asks of the wire is not yet
-//     safe on tool turns.
+//     and 1h makes it 5. The manta-claude-max plugin (docs/opencode-plugins-v2/
+//     manta-claude-max/lib/body.ts `normalizeCacheControl`) therefore FOLDS the
+//     top-level `cache_control` into opencode's own block-level breakpoints
+//     (same ttl on all of them) before the request leaves the box, so a 1h turn
+//     stays at <= 4 blocks. Without that plugin loaded, 1h is NOT safe on tool
+//     turns.
 //
 //  3. The option is still per-MODEL (ProviderTransform does not pass
 //     provider-level settings through), so the setting fans out over the
