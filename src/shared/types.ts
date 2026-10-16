@@ -2744,7 +2744,12 @@ export type StreamPlanModePayload = { on: boolean };
 export type StreamPermissionsPayload = { permissions: unknown[] };
 
 /** `session.error`, minus the intentional `MessageAbortedError` (never emitted). `name` is opencode's raw error name, unchanged. */
-export type StreamSessionErrorPayload = { name: string | null; message: string };
+export type StreamSessionErrorPayload = {
+  name: string | null;
+  message: string;
+  /** The original provider message, present only when `message` was humanized (unwrapped) from it. */
+  rawMessage?: string;
+};
 
 // ── Slice A frames (OpenCode V2 migration, phase 1) ──
 // Pinned in docs/superpowers/specs/2026-10-16-opencode-v2-phase1-frames-phase3-plugins.md.
@@ -2836,7 +2841,10 @@ export type StreamEnvelope = {
     | "messageChanged"
     | "commandExecuted"
     | "childSession"
-    | "attention";
+    | "attention"
+    // Client-synthesised (never sent by the box): the events socket reconnected,
+    // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".
+    | "resync";
   sessionId: string;
   payload: unknown;
 };

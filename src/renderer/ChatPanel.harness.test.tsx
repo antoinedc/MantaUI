@@ -76,19 +76,22 @@ describe("ChatPanel render harness", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("subscribes to the opencode event bus on mount", async () => {
+  it("subscribes to the interpreted stream on mount, and to NO raw opencode events", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    expect(bus.listenerCount()).toBeGreaterThan(0);
+    expect(bus.streamListenerCount()).toBeGreaterThan(0);
+    // OpenCode V2 slice A2: the renderer reads frames only — nothing subscribes
+    // to onOpencodeEvent.
+    expect(bus.listenerCount()).toBe(0);
   });
 
-  it("unsubscribes from the event bus on unmount", async () => {
+  it("unsubscribes from the stream on unmount", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    expect(bus.listenerCount()).toBeGreaterThan(0);
+    expect(bus.streamListenerCount()).toBeGreaterThan(0);
     h.unmount();
     h = null;
-    expect(bus.listenerCount()).toBe(0);
+    expect(bus.streamListenerCount()).toBe(0);
   });
 
   it("renders a permission card when a permission.asked event arrives", async () => {

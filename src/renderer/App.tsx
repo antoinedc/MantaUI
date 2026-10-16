@@ -25,7 +25,7 @@ import {
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
@@ -262,7 +262,7 @@ function Shell() {
   const boxStale = useStore((s) => s.boxStale);
   // BET-708: first-time pairing swaps window.api in place with no reload
   // (transportInstall), so an app-level effect that guards on an httpApi-only
-  // method (onSyncDelta, onStatusEvent, onOpencodeEvent,
+  // method (onSyncDelta, onStatusEvent, onStreamEvent,
   // delegateList/onDelegateUpdated, onAgentFileReady, onServerUpdateProgress)
   // bails at mount and never re-subscribes for the whole first session.
   // transportInstall dispatches `manta-api-installed` after every swap; bump
@@ -1163,84 +1163,45 @@ function Shell() {
   // requests.
   //
   // App-level (not per-ChatPanel) so signals fire even for chat windows
-  // the user hasn't visited yet this session — opencode SSE delivers
-  // events for ALL active sessions on every connected directory's
-  // scoped stream, not just the one the user has open.
+  // the user hasn't visited yet this session — the box interprets the
+  // opencode stream for ALL active sessions on every connected directory,
+  // not just the one the user has open.
   //
-  // Driven entirely from opencode SSE events main/server already forward:
-  //   - session.status{type:"busy"|"retry"} → running:true
-  //   - session.status{type:"idle"} / session.idle → running:false
-  //                                                  (latches "idle"
-  //                                                  attention if user
-  //                                                  isn't on the
-  //                                                  window — same
-  //                                                  logic as the poller)
-  //   - question.asked   → attention "question"
-  //   - question.replied / question.rejected → clear attention
-  //   - permission.asked → attention "permission"
-  //   - permission.replied / permission.rejected → clear attention
+  // Driven entirely from the box-interpreted `stream` frames (OpenCode V2
+  // slice A2 — this used to read raw opencode events, and no renderer code
+  // does any more):
+  //   - running {running:true}            → running:true
+  //   - running {running:false} / sessionError
+  //                                       → running:false (latches "idle"
+  //                                         attention if user isn't on the
+  //                                         window — same logic as the poller)
+  //   - childSession                      → remember child → parent
+  //   - attention {kind}                  → "question" | "permission" | clear
   //
-  // chatAutoAllow suppresses permission.asked at the bus layer in
-  // both transports, so the sidebar correctly stays quiet in trust
-  // mode without any extra branching here.
+  // `turnComplete` is NOT used for the dot: the box derives it from the
+  // transcript, so it fires mid-turn at every tool-step boundary and would
+  // flicker the rail; `running` is the hard signal.
+  //
+  // Trust mode (chatAutoAllow): the box answers a permission ask itself within
+  // milliseconds, and used to suppress the raw ask so the sidebar stayed quiet.
+  // The `attention` frame is derived before that suppression, so a pending
+  // "permission" is held back for a short grace (createGraceApplier) — an
+  // auto-answered ask is cleared inside it and never badges the row.
   useEffect(() => {
-    if (!window.api.onOpencodeEvent) return;
-    const off = window.api.onOpencodeEvent((ev) => {
-      const props = (ev.properties ?? {}) as Record<string, unknown>;
-      // Subagent child sessions: remember child → parent so a child still
-      // working after the parent's turn ends keeps the parent row "running".
-      if (ev.type === "session.created") {
-        const info = props.info as { id?: string; parentID?: string } | undefined;
-        if (info?.id && info.parentID) {
-          useStore.getState().setSessionParent(info.id, info.parentID);
-        }
-        return;
-      }
-      // Running / idle / error transitions.
-      if (ev.type === "session.idle" || ev.type === "session.error") {
-        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (sid) useStore.getState().setChatRunning(sid, false);
-        return;
-      }
-      if (ev.type === "session.status") {
-        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (!sid) return;
-        const status = props.status as { type?: string } | undefined;
-        const t = status?.type;
-        // Same set the box treats as a live turn (streamInterp session.status).
-        if (t === "busy" || t === "working" || t === "retry") {
-          useStore.getState().setChatRunning(sid, true);
-        } else if (t === "idle") {
-          useStore.getState().setChatRunning(sid, false);
-        }
-        return;
-      }
-      // Question and permission lifecycle — both use `properties.sessionID`
-      // (verified in chatUtils.applyQuestionEvent and the in-ChatPanel
-      // handler). Treat `.asked` as latch-on, `.replied`/`.rejected`
-      // as latch-off.
-      if (ev.type === "question.asked") {
-        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (sid) useStore.getState().setChatAttention(sid, "question");
-        return;
-      }
-      if (ev.type === "permission.asked") {
-        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (sid) useStore.getState().setChatAttention(sid, "permission");
-        return;
-      }
-      if (
-        ev.type === "question.replied" ||
-        ev.type === "question.rejected" ||
-        ev.type === "permission.replied" ||
-        ev.type === "permission.rejected"
-      ) {
-        const sid = typeof props.sessionID === "string" ? props.sessionID : "";
-        if (sid)         useStore.getState().setChatAttention(sid, null);
-        return;
-      }
-    });
-    return off;
+    if (!window.api.onStreamEvent) return;
+    const sidebar = createSidebarFrameHandler(
+      {
+        setChatRunning: (sid, running) => useStore.getState().setChatRunning(sid, running),
+        setChatAttention: (sid, kind) => useStore.getState().setChatAttention(sid, kind),
+        setSessionParent: (child, parent) => useStore.getState().setSessionParent(child, parent),
+      },
+      () => useStore.getState().chatAutoAllow,
+    );
+    const off = window.api.onStreamEvent(sidebar.handle);
+    return () => {
+      off();
+      sidebar.dispose();
+    };
   }, [apiGeneration]);
 
   // The box replays its authoritative running set on every events

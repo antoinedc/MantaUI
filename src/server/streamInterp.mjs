@@ -774,7 +774,11 @@ export function createStreamInterpreter({
         // Unwrap a provider rejection body down to the human sentence so the
         // native iOS transcript notice shows the same clean text desktop does
         // (BET-1131). Lossless — unrecognised messages pass through unchanged.
-        emit(sid, "sessionError", { name, message: humanizeProviderError(message) });
+        // `rawMessage` (additive, only when unwrapping changed the text) lets the
+        // desktop keep classifying credential failures against the original
+        // provider body, exactly as it did when it read the raw event.
+        const human = humanizeProviderError(message);
+        emit(sid, "sessionError", { name, message: human, ...(human !== message ? { rawMessage: message } : {}) });
         emitTurnComplete(sid, st, true);
         return;
       }

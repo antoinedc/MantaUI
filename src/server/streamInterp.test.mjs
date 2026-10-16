@@ -1446,3 +1446,15 @@ test("a step-finish part does not emit context/cache/truncation (only stepEnded)
   interp.interpret(stepFinish("prt_sf1", "msg_a", { reason: "length" }));
   for (const sub of ["context", "cache", "truncation"]) assert.equal(subs(events, sub).length, 0, sub);
 });
+
+test("sessionError carries rawMessage only when humanizing changed the text", () => {
+  const { interp, events } = make();
+  const body = JSON.stringify({ type: "error", error: { type: "authentication_error", message: "OAuth token has expired" } });
+  interp.interpret({ id: "r1", type: "session.error", properties: { sessionID: SID, error: { name: "ApiError", data: { message: `Unauthorized: ${body}` } } } });
+  interp.interpret({ id: "r2", type: "session.error", properties: { sessionID: SID, error: { name: "ApiError", data: { message: "plain failure" } } } });
+  const [wrapped, plain] = subs(events, "sessionError").map((e) => e.payload);
+  assert.equal(wrapped.message, "OAuth token has expired");
+  assert.equal(wrapped.rawMessage, `Unauthorized: ${body}`);
+  assert.equal(plain.message, "plain failure");
+  assert.equal("rawMessage" in plain, false);
+});
