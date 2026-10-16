@@ -2727,7 +2727,7 @@ import { restartOpencode as restartOpencodeImpl } from "./opencodeAdmin.mjs";
  *   - `"completed"`   — file exists and was modified AT or AFTER the card
  *                       mounted. Call `restartOpencode()` (BET-354: a
  *                       restart is needed — verified live by BET-352 POC;
- *                       the opencode-claude-auth plugin reads the file at
+ *                       the Claude auth plugin reads the file at
  *                       startup, not at request time, despite the
  *                       RESULTS.md Q4 "no restart required" claim that was
  *                       not exercised against the positive path). Then

@@ -360,9 +360,8 @@ export async function providerAuthStart(oc, id) {
     // API-key form (Kimi path). Mirrors the "use the generic API-key
     // path" contract in resolveAuthMethod's docstring.
     //
-    // For anthropic this almost always means the opencode-claude-auth
-    // plugin did not load (it is what advertises the "Switch Claude
-    // Code account" oauth method), so say so — this branch used to be
+    // For anthropic this almost always means the Claude auth plugin
+    // (manta-claude-max) did not load, so say so — this branch used to be
     // silent and the resulting API-key prompt was undiagnosable.
     console.warn(
       `[provider-auth] ${id}: no auth method resolved from ${
@@ -1815,9 +1814,9 @@ export function buildHandlers({
     "opencode:references": () => oc.listReferences(),
 
     // BET-1023: upsert the user's opencode references through the single
-    // config-write path (providers.setReferences → PATCH /global/config).
+    // config-write path (providers.setReferences → config-file edit + reload).
     // Args { upsert: [{ alias, path|repository, branch?, description? }],
-    //        remove?: string[] } — remove is rejected (no delete semantics).
+    //        remove?: string[] } — remove deletes the alias.
     "opencode:set-references": (input) => providers.setReferences(input ?? {}),
 
     // BET-698: server-side conversation search over opencode's SQLite
