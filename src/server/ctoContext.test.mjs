@@ -33,7 +33,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ctoListSessions, ctoSearch, ctoAround, CTO_CONTEXT_LIMITS } from "./ctoContext.mjs";
 import { _resetDbHandle, _setSqliteModuleOverride } from "./opencodeDb.mjs";
-import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeDbFixture.mjs";
+import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeV2DbFixture.mjs";
 
 const hasSqlite = await sqliteAvailable();
 
@@ -318,7 +318,7 @@ test("search: serializer-independent decoded matching — raw JSON \\u00e9, esca
     } finally {
       raw.close();
     }
-    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    const { withFixtureDb } = await import("./fixtures/opencodeV2DbFixture.mjs");
     await withFixtureDb(fixture, async () => {
       const cafe = await ctoSearch({ query: "café" });
       assert.equal(cafe.hits.length, 1, "a \\u00e9-escaped store must match the decoded query");
@@ -763,7 +763,7 @@ test("search: object-shaped state.input with alternate stored serializer escapes
     } finally {
       raw.close();
     }
-    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    const { withFixtureDb } = await import("./fixtures/opencodeV2DbFixture.mjs");
     await withFixtureDb(fixture, async () => {
       const cafe = await ctoSearch({ query: "café" });
       assert.equal(cafe.hits.length, 1, "a nested \u00e9-escaped object input must match the decoded query");
@@ -791,7 +791,7 @@ test("around: a single MB output propagates its per-part cut to the aggregate tr
     return fixture;
   })();
   try {
-    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    const { withFixtureDb } = await import("./fixtures/opencodeV2DbFixture.mjs");
     await withFixtureDb(f, async () => {
       const res = await ctoAround({ sessionId: "s_one", messageId: "m_one", before: 0, after: 0 });
       assert.equal(res.status, "ok");
@@ -918,7 +918,7 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
     } finally {
       raw.close();
     }
-    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    const { withFixtureDb } = await import("./fixtures/opencodeV2DbFixture.mjs");
     await withFixtureDb(fixture, async () => {
       const txtmeta = await ctoSearch({ query: "metadatum-only token" });
       assert.deepEqual(txtmeta.hits, [], "text-part metadata atoms are not eligible — no hit");
@@ -981,7 +981,7 @@ test("search: descendant eligibility needs the exact prefix AND the boundary —
     } finally {
       raw.close();
     }
-    const { withFixtureDb } = await import("./fixtures/opencodeDbFixture.mjs");
+    const { withFixtureDb } = await import("./fixtures/opencodeV2DbFixture.mjs");
     await withFixtureDb(fixture, async () => {
       const alone = await ctoSearch({ query: "decoy-only token" });
       assert.deepEqual(alone.hits, [], "the same-offset decoy is not an eligible input descendant — no hit");

@@ -32,7 +32,7 @@ import "./ctoTestGuard.mjs";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createCtoEngine } from "./cto.mjs";
-import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeDbFixture.mjs";
+import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeV2DbFixture.mjs";
 import { _resetDbHandle, _setSqliteModuleOverride } from "./opencodeDb.mjs";
 
 const hasSqlite = await sqliteAvailable();

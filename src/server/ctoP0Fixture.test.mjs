@@ -37,7 +37,7 @@ import {
   sqliteAvailable,
   assertNoLiveDbFallback,
   withFixtureDb,
-} from "./fixtures/opencodeDbFixture.mjs";
+} from "./fixtures/opencodeV2DbFixture.mjs";
 
 const hasSqlite = await sqliteAvailable();
 

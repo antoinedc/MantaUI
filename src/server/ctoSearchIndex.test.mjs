@@ -23,7 +23,7 @@
 //
 // Runs under the suite's `MANTA_STATE_HOME` sandbox; every source is a
 // synthetic fixture armed via `MANTA_OPENCODE_DB`
-// (fixtures/opencodeDbFixture.mjs §14 canary).
+// (fixtures/opencodeV2DbFixture.mjs §14 canary).
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -41,7 +41,7 @@ import {
   createFixtureDb,
   sqliteAvailable,
   withFixtureDb,
-} from "./fixtures/opencodeDbFixture.mjs";
+} from "./fixtures/opencodeV2DbFixture.mjs";
 
 // Guarded dynamic import — the file must LOAD (and skip cleanly) on Node 20.
 let DatabaseSync = null;
