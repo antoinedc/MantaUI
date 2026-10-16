@@ -22,12 +22,18 @@
   Bind is 127.0.0.1 on purpose: the chat backend is NOT exposed directly.
   Everything reaches it through manta-server auth-gated reverse proxy,
   which itself is loopback-only. The chat service needs at least one
-  provider in `connected[]` (Claude via the `opencode-claude-auth@latest`
-  plugin seeded by install.sh step C, or Codex/Kimi via `opencode auth
-  login -p <id>` / `PUT /auth/<id>`); install.sh's per-provider detection
+  provider in `connected[]` (Claude via the `manta-claude-max` V2 plugin the
+  installer drops into ~/.config/opencode/plugins/, or Codex/Kimi via
+  `opencode auth login -p <id>`); install.sh's per-provider detection
   summary (BET-313) prints which providers are reachable at the tail of
   the install. Claude picks up its auth from `~/.claude/.credentials.json`,
   which the installer treats as a hint — not a hard prerequisite.
+
+  OpenCode V2 (slice C3): the binary is the PINNED one the release ships
+  (~/.opencode/bin/opencode; `opencode-v1` is the preserved V1 binary a
+  rollback returns to) and the server always requires HTTP Basic auth, so the
+  password is fixed (K1) and rendered below from ~/.manta/opencode-password.
+  This plist therefore carries a secret and is written 0600.
 
   The installer substitutes the placeholder tokens and writes the result to
   ~/Library/LaunchAgents/com.mantaui.opencode.plist.
@@ -64,11 +70,22 @@
          so there is no placeholder to substitute. -->
     <key>OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS</key>
     <string>true</string>
-    <!-- Claude Code version claimed to Anthropic by the opencode-claude-auth
-         plugin, which authenticates as Claude Code. The plugin hardcodes a
-         version that lags badly, and Anthropic REFUSES a request whose claim
-         is below the floor for the model asked for — so a stale claim makes
-         newer models unusable. install.sh substitutes the version resolved
+    <!-- K1: the fixed OpenCode server password (HTTP Basic, user `opencode`);
+         the same value manta-server reads from ~/.manta/opencode-password. -->
+    <key>OPENCODE_PASSWORD</key>
+    <string>@@OPENCODE_PASSWORD@@</string>
+    <!-- The binary is pinned to the release; a self-updating opencode would
+         defeat that. -->
+    <key>OPENCODE_DISABLE_AUTOUPDATE</key>
+    <string>true</string>
+    <!-- The history DB the upgrade chose: replaced by a whole key/string pair
+         ONLY when the V1 → V2 migration ran as a COPY, else by nothing (an
+         empty OPENCODE_DB would make V2 open the path ""). -->
+    @@OPENCODE_DB_ENTRY@@
+    <!-- Claude Code version claimed to Anthropic by the manta-claude-max
+         plugin, which authenticates as Claude Code. Anthropic REFUSES a
+         request whose claim is below the floor for the model asked for — so a
+         stale claim makes newer models unusable. install.sh substitutes the version resolved
          from the box's own `claude` CLI; see resolve_anthropic_cli_version in
          scripts/lib/release.sh. Mirrors
          scripts/systemd/opencode-serve.service. -->

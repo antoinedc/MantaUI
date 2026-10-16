@@ -169,7 +169,7 @@ fi
 # through to the restart(s) that apply. RUNS ON THE RUNTIME NODE THE SCRIPT
 # ALREADY PINNED ON PATH ($MANTA_HOME/runtime/node/bin — NODE_CMD).
 #
-# Non-fatal throughout, mirroring refresh_opencode_tools(): an offline box, a
+# Non-fatal throughout: an offline box, a
 # missing CLI, a refused upgrade, a vendor endpoint that 500s, or even a node
 # that cannot run the script must never abort the server update.
 echo "MANTA_PROGRESS 2/7 Updating command-line tools"
@@ -362,86 +362,42 @@ fi
 echo "MANTA_PROGRESS 4/7 Installing dependencies"
 install_prod_deps "$MANTA_HOME"
 
-# --- Refresh the manta-native opencode tools --------------------------------
-# The AI-facing tool sources (docs/opencode-tools/*.ts) are COPIED into
-# ~/.config/opencode/tools/ rather than symlinked — opencode resolves a tool's
-# imports from the file's REAL path, so a symlink back into the checkout misses
-# ~/.config/opencode/node_modules/@opencode-ai/plugin and the tool silently
-# never registers.
-#
-# WHY THIS IS HERE: install.sh does that copy, but ONLY on install. Nothing in
-# the update path did, so updating the SOURCE while every box kept running
-# whatever tool copy it was installed with left tool updates undeliverable to
-# an existing box (BET-344 / BET-640 background delegation).
-#
-# Non-fatal throughout: a tool copy failing must never abort an update that has
-# already updated the checkout and reinstalled deps.
-#
-# NOTE: we deliberately do NOT restart opencode here. Picking up a new tool
-# needs an opencode restart, but that kills every in-flight agent turn on the
-# box. Staging the files is safe and unconditional; they take effect at the
-# next opencode restart, and we say so.
-refresh_opencode_tools() {
-  local src="$MANTA_HOME/docs/opencode-tools"
-  local dest="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/tools"
-
-  if [ ! -d "$src" ]; then
-    echo "⚠ self-update: $src not found — skipping opencode tool refresh"
-    return 0
+# --- Prepare OpenCode V2 (slice C3) ---------------------------------------------
+# Replaces the V1 tool/plugin refresh steps that lived here and the
+# old `opencode upgrade`. ONE idempotent routine — src/server/upgradeV2Prepare.mjs, shared with
+# install.sh and manta-server's boot hook — now does it all:
+#   * ~/.manta/opencode-password (0600) if absent
+#   * the release's PINNED opencode binary → ~/.opencode/bin/opencode (integrity-checked; the
+#     previous V1 binary is kept as opencode-v1 for rollback)
+#   * the V2 plugins → ~/.config/opencode/plugins/
+#   * Manta's V1 tools/plugins + the opencode-claude-auth config entry retired — unless a V1
+#     history DB still has to be migrated, in which case that waits for the upgrade flow, the
+#     service is pinned to the V1 binary, and manta-server runs the migration on its next boot.
+# It never restarts anything: the conditional restart block below decides that. Non-fatal for a
+# CLI-only update (nothing to prepare); fatal when it fails after a payload swap, because a box
+# on a new release with half-installed V2 pieces is worse than a failed update.
+echo "MANTA_PROGRESS 5/7 Preparing OpenCode"
+MIGRATION_NEEDED=0
+OPENCODE_BINARY_CHANGED=0
+OPENCODE_PLUGINS_CHANGED=0
+if [ -x "$NODE_CMD" ] && [ -f "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" ]; then
+  if PREPARE_OUT="$("$NODE_CMD" "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" prepare --home "$MANTA_HOME")"; then
+    eval "$PREPARE_OUT"
+    log "self-update: OpenCode prepared (migration needed: $MIGRATION_NEEDED, binary changed: $OPENCODE_BINARY_CHANGED, plugins changed: $OPENCODE_PLUGINS_CHANGED)"
+  elif [ "$PAYLOAD_REPLACED" = "1" ]; then
+    die "self-update: preparing OpenCode V2 failed (see above) — the new release is on disk; re-run the update"
+  else
+    warn "self-update: preparing OpenCode V2 failed — continuing"
   fi
-  if ! mkdir -p "$dest" 2>/dev/null; then
-    echo "⚠ self-update: cannot create $dest — skipping opencode tool refresh"
-    return 0
-  fi
-
-  # EXCLUDE *.test.ts: opencode loads EVERY file in tools/ as a tool, and a
-  # test file imports vitest (absent under ~/.config/opencode/node_modules),
-  # which makes tool resolution throw and every chat turn fail with
-  # "Cannot find package 'vitest'". Same exclusion as install.sh.
-  local copied=0 changed=0 tool base
-  for tool in "$src"/*.ts; do
-    case "$tool" in
-      *.test.ts) continue ;;
-    esac
-    [ -e "$tool" ] || continue
-    base="$(basename "$tool")"
-    if ! cmp -s "$tool" "$dest/$base" 2>/dev/null; then
-      changed=$((changed + 1))
-    fi
-    if cp -f "$tool" "$dest/" 2>/dev/null; then
-      copied=$((copied + 1))
-    else
-      echo "⚠ self-update: failed to copy opencode tool $base"
-    fi
-  done
-
-  if [ "$copied" = "0" ]; then
-    echo "⚠ self-update: no opencode tool sources found in $src"
-    return 0
-  fi
-  if [ "$changed" = "0" ]; then
-    echo "✓ self-update: opencode tools already current ($copied checked)"
-    return 0
-  fi
-  echo "✓ self-update: opencode tools refreshed ($changed of $copied changed)"
-}
-
-echo "MANTA_PROGRESS 5/7 Refreshing AI tools"
-refresh_opencode_tools
-
-# --- Sync the manta-native opencode PLUGINS ------------------------------------
-# docs/opencode-plugins/*.ts → ~/.config/opencode/plugins/ (real copies; a
-# plugin the release stopped shipping is deleted, a user's own files never are —
-# see sync_opencode_plugins in scripts/lib/release.sh). Sets PLUGINS_CHANGED,
-# which the conditional-restart block below treats like OPENCODE_CHANGED:
-# opencode loads plugins only at startup, so a changed plugin is inert until it
-# restarts. Non-fatal, and guarded on the function existing (an old lib).
-PLUGINS_CHANGED=0
-if declare -F sync_opencode_plugins >/dev/null 2>&1; then
-  sync_opencode_plugins "$MANTA_HOME/docs/opencode-plugins" \
-    "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/plugins" \
-    "$STATE_HOME/.manta/opencode-plugins.manifest" || true
+else
+  warn "self-update: node or upgradeV2Prepare.mjs unavailable — skipping OpenCode preparation"
 fi
+# The restart plan treats "binary or plugins changed" like the old OPENCODE_CHANGED/PLUGINS_CHANGED.
+OPENCODE_CHANGED="$OPENCODE_BINARY_CHANGED"
+PLUGINS_CHANGED="$OPENCODE_PLUGINS_CHANGED"
+# A box that still has V1 history to migrate must NOT have its opencode restarted by the update
+# (opencode_restart_plan → "server"): the service is pinned to V1 and manta-server's boot hook
+# (upgradeV2) restarts it itself, in order, once the disk preflight has passed.
 
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
 # Appends any top-level `## ` guidance section that is missing from the user's
@@ -463,8 +419,8 @@ sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_C
 #   | only other CLIs changed                       | NOTHING               |
 #
 # `PAYLOAD_REPLACED` is the single flag set at the one place each install kind
-# swaps its payload. `OPENCODE_CHANGED` comes from the upgrade-clis state file.
-# `PLUGINS_CHANGED` comes from sync_opencode_plugins above. The decision itself
+# swaps its payload. `OPENCODE_CHANGED` / `PLUGINS_CHANGED` come from the OpenCode
+# preparation step above (pinned binary / service definition / V2 plugins changed). The decision itself
 # is `opencode_restart_plan` in scripts/lib/release.sh (unit-tested).
 # A skipped step emits no MANTA_PROGRESS line; the bar jumps forward (the
 # progress parser requires strictly-increasing steps).
@@ -542,13 +498,18 @@ wait_server_healthy() {
   die "server did not become healthy after the update — re-run install.sh to restore a matching prebuilt tree"
 }
 
-case "$(opencode_restart_plan "$PAYLOAD_REPLACED" "$OPENCODE_CHANGED" "$PLUGINS_CHANGED")" in
+case "$(opencode_restart_plan "$PAYLOAD_REPLACED" "$OPENCODE_CHANGED" "$PLUGINS_CHANGED" "$MIGRATION_NEEDED")" in
   both)
     echo "MANTA_PROGRESS 6/7 Restarting opencode"
     restart_opencode
     echo "MANTA_PROGRESS 7/7 Restarting box server"
     restart_server
     # Confirm the new payload actually boots before reporting success.
+    wait_server_healthy
+    ;;
+  server)
+    echo "MANTA_PROGRESS 7/7 Restarting box server"
+    restart_server
     wait_server_healthy
     ;;
   opencode)

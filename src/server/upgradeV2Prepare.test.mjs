@@ -23,7 +23,6 @@ import {
   restoreV1Assets,
   retireV1Assets,
 } from "./upgradeV2Prepare.mjs";
-import { unitEnvValue, unitExecBin } from "./upgradeV2Service.mjs";
 
 let root;
 let prevState;
@@ -287,7 +286,15 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     };
     return { home, mantaHome, cfg, exec, execs, env: { HOME: home, XDG_DATA_HOME: join(home, ".local", "share") } };
   }
-  const run = (b) => prepareOpencodeV2({ mantaHome: b.mantaHome, home: b.home, env: b.env, exec: b.exec });
+  // The service controller is faked: what it was told is the assertion (its own behaviour is
+  // covered in upgradeV2Service.test.mjs).
+  const run = (b) => {
+    b.configured = [];
+    return prepareOpencodeV2({
+      mantaHome: b.mantaHome, home: b.home, env: b.env, exec: b.exec,
+      service: { configure: async (variant, args) => (b.configured.push([variant, args?.db ?? null]), true) },
+    });
+  };
 
   test("V1 box with a history DB: V1 binary kept, service pinned to it, V2 installed, V1 assets left for the upgrade flow", async () => {
     mkdirSync(join(root, "state", ".manta"), { recursive: true });
@@ -297,9 +304,7 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     assert.equal(r.bin, join(b.home, ".opencode", "bin", "opencode-v1"));
     assert.equal(readFileSync(join(b.home, ".opencode", "bin", "opencode-v1"), "utf8"), "V1-BINARY");
     assert.equal(readFileSync(join(b.home, ".opencode", "bin", "opencode"), "utf8"), "V2-BINARY");
-    const unit = readFileSync(join(b.home, ".config", "systemd", "user", "opencode-serve.service"), "utf8");
-    assert.equal(unitExecBin(unit), join(b.home, ".opencode", "bin", "opencode-v1"), "the unit must not run V2 against a raw V1 DB");
-    assert.ok(b.execs.some((e) => e[0] === "systemctl" && e[2] === "daemon-reload"));
+    assert.deepEqual(b.configured, [["v1", null]], "the service must not run V2 against a raw V1 DB");
     assert.ok(existsSync(join(b.cfg, "tools", "schedule.ts")), "V1 still running: keep its tools until it is stopped");
     assert.match(readFileSync(join(b.cfg, "opencode.jsonc"), "utf8"), /opencode-claude-auth/);
     for (const n of V2_PLUGINS) assert.ok(existsSync(join(b.cfg, "plugins", n, "index.ts")));
@@ -325,6 +330,16 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     assert.ok(!existsSync(join(b.cfg, "tools", "schedule.ts")));
     assert.ok(!/opencode-claude-auth/.test(readFileSync(join(b.cfg, "opencode.jsonc"), "utf8")));
     assert.ok(!existsSync(migrationStatePath()), "no state file for a fresh box");
+    assert.deepEqual(b.configured, [["v2", null]], "service definition brought to V2 (password, pinned binary)");
+    assert.equal(r.serviceChanged, true);
+  });
+
+  test("a mid-flight upgrade's service definition is not touched by a concurrent prepare (self-update during migration)", async () => {
+    mkdirSync(join(root, "state", ".manta"), { recursive: true });
+    const b = box({ state: { state: "running" } });
+    const r = await run(b);
+    assert.equal(r.migrationNeeded, true);
+    assert.deepEqual(b.configured, []);
   });
 
   test("a box already on V2 whose own DB exists is NOT mistaken for a V1 box", async () => {
@@ -345,7 +360,7 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     assert.equal(readFileSync(join(b.home, ".opencode", "bin", "opencode"), "utf8"), "V1-BINARY");
     assert.ok(existsSync(join(b.cfg, "tools", "schedule.ts")));
     assert.ok(!existsSync(join(b.cfg, "plugins")) || readdirSync(join(b.cfg, "plugins")).length === 0);
-    assert.ok(!unitEnvValue(readFileSync(join(b.home, ".config", "systemd", "user", "opencode-serve.service"), "utf8"), "OPENCODE_PASSWORD"));
+    assert.deepEqual(b.configured, [], "service untouched");
   });
 
   test("a completed migration is final: later runs only refresh binary/plugins and retire leftovers", async () => {
@@ -354,5 +369,6 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     const r = await run(b);
     assert.equal(r.migrationNeeded, false);
     assert.equal(r.bin, join(b.home, ".opencode", "bin", "opencode"));
+    assert.deepEqual(b.configured, [["v2", "/x/opencode-v2.db"]], "the chosen copy DB is carried into the rendered service");
   });
 });

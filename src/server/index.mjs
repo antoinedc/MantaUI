@@ -125,7 +125,6 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
-import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -670,15 +669,6 @@ accountsService.onChange(({ provider }) => accountsEvents.updated(provider));
 const stopAccountsUsageEvents = bus.subscribe((evt) => {
   if (evt?.kind === "usage.updated") for (const p of ACCOUNT_PROVIDERS) accountsEvents.updated(p);
 });
-
-// Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
-// plugins). self-update.sh does this too, but an installed box runs the script it
-// ALREADY had, so the first update that ships a plugin would not install it; the
-// NEW server code running here is what closes that gap. Non-blocking, never
-// fatal; restarts opencode only if it was itself just restarted (see
-// opencodePlugins.mjs). index.mjs is never imported by tests, so this cannot
-// touch a developer's real config dir from the suite.
-void runStartupPluginSync();
 
 // Multi-account phase 2: which seat a conversation's requests use. Called by the
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST

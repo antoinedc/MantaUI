@@ -120,21 +120,92 @@ function evalArrayLiteral(declName, scope = {}) {
   return Function(...Object.keys(scope), `return ${m[1]}`)(...Object.values(scope));
 }
 
-test("OWNED_ON_BOX = INCLUDE + runtime + node_modules: staged-not-copied paths are owned, otherwise equal", () => {
+test("OWNED_ON_BOX = INCLUDE + runtime + node_modules + vendor: staged-not-copied paths are owned, otherwise equal", () => {
   const include = evalArrayLiteral("INCLUDE");
   const owned = evalArrayLiteral("OWNED_ON_BOX", { INCLUDE: include });
 
-  for (const staged of ["runtime", "node_modules"]) {
+  for (const staged of ["runtime", "node_modules", "vendor"]) {
     assert.ok(owned.includes(staged), `owned-on-box list must include ${staged}`);
     assert.ok(!include.includes(staged), `staging allowlist must NOT include ${staged}`);
   }
   assert.deepEqual(
-    owned.filter((p) => p !== "runtime" && p !== "node_modules"),
+    owned.filter((p) => p !== "runtime" && p !== "node_modules" && p !== "vendor"),
     include,
     "owned list must otherwise equal the staging allowlist",
   );
   // guard against the two lists silently collapsing back into one
   assert.notDeepEqual(owned, include);
+});
+
+test("the release ships the V2 plugins and no longer the V1 plugin directory", () => {
+  const include = evalArrayLiteral("INCLUDE");
+  assert.ok(include.includes("docs/opencode-plugins-v2"));
+  assert.ok(!include.includes("docs/opencode-plugins"));
+});
+
+// --- stageOpencodeBinary: the pinned OpenCode V2 binary rides in the tarball ----------------
+import { createHash } from "node:crypto";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+
+function stager() {
+  return evalFunctionDecl("stageOpencodeBinary", {
+    // the helpers the function closes over
+    join,
+    mkdir, copyFile, chmod, readFile, writeFile, createHash,
+    opencodePlatformFor: evalFunctionDecl("opencodePlatformFor"),
+    OPENCODE_V2_VERSION: "2.0.30",
+    ensureOpencodeBinary: null,
+    opencodePlatformKey: null,
+  });
+}
+
+test("stageOpencodeBinary: copies the binary executable, with a sha256 sidecar + VERSION, into vendor/opencode", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-pack-oc-"));
+  try {
+    const src = join(dir, "cache-opencode");
+    await writeFile(src, "PINNED-BINARY");
+    const stage = join(dir, "stage");
+    const r = await stager()(stage, "x64", { ensureBinary: async () => src, platformKey: () => "linux-x64" });
+    const out = join(stage, "vendor", "opencode");
+    assert.equal(await readFile(join(out, "opencode"), "utf8"), "PINNED-BINARY");
+    assert.equal((await stat(join(out, "opencode"))).mode & 0o777, 0o755);
+    const want = createHash("sha256").update("PINNED-BINARY").digest("hex");
+    assert.equal(await readFile(join(out, "opencode.sha256"), "utf8"), `${want}  opencode\n`);
+    assert.equal(await readFile(join(out, "VERSION"), "utf8"), "2.0.30\n");
+    assert.deepEqual(r, { version: "2.0.30", sha256: want, platform: "linux-x64" });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("stageOpencodeBinary: refuses to ship a binary built for a different platform than --arch", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "manta-pack-oc-"));
+  try {
+    await assert.rejects(
+      () => stager()(join(dir, "s"), "arm64", { ensureBinary: async () => assert.fail("must not download"), platformKey: () => "linux-x64" }),
+      /cannot stage the linux-arm64 OpenCode binary on a linux-x64 host/,
+    );
+    await assert.rejects(() => stager()(join(dir, "s"), "bogus", { platformKey: () => "linux-x64" }), /no OpenCode build for --arch bogus/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the staged binary's sidecar is exactly what the box-side installer verifies (round trip through installPinnedBinary)", async () => {
+  const { installPinnedBinary } = await import("../../src/server/upgradeV2Prepare.mjs");
+  const dir = await mkdtemp(join(tmpdir(), "manta-pack-oc-"));
+  try {
+    const src = join(dir, "cache-opencode");
+    await writeFile(src, "PINNED-BINARY");
+    const stage = join(dir, "stage");
+    await stager()(stage, "x64", { ensureBinary: async () => src, platformKey: () => "linux-x64" });
+    const r = await installPinnedBinary({ src: join(stage, "vendor", "opencode", "opencode"), destDir: join(dir, "home", ".opencode", "bin") });
+    assert.equal(r.changed, true);
+    assert.equal(await readFile(r.bin, "utf8"), "PINNED-BINARY");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // BET-829 regression. Dropping node_modules from the owned list would silently

@@ -141,27 +141,41 @@ export function createOpencodeService({
       bin: opencodeBinPath(variant, home),
       env: { ...serviceEnvFor(variant, { password, db }), OPENCODE_DISABLE_AUTOUPDATE: variant === "v2" ? "true" : null },
     });
-    if (patched !== current) {
+    const changed = patched !== current;
+    if (changed) {
       // 0600: the unit carries OPENCODE_PASSWORD.
       await write(unitPath, patched, 0o600);
       await chmod(unitPath, 0o600).catch(() => {});
+      await exec("systemctl", ["--user", "daemon-reload"]);
     }
-    await exec("systemctl", ["--user", "daemon-reload"]);
+    return changed;
   }
 
   async function configureLaunchd(variant, { db }) {
     const password = variant === "v2" ? await readPassword() : null;
-    await pb(`Set :ProgramArguments:0 ${opencodeBinPath(variant, home)}`);
+    let changed = false;
+    const get = async (k) => (await pb(`Print ${k}`).then((r) => String(r.stdout ?? "").trim(), () => null));
+    const bin = opencodeBinPath(variant, home);
+    if ((await get(":ProgramArguments:0")) !== bin) {
+      await pb(`Set :ProgramArguments:0 ${bin}`);
+      changed = true;
+    }
     const env = { ...serviceEnvFor(variant, { password, db }), OPENCODE_DISABLE_AUTOUPDATE: variant === "v2" ? "true" : null };
     for (const [key, value] of Object.entries(env)) {
       const k = `:EnvironmentVariables:${key}`;
+      const have = await get(k);
       if (value === null || value === undefined || value === "") {
-        await pb(`Delete ${k}`).catch(() => {}); // absent already is fine
-      } else if (!(await pb(`Set ${k} ${value}`).then(() => true, () => false))) {
-        await pb(`Add ${k} string ${value}`);
+        if (have !== null && have !== "") {
+          await pb(`Delete ${k}`).catch(() => {}); // absent already is fine
+          changed = true;
+        }
+      } else if (have !== value) {
+        if (!(await pb(`Set ${k} ${value}`).then(() => true, () => false))) await pb(`Add ${k} string ${value}`);
+        changed = true;
       }
     }
     await chmod(plistPath, 0o600).catch(() => {});
+    return changed;
   }
 
   return {
@@ -169,12 +183,17 @@ export function createOpencodeService({
     unitPath,
     plistPath,
 
-    /** Point the service at V1 or V2 (and set/drop its env) WITHOUT restarting it. */
+    /**
+     * Point the service at V1 or V2 (and set/drop its env) WITHOUT restarting it. Returns whether
+     * the definition changed (so a caller can tell if a restart is owed). nohup has no
+     * definition: it is remembered and applied by the next start().
+     */
     async configure(variant, { db = null } = {}) {
       log(`[upgrade] service → ${variant}${db ? ` db=${db}` : ""} (${supervisor})`);
       if (supervisor === "systemd") return configureSystemd(variant, { db });
       if (supervisor === "launchd") return configureLaunchd(variant, { db });
-      this._nohup = { variant, db }; // applied on the next start()
+      this._nohup = { variant, db };
+      return false;
     },
 
     async stop() {

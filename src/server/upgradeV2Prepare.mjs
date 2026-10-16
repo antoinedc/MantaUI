@@ -46,7 +46,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { applyEdits, modify, parse } from "jsonc-parser";
 import { STATE_DIRNAME, stateHome } from "../shared/paths.mjs";
-import { opencodeBinPath, passwordFilePath, patchUnitText, unitExecBin, OPENCODE_UNIT } from "./upgradeV2Service.mjs";
+import { createOpencodeService, opencodeBinPath, passwordFilePath } from "./upgradeV2Service.mjs";
 
 /** The V2 plugins Manta ships (directory names under docs/opencode-plugins-v2/). */
 export const V2_PLUGINS = Object.freeze(["manta", "manta-claude-max", "manta-optimizer"]);
@@ -336,21 +336,9 @@ export async function restoreV1Assets({ configDir, backupDir = v1BackupDir(), fs
   return { restored };
 }
 
-/** Pin an existing opencode systemd unit's ExecStart to `bin` (no restart). Returns whether it changed. */
-async function pinUnitExec({ unitPath, bin, fs, exec, log }) {
-  if (!(await exists(fs, unitPath))) return false;
-  const text = await fs.readFile(unitPath, "utf8");
-  if (unitExecBin(text) === bin) return false;
-  const patched = patchUnitText(text, { bin });
-  if (patched === text) return false;
-  await fs.writeFile(unitPath, patched, { mode: 0o600 });
-  await exec("systemctl", ["--user", "daemon-reload"]).catch((e) => log(`[prepare] daemon-reload failed: ${e?.message ?? e}`));
-  return true;
-}
-
 /**
  * The whole routine. Never restarts anything. Returns
- *   { migrationNeeded, bin, passwordFile, passwordCreated, binaryChanged, pluginsChanged, retired }
+ *   { migrationNeeded, bin, passwordFile, passwordCreated, binaryChanged, pluginsChanged, serviceChanged, retired }
  * `bin` is the binary the opencode SERVICE must run right now: the preserved V1
  * binary while a migration is pending, else the pinned V2.
  */
@@ -360,6 +348,7 @@ export async function prepareOpencodeV2({
   env = process.env,
   fs = nodeFs,
   exec = defaultExec,
+  service = createOpencodeService({ home, exec: (c, a) => exec(c, a).then((stdout) => ({ stdout, stderr: "" })), log }),
   readState = () => readJson(nodeFs, migrationStatePath()),
   writeState = (s) => nodeFs.writeFile(migrationStatePath(), `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 }),
   log = () => {},
@@ -368,7 +357,6 @@ export async function prepareOpencodeV2({
   const v2Bin = join(binDir, "opencode");
   const v1Bin = opencodeBinPath("v1", home);
   const configDir = opencodeConfigDir(home);
-  const unitPath = join(home, ".config", "systemd", "user", OPENCODE_UNIT);
 
   const password = await ensurePasswordFile({ fs });
 
@@ -379,7 +367,7 @@ export async function prepareOpencodeV2({
     log("[prepare] no vendor/opencode binary in this release — leaving opencode as it is");
     return {
       migrationNeeded: false, bin: v2Bin, passwordFile: password.file, passwordCreated: password.created,
-      binaryChanged: false, binaryMissing: true, pluginsChanged: false, retired: null,
+      binaryChanged: false, binaryMissing: true, pluginsChanged: false, serviceChanged: false, retired: null,
     };
   }
 
@@ -397,7 +385,12 @@ export async function prepareOpencodeV2({
     await fs.copyFile(v2Bin, v1Bin);
     await fs.chmod(v1Bin, 0o755);
   }
-  if (migrationNeeded) await pinUnitExec({ unitPath, bin: v1Bin, fs, exec, log });
+  // Pin the service to V1 so V2 can never start on a raw V1 DB before the preflight — but never
+  // while an upgrade is mid-flight (the flow itself owns the service definition then).
+  let serviceChanged = false;
+  if (migrationNeeded && state?.state !== "running" && (await exists(fs, v1Bin))) {
+    serviceChanged = await service.configure("v1");
+  }
 
   const bin = await installPinnedBinary({ src: vendorSrc, destDir: binDir, fs });
   const plugins = await installV2Plugins({
@@ -408,8 +401,14 @@ export async function prepareOpencodeV2({
   });
 
   let retired = null;
-  if (!migrationNeeded) retired = await retireV1Assets({ configDir, fs });
-  else if (!state) await writeState({ version: 1, state: "idle", createdAt: Date.now() });
+  if (!migrationNeeded) {
+    retired = await retireV1Assets({ configDir, fs });
+    // A V2-capable box with nothing to migrate (fresh install, or a V1 box without history) needs
+    // its service definition brought to V2: pinned binary, password, and the DB a finished
+    // copy-mode migration chose (without it the service would open an empty one).
+    const done = state?.state === "completed" && state?.mode === "copy" ? state.targetDb : null;
+    serviceChanged = await service.configure("v2", { db: done });
+  } else if (!state) await writeState({ version: 1, state: "idle", createdAt: Date.now() });
 
   return {
     migrationNeeded,
@@ -419,6 +418,7 @@ export async function prepareOpencodeV2({
     binaryChanged: bin.changed,
     binaryMissing: false,
     pluginsChanged: plugins.changed,
+    serviceChanged,
     retired,
   };
 }
@@ -441,7 +441,7 @@ async function cli(argv) {
         `MIGRATION_NEEDED=${r.migrationNeeded ? 1 : 0}`,
         `OPENCODE_BIN=${q(r.bin)}`,
         `OPENCODE_PASSWORD_FILE=${q(r.passwordFile)}`,
-        `OPENCODE_BINARY_CHANGED=${r.binaryChanged ? 1 : 0}`,
+        `OPENCODE_BINARY_CHANGED=${r.binaryChanged || r.serviceChanged ? 1 : 0}`,
         `OPENCODE_PLUGINS_CHANGED=${r.pluginsChanged ? 1 : 0}`,
       ].join("\n") + "\n",
     );

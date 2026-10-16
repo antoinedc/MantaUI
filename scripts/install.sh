@@ -1120,167 +1120,51 @@ main() {
   # (manta-server) below; define it once, up front.
   UNIT_DIR="$HOME/.config/systemd/user"
 
-  # --- A. opencode install (idempotent via official installer). ------------
-  # We use opencode's official installer; no version pinning in v1 — the
-  # installer is the source of truth for "current". Re-running is a no-op
-  # when the binary is already on PATH.
-  # An existing install may be off-PATH in this non-login shell (the app's
-  # ssh -tt install path) — probe the known install dirs before deciding to
-  # reinstall. Mirrors the post-install PATH fixup below.
-  for _ocdir in "$HOME/.opencode/bin" "$HOME/.local/bin"; do
-    if [ -x "$_ocdir/opencode" ]; then export PATH="$_ocdir:$PATH"; break; fi
-  done
-  OPENCODE_BIN="$(command -v opencode || true)"
-  if [ -n "$OPENCODE_BIN" ]; then
-    ok "opencode already installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
-  else
-    log "Installing opencode (official installer)…"
-    # The installer writes to ~/.opencode/bin/opencode (per the installer's
-    # current shape) and appends `export PATH=...` to ~/.bashrc. Bash
-    # non-interactive shells (which is how install.sh runs) don't source
-    # .bashrc, so the binary isn't on PATH in the current shell — we add
-    # it explicitly. The fallback covers the documented path.
-    # NOTE: download-then-run is load-bearing, do NOT collapse this back into
-    # `curl … | bash`. Two constraints collide:
-    #  (a) install.sh is itself run as `curl -fsSL … | bash`, so the OUTER bash
-    #      reads THIS script from stdin (the pipe). A child that reads stdin
-    #      (a prompt / read / cat) drains the rest of install.sh's bytes and the
-    #      outer bash then hits EOF here and exits 0 — no error, the install
-    #      silently stops "after opencode install". So the child's stdin must
-    #      be /dev/null.
-    #  (b) But `curl … | bash </dev/null` DOES NOT WORK: bash reads its SCRIPT
-    #      from stdin, and the redirect replaces the pipe with /dev/null — bash
-    #      sees an empty script, runs nothing, exits 0, and curl dies writing to
-    #      the closed pipe (`curl: (23) Failure writing output to destination`),
-    #      which pipefail turns into a spurious "opencode install failed".
-    # Writing the installer to a file satisfies both: script from the file,
-    # stdin from /dev/null.
-    _oc_installer="$WORK/opencode-install.sh"
-    curl -fsSL https://opencode.ai/install -o "$_oc_installer" \
-      || die "opencode installer download failed — install manually: https://opencode.ai"
-    bash "$_oc_installer" </dev/null \
-      || die "opencode install failed — install manually: https://opencode.ai"
-    rm -f "$_oc_installer"
-    # Resolve the freshly-installed binary deterministically from its WELL-KNOWN
-    # install dir — do NOT re-source the user's ~/.bashrc (or ~/.profile) to pick
-    # up the PATH line the installer appended. Installers (nvm, rustup, and
-    # opencode's own installer) never source the user's rc file; they write a
-    # PATH line and probe the known dir. Sourcing rc is both fragile and
-    # distro-dependent: a stock Debian/Ubuntu ROOT ~/.bashrc opens with
-    # `[ -z "$PS1" ] && return`, which dereferences an unbound $PS1 in a
-    # non-interactive shell and — under this script's `set -eu` — aborts the
-    # whole outer bash (exit 127) before control returns to the `|| true`; the
-    # fresh-root install died silently right here with no message. On other
-    # distros rc can prompt (hang), `read` stdin, or execute arbitrary user
-    # code. The opencode installer always installs to $HOME/.opencode/bin, so
-    # probing that path is both sufficient and portable.
-    if [ -x "$HOME/.opencode/bin/opencode" ]; then
-      export PATH="$HOME/.opencode/bin:$PATH"
-    fi
-    OPENCODE_BIN="$(command -v opencode || true)"
-    if [ -z "$OPENCODE_BIN" ]; then
-      die "opencode still not on PATH after install. Try: export PATH=\"\$HOME/.opencode/bin:\$PATH\" and re-run."
-    fi
-    ok "opencode installed ($("$OPENCODE_BIN" --version 2>/dev/null | head -n1 || echo "$OPENCODE_BIN"))."
+  # --- A. OpenCode V2: the PINNED binary the release ships (slice C3). ------
+  # No installer download and no "latest": the release tarball bundles the exact
+  # binary (vendor/opencode/opencode, integrity-checked when packed AND again
+  # here against its sha256 sidecar), so every box on a release runs the same
+  # OpenCode. ONE idempotent routine — src/server/upgradeV2Prepare.mjs, also run
+  # by self-update.sh and by manta-server's boot hook — does the whole job:
+  #   * ~/.manta/opencode-password (32 hex, 0600) if absent (K1)
+  #   * the pinned binary → ~/.opencode/bin/opencode (a V1 binary already there is
+  #     kept as opencode-v1: it is the rollback target)
+  #   * the V2 plugins (manta, manta-claude-max, manta-optimizer) → ~/.config/opencode/plugins/
+  #   * Manta's V1 tools / V1 plugins / the opencode-claude-auth config entry are
+  #     retired and the V2 config rules (external_directory: ask, CLAUDE.md
+  #     instructions) merged in
+  # When the box still has a V1 history DB to migrate, the retirement is DEFERRED
+  # and the service is pinned to the V1 binary: V2 must never auto-migrate a raw
+  # V1 DB before the upgrade flow's disk preflight has run. It prints
+  #   MIGRATION_NEEDED / OPENCODE_BIN / OPENCODE_PASSWORD_FILE / …
+  # as shell assignments, evaluated here.
+  PREPARE_OUT="$("$NODE" "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" prepare --home "$MANTA_HOME")" \
+    || die "preparing OpenCode V2 failed — see the message above"
+  eval "$PREPARE_OUT"
+  export PATH="$HOME/.opencode/bin:$PATH"
+  [ -x "$HOME/.opencode/bin/opencode" ] \
+    || die "the release did not provide an opencode binary (vendor/opencode) — re-run the installer"
+  ok "opencode V2 ready ($("$HOME/.opencode/bin/opencode" --version 2>/dev/null | head -n1 || echo pinned))."
+  if [ "${MIGRATION_NEEDED:-0}" = "1" ]; then
+    log "A V1 conversation history was found — the box migrates it automatically on first start (the chat service stays on V1 until then)."
   fi
+  OPENCODE_PASSWORD="$(cat "$OPENCODE_PASSWORD_FILE")"
+  # A finished COPY-mode migration keeps its history in a separate DB; re-rendering the service
+  # without it would silently open an empty one.
+  OPENCODE_DB_PATH="$("$NODE" "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" db-env 2>/dev/null || true)"
 
   # --- A2. claude CLI install — REMOVED (BET-421 §E). -----------------------
   # The app now owns the Claude CLI: it installs the binary lazily, the
   # first time the user picks Claude, via the official installer — no
   # confirmation step, straight into sign-in. A box that never picks Claude
   # never gets the binary, which is fine (Codex / Kimi / custom need no
-  # binary). Nothing here is a flag or opt-in; the whole block is deleted.
-  # The box is usable without claude — its own comment (below, at A2's old
-  # site) already anticipated that.
+  # binary).
 
-  # --- B. opencode config seeding — MERGE the plugin entry, never clobber. --
-  # Target: ~/.config/opencode/opencode.jsonc. Required:
-  #   plugin: ["opencode-claude-auth@latest", ...]
-  # All other keys (theme, model, mcp, provider, …) are preserved. On parse
-  # failure we back the file up to .pre-manta and start from {} — matches the
-  # documented skills.urls merge pattern in src/server/local.mjs.
+  # --- C. agent guidance (the tools themselves are V2 plugins now). --------
   OPENCODE_CONFIG_DIR="$HOME/.config/opencode"
-  OPENCODE_CONFIG="$OPENCODE_CONFIG_DIR/opencode.jsonc"
-  mkdir -p "$OPENCODE_CONFIG_DIR"
-  OPENCODE_CONFIG_BACKUP="$OPENCODE_CONFIG.pre-manta"
-  # The installer runs under `set -u`, so a bare expansion of an unset var is a
-  # hard error. Both plugin vars are therefore guarded with `${VAR:-}`:
-  #   - MANTA_CLAUDE_AUTH_PLUGIN — the dev/CI override; unset for every end
-  #     user. The macOS CI job caught this once (BET-319): every public
-  #     install crashed because end users never set the override.
-  #   - OPENCODE_CLAUDE_AUTH_PLUGIN — the LOG-ONLY default name, emitted by the
-  #     `print-config` eval above (line ~659). It is pure cosmetic output for
-  #     the seeding message here; it must never be able to abort the install,
-  #     so the (should-be-unreachable-in-practice) empty default is fine.
-  if [ -f "$OPENCODE_CONFIG" ]; then
-    if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
-      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — merging into existing ${OPENCODE_CONFIG}…"
-    else
-      log "Seeding Claude auth plugin (${OPENCODE_CLAUDE_AUTH_PLUGIN:-}) — merging into existing ${OPENCODE_CONFIG}…"
-    fi
-    existing="$(cat "$OPENCODE_CONFIG" 2>/dev/null || true)"
-  else
-    if [ -n "${MANTA_CLAUDE_AUTH_PLUGIN:-}" ]; then
-      log "Seeding Claude auth plugin (override: ${MANTA_CLAUDE_AUTH_PLUGIN}) — no existing ${OPENCODE_CONFIG}, creating…"
-    else
-      log "Seeding Claude auth plugin (${OPENCODE_CLAUDE_AUTH_PLUGIN:-}) — no existing ${OPENCODE_CONFIG}, creating…"
-    fi
-    existing=""
-  fi
-  merged="$(printf '%s' "$existing" | "$NODE" "$LIB" merge-opencode-config 2>/tmp/opencode-merge.err)" \
-    || die "merge-opencode-config failed (see /tmp/opencode-merge.err)"
-  if grep -q '^corrupt=1' /tmp/opencode-merge.err 2>/dev/null; then
-    cp "$OPENCODE_CONFIG" "$OPENCODE_CONFIG_BACKUP" 2>/dev/null \
-      && warn "opencode.jsonc was unparseable — original backed up to $OPENCODE_CONFIG_BACKUP, starting from {}." \
-      || warn "opencode.jsonc was unparseable and the backup FAILED — installer continues but original is NOT preserved."
-  fi
-  printf '%s' "$merged" > "$OPENCODE_CONFIG"
-  ok "opencode.jsonc seeded."
-
-  # --- C. manta opencode tools + agent guidance (REAL copies, not symlinks).
-  # Per AGENTS.md ("Mobile / web client"): opencode resolves tool imports from
-  # the file's REAL path; a symlink into the tarball tree misses
-  # ~/.config/opencode/node_modules/@opencode-ai/plugin and the tool silently
-  # never registers. So we cp — same inode-disjoint paths.
   OPENCODE_TOOLS_SRC="$MANTA_HOME/docs/opencode-tools"
-  OPENCODE_TOOLS_DIR="$OPENCODE_CONFIG_DIR/tools"
   OPENCODE_AGENTS="$OPENCODE_CONFIG_DIR/AGENTS.md"
-  if [ -d "$OPENCODE_TOOLS_SRC" ]; then
-    mkdir -p "$OPENCODE_TOOLS_DIR"
-    log "Copying manta-native opencode tools into ${OPENCODE_TOOLS_DIR}…"
-    # cp -f overwrites — tools are versioned with the tarball, so a re-run
-    # naturally picks up upgrades. EXCLUDE *.test.ts: opencode loads EVERY file
-    # in tools/ as a tool, and a test file imports vitest (absent under
-    # ~/.config/opencode/node_modules), which makes tool resolution throw and
-    # every chat turn fail with "Cannot find package 'vitest'". Copy only real
-    # tool sources.
-    copied_any=0
-    for _tool in "$OPENCODE_TOOLS_SRC"/*.ts; do
-      case "$_tool" in
-        *.test.ts) continue ;;
-      esac
-      [ -e "$_tool" ] || continue
-      cp -f "$_tool" "$OPENCODE_TOOLS_DIR/" \
-        || die "failed to copy opencode tool $_tool"
-      copied_any=1
-    done
-    [ "$copied_any" = "1" ] || warn "no opencode tool .ts files found in $OPENCODE_TOOLS_SRC"
-    ok "opencode tools copied."
-  else
-    warn "$OPENCODE_TOOLS_SRC not found in tarball — skipping tool copy (was docs/opencode-tools/* added to release/pack.mjs?)."
-  fi
-  # --- C2. manta opencode PLUGINS (docs/opencode-plugins/*.ts → plugins/).
-  # Same real-copy rule as the tools. The helper lives only in the lib, which is
-  # sourced from MANTA_HOME here (the tarball is extracted by now, exactly like
-  # sync_opencode_guidance below) — so, unlike the four release-resolution
-  # helpers, it is NOT part of the inline `curl | bash` fallback: piped mode
-  # never needs it before extraction. Non-fatal: a plugin copy failing must not
-  # fail an install. The opencode service is (re)started further down, so the
-  # plugins are loaded without a separate restart here.
-  if ! declare -F sync_opencode_plugins >/dev/null 2>&1; then
-    . "$MANTA_HOME/scripts/lib/release.sh"
-  fi
-  sync_opencode_plugins "$MANTA_HOME/docs/opencode-plugins" "$OPENCODE_CONFIG_DIR/plugins" "$AUTH_DIR/opencode-plugins.manifest" || true
+  mkdir -p "$OPENCODE_CONFIG_DIR"
   # AGENTS.md section-sync (BET-640): append any top-level `## ` guidance
   # section from docs/opencode-tools/AGENTS.md that is not already present, so
   # a section added after a box was installed lands on the NEXT install/update.
@@ -1313,11 +1197,15 @@ main() {
       -e "s|@@MANTA_PORT@@|$MANTA_PORT|g" \
       -e "s|@@MANTA_TAILNET_HOST@@|${TAILNET_BIND_HOSTS:-}|g" \
       -e "s|@@OPENCODE_BIN@@|${OPENCODE_BIN:-}|g" \
+      -e "s|@@OPENCODE_PASSWORD@@|${OPENCODE_PASSWORD:-}|g" \
+      -e "s|@@OPENCODE_DB_ENTRY@@|${OPENCODE_DB_PATH:+<key>OPENCODE_DB</key><string>$OPENCODE_DB_PATH</string>}|g" \
       -e "s|@@AUTH_DIR@@|$AUTH_DIR|g" \
       -e "s|@@AGENT_PATH@@|$(launchd_agent_path)|g" \
       -e "s|@@ANTHROPIC_CLI_VERSION@@|$(resolve_anthropic_cli_version)|g" \
       -e "s|@@MANTA_CHANNEL@@|${MANTA_CHANNEL:-prod}|g" \
       "$src" > "$dest"
+    # The opencode plist carries OPENCODE_PASSWORD (K1) — owner-only.
+    chmod 600 "$dest"
     local uid; uid="$(id -u)"
     # bootout first (ignore failure if not loaded), then bootstrap for a clean
     # reload that picks up template changes on re-run.
@@ -1416,10 +1304,14 @@ main() {
     rendered="$("$NODE" "$LIB" render-systemd-unit \
       --template "$OC_UNIT_SRC" \
       --placeholder OPENCODE_BIN="$OPENCODE_BIN" \
+      --placeholder OPENCODE_PASSWORD="$OPENCODE_PASSWORD" \
+      --placeholder OPENCODE_DB_LINE="${OPENCODE_DB_PATH:+Environment=OPENCODE_DB=$OPENCODE_DB_PATH}" \
       --placeholder AGENT_PATH="$(launchd_agent_path)" \
       --placeholder ANTHROPIC_CLI_VERSION="$(resolve_anthropic_cli_version)")" \
       || die "render-systemd-unit failed (see lib)"
-    printf '%s' "$rendered" > "$OC_UNIT"
+    # 0600: the unit carries OPENCODE_PASSWORD (K1).
+    ( umask 077; printf '%s' "$rendered" > "$OC_UNIT" )
+    chmod 600 "$OC_UNIT"
     systemctl --user daemon-reload
     systemctl --user enable --now opencode-serve.service
     if [ "${MANTA_RESTART:-1}" = "1" ]; then
@@ -1447,8 +1339,13 @@ main() {
       # Same background-subagent flag AND the same claimed Claude Code version
       # the systemd unit and the LaunchAgent carry — keep the three
       # supervisors' environments identical.
-      ( OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true \
-        ANTHROPIC_CLI_VERSION="$(resolve_anthropic_cli_version)" \
+      # Exported inside the subshell (not `env VAR=…`) so the password never appears in a
+      # process's argument list.
+      ( export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+        export OPENCODE_PASSWORD
+        export OPENCODE_DISABLE_AUTOUPDATE=true
+        export ANTHROPIC_CLI_VERSION="$(resolve_anthropic_cli_version)"
+        if [ -n "${OPENCODE_DB_PATH:-}" ]; then export OPENCODE_DB="$OPENCODE_DB_PATH"; fi
         nohup "$OPENCODE_BIN" serve --port 4096 --hostname 127.0.0.1 >"$AUTH_DIR/opencode.log" 2>&1 & )
     fi
   fi

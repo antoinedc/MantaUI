@@ -96,7 +96,7 @@ describe("systemd controller", () => {
     const io = fakeIO();
     const svc = createOpencodeService({ platform: "linux", ...io.opts });
     assert.equal(svc.supervisor, "systemd");
-    await svc.configure("v2", { db: "/d/opencode-v2.db" });
+    assert.equal(await svc.configure("v2", { db: "/d/opencode-v2.db" }), true);
     const text = io.files.get("UNIT");
     assert.equal(unitExecBin(text), "/home/u/.opencode/bin/opencode");
     assert.equal(unitEnvValue(text, "OPENCODE_PASSWORD"), "deadbeef");
@@ -104,6 +104,9 @@ describe("systemd controller", () => {
     assert.equal(unitEnvValue(text, "OPENCODE_DISABLE_AUTOUPDATE"), "true");
     assert.equal(io.writes[0][1], 0o600, "the unit carries a password");
     assert.deepEqual(io.execs.at(-1), ["systemctl", "--user", "daemon-reload"]);
+    io.execs.length = 0;
+    assert.equal(await svc.configure("v2", { db: "/d/opencode-v2.db" }), false, "already configured → no rewrite, no reload");
+    assert.deepEqual(io.execs, []);
   });
   test("configure(v1) returns the unit to the preserved V1 binary and strips every V2-only env", async () => {
     const io = fakeIO();
@@ -152,16 +155,34 @@ describe("launchd controller", () => {
       ["launchctl", "bootstrap", "gui/501", "/Users/u/Library/LaunchAgents/com.mantaui.opencode.plist"],
     ]);
   });
-  test("configure(v1) deletes the V2-only keys", async () => {
+  test("configure(v1) deletes the V2-only keys that are present and reports a change; a second pass changes nothing", async () => {
     const execs = [];
-    const svc = createOpencodeService({
-      platform: "darwin", home: "/Users/u", exec: async (c, a) => (execs.push(a[1]), { stdout: "" }),
-      exists: (p) => p.endsWith(".plist"),
-    });
-    await svc.configure("v1");
+    const plist = new Map([
+      [":ProgramArguments:0", "/Users/u/.opencode/bin/opencode"],
+      [":EnvironmentVariables:OPENCODE_PASSWORD", "deadbeef"],
+      [":EnvironmentVariables:OPENCODE_DB", "/d/x.db"],
+      [":EnvironmentVariables:OPENCODE_DISABLE_AUTOUPDATE", "true"],
+    ]);
+    const exec = async (c, a) => {
+      const cmd = a[1];
+      execs.push(cmd);
+      const [verb, key, ...rest] = cmd.split(" ");
+      if (verb === "Print") {
+        if (!plist.has(key)) throw new Error("Does Not Exist");
+        return { stdout: `${plist.get(key)}\n` };
+      }
+      if (verb === "Delete") plist.delete(key);
+      if (verb === "Set" || verb === "Add") plist.set(key, verb === "Add" ? rest.slice(1).join(" ") : rest.join(" "));
+      return { stdout: "" };
+    };
+    const svc = createOpencodeService({ platform: "darwin", home: "/Users/u", exec, exists: (p) => p.endsWith(".plist") });
+    assert.equal(await svc.configure("v1"), true);
     assert.ok(execs.includes("Delete :EnvironmentVariables:OPENCODE_PASSWORD"));
     assert.ok(execs.includes("Delete :EnvironmentVariables:OPENCODE_DB"));
     assert.ok(execs.includes("Set :ProgramArguments:0 /Users/u/.opencode/bin/opencode-v1"));
+    execs.length = 0;
+    assert.equal(await svc.configure("v1"), false);
+    assert.ok(!execs.some((e) => /^(Set|Add|Delete)/.test(e)), "idempotent: nothing written the second time");
   });
 });
 
