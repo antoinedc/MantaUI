@@ -75,6 +75,7 @@ export function _setApiBase(url) {
 const OPENCODE_PASSWORD_FILE = "opencode-password";
 let cachedFilePassword = null;
 
+// TODO(C3 rebase): switch to readOpencodePassword() from ./upgradeV2Service.mjs (same lazy semantics).
 function opencodePassword() {
   const env = process.env.MANTA_OPENCODE_PASSWORD;
   if (typeof env === "string" && env.trim()) return env.trim();
