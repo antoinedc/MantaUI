@@ -240,7 +240,8 @@ try {
   check("generateSessionTitle → one-shot text with no session created", title.trim().length > 0, j(title));
   await oc.compactSession(s1.id);
   await until("compaction frames", () => of(s1.id, "compaction").some((f) => f.payload.phase === "ended"), 60_000);
-  check("compaction started…ended + transcriptStale", of(s1.id, "compaction")[0].payload.phase === "started" && of(s1.id, "transcriptStale").length >= 1);
+  await until("transcriptStale after the compaction settles", () => of(s1.id, "transcriptStale").length >= 1, 30_000);
+  check("compaction started…ended, then transcriptStale once it settles", of(s1.id, "compaction")[0].payload.phase === "started" && of(s1.id, "transcriptStale").length >= 1);
   check("a plan-mode prompt sets the plan agent, the next plain prompt returns to build", await (async () => {
     const n0 = of(s2.id, "turnComplete").length;
     await oc.sendPrompt({ sessionId: s2.id, text: "Reply with the word one.", agent: "plan", model: MODEL });
