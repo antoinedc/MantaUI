@@ -79,6 +79,7 @@ paths = [
   # generic-api-key next to a `BETAS` identifier. Public header values, audited
   # 2026-10-16. Listed per file: a new file must still be read before adding it.
   '''docs/opencode-v2/spikes/p1/manta-claude-max\.ts''',
+  '''docs/opencode-plugins-v2/manta-claude-max/lib/config\.ts''',
 
   # --- codemagic.yaml matches only the LITERAL STRINGS "-----BEGIN … PRIVATE
   # KEY-----" inside sed/printf commands that reconstruct a PEM at build time.
