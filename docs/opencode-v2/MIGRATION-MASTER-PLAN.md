@@ -1,6 +1,6 @@
 # OpenCode V2 migration — master plan
 
-Status: **draft for review** · Owner: CTO · Target opencode: **v2.0.30** (pin; re-validate on bump)
+Status: **approved 2026-10-16** · Owner: CTO · Target opencode: **v2.0.30** (pin; re-validate on bump)
 Evidence: `docs/opencode-v2/spikes/` — round 1 (`round1-a/b/c.md`) and proof spikes
 `p1` (Claude Max), `p2` (history migration), `p3` (behaviour gaps), `p4-inventory.md`
 (every Manta touchpoint). Every claim below marked *proven* was observed live on V2 2.0.30
@@ -75,8 +75,8 @@ removes that so the backend swap is invisible to every client.
 | D2 | Pin the opencode V2 version exactly; bump only after the contract suite passes; remove `opencode upgrade` from self-update | **Decided** |
 | D3 | Disk: the box owner frees space; migration pre-flight checks and refuses to start (nothing stopped, nothing changed) until there is enough | **Decided** |
 | D4 | **Hard switch.** One coordinated release: box release **R2** (V2 only), desktop **D2**, iOS **I2**. No dual-backend mode, no opt-in, no gradual rollout to users. Users must update everything | **Decided** |
-| D5 | Migrate on a copy when space allows (clean rollback), in place otherwise (V1 tables remain in the file) | Proposed |
-| D6 | Project `CLAUDE.md`: installer adds it to config `instructions` so V2 keeps reading it | Proposed |
+| D5 | Migrate on a copy when space allows (clean rollback), in place otherwise (V1 tables remain in the file) | **Decided** |
+| D6 | Project `CLAUDE.md`: installer adds it to config `instructions` so V2 keeps reading it | **Decided** |
 
 ---
 
