@@ -52,9 +52,15 @@ export const STEP_LABELS = Object.freeze({
 // How much of the overall bar each step is worth (copy's share moves to migrate in in-place mode).
 const WEIGHTS = { preflight: 0.02, stop: 0.03, copy: 0.2, migrate: 0.65, verify: 0.05, cutover: 0.05 };
 
-/** Free space needed, as a multiple of the V1 DB size (spec: copy ≥ 1.0×, in place ≥ 0.8×). */
-export const COPY_MODE_FACTOR = 1.0;
-export const IN_PLACE_FACTOR = 0.8;
+/**
+ * Free space needed, as a multiple of the V1 DB size. MEASURED in the C3 rehearsal (pinned 2.0.30,
+ * 300-session synthetic DB): migrating a COPY took 13.9 MB → 32.5 MB (the copy itself plus V2's
+ * rows, 2.34×); migrating IN PLACE grows the one file 1.34× (V1 tables stay, V2 tables are added).
+ * The thresholds sit just above those: a box that passes preflight can finish. (The first spec draft
+ * said 1.0× / 0.8×, which would let a box pass and then die mid-migration on ENOSPC.)
+ */
+export const COPY_MODE_FACTOR = 2.4;
+export const IN_PLACE_FACTOR = 1.4;
 
 export const OPENCODE_V2_URL = "http://127.0.0.1:4096";
 export const STOP_WAIT_MS = 60_000;

@@ -152,14 +152,18 @@ describe("path gate", () => {
 });
 
 describe("decideMode", () => {
-  test("copy needs 1.0x, in-place 0.8x, below that refuse — boundaries are inclusive", () => {
+  test("copy needs 2.4x, in-place 1.4x, below that refuse (needBytes = the in-place need) — boundaries inclusive", () => {
     const db = 100;
-    assert.equal(decideMode({ dbBytes: db, freeBytes: 100 }).mode, "copy");
-    assert.equal(decideMode({ dbBytes: db, freeBytes: 99 }).mode, "in-place");
-    assert.equal(decideMode({ dbBytes: db, freeBytes: 80 }).mode, "in-place");
-    assert.equal(decideMode({ dbBytes: db, freeBytes: 79 }).mode, null);
-    assert.equal(COPY_MODE_FACTOR, 1.0);
-    assert.equal(IN_PLACE_FACTOR, 0.8);
+    assert.equal(decideMode({ dbBytes: db, freeBytes: 240 }).mode, "copy");
+    assert.equal(decideMode({ dbBytes: db, freeBytes: 239 }).mode, "in-place");
+    assert.equal(decideMode({ dbBytes: db, freeBytes: 140 }).mode, "in-place");
+    const refused = decideMode({ dbBytes: db, freeBytes: 139 });
+    assert.equal(refused.mode, null);
+    assert.equal(refused.needBytes, 140);
+    assert.equal(COPY_MODE_FACTOR, 2.4);
+    assert.equal(IN_PLACE_FACTOR, 1.4);
+    // the measured growth (13.9→32.5 MB copy = 2.34x, 1.34x in place) fits under the thresholds
+    assert.ok(32.5 / 13.9 < COPY_MODE_FACTOR && 1.34 < IN_PLACE_FACTOR);
   });
 });
 
@@ -194,7 +198,7 @@ describe("preflight", () => {
     assert.equal(s.error.step, "preflight");
     assert.equal(s.error.retryable, true);
     assert.equal(s.error.haveBytes, 3 * GB);
-    assert.equal(s.error.needBytes, Math.ceil(32 * GB * 0.8));
+    assert.equal(s.error.needBytes, Math.ceil(32 * GB * 1.4));
     assert.match(s.error.message, /free disk space/);
     assert.equal(s.steps[0].status, "failed");
     assert.ok(s.steps[0].error);
@@ -219,8 +223,8 @@ describe("preflight", () => {
 });
 
 describe("copy vs in-place", () => {
-  test("enough room → copy mode: copies to opencode-v2.db, V2 started on that DB", async () => {
-    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 12 * GB });
+  test(">= 2.4x free → copy mode: copies to opencode-v2.db, V2 started on that DB", async () => {
+    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 25 * GB });
     const m = createUpgradeV2(box.deps);
     await m.boot();
     await runToIdle(m);
@@ -233,8 +237,8 @@ describe("copy vs in-place", () => {
     assert.equal(m._state().mode, "copy");
   });
 
-  test("only 0.8x–1.0x free → in-place: no copy, V2 started with no OPENCODE_DB", async () => {
-    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 9 * GB });
+  test("only 1.4x–2.4x free → in-place: no copy, V2 started with no OPENCODE_DB", async () => {
+    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 15 * GB });
     const m = createUpgradeV2(box.deps);
     await m.boot();
     await runToIdle(m);
@@ -536,7 +540,7 @@ describe("rollback", () => {
   });
 
   test("in-place mode: nothing to delete — V1 tables are intact", async () => {
-    const { box, m } = await failedAtVerify({ dbBytes: 10 * GB, freeBytes: 9 * GB });
+    const { box, m } = await failedAtVerify({ dbBytes: 10 * GB, freeBytes: 15 * GB });
     await m.rollback();
     assert.ok(!box.names().includes("removeDb"));
     assert.ok(box.names().includes("restoreV1"));
@@ -640,7 +644,7 @@ describe("HTTP surface (real server): upgrade-mode 503 gate + K3 routes", () => 
       assert.equal((await call("POST", "/rpc/x")).status, 200, "not upgrade mode any more");
       const st = await call("GET", "/api/upgrade");
       assert.equal(st.body.state, "failed");
-      assert.equal(st.body.error.needBytes, Math.ceil(10 * GB * 0.8));
+      assert.equal(st.body.error.needBytes, Math.ceil(10 * GB * 1.4));
       assert.equal(st.body.error.haveBytes, 1 * GB);
       assert.deepEqual((await call("POST", "/api/upgrade/rollback")).body, { ok: true });
       assert.equal((await call("GET", "/api/upgrade")).body.state, "rolled_back");
