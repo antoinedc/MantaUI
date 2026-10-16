@@ -63,29 +63,24 @@ async function openFixture() {
     return null;
   }
   const db = new DatabaseSync(":memory:");
+  // OpenCode V2 store: session_v2 + session_message (user | assistant rows).
   db.exec(`
-    CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-    CREATE TABLE session (id TEXT, parent_id TEXT, agent TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-    CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+    CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER);
+    CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
   `);
+  let seq = 0;
   return {
     db,
     insSession(id, { agent = "build", directory = "/w" } = {}) {
-      db.prepare("INSERT INTO session (id, parent_id, agent, directory, time_created) VALUES (?,?,?,?,?)").run(id, null, agent, directory, 0);
+      db.prepare("INSERT INTO session_v2 (id, parent_id, agent, directory, time_created) VALUES (?,?,?,?,?)").run(id, null, agent, directory, 0);
     },
     insMessage(id, sessionId, { role, ts, cost = 0, text = "" }) {
-      db.prepare("INSERT INTO message (id, session_id, time_created, data) VALUES (?,?,?,?)").run(
-        id,
-        sessionId,
-        ts,
-        JSON.stringify({
-          role,
-          providerID: "anthropic",
-          modelID: "claude-sonnet",
-          cost,
-          tokens: { input: 1, output: 1 },
-          text,
-        }),
+      // user → {text}; assistant → model/cost/tokens (a user message carries the text).
+      const data = role === "user"
+        ? { text, time: { created: ts } }
+        : { agent: "build", model: { providerID: "anthropic", id: "claude-sonnet" }, cost, tokens: { input: 1, output: 1 }, time: { created: ts, completed: ts }, content: [] };
+      db.prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)").run(
+        id, sessionId, role, ++seq, ts, ts, JSON.stringify(data),
       );
     },
   };

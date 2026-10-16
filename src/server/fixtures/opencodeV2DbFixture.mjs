@@ -214,6 +214,71 @@ export async function createFixtureDb(seed = {}) {
   };
 }
 
+// ---- source-DB editing helpers (suites that mutate the source after sync) ----
+// All take an OPEN read-write handle on the fixture db and speak the seed's
+// V1-era vocabulary, translating to V2's one-row-per-message storage.
+
+function readAssistant(db, messageId) {
+  const row = db.prepare("SELECT data FROM session_message WHERE id = ?").get(messageId);
+  if (!row) throw new Error(`fixture: no message ${messageId}`);
+  return JSON.parse(row.data);
+}
+function writeAssistant(db, messageId, data) {
+  db.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(JSON.stringify(data), messageId);
+}
+function locate(seedPartId) {
+  const id = partId(seedPartId);
+  const m = /^part_(.+)x(\d{4})$/.exec(id);
+  return { id, idx: Number(m[2]), messageIds: [`msg_${m[1]}`, m[1]] };
+}
+function messageIdOf(db, loc) {
+  const row = db.prepare("SELECT id FROM session_message WHERE id IN (?, ?)").get(...loc.messageIds);
+  return row.id;
+}
+
+/** Rewrite one part's content in place (the message's time_updated is NOT touched). */
+export function editPart(db, seedPartId, newPartData) {
+  const loc = locate(seedPartId);
+  const mid = messageIdOf(db, loc);
+  const data = readAssistant(db, mid);
+  const item = contentItem({ id: seedPartId, data: newPartData }, loc.idx);
+  if (data.content) data.content[loc.idx] = item;
+  else data.text = newPartData.text; // user / synthetic / system: the single text
+  writeAssistant(db, mid, data);
+}
+
+/**
+ * Append a part to an existing assistant message; its derived id is registered.
+ * `timeUpdated` (optional) bumps the owning message's time_updated — a part's
+ * time_updated IS its message's, so this is how a "newer" part is simulated.
+ */
+export function addPart(db, { id, messageId, data, timeUpdated }) {
+  const msg = readAssistant(db, messageId);
+  const item = contentItem({ id, data }, msg.content.length);
+  msg.content.push(item);
+  PART_IDS.set(id, partIdFor(messageId, msg.content.length - 1));
+  writeAssistant(db, messageId, msg);
+  if (timeUpdated !== undefined) db.prepare("UPDATE session_message SET time_updated = ? WHERE id = ?").run(timeUpdated, messageId);
+}
+
+/** Drop the last `n` content items of a message (V2 content is append-only, so the tail is what can vanish). */
+export function dropTrailingParts(db, messageId, n) {
+  const msg = readAssistant(db, messageId);
+  msg.content.splice(msg.content.length - n, n);
+  writeAssistant(db, messageId, msg);
+}
+
+/** Replace a message's raw V2 row (type + data object). */
+export function setMessage(db, messageId, { type, data }) {
+  db.prepare("UPDATE session_message SET type = ?, data = ? WHERE id = ?").run(type, JSON.stringify(data), messageId);
+}
+
+/** Delete a session and its messages (V2 cascades session_message on session_v2). */
+export function deleteSession(db, sessionId) {
+  db.prepare("DELETE FROM session_message WHERE session_id = ?").run(sessionId);
+  db.prepare("DELETE FROM session_v2 WHERE id = ?").run(sessionId);
+}
+
 /**
  * Spec §14 canary: the fixture's resolved DB path must be the synthetic file
  * and can never fall back to the production home path — under MANTA_STATE_HOME
