@@ -33,7 +33,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ctoListSessions, ctoSearch, ctoAround, CTO_CONTEXT_LIMITS } from "./ctoContext.mjs";
 import { _resetDbHandle, _setSqliteModuleOverride } from "./opencodeDb.mjs";
-import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeV2DbFixture.mjs";
+import { createFixtureDb, sqliteAvailable, withFixtureDb, partId as pid, rawPart } from "./fixtures/opencodeV2DbFixture.mjs";
 
 const hasSqlite = await sqliteAvailable();
 
@@ -306,15 +306,11 @@ test("search: serializer-independent decoded matching — raw JSON \\u00e9, esca
     const { DatabaseSync } = await import("node:sqlite");
     const raw = new DatabaseSync(fixture.dbPath);
     try {
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_cafe", "m_e", "s_raw", T, T, '{"type":"text","text":"caf\\u00e9 finding"}',
-      );
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_slash", "m_s", "s_raw", T + 1, T + 1, '{"type":"text","text":"path a\\/b piece"}',
-      );
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_surr", "m_u", "s_raw", T + 2, T + 2, '{"type":"tool","tool":"bash","state":{"status":"completed","output":"logo \\ud83d\\ude00 done"}}',
-      );
+      // V2 stores a message's parts inside the message row's data, so the raw
+      // bytes are a hand-escaped content item written straight into the row.
+      rawPart(raw, "p_cafe", "m_e", '{"type":"text","text":"caf\\u00e9 finding"}');
+      rawPart(raw, "p_slash", "m_s", '{"type":"text","text":"path a\\/b piece"}');
+      rawPart(raw, "p_surr", "m_u", '{"type":"tool","id":"toolu_1","name":"bash","state":{"status":"completed","input":{},"content":[{"type":"text","text":"logo \\ud83d\\ude00 done"}]}}');
     } finally {
       raw.close();
     }
@@ -322,13 +318,13 @@ test("search: serializer-independent decoded matching — raw JSON \\u00e9, esca
     await withFixtureDb(fixture, async () => {
       const cafe = await ctoSearch({ query: "café" });
       assert.equal(cafe.hits.length, 1, "a \\u00e9-escaped store must match the decoded query");
-      assert.equal(cafe.hits[0].partId, "p_cafe");
+      assert.equal(cafe.hits[0].partId, pid("p_cafe"));
       const slash = await ctoSearch({ query: "a/b" });
       assert.equal(slash.hits.length, 1, "an escaped-solidus store must match the decoded query");
-      assert.equal(slash.hits[0].partId, "p_slash");
+      assert.equal(slash.hits[0].partId, pid("p_slash"));
       const surr = await ctoSearch({ query: "\u{1F600} done" });
       assert.equal(surr.hits.length, 1, "a surrogate-pair-escaped store must match the decoded query");
-      assert.equal(surr.hits[0].partId, "p_surr");
+      assert.equal(surr.hits[0].partId, pid("p_surr"));
       assert.equal(surr.hits[0].tool.matchedField, "output");
     });
   } finally {
@@ -356,20 +352,20 @@ test("around: a partId anchor reaches evidence beyond the first bounded part rea
       // The search hit exists and names the part beyond the first read.
       const hit = await ctoSearch({ query: "decisive result 51", sessionId: "s_deep" });
       assert.equal(hit.hits.length, 1);
-      assert.equal(hit.hits[0].partId, "p_deep50");
+      assert.equal(hit.hits[0].partId, pid("p_deep50"));
 
       // WITHOUT the partId anchor: the first bounded read caps at 50 and
       // reports the omission (the gap this contract closes).
       const plain = await ctoAround({ sessionId: "s_deep", messageId: "m_deep", before: 0, after: 0 });
       assert.equal(plain.messages[0].partsOmitted, true);
-      assert.ok(!plain.messages[0].parts.some((p) => p.partId === "p_deep50"), "the 51st part is genuinely beyond the plain bounded read");
+      assert.ok(!plain.messages[0].parts.some((p) => p.partId === pid("p_deep50")), "the 51st part is genuinely beyond the plain bounded read");
 
       // WITH the partId anchor: the decisive tool result is retrievable,
       // centered, without loading all 60 parts.
-      const anchored = await ctoAround({ sessionId: "s_deep", messageId: "m_deep", partId: "p_deep50", before: 0, after: 0 });
+      const anchored = await ctoAround({ sessionId: "s_deep", messageId: "m_deep", partId: pid("p_deep50"), before: 0, after: 0 });
       assert.equal(anchored.status, "ok");
-      assert.equal(anchored.session.anchorPartId, "p_deep50");
-      const decisive = anchored.messages[0].parts.find((p) => p.partId === "p_deep50");
+      assert.equal(anchored.session.anchorPartId, pid("p_deep50"));
+      const decisive = anchored.messages[0].parts.find((p) => p.partId === pid("p_deep50"));
       assert.ok(decisive, "the hit's evidence is fetchable across the part boundary");
       assert.match(decisive.text, /decisive result 51/);
       assert.equal(decisive.tool.name, "bash");
@@ -397,7 +393,7 @@ test("search: the decision that exists only in the CLOSED child session is found
     const hit = res.hits[0];
     assert.equal(hit.sessionId, "s_child");
     assert.equal(hit.messageId, "mc2");
-    assert.equal(hit.partId, "p_decision");
+    assert.equal(hit.partId, pid("p_decision"));
     assert.equal(hit.kind, "text");
     assert.equal(hit.role, "assistant");
     assert.match(hit.snippet.match, /lease-based locking/);
@@ -419,7 +415,7 @@ test("search: tool evidence is retrievable and its field identified (U05), with 
     assert.equal(byOutput.hits[0].kind, "tool");
     assert.equal(byOutput.hits[0].sessionId, "s_child");
     assert.equal(byOutput.hits[0].messageId, "mc3");
-    assert.equal(byOutput.hits[0].partId, "p_tool");
+    assert.equal(byOutput.hits[0].partId, pid("p_tool"));
     assert.equal(byOutput.hits[0].tool.name, "bash");
     assert.equal(byOutput.hits[0].tool.status, "completed");
     assert.equal(byOutput.hits[0].tool.matchedField, "output");
@@ -438,10 +434,10 @@ test("search: decoded evidence with quotes/backslashes/newlines stays reachable 
     const winPath = await ctoSearch({ query: "C:\\store\\db" });
     assert.equal(winPath.status, "ok");
     assert.equal(winPath.hits.length, 1, "the Windows path literal must match its JSON-escaped storage");
-    assert.equal(winPath.hits[0].partId, "p_decision");
+    assert.equal(winPath.hits[0].partId, pid("p_decision"));
     const quoted = await ctoSearch({ query: 'she said "lease it"' });
     assert.equal(quoted.hits.length, 1, "a quoted phrase must match its JSON-escaped storage");
-    assert.equal(quoted.hits[0].partId, "p_decision");
+    assert.equal(quoted.hits[0].partId, pid("p_decision"));
   });
   const nlSeed = {
     sessions: [{ id: "s_nl", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }],
@@ -451,7 +447,7 @@ test("search: decoded evidence with quotes/backslashes/newlines stays reachable 
   await withFixture(nlSeed, async () => {
     const res = await ctoSearch({ query: "line1\nline2" });
     assert.equal(res.hits.length, 1, "a query containing a real newline must match its JSON-escaped storage");
-    assert.equal(res.hits[0].partId, "p_nl");
+    assert.equal(res.hits[0].partId, pid("p_nl"));
   });
 });
 
@@ -485,7 +481,7 @@ test("search: a scan window FULL of discarded candidates advances the cursor and
       assert.ok(page1.nextCursor, "the cursor must advance past the last CONSUMED candidate");
       const page2 = await ctoSearch({ query: "needle", sessionId: "s_child", cursor: page1.nextCursor });
       assert.equal(page2.hits.length, 1, "the older real match becomes reachable");
-      assert.equal(page2.hits[0].partId, "p_real");
+      assert.equal(page2.hits[0].partId, pid("p_real"));
       assert.equal(page2.nextCursor, null, "the source is exhausted after it");
     },
   );
@@ -558,7 +554,7 @@ test("search: hit limit clamp + keyset cursor pagination over a needle series wi
     assert.equal(new Set(seen).size, seen.length, "keyset cursor pages must never repeat a hit");
     assert.deepEqual(
       seen.slice().sort(),
-      Array.from({ length: 7 }, (_, i) => `p_needle${i}`).sort(),
+      Array.from({ length: 7 }, (_, i) => pid(`p_needle${i}`)).sort(),
       "pagination must cover every matching part exactly once",
     );
     const bad = await ctoSearch({ query: "needle", cursor: "%%%not-a-cursor%%%" });
@@ -583,7 +579,7 @@ test("around: returns the exact chronological neighborhood with stable IDs, anch
     assert.equal(res.truncated, false);
     const anchorMsg = res.messages[1];
     assert.equal(anchorMsg.anchor, true);
-    assert.equal(anchorMsg.parts[0].partId, "p_decision");
+    assert.equal(anchorMsg.parts[0].partId, pid("p_decision"));
     assert.match(anchorMsg.parts[0].text, /lease-based locking/);
     const toolMsg = res.messages[2];
     assert.equal(toolMsg.parts[0].kind, "tool");
@@ -665,7 +661,7 @@ test("around: a MB tool output is cut per part with omitted-size metadata, part 
       assert.equal(res.status, "ok");
       // MB output: per-part cap with honest omitted-size metadata.
       const mbItem = res.messages[0].parts[0];
-      assert.equal(mbItem.partId, "p_mb");
+      assert.equal(mbItem.partId, pid("p_mb"));
       assert.equal(mbItem.textTruncated, true);
       assert.equal(mbItem.textSourceBytes, 1_000_000);
       assert.ok(encoder.encode(mbItem.text).length <= CTO_CONTEXT_LIMITS.partEvidenceMaxBytes);
@@ -714,7 +710,7 @@ test("around: compaction removes the INTENDED records — the requested anchor m
   await withFixture(
     { sessions: [{ id: "s_r", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages, parts },
     async () => {
-      const requestedPart = "pr_mr7_49";
+      const requestedPart = pid("pr_mr7_49");
       const res = await ctoAround({ sessionId: "s_r", messageId: "mr7", partId: requestedPart });
       assert.equal(res.status, "ok");
       assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
@@ -752,14 +748,8 @@ test("search: object-shaped state.input with alternate stored serializer escapes
     const { DatabaseSync } = await import("node:sqlite");
     const raw = new DatabaseSync(fixture.dbPath);
     try {
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_objcafe", "m_cafe", "s_obj", T, T,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"deploy caf\\u00e9 now"}}}',
-      );
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_objpath", "m_path", "s_obj", T + 1, T + 1,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"robocopy C:\\\\Users\\\\dev"}}}',
-      );
+      rawPart(raw, "p_objcafe", "m_cafe", '{"type":"tool","id":"t6","name":"bash","state":{"status":"completed","input":{"command":"deploy caf\\u00e9 now"}}}');
+      rawPart(raw, "p_objpath", "m_path", '{"type":"tool","id":"t7","name":"bash","state":{"status":"completed","input":{"command":"robocopy C:\\\\Users\\\\dev"}}}');
     } finally {
       raw.close();
     }
@@ -767,12 +757,12 @@ test("search: object-shaped state.input with alternate stored serializer escapes
     await withFixtureDb(fixture, async () => {
       const cafe = await ctoSearch({ query: "café" });
       assert.equal(cafe.hits.length, 1, "a nested \u00e9-escaped object input must match the decoded query");
-      assert.equal(cafe.hits[0].partId, "p_objcafe");
+      assert.equal(cafe.hits[0].partId, pid("p_objcafe"));
       assert.equal(cafe.hits[0].tool.matchedField, "input");
       assert.match(cafe.hits[0].snippet.match, /café/);
       const path = await ctoSearch({ query: "C:\\Users\\dev" });
       assert.equal(path.hits.length, 1, "a nested Windows path in an object input must match the decoded query");
-      assert.equal(path.hits[0].partId, "p_objpath");
+      assert.equal(path.hits[0].partId, pid("p_objpath"));
       assert.equal(path.hits[0].tool.matchedField, "input");
     });
   } finally {
@@ -830,12 +820,12 @@ test("search: the matched atom comes from SQL json_tree — hits beyond every JS
       const res = await ctoSearch({ query: "the decisive thirty third scalar" });
       assert.equal(res.status, "ok");
       assert.equal(res.hits.length, 1, "the true hit beyond every cap is found on this page — no cursor-then-exhaustion");
-      assert.equal(res.hits[0].partId, "p_cap");
+      assert.equal(res.hits[0].partId, pid("p_cap"));
       assert.equal(res.hits[0].tool.matchedField, "input", "the candidate evidence stays tied to its part+field");
       assert.match(res.hits[0].snippet.match, /thirty third/);
       const deepRes = await ctoSearch({ query: "deeply nested decisive token" });
       assert.equal(deepRes.hits.length, 1, "a match beyond the old depth cap is reachable");
-      assert.equal(deepRes.hits[0].partId, "p_deep");
+      assert.equal(deepRes.hits[0].partId, pid("p_deep"));
       assert.equal(deepRes.hits[0].tool.matchedField, "input");
     },
   );
@@ -861,17 +851,17 @@ test("around: protected anchor text is trimmed only AFTER neighbors are relieved
   await withFixture(
     { sessions: [{ id: "s_tail", projectId: "prj_a", directory: "/repo-a", timeUpdated: T }], messages, parts },
     async () => {
-      const res = await ctoAround({ sessionId: "s_tail", messageId: "m_anchor", partId: "p_anchor", before: 25, after: 0 });
+      const res = await ctoAround({ sessionId: "s_tail", messageId: "m_anchor", partId: pid("p_anchor"), before: 25, after: 0 });
       assert.equal(res.status, "ok");
       assert.ok(serializedBytes(res) <= CTO_CONTEXT_LIMITS.textBudgetBytes, "the ACTUAL serialized response must stay within 24 KiB");
       const anchorMsg = res.messages.find((m) => m.id === "m_anchor");
       assert.ok(anchorMsg, "the anchor message survives");
-      const anchorPart = anchorMsg.parts.find((p) => p.partId === "p_anchor");
+      const anchorPart = anchorMsg.parts.find((p) => p.partId === pid("p_anchor"));
       assert.ok(anchorPart, "the requested part evidence is never omitted");
       assert.equal(anchorPart.text.length, 5988, "the anchor text is untouched — neighbor shrink satisfied the budget");
       assert.ok(anchorPart.text.endsWith(tail), "the exact decisive tail is preserved");
       assert.equal(res.truncated, true, "the neighbor bounding is reported");
-      const relieved = res.messages.flatMap((m) => m.parts).some((p) => p.textTruncated === true && p.partId !== "p_anchor");
+      const relieved = res.messages.flatMap((m) => m.parts).some((p) => p.textTruncated === true && p.partId !== pid("p_anchor"));
       assert.ok(relieved, "neighbors were relieved (bounded) instead of the anchor");
     },
   );
@@ -894,27 +884,15 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
     const raw = new DatabaseSync(fixture.dbPath);
     try {
       // Text part: the query ONLY in a metadata field — not eligible.
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_txtmeta", "m_txtmeta", "s_elig", T, T,
-        '{"type":"text","text":"nothing relevant here","metadata":{"notes":"metadatum-only token"}}',
-      );
+      rawPart(raw, "p_txtmeta", "m_txtmeta", '{"type":"text","text":"nothing relevant here","metadata":{"notes":"metadatum-only token"}}');
       // Reasoning part: its text is not an eligible atom class.
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_reason", "m_reason", "s_elig", T + 1, T + 1,
-        '{"type":"reasoning","text":"reasoner muses about reasoning-only token"}',
-      );
+      rawPart(raw, "p_reason", "m_reason", '{"type":"reasoning","text":"reasoner muses about reasoning-only token"}');
       // Tool part: state.metadata.output (a streaming transient) sits BEFORE
       // state.output in document order and shares a term with it — the pick
       // must be the REAL output atom, never the metadata shadow.
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_shadow", "m_shadow", "s_elig", T + 2, T + 2,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"output":"claims shadowed done"},"output":"the real output done"}}',
-      );
+      rawPart(raw, "p_shadow", "m_shadow", '{"type":"tool","id":"t1","name":"bash","state":{"status":"completed","input":{},"metadata":{"output":"claims shadowed done"},"content":[{"type":"text","text":"the real output done"}]}}');
       // Tool part: state.inputSummary is NOT a descendant of state.input.
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_summary", "m_summary", "s_elig", T + 3, T + 3,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","inputSummary":"summary-only token","input":{"command":"npm test"}}}',
-      );
+      rawPart(raw, "p_summary", "m_summary", '{"type":"tool","id":"t2","name":"bash","state":{"status":"completed","inputSummary":"summary-only token","input":{"command":"npm test"}}}');
     } finally {
       raw.close();
     }
@@ -926,7 +904,7 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
       assert.deepEqual(reason.hits, [], "reasoning parts are not eligible — no hit");
       const shared = await ctoSearch({ query: "done" });
       assert.equal(shared.hits.length, 1, "the tool part is found via its REAL output");
-      assert.equal(shared.hits[0].partId, "p_shadow");
+      assert.equal(shared.hits[0].partId, pid("p_shadow"));
       assert.equal(shared.hits[0].tool.matchedField, "output", "the metadata atom never shadows the legitimate output");
       assert.match(shared.hits[0].snippet.match, /done/);
       assert.match(shared.hits[0].snippet.pre + shared.hits[0].snippet.match, /real output/, "the snippet comes from state.output, not the metadata");
@@ -936,7 +914,7 @@ test("search: eligibility restricts atoms BEFORE first-pick — metadata, reason
       assert.deepEqual(summary.hits, [], "inputSummary is not a descendant of state.input — no hit");
       const legit = await ctoSearch({ query: "npm test", sessionId: "s_elig" });
       assert.equal(legit.hits.length, 1, "the legitimate input remains reachable");
-      assert.equal(legit.hits[0].partId, "p_summary");
+      assert.equal(legit.hits[0].partId, pid("p_summary"));
       assert.equal(legit.hits[0].tool.matchedField, "input");
     });
   } finally {
@@ -964,20 +942,11 @@ test("search: descendant eligibility needs the exact prefix AND the boundary —
     const { DatabaseSync } = await import("node:sqlite");
     const raw = new DatabaseSync(fixture.dbPath);
     try {
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_decoy", "m_decoy", "s_decoy", T, T,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"xy":{"note":"decoy-only token"}},"output":"nothing relevant"}}',
-      );
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_real", "m_real", "s_decoy", T + 1, T + 1,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"xy":{"note":"shared done decoy"}},"output":"the real output done"}}',
-      );
+      rawPart(raw, "p_decoy", "m_decoy", '{"type":"tool","id":"t3","name":"bash","state":{"status":"completed","input":{},"metadata":{"xy":{"note":"decoy-only token"}},"content":[{"type":"text","text":"nothing relevant"}]}}');
+      rawPart(raw, "p_real", "m_real", '{"type":"tool","id":"t4","name":"bash","state":{"status":"completed","input":{},"metadata":{"xy":{"note":"shared done decoy"}},"content":[{"type":"text","text":"the real output done"}]}}');
       // EXACT top-level $.metadata.xy.note decoy — ineligible for every part
       // type; alone it must fabricate no hit.
-      raw.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)").run(
-        "p_toplevel", "m_real", "s_decoy", T + 2, T + 2,
-        '{"type":"tool","tool":"bash","state":{"status":"completed","output":"nothing relevant"},"metadata":{"xy":{"note":"toplevel-only token"}}}',
-      );
+      rawPart(raw, "p_toplevel", "m_real", '{"type":"tool","id":"t5","name":"bash","state":{"status":"completed","input":{},"content":[{"type":"text","text":"nothing relevant"}]},"metadata":{"xy":{"note":"toplevel-only token"}}}');
     } finally {
       raw.close();
     }
@@ -987,7 +956,7 @@ test("search: descendant eligibility needs the exact prefix AND the boundary —
       assert.deepEqual(alone.hits, [], "the same-offset decoy is not an eligible input descendant — no hit");
       const shared = await ctoSearch({ query: "done" });
       assert.equal(shared.hits.length, 1, "the part is found via its REAL output");
-      assert.equal(shared.hits[0].partId, "p_real");
+      assert.equal(shared.hits[0].partId, pid("p_real"));
       assert.equal(shared.hits[0].tool.matchedField, "output", "the decoy atom never shadows the legitimate output");
       assert.match(shared.hits[0].snippet.pre + shared.hits[0].snippet.match, /real output/, "the snippet comes from state.output, not the decoy");
       const toplevel = await ctoSearch({ query: "toplevel-only token" });
@@ -1075,11 +1044,11 @@ test("U04: passive reads observe ZERO side effects — no fetch/prompt dispatch,
   try {
     await withFixture(seedRows(), async (fixture) => {
       const beforeTables = await tableNames(fixture.dbPath);
-      const beforeRows = fixture.rowCount("session") + fixture.rowCount("message") + fixture.rowCount("part");
+      const beforeRows = fixture.rowCount("session_v2") + fixture.rowCount("session_message");
       assert.equal((await ctoListSessions({})).status, "ok");
       assert.equal((await ctoSearch({ query: "lease" })).status, "ok");
       assert.equal((await ctoAround({ sessionId: "s_child", messageId: "mc2" })).status, "ok");
-      const afterRows = fixture.rowCount("session") + fixture.rowCount("message") + fixture.rowCount("part");
+      const afterRows = fixture.rowCount("session_v2") + fixture.rowCount("session_message");
       assert.equal(afterRows, beforeRows, "a passive read must leave source row counts unchanged");
       assert.deepEqual(await tableNames(fixture.dbPath), beforeTables, "no table/index may be created in the source DB (no index modification)");
       assert.equal(fetchCalls, 0, "the fetch seam observed zero calls — no prompt dispatch, window or job creation on read");

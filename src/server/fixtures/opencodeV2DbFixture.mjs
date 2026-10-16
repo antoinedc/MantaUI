@@ -63,6 +63,24 @@ export function partId(seedPartId) {
   return id;
 }
 
+// Hand-written message bytes for the serializer-escape tests: V2 keeps a
+// message's parts INSIDE the message row, so "a part whose stored JSON uses a
+// different escape form" is a content item written verbatim into the row. Each
+// call appends `itemJson` (a raw JSON string, never re-serialised) to the
+// message's content and registers the derived part id for `partId(seedId)`.
+const RAW_ITEMS = new WeakMap(); // rawDb handle → Map<messageId, raw item strings>
+export function rawPart(rawDb, seedPartId, messageId, itemJson) {
+  if (!RAW_ITEMS.has(rawDb)) RAW_ITEMS.set(rawDb, new Map());
+  const byMessage = RAW_ITEMS.get(rawDb);
+  const items = byMessage.get(messageId) ?? [];
+  items.push(itemJson);
+  byMessage.set(messageId, items);
+  const row = rawDb.prepare("SELECT time_created FROM session_message WHERE id = ?").get(messageId);
+  const data = `{"agent":"build","model":{},"time":{"created":${row.time_created}},"content":[${items.join(",")}]}`;
+  rawDb.prepare("UPDATE session_message SET data = ? WHERE id = ?").run(data, messageId);
+  PART_IDS.set(seedPartId, partIdFor(messageId, items.length - 1));
+}
+
 // A V1-shaped seed part → the V2 assistant content item it becomes.
 function contentItem(part, idx) {
   const d = part.data ?? {};
@@ -150,6 +168,13 @@ export async function createFixtureDb(seed = {}) {
       if (md.role === "user") {
         const text = parts.filter((p) => p.data?.type === "text").map((p) => p.data.text ?? "").join("\n") || (typeof md.text === "string" ? md.text : "");
         insMsg.run(m.id, m.sessionId, "user", seq, created, updated, JSON.stringify({ text, time: { created } }));
+        parts.forEach((p) => PART_IDS.set(p.id, partIdFor(m.id, 0)));
+        continue;
+      }
+      // A message whose every part is a `synthetic` text part is how V2 stores
+      // injected text: a `synthetic` message, not assistant content.
+      if (parts.length > 0 && parts.every((p) => p.data?.type === "text" && p.data.synthetic)) {
+        insMsg.run(m.id, m.sessionId, "synthetic", seq, created, updated, JSON.stringify({ text: parts.map((p) => p.data.text ?? "").join("\n"), time: { created } }));
         parts.forEach((p) => PART_IDS.set(p.id, partIdFor(m.id, 0)));
         continue;
       }
