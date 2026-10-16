@@ -497,7 +497,20 @@ test("snapshotState replays running + questions + permissions together, each wit
   assert.equal(snap[0].payload.sessions.length, 1);
   assert.equal(snap[0].payload.sessions[0].sessionId, SID);
   const subs = snap.slice(1).map((e) => e.sub).sort();
-  assert.deepEqual(subs, ["permissions", "questions"]);
+  // One `attention` frame too (question wins over permission), so a reconnecting
+  // sidebar shows the badge.
+  assert.deepEqual(subs, ["attention", "permissions", "questions"]);
+  assert.deepEqual(snap.find((e) => e.sub === "attention").payload, { kind: "question" });
+});
+
+test("snapshotState replays attention only for sessions with a pending ask; permission-only → permission", () => {
+  const { interp } = make(42_000);
+  interp.interpret({ type: "permission.asked", properties: { sessionID: "ses_perm", id: "perm_1", prompt: "p" } });
+  interp.interpret({ type: "session.status", properties: { sessionID: "ses_quiet", status: { type: "busy" } } });
+  const att = interp.snapshotState().filter((e) => e.sub === "attention");
+  assert.deepEqual(att.map((e) => [e.sessionId, e.payload.kind]), [["ses_perm", "permission"]]);
+  interp.interpret({ type: "permission.replied", properties: { sessionID: "ses_perm", requestID: "perm_1", id: "perm_1" } });
+  assert.equal(interp.snapshotState().filter((e) => e.sub === "attention").length, 0);
 });
 
 test("a second busy while already running emits the SAME since (clock not restarted)", () => {
@@ -1350,4 +1363,86 @@ test("message.* events that nest the session id (info/part) are still interprete
   interp.interpret({ id: "n1", type: "message.updated", properties: { info: { id: "msg_n", sessionID: SID, role: "user" } } });
   interp.interpret({ id: "n2", type: "message.part.updated", properties: { part: { id: "p", type: "text", messageID: "msg_n2", sessionID: SID } } });
   assert.deepEqual(subs(events, "messageChanged").map((e) => [e.sessionId, e.payload.messageID]), [[SID, "msg_n"], [SID, "msg_n2"]]);
+});
+
+// ── stepEnded from step-finish parts (OpenCode V2 slice A2) ──
+
+const stepFinish = (id, messageID, extra = {}) => ({
+  id: `evt_${id}`,
+  type: "message.part.updated",
+  properties: {
+    sessionID: SID,
+    part: {
+      id,
+      messageID,
+      sessionID: SID,
+      type: "step-finish",
+      reason: "tool-calls",
+      cost: 0.5,
+      tokens: { total: 90, input: 3, output: 12, reasoning: 1, cache: { read: 70, write: 4 } },
+      ...extra,
+    },
+  },
+});
+
+test("step-finish part emits stepEnded with tokens/cost/reason (finish = reason)", () => {
+  const { interp, events } = make();
+  interp.interpret(stepFinish("prt_sf1", "msg_a"));
+  const f = subs(events, "stepEnded");
+  assert.equal(f.length, 1);
+  assert.deepEqual(f[0].payload, {
+    messageID: "msg_a",
+    tokens: { input: 3, output: 12, reasoning: 1, cache: { read: 70, write: 4 } },
+    cost: 0.5,
+    finish: "tool-calls",
+  });
+});
+
+test("step-finish: a re-emitted part (same id) produces one frame; a second part another", () => {
+  const { interp, events } = make();
+  interp.interpret(stepFinish("prt_sf1", "msg_a"));
+  interp.interpret(stepFinish("prt_sf1", "msg_a")); // no event id → not caught by the id filter, caught by part id
+  interp.interpret(stepFinish("prt_sf2", "msg_a", { reason: "stop" }));
+  assert.deepEqual(subs(events, "stepEnded").map((e) => e.payload.finish), ["tool-calls", "stop"]);
+});
+
+test("step-finish without usage still announces the step (zeros, no cost/finish)", () => {
+  const { interp, events } = make();
+  interp.interpret(stepFinish("prt_sf1", "msg_a", { tokens: undefined, cost: undefined, reason: undefined }));
+  assert.deepEqual(subs(events, "stepEnded")[0].payload, {
+    messageID: "msg_a",
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  });
+});
+
+test("stepEnded de-dup: a build emitting BOTH step.ended and step-finish yields one frame per step (either order)", () => {
+  const ended = (id, messageID) => ({
+    id: `evt_${id}`,
+    type: "session.next.step.ended",
+    properties: { sessionID: SID, messageID, finish: "tool-calls", tokens: { input: 1, output: 2, cache: { read: 3, write: 4 } } },
+  });
+  // event first, then the part
+  const a = make();
+  a.interp.interpret(ended("e1", "msg_a"));
+  a.interp.interpret(stepFinish("prt_1", "msg_a"));
+  assert.equal(subs(a.events, "stepEnded").length, 1);
+  // part first, then the event — the event's truncation/context frames still fire
+  const b = make();
+  b.interp.interpret(stepFinish("prt_1", "msg_a"));
+  b.interp.interpret(ended("e1", "msg_a"));
+  assert.equal(subs(b.events, "stepEnded").length, 1);
+  assert.equal(subs(b.events, "context").length, 1, "the event path still emits context");
+  // a SECOND step of the same message is a new step on both sources
+  b.interp.interpret(stepFinish("prt_2", "msg_a"));
+  b.interp.interpret(ended("e2", "msg_a"));
+  assert.equal(subs(b.events, "stepEnded").length, 2);
+  // different messages never suppress each other
+  b.interp.interpret(ended("e3", "msg_b"));
+  assert.equal(subs(b.events, "stepEnded").length, 3);
+});
+
+test("a step-finish part does not emit context/cache/truncation (only stepEnded)", () => {
+  const { interp, events } = make();
+  interp.interpret(stepFinish("prt_sf1", "msg_a", { reason: "length" }));
+  for (const sub of ["context", "cache", "truncation"]) assert.equal(subs(events, sub).length, 0, sub);
 });

@@ -249,3 +249,32 @@ test("recorder ownership filter reads every place an event can name its session"
   assert.deepEqual([...eventSessionIds({ type: "session.created", properties: { sessionID: "c", info: { id: "c", parentID: "p" } } })], ["c"]);
   assert.equal(eventSessionIds({ type: "server.heartbeat", properties: {} }).size, 0);
 });
+
+test("stepEnded: exactly one frame per step-finish part in every recorded stream", () => {
+  let total = 0;
+  for (const name of corpus) {
+    const events = readEvents(name);
+    const parts = new Set();
+    for (const e of events) {
+      const p = e.properties?.part;
+      if (e.type === "message.part.updated" && p?.type === "step-finish") parts.add(p.id);
+    }
+    total += parts.size;
+    const steps = replay(events).filter((f) => f.sub === "stepEnded");
+    // synthetic-legacy announces its steps via the legacy session.next.step.ended event, not parts.
+    if (name !== "synthetic-legacy") assert.equal(steps.length, parts.size, name);
+  }
+  assert.ok(total > 0, "the recorded corpus contains step-finish parts");
+});
+
+test("05-question: the connect-time snapshot taken while the question is pending carries attention", () => {
+  const events = readEvents("05-question");
+  const askedAt = events.findIndex((e) => e.type === "question.asked");
+  assert.ok(askedAt >= 0);
+  const interp = createStreamInterpreter({ publish: () => {}, now: () => T0, setTimer: () => ({}), clearTimer: () => {} });
+  for (const e of events.slice(0, askedAt + 1)) interp.interpret(e);
+  const snap = interp.snapshotState().filter((f) => f.sub === "attention");
+  assert.deepEqual(snap.map((f) => f.payload.kind), ["question"]);
+  for (const e of events.slice(askedAt + 1)) interp.interpret(e);
+  assert.equal(interp.snapshotState().filter((f) => f.sub === "attention").length, 0, "cleared after the reply");
+});

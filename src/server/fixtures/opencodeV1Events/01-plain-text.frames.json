@@ -22,6 +22,7 @@
 {"kind":"stream","sub":"flush","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"messageID":"msg_144e3f4d600150JJKJRecPzm79","partID":"prt_144e445bb001iyzsrXXy1Y5XjR","field":"text","text":"copy of `main` available for reference while you "}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"messageID":"msg_144e3f4d600150JJKJRecPzm79"}},
 {"kind":"stream","sub":"flush","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"messageID":"msg_144e3f4d600150JJKJRecPzm79","partID":"prt_144e445bb001iyzsrXXy1Y5XjR","field":"text","text":"develop a feature branch."}},
+{"kind":"stream","sub":"stepEnded","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"messageID":"msg_144e3f4d600150JJKJRecPzm79","tokens":{"input":3,"output":128,"reasoning":0,"cache":{"read":0,"write":69811}},"cost":0.08790675,"finish":"stop"}},
 {"kind":"stream","sub":"context","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"freshInput":3,"cacheRead":0,"cacheWrite":69811,"totalInput":69814,"pct":null,"hasLimit":false,"segments":[]}},
 {"kind":"stream","sub":"cache","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"isStale":false,"idleMs":0,"staleTokens":69811,"ttlMs":300000}},
 {"kind":"stream","sub":"turnComplete","sessionId":"ses_ebb1c1787ffe7Ldr1RIAkHyPYL","payload":{"complete":false,"running":true,"since":1000080}},

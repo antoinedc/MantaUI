@@ -120,7 +120,40 @@ function newSessionState() {
     retryActive: false,        // a non-null `retry` frame is outstanding (cleared by busy/idle)
     boundaryParts: new Set(),  // partIDs that already emitted a toolBoundary frame
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
+    stepFinishParts: new Set(),   // partIDs of step-finish parts that already produced a stepEnded frame
+    stepsViaPart: new Map(),      // messageID -> number of steps announced from step-finish parts
+    stepsViaEvent: new Map(),     // messageID -> number of steps announced from session.next.step.ended
   };
+}
+
+const finiteNumber = (x) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+
+// Normalise a usage object (a step-finish part's `tokens`, or a step.ended
+// event's `tokens`/`usage`) into the `stepEnded` payload shape. All zeros when
+// the source carried no usage.
+function stepTokensPayload(u) {
+  const t = u && typeof u === "object" ? u : {};
+  return {
+    input: finiteNumber(t.input),
+    output: finiteNumber(t.output),
+    reasoning: finiteNumber(t.reasoning),
+    cache: { read: finiteNumber(t.cache?.read), write: finiteNumber(t.cache?.write) },
+  };
+}
+
+// Bound the per-message step counters (a long-lived session accumulates one
+// entry per assistant message). Oldest-first eviction; an evicted message only
+// risks a duplicate `stepEnded` if a late event for it arrives, which is benign.
+const STEP_COUNTER_CAP = 512;
+function boundStepCounters(st) {
+  for (const m of [st.stepsViaPart, st.stepsViaEvent]) {
+    if (m.size <= STEP_COUNTER_CAP) continue;
+    let drop = m.size - STEP_COUNTER_CAP / 2;
+    for (const k of m.keys()) {
+      if (drop-- <= 0) break;
+      m.delete(k);
+    }
+  }
 }
 
 // design: live tool-output frames (server half, BET-745).
@@ -546,6 +579,31 @@ export function createStreamInterpreter({
             status: part.state.status,
           });
         }
+        // stepEnded from the step-finish PART. The deployed V1 build never emits
+        // `session.next.step.ended`, but every step it runs ends with a
+        // `step-finish` part carrying the same usage/cost/reason — derive the
+        // frame from that (once per part id). A build that emits BOTH is
+        // reconciled per message: steps are counted from each source and a step
+        // already announced by the other source is not announced again.
+        if (
+          part?.type === "step-finish" &&
+          typeof partID === "string" && partID.length > 0 &&
+          !st.stepFinishParts.has(partID)
+        ) {
+          st.stepFinishParts.add(partID);
+          const mid = String(part.messageID ?? evt.properties?.messageID ?? "");
+          const nth = (st.stepsViaPart.get(mid) ?? 0) + 1;
+          st.stepsViaPart.set(mid, nth);
+          boundStepCounters(st);
+          if ((st.stepsViaEvent.get(mid) ?? 0) < nth) {
+            emit(sid, "stepEnded", {
+              messageID: mid,
+              tokens: stepTokensPayload(part.tokens),
+              ...(typeof part.cost === "number" && Number.isFinite(part.cost) ? { cost: part.cost } : {}),
+              ...(typeof part.reason === "string" && part.reason.length > 0 ? { finish: part.reason } : {}),
+            });
+          }
+        }
         // Plan-mode mirror (BET-977). Plan mode is NOT server state — opencode
         // switches its agent locally on plan_enter/plan_exit, so the box must
         // relay the fact for the phone's Plan chip to stay honest. Only a
@@ -725,20 +783,20 @@ export function createStreamInterpreter({
         const props = evt.properties ?? {};
         const finish = typeof props.finish === "string" ? props.finish : null;
         {
-          const u = props.tokens ?? props.usage ?? {};
-          const n = (x) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
-          emit(sid, "stepEnded", {
-            messageID: String(props.messageID ?? props.info?.id ?? ""),
-            // All zeros when the event carried no usage.
-            tokens: {
-              input: n(u.input),
-              output: n(u.output),
-              reasoning: n(u.reasoning),
-              cache: { read: n(u.cache?.read), write: n(u.cache?.write) },
-            },
-            ...(typeof props.cost === "number" ? { cost: props.cost } : {}),
-            ...(finish != null ? { finish } : {}),
-          });
+          const mid = String(props.messageID ?? props.info?.id ?? "");
+          const nth = (st.stepsViaEvent.get(mid) ?? 0) + 1;
+          st.stepsViaEvent.set(mid, nth);
+          boundStepCounters(st);
+          // Already announced by this step's step-finish part → don't double it.
+          if ((st.stepsViaPart.get(mid) ?? 0) < nth) {
+            emit(sid, "stepEnded", {
+              messageID: mid,
+              // All zeros when the event carried no usage.
+              tokens: stepTokensPayload(props.tokens ?? props.usage),
+              ...(typeof props.cost === "number" ? { cost: props.cost } : {}),
+              ...(finish != null ? { finish } : {}),
+            });
+          }
         }
         const kind = classifyFinish(finish, { lastPartIsToolUse: props.lastPartIsToolUse });
         if (kind) {
@@ -874,6 +932,12 @@ export function createStreamInterpreter({
       }
       const out = [{ kind: "runningSet", payload: { sessions: running } }];
       for (const [sid, st] of sessions) {
+        // Same precedence as the live `attention` frame (question over
+        // permission) so a reconnecting sidebar shows the badge.
+        const attention = st.questions.length > 0 ? "question" : st.permissions.length > 0 ? "permission" : null;
+        if (attention) {
+          out.push({ kind: "stream", sub: "attention", sessionId: sid, payload: { kind: attention } });
+        }
         if (st.questions.length > 0) {
           out.push({
             kind: "stream",
