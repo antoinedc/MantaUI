@@ -62,7 +62,12 @@ export function errorFromV2(err) {
     (type.startsWith("provider.") || type === "" ? "APIError" : "UnknownError");
   const message = typeof err.message === "string" && err.message ? err.message : type || "The turn failed.";
   const data = { message };
-  if (typeof err.status === "number") data.statusCode = err.status;
+  if (typeof err.status === "number") {
+    data.statusCode = err.status;
+    // V2 retries retryable failures itself (session.retry.scheduled); an error
+    // that finally surfaces is retryable only for rate limits / server faults.
+    data.isRetryable = err.status === 429 || err.status >= 500;
+  }
   const body = err.response?.body;
   if (typeof body === "string") data.responseBody = body;
   if (type) data.type = type;

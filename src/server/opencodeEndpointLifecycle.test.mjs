@@ -34,6 +34,21 @@ function makeRecorder({ now = () => 1000 } = {}) {
   return { store, rec };
 }
 
+// The tests state transcripts in the V1 {info, parts} shape; the V2 timeline is what is on the wire.
+function v2Timeline(messages) {
+  return (messages ?? []).map((m, i) => ({
+    id: `msg_${i}`,
+    type: "assistant",
+    time: m.info.time,
+    model: m.info.providerID ? { providerID: m.info.providerID, id: m.info.modelID } : undefined,
+    finish: m.info.finish,
+    content: (m.parts ?? []).map((p) => ({ type: "text", text: p.text })),
+    ...(m.info.error
+      ? { error: { type: "provider.internal", message: m.info.error.message ?? "x", status: m.info.error.data?.statusCode } }
+      : {}),
+  }));
+}
+
 const jsonRes = (body, status = 200, headers) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...(headers ?? {}) } });
 
@@ -45,16 +60,17 @@ function happyTransport(extra = {}) {
     handler: async (url, opts) => {
       calls.push({ url: String(url), method: opts?.method, opts });
       const u = String(url);
-      if (u.includes("/session?directory=")) return jsonRes({ id: "ses_lifecycle" });
-      if (u.includes("/prompt_async")) {
+      if (opts?.method === "POST" && u.endsWith("/api/session")) return jsonRes({ data: { id: "ses_lifecycle" } });
+      if (u.endsWith("/prompt")) {
         if (extra.promptStatus) return new Response("nope", { status: extra.promptStatus, headers: extra.promptHeaders });
         return new Response(null, { status: 204 });
       }
-      if (u.endsWith("/message")) return jsonRes(extra.messages ?? [{
+      if (opts?.method !== "DELETE" && opts?.method !== "POST" && /\/api\/session\/[^/]+$/.test(u)) return jsonRes({ data: { id: "ses_lifecycle" } });
+      if (u.includes("/message")) return jsonRes({ data: v2Timeline(extra.messages ?? [{
         info: { role: "assistant", time: { created: 1, completed: 2 }, finish: "stop",
           providerID: "anthropic", modelID: "claude-x" },
         parts: [{ type: "text", text: "done" }],
-      }]);
+      }]) });
       if (opts?.method === "DELETE") return new Response(null, { status: 204 });
       return new Response(null, { status: 204 });
     },
@@ -111,7 +127,7 @@ test("every taxonomy code produces exactly one operation record with the right t
       const { rec, store } = makeRecorder();
       const t = happyTransport();
       t.handler = async (url, opts) => {
-        if (String(url).includes("/session?directory=")) return new Response("boom", { status: 503 });
+        if (opts?.method === "POST" && String(url).endsWith("/api/session")) return new Response("boom", { status: 503 });
         return new Response(null, { status: 204 });
       };
       return { rec, store, transport: t, expect: { code: "create-http", stage: "create", attribution: "not-dispatched" } };
@@ -120,7 +136,7 @@ test("every taxonomy code produces exactly one operation record with the right t
       const { rec, store } = makeRecorder();
       const t = happyTransport();
       t.handler = async (url, opts) => {
-        if (String(url).includes("/session?directory=")) return jsonRes({});
+        if (opts?.method === "POST" && String(url).endsWith("/api/session")) return jsonRes({ data: {} });
         return new Response(null, { status: 204 });
       };
       return { rec, store, transport: t, expect: { code: "create-invalid", stage: "create", attribution: "not-dispatched" } };
@@ -141,9 +157,9 @@ test("every taxonomy code produces exactly one operation record with the right t
       const t = happyTransport({ messages: null });
       t.handler = async (url, opts) => {
         const u = String(url);
-        if (u.includes("/session?directory=")) return jsonRes({ id: "s" });
-        if (u.includes("/prompt_async")) return new Response(null, { status: 204 });
-        if (u.endsWith("/message")) return new Response("no", { status: 500 });
+        if (opts?.method === "POST" && u.endsWith("/api/session")) return jsonRes({ data: { id: "s" } });
+        if (u.endsWith("/prompt")) return new Response(null, { status: 204 });
+        if (u.includes("/message")) return new Response("no", { status: 500 });
         if (opts?.method === "DELETE") return new Response(null, { status: 204 });
         return new Response(null, { status: 204 });
       };
@@ -194,8 +210,8 @@ test("transport-error records the stage the run died in", async () => {
   const { rec, store } = makeRecorder();
   const t = happyTransport();
   t.handler = async (url, opts) => {
-    if (String(url).includes("/prompt_async")) throw new Error("ECONNRESET");
-    if (String(url).includes("/session?directory=")) return jsonRes({ id: "s" });
+    if (String(url).endsWith("/prompt")) throw new Error("ECONNRESET");
+    if (opts?.method === "POST" && String(url).endsWith("/api/session")) return jsonRes({ data: { id: "s" } });
     if (opts?.method === "DELETE") return new Response(null, { status: 204 });
     return new Response(null, { status: 204 });
   };

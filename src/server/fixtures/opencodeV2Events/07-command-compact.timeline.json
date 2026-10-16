@@ -1,0 +1,90 @@
+[
+ {
+  "id": "msg_145ad2b7a001xmXD7vSXSsN0fl",
+  "time": {
+   "created": 1792170339306
+  },
+  "text": "Reply with exactly these words and nothing else: command ran ok. Extra: please",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ad2c3b001xrmMA1yHKqt2HO",
+  "time": {
+   "created": 1792170339430,
+   "streamed": 1792170340717,
+   "completed": 1792170340767
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "text",
+    "text": "command ran ok. Extra: please"
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "stop",
+  "rawFinish": "end_turn",
+  "cost": 0.002358,
+  "tokens": {
+   "input": 3,
+   "output": 10,
+   "reasoning": 0,
+   "cache": {
+    "read": 18850,
+    "write": 336
+   }
+  }
+ },
+ {
+  "id": "msg_145ad31b1001g77fyWAH9kht8w",
+  "time": {
+   "created": 1792170340785
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ },
+ {
+  "type": "compaction",
+  "id": "msg_145ad3545001Mn9Tmfwnd2SaZH",
+  "time": {
+   "created": 1792170341754
+  },
+  "status": "completed",
+  "reason": "manual",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "summary": "## Objective\n- User requested a simple test: the assistant should reply with exactly \"command ran ok. Extra: please\" and nothing else.\n\n## Requirements\n- Reply must contain exactly those words with no additional content.\n\n## Decisions\n- Assistant complied with the exact instruction.\n\n## Work State\n\n### Completed\n- User's request fulfilled: replied with the exact specified words.\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n- (none)\n\n## Relevant Files\n- (none)\n\n## Important Context\n- (none)",
+  "recent": "",
+  "cost": 0.0033478500000000003,
+  "tokens": {
+   "input": 3,
+   "output": 130,
+   "reasoning": 0,
+   "cache": {
+    "read": 19186,
+    "write": 621
+   }
+  }
+ },
+ {
+  "id": "msg_145ad3cbd001FSKSOscebnnrmZ",
+  "time": {
+   "created": 1792170343613
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ }
+]

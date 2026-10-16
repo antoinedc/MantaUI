@@ -90,12 +90,14 @@ test("the duplicate delivery (global + scoped stream) is suppressed entirely —
 test("integration with the real interpreter: an auto-answered ask publishes NO permissions/attention frame; a pending one does", async () => {
   const frames = [];
   const interp = createStreamInterpreter({ publish: (f) => frames.push(f), now: () => 1, setTimer: () => 0, clearTimer: () => {} });
+  // V2: the pump hands the lifecycle form to its handler and interprets the RAW event.
+  const raw = (id) => ({ type: "permission.asked", id: `evt_${id}`, data: { id, sessionID: "ses_a", action: "shell", resources: ["ls"], save: ["ls *"] } });
   const run = (cfg, evt) =>
     handlePermissionAsk({
       evt,
       getConfig: async () => cfg,
       reply: async () => {},
-      interpret: (e) => interp.interpret(e),
+      interpret: () => interp.interpret(raw(evt.properties.id)),
       publish: () => {},
       push: () => {},
       ledger: createAutoAnswerLedger(),
