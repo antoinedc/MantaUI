@@ -1239,6 +1239,16 @@ describe("applyPermissionEvent", () => {
     ).toEqual([]);
   });
 
+  it("permission.replied / rejected clear by V1's `requestID` (no `id` on the wire)", () => {
+    const prev = [askedProps];
+    expect(
+      applyPermissionEvent(prev, "permission.replied", { requestID: "perm_1", reply: "once", sessionID: SID }, SID),
+    ).toEqual([]);
+    expect(
+      applyPermissionEvent(prev, "permission.rejected", { requestID: "perm_1", sessionID: SID }, SID),
+    ).toEqual([]);
+  });
+
   it("permission.rejected removes the dismissed permission", () => {
     const prev = [askedProps];
     expect(

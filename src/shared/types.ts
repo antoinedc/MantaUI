@@ -2687,9 +2687,19 @@ export type StreamFlushPayload = {
   text: string;
 };
 
-export type StreamRunningPayload = { running: boolean };
+export type StreamRunningPayload = {
+  running: boolean;
+  // Raw session.status type ("busy" | "working" | "retry" | "idle"), additive.
+  type?: string | null;
+  // Epoch ms of the idle→busy edge; null when not running.
+  since?: number | null;
+};
 
-export type StreamTurnCompletePayload = { complete: boolean; running: boolean };
+export type StreamTurnCompletePayload = {
+  complete: boolean;
+  running: boolean;
+  since?: number | null;
+};
 
 export type StreamTodosPayload = {
   active: Array<Record<string, unknown>> | null;
@@ -2710,6 +2720,87 @@ export type StreamSubagentChildPayload = { childSessionId: string };
 
 export type StreamSubagentPayload = Record<string, unknown>;
 
+export type StreamToolStartedPayload = {
+  sessionId: string;
+  /** The tool PART id; identical on started / output / ended. */
+  idx: string;
+  callID: string;
+  toolName: string | null;
+  toolPresentationHint: string | null;
+  status: string;
+};
+
+export type StreamToolOutputPayload = { sessionId: string; idx: string; text: string };
+
+export type StreamToolEndedPayload = {
+  sessionId: string;
+  idx: string;
+  ok: boolean;
+  truncated?: boolean;
+};
+
+export type StreamPlanModePayload = { on: boolean };
+
+export type StreamPermissionsPayload = { permissions: unknown[] };
+
+/** `session.error`, minus the intentional `MessageAbortedError` (never emitted). `name` is opencode's raw error name, unchanged. */
+export type StreamSessionErrorPayload = { name: string | null; message: string };
+
+// ── Slice A frames (OpenCode V2 migration, phase 1) ──
+// Pinned in docs/superpowers/specs/2026-10-16-opencode-v2-phase1-frames-phase3-plugins.md.
+// Together with the frames above they cover every raw opencode event the desktop
+// renderer consumes, so a client can stop reading raw `opencode` events.
+// `sessionId` on the envelope is the session the event belongs to (child sessions
+// included — the client filters), except `childSession`, which is published under
+// the PARENT's id.
+
+/** `retry`: session.status type "retry" → value; the next busy/idle → `null` (cleared). */
+export type StreamRetryPayload = {
+  attempt: number;
+  message: string;
+  next?: number;
+  action?: { title: string; message: string; label: string; link?: string };
+} | null;
+
+/** `stepEnded`: session.next.step.ended. `tokens` is all zeros when the event carried no usage. */
+export type StreamStepEndedPayload = {
+  messageID: string;
+  tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+  cost?: number;
+  finish?: string;
+};
+
+/** `toolBoundary`: a tool part reached a terminal status (once per part) — the queued-prompt drain trigger. */
+export type StreamToolBoundaryPayload = {
+  messageID: string;
+  partID: string;
+  callID: string;
+  tool: string;
+  status: "completed" | "error";
+};
+
+/** `compaction`: session.next.compaction.{started,delta,ended}. `text` is the initial text on started, the chunk on delta; `reason` only on started (additive to the pinned shape: the CompactionCard renders it). */
+export type StreamCompactionPayload = {
+  phase: "started" | "delta" | "ended";
+  text?: string;
+  reason?: string;
+};
+
+/** `transcriptStale`: session.compacted — refetch the transcript. */
+export type StreamTranscriptStalePayload = Record<string, never>;
+
+/** `messageChanged`: a message (or one of its parts) changed — refetch it. Coalesced to ≤1 frame per message per 100 ms, trailing edge guaranteed. */
+export type StreamMessageChangedPayload = { messageID: string };
+
+/** `commandExecuted`: command.executed (origin of a slash-command user message). */
+export type StreamCommandExecutedPayload = { messageID: string; name: string; arguments: string };
+
+/** `childSession`: a subagent session was created; published under the PARENT's sessionId. */
+export type StreamChildSessionPayload = { childSessionId: string; parentSessionId: string };
+
+/** `attention`: what the turn is blocked on (question wins over permission); `null` when nothing is pending. */
+export type StreamAttentionPayload = { kind: "question" | "permission" | null };
+
 // The box's authoritative "what is running right now" frame, replayed to every
 // new /events subscriber (BET-922). A session absent from `sessions` is NOT
 // running.
@@ -2725,12 +2816,27 @@ export type StreamEnvelope = {
     | "todos"
     | "truncation"
     | "questions"
+    | "permissions"
     | "subagent.child"
     | "subagent"
     | "context"
     | "cache"
     | "autoRename"
-    | "optimizer.compacted";
+    | "optimizer.compacted"
+    | "toolStarted"
+    | "toolOutput"
+    | "toolEnded"
+    | "planMode"
+    | "sessionError"
+    | "retry"
+    | "stepEnded"
+    | "toolBoundary"
+    | "compaction"
+    | "transcriptStale"
+    | "messageChanged"
+    | "commandExecuted"
+    | "childSession"
+    | "attention";
   sessionId: string;
   payload: unknown;
 };
