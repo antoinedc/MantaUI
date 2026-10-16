@@ -22,6 +22,14 @@ export function seatLoadWindow(
   snap: { windows?: Array<SeatWindowLike & { kind?: string }> } | null | undefined,
 ): { kind: string; pct: number } | null;
 export function isSeatExhausted(snap: { exhausted?: boolean } | null | undefined): boolean;
+export function nextResetAt(
+  snap: { windows?: Array<SeatWindowLike & { resetsAt?: number }> } | null | undefined,
+  opts: { nowMs: number; model?: string | null },
+): number;
+export function soonestResettingSeat<S extends { seatId?: string }>(
+  seatSnapshots: S[],
+  opts: { nowMs: number; withinMs: number; activeSeatId?: string | null; model?: string | null },
+): S | null;
 export function leastLoadedSeat<S extends { seatId?: string }>(
   seatSnapshots: S[],
   opts?: { activeSeatId?: string | null },
