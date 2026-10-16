@@ -1,0 +1,138 @@
+// V2 twin of docs/opencode-tools/peers.ts → peers_list / peers_inspect /
+// peers_message. The descriptions are deliberately cost-aware and anti-reflex —
+// keep them verbatim. manta-server (src/server/peers.mjs) resolves the
+// workspace from sessionID (+ directory) and does the real work.
+
+import { call } from "../lib/server.ts";
+import { input, noInput, str } from "../lib/schema.ts";
+import type { ToolContext, ToolDef } from "../lib/types.ts";
+
+function q(context: ToolContext): string {
+  const params = new URLSearchParams();
+  if (context?.sessionID) params.set("sessionID", context.sessionID);
+  if (context?.directory) params.set("directory", context.directory);
+  return params.toString();
+}
+
+export const tools: ToolDef[] = [
+  {
+    name: "peers_list",
+    description: [
+      "List the OTHER agent sessions in the same workspace and a one-line summary",
+      "of each. COSTS TOKENS AND HAS SIDE EFFECTS: inspecting a peer reads its",
+      "transcript and a message WAKES it, warming a possibly-stale context — so",
+      "this is NOT a free 'situational awareness' check and must not be called",
+      "reflexively at the start of a task.",
+      "ONLY call it when there is CONCRETE EVIDENCE another agent is editing the",
+      "SAME files right now AND you must coordinate to avoid a collision:",
+      "e.g. `git status` shows changes you did not make, a file changed under you",
+      "mid-edit, or the user explicitly asks who else is working here.",
+      "DO NOT use it to answer questions you can resolve yourself from git / gh /",
+      "CI / the filesystem (e.g. 'is main green?', 'did the build pass?', 'what",
+      "was done today?') — a peer's opinion is stale and worse than the source of",
+      "truth. If in doubt, don't call it. Shows each peer's branch, uncommitted-",
+      "file count, status, and current activity; call peers_inspect for detail.",
+    ].join(" "),
+    input: noInput(),
+    async execute(_args, context) {
+      const result = await call("GET", `/api/peers?${q(context)}`);
+      const peers = result.peers ?? [];
+      if (peers.length === 0) {
+        return `No other sessions in workspace "${result.workspace}". You're the only agent here.`;
+      }
+      const lines = peers.map((p: any) => {
+        const changes = p.gitChanges > 0 ? `${p.gitChanges} uncommitted` : "clean";
+        const branch = p.branch ? ` ⎇${p.branch}` : "";
+        return `• [${p.name}] (${p.type}, ${p.status})${branch} · ${changes}\n    ${p.activity}`;
+      });
+      return `Workspace "${result.workspace}" — ${peers.length} peer session(s):\n${lines.join("\n")}`;
+    },
+  },
+  {
+    name: "peers_inspect",
+    description: [
+      "Inspect ONE peer session in detail: its full git status (which files it's",
+      "changing), branch, and — for chat sessions — recent transcript turns +",
+      "todos, or — for terminal sessions — the terminal-pane tail. Use ONLY after",
+      "peers_list has already shown a peer is actively touching files you care",
+      "about and you need to see exactly what, to avoid a collision. Reading a",
+      "peer's transcript costs tokens; do not inspect out of curiosity or to",
+      "gather facts you can get from git / gh / CI yourself. Identify the peer by",
+      "its window name, window index, or opencode session id (from peers_list).",
+    ].join(" "),
+    input: input({
+      target: str("The peer to inspect: its window name, window index, or session id."),
+    }),
+    async execute(args, context) {
+      const params = q(context);
+      const result = await call("GET", `/api/peers?${params}&target=${encodeURIComponent(args.target)}`);
+      const p = result.peer;
+      const out: string[] = [];
+      out.push(`Peer "${p.name}" (${p.type}, ${p.status})${p.branch ? ` ⎇${p.branch}` : ""}`);
+      out.push(`cwd: ${p.cwd}`);
+
+      const files = p.git?.files ?? [];
+      if (files.length === 0) {
+        out.push("git: clean (no uncommitted changes)");
+      } else {
+        out.push(`git: ${p.git.count} uncommitted file(s):`);
+        for (const f of files.slice(0, 40)) out.push(`  ${f.status.padEnd(2)} ${f.path}`);
+        if (files.length > 40) out.push(`  …and ${files.length - 40} more`);
+      }
+
+      if (p.type === "chat") {
+        const todos = p.todos ?? [];
+        if (todos.length) {
+          out.push("todos:");
+          for (const t of todos) {
+            const mark = t.status === "completed" ? "✓" : t.status === "in_progress" ? "▶" : "○";
+            out.push(`  ${mark} ${t.content}`);
+          }
+        }
+        const turns = p.turns ?? [];
+        if (turns.length) {
+          out.push("recent turns:");
+          for (const t of turns) {
+            const tools = t.tools?.length ? ` [tools: ${t.tools.join(", ")}]` : "";
+            out.push(`  ${t.role}: ${t.text || "(no text)"}${tools}`);
+          }
+        }
+      } else if (p.pane) {
+        out.push("terminal (last lines):");
+        out.push(p.pane);
+      }
+
+      return out.join("\n");
+    },
+  },
+  {
+    name: "peers_message",
+    description: [
+      "Send a message to ANOTHER agent session in your workspace (a sibling tmux",
+      "window). WAKES the target: it runs a fresh turn, warming its context and",
+      "spending its tokens — so only send when you have something the peer",
+      "genuinely NEEDS and cannot get otherwise: a real coordination/hand-off, a",
+      "warning that you changed a file it's editing, or a direct answer it asked",
+      "you for. Do NOT ping a peer for status you can read yourself, to 'check in',",
+      "or to share an FYI it didn't request. The message is injected as a new turn",
+      "prefixed with your session name + workspace so the receiver knows it came",
+      "from a peer, not its user — e.g. 'I just changed the API in src/x.ts, rebase",
+      "before you continue'. Identify the peer by window name, index, or session id",
+      "(from peers_list). Only chat-mode peers can receive a message; terminal",
+      "(claude-TUI) peers cannot.",
+    ].join(" "),
+    input: input({
+      target: str("The peer to message: its window name, window index, or session id."),
+      message: str("The message text to deliver to the peer agent."),
+    }),
+    async execute(args, context) {
+      const result = await call("POST", "/api/peers", {
+        target: args.target,
+        message: args.message,
+        sessionID: context?.sessionID,
+        directory: context?.directory,
+      });
+      return `Message delivered to peer "${result.to}" in workspace "${result.workspace}". It will appear as a new turn in that session.`;
+    },
+  },
+];
