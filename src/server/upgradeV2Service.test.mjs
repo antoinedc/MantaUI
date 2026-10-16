@@ -198,13 +198,15 @@ describe("nohup controller", () => {
     await svc.configure("v2", { db: "/d/x.db" });
     await svc.stop();
     await svc.start();
-    assert.deepEqual(spawned[1], [
+    assert.deepEqual(spawned.slice(0, 2).map((x) => x[0]), ["killed", "killed"]);
+    assert.deepEqual(spawned[2], [
       "/home/u/.opencode/bin/opencode",
       ["serve", "--port", "4096", "--hostname", "127.0.0.1"],
       { OPENCODE_PASSWORD: "deadbeef", OPENCODE_DB: "/d/x.db", OPENCODE_DISABLE_AUTOUPDATE: "true" },
     ]);
     await svc.configure("v1");
     await svc.start();
-    assert.deepEqual(spawned[2], ["/home/u/.opencode/bin/opencode-v1", ["serve", "--port", "4096", "--hostname", "127.0.0.1"], {}]);
+    assert.deepEqual(spawned[3], ["killed"], "start() is a restart: whatever runs is killed first");
+    assert.deepEqual(spawned[4], ["/home/u/.opencode/bin/opencode-v1", ["serve", "--port", "4096", "--hostname", "127.0.0.1"], {}]);
   });
 });

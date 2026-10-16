@@ -126,6 +126,7 @@ export function createOpencodeService({
   readPassword = async () => (await readFile(passwordFilePath(), "utf8")).trim(),
   spawnDetached = null, // nohup mode: (bin, args, env) => void
   killNohup = null, // nohup mode: () => Promise<void>
+  port = OPENCODE_PORT, // overridable ONLY so a rehearsal/test can never bind (or kill) the real :4096
   log = () => {},
 } = {}) {
   const unitPath = join(home, ".config", "systemd", "user", OPENCODE_UNIT);
@@ -204,7 +205,7 @@ export function createOpencodeService({
       if (killNohup) await killNohup();
     },
 
-    /** (Re)start with the definition as currently configured. */
+    /** (Re)start with the definition as currently configured. (On nohup: stop whatever is there, then spawn.) */
     async start() {
       if (supervisor === "systemd") return void (await exec("systemctl", ["--user", "restart", "opencode-serve"]));
       if (supervisor === "launchd") {
@@ -214,6 +215,9 @@ export function createOpencodeService({
         return void (await exec("launchctl", ["bootstrap", `gui/${uid}`, plistPath]));
       }
       if (!spawnDetached) throw new Error("no supervisor found for opencode and no nohup launcher provided");
+      // start() means RESTART everywhere: a second start (the cutover) must not leave two servers
+      // fighting over the port.
+      if (killNohup) await killNohup();
       const cfg = this._nohup ?? { variant: "v2", db: null };
       const password = cfg.variant === "v2" ? await readPassword() : null;
       const env = {};
@@ -223,7 +227,7 @@ export function createOpencodeService({
       })) {
         if (v) env[k] = v;
       }
-      spawnDetached(opencodeBinPath(cfg.variant, home), ["serve", "--port", String(OPENCODE_PORT), "--hostname", "127.0.0.1"], env);
+      spawnDetached(opencodeBinPath(cfg.variant, home), ["serve", "--port", String(port), "--hostname", "127.0.0.1"], env);
     },
 
     /** Restart manta-server itself (used once, at the very end, when it must re-read the password). */

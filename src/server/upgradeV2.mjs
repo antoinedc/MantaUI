@@ -142,6 +142,7 @@ export function createUpgradeV2(deps) {
     stopWaitMs = STOP_WAIT_MS,
     startTimeoutMs = 120_000,
     requiredStallMs = 60_000,
+    pluginWaitMs = 30_000,
     publish = () => {},
     log = () => {},
   } = deps;
@@ -278,7 +279,14 @@ export function createUpgradeV2(deps) {
             throw new UpgradeError("OpenCode did not come up after the upgrade started. Retry, or roll back.", { retryable: true });
           }
         } else if (r.status === "completed") {
-          await setProgress("migrate", { label: "Migrated", numerator: 1, denominator: 1 });
+          const prev = state.steps.migrate.progress;
+          // Keep the real count V2 last reported (300/300) rather than inventing a 1/1.
+          await setProgress(
+            "migrate",
+            Number.isFinite(prev?.denominator) && prev.denominator > 0
+              ? { label: prev.label, numerator: prev.denominator, denominator: prev.denominator }
+              : { label: "Migrated" },
+          );
           return;
         } else if (r.status === "error") {
           throw new UpgradeError(`Conversation migration failed: ${r.error?.message ?? r.error ?? "unknown error"}`, { retryable: true });
@@ -312,8 +320,16 @@ export function createUpgradeV2(deps) {
 
     async verify() {
       await setProgress("verify", { label: "Checking plugins" });
-      const ids = await deps.v2.pluginIds();
-      const missing = V2_PLUGIN_IDS.filter((id) => !ids.includes(id));
+      // OpenCode loads plugins LAZILY, per location, on the first request that needs them — the
+      // first listing is empty, a later one is not. Poll until they are all active (or give up).
+      const pluginDeadline = now() + pluginWaitMs;
+      let missing = [...V2_PLUGIN_IDS];
+      for (;;) {
+        const ids = await deps.v2.pluginIds().catch(() => []);
+        missing = V2_PLUGIN_IDS.filter((id) => !ids.includes(id));
+        if (missing.length === 0 || now() >= pluginDeadline) break;
+        await sleep(pollMs);
+      }
       if (missing.length > 0) {
         throw new UpgradeError(`Manta plugins did not load in OpenCode: ${missing.join(", ")}.`, { retryable: true });
       }
@@ -550,10 +566,12 @@ export function createDefaultDeps({
   env = process.env,
   home = homedir(),
   fetchImpl = globalThis.fetch,
+  opencodeUrl = OPENCODE_V2_URL, // overridable ONLY for rehearsals/tests; production is always :4096
+  opencodeService = null,
   log = (m) => console.log(m),
 } = {}) {
   const statePathFile = migrationStatePath();
-  const opencode = createOpencodeService({
+  const opencode = opencodeService ?? createOpencodeService({
     home,
     log,
     spawnDetached: (bin, args, childEnv) => {
@@ -570,7 +588,7 @@ export function createDefaultDeps({
   const configDir = opencodeConfigDir(home);
   const password = async () => (await readFile(passwordFilePath(), "utf8")).trim();
   const v2Fetch = async (path, init = {}) => {
-    const res = await fetchImpl(`${OPENCODE_V2_URL}${path}`, {
+    const res = await fetchImpl(`${opencodeUrl}${path}`, {
       ...init,
       headers: {
         authorization: `Basic ${Buffer.from(`opencode:${await password()}`).toString("base64")}`,
@@ -590,7 +608,7 @@ export function createDefaultDeps({
     publish,
     log,
     v1DbPath: () => resolveV1DbPath({ env, home }),
-    prepare: () => prepareOpencodeV2({ mantaHome, home, env, log }),
+    prepare: () => prepareOpencodeV2({ mantaHome, home, env, log, service: opencode }),
     retireV1: () => retireV1Assets({ configDir }),
     restoreV1: () => restoreV1Assets({ configDir }),
     opencode,
@@ -600,7 +618,7 @@ export function createDefaultDeps({
       // V1's own status endpoint — the only thing here that talks to a V1 service.
       runningTurns: async () => {
         try {
-          const res = await fetchImpl(`${OPENCODE_V2_URL}/session/status`, { signal: AbortSignal.timeout(3000) });
+          const res = await fetchImpl(`${opencodeUrl}/session/status`, { signal: AbortSignal.timeout(3000) });
           if (!res.ok) return 0;
           const body = await res.json();
           return Object.values(body ?? {}).filter((s) => s && s.type && s.type !== "idle").length;
@@ -663,9 +681,13 @@ export function createDefaultDeps({
 
     v2: {
       migrationStatus: () => v2Fetch("/api/experimental/migration/v1"),
+      // Only ACTIVE plugins count: a plugin that failed to load still appears in the list.
       pluginIds: async () => {
-        const r = await v2Fetch("/api/plugin");
-        return (r?.data ?? []).map((p) => (typeof p === "string" ? p : p?.id)).filter(Boolean);
+        const r = await v2Fetch(`/api/plugin?location[directory]=${encodeURIComponent(home)}`);
+        return (r?.data ?? [])
+          .filter((p) => typeof p === "string" || !p?.state?.status || p.state.status === "active")
+          .map((p) => (typeof p === "string" ? p : p?.id))
+          .filter(Boolean);
       },
       // One tiny real turn through the Claude login proves auth + plugins + model routing end to end.
       tinyTurn: async () => {

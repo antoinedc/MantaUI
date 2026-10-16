@@ -48,6 +48,7 @@ function makeBox(opts = {}) {
   const hook = (name) => (o.crashOn === name ? NEVER() : undefined);
   const rec = (name, ...args) => calls.push([name, ...args]);
   let migrateIdx = 0;
+  let pluginIdx = 0;
   const turnQueue = [...o.turns];
 
   const deps = {
@@ -119,6 +120,7 @@ function makeBox(opts = {}) {
       pluginIds: async () => {
         const h = hook("v2.pluginIds");
         if (h) return h;
+        if (o.pluginIdsScript) return o.pluginIdsScript[Math.min(pluginIdx++, o.pluginIdsScript.length - 1)];
         return o.pluginIds;
       },
       tinyTurn: async () => {
@@ -408,6 +410,14 @@ describe("failure, retry", () => {
     assert.equal(s.state, "completed");
     // verify + cutover ran; migrate did not start V2 again (cutover restarts it once)
     assert.equal(box.calls.filter((c) => c[0] === "opencode.start").length, startsBefore + 1);
+  });
+
+  test("plugins load lazily: an empty first listing is polled until they appear — no false failure", async () => {
+    const box = makeBox({ pluginIdsScript: [[], ["manta"], [...V2_PLUGIN_IDS]] });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
   });
 
   test("V2 reports a migration error → failed at migrate; retry restarts V2 and resumes", async () => {
