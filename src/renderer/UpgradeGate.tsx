@@ -353,7 +353,7 @@ export function UpgradeGate({ view, onUpgradeBox, onRetry, onRollback }: Upgrade
         <ConfirmModal
           open={confirmRollback}
           title="Roll the box back?"
-          body="The box returns to the previous version with your original history, which the upgrade did not change. Conversations started since the upgrade are exported to a file instead. You will then need to reinstall the previous desktop version."
+          body="The box returns to the previous version with your original history, which the upgrade did not change. Conversations started since the upgrade will not appear in the previous version. You will then need to reinstall the previous desktop version."
           confirmLabel="Roll back"
           confirmTone="danger"
           onConfirm={() => {
