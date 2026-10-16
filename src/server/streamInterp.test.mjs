@@ -1073,3 +1073,281 @@ test("session.next.agent.switched away from plan emits planMode {on:false}", () 
   assert.equal(pm.length, 1);
   assert.equal(pm[0].payload.on, false);
 });
+
+// ───────────────────────── Slice A: complete frame vocabulary ─────────────────────────
+// (OpenCode V2 migration, phase 1.) Payload shapes are pinned by
+// docs/superpowers/specs/2026-10-16-opencode-v2-phase1-frames-phase3-plugins.md.
+
+// Interpreter with a controllable clock + timer queue (the messageChanged
+// trailing edge is the only timer the interpreter owns).
+function makeTimed() {
+  let clock = 1_000_000;
+  const events = [];
+  const timers = [];
+  const interp = createStreamInterpreter({
+    publish: (e) => events.push(e),
+    now: () => clock,
+    setTimer: (fn, ms) => {
+      const t = { at: clock + ms, fn, dead: false };
+      timers.push(t);
+      return t;
+    },
+    clearTimer: (t) => { t.dead = true; },
+  });
+  const advance = (ms) => {
+    const until = clock + ms;
+    for (;;) {
+      const due = timers.filter((t) => !t.dead && t.at <= until).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      due.dead = true;
+      clock = due.at;
+      due.fn();
+    }
+    clock = until;
+  };
+  return { interp, events, advance, pending: () => timers.filter((t) => !t.dead).length };
+}
+const subs = (events, sub) => events.filter((e) => e.sub === sub);
+
+test("retry: session.status retry publishes the banner payload; busy/idle clears it with null", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    id: "e1",
+    type: "session.status",
+    properties: {
+      sessionID: SID,
+      status: {
+        type: "retry",
+        attempt: 2,
+        message: "Rate limited",
+        next: 1234,
+        action: { title: "T", message: "M", label: "L", link: "https://example.invalid" },
+      },
+    },
+  });
+  assert.deepEqual(subs(events, "retry")[0].payload, {
+    attempt: 2,
+    message: "Rate limited",
+    next: 1234,
+    action: { title: "T", message: "M", label: "L", link: "https://example.invalid" },
+  });
+  // running still treats retry as a live turn, unchanged.
+  assert.equal(subs(events, "running")[0].payload.running, true);
+  interp.interpret({ id: "e2", type: "session.status", properties: { sessionID: SID, status: { type: "busy" } } });
+  assert.equal(subs(events, "retry").length, 2);
+  assert.equal(subs(events, "retry")[1].payload, null);
+  // A plain busy with no retry outstanding does not spam null.
+  interp.interpret({ id: "e3", type: "session.status", properties: { sessionID: SID, status: { type: "busy" } } });
+  assert.equal(subs(events, "retry").length, 2);
+});
+
+test("retry: optional fields are omitted when the event lacks them; idle also clears", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "e1", type: "session.status", properties: { sessionID: SID, status: { type: "retry", attempt: 1, message: "x" } } });
+  assert.deepEqual(subs(events, "retry")[0].payload, { attempt: 1, message: "x" });
+  interp.interpret({ id: "e2", type: "session.status", properties: { sessionID: SID, status: { type: "idle" } } });
+  assert.equal(subs(events, "retry")[1].payload, null);
+});
+
+test("stepEnded: carries messageID, normalised tokens, cost and finish", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    id: "e1",
+    type: "session.next.step.ended",
+    properties: {
+      sessionID: SID,
+      messageID: "msg_9",
+      usage: { input: 10, output: 20, reasoning: 3, cache: { read: 100, write: 5 } },
+      cost: 0.5,
+      finish: "tool-calls",
+    },
+  });
+  assert.deepEqual(subs(events, "stepEnded")[0].payload, {
+    messageID: "msg_9",
+    tokens: { input: 10, output: 20, reasoning: 3, cache: { read: 100, write: 5 } },
+    cost: 0.5,
+    finish: "tool-calls",
+  });
+  // No usage -> still a boundary, zeros; no cost/finish keys.
+  interp.interpret({ id: "e2", type: "session.next.step.ended", properties: { sessionID: SID, messageID: "msg_9" } });
+  assert.deepEqual(subs(events, "stepEnded")[1].payload, {
+    messageID: "msg_9",
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+  });
+});
+
+test("toolBoundary: once per tool part at a terminal status, with callID fallback", () => {
+  const { interp, events } = make();
+  const part = (status, extra = {}) => ({
+    type: "tool",
+    id: "prt_1",
+    messageID: "msg_1",
+    callID: "call_1",
+    tool: "bash",
+    state: { status },
+    ...extra,
+  });
+  interp.interpret({ id: "e1", type: "message.part.updated", properties: { sessionID: SID, part: part("running") } });
+  assert.equal(subs(events, "toolBoundary").length, 0);
+  interp.interpret({ id: "e2", type: "message.part.updated", properties: { sessionID: SID, part: part("completed") } });
+  interp.interpret({ id: "e3", type: "message.part.updated", properties: { sessionID: SID, part: part("completed") } }); // re-emit, new event id
+  assert.deepEqual(subs(events, "toolBoundary").map((e) => e.payload), [
+    { messageID: "msg_1", partID: "prt_1", callID: "call_1", tool: "bash", status: "completed" },
+  ]);
+  interp.interpret({
+    id: "e4",
+    type: "message.part.updated",
+    properties: { sessionID: SID, part: part("error", { id: "prt_2", callID: undefined }) },
+  });
+  const b2 = subs(events, "toolBoundary")[1].payload;
+  assert.equal(b2.status, "error");
+  assert.equal(b2.callID, "prt_2"); // falls back to the part id
+});
+
+test("compaction: started / delta / ended; legacy raw events carry reason + delta", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "e1", type: "session.next.compaction.started", properties: { sessionID: SID, reason: "context", text: "" } });
+  interp.interpret({ id: "e2", type: "session.next.compaction.delta", properties: { sessionID: SID, delta: "abc" } });
+  interp.interpret({ id: "e3", type: "session.next.compaction.ended", properties: { sessionID: SID } });
+  assert.deepEqual(subs(events, "compaction").map((e) => e.payload), [
+    { phase: "started", text: "", reason: "context" },
+    { phase: "delta", text: "abc" },
+    { phase: "ended" },
+  ]);
+});
+
+test("transcriptStale: session.compacted -> {}", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "e1", type: "session.compacted", properties: { sessionID: SID } });
+  assert.deepEqual(subs(events, "transcriptStale"), [
+    { kind: "stream", sub: "transcriptStale", sessionId: SID, payload: {} },
+  ]);
+});
+
+test("commandExecuted: messageID, name, arguments as strings", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    id: "e1",
+    type: "command.executed",
+    properties: { sessionID: SID, name: "review", arguments: "src/", messageID: "msg_c" },
+  });
+  assert.deepEqual(subs(events, "commandExecuted")[0].payload, { messageID: "msg_c", name: "review", arguments: "src/" });
+});
+
+test("childSession: published under the PARENT session id (the child's own id is properties.sessionID)", () => {
+  const { interp, events } = make();
+  interp.interpret({
+    id: "e1",
+    type: "session.created",
+    properties: { sessionID: "ses_child", info: { id: "ses_child", parentID: SID } },
+  });
+  const f = subs(events, "childSession");
+  assert.equal(f.length, 1);
+  assert.equal(f[0].sessionId, SID);
+  assert.deepEqual(f[0].payload, { childSessionId: "ses_child", parentSessionId: SID });
+  // A top-level session (no parentID) announces nothing.
+  interp.interpret({ id: "e2", type: "session.created", properties: { sessionID: "ses_top", info: { id: "ses_top" } } });
+  assert.equal(subs(events, "childSession").length, 1);
+});
+
+test("attention: question wins over permission; null only when nothing is pending", () => {
+  const { interp, events } = make();
+  const att = () => subs(events, "attention").map((e) => e.payload.kind);
+  interp.interpret({ id: "p1", type: "permission.asked", properties: { sessionID: SID, id: "per_1" } });
+  assert.deepEqual(att(), ["permission"]);
+  interp.interpret({
+    id: "q1",
+    type: "question.asked",
+    properties: { sessionID: SID, id: "que_1", tool: { callID: "call_q" }, questions: [{ question: "?" }] },
+  });
+  assert.deepEqual(att(), ["permission", "question"]);
+  // Answering the question leaves the permission pending -> back to "permission".
+  interp.interpret({ id: "q2", type: "question.replied", properties: { sessionID: SID, requestID: "que_1" } });
+  assert.deepEqual(att(), ["permission", "question", "permission"]);
+  // V1's permission.replied carries requestID (no id) — must still clear it.
+  interp.interpret({ id: "p2", type: "permission.replied", properties: { sessionID: SID, requestID: "per_1", reply: "once" } });
+  assert.deepEqual(att(), ["permission", "question", "permission", null]);
+  // The existing questions/permissions frames are unchanged and stay last per event.
+  assert.equal(events[events.length - 1].sub, "permissions");
+  assert.equal(events[events.length - 1].payload.permissions.length, 0);
+});
+
+test("messageChanged: resolves messageID from properties.info.id, part.messageID and properties.messageID", () => {
+  const { interp, events } = makeTimed();
+  interp.interpret({ id: "e1", type: "message.updated", properties: { sessionID: SID, info: { id: "msg_a", role: "user" } } });
+  interp.interpret({ id: "e2", type: "message.part.updated", properties: { sessionID: SID, part: { id: "p", type: "text", messageID: "msg_b" } } });
+  interp.interpret({ id: "e3", type: "message.part.removed", properties: { sessionID: SID, messageID: "msg_c", partID: "p" } });
+  interp.interpret({ id: "e4", type: "message.removed", properties: { sessionID: SID, messageID: "msg_d" } });
+  assert.deepEqual(subs(events, "messageChanged").map((e) => e.payload.messageID), ["msg_a", "msg_b", "msg_c", "msg_d"]);
+  // An event with no resolvable message id announces nothing.
+  interp.interpret({ id: "e5", type: "message.part.updated", properties: { sessionID: SID, part: { id: "p", type: "text" } } });
+  assert.equal(subs(events, "messageChanged").length, 4);
+});
+
+test("messageChanged: coalesces to one frame per message per 100 ms, trailing edge guaranteed", () => {
+  const { interp, events, advance, pending } = makeTimed();
+  const touch = (id, mid = "msg_1") =>
+    interp.interpret({ id, type: "message.part.updated", properties: { sessionID: SID, part: { id: "p", type: "text", messageID: mid } } });
+  touch("a"); // leading edge: immediate
+  assert.equal(subs(events, "messageChanged").length, 1);
+  advance(30); touch("b");
+  advance(30); touch("c");
+  advance(30); touch("d");
+  assert.equal(subs(events, "messageChanged").length, 1, "inside the window: nothing yet");
+  assert.equal(pending(), 1, "exactly one trailing timer");
+  advance(15); // t = 105 -> window closed, trailing fires
+  assert.equal(subs(events, "messageChanged").length, 2);
+  // A different message is independent.
+  touch("e", "msg_2");
+  assert.equal(subs(events, "messageChanged").length, 3);
+  // After the window a new change is a fresh leading edge.
+  advance(200); touch("f");
+  assert.equal(subs(events, "messageChanged").length, 4);
+  assert.equal(pending(), 0);
+});
+
+test("messageChanged: flushPending fires an outstanding trailing frame; dispose drops timers", () => {
+  const { interp, events, pending } = makeTimed();
+  const touch = (id) =>
+    interp.interpret({ id, type: "message.updated", properties: { sessionID: SID, info: { id: "msg_1", role: "user" } } });
+  touch("a");
+  touch("b"); // inside the window
+  assert.equal(pending(), 1);
+  interp.flushPending();
+  assert.equal(subs(events, "messageChanged").length, 2);
+  assert.equal(pending(), 0);
+  touch("c");
+  touch("d");
+  interp.dispose();
+  assert.equal(pending(), 0);
+});
+
+test("new frames go through the event-id de-dup (global + scoped double delivery)", () => {
+  const { interp, events } = make();
+  const evts = [
+    { id: "d1", type: "command.executed", properties: { sessionID: SID, name: "n", arguments: "", messageID: "m" } },
+    { id: "d2", type: "session.compacted", properties: { sessionID: SID } },
+    { id: "d3", type: "session.next.compaction.ended", properties: { sessionID: SID } },
+    { id: "d4", type: "session.created", properties: { sessionID: "ses_c", info: { id: "ses_c", parentID: SID } } },
+    { id: "d5", type: "session.status", properties: { sessionID: SID, status: { type: "retry", attempt: 1, message: "m" } } },
+  ];
+  for (const e of evts) { interp.interpret(e); interp.interpret(e); }
+  for (const sub of ["commandExecuted", "transcriptStale", "compaction", "childSession", "retry"]) {
+    assert.equal(subs(events, sub).length, 1, sub);
+  }
+});
+
+test("sessionError carries the raw error name unchanged; MessageAbortedError stays silent", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "e1", type: "session.error", properties: { sessionID: SID, error: { name: "ProviderAuthError", data: { message: "bad key" } } } });
+  assert.equal(subs(events, "sessionError")[0].payload.name, "ProviderAuthError");
+  interp.interpret({ id: "e2", type: "session.error", properties: { sessionID: SID, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } });
+  assert.equal(subs(events, "sessionError").length, 1);
+});
+
+test("message.* events that nest the session id (info/part) are still interpreted", () => {
+  const { interp, events } = make();
+  interp.interpret({ id: "n1", type: "message.updated", properties: { info: { id: "msg_n", sessionID: SID, role: "user" } } });
+  interp.interpret({ id: "n2", type: "message.part.updated", properties: { part: { id: "p", type: "text", messageID: "msg_n2", sessionID: SID } } });
+  assert.deepEqual(subs(events, "messageChanged").map((e) => [e.sessionId, e.payload.messageID]), [[SID, "msg_n"], [SID, "msg_n2"]]);
+});

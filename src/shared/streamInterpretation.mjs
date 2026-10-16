@@ -807,14 +807,17 @@ export function applyQuestionEvent(prev, eventType, properties, viewedSessionId)
  * and the reply key.
  *
  * - permission.asked    → append (dedupe on id; ignore other sessions)
- * - permission.replied / permission.rejected → remove by id
+ * - permission.replied / permission.rejected → remove by id (`id` or V1's `requestID`)
  */
 export function applyPermissionEvent(prev, eventType, properties, viewedSessionId) {
   const p = properties ?? {};
   const id = typeof p.id === "string" ? p.id : "";
   if (eventType === "permission.replied" || eventType === "permission.rejected") {
-    if (!id) return prev;
-    return prev.filter((perm) => perm?.id !== id);
+    // opencode V1 emits the answered request as `requestID` (the `per_…` id of
+    // the ask), not `id`; match on either so a real reply actually clears it.
+    const answered = id || (typeof p.requestID === "string" ? p.requestID : "");
+    if (!answered) return prev;
+    return prev.filter((perm) => perm?.id !== answered);
   }
   if (eventType === "permission.asked") {
     if (!id) return prev;
