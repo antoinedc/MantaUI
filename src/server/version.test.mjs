@@ -325,3 +325,21 @@ test("/api/version falls through the auth gate (NOT exempt)", () => {
   assert.equal(isExemptPath("/api/version"), false);
   assert.equal(queryTokenAllowedForPath("/api/version"), false);
 });
+
+// ---------------------------------------------------------------------------
+// K3: /api/version carries the OpenCode generation this release runs
+// ---------------------------------------------------------------------------
+
+test("writeVersionResponse adds opencode: { major: 2, version: <pinned> } (K3)", async () => {
+  const { opencodeInfo } = await import("./version.mjs");
+  const { OPENCODE_V2_VERSION } = await import("../../scripts/opencode-v2/version.mjs");
+  let body = null;
+  writeVersionResponse(
+    { writeHead() {}, end(b) { body = JSON.parse(b); } },
+    { version: "1.0.0" },
+  );
+  assert.deepEqual(body.opencode, { major: 2, version: OPENCODE_V2_VERSION });
+  assert.deepEqual(opencodeInfo("2.0.30"), { major: 2, version: "2.0.30" });
+  assert.equal(body.version, "1.0.0");
+  assert.ok("opencodeVersion" in body, "the pre-existing field stays for older readers");
+});

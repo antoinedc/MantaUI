@@ -114,10 +114,16 @@ describe("isCompatible — same-matrix cases (the issue's required coverage)", (
     ).toBe("match");
   });
 
-  it("the default matrix uses the shipping desktop's current major (today: 0)", () => {
+  it("the default matrix uses the shipping desktop's current major (today: 1)", () => {
     // The renderer reads this constant at module load; pinning today's
     // value here forces an explicit PR when the next major ships.
-    expect(DEFAULT_COMPATIBILITY_MATRIX.supportedMajor).toBe(0);
+    expect(DEFAULT_COMPATIBILITY_MATRIX.supportedMajor).toBe(1);
+  });
+
+  it("K4: an old (0.x) desktop against a V2 (1.x) box, and the reverse, are incompatible — not behind", () => {
+    expect(isCompatible({ desktopVersion: "0.0.57", boxVersion: "1.0.0" })).toBe("incompatible");
+    expect(isCompatible({ desktopVersion: "1.0.0", boxVersion: "0.0.57" })).toBe("incompatible");
+    expect(isCompatible({ desktopVersion: "1.0.0", boxVersion: "1.0.0" })).toBe("match");
   });
 });
 

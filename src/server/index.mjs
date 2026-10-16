@@ -125,7 +125,6 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
-import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -272,6 +271,7 @@ import {
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./version.mjs";
+import { createUpgradeV2, createDefaultDeps as createUpgradeDeps, createUpgradeRoutes } from "./upgradeV2.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -669,15 +669,6 @@ accountsService.onChange(({ provider }) => accountsEvents.updated(provider));
 const stopAccountsUsageEvents = bus.subscribe((evt) => {
   if (evt?.kind === "usage.updated") for (const p of ACCOUNT_PROVIDERS) accountsEvents.updated(p);
 });
-
-// Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
-// plugins). self-update.sh does this too, but an installed box runs the script it
-// ALREADY had, so the first update that ships a plugin would not install it; the
-// NEW server code running here is what closes that gap. Non-blocking, never
-// fatal; restarts opencode only if it was itself just restarted (see
-// opencodePlugins.mjs). index.mjs is never imported by tests, so this cannot
-// touch a developer's real config dir from the suite.
-void runStartupPluginSync();
 
 // Multi-account phase 2: which seat a conversation's requests use. Called by the
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
@@ -3909,6 +3900,11 @@ const handleRequest = async (req, res) => {
     }
   }
 
+  // ---------- Upgrade mode + upgrade API (K3) ----------
+  // While the V1 → V2 upgrade runs, every route except auth, version, the upgrade API, the event
+  // stream and push answers 503; GET /api/upgrade + POST …/retry|rollback live here too.
+  if (await upgradeRoutes.handle(req, res, path)) return;
+
   // ---------- Auth status (AUTHENTICATED) ----------
   // GET /auth/status → {authenticated:true, box_id, enforced}
   // Reaching here means the gate already passed, so the caller is authenticated
@@ -6030,6 +6026,43 @@ const handleRequest = async (req, res) => {
   res.end("not found");
 };
 
+// ---------- OpenCode V1 → V2 upgrade (slice C3, K3) ----------
+// Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
+// MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
+// the three pollers that start turns / jobs on their own; resuming re-creates them.
+const upgradePausable = { schedule: stopSchedulePoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller };
+const upgradeV2 = createUpgradeV2(
+  createUpgradeDeps({
+    mantaHome: PROJECT_ROOT,
+    publish: (evt) => bus.publish(evt),
+    services: {
+      pauseBackground: async () => {
+        for (const k of Object.keys(upgradePausable)) {
+          try { upgradePausable[k]?.(); } catch { /* already stopped */ }
+          upgradePausable[k] = null;
+        }
+      },
+      resumeBackground: async () => {
+        if (upgradePausable.schedule) return; // never ran a pause, or already resumed
+        upgradePausable.schedule = startSchedulePoller(
+          {
+            sendPrompt: (args) => promptDelivery.deliver(args),
+            fireNotify: (args) => push.fireNotify(args),
+            publish: (evt) => bus.publish(evt),
+          },
+          { intervalMs: 30000 },
+        ).stop;
+        upgradePausable.sweeper = delegateEngine.startSweeper().stop;
+        upgradePausable.activity = delegateEngine.startActivityPoller().stop;
+      },
+    },
+  }),
+);
+const upgradeRoutes = createUpgradeRoutes(upgradeV2);
+// Resume an interrupted upgrade, or start one when this release finds a V1 history DB to migrate.
+// Never blocks startup and never throws into it.
+upgradeV2.boot().catch((e) => console.warn("[upgrade] boot hook failed:", e?.message ?? e));
+
 const server = createServer(handleRequest);
 
 // ---------- WebSocket: /events live stream + /pty terminal bridge ----------
@@ -6070,6 +6103,10 @@ const handleUpgrade = (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  // Upgrade mode (K3): /pty, /call and any other WS route get the same 503 the HTTP routes do —
+  // refused before the handshake. /events stays open (it carries the upgrade progress).
+  if (upgradeRoutes.refuseWebSocket(socket, url.pathname)) return;
 
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,

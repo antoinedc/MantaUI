@@ -50,7 +50,10 @@ import { compareVersions } from "./versionCompare.mjs";
  * matrix out from under the server's.
  */
 export const DEFAULT_COMPATIBILITY_MATRIX = Object.freeze({
-  supportedMajor: 0,
+  // 1 since the OpenCode V2 cutover (K4): the box speaks V2 and the desktop/iOS clients consume
+  // its frames, so a 0.x client against this box — or a 1.x client against a 0.x box — is
+  // `incompatible`, never merely `behind`.
+  supportedMajor: 1,
 });
 
 /**

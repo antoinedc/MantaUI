@@ -10,6 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { OPENCODE_V2_VERSION } from "../../scripts/opencode-v2/version.mjs";
 
 // Returned when package.json is unreadable / malformed / missing the `version`
 // field. Lets the server boot in broken packaging scenarios (a tarball that
@@ -82,6 +83,17 @@ export function readOpencodeVersion(exec = execFileSync) {
 }
 
 /**
+ * The OpenCode generation this release runs (K3, slice C3): `{ major: 2, version: "2.0.30" }`.
+ * The version is the PINNED one the release ships (scripts/opencode-v2/version.mjs) — the
+ * release's identity — not whatever happens to answer `opencode --version`, which during an
+ * upgrade can still be the old binary.
+ */
+export function opencodeInfo(pinned = OPENCODE_V2_VERSION) {
+  const major = Number.parseInt(String(pinned).split(".")[0], 10);
+  return { major: Number.isFinite(major) ? major : 2, version: String(pinned) };
+}
+
+/**
  * Write the /api/version JSON response. Pure: takes `res` (anything with
  * writeHead + end) and `deps` ({ version, opencodeVersion? }) and emits the
  * response body. No IO. Tests pass a recorder `res` and assert on the
@@ -98,13 +110,14 @@ export function readOpencodeVersion(exec = execFileSync) {
  * (and the BET-180 test) keep working; production always passes the cached
  * startup value.
  */
-export function writeVersionResponse(res, { version, opencodeVersion = FALLBACK_VERSION }) {
+export function writeVersionResponse(res, { version, opencodeVersion = FALLBACK_VERSION, opencode = opencodeInfo() }) {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(
     JSON.stringify({
       version,
       minClient: MIN_CLIENT,
       opencodeVersion,
+      opencode,
     }),
   );
 }

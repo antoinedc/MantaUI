@@ -37,6 +37,11 @@ import { writeFileSync } from "node:fs";
 import { CLI_CATALOG } from "../src/shared/cliCatalog.mjs";
 import { detectClis, readVersion, resolveBinary, runUpgrade } from "../src/server/cliUpdates.mjs";
 
+// CLIs the release PINS (slice C3): opencode is the exact binary the release ships, installed by
+// upgradeV2Prepare.mjs. `opencode upgrade` would replace it with whatever is latest and silently
+// break the pin (and the plugins/migration built against it), so it is never run here.
+export const PINNED_CLIS = Object.freeze(["opencode"]);
+
 function parseArgs(argv) {
   const out = { progressStep: "2", progressTotal: "7", stateFile: null };
   for (const arg of argv) {
@@ -71,6 +76,7 @@ async function main() {
       // A CLI with no resolved upgrade command (`manual`) is skipped silently —
       // it has no safe upgrade path and must not disturb the run.
       if (!Array.isArray(r.upgrade) || r.upgrade.length === 0) continue;
+      if (PINNED_CLIS.includes(r.id)) continue;
 
       // Same step every time, refined label — the bar must not jump per CLI.
       process.stdout.write(`MANTA_PROGRESS ${progressStep}/${progressTotal} Updating ${r.label}\n`);
@@ -109,4 +115,4 @@ async function main() {
   }
 }
 
-main();
+if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) main();

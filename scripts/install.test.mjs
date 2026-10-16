@@ -18,8 +18,6 @@ import {
   buildPairPageUrl,
   formatExpiry,
   renderShellConfig,
-  stripJsoncLineComments,
-  mergeOpencodeConfig,
   mergeGatewayAuth,
   parseTailscaleStatus,
   normalizeTailnetDnsName,
@@ -31,8 +29,6 @@ import {
   readOsReleaseIds,
   classifyDistro,
   renderSystemdUnit,
-  OPENCODE_CLAUDE_AUTH_PLUGIN,
-  CLAUDE_AUTH_FAMILY,
   DEFAULT_PORT,
   DEFAULT_RELEASE_HOST,
   DESKTOP_DMG_URL,
@@ -855,225 +851,6 @@ test("renderShellConfig single-quotes values with spaces safely", () => {
 });
 
 // ----------------------------------------------------------------------------
-// stripJsoncLineComments — keeps // inside strings intact
-// ----------------------------------------------------------------------------
-
-test("stripJsoncLineComments removes line comments, preserves strings", () => {
-  const src = `{
-    // drop this
-    "model": "claude-sonnet-4-6", // also a comment
-    "note": "http://example.com", // url must survive
-    "label": "// not a comment"
-  }`;
-  const out = stripJsoncLineComments(src);
-  assert.doesNotMatch(out, /drop this/);
-  assert.doesNotMatch(out, /also a comment/);
-  assert.match(out, /"note": "http:\/\/example\.com"/);
-  assert.match(out, /"label": "\/\/ not a comment"/);
-});
-
-// ----------------------------------------------------------------------------
-// mergeOpencodeConfig — MERGE, never clobber; idempotent; corrupt-safe
-// ----------------------------------------------------------------------------
-
-test("mergeOpencodeConfig on empty input seeds plugin only", () => {
-  const { text, corrupt, plugin } = mergeOpencodeConfig("");
-  assert.equal(corrupt, false, "empty input is not corrupt");
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  const parsed = JSON.parse(text);
-  assert.deepEqual(parsed.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  assert.equal(parsed.theme, undefined);
-});
-
-test("mergeOpencodeConfig preserves unrelated keys (model, theme, provider)", () => {
-  const before = JSON.stringify(
-    {
-      $schema: "https://opencode.ai/config.json",
-      theme: "system",
-      model: "anthropic/claude-sonnet-4-6",
-      provider: {
-        voska: {
-          npm: "@ai-sdk/openai-compatible",
-          name: "Voska AI",
-          options: { baseURL: "https://api.example.com/v1", apiKey: "sk-test" },
-          models: {},
-        },
-      },
-    },
-    null,
-    2,
-  );
-  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
-  assert.equal(corrupt, false);
-  const after = JSON.parse(text);
-  assert.equal(after.theme, "system");
-  assert.equal(after.model, "anthropic/claude-sonnet-4-6");
-  assert.equal(after.$schema, "https://opencode.ai/config.json");
-  assert.equal(after.provider.voska.options.baseURL, "https://api.example.com/v1");
-  assert.equal(after.provider.voska.options.apiKey, "sk-test");
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig is byte-identical when plugin already present", () => {
-  const before = JSON.stringify(
-    { theme: "system", plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN] },
-    null,
-    2,
-  ) + "\n";
-  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
-  assert.equal(corrupt, false);
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  assert.equal(text, before);
-});
-
-test("mergeOpencodeConfig appends without duplicating an existing match", () => {
-  // The auth plugin is already present (1st slot); the new entry is appended.
-  const before = JSON.stringify(
-    { plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"] },
-    null,
-    2,
-  ) + "\n";
-  const { text, plugin } = mergeOpencodeConfig(before);
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN, "some-other-plugin"]);
-});
-
-test("mergeOpencodeConfig appends the auth plugin at the END when missing", () => {
-  // Order-preserving: existing entries stay where they were; the new one is appended.
-  const before = JSON.stringify(
-    { plugin: ["some-other-plugin"] },
-    null,
-    2,
-  ) + "\n";
-  const { text, plugin } = mergeOpencodeConfig(before);
-  assert.deepEqual(plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig strips JSONC comments and merges plugin", () => {
-  const jsonc = `{
-    // top-level comment
-    "theme": "system", // inline
-    "plugin": ["already-there"]
-  }`;
-  const { text, corrupt, plugin } = mergeOpencodeConfig(jsonc);
-  assert.equal(corrupt, false);
-  const after = JSON.parse(text);
-  assert.equal(after.theme, "system");
-  assert.deepEqual(plugin, ["already-there", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig flags corrupt JSONC and starts from {}", () => {
-  const { text, corrupt, plugin } = mergeOpencodeConfig("{ broken: not-json,");
-  assert.equal(corrupt, true);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig coerces non-object root to {} + corrupt", () => {
-  const { text, corrupt } = mergeOpencodeConfig("[1,2,3]");
-  assert.equal(corrupt, true);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig tolerates a malformed plugin array (drops non-strings)", () => {
-  const before = JSON.stringify(
-    { plugin: ["keep-me", null, 42, { junk: true }, "also-keep"] },
-    null,
-    2,
-  );
-  const { plugin } = mergeOpencodeConfig(before);
-  // Non-strings are dropped; the new auth plugin is appended.
-  assert.deepEqual(plugin, ["keep-me", "also-keep", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig is null/undefined safe (treated as empty)", () => {
-  const a = mergeOpencodeConfig(null);
-  const b = mergeOpencodeConfig(undefined);
-  assert.equal(a.corrupt, false);
-  assert.equal(b.corrupt, false);
-  assert.deepEqual(a.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  assert.deepEqual(b.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-// ----------------------------------------------------------------------------
-// mergeOpencodeConfig — family-aware REPLACE (BET-319)
-// ----------------------------------------------------------------------------
-//
-// The Claude auth plugin is a single logical family: every variant shares
-// the prefix `opencode-claude-auth`. The merge now REPLACES an existing
-// variant with the target instead of appending alongside it (which used to
-// leave both variants loaded — the dev-box bug). The target defaults to
-// `@latest`; dev/CI boxes pass an explicit `-bui` target via the CLI bridge
-// (MANTA_CLAUDE_AUTH_PLUGIN env var). These tests pin the family behavior;
-// the default-target path is covered by the 10 cases above.
-
-const BUI_PLUGIN = "opencode-claude-auth-bui@1.5.4-bui.1";
-
-test("mergeOpencodeConfig family-replaces -bui -> @latest (default target)", () => {
-  const before = JSON.stringify({ plugin: [BUI_PLUGIN] }, null, 2) + "\n";
-  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
-  assert.equal(corrupt, false);
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig family-replaces @latest -> -bui (explicit target)", () => {
-  const before = JSON.stringify({ plugin: [OPENCODE_CLAUDE_AUTH_PLUGIN] }, null, 2) + "\n";
-  const { text, corrupt, plugin } = mergeOpencodeConfig(before, BUI_PLUGIN);
-  assert.equal(corrupt, false);
-  assert.deepEqual(plugin, [BUI_PLUGIN]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [BUI_PLUGIN]);
-});
-
-test("mergeOpencodeConfig family-replace preserves unrelated plugins", () => {
-  const before = JSON.stringify(
-    { plugin: ["some-other-plugin", BUI_PLUGIN] },
-    null,
-    2,
-  ) + "\n";
-  const { text, plugin } = mergeOpencodeConfig(before);
-  // Only the family member is replaced; the unrelated plugin stays first.
-  assert.deepEqual(plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, ["some-other-plugin", OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("mergeOpencodeConfig is idempotent with an explicit target", () => {
-  const before = JSON.stringify({ plugin: ["unrelated"] }, null, 2) + "\n";
-  const first = mergeOpencodeConfig(before, BUI_PLUGIN);
-  const second = mergeOpencodeConfig(first.text, BUI_PLUGIN);
-  assert.equal(second.text, first.text);
-  assert.deepEqual(second.plugin, ["unrelated", BUI_PLUGIN]);
-});
-
-test("mergeOpencodeConfig collapses both variants to a single target", () => {
-  // The dev box's current state: both -bui and @latest present.
-  const before = JSON.stringify(
-    { plugin: [BUI_PLUGIN, OPENCODE_CLAUDE_AUTH_PLUGIN] },
-    null,
-    2,
-  ) + "\n";
-  const { text, corrupt, plugin } = mergeOpencodeConfig(before);
-  assert.equal(corrupt, false);
-  // Both family members collapse to the single default target.
-  assert.deepEqual(plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-  const after = JSON.parse(text);
-  assert.deepEqual(after.plugin, [OPENCODE_CLAUDE_AUTH_PLUGIN]);
-});
-
-test("CLAUDE_AUTH_FAMILY prefix matches both plugin variants", () => {
-  // Guard against an accidental rename that would silently stop recognizing
-  // a variant and re-introduce the double-load bug.
-  assert.equal(OPENCODE_CLAUDE_AUTH_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
-  assert.equal(BUI_PLUGIN.startsWith(CLAUDE_AUTH_FAMILY), true);
-  assert.equal("some-other-plugin".startsWith(CLAUDE_AUTH_FAMILY), false);
-});
 
 // ----------------------------------------------------------------------------
 // renderSystemdUnit — placeholder substitution used by install.sh
@@ -1230,45 +1007,6 @@ function scanInstallSh(pattern) {
   }
   return offenders;
 }
-
-test("install.sh guards every MANTA_CLAUDE_AUTH_PLUGIN use against set -u (BET-319 regression)", () => {
-  // install.sh runs under `set -euo pipefail`. The first BET-319 iteration
-  // referenced $MANTA_CLAUDE_AUTH_PLUGIN directly inside `[ -n "$VAR" ]`,
-  // which — because end-user installs NEVER set the override — crashed the
-  // installer for every public install on macOS + Linux (the advisory CI job
-  // caught it; `npm test` doesn't execute the shell). `bash -n` parses but
-  // does not execute, so it cannot catch an unset-variable expansion. This
-  // static guard pins the fix: every NON-COMMENT reference to the var must
-  // use the `${VAR:-}` default-expansion form (or be inside a branch that is
-  // only reached after a `:-` guard already proved it set).
-  // A bare `$MANTA_CLAUDE_AUTH_PLUGIN` or `"$MANTA_CLAUDE_AUTH_PLUGIN"` (no
-  // `${...:-}` form) is the bug. The safe form is `${MANTA_CLAUDE_AUTH_PLUGIN:-}`.
-  // A bare expansion is `$VAR` NOT immediately followed by `{`.
-  const offenders = scanInstallSh(/\$MANTA_CLAUDE_AUTH_PLUGIN(?!\{)/);
-  assert.deepEqual(
-    offenders,
-    [],
-    `install.sh references MANTA_CLAUDE_AUTH_PLUGIN without the \${VAR:-} set -u guard:\n${offenders.join("\n")}`,
-  );
-});
-
-test("install.sh guards every OPENCODE_CLAUDE_AUTH_PLUGIN use against set -u (BET-446 regression)", () => {
-  // BET-319 guarded MANTA_CLAUDE_AUTH_PLUGIN (the override) but missed the
-  // parallel LOG-ONLY var OPENCODE_CLAUDE_AUTH_PLUGIN, which install.sh
-  // references at the two "Seeding Claude auth plugin (...)" messages inside
-  // the then/else branches for the `-n "${MANTA_CLAUDE_AUTH_PLUGIN:-}"`
-  // checks. That var is normally set by the `print-config` eval earlier in
-  // main(), but the installer runs under `set -u`, and a bare expansion of an
-  // unset var is a hard abort mid-install — the same class of failure
-  // BET-319 fixed for the override. This static guard pins the fix: every
-  // non-comment reference must use the `${VAR:-}` default-expansion form.
-  const offenders = scanInstallSh(/\$OPENCODE_CLAUDE_AUTH_PLUGIN(?!\{)/);
-  assert.deepEqual(
-    offenders,
-    [],
-    `install.sh references OPENCODE_CLAUDE_AUTH_PLUGIN without the \${VAR:-} set -u guard:\n${offenders.join("\n")}`,
-  );
-});
 
 test("install.sh brace-delimits every $VAR adjacent to the … ellipsis (BET-319 bash 3.2 regression)", () => {
   // macOS ships bash 3.2, which under a UTF-8 locale absorbs the multibyte
@@ -4807,13 +4545,8 @@ test("install.sh: opencode-serve gets background subagents, on every supervisor,
     scriptFile("launchd", "com.mantaui.opencode.plist"),
     new RegExp(`<key>${VAR}</key>\\s*<string>true</string>`),
   );
-  // The fallback sets the var on the same `nohup` invocation. Matched loosely
-  // across the line continuation, because that subshell also carries the
-  // claimed-Claude-Code-version env var (BET-1503) between the two.
-  assert.match(
-    installSh,
-    new RegExp(`\\( ${VAR}=true[\\s\\S]{0,300}?nohup "\\$OPENCODE_BIN" serve`),
-  );
+  // The fallback exports the var in the same subshell that launches `nohup`.
+  assert.match(installSh, new RegExp(`export ${VAR}=true[\\s\\S]{0,600}?nohup "\\$OPENCODE_BIN" serve`));
   // …and the unit must be re-rendered on every run, or an already-installed
   // box would never pick the line up: the systemd branch used to skip when
   // already active, and self-update.sh renders no units either. Pin the
@@ -4821,6 +4554,53 @@ test("install.sh: opencode-serve gets background subagents, on every supervisor,
   // because `enable --now` does not restart a running unit.
   assert.doesNotMatch(installSh, /is-active --quiet opencode-serve/);
   assert.match(installSh, /systemctl --user restart opencode-serve\.service/);
+});
+
+test("install.sh (C3): ALL THREE supervisors carry OPENCODE_PASSWORD + OPENCODE_DISABLE_AUTOUPDATE, OPENCODE_DB only when set, and the secret-bearing files are 0600", () => {
+  const installSh = scriptFile("install.sh");
+  const unit = scriptFile("systemd", "opencode-serve.service");
+  const plist = scriptFile("launchd", "com.mantaui.opencode.plist");
+  // systemd template + render
+  assert.match(unit, /^Environment=OPENCODE_PASSWORD=@@OPENCODE_PASSWORD@@$/m);
+  assert.match(unit, /^Environment=OPENCODE_DISABLE_AUTOUPDATE=true$/m);
+  assert.match(unit, /^@@OPENCODE_DB_LINE@@$/m, "OPENCODE_DB is a whole optional line, never an empty assignment");
+  assert.doesNotMatch(unit, /OPENCODE_DB=@@/);
+  assert.match(installSh, /--placeholder OPENCODE_PASSWORD="\$OPENCODE_PASSWORD"/);
+  assert.match(installSh, /--placeholder OPENCODE_DB_LINE="\$\{OPENCODE_DB_PATH:\+Environment=OPENCODE_DB=\$OPENCODE_DB_PATH\}"/);
+  // launchd template + sed
+  assert.match(plist, /<key>OPENCODE_PASSWORD<\/key>\s*<string>@@OPENCODE_PASSWORD@@<\/string>/);
+  assert.match(plist, /<key>OPENCODE_DISABLE_AUTOUPDATE<\/key>\s*<string>true<\/string>/);
+  assert.match(plist, /@@OPENCODE_DB_ENTRY@@/);
+  assert.match(installSh, /s\|@@OPENCODE_PASSWORD@@\|\$\{OPENCODE_PASSWORD:-\}\|g/);
+  assert.match(installSh, /s\|@@OPENCODE_DB_ENTRY@@\|\$\{OPENCODE_DB_PATH:\+<key>OPENCODE_DB<\/key><string>\$OPENCODE_DB_PATH<\/string>\}\|g/);
+  // nohup fallback
+  const nohup = installSh.slice(installSh.indexOf("( export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"));
+  assert.match(nohup, /export OPENCODE_PASSWORD\n/);
+  assert.match(nohup, /export OPENCODE_DISABLE_AUTOUPDATE=true/);
+  assert.match(nohup, /if \[ -n "\$\{OPENCODE_DB_PATH:-\}" \]; then export OPENCODE_DB="\$OPENCODE_DB_PATH"; fi/);
+  // secrets on disk are owner-only
+  assert.match(installSh, /\( umask 077; printf '%s' "\$rendered" > "\$OC_UNIT" \)\s*\n\s*chmod 600 "\$OC_UNIT"/);
+  assert.match(installSh, /chmod 600 "\$dest"/);
+});
+
+test("install.sh (C3): every @@PLACEHOLDER@@ in the opencode templates has a substitution in install.sh", () => {
+  const installSh = scriptFile("install.sh");
+  const names = (text) => [...new Set([...text.matchAll(/@@([A-Z_]+)@@/g)].map((m) => m[1]))];
+  for (const n of names(scriptFile("systemd", "opencode-serve.service"))) {
+    assert.match(installSh, new RegExp(`--placeholder ${n}=`), `systemd template placeholder ${n} is never rendered`);
+  }
+  for (const n of names(scriptFile("launchd", "com.mantaui.opencode.plist"))) {
+    assert.match(installSh, new RegExp(`s\\|@@${n}@@\\|`), `launchd template placeholder ${n} is never substituted`);
+  }
+});
+
+test("install.sh (C3): fetches no opencode installer, runs the shared prepare routine, then only guidance sync", () => {
+  const installSh = scriptFile("install.sh");
+  assert.doesNotMatch(installSh, /opencode\.ai\/install|opencode-install\.sh|opencode upgrade/);
+  assert.doesNotMatch(installSh, /merge-opencode-config|OPENCODE_TOOLS_DIR|Copying manta-native opencode tools/);
+  assert.match(installSh, /upgradeV2Prepare\.mjs" prepare --home "\$MANTA_HOME"/);
+  // the service is rendered AFTER prepare, from what prepare reported
+  assert.ok(installSh.indexOf('upgradeV2Prepare.mjs" prepare') < installSh.indexOf("Installing opencode-serve systemd --user unit"));
 });
 
 test("install.sh: scripts/systemd/manta-server.service + scripts/launchd/com.mantaui.server.plist carry @@MANTA_CHANNEL@@ placeholder (BET-392)", () => {
@@ -5060,6 +4840,8 @@ sed \\
   -e "s|@@MANTA_PORT@@|\$MANTA_PORT|g" \\
   -e "s|@@MANTA_TAILNET_HOST@@|\${TAILNET_IP:-}|g" \\
   -e "s|@@OPENCODE_BIN@@|\${OPENCODE_BIN:-}|g" \\
+  -e "s|@@OPENCODE_PASSWORD@@|\${OPENCODE_PASSWORD:-}|g" \\
+  -e "s|@@OPENCODE_DB_ENTRY@@||g" \\
   -e "s|@@AUTH_DIR@@|\$AUTH_DIR|g" \\
   -e "s|@@AGENT_PATH@@|\$(launchd_agent_path)|g" \\
   -e "s|@@ANTHROPIC_CLI_VERSION@@|\$(resolve_anthropic_cli_version)|g" \\
@@ -5318,135 +5100,6 @@ echo "       \$(supervisor_hint status server)"
   // And no `systemctl` token should appear in any of the rendered
   // messages (the headline acceptance criterion).
   assert.doesNotMatch(out, /systemctl/);
-});
-
-// ----------------------------------------------------------------------------
-// scripts/self-update.sh — refresh_opencode_tools.
-// ----------------------------------------------------------------------------
-//
-// The manta-native opencode tools (docs/opencode-tools/*.ts) are COPIED into
-// ~/.config/opencode/tools/, never symlinked (opencode resolves a tool's
-// imports from the file's REAL path). install.sh does that copy on INSTALL;
-// nothing did it on UPDATE, so `git reset --hard origin/main` refreshed the
-// source while every box kept running the tool copy it was installed with —
-// making any change to what the AI is told about a tool undeliverable to an
-// existing box (BET-344 rewrote serve_page's description and no box would
-// ever have seen it).
-//
-// These tests run the REAL function out of the REAL script against a fake box
-// layout, rather than replicating its logic in a preBody, so a regression in
-// the shipped source is what goes red.
-
-function runRefreshOpencodeTools({ manthaHome, opencodeConfigDir }) {
-  const selfUpdate = join(__dirname, "self-update.sh");
-  const src = readFileSync(selfUpdate, "utf8");
-  const start = src.indexOf("refresh_opencode_tools() {");
-  assert.ok(start !== -1, "self-update.sh must define refresh_opencode_tools()");
-  const end = src.indexOf("\n}\n", start);
-  assert.ok(end !== -1, "refresh_opencode_tools() must be brace-terminated");
-  const fn = src.slice(start, end + 3);
-
-  const dir = mkdtempSync(join(tmpdir(), "manta-selfupd-fn-"));
-  const fnPath = join(dir, "fn.sh");
-  writeFileSync(fnPath, `set -euo pipefail\n${fn}\nrefresh_opencode_tools\n`);
-  try {
-    const res = spawnSync("bash", [fnPath], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        MANTA_HOME: manthaHome,
-        OPENCODE_CONFIG_DIR: opencodeConfigDir,
-      },
-    });
-    return `${res.stdout ?? ""}${res.stderr ?? ""}EXIT=${res.status}`;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-function makeFakeBox() {
-  const root = mkdtempSync(join(tmpdir(), "manta-fakebox-"));
-  const srcDir = join(root, "repo", "docs", "opencode-tools");
-  const toolsDir = join(root, "home", ".config", "opencode", "tools");
-  mkdirSync(srcDir, { recursive: true });
-  mkdirSync(toolsDir, { recursive: true });
-  return { root, srcDir, toolsDir, manthaHome: join(root, "repo"), opencodeConfigDir: join(root, "home", ".config", "opencode") };
-}
-
-test("self-update.sh refresh_opencode_tools overwrites a stale installed tool (BET-344 deliverability)", () => {
-  const box = makeFakeBox();
-  try {
-    writeFileSync(join(box.srcDir, "serve-page.ts"), "NEW serve-page\n");
-    writeFileSync(join(box.toolsDir, "serve-page.ts"), "OLD serve-page\n");
-
-    const out = runRefreshOpencodeTools(box);
-
-    assert.equal(
-      readFileSync(join(box.toolsDir, "serve-page.ts"), "utf8"),
-      "NEW serve-page\n",
-      "the installed tool must be replaced by the repo's version",
-    );
-    assert.match(out, /opencode tools refreshed/);
-    assert.match(out, /EXIT=0/);
-  } finally {
-    rmSync(box.root, { recursive: true, force: true });
-  }
-});
-
-test("self-update.sh refresh_opencode_tools never copies *.test.ts into tools/", () => {
-  // opencode loads EVERY file in tools/ as a tool; a test file imports vitest
-  // (absent under ~/.config/opencode/node_modules), which makes tool
-  // resolution throw and every chat turn fail with "Cannot find package
-  // 'vitest'". Same exclusion install.sh carries.
-  const box = makeFakeBox();
-  try {
-    writeFileSync(join(box.srcDir, "serve-page.ts"), "tool\n");
-    writeFileSync(join(box.srcDir, "serve-page.test.ts"), "import 'vitest'\n");
-
-    runRefreshOpencodeTools(box);
-
-    const installed = readdirSync(box.toolsDir);
-    assert.ok(installed.includes("serve-page.ts"));
-    assert.deepEqual(
-      installed.filter((f) => f.endsWith(".test.ts")),
-      [],
-      "a *.test.ts must never land in tools/",
-    );
-  } finally {
-    rmSync(box.root, { recursive: true, force: true });
-  }
-});
-
-test("self-update.sh refresh_opencode_tools is idempotent — a second run reports no change", () => {
-  const box = makeFakeBox();
-  try {
-    writeFileSync(join(box.srcDir, "notify.ts"), "same\n");
-
-    const first = runRefreshOpencodeTools(box);
-    assert.match(first, /opencode tools refreshed/);
-
-    const second = runRefreshOpencodeTools(box);
-    assert.match(second, /already current/);
-    assert.doesNotMatch(second, /refreshed/);
-    assert.match(second, /EXIT=0/);
-  } finally {
-    rmSync(box.root, { recursive: true, force: true });
-  }
-});
-
-test("self-update.sh refresh_opencode_tools is non-fatal when the source dir is missing", () => {
-  // It runs AFTER the checkout has been reset and deps reinstalled. Aborting
-  // there would leave the box half-updated, so a missing source dir must warn
-  // and return 0.
-  const box = makeFakeBox();
-  try {
-    rmSync(join(box.root, "repo", "docs"), { recursive: true, force: true });
-    const out = runRefreshOpencodeTools(box);
-    assert.match(out, /skipping opencode tool refresh/);
-    assert.match(out, /EXIT=0/);
-  } finally {
-    rmSync(box.root, { recursive: true, force: true });
-  }
 });
 
 test("self-update.sh does NOT restart opencode — that would kill in-flight agent turns", () => {
@@ -5719,98 +5372,6 @@ test("missing Caddyfile under pipefail yields empty stdin and a created block, n
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-// ----------------------------------------------------------------------------
-// BET-446 — `$OPENCODE_CLAUDE_AUTH_PLUGIN` must be `set -u` safe in the seeding
-// block.
-// ----------------------------------------------------------------------------
-//
-// install.sh runs under `set -euo pipefail`. BET-319 guarded the
-// MANTA_CLAUDE_AUTH_PLUGIN override but missed the parallel LOG-ONLY var
-// OPENCODE_CLAUDE_AUTH_PLUGIN, referenced in the two "Seeding Claude auth
-// plugin (...)" messages that are reached exactly when NO override is set —
-// i.e. the default install path. A bare `$OPENCODE_CLAUDE_AUTH_PLUGIN` there
-// would abort the whole install the instant the var is unset.
-//
-// These tests run the REAL extracted seeding block out of the REAL install.sh
-// under the real `set -eu` semantics against a fake box, rather than
-// replicating the branch logic in a test copy, so a regression in the shipped
-// source is what goes red.
-
-// Extract the "B. opencode config seeding" block from install.sh (inline in
-// main(), so slice it out of the source between its comment marker and the
-// `ok "opencode.jsonc seeded."` line). Returns the literal shell source — the
-// `${...}` / `$VAR` tokens inside are intended for the SHELL, so must never be
-// JS-interpolated by the caller.
-function extractSeedClaudeAuthBlock() {
-  const lines = readFileSync(INSTALL_SH, "utf-8").split("\n");
-  const start = lines.findIndex((l) => l.includes("# --- B. opencode config seeding"));
-  const end = lines.findIndex((l) => /ok "opencode\.jsonc seeded\."/.test(l));
-  assert.ok(start !== -1, "must find the '# --- B. opencode config seeding' comment in install.sh");
-  assert.ok(end > start, "must find the \\`ok \"opencode.jsonc seeded.\"\\` line after the block start");
-  return lines.slice(start, end + 1).join("\n");
-}
-
-// Run the real seeding block under `set -euo pipefail` with a fake $HOME and
-// the real merge lib. `pluginVar`:
-//   - undefined → the var is absent from the env (the BET-446 failure mode)
-//   - a string  → the var is set (regression: must still seed normally)
-// Returns { code, out, config } where `config` is the merged opencode.jsonc
-// content under the fake home (for the set case) or null (for the unset case,
-// where the else branch still writes a fresh file).
-function runSeedClaudeAuthBlock(pluginVar) {
-  const block = extractSeedClaudeAuthBlock();
-  const fakeHome = mkdtempSync(join(tmpdir(), "manta-seed-home-"));
-  const script = join(tmpdir(), `manta-seed-${process.pid}.sh`);
-  const body =
-    "#!/usr/bin/env bash\n" +
-    "set -euo pipefail\n" + // exactly the real installer's flag set
-    "export MANTA_INSTALL_TEST_MODE=1\n" +
-    "set +e\n" + // source install.sh (test-mode guard returns cleanly under set +e)
-    "source '" + INSTALL_SH + "'\n" +
-    "set -euo pipefail\n" + // re-assert the real flags after sourcing
-    "NODE=node\n" +
-    "LIB='" + join(__dirname, "install-lib.mjs") + "'\n" +
-    block + "\n" +
-    'echo "SEED_COMPLETE"\n'; // only reached if the block did not abort under set -u
-  writeFileSync(script, body, { mode: 0o755 });
-  const env = { ...process.env, HOME: fakeHome };
-  if (pluginVar === undefined) {
-    delete env.OPENCODE_CLAUDE_AUTH_PLUGIN;
-  } else {
-    env.OPENCODE_CLAUDE_AUTH_PLUGIN = pluginVar;
-  }
-  try {
-    const res = spawnSync("bash", [script], { env, encoding: "utf8" });
-    const out = (res.stdout ?? "") + (res.stderr ?? "");
-    let config = null;
-    const cfgPath = join(fakeHome, ".config", "opencode", "opencode.jsonc");
-    try {
-      config = readFileSync(cfgPath, "utf8");
-    } catch {
-      /* no config written (shouldn't happen — the else branch writes one) */
-    }
-    return { code: res.status, out, config };
-  } finally {
-    rmSync(script, { force: true });
-    rmSync(fakeHome, { recursive: true, force: true });
-  }
-}
-
-test("BET-446: seeding block does NOT abort under set -u when OPENCODE_CLAUDE_AUTH_PLUGIN is unset", () => {
-  const { code, out } = runSeedClaudeAuthBlock(undefined);
-  assert.equal(code, 0, `seeding block must complete when the var is unset:\n${out}`);
-  assert.match(out, /SEED_COMPLETE/, `seeding block must reach completion:\n${out}`);
-  assert.doesNotMatch(out, /unbound variable/, `no bare-expansion abort under set -u:\n${out}`);
-});
-
-test("BET-446: seeding still merges the plugin when OPENCODE_CLAUDE_AUTH_PLUGIN is set", () => {
-  const { code, out, config } = runSeedClaudeAuthBlock("opencode-claude-auth@latest");
-  assert.equal(code, 0, `seeding block must complete when the var is set:\n${out}`);
-  assert.match(out, /opencode\.jsonc seeded\./, `must print the success line:\n${out}`);
-  assert.ok(config !== null, "the merged opencode.jsonc must be written");
-  assert.match(config, /opencode-claude-auth@latest/, "the plugin must still be seeded into the config");
 });
 
 // ----------------------------------------------------------------------------
