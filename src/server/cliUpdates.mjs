@@ -184,7 +184,7 @@ export async function readVersion(absPath, { spawn, timeoutMs = 10_000 }) {
 // ---------------------------------------------------------------------------
 
 /**
- * Run one upgrade command array (`["opencode","upgrade"]`,
+ * Run one upgrade command array (`["claude","update"]`,
  * `["npm","install","-g",…]`, or a `["sh","-c",…]` pipeline). Streams child
  * stdout/stderr through (stdio:"inherit") so the self-update log shows what the
  * vendor installer did. Resolves on exit 0, rejects otherwise — on ENOENT
