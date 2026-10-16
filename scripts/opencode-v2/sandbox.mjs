@@ -14,7 +14,7 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const FORBIDDEN_PORTS = new Set([4096, 8787]);
 
@@ -81,13 +81,19 @@ async function waitReady(url, auth, child, timeoutMs) {
  *        plugin files/dirs copied into $XDG_CONFIG_HOME/opencode/plugins/
  *        (under their basename, or `name` when given)
  * @param {Record<string,string>} [opts.env]  extra env for the child (e.g. ANTHROPIC_API_KEY)
+ * @param {(root:string)=>void} [opts.onRoot]  called with the temp root BEFORE anything is written
+ *        into it (so a caller can register it for cleanup first)
+ * @param {{path:string,content:string,mode?:number}[]} [opts.files]  files (path relative to the
+ *        root, e.g. "home/.claude/.credentials.json") written, mode 0600 by default, before the
+ *        server starts — for anything a plugin reads at setup time
  * @param {object} [opts.config]      written as $XDG_CONFIG_HOME/opencode/opencode.jsonc (plain JSON)
  * @param {string[]} [opts.dirs]      extra empty project dirs to create inside the sandbox
  * @returns {Promise<{url:string,auth:string,password:string,root:string,projectDir:string,
  *   dirs:Record<string,string>,logPath:string,pid:number,stop:()=>Promise<void>}>}
  */
-export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], config, readyTimeoutMs = 60_000 }) {
+export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], config, files = [], onRoot, readyTimeoutMs = 60_000 }) {
   const root = await mkdtemp(join(tmpdir(), "manta-v2-sandbox-"));
+  onRoot?.(root);
   const password = randomBytes(24).toString("base64url");
   let child;
   const cleanup = async () => {
@@ -100,6 +106,11 @@ export async function startSandbox({ binary, plugins = [], env = {}, dirs = [], 
     }
     const pluginsDir = join(e.XDG_CONFIG_HOME, "opencode", "plugins");
     await mkdir(pluginsDir, { recursive: true });
+    for (const f of files) {
+      const dest = join(root, f.path);
+      await mkdir(dirname(dest), { recursive: true, mode: 0o700 });
+      await writeFile(dest, f.content, { mode: f.mode ?? 0o600 });
+    }
     if (config !== undefined) {
       await writeFile(join(e.XDG_CONFIG_HOME, "opencode", "opencode.jsonc"), JSON.stringify(config, null, 2));
     }

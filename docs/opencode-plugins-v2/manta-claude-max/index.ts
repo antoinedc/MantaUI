@@ -47,16 +47,16 @@ export default Plugin.define({
 
     // M1/R4 — the Anthropic provider is `activation: "auto"` (active only with an
     // API key / connection). Forcing it enabled makes its models selectable with
-    // no key at all; the http hooks below supply the subscription Bearer. Decided
-    // before registering (transforms are synchronous and replayed).
-    if (haveClaudeCredentials()) {
-      await ctx.provider.transform((editor: any) => {
-        if (!editor.get("anthropic")) return;
-        editor.update("anthropic", (provider: any) => {
-          provider.activation = "enabled";
-        });
+    // no key at all (no `apiKey:""` sentinel in config); the http hooks below supply
+    // the subscription Bearer. The callback is synchronous and REPLAYED on every
+    // registry rebuild, so the (cheap, sync) credentials check re-runs each time:
+    // a login that appears after startup is picked up without a restart.
+    await ctx.provider.transform((editor: any) => {
+      if (!editor.get("anthropic") || !haveClaudeCredentials()) return;
+      editor.update("anthropic", (provider: any) => {
+        provider.activation = "enabled";
       });
-    }
+    });
 
     // M5 — Claude Code identity as system[0] on EVERY kind of Anthropic request
     // (a hook registered for one kind does not run for the others).
