@@ -581,6 +581,22 @@ const json = (res, status, body, extra = {}) => {
  */
 export function createUpgradeRoutes(engine) {
   return {
+    /**
+     * WebSocket twin of the 503 gate (call it from the `upgrade` handler, after auth). In upgrade mode
+     * a non-exempt path (/pty, /call, anything else) is refused with the SAME HTTP 503 + body BEFORE
+     * the handshake completes, then the socket is closed. Returns true when it refused.
+     */
+    refuseWebSocket(socket, path) {
+      if (!engine.isUpgradeMode() || isUpgradeExemptPath(path)) return false;
+      const body = JSON.stringify({ error: "box upgrading", upgrade: true });
+      socket.write(
+        `HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 5\r\n` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+      );
+      socket.destroy();
+      return true;
+    },
+
     async handle(req, res, path) {
       if (engine.isUpgradeMode() && !isUpgradeExemptPath(path)) {
         json(res, 503, { error: "box upgrading", upgrade: true }, { "retry-after": "5" });

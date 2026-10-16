@@ -5,6 +5,10 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { WebSocketServer, WebSocket } from "ws";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createUpgradeRoutes,
   runSelfUpdateTo,
@@ -719,5 +723,76 @@ describe("runSelfUpdateTo (the real re-install call)", () => {
     assert.match((await runSelfUpdateTo({ script: "/nope/self-update.sh", sha: "abc1234" })).skipped, /self-update\.sh is missing/);
     const r = await run({ sha: "abc1234", spawnFn: () => { throw new Error("EPERM"); } });
     assert.match(r.skipped, /could not start self-update\.sh: EPERM/);
+  });
+});
+
+describe("WebSocket gate in upgrade mode", () => {
+  // The real wiring shape from index.mjs: an http server whose `upgrade` handler asks the gate first.
+  async function wsServer(engine) {
+    const routes = createUpgradeRoutes(engine);
+    const wss = new WebSocketServer({ noServer: true });
+    const server = createServer((_, res) => res.end("x"));
+    server.on("upgrade", (req, socket, head) => {
+      const path = new URL(req.url, "http://x").pathname;
+      if (routes.refuseWebSocket(socket, path)) return;
+      wss.handleUpgrade(req, socket, head, (ws) => ws.send(`hello ${path}`));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    return { port: server.address().port, close: () => new Promise((r) => { wss.close(); server.close(r); server.closeAllConnections?.(); }) };
+  }
+  const attempt = (port, path) =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+      ws.on("unexpected-response", (_req, res) => {
+        let body = "";
+        res.on("data", (d) => (body += d));
+        res.on("end", () => resolve({ refused: true, status: res.statusCode, body: JSON.parse(body), retryAfter: res.headers["retry-after"] }));
+      });
+      ws.on("message", (m) => { resolve({ refused: false, message: String(m) }); ws.close(); });
+      ws.on("error", () => {});
+    });
+
+  test("while running: /pty and /call are refused with HTTP 503 {error,upgrade:true} before the handshake; /events is allowed", async () => {
+    const box = makeBox({ crashOn: "opencode.stop" });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+    assert.equal(m.isUpgradeMode(), true);
+    const srv = await wsServer(m);
+    try {
+      for (const p of ["/pty?session=a", "/call", "/anything-else"]) {
+        const r = await attempt(srv.port, p);
+        assert.equal(r.refused, true, p);
+        assert.equal(r.status, 503, p);
+        assert.deepEqual(r.body, { error: "box upgrading", upgrade: true });
+        assert.equal(r.retryAfter, "5");
+      }
+      const ev = await attempt(srv.port, "/events");
+      assert.deepEqual(ev, { refused: false, message: "hello /events" });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  test("when not upgrading, /pty and /call connect normally", async () => {
+    const box = makeBox({ prepare: { migrationNeeded: false, passwordCreated: false } });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    const srv = await wsServer(m);
+    try {
+      assert.deepEqual(await attempt(srv.port, "/pty"), { refused: false, message: "hello /pty" });
+      assert.deepEqual(await attempt(srv.port, "/call"), { refused: false, message: "hello /call" });
+    } finally {
+      await srv.close();
+    }
+  });
+
+  test("index.mjs asks the gate in its real upgrade handler, after auth and before routing", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.mjs"), "utf8");
+    const h = src.slice(src.indexOf("const handleUpgrade = "));
+    assert.ok(h.indexOf("authEngine.authorize") < h.indexOf("upgradeRoutes.refuseWebSocket(socket, url.pathname)"));
+    assert.ok(h.indexOf("upgradeRoutes.refuseWebSocket") < h.indexOf('url.pathname === "/events"'));
+    assert.ok(h.indexOf("upgradeRoutes.refuseWebSocket") < h.indexOf('url.pathname === "/pty"'));
+    assert.ok(h.indexOf("upgradeRoutes.refuseWebSocket") < h.indexOf('url.pathname === "/call"'));
   });
 });

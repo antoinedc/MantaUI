@@ -6104,6 +6104,10 @@ const handleUpgrade = (req, socket, head) => {
     return;
   }
 
+  // Upgrade mode (K3): /pty, /call and any other WS route get the same 503 the HTTP routes do —
+  // refused before the handshake. /events stays open (it carries the upgrade progress).
+  if (upgradeRoutes.refuseWebSocket(socket, url.pathname)) return;
+
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,
     // which can't reliably receive EventSource). Same bus + envelope.
