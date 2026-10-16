@@ -59,204 +59,183 @@ removes that so the backend swap is invisible to every client.
 | Usage / context | `model.limit.context`, Session.Info tokens, `session.usage.updated`. | `p3` 13 |
 
 ### Known gaps that need a product decision (not technical unknowns)
-1. **Todos: V2 deliberately removed TodoWrite.** Manta's pinned todo card breaks. → Decision D1.
+1. **Todos: V2 deliberately removed TodoWrite** and ships no replacement. The docs only say the Plan agent "may write OpenCode plan files when asked"; in practice models fall back to writing a markdown checklist (`.task_plan.md` / `TODO.md`). There is no todo state or event. → Decision D1 (decided: Manta ships its own todo tool).
 2. **No event replay.** `/log` only emits `seq` watermarks. Reconnect = cheap "changed since seq N?" check + refetch. Fine, but the renderer's gap-handling must be built on refetch.
 3. **`CLAUDE.md` ignored**, **no LSP**. Only matters for users relying on either.
-4. **Disk:** migration needs ≈0.8× the history size of extra space in place, ≈1.8× on a copy. The dev box cannot migrate today (32 GB history, ~3 GB free). → Decision D3.
+4. **Disk:** migration needs ≈0.8× the history size of extra space in place, ≈1.8× on a copy. The dev box cannot migrate today (32 GB history, ~3 GB free). → Decision D3 (decided: the box owner frees the space; Manta checks and blocks until it is there).
 5. **Security defaults:** `external_directory` is allowed by default (V1 asked) — we ship an `ask` rule; `GET /api/credential` returns secrets in plain text — never proxied.
 
 ---
 
-## 3. Decisions needed before Phase 2 (owner: you)
+## 3. Decisions
 
-| # | Decision | Recommendation |
+| # | Decision | Status |
 |---|---|---|
-| D1 | Todo card: ship a Manta `todowrite` tool in our plugin (same UX), or retire the card | **Ship the tool** — it's a ~50-line plugin tool + a custom event; keeps the UX users know |
-| D2 | Pin opencode version (today: unpinned, `opencode upgrade` every self-update) | **Pin** V2 exactly; bump deliberately after re-running the contract test suite (Phase 2) |
-| D3 | Disk policy for migration | Pre-flight requires free ≥ 1.0× history size; otherwise the gate offers "free space / archive sessions older than N days" — never auto-deletes |
-| D4 | Migrate in place vs on a copy | **Copy when space allows (clean rollback), in place otherwise** (V1 tables remain in the file, so rollback is still possible but less clean) |
-| D5 | `CLAUDE.md` users | Box installer symlinks/appends project `CLAUDE.md` into instructions via config `instructions` |
-| D6 | Who triggers migration | The **first desktop running the new version** (your requirement); iOS shows a read-only "box is upgrading" state |
+| D1 | Todos: V2 has no replacement → Manta ships its own `todowrite` tool in the plugin pack + a todo frame, so the pinned checklist card keeps working | **Decided** |
+| D2 | Pin the opencode V2 version exactly; bump only after the contract suite passes; remove `opencode upgrade` from self-update | **Decided** |
+| D3 | Disk: the box owner frees space; migration pre-flight checks and refuses to start (nothing stopped, nothing changed) until there is enough | **Decided** |
+| D4 | **Hard switch.** One coordinated release: box release **R2** (V2 only), desktop **D2**, iOS **I2**. No dual-backend mode, no opt-in, no gradual rollout to users. Users must update everything | **Decided** |
+| D5 | Migrate on a copy when space allows (clean rollback), in place otherwise (V1 tables remain in the file) | Proposed |
+| D6 | Project `CLAUDE.md`: installer adds it to config `instructions` so V2 keeps reading it | Proposed |
 
 ---
 
 ## 4. Migration path — step by step
 
-Each phase ships to `main` independently and leaves the product working. Phases 1–3 are
-invisible to users. Exit criteria are gates: a phase is not done until its gate passes.
+**Development model.** Work merges to `main` continuously, but users can never reach the
+V2 path until the cut-over release: the V2 backend is selectable only on dev boxes
+(`~/.manta/opencode-backend=v2`). The cut-over release (Phase 6) deletes the V1 backend
+and makes V2 the only path. This avoids a months-long branch without exposing a dual mode
+to users.
 
 ### Phase 0 — Spikes ✅ (this document)
 
-### Phase 1 — Insulate Manta from opencode (on V1, no behaviour change)
-Goal: every opencode-specific shape lives behind one boundary in manta-server.
+### Phase 1 — One boundary around opencode (lands on V1, invisible to users)
+Goal: every opencode-specific shape is translated in manta-server, so the engine swap does
+not ripple into the clients.
+1.1 **Backend interface.** `src/server/opencode.mjs` behind an `OpencodeBackend` interface
+(sessions, prompt + delivery, interrupt, permissions, questions/forms, providers, models,
+files, VCS, config, events). V1 implementation = today's code, moved.
+1.2 **Freeze the frame contract.** The `/events` interpreted frames (`streamInterp.mjs`
+output) and the `/rpc` message model become Manta-owned types in `src/shared/`, with golden
+tests replaying recorded event streams. iOS depends only on these — keeping them stable is
+what lets old iOS builds survive the switch.
+1.3 **Renderer stops reading raw opencode events** (`useSseBus.ts`, `App.tsx`); add frame
+kinds where missing (todos, compaction, retry, truncation, command origin, child sessions,
+live tool output).
+1.4 **Manta message model** (text / reasoning / tool{status,input,output,liveOutput} /
+file / child-session / form) built server-side; renderer + `chatUtils.ts` consume only it.
+1.5 `HistoryStore` interface for every direct DB reader (search, model ledger, optimizer,
+CTO); `ConfigStore` interface for every config writer.
+Gate: suites green; manual regression checklist identical on V1 (streaming, tools, live
+bash, permissions, questions, subagents, queued messages, search, compaction, model switch,
+schedules, delegate, push).
 
-1.1 **Backend interface.** Extract `src/server/opencode.mjs` behind an `OpencodeBackend`
-interface (sessions, prompt, abort/interrupt, permissions, questions/forms, providers,
-models, files, VCS, config write, events). `opencodeV1` = today's code moved, unchanged.
-1.2 **Freeze the frame contract.** Document the `/events` interpreted-frame schema
-(`streamInterp.mjs` output) and the `/rpc` message model as Manta-owned types
-(`src/shared/`); add golden tests that replay recorded V1 event streams → frames.
-1.3 **Renderer stops reading raw opencode events.** Move every raw-event consumer in
-`useSseBus.ts` / `App.tsx` onto interpreted frames (add frame kinds where missing:
-todos, compaction, retry, finish/truncation, command-origin, child sessions).
-1.4 **Manta message model.** Renderer + `chatUtils.ts` consume a Manta-owned message model
-(text / reasoning / tool{status, input, output, liveOutput} / file / child-session), built
-server-side from V1 parts. This absorbs the parts→timeline change in one place.
-1.5 **DB readers behind an interface.** `opencodeDb.mjs` gains a `HistoryStore` interface
-used by search, model ledger, optimizer, CTO readers; V1 implementation = today's SQL.
-1.6 **Config writer interface.** `providers.mjs`/`subagentSync`/cache TTL write through
-`ConfigStore` (V1 = PATCH /global/config + `removeConfigKeys`).
-
-Gate: full test suites green; desktop + iOS behave identically on V1 (manual regression
-checklist: streaming, tools, live bash, permissions, questions, subagents, queue drain,
-search, compaction, model switch, schedules, delegate).
-
-### Phase 2 — V2 backend, behind a flag (dev boxes only)
-2.1 `opencodeV2` backend: `/api/*` client, Basic auth from `~/.manta/opencode-password`
-(0600), location handling.
-2.2 Event mapper V2 → Manta frames (the 25 types in `round1-b` B1); live-shell poller
-(`/api/shell/{id}/output`) emitting the same live-output frames as today.
+### Phase 2 — V2 backend (dev boxes only)
+2.1 `/api/*` client with Basic auth from `~/.manta/opencode-password` (0600).
+2.2 Event mapper V2 → Manta frames; live-shell poller on `/api/shell/{id}/output`.
 2.3 Message mapper V2 timeline → Manta message model.
-2.4 Native queue: Manta's queued messages → `delivery:"queue"`/`"steer"` + inbox APIs;
-interrupt → `/interrupt`; running state → `/session/active`.
-2.5 Questions → forms (QuestionCard renders V2 form fields; keep current UX for the
-simple case). Permissions → V2 request/reply; trust mode → session allow-all ruleset.
-2.6 Config writes → edit opencode.jsonc + `POST /api/location/reload` (no restart).
-2.7 `HistoryStore` V2 implementation on the new schema (`session_v2`,
-`session_message.data` JSON) — search, ledgers, optimizer, CTO.
-2.8 **Contract test suite against a real V2 binary** (CI job, sandboxed, API-key model,
-tiny budget): replays the spike scenarios and asserts frames. This is what makes
-version bumps safe (D2).
-2.9 Backend selection: `~/.manta/opencode-backend` = `v1|v2` (dev only).
+2.4 Natives: queued messages → `delivery: queue|steer` + inbox; interrupt → `/interrupt`;
+running → `/session/active`; titles → `session.renamed`; model/agent → server-side switch.
+2.5 Questions → forms; permissions → V2 requests; trust mode → session allow-all ruleset.
+2.6 `ConfigStore` V2: edit `opencode.jsonc` + `POST /api/location/reload` (no restart).
+2.7 `HistoryStore` V2 on the new schema.
+2.8 **Contract suite** against the pinned V2 binary (CI, sandboxed, API-key model, tiny
+budget) — replays the spike scenarios and asserts frames.
+Gate: the dev box runs V2 daily for a week; contract suite green.
 
-Gate: a dev box runs V2 end-to-end for a week of real use with zero client changes beyond
-Phase 1; contract suite green.
+### Phase 3 — Manta V2 plugin pack (parallel with Phase 1–2)
+3.1 One `manta` plugin: all 20 tools (shared helper replaces `manta-auth.ts`) + the todo
+tool (D1).
+3.2 `manta-claude-max` from `p1`: auth, identity, version gating, billing header, tool-name
+prefix with response un-prefix, body clone, SSE un-prefix buffered to event boundaries.
+3.3 Seats: per-session account in `http.request`; refresh via manta-server.
+3.4 Optimizer → `session` `context` / `compaction` hooks.
+Gate: every tool exercised by a live turn; Max + two seats + Opus verified on the dev box.
 
-### Phase 3 — The Manta V2 plugin pack
-3.1 One plugin package `manta` (`docs/opencode-plugins-v2/`): all 20 tools (shared helper
-replaces `manta-auth.ts`), mechanical port (Plugin.define + `ctx.tool.transform`, JSON
-Schema inputs, `{content}` results). Plus the todo tool (D1).
-3.2 `manta-claude-max` (from `p1`): auth, identity, version gating, billing header,
-tool-name prefix **with response un-prefix** (R1), body clone (R2); production SSE
-un-prefix buffers to event boundaries.
-3.3 Seats: per-session account selection in `http.request`; refresh via manta-server.
-3.4 Optimizer → `ctx.session.hook("context" | "compaction")`.
-3.5 Plugin RPC endpoints for anything manta-server needs to ask opencode directly.
+### Phase 4 — Box release R2 (install + update + migration)
+4.1 Bundle the pinned V2 binary; the V2 curl installer is never used.
+4.2 Generate `OPENCODE_PASSWORD` into `~/.manta/opencode-password`; all three supervisors
+(systemd, launchd, nohup fallback) pass it + `OPENCODE_DB` + `ANTHROPIC_CLI_VERSION`.
+4.3 Global config: `external_directory: ask` rule; D6 `CLAUDE.md` instructions; drop
+`provider.openrouter.whitelist` (unsupported) after recording it.
+4.4 Plugin pack installed to `~/.config/opencode/plugins/`; `tools/*.ts` and V1 plugins
+removed; `opencode upgrade` removed.
+4.5 **Migration runs as part of the box update itself** (§5). Both fresh installs and
+upgrades from R1 land on V2. `supportedMajor` bumps, so R1-era desktops see "incompatible".
+Gate: on the staging box — fresh install; upgrade from R1 with a realistic copied history
+(≥ 2 GB); kill manta-server, kill opencode, reboot, and quit the desktop mid-migration;
+too-little-disk path; rollback path.
 
-Gate: every tool exercised by a live turn in the contract suite; Max + two seats verified
-on a dev box; Opus with current CLI version.
+### Phase 5 — Desktop D2 + iOS I2
+5.1 D2 requires box ≥ R2. On launch it runs the **blocking upgrade screen** (§5) when the
+box is older or still migrating; otherwise opens normally.
+5.2 I2: V2-era features (forms, todos frame) + a read-only "Your box is upgrading" screen.
+Old iOS builds keep working against R2 as long as the frame contract (1.2) held — verified
+in the Phase 4 rehearsal with the previous TestFlight build.
 
-### Phase 4 — Box install & update for V2
-4.1 Releases bundle a **pinned** V2 binary staged at `~/.opencode-v2/bin/opencode`
-(never overwrite V1 in place; the V2 installer is never used).
-4.2 Generate `OPENCODE_PASSWORD` once into `~/.manta/opencode-password` (0600); service
-units (systemd, launchd, nohup fallback — all three) pass it + `OPENCODE_DB` +
-`ANTHROPIC_CLI_VERSION`.
-4.3 Global config additions: `external_directory: ask` rule; D5 instructions for CLAUDE.md.
-4.4 Self-update installs the plugin pack into `~/.config/opencode/plugins/` and stops
-copying `tools/*.ts` once on V2. `opencode upgrade` removed (pinned).
-4.5 The box release containing all of the above is **dual-backend**: it keeps running V1
-until a migration is started (Phase 5). Shipping it changes nothing for users.
+### Phase 6 — Cut-over release
+6.1 Delete the V1 backend, V1 tool/plugin install paths, V1 tests, and the workarounds V2
+replaces: abort-based queue drain, per-directory streams + readiness gate, delta flush
+buffer, throwaway title sessions, restart-on-config-remove, localStorage model override,
+status guessing in peers/push.
+6.2 Migrate the dev box first (disk provided per D3), then the staging box.
+6.3 Publish **R2, D2 and I2 together** (server tarballs → desktop feed → TestFlight).
+Gate: dev + staging boxes on V2 for 2+ days with no regressions.
 
-Gate: fresh install + upgrade from current release on the staging box, both still on V1,
-V2 binary staged, password present, services correct.
-
-### Phase 5 — Migration orchestrator + blocking first-launch screen
-See §5 for the full design. Summary:
-5.1 Box: `migrationV2.mjs` state machine (durable in `~/.manta/v2-migration.json`).
-5.2 Box API: `GET /api/migration/v2` (state + progress), `POST /api/migration/v2/start`,
-`POST /api/migration/v2/retry`, `POST /api/migration/v2/rollback`.
-5.3 Desktop: full-screen `MigrationGate` in the Onboarding host; compatibility matrix bump.
-5.4 iOS: read-only "Your box is upgrading" screen with the same progress.
-
-Gate: rehearsal on the staging box with a realistic copied history (≥2 GB), including:
-kill manta-server mid-migration, kill opencode mid-migration, desktop quit and relaunch
-mid-migration, disk-too-small path, rollback path.
-
-### Phase 6 — Adopt natives, delete workarounds
-Delete: abort-based queue drain + `isDrainAbortError`; per-directory streams + readiness
-gate + `rememberSessionDirectory`; delta flush buffer; throwaway title sessions;
-restart-on-config-remove; localStorage model override; status guessing in peers/push.
-Gate: deleted code has no remaining callers; suites green.
-
-### Phase 7 — Rollout
-7.1 Dev box (needs D3 disk first: ~25 GB more on the history volume, or archive).
-7.2 Staging box, fresh + upgraded.
-7.3 Users: publish box release (Phase 4/5, dual-backend) → publish desktop release that
-requires it → migration happens on each user's first launch.
-7.4 Two releases later: remove the V1 backend, V1 plugin/tool install paths, V1 tests;
-offer "reclaim disk" (drop V1 tables + VACUUM, needs temp space) once the user confirms.
+### Phase 7 — After the switch
+7.1 Watch: migration success rate, durations, rollbacks, Claude Max errors.
+7.2 Two weeks after release, offer "Reclaim disk space" in Settings (drop V1 tables +
+VACUUM, needs temp space; explicit user click).
 
 ---
 
-## 5. Blocking first-launch migration screen — design
+## 5. Hard switch: update order and the blocking upgrade screen
 
-### Trigger
-- The new desktop version bumps the compatibility matrix: it requires box ≥ release R
-  **and** `backend == v2`.
-- On launch the desktop reads `GET /api/version` + `GET /api/migration/v2`:
-  - box older than R → gate step 1 runs the existing box update flow (confirm → update →
-    reconnect); then continues.
-  - box on R, backend v1, state `not_started` → gate shows the pre-flight result and a
-    single **"Upgrade now"** button (it stops running agents, so it must be a deliberate
-    click; the screen explains that and estimates duration).
-  - state `running` (started by another device, or resumed after a crash) → gate attaches
-    and shows progress immediately.
-  - state `completed` → app opens normally.
-- The gate is **blocking**: no sidebar, no sessions, no settings except "Help / logs".
-  It reuses the full-screen Onboarding host (`App.tsx` already swaps to it by state).
+### The box upgrade (R1 → R2) is atomic from the user's point of view
+`self-update.sh` for R2 runs these steps; each is idempotent and recorded in
+`~/.manta/v2-migration.json`, so a crash, reboot or manta-server restart resumes:
+1. **Pre-flight** — disk (free ≥ 1.0× history size, D3), CPU arch, current version.
+   Failure → abort before anything is stopped; box stays fully on R1; the reason is
+   recorded and shown to the user.
+2. **Swap code** to R2; manta-server restarts in *upgrade mode* (serves only auth,
+   version and migration status; every other route answers `503 box upgrading`).
+3. **Stop V1 opencode** after waiting up to 60 s for running turns (scheduler, webhooks
+   and delegate paused).
+4. **Copy history** (D5) — progress = bytes copied.
+5. **Migrate** — start V2 with `OPENCODE_DB`; progress = `numerator/denominator` from
+   `/api/experimental/migration/v1`, caption = `label`.
+6. **Verify** — plugin pack loaded, tools registered, one tiny Claude turn per account,
+   session count matches.
+7. **Cut over** — manta-server leaves upgrade mode; scheduler/webhooks resume.
+Progress for all steps is published on `/events` and pollable at `GET /api/upgrade`.
 
-### Steps shown (one bar per step, overall bar on top)
-1. **Checking your box** — version, disk pre-flight (D3), running sessions.
-2. **Updating your box** (only if needed) — existing update flow, reconnect-tolerant.
-3. **Preparing** — stop new turns, wait up to N s for running turns to finish (show which),
-   stop V1 opencode, snapshot config, copy history if D4 = copy (bar = bytes copied).
-4. **Migrating your conversations** — V2 started with `OPENCODE_DB`; bar =
-   `progress.numerator / denominator`, caption = `progress.label`; the "Clearing old
-   events" lead-in shows as indeterminate. ETA from measured rate.
-5. **Installing plugins & checking your setup** — plugin pack loaded (`GET /api/plugin`),
-   Claude login works (one tiny Haiku turn per account), tools registered.
-6. **Done** — "Your conversations are on the new engine" → app opens.
+### Update order (both orders work)
+**Desktop first** (D2 launched against an R1 box):
+1. D2 reads `GET /api/version` → box is older than R2 → full-screen gate, nothing else
+   reachable.
+2. Gate shows the pre-flight result and one button: **"Upgrade box"** (explains running
+   agents will be stopped, shows estimated duration).
+3. D2 triggers the existing box-update mechanism, then follows `/api/upgrade` through
+   steps 1–7. It tolerates the manta-server restart (polls once per second until the
+   events stream reconnects).
+4. Done → app opens on V2.
 
-### Who does the work
-The **box** does everything; the desktop only displays and starts it. manta-server owns a
-durable state machine:
-`not_started → preflight → updating → preparing → migrating → verifying → completed`
-with `failed{step, error, retryable}` and `rolled_back`. Every step is idempotent so a
-restart of manta-server, a box reboot, or the desktop quitting simply resumes (V2
-migration itself is proven resumable + idempotent). Progress is published on the existing
-`/events` bus and also pollable (the desktop polls 1/s when SSE is down — manta-server
-restarts during step 2).
+**Box first** (box updated from the R1-era desktop banner or `manta update`):
+1. The box upgrades itself through steps 1–7 with no client attached.
+2. The R1-era desktop sees `incompatible` → existing blocking banner: "Update Manta to
+   continue" (desktop auto-update is already wired).
+3. When D2 launches: migration done → opens normally; still running → gate attaches and
+   shows live progress; failed → gate shows the failure with Retry / Roll back.
 
-### Failure handling
-- Pre-flight fails (disk) → gate shows exact numbers ("needs 31 GB free, you have 3 GB")
-  and options: free space and re-check, or archive sessions older than N days (explicit,
-  previewed, reversible export to a tarball first). Nothing destructive happens
-  automatically.
-- Migration error → **Retry** (safe: resumable) and **Roll back** (switch the service back
-  to V1 and the untouched V1 history; desktop then shows "the upgrade was rolled back"
-  and keeps working on the previous box release until the user retries).
-- Verification fails (e.g. Claude login) → do not roll back conversations; show the
-  specific fix (sign in again) inside the gate.
+**iOS:** I2 shows the same progress read-only ("Your box is upgrading"). If the user has
+not updated iOS yet, the old build keeps working once the box is on R2 (frame contract
+held), and during the upgrade it sees the box as unreachable/upgrading.
 
-### Other clients during migration
-- iOS: `GET /api/migration/v2` → full-screen read-only progress ("Your box is upgrading,
-  started from your Mac"); cannot start or cancel.
-- Old desktops: compatibility verdict `incompatible` → existing blocking banner asks them
-  to update.
-- Scheduled prompts, webhooks, delegate jobs: paused during `preparing…verifying`, resumed
-  after (scheduler skips, no catch-up — existing semantics).
+### The gate (desktop)
+- Hosted in the full-screen Onboarding flow (`Onboarding.tsx`, which `App.tsx` already
+  swaps to by state) — no new blocking primitive.
+- Top: overall progress bar. Below: the 7 steps with a check, spinner or error each; the
+  current step has its own bar and ETA (measured rate).
+- Not dismissible. Only "View logs" and "Get help" are available.
+- Failure states:
+  - **Not enough disk:** exact numbers ("needs 31 GB free on /mnt/…, has 3 GB") and
+    **Check again**. Nothing was stopped.
+  - **Migration error:** **Retry** (resumable) or **Roll back** (box returns to R1 + the
+    untouched V1 history; the gate then says to reinstall the previous desktop version,
+    with a link).
+  - **Verification failed** (e.g. Claude login): no rollback; shows the specific fix
+    (sign in again) and **Check again**.
 
 ---
 
 ## 6. Rollback
 
-| Point of failure | Rollback |
+| When | How |
 |---|---|
-| Phases 1–4 | Normal code revert; users never left V1 |
-| During migration | Built-in: service back to V1 binary + untouched V1 history (copy mode) or same file (in-place: V1 tables are kept) |
-| After cut-over, within the dual-backend window | `POST /api/migration/v2/rollback`: V1 resumes on the pre-migration history; conversations created on V2 since cut-over are exported to a file (not lost) |
-| After Phase 7.4 | No automatic rollback (V1 removed); restore from the pre-migration backup |
+| Phases 1–5 | Normal revert; no user is on V2 |
+| Pre-flight fails | Nothing to roll back; box never left R1 |
+| During / after migration | `manta rollback` (also the gate's Roll back button): reinstall the previous box release, start V1 on the untouched V1 history (copy mode) or the same file (in place: V1 tables kept). Conversations created on V2 since cut-over are exported to a file. User reinstalls the previous desktop version. Emergency path, not a mode |
 
 ---
 
@@ -264,12 +243,12 @@ restarts during step 2).
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Anthropic changes the Claude Code billing signature / version gating | Medium (same as today) | Same exposure as V1; version derived from box CLI; contract test alerts |
-| V2 point release breaks the contract | Medium (V2 is young: 2.0.x) | Pin (D2); contract suite gates every bump |
-| History migration slow or out of disk on large boxes | Medium | Pre-flight; copy/in-place choice; resumable; ETA shown |
-| Users relying on todos / CLAUDE.md / LSP | Low–Med | D1, D5; release notes |
-| Credentials endpoint leaking secrets | Low | manta-server never proxies `/api/credential`; test asserts it |
-| Renderer regression from message-model change | Medium | Phase 1 lands on V1 first with golden tests, before V2 exists |
+| A bug only found after users switch (no gradual rollout) | Medium | Contract suite; dev + staging boxes on V2 before release; rollback command; release on a quiet day with monitoring |
+| Anthropic changes the Claude Code billing signature / version gating | Medium (same as today) | Version derived from the box CLI; contract suite alerts |
+| V2 point release breaks the contract | Medium (V2 is 2.0.x) | Pinned (D2) |
+| Migration slow / out of disk on big boxes | Medium | Pre-flight refuses before touching anything; resumable; ETA shown |
+| Old iOS build breaks on R2 | Low–Med | Frame contract (1.2) + rehearsal with the previous TestFlight build |
+| Credentials endpoint leaks secrets | Low | Never proxied; test asserts it |
 
 ---
 
@@ -277,13 +256,12 @@ restarts during step 2).
 
 | Phase | Days |
 |---|---|
-| 1 Insulation | 10–15 |
-| 2 V2 backend + contract suite | 12–18 |
-| 3 Plugin pack (tools, Max, seats, optimizer, todos) | 6–9 |
-| 4 Install / update | 3–5 |
-| 5 Orchestrator + gate + iOS state | 6–9 |
-| 6 Delete workarounds | 3–4 |
-| 7 Rollout + cleanup | 3–5 |
-| **Total** | **~45–65** |
+| 1 One boundary around opencode | 8–12 |
+| 2 V2 backend + contract suite | 12–16 |
+| 3 Plugin pack | 6–9 |
+| 4 Box release R2 (install, update, migration) | 5–7 |
+| 5 Desktop gate + iOS | 4–6 |
+| 6 Cut-over + deletions | 3–4 |
+| **Total** | **~38–54** |
 
-Phases 1 and 3 can run in parallel; 2 depends on 1; 5 depends on 2–4.
+Phase 3 runs in parallel with 1–2; 4–5 depend on 2.
