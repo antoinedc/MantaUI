@@ -15,7 +15,8 @@ import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { expandTilde, patchPath, statePath } from "../shared/paths.mjs";
+import { expandTilde, patchPath } from "../shared/paths.mjs";
+import { readOpencodePassword } from "./upgradeV2Service.mjs";
 import { isPlanAgent } from "../shared/planMode.mjs";
 import {
   mapTimeline,
@@ -71,37 +72,27 @@ export function _setApiBase(url) {
 // EVERY request, SSE included. The password is `~/.manta/opencode-password`
 // (the service gets the same value as OPENCODE_PASSWORD); MANTA_OPENCODE_PASSWORD
 // overrides it (tests / the sandbox smoke). This is the ONE helper that builds
-// the header — every other module that talks to opencode imports it.
-const OPENCODE_PASSWORD_FILE = "opencode-password";
-let cachedFilePassword = null;
+// the header — every other module that talks to opencode imports it. The read is
+// `readOpencodePassword` (upgradeV2Service.mjs): it re-reads the tiny file on
+// EVERY call and caches nothing, so a password file created or rotated after
+// boot is picked up by the next request.
 
-// TODO(C3 rebase): switch to readOpencodePassword() from ./upgradeV2Service.mjs (same lazy semantics).
-function opencodePassword() {
-  const env = process.env.MANTA_OPENCODE_PASSWORD;
-  if (typeof env === "string" && env.trim()) return env.trim();
-  if (cachedFilePassword) return cachedFilePassword;
+/**
+ * `Basic …` header value for opencode, or undefined when no password is
+ * configured (no env override, file missing/empty) — the request then goes out
+ * unauthenticated and opencode's own 401 is the error the caller sees.
+ */
+export async function opencodeAuthHeader() {
   try {
-    const raw = readFileSync(statePath(OPENCODE_PASSWORD_FILE), "utf8").split("\n")[0].trim();
-    if (raw) cachedFilePassword = raw; // never cache a miss: the file may appear after boot
+    const pw = await readOpencodePassword();
+    return `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}`;
   } catch {
-    /* no password file yet */
+    return undefined;
   }
-  return cachedFilePassword;
 }
 
-/** `Basic …` header value for opencode, or undefined when no password is configured. */
-export function opencodeAuthHeader() {
-  const pw = opencodePassword();
-  return pw ? `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}` : undefined;
-}
-
-/** Test-only: forget the cached password file. */
-export function _resetOpencodeAuth() {
-  cachedFilePassword = null;
-}
-
-function withAuth(init) {
-  const auth = opencodeAuthHeader();
+async function withAuth(init) {
+  const auth = await opencodeAuthHeader();
   if (!auth) return init;
   const headers = { ...(init?.headers ?? {}) };
   if (!Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) headers.authorization = auth;
@@ -169,8 +160,8 @@ export function _pooledOcRequest(url, init) {
 // `.status` / `.json()` / `.text()` unchanged. Same http.Agent-then-adapt
 // technique the desktop's previous pooledRequest used (over the SSH forward);
 // here the same pattern goes straight to opencode on this box.
-function ocFetch(url, init) {
-  return (ocTransport ?? pooledOcRequest)(url, withAuth(init));
+async function ocFetch(url, init) {
+  return (ocTransport ?? pooledOcRequest)(url, await withAuth(init));
 }
 
 function pooledOcRequest(url, init) {
@@ -2563,8 +2554,8 @@ let eventStreamTransport = null;
 export function _setEventStreamTransport(fn) {
   eventStreamTransport = fn;
 }
-function eventFetch(url, init) {
-  return (eventStreamTransport ?? fetch)(url, withAuth(init));
+async function eventFetch(url, init) {
+  return (eventStreamTransport ?? fetch)(url, await withAuth(init));
 }
 
 /**

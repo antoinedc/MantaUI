@@ -22,6 +22,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { statePath } from "../shared/paths.mjs";
+import { apiUrl, opencodeAuthHeader } from "./opencode.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -36,59 +37,19 @@ const execFileAsync = promisify(execFileCb);
 // That is what removed every "restart opencode to apply this" path; restartOpencode
 // above remains only for an explicit user action and the upgrade flow.
 //
-// TODO(C1): this is a local copy of the K1 contract (Basic `opencode:<password>`
-// on 127.0.0.1:4096) so this slice does not depend on opencode.mjs landing
-// first. Once opencode.mjs exports `opencodeAuthHeader()` / `apiUrl()` /
-// `ocFetch`, delete `opencodeBaseUrl` / `opencodePassword` / `localAuthHeader`
-// and call those instead.
-
-/** Where the box's opencode listens. `MANTA_OPENCODE_URL` is a test/harness seam only. */
-export function opencodeBaseUrl(env = process.env) {
-  const override = env.MANTA_OPENCODE_URL;
-  if (typeof override === "string" && override.trim()) return override.trim().replace(/\/+$/, "");
-  return "http://127.0.0.1:4096";
-}
-
-let cachedPassword = null;
-
-/**
- * The opencode server password (K1): `MANTA_OPENCODE_PASSWORD` overrides the
- * single-line 0600 file `~/.manta/opencode-password`. Cached per process; a
- * missing file yields null (the request then goes out unauthenticated and the
- * server's 401 is reported as the error).
- */
-export function opencodePassword(env = process.env, readText = (p) => readFileSync(p, "utf8")) {
-  const fromEnv = env.MANTA_OPENCODE_PASSWORD;
-  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv;
-  if (cachedPassword !== null) return cachedPassword;
-  try {
-    const pw = readText(statePath("opencode-password")).split(/\r?\n/)[0].trim();
-    if (pw) cachedPassword = pw;
-    return pw || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Test-only: forget the cached password so the next call re-reads it. */
-export function _resetOpencodePasswordCache() {
-  cachedPassword = null;
-}
-
-function localAuthHeader(env, readText) {
-  const pw = opencodePassword(env, readText);
-  return pw ? { authorization: `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}` } : {};
-}
+// The endpoint and the Basic-auth header are opencode.mjs's (`apiUrl`,
+// `opencodeAuthHeader`) — the single K1 implementation; nothing here re-derives
+// them.
 
 /**
  * The models V2 currently lists (`GET /api/model` → `data[]`, each
  * `{providerID, modelID, package, …}`). Throws on a transport/HTTP error — callers
- * decide whether a missing list is fatal. `fetchFn` / `env` / `readText` are
- * injectable for tests.
+ * decide whether a missing list is fatal. `fetchFn` is injectable for tests.
  */
-export async function listOpencodeModels({ fetchFn = fetch, env = process.env, readText, timeoutMs = 15_000 } = {}) {
-  const res = await fetchFn(`${opencodeBaseUrl(env)}/api/model`, {
-    headers: localAuthHeader(env, readText),
+export async function listOpencodeModels({ fetchFn = fetch, timeoutMs = 15_000 } = {}) {
+  const auth = await opencodeAuthHeader();
+  const res = await fetchFn(apiUrl("/api/model"), {
+    headers: auth ? { authorization: auth } : {},
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`opencode model list failed (${res.status})`);
@@ -107,14 +68,15 @@ export async function listOpencodeModels({ fetchFn = fetch, env = process.env, r
  *   { ok:false, error }                        — opencode answered with an error:
  *        the live server may still hold the old config, so this is NOT success
  *
- * `fetchFn` / `env` / `readText` are injectable for tests.
+ * `fetchFn` is injectable for tests.
  */
-export async function reloadOpencodeConfig({ fetchFn = fetch, env = process.env, readText, timeoutMs = 15_000 } = {}) {
+export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000 } = {}) {
   let res;
   try {
-    res = await fetchFn(`${opencodeBaseUrl(env)}/api/location/reload`, {
+    const auth = await opencodeAuthHeader();
+    res = await fetchFn(apiUrl("/api/location/reload"), {
       method: "POST",
-      headers: { "content-type": "application/json", ...localAuthHeader(env, readText) },
+      headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
       body: "{}",
       signal: AbortSignal.timeout(timeoutMs),
     });

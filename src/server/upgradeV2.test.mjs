@@ -77,6 +77,11 @@ function makeBox(opts = {}) {
       rec("prepare");
       return o.prepare;
     },
+    migrateLegacyWhitelists: async () => {
+      rec("migrateWhitelists");
+      if (o.whitelistThrows) throw new Error("boom");
+      return o.whitelistResult ?? { ok: true, migrated: [] };
+    },
     retireV1: async () => rec("retireV1"),
     restoreV1: async () => rec("restoreV1"),
     opencode: {
@@ -437,6 +442,44 @@ describe("failure, retry", () => {
     assert.equal(s.state, "completed");
     // verify + cutover ran; migrate did not start V2 again (cutover restarts it once)
     assert.equal(box.calls.filter((c) => c[0] === "opencode.start").length, startsBefore + 1);
+  });
+
+  test("cutover migrates legacy whitelists once, after V2 is up", async () => {
+    const box = makeBox({ whitelistResult: { ok: true, migrated: ["openrouter"] } });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    const names = box.names();
+    assert.equal(names.filter((n) => n === "migrateWhitelists").length, 1);
+    assert.ok(names.lastIndexOf("opencode.start") < names.indexOf("migrateWhitelists"), "runs after the switch-over start");
+    assert.ok(names.indexOf("migrateWhitelists") < names.lastIndexOf("resume"), "before background work resumes");
+  });
+
+  for (const [label, o] of [
+    ["returns ok:false", { whitelistResult: { ok: false, migrated: [], error: "config locked" } }],
+    ["throws", { whitelistThrows: true }],
+  ]) {
+    test(`a whitelist migration that ${label} is logged and never fails the cutover step`, async () => {
+      const box = makeBox(o);
+      const logs = [];
+      const m = createUpgradeV2({ ...box.deps, log: (l) => logs.push(l) });
+      await m.boot();
+      await runToIdle(m);
+      const s = m.status();
+      assert.equal(s.state, "completed");
+      assert.equal(s.steps.find((x) => x.id === "cutover").status, "done");
+      assert.ok(logs.some((l) => /whitelist migration .*\(ignored\)/.test(l)), logs.join("\n"));
+    });
+  }
+
+  test("a failed earlier step never reaches the whitelist migration", async () => {
+    const box = makeBox({ dbBytes: 10 * GB, freeBytes: 1 * GB });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "failed");
+    assert.ok(!box.names().includes("migrateWhitelists"));
   });
 
   test("plugins load lazily: an empty first listing is polled until they appear — no false failure", async () => {

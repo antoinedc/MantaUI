@@ -325,7 +325,7 @@ const streamInterp = createStreamInterpreter({
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.
-  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  readCacheTtl: () => readProvidersCacheTtl(),
   // V2 pushes no per-chunk shell event: a running shell is tailed by cursor.
   fetchShellOutput: (a) => oc.readShellOutput(a),
 });
@@ -1511,7 +1511,7 @@ const optimizerSummary = createOptimizerSummary({
   counterfactualStore: optimizerCounterfactual,
   usageSnapshots: listSnapshots,
   usageHistory: getUsageHistory,
-  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  readCacheTtl: () => readProvidersCacheTtl(),
   activityStore: optimizerActivity,
   // BET-1347: per-window pacing pressure (deficit / tokens-per-pct) for the
   // chips under each gauge.

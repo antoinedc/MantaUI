@@ -368,8 +368,23 @@ export function createUpgradeV2(deps) {
         if (now() > deadline) throw new UpgradeError("OpenCode did not come back after the switch-over. Retry, or roll back.", { retryable: true });
         await sleep(pollMs);
       }
+      // One-shot config cutover: V1 `whitelist` entries are inert in V2 (the whole catalog would
+      // show), so rewrite them now that V2 is up. Idempotent. A failure is logged, NEVER fails the
+      // step — the upgrade itself is complete and the user can still fix a provider by hand.
+      await migrateWhitelists();
     },
   };
+
+  async function migrateWhitelists() {
+    if (typeof deps.migrateLegacyWhitelists !== "function") return;
+    try {
+      const r = await deps.migrateLegacyWhitelists();
+      if (r?.ok === false) log(`[upgrade] legacy whitelist migration failed (ignored): ${r.error ?? "unknown error"}`);
+      else if (r?.migrated?.length) log(`[upgrade] migrated legacy whitelists: ${r.migrated.join(", ")}`);
+    } catch (e) {
+      log(`[upgrade] legacy whitelist migration threw (ignored): ${e?.message ?? e}`);
+    }
+  }
 
   // ---------------------------------------------------------------- the loop
 
@@ -680,6 +695,9 @@ export function createDefaultDeps({
     log,
     v1DbPath: () => resolveV1DbPath({ env, home }),
     prepare: () => prepareOpencodeV2({ mantaHome, home, env, log, service: opencode }),
+    // C2's one-shot provider-config cutover; lazy so the upgrade module does not pull in the
+    // whole providers graph at import.
+    migrateLegacyWhitelists: async () => (await import("./providers.mjs")).migrateLegacyWhitelists(),
     retireV1: () => retireV1Assets({ configDir }),
     restoreV1: () => restoreV1Assets({ configDir }),
     opencode,

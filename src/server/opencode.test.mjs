@@ -7,7 +7,6 @@ import {
   apiUrl,
   _setApiBase,
   opencodeAuthHeader,
-  _resetOpencodeAuth,
   parseSseFrame,
   createSseFramer,
   createSession,
@@ -121,7 +120,6 @@ const SESSION = (extra = {}) => ({
 afterEach(() => {
   _setApiBase(null);
   delete process.env.MANTA_OPENCODE_PASSWORD;
-  _resetOpencodeAuth();
 });
 
 // ---------------------------------------------------------------------------
@@ -132,22 +130,21 @@ test("apiUrl targets local opencode port 4096 (V2 /api/* routes)", () => {
   assert.equal(apiUrl("/api/session"), "http://127.0.0.1:4096/api/session");
 });
 
-test("opencodeAuthHeader: MANTA_OPENCODE_PASSWORD overrides; Basic base64('opencode:'+password)", () => {
+test("opencodeAuthHeader: MANTA_OPENCODE_PASSWORD overrides; Basic base64('opencode:'+password)", async () => {
   process.env.MANTA_OPENCODE_PASSWORD = "s3cret";
-  assert.equal(opencodeAuthHeader(), `Basic ${Buffer.from("opencode:s3cret").toString("base64")}`);
+  assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:s3cret").toString("base64")}`);
 });
 
-test("opencodeAuthHeader reads ~/.manta/opencode-password LAZILY (the file may appear after boot) and never caches a miss", () => {
+test("opencodeAuthHeader re-reads ~/.manta/opencode-password on EVERY call (file may appear after boot; nothing is cached)", async () => {
   const file = statePath("opencode-password");
   rmSync(file, { force: true });
-  _resetOpencodeAuth();
   try {
-    assert.equal(opencodeAuthHeader(), undefined, "no file yet → no header, no throw");
+    assert.equal(await opencodeAuthHeader(), undefined, "no file yet → no header, no throw");
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, "filepw\nsecond line ignored\n", { mode: 0o600 });
-    assert.equal(opencodeAuthHeader(), `Basic ${Buffer.from("opencode:filepw").toString("base64")}`);
+    writeFileSync(file, "filepw\n", { mode: 0o600 });
+    assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:filepw").toString("base64")}`);
     writeFileSync(file, "changed\n");
-    assert.equal(opencodeAuthHeader(), `Basic ${Buffer.from("opencode:filepw").toString("base64")}`, "a found password is cached for the process");
+    assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:changed").toString("base64")}`, "a rotated password is picked up by the next call");
   } finally {
     rmSync(file, { force: true });
   }

@@ -647,7 +647,7 @@ export function buildHandlers({
     counterfactualStore,
     usageSnapshots,
     usageHistory,
-    readCacheTtl: () => providers.readCacheTtl({ listProviders: oc.getProviders }),
+    readCacheTtl: () => providers.readCacheTtl(),
   });
 
   // BET-1369: the windowed `optimizer:series` read model. Like optimizerSummary,
@@ -669,13 +669,12 @@ export function buildHandlers({
     //
     // The direction rule matters. Manta's stored value is the user's INTENT;
     // opencode's config is the mechanism. So:
-    //   - stored "1h", opencode has none → apply the intent (a pure upsert,
-    //     hot-applies, no restart). This is what carries a user who chose 1h
+    //   - stored "1h", opencode has none → apply the intent (a config-file edit
+    //     + live reload, no restart). This is what carries a user who chose 1h
     //     before the setting was wired through, without them re-picking it.
-    //   - otherwise they disagree in the direction that would need a REMOVAL,
-    //     and a removal restarts opencode and kills in-flight turns — far too
-    //     rude for a read. Adopt opencode's value into the mirror instead; the
-    //     user can change it explicitly, which confirms first.
+    //   - otherwise they disagree the other way (opencode says 1h, mirror says
+    //     5m): a read must not silently rewrite opencode's config, so adopt
+    //     opencode's value into the mirror; the user can change it explicitly.
     //
     // Non-fatal throughout: `readCacheTtl` returns null on any failure and the
     // stored mirror is used unchanged rather than showing the user a guess.
@@ -689,13 +688,10 @@ export function buildHandlers({
         ? { ctoDoctrineRestartPending: doctrineRestart.isPending() === true }
         : {};
       try {
-        const live = await providers.readCacheTtl({ listProviders: oc.getProviders });
+        const live = await providers.readCacheTtl();
         if (live && live !== cfg.cacheTtl) {
           if (cfg.cacheTtl === "1h") {
-            const applied = await providers.syncCacheTtl(
-              { ttl: "1h" },
-              { listProviders: oc.getProviders },
-            );
+            const applied = await providers.syncCacheTtl({ ttl: "1h" });
             if (applied.ok) {
               console.log("[config] applied stored cacheTtl=1h to opencode");
               return { ...cfg, ...doctrineFlag };
@@ -732,20 +728,15 @@ export function buildHandlers({
     //
     // Written to opencode FIRST: only on success is config.json persisted, so
     // a TTL change that can't reach opencode fails loudly instead of leaving
-    // the mirror claiming something the box does not do. NOTE the 1h→5m
-    // direction restarts opencode (a removal must, or the deleted key lives on
-    // in its in-memory config) and therefore ends in-flight turns — the UI
-    // confirms before sending it.
+    // the mirror claiming something the box does not do. Both directions are a
+    // config-file edit + live reload (V2): nothing restarts, no turn ends.
     "config:update": async (patch) => {
       if (Array.isArray(patch?.skillRegistryUrls)) {
         const applied = await providers.setSkillRegistryUrls(patch.skillRegistryUrls);
         if (!applied.ok) throw new Error(applied.error);
       }
       if (patch?.cacheTtl === "5m" || patch?.cacheTtl === "1h") {
-        const applied = await providers.syncCacheTtl(
-          { ttl: patch.cacheTtl },
-          { listProviders: oc.getProviders },
-        );
+        const applied = await providers.syncCacheTtl({ ttl: patch.cacheTtl });
         if (!applied.ok) throw new Error(applied.error);
       }
       const prev = await local.configGet();
