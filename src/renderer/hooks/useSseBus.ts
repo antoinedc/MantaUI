@@ -597,20 +597,31 @@ export function useSseBus(params: {
           );
           return;
         }
-        case "sessionError": {
-          const p = ev.payload as StreamSessionErrorPayload;
-          // Our own queued-drain abort must be invisible. (The box never emits
-          // MessageAbortedError as a frame today, so this is the guard for a
-          // box/engine that does — the drain re-arms in the drain effect.)
-          if (isDrainAbortError(p.name ?? undefined, drainAbortRef.current)) {
+        case "aborted": {
+          // session.error MessageAbortedError — the box publishes it as its own
+          // frame (never as a `sessionError`, so iOS shows no banner).
+          // Our own queued-drain abort must be invisible: the queued prompt is
+          // submitted on the upcoming idle.
+          if (isDrainAbortError("MessageAbortedError", drainAbortRef.current)) {
             cancelTurnSettle();
             setRunning(false);
             return;
           }
-          // Auth-error banner (BET-316) or the typed-prefix message.
+          // A user Stop (or the box aborting a seat-limit retry): show the
+          // "Aborted" banner; the next busy/retry clears it (abortedBannerRef).
+          setSendError("Aborted");
+          abortedBannerRef.current = true;
+          setAuthReconnect(null);
+          cancelTurnSettle();
+          setRunning(false);
+          return;
+        }
+        case "sessionError": {
+          const p = ev.payload as StreamSessionErrorPayload;
+          // Auth-error banner (BET-316) or the typed-prefix message. (An abort
+          // never arrives here — see the `aborted` frame above.)
           const d = describeSessionError(p, providerIDRef.current);
           setSendError(d.message);
-          abortedBannerRef.current = d.aborted;
           setAuthReconnect(d.auth ? d.auth.label : null);
           cancelTurnSettle();
           setRunning(false);

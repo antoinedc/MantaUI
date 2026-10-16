@@ -917,15 +917,14 @@ export function stepTokensFromFrame(p: {
  *   because its keyword match must not shift with the box's unwrapping (BET-1131).
  * - Otherwise `message` is the typed prefix + the humanized sentence. `message`
  *   on the frame is already humanized by the box.
- * - `aborted` marks a MessageAbortedError banner, which a later busy/retry clears.
  */
 export function describeSessionError(
   p: { name: string | null; message: string; rawMessage?: string },
   providerID: string | null | undefined,
-): { message: string; auth: { providerID: string; label: string } | null; aborted: boolean } {
+): { message: string; auth: { providerID: string; label: string } | null } {
   const name = p.name ?? undefined;
   const auth = authErrorAdvice(name, p.rawMessage ?? p.message, providerID);
-  if (auth) return { message: `${auth.label} needs to be reconnected.`, auth, aborted: false };
+  if (auth) return { message: `${auth.label} needs to be reconnected.`, auth };
   const human = p.message;
   let message: string;
   switch (name) {
@@ -944,7 +943,7 @@ export function describeSessionError(
     default:
       message = human;
   }
-  return { message, auth: null, aborted: name === "MessageAbortedError" };
+  return { message, auth: null };
 }
 
 /**
@@ -953,7 +952,7 @@ export function describeSessionError(
  * apart from the injected store actions + timers, so it is unit-tested.
  *
  *   running {running}   → setChatRunning(sid, running)   (the hard signal)
- *   sessionError        → setChatRunning(sid, false)
+ *   sessionError/aborted→ setChatRunning(sid, false)
  *   childSession        → setSessionParent(child, parent) (frame is published
  *                         under the PARENT's session id)
  *   attention {kind}    → setChatAttention(sid, kind) (the box never frames a
@@ -979,7 +978,7 @@ export function createSidebarFrameHandler(store: {
     if (!sid) return;
     if (ev.sub === "running") {
       store.setChatRunning(sid, (ev.payload as StreamRunningPayload)?.running === true);
-    } else if (ev.sub === "sessionError") {
+    } else if (ev.sub === "sessionError" || ev.sub === "aborted") {
       store.setChatRunning(sid, false);
     } else if (ev.sub === "attention") {
       store.setChatAttention(sid, (ev.payload as StreamAttentionPayload)?.kind ?? null);

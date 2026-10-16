@@ -1131,12 +1131,10 @@ describe("BET-1248 main-conversation routing at boundaries (ChatPanel submit)", 
 // with "Keep going". The abort surfaces as a MessageAbortedError banner that
 // nothing used to clear, so it sat on screen while work continued.
 //
-// OpenCode V2 slice A2: the box's interpreter deliberately publishes NO frame for
-// a MessageAbortedError (an intentional abort is not a failure — iOS must not show
-// one), so the desktop never sees the abort banner from a V1 box. The renderer
-// still honours a `sessionError` frame carrying that name (a box/engine that
-// emits one), so these tests feed that frame directly; the first test below pins
-// the real V1 behaviour.
+// OpenCode V2 slice A2: the abort reaches the desktop as the box's `aborted`
+// frame (the interpreter drops it as an ERROR so iOS shows no banner, but
+// announces it separately). Raw V1 events below are replayed through the real
+// interpreter, so the whole path is exercised.
 describe("useSseBus aborted-error banner clears on the next turn", () => {
   let bus: ReturnType<typeof installMockApi>["bus"];
   let h: ReturnType<typeof mount> | null = null;
@@ -1155,26 +1153,21 @@ describe("useSseBus aborted-error banner clears on the next turn", () => {
     type: "session.error",
     properties: { sessionID: "ses_test", error: { name, data: { message } } },
   });
-  // The frame a box that DID publish the abort would send (see the note above).
-  const abortFrame = {
-    sub: "sessionError" as const,
-    sessionId: "ses_test",
-    payload: { name: "MessageAbortedError", message: "The operation was aborted" },
-  };
+  const abortFrame = { sub: "aborted" as const, sessionId: "ses_test", payload: {} };
+  const ABORTED = "Aborted";
   const statusEv = (type: string) => ({
     type: "session.status",
     properties: { sessionID: "ses_test", status: { type } },
   });
 
-  it("a real V1 abort (session.error MessageAbortedError) publishes no frame and shows no banner", async () => {
+  it("a user Stop (raw session.error MessageAbortedError) shows the Aborted banner, and the idle that follows keeps it", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
-    expect(h.text()).not.toContain("The operation was aborted");
-    // …and the idle that follows still ends the turn.
     await emitAndFlush(bus, h, statusEv("busy"));
+    await emitAndFlush(bus, h, errorEv("MessageAbortedError", "The operation was aborted"));
+    expect(h.text()).toContain(ABORTED);
     await emitAndFlush(bus, h, statusEv("idle"));
-    expect(h.text()).not.toContain("The operation was aborted");
+    expect(h.text()).toContain(ABORTED);
   });
 
   it("MessageAbortedError shows the banner; a following busy clears it", async () => {
@@ -1182,10 +1175,10 @@ describe("useSseBus aborted-error banner clears on the next turn", () => {
     await h.flush();
 
     await emitStreamAndFlush(bus, h, abortFrame);
-    expect(h.text()).toContain("The operation was aborted");
+    expect(h.text()).toContain(ABORTED);
 
     await emitAndFlush(bus, h, statusEv("busy"));
-    expect(h.text()).not.toContain("The operation was aborted");
+    expect(h.text()).not.toContain(ABORTED);
   });
 
   it("a following retry also clears it", async () => {
@@ -1193,10 +1186,10 @@ describe("useSseBus aborted-error banner clears on the next turn", () => {
     await h.flush();
 
     await emitStreamAndFlush(bus, h, abortFrame);
-    expect(h.text()).toContain("The operation was aborted");
+    expect(h.text()).toContain(ABORTED);
 
     await emitAndFlush(bus, h, statusEv("retry"));
-    expect(h.text()).not.toContain("The operation was aborted");
+    expect(h.text()).not.toContain(ABORTED);
   });
 
   it("a non-abort error is NOT cleared by busy", async () => {

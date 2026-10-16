@@ -253,11 +253,20 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       expect(bus.authReconnect).toBe("Claude");
     });
 
+    it("a user Stop (aborted frame, no drain in progress) shows the Aborted banner and ends the turn", async () => {
+      await mountProbe();
+      await emit(frame("running", { running: true }));
+      await emit(frame("aborted", {}));
+      expect(bus.sendError).toBe("Aborted");
+      expect(bus.running).toBe(false);
+      expect(bus.authReconnect).toBeNull();
+    });
+
     it("our own queued-drain abort is invisible: no banner, running false", async () => {
       await mountProbe();
       await emit(frame("running", { running: true }));
       bus.drainAbortRef.current = true;
-      await emit(frame("sessionError", { name: "MessageAbortedError", message: "Aborted" }));
+      await emit(frame("aborted", {}));
       expect(bus.sendError).toBeNull();
       expect(bus.running).toBe(false);
     });
@@ -399,8 +408,8 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
   describe("running", () => {
     it("a running:true frame clears a stale 'Aborted' banner", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "MessageAbortedError", message: "The operation was aborted" }));
-      expect(bus.sendError).toContain("aborted");
+      await emit(frame("aborted", {}));
+      expect(bus.sendError).toBe("Aborted");
       await emit(frame("running", { running: true, type: "busy" }));
       expect(bus.sendError).toBeNull();
     });

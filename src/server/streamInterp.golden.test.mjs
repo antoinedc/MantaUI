@@ -53,6 +53,7 @@ const NEW_SUBS = [
   "commandExecuted",
   "childSession",
   "attention",
+  "aborted",
 ];
 
 const corpus = readdirSync(DIR)
@@ -188,6 +189,10 @@ test("running state frames still carry the abort/idle edges (06-abort)", () => {
   // MessageAbortedError is an intentional abort: it must NOT surface as sessionError.
   assert.equal(frames.filter((f) => f.sub === "sessionError").length, 0);
   assert.ok(frames.some((f) => f.sub === "turnComplete" && f.payload.complete === true));
+  // …but the user Stop IS announced, as its own frame, before the idle edge.
+  const aborted = frames.filter((f) => f.sub === "aborted");
+  assert.equal(aborted.length, 1);
+  assert.deepEqual(aborted[0].payload, {});
 });
 
 test("05-question: attention goes question -> null around the reply", () => {

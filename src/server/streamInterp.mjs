@@ -764,10 +764,19 @@ export function createStreamInterpreter({
         // desktop's queued-drain abort) — NOT a failure. Same name-check the
         // push pump uses (src/server/push.mjs, classifyPushEvent session.error
         // branch): the abort carries no other marker, the name is the only
-        // signal. Do NOT emit it.
+        // signal. It is never a `sessionError` frame; it gets its own `aborted`
+        // frame below.
         const err = evt.properties?.error;
         const name = typeof err?.name === "string" ? err.name : null;
-        if (name === "MessageAbortedError") return;
+        if (name === "MessageAbortedError") {
+          // Not an error frame (iOS must show no banner for an abort), but the
+          // desktop needs to know it happened: a user Stop shows its "Aborted"
+          // banner, while its own queued-drain abort stays invisible. `aborted`
+          // carries no payload — the frame IS the signal. Same de-dup as every
+          // frame (the id filter above).
+          emit(sid, "aborted", {});
+          return;
+        }
         const message =
           typeof err?.data?.message === "string" ? err.data.message :
           typeof err?.message === "string" ? err.message : "The turn failed.";

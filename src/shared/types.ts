@@ -2803,6 +2803,9 @@ export type StreamCommandExecutedPayload = { messageID: string; name: string; ar
 /** `childSession`: a subagent session was created; published under the PARENT's sessionId. */
 export type StreamChildSessionPayload = { childSessionId: string; parentSessionId: string };
 
+/** `aborted`: session.error MessageAbortedError (user Stop or a queued-drain abort). Not an error — no banner on iOS; the desktop shows its "aborted" banner unless it issued the abort itself. Payload is empty. */
+export type StreamAbortedPayload = Record<string, never>;
+
 /** `attention`: what the turn is blocked on (question wins over permission); `null` when nothing is pending. */
 export type StreamAttentionPayload = { kind: "question" | "permission" | null };
 
@@ -2842,6 +2845,7 @@ export type StreamEnvelope = {
     | "commandExecuted"
     | "childSession"
     | "attention"
+    | "aborted"
     // Client-synthesised (never sent by the box): the events socket reconnected,
     // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".
     | "resync";

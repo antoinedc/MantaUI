@@ -316,7 +316,7 @@ test("session.error emits sessionError with name+message AND turnComplete runnin
   assert.equal(done.payload.running, false);
 });
 
-test("session.error with a MessageAbortedError name emits NOTHING", () => {
+test("session.error with a MessageAbortedError name emits an `aborted` frame and NO sessionError", () => {
   const { interp, events } = make();
   interp.interpret({
     type: "session.error",
@@ -325,7 +325,19 @@ test("session.error with a MessageAbortedError name emits NOTHING", () => {
       error: { name: "MessageAbortedError", message: "aborted" },
     },
   });
-  assert.equal(events.length, 0, "an abort is not a failure — no frames emitted");
+  assert.deepEqual(events.map((e) => e.sub), ["aborted"], "an abort is not a failure — only the aborted signal");
+  assert.deepEqual(events[0].payload, {});
+  assert.equal(events[0].sessionId, SID);
+});
+
+test("aborted frame is de-duped like every frame (same event id twice → one frame); a new event emits again", () => {
+  const { interp, events } = make();
+  const abort = (id) => ({ id, type: "session.error", properties: { sessionID: SID, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } });
+  interp.interpret(abort("evt_ab1"));
+  interp.interpret(abort("evt_ab1")); // global + scoped stream delivery
+  assert.equal(subs(events, "aborted").length, 1);
+  interp.interpret(abort("evt_ab2"));
+  assert.equal(subs(events, "aborted").length, 2);
 });
 
 test("session.status retry reports running true and carries type retry (parity with pre-S1b renderer)", () => {
@@ -1350,7 +1362,7 @@ test("new frames go through the event-id de-dup (global + scoped double delivery
   }
 });
 
-test("sessionError carries the raw error name unchanged; MessageAbortedError stays silent", () => {
+test("sessionError carries the raw error name unchanged; MessageAbortedError is never a sessionError", () => {
   const { interp, events } = make();
   interp.interpret({ id: "e1", type: "session.error", properties: { sessionID: SID, error: { name: "ProviderAuthError", data: { message: "bad key" } } } });
   assert.equal(subs(events, "sessionError")[0].payload.name, "ProviderAuthError");

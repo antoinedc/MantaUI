@@ -31,7 +31,6 @@ describe("describeSessionError", () => {
     const d = describeSessionError({ name: "ProviderAuthError", message: "x" }, "anthropic");
     expect(d.message).toMatch(/needs to be reconnected\.$/);
     expect(d.auth?.providerID).toBe("anthropic");
-    expect(d.aborted).toBe(false);
   });
 
   it("classifies against the RAW provider message when the box humanized it (BET-1131)", () => {
@@ -56,11 +55,6 @@ describe("describeSessionError", () => {
     expect(describeSessionError({ name: "Whatever", message: "plain" }, "x").message).toBe("plain");
     expect(describeSessionError({ name: null, message: "plain" }, "x").message).toBe("plain");
   });
-
-  it("flags an abort so a later busy/retry can clear the banner", () => {
-    expect(describeSessionError({ name: "MessageAbortedError", message: "Aborted" }, "x").aborted).toBe(true);
-    expect(describeSessionError({ name: "ApiError", message: "boom" }, "x").aborted).toBe(false);
-  });
 });
 
 describe("createSidebarFrameHandler", () => {
@@ -82,6 +76,12 @@ describe("createSidebarFrameHandler", () => {
     h.handle(frame("running", "ses_a", { running: true, type: "busy" }));
     h.handle(frame("running", "ses_b", { running: false, type: "idle" }));
     expect(calls).toEqual([["running", "ses_a", true], ["running", "ses_b", false]]);
+  });
+
+  it("a user Stop (aborted frame) stops the dot", () => {
+    const { h, calls } = make();
+    h.handle(frame("aborted", "ses_a", {}));
+    expect(calls).toEqual([["running", "ses_a", false]]);
   });
 
   it("a session error stops the dot; turnComplete does NOT (it fires mid-turn)", () => {
