@@ -60,11 +60,20 @@ export function useUpgradeGate(inputs: UpgradeGateInputs): UpgradeGate {
     };
   }, []);
 
-  // One fetch in flight at a time: at 1 Hz a slow answer must not stack.
+  // One fetch in flight at a time: at 1 Hz a slow answer must not stack. An
+  // EVENT-driven request (`urgent`: a 503, a reconnect, a button press) that
+  // lands while one is in flight is not dropped — the in-flight answer may
+  // predate the event, so it re-reads once that one settles. A poll tick that
+  // finds one in flight just skips: the next tick is a second away.
   const inFlight = useRef(false);
-  const fetchStatus = useCallback(async () => {
+  const rerun = useRef(false);
+  const fetchStatus = useCallback(async (urgent = false) => {
     const api = window.api;
-    if (!api?.upgradeStatus || inFlight.current) return;
+    if (!api?.upgradeStatus) return;
+    if (inFlight.current) {
+      if (urgent) rerun.current = true;
+      return;
+    }
     inFlight.current = true;
     try {
       const status = await api.upgradeStatus();
@@ -74,6 +83,10 @@ export function useUpgradeGate(inputs: UpgradeGateInputs): UpgradeGate {
       // status; the poll (or the next frame) will settle it.
     } finally {
       inFlight.current = false;
+      if (rerun.current && alive.current) {
+        rerun.current = false;
+        void fetchStatus(true);
+      }
     }
   }, []);
 
@@ -88,7 +101,7 @@ export function useUpgradeGate(inputs: UpgradeGateInputs): UpgradeGate {
       offs.push(
         api.onBoxUpgrading(() => {
           dispatch({ type: "upgradeModeSeen" });
-          void fetchStatus();
+          void fetchStatus(true);
         }),
       );
     }
@@ -100,7 +113,7 @@ export function useUpgradeGate(inputs: UpgradeGateInputs): UpgradeGate {
   // Producer 3: read on mount and on every (re)connect — the status may have
   // changed while the stream was down and no replay exists.
   useEffect(() => {
-    void fetchStatus();
+    void fetchStatus(true);
   }, [connected, inputs.apiGeneration, fetchStatus]);
 
   // ...and once a second while the stream is down.
@@ -145,7 +158,7 @@ export function useUpgradeGate(inputs: UpgradeGateInputs): UpgradeGate {
         if (!alive.current) return;
         dispatch({ type: "actionFinished", action, result });
         // Don't wait for the next frame/poll to show what the press did.
-        if (result.ok) void fetchStatus();
+        if (result.ok) void fetchStatus(true);
       })();
     },
     [fetchStatus],
