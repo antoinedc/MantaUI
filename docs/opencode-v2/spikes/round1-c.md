@@ -90,8 +90,8 @@ opencode:<password>`. `--service` adds a registration file in XDG state. Self-up
 our config set it; a stock build agent has sensible deny/ask defaults.
 
 **Evidence:**
-- Created `POST /api/credential {integrationID:"test-xyz", value:{type:"key",key:"SECRET_SENTINEL_12345"}}`
-  then `GET /api/credential` → response contained `"key":"SECRET_SENTINEL_12345"` verbatim.
+- Created `POST /api/credential {integrationID:"test-xyz", value:{type:"key",key:"<dummy-value>"}}`
+  then `GET /api/credential` → response contained `"key":"<dummy-value>"` verbatim.
   (Dummy deleted, `DELETE /api/credential/<id>` → 204.)
 - `GET /api/agent` build agent `permissions`: `{*:allow}`, `read *.env:ask`, `read *.env.*:ask`,
   `read *.env.example:allow`, `question *:allow`, `external_directory *:allow` (from OUR config),
