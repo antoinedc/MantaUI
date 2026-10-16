@@ -82,8 +82,6 @@ import {
   hydrateQuestion,
   describeSessionError,
   stepTokensFromFrame,
-  createGraceApplier,
-  TRUST_PERMISSION_GRACE_MS,
   fetchTranscriptWithRetry,
 } from "../chatUtils";
 import type { TokenUsage } from "../chatShared";
@@ -435,16 +433,6 @@ export function useSseBus(params: {
         .then(() => rejectAllPendingQuestions());
     };
 
-    // Trust mode (chatAutoAllow): the box auto-answers a permission ask in
-    // milliseconds, but the `permissions` frame for it is derived before that
-    // answer, so a pending list must survive a short grace before it is shown or
-    // the approval card would flash on every tool call. See createGraceApplier.
-    const permissionGate = createGraceApplier<PermissionRequest[]>({
-      graceMs: TRUST_PERMISSION_GRACE_MS,
-      shouldDefer: (list) => list.length > 0 && useStore.getState().chatAutoAllow,
-      apply: (_key, list) => setPermissions(list),
-    });
-
     // Initial fetch. Arm `refreshing` here (not just in scheduleRefetch) so the
     // ambient loading divider shows during the REAL transcript load when a
     // session first opens — previously only background refetches drove the bar,
@@ -732,9 +720,10 @@ export function useSseBus(params: {
         }
         case "permissions": {
           // The box's list of this session's pending asks, used directly (no
-          // refetch). Trust-mode asks are deferred a moment — see permissionGate.
+          // refetch). Under trust mode the box never frames an ask it
+          // auto-answers, so a pending list here is one the user must act on.
           const { permissions: list } = ev.payload as StreamPermissionsPayload;
-          if (Array.isArray(list)) permissionGate.push(sessionId, list as PermissionRequest[]);
+          if (Array.isArray(list)) setPermissions(list as PermissionRequest[]);
           return;
         }
         case "subagent.child": {
@@ -767,7 +756,6 @@ export function useSseBus(params: {
 
     return () => {
       offStream();
-      permissionGate.dispose();
       cancelTurnSettle();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
       if (compactionNoticeTimer.current) clearTimeout(compactionNoticeTimer.current);

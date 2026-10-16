@@ -948,55 +948,6 @@ export function describeSessionError(
 }
 
 /**
- * Apply a keyed value either immediately or after a grace period.
- *
- * Why: under trust mode (`chatAutoAllow`) the box answers a permission ask
- * itself within milliseconds and used to suppress the raw `permission.asked`
- * event, so the desktop never saw it. The interpreted `permissions` /
- * `attention` frames are derived BEFORE that suppression, so an auto-answered
- * ask arrives as a pending frame followed ~immediately by a cleared one —
- * which would flash the approval card / red sidebar badge on every tool call.
- * A value the caller marks `shouldDefer` is only applied if no newer value for
- * the same key supersedes it within `graceMs` (an auto-allow that FAILED leaves
- * the ask pending, so it still surfaces, just that much later). Anything not
- * deferred applies at once and cancels a pending deferral for its key.
- */
-export function createGraceApplier<T>(opts: {
-  graceMs: number;
-  shouldDefer: (value: T) => boolean;
-  apply: (key: string, value: T) => void;
-}): { push: (key: string, value: T) => void; dispose: () => void } {
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
-  const cancel = (key: string) => {
-    const t = timers.get(key);
-    if (t !== undefined) {
-      clearTimeout(t);
-      timers.delete(key);
-    }
-  };
-  return {
-    push(key, value) {
-      cancel(key);
-      if (!opts.shouldDefer(value)) {
-        opts.apply(key, value);
-        return;
-      }
-      timers.set(
-        key,
-        setTimeout(() => {
-          timers.delete(key);
-          opts.apply(key, value);
-        }, opts.graceMs),
-      );
-    },
-    dispose() {
-      for (const t of timers.values()) clearTimeout(t);
-      timers.clear();
-    },
-  };
-}
-
-/**
  * The sidebar's reading of the interpreted stream (App.tsx): per-session running
  * dot, child → parent links and the question/permission attention badge. Pure
  * apart from the injected store actions + timers, so it is unit-tested.
@@ -1005,50 +956,36 @@ export function createGraceApplier<T>(opts: {
  *   sessionError        → setChatRunning(sid, false)
  *   childSession        → setSessionParent(child, parent) (frame is published
  *                         under the PARENT's session id)
- *   attention {kind}    → setChatAttention(sid, kind); a pending "permission" is
- *                         deferred a grace period under trust mode (see
- *                         createGraceApplier)
+ *   attention {kind}    → setChatAttention(sid, kind) (the box never frames a
+ *                         trust-mode ask it auto-answers, so there is nothing
+ *                         to debounce client-side)
  *
  * `turnComplete` is deliberately ignored: the box derives it from the
  * transcript, so it fires mid-turn at every tool-step boundary and would
  * flicker the rail dot.
  */
-export function createSidebarFrameHandler(
-  store: {
-    setChatRunning: (sid: string, running: boolean) => void;
-    setChatAttention: (sid: string, kind: "question" | "permission" | null) => void;
-    setSessionParent: (child: string, parent: string) => void;
-  },
-  isTrustMode: () => boolean,
-): { handle: (ev: StreamEnvelope) => void; dispose: () => void } {
-  const attention = createGraceApplier<"question" | "permission" | null>({
-    graceMs: TRUST_PERMISSION_GRACE_MS,
-    shouldDefer: (kind) => kind === "permission" && isTrustMode(),
-    apply: (sid, kind) => store.setChatAttention(sid, kind),
-  });
-  return {
-    handle(ev) {
-      if (ev.sub === "childSession") {
-        const p = ev.payload as StreamChildSessionPayload;
-        if (p?.childSessionId && p.parentSessionId) store.setSessionParent(p.childSessionId, p.parentSessionId);
-        return;
-      }
-      const sid = ev.sessionId;
-      if (!sid) return;
-      if (ev.sub === "running") {
-        store.setChatRunning(sid, (ev.payload as StreamRunningPayload)?.running === true);
-      } else if (ev.sub === "sessionError") {
-        store.setChatRunning(sid, false);
-      } else if (ev.sub === "attention") {
-        attention.push(sid, (ev.payload as StreamAttentionPayload)?.kind ?? null);
-      }
-    },
-    dispose: () => attention.dispose(),
+export function createSidebarFrameHandler(store: {
+  setChatRunning: (sid: string, running: boolean) => void;
+  setChatAttention: (sid: string, kind: "question" | "permission" | null) => void;
+  setSessionParent: (child: string, parent: string) => void;
+}): (ev: StreamEnvelope) => void {
+  return (ev) => {
+    if (ev.sub === "childSession") {
+      const p = ev.payload as StreamChildSessionPayload;
+      if (p?.childSessionId && p.parentSessionId) store.setSessionParent(p.childSessionId, p.parentSessionId);
+      return;
+    }
+    const sid = ev.sessionId;
+    if (!sid) return;
+    if (ev.sub === "running") {
+      store.setChatRunning(sid, (ev.payload as StreamRunningPayload)?.running === true);
+    } else if (ev.sub === "sessionError") {
+      store.setChatRunning(sid, false);
+    } else if (ev.sub === "attention") {
+      store.setChatAttention(sid, (ev.payload as StreamAttentionPayload)?.kind ?? null);
+    }
   };
 }
-
-/** How long a trust-mode permission ask may stay pending before it is shown. */
-export const TRUST_PERMISSION_GRACE_MS = 1500;
 
 // BET-640: server-rpc unsupported-channel predicate. manta-server throws
 // `unknown rpc channel: <ch>` (src/server/rpc.mjs) and httpApi surfaces that

@@ -17,8 +17,6 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 import { act, useRef } from "react";
 import { useSseBus, type SseBus } from "./useSseBus";
 import { installMockApi, resetStore, mount } from "../testHarness";
-import { useStore } from "../store";
-import { TRUST_PERMISSION_GRACE_MS } from "../chatUtils";
 import type { StreamEnvelope } from "../../shared/types";
 
 const SID = "ses_test";
@@ -425,33 +423,6 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       await emit(frame("permissions", { permissions: [] }));
       expect(bus.permissions).toEqual([]);
       expect(api.calls.opencodePermissions ?? []).toHaveLength(0);
-    });
-
-    it("trust mode: an ask the box auto-answers inside the grace never flashes the card", async () => {
-      await mountProbe();
-      useStore.setState({ chatAutoAllow: true });
-      vi.useFakeTimers();
-      act(() => mockBus.emitStream(frame("permissions", { permissions: [ask] })));
-      expect(bus.permissions).toEqual([]);
-      act(() => {
-        vi.advanceTimersByTime(40);
-      });
-      act(() => mockBus.emitStream(frame("permissions", { permissions: [] })));
-      act(() => {
-        vi.advanceTimersByTime(TRUST_PERMISSION_GRACE_MS * 2);
-      });
-      expect(bus.permissions).toEqual([]);
-    });
-
-    it("trust mode: an ask still pending after the grace (auto-allow failed) does show", async () => {
-      await mountProbe();
-      useStore.setState({ chatAutoAllow: true });
-      vi.useFakeTimers();
-      act(() => mockBus.emitStream(frame("permissions", { permissions: [ask] })));
-      act(() => {
-        vi.advanceTimersByTime(TRUST_PERMISSION_GRACE_MS);
-      });
-      expect(bus.permissions).toEqual([ask]);
     });
   });
 

@@ -1182,26 +1182,19 @@ function Shell() {
   // transcript, so it fires mid-turn at every tool-step boundary and would
   // flicker the rail; `running` is the hard signal.
   //
-  // Trust mode (chatAutoAllow): the box answers a permission ask itself within
-  // milliseconds, and used to suppress the raw ask so the sidebar stayed quiet.
-  // The `attention` frame is derived before that suppression, so a pending
-  // "permission" is held back for a short grace (createGraceApplier) — an
-  // auto-answered ask is cleared inside it and never badges the row.
+  // Trust mode (chatAutoAllow): the box answers a permission ask itself and
+  // never publishes frames for it (src/server/permissionAskPump.mjs), so the
+  // sidebar stays quiet with no client-side handling.
   useEffect(() => {
     if (!window.api.onStreamEvent) return;
-    const sidebar = createSidebarFrameHandler(
-      {
+    const off = window.api.onStreamEvent(
+      createSidebarFrameHandler({
         setChatRunning: (sid, running) => useStore.getState().setChatRunning(sid, running),
         setChatAttention: (sid, kind) => useStore.getState().setChatAttention(sid, kind),
         setSessionParent: (child, parent) => useStore.getState().setSessionParent(child, parent),
-      },
-      () => useStore.getState().chatAutoAllow,
+      }),
     );
-    const off = window.api.onStreamEvent(sidebar.handle);
-    return () => {
-      off();
-      sidebar.dispose();
-    };
+    return off;
   }, [apiGeneration]);
 
   // The box replays its authoritative running set on every events

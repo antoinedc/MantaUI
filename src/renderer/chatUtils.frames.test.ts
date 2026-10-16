@@ -2,14 +2,8 @@
 // (OpenCode V2 slice A2). The hook-level behaviour is covered in
 // hooks/useSseBusFrames.test.tsx; this file pins the pieces that carry logic.
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  createGraceApplier,
-  createSidebarFrameHandler,
-  describeSessionError,
-  stepTokensFromFrame,
-  TRUST_PERMISSION_GRACE_MS,
-} from "./chatUtils";
+import { describe, expect, it } from "vitest";
+import { createSidebarFrameHandler, describeSessionError, stepTokensFromFrame } from "./chatUtils";
 import type { StreamEnvelope } from "../shared/types";
 
 describe("stepTokensFromFrame", () => {
@@ -69,73 +63,18 @@ describe("describeSessionError", () => {
   });
 });
 
-describe("createGraceApplier", () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
-  const make = () => {
-    const applied: Array<[string, number[]]> = [];
-    const g = createGraceApplier<number[]>({
-      graceMs: 1000,
-      shouldDefer: (v) => v.length > 0,
-      apply: (k, v) => applied.push([k, v]),
-    });
-    return { g, applied };
-  };
-
-  it("applies a non-deferred value immediately", () => {
-    const { g, applied } = make();
-    g.push("a", []);
-    expect(applied).toEqual([["a", []]]);
-  });
-
-  it("holds a deferred value back for the grace period, then applies it", () => {
-    const { g, applied } = make();
-    g.push("a", [1]);
-    vi.advanceTimersByTime(999);
-    expect(applied).toEqual([]);
-    vi.advanceTimersByTime(1);
-    expect(applied).toEqual([["a", [1]]]);
-  });
-
-  it("a superseding value inside the grace cancels the deferred one (the auto-allowed ask never shows)", () => {
-    const { g, applied } = make();
-    g.push("a", [1]);
-    vi.advanceTimersByTime(200);
-    g.push("a", []);
-    vi.advanceTimersByTime(5000);
-    expect(applied).toEqual([["a", []]]);
-  });
-
-  it("keys are independent; dispose drops pending values", () => {
-    const { g, applied } = make();
-    g.push("a", [1]);
-    g.push("b", [2]);
-    g.push("a", []);
-    g.dispose();
-    vi.advanceTimersByTime(5000);
-    expect(applied).toEqual([["a", []]]);
-  });
-});
-
 describe("createSidebarFrameHandler", () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
-
   const frame = (sub: string, sessionId: string, payload: unknown): StreamEnvelope =>
     ({ sub, sessionId, payload }) as StreamEnvelope;
 
-  const make = (trust = false) => {
+  const make = () => {
     const calls: Array<[string, ...unknown[]]> = [];
-    const h = createSidebarFrameHandler(
-      {
-        setChatRunning: (...a) => calls.push(["running", ...a]),
-        setChatAttention: (...a) => calls.push(["attention", ...a]),
-        setSessionParent: (...a) => calls.push(["parent", ...a]),
-      },
-      () => trust,
-    );
-    return { h, calls };
+    const handle = createSidebarFrameHandler({
+      setChatRunning: (...a) => calls.push(["running", ...a]),
+      setChatAttention: (...a) => calls.push(["attention", ...a]),
+      setSessionParent: (...a) => calls.push(["parent", ...a]),
+    });
+    return { h: { handle }, calls };
   };
 
   it("running frames drive the rail dot, for any session", () => {
@@ -165,28 +104,6 @@ describe("createSidebarFrameHandler", () => {
     h.handle(frame("attention", "ses_a", { kind: "permission" }));
     h.handle(frame("attention", "ses_a", { kind: null }));
     expect(calls).toEqual([["attention", "ses_a", "question"], ["attention", "ses_a", "permission"], ["attention", "ses_a", null]]);
-  });
-
-  it("trust mode: a permission that is auto-answered inside the grace never badges the row", () => {
-    const { h, calls } = make(true);
-    h.handle(frame("attention", "ses_a", { kind: "permission" }));
-    vi.advanceTimersByTime(50);
-    h.handle(frame("attention", "ses_a", { kind: null }));
-    vi.advanceTimersByTime(TRUST_PERMISSION_GRACE_MS * 2);
-    expect(calls).toEqual([["attention", "ses_a", null]]);
-  });
-
-  it("trust mode: a permission still pending after the grace (auto-allow failed) does surface", () => {
-    const { h, calls } = make(true);
-    h.handle(frame("attention", "ses_a", { kind: "permission" }));
-    vi.advanceTimersByTime(TRUST_PERMISSION_GRACE_MS);
-    expect(calls).toEqual([["attention", "ses_a", "permission"]]);
-  });
-
-  it("trust mode never delays a question", () => {
-    const { h, calls } = make(true);
-    h.handle(frame("attention", "ses_a", { kind: "question" }));
-    expect(calls).toEqual([["attention", "ses_a", "question"]]);
   });
 
   it("ignores frames with no session id and unrelated subs", () => {
