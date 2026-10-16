@@ -376,12 +376,13 @@ describe("crash and resume at every step", () => {
       const m2 = createUpgradeV2(second.deps);
       assert.deepEqual(await m2.boot(), { action: "resume" });
       assert.equal(m2.isUpgradeMode(), true, "resumed upgrade is in upgrade mode immediately");
+      assert.equal(second.names()[0], "pause", "a resumed run re-pauses the pollers the fresh process just started");
       await runToIdle(m2);
       assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
       assert.equal(m2.status().overall, 1);
       assert.ok(!second.names().includes("prepare"), "resume does not re-prepare");
       if (doneBefore.includes("preflight")) assert.ok(!second.names().includes("freeBytes"), "preflight was not redone");
-      if (doneBefore.includes("stop")) assert.ok(!second.names().includes("pause"), "stop was not redone");
+      if (doneBefore.includes("stop")) assert.ok(!second.names().includes("opencode.stop"), "stop was not redone");
       if (doneBefore.includes("copy")) assert.ok(!second.names().includes("copyDb"), "copy was not redone");
       if (step === "copy") assert.ok(second.names().includes("copyDb"), "an interrupted copy is redone from scratch");
     });

@@ -435,6 +435,8 @@ export function createUpgradeV2(deps) {
       if (state.state === "completed") return { action: "none" };
       if (state.state === "running") {
         log("[upgrade] resuming an interrupted upgrade");
+        // This process just started its pollers; the interrupted run had paused them.
+        await deps.services.pauseBackground().catch(() => {});
         launch(runFromFirstPending);
         return { action: "resume" };
       }
