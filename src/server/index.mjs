@@ -91,6 +91,7 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
@@ -325,6 +326,8 @@ const streamInterp = createStreamInterpreter({
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.
   readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  // V2 pushes no per-chunk shell event: a running shell is tailed by cursor.
+  fetchShellOutput: (a) => oc.readShellOutput(a),
 });
 // BET-913 + BET-916 + BET-922: when a client (re)connects mid-state, replay the
 // current edge-only state so frames that only fire on an edge aren't lost —
@@ -3172,25 +3175,6 @@ const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller({ 
 // the async trust-mode logic in an immediately-invoked async function
 // with .catch() to avoid unhandled rejection warnings if the async work
 // rejects — the pump loop itself is unaffected.
-// Compute live chat-session directories once at startup (best-effort). Used to
-// eagerly open their scoped opencode event streams so the first turn streams
-// live on a fresh box. Bounded to actual chat windows (those stamped with an
-// opencode session id) — not the full catalog. Top-level `await` is available
-// in this module (index.mjs is ESM and runs top-level awaits already).
-let eagerChatDirs = [];
-try {
-  const projects = await tmux.listProjects();
-  eagerChatDirs = [
-    ...new Set(
-      (projects ?? [])
-        .flatMap((p) => p.windows ?? [])
-        .filter((w) => typeof w.opencodeSessionId === "string" && w.opencodeSessionId.length > 0)
-        .map((w) => w.paneCurrentPath)
-        .filter((d) => typeof d === "string" && d.length > 0),
-    ),
-  ];
-} catch { /* non-fatal */ }
-
 // Forward opencode's own `installation.update-available` onto the shared
 // serverUpdateAvailable banner. Dedup state is held in the forwarder closure.
 const forwardOpencodeUpdate = createOpencodeUpdateForwarder();
@@ -3204,49 +3188,36 @@ function interpretEvent(evt) {
     console.warn("[stream-interp] interpret failed:", e?.message ?? e);
   }
 }
-// eslint-disable-next-line no-unused-vars
-const stopOpencodePump = oc.subscribeEvents((evt) => {
-  // Map opencode's own installation.update-available onto the EXISTING
-  // serverUpdateAvailable banner (BET-1016). The forwarder is dedup-gated by
-  // opencode version and returns null for non-update events, so this is a no-op
-  // for everything else and never re-raises a version already shown.
-  const forwardedUpdate = forwardOpencodeUpdate(evt);
-  if (forwardedUpdate) {
-    bus.publish(forwardedUpdate);
-  }
-  // Preserve the provider HTTP status on a failed turn (BET-1230). The raw
-  // `session.error` message is "<reason phrase>: <body>" — parse the phrase
-  // back to a status so downstream (provider health, Stage 4) can tell 402
-  // (out of credit) from 429 (rate limited) from 5xx (broken) without
-  // substring-matching error text. Purely additive: `error` is replaced by an
-  // enriched copy whose `name` / `data.message` are byte-identical, so every
-  // existing consumer (renderer banner, push classification, the usage-stop
-  // enroller) keeps working unchanged.
-  if (evt && evt.type === "session.error" && evt.properties?.error) {
-    // BET-1270 6c: a transport-level 429 (prompt_async POST) carries the
-    // provider's Retry-After but is NOT a session.error on the stream — the
-    // pump bridges it here so the enrichment hands a real retryAfterMs to
-    // providerHealth instead of clamping every rate-limit to the 2-min floor.
+// V2 event pump. ONE global stream carries every session. The stream
+// interpreter reads the RAW V2 events; every other observer below (prompt
+// delivery, delegate, push, the CTO engines, seat-retry, usage-resume, …) reads
+// the small lifecycle vocabulary `createLifecycleAdapter` derives from them
+// (busy / idle / error / retry, a tool finished, an ask raised or answered, a
+// session created) — see src/shared/opencodeV2.mjs.
+const lifecycleAdapter = createLifecycleAdapter();
+
+// One lifecycle event → every observer that tracks session state.
+function observeLifecycleEvent(evt, raw) {
+  // Preserve the provider HTTP status on a failed turn (BET-1230). The V2 error
+  // already carries `status`; the transport-level refusal (a 429 on the prompt
+  // POST itself) carries the provider's Retry-After and is bridged here so the
+  // enrichment hands a real retryAfterMs to providerHealth instead of clamping
+  // every rate-limit to the 2-min floor (BET-1270 6c). Purely additive: `error`
+  // is replaced by an enriched copy whose `name` / `data.message` are
+  // byte-identical, so every existing consumer keeps working unchanged.
+  if (evt.type === "session.error" && evt.properties?.error) {
     const refusal = oc.getAndClearSessionRefusal(evt.properties?.sessionID);
-    evt.properties.error = enrichProviderError(
-      evt.properties.error,
-      refusal?.retryAfterMs,
-    );
+    const status = evt.properties.error?.data?.statusCode;
+    const enriched = enrichProviderError(evt.properties.error, refusal?.retryAfterMs);
+    evt.properties.error = typeof status === "number" && enriched.httpStatus == null ? { ...enriched, httpStatus: status } : enriched;
   }
   // Ordinary sessions' account-level refusals (429 usage limit / 402 out of
   // credit) feed the health registers too, so the router and the CTO's
   // usable-model check stop choosing a plan that is refusing turns.
-  if (evt && evt.type === "message.updated") {
+  if (evt.type === "message.updated") {
     const observed = attemptFromAssistantError(evt.properties?.info);
     if (observed) void endpointAttempts.recordProviderAttempt(observed).catch(() => {});
   }
-  // Box-side stream interpretation (BET-551 / §17): derive interpreted events
-  // from the raw opencode stream and publish them on the SAME bus (no second
-  // stream/endpoint). Consumers (S1b) demux by `kind:"stream"`.
-  // `permission.asked` is the one exception: it is interpreted inside the
-  // trust-mode branch below, only when the user actually has to act on it (see
-  // permissionAskPump.mjs). Every other event is interpreted here, as before.
-  if (!(evt && evt.type === "permission.asked")) interpretEvent(evt);
   // Track per-session busy state for the defer-until-idle queue shared by all
   // prompt senders (schedule, capability, peer, webhook). Cheap, runs for
   // every event; never throws into the pump.
@@ -3316,13 +3287,15 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
-  if (evt && evt.type === "permission.asked") {
+  if (evt.type === "permission.asked") {
+    // Trust mode answers the ask itself; the stream interpreter (and the raw
+    // publish) see it only when the user really has to act — the same event.
     handlePermissionAsk({
       evt,
       getConfig: () => local.configGet(),
       reply: (a) => oc.replyPermission(a),
-      interpret: interpretEvent,
-      publish: (e) => bus.publish({ kind: "opencode", payload: e }),
+      interpret: () => interpretEvent(raw),
+      publish: () => bus.publish({ kind: "opencode", payload: raw }),
       push: (e) => push.firePush(e),
       ledger: autoAnsweredAsks,
       warn: (...a) => console.warn(...a),
@@ -3331,13 +3304,56 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     });
     return;
   }
-  bus.publish({ kind: "opencode", payload: evt });
   // Notify on question/error/done (and track busy→idle). firePush decides
   // what (if anything) to send; permission.asked is handled in the branch
   // above so it isn't double-fired here.
   push.firePush(evt);
+}
+
+// V2 has no event replay: after a reconnect, every session the interpreter
+// knows is re-read (running? pending asks?) and its clients told to refetch.
+async function resyncAfterReconnect() {
+  let active = null;
+  try {
+    active = new Set(await oc.listActiveSessionIds());
+  } catch { /* unknown: leave running flags alone, still ask clients to refetch */ }
+  for (const sid of streamInterp.knownSessionIds()) {
+    const [permissions, questions] = await Promise.all([
+      oc.listPermissions(sid).catch(() => undefined),
+      oc.listQuestions(sid).catch(() => undefined),
+    ]);
+    streamInterp.resync(sid, {
+      running: active ? active.has(sid) : undefined,
+      permissions,
+      questions,
+    });
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+const stopOpencodePump = oc.subscribeEvents((raw) => {
+  // (installation.update-available no longer exists on V2; the forwarder stays
+  // inert and dedup-gated, so it is a no-op for every event.)
+  const forwardedUpdate = forwardOpencodeUpdate(raw);
+  if (forwardedUpdate) bus.publish(forwardedUpdate);
+  // Box-side stream interpretation (BET-551 / §17): derive interpreted events
+  // from the raw opencode stream and publish them on the SAME bus (no second
+  // stream/endpoint). Consumers demux by `kind:"stream"`. `permission.asked`
+  // is the one exception: it is interpreted inside the trust-mode branch of
+  // observeLifecycleEvent, only when the user actually has to act on it.
+  if (raw?.type !== "permission.asked") interpretEvent(raw);
+  for (const evt of lifecycleAdapter.adapt(raw)) {
+    try {
+      observeLifecycleEvent(evt, raw);
+    } catch (e) {
+      console.warn("[opencode-pump] observer failed:", e?.message ?? e);
+    }
+  }
+  if (raw?.type !== "permission.asked") bus.publish({ kind: "opencode", payload: raw });
 }, {
-  eagerDirectories: () => eagerChatDirs,
+  onConnect: ({ reconnect }) => {
+    if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+  },
 });
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);

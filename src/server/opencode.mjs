@@ -1,8 +1,11 @@
-// opencode HTTP proxy — server-side.
+// opencode HTTP client — server-side (OpenCode V2).
 //
-// Opencode runs on the SAME machine as this Node server, listening at
-// http://127.0.0.1:4096. No SSH tunnel or port-forward is needed; the desktop
-// + mobile clients reach this server over HTTPS (paired, Bearer-token auth).
+// OpenCode V2 runs on the SAME machine as this Node server, listening at
+// http://127.0.0.1:4096 behind HTTP Basic auth (see opencodeAuthHeader). The
+// desktop + mobile clients never talk to it: they reach THIS server over HTTPS
+// (paired, Bearer-token auth) and see the same `/rpc` + `/events` contract as
+// before the V2 cutover (spec K2) — V2's wire shapes are translated in
+// src/shared/opencodeV2.mjs.
 //
 // Export names are kept exactly as the rpc-wiring task expects them (see
 // task comments on each function).
@@ -12,7 +15,17 @@ import { homedir, tmpdir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { expandTilde, patchPath } from "../shared/paths.mjs";
+import { expandTilde, patchPath, statePath } from "../shared/paths.mjs";
+import { isPlanAgent } from "../shared/planMode.mjs";
+import {
+  mapTimeline,
+  sessionFromV2,
+  permissionFromV2,
+  permissionKeyToV2,
+  isQuestionForm,
+  questionFromForm,
+  formAnswerFromAnswers,
+} from "../shared/opencodeV2.mjs";
 import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
@@ -39,12 +52,61 @@ import {
 // delegate.mjs ownership helpers (relatedSessionIds/jobNameForSession) are no
 // longer imported here.
 
-const REMOTE_PORT = 4096;
+const DEFAULT_OPENCODE_URL = "http://127.0.0.1:4096";
+let apiBase = DEFAULT_OPENCODE_URL;
 
 /** Build the full URL for an opencode API path. */
 export function apiUrl(path) {
-  return `http://127.0.0.1:${REMOTE_PORT}${path}`;
+  return `${apiBase}${path}`;
 }
+
+/** Test/smoke seam: point the client at another opencode (a sandbox). Pass null to restore 127.0.0.1:4096. */
+export function _setApiBase(url) {
+  apiBase = url ? String(url).replace(/\/+$/, "") : DEFAULT_OPENCODE_URL;
+}
+
+// ===== K1: authentication =====
+//
+// OpenCode V2 requires `Authorization: Basic base64("opencode:" + password)` on
+// EVERY request, SSE included. The password is `~/.manta/opencode-password`
+// (the service gets the same value as OPENCODE_PASSWORD); MANTA_OPENCODE_PASSWORD
+// overrides it (tests / the sandbox smoke). This is the ONE helper that builds
+// the header — every other module that talks to opencode imports it.
+const OPENCODE_PASSWORD_FILE = "opencode-password";
+let cachedFilePassword = null;
+
+function opencodePassword() {
+  const env = process.env.MANTA_OPENCODE_PASSWORD;
+  if (typeof env === "string" && env.trim()) return env.trim();
+  if (cachedFilePassword) return cachedFilePassword;
+  try {
+    const raw = readFileSync(statePath(OPENCODE_PASSWORD_FILE), "utf8").split("\n")[0].trim();
+    if (raw) cachedFilePassword = raw; // never cache a miss: the file may appear after boot
+  } catch {
+    /* no password file yet */
+  }
+  return cachedFilePassword;
+}
+
+/** `Basic …` header value for opencode, or undefined when no password is configured. */
+export function opencodeAuthHeader() {
+  const pw = opencodePassword();
+  return pw ? `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}` : undefined;
+}
+
+/** Test-only: forget the cached password file. */
+export function _resetOpencodeAuth() {
+  cachedFilePassword = null;
+}
+
+function withAuth(init) {
+  const auth = opencodeAuthHeader();
+  if (!auth) return init;
+  const headers = { ...(init?.headers ?? {}) };
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === "authorization")) headers.authorization = auth;
+  return { ...(init ?? {}), headers };
+}
+
 
 // ===== Loopback connection pooling =====
 //
@@ -107,7 +169,7 @@ export function _pooledOcRequest(url, init) {
 // technique the desktop's previous pooledRequest used (over the SSH forward);
 // here the same pattern goes straight to opencode on this box.
 function ocFetch(url, init) {
-  return (ocTransport ?? pooledOcRequest)(url, init);
+  return (ocTransport ?? pooledOcRequest)(url, withAuth(init));
 }
 
 function pooledOcRequest(url, init) {
@@ -189,264 +251,19 @@ export function parseSseFrame(line) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-session project-directory scope
+// Session → directory cache
 // ---------------------------------------------------------------------------
 //
-// opencode's tool execution runs from the server's startup cwd, NOT from
-// session.directory metadata. To make tools execute in the project worktree,
-// every session-mutating POST must carry `?directory=<absolute-worktree-path>`.
-// opencode's `/event` SSE stream is ALSO scoped by `?directory=`: events from
-// a scoped POST land only on the matching scoped stream. The bus below
-// (subscribeEvents) opens one subscription per directory we know about so
-// every project's events flow back into the renderer.
-//
-// We cache session→directory locally so each prompt/command POST doesn't
-// require an extra GET /session lookup.
+// V2 session routes need no `?directory=` scope (the session id is global and
+// there is ONE event stream), so this is only a lookup table for the callers
+// that want a session's directory without a round trip (seat-retry sweep).
+// There are no listeners, no per-directory streams and no readiness gate.
 
 const sessionDirectoryCache = new Map();
-const directoryListeners = new Set(); // notified on new directory
 
 function rememberSessionDirectory(sessionId, directory) {
   if (!sessionId || typeof directory !== "string" || directory.length === 0) return;
-  const prev = sessionDirectoryCache.get(sessionId);
   sessionDirectoryCache.set(sessionId, directory);
-  if (prev !== directory) {
-    for (const fn of directoryListeners) {
-      try { fn(directory); } catch { /* ignore listener error */ }
-    }
-  }
-}
-
-// Cache a session→directory WITHOUT opening a scoped stream. Used by the
-// subscribe bootstrap: we want existing sessions' dirs resolvable (so the
-// first prompt is fast) but we must NOT open a `/event?directory=` stream for
-// every session in the catalog. On a box with many opencode workspaces (e.g.
-// Multica), listSessions() returns ~100 dirs, and eagerly streaming each one
-// piled up hundreds of connections that buried opencode serve and made every
-// request crawl. Streams now open on demand via ensureStreamForDirectory when
-// a session is actually used (prompt / message fetch).
-function cacheSessionDirectoryQuiet(sessionId, directory) {
-  if (!sessionId || typeof directory !== "string" || directory.length === 0) return;
-  sessionDirectoryCache.set(sessionId, directory);
-}
-
-// Opens the scoped stream for a directory if a subscription is active. Set by
-// subscribeEvents (to its openFor); called by getSessionDirectoryQuery so an
-// in-use session's events arrive even though the bootstrap didn't pre-open it.
-let ensureStreamForDirectory = null;
-
-// ---------------------------------------------------------------------------
-// Scoped-stream readiness gate (BET-115 fix C)
-//
-// opencode's `/event?directory=` is a fresh subscription every time it opens
-// (fresh session/reconnect), and events emitted BEFORE the subscription
-// registers upstream are lost forever — no replay. `sendPrompt` (and the
-// other session-mutating calls) POST through `getSessionDirectoryQuery`,
-// which fire-and-forgets `ensureStreamForDirectory(dir)`. On a brand-new
-// session that races: the POST can land before the scoped stream is actually
-// listening, so the first turn's events vanish and the UI looks frozen.
-//
-// `streamReadyState` tracks, per directory key ("" = global), a promise that
-// resolves the first time `openEventStream`'s upstream fetch comes back OK
-// (see `onConnect` below). `getSessionDirectoryQuery` awaits it with a 5s
-// bound before returning — long enough for a normal connect, short enough
-// that a wedged opencode degrades to "send anyway" rather than hanging the
-// prompt forever.
-// ---------------------------------------------------------------------------
-const streamReadyState = new Map(); // key -> { promise, resolve }
-
-// Test-only: shrink the 5s readiness bound so tests don't have to sleep for
-// real. Reset to null (→ default 5000) between tests.
-let readinessTimeoutMsOverride = null;
-export function _setReadinessTimeoutMs(ms) {
-  readinessTimeoutMsOverride = ms;
-}
-
-function makePendingReadyEntry() {
-  let resolve;
-  const promise = new Promise((res) => { resolve = res; });
-  return { promise, resolve };
-}
-
-function getOrCreateStreamReady(key) {
-  let entry = streamReadyState.get(key);
-  if (!entry) {
-    entry = makePendingReadyEntry();
-    streamReadyState.set(key, entry);
-  }
-  return entry;
-}
-
-/** Called by openEventStream's onConnect: the scoped subscription is live. */
-function markStreamConnected(key) {
-  getOrCreateStreamReady(key).resolve();
-}
-
-/**
- * Called by openEventStream's onDisconnect: the scoped subscription dropped.
- * Re-arm with a FRESH pending promise so a prompt sent during the reconnect
- * window waits for the NEW subscription rather than resolving instantly off
- * the stale (already-resolved) promise. Callers that already captured the old
- * promise reference are still bounded by the 5s race in
- * getSessionDirectoryQuery, so this can't hang a caller indefinitely.
- */
-function markStreamDisconnected(key) {
-  streamReadyState.set(key, makePendingReadyEntry());
-}
-
-/** Test-only: clear readiness state between scenarios. */
-export function _resetStreamReadyState() {
-  streamReadyState.clear();
-}
-
-// ---------------------------------------------------------------------------
-// Scoped-stream eviction (unbounded-stream-growth fix)
-//
-// opencode's `/event?directory=` streams open lazily (good) but the subscribe
-// registry never removed an entry, so every distinct directory ever touched
-// kept a permanent SSE connection to opencode. On a box that churns one-shot
-// workspaces (e.g. the Multica watchdog spawns a fresh throwaway
-// `multica_workspaces/.../workdir` every run), this grows without bound: a
-// dead workdir's stream lingers forever, and the matching per-directory state
-// inside opencode accumulates too — the slow-degradation the user sees.
-//
-// Eviction is SAFE because every stream is re-openable on demand:
-// `getSessionDirectoryQuery` calls `ensureStreamForDirectory(dir)` (idempotent)
-// before every prompt/message fetch, so closing an idle stream cannot lose
-// events for an active session — the next use re-opens it. A prompt (write)
-// additionally AWAITS the readiness gate so it cannot race ahead of its own
-// subscription; a transcript fetch (read) opens the stream but does not wait,
-// because a read has no reply to lose and the wait is up to 5s on exactly the
-// cold/just-evicted stream this eviction creates. The global stream (key "")
-// is NEVER evicted (it carries unscoped events and has no directory to
-// disappear).
-//
-// A stream is evicted when its directory:
-//   (a) no longer exists on disk (the one-shot workdir was deleted), OR
-//   (b) has seen no event/use for STREAM_IDLE_MS, OR
-//   (c) is over the STREAM_MAX hard cap — the least-recently-active scoped
-//       streams are dropped down to the cap (LRU).
-// ---------------------------------------------------------------------------
-
-export const STREAM_IDLE_MS = 2 * 60 * 60 * 1000; // 2h idle → evict
-export const STREAM_MAX = 32; // hard LRU cap on scoped streams (excl. global)
-export const STREAM_SWEEP_MS = 5 * 60 * 1000; // sweep cadence
-
-/**
- * Pure: decide which scoped-stream keys to evict. The global key ("") is
- * always retained. `existsFn(dir)` reports whether the directory still exists
- * on disk (injected so the logic is testable without touching the FS).
- *
- * @param {object} args
- * @param {Iterable<string>} args.keys        current stream keys (incl. "")
- * @param {Map<string,number>} args.lastActivity  key -> last-active epoch ms
- * @param {(dir:string)=>boolean} args.existsFn    directory-exists predicate
- * @param {number} args.now                    epoch ms
- * @param {number} [args.idleMs=STREAM_IDLE_MS]
- * @param {number} [args.maxStreams=STREAM_MAX]
- * @returns {string[]} keys to close (never includes "")
- */
-export function selectStreamsToEvict({
-  keys,
-  lastActivity,
-  existsFn,
-  now,
-  idleMs = STREAM_IDLE_MS,
-  maxStreams = STREAM_MAX,
-}) {
-  const scoped = [...keys].filter((k) => k !== "");
-  const evict = new Set();
-
-  for (const key of scoped) {
-    // (a) directory gone from disk → evict.
-    let exists = true;
-    try {
-      exists = existsFn(key);
-    } catch {
-      exists = true; // an existsFn error is not proof the dir is gone; keep it.
-    }
-    if (!exists) {
-      evict.add(key);
-      continue;
-    }
-    // (b) idle past the threshold → evict.
-    const last = lastActivity.get(key) ?? 0;
-    if (now - last > idleMs) evict.add(key);
-  }
-
-  // (c) LRU hard cap over the survivors: keep the most-recently-active up to
-  // maxStreams, evict the rest (least-recently-active first).
-  const survivors = scoped.filter((k) => !evict.has(k));
-  if (survivors.length > maxStreams) {
-    survivors
-      .sort((a, b) => (lastActivity.get(b) ?? 0) - (lastActivity.get(a) ?? 0))
-      .slice(maxStreams)
-      .forEach((k) => evict.add(k));
-  }
-
-  return [...evict];
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function fetchSessionDirectory(sessionId, signal) {
-  try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`), signal ? { signal } : undefined);
-    if (!res.ok) {
-      await discardBody(res);
-      return null;
-    }
-    const body = await res.json();
-    return typeof body?.directory === "string" ? body.directory : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Rejects when the caller's bounded signal fires (no-op without one). */
-function signalAborted(signal) {
-  if (!signal) return new Promise(() => {});
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"));
-  return new Promise((_, reject) => {
-    signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
-  });
-}
-
-async function getSessionDirectoryQuery(sessionId, { awaitReady = true, signal } = {}) {
-  let dir = sessionDirectoryCache.get(sessionId);
-  if (!dir) {
-    const fetched = await fetchSessionDirectory(sessionId, signal);
-    if (fetched) {
-      rememberSessionDirectory(sessionId, fetched);
-      dir = fetched;
-    }
-  }
-  // This session is genuinely being used (prompt / message fetch routes here),
-  // so ensure its scoped stream is open — covers BOTH the freshly-fetched dir
-  // and a dir that the bootstrap cached quietly (cacheSessionDirectoryQuiet
-  // doesn't open a stream). opencode emits this prompt's events only on the
-  // scoped channel; without the stream they're lost and the session looks
-  // frozen. Idempotent (openFor no-ops if already open).
-  //
-  // Readiness gate: wait (bounded) for the scoped stream's FIRST successful
-  // connect before returning, so a session-mutating call (sendPrompt et al.)
-  // can't race ahead of its own event subscription and lose the reply. Bound
-  // is deliberately short — a wedged opencode must never hang the prompt.
-  //
-  // `awaitReady:false` (read-only callers — see listMessages) still OPENS the
-  // stream but does not wait for it. A read has no reply that could be lost to
-  // the race the gate protects against, and the wait is up to 5s on a cold or
-  // LRU-evicted stream.
-  if (dir && ensureStreamForDirectory) {
-    try { ensureStreamForDirectory(dir); } catch { /* non-fatal */ }
-    if (awaitReady) {
-      const ready = getOrCreateStreamReady(dir).promise;
-      // P3a2: the caller's bounded signal also bounds the gate wait — a hung
-      // stream connect must not outlive the caller's deadline.
-      await Promise.race([ready, sleep(readinessTimeoutMsOverride ?? 5000), signalAborted(signal)]);
-    }
-  }
-  return dir ? `?directory=${encodeURIComponent(dir)}` : "";
 }
 
 /** Test-only: reset cache between scenarios. */
@@ -454,15 +271,30 @@ export function _resetSessionDirectoryCache() {
   sessionDirectoryCache.clear();
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
- * Test-only: register a directory listener (same set the SSE manager uses).
- * Lets tests assert the lazy-fetch path actually notifies — the listener
- * firing is what opens the scoped stream, and the bug was a bare cache.set
- * that skipped it. Returns an unsubscribe fn.
+ * One V2 call: JSON in, JSON out, `data` unwrapped. A non-2xx throws
+ * `opencode <label> <status>: <body>` with `err.status` set so callers can tell
+ * a definitive refusal (4xx) from an unknown outcome (network / 5xx).
  */
-export function _onSessionDirectoryAdded(fn) {
-  directoryListeners.add(fn);
-  return () => directoryListeners.delete(fn);
+async function ocJson(label, method, path, body, { signal } = {}) {
+  const res = await ocFetch(apiUrl(path), {
+    method,
+    headers: body === undefined ? {} : { "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    ...(signal ? { signal } : {}),
+  });
+  if (!res.ok) {
+    const err = new Error(`opencode ${label} ${res.status}: ${await res.text()}`);
+    err.status = res.status;
+    err.retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
+    throw err;
+  }
+  const text = await res.text();
+  if (!text) return undefined;
+  const parsed = JSON.parse(text);
+  return parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
 }
 
 // ---------------------------------------------------------------------------
@@ -481,46 +313,37 @@ export function _onSessionDirectoryAdded(fn) {
 // opencode sees the path.
 export async function createSession({ directory, title = "", permission, metadata, signal }) {
   const absDir = expandTilde(directory);
-  const url = `/session?directory=${encodeURIComponent(absDir)}`;
-  const body = { title };
+  const body = { location: { directory: absDir } };
+  // An empty title is left unset so V2 titles the session itself.
+  if (title) body.title = title;
   // BET-418 §A: a background job is created with a permission ruleset so it
-  // never asks once running. opencode's POST /session accepts a `permission`
-  // array (verified working against opencode v1.15.12) — forward it verbatim
-  // when provided. The ruleset MUST end with a catch-all deny (enforced by
-  // buildPermissionRuleset in delegate.mjs).
+  // never asks once running. Callers still build the Manta ruleset
+  // ({permission, pattern, action}, catch-all deny FIRST — V2 is last-match-
+  // wins exactly like V1, verified on 2.0.30); V2 spells it
+  // {action, resource, effect} with V2's own permission keys (shell, subagent…).
   if (Array.isArray(permission) && permission.length > 0) {
-    body.permission = permission;
+    body.permissions = permission.map((r) => ({
+      action: permissionKeyToV2(String(r.permission)),
+      resource: r.pattern === "**" ? "*" : String(r.pattern),
+      effect: r.action,
+    }));
   }
   // P3a1 (unified-cto-spec §3.1): a free-form `metadata` object stamped at
-  // create — the role-session identity marker. Round-trip behavior verified
-  // on the installed binary by the P0 live probes (docs/cto-implementation-map.md
-  // §1/§8): the object persists on the Session record and reads back verbatim
-  // through GET /session/{id}. Only forward plain objects; opencode's
-  // CreateInput declares `metadata: object`.
+  // create — the role-session identity marker; it round-trips verbatim through
+  // GET /api/session/{id}. Only plain objects are forwarded.
   if (metadata !== undefined) {
     if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
       throw new Error("opencode createSession metadata must be a plain object");
     }
     body.metadata = metadata;
   }
-  const res = await ocFetch(apiUrl(url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!res.ok) {
-    const err = new Error(`opencode createSession ${res.status}: ${await res.text()}`);
-    // The numeric status lets callers distinguish a DEFINITIVE rejection
-    // (4xx — nothing was created) from an unknown outcome (network error,
-    // timeout, 5xx — the create may still have landed). The binding service
-    // clears a reservation only on the former (P3a1 review blocker 1).
-    err.status = res.status;
-    throw err;
-  }
-  const sess = await res.json();
+  // The numeric `err.status` (set by ocJson) lets callers distinguish a
+  // DEFINITIVE rejection (4xx — nothing was created) from an unknown outcome
+  // (network error, timeout, 5xx — the create may still have landed). The
+  // binding service clears a reservation only on the former (P3a1 review blocker 1).
+  const sess = sessionFromV2(await ocJson("createSession", "POST", "/api/session", body, { signal }));
   // Fall back to the EXPANDED dir, never the raw tilde (the bug we fixed).
-  rememberSessionDirectory(sess.id, sess.directory ?? absDir);
+  rememberSessionDirectory(sess.id, sess.directory || absDir);
   return sess;
 }
 
@@ -593,69 +416,108 @@ function stripDuplicateToolOutputPart(part) {
   return { ...part, state: { ...state, metadata: restMetadata } };
 }
 
-/** Fetch a session's message transcript.
+// V2 returns the timeline NEWEST-first in pages of at most 200 records.
+const TIMELINE_PAGE = 200;
+// A runaway guard, not a feature: 200 × 50 = 10,000 records.
+const TIMELINE_MAX_PAGES = 50;
+
+const isConversation = (m) => m?.type === "user" || m?.type === "assistant" || (m?.type === "compaction" && m?.status === "completed");
+
+/**
+ * Read a session's V2 timeline and return it CHRONOLOGICALLY. `limit` is the
+ * number of CONVERSATION records wanted (the tail): the timeline also holds
+ * idle / agent-switch records that are not messages, so pages are read until
+ * enough conversation records have been seen.
+ */
+async function readTimeline(sessionId, { limit } = {}) {
+  const base = `/api/session/${encodeURIComponent(sessionId)}/message`;
+  const desc = [];
+  let convo = 0;
+  let cursor = null;
+  for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
+    const qs = cursor ? `cursor=${encodeURIComponent(cursor)}&limit=${TIMELINE_PAGE}` : `order=desc&limit=${TIMELINE_PAGE}`;
+    const res = await ocFetch(apiUrl(`${base}?${qs}`));
+    if (!res.ok) throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    const rows = Array.isArray(body?.data) ? body.data : [];
+    for (const m of rows) {
+      desc.push(m);
+      if (isConversation(m)) convo++;
+    }
+    cursor = body?.cursor?.next ?? null;
+    if (!cursor || rows.length === 0) break;
+    if (limit != null && convo >= limit) break;
+  }
+  return desc.reverse();
+}
+
+/** A running shell tool's live stdout lives behind GET /api/shell/{id}/output — pull it into `metadata.output` so a refetch keeps the tail. */
+async function hydrateRunningShells(messages) {
+  const jobs = [];
+  for (const m of messages) {
+    for (const p of m.parts ?? []) {
+      const id = p?.type === "tool" && p.state?.status === "running" ? p.state.metadata?.shellID : null;
+      if (typeof id === "string" && id) {
+        jobs.push(
+          ocFetch(apiUrl(`/api/shell/${encodeURIComponent(id)}/output`))
+            .then(async (res) => {
+              if (!res.ok) return void (await discardBody(res));
+              const out = (await res.json())?.data;
+              if (typeof out?.output === "string") p.state.metadata = { ...p.state.metadata, output: out.output };
+            })
+            .catch(() => {}),
+        );
+      }
+    }
+  }
+  await Promise.all(jobs);
+  return messages;
+}
+
+/** Fetch a session's message transcript, in the `{info, parts}[]` shape every client reads.
  *
  *  @param {string} sessionId
  *  @param {{limit?: number, slim?: boolean}} [opts]
- *    limit — return only the most recent N messages (opencode's `?limit=`
- *      returns the TAIL, chronologically ordered; verified live). Omit for the
- *      whole history (the desktop's "Load earlier" / follow-up refetches).
+ *    limit — return only the most recent N messages (the TAIL, chronological).
+ *      Omit for the whole history (the desktop's "Load earlier" / refetches).
  *    slim  — additionally drop parts the iOS client never renders (opt-in;
  *      mobile only). Duplicate tool stdout is ALWAYS stripped for every
  *      client regardless of `slim` (see stripDuplicateToolOutput).
  */
 export async function listMessages(sessionId, opts = {}) {
-  // Open the session's scoped event stream BEFORE reading the transcript
-  // snapshot, so live events emitted around the snapshot land on the now-open
-  // stream instead of vanishing (opencode has no replay).
-  //
-  // We do NOT await the readiness gate here. The gate exists so a
-  // session-MUTATING call (sendPrompt et al.) can't race ahead of its own
-  // event subscription and lose the reply; a read has no reply to lose. On a
-  // cold or evicted stream that wait costs up to 5s, and it was being paid in
-  // front of every transcript fetch — the single largest component of "opening
-  // a session on mobile is slow". `ensureStreamForDirectory` still runs, so
-  // the stream is opened either way; we just don't block the read on it.
-  let query = "";
-  try {
-    query = await getSessionDirectoryQuery(sessionId, { awaitReady: false });
-  } catch {
-    /* non-fatal: fetch the snapshot regardless */
-  }
   const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : null;
-  if (limit != null) query += `${query ? "&" : "?"}limit=${limit}`;
-  const url = `/session/${encodeURIComponent(sessionId)}/message${query}`;
-  const res = await ocFetch(apiUrl(url));
-  if (!res.ok) {
-    throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
-  }
-  const messages = await res.json();
-  const stripped = messages.map(stripDuplicateToolOutput);
+  const timeline = await readTimeline(sessionId, { limit });
+  let mapped = mapTimeline(timeline, { sessionID: sessionId });
+  if (limit != null && mapped.length > limit) mapped = mapped.slice(mapped.length - limit);
+  await hydrateRunningShells(mapped);
+  const stripped = mapped.map(stripDuplicateToolOutput);
   return opts.slim ? slimTranscript(stripped) : stripped;
 }
 
-/** Fetch a single message by id (GET /session/{id}/message/{messageID}).
+/** Fetch a single message by id (GET /api/session/{id}/message/{messageID}).
  *  Returns null on miss/error so the caller can fall back to a full refetch.
  *  @param {string} sessionId
  *  @param {string} messageId
  */
 export async function getMessage(sessionId, messageId) {
   try {
-    const url = `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
+    const url = `/api/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
     const res = await ocFetch(apiUrl(url));
     if (!res.ok) {
       await discardBody(res);
       return null;
     }
-    return stripDuplicateToolOutput(await res.json());
+    const record = (await res.json())?.data;
+    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId }));
+    return mapped ? stripDuplicateToolOutput(mapped) : null;
   } catch {
     return null;
   }
 }
 
-// BET-1270 6c: transport-level refusals (a non-2xx on the prompt_async POST
-// itself) carry the provider's Retry-After, but surface to the box as a THROWN
-// error rather than a `session.error` SSE event — so the Retry-After never
+// BET-1270 6c: transport-level refusals (a non-2xx on the prompt POST itself)
+// carry the provider's Retry-After, but surface to the box as a THROWN error
+// rather than a `session.error` stream event — so the Retry-After never
 // reaches providerHealth and every rate-limit clamps to the 2-min floor. Record
 // the transport refusal per-session at the point it is read, so the opencode
 // pump's session.error enrichment can attach its retryAfterMs when the matching
@@ -678,64 +540,84 @@ export function getAndClearSessionRefusal(sessionId) {
   return r;
 }
 
+const DEFAULT_AGENT = "build";
+const normVariant = (v) => (typeof v === "string" && v && v !== "default" ? v : "default");
+
 /**
- * Send a user message (prompt_async — returns 204 immediately; response
- * streams via SSE). Model is per-prompt; omit to use opencode's default.
- *
- * `messageID` (P3a2, unified-cto-spec §8.3) is the P0-proven caller-supplied
- * identity: opencode persists it verbatim as the user message id, readable
- * back via getMessage/listMessages — the delivery receipt. The 204 alone is
- * NOT a receipt (no echo of the messageID). Callers that do not need
- * reconciliation omit it and get the pre-P3a2 behavior byte-identically.
- *
- * `signal` (P3a2) bounds the call through the ACTUAL transport: it is raced
- * against the per-directory readiness gate AND forwarded to the POST itself
- * (pooledOcRequest passes it to http.request — bound headers + body).
- * Aborting the client request does NOT prove the server didn't accept; the
- * admission layer classifies an abort as uncertainty (unknown), never a
- * refusal.
- *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, messageID?: string, signal?: AbortSignal }} opts
+ * V2 keeps the model and the agent on the SESSION (the prompt body has neither
+ * field) and every POST adds a record to the timeline, so a prompt that names
+ * a model/agent first reads the session and only switches what differs.
+ * An omitted agent after a plan-mode turn means "back to build" — V1's
+ * per-prompt agent was never sticky, V2's is.
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID, signal }) {
-  // Scope tools + events to the session's worktree. The matching per-directory
-  // subscription in subscribeEvents below ensures the events still reach
-  // listeners (the global /event subscription wouldn't see them otherwise).
-  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
-  const url = `/session/${encodeURIComponent(sessionId)}/prompt_async${dirQ}`;
-  const parts = [];
-  if (attachments) {
-    for (const a of attachments) {
-      parts.push({
-        type: "file",
-        mime: a.mime,
-        url: `file://${a.remotePath}`,
-        ...(a.filename ? { filename: a.filename } : {}),
-      });
+async function syncSessionControls(sessionId, { model, agent, signal }) {
+  let info;
+  try {
+    info = sessionFromV2(await ocJson("getSession", "GET", `/api/session/${encodeURIComponent(sessionId)}`, undefined, { signal }));
+  } catch (e) {
+    if (e?.status === 404) throw e;
+    info = null; // can't read it — set what was asked and let the prompt decide
+  }
+  const base = `/api/session/${encodeURIComponent(sessionId)}`;
+  const wantAgent = agent ?? (isPlanAgent(info?.agent) ? DEFAULT_AGENT : null);
+  if (wantAgent && (info?.agent ?? DEFAULT_AGENT) !== wantAgent) {
+    await ocJson("setAgent", "POST", `${base}/agent`, { agent: wantAgent }, { signal });
+  }
+  if (model?.providerID && model?.modelID) {
+    const cur = info?.model;
+    if (!cur || cur.providerID !== model.providerID || cur.id !== model.modelID || normVariant(cur.variant) !== normVariant(model.variant)) {
+      await ocJson(
+        "setModel",
+        "POST",
+        `${base}/model`,
+        { model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } },
+        { signal },
+      );
     }
   }
-  if (mentions) {
-    for (const m of mentions) {
-      parts.push({ type: "agent", name: m.name, source: m.source });
-    }
-  }
-  parts.push({ type: "text", text });
+}
 
-  const body = { parts };
-  if (model) {
-    body.model = { providerID: model.providerID, modelID: model.modelID };
-    if (model.variant) body.variant = model.variant;
-  }
-  if (agent) body.agent = agent;
-  if (messageID) body.messageID = messageID; // P0-proven: persisted verbatim as the user message id
+function fileInputs(attachments) {
+  return (attachments ?? []).map((a) => ({ uri: `file://${a.remotePath}`, ...(a.filename ? { name: a.filename } : {}) }));
+}
 
-  const res = await ocFetch(apiUrl(url), {
+/**
+ * Send a user message (POST /api/session/{id}/prompt — enqueues into the
+ * session inbox and returns immediately; the response streams via the event
+ * stream). The model/agent are session state in V2 (see syncSessionControls).
+ *
+ * `messageID` (P3a2, unified-cto-spec §8.3) is the caller-supplied identity:
+ * opencode persists it verbatim as the user message id (V2 also treats it as an
+ * idempotency key — re-posting the same id never enqueues twice), readable back
+ * via getMessage/listMessages — the delivery receipt.
+ *
+ * `signal` (P3a2) bounds the call through the ACTUAL transport. Aborting the
+ * client request does NOT prove the server didn't accept; the admission layer
+ * classifies an abort as uncertainty (unknown), never a refusal.
+ *
+ * `delivery` ("steer" | "queue") is passed through when given; today's callers
+ * leave it unset (V2's default is steer) — native use is a later phase.
+ *
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
+ */
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID, delivery, signal }) {
+  await syncSessionControls(sessionId, { model, agent, signal });
+  const body = { text };
+  const files = fileInputs(attachments);
+  if (files.length) body.files = files;
+  if (mentions?.length) {
+    body.agents = mentions.map((m) => ({
+      name: m.name,
+      mention: { start: m.source.start, end: m.source.end, text: m.source.value },
+    }));
+  }
+  if (messageID) body.id = messageID;
+  if (delivery) body.delivery = delivery;
+
+  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/prompt`), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-    // P3a2: propagate the caller's bounded signal to the actual POST (the
-    // wrapper used to drop it — pooledOcRequest forwards init.signal to
-    // http.request, so headers/body are bounded end-to-end).
     ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
@@ -755,79 +637,84 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
     });
     throw err;
   }
+  await discardBody(res);
 }
 
-/** Abort the running generation for a session (idempotent).
- *
- *  MUST carry `?directory=<session.directory>` like every other session-
- *  mutating POST (prompt_async, command, fork, compact). opencode v2 routes
- *  session mutations to the per-directory worker; an unscoped abort lands
- *  on the wrong worker so the per-directory worker keeps generating. The
- *  renderer's running indicator clears because opencode emits *some* idle
- *  signal in response, but the model loop never actually stops.
- *  @param {string} sessionId
- */
 /**
- * Abort the running generation for a session (idempotent — aborting an idle
- * session is a 200 no-op). P3a2 blocker 2: an optional `{ signal }` bounds
- * the call through the directory gate AND the actual POST (the admission
- * layer classifies a deadline hit as an UNCERTAIN abort — the server may
- * still process it, so the caller keeps its barrier until a definitive
- * response).
+ * Abort the running generation for a session (idempotent — interrupting an
+ * idle session answers `{interrupted:false}`). P3a2 blocker 2: an optional
+ * `{ signal }` bounds the call (the admission layer classifies a deadline hit
+ * as an UNCERTAIN abort — the server may still process it, so the caller keeps
+ * its barrier until a definitive response). V2 reports the stop as its own
+ * `session.execution.interrupted` event, surfaced to clients as `aborted`.
  *
  * @param {string} sessionId
  * @param {{ signal?: AbortSignal }} [opts]
  */
 export async function abortSession(sessionId, { signal } = {}) {
-  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
-  const url = `/session/${encodeURIComponent(sessionId)}/abort${dirQ}`;
-  const res = await ocFetch(apiUrl(url), { method: "POST", ...(signal ? { signal } : {}) });
-  if (!res.ok) {
-    throw new Error(`opencode abortSession ${res.status}: ${await res.text()}`);
-  }
+  await ocJson("abortSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=false`, undefined, { signal });
 }
 
-/** Ask opencode for a session's real status. `GET /session/status` is scoped to
- *  a directory instance (unscoped it returns `{}` even while busy), and an idle
- *  session is simply absent from the map. Throws on non-2xx / network error so
- *  callers can leave their state untouched.
+/** The set of sessions with a turn in flight: GET /api/session/active → `{[sessionId]: {type:"running"}}`. */
+async function readActive() {
+  const res = await ocFetch(apiUrl("/api/session/active"), { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`opencode session/active ${res.status}: ${await res.text()}`);
+  const data = (await res.json())?.data;
+  return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+}
+
+/** Ids of every session with a turn in flight right now (GET /api/session/active). Throws on failure. */
+export async function listActiveSessionIds() {
+  return Object.keys(await readActive());
+}
+
+/**
+ * A running shell's output from `cursor` on (V2 pushes no per-chunk event):
+ * `GET /api/shell/{id}/output?cursor=N` → only the bytes after N.
+ * @param {{ shellID: string, cursor?: number }} a
+ * @returns {Promise<{ output: string, cursor: number, truncated: boolean }|null>} null once the shell is gone
+ */
+export async function readShellOutput({ shellID, cursor = 0 }) {
+  const res = await ocFetch(apiUrl(`/api/shell/${encodeURIComponent(shellID)}/output?cursor=${Math.max(0, cursor | 0)}`), {
+    signal: AbortSignal.timeout(8000),
+  });
+  if (res.status === 404) {
+    await discardBody(res);
+    return null;
+  }
+  if (!res.ok) throw new Error(`opencode readShellOutput ${res.status}: ${await res.text()}`);
+  const data = (await res.json())?.data;
+  return data && typeof data.output === "string"
+    ? { output: data.output, cursor: Number.isFinite(data.cursor) ? data.cursor : cursor, truncated: data.truncated === true }
+    : null;
+}
+
+/** Ask opencode for a session's real status. Throws on non-2xx / network error
+ *  so callers can leave their state untouched.
  *  @param {string} sessionId
  *  @returns {Promise<"busy"|"retry"|"idle">}
  */
 export async function getSessionStatus(sessionId) {
-  const dirQ = await getSessionDirectoryQuery(sessionId, { awaitReady: false });
-  // Never fall back to the UNSCOPED /session/status: it always answers `{}`,
-  // which would read as "idle" for a session that is really mid-turn and let
-  // the stale-busy sweep release it. An unresolvable directory is "unknown".
-  if (!dirQ) throw new Error(`no directory for ${sessionId}`);
-  const res = await ocFetch(apiUrl(`/session/status${dirQ}`));
-  if (!res.ok) {
-    throw new Error(`opencode getSessionStatus ${res.status}: ${await res.text()}`);
-  }
-  const map = await res.json();
-  const t = map?.[sessionId]?.type;
-  return t === "busy" || t === "retry" ? t : "idle";
+  const active = await readActive();
+  return active[sessionId] ? "busy" : "idle";
 }
 
-/** Every session's status in one project directory, as opencode reports it:
- *  `{[sessionId]: {type: "busy"|"retry"|"idle", ...}}` — an idle session is
- *  simply absent. Unlike `getSessionStatus` this reads the whole map (a retry
- *  entry carries `message` / `next` / `attempt`). Bounded, and throws on non-2xx
- *  or a network error so a caller never mistakes "could not ask" for "nobody is
- *  retrying".
+/** Every running session as `{[sessionId]: {type:"busy"}}` (an idle session is
+ *  simply absent). `directory` is required for API compatibility but V2's
+ *  running set is global, so the result is narrowed to sessions this server
+ *  knows to live there when it can. A V2 retry is visible only as a stream
+ *  event (`retry` frame / `session.status` retry), never in this map.
  *  @param {string} directory  absolute project directory
- *  @returns {Promise<Record<string, {type?: string, message?: string, next?: number, attempt?: number}>>}
  */
 export async function listSessionStatuses(directory) {
   if (typeof directory !== "string" || directory.length === 0) throw new Error("listSessionStatuses: directory required");
-  const res = await ocFetch(apiUrl(`/session/status?directory=${encodeURIComponent(directory)}`), {
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) {
-    throw new Error(`opencode listSessionStatuses ${res.status}: ${await res.text()}`);
+  const active = await readActive();
+  const out = {};
+  for (const id of Object.keys(active)) {
+    const dir = sessionDirectoryCache.get(id);
+    if (dir === undefined || dir === directory) out[id] = { type: "busy" };
   }
-  const map = await res.json();
-  return map && typeof map === "object" && !Array.isArray(map) ? map : {};
+  return out;
 }
 
 /** Distinct directories of the sessions this server knows (the session→directory
@@ -845,85 +732,80 @@ export function cachedSessionDirectory(sessionId) {
   return sessionDirectoryCache.get(sessionId) ?? null;
 }
 
-/** List sessions scoped to a project directory.
+/** List sessions, newest first, optionally scoped to a project directory.
+ *  Pages are followed up to 500 sessions (V1 capped at 100).
  *  @param {string} [directory]
  */
 export async function listSessions(directory, { signal } = {}) {
-  const qs = directory ? `?directory=${encodeURIComponent(directory)}` : "";
-  const res = await ocFetch(apiUrl(`/session${qs}`), { signal });
-  if (!res.ok) {
-    throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
+  const out = [];
+  let cursor = null;
+  for (let page = 0; page < 5; page++) {
+    const q = [`limit=100`];
+    if (directory) q.push(`directory=${encodeURIComponent(directory)}`);
+    if (cursor) q.push(`cursor=${encodeURIComponent(cursor)}`);
+    const res = await ocFetch(apiUrl(`/api/session?${q.join("&")}`), { signal });
+    if (!res.ok) throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    for (const s of Array.isArray(body?.data) ? body.data : []) {
+      const mapped = sessionFromV2(s);
+      rememberSessionDirectory(mapped.id, mapped.directory);
+      out.push(mapped);
+    }
+    cursor = body?.cursor?.next ?? null;
+    if (!cursor || !Array.isArray(body?.data) || body.data.length < 100) break;
   }
-  return res.json();
+  return out;
 }
 
-/**
- * Read a single session's active `agent` field (BET-949). Used to seed the
- * plan-mode toggle from a session already set to plan OUTSIDE MantaUI (e.g.
- * via opencode's own `plan_enter`/agent endpoint), so the chip matches the
- * agent the next turn will actually run before the honesty sync's first event.
- *
- * @param {string} sessionId
- * @returns {Promise<string | null>} the agent name (e.g. "plan"), or null when
- *   absent / the session is unknown / the box errored (best-effort — a failed
- *   seed falls back to the stored key).
- */
-export async function getSessionAgent(sessionId) {
+/** One session record, mapped; null on miss/error. */
+async function getSessionInfo(sessionId) {
   try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
+    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`));
     if (!res.ok) {
       await discardBody(res);
       return null;
     }
-    const body = await res.json();
-    const agent = typeof body?.agent === "string" ? body.agent : null;
-    return agent && agent.length > 0 ? agent : null;
+    const s = sessionFromV2((await res.json())?.data);
+    if (s?.id) rememberSessionDirectory(s.id, s.directory);
+    return s;
   } catch {
     return null;
   }
 }
 
 /**
+ * Read a single session's active `agent` field (BET-949). Used to seed the
+ * plan-mode toggle from a session already set to plan, so the chip matches the
+ * agent the next turn will actually run. Null when absent / unknown / error.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<string | null>}
+ */
+export async function getSessionAgent(sessionId) {
+  const s = await getSessionInfo(sessionId);
+  return typeof s?.agent === "string" && s.agent.length > 0 ? s.agent : null;
+}
+
+/**
  * A session's working directory, as opencode recorded it at creation. Used to
- * resolve (and confine) a plan file path server-side. Returns null when the
- * session is unknown or carries no directory.
+ * resolve (and confine) a plan file path server-side. Null when unknown.
  *
  * @param {string} sessionId
  * @returns {Promise<string | null>}
  */
 export async function getSessionDirectory(sessionId) {
-  try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) {
-      await discardBody(res);
-      return null;
-    }
-    const body = await res.json();
-    const dir = typeof body?.directory === "string" ? body.directory.trim() : "";
-    return dir.length > 0 ? dir : null;
-  } catch {
-    return null;
-  }
+  const dir = (await getSessionInfo(sessionId))?.directory?.trim() ?? "";
+  return dir.length > 0 ? dir : null;
 }
 
 /**
  * Does this opencode session still exist?
  *
- * Answered with a DIRECT lookup (`GET /session/{id}`), never by scanning
- * `listSessions()`. opencode caps `GET /session` at 100 records and the
- * unscoped form returns the 100 most-recently-updated sessions BOX-WIDE, so on
- * any box with real history a perfectly healthy session is absent from that
- * page — a scan reports it as gone. That false "gone" is destructive: the
- * delegate sweeper reads it as "parent session gone", stops the background job
- * (BET-418 §B) and stamps it `stopped by user`, so every delegated job died
- * within a sweep tick and the sidebar never had a job to show.
- *
- * Returns:
  *   true   — 200, the session is alive
  *   false  — 404, the session is genuinely gone (the ONLY negative)
  *   true   — anything else (5xx, network error): best-effort "assume alive",
- *            preserving the existing rule that a transient opencode blip must
- *            never orphan a healthy job. Only a definitive 404 is destructive.
+ *            so a transient opencode blip never orphans a healthy job (a false
+ *            "gone" stops a delegated job). Only a definitive 404 is destructive.
  *
  * @param {string} sessionId
  * @returns {Promise<boolean>}
@@ -931,9 +813,9 @@ export async function getSessionDirectory(sessionId) {
 export async function sessionExists(sessionId) {
   if (!sessionId) return false;
   try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`));
-    if (res.status === 404) return false;
-    return true;
+    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`));
+    await discardBody(res);
+    return res.status !== 404;
   } catch {
     return true; // transient failure — never treat as "gone"
   }
@@ -942,11 +824,9 @@ export async function sessionExists(sessionId) {
 /**
  * Read one session record with an EXPLICIT three-state outcome. The durable
  * CTO binding (ctoBinding.mjs) needs the distinction sessionExists collapses:
- * only a definitive 404 proves absence; anything else (5xx, auth, network)
- * is "unknown" and must never be read as "gone" — a replacement created off
- * a transient error would duplicate the role session. Returns the FULL
- * record (including `metadata`) so callers can verify an identity marker
- * stamped at create (P0 live probes: metadata round-trips verbatim).
+ * only a definitive 404 proves absence; anything else is "unknown" and must
+ * never be read as "gone". Returns the FULL record (including `metadata`) so
+ * callers can verify an identity marker stamped at create.
  *
  * @param {string} sessionId
  * @returns {Promise<{ state: "found", session: object } | { state: "missing" } | { state: "unknown" }>}
@@ -954,7 +834,7 @@ export async function sessionExists(sessionId) {
 export async function readSession(sessionId, { signal } = {}) {
   if (!sessionId) return { state: "missing" };
   try {
-    const res = await ocFetch(apiUrl(`/session/${encodeURIComponent(sessionId)}`), { signal });
+    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`), { signal });
     if (res.status === 404) {
       await discardBody(res);
       return { state: "missing" };
@@ -963,42 +843,34 @@ export async function readSession(sessionId, { signal } = {}) {
       await discardBody(res);
       return { state: "unknown" };
     }
-    return { state: "found", session: await res.json() };
+    return { state: "found", session: sessionFromV2((await res.json())?.data) };
   } catch {
     return { state: "unknown" };
   }
 }
 
 /**
- * Fork a session (copies history up to messageID into a new session).
+ * Fork a session (copies history up to — not including — messageID into a new session).
  * @param {{ sessionId: string, messageID?: string }} opts
  */
 export async function forkSession({ sessionId, messageID }) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/session/${encodeURIComponent(sessionId)}/fork${dirQ}`;
-  const res = await ocFetch(apiUrl(url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(messageID ? { messageID } : {}),
-  });
-  if (!res.ok) {
-    throw new Error(`opencode forkSession ${res.status}: ${await res.text()}`);
-  }
-  const sess = await res.json();
-  rememberSessionDirectory(sess.id, sess.directory);
+  const data = await ocJson(
+    "forkSession",
+    "POST",
+    `/api/session/${encodeURIComponent(sessionId)}/fork`,
+    messageID ? { before: messageID } : {},
+  );
+  // `data` is the NEW session's record (`fork.sessionID` names the parent).
+  const sess = sessionFromV2(data);
+  rememberSessionDirectory(sess.id, sess.directory || cachedSessionDirectory(sessionId));
   return sess;
 }
 
-/** Summarize a session in-place to free context (v2 compact endpoint).
+/** Summarize a session in-place to free context.
  *  @param {string} sessionId
  */
 export async function compactSession(sessionId) {
-  const dirQ = await getSessionDirectoryQuery(sessionId);
-  const url = `/api/session/${encodeURIComponent(sessionId)}/compact${dirQ}`;
-  const res = await ocFetch(apiUrl(url), { method: "POST" });
-  if (!res.ok) {
-    throw new Error(`opencode compactSession ${res.status}: ${await res.text()}`);
-  }
+  await ocJson("compactSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/compact`, {});
 }
 
 // BET-1356: the background-compaction one-liner's "before → after" figure.
@@ -1077,39 +949,88 @@ export async function measureSessionContextTokens(sessionId) {
  */
 export async function deleteSessionRaw(sessionId) {
   sessionDirectoryCache.delete(sessionId);
-  const url = `/session/${encodeURIComponent(sessionId)}`;
-  const res = await ocFetch(apiUrl(url), { method: "DELETE" });
-  if (!res.ok) {
-    throw new Error(`opencode deleteSession ${res.status}: ${await res.text()}`);
+  await ocJson("deleteSession", "DELETE", `/api/session/${encodeURIComponent(sessionId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// One-shot text generation (auto-rename, constraint extraction)
+// ---------------------------------------------------------------------------
+//
+// V1 had no one-shot completion endpoint, so a hidden session was created,
+// prompted, polled and deleted. V2 has `POST /api/experimental/generate`
+// ({prompt, model?} → {data:{text}}): no session, nothing to clean up. Without
+// a model V2 falls back to its own default (the free tier, which refuses calls
+// from outside opencode), so a cheap CONNECTED model is picked here — the V1
+// `title` agent's own small-model config no longer exists.
+
+const CHEAP_MODEL_RE = /haiku|mini|flash|nano|lite|small/i;
+
+/** The cheapest usable connected model for a one-shot text call, or null. */
+export async function pickCheapModel(listFn = listModels) {
+  let models = [];
+  try {
+    models = await listFn();
+  } catch {
+    return null;
+  }
+  const usable = (Array.isArray(models) ? models : []).filter(
+    (m) => m && m.providerID !== "opencode" && m.status !== "deprecated" && m.enabled !== false,
+  );
+  const named = usable.filter((m) => CHEAP_MODEL_RE.test(m.id) || CHEAP_MODEL_RE.test(m.family ?? ""));
+  const pool = named.length > 0 ? named : usable;
+  const priced = pool.filter((m) => typeof m.cost?.input === "number");
+  const by = (priced.length > 0 ? priced : pool).slice().sort((a, b) => (a.cost?.input ?? Infinity) - (b.cost?.input ?? Infinity));
+  return by[0] ?? null;
+}
+
+/**
+ * Generate text from a prompt with no session. Returns the RAW text; "" on any
+ * failure/timeout so a caller can skip rather than error.
+ *
+ * @param {{ instruction: string, model?: { providerID: string, id?: string, modelID?: string }|null, signal?: AbortSignal }} a
+ */
+export async function generateText({ instruction, model, signal } = {}) {
+  try {
+    const m = model ?? (await pickCheapModel());
+    const body = { prompt: instruction };
+    if (m?.providerID && (m.id || m.modelID)) body.model = { providerID: m.providerID, id: m.id ?? m.modelID };
+    const data = await ocJson("generate", "POST", "/api/experimental/generate", body, { signal: signal ?? AbortSignal.timeout(30_000) });
+    return typeof data?.text === "string" ? data.text : "";
+  } catch {
+    return "";
   }
 }
 
-// Auto-rename: generate a 1-2 word title via a THROWAWAY session.
-// opencode has no one-shot completion endpoint, so we create→prompt→poll→delete
-// a hidden session. Returns the RAW model reply; the renderer sanitizes it.
-// Returns "" on timeout/failure so the caller skips the rename rather than
-// erroring. Reuses runThrowawayAgent — the ONE throwaway-session cheap-agent
-// mechanism (also used by the optimizer's constraint extraction, BET-1346).
-export function generateSessionTitle({ directory, instruction }) {
-  return runThrowawayAgent({ directory, instruction, agent: "title", title: "manta-auto-title" });
+// Auto-rename: generate a 1-2 word title. Returns the RAW model reply; the
+// renderer sanitizes it. "" on failure so the caller skips the rename.
+export function generateSessionTitle({ instruction }) {
+  return generateText({ instruction });
+}
+
+/**
+ * The cheap one-shot call used by the optimizer's constraint extraction: run a
+ * short instruction, return the RAW text ("" on any failure). Kept under its
+ * old name for its callers; there is no throwaway session any more.
+ *
+ * @param {{ instruction: string }} a
+ * @returns {Promise<string>}
+ */
+export async function runThrowawayAgent({ instruction }) {
+  return generateText({ instruction });
 }
 
 /**
  * The THROWAWAY-SESSION synchronous mechanism: create a hidden session in
  * `directory`, prompt it (optionally on a given agent with a routed model)
- * with an `instruction`, poll the assistant reply from the raw message list
- * for up to ~`maxAttempts * pollIntervalMs`, then delete the session — all
- * WITHOUT subscribing to a scoped SSE stream and WITHOUT registering the
- * session directory (avoids the documented scoped-stream trap in the CTO
- * spec §3.1). Returns `{ text, sid }`; `text` is "" on any failure/timeout so
- * a caller can skip rather than error.
+ * with an `instruction`, poll the assistant reply from the transcript for up to
+ * ~`maxAttempts * pollIntervalMs`, then delete the session. Returns
+ * `{ text, sid }`; `text` is "" on any failure/timeout so a caller can skip
+ * rather than error.
  *
- * The ONE non-SSE create→prompt→poll→read→delete primitive — auto-rename
- * (BET-1018), the optimizer's constraint extraction (BET-1346) and the
- * Adaptive CTO's ephemeral sessions (BET-1378) all go through it; a second
- * copy must not be built. NOTE: do NOT add structured output (a JSON schema
- * format) to the prompt_async body — it is ACCEPTED by opencode but makes its
- * reader reject the whole session's message list with a permanent HTTP 400.
+ * Unlike generateText this runs a REAL session (an agent, tools, a pinned
+ * model), which the Adaptive CTO's ephemeral sessions (BET-1378) and the W8
+ * health probes need — so it stays. It is the ONE create→prompt→poll→read→
+ * delete primitive; a second copy must not be built.
  *
  * `onCreated(sid)` (optional) is awaited right AFTER create and BEFORE the
  * prompt is sent, so a caller that must track the session while it runs (the
@@ -1119,7 +1040,7 @@ export function generateSessionTitle({ directory, instruction }) {
  * @param {object} a
  * @param {string} a.directory  absolute session directory
  * @param {string} a.instruction  the prompt text
- * @param {string} [a.agent]  agent to run on (default "title" — the cheap model)
+ * @param {string} [a.agent]  agent to run on (default: the session's own)
  * @param {object} [a.model]  structured { providerID, modelID, variant? } to pin (null/absent → box default)
  * @param {string} [a.title]  creation title tag for the hidden session
  * @param {number} [a.pollIntervalMs]  ms between message-list polls (default 1000)
@@ -1204,20 +1125,17 @@ export async function runSynchronousSession({
     // §4.3 fix: trackCreation() runs INSIDE the try — a synchronous throw here
     // previously escaped the function with no finish(), no cleanup and no record.
     finishCreation = trackCreation();
-    const createRes = await ocFetch(
-      apiUrl(`/session?directory=${encodeURIComponent(absDir)}`),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title }),
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
+    const createRes = await ocFetch(apiUrl("/api/session"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ location: { directory: absDir }, title }),
+      signal: AbortSignal.timeout(10_000),
+    });
     if (!createRes.ok) {
       await discardBody(createRes);
       return finish({ text: "", sid: null, ok: false, code: "create-http" });
     }
-    sid = (await createRes.json()).id;
+    sid = (await createRes.json())?.data?.id;
     try { await finishCreation(sid); } catch {
       return finish({ text: "", sid, ok: false, code: "provenance-error" });
     }
@@ -1230,24 +1148,20 @@ export async function runSynchronousSession({
       }
     }
 
-    const promptBody = { parts: [{ type: "text", text: instruction }], agent };
-    if (pinned) {
-      promptBody.model = { providerID: model.providerID, modelID: model.modelID };
-      if (model.variant) promptBody.variant = model.variant;
-    }
     stage = "prompt";
     dispatched = true;
     void attempts.markDispatched(attemptId, pinned).catch(() => {});
-    const promptRes = await ocFetch(
-      apiUrl(
-        `/session/${encodeURIComponent(sid)}/prompt_async?directory=${encodeURIComponent(absDir)}`,
-      ),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(promptBody),
-      },
-    );
+    // The model/agent are session state in V2 (the prompt body has neither).
+    try {
+      await syncSessionControls(sid, { model: pinned ? model : undefined, agent });
+    } catch {
+      return finish({ text: "", sid, ok: false, code: "prompt-http" });
+    }
+    const promptRes = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sid)}/prompt`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: instruction }),
+    });
     if (!promptRes.ok) {
       // §4.1a: preserve the refusal's status and Retry-After, mirroring sendPrompt.
       const status = promptRes.status;
@@ -1259,18 +1173,17 @@ export async function runSynchronousSession({
     }
     stage = "poll";
 
-    const msgUrl = apiUrl(`/session/${encodeURIComponent(sid)}/message`);
     let readFailed = false;
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
-      const r = await ocFetch(msgUrl);
-      if (!r.ok) {
-        await discardBody(r);
+      let msgs;
+      try {
+        msgs = await listMessages(sid);
+      } catch {
         readFailed = true;
         continue;
       }
       readFailed = false;
-      const msgs = await r.json();
       if (Array.isArray(msgs)) {
         // D7: build the provider attempt from the CAUSATIVE assistant row —
         // the message carrying the error, not merely the last row.
@@ -1354,24 +1267,6 @@ export async function runSynchronousSession({
   }
 }
 
-/**
- * The THROWAWAY-SESSION cheap-agent call: run runSynchronousSession on a cheap
- * agent (default `title`), returning the RAW assistant text; "" on any
- * failure/timeout so the caller can skip rather than error. Thin wrapper over
- * runSynchronousSession — the single source of truth for this mechanism.
- *
- * @param {object} a
- * @param {string} a.directory  absolute session directory
- * @param {string} a.instruction  the prompt text
- * @param {string} [a.agent]  agent to run on (default "title" — the cheap model)
- * @param {string} [a.title]  creation title tag for the hidden session
- * @returns {Promise<string>}
- */
-export async function runThrowawayAgent({ directory, instruction, agent = "title", title = "manta-throwaway" }) {
-  const { text } = await runSynchronousSession({ directory, instruction, agent, title });
-  return text;
-}
-
 function extractAssistantText(msgs) {
   const out = [];
   for (const m of msgs ?? []) {
@@ -1389,20 +1284,13 @@ function extractAssistantText(msgs) {
 
 // Background delegation jobs no longer route their permission/question asks
 // into the parent's panel (BET-418 §A): a job is created with a pre-flight
-// permission ruleset so it never asks anything once running. The BET-380
-// widening (relatedSessionIds / jobNameForSession / fromJobName stamping /
-// merged multi-directory fetch) is deleted. listPermissions/listQuestions are
-// back to plain scoped reads of the requested session's directory.
+// permission ruleset so it never asks anything once running.
 
-/** Fetch a pending-items listing and soften a non-OK response.
- *  opencode's listings are not all-or-nothing safe: a single malformed pending
- *  item makes GET /permission (or /question) return 400 for the WHOLE array
- *  (upstream #38912) — which would otherwise throw and blank out the card the
- *  user is waiting on. Treat a non-OK response as "no pending items I can
- *  see": warn once and return []. The live SSE path remains the primary
- *  source; these listings are reconciliation only. Scoped to the two READ
- *  listings below — NOT a general-purpose opencode wrapper.
- *  @param {string} endpoint  API path with `?directory=` already applied.
+/** Fetch a pending-items listing (`{data:[…]}`) and soften a non-OK response.
+ *  The live stream is the primary source; these listings are reconciliation
+ *  only, so a failing listing means "no pending items I can see" (warn once,
+ *  return []) rather than blanking the card the user is waiting on.
+ *  @param {string} endpoint  API path.
  *  @param {string} label     caller name, for the warning.
  *  @returns {Promise<Array<unknown>>}
  */
@@ -1414,106 +1302,81 @@ async function fetchPendingList(endpoint, label) {
     );
     return [];
   }
-  const all = await res.json();
+  const body = await res.json();
+  const all = body && typeof body === "object" && !Array.isArray(body) ? body.data : body;
   return Array.isArray(all) ? all : [];
 }
 
-/** List all pending tool-use permissions.
- *  Scoped to the session's directory when sessionId is provided. opencode's
- *  WorkspaceRoutingMiddleware makes the UNSCOPED endpoint return [] for
- *  sessions bound to a non-default directory — so without `?directory=` the
- *  PermissionCard never appears on mobile and the turn hangs forever (the
- *  live `per_…` is sitting in the server's pending map, we just can't see
- *  it). Mirrors listQuestions below + desktop listPermissions.
+/** List pending tool-use permissions (one session's, or every session's), in the PermissionCard's shape.
  *  @param {string} [sessionId]
- *  @returns {Promise<Array<{ id: string, sessionID: string, permission: string, ... }>>}
  */
 export async function listPermissions(sessionId) {
-  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const list = await fetchPendingList(`/permission${dirQ}`, "listPermissions");
-  // opencode's /permission is `?directory=`-scoped, not session-scoped: a
-  // directory can hold pending items from multiple sessions (orphan/subagent
-  // sessions included). Filter the directory-wide response down to the
-  // requested sessionId so callers never see cross-session leaks (BET-110).
-  // Background-job children no longer surface here (BET-418 §A).
-  if (!sessionId) return list;
-  return list.filter((p) => p.sessionID === sessionId);
+  const path = sessionId ? `/api/session/${encodeURIComponent(sessionId)}/permission` : "/api/permission/request";
+  const list = await fetchPendingList(path, "listPermissions");
+  return list.map(permissionFromV2).filter((p) => !sessionId || p.sessionID === sessionId);
 }
 
-/** Approve or deny a permission request.
- *  Same workspace-routing rule as listPermissions: an UNSCOPED reply 404s
- *  (PermissionNotFoundError) or silently no-ops if routed to the wrong
- *  workspace, so the tool stays pending forever. Pass sessionId so the reply
- *  lands on the pending entry's scope. This was the root cause of mobile
- *  trust-mode auto-allow failing with `PermissionNotFoundError`.
+/** Approve or deny a permission request. V2 routes it by session, so without a
+ *  `sessionId` the request is looked up first.
  *  @param {{ requestId: string, reply: "once"|"always"|"reject", sessionId?: string }} opts
  */
 export async function replyPermission({ requestId, reply, sessionId }) {
-  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const url = `/permission/${encodeURIComponent(requestId)}/reply${dirQ}`;
-  const res = await ocFetch(apiUrl(url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ reply }),
-  });
-  if (!res.ok) {
-    throw new Error(`opencode replyPermission ${res.status}: ${await res.text()}`);
-  }
+  let sid = sessionId;
+  if (!sid) sid = (await listPermissions()).find((p) => p.id === requestId)?.sessionID;
+  if (!sid) throw new Error(`opencode replyPermission: no pending permission ${requestId}`);
+  await ocJson(
+    "replyPermission",
+    "POST",
+    `/api/session/${encodeURIComponent(sid)}/permission/${encodeURIComponent(requestId)}/reply`,
+    { decision: reply },
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Question flow (Question tool)
+// Question flow (the `question` tool is a V2 Form with metadata.kind "question")
 // ---------------------------------------------------------------------------
 
-/** List pending questions from the Question tool.
- *  Scoped to the session's directory when sessionId is provided, so questions
- *  from the correct workspace are returned. Without scoping, opencode returns
- *  questions for the default workspace only — causing the QuestionCard to
- *  never appear for non-default sessions and the agent to hang forever.
+/** Pending question forms (the model's `question` tool), in the QuestionRequest shape; the
+ *  request `id` is the form id — the key reply/reject take.
  *  @param {string} [sessionId]
- *  @returns {Promise<Array<{ id: string, sessionID: string, questions: Array<...>, ... }>>}
  */
 export async function listQuestions(sessionId) {
-  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const list = await fetchPendingList(`/question${dirQ}`, "listQuestions");
-  // opencode's /question is `?directory=`-scoped, not session-scoped — see
-  // listPermissions above. Filter to the requested sessionId (BET-110).
-  // Background-job children no longer surface here (BET-418 §A).
-  if (!sessionId) return list;
-  return list.filter((q) => q.sessionID === sessionId);
+  const path = sessionId ? `/api/session/${encodeURIComponent(sessionId)}/form` : "/api/form";
+  const forms = (await fetchPendingList(path, "listQuestions")).filter(isQuestionForm);
+  return forms.map(questionFromForm).filter((q) => !sessionId || q.sessionID === sessionId);
+}
+
+async function findForm(requestId, sessionId) {
+  if (sessionId) {
+    const f = await ocJson("getForm", "GET", `/api/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(requestId)}`);
+    if (f) return { form: f, sessionId };
+  }
+  const f = (await fetchPendingList("/api/form", "findForm")).find((x) => x?.id === requestId);
+  if (!f) throw new Error(`opencode: no pending question ${requestId}`);
+  return { form: f, sessionId: f.sessionID };
 }
 
 /**
- * Reply to a question (one answers array per QuestionInfo entry).
- *
- * opencode's /question endpoints are `?directory=`-scoped like prompt_async;
- * an UNSCOPED reply 200s but never resumes the blocked tool (agent hangs in
- * "processing"). Scope to the question's session directory.
+ * Reply to a question (one answers array per question; a typed answer rides
+ * along as an extra label). The V2 reply is `{answer:{<fieldKey>:value}}`.
  * @param {{ requestId: string, answers: string[][], sessionId?: string }} opts
  */
 export async function replyQuestion({ requestId, answers, sessionId }) {
-  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const url = `/question/${encodeURIComponent(requestId)}/reply${dirQ}`;
-  const res = await ocFetch(apiUrl(url), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ answers }),
-  });
-  if (!res.ok) {
-    throw new Error(`opencode replyQuestion ${res.status}: ${await res.text()}`);
-  }
+  const { form, sessionId: sid } = await findForm(requestId, sessionId);
+  await ocJson(
+    "replyQuestion",
+    "POST",
+    `/api/session/${encodeURIComponent(sid)}/form/${encodeURIComponent(requestId)}/reply`,
+    { answer: formAnswerFromAnswers(form, answers) },
+  );
 }
 
 /** Reject (dismiss) a question without answering.
  *  @param {{ requestId: string, sessionId?: string }} opts
  */
 export async function rejectQuestion({ requestId, sessionId }) {
-  const dirQ = sessionId ? await getSessionDirectoryQuery(sessionId) : "";
-  const url = `/question/${encodeURIComponent(requestId)}/reject${dirQ}`;
-  const res = await ocFetch(apiUrl(url), { method: "POST" });
-  if (!res.ok) {
-    throw new Error(`opencode rejectQuestion ${res.status}: ${await res.text()}`);
-  }
+  const sid = sessionId ?? (await findForm(requestId)).sessionId;
+  await ocJson("rejectQuestion", "DELETE", `/api/session/${encodeURIComponent(sid)}/form/${encodeURIComponent(requestId)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,14 +1384,95 @@ export async function rejectQuestion({ requestId, sessionId }) {
 // ---------------------------------------------------------------------------
 
 /**
- * Get the default model from the first connected provider.
- * Single source of truth for live provider state is `getProviders()`
- * (BET-318). Keeping the inline `GET /provider` fetch out of here
- * eliminates the latent drift trap between this caller and the
- * `opencode:provider-auth` `status` action.
+ * A V2 model record (`GET /api/model`) in the shape the model normalizer and
+ * providers.mjs (cache-TTL fan-out) read: `capabilities.{toolcall,reasoning,
+ * attachment,input[],output[]}`, a single `cost`, `limit`, `variants`.
+ * @param {any} m
+ */
+export function _modelFromV2(m) {
+  const caps = m?.capabilities ?? {};
+  const input = Array.isArray(caps.input) ? caps.input : [];
+  const costs = Array.isArray(m?.cost) ? m.cost : m?.cost ? [m.cost] : [];
+  return {
+    id: m.modelID ?? m.id,
+    name: m.name,
+    family: m.family,
+    status: m.status,
+    enabled: m.enabled,
+    limit: m.limit,
+    // The first cost entry is the base tier; context-tiered pricing is not modelled.
+    cost: costs.find((c) => !c?.tier) ?? costs[0],
+    variants: m.variants,
+    capabilities: {
+      toolcall: caps.tools,
+      reasoning: Array.isArray(m.variants) && m.variants.length > 0 ? true : caps.reasoning,
+      attachment: input.includes("image") || input.includes("pdf"),
+      input: caps.input,
+      output: caps.output,
+    },
+  };
+}
+
+async function getJsonSoft(path) {
+  try {
+    const res = await ocFetch(apiUrl(path));
+    if (!res.ok) {
+      await discardBody(res);
+      return null;
+    }
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the live provider state from V2 as `{ connected, all, default }`:
+ *   connected — provider ids with a credential/env key, or always-on (config) providers
+ *   all       — every provider with its models: `{id, name, models:{[modelID]: raw model}}`
+ *   default   — `{[providerID]: modelID}` for the default model's provider
+ * Single source of truth for callers that need the authoritative `connected[]`
+ * list. Never throws — a transport failure or non-2xx yields `{ connected: [] }`.
  *
- * Returns `null` when opencode is unreachable, returns a non-2xx,
- * or when no connected provider has a default model recorded.
+ * @returns {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string> }>}
+ */
+export async function getProviders() {
+  try {
+    const [prov, integ, models, def] = await Promise.all([
+      getJsonSoft("/api/provider"),
+      getJsonSoft("/api/integration"),
+      getJsonSoft("/api/model"),
+      getJsonSoft("/api/model/default"),
+    ]);
+    if (!prov || !Array.isArray(prov.data)) return { connected: [] };
+    const hasConnection = new Map();
+    for (const i of Array.isArray(integ?.data) ? integ.data : []) {
+      hasConnection.set(i.id, Array.isArray(i.connections) && i.connections.length > 0);
+    }
+    const modelsByProvider = new Map();
+    for (const m of Array.isArray(models?.data) ? models.data : []) {
+      const bucket = modelsByProvider.get(m.providerID) ?? {};
+      bucket[m.modelID ?? m.id] = _modelFromV2(m);
+      modelsByProvider.set(m.providerID, bucket);
+    }
+    const connected = [];
+    const all = [];
+    for (const p of prov.data) {
+      if (hasConnection.get(p.integrationID ?? p.id) || p.activation === "enabled") connected.push(p.id);
+      all.push({ id: p.id, name: p.name, models: modelsByProvider.get(p.id) ?? {} });
+    }
+    const d = def?.data;
+    const defaults = d?.providerID && (d.modelID ?? d.id) ? { [d.providerID]: d.modelID ?? d.id } : undefined;
+    return { connected, all, ...(defaults ? { default: defaults } : {}) };
+  } catch {
+    return { connected: [] };
+  }
+}
+
+/**
+ * Get the default model from the first connected provider that has one.
+ * Returns `null` when opencode is unreachable or no connected provider has a
+ * default model recorded.
  * @returns {Promise<{ providerID: string, modelID: string }|null>}
  */
 export async function getDefaultModel() {
@@ -1538,37 +1482,6 @@ export async function getDefaultModel() {
     if (modelID) return { providerID: id, modelID };
   }
   return null;
-}
-
-/**
- * Read the live provider state from opencode's `GET /provider`.
- * Single source of truth for callers that need the authoritative
- * `connected[]` list (and the full `all`/`default` shape when available).
- *
- * Used by the `opencode:provider-auth` `status` action to feed
- * `subscriptionProviders.subscriptionStatuses(connected)`.
- *
- * @returns {Promise<{ connected: string[], all?: Array<{id:string}>, default?: Record<string,string> }>}
- *   Never throws — a transport failure or non-2xx response yields
- *   `{ connected: [] }` so the caller's `connected[]` reads are safe.
- */
-export async function getProviders() {
-  try {
-    const res = await ocFetch(apiUrl("/provider"));
-    if (!res.ok) {
-      await discardBody(res);
-      return { connected: [] };
-    }
-    const data = await res.json();
-    return {
-      connected: Array.isArray(data?.connected) ? data.connected : [],
-      all: Array.isArray(data?.all) ? data.all : undefined,
-      default:
-        data?.default && typeof data.default === "object" ? data.default : undefined,
-    };
-  } catch {
-    return { connected: [] };
-  }
 }
 
 /**
@@ -1753,64 +1666,83 @@ export function _normalizeProviderModel(providerID, modelId, m) {
 // Subscription provider auth (BET-308, BET-309)
 // ---------------------------------------------------------------------------
 //
-// Thin HTTP proxies to opencode's `/provider/auth`, `/provider/{id}/oauth/
-// authorize`, `/provider/{id}/oauth/callback`, `PUT /auth/{id}`, and
-// `DELETE /auth/{id}` endpoints. Policy (which method to pick, which
-// shape to render) lives in src/server/subscriptionProviders.mjs; this
-// file only transports the request and surfaces a structured failure
+// Thin proxies to V2's integration API: `GET /api/integration` (methods),
+// `POST …/connect/key`, `POST …/connect/oauth` + `…/{attempt}/complete`, and
+// `/api/credential` for removal. Policy (which method to pick, which shape to
+// render) lives in src/server/subscriptionProviders.mjs; this file only
+// transports the request and surfaces a structured failure
 // (`{ok:false, error, detail?}`) on a non-2xx. Error vocabulary matches
 // src/server/providers.mjs's discoverModels: "unreachable" | "unauthorized"
 // | "bad_response" — reuse rather than invent.
 //
-// `setProviderApiKey` is the one path that handles a secret: the key is
-// written to opencode's auth store box-side and NEVER echoed back, not in
-// the return value and not in any log line.
+// `setProviderApiKey` is the one path that handles a secret: the key is sent
+// to opencode's credential store and NEVER echoed back, not in the return
+// value and not in any log line.
+
+// V2 method → the V1 method record resolveAuthMethod reads (type "oauth" | "api").
+const AUTH_METHOD_TYPE = { key: "api" };
+const toAuthMethod = (m) => ({ ...m, type: AUTH_METHOD_TYPE[m?.type] ?? m?.type, label: m?.label ?? (m?.type === "key" ? "API key" : String(m?.type ?? "")) });
+
+async function integrationMethods(providerID) {
+  const data = await ocJson("integration", "GET", `/api/integration/${encodeURIComponent(providerID)}`);
+  return Array.isArray(data?.methods) ? data.methods : [];
+}
+
+const failFrom = async (res) => {
+  const detail = await res.text().catch(() => "");
+  return {
+    ok: false,
+    error: res.status === 401 || res.status === 403 ? "unauthorized" : "bad_response",
+    detail: detail.slice(0, 200),
+  };
+};
 
 /**
- * Fetch the auth-method list for every provider (GET /provider/auth).
- * @returns {Promise<Record<string, Array<{type:string,label?:string,prompts?:Array<unknown>}>|null>>}
- *          raw shape — the renderer's RPC layer wraps this in the
- *          resolveAuthMethod policy from subscriptionProviders.mjs.
+ * The auth methods of every provider (GET /api/integration), keyed by provider id.
+ * @returns {Promise<{ok:true, methods: Record<string, Array<{type:string,label?:string,id?:string}>>} | {ok:false, error:string, detail?:string}>}
  */
 export async function listProviderAuthMethods() {
   try {
-    const res = await ocFetch(apiUrl("/provider/auth"));
+    const res = await ocFetch(apiUrl("/api/integration"));
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      await discardBody(res);
-      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+      const out = await failFrom(res);
+      return { ...out, error: "bad_response" };
     }
-    const data = await res.json();
-    return { ok: true, methods: data ?? {} };
+    const methods = {};
+    for (const i of (await res.json())?.data ?? []) {
+      methods[i.id] = (Array.isArray(i.methods) ? i.methods : []).map(toAuthMethod);
+    }
+    return { ok: true, methods };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
   }
 }
 
+// providerID:methodIndex -> the OAuth attempt a later `complete` call belongs to.
+const oauthAttempts = new Map();
+
 /**
- * Start a provider's OAuth flow (POST /provider/{id}/oauth/authorize {method}).
- * Returns the raw `{url, method, instructions}` from opencode; the caller
- * applies describeConnectShape to pick the renderer's UI.
+ * Start a provider's OAuth flow. Returns `{url, method:"auto"|"code", instructions}`;
+ * the caller applies describeConnectShape to pick the renderer's UI.
  * @param {string} providerID
  * @param {number} methodIndex   resolved via resolveAuthMethod, NEVER a literal
  */
 export async function startProviderOauth(providerID, methodIndex) {
   try {
-    const res = await ocFetch(apiUrl(`/provider/${encodeURIComponent(providerID)}/oauth/authorize`), {
+    const m = (await integrationMethods(providerID))[methodIndex];
+    if (m?.type !== "oauth") return { ok: false, error: "bad_response", detail: "no such oauth method" };
+    const res = await ocFetch(apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/oauth`), {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ method: methodIndex }),
+      body: JSON.stringify({ methodID: m.id }),
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      await discardBody(res);
-      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
-    }
-    const data = await res.json();
+    if (!res.ok) return failFrom(res);
+    const data = (await res.json())?.data;
+    if (data?.attemptID) oauthAttempts.set(`${providerID}:${methodIndex}`, data.attemptID);
     return {
       ok: true,
       url: typeof data?.url === "string" ? data.url : "",
-      method: typeof data?.method === "string" ? data.method : "auto",
+      method: data?.mode === "code" ? "code" : "auto",
       instructions: typeof data?.instructions === "string" ? data.instructions : "",
     };
   } catch (e) {
@@ -1819,37 +1751,28 @@ export async function startProviderOauth(providerID, methodIndex) {
 }
 
 /**
- * Complete an OAuth device flow (POST /provider/{id}/oauth/callback {method[, code]}).
- * Serves BOTH modes with one function: a `code`-mode flow sends the
- * user-typed code; an `auto`-mode flow omits `code` entirely, in which
- * case opencode's callback BLOCKS until the user approves on the
- * provider's device page.
+ * Complete an OAuth flow. Serves BOTH modes with one function: a `code`-mode
+ * flow sends the user-typed code; an `auto`-mode flow omits it, in which case
+ * opencode's complete call BLOCKS until the user approves on the provider's page.
  * @param {string} providerID
  * @param {number} methodIndex
- * @param {string} code   the user-typed code for a `code`-mode flow; pass
- *                        `""` for an `auto`-mode flow, where the call blocks
- *                        until the user approves on the provider's device page.
+ * @param {string} code   the user-typed code, or `""` for an `auto`-mode flow
  */
 export async function completeProviderOauth(providerID, methodIndex, code) {
   try {
-    const body = { method: methodIndex };
-    if (typeof code === "string" && code !== "") body.code = code;
-    const res = await ocFetch(apiUrl(`/provider/${encodeURIComponent(providerID)}/oauth/callback`), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      await discardBody(res);
-      // 401 from opencode means a wrong/expired code — surface as a distinct
-      // vocabulary word so the renderer can label the input correctly.
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, error: "unauthorized", detail: detail.slice(0, 200) };
-      }
-      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
-    }
+    const attemptID = oauthAttempts.get(`${providerID}:${methodIndex}`);
+    if (!attemptID) return { ok: false, error: "bad_response", detail: "no oauth attempt in progress" };
+    const res = await ocFetch(
+      apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/oauth/${encodeURIComponent(attemptID)}/complete`),
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(typeof code === "string" && code !== "" ? { code } : {}),
+      },
+    );
+    if (!res.ok) return failFrom(res);
     await discardBody(res);
+    oauthAttempts.delete(`${providerID}:${methodIndex}`);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -1857,7 +1780,7 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
 }
 
 /**
- * Write an API key into opencode's auth store (PUT /auth/{id} {type:"api", key}).
+ * Store an API key for a provider (POST /api/integration/{id}/connect/key).
  *
  * SECURITY: the key is NEVER echoed back to the caller and NEVER logged.
  * `setProviderApiKey` returns `{ok:boolean}` only; a logged error must not
@@ -1867,21 +1790,12 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
  */
 export async function setProviderApiKey(providerID, key) {
   try {
-    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
-      method: "PUT",
+    const res = await ocFetch(apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/key`), {
+      method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "api", key }),
+      body: JSON.stringify({ key }),
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      await discardBody(res);
-      // Provider-specific validation (e.g. Kimi 401s on a bad key) comes back
-      // as 401 — re-use "unauthorized" so the renderer can show the right copy.
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, error: "unauthorized", detail: detail.slice(0, 200) };
-      }
-      return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
-    }
+    if (!res.ok) return failFrom(res);
     await discardBody(res);
     return { ok: true };
   } catch (e) {
@@ -1890,34 +1804,35 @@ export async function setProviderApiKey(providerID, key) {
 }
 
 /**
- * Write a whole auth ENTRY into opencode's auth store (PUT /auth/{id}) — the
- * general form of `setProviderApiKey`, used to put a previous OAuth login back
- * (`{type:"oauth", access, refresh, expires, accountId?}`) when a seat sign-in
- * borrowed the live slot. Only the fields opencode's auth schema knows are
- * forwarded, so a stray property of a hand-edited file cannot be rejected or
- * smuggled in.
+ * Put a whole auth ENTRY back (`{type:"api"|"key", key}` or
+ * `{type:"oauth", access, refresh, expires}`) — used to restore a previous
+ * login when a seat sign-in borrowed the live slot. Only the fields opencode's
+ * credential schema knows are forwarded.
  *
  * SECURITY: like `setProviderApiKey`, the entry is NEVER echoed back and NEVER
  * logged; the result is `{ok}` / `{ok:false, error}` only.
  * @param {string} providerID
- * @param {{type:string, access?:string, refresh?:string, expires?:number, accountId?:string, enterpriseUrl?:string, key?:string}} entry
+ * @param {{type:string, access?:string, refresh?:string, expires?:number, key?:string}} entry
  */
 export async function setProviderAuthEntry(providerID, entry) {
-  const body = {};
-  for (const k of ["type", "access", "refresh", "expires", "accountId", "enterpriseUrl", "key"]) {
-    if (entry?.[k] !== undefined) body[k] = entry[k];
-  }
   try {
-    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
-      method: "PUT",
+    if (entry?.type === "api" || entry?.type === "key") return setProviderApiKey(providerID, entry.key);
+    const oauth = (await integrationMethods(providerID)).find((m) => m?.type === "oauth");
+    const res = await ocFetch(apiUrl("/api/credential"), {
+      method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        integrationID: providerID,
+        value: {
+          type: "oauth",
+          methodID: oauth?.id ?? "oauth",
+          refresh: entry?.refresh,
+          access: entry?.access,
+          expires: entry?.expires,
+        },
+      }),
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      await discardBody(res);
-      return { ok: false, error: res.status === 401 || res.status === 403 ? "unauthorized" : "bad_response", detail: detail.slice(0, 200) };
-    }
+    if (!res.ok) return failFrom(res);
     await discardBody(res);
     return { ok: true };
   } catch (e) {
@@ -1926,41 +1841,29 @@ export async function setProviderAuthEntry(providerID, entry) {
 }
 
 /**
- * Remove a provider's auth from opencode's store (DELETE /auth/{id}).
- * Idempotent — a missing entry returns 404 from opencode, which we surface
- * as `{ok:true}` (the user's intent is satisfied: the auth is gone).
+ * Remove a provider's stored credentials. Idempotent — none stored is
+ * `{ok:true}` (the user's intent is satisfied: the auth is gone).
  * @param {string} providerID
  */
 export async function removeProviderAuth(providerID) {
   try {
-    const res = await ocFetch(apiUrl(`/auth/${encodeURIComponent(providerID)}`), {
-      method: "DELETE",
-    });
-    if (res.ok || res.status === 404) {
+    const creds = await listCredentials();
+    for (const c of creds.filter((x) => x?.integrationID === providerID)) {
+      const res = await ocFetch(apiUrl(`/api/credential/${encodeURIComponent(c.id)}`), { method: "DELETE" });
+      if (!res.ok && res.status !== 404) return failFrom(res);
       await discardBody(res);
-      return { ok: true };
     }
-    const detail = await res.text().catch(() => "");
-    await discardBody(res);
-    return { ok: false, error: "bad_response", detail: detail.slice(0, 200) };
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
   }
 }
 
 /**
- * Resolve where opencode itself persists provider auth — including the API
- * keys `setProviderApiKey` above writes via `PUT /auth/{id}` — as
- * `{"<providerID>": {"type":"api"|"oauth", "key"|"access"/"refresh", …}}`.
- * See docs/subscription-providers.md §1.3: "Codex/Kimi/Copilot tokens live
- * in opencode's own auth store … opencode refreshes them itself."
- *
- * Mirrors messageSearch.mjs's `resolveDbPath()` for the SAME opencode XDG
- * data directory: `XDG_DATA_HOME` first when set, else `homedir()`-based —
- * never hardcode `/home/…`. A box that sets `XDG_DATA_HOME` (review cycle 2
- * Nit) would otherwise never find a real key here, and `detect()` would
- * silently report false with no error, the quiet-failure mode this repo
- * already decided against for opencode's other data-dir resolver.
+ * Where the V1 opencode kept provider auth: `~/.local/share/opencode/auth.json`.
+ * V2 keeps credentials in its own database (read through `GET /api/credential`
+ * below); this path survives only for the Codex/Claude seat code that still
+ * reads and writes that file directly (see accounts.mjs / codexRefresh.mjs).
  * @returns {string}
  */
 export function opencodeAuthPath() {
@@ -1968,185 +1871,76 @@ export function opencodeAuthPath() {
   return path.join(base, "opencode", "auth.json");
 }
 
-/**
- * Pure: extract a provider's API key from the ALREADY-READ text of
- * opencode's auth store. Mirrors `parseCredentials` above exactly — never
- * throws, returns `""` (not null; this value is used directly as a header)
- * for invalid JSON, a missing provider entry, or an entry whose `key` isn't
- * a non-empty string (e.g. an oauth-type entry, which has `access`/`refresh`
- * instead — see the `anthropic` shape this same file writes).
- *
- * Separated from the file read below so it's directly unit-testable without
- * touching a real auth store, the same split `parseCredentials` /
- * `readCredsSnapshot` uses.
- *
- * @param {string} rawFileText
- * @param {string} providerId
- * @returns {string}
- */
-export function parseProviderApiKey(rawFileText, providerId) {
-  try {
-    const parsed = JSON.parse(rawFileText);
-    const entry = parsed?.[providerId];
-    // Discriminate on `type === "api"` before trusting any `key` value: the
-    // key is used directly as a `Bearer` header, so a non-api entry (e.g. an
-    // oauth one) must never supply it even if it happens to carry a `key`
-    // field.
-    return entry?.type === "api" && typeof entry?.key === "string" && entry.key.length > 0
-      ? entry.key
-      : "";
-  } catch {
-    return "";
-  }
+/** Every stored credential: `[{id, integrationID, label, active, value:{type:"key"|"oauth"|…, …}}]`. */
+async function listCredentials() {
+  const data = await ocJson("credentials", "GET", "/api/credential");
+  return Array.isArray(data) ? data : [];
 }
 
+// The live credential for a provider: the ACTIVE one, else the first.
+const pickCredential = (creds, providerId) => {
+  const mine = creds.filter((c) => c?.integrationID === providerId);
+  return mine.find((c) => c.active) ?? mine[0];
+};
+
 /**
- * Read a provider's raw API key straight off opencode's own auth store
- * (BET-737's usage engine needs it to call a provider's usage endpoint
- * itself — opencode exposes no usage-reporting RPC of its own). This is a
- * READER only, never a second place to write the key: the only writer is
- * `setProviderApiKey` above (the Kimi connect card, via `PUT /auth/{id}`).
+ * Read a provider's raw API key from opencode's credential store (BET-737's
+ * usage engine needs it to call a provider's usage endpoint itself). A READER
+ * only — the only writer is `setProviderApiKey` above. Returns `""` (this value
+ * is used directly as a header) when there is none or opencode can't be asked;
+ * NEVER throws.
  *
- * Mirrors `readCredsSnapshot` above exactly: tolerates a missing file by
- * returning `""` — NEVER throws, so a caller can `await` this
- * unconditionally. The parse itself is `parseProviderApiKey` above.
- *
- * The file-read function is injectable (`readFile`), defaulting to the real
- * `readFileSync`, so tests can drive the missing-file / unparseable cases
- * with a fake reader and never touch a real auth store on a live box.
+ * `listCredentials` is injectable so tests never talk to a real store.
  *
  * SECURITY: this resolves a LIVE credential. It must never log, echo, or
- * return the key anywhere but to its direct caller, and a caller must never
- * fold it into an error message.
+ * return the key anywhere but to its direct caller.
  *
  * @param {string} providerId
- * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
+ * @param {{ listCredentials?: () => Promise<any[]> }} [opts]
  * @returns {Promise<string>}
  */
-export async function readProviderApiKey(providerId, { readFile = readFileSync } = {}) {
-  let raw;
+export async function readProviderApiKey(providerId, { listCredentials: list = listCredentials } = {}) {
   try {
-    raw = readFile(opencodeAuthPath(), "utf-8");
-  } catch {
-    return "";
-  }
-  return parseProviderApiKey(raw, providerId);
-}
-
-/**
- * Pure: extract a provider's OAuth access token from the ALREADY-READ text of
- * opencode's auth store. Mirrors `parseProviderApiKey` above exactly — never
- * throws, returns `""` (this value is used directly as a Bearer header) for
- * invalid JSON, a missing provider entry, or an entry that isn't an oauth
- * token. Discriminating on `type === "oauth"` matters for the same reason the
- * api-key reader discriminates on `type === "api"`: the value goes straight
- * into a `Bearer` header, so an entry of the wrong type must never supply it.
- *
- * opencode persists an oauth sign-in as
- * `{"<providerId>": {"type":"oauth", "access":"…", "refresh":"…", …}}` — e.g.
- * the `openai` entry this box writes for an OpenAI sign-in.
- *
- * @param {string} rawFileText
- * @param {string} providerId
- * @returns {string}
- */
-export function parseProviderOAuthToken(rawFileText, providerId) {
-  try {
-    const entry = JSON.parse(rawFileText)?.[providerId];
-    return entry?.type === "oauth" && typeof entry?.access === "string" && entry.access.length > 0
-      ? entry.access
-      : "";
+    const v = pickCredential(await list(), providerId)?.value;
+    return v?.type === "key" && typeof v.key === "string" ? v.key : "";
   } catch {
     return "";
   }
 }
 
 /**
- * Read a provider's OAuth access token straight off opencode's own auth store.
- * The sibling of `readProviderApiKey` above for the oauth entry shape — a
- * READER only, never a writer: opencode owns the token's lifecycle (including
- * refreshing it), and an expired token simply 401s at the usage endpoint.
- *
- * Tolerates a missing file by returning `""` — NEVER throws, so a caller can
- * `await` this unconditionally. The file-read function is injectable
- * (`readFile`), defaulting to the real `readFileSync`, so tests never touch a
- * real auth store. Reuses `opencodeAuthPath()` — do not compute the path again.
- *
- * SECURITY: this resolves a LIVE credential. It must never log, echo, or
- * return the token anywhere but to its direct caller, and a caller must never
- * fold it into an error message.
+ * The sibling of `readProviderApiKey` for an OAuth login: the access token.
+ * opencode owns the token's lifecycle (including refreshing it); an expired
+ * token simply 401s at the usage endpoint. `""` when none; NEVER throws.
  *
  * @param {string} providerId
- * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
+ * @param {{ listCredentials?: () => Promise<any[]> }} [opts]
  * @returns {Promise<string>}
  */
-export async function readProviderOAuthToken(providerId, { readFile = readFileSync } = {}) {
-  let raw;
+export async function readProviderOAuthToken(providerId, { listCredentials: list = listCredentials } = {}) {
   try {
-    raw = readFile(opencodeAuthPath(), "utf-8");
+    const v = pickCredential(await list(), providerId)?.value;
+    return v?.type === "oauth" && typeof v.access === "string" ? v.access : "";
   } catch {
     return "";
   }
-  return parseProviderOAuthToken(raw, providerId);
 }
 
 /**
- * Pure: return the top-level provider ids present in opencode's auth store
- * from the ALREADY-READ text of the file. Mirrors `parseProviderApiKey`
- * above exactly — never throws, returns `[]` for invalid JSON or an
- * unparseable store.
+ * The provider ids opencode currently holds a credential for. Both connect and
+ * disconnect write the store, so this reflects a completed disconnect
+ * immediately — unlike `GET /api/provider`/`connected[]`, which also counts
+ * environment keys (BET-1319). `[]` when none or opencode can't be asked.
  *
- * This is the truth the subscription status reads: BOTH connect
- * (`PUT /auth/{id}`) and disconnect (`DELETE /auth/{id}`) write this store,
- * so its top-level keys reflect a completed disconnect immediately — unlike
- * opencode's process-lifetime `GET /provider` `connected[]`, which only a
- * restart clears (BET-1319). The `opencode-claude-auth` plugin DOES re-sync
- * the `anthropic` entry back in within seconds of a restart, so `anthropic`
- * is never a reliable subject for this check.
- *
- * Separated from the file read below so it's directly unit-testable without
- * touching a real auth store, the same split `parseProviderApiKey` /
- * `readProviderApiKey` uses.
- *
- * @param {string} rawFileText
- * @returns {string[]}
- */
-export function parseAuthedProviderIds(rawFileText) {
-  try {
-    const parsed = JSON.parse(rawFileText);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? Object.keys(parsed)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Read opencode's own auth store and return the provider ids it currently
- * holds. This is the reader the subscription status uses: both connect and
- * disconnect write it, so it updates immediately — see
- * `parseAuthedProviderIds` above for why `GET /provider` cannot be trusted
- * here.
- *
- * Mirrors `readProviderApiKey` above exactly: tolerates a missing file by
- * returning `[]` — NEVER throws, so a caller can `await` this
- * unconditionally. The file-read function is injectable (`readFile`),
- * defaulting to the real `readFileSync`, so tests can drive the
- * missing-file / unparseable cases with a fake reader and never touch a real
- * auth store. Reuses `opencodeAuthPath()` — do not compute the path again.
- *
- * @param {{ readFile?: (file: string, encoding: string) => string }} [opts]
+ * @param {{ listCredentials?: () => Promise<any[]> }} [opts]
  * @returns {Promise<string[]>}
  */
-export async function readAuthedProviderIds({ readFile = readFileSync } = {}) {
-  let raw;
+export async function readAuthedProviderIds({ listCredentials: list = listCredentials } = {}) {
   try {
-    raw = readFile(opencodeAuthPath(), "utf-8");
+    return [...new Set((await list()).map((c) => c?.integrationID).filter((x) => typeof x === "string"))];
   } catch {
     return [];
   }
-  return parseAuthedProviderIds(raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -2634,15 +2428,11 @@ export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_M
 // Commands, agents, file search
 // ---------------------------------------------------------------------------
 
-/** List built-in and user-defined slash commands.
- *  @returns {Promise<Array<{ name: string, description?: string, source?: string, ... }>>}
+/** List built-in and user-defined slash commands (V2 reports only name + description).
+ *  @returns {Promise<Array<{ name: string, description?: string }>>}
  */
 export async function listCommands() {
-  const res = await ocFetch(apiUrl("/command"));
-  if (!res.ok) {
-    throw new Error(`opencode listCommands ${res.status}: ${await res.text()}`);
-  }
-  const raw = await res.json();
+  const raw = (await ocJson("listCommands", "GET", "/api/command")) ?? [];
   return raw.map((c) => ({
     name: String(c.name ?? ""),
     description: typeof c.description === "string" ? c.description : undefined,
@@ -2658,36 +2448,28 @@ export async function listCommands() {
  *  @returns {Promise<Array<{ name: string, description?: string, mode?: string, ... }>>}
  */
 export async function listAgents() {
-  const res = await ocFetch(apiUrl("/agent"));
-  if (!res.ok) {
-    throw new Error(`opencode listAgents ${res.status}: ${await res.text()}`);
-  }
-  const raw = await res.json();
+  const raw = (await ocJson("listAgents", "GET", "/api/agent")) ?? [];
   return raw.map((a) => ({
-    name: String(a.name ?? ""),
+    name: String(a.id ?? a.name ?? ""),
     description: typeof a.description === "string" ? a.description : undefined,
     mode: typeof a.mode === "string" ? a.mode : undefined,
     native: typeof a.native === "boolean" ? a.native : undefined,
     builtIn: typeof a.builtIn === "boolean" ? a.builtIn : undefined,
     model:
-      a.model && typeof a.model.providerID === "string" && typeof a.model.modelID === "string"
-        ? { providerID: a.model.providerID, modelID: a.model.modelID }
+      a.model && typeof a.model.providerID === "string" && typeof (a.model.id ?? a.model.modelID) === "string"
+        ? { providerID: a.model.providerID, modelID: a.model.id ?? a.model.modelID }
         : undefined,
   }));
 }
 
-/** ripgrep-backed file search under a directory.
+/** File search under a directory (GET /api/fs/find), as project-relative paths.
  *  @param {{ query: string, directory: string }} opts
  *  @returns {Promise<string[]>}
  */
 export async function findFiles({ query, directory }) {
-  const qs =
-    `?query=${encodeURIComponent(query)}&directory=${encodeURIComponent(directory)}`;
-  const res = await ocFetch(apiUrl(`/find/file${qs}`));
-  if (!res.ok) {
-    throw new Error(`opencode findFiles ${res.status}: ${await res.text()}`);
-  }
-  return res.json();
+  const qs = `location%5Bdirectory%5D=${encodeURIComponent(directory)}&query=${encodeURIComponent(query)}&limit=50`;
+  const rows = (await ocJson("findFiles", "GET", `/api/fs/find?${qs}`)) ?? [];
+  return rows.map((r) => (typeof r === "string" ? r : r?.path)).filter((p) => typeof p === "string");
 }
 
 /**
@@ -2727,44 +2509,22 @@ export async function listReferences() {
 }
 
 /**
- * Invoke a slash command inside a session.
- * model is serialised as "providerID/modelID" string (unlike prompt_async's object).
+ * Invoke a slash command inside a session (POST /api/session/{id}/command
+ * {name, text}); the expanded template arrives as the next user message.
  *
- * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string }} opts
+ * P3a3 (spec §8.3): the CTO admission queue admits slash commands too. V2's
+ * command route takes no message id, so — unlike a prompt — a command carries
+ * no delivery receipt; the admission engine's reconciliation treats it as
+ * unknown (never resent), the safe direction.
+ *
+ * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, signal?: AbortSignal }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, messageID, signal }) {
-  // P3a3 (spec §8.3): the CTO admission queue admits slash commands too, and
-  // its durable model needs the SAME P0-proven receipt for a command as for a
-  // prompt. opencode creates the command's user message as
-  // `id: input.messageID ?? MessageID.ascending()` on the /command path
-  // (session/prompt.ts:471, verified in docs/cto-implementation-map.md §8): a
-  // caller-supplied `messageID` is persisted verbatim and readable back via
-  // GET /session/{id}/message. So a command dispatched by admission carries an
-  // admission-allocated `messageID` and a bounded `signal`, exactly like
-  // sendPrompt — the crash-window reconciliation (dispatching → receipt found
-  // → accepted; absent → unknown, never resent) then works identically for
-  // both kinds. Ordinary composer traffic passes neither and behaves as before.
-  const dirQ = await getSessionDirectoryQuery(sessionId, { signal });
-  const url = `/session/${encodeURIComponent(sessionId)}/command${dirQ}`;
-  const parts = [];
-  if (attachments) {
-    for (const a of attachments) {
-      parts.push({
-        type: "file",
-        mime: a.mime,
-        url: `file://${a.remotePath}`,
-        ...(a.filename ? { filename: a.filename } : {}),
-      });
-    }
-  }
-  const body = { command, arguments: argumentsStr, parts };
-  if (model) {
-    body.model = `${model.providerID}/${model.modelID}`;
-    if (model.variant) body.variant = model.variant;
-  }
-  if (agent) body.agent = agent;
-  if (messageID) body.messageID = messageID; // P0-proven: persisted verbatim as the user message id
-  const res = await ocFetch(apiUrl(url), {
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, signal }) {
+  await syncSessionControls(sessionId, { model, agent, signal });
+  const body = { name: command, text: argumentsStr ?? "" };
+  const files = fileInputs(attachments);
+  if (files.length) body.files = files;
+  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/command`), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -2777,73 +2537,43 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     const err = new Error(`opencode runCommand ${res.status}: ${await res.text()}`);
     // Carry the real HTTP status so admission can tell a DEFINITIVE 4xx
     // refusal (→ failed, proven not accepted) from anything else (→ unknown,
-    // never resent) — the same classification sendPrompt's error already
-    // enables (blocker 3 / invariant 4).
+    // never resent).
     err.status = res.status;
     throw err;
   }
+  await discardBody(res);
 }
 
 // ---------------------------------------------------------------------------
 // SSE event subscription
 // ---------------------------------------------------------------------------
 
-// Transport used by the long-lived SSE stream in openEventStream. Production
-// = the real global `fetch` (undici) — deliberately NOT the pooled ocFetch
-// transport (a keep-alive pool socket would be pinned forever by a streaming
-// body; see the ocAgent comment above). Tests can override this to simulate
-// a controllable SSE response (including WHEN it "connects") without a live
-// opencode server.
+// Transport used by the long-lived SSE stream. Production = the real global
+// `fetch` (undici) — deliberately NOT the pooled ocFetch transport (a keep-alive
+// pool socket would be pinned forever by a streaming body). Tests can override
+// this to simulate a controllable SSE response without a live opencode server.
 let eventStreamTransport = null;
-/** Test-only: override the transport openEventStream dispatches through.
+/** Test-only: override the transport the event stream dispatches through.
  *  Pass null to restore the default (global fetch). */
 export function _setEventStreamTransport(fn) {
   eventStreamTransport = fn;
 }
 function eventFetch(url, init) {
-  return (eventStreamTransport ?? fetch)(url, init);
-}
-
-// Liveness: opencode emits a `server.heartbeat` on BOTH the global and every
-// scoped /event stream roughly every 10s, even when idle (verified on the box:
-// ~6 heartbeats in 65s). So a healthy connection ALWAYS receives bytes within
-// ~10s. If we go longer than this with zero bytes the subscription has gone
-// DEAF — opencode stopped publishing to it (correlated with session
-// churn/prune in the same directory) WITHOUT closing the TCP, so reader.read()
-// blocks forever, the reconnect loop never runs, and the readiness gate stays
-// stuck "connected". This is the user's recurring "must leave + re-enter the
-// session to see updates" bug (every manta-server restart masked it until the
-// next deafness). 45s = 4+ missed heartbeats — long enough to never
-// false-positive on a GC pause / one dropped frame, short enough to self-heal
-// well within the time a user notices nothing streaming.
-export const LIVENESS_TIMEOUT_MS = 45_000;
-const LIVENESS_CHECK_MS = 15_000;
-
-/**
- * Pure: has the stream gone deaf? True when no byte has arrived for longer than
- * timeoutMs (given opencode's ~10s heartbeat, that means the subscription
- * stopped delivering). Exported for unit tests.
- * @param {number} lastByteAt  epoch ms of the last byte received
- * @param {number} now         epoch ms
- * @param {number} [timeoutMs=LIVENESS_TIMEOUT_MS]
- */
-export function isStreamDeaf(lastByteAt, now, timeoutMs = LIVENESS_TIMEOUT_MS) {
-  return now - lastByteAt > timeoutMs;
+  return (eventStreamTransport ?? fetch)(url, withAuth(init));
 }
 
 /**
  * Incremental SSE framer, linear in bytes received. Events are separated by a
- * double newline ("\n\n" only — same as the loop it replaced). `push(text)`
- * takes the next decoded piece and returns the `data:` payload (lines joined
- * with "\n") of every event completed by it; event:/id:/retry:/comment lines
- * are ignored and events with no data are dropped.
+ * double newline ("\n\n" only). `push(text)` takes the next decoded piece and
+ * returns the `data:` payload (lines joined with "\n") of every event completed
+ * by it; event:/id:/retry:/comment lines (V2's `: heartbeat`) are ignored and
+ * events with no data are dropped.
  *
- * Why not `buf += piece; buf.indexOf("\n\n")`: opencode can emit single
- * events of 14 MB, delivered in ~64 KB reads. Concatenating onto a growing
- * string and rescanning from 0 on every read is quadratic (gigabytes copied
- * per event). Here pieces accumulate in an array, only NEW text is searched
- * (plus a one-char carry for a separator split across reads), and the pieces
- * are joined once when an event completes.
+ * Why not `buf += piece; buf.indexOf("\n\n")`: a single event can be megabytes,
+ * delivered in ~64 KB reads. Concatenating onto a growing string and rescanning
+ * from 0 on every read is quadratic. Here pieces accumulate in an array, only
+ * NEW text is searched (plus a one-char carry for a separator split across
+ * reads), and the pieces are joined once when an event completes.
  */
 export function createSseFramer() {
   let pieces = [];
@@ -2893,83 +2623,37 @@ export function createSseFramer() {
 }
 
 /**
- * opencode's `message.updated` for a user message carries
- * `info.summary.diffs` — the session's full file diffs, up to ~14 MB, re-sent
- * ~1.5x/s. Nothing consumes it, so drop that one key (counts etc. in `summary`
- * stay) before the event reaches the bus. Mutates and returns `ev`; tolerates
- * any shape.
+ * Subscribe to opencode events: ONE global `GET /api/event` stream carries every
+ * session of every directory (V2 has no per-directory streams), reconnecting
+ * after 1.5 s on any drop. There is no replay: every (re)connect calls
+ * `opts.onConnect({ reconnect })` so the caller can re-read what it missed
+ * (`reconnect` is false for the very first connect).
+ *
+ * @param {(event: object) => void} onEvent
+ * @param {{ onConnect?: (info: { reconnect: boolean }) => void, reconnectMs?: number }} [opts]
+ * @returns {() => void} stop
  */
-export function stripMessageSummaryDiffs(ev) {
-  if (ev?.type !== "message.updated") return ev;
-  const summary = ev.properties?.info?.summary;
-  if (summary && typeof summary === "object" && Array.isArray(summary.diffs)) {
-    delete summary.diffs;
-  }
-  return ev;
-}
-
-// One long-lived SSE connection to opencode's /event endpoint, optionally
-// scoped to a project `?directory=`. Auto-reconnects on drop with 1.5 s
-// delay; returns stop() that flips stopped=true AND aborts the in-flight
-// fetch so reader.read() unblocks immediately.
-//
-// `hooks.onConnect` fires each time the upstream fetch comes back OK, before
-// the parse loop starts — this is what resolves the readiness gate above.
-// `hooks.onDisconnect` fires whenever a (non-teardown) connection ends, so
-// the readiness gate can re-arm for the next connect.
-//
-// A per-connection liveness watchdog aborts the controller when the stream
-// goes deaf (see LIVENESS_TIMEOUT_MS) — the abort unblocks reader.read(), which
-// falls through to onDisconnect + the 1.5s reconnect, re-establishing a live
-// subscription. `opts.livenessTimeoutMs` / `opts.livenessCheckMs` are injectable
-// for tests (0 check disables the watchdog).
-function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
-  const { onConnect, onDisconnect } = hooks;
-  const livenessTimeoutMs = opts.livenessTimeoutMs ?? LIVENESS_TIMEOUT_MS;
-  const livenessCheckMs =
-    opts.livenessCheckMs != null ? opts.livenessCheckMs : LIVENESS_CHECK_MS;
-  const key = directory || "(global)";
+export function subscribeEvents(onEvent, opts = {}) {
+  const reconnectMs = opts.reconnectMs ?? 1500;
   let stopped = false;
-  let currentController = null;
-
-  const path = directory
-    ? `/event?directory=${encodeURIComponent(directory)}`
-    : "/event";
+  let controller = null;
+  let connects = 0;
 
   (async function loop() {
     while (!stopped) {
-      const controller = new AbortController();
-      currentController = controller;
-      let lastByteAt = Date.now();
-      let deaf = false;
-      let watchdog = null;
+      controller = new AbortController();
       try {
-        const res = await eventFetch(apiUrl(path), {
+        const res = await eventFetch(apiUrl("/api/event"), {
           signal: controller.signal,
           headers: { accept: "text/event-stream" },
         });
-        if (!res.ok || !res.body) {
-          throw new Error(`opencode SSE ${res.status}: ${res.statusText}`);
-        }
-        console.log(`[opencode-bus] stream CONNECTED dir=${key}`);
-        onConnect?.();
-        lastByteAt = Date.now();
-        // Liveness watchdog: abort the connection if it goes silent past the
-        // heartbeat window. The abort rejects the pending reader.read() below,
-        // dropping us into the reconnect path. unref'd so it never holds the
-        // process open.
-        if (livenessCheckMs > 0) {
-          watchdog = setInterval(() => {
-            if (stopped) return;
-            if (isStreamDeaf(lastByteAt, Date.now(), livenessTimeoutMs)) {
-              deaf = true;
-              console.log(
-                `[opencode-bus] stream ${key} deaf >${Math.round(livenessTimeoutMs / 1000)}s — reconnecting`,
-              );
-              try { controller.abort(); } catch { /* already aborted */ }
-            }
-          }, livenessCheckMs);
-          watchdog.unref?.();
+        if (!res.ok || !res.body) throw new Error(`opencode SSE ${res.status}: ${res.statusText}`);
+        const reconnect = connects++ > 0;
+        console.log(`[opencode-bus] stream CONNECTED${reconnect ? " (reconnect)" : ""}`);
+        try {
+          opts.onConnect?.({ reconnect });
+        } catch (e) {
+          console.warn("[opencode-bus] onConnect failed:", e?.message ?? e);
         }
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -2978,10 +2662,9 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
           while (!stopped) {
             const { value, done } = await reader.read();
             if (done) break;
-            lastByteAt = Date.now(); // any byte (heartbeat or real) = alive
             for (const data of framer.push(dec.decode(value, { stream: true }))) {
               try {
-                onEvent(stripMessageSummaryDiffs(JSON.parse(data)));
+                onEvent(JSON.parse(data));
               } catch {
                 // skip malformed event
               }
@@ -2992,221 +2675,19 @@ function openEventStream(onEvent, directory, hooks = {}, opts = {}) {
           controller.abort(); // always abort to release the connection
         }
       } catch {
-        /* reconnect on error, deaf-abort, or AbortError from stop() */
-      } finally {
-        if (watchdog) { clearInterval(watchdog); watchdog = null; }
+        /* reconnect on error or AbortError from stop() */
       }
-      // The connection just ended (cleanly, via error, or a deaf-abort) and
-      // we're about to retry — a real drop, not an intentional stop(). Re-arm
-      // the readiness gate so a prompt sent during this reconnect window waits
-      // for the NEXT successful connect instead of resolving off a stale "was
-      // connected" promise.
       if (!stopped) {
-        console.log(`[opencode-bus] stream DISCONNECTED dir=${key}`);
-        onDisconnect?.();
-        // A deaf reconnect is immediate — the subscription is already dead and
-        // every second of silence is dropped events. A normal error backs off.
-        await sleep(deaf ? 250 : 1500);
+        console.log("[opencode-bus] stream DISCONNECTED");
+        await sleep(reconnectMs);
       }
     }
   })();
 
-  return () => { stopped = true; currentController?.abort(); };
-}
-
-/**
- * Subscribe to opencode events across ALL project directories.
- *
- * opencode's `/event` is project-scoped: a POST with `?directory=X` emits
- * its events on the stream subscribed to `?directory=X` only. To catch
- * everything we open the global stream PLUS one stream per directory we've
- * seen (via createSession / forkSession / listSessions). Newly-discovered
- * directories auto-spawn a stream via the directoryListeners hook.
- *
- * Bootstrap: we call listSessions() once on subscribe so existing sessions
- * (from a previous server restart) have their directories cached and a
- * stream opened.
- *
- * @param {(event: object) => void} onEvent
- * @param {object} [opts]
- * @param {(dir:string)=>boolean} [opts.existsFn]  directory-exists predicate
- *   (injected for tests; defaults to fs.existsSync).
- * @param {number} [opts.sweepIntervalMs]  eviction sweep cadence (default
- *   STREAM_SWEEP_MS; set 0 to disable the timer — tests call the returned
- *   `_sweep` directly).
- * @param {number} [opts.idleMs]      idle-eviction threshold (default STREAM_IDLE_MS)
- * @param {number} [opts.maxStreams]  LRU cap (default STREAM_MAX)
- * @param {() => string[]} [opts.eagerDirectories]  callback returning the small
- *   bounded set of directories to pre-open scoped streams for at startup
- *   (e.g. live chat-session directories supplied by index.mjs from
- *   `tmux.listProjects()`). The full session catalog stays lazily-opened — the
- *   many-workspace flood fix — only this bounded live set is pre-opened so a
- *   fresh box's first turn never races an unopened subscription.
- * @returns {() => void} stop
- */
-export function subscribeEvents(onEvent, opts = {}) {
-  const streams = new Map(); // key: "" (global) or directory string
-  // key -> last-active epoch ms. Bumped when a stream is opened AND every time
-  // the session that owns its directory is used (ensureStreamForDirectory), so
-  // an in-use directory never looks idle even between reconnects.
-  const lastActivity = new Map();
-  const existsFn = opts.existsFn ?? existsSync;
-  const idleMs = opts.idleMs ?? STREAM_IDLE_MS;
-  const maxStreams = opts.maxStreams ?? STREAM_MAX;
-  const sweepIntervalMs =
-    opts.sweepIntervalMs != null ? opts.sweepIntervalMs : STREAM_SWEEP_MS;
-  // Directories of LIVE chat sessions (a small bounded set — the actual open
-  // chat windows), injected by index.mjs from tmux.listProjects(). Their scoped
-  // streams are opened EAGERLY at startup so a fresh box's first turn never
-  // races an unopened subscription. The full session catalog stays
-  // lazily-opened (the many-workspace flood fix); only this bounded live set
-  // is pre-opened.
-  const eagerDirectories = typeof opts.eagerDirectories === "function"
-    ? opts.eagerDirectories
-    : () => [];
-  // Liveness-watchdog knobs (see openEventStream) — passed through, injectable
-  // for tests. Undefined → openEventStream's defaults (45s timeout / 15s check).
-  const streamOpts = {
-    livenessTimeoutMs: opts.livenessTimeoutMs,
-    livenessCheckMs: opts.livenessCheckMs,
-  };
-  let stopped = false;
-
-  const touch = (key) => { lastActivity.set(key, Date.now()); };
-
-  const openFor = (key, dir) => {
-    touch(key); // opening or re-using a stream counts as activity
-    if (streams.has(key)) return;
-    streams.set(
-      key,
-      openEventStream(
-        (ev) => { touch(key); onEvent(ev); }, // an arriving event = activity
-        dir,
-        {
-          onConnect: () => markStreamConnected(key),
-          onDisconnect: () => markStreamDisconnected(key),
-        },
-        streamOpts,
-      ),
-    );
-  };
-
-  // Close + forget one scoped stream. The global stream ("") is never passed
-  // here. Readiness state is cleared so a later re-open re-arms the gate.
-  const closeStream = (key) => {
-    const stop = streams.get(key);
-    if (stop) { try { stop(); } catch { /* ignore */ } }
-    streams.delete(key);
-    lastActivity.delete(key);
-    streamReadyState.delete(key);
-  };
-
-  // One eviction pass. Pure decision in selectStreamsToEvict; this just applies
-  // it. Safe: every evicted directory re-opens on next use via
-  // ensureStreamForDirectory (idempotent) + the readiness gate.
-  const _sweep = () => {
-    if (stopped) return;
-    let toEvict;
-    try {
-      toEvict = selectStreamsToEvict({
-        keys: streams.keys(),
-        lastActivity,
-        existsFn,
-        now: Date.now(),
-        idleMs,
-        maxStreams,
-      });
-    } catch {
-      return; // never let a sweep error break the event pump
-    }
-    for (const key of toEvict) closeStream(key);
-    if (toEvict.length > 0) {
-      console.log(`[opencode-bus] evicted ${toEvict.length} idle/dead scoped stream(s); ${streams.size} remain`);
-    }
-  };
-
-  // Global stream catches non-scoped events (server.heartbeat, vcs.branch.updated,
-  // and any future event that opencode emits without a directory).
-  openFor("", undefined);
-
-  // Auto-open scoped streams for newly-discovered directories (createSession /
-  // forkSession route through rememberSessionDirectory, which fires this).
-  const listener = (dir) => {
-    if (stopped || !dir) return;
-    openFor(dir, dir);
-  };
-  directoryListeners.add(listener);
-
-  // Expose the on-demand opener so getSessionDirectoryQuery can open a stream
-  // the moment a session is actually used, rather than us pre-opening one for
-  // every session in the catalog.
-  ensureStreamForDirectory = (dir) => {
-    if (stopped || !dir) return;
-    openFor(dir, dir);
-  };
-
-  // Prime the dir cache from existing sessions so a prompt to a pre-existing
-  // session resolves its directory fast — but do NOT open a stream per
-  // session here. Streams open lazily when a session is used (see
-  // getSessionDirectoryQuery → ensureStreamForDirectory). This is the fix for
-  // the connection flood: on a many-workspace box, eagerly streaming every
-  // session in listSessions() opened hundreds of connections to opencode.
-  //
-  // Eager-open runs FIRST (synchronously inside the IIFE) so it never blocks
-  // behind listSessions — a slow / hung opencode on the bootstrap fetch
-  // would otherwise defer the scoped streams and the first turn on a live
-  // chat window would race an unopened subscription (BET-256 follow-up —
-  // test `subscribeEvents eagerly opens scoped streams for supplied
-  // eagerDirectories at startup` was flaky under CI load when listSessions
-  // blocked the IIFE).
-  (async () => {
-    try {
-      const dirs = eagerDirectories();
-      const seen = new Set();
-      for (const dir of Array.isArray(dirs) ? dirs : []) {
-        if (stopped) break;
-        if (typeof dir !== "string" || dir.length === 0 || seen.has(dir)) continue;
-        seen.add(dir);
-        openFor(dir, dir);
-      }
-    } catch { /* non-fatal: eager-open is best-effort */ }
-
-    try {
-      const sessions = await listSessions();
-      for (const s of sessions || []) {
-        if (s?.id && typeof s?.directory === "string") {
-          cacheSessionDirectoryQuiet(s.id, s.directory);
-        }
-      }
-    } catch { /* non-fatal: bootstrap is best-effort */ }
-  })();
-
-  // Periodic eviction sweep. unref() so it never keeps the process alive on its
-  // own. Disabled when sweepIntervalMs is 0 (tests drive _sweep directly).
-  let sweepTimer = null;
-  if (sweepIntervalMs > 0) {
-    sweepTimer = setInterval(_sweep, sweepIntervalMs);
-    sweepTimer.unref?.();
-  }
-
-  const stop = () => {
+  return () => {
     stopped = true;
-    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
-    directoryListeners.delete(listener);
-    ensureStreamForDirectory = null;
-    for (const s of streams.values()) {
-      try { s(); } catch { /* ignore */ }
-    }
-    streams.clear();
-    lastActivity.clear();
+    controller?.abort();
   };
-  // Test hooks: drive one sweep pass, open a scoped stream, and inspect live
-  // stream keys without a real timer / real opencode / real session.
-  stop._sweep = _sweep;
-  stop._streamKeys = () => [...streams.keys()];
-  stop._touch = touch;
-  stop._openFor = openFor;
-  return stop;
 }
 
 // ---------------------------------------------------------------------------
@@ -3368,3 +2849,4 @@ export async function pollClaudeLogin({
     restore,
   };
 }
+
