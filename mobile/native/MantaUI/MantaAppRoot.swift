@@ -14,6 +14,7 @@ import SwiftUI
 struct MantaAppRoot: View {
     @EnvironmentObject private var store: MantaEventStore
     @EnvironmentObject private var sessionStore: SessionListStore
+    @EnvironmentObject private var upgradeStore: UpgradeStore
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var flow: MantaOnboardingFlow
@@ -114,6 +115,17 @@ struct MantaAppRoot: View {
                     }
             }
         }
+        // C4 (OpenCode V2 cutover): while the box migrates onto V2 every data
+        // route answers 503, so a paired device shows the box's upgrade
+        // instead — read-only, not dismissible, gone the moment the box says it
+        // is done. Only over the paired destination: never over onboarding or a
+        // capture-harness scene.
+        .overlay {
+            if paired, scene == nil, let model = upgradeStore.screen {
+                UpgradeScreen(model: model, tokens: tokens)
+                    .transition(.opacity)
+            }
+        }
         // S8 (BET-600): a pairing link — either the manta:// custom scheme or
         // the associated-domain universal link (https://app.mantaui.com/m/…)—
         // is parsed and fed into the S2 onboarding flow. Delivery happens via
@@ -132,6 +144,7 @@ struct MantaAppRoot: View {
             MantaPushService.applyRegistrationState()
             store.resume()
             Task { await sessionStore.refresh() }
+            Task { await upgradeStore.refresh() }
         }
         .onOpenURL { url in
             _ = MantaPairingRouter.route(url)

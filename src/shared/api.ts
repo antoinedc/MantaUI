@@ -105,6 +105,42 @@ import type {
 } from "./types.js";
 import type { ClaimOutcome } from "./claim.mjs";
 
+// ---------------------------------------------------------------------------
+// Box upgrade gate (OpenCode V2 cutover, slice C4 — contract K3).
+//
+// Served by the box (`GET /api/upgrade`, published as `{kind:"upgrade"}` on
+// /events) while it migrates onto OpenCode V2. The desktop's blocking upgrade
+// screen and the iOS read-only screen both render exactly this shape.
+// ---------------------------------------------------------------------------
+export type UpgradeState = "idle" | "running" | "failed" | "completed" | "rolled_back";
+export type UpgradeStepId = "preflight" | "stop" | "copy" | "migrate" | "verify" | "cutover";
+export type UpgradeStepStatus = "pending" | "running" | "done" | "failed";
+export type UpgradeStep = {
+  id: UpgradeStepId;
+  label: string;
+  status: UpgradeStepStatus;
+  /** Present while the step reports measurable progress; absent → indeterminate. */
+  progress: { label?: string; numerator?: number; denominator?: number } | null;
+  error?: string;
+};
+export type UpgradeStatus = {
+  state: UpgradeState;
+  steps: UpgradeStep[];
+  /** 0..1 */
+  overall: number;
+  etaSeconds: number | null;
+  error: {
+    step: UpgradeStepId;
+    message: string;
+    retryable: boolean;
+    /** Disk-space failures only: bytes the upgrade needs / the box has free. */
+    needBytes?: number;
+    haveBytes?: number;
+  } | null;
+};
+/** `POST /api/upgrade/retry` and `/rollback` outcome. */
+export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
+
 type PromptModel = { providerID: string; modelID: string; variant?: string };
 // BET-1244: the generic, read-only routing decision (`routing:choose`) — the
 // routing decision carries no `incumbent` but adds
@@ -1538,6 +1574,24 @@ export interface Api {
   onServerUpdateProgress(
     cb: (p: { step: number; total: number; label: string }) => void,
   ): () => void;
+
+  // ---- Box upgrade gate (OpenCode V2 cutover C4, contract K3) ----
+  // `GET /api/upgrade`. Resolves `null` when the box predates the upgrade API
+  // (404) — an old box is never "upgrading", so callers treat null as idle.
+  // Rejects on a transport failure (box restarting) so the caller can keep
+  // polling; a 401 rejects with AuthRequiredError like every other call.
+  upgradeStatus(): Promise<UpgradeStatus | null>;
+  // `POST /api/upgrade/retry` / `/rollback`. Never reject on a refusal or a
+  // network error — the outcome comes back as `{ok:false, error}` so the gate
+  // can show it next to the button that was pressed.
+  upgradeRetry(): Promise<UpgradeActionResult>;
+  upgradeRollback(): Promise<UpgradeActionResult>;
+  // `{kind:"upgrade"}` frames on /events: the whole K3 object on every change.
+  onUpgrade(cb: (status: UpgradeStatus) => void): () => void;
+  // Fires when ANY data call is answered `503 {upgrade:true}` — the box is in
+  // upgrade mode and every route but /auth, /api/version, /api/upgrade*,
+  // /events and /push/* is refused. Routes the user to the gate.
+  onBoxUpgrading(cb: () => void): () => void;
 
   // Plugins (BET-189 / BET-190): read the current plugin registry the Mac
   // executor has published. Backed by GET /api/plugins/registry via the

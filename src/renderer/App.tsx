@@ -27,6 +27,9 @@ import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
+import { useUpgradeGate } from "./hooks/useUpgradeGate";
+import { UpgradeGate } from "./UpgradeGate";
+import { boxNeedsMajorUpgrade } from "./upgradeGate";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";
@@ -1683,6 +1686,34 @@ function Shell() {
   const boxRestarting =
     boxUpgrading && connectionState.state !== "connected" && connectionState.state !== "idle";
 
+  // OpenCode V2 cutover (slice C4): the blocking upgrade screen. Shown when the
+  // box is on an older wire major than this desktop (K4 → "Upgrade box", which
+  // raises the SAME confirm + applyServerUpdate flow every other box update
+  // uses — it never calls serverUpdateApply itself), and then whenever the box
+  // reports an upgrade in progress / failed / rolled back (K3), or refuses a
+  // call with 503 {upgrade:true}. Rendered as a full-window overlay at the end
+  // of this component; the shell stays mounted underneath so its state
+  // survives and is simply re-read when the gate clears.
+  const upgradeGate = useUpgradeGate({
+    boxNeedsUpgrade: boxNeedsMajorUpgrade({ clientVersion, boxVersion: serverVersion }),
+    boxUpdating: boxUpgrading,
+    boxUpdateError: updateError?.message ?? null,
+    boxUpdateProgress: serverUpdateProgress,
+    apiGeneration,
+    onCleared: () => {
+      // The migration finished: the box's version and every list this shell
+      // loaded against a mid-migration box (503s) are stale.
+      setUpdateRefreshKey((k) => k + 1);
+      void refresh();
+    },
+  });
+  // The version was read before a box restart can have changed it. While the
+  // gate is up, re-read it every time the stream (re)connects so the K4 test
+  // clears once the box is on the new major.
+  useEffect(() => {
+    if (upgradeGate.visible && upgradeGate.connected) setUpdateRefreshKey((k) => k + 1);
+  }, [upgradeGate.visible, upgradeGate.connected]);
+
   // BET-1195: the DESKTOP leg's presentation, decided by the pure shared helper
   // (`desktopUpdateBusy`) so the banner and Settings can never disagree. null
   // while no desktop update is running; otherwise the download label/progress
@@ -2281,6 +2312,16 @@ function Shell() {
           onClose={() => setSearchOpen(false)}
         />
       )}
+      {/* OpenCode V2 cutover (C4): the blocking, non-dismissible upgrade screen.
+          Placed BEFORE the confirm modals below so, at the same z-level, the
+          "Update Manta Server?" confirm that its "Upgrade box" button raises
+          paints above it. */}
+      <UpgradeGate
+        view={upgradeGate.view}
+        onUpgradeBox={() => setConfirmServerUpdate(true)}
+        onRetry={upgradeGate.retry}
+        onRollback={upgradeGate.rollback}
+      />
       {/* Box self-update confirm: restarting opencode ends every in-flight
           agent turn, so the destructive restart needs explicit consent before
           the update starts. */}

@@ -1,0 +1,13 @@
+- dialog "The upgrade couldn't finish":
+  - text: Manta
+  - heading "The upgrade couldn't finish" [level=2]
+  - alert: /There isn't enough free disk space to upgrade safely\. Needs \d+ GB free, has 3 GB\. Nothing was changed — your box is exactly as it was\./
+  - list "Upgrade steps":
+    - listitem: Check disk space Not enough free disk space
+    - listitem: Stop running agents
+    - listitem: Copy history
+    - listitem: Migrate conversations
+    - listitem: Verify
+    - listitem: Switch over
+  - button "Check again"
+  - button "Copy details"

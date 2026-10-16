@@ -219,6 +219,35 @@ export const SCREENS = [
     ],
   },
   {
+    // The blocking box-upgrade screen (OpenCode V2 cutover C4) in its failed
+    // state — the box's migration stopped at pre-flight for lack of disk, so the
+    // screen shows "needs 31 GB free, has 3 GB" with Check again. Driven by the
+    // demo transport answering GET /api/upgrade with a failed K3 object. The
+    // session shell is mounted underneath (the gate is an overlay), so its popup
+    // triggers are present in the capture but not opened by it. No design exists.
+    //
+    // PIXELS ARE A REGION CROP on purpose: the demo's always-mounted CTO panel
+    // fires reads the demo transport doesn't stub, and the resulting error
+    // toasts (z-60, top-right) land in a full-page capture at a timing-dependent
+    // moment. The gate's own column never overlaps them; the structure contract
+    // stays the whole dialog (`snapshot`).
+    id: "upgrade-failed",
+    title: "Blocking box-upgrade screen — failed on disk space (state)",
+    url: "/app/index.html?demo&desktop&state=upgrade-failed",
+    ready: '[data-screen="upgrade"]',
+    final: '[data-screen="upgrade"]',
+    snapshot: '[data-screen="upgrade"]',
+    region: "[data-upgrade-body]",
+    viewport: DESKTOP_VIEWPORT,
+    mockup: null,
+    surfacesClosed: [
+      "manta-ctx-pill",
+      "manta-effort-picker-btn",
+      "manta-model-picker-btn",
+      "manta-session-menu-trigger",
+    ],
+  },
+  {
     // PHRASED ROW (BET-560) — the mid-stream capture harness. This row's url
     // selects the stepped `stream` demo state, which serves the transcript a
     // few parts at a time and exposes window.__mantaDemoStream. The capture

@@ -33,6 +33,7 @@ describe("pickDemoState — every member is a valid DemoState", () => {
       "incompatible",
       "update-failed",
       "server-update",
+      "upgrade-failed",
       "stream",
       "artifacts",
     ]);
