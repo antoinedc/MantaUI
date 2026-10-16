@@ -1,12 +1,20 @@
-import { test } from "node:test";
+import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
+import { statePath } from "../shared/paths.mjs";
 import {
   apiUrl,
+  _setApiBase,
+  opencodeAuthHeader,
   parseSseFrame,
+  createSseFramer,
   createSession,
   sendPrompt,
   getAndClearSessionRefusal,
   getSessionAgent,
+  getSessionDirectory,
+  readSession,
   listMessages,
   getMessage,
   slimTranscript,
@@ -15,307 +23,213 @@ import {
   forkSession,
   compactSession,
   abortSession,
+  deleteSessionRaw,
   getSessionStatus,
   listSessionStatuses,
+  listActiveSessionIds,
+  readShellOutput,
   knownSessionDirectories,
   cachedSessionDirectory,
+  listSessions,
   sessionExists,
   listPermissions,
   listQuestions,
   replyPermission,
   replyQuestion,
+  rejectQuestion,
   subscribeEvents,
-  selectStreamsToEvict,
-  isStreamDeaf,
-  LIVENESS_TIMEOUT_MS,
-  STREAM_IDLE_MS,
-  STREAM_MAX,
   _resetSessionDirectoryCache,
-  _onSessionDirectoryAdded,
   _setOcTransport,
   _setEventStreamTransport,
-  _setReadinessTimeoutMs,
-  _resetStreamReadyState,
   _getOcAgent,
   listReferences,
+  findFiles,
+  listCommands,
+  listAgents,
   _pooledOcRequest,
   discardBody,
   getProviders,
   getDefaultModel,
   generateSessionTitle,
+  generateText,
+  pickCheapModel,
+  runThrowawayAgent,
   estimateMessageListTokens,
   listModels,
   listRoutableModels,
   _normalizeProviderModel,
   claudeCliStatus,
-  parseProviderApiKey,
   readProviderApiKey,
-  parseProviderOAuthToken,
   readProviderOAuthToken,
-  parseAuthedProviderIds,
   readAuthedProviderIds,
-  opencodeAuthPath,
+  setProviderApiKey,
+  removeProviderAuth,
+  listProviderAuthMethods,
+  startProviderOauth,
   completeProviderOauth,
+  opencodeAuthPath,
 } from "./opencode.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-test("apiUrl targets local opencode port 4096", () => {
-  assert.equal(apiUrl("/session"), "http://127.0.0.1:4096/session");
-});
-
-test("parseSseFrame extracts JSON from data: lines", () => {
-  const evt = parseSseFrame('data: {"type":"message.updated","x":1}');
-  assert.equal(evt.type, "message.updated");
-});
-
-test("parseSseFrame returns null for comments/keepalive", () => {
-  assert.equal(parseSseFrame(": keep-alive"), null);
-});
-
 // ---------------------------------------------------------------------------
-// parseProviderApiKey (BET-737) — pure parse of opencode's own auth store,
-// same split as parseCredentials/readCredsSnapshot. Never touches a real
-// file.
+// A tiny V2 router: `routes` maps "METHOD /path" (exact pathname) to a handler
+// `({url, query, body}) => body | Response`. Everything not listed is a 599, so
+// an unexpected request fails the test loudly. Every request is recorded.
 // ---------------------------------------------------------------------------
 
-test("parseProviderApiKey extracts the key from an api-type entry", () => {
-  const raw = JSON.stringify({ "kimi-for-coding": { type: "api", key: "fake-test-key" } });
-  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "fake-test-key");
-});
+const json = (body, status = 200, headers = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
-test("parseProviderApiKey returns \"\" for a provider with no entry", () => {
-  const raw = JSON.stringify({ anthropic: { type: "oauth", access: "x", refresh: "y" } });
-  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey returns \"\" for an oauth-type entry (no `key` field)", () => {
-  const raw = JSON.stringify({ "kimi-for-coding": { type: "oauth", access: "x", refresh: "y" } });
-  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey returns \"\" for a non-api entry even when it carries a non-empty `key` (type gate)", () => {
-  // type === "api" is the discriminant — a stray `key` on an oauth/common
-  // entry must never be trusted as a Bearer credential.
-  const raw = JSON.stringify({ "kimi-for-coding": { type: "oauth", key: "should-not-leak", access: "x" } });
-  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
-  const rawCoding = JSON.stringify({ "kimi-for-coding": { key: "still-no-type" } });
-  assert.equal(parseProviderApiKey(rawCoding, "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey returns \"\" for an empty-string key", () => {
-  const raw = JSON.stringify({ "kimi-for-coding": { type: "api", key: "" } });
-  assert.equal(parseProviderApiKey(raw, "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey returns \"\" for invalid JSON", () => {
-  assert.equal(parseProviderApiKey("not json{", "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey returns \"\" for an empty auth store", () => {
-  assert.equal(parseProviderApiKey("{}", "kimi-for-coding"), "");
-});
-
-test("parseProviderApiKey never echoes the key into an exception (it doesn't throw at all)", () => {
-  // Malformed input that would throw if a naive implementation destructured
-  // without guarding — assert it degrades to "" instead of leaking anything.
-  assert.equal(parseProviderApiKey("null", "kimi-for-coding"), "");
-  assert.equal(parseProviderApiKey("[]", "kimi-for-coding"), "");
-  assert.equal(parseProviderApiKey('"just a string"', "kimi-for-coding"), "");
-});
-
-// readProviderApiKey (BET-740) — the IO wrapper around parseProviderApiKey,
-// driven with an INJECTED reader so no case here can touch a real auth store
-// on the live box. Missing file / unparseable bytes / absent provider / oauth
-// entry all degrade to "" (never throw); a valid api entry returns the key.
-const readVia = (text) => readProviderApiKey("kimi-for-coding", {
-  readFile: () => text,
-});
-
-test("readProviderApiKey returns \"\" when the auth store file is missing (reader throws)", async () => {
-  assert.equal(
-    await readProviderApiKey("kimi-for-coding", { readFile: () => { throw new Error("ENOENT"); } }),
-    "",
-  );
-});
-
-test("readProviderApiKey returns \"\" for unparseable JSON", async () => {
-  assert.equal(await readVia("not json{"), "");
-});
-
-test("readProviderApiKey returns \"\" for a provider with no entry", async () => {
-  assert.equal(await readVia(JSON.stringify({ anthropic: { type: "oauth", access: "x" } })), "");
-});
-
-test("readProviderApiKey returns \"\" for an oauth-type entry (no `key` field)", async () => {
-  assert.equal(
-    await readVia(JSON.stringify({ "kimi-for-coding": { type: "oauth", access: "x", refresh: "y" } })),
-    "",
-  );
-});
-
-test("readProviderApiKey returns \"\" for a non-api entry even when it carries a non-empty `key` (type gate)", async () => {
-  assert.equal(
-    await readVia(JSON.stringify({ "kimi-for-coding": { type: "oauth", key: "should-not-leak", access: "x" } })),
-    "",
-  );
-});
-
-test("readProviderApiKey returns the key for a valid api-type entry", async () => {
-  assert.equal(
-    await readVia(JSON.stringify({ "kimi-for-coding": { type: "api", key: "kimi-provider-key" } })),
-    "kimi-provider-key",
-  );
-});
-
-// ---------------------------------------------------------------------------
-// parseProviderOAuthToken (BET-1128) — the oauth sibling of
-// parseProviderApiKey. Reads the `access` token of an `oauth`-type entry in
-// opencode's own auth store (e.g. the `openai` entry for an OpenAI sign-in).
-// Never touches a real file.
-// ---------------------------------------------------------------------------
-
-const OPENAI_OAUTH = JSON.stringify({
-  openai: { type: "oauth", access: "mom-access-token", refresh: "mom-refresh", accountId: "acc-1", expires: 1788 },
-});
-
-test("parseProviderOAuthToken extracts the access token from an oauth-type entry", () => {
-  assert.equal(parseProviderOAuthToken(OPENAI_OAUTH, "openai"), "mom-access-token");
-});
-
-test("parseProviderOAuthToken returns \"\" for an api-type entry (no `access` field)", () => {
-  const raw = JSON.stringify({ openai: { type: "api", key: "some-key" } });
-  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
-});
-
-test("parseProviderOAuthToken returns \"\" for a provider with no entry", () => {
-  const raw = JSON.stringify({ anthropic: { type: "oauth", access: "x", refresh: "y" } });
-  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
-});
-
-test("parseProviderOAuthToken returns \"\" for a non-oauth entry even when it carries a non-empty `access` (type gate)", () => {
-  // type === "oauth" is the discriminant — a stray `access` on an api/common
-  // entry must never be trusted as a Bearer credential.
-  const raw = JSON.stringify({ openai: { type: "api", access: "should-not-leak", key: "x" } });
-  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
-  const rawNoType = JSON.stringify({ openai: { access: "still-no-type" } });
-  assert.equal(parseProviderOAuthToken(rawNoType, "openai"), "");
-});
-
-test("parseProviderOAuthToken returns \"\" for an empty-string access token", () => {
-  const raw = JSON.stringify({ openai: { type: "oauth", access: "" } });
-  assert.equal(parseProviderOAuthToken(raw, "openai"), "");
-});
-
-test("parseProviderOAuthToken returns \"\" for unparseable JSON", () => {
-  assert.equal(parseProviderOAuthToken("not json{", "openai"), "");
-});
-
-test("parseProviderOAuthToken returns \"\" for an empty auth store", () => {
-  assert.equal(parseProviderOAuthToken("{}", "openai"), "");
-});
-
-test("parseProviderOAuthToken never echoes the token into an exception (it doesn't throw at all)", () => {
-  assert.equal(parseProviderOAuthToken("null", "openai"), "");
-  assert.equal(parseProviderOAuthToken("[]", "openai"), "");
-  assert.equal(parseProviderOAuthToken('"just a string"', "openai"), "");
-});
-
-// readProviderOAuthToken (BET-1128) — the IO wrapper around
-// parseProviderOAuthToken, mirroring readProviderApiKey exactly: injectable
-// readFile, "" (never a throw) on missing file / unparseable / wrong type.
-const readOauthVia = (text) =>
-  readProviderOAuthToken("openai", { readFile: () => text });
-
-test("readProviderOAuthToken returns \"\" when the auth store file is missing (reader throws)", async () => {
-  assert.equal(
-    await readProviderOAuthToken("openai", { readFile: () => { throw new Error("ENOENT"); } }),
-    "",
-  );
-});
-
-test("readProviderOAuthToken returns \"\" for unparseable JSON", async () => {
-  assert.equal(await readOauthVia("not json{"), "");
-});
-
-test("readProviderOAuthToken returns \"\" for a provider with no entry", async () => {
-  assert.equal(await readOauthVia(JSON.stringify({ anthropic: { type: "oauth", access: "x" } })), "");
-});
-
-test("readProviderOAuthToken returns \"\" for an api-type entry", async () => {
-  assert.equal(await readOauthVia(JSON.stringify({ openai: { type: "api", key: "k" } })), "");
-});
-
-test("readProviderOAuthToken returns the access token for a valid oauth-type entry", async () => {
-  assert.equal(await readOauthVia(OPENAI_OAUTH), "mom-access-token");
-});
-
-// ---------------------------------------------------------------------------
-// parseAuthedProviderIds / readAuthedProviderIds (BET-1319) — the
-// subscription-status reader. Returns the top-level provider ids of
-// opencode's auth store, which is what both connect (PUT /auth/{id}) and
-// disconnect (DELETE /auth/{id}) write — so it reflects a completed
-// disconnect immediately, unlike GET /provider's process-lifetime connected[].
-// Pure parse + injectable-reader IO, never touches a real file.
-// ---------------------------------------------------------------------------
-
-test("parseAuthedProviderIds returns the top-level provider ids of a valid store", () => {
-  const raw = JSON.stringify({ anthropic: { type: "oauth" }, openai: { type: "oauth" } });
-  assert.deepEqual(parseAuthedProviderIds(raw), ["anthropic", "openai"]);
-});
-
-test("parseAuthedProviderIds returns [] for an empty store", () => {
-  assert.deepEqual(parseAuthedProviderIds("{}"), []);
-});
-
-test("parseAuthedProviderIds returns [] for malformed JSON", () => {
-  assert.deepEqual(parseAuthedProviderIds("not json{"), []);
-});
-
-test("parseAuthedProviderIds never echoes any values — returns [] for non-object roots", () => {
-  assert.deepEqual(parseAuthedProviderIds("null"), []);
-  assert.deepEqual(parseAuthedProviderIds("[]"), []);
-  assert.deepEqual(parseAuthedProviderIds('"just a string"'), []);
-});
-
-test("readAuthedProviderIds returns [] when the auth store file is missing (reader throws)", async () => {
-  assert.deepEqual(
-    await readAuthedProviderIds({ readFile: () => { throw new Error("ENOENT"); } }),
-    [],
-  );
-});
-
-test("readAuthedProviderIds returns the provider ids from a populated store", async () => {
-  const raw = JSON.stringify({ openai: { type: "oauth" }, "kimi-for-coding": { type: "api" } });
-  assert.deepEqual(
-    await readAuthedProviderIds({ readFile: () => raw }),
-    ["openai", "kimi-for-coding"],
-  );
-});
-
-test("readAuthedProviderIds returns [] for unparseable JSON", async () => {
-  assert.deepEqual(await readAuthedProviderIds({ readFile: () => "not json{" }), []);
-});
-
-// opencodeAuthPath (review cycle 2 Nit): mirrors messageSearch.mjs's
-// resolveDbPath() for the SAME opencode XDG data directory — XDG_DATA_HOME
-// first when set, else homedir()-based. Save/restore the env var so this
-// test can't leak state into any other test in the process.
-test("opencodeAuthPath resolves under homedir() by default", () => {
-  const saved = process.env.XDG_DATA_HOME;
-  delete process.env.XDG_DATA_HOME;
+async function withV2(routes, fn) {
+  const calls = [];
+  _setOcTransport(async (url, init = {}) => {
+    const u = new URL(String(url));
+    const method = init.method ?? "GET";
+    const body = init.body ? JSON.parse(init.body) : undefined;
+    const call = { method, path: u.pathname, query: Object.fromEntries(u.searchParams), body, headers: init.headers ?? {}, signal: init.signal };
+    calls.push(call);
+    const h = routes[`${method} ${u.pathname}`];
+    if (h === undefined) return new Response(`unexpected ${method} ${u.pathname}`, { status: 599 });
+    const out = typeof h === "function" ? await h(call) : h;
+    if (out instanceof Response) return out;
+    return out === undefined || out === null ? new Response(null, { status: 204 }) : json(out);
+  });
   try {
-    assert.equal(
-      opencodeAuthPath(),
-      join(homedir(), ".local", "share", "opencode", "auth.json"),
-    );
+    await fn(calls);
   } finally {
-    if (saved === undefined) delete process.env.XDG_DATA_HOME;
-    else process.env.XDG_DATA_HOME = saved;
+    _setOcTransport(null);
+    _resetSessionDirectoryCache();
+  }
+  return calls;
+}
+const withMockFetch = (handler, fn) => {
+  _setOcTransport(handler);
+  return fn().finally(() => _setOcTransport(null));
+};
+const only = (calls, method, path) => calls.filter((c) => c.method === method && c.path === path);
+
+const SESSION = (extra = {}) => ({
+  id: "ses_a",
+  projectID: "p",
+  model: { providerID: "anthropic", id: "claude-haiku-4-5", variant: "default" },
+  location: { directory: "/work/proj" },
+  ...extra,
+});
+
+afterEach(() => {
+  _setApiBase(null);
+  delete process.env.MANTA_OPENCODE_PASSWORD;
+});
+
+// ---------------------------------------------------------------------------
+// K1: endpoint + authentication
+// ---------------------------------------------------------------------------
+
+test("apiUrl targets local opencode port 4096 (V2 /api/* routes)", () => {
+  assert.equal(apiUrl("/api/session"), "http://127.0.0.1:4096/api/session");
+});
+
+test("opencodeAuthHeader: MANTA_OPENCODE_PASSWORD overrides; Basic base64('opencode:'+password)", async () => {
+  process.env.MANTA_OPENCODE_PASSWORD = "s3cret";
+  assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:s3cret").toString("base64")}`);
+});
+
+test("opencodeAuthHeader re-reads ~/.manta/opencode-password on EVERY call (file may appear after boot; nothing is cached)", async () => {
+  const file = statePath("opencode-password");
+  rmSync(file, { force: true });
+  try {
+    assert.equal(await opencodeAuthHeader(), undefined, "no file yet → no header, no throw");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "filepw\n", { mode: 0o600 });
+    assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:filepw").toString("base64")}`);
+    writeFileSync(file, "changed\n");
+    assert.equal(await opencodeAuthHeader(), `Basic ${Buffer.from("opencode:changed").toString("base64")}`, "a rotated password is picked up by the next call");
+  } finally {
+    rmSync(file, { force: true });
   }
 });
 
-test("opencodeAuthPath honours XDG_DATA_HOME when set, like resolveDbPath does", () => {
+test("every request carries the Authorization header; an explicit one is not overridden", async () => {
+  process.env.MANTA_OPENCODE_PASSWORD = "pw";
+  const want = `Basic ${Buffer.from("opencode:pw").toString("base64")}`;
+  const calls = await withV2({ "GET /api/session/active": { data: {} } }, async () => {
+    await listActiveSessionIds();
+  });
+  assert.equal(calls[0].headers.authorization, want);
+});
+
+test("the SSE request carries the Authorization header too", async () => {
+  process.env.MANTA_OPENCODE_PASSWORD = "pw";
+  let seen;
+  _setEventStreamTransport(async (url, init) => {
+    seen = { url: String(url), headers: init.headers };
+    return { ok: false, status: 503, statusText: "x" };
+  });
+  const stop = subscribeEvents(() => {}, { reconnectMs: 60_000 });
+  await new Promise((r) => setTimeout(r, 30));
+  stop();
+  _setEventStreamTransport(null);
+  assert.equal(seen.url, "http://127.0.0.1:4096/api/event");
+  assert.equal(seen.headers.authorization, `Basic ${Buffer.from("opencode:pw").toString("base64")}`);
+});
+
+test("_setApiBase points the client at another opencode (the sandbox smoke)", () => {
+  _setApiBase("http://127.0.0.1:5555/");
+  assert.equal(apiUrl("/api/info"), "http://127.0.0.1:5555/api/info");
+});
+
+test("parseSseFrame extracts JSON from data: lines; comments/heartbeats are null", () => {
+  assert.equal(parseSseFrame('data: {"type":"x","a":1}').type, "x");
+  assert.equal(parseSseFrame(": heartbeat"), null);
+});
+
+// ---------------------------------------------------------------------------
+// auth-store readers (credentials live behind GET /api/credential now)
+// ---------------------------------------------------------------------------
+
+const creds = (list) => async () => list;
+
+test("readProviderApiKey returns the ACTIVE key credential, else the first; '' when none / wrong type / unreadable", async () => {
+  const list = [
+    { id: "c1", integrationID: "kimi", active: false, value: { type: "key", key: "k-old" } },
+    { id: "c2", integrationID: "kimi", active: true, value: { type: "key", key: "k-live" } },
+    { id: "c3", integrationID: "openai", active: true, value: { type: "oauth", access: "a", refresh: "r", expires: 1 } },
+  ];
+  assert.equal(await readProviderApiKey("kimi", { listCredentials: creds(list) }), "k-live");
+  assert.equal(await readProviderApiKey("openai", { listCredentials: creds(list) }), "", "an oauth credential never supplies a key");
+  assert.equal(await readProviderApiKey("nobody", { listCredentials: creds(list) }), "");
+  assert.equal(await readProviderApiKey("kimi", { listCredentials: async () => { throw new Error("down"); } }), "");
+});
+
+test("readProviderOAuthToken returns the access token of an oauth credential only", async () => {
+  const list = [
+    { id: "c1", integrationID: "openai", active: true, value: { type: "oauth", access: "tok", refresh: "r", expires: 1 } },
+    { id: "c2", integrationID: "kimi", active: true, value: { type: "key", key: "k" } },
+  ];
+  assert.equal(await readProviderOAuthToken("openai", { listCredentials: creds(list) }), "tok");
+  assert.equal(await readProviderOAuthToken("kimi", { listCredentials: creds(list) }), "");
+  assert.equal(await readProviderOAuthToken("openai", { listCredentials: async () => { throw new Error("x"); } }), "");
+});
+
+test("readAuthedProviderIds lists the distinct integrations holding a credential; [] when unreadable", async () => {
+  const list = [{ integrationID: "a" }, { integrationID: "b" }, { integrationID: "a" }];
+  assert.deepEqual(await readAuthedProviderIds({ listCredentials: creds(list) }), ["a", "b"]);
+  assert.deepEqual(await readAuthedProviderIds({ listCredentials: async () => { throw new Error("x"); } }), []);
+});
+
+test("the credential readers go through GET /api/credential by default", async () => {
+  const calls = await withV2(
+    { "GET /api/credential": { data: [{ id: "c", integrationID: "kimi", active: true, value: { type: "key", key: "KK" } }] } },
+    async () => {
+      assert.equal(await readProviderApiKey("kimi"), "KK");
+    },
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("opencodeAuthPath still resolves the legacy auth.json used by the seat code (XDG_DATA_HOME honoured)", () => {
+  assert.equal(opencodeAuthPath(), join(homedir(), ".local", "share", "opencode", "auth.json"));
   const saved = process.env.XDG_DATA_HOME;
   process.env.XDG_DATA_HOME = "/tmp/xdg-test-home";
   try {
@@ -327,843 +241,980 @@ test("opencodeAuthPath honours XDG_DATA_HOME when set, like resolveDbPath does",
 });
 
 // ---------------------------------------------------------------------------
-// Session-directory scope
-//
-// Each session-mutating request (prompt_async, command, fork, compact) must
-// carry `?directory=<session.directory>` so opencode:
-//   1. runs tools in the project worktree (not the server's startup cwd), AND
-//   2. emits its SSE events on the matching scoped /event subscription.
-//
-// The directory comes from `sessionDirectoryCache`, populated by
-// createSession / forkSession / listSessions, and lazy-fetched via
-// `GET /session/{id}` on a miss.
+// sessions
 // ---------------------------------------------------------------------------
 
-// The non-streaming opencode calls now route through ocFetch → a pooled
-// node:http transport (NOT globalThis.fetch, which undici won't let us pool).
-// Install the test handler as the ocFetch transport instead. Handler signature
-// is unchanged: (url, init) => Promise<Response>.
-function withMockFetch(handler, fn) {
-  _setOcTransport(handler);
-  return fn().finally(() => {
-    _setOcTransport(null);
+test("createSession POSTs /api/session with the location, returns the V1-shaped record and primes the directory cache", async () => {
+  const calls = await withV2({ "POST /api/session": () => ({ data: SESSION({ title: "t" }) }) }, async () => {
+    const s = await createSession({ directory: "/work/proj", title: "t" });
+    assert.equal(s.id, "ses_a");
+    assert.equal(s.directory, "/work/proj");
+    assert.equal(s.title, "t");
+    assert.equal(cachedSessionDirectory("ses_a"), "/work/proj");
+    assert.deepEqual(knownSessionDirectories(), ["/work/proj"]);
   });
-}
+  assert.deepEqual(calls[0].body, { location: { directory: "/work/proj" }, title: "t" });
+});
 
-// Shared mock-fetch helper for the single-message splice tests: a GET to
-// /message/m1 returns `raw` as JSON and everything else 204s. Deduplicates the
-// boilerplate the two `getMessage` tests share (duplication-gate, min-tokens 70).
-function withMessageFetch(raw, body) {
-  return withMockFetch(
-    async (url) =>
-      String(url).includes("/message/m1")
-        ? new Response(JSON.stringify(raw), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          })
-        : new Response(null, { status: 204 }),
-    body,
-  );
-}
-
-// Shared mock-fetch helper for the cached-session tests: seeds a fresh
-// directory cache and serves a GET /session?directory= returning `template`,
-// recording every call so the caller can assert on it after the body runs.
-// Collapses the createSession/runCommand test setup prefix (duplication-gate).
-async function withSessionDirectoryMock(template, body) {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push({ url: String(url), method: opts?.method ?? "GET" });
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify(template), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    body,
-  );
-  return { calls };
-}
-
-// Shared stream-transport capture preamble for the subscribeEvents tests:
-// arms the event stream transport to record every URL it is asked to open,
-// resets directory-cache/stream-ready state, and returns callers their
-// `openedUrls` plus a `cleanup` that tears the transport down. Collapses the
-// three tests' identical setup blocks (duplication-gate).
-function setupEventStreamCapture() {
-  const openedUrls = [];
-  _setEventStreamTransport(async (url) => {
-    openedUrls.push(String(url));
-    return { ok: true, body: { getReader: () => ({ read: () => new Promise(() => {}), releaseLock() {} }) } };
+test("createSession omits an empty title (V2 titles the session itself)", async () => {
+  const calls = await withV2({ "POST /api/session": { data: SESSION() } }, async () => {
+    await createSession({ directory: "/work/proj" });
   });
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  return { openedUrls, cleanup: () => _setEventStreamTransport(null) };
-}
-
-test("createSession primes directory cache; sendPrompt then appends ?directory=", async () => {
-  const { calls } = await withSessionDirectoryMock(
-    { id: "ses_x", title: "t", directory: "/work/proj", projectID: "pid" },
-    async () => {
-      await createSession({ directory: "/work/proj", title: "t" });
-      await sendPrompt({ sessionId: "ses_x", text: "hi" });
-    },
-  );
-  const prompt = calls.find((c) => c.url.includes("/prompt_async"));
-  assert.ok(prompt, `expected prompt_async call, got ${JSON.stringify(calls)}`);
-  assert.ok(
-    prompt.url.includes("directory=%2Fwork%2Fproj"),
-    `prompt URL missing scoped directory: ${prompt.url}`,
-  );
-});
-
-function sessionFetch(session, fallback) {
-  return async (url) => {
-    if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-      return new Response(JSON.stringify(session), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    return fallback(url);
-  };
-}
-
-test("sendPrompt non-2xx carries status + Retry-After (BET-1230)", async () => {
-  // The model-turn path must mirror the usage meter's HTTP error shape so a
-  // refusal can be told apart by status (402/429/5xx) without string-matching.
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
-      new Response("slow down", {
-        status: 429,
-        headers: { "retry-after": "30" },
-      }),
-    ),
-    async () => {
-      let thrown = null;
-      try {
-        await sendPrompt({ sessionId: "ses_rl", text: "hi" });
-      } catch (e) {
-        thrown = e;
-      }
-      assert.ok(thrown, "expected sendPrompt to throw on a non-2xx");
-      assert.equal(thrown.status, 429);
-      assert.equal(thrown.retryAfterMs, 30_000);
-      assert.match(thrown.message, /429/);
-    },
-  );
-});
-
-test("transport refusal records Retry-After per-session for the pump to bridge (BET-1270 6c)", async () => {
-  // The prompt_async POST carries Retry-After but is a THROWN error, not a
-  // session.error SSE event — getAndClearSessionRefusal is how the pump attaches
-  // it to the matching session.error so providerHealth gets a real cooldown.
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    sessionFetch({ id: "ses_rl", title: "t", directory: "/w", projectID: "p" }, () =>
-      new Response("slow down", {
-        status: 429,
-        headers: { "retry-after": "900" },
-      }),
-    ),
-    async () => {
-      await assert.rejects(() => sendPrompt({ sessionId: "ses_rl", text: "hi" }));
-      const refusal = getAndClearSessionRefusal("ses_rl");
-      // Retry-After: 900 seconds -> 900_000 ms, carried to the pump.
-      assert.deepEqual(refusal, { httpStatus: 429, retryAfterMs: 900_000 });
-      // Read-once: a second read returns undefined (the pump must not re-apply it).
-      assert.equal(getAndClearSessionRefusal("ses_rl"), undefined);
-      // A session with no refusal returns undefined.
-      assert.equal(getAndClearSessionRefusal("ses_other"), undefined);
-    },
-  );
-});
-
-test("sendPrompt includes agent when passed and omits it when not", async () => {
-  // BET-949: the plan-mode chip must drive `agent:"plan"` on the prompt_async
-  // body; an omitted agent keeps today's body byte-identical.
-  _resetSessionDirectoryCache();
-  const bodies = [];
-  await withMockFetch(
-    async (url, opts) => {
-      if (String(url).includes("/ses_a/prompt_async")) {
-        bodies.push(opts.body ? JSON.parse(String(opts.body)) : {});
-        return new Response(null, { status: 204 });
-      }
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_a", title: "t", directory: "/w", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await sendPrompt({ sessionId: "ses_a", text: "plan it", agent: "plan" });
-      await sendPrompt({ sessionId: "ses_a", text: "build it" });
-    },
-  );
-  assert.ok(
-    bodies.some((b) => b.agent === "plan"),
-    "expected an agent:plan body for the plan-mode prompt",
-  );
-  assert.ok(
-    bodies.some((b) => !("agent" in b)),
-    "expected an agent-less body for the plain prompt",
-  );
-});
-
-test("getSessionAgent returns the session's agent field (or null)", async () => {
-  // BET-949: seeds the plan toggle from a session already set to plan outside
-  // MantaUI. Returns the agent name, and null on absence / non-OK.
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/session/ses_plan")) {
-        return new Response(
-          JSON.stringify({ id: "ses_plan", agent: "plan", directory: "/w" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (String(url).includes("/session/ses_build")) {
-        return new Response(
-          JSON.stringify({ id: "ses_build", directory: "/w" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (String(url).includes("/session/ses_gone")) {
-        return new Response(null, { status: 404 });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      assert.equal(await getSessionAgent("ses_plan"), "plan");
-      assert.equal(await getSessionAgent("ses_build"), null);
-      assert.equal(await getSessionAgent("ses_gone"), null);
-    },
-  );
+  assert.equal("title" in calls[0].body, false);
 });
 
 test("createSession expands a leading ~ before POSTing (no /home/$USER/~ corruption)", async () => {
-  // Regression: resolveProjectCwd (/clear, /fork) returns raw `~/projects/x`.
-  // createSession passed it straight to opencode, which resolves the tilde
-  // against its OWN server cwd ($HOME) and persists `/home/<user>/~/projects/x`.
-  // The fix expands `~` here at the creation chokepoint. Assert the POSTed
-  // ?directory= is the absolute home-expanded path and contains no literal `~`.
-  _resetSessionDirectoryCache();
-  const calls = [];
-  const home = (await import("node:os")).homedir();
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push({ url: String(url), method: opts?.method ?? "GET" });
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        // Echo back whatever directory we were sent so the test asserts on
-        // OUR input, not a server-canonicalized value.
-        const sent = decodeURIComponent(
-          String(url).split("?directory=")[1].split("&")[0],
-        );
-        return new Response(
-          JSON.stringify({ id: "ses_t", title: "t", directory: sent, projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await createSession({ directory: "~/projects/better-ui", title: "t" });
-    },
-  );
-  const create = calls.find((c) =>
-    c.url.startsWith("http://127.0.0.1:4096/session?directory="),
-  );
-  assert.ok(create, "expected a /session create call");
-  const sentDir = decodeURIComponent(
-    create.url.split("?directory=")[1].split("&")[0],
-  );
-  assert.equal(
-    sentDir,
-    `${home}/projects/better-ui`,
-    "createSession must expand ~ to an absolute path",
-  );
-  assert.ok(
-    !sentDir.includes("~"),
-    `directory still contains a literal tilde: ${sentDir}`,
-  );
+  const calls = await withV2({ "POST /api/session": () => ({ data: SESSION({ location: { directory: join(homedir(), "projects/x") } }) }) }, async () => {
+    await createSession({ directory: "~/projects/x" });
+  });
+  assert.equal(calls[0].body.location.directory, join(homedir(), "projects/x"));
+  const bare = await withV2({ "POST /api/session": { data: SESSION() } }, async () => {
+    await createSession({ directory: "~" });
+  });
+  assert.equal(bare[0].body.location.directory, homedir());
 });
 
 test("createSession leaves an already-absolute directory untouched", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push(String(url));
-      if (String(url).startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(
-          JSON.stringify({ id: "ses_a", title: "t", directory: "/srv/app", projectID: "p" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await createSession({ directory: "/srv/app", title: "t" });
-    },
-  );
-  const create = calls.find((u) =>
-    u.startsWith("http://127.0.0.1:4096/session?directory="),
-  );
-  const sentDir = decodeURIComponent(create.split("?directory=")[1].split("&")[0]);
-  assert.equal(sentDir, "/srv/app", "absolute dir must pass through unchanged");
+  const calls = await withV2({ "POST /api/session": { data: SESSION() } }, async () => {
+    await createSession({ directory: "/srv/app" });
+  });
+  assert.equal(calls[0].body.location.directory, "/srv/app");
 });
 
-test("runCommand carries ?directory= from cached session", async () => {
-  const { calls } = await withSessionDirectoryMock(
-    { id: "ses_q", title: "t", directory: "/work/repo", projectID: "pid" },
-    async () => {
-      await createSession({ directory: "/work/repo", title: "t" });
-      await runCommand({ sessionId: "ses_q", command: "do", arguments: "" });
-    },
-  );
-  const cmd = calls.find((c) => c.url.includes("/command"));
-  assert.ok(cmd, "expected /command call");
-  assert.ok(
-    cmd.url.includes("directory=%2Fwork%2Frepo"),
-    `command URL missing scoped directory: ${cmd.url}`,
-  );
+test("createSession forwards the metadata marker and rejects a non-object one", async () => {
+  const calls = await withV2({ "POST /api/session": { data: SESSION({ metadata: { role: "cto" } }) } }, async () => {
+    const s = await createSession({ directory: "/w", metadata: { role: "cto" } });
+    assert.deepEqual(s.metadata, { role: "cto" });
+    await assert.rejects(createSession({ directory: "/w", metadata: [1] }), /plain object/);
+  });
+  assert.deepEqual(calls[0].body.metadata, { role: "cto" });
 });
 
-test("sendPrompt lazy-fetches directory via GET /session/{id} on cache miss", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push({ url: String(url), method: opts?.method ?? "GET" });
-      if (
-        String(url) === "http://127.0.0.1:4096/session/ses_miss" &&
-        (opts?.method ?? "GET") === "GET"
-      ) {
-        return new Response(JSON.stringify({
-          id: "ses_miss",
-          directory: "/restored/dir",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await sendPrompt({ sessionId: "ses_miss", text: "hi" });
-    },
-  );
-  const lookup = calls.find((c) => c.url === "http://127.0.0.1:4096/session/ses_miss" && c.method === "GET");
-  assert.ok(lookup, "expected lazy GET /session/{id}");
-  const prompt = calls.find((c) => c.url.includes("/prompt_async"));
-  assert.ok(prompt && prompt.url.includes("directory=%2Frestored%2Fdir"), `prompt URL: ${prompt?.url}`);
+test("createSession translates the Manta permission ruleset to V2 rules (catch-all deny FIRST, bash→shell)", async () => {
+  const calls = await withV2({ "POST /api/session": { data: SESSION() } }, async () => {
+    await createSession({
+      directory: "/w",
+      permission: [
+        { permission: "*", pattern: "**", action: "deny" },
+        { permission: "bash", pattern: "**", action: "allow" },
+        { permission: "edit", pattern: "src/*", action: "allow" },
+      ],
+    });
+  });
+  assert.deepEqual(calls[0].body.permissions, [
+    { action: "*", resource: "*", effect: "deny" },
+    { action: "shell", resource: "*", effect: "allow" },
+    { action: "edit", resource: "src/*", effect: "allow" },
+  ]);
 });
 
-test("sendPrompt lazy-fetch notifies directory listeners (opens scoped SSE stream)", async () => {
-  // Regression: the lazy-fetch branch used a bare sessionDirectoryCache.set,
-  // skipping rememberSessionDirectory — so directoryListeners never fired and
-  // the scoped /event?directory= stream for an existing session was never
-  // opened. opencode then emitted that prompt's response events onto a stream
-  // with no subscriber: SSE "broken in existing sessions". This asserts the
-  // listener now fires with the resolved directory.
-  _resetSessionDirectoryCache();
-  const notified = [];
-  const unsub = _onSessionDirectoryAdded((dir) => notified.push(dir));
-  try {
-    await withMockFetch(
-      async (url, opts) => {
-        if (
-          String(url) === "http://127.0.0.1:4096/session/ses_existing" &&
-          (opts?.method ?? "GET") === "GET"
-        ) {
-          return new Response(
-            JSON.stringify({ id: "ses_existing", directory: "/proj/worktree" }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
-        }
-        return new Response(null, { status: 204 });
-      },
-      async () => {
-        await sendPrompt({ sessionId: "ses_existing", text: "hi" });
-      },
-    );
-  } finally {
-    unsub();
+test("createSession non-2xx carries err.status (4xx = definitive rejection)", async () => {
+  await withV2({ "POST /api/session": () => new Response("bad", { status: 400 }) }, async () => {
+    await assert.rejects(createSession({ directory: "/w" }), (e) => e.status === 400 && /createSession 400/.test(e.message));
+  });
+});
+
+test("readSession: 200 found (mapped), 404 missing, anything else unknown", async () => {
+  for (const [status, state] of [[404, "missing"], [500, "unknown"]]) {
+    await withV2({ "GET /api/session/ses_a": () => new Response("x", { status }) }, async () => {
+      assert.equal((await readSession("ses_a")).state, state);
+    });
   }
-  assert.deepEqual(
-    notified,
-    ["/proj/worktree"],
-    "lazy-fetch must notify directory listeners exactly once with the resolved dir",
-  );
+  await withV2({ "GET /api/session/ses_a": { data: SESSION({ metadata: { m: 1 } }) } }, async () => {
+    const r = await readSession("ses_a");
+    assert.equal(r.state, "found");
+    assert.equal(r.session.directory, "/work/proj");
+    assert.deepEqual(r.session.metadata, { m: 1 });
+  });
+  assert.equal((await readSession("")).state, "missing");
 });
 
-test("sendPrompt omits ?directory= when session is unknown (best-effort)", async () => {
-  _resetSessionDirectoryCache();
-  let promptUrl = "";
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      if (u === "http://127.0.0.1:4096/session/ses_unknown" && (opts?.method ?? "GET") === "GET") {
-        return new Response("not found", { status: 404 });
-      }
-      if (u.includes("/prompt_async")) promptUrl = u;
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await sendPrompt({ sessionId: "ses_unknown", text: "hi" });
-    },
-  );
-  assert.ok(promptUrl.endsWith("/session/ses_unknown/prompt_async"), promptUrl);
-  assert.ok(!promptUrl.includes("directory="), `unknown session should not append directory: ${promptUrl}`);
+test("sessionExists: direct lookup — 200 alive, 404 gone, 5xx/network assume alive; empty id → false with no request", async () => {
+  await withV2({ "GET /api/session/ses_a": { data: SESSION() } }, async () => assert.equal(await sessionExists("ses_a"), true));
+  await withV2({ "GET /api/session/ses_a": () => new Response("x", { status: 404 }) }, async () => assert.equal(await sessionExists("ses_a"), false));
+  await withV2({ "GET /api/session/ses_a": () => new Response("x", { status: 503 }) }, async () => assert.equal(await sessionExists("ses_a"), true));
+  _setOcTransport(async () => { throw new Error("ECONNRESET"); });
+  assert.equal(await sessionExists("ses_a"), true);
+  _setOcTransport(async () => { throw new Error("must not be called"); });
+  assert.equal(await sessionExists(""), false);
+  _setOcTransport(null);
 });
 
-test("forkSession carries parent ?directory= and caches it for the new session", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      calls.push({ url: u, method: opts?.method ?? "GET" });
-      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_parent",
-          title: "p",
-          directory: "/proj/a",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.includes("/fork")) {
-        return new Response(JSON.stringify({
-          id: "ses_child",
-          title: "c",
-          directory: "/proj/a",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await createSession({ directory: "/proj/a", title: "p" });
-      await forkSession({ sessionId: "ses_parent" });
-      // Sending a prompt to the new session should use the cached dir.
-      await sendPrompt({ sessionId: "ses_child", text: "hi" });
-    },
-  );
-  const fork = calls.find((c) => c.url.includes("/fork"));
-  const childPrompt = calls.find((c) => c.url.includes("/ses_child/prompt_async"));
-  assert.ok(fork.url.includes("directory=%2Fproj%2Fa"), fork.url);
-  assert.ok(
-    childPrompt.url.includes("directory=%2Fproj%2Fa"),
-    `child prompt missing scoped directory: ${childPrompt.url}`,
-  );
+test("getSessionAgent / getSessionDirectory read the session record (null on miss)", async () => {
+  await withV2({ "GET /api/session/ses_a": { data: SESSION({ agent: "plan" }) } }, async () => {
+    assert.equal(await getSessionAgent("ses_a"), "plan");
+    assert.equal(await getSessionDirectory("ses_a"), "/work/proj");
+  });
+  await withV2({ "GET /api/session/ses_a": { data: SESSION() } }, async () => assert.equal(await getSessionAgent("ses_a"), null));
+  await withV2({ "GET /api/session/ses_a": () => new Response("x", { status: 404 }) }, async () => {
+    assert.equal(await getSessionAgent("ses_a"), null);
+    assert.equal(await getSessionDirectory("ses_a"), null);
+  });
 });
 
-test("abortSession appends ?directory= from cache", async () => {
-  // Regression: without ?directory= the abort POST lands on the wrong
-  // (un-scoped) worker. opencode emits some idle signal so the UI's
-  // running indicator clears, but the per-directory worker keeps
-  // generating tokens. ESC felt like a no-op server-side.
-  _resetSessionDirectoryCache();
-  let abortUrl = "";
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_ab",
-          title: "t",
-          directory: "/proj/ab",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.includes("/abort")) abortUrl = u;
-      return new Response(null, { status: 204 });
+test("listSessions maps records, passes the directory filter, follows pages and primes the cache", async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => SESSION({ id: `ses_${i}` }));
+  const calls = await withV2(
+    {
+      "GET /api/session": ({ query }) =>
+        query.cursor ? { data: [SESSION({ id: "ses_last" })], cursor: { next: null } } : { data: page1, cursor: { next: "CUR" } },
     },
     async () => {
-      await createSession({ directory: "/proj/ab", title: "t" });
-      await abortSession("ses_ab");
+      const out = await listSessions("/work/proj");
+      assert.equal(out.length, 101);
+      assert.equal(out[0].directory, "/work/proj");
+      assert.equal(cachedSessionDirectory("ses_last"), "/work/proj");
     },
   );
-  assert.ok(
-    abortUrl.includes("directory=%2Fproj%2Fab"),
-    `abort URL missing scoped directory: ${abortUrl}`,
-  );
+  assert.equal(calls[0].query.directory, "/work/proj");
+  assert.equal(calls[1].query.cursor, "CUR");
 });
 
-test("abortSession lazy-fetches directory via GET /session/{id} on cache miss", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      calls.push({ url: u, method: opts?.method ?? "GET" });
-      if (u === "http://127.0.0.1:4096/session/ses_amiss" && (opts?.method ?? "GET") === "GET") {
-        return new Response(
-          JSON.stringify({ id: "ses_amiss", directory: "/restored/abort" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
+test("forkSession posts {before} and returns the NEW session (read from the fork response)", async () => {
+  const calls = await withV2(
+    { "POST /api/session/ses_a/fork": { data: SESSION({ id: "ses_child", fork: { sessionID: "ses_a" } }) } },
     async () => {
-      await abortSession("ses_amiss");
+      const s = await forkSession({ sessionId: "ses_a", messageID: "msg_9" });
+      assert.equal(s.id, "ses_child");
+      assert.equal(cachedSessionDirectory("ses_child"), "/work/proj");
     },
   );
-  const abort = calls.find((c) => c.url.includes("/abort"));
-  assert.ok(abort, "expected /abort call");
-  assert.ok(
-    abort.url.includes("directory=%2Frestored%2Fabort"),
-    `abort URL missing scoped directory after lazy fetch: ${abort.url}`,
-  );
+  assert.deepEqual(calls[0].body, { before: "msg_9" });
 });
 
-test("compactSession appends ?directory= from cache", async () => {
-  _resetSessionDirectoryCache();
-  let compactUrl = "";
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_z",
-          title: "t",
-          directory: "/proj/z",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.includes("/compact")) compactUrl = u;
-      return new Response(null, { status: 204 });
+test("compactSession / deleteSessionRaw / abortSession hit the V2 routes", async () => {
+  const calls = await withV2(
+    {
+      "POST /api/session/ses_a/compact": null,
+      "DELETE /api/session/ses_a": null,
+      "POST /api/session/ses_a/interrupt": { interrupted: true },
     },
     async () => {
-      await createSession({ directory: "/proj/z", title: "t" });
-      await compactSession("ses_z");
+      await compactSession("ses_a");
+      await abortSession("ses_a");
+      await deleteSessionRaw("ses_a");
     },
   );
-  assert.ok(
-    compactUrl.includes("directory=%2Fproj%2Fz"),
-    `compact URL missing scoped directory: ${compactUrl}`,
-  );
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /api/session/ses_a/compact", "POST /api/session/ses_a/interrupt", "DELETE /api/session/ses_a"]);
+  assert.equal(calls[1].query.resume, "false");
+});
+
+test("abortSession carries a caller's bounded signal and throws on non-2xx", async () => {
+  const ac = new AbortController();
+  const calls = await withV2({ "POST /api/session/ses_a/interrupt": { interrupted: false } }, async () => {
+    await abortSession("ses_a", { signal: ac.signal });
+  });
+  assert.equal(calls[0].signal, ac.signal);
+  await withV2({ "POST /api/session/ses_a/interrupt": () => new Response("no", { status: 500 }) }, async () => {
+    await assert.rejects(abortSession("ses_a"), /abortSession 500/);
+  });
 });
 
 // ---------------------------------------------------------------------------
-// Permission flow scope
-//
-// Regression: opencode's WorkspaceRoutingMiddleware returns [] from the
-// UNSCOPED /permission list (and 404s an unscoped reply) for a session bound
-// to a non-default directory. Without ?directory= the mobile PermissionCard
-// never appeared and trust-mode auto-allow failed with
-// PermissionNotFoundError — either way the turn hung. Same root cause as the
-// question scoping regression (an UNSCOPED call returns 200 / 404 without
-// reaching the session).
+// prompts
 // ---------------------------------------------------------------------------
 
-test("listPermissions appends ?directory= from cache", async () => {
-  _resetSessionDirectoryCache();
-  let permUrl = "";
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_p",
-          title: "t",
-          directory: "/proj/perm",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.includes("/permission")) {
-        permUrl = u;
-        return new Response("[]", {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
+test("sendPrompt POSTs {text} to /api/session/{id}/prompt; no model/agent → no model/agent request", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
     async () => {
-      await createSession({ directory: "/proj/perm", title: "t" });
-      await listPermissions("ses_p");
+      await sendPrompt({ sessionId: "ses_a", text: "hi" });
     },
   );
-  assert.ok(
-    permUrl.includes("directory=%2Fproj%2Fperm"),
-    `listPermissions URL missing scoped directory: ${permUrl}`,
-  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/prompt")[0].body, { text: "hi" });
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1);
 });
 
-test("listPermissions omits ?directory= when no sessionId given", async () => {
-  _resetSessionDirectoryCache();
-  let permUrl = "";
-  await withMockFetch(
-    async (url) => {
-      permUrl = String(url);
-      return new Response("[]", {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
+test("sendPrompt: attachments → files, mentions → agents, messageID → id, delivery passed through", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/prompt": { data: {} } },
     async () => {
-      await listPermissions();
-    },
-  );
-  assert.ok(
-    !permUrl.includes("directory="),
-    `unscoped listPermissions should not append directory: ${permUrl}`,
-  );
-});
-
-test("replyPermission appends ?directory= from cache (auto-allow path)", async () => {
-  _resetSessionDirectoryCache();
-  let replyUrl = "";
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      if (u.startsWith("http://127.0.0.1:4096/session?directory=")) {
-        return new Response(JSON.stringify({
-          id: "ses_pr",
-          title: "t",
-          directory: "/proj/preply",
-          projectID: "pid",
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (u.includes("/reply")) replyUrl = u;
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      await createSession({ directory: "/proj/preply", title: "t" });
-      await replyPermission({
-        requestId: "per_123",
-        reply: "always",
-        sessionId: "ses_pr",
+      await sendPrompt({
+        sessionId: "ses_a",
+        text: "look @explore",
+        attachments: [{ remotePath: "/up/a.png", mime: "image/png", filename: "a.png" }],
+        mentions: [{ name: "explore", source: { value: "@explore", start: 5, end: 13 } }],
+        messageID: "msg_x",
+        delivery: "queue",
       });
     },
   );
-  assert.ok(
-    replyUrl.includes("/permission/per_123/reply"),
-    `reply URL wrong path: ${replyUrl}`,
-  );
-  assert.ok(
-    replyUrl.includes("directory=%2Fproj%2Fpreply"),
-    `replyPermission URL missing scoped directory: ${replyUrl}`,
-  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/prompt")[0].body, {
+    text: "look @explore",
+    files: [{ uri: "file:///up/a.png", name: "a.png" }],
+    agents: [{ name: "explore", mention: { start: 5, end: 13, text: "@explore" } }],
+    id: "msg_x",
+    delivery: "queue",
+  });
 });
 
-// ---------------------------------------------------------------------------
-// Session-scoped filtering for listQuestions / listPermissions (BET-110)
-//
-// opencode's /question and /permission endpoints are `?directory=`-scoped, not
-// session-scoped. A directory can hold pending items from multiple sessions
-// (including orphan/subagent sessions). listQuestions/listPermissions must
-// filter the directory-wide response down to the requested sessionId so callers
-// never see cross-session leaks or stale/orphan asks.
-// ---------------------------------------------------------------------------
-
-test("listPermissions filters directory-wide response to the requested sessionId", async () => {
-  _resetSessionDirectoryCache();
-  const calls = [];
-  await withMockFetch(
-    async (url, opts) => {
-      calls.push(String(url));
-      // getSessionDirectoryQuery lazy-fetches the session's directory.
-      if (String(url) === "http://127.0.0.1:4096/session/ses_B") {
-        return new Response(
-          JSON.stringify({ id: "ses_B", directory: "/shared/dir" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (String(url).startsWith("http://127.0.0.1:4096/permission?directory=")) {
-        // Directory-wide response: permissions from THREE different sessions.
-        return new Response(
-          JSON.stringify([
-            { id: "per_a", sessionID: "ses_A", permission: "Bash", reply: null },
-            { id: "per_b", sessionID: "ses_B", permission: "Write", reply: null },
-            { id: "per_c", sessionID: "ses_C", permission: "Bash", reply: null },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
+test("sendPrompt sets the session MODEL only when it differs (V2 keeps the model on the session)", async () => {
+  const model = { providerID: "anthropic", modelID: "claude-opus-5-5", variant: "high" };
+  const calls = await withV2(
+    { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/model": null, "POST /api/session/ses_a/prompt": { data: {} } },
     async () => {
-      const result = await listPermissions("ses_B");
-      assert.deepEqual(
-        result,
-        [{ id: "per_b", sessionID: "ses_B", permission: "Write", reply: null }],
-        "must return only the requested session's permissions",
-      );
+      await sendPrompt({ sessionId: "ses_a", text: "x", model });
+      await sendPrompt({ sessionId: "ses_a", text: "y", model: { providerID: "anthropic", modelID: "claude-haiku-4-5" } });
     },
   );
+  const sets = only(calls, "POST", "/api/session/ses_a/model");
+  assert.equal(sets.length, 1, "the second prompt names the model the session already has");
+  assert.deepEqual(sets[0].body, { model: { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" } });
+  assert.equal("model" in only(calls, "POST", "/api/session/ses_a/prompt")[0].body, false, "the prompt body never carries a model");
 });
 
-test("listQuestions filters directory-wide response to the requested sessionId", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url, opts) => {
-      // getSessionDirectoryQuery lazy-fetches the session's directory.
-      if (String(url) === "http://127.0.0.1:4096/session/ses_B") {
-        return new Response(
-          JSON.stringify({ id: "ses_B", directory: "/shared/dir" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (String(url).startsWith("http://127.0.0.1:4096/question?directory=")) {
-        // Directory-wide response: questions from THREE different sessions,
-        // plus an orphan session (ses_orphan) that should be dropped.
-        return new Response(
-          JSON.stringify([
-            { id: "que_1", sessionID: "ses_A", questions: [{ question: "OK?", answers: [] }] },
-            { id: "que_2", sessionID: "ses_B", questions: [{ question: "Your move?", answers: [] }] },
-            { id: "que_3", sessionID: "ses_orphan", questions: [{ question: "stale", answers: [] }] },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
+test("sendPrompt agent: an explicit agent is set when different; omitting it after plan mode returns to build", async () => {
+  const state = { agent: undefined };
+  const calls = await withV2(
+    {
+      "GET /api/session/ses_a": () => ({ data: SESSION({ agent: state.agent }) }),
+      "POST /api/session/ses_a/agent": ({ body }) => { state.agent = body.agent; return null; },
+      "POST /api/session/ses_a/prompt": { data: {} },
     },
     async () => {
-      const result = await listQuestions("ses_B");
-      assert.deepEqual(
-        result,
-        [{ id: "que_2", sessionID: "ses_B", questions: [{ question: "Your move?", answers: [] }] }],
-        "must return only the requested session's questions",
-      );
+      await sendPrompt({ sessionId: "ses_a", text: "plan it", agent: "plan" });
+      await sendPrompt({ sessionId: "ses_a", text: "again", agent: "plan" });
+      await sendPrompt({ sessionId: "ses_a", text: "now build" });
+      await sendPrompt({ sessionId: "ses_a", text: "and again" });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/agent").map((c) => c.body.agent), ["plan", "build"]);
+});
+
+test("sendPrompt non-2xx carries status + Retry-After (BET-1230) and records the transport refusal (BET-1270 6c)", async () => {
+  await withV2(
+    {
+      "GET /api/session/ses_a": { data: SESSION() },
+      "POST /api/session/ses_a/prompt": () => new Response("limit", { status: 429, headers: { "retry-after": "7" } }),
+    },
+    async () => {
+      await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "x" }), (e) => e.status === 429 && e.retryAfterMs === 7000);
+      assert.deepEqual(getAndClearSessionRefusal("ses_a"), { httpStatus: 429, retryAfterMs: 7000 });
+      assert.equal(getAndClearSessionRefusal("ses_a"), undefined, "read-and-clear");
     },
   );
 });
 
-test("listPermissions without sessionId returns unfiltered directory-wide list", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/permission")) {
-        return new Response(
-          JSON.stringify([
-            { id: "per_x", sessionID: "ses_X", permission: "Bash", reply: null },
-            { id: "per_y", sessionID: "ses_Y", permission: "Write", reply: null },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const result = await listPermissions(null);
-      assert.equal(result.length, 2, "unscoped call returns full list");
-    },
-  );
+test("sendPrompt on an unknown session fails with the 404 (nothing is posted)", async () => {
+  const calls = await withV2({ "GET /api/session/ses_gone": () => new Response("nf", { status: 404 }) }, async () => {
+    await assert.rejects(sendPrompt({ sessionId: "ses_gone", text: "x" }), (e) => e.status === 404);
+  });
+  assert.equal(calls.length, 1);
 });
 
-test("listQuestions without sessionId returns unfiltered directory-wide list", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      if (String(url).startsWith("http://127.0.0.1:4096/question")) {
-        return new Response(
-          JSON.stringify([
-            { id: "que_x", sessionID: "ses_X", questions: [{ question: "q?", answers: [] }] },
-            { id: "que_y", sessionID: "ses_Y", questions: [{ question: "q2?", answers: [] }] },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response(null, { status: 204 });
-    },
+test("runCommand POSTs {name, text} to the command route", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": null },
     async () => {
-      const result = await listQuestions(null);
-      assert.equal(result.length, 2, "unscoped call returns full list");
+      await runCommand({ sessionId: "ses_a", command: "init", arguments: "now" });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "init", text: "now" });
+});
+
+test("runCommand non-2xx carries err.status (admission: definitive 4xx vs unknown)", async () => {
+  await withV2(
+    { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": () => new Response("bad", { status: 400 }) },
+    async () => {
+      await assert.rejects(runCommand({ sessionId: "ses_a", command: "nope", arguments: "" }), (e) => e.status === 400);
     },
   );
 });
 
 // ---------------------------------------------------------------------------
-// Fail-soft listing on non-OK (BET-1020)
-//
-// Upstream opencode #38912: GET /permission returns 400 whenever ANY pending
-// request carries unset optional metadata (glob / grep / webfetch / etc.). The
-// whole array is validated at once, so one malformed pending item 400s the
-// entire listing — including the good request the user is waiting on. The
-// READ listings must fail soft (return []) so the live SSE path, the primary
-// source, keeps driving the card; the REPLY path must keep throwing.
+// running state
 // ---------------------------------------------------------------------------
 
-test("listPermissions returns [] on a 400 and does not throw", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/permission")) {
-        return new Response("one malformed pending item", { status: 400 });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const result = await listPermissions();
-      assert.deepEqual(result, [], "400 must yield an empty list, not throw");
-    },
-  );
+test("getSessionStatus / listActiveSessionIds / listSessionStatuses read GET /api/session/active", async () => {
+  await withV2({ "GET /api/session/active": { data: { ses_a: { type: "running" }, ses_b: { type: "running" } } } }, async () => {
+    _resetSessionDirectoryCache();
+    assert.equal(await getSessionStatus("ses_a"), "busy");
+    assert.equal(await getSessionStatus("ses_zzz"), "idle");
+    assert.deepEqual((await listActiveSessionIds()).sort(), ["ses_a", "ses_b"]);
+    assert.deepEqual(Object.keys(await listSessionStatuses("/work/proj")).sort(), ["ses_a", "ses_b"], "unknown directories are not filtered out");
+  });
 });
 
-test("listQuestions returns [] on a non-OK and does not throw", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/question")) {
-        return new Response("boom", { status: 500 });
-      }
-      return new Response(null, { status: 204 });
-    },
+test("listSessionStatuses narrows to sessions known to live in the directory; a directory is required; non-2xx throws", async () => {
+  await withV2(
+    { "POST /api/session": () => ({ data: SESSION({ id: "ses_a" }) }), "GET /api/session/active": { data: { ses_a: {}, ses_other: {} } } },
     async () => {
-      const result = await listQuestions("ses_B");
-      assert.deepEqual(result, [], "non-OK must yield an empty list, not throw");
+      await createSession({ directory: "/work/proj" });
+      _setOcTransport(async () => json({ data: { ses_a: {}, ses_other: {} } }));
+      assert.deepEqual(Object.keys(await listSessionStatuses("/work/proj")), ["ses_a", "ses_other"]);
+      assert.deepEqual(Object.keys(await listSessionStatuses("/elsewhere")), ["ses_other"]);
     },
   );
+  await assert.rejects(listSessionStatuses(""), /directory required/);
+  await withV2({ "GET /api/session/active": () => new Response("x", { status: 500 }) }, async () => {
+    await assert.rejects(getSessionStatus("ses_a"), /session\/active 500/);
+  });
 });
 
-// The fail-soft treatment is scoped to the two READ listings. A failed REPLY
-// must still surface — the user pressed a button and deserves to know it did
-// not land (BET-1020 non-goals).
-test("replyPermission still throws on a non-OK reply", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    sessionFetch({ id: "ses_r", directory: "/proj/r" }, (url) => {
-      if (String(url).includes("/reply")) {
-        return new Response("nope", { status: 400 });
-      }
-      return new Response(null, { status: 204 });
-    }),
+test("readShellOutput reads from a cursor; null once the shell is gone", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/shell/sh_1/output": ({ query }) => query["location[directory]"] === "/w" ? { data: { output: query.cursor === "0" ? "tick1\n" : "", cursor: 6, size: 6, truncated: false } } : new Response("nf", { status: 404 }),
+      "GET /api/shell/sh_gone/output": () => new Response("nf", { status: 404 }),
+    },
     async () => {
-      await assert.rejects(
-        replyPermission({ requestId: "per_x", reply: "always", sessionId: "ses_r" }),
-        /replyPermission/,
-        "a failed permission reply must still throw",
-      );
+      assert.deepEqual(await readShellOutput({ shellID: "sh_1", cursor: 0, directory: "/w" }), { output: "tick1\n", cursor: 6, truncated: false });
+      assert.equal((await readShellOutput({ shellID: "sh_1", cursor: 6, directory: "/w" })).output, "");
+      assert.equal(await readShellOutput({ shellID: "sh_1", cursor: 0 }), null, "location-scoped: no directory → the shell is not found");
+      assert.equal(await readShellOutput({ shellID: "sh_gone" }), null);
     },
   );
-});
-
-test("replyQuestion still throws on a non-OK reply", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    sessionFetch({ id: "ses_rq", directory: "/proj/rq" }, (url) => {
-      if (String(url).includes("/reply")) {
-        return new Response("nope", { status: 400 });
-      }
-      return new Response(null, { status: 204 });
-    }),
-    async () => {
-      await assert.rejects(
-        replyQuestion({ requestId: "que_x", answers: [["a"]], sessionId: "ses_rq" }),
-        /replyQuestion/,
-        "a failed question reply must still throw",
-      );
-    },
-  );
+  assert.equal(calls[0].query.cursor, "0");
 });
 
 // ---------------------------------------------------------------------------
+// transcript
+// ---------------------------------------------------------------------------
+
+const U = (id, text) => ({ id, type: "user", text, time: { created: 1 } });
+const A = (id, content, extra = {}) => ({ id, type: "assistant", agent: "build", model: { id: "m", providerID: "p" }, time: { created: 2, completed: 3 }, content, ...extra });
+const IDLE = (id) => ({ id, type: "idle", outcome: "succeeded", time: { created: 4 } });
+
+test("listMessages maps the V2 timeline (newest-first pages) to chronological {info, parts}", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a/message": () => ({ data: [IDLE("msg_4"), A("msg_3", [{ type: "text", text: "hello" }], { finish: "stop", tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 3, write: 4 } } }), U("msg_1", "hi")], cursor: { next: null } }) },
+    async () => {
+      const msgs = await listMessages("ses_a");
+      assert.deepEqual(msgs.map((m) => m.info.role), ["user", "assistant"]);
+      assert.equal(msgs[1].info.modelID, "m");
+      assert.equal(msgs[1].info.providerID, "p");
+      assert.equal(msgs[1].info.parentID, "msg_1");
+      assert.equal(msgs[1].info.time.completed, 3);
+      assert.deepEqual(msgs[1].info.tokens, { input: 1, output: 2, reasoning: 0, cache: { read: 3, write: 4 } });
+      assert.equal(msgs[1].parts.find((p) => p.type === "text").text, "hello");
+      assert.equal(msgs[1].parts.at(-1).type, "step-finish");
+    },
+  );
+  assert.equal(calls[0].query.order, "desc");
+});
+
+test("listMessages {limit}: stops reading pages once enough conversation records are seen, returns the TAIL", async () => {
+  let page = 0;
+  const calls = await withV2(
+    {
+      "GET /api/session/ses_a/message": ({ query }) => {
+        page++;
+        if (!query.cursor) return { data: [IDLE("i3"), A("a3", [{ type: "text", text: "3" }]), U("u3", "3")], cursor: { next: "C1" } };
+        return { data: [A("a2", [{ type: "text", text: "2" }]), U("u2", "2")], cursor: { next: null } };
+      },
+    },
+    async () => {
+      const two = await listMessages("ses_a", { limit: 2 });
+      assert.deepEqual(two.map((m) => m.info.id), ["u3", "a3"]);
+      assert.equal(page, 1, "the first page already held 2 conversation records");
+      page = 0;
+      const four = await listMessages("ses_a", { limit: 4 });
+      assert.deepEqual(four.map((m) => m.info.id), ["u2", "a2", "u3", "a3"]);
+      assert.equal(page, 2);
+    },
+  );
+  assert.equal(calls.filter((c) => c.query.cursor).length, 1);
+});
+
+test("listMessages non-2xx throws", async () => {
+  await withV2({ "GET /api/session/ses_a/message": () => new Response("x", { status: 500 }) }, async () => {
+    await assert.rejects(listMessages("ses_a"), /listMessages 500/);
+  });
+});
+
+test("tool blocks map to V1 tool parts: names, input spellings, output, metadata, subagent child id", async () => {
+  const timeline = [
+    A("a1", [
+      { type: "tool", id: "toolu_1", name: "shell", state: { status: "completed", input: { command: "ls" }, content: [{ type: "text", text: "a\nb\n" }], metadata: { exit: 0 } }, time: { created: 1, ran: 2, completed: 3 } },
+      { type: "tool", id: "toolu_2", name: "edit", state: { status: "completed", input: { path: "n.txt" }, content: [{ type: "text", text: "Edited" }], metadata: { files: [{ file: "n.txt", patch: "@@ P", additions: 1, deletions: 0 }] } }, time: { created: 1 } },
+      { type: "tool", id: "toolu_3", name: "subagent", state: { status: "completed", input: { agent: "explore", description: "d" }, content: [{ type: "text", text: '<subagent sessionID="ses_c" state="completed">\nanswer\n</subagent>' }], metadata: { sessionID: "ses_c", status: "completed" } }, time: { created: 1 } },
+      { type: "tool", id: "toolu_4", name: "shell", state: { status: "error", input: { command: "x" }, error: { type: "aborted", message: "Tool execution interrupted" } }, time: { created: 1 } },
+      { type: "tool", id: "toolu_5", name: "read", state: { status: "streaming", input: '{"pa' }, time: { created: 1 } },
+    ]),
+  ];
+  await withV2({ "GET /api/session/ses_a/message": { data: timeline.slice().reverse(), cursor: { next: null } } }, async () => {
+    const parts = (await listMessages("ses_a"))[0].parts.filter((p) => p.type === "tool");
+    const [sh, ed, sub, err, pending] = parts;
+    assert.equal(sh.tool, "bash");
+    assert.equal(sh.callID, "toolu_1");
+    assert.equal(sh.state.status, "completed");
+    assert.equal(sh.state.output, "a\nb\n");
+    assert.equal(ed.state.input.filePath, "n.txt", "the V1 spelling the renderer reads");
+    assert.equal(ed.state.metadata.diff, "@@ P");
+    assert.equal(ed.state.metadata.filediff.additions, 1);
+    assert.equal(sub.tool, "task");
+    assert.equal(sub.state.metadata.sessionId, "ses_c");
+    assert.equal(sub.state.input.subagent_type, "explore");
+    assert.equal(sub.state.output, "answer", "the <subagent> wrapper is unwrapped");
+    assert.equal(err.state.status, "error");
+    assert.equal(err.state.error, "Tool execution interrupted");
+    assert.equal(pending.state.status, "pending");
+  });
+});
+
+test("reasoning blocks map to reasoning parts; ids are stable per message+ordinal", async () => {
+  await withV2({ "GET /api/session/ses_a/message": { data: [A("a1", [{ type: "reasoning", text: "think" }, { type: "text", text: "ans" }, { type: "text", text: "more" }])], cursor: { next: null } } }, async () => {
+    const parts = (await listMessages("ses_a"))[0].parts;
+    assert.deepEqual(parts.map((p) => [p.id, p.type]), [["a1:reasoning:0", "reasoning"], ["a1:text:0", "text"], ["a1:text:1", "text"]]);
+  });
+});
+
+test("a RUNNING shell tool's live output is hydrated from GET /api/shell/{id}/output (a refetch keeps the tail)", async () => {
+  const timeline = [A("a1", [{ type: "tool", id: "toolu_1", name: "shell", state: { status: "running", input: { command: "loop" }, metadata: { shellID: "sh_1" } }, time: { created: 1 } }], { time: { created: 2 } })];
+  await withV2(
+    { "GET /api/session/ses_a/message": { data: timeline, cursor: { next: null } }, "GET /api/session/ses_a": { data: SESSION() }, "GET /api/shell/sh_1/output": ({ query }) => query["location[directory]"] === "/work/proj" ? { data: { output: "tick1\ntick2\n", cursor: 12, size: 12, truncated: false } } : new Response("nf", { status: 404 }) },
+    async () => {
+      const part = (await listMessages("ses_a"))[0].parts[0];
+      assert.equal(part.state.status, "running");
+      assert.equal(part.state.metadata.output, "tick1\ntick2\n");
+    },
+  );
+});
+
+test("a completed compaction becomes a summary message", async () => {
+  await withV2({ "GET /api/session/ses_a/message": { data: [{ id: "c1", type: "compaction", status: "completed", reason: "manual", summary: "## Objective", time: { created: 5 } }, U("u1", "x")], cursor: { next: null } } }, async () => {
+    const msgs = await listMessages("ses_a");
+    assert.equal(msgs[1].info.summary, true);
+    assert.equal(msgs[1].parts[0].text, "## Objective");
+  });
+});
+
+test("listMessages ALWAYS strips a byte-identical tool stdout duplicate (no slim needed)", async () => {
+  const timeline = [A("a1", [{ type: "tool", id: "t", name: "shell", state: { status: "completed", input: {}, content: [{ type: "text", text: "OUT" }], metadata: { output: "OUT", exit: 0 } } }])];
+  await withV2({ "GET /api/session/ses_a/message": { data: timeline, cursor: { next: null } } }, async () => {
+    const st = (await listMessages("ses_a"))[0].parts[0].state;
+    assert.equal(st.output, "OUT");
+    assert.equal("output" in st.metadata, false);
+    assert.equal(st.metadata.exit, 0);
+  });
+});
+
+test("listMessages {slim:true} drops the part types the iOS client never renders", async () => {
+  await withV2({ "GET /api/session/ses_a/message": { data: [A("a1", [{ type: "reasoning", text: "r" }, { type: "text", text: "t" }], { tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } })], cursor: { next: null } } }, async () => {
+    assert.deepEqual((await listMessages("ses_a", { slim: true }))[0].parts.map((p) => p.type), ["text"]);
+    assert.deepEqual((await listMessages("ses_a"))[0].parts.map((p) => p.type), ["reasoning", "text", "step-finish"]);
+  });
+});
+
+test("getMessage maps ONE record (the splice / receipt path); null on a miss or error", async () => {
+  await withV2({ "GET /api/session/ses_a/message/msg_1": { data: U("msg_1", "hi") }, "GET /api/session/ses_a/message/msg_nope": () => new Response("nf", { status: 404 }) }, async () => {
+    const m = await getMessage("ses_a", "msg_1");
+    assert.equal(m.info.id, "msg_1");
+    assert.equal(m.info.role, "user");
+    assert.equal(m.parts[0].text, "hi");
+    assert.equal(await getMessage("ses_a", "msg_nope"), null);
+  });
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.equal(await getMessage("ses_a", "msg_1"), null);
+  _setOcTransport(null);
+});
+
+// ---------------------------------------------------------------------------
+// permissions + questions (forms)
+// ---------------------------------------------------------------------------
+
+const PERM = (id, sid = "ses_a") => ({ id, sessionID: sid, action: "shell", resources: ["echo hi"], save: ["echo *"], source: { type: "tool", messageID: "msg_1", id: "toolu_1" } });
+const FORM = (id, kind = "question") => ({
+  id,
+  sessionID: "ses_a",
+  title: "Questions",
+  metadata: { kind, tool: { messageID: "msg_1", id: "toolu_q" } },
+  fields: [
+    { key: "q0", title: "Colour", description: "Which colour?", type: "string", options: [{ value: "Red", label: "Red", description: "warm" }, { value: "Blue", label: "Blue" }], custom: true },
+    { key: "q1", title: "Sizes", description: "Pick sizes", type: "multiselect", options: [{ value: "S", label: "S" }, { value: "L", label: "L" }] },
+  ],
+});
+
+test("listPermissions: per-session route, mapped to the PermissionCard shape; without a session → the global list", async () => {
+  await withV2({ "GET /api/session/ses_a/permission": { data: [PERM("per_1")] }, "GET /api/permission/request": { data: [PERM("per_1"), PERM("per_2", "ses_b")] } }, async () => {
+    const [p] = await listPermissions("ses_a");
+    assert.equal(p.id, "per_1");
+    assert.equal(p.permission, "bash");
+    assert.deepEqual(p.patterns, ["echo hi"]);
+    assert.deepEqual(p.always, ["echo *"]);
+    assert.equal(p.metadata.command, "echo hi");
+    assert.deepEqual(p.tool, { messageID: "msg_1", callID: "toolu_1" });
+    assert.equal((await listPermissions()).length, 2);
+  });
+});
+
+test("listPermissions / listQuestions return [] on a non-OK and do not throw", async () => {
+  const bad = () => new Response("bad", { status: 400 });
+  await withV2({ "GET /api/session/ses_a/permission": bad, "GET /api/session/ses_a/form": bad }, async () => {
+    assert.deepEqual(await listPermissions("ses_a"), []);
+    assert.deepEqual(await listQuestions("ses_a"), []);
+  });
+});
+
+test("replyPermission POSTs {decision} on the session route; a trust-mode reply with no session looks it up", async () => {
+  const calls = await withV2(
+    { "POST /api/session/ses_a/permission/per_1/reply": null, "GET /api/permission/request": { data: [PERM("per_1")] } },
+    async () => {
+      await replyPermission({ requestId: "per_1", reply: "always", sessionId: "ses_a" });
+      await replyPermission({ requestId: "per_1", reply: "once" });
+    },
+  );
+  const posts = only(calls, "POST", "/api/session/ses_a/permission/per_1/reply");
+  assert.deepEqual(posts.map((c) => c.body), [{ decision: "always" }, { decision: "once" }]);
+});
+
+test("replyPermission throws on a non-OK reply and when the request is unknown", async () => {
+  await withV2({ "POST /api/session/ses_a/permission/per_1/reply": () => new Response("no", { status: 404 }) }, async () => {
+    await assert.rejects(replyPermission({ requestId: "per_1", reply: "once", sessionId: "ses_a" }), /replyPermission 404/);
+  });
+  await withV2({ "GET /api/permission/request": { data: [] } }, async () => {
+    await assert.rejects(replyPermission({ requestId: "per_x", reply: "once" }), /no pending permission/);
+  });
+});
+
+test("listQuestions: only `question` forms, mapped to the QuestionRequest shape (form id = request id)", async () => {
+  await withV2({ "GET /api/session/ses_a/form": { data: [FORM("frm_1"), FORM("frm_2", "oauth")] } }, async () => {
+    const qs = await listQuestions("ses_a");
+    assert.equal(qs.length, 1);
+    assert.equal(qs[0].id, "frm_1");
+    assert.deepEqual(qs[0].tool, { messageID: "msg_1", callID: "toolu_q" });
+    assert.equal(qs[0].questions[0].question, "Which colour?");
+    assert.equal(qs[0].questions[0].header, "Colour");
+    assert.deepEqual(qs[0].questions[0].options, [{ label: "Red", description: "warm" }, { label: "Blue" }]);
+    assert.equal(qs[0].questions[1].multiple, true);
+  });
+});
+
+test("replyQuestion maps answers[][] onto the form's field keys: {answer:{q0:'Red', q1:['S','L']}}", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a/form/frm_1": { data: FORM("frm_1") }, "POST /api/session/ses_a/form/frm_1/reply": null },
+    async () => {
+      await replyQuestion({ requestId: "frm_1", sessionId: "ses_a", answers: [["Red"], ["S", "L"]] });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/form/frm_1/reply")[0].body, { answer: { q0: "Red", q1: ["S", "L"] } });
+});
+
+test("replyQuestion: a picked option AND a typed clarification both reach the model; unanswered fields are ''", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a/form/frm_1": { data: FORM("frm_1") }, "POST /api/session/ses_a/form/frm_1/reply": null },
+    async () => {
+      await replyQuestion({ requestId: "frm_1", sessionId: "ses_a", answers: [["Red", "but darker"]] });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/form/frm_1/reply")[0].body.answer, { q0: "Red, but darker", q1: [] });
+});
+
+test("replyQuestion without a session finds the form in the global list; rejectQuestion DELETEs it", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/form": { data: [FORM("frm_1")] },
+      "POST /api/session/ses_a/form/frm_1/reply": null,
+      "DELETE /api/session/ses_a/form/frm_1": null,
+    },
+    async () => {
+      await replyQuestion({ requestId: "frm_1", answers: [["Red"]] });
+      await rejectQuestion({ requestId: "frm_1" });
+      await rejectQuestion({ requestId: "frm_1", sessionId: "ses_a" });
+    },
+  );
+  assert.equal(only(calls, "DELETE", "/api/session/ses_a/form/frm_1").length, 2);
+  await withV2({ "POST /api/session/ses_a/form/frm_1/reply": () => new Response("no", { status: 409 }), "GET /api/session/ses_a/form/frm_1": { data: FORM("frm_1") } }, async () => {
+    await assert.rejects(replyQuestion({ requestId: "frm_1", sessionId: "ses_a", answers: [["Red"]] }), /replyQuestion 409/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// models / providers
+// ---------------------------------------------------------------------------
+
+const PROVIDER_ROUTES = (extra = {}) => ({
+  "GET /api/provider": { data: [{ id: "anthropic", integrationID: "anthropic", name: "Anthropic", activation: "auto" }, { id: "fake", name: "Fake", activation: "enabled" }, { id: "idle", integrationID: "idle", name: "Idle", activation: "auto" }] },
+  "GET /api/integration": { data: [{ id: "anthropic", methods: [], connections: [{ type: "env", name: "K" }] }, { id: "idle", methods: [], connections: [] }] },
+  "GET /api/model": {
+    data: [
+      { id: "claude-haiku-4-5", modelID: "claude-haiku-4-5", providerID: "anthropic", name: "Haiku", family: "claude-haiku", status: "active", enabled: true, limit: { context: 200000, output: 64000 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, cost: [{ input: 1, output: 5, cache: { read: 0.1, write: 1.25 } }, { tier: { type: "context", size: 1 }, input: 9, output: 9, cache: { read: 9, write: 9 } }], variants: [{ id: "high" }] },
+      { id: "fm", modelID: "fm", providerID: "fake", name: "fm" },
+    ],
+  },
+  "GET /api/model/default": { data: { id: "claude-haiku-4-5", modelID: "claude-haiku-4-5", providerID: "anthropic" } },
+  ...extra,
+});
+
+test("getProviders: connected = credential/env-backed or always-enabled; all carries models in the normalizer's shape; default from /model/default", async () => {
+  await withV2(PROVIDER_ROUTES(), async () => {
+    const p = await getProviders();
+    assert.deepEqual(p.connected, ["anthropic", "fake"]);
+    assert.deepEqual(p.all.map((x) => x.id), ["anthropic", "fake", "idle"]);
+    const m = p.all[0].models["claude-haiku-4-5"];
+    assert.equal(m.capabilities.toolcall, true);
+    assert.equal(m.capabilities.attachment, true);
+    assert.equal(m.capabilities.reasoning, true, "variants imply reasoning");
+    assert.deepEqual(m.cost, { input: 1, output: 5, cache: { read: 0.1, write: 1.25 } }, "the base tier");
+    assert.deepEqual(p.default, { anthropic: "claude-haiku-4-5" });
+  });
+});
+
+test("getProviders returns {connected:[]} on a non-2xx response and on a transport throw", async () => {
+  await withV2({ "GET /api/provider": () => new Response("x", { status: 500 }), "GET /api/integration": { data: [] }, "GET /api/model": { data: [] }, "GET /api/model/default": () => new Response("x", { status: 404 }) }, async () => {
+    assert.deepEqual(await getProviders(), { connected: [] });
+  });
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.deepEqual(await getProviders(), { connected: [] });
+  _setOcTransport(null);
+});
+
+test("getDefaultModel: the default of the first connected provider that has one; null otherwise (never re-throws)", async () => {
+  await withV2(PROVIDER_ROUTES(), async () => {
+    assert.deepEqual(await getDefaultModel(), { providerID: "anthropic", modelID: "claude-haiku-4-5" });
+  });
+  await withV2(PROVIDER_ROUTES({ "GET /api/model/default": () => new Response("x", { status: 404 }) }), async () => {
+    assert.equal(await getDefaultModel(), null);
+  });
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.equal(await getDefaultModel(), null);
+  _setOcTransport(null);
+});
+
+test("listModels: normalized models for CONNECTED providers only; overrides applied by providerID/modelID", async () => {
+  await withV2(PROVIDER_ROUTES(), async () => {
+    const out = await listModels({ "anthropic/claude-haiku-4-5": { name: "Mine", context: 500000 } });
+    assert.deepEqual(out.map((m) => `${m.providerID}/${m.id}`), ["anthropic/claude-haiku-4-5", "fake/fm"]);
+    assert.equal(out[0].name, "Mine");
+    assert.equal(out[0].limit.context, 500000);
+    assert.deepEqual(out[0].variants, [{ id: "high" }]);
+    assert.equal(out[0].cost.cacheWrite, 1.25);
+  });
+});
+
+test("listModels returns [] when nothing is connected and on a transport throw", async () => {
+  await withV2({ "GET /api/provider": { data: [] }, "GET /api/integration": { data: [] }, "GET /api/model": { data: [] }, "GET /api/model/default": { data: null } }, async () => {
+    assert.deepEqual(await listModels(), []);
+  });
+  _setOcTransport(async () => { throw new Error("down"); });
+  assert.deepEqual(await listModels(), []);
+  _setOcTransport(null);
+});
+
+test("pickCheapModel prefers a small-model name on a real (non-free-tier) provider, cheapest first", async () => {
+  const models = [
+    { providerID: "opencode", id: "free", cost: { input: 0 } },
+    { providerID: "anthropic", id: "claude-opus-5-5", cost: { input: 5 } },
+    { providerID: "anthropic", id: "claude-haiku-5-5", cost: { input: 1 } },
+    { providerID: "openai", id: "gpt-mini", cost: { input: 0.5 } },
+    { providerID: "anthropic", id: "old-haiku", status: "deprecated", cost: { input: 0.1 } },
+  ];
+  assert.equal((await pickCheapModel(async () => models)).id, "gpt-mini");
+  assert.equal(await pickCheapModel(async () => []), null);
+  assert.equal(await pickCheapModel(async () => { throw new Error("x"); }), null);
+  assert.equal((await pickCheapModel(async () => [{ providerID: "a", id: "big", cost: { input: 3 } }, { providerID: "a", id: "bigger", cost: { input: 4 } }])).id, "big");
+});
+
+// ---------------------------------------------------------------------------
+// one-shot text (auto-rename / constraint extraction)
+// ---------------------------------------------------------------------------
+
+test("generateSessionTitle uses POST /api/experimental/generate on a cheap connected model — no session is created", async () => {
+  const calls = await withV2(
+    { ...PROVIDER_ROUTES(), "POST /api/experimental/generate": { data: { text: "Fix login bug" } } },
+    async () => {
+      assert.equal(await generateSessionTitle({ directory: "/w", instruction: "title this" }), "Fix login bug");
+    },
+  );
+  const gen = only(calls, "POST", "/api/experimental/generate")[0];
+  assert.equal(gen.body.prompt, "title this");
+  assert.deepEqual(gen.body.model, { providerID: "anthropic", id: "claude-haiku-4-5" });
+  assert.equal(calls.some((c) => c.path === "/api/session"), false);
+  assert.equal("format" in gen.body, false, "never a structured-output field");
+});
+
+test("generateText returns '' on any failure; an explicit model is used as given; runThrowawayAgent delegates", async () => {
+  await withV2({ "POST /api/experimental/generate": () => new Response("x", { status: 503 }) }, async () => {
+    assert.equal(await generateText({ instruction: "x", model: { providerID: "p", id: "m" } }), "");
+  });
+  const calls = await withV2({ "POST /api/experimental/generate": { data: { text: "ok" } } }, async () => {
+    assert.equal(await generateText({ instruction: "x", model: { providerID: "p", modelID: "m" } }), "ok");
+    assert.equal(await runThrowawayAgent({ directory: "/w", instruction: "y", agent: "title" }) !== undefined, true);
+  });
+  assert.deepEqual(calls[0].body.model, { providerID: "p", id: "m" });
+});
+
+// ---------------------------------------------------------------------------
+// the throwaway SESSION primitive (still a real session: CTO ephemerals, health probes)
+// ---------------------------------------------------------------------------
+
+test("headless primitive records provenance before prompt and returns safe structured errors", async () => {
+  const { runSynchronousSession } = await import("./opencode.mjs");
+  const { resolvePipelineSession } = await import("./internalSessions.mjs");
+  let deleted = false;
+  await withMockFetch(async (url, opts) => {
+    const u = String(url);
+    if (opts?.method === "DELETE") { deleted = true; return new Response(null, { status: 204 }); }
+    if (u.endsWith("/prompt")) {
+      assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+      return new Response("SECRET provider response", { status: 503 });
+    }
+    if (opts?.method === "POST" && u.endsWith("/api/session")) return json({ data: { id: "internal-error" } });
+    return json({ data: { id: "internal-error" } });
+  }, async () => {
+    const result = await runSynchronousSession({ directory: "/work", instruction: "summarize" });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "prompt-http");
+    assert.ok(!JSON.stringify(result).includes("SECRET"));
+  });
+  assert.equal(deleted, true);
+  assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
+});
+
+for (const final of ["complete", "error"]) {
+  test(`headless primitive waits through partial text before terminal ${final}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    let polls = 0;
+    let deleted = 0;
+    await withMockFetch(async (url, opts) => {
+      const u = String(url);
+      if (opts?.method === "DELETE") {
+        assert.equal(polls, 2, "must not delete during partial output");
+        deleted++;
+        return new Response(null, { status: 204 });
+      }
+      if (u.endsWith("/prompt")) return new Response(null, { status: 204 });
+      if (u.includes("/message")) {
+        polls++;
+        const done = polls === 2;
+        const row = { id: "m1", type: "assistant", time: done ? { created: 1, completed: 2 } : { created: 1 }, content: [{ type: "text", text: polls === 1 ? "part" : "complete" }] };
+        if (done) {
+          row.finish = final === "error" ? "error" : "stop";
+          if (final === "error") row.error = { type: "provider.internal", message: "SECRET" };
+        }
+        return json({ data: [row], cursor: { next: null } });
+      }
+      return json({ data: { id: `partial-${final}` } });
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test", pollIntervalMs: 0, maxAttempts: 3 });
+      assert.equal(result.ok, final === "complete");
+      assert.equal(result.text, final === "complete" ? "complete" : "");
+      if (final === "error") assert.equal(result.code, "model-error");
+      assert.ok(!JSON.stringify(result).includes("SECRET"));
+    });
+    assert.equal(deleted, 1);
+  });
+}
+
+for (const cleanupFails of [false, true]) {
+  test(`provenance write failure never prompts and reports cleanup failure=${cleanupFails}`, async () => {
+    const { runSynchronousSession } = await import("./opencode.mjs");
+    let deleted = false;
+    await withMockFetch(async (url, opts) => {
+      assert.ok(!String(url).endsWith("/prompt"));
+      if (opts?.method === "DELETE") {
+        deleted = true;
+        return new Response(null, { status: cleanupFails ? 503 : 204 });
+      }
+      return json({ data: { id: "provenance-failed" } });
+    }, async () => {
+      const result = await runSynchronousSession({ directory: "/work", instruction: "test",
+        trackCreation: () => async () => { throw new Error("SECRET disk failure"); },
+      });
+      assert.equal(result.code, "provenance-error");
+      assert.equal(result.cleanupCode, cleanupFails ? "cleanup-error" : undefined);
+      assert.equal(result.ok, false);
+    });
+    assert.equal(deleted, true);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// provider connect flows
+// ---------------------------------------------------------------------------
+
+test("listProviderAuthMethods maps V2 methods onto the resolveAuthMethod vocabulary (key → api)", async () => {
+  await withV2({ "GET /api/integration": { data: [{ id: "openai", methods: [{ id: "chatgpt", type: "oauth", label: "ChatGPT" }, { type: "key" }], connections: [] }] } }, async () => {
+    const r = await listProviderAuthMethods();
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.methods.openai.map((m) => m.type), ["oauth", "api"]);
+    assert.equal(r.methods.openai[0].label, "ChatGPT");
+  });
+  await withV2({ "GET /api/integration": () => new Response("x", { status: 500 }) }, async () => {
+    assert.equal((await listProviderAuthMethods()).error, "bad_response");
+  });
+});
+
+test("startProviderOauth resolves the method index to its id, returns url/mode; completeProviderOauth finishes THAT attempt", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "chatgpt", type: "oauth", label: "x" }] } },
+      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_1", url: "https://auth/x", instructions: "enter code", mode: "code" } },
+      "POST /api/integration/openai/connect/oauth/att_1/complete": null,
+    },
+    async () => {
+      const s = await startProviderOauth("openai", 0);
+      assert.deepEqual(s, { ok: true, url: "https://auth/x", method: "code", instructions: "enter code" });
+      assert.deepEqual(await completeProviderOauth("openai", 0, "ABCD"), { ok: true });
+      assert.equal((await completeProviderOauth("openai", 0, "")).ok, false, "the attempt is consumed");
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/integration/openai/connect/oauth")[0].body, { methodID: "chatgpt" });
+  assert.deepEqual(only(calls, "POST", "/api/integration/openai/connect/oauth/att_1/complete")[0].body, { code: "ABCD" });
+});
+
+test("completeProviderOauth omits code for an auto-mode flow; a 401 is `unauthorized`", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
+      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_2", url: "u", instructions: "", mode: "auto" } },
+      "POST /api/integration/openai/connect/oauth/att_2/complete": null,
+    },
+    async () => {
+      assert.equal((await startProviderOauth("openai", 0)).method, "auto");
+      assert.deepEqual(await completeProviderOauth("openai", 0, ""), { ok: true });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/integration/openai/connect/oauth/att_2/complete")[0].body, {});
+  await withV2(
+    {
+      "GET /api/integration/openai": { data: { id: "openai", methods: [{ id: "dev", type: "oauth" }] } },
+      "POST /api/integration/openai/connect/oauth": { data: { attemptID: "att_3", url: "u", instructions: "", mode: "code" } },
+      "POST /api/integration/openai/connect/oauth/att_3/complete": () => new Response("bad", { status: 401 }),
+    },
+    async () => {
+      await startProviderOauth("openai", 0);
+      assert.equal((await completeProviderOauth("openai", 0, "x")).error, "unauthorized");
+    },
+  );
+});
+
+test("setProviderApiKey POSTs the key and never echoes it; removeProviderAuth deletes every stored credential (idempotent)", async () => {
+  const calls = await withV2(
+    {
+      "POST /api/integration/kimi/connect/key": null,
+      "GET /api/credential": { data: [{ id: "c1", integrationID: "kimi" }, { id: "c2", integrationID: "other" }, { id: "c3", integrationID: "kimi" }] },
+      "DELETE /api/credential/c1": null,
+      "DELETE /api/credential/c3": null,
+    },
+    async () => {
+      const r = await setProviderApiKey("kimi", "sk-secret");
+      assert.deepEqual(r, { ok: true });
+      assert.ok(!JSON.stringify(r).includes("sk-secret"));
+      assert.deepEqual(await removeProviderAuth("kimi"), { ok: true });
+    },
+  );
+  assert.deepEqual(only(calls, "POST", "/api/integration/kimi/connect/key")[0].body, { key: "sk-secret" });
+  assert.deepEqual(calls.filter((c) => c.method === "DELETE").map((c) => c.path), ["/api/credential/c1", "/api/credential/c3"]);
+  await withV2({ "GET /api/credential": { data: [] } }, async () => assert.deepEqual(await removeProviderAuth("kimi"), { ok: true }));
+  await withV2({ "POST /api/integration/kimi/connect/key": () => new Response("no", { status: 401 }) }, async () => {
+    assert.equal((await setProviderApiKey("kimi", "k")).error, "unauthorized");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// commands, agents, files, references
+// ---------------------------------------------------------------------------
+
+test("listCommands / listAgents / findFiles / listReferences read the V2 routes in the old shapes", async () => {
+  await withV2(
+    {
+      "GET /api/command": { data: [{ name: "init", description: "setup" }] },
+      "GET /api/agent": { data: [{ id: "build", mode: "primary", description: "d" }, { id: "plan", mode: "primary" }] },
+      "GET /api/fs/find": { data: [{ path: "notes.txt", type: "file" }, { path: "src", type: "directory" }] },
+      "GET /api/reference": { data: [{ name: "docs", path: "/d", source: { type: "local", path: "/d" } }, { name: "lib", source: { type: "git", repository: "https://g/x", branch: "main" }, description: "L" }] },
+    },
+    async () => {
+      assert.deepEqual((await listCommands()).map((c) => [c.name, c.description]), [["init", "setup"]]);
+      assert.deepEqual((await listAgents()).map((a) => [a.name, a.mode]), [["build", "primary"], ["plan", "primary"]]);
+      assert.deepEqual(await findFiles({ query: "no", directory: "/w" }), ["notes.txt", "src"]);
+      assert.deepEqual(await listReferences(), [{ name: "docs", path: "/d" }, { name: "lib", description: "L", repository: "https://g/x", branch: "main" }]);
+    },
+  );
+});
+
+test("findFiles scopes the search with location[directory]", async () => {
+  const calls = await withV2({ "GET /api/fs/find": { data: [] } }, async () => {
+    await findFiles({ query: "a b", directory: "/w x" });
+  });
+  assert.equal(calls[0].query["location[directory]"], "/w x");
+  assert.equal(calls[0].query.query, "a b");
+});
+
+test("listReferences degrades to [] when the payload has no data array", async () => {
+  await withV2({ "GET /api/reference": {} }, async () => assert.deepEqual(await listReferences(), []));
+});
+
+// ---------------------------------------------------------------------------
+// the event stream
+// ---------------------------------------------------------------------------
+
+const sseBody = (chunks) =>
+  new ReadableStream({
+    start(c) {
+      for (const ch of chunks) c.enqueue(new TextEncoder().encode(ch));
+      c.close();
+    },
+  });
+
+test("subscribeEvents: ONE global /api/event stream; frames are parsed, heartbeats ignored; onConnect(reconnect) fires per connect", async () => {
+  const urls = [];
+  const connects = [];
+  const got = [];
+  let n = 0;
+  _setEventStreamTransport(async (url) => {
+    urls.push(String(url));
+    n++;
+    return { ok: true, body: sseBody(n === 1 ? [': heartbeat\n\ndata: {"id":"e1","type":"server.connected","data":{}}\n\n', 'data: {"id":"e2","type":"session.text.delta","da', 'ta":{"delta":"hi"}}\n\n'] : ['data: {"id":"e3","type":"x","data":{}}\n\n']) };
+  });
+  const stop = subscribeEvents((e) => got.push(e.id), { onConnect: (i) => connects.push(i.reconnect), reconnectMs: 10 });
+  await new Promise((r) => setTimeout(r, 120));
+  stop();
+  _setEventStreamTransport(null);
+  assert.deepEqual(got.slice(0, 3), ["e1", "e2", "e3"], "split frames are re-assembled");
+  assert.deepEqual(connects.slice(0, 2), [false, true]);
+  assert.ok(urls.every((u) => u === "http://127.0.0.1:4096/api/event"), "never a per-directory stream");
+});
+
+test("subscribeEvents: a non-OK connect retries; stop() ends the loop and aborts the connection", async () => {
+  let attempts = 0;
+  let aborted = false;
+  _setEventStreamTransport(async (_url, init) => {
+    attempts++;
+    init.signal.addEventListener("abort", () => { aborted = true; });
+    if (attempts === 1) return { ok: false, status: 503, statusText: "no" };
+    return { ok: true, body: new ReadableStream({ start() {} }) };
+  });
+  const stop = subscribeEvents(() => {}, { reconnectMs: 10 });
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(attempts, 2);
+  stop();
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(aborted, true);
+  const before = attempts;
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(attempts, before);
+  _setEventStreamTransport(null);
+});
+
+test("a throwing onEvent or onConnect never kills the stream", async () => {
+  _setEventStreamTransport(async () => ({ ok: true, body: sseBody(['data: {"id":"a","type":"x","data":{}}\n\ndata: {"id":"b","type":"x","data":{}}\n\n']) }));
+  const got = [];
+  const stop = subscribeEvents((e) => { got.push(e.id); if (e.id === "a") throw new Error("boom"); }, { onConnect: () => { throw new Error("c"); }, reconnectMs: 60_000 });
+  await new Promise((r) => setTimeout(r, 40));
+  stop();
+  _setEventStreamTransport(null);
+  assert.deepEqual(got, ["a", "b"]);
+});
+
+test("knownSessionDirectories / cachedSessionDirectory read the session→directory cache (distinct dirs, optional filter)", async () => {
+  await withV2({ "POST /api/session": () => ({ data: SESSION({ id: `ses_${Math.random().toString(36).slice(2, 8)}` }) }) }, async () => {
+    _resetSessionDirectoryCache();
+    const a = await createSession({ directory: "/work/proj" });
+    const b = await createSession({ directory: "/work/proj" });
+    assert.deepEqual(knownSessionDirectories(), ["/work/proj"], "distinct");
+    assert.deepEqual(knownSessionDirectories((id) => id === a.id), ["/work/proj"]);
+    assert.deepEqual(knownSessionDirectories(() => false), []);
+    assert.equal(cachedSessionDirectory(b.id), "/work/proj");
+    assert.equal(cachedSessionDirectory("ses_none"), null);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// unchanged by the V2 cutover
+// ---------------------------------------------------------------------------
+
 // Loopback connection pooling (BET-65)
 //
 // Global fetch (undici) opened a fresh 127.0.0.1:4096 socket per call that
@@ -1211,248 +1262,32 @@ test("discardBody swallows errors on an already-consumed body", async () => {
   assert.ok(true);
 });
 
-// ---------------------------------------------------------------------------
-// getProviders — live provider state from opencode's GET /provider
-// (BET-309 follow-up: BET-318). Feeds the `opencode:provider-auth` `status`
-// action. Must never throw — transport failures degrade to
-// `{ connected: [] }` so the caller's `connected[]` reads stay safe.
-// ---------------------------------------------------------------------------
-
-test("getProviders returns {connected:[...]} for a 200 with a populated connected[]", async () => {
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic", "openai"],
-          all: [{ id: "anthropic" }, { id: "openai" }, { id: "deepseek" }],
-          default: { anthropic: "claude-sonnet-4-6", openai: "gpt-5" },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      const out = await getProviders();
-      assert.deepEqual(out.connected, ["anthropic", "openai"]);
-      assert.equal(out.all.length, 3);
-      assert.equal(out.default.anthropic, "claude-sonnet-4-6");
-    },
-  );
+test("pooled ocFetch reuses one socket across sequential calls", async () => {
+  // A real local server: N sequential ocFetch calls must reuse a bounded
+  // number of sockets (not open N), proving the keep-alive pool works.
+  const { createServer } = await import("node:http");
+  const remotePorts = new Set();
+  const server = createServer((req, res) => {
+    remotePorts.add(req.socket.remotePort);
+    res.end("ok");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    for (let i = 0; i < 25; i++) {
+      const res = await _pooledOcRequest(base + "/x");
+      await res.text();
+    }
+    assert.ok(
+      remotePorts.size <= 2,
+      `expected sequential calls to reuse ~1 socket, saw ${remotePorts.size}`,
+    );
+  } finally {
+    server.close();
+  }
 });
 
-test("getProviders returns {connected:[]} on a non-2xx response", async () => {
-  await withMockFetch(
-    async () => new Response("server gone", { status: 503 }),
-    async () => {
-      const out = await getProviders();
-      assert.deepEqual(out.connected, []);
-    },
-  );
-});
-
-test("getProviders returns {connected:[]} on a transport throw", async () => {
-  await withMockFetch(
-    async () => { throw new Error("ECONNREFUSED"); },
-    async () => {
-      const out = await getProviders();
-      assert.deepEqual(out.connected, []);
-    },
-  );
-});
-
-test("getProviders coerces a non-array connected[] to []", async () => {
-  // Defensive: opencode has been observed to return shapes that drift over
-  // versions; the renderer's `connected.includes(id)` check must not break
-  // when the server returns e.g. `{connected: "anthropic"}`.
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({ connected: "anthropic", all: null, default: null }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      const out = await getProviders();
-      assert.deepEqual(out.connected, []);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// getDefaultModel — picks the first connected provider with a default model.
-//
-// BET-320 follow-up: getDefaultModel used to inline its own `GET /provider`
-// fetch alongside `getProviders()`. The two paths were byte-identical for any
-// 2xx opencode response, but a future drift in defensive handling between
-// them would be a silent bug. The refactor routes getDefaultModel through
-// getProviders() so there is exactly one fetch site for /provider.
-// ---------------------------------------------------------------------------
-
-test("getDefaultModel returns the first connected provider's default", async () => {
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic", "openai"],
-          default: { anthropic: "claude-sonnet-4-6", openai: "gpt-5" },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      assert.deepEqual(
-        await getDefaultModel(),
-        { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
-      );
-    },
-  );
-});
-
-test("getDefaultModel returns null when no connected provider has a default", async () => {
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic", "openai"],
-          default: {},
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      assert.equal(await getDefaultModel(), null);
-    },
-  );
-});
-
-test("getDefaultModel skips connected providers with no recorded default", async () => {
-  // anthropic is connected but has no default; openai does. We expect
-  // openai's model — proves we iterate, not just take the first key.
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic", "openai"],
-          default: { openai: "gpt-5" },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      assert.deepEqual(
-        await getDefaultModel(),
-        { providerID: "openai", modelID: "gpt-5" },
-      );
-    },
-  );
-});
-
-test("getDefaultModel returns null on a non-2xx response", async () => {
-  await withMockFetch(
-    async () => new Response("server gone", { status: 503 }),
-    async () => {
-      assert.equal(await getDefaultModel(), null);
-    },
-  );
-});
-
-test("getDefaultModel returns null on a transport throw (never re-throws)", async () => {
-  await withMockFetch(
-    async () => { throw new Error("ECONNREFUSED"); },
-    async () => {
-      assert.equal(await getDefaultModel(), null);
-    },
-  );
-});
-
-test("getDefaultModel returns null when default is missing from the payload", async () => {
-  // `default` field absent — getProviders() returns { connected, default: undefined }.
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({ connected: ["anthropic"] }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      assert.equal(await getDefaultModel(), null);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// listModels — flattens connected providers into a normalized model list.
-//
-// BET-342 follow-up: listModels used to inline its own `GET /provider` fetch
-// alongside `getProviders()`. The two paths were byte-identical for any 2xx
-// opencode response, but a future drift in defensive handling between them
-// would be a silent bug. The refactor routes listModels through
-// getProviders() so there is exactly one fetch site for /provider.
-// ---------------------------------------------------------------------------
-
-test("listModels returns normalized models for every connected provider", async () => {
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic", "openai"],
-          all: [
-            {
-              id: "anthropic",
-              models: {
-                "claude-sonnet-4-6": { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-              },
-            },
-            {
-              id: "openai",
-              models: {
-                "gpt-5": { id: "gpt-5", name: "GPT-5" },
-              },
-            },
-            {
-              id: "deepseek",
-              models: { "deepseek-chat": { id: "deepseek-chat" } },
-            },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      const out = await listModels();
-      const ids = out.map((m) => `${m.providerID}/${m.id}`).sort();
-      // deepseek is in `all` but not in `connected` → must be filtered out.
-      assert.deepEqual(ids, ["anthropic/claude-sonnet-4-6", "openai/gpt-5"]);
-      const anthropic = out.find((m) => m.providerID === "anthropic");
-      assert.equal(anthropic.name, "Claude Sonnet 4.6");
-      const openai = out.find((m) => m.providerID === "openai");
-      assert.equal(openai.name, "GPT-5");
-    },
-  );
-});
-
-test("listModels returns [] when no providers are connected", async () => {
-  // `connected` empty → every provider in `all` is filtered out → empty out.
-  await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: [],
-          all: [
-            { id: "anthropic", models: { "claude-sonnet-4-6": { id: "claude-sonnet-4-6" } } },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    async () => {
-      const out = await listModels();
-      assert.deepEqual(out, []);
-    },
-  );
-});
-
-test("listModels returns [] on a transport throw (never re-throws)", async () => {
-  await withMockFetch(
-    async () => { throw new Error("ECONNREFUSED"); },
-    async () => {
-      const out = await listModels();
-      assert.deepEqual(out, []);
-    },
-  );
-});
 
 // listRoutableModels — the single routable-catalogue helper (BET-1229). Auto's
 // consent set: a model is routable only when it is connected AND active AND
@@ -1583,282 +1418,6 @@ test("_normalizeProviderModel carries reasoning through", () => {
   assert.equal(m.capabilities.reasoning, true);
 });
 
-// Scoped-stream readiness gate (BET-115 fix C)
-//
-// sendPrompt (via getSessionDirectoryQuery) must not POST to opencode before
-// the scoped `/event?directory=` subscription it depends on has actually
-// connected upstream — otherwise events emitted in response to the prompt
-// land on a subscription that isn't listening yet and are lost forever.
-// ---------------------------------------------------------------------------
-
-/** A ReadableStream that never emits or closes — models an SSE body that's
- *  "connected" but has delivered no frames yet. */
-function openStreamBody() {
-  return new ReadableStream({ start() {} });
-}
-
-test("readiness gate: sendPrompt does not POST before the scoped stream connects", async () => {
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  let releaseConnect;
-  const connectGate = new Promise((r) => { releaseConnect = r; });
-  _setEventStreamTransport(async (url) => {
-    if (String(url).includes("directory=")) {
-      await connectGate; // hold the scoped stream "connecting" until released
-    }
-    return new Response(openStreamBody(), { status: 200 });
-  });
-
-  const calls = [];
-  const stop = subscribeEvents(() => {});
-  try {
-    await withMockFetch(
-      async (url, opts) => {
-        calls.push({ url: String(url), method: opts?.method ?? "GET" });
-        if (String(url).endsWith("/session/ses_gate")) {
-          return new Response(JSON.stringify({ directory: "/work/gate" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(null, { status: 204 });
-      },
-      async () => {
-        const promptDone = sendPrompt({ sessionId: "ses_gate", text: "hi" }).then(
-          () => { calls.push({ marker: "prompt-resolved" }); },
-        );
-        // Let microtasks/timers run without advancing past the gate — the
-        // scoped stream hasn't connected, so the POST must not have fired.
-        await new Promise((r) => setTimeout(r, 30));
-        assert.ok(
-          !calls.some((c) => c.url?.includes("prompt_async")),
-          "sendPrompt POSTed before the scoped stream connected",
-        );
-        releaseConnect();
-        await promptDone;
-        assert.ok(
-          calls.some((c) => c.url?.includes("prompt_async")),
-          "sendPrompt never POSTed after the scoped stream connected",
-        );
-      },
-    );
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-    _resetStreamReadyState();
-  }
-});
-
-test("readiness gate: degrades to sending after the bound elapses (wedged stream)", async () => {
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  _setReadinessTimeoutMs(30); // don't make the test sleep 5s for real
-  // The scoped stream never connects (transport hangs forever) — the gate
-  // must still let the prompt through once the bound elapses.
-  _setEventStreamTransport(() => new Promise(() => {}));
-
-  const calls = [];
-  const stop = subscribeEvents(() => {});
-  try {
-    await withMockFetch(
-      async (url, opts) => {
-        calls.push({ url: String(url), method: opts?.method ?? "GET" });
-        if (String(url).endsWith("/session/ses_wedge")) {
-          return new Response(JSON.stringify({ directory: "/work/wedge" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(null, { status: 204 });
-      },
-      async () => {
-        await sendPrompt({ sessionId: "ses_wedge", text: "hi" });
-      },
-    );
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-    _setReadinessTimeoutMs(null);
-    _resetStreamReadyState();
-  }
-  assert.ok(
-    calls.some((c) => c.url?.includes("prompt_async")),
-    "sendPrompt never degraded to sending once the readiness bound elapsed",
-  );
-});
-
-test("listMessages OPENS the scoped stream but does NOT wait for it", async () => {
-  // The readiness gate is a WRITE-path guarantee: a session-mutating call must
-  // not race ahead of its own event subscription and lose the reply. A READ has
-  // no reply to lose, and on a cold or LRU-evicted stream the wait costs up to
-  // 5s — paid in front of every transcript fetch, it was the single largest
-  // component of a slow session open on mobile.
-  //
-  // So this pins BOTH halves of the current contract: the scoped stream is
-  // still opened (events keep flowing), and the /message GET does NOT wait for
-  // it to connect. The write-path gate test above is what keeps the guarantee
-  // that actually matters; do not "restore symmetry" by re-awaiting here.
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  const streamUrls = [];
-  _setEventStreamTransport(async (url) => {
-    streamUrls.push(String(url));
-    if (String(url).includes("directory=")) {
-      await new Promise(() => {}); // scoped stream never finishes connecting
-    }
-    return new Response(openStreamBody(), { status: 200 });
-  });
-
-  const stop = subscribeEvents(() => {});
-  try {
-    await withMockFetch(
-      async (url) => {
-        if (String(url).endsWith("/session/ses_msg_gate")) {
-          return new Response(JSON.stringify({ directory: "/work/msg-gate" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        if (String(url).includes("/message")) {
-          return new Response(JSON.stringify([{ id: "m1" }]), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(null, { status: 204 });
-      },
-      async () => {
-        // Resolves even though the scoped stream never connects, and without
-        // the readiness bound having to elapse.
-        const msgs = await listMessages("ses_msg_gate");
-        assert.deepEqual(msgs, [{ id: "m1" }]);
-        assert.ok(
-          streamUrls.some((u) => u.includes("directory=")),
-          "listMessages never opened the session's scoped event stream",
-        );
-      },
-    );
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-    _resetStreamReadyState();
-  }
-});
-
-test("listMessages passes ?limit through and leaves the tail slim-untouched by default", async () => {
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  const urls = [];
-  const raw = [
-    {
-      id: "m1",
-      parts: [
-        { type: "step-start" },
-        { type: "text", text: "hi" },
-        { type: "tool", state: { output: "OUT", metadata: { output: "META", exit: 0 } } },
-      ],
-    },
-  ];
-  await withMockFetch(
-    async (url) => {
-      urls.push(String(url));
-      if (String(url).includes("/message")) {
-        return new Response(JSON.stringify(raw), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const full = await listMessages("ses_lim");
-      assert.ok(!urls.some((u) => u.includes("limit=")), "a no-opts call must not add ?limit");
-      assert.deepEqual(full, raw, "a no-opts call must return the payload verbatim (desktop)");
-
-      urls.length = 0;
-      await listMessages("ses_lim", { limit: 20 });
-      assert.ok(urls.some((u) => u.includes("limit=20")), "limit was not forwarded to opencode");
-
-      urls.length = 0;
-      await listMessages("ses_lim", { limit: 0 });
-      assert.ok(!urls.some((u) => u.includes("limit=")), "a non-positive limit must be ignored");
-    },
-  );
-});
-
-test("listMessages ALWAYS strips a byte-identical tool stdout duplicate (no slim needed)", async () => {
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  const raw = [
-    {
-      id: "m1",
-      parts: [
-        { type: "text", text: "hi" },
-        { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
-      ],
-    },
-  ];
-  await withMockFetch(
-    async (url) => {
-      if (String(url).includes("/message")) {
-        return new Response(JSON.stringify(raw), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const full = await listMessages("ses_strip_dup");
-      assert.deepEqual(
-        full[0].parts[1].state,
-        { output: "OUT", metadata: { exit: 0 } },
-        "the duplicate metadata.output must be dropped for every client",
-      );
-      assert.equal(full[0].parts[0].type, "text", "non-tool parts untouched");
-      assert.equal(
-        raw[0].parts[1].state.metadata.output,
-        "OUT",
-        "the input fixture must not be mutated",
-      );
-    },
-  );
-});
-
-test("getMessage strips a byte-identical tool stdout duplicate (splice path)", async () => {
-  const raw = {
-    id: "m1",
-    parts: [
-      { type: "tool", state: { output: "OUT", metadata: { output: "OUT", exit: 0 } } },
-    ],
-  };
-  await withMessageFetch(raw, async () => {
-    const msg = await getMessage("ses_get_strip", "m1");
-    assert.deepEqual(
-      msg.parts[0].state,
-      { output: "OUT", metadata: { exit: 0 } },
-      "the duplicate metadata.output must be dropped in the single-message splice too",
-    );
-  });
-});
-
-test("getMessage leaves a NON-identical metadata.output (live streaming) untouched", async () => {
-  const raw = {
-    id: "m1",
-    parts: [
-      { type: "tool", state: { output: "final", metadata: { output: "partial", exit: 0 } } },
-    ],
-  };
-  await withMessageFetch(raw, async () => {
-    const msg = await getMessage("ses_get_live", "m1");
-    assert.deepEqual(
-      msg.parts[0].state.metadata.output,
-      "partial",
-      "different metadata.output must survive (running tool)",
-    );
-  });
-});
-
 test("stripDuplicateToolOutput is lossless and tolerant", () => {
   // Exact duplicate removed.
   assert.deepEqual(
@@ -1935,760 +1494,6 @@ test("slimTranscript tolerates malformed payloads", () => {
   ]);
 });
 
-test("listMessages still returns the transcript when the readiness gate times out", async () => {
-  // Degradation case: a wedged opencode (scoped stream never connects) must
-  // never turn the transcript fetch into a hang — the bounded gate elapses
-  // and listMessages still resolves with the fetched messages.
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  _setReadinessTimeoutMs(30); // don't make the test sleep 5s for real
-  _setEventStreamTransport(() => new Promise(() => {})); // never connects
-
-  const stop = subscribeEvents(() => {});
-  let msgs;
-  try {
-    await withMockFetch(
-      async (url) => {
-        if (String(url).endsWith("/session/ses_msg_wedge")) {
-          return new Response(JSON.stringify({ directory: "/work/msg-wedge" }), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        if (String(url).includes("/message")) {
-          return new Response(JSON.stringify([{ id: "m2" }]), {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          });
-        }
-        return new Response(null, { status: 204 });
-      },
-      async () => {
-        msgs = await listMessages("ses_msg_wedge");
-      },
-    );
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-    _setReadinessTimeoutMs(null);
-    _resetStreamReadyState();
-  }
-  assert.deepEqual(
-    msgs,
-    [{ id: "m2" }],
-    "listMessages never degraded to fetching the transcript once the readiness bound elapsed",
-  );
-});
-
-test("pooled ocFetch reuses one socket across sequential calls", async () => {
-  // A real local server: N sequential ocFetch calls must reuse a bounded
-  // number of sockets (not open N), proving the keep-alive pool works.
-  const { createServer } = await import("node:http");
-  const remotePorts = new Set();
-  const server = createServer((req, res) => {
-    remotePorts.add(req.socket.remotePort);
-    res.end("ok");
-  });
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const port = server.address().port;
-  const base = `http://127.0.0.1:${port}`;
-  try {
-    for (let i = 0; i < 25; i++) {
-      const res = await _pooledOcRequest(base + "/x");
-      await res.text();
-    }
-    assert.ok(
-      remotePorts.size <= 2,
-      `expected sequential calls to reuse ~1 socket, saw ${remotePorts.size}`,
-    );
-  } finally {
-    server.close();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// selectStreamsToEvict — scoped-stream eviction (unbounded-growth fix)
-// ---------------------------------------------------------------------------
-
-test("selectStreamsToEvict never evicts the global stream ('')", () => {
-  const now = 1_000_000_000;
-  const out = selectStreamsToEvict({
-    keys: ["", "/a", "/b"],
-    lastActivity: new Map([["", 0], ["/a", now], ["/b", now]]),
-    existsFn: () => true,
-    now,
-  });
-  assert.equal(out.includes(""), false, "global key must never be evicted");
-});
-
-test("selectStreamsToEvict evicts a directory that no longer exists on disk", () => {
-  const now = 1_000_000_000;
-  const out = selectStreamsToEvict({
-    keys: ["", "/live", "/gone"],
-    // both recently active, so only the missing-dir rule can evict
-    lastActivity: new Map([["/live", now], ["/gone", now]]),
-    existsFn: (dir) => dir === "/live",
-    now,
-  });
-  assert.deepEqual(out, ["/gone"]);
-});
-
-test("selectStreamsToEvict evicts a directory idle past the threshold", () => {
-  const now = 10 * STREAM_IDLE_MS;
-  const out = selectStreamsToEvict({
-    keys: ["", "/fresh", "/stale"],
-    lastActivity: new Map([
-      ["/fresh", now - 1000], // just used
-      ["/stale", now - STREAM_IDLE_MS - 1], // idle past 2h
-    ]),
-    existsFn: () => true,
-    now,
-  });
-  assert.deepEqual(out, ["/stale"]);
-});
-
-test("selectStreamsToEvict keeps a busy dir even if its last event is old (activity bumps on use)", () => {
-  const now = 10 * STREAM_IDLE_MS;
-  const out = selectStreamsToEvict({
-    keys: ["", "/busy"],
-    lastActivity: new Map([["/busy", now]]), // touched now
-    existsFn: () => true,
-    now,
-  });
-  assert.deepEqual(out, []);
-});
-
-test("selectStreamsToEvict enforces the LRU cap, dropping least-recently-active first", () => {
-  const now = 1_000_000_000;
-  // 5 live+existing streams, cap of 2 → keep the 2 most-recently-active,
-  // evict the other 3.
-  const keys = ["", "/k1", "/k2", "/k3", "/k4", "/k5"];
-  const lastActivity = new Map([
-    ["/k1", now - 50],
-    ["/k2", now - 40],
-    ["/k3", now - 30],
-    ["/k4", now - 20],
-    ["/k5", now - 10], // most recent
-  ]);
-  const out = selectStreamsToEvict({
-    keys,
-    lastActivity,
-    existsFn: () => true,
-    now,
-    idleMs: STREAM_IDLE_MS, // none idle
-    maxStreams: 2,
-  });
-  // Keep /k5 (10) and /k4 (20); evict /k1,/k2,/k3.
-  assert.deepEqual(out.sort(), ["/k1", "/k2", "/k3"]);
-});
-
-test("selectStreamsToEvict: missing-dir + idle + LRU compose without double-listing", () => {
-  const now = 10 * STREAM_IDLE_MS;
-  const keys = ["", "/gone", "/stale", "/a", "/b", "/c"];
-  const lastActivity = new Map([
-    ["/gone", now], // exists=false → evicted regardless of recency
-    ["/stale", now - STREAM_IDLE_MS - 1], // idle → evicted
-    ["/a", now - 3],
-    ["/b", now - 2],
-    ["/c", now - 1],
-  ]);
-  const out = selectStreamsToEvict({
-    keys,
-    lastActivity,
-    existsFn: (d) => d !== "/gone",
-    now,
-    maxStreams: 2, // survivors /a,/b,/c → keep /c,/b, evict /a
-  });
-  const set = new Set(out);
-  assert.equal(set.has("/gone"), true);
-  assert.equal(set.has("/stale"), true);
-  assert.equal(set.has("/a"), true);
-  assert.equal(set.has("/c"), false, "most-recent survivor retained");
-  assert.equal(out.length, new Set(out).size, "no duplicate keys");
-});
-
-test("selectStreamsToEvict: a throwing existsFn keeps the stream (not proof it's gone)", () => {
-  const now = 1_000_000_000;
-  const out = selectStreamsToEvict({
-    keys: ["", "/x"],
-    lastActivity: new Map([["/x", now]]),
-    existsFn: () => { throw new Error("stat failed"); },
-    now,
-  });
-  assert.deepEqual(out, [], "existsFn error must not evict");
-});
-
-// ---------------------------------------------------------------------------
-// isStreamDeaf + liveness watchdog (scoped-SSE deafness fix)
-// ---------------------------------------------------------------------------
-
-test("isStreamDeaf: false within the timeout, true past it", () => {
-  const now = 1_000_000_000;
-  assert.equal(isStreamDeaf(now - 10_000, now, 45_000), false, "10s of silence is fine (heartbeat ~10s)");
-  assert.equal(isStreamDeaf(now - 44_000, now, 45_000), false, "just under the threshold");
-  assert.equal(isStreamDeaf(now - 46_000, now, 45_000), true, "past the threshold → deaf");
-  assert.equal(isStreamDeaf(now, now, 45_000), false, "a byte just arrived → alive");
-});
-
-test("openEventStream: a deaf (silent) scoped stream is aborted + reconnected", async () => {
-  // A stalled reader: the first connection's read() never resolves (no bytes,
-  // no done) — exactly the deafness signature (opencode stops publishing but
-  // keeps the TCP open). The liveness watchdog must abort it and the loop must
-  // reconnect (a SECOND fetch is issued), proving self-heal.
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-
-  let connectCount = 0;
-  let disconnects = 0;
-  const controllers = [];
-  _setEventStreamTransport(async (_url, init) => {
-    connectCount += 1;
-    const signal = init?.signal;
-    // Reader that only resolves when the fetch is aborted (mirrors how
-    // undici's reader rejects on AbortController.abort()).
-    const reader = {
-      read: () =>
-        new Promise((_resolve, reject) => {
-          if (signal) {
-            if (signal.aborted) return reject(new Error("aborted"));
-            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-          }
-          // else: never resolves (only the watchdog abort ends it)
-        }),
-      releaseLock() {},
-    };
-    controllers.push(signal);
-    return { ok: true, body: { getReader: () => reader } };
-  });
-
-  // Drive openEventStream indirectly via subscribeEvents' global stream, with a
-  // tiny liveness window so the test runs fast. subscribeEvents passes opts
-  // through to openEventStream for the global + scoped opens.
-  const stop = subscribeEvents(() => {}, {
-    sweepIntervalMs: 0,
-    // liveness knobs plumbed to openEventStream:
-    livenessTimeoutMs: 40,
-    livenessCheckMs: 10,
-  });
-  try {
-    // Wait long enough for: connect #1 → watchdog fires (~40ms deaf) → abort →
-    // reconnect #1 → connect #2. Poll for the second connect.
-    const deadline = Date.now() + 2000;
-    while (connectCount < 2 && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    assert.ok(connectCount >= 2, `deaf stream must reconnect (connects=${connectCount})`);
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-  }
-});
-
-test("subscribeEvents _sweep evicts a dead/idle scoped stream but keeps global + live, and re-open works", () => {
-  // Drive the sweep directly (sweepIntervalMs:0 disables the real timer).
-  // Inject a fake event transport: a stream whose reader never resolves, so an
-  // "open" stays open and no real opencode connection is made.
-  _setEventStreamTransport(async () => ({
-    ok: true,
-    body: {
-      getReader: () => ({
-        read: () => new Promise(() => {}),
-        releaseLock() {},
-      }),
-    },
-  }));
-  _resetSessionDirectoryCache();
-  _resetStreamReadyState();
-  const existing = new Set(["/keep"]); // "/gone" will be reported missing
-  const stop = subscribeEvents(() => {}, {
-    existsFn: (d) => existing.has(d),
-    sweepIntervalMs: 0,
-    idleMs: STREAM_IDLE_MS,
-  });
-  try {
-    // Open two scoped streams via the exposed opener (what the query path uses).
-    stop._openFor("/keep", "/keep");
-    stop._openFor("/gone", "/gone");
-    let keys = stop._streamKeys();
-    assert.ok(keys.includes("") && keys.includes("/keep") && keys.includes("/gone"),
-      "global + both scoped streams open");
-
-    // Sweep: /gone's directory doesn't exist → evicted; /keep + global stay.
-    stop._sweep();
-    keys = stop._streamKeys();
-    assert.equal(keys.includes(""), true, "global survives");
-    assert.equal(keys.includes("/keep"), true, "live dir survives");
-    assert.equal(keys.includes("/gone"), false, "missing dir evicted");
-
-    // Re-open works after eviction (idempotent open, gate re-arms).
-    existing.add("/gone");
-    stop._openFor("/gone", "/gone");
-    assert.equal(stop._streamKeys().includes("/gone"), true, "re-open after eviction");
-  } finally {
-    stop();
-    _setEventStreamTransport(null);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Eager scoped-stream open at startup (BET-253 first-turn SSE race fix)
-//
-// On a fresh box, the first chat turn's events were lost because the scoped
-// `/event?directory=<dir>` subscription for a live chat window wasn't open
-// when the prompt POSTed. subscribeEvents now accepts an `eagerDirectories()`
-// callback (e.g. live chat-session directories from tmux.listProjects()) and
-// pre-opens those streams during the bootstrap IIFE — the full catalog stays
-// quietly cached (the many-workspace flood fix). These tests pin the
-// behaviour: eager open fires for the supplied dirs at startup, de-dup/empty
-// filtering skips no-ops, and the default (no opts) preserves the flood fix
-// (only the global /event stream is opened at startup).
-// ---------------------------------------------------------------------------
-
-test("subscribeEvents eagerly opens scoped streams for supplied eagerDirectories at startup", async () => {
-  // Capture every SSE URL the stream transport is asked to open. The eager
-  // open fires from the bootstrap IIFE — no prompt, no session use, just
-  // startup. Assert both /work/a and /work/b scoped URLs show up in the URL
-  // list, alongside the global /event URL.
-  const { openedUrls, cleanup } = setupEventStreamCapture();
-
-  const stop = subscribeEvents(() => {}, {
-    sweepIntervalMs: 0,
-    eagerDirectories: () => ["/work/a", "/work/b"],
-  });
-  try {
-    // The bootstrap IIFE is async; wait until both eager URLs have been
-    // requested (or a short deadline elapses) before asserting.
-    const deadline = Date.now() + 1000;
-    while (
-      Date.now() < deadline &&
-      !(openedUrls.some((u) => u.includes("directory=%2Fwork%2Fa")) &&
-        openedUrls.some((u) => u.includes("directory=%2Fwork%2Fb")))
-    ) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    assert.ok(
-      openedUrls.some((u) => u.endsWith("/event?directory=%2Fwork%2Fa")),
-      `expected /event?directory=/work/a to be opened eagerly; saw ${JSON.stringify(openedUrls)}`,
-    );
-    assert.ok(
-      openedUrls.some((u) => u.endsWith("/event?directory=%2Fwork%2Fb")),
-      `expected /event?directory=/work/b to be opened eagerly; saw ${JSON.stringify(openedUrls)}`,
-    );
-    assert.ok(
-      openedUrls.some((u) => u.endsWith("/event") && !u.includes("directory=")),
-      `expected the unscoped global /event to also be opened; saw ${JSON.stringify(openedUrls)}`,
-    );
-    // Stream keys reflect the same set.
-    const keys = stop._streamKeys();
-    assert.ok(keys.includes(""), "global stream key present");
-    assert.ok(keys.includes("/work/a"), "/work/a eager stream key present");
-    assert.ok(keys.includes("/work/b"), "/work/b eager stream key present");
-  } finally {
-    stop();
-    cleanup();
-  }
-});
-
-test("subscribeEvents eager open de-dupes and skips empty/null entries", async () => {
-  // The eagerDirectories set is a small bounded list, but callers may still
-  // pass dupes or blanks by accident (e.g. a chat window whose
-  // paneCurrentPath is empty). The eager loop must:
-  //   - open /work/a exactly once even when listed twice,
-  //   - skip "" and null entries without throwing or opening a bogus stream.
-  const { openedUrls, cleanup } = setupEventStreamCapture();
-
-  const stop = subscribeEvents(() => {}, {
-    sweepIntervalMs: 0,
-    eagerDirectories: () => ["/work/a", "/work/a", "", null, "/work/a"],
-  });
-  try {
-    const deadline = Date.now() + 1000;
-    while (Date.now() < deadline && !openedUrls.some((u) => u.includes("directory=%2Fwork%2Fa"))) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    const aOpens = openedUrls.filter((u) => u.endsWith("/event?directory=%2Fwork%2Fa"));
-    assert.equal(aOpens.length, 1, `expected /work/a opened exactly once, saw ${aOpens.length} (${JSON.stringify(openedUrls)})`);
-    assert.ok(
-      !openedUrls.some((u) => u.includes("directory=") && (u.endsWith("directory=") || u.endsWith("directory=&") || u.includes("directory=null"))),
-      `empty/null entries must not produce scoped stream URLs; saw ${JSON.stringify(openedUrls)}`,
-    );
-  } finally {
-    stop();
-    cleanup();
-  }
-});
-
-test("subscribeEvents default (no eagerDirectories) opens NO scoped stream at startup — flood fix preserved", async () => {
-  // Regression guard: the many-workspace flood fix relied on the catalog
-  // being cached quietly (no per-session open). Eager open is opt-in via
-  // `opts.eagerDirectories`. When the caller doesn't supply it, only the
-  // global /event stream must be opened at startup — no scoped /event
-  // requests, no per-catalog flood.
-  const { openedUrls, cleanup } = setupEventStreamCapture();
-
-  const stop = subscribeEvents(() => {}, { sweepIntervalMs: 0 });
-  try {
-    // Give the bootstrap IIFE a moment to settle (it tries listSessions and
-    // catches; the empty eagerDirectories path completes a tick later).
-    await new Promise((r) => setTimeout(r, 50));
-    const scoped = openedUrls.filter((u) => u.includes("directory="));
-    assert.deepEqual(
-      scoped,
-      [],
-      `no scoped /event?directory= should be opened at startup when eagerDirectories is absent; saw ${JSON.stringify(scoped)}`,
-    );
-    const globals = openedUrls.filter((u) => u.endsWith("/event") && !u.includes("directory="));
-    assert.equal(globals.length, 1, `expected exactly one unscoped global /event open; saw ${globals.length} (${JSON.stringify(openedUrls)})`);
-    const keys = stop._streamKeys();
-    assert.deepEqual(keys, [""], `only the global key should be live at startup; saw ${JSON.stringify(keys)}`);
-  } finally {
-    stop();
-    cleanup();
-  }
-});
-
-
-// ===== claudeCliStatus (BET-421 §E) =====
-
-test("claudeCliStatus reports installed when a candidate binary exists", () => {
-  const status = claudeCliStatus({
-    existsFn: (p) => p === "/usr/local/bin/claude",
-  });
-  assert.equal(status.installed, true);
-  assert.equal(status.path, "/usr/local/bin/claude");
-});
-
-test("claudeCliStatus reports not-installed when no candidate exists", () => {
-  const status = claudeCliStatus({ existsFn: () => false });
-  assert.equal(status.installed, false);
-  // Falls back to the bare name, which is NOT "installed".
-  assert.equal(status.path, "claude");
-});
-
-test("claudeCliStatus prefers ~/.local/bin/claude over /usr/local/bin/claude", () => {
-  const status = claudeCliStatus({ existsFn: () => true });
-  // resolveClaudeBinExists walks candidates in order; the home-dir path wins.
-  assert.match(status.path, /\.local\/bin\/claude$/);
-  assert.equal(status.installed, true);
-});
-
-// ---------------------------------------------------------------------------
-// sessionExists — the delegate sweeper's "is the parent still alive?" probe.
-//
-// THE BUG THIS LOCKS IN: this used to scan `listSessions()`. opencode caps
-// `GET /session` at 100 records and the unscoped form is box-wide, so on a box
-// with real history a healthy parent simply isn't in that page — the scan said
-// "gone", the sweeper stopped the background job as orphaned (BET-418 §B) and
-// stamped it `stopped by user`. Every delegated job died within a sweep tick.
-// ---------------------------------------------------------------------------
-
-test("sessionExists: 200 → alive, via a DIRECT lookup (never a capped list scan)", async () => {
-  const calls = [];
-  await withMockFetch(
-    async (url) => {
-      calls.push(String(url));
-      return new Response(JSON.stringify({ id: "ses_parent" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-    async () => {
-      assert.equal(await sessionExists("ses_parent"), true);
-    },
-  );
-  assert.equal(calls.length, 1, "one request, not a list scan");
-  assert.ok(
-    calls[0].endsWith("/session/ses_parent"),
-    `expected a direct /session/{id} lookup, got ${calls[0]}`,
-  );
-  assert.ok(
-    !calls[0].match(/\/session(\?|$)/),
-    `must NOT hit the capped collection endpoint: ${calls[0]}`,
-  );
-});
-
-test("sessionExists: REGRESSION — alive even when absent from the 100-record list page", async () => {
-  // The exact production shape: the collection endpoint returns a full page of
-  // 100 OTHER sessions and does not contain the parent. The old scan-based
-  // implementation returned false here and killed the job.
-  const page = Array.from({ length: 100 }, (_, i) => ({ id: `ses_other_${i}` }));
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      if (u.endsWith("/session")) {
-        return new Response(JSON.stringify(page), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      // The direct lookup still resolves it — that is the whole point.
-      return new Response(JSON.stringify({ id: "ses_parent" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-    async () => {
-      assert.equal(await sessionExists("ses_parent"), true);
-    },
-  );
-});
-
-// The remaining cases share one shape — stub a single response, assert the
-// verdict — so they are table-driven rather than five copies of the same body.
-// The asymmetry IS the contract: only a definitive 404 is allowed to be
-// destructive, because that verdict stops a running job and tears down its
-// window and worktree.
-for (const { name, respond, expected } of [
-  {
-    name: "404 → gone (the only negative)",
-    respond: () => new Response(JSON.stringify({ name: "NotFoundError" }), { status: 404 }),
-    expected: false,
-  },
-  {
-    name: "5xx → assume alive (a blip must never orphan a healthy job)",
-    respond: () => new Response("boom", { status: 500 }),
-    expected: true,
-  },
-  {
-    name: "transport throw → assume alive",
-    respond: () => {
-      throw new Error("ECONNREFUSED");
-    },
-    expected: true,
-  },
-]) {
-  test(`sessionExists: ${name}`, async () => {
-    await withMockFetch(
-      async () => respond(),
-      async () => {
-        assert.equal(await sessionExists("ses_probe"), expected);
-      },
-    );
-  });
-}
-
-test("sessionExists: empty id → false without any request", async () => {
-  let called = 0;
-  await withMockFetch(
-    async () => {
-      called++;
-      return new Response(null, { status: 200 });
-    },
-    async () => {
-      assert.equal(await sessionExists(""), false);
-    },
-  );
-  assert.equal(called, 0);
-});
-
-// ---------------------------------------------------------------------------
-// listReferences — BET-1023: GET /api/reference → projected renderer shape.
-// ---------------------------------------------------------------------------
-test("listReferences projects the /api/reference payload", async () => {
-  await withMockFetch(
-    async (url) => {
-      assert.equal(String(url), "http://127.0.0.1:4096/api/reference");
-      return new Response(JSON.stringify({
-        location: { directory: "/box", project: undefined },
-        data: [
-          { name: "docs", path: "/box/docs", source: { type: "local", path: "/box/docs" } },
-          {
-            name: "sdk", path: "/box/.opencode/repos/sdk",
-            source: { type: "git", repository: "anomalyco/opencode-sdk-js", branch: "main" },
-            description: "SDK impl",
-          },
-          { name: "internal", path: "/box/internal", hidden: true, source: { type: "local", path: "/box/internal" } },
-        ],
-      }));
-    },
-    async () => {
-      const refs = await listReferences();
-      assert.deepEqual(refs, [
-        { name: "docs", path: "/box/docs" },
-        { name: "sdk", repository: "anomalyco/opencode-sdk-js", branch: "main", description: "SDK impl" },
-        { name: "internal", hidden: true, path: "/box/internal" },
-      ]);
-    },
-  );
-});
-
-test("listReferences degrades to [] when the payload has no data array", async () => {
-  await withMockFetch(
-    async () => new Response(JSON.stringify({ location: { directory: "/box" } })),
-    async () => assert.deepEqual(await listReferences(), []),
-  );
-});
-
-// generateSessionTitle (BET-1018) — retitles run on opencode's own "title"
-// agent. Assert the prompt_async body sends `agent:"title"` and NEVER a
-// `format` (structured-output) field or a main-model override: json_schema on
-// prompt_async is accepted by opencode 1.18.10 but poisons the whole session
-// transcript with a permanent HTTP 400.
-// ---------------------------------------------------------------------------
-test("generateSessionTitle sends agent:title and never a format/model field", async () => {
-  let promptBody = null;
-  await withMockFetch(
-    async (url, opts) => {
-      const u = String(url);
-      if (u.includes("/prompt_async")) {
-        promptBody = JSON.parse(String(opts?.body ?? "{}"));
-        return new Response(null, { status: 204 });
-      }
-      if (u.includes("/message")) {
-        return new Response(
-          JSON.stringify([
-            {
-              info: { role: "assistant", time: { completed: 2 }, finish: "stop" },
-              parts: [{ type: "text", text: "Payment webhook retry idempotency" }],
-            },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      if (u.includes("/session?directory=")) {
-        return new Response(JSON.stringify({ id: "ses_title" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const title = await generateSessionTitle({
-        directory: "/w",
-        instruction: "Title this session",
-      });
-      assert.equal(title, "Payment webhook retry idempotency");
-      assert.ok(promptBody, "expected a prompt_async body");
-      assert.equal(promptBody.agent, "title", "retitle must run on the title agent");
-      assert.equal("format" in promptBody, false, "must never send a format/structured-output field");
-      assert.equal("model" in promptBody, false, "title agent uses its own model, not our main model");
-    },
-  );
-});
-
-test("headless primitive records provenance before prompt and returns safe structured errors", async () => {
-  const { runSynchronousSession } = await import("./opencode.mjs");
-  const { resolvePipelineSession } = await import("./internalSessions.mjs");
-  let deleted = false;
-  await withMockFetch(async (url, opts) => {
-    const u = String(url);
-    if (opts?.method === "DELETE") { deleted = true; return new Response(null, { status: 204 }); }
-    if (u.includes("/prompt_async")) {
-      assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
-      return new Response("SECRET provider response", { status: 503 });
-    }
-    return new Response(JSON.stringify({ id: "internal-error" }));
-  }, async () => {
-    const result = await runSynchronousSession({ directory: "/work", instruction: "summarize" });
-    assert.equal(result.ok, false);
-    assert.equal(result.code, "prompt-http");
-    assert.ok(!JSON.stringify(result).includes("SECRET"));
-  });
-  assert.equal(deleted, true);
-  assert.equal((await resolvePipelineSession("internal-error", async () => [])).owner, "cto");
-});
-
-for (const final of ["complete", "error"]) {
-  test(`headless primitive waits through partial text before terminal ${final}`, async () => {
-    const { runSynchronousSession } = await import("./opencode.mjs");
-    let polls = 0;
-    let deleted = 0;
-    await withMockFetch(async (url, opts) => {
-      if (opts?.method === "DELETE") {
-        assert.equal(polls, 2, "must not delete during partial output");
-        deleted++;
-        return new Response(null, { status: 204 });
-      }
-      if (String(url).includes("/prompt_async")) return new Response(null, { status: 204 });
-      if (String(url).endsWith("/message")) {
-        polls++;
-        const info = { role: "assistant", time: { created: 1 } };
-        if (polls === 2) {
-          info.time.completed = 2;
-          info.finish = "stop";
-          if (final === "error") info.error = { name: "ProviderError", data: { message: "SECRET" } };
-        }
-        return new Response(JSON.stringify([{ info, parts: [{ type: "text", text: polls === 1 ? "part" : "complete" }] }]));
-      }
-      return new Response(JSON.stringify({ id: `partial-${final}` }));
-    }, async () => {
-      const result = await runSynchronousSession({ directory: "/work", instruction: "test", pollIntervalMs: 0, maxAttempts: 3 });
-      assert.equal(result.ok, final === "complete");
-      assert.equal(result.text, final === "complete" ? "complete" : "");
-      if (final === "error") assert.equal(result.code, "model-error");
-      assert.ok(!JSON.stringify(result).includes("SECRET"));
-    });
-    assert.equal(deleted, 1);
-  });
-}
-
-for (const cleanupFails of [false, true]) {
-  test(`provenance write failure never prompts and reports cleanup failure=${cleanupFails}`, async () => {
-    const { runSynchronousSession } = await import("./opencode.mjs");
-    let deleted = false;
-    await withMockFetch(async (url, opts) => {
-      assert.ok(!String(url).includes("/prompt_async"));
-      if (opts?.method === "DELETE") {
-        deleted = true;
-        return new Response(null, { status: cleanupFails ? 503 : 204 });
-      }
-      return new Response(JSON.stringify({ id: "provenance-failed" }));
-    }, async () => {
-      const result = await runSynchronousSession({ directory: "/work", instruction: "test",
-        trackCreation: () => async () => { throw new Error("SECRET disk failure"); },
-      });
-      assert.equal(result.code, "provenance-error");
-      assert.equal(result.cleanupCode, cleanupFails ? "cleanup-error" : undefined);
-      assert.equal(result.ok, false);
-    });
-    assert.equal(deleted, true);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// completeProviderOauth (BET-1043)
-// ---------------------------------------------------------------------------
-//
-// The oauth-auto (Codex headless) path fires the callback with NO code —
-// opencode then blocks polling the device-token endpoint. The oauth-code
-// path sends the user-typed code. One function must serve both, and only
-// include `code` in the body when it is a non-empty string.
-
-test("completeProviderOauth omits code from the body when passed empty string (oauth-auto)", async () => {
-  let captured = null;
-  await withMockFetch(
-    async (url, init) => {
-      captured = { url: String(url), method: init.method, body: JSON.parse(init.body) };
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const r = await completeProviderOauth("openai", 1, "");
-      assert.ok(r.ok);
-      assert.equal(captured.url, "http://127.0.0.1:4096/provider/openai/oauth/callback");
-      assert.deepEqual(captured.body, { method: 1 });
-      assert.ok(!("code" in captured.body), "empty code must be omitted entirely");
-    },
-  );
-});
-
-test("completeProviderOauth includes code in the body when passed a real code (oauth-code)", async () => {
-  let captured = null;
-  await withMockFetch(
-    async (url, init) => {
-      captured = { method: init.method, body: JSON.parse(init.body) };
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const r = await completeProviderOauth("openai", 1, "ABCD-1234");
-      assert.ok(r.ok);
-      assert.deepEqual(captured.body, { method: 1, code: "ABCD-1234" });
-    },
-  );
-});
-
-// BET-1356: post-compaction context estimate for the one-liner's "before →
-// after" figure. Pure over the message list; numbers/structural keys are not
 // content and never inflate the estimate.
 test("estimateMessageListTokens: 0 for empty/missing input", () => {
   assert.equal(estimateMessageListTokens(undefined), 0);
@@ -2724,102 +1529,26 @@ test("estimateMessageListTokens: a single empty text message yields 0 not a tiny
   assert.equal(estimateMessageListTokens([{ info: { role: "user" }, parts: [{ type: "text", text: "" }] }]), 0);
 });
 
-test("getSessionStatus: directory-scoped URL; absent → idle, busy/retry passed through", async () => {
-  _resetSessionDirectoryCache();
-  const urls = [];
-  const map = { ses_b: { type: "busy" }, ses_r: { type: "retry" } };
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      urls.push(u);
-      if (u.startsWith("http://127.0.0.1:4096/session/status")) {
-        return new Response(JSON.stringify(map), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      const id = u.split("/session/")[1];
-      return new Response(JSON.stringify({ id, directory: "/proj/x" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-    async () => {
-      assert.equal(await getSessionStatus("ses_b"), "busy");
-      assert.equal(await getSessionStatus("ses_r"), "retry");
-      assert.equal(await getSessionStatus("ses_idle"), "idle");
-    },
-  );
-  const statusUrls = urls.filter((u) => u.includes("/session/status"));
-  assert.equal(statusUrls.length, 3);
-  assert.ok(statusUrls.every((u) => u.endsWith("/session/status?directory=%2Fproj%2Fx")), statusUrls.join(","));
+// ===== claudeCliStatus (BET-421 §E) =====
+
+test("claudeCliStatus reports installed when a candidate binary exists", () => {
+  const status = claudeCliStatus({
+    existsFn: (p) => p === "/usr/local/bin/claude",
+  });
+  assert.equal(status.installed, true);
+  assert.equal(status.path, "/usr/local/bin/claude");
 });
 
-test("getSessionStatus throws on a non-2xx response", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      if (u.includes("/session/status")) return new Response("boom", { status: 500 });
-      return new Response(JSON.stringify({ id: "ses_e", directory: "/p" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-    async () => {
-      await assert.rejects(() => getSessionStatus("ses_e"), /getSessionStatus 500/);
-    },
-  );
+test("claudeCliStatus reports not-installed when no candidate exists", () => {
+  const status = claudeCliStatus({ existsFn: () => false });
+  assert.equal(status.installed, false);
+  // Falls back to the bare name, which is NOT "installed".
+  assert.equal(status.path, "claude");
 });
 
-test("listSessionStatuses: whole directory-scoped map incl. retry details; non-2xx and a missing directory throw", async () => {
-  const map = { ses_r: { type: "retry", attempt: 1, message: "rate limit", next: 1791811799362 } };
-  const urls = [];
-  await withMockFetch(
-    async (url) => {
-      urls.push(String(url));
-      return String(url).includes("%2Fbad") ? new Response("boom", { status: 500 }) : new Response(JSON.stringify(map), { status: 200 });
-    },
-    async () => {
-      assert.deepEqual(await listSessionStatuses("/proj/x"), map);
-      await assert.rejects(() => listSessionStatuses("/bad"), /listSessionStatuses 500/);
-      await assert.rejects(() => listSessionStatuses(""), /directory required/);
-    },
-  );
-  assert.equal(urls[0], "http://127.0.0.1:4096/session/status?directory=%2Fproj%2Fx");
-});
-
-test("knownSessionDirectories / cachedSessionDirectory read the session→directory cache (distinct dirs, optional filter)", async () => {
-  _resetSessionDirectoryCache();
-  await withMockFetch(
-    async (url) => {
-      const u = String(url);
-      if (u.includes("/session/status")) return new Response("{}", { status: 200 });
-      const id = u.split("/session/")[1];
-      return new Response(JSON.stringify({ id, directory: id === "ses_c" ? "/proj/y" : "/proj/x" }), { status: 200 });
-    },
-    async () => {
-      for (const id of ["ses_a", "ses_b", "ses_c"]) await getSessionStatus(id);
-    },
-  );
-  assert.deepEqual(knownSessionDirectories().sort(), ["/proj/x", "/proj/y"]);
-  assert.deepEqual(knownSessionDirectories((sid) => sid === "ses_c"), ["/proj/y"]);
-  assert.equal(cachedSessionDirectory("ses_a"), "/proj/x");
-  assert.equal(cachedSessionDirectory("nope"), null);
-});
-
-test("getSessionStatus: unresolvable directory throws and never hits the unscoped /session/status", async () => {
-  _resetSessionDirectoryCache();
-  const urls = [];
-  await withMockFetch(
-    async (url) => {
-      urls.push(String(url));
-      // Directory lookup fails; an unscoped status call would answer `{}` (→ "idle").
-      if (String(url).includes("/session/status")) {
-        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return new Response("nope", { status: 404 });
-    },
-    async () => {
-      await assert.rejects(() => getSessionStatus("ses_unknown"), /no directory for ses_unknown/);
-    },
-  );
-  assert.equal(urls.filter((u) => u.includes("/session/status")).length, 0, urls.join(","));
+test("claudeCliStatus prefers ~/.local/bin/claude over /usr/local/bin/claude", () => {
+  const status = claudeCliStatus({ existsFn: () => true });
+  // resolveClaudeBinExists walks candidates in order; the home-dir path wins.
+  assert.match(status.path, /\.local\/bin\/claude$/);
+  assert.equal(status.installed, true);
 });

@@ -1414,8 +1414,7 @@ export interface Api {
   opencodeAgents(): Promise<OpencodeAgent[]>;
   opencodeFindFiles(input: { query: string; directory: string }): Promise<string[]>;
   // BET-1023: configured opencode references (GET /api/reference) + the
-  // single-writer upsert for them. `remove` is rejected server-side (opencode's
-  // PATCH /global/config has no delete semantics) — removal is deferred.
+  // writer for them (config-file edit + reload; `remove` deletes an alias).
   opencodeReferences(): Promise<OpencodeReference[]>;
   opencodeSetReferences(ops: {
     upsert?: OpencodeReferenceUpsert[];

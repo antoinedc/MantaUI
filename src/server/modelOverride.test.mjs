@@ -47,21 +47,19 @@ test("applyModelOverride skips empty/invalid fields and no override", () => {
 
 test("listModels applies overrides keyed by providerID/modelID", async () => {
   await withMockFetch(
-    async () =>
-      new Response(
-        JSON.stringify({
-          connected: ["anthropic"],
-          all: [
-            {
-              id: "anthropic",
-              models: {
-                "claude-sonnet-4-6": { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-              },
-            },
-          ],
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
+    // V2 wire: providers, integrations (connections) and models are separate reads.
+    async (url) => {
+      const path = new URL(url).pathname;
+      const body =
+        path === "/api/provider"
+          ? { data: [{ id: "anthropic", integrationID: "anthropic", name: "Anthropic", activation: "auto" }] }
+          : path === "/api/integration"
+            ? { data: [{ id: "anthropic", name: "Anthropic", methods: [], connections: [{ type: "env", name: "ANTHROPIC_API_KEY" }] }] }
+            : path === "/api/model"
+              ? { data: [{ id: "claude-sonnet-4-6", modelID: "claude-sonnet-4-6", providerID: "anthropic", name: "Claude Sonnet 4.6" }] }
+              : {};
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    },
     async () => {
       const out = await listModels({
         "anthropic/claude-sonnet-4-6": { name: "My Sonnet", description: "Custom", context: 1_000_000 },

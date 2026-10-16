@@ -1546,21 +1546,21 @@ test("turnCompletionFromTranscript: linkage + terminal finish only; running/tool
 
 test("production composition: real opencode.mjs sendPrompt carries the caller messageID AND the bounded signal on the wire; getMessage reads the receipt back", async () => {
   const { calls, reset } = spyOcWire(({ u, method, body }) => {
-    if (method === "GET" && u.pathname === "/session/ses_live") {
+    if (method === "GET" && u.pathname === "/api/session/ses_live") {
       return new Response(
-        JSON.stringify({ id: "ses_live", directory: "/tmp/cto-control", projectID: "global" }),
+        JSON.stringify({ data: { id: "ses_live", location: { directory: "/tmp/cto-control" }, projectID: "global" } }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
-    if (method === "POST" && u.pathname === "/session/ses_live/prompt_async") {
-      return new Response(null, { status: 204 });
+    if (method === "POST" && u.pathname === "/api/session/ses_live/prompt") {
+      return new Response(JSON.stringify({ data: { id: body?.id } }), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (method === "GET" && u.pathname.startsWith("/session/ses_live/message/")) {
-      // P0-proven behavior: the client messageID is persisted verbatim as the
-      // user message id and is readable back — this IS the receipt.
-      const mid = decodeURIComponent(u.pathname.slice("/session/ses_live/message/".length));
+    if (method === "GET" && u.pathname.startsWith("/api/session/ses_live/message/")) {
+      // V2: the client message id is persisted verbatim as the user message id
+      // (the inbox id) and is readable back — this IS the receipt.
+      const mid = decodeURIComponent(u.pathname.slice("/api/session/ses_live/message/".length));
       return new Response(
-        JSON.stringify({ info: { id: mid, role: "user", time: { created: 1 } }, parts: [] }),
+        JSON.stringify({ data: { id: mid, type: "user", text: "wire probe", time: { created: 1 } } }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -1569,18 +1569,18 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
   ocModule._resetSessionDirectoryCache();
   try {
     await ocModule.sendPrompt({ sessionId: "ses_live", text: "wire probe", messageID: "msg_probe" });
-    const post = calls.find((c) => c.method === "POST" && c.path === "/session/ses_live/prompt_async");
-    assert.ok(post, "prompt_async hit the wire");
-    assert.equal(post.body.messageID, "msg_probe", "the client messageID rides the prompt_async body");
-    assert.equal(post.query.directory, "/tmp/cto-control");
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/session/ses_live/prompt");
+    assert.ok(post, "prompt hit the wire");
+    assert.equal(post.body.id, "msg_probe", "the client messageID rides the prompt body as `id`");
     assert.equal(post.signal, undefined, "no signal given → none on the wire (pre-P3a2 compat)");
     // And WITHOUT a messageID the body omits it entirely (pre-P3a2 behavior).
     await ocModule.sendPrompt({ sessionId: "ses_live", text: "bare" });
-    const bare = calls.filter((c) => c.method === "POST" && c.path === "/session/ses_live/prompt_async")[1];
-    assert.equal(bare.body.messageID, undefined);
+    const bare = calls.filter((c) => c.method === "POST" && c.path === "/api/session/ses_live/prompt")[1];
+    assert.equal(bare.body.id, undefined);
 
     const receipt = await ocModule.getMessage("ses_live", "msg_probe");
     assert.equal(receipt.info.id, "msg_probe", "the receipt read-back round-trips");
+    assert.equal(receipt.info.role, "user");
 
     // Production composition end-to-end: the admission service over the REAL
     // client functions, with a real binding store snapshot as the binding.
@@ -1599,11 +1599,11 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     const res = await svc.submit({ text: "production admission", origin: "human" });
     await svc.tick();
     const record = await recordOf(svc, res.id);
-    assert.equal(record.status, "accepted", "204 + wire receipt → accepted");
+    assert.equal(record.status, "accepted", "accepted prompt + wire receipt → accepted");
     assert.match(record.messageID, /^msg_/);
-    const prodPost = calls.filter((c) => c.method === "POST" && c.path === "/session/ses_live/prompt_async").at(-1);
-    assert.equal(prodPost.body.messageID, record.messageID);
-    assert.equal(prodPost.body.parts.at(-1).text, "production admission");
+    const prodPost = calls.filter((c) => c.method === "POST" && c.path === "/api/session/ses_live/prompt").at(-1);
+    assert.equal(prodPost.body.id, record.messageID);
+    assert.equal(prodPost.body.text, "production admission");
     assert.ok(prodPost.signal instanceof AbortSignal, "the admission deadline bounds the real POST");
   } finally {
     reset();

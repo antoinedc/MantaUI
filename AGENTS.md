@@ -622,31 +622,27 @@ SSH — the old `host`-based mode is fully removed.
 
 When `autoRenameSessions` is on, a chat-mode window gets its **first name on
 its first turn** from opencode's own session title **when opencode has one**
-(`GET /session`, read via `opencodeListSessions(cwd)` → `findSessionTitle`).
-A manta-created chat session is created with an EMPTY title, and opencode does
-NOT title it from the first message (verified live, 1.18.10) — so for a fresh
-window that title is "". The first-name path therefore **falls through to the
-title agent** (`opencodeGenerateTitle`) so the first turn still produces a
+(the session list, read via `opencodeListSessions(cwd)` → `findSessionTitle`).
+A manta-created chat session is created with an EMPTY title, so for a fresh
+window that title is "". The first-name path therefore **falls through to
+generation** (`opencodeGenerateTitle`) so the first turn still produces a
 sensible rename instead of keeping the creation-time first-word placeholder.
 If generation also fails/times out the effect retries on the next turn; never
 blank a window name.
 
-Subsequent **re-titles** (every `AUTO_RENAME_EVERY_N_TURNS` = 5 turns) run on
-opencode's **"title" agent** (`agent:"title"` in `generateSessionTitle`'s
-prompt_async body in `src/server/opencode.mjs`) — its own cheap naming model,
-not our main model — returning a clean short name. `sanitizeGeneratedTitle`
-stays as a safety net on both paths.
+Subsequent **re-titles** (every `AUTO_RENAME_EVERY_N_TURNS` = 5 turns) and the
+first-name fallback use V2's session-less one-shot `POST
+/api/experimental/generate` (`generateText` in `src/server/opencode.mjs`): no
+hidden session is created, prompted, polled or deleted. V1's `title` agent no
+longer exists, so a cheap CONNECTED model is picked explicitly
+(`pickCheapModel`: haiku/mini/flash/nano/lite/small by name, then lowest input
+cost; V2's own default is the free tier, which refuses calls from outside
+opencode). It returns "" on any failure/timeout so the caller skips rather
+than errors. `sanitizeGeneratedTitle` stays as a safety net on both paths.
 
-**DO NOT add structured output to that prompt_async call.** Passing
-`{"format":{"type":"json_schema",…}}` is ACCEPTED on opencode 1.18.10, but
-opencode defaults `retryCount` and its own reader then rejects the whole
-session's message list with a permanent HTTP 400 — the entire transcript
-becomes unreadable, not just that one message. See the code comment at
-`generateSessionTitle`.
-
-Do not change `AUTO_RENAME_EVERY_N_TURNS` (cadence is a separate concern) and
-do not delete the throwaway-session mechanism (it's still how drift-tracking
-re-titles work — the session title is first-name-only and never updates).
+Do not change `AUTO_RENAME_EVERY_N_TURNS` (cadence is a separate concern); the
+session title is first-name-only and never updates, which is why re-titles are
+generated rather than read.
 
 ## Web Push notifications (`src/server/push.mjs`)
 
@@ -1227,6 +1223,70 @@ including the entries where the optimizer rolled its own change back.
 any kind; every parameter the tuner learns is learned from this box's own
 history and stays on it.
 
+## OpenCode V2 cutover / upgrade (`src/server/upgradeV2*.mjs`)
+
+The box runs the **pinned OpenCode V2** (`scripts/opencode-v2/version.mjs`; `GET
+/api/version` reports `opencode: {major: 2, version}`). There is no backend
+switch and no V1/V2 dual mode; V1 support was deleted as each area moved. Spec:
+`docs/superpowers/specs/2026-10-16-opencode-v2-cutover.md` (contracts K1–K4).
+The wire major (K4) is `1`: `DEFAULT_COMPATIBILITY_MATRIX.supportedMajor` — an
+old desktop against a new box, or the reverse, is `incompatible`.
+
+**What clients see is unchanged (K2).** Every `/rpc` channel name/response
+shape and every `/events` frame is as before the cutover; manta-server
+translates V2's wire (`src/shared/opencodeV2.mjs`, `streamInterp.mjs`).
+
+**The upgrade flow (K3) — a durable, resumable state machine**, `upgradeV2.mjs`,
+state in `~/.manta/v2-migration.json`, every step idempotent. It starts
+automatically on the first boot of a release that finds an un-migrated V1
+history DB (`upgradeV2.boot()` in `index.mjs`), and resumes after a manta-server
+restart or crash. Steps (K3 ids, in order):
+
+1. `preflight` — free space on the DB's filesystem vs the V1 DB size:
+   **≥ 2.4× → copy mode**, **≥ 1.4× → in-place mode**, else fail `retryable`
+   with `needBytes`/`haveBytes` (`COPY_MODE_FACTOR` / `IN_PLACE_FACTOR`,
+   `decideMode`; the factors are measured growth — 2.34× copy, 1.34× in place —
+   plus margin; don't lower them). Nothing is stopped yet.
+2. `stop` — wait ≤ 60 s for running turns, stop opencode, pause the
+   scheduler/webhooks/delegate pollers, retire the V1 tools/plugins (backed up).
+3. `copy` (copy mode only) — sqlite-backup the V1 DB to `opencode-v2.db` next to
+   it; progress = bytes. The V1 DB is never written.
+4. `migrate` — start V2 on that DB (`OPENCODE_DB`); V2 migrates on startup; poll
+   `GET /api/experimental/migration/v1` 1/s; progress = its numerator /
+   denominator / label; the ETA is derived from the measured rate.
+5. `verify` — plugins active (`GET /api/plugin`), V2 session count ≥ V1's, one
+   tiny turn if a Claude login exists.
+6. `cutover` — persist `OPENCODE_DB` into the service env, restart opencode
+   normally, wait for the migration to report `completed`, run
+   `migrateLegacyWhitelists()` once (idempotent; a failure is logged, **never**
+   fails the step), leave upgrade mode, resume the background pollers.
+
+API: `GET /api/upgrade` → `{state: idle|running|failed|completed|rolled_back,
+steps[], overall, etaSeconds, error}` (every mode, auth required);
+`POST /api/upgrade/retry` and `/rollback` → `{ok}`; progress is also published
+as `{kind:"upgrade", payload}` on `/events`. **While `state === "running"` the
+box is in upgrade mode:** every route except `/auth/*`, `/api/version`,
+`/api/upgrade*`, `/events` and `/push/*` answers `503 {"error":"box
+upgrading","upgrade":true}` (`isUpgradeExemptPath`; a WS twin guards `/pty`).
+Clients show the blocking `UpgradeGate` (desktop) / read-only state (iOS).
+
+**Rollback** (only from `failed`): stop V2 → drop the V2 copy → restore the V1
+tools/plugins/config from the backup → start the preserved V1 binary
+(`~/.opencode/bin/opencode-v1`) on the untouched V1 DB → re-install the previous
+Manta release with `scripts/self-update.sh --to <sha> [--version <v>]`, the sha
+coming from `~/.manta/previous-release.json`. That file is captured into the
+migration state when the upgrade STARTS, because a later self-update overwrites
+it. If it is missing the box is still rolled back to V1 (service, assets, DB)
+and the reason is surfaced — only the release re-install is skipped. In-place
+mode keeps V1's tables (V2 only adds its own), so the same path works. A failure
+before `stop` never touched V1: rollback only puts the previous release back.
+
+**Rehearse it, never on the live box.** The state machine is unit-tested with
+injected I/O (`upgradeV2.test.mjs`); real runs use the sandbox harness
+(`scripts/opencode-v2/sandbox.mjs`) against a synthetic V1 DB with service
+control stubbed. Never point a test at `:4096` / `~/.config/opencode` /
+`~/.local/share/opencode`.
+
 ## Mouse mode — design decision, do not re-litigate
 
 **Mouse is ON through the whole pipeline (tmux + claude).** This matches what
@@ -1351,45 +1411,42 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   effect submits the queued prompt as a fresh turn via `submit()` (so slash
   commands, attachments, and model resolution all go through the normal path).
 
-  **What counts as a "step boundary" — a COMPLETED TOOL PART, not
-  `session.next.step.ended`.** This is THE fix for "queued prompt waits for
-  the whole turn" (2026-06-19). The deployed opencode build does NOT emit the
-  `session.next.*` event family AT ALL — verified live by streaming `/event`
-  during a multi-tool turn: you only get `message.part.delta`,
-  `message.part.updated`, `session.status` (busy/idle), and a final
-  `session.idle`. The original trigger hooked onto `session.next.step.ended`
-  therefore never fired, so the drain silently fell back to full-idle. The
-  primary trigger is now a `message.part.updated` whose `properties.part` is a
-  `tool` part at `state.status === "completed" | "error"`
-  (`isToolStepBoundary`, pure + tested). The legacy `step.ended` block still
-  calls `maybeDrainQueuedPrompt` as a harmless fallback for any build that
-  DOES emit it (the helper is idempotent via `drainAbortRef`). If you ever see
-  the drain regress to "waits for whole turn", FIRST re-verify which events
-  opencode emits — do not assume `session.next.*` works.
+  **What counts as a "step boundary" — the box's `toolBoundary` frame (also
+  `stepEnded`).** The renderer consumes only box-interpreted `stream` frames
+  (`src/renderer/hooks/useSseBus.ts`); it never sees raw opencode events. The box
+  (`src/server/streamInterp.mjs`) emits `toolBoundary` when a tool reaches a
+  terminal state (V2 `session.tool.success` / `.failed`) and `stepEnded` on
+  `session.step.ended`; both call `maybeDrainQueuedPrompt` (idempotent via
+  `drainAbortRef`). The older events-based triggers (`message.part.updated`
+  tool parts, `session.next.step.ended`) are gone with the V1 event
+  vocabulary. If the drain regresses to "waits for whole turn", check that the
+  box still emits those two frames for the turn.
 
-  The abort is made INVISIBLE to the user:
+  The abort is `window.api.opencodeAbort` → V2 `POST
+  /api/session/{id}/interrupt?resume=false`, and the box surfaces it as an
+  **`aborted` frame** (from `session.execution.interrupted`), never as a
+  `sessionError`. The abort is made INVISIBLE to the user:
   - `drainAbortRef` is set when the drain-abort POSTs. It guards re-entrancy
-    (several boundary events can arrive before the abort lands — only the
-    first fires) AND tags the resulting `MessageAbortedError`.
-  - The `session.error` handler swallows that error silently via
-    `isDrainAbortError(err.name, drainAbortRef.current)` — no `sendError`
-    banner. It just flips `running` false (safety net if `session.idle`
-    doesn't also fire) so the drain effect runs.
+    (several boundary frames can arrive before the abort lands — only the
+    first fires) AND tags the resulting `aborted` frame.
+  - The `aborted` frame handler swallows it silently via
+    `isDrainAbortError("MessageAbortedError", drainAbortRef.current)` — no
+    "Aborted" banner. It just flips `running` false so the drain effect runs.
+    An abort the user triggered (`drainAbortRef` false) shows the banner.
   - The drain effect re-arms `drainAbortRef = false` before submitting, so a
     SECOND queued item can again abort the freshly-submitted turn at its next
     step boundary (FIFO, each interrupting at a tool boundary).
 
-  This REPLACES the older "drain ONLY on `session.idle`, never mid-turn"
-  rule. That rule existed because posting a prompt mid-turn WITHOUT a
-  preceding explicit abort makes opencode abort implicitly, surfacing a
-  `MessageAbortedError` banner + marking the assistant message aborted. The
-  fix is the explicit abort + `isDrainAbortError` suppression — NOT avoiding
-  mid-turn sends. Do NOT reintroduce an `idle`-only drain; the suppression
-  path is what keeps the swap clean. The partial assistant output generated
-  before the abort legitimately stays in the transcript (real work the model
-  did); only the abort *error/indication* is hidden. The predicates are pure +
-  tested in `chatUtils.test.ts`. ChatPanel is shared with mobile, so this
-  behavior applies on both transports (both implement `opencodeAbort`).
+  This REPLACES the older "drain ONLY on idle, never mid-turn" rule: posting a
+  prompt mid-turn WITHOUT a preceding explicit abort makes opencode abort
+  implicitly and mark the assistant message aborted. The fix is the explicit
+  abort + `isDrainAbortError` suppression — NOT avoiding mid-turn sends. Do NOT
+  reintroduce an idle-only drain. The partial assistant output generated
+  before the abort legitimately stays in the transcript; only the abort
+  *indication* is hidden. The predicates (`shouldAbortForQueuedDrain`,
+  `isDrainAbortError`) are pure + tested in `chatUtils.test.ts`. (V2's native
+  `delivery: "steer" | "queue"` would make this machinery unnecessary; adopting
+  it is deliberately a later change.)
 
   **The drain effect is the SOLE owner and lives in `useSseBus.ts` — do NOT
   duplicate it.** The BET-64 hook extraction left an IDENTICAL
@@ -1619,25 +1676,33 @@ degrades to `{ supported:false }` and the palette shows "update the box". The DB
 handle is read-only, always.
 
 **Architecture** (HTTP-only — opencode session mgmt + SSE live server-side):
-- opencode runs as a `systemd --user` service (`opencode-serve`) on the Linux
-  box, port 4096, bound to 127.0.0.1. manta-server proxies it over HTTP
-  (`src/server/opencode.mjs`) — no SSH tunnel, no `-L` forward.
+- opencode (OpenCode V2, pinned — `scripts/opencode-v2/version.mjs`) runs as a
+  `systemd --user` service (`opencode-serve`) on the Linux box, port 4096, bound
+  to 127.0.0.1, behind **HTTP Basic auth** (`opencode:<password>`, the password
+  in `~/.manta/opencode-password`, 0600). manta-server proxies it over HTTP
+  (`src/server/opencode.mjs`) — no SSH tunnel, no `-L` forward. The ONE header
+  builder is `opencodeAuthHeader()` in `opencode.mjs` (async; it re-reads the
+  password file on every call and caches nothing, so a file created or rotated
+  after boot is picked up; `MANTA_OPENCODE_PASSWORD` overrides it in tests).
+  Every other module that talks to opencode (`opencodeAdmin.mjs`, …) uses it and
+  `apiUrl()` — never a second reader.
 - Renderer never talks to opencode directly — only via `window.api.*`, which is
   `httpApi` (`/rpc` + `/events`) on both desktop and mobile.
-- **manta-server** owns the opencode SSE streams (`src/server/opencode.mjs`
-  `subscribeEvents` — global + one scoped `/event?directory=` stream per known
-  session directory) and republishes on its in-process bus; the renderer
-  consumes them via `GET /events`. ChatPanel filters by sessionID. (Historical:
-  the desktop main process used to own this SSE bus via `src/main/opencode.ts` +
-  `src/main/index.ts` over an SSH forward — that path is deleted.)
-- Anthropic auth via `opencode-claude-auth@latest` plugin in
-  `~/.config/opencode/opencode.jsonc` (Claude Max sub, `~/.claude/.credentials.json`).
+- **manta-server** owns the ONE opencode event stream (`src/server/opencode.mjs`
+  `subscribeEvents` → `GET /api/event`), interprets it (`streamInterp.mjs`) and
+  republishes **frames** on its in-process bus; the renderer consumes them via
+  `GET /events`. ChatPanel filters by sessionID. (Historical: the desktop main
+  process used to own this SSE bus over an SSH forward — deleted.)
+- Anthropic auth via the **`manta-claude-max`** V2 plugin
+  (`docs/opencode-plugins-v2/manta-claude-max`, installed to
+  `~/.config/opencode/plugins/`; Claude Max sub, `~/.claude/.credentials.json`).
+  The V1 `opencode-claude-auth` plugin is retired by the upgrade.
 
 **Key files**:
 
 | File | What |
 |---|---|
-| `src/server/opencode.mjs` | opencode HTTP proxy, session mgmt, per-directory SSE streams (server-side, the sole owner) |
+| `src/server/opencode.mjs` | opencode V2 HTTP client (Basic auth), session mgmt, the single global event stream (server-side, the sole owner) |
 | `src/server/tmux.mjs` | tmux CRUD, `restampSessionId` (`@manta-session-id`), chat-holder pane, `maybeCreateChatSession` |
 | `src/server/rpc.mjs` | `/rpc` channel dispatch — the `window.api` contract, server side; `resolveProjectCwd` |
 | `src/server/index.mjs` | manta-server entry: `/rpc`, `/events` SSE, REST `/api/*`, WS `/pty`, auth gate |
@@ -1654,39 +1719,46 @@ picks its own default. `skillRegistryUrls: string[]` — extra opencode skill
 registry URLs (Settings UI), persisted to `~/.manta/config.json` via the generic
 `configUpdate` channel.
 
-**opencode.jsonc writes go through exactly two writers (BET-1318).** Upserts go
-through opencode's own `PATCH /global/config` (BET-1019) — the writer lives in
-`src/server/providers.mjs` (`patchGlobalConfig` → `setProviders` /
-`setSubagents`). The endpoint owns both the in-memory config and the file, edits
-the `.jsonc` surgically, and **preserves `//` comments** (verified live). Note
-`PATCH /config` is INERT on 1.18.x (returns 200 but changes nothing): only
-`PATCH /global/config` works. Deletions go through `removeConfigKeys` (surgical
-jsonc-parser edit + mandatory opencode restart) — the PATCH endpoint has no
-delete semantics over HTTP (it deep-merges and rejects `null`), so a `remove`
-op (deactivating a subagent / deleting a provider endpoint / removing a
-reference) cannot be expressed through it; the restart is what stops a removed
-key resurrecting from opencode's stale in-memory config. There is no third
-writer. The default
-registry
+**opencode.jsonc writes go through exactly ONE writer.** `editConfig` in
+`src/server/providers.mjs` edits `~/.config/opencode/opencode.jsonc` surgically
+with jsonc-parser (comments preserved) and then asks the running opencode to
+re-read it with `POST /api/location/reload` (`reloadOpencodeConfig` in
+`src/server/opencodeAdmin.mjs`). Upserts AND removals take the same path, and
+neither restarts opencode, so a config change never ends an in-flight turn
+(proven on the pinned binary: a turn running during the reload completes).
+`reloadOpencodeConfig` never throws: opencode not listening is `ok:true,
+reloaded:false` (the edit is on disk and applies at its next start); any error
+status is `ok:false`. `restartOpencode` remains only for explicit user action
+(Settings restart button) and the upgrade flow. V1-format keys (`provider`,
+`agent`, `options.cacheControl`) are still written — V2 accepts and renames
+them. There is no `PATCH /global/config` writer, no `removeConfigKeys`, no
+"restart to apply" after a config edit. The one-shot V1→V2 provider cutover
+(`migrateLegacyWhitelists`: a V1 `whitelist` is inert in V2, so it becomes
+`models` + native `disabled` markers) runs from the upgrade's `cutover` step.
+The default skill registry
 (`https://antoinedc.github.io/manta-skills`) ships in the opencode binary once
 the upstream PR (anomalyco/opencode#28068) lands; these are user-added extras.
 `cacheTtl: "5m" | "1h"` — Anthropic prompt cache TTL (default `"5m"`).
-Display-only: drives the stale-cache threshold on the SessionHeader context
+Drives the stale-cache threshold on the SessionHeader context
 pill (a stale cache tints that pill warn and shows a Clear-session block in
 its popover — there is no separate cache pill; see the "Stale prompt-cache"
 section below). MantaUI does NOT set `cache_control.ttl` on any request.
 **NOT display-only: it changes the real wire TTL** by writing
 `options.cacheControl` into opencode's own config. The default is `"5m"`
-because that is what opencode sends when the key is absent, measured. Going
-1h→5m RESTARTS opencode and ends in-flight turns; going to 1h does not. See
-"Stale prompt-cache" for the wire evidence and the four opencode properties
-the implementation depends on.
+because that is what opencode sends when the key is absent, measured. Both
+directions are a config edit + live reload — nothing restarts and the Settings
+control carries no confirm. See "Stale prompt-cache" for the wire evidence and
+what the implementation depends on.
 
-**v2-only endpoints** (used alongside the v1 base):
-- `GET /question` — list pending Question tool requests
-- `POST /question/{id}/reply` — body `{answers: string[][]}` (one array of selected
-  option labels per question)
-- `POST /question/{id}/reject` — dismiss without answering
+**OpenCode V2 endpoints** (all `/api/*`, Basic auth; see
+`docs/opencode-v2/spikes/` and `https://opencode.ai/v2/openapi.json`):
+- Questions are **forms**: `GET /api/session/{id}/form` lists them; reply is
+  `POST /api/session/{id}/form/{formID}/reply` with `{answer:{<key>:value}}`,
+  reject is `DELETE`. The box maps one form field → one question
+  (`src/shared/opencodeV2.mjs`) so the renderer keeps its current question shape.
+- Permissions: `POST /api/session/{id}/permission/{id}/reply {decision}`
+  (`always` in trust mode).
+- Prompt: `POST /api/session/{id}/prompt`; abort: `POST …/interrupt`.
 - `GET /vcs?directory=<cwd>` — `{branch?, default_branch?}` for the session
   cwd. **MantaUI does NOT use this.** opencode caches the branch per-worker and
   its internal watcher misses terminal-side `git checkout`s, so `/vcs`
@@ -1699,54 +1771,35 @@ the implementation depends on.
   ChatPanel polls every 5s and on every submit, so terminal-side checkouts
   reflect within one tick. If you ever need branch info elsewhere, use the
   same IPC — never call `/vcs` directly.
-- SSE events consumed in ChatPanel's `onOpencodeEvent` handler beyond the
-  basics (`session.idle/status/error/compacted`, `message.part.*`, `permission.*`,
-  `question.*`):
-  - `session.next.step.ended` — live token/cost snapshot. `stepTokens` state
-    is preferred over the transcript-scraped `latestTokens` so the
-    SessionHeader context pill updates between tool calls, not just on
-    re-fetch. `properties.
-    finish` is classified via `classifyFinish()` into `"output-cap" |
-    "context-wall" | "tool-cutoff" | null` (covers Anthropic `max_tokens` /
-    `model_context_window_exceeded`, OpenAI `length`, Gemini `MAX_TOKENS`).
-    Non-null results land in `finishByMessageId: Map<messageID,
-    TruncationKind>` and render an inline orange `⚠ truncated (…)` pill
-    on the matching `MessageRow` next to the turn-duration footer.
-    `tool-cutoff` is promoted from `max_tokens` when the message's last
-    non-step part is a `tool` — silently-fatal case where the tool JSON is
-    incomplete; the badge tells the user a retry is needed. The legacy
-    `sendError` banner also fires (finish-aware copy via
-    `describeTruncation().label`), without clobbering a more-specific
-    `session.error`.
-  - `session.next.compaction.{started,delta,ended}` — drives the inline
-    `CompactionCard` above the running indicator. `.ended` holds the
-    "Compacted" confirmation for 2.5s then clears (the `session.compacted`
-    refetch has landed by then).
-  - `todo.updated` — `liveTodos` state, preferred over transcript-scraped
-    `activeTodos`. Lets the `ActiveTodos` card flip items between
-    in_progress/completed live.
-  - `vcs.branch.updated` — keeps the branch chip in SessionHeader's left
-    group current
-    when opencode itself notices a change (rare in practice: its watcher
-    misses terminal-side `git checkout`s — see the `/vcs` note above for
-    why we don't rely on this event). The handler is still wired because
-    when opencode DOES emit it, the value is correct, but the 5s poll +
-    submit refetch is the authoritative path. Properties have no
-    `sessionID` so the early sessionID filter at the top of
-    `onOpencodeEvent` short-circuits (undefined → falsy).
-  - On `todo.updated`, `todosDismissed` is reset to `false` so a fresh
-    TodoWrite resurfaces the card even if the prior list was user-dismissed.
-  - `session.status` with `type === "retry"` — drives the `RetryCard` above
-    the running indicator with `attempt`, `message`, and an optional
-    `action {title, message, label, link?}`. Cleared on next `busy`/`idle`.
-  - `command.executed` — fired right after opencode creates the user
-    message that holds an expanded slash-command template. Properties
-    `{name, arguments, messageID, sessionID}` populate `commandByMessageId:
-    Map<messageID, {name, arguments}>`. `MessageRow` reads the map and
-    swaps the user-text gray bar for `UserCommandBar` — a collapsed
-    `› ▸ /name args` row with a chevron that expands to the full template
-    body. Without this, invoking a large skill (e.g. gsd-*) dumped the
-    entire SKILL.md as the user's turn.
+- **The renderer consumes box-interpreted `stream` frames, not raw opencode
+  events** (`useSseBus.ts` `case "<sub>"`; the box side is
+  `src/server/streamInterp.mjs`, whose header has the full V2-event → frame
+  table — frame vocabulary and payloads are unchanged by the V2 cutover, spec
+  K2). The ones with non-obvious UI behaviour:
+  - `stepEnded` — live token/cost snapshot. `stepTokens` state is preferred over
+    the transcript-scraped `latestTokens` so the SessionHeader context pill
+    updates between tool calls. Its `finish` is classified via
+    `classifyFinish()` into `"output-cap" | "context-wall" | "tool-cutoff" |
+    null`; non-null results arrive as `truncation` frames and land in
+    `finishByMessageId`, rendered as an inline orange `⚠ truncated (…)` pill on
+    the matching `MessageRow`. `tool-cutoff` (max_tokens mid tool block) means
+    the tool JSON is incomplete and a retry is needed.
+  - `compaction` {phase: started|delta|ended} — drives the inline
+    `CompactionCard`; `ended` holds "Compacted" for 2.5s. `transcriptStale`
+    (sent once the compaction's execution settles) triggers the refetch.
+  - `todos` — `liveTodos` state, preferred over transcript-scraped
+    `activeTodos`; also resets `todosDismissed` so a fresh TodoWrite resurfaces
+    the card.
+  - `retry` — drives the `RetryCard` (`attempt`, `message`, optional `action`);
+    cleared on the next running/step frame.
+  - `commandExecuted` — populates `commandByMessageId` so `MessageRow` shows the
+    collapsed `› ▸ /name args` `UserCommandBar` instead of the expanded skill
+    template as the user's turn.
+  - `questions` / `permissions` / `attention` — the Question and Permission
+    cards and the sidebar badge.
+  - `childSession` / `subagent.child` — subagent wiring (see "Subagent rendering").
+  - Branch: still the local `git branch --show-current` poll (see `/vcs` note);
+    the `vcs.branch.updated` event is not consumed.
 
 The `QuestionCard` component (bottom of `ChatPanel.tsx`) renders above
 `PermissionCard`. Each card shows question header + body text, clickable option
@@ -1766,18 +1819,17 @@ The transcript only refreshes on the 300ms debounced refetch — a long tool
 roundtrip leaves footers and cards stale until the next part arrives.
 Several `useMemo` selectors over `messages` now check a "live" state first
 and fall back to the message scan:
-- `latestTokens` prefers `stepTokens` (from `session.next.step.ended`)
-- `activeTodos` prefers `liveTodos` (from `todo.updated`)
+- `latestTokens` prefers `stepTokens` (from the `stepEnded` frame)
+- `activeTodos` prefers `liveTodos` (from the `todos` frame)
 - `branch` is pure state (initial fetch + 5s poll + submit refetch +
-  best-effort `vcs.branch.updated`; see `/vcs` note above)
-- `finishByMessageId` is pure state (from `session.next.step.ended`'s
-  `properties.finish`) — survives refetch because the canonical messages
+  see `/vcs` note above)
+- `finishByMessageId` is pure state (from `truncation` frames) — survives refetch because the canonical messages
   payload doesn't carry per-step finish metadata.
-- `commandByMessageId` is pure state (from `command.executed`) — same
+- `commandByMessageId` is pure state (from the `commandExecuted` frame) — same
   reason: the canonical messages payload has no command-origin field, so
   re-fetch can't restore the `/name args` collapsed view.
 When adding a new live-event consumer in ChatPanel, follow the same shape:
-`useState` reset on session change, set in the SSE handler, consumed via a
+`useState` reset on session change, set in the frame handler, consumed via a
 `liveX ?? transcript-derived` selector. Don't try to mutate messages
 in-place — the canonical refetch will overwrite you.
 
@@ -1824,57 +1876,51 @@ with a **Clear session** button. The warn state matches when:
 from `AppConfig.cacheTtl` ("5m" | "1h", default **"5m"**, in Settings).
 
 **cacheTtl is a REAL setting — it changes what Anthropic is asked for, not
-just what the pill predicts (BET-1336).** opencode's `applyCaching()`
-(`packages/opencode/src/provider/transform.ts`) stamps its own cache
+just what the pill predicts (BET-1336).** opencode stamps its own cache
 breakpoints `{type:"ephemeral"}` with **no `ttl` field**, so left alone
 Anthropic applies its default 5-minute TTL — measured on the wire:
 `usage.cache_creation.ephemeral_5m_input_tokens: 4421`,
 `ephemeral_1h_input_tokens: 0`. That is why **"5m" is the default and is
 expressed as the config key being ABSENT**.
 
-**"1h" is applied by writing `options.cacheControl` into opencode's own
-config**, which opencode turns into a **top-level** `cache_control` on the
-request. Verified end-to-end through a real opencode turn (isolated proxy
-provider, 1.18.22): `TOP-LEVEL cache_control={"type":"ephemeral","ttl":"1h"}`,
-and Anthropic bills the write to `ephemeral_1h_input_tokens`. No beta header
-needed. The machinery is `selectCacheTtlTargets` / `planCacheTtlOps` /
-`syncCacheTtl` / `readCacheTtl` in `src/server/providers.mjs`, driven from the
-`config:update` and `config:get` channels in `rpc.mjs`.
+**"1h" is applied by writing a per-model `cacheControl` into opencode's own
+config** (`provider.<id>.models.<model>.options.cacheControl =
+{type:"ephemeral", ttl:"1h"}`; V2 loads it as
+`providers.<id>.models.<model>.settings.cacheControl`, either spelling is
+read), which V2 turns into a **top-level** `cache_control` on the request. The
+machinery is `selectCacheTtlTargets` / `planCacheTtlOps` / `syncCacheTtl` /
+`readCacheTtl` in `src/server/providers.mjs`, driven from the `config:update`
+and `config:get` channels in `rpc.mjs`.
 
-Four properties of opencode's logic that the implementation is shaped around —
-change any of them and this breaks:
+What the implementation depends on (change any of them and this breaks):
 
-1. **`cacheControl` is a caching-MODE switch, not a TTL field.**
-   `usesAnthropicAutomaticCaching` (gated on `options.cacheControl !== undefined`
-   + `@ai-sdk/anthropic`) makes opencode SKIP its own breakpoints and hand
-   placement to Anthropic — measured as `block_breakpoints=0` on the wire.
-   **So "5m" must REMOVE the key, never write `ttl:"5m"`** — an explicit 5m
-   would silently flip every default user into automatic caching. There is
-   likewise no "off" value: `null` leaves opencode in automatic mode with no
-   `cache_control` on the wire, i.e. no caching at all.
-2. **The option is per-MODEL.** `ProviderTransform.options()` does not pass
-   provider-level options through, so there is no single global key; the
-   setting fans out over the Anthropic-SDK models of the CONNECTED providers
-   (15 on a stock Anthropic box). Only `@ai-sdk/anthropic` and
-   `@ai-sdk/google-vertex/anthropic` honour it — anything else would be a stray
-   option under the wrong providerOptions namespace, so the target set is exact.
-3. **Writing hot-applies; removing RESTARTS opencode.** `PATCH /global/config`
-   lands in the live config with no restart (verified). A removal has to go
-   through `removeConfigKeys`, which restarts `opencode-serve` — otherwise the
-   deleted key survives in opencode's in-memory config. That restart **ends
-   every in-flight turn box-wide**, so 1h→5m confirms with the user first and
-   `syncCacheTtl` reports `restarted` so a caller can say so. (Not theoretical:
-   it killed an agent's own turn mid-call during development.)
-4. **Reconciliation has a DIRECTION rule.** manta's stored value is the user's
+1. **The top-level `cache_control` is ADDED to opencode's own breakpoints (V2),
+   and Anthropic allows only 4 per request.** A tool-bearing request is already
+   at 4, so a raw 1h makes it 5 and Anthropic answers HTTP 400 "A maximum of 4
+   blocks with cache_control may be provided. Found 5." The **`manta-claude-max`
+   plugin folds it in** (`normalizeCacheControl` in
+   `docs/opencode-plugins-v2/manta-claude-max/lib/body.ts`, run after its other
+   body rewrites): when both a top-level and block-level breakpoints exist it
+   drops the top-level one and gives its ttl to every block-level one (same ttl
+   everywhere, so Anthropic's "1h must not follow 5m" ordering holds); with no
+   block-level breakpoints the top-level one is left alone; unparseable bodies
+   pass through. **1h is only safe on tool turns while that plugin is loaded.**
+   Harness proof: `scripts/opencode-v2/cache-breakpoints.e2e.mjs`.
+2. **"5m" REMOVES the key**, never writes `ttl:"5m"` (absent keeps opencode's own
+   default breakpoints).
+3. **The option is per-MODEL** (provider-level settings are not passed through),
+   so the setting fans out over the Anthropic-SDK models V2 lists
+   (`ANTHROPIC_PACKAGE_RE` on `GET /api/model`'s `package`). The target set is
+   exact; anything else would be a stray option.
+4. **Writes AND removals hot-apply** — a config-file edit + `POST
+   /api/location/reload`, never a restart — so 1h→5m no longer ends in-flight
+   turns, `syncCacheTtl.restarted` is always false, and the Settings control has
+   no confirm dialog (its help text no longer warns about a restart).
+5. **Reconciliation has a DIRECTION rule.** manta's stored value is the user's
    INTENT, opencode's config is the mechanism. On read (`config:get`), stored
-   "1h" with opencode unset is APPLIED (a pure upsert, no restart) — that is
-   what carries a user who chose 1h before the setting was wired through.
-   Any other disagreement adopts opencode's value into the mirror, because
-   resolving it the other way would mean a restart, which a read must never do.
-
-**Still worth fixing upstream**: `applyCaching()` should accept a configurable
-`ttl` on the breakpoints it already writes, which would give a real TTL knob
-without the mode switch in (1) or the per-model fan-out in (2).
+   "1h" with opencode unset is APPLIED; any other disagreement adopts opencode's
+   value into the mirror, because a read must not silently rewrite opencode's
+   config.
 
 **History note:** BET-1334 deleted this setting and replaced it with a TTL
 measured from the message ledger, on the reasoning that it asked users to
@@ -1905,7 +1951,11 @@ sits on its own row beneath the footer. Status that describes the SESSION
 (branch, context pill, stale-cache warning, fork/compact/clear/delete) lives
 in the SessionHeader, not here — BET-415's organising split.
 
-**Buffered text-delta streaming.** opencode emits `message.part.delta`
+**Buffered text-delta streaming.** *(V2 note: V2's deltas are phrase-level and
+the box forwards them as `flush`/`messageChanged` frames; the renderer-side
+buffer below is kept for frame semantics and is a Phase-6 deletion candidate.
+The event names in the force-flush list are the V1 ones — read them as "the
+equivalent frame".)* opencode emitted `message.part.delta`
 events ~character-by-character for text/reasoning parts. The naive
 "setMessages on every delta" policy produces visible markdown jitter:
 bullets appear before their content, code fences flash as inline-code
@@ -1969,126 +2019,71 @@ full — try /compact: …", `MessageOutputLengthError` → "Response truncated
 when opencode introduces new error class names; unknown names fall through
 to the raw message.
 
-**Live tool output (bash tailing) — the messageID + debounce-starvation
-trap.** A running tool streams its stdout into `state.metadata.output` (NOT
-`state.output`, which only exists at `completed`); `resolveToolOutput`
-(`chatUtils.ts`) prefers `state.output` and falls back to the live
-`metadata.output` so `BashBody` tails a long command's latest lines. opencode
-emits a `message.part.updated` for the tool part every ~20-40ms as output
-grows (verified live against `/events`). Two bugs conspired to make this show
-nothing until the turn ended ("bash · running" with an empty body, then the
-whole output dumped at once on completion):
+**Live tool output (shell tailing) — polled by the box from `/api/shell`.**
+V2 pushes no per-chunk shell event. When a `session.tool.progress` event names
+`metadata.shellID`, `streamInterp.mjs` polls `GET
+/api/shell/{id}/output?cursor=<n>` (`readShellOutput` in `opencode.mjs`, with
+`location[directory]=` from the event) every `SHELL_POLL_MS` = 250 ms until the
+tool ends, and emits **`toolOutput`** frames carrying only the NEW chunk
+(`{sessionId, idx, text}`; cursor-based, never the full output). Each tool is
+capped at `MAX_TOOL_OUTPUT_CHARS` = 20 000 characters, after which one
+`… [output truncated]` marker is sent and the rest is dropped (an endless
+`yes` can't balloon the device stream). A 404 means the shell is already gone —
+the final output still arrives with the tool result. The renderer appends
+`toolOutput` chunks to the running tool's body (`resolveToolOutput` →
+`BashBody` → `ConnectorOutput` pin-to-bottom) and prefers the completed
+`state.output` once the tool part carries it. The old failure modes (message
+id read from the wrong event path, a starved 300 ms refetch debounce) were
+about raw V1 `message.part.updated` traffic; the per-message splice max-wait
+(`SPLICE_MAX_WAIT_MS = 250` in `useTranscriptState.ts`) remains for the
+transcript refetch path. To debug "bash shows nothing until the end": confirm
+the box emits `toolOutput` frames for the turn (`/events`), and that the
+`shellID` poll isn't 404ing.
 
-- **messageID is at a DIFFERENT path per event type.** On
-  `message.part.updated` the id lives at `properties.part.messageID`; the
-  top-level `properties.messageID` is UNDEFINED (it's only set on
-  `message.updated`). The handler read only `props.messageID`, so
-  `message.part.updated` resolved to `""` and `spliceMessage("")` fell through
-  to a FULL `scheduleRefetch()` instead of the targeted per-message splice.
-  Fix: resolve `props.messageID ?? props.part.messageID ?? props.info.id`
-  (`useSseBus.ts`).
-- **The refetch debounce was starved.** Both `scheduleRefetch` and the
-  per-message `spliceMessage` are 300ms-debounced with a timer that RESETS on
-  every call. Because tool updates arrive every ~30ms — far faster than
-  300ms — the timer never fired until the stream paused (turn idle). Fix: a
-  per-message **max-wait guard** (`SPLICE_MAX_WAIT_MS = 250` in
-  `useTranscriptState.ts`) — if a message's splice has been pending longer
-  than the cap, the in-flight timer is allowed to fire instead of being reset,
-  so live output updates at a steady ~4Hz cap. `spliceTimers` +
-  `spliceFirstScheduledAt` are cleared on session change so a late timer can't
-  write a stale message into the new session.
+**One global event stream, Basic auth (replaces the V1 per-directory scope).**
+V2 session routes take the session id alone — no `?directory=` scope — and ONE
+`GET /api/event` stream carries every session of every directory (events carry
+`location` when a directory matters). `subscribeEvents` in
+`src/server/opencode.mjs` owns it: Basic auth (`opencodeAuthHeader()`), SSE
+framing, reconnect after 1.5 s on any drop. The V1 machinery — per-directory
+streams, directory listeners, the readiness gate, stream refcounting — is
+deleted; do not reintroduce it.
 
-The renderer's render path (`resolveToolOutput` → `BashBody` →
-`ConnectorOutput` pin-to-bottom, memoized on the `part` reference) was already
-correct; the bug was purely event-routing + debounce, not rendering. The full
-pipeline (opencode → manta-server `/events` → RPC `opencode:message`) delivers
-`metadata.output` intact both mid-run and at completion — verified by
-streaming the box's opencode `/event` and manta-server `/events` during a slow
-`for i…; do echo; sleep 1; done`.
-
-**Per-project SSE scope** — every session-mutating POST
-(`prompt_async`, `command`, `fork`, `compact`) carries
-`?directory=<session.directory>` so opencode runs tools inside the project
-worktree. opencode's `/event` stream is ALSO scoped by `?directory=`: events
-from a scoped POST land only on the matching scoped subscription, NOT on
-the global stream. The event bus therefore opens **one `/event` stream per
-directory** in addition to the global stream.
-
-**Location (HTTP-only):** this machinery now lives entirely in manta-server —
-`src/server/opencode.mjs` (`subscribeEvents`, `sessionDirectoryCache`,
-`rememberSessionDirectory`) + `src/server/index.mjs` (the bus that spawns
-per-directory streams and republishes on `/events`). References below to
-`src/main/{index,opencode}.ts` are the deleted desktop-main equivalents, kept
-only to explain the shared contract and the historical "identical bug in both
-transports"; the surviving copy is the `src/server/*.mjs` one.
-
-- `sessionDirectoryCache` (`src/server/opencode.mjs`) maps `sessionId →
-  directory`; populated by `createSession`, `forkSession`, and `listSessions`
-  (via a side-effect loop), and lazy-filled by `GET /session/{id}` on miss.
-- `onSessionDirectoryAdded` lets the bus auto-spawn a stream whenever a new
-  directory shows up in the cache.
-- On startup the bus opens the global stream, replays
-  `knownSessionDirectories()`, and calls `opencodeListSessions(config)` to
-  prime the cache from server-side sessions (recovers from restarts).
-- **GOTCHA — every cache write MUST go through `rememberSessionDirectory`,
-  never a bare `sessionDirectoryCache.set`.** Only `rememberSessionDirectory`
-  fires the `onSessionDirectoryAdded` listeners; a bare `.set` populates the
-  map but the bus never learns to open the scoped stream. This was the exact
-  "SSE broken in *existing* sessions, fine in new ones" bug:
-  `getSessionDirectoryQuery`'s lazy-fetch branch used a bare `.set`, so an
-  existing/restored session resolved on its first prompt never opened its
-  scoped stream and every response event vanished. Fixed in BOTH transports
-  (`src/main/opencode.ts` + `src/server/opencode.mjs` had the identical
-  bug). Regression test: `sendPrompt lazy-fetch notifies directory
-  listeners …` in `src/server/opencode.test.mjs` (red/green verified).
-- **Readiness gate (desktop)** — even with the listener firing, the scoped
-  stream opens asynchronously while the prompt POST is already in flight.
-  `setDirectoryReadyGate` (registered by the bus in `src/main/index.ts`) lets
-  `getSessionDirectoryQuery` await the scoped subscription being live before
-  the scoped POST goes out. Bounded at 5s — a wedged server degrades to
-  "send anyway", never freezes the prompt. Readiness re-arms on stream
-  disconnect so reconnect-window prompts wait for the new subscription.
-- **Success-path instrumentation** — the bus logs `[opencode-bus] stream
-  CONNECTED dir=…`, the open-stream set, and a sampled per-dir event trace
-  (event#0, then every 50th) to the dev log. The earlier `debug(...)` commits
-  only logged the main-process cwd path, not SSE success — "nothing prints"
-  was undiagnosable. Keep this; it's how you tell "events flowing for a dir"
-  from "silent" (the bug signature).
-
-Symptom you'll see if this breaks again: user message shows optimistically,
-assistant turn stays blank forever, no JS errors. The transcript
-(`GET .../message`) shows the response was generated and persisted — it
-just never streams to the renderer because the matching scoped stream
-isn't open. Verify with
-`curl -sN 'http://127.0.0.1:4096/event?directory=<cwd>'` while a prompt is
-in flight: you should see `message.part.delta` frames.
-
-The mobile server (`src/server/opencode.mjs`) mirrors this with its own
-`sessionDirectoryCache` and `subscribeEvents()` that opens global + one
-scoped stream per known directory. Both code paths share the same contract;
-when changing one, change the other.
+- **No replay.** Every (re)connect calls `onConnect({reconnect})`; on a
+  reconnect the pump in `index.mjs` (`resyncAfterReconnect`) re-reads, for
+  every session the interpreter knows, whether it is running and what asks are
+  pending, and tells clients to refetch — a gap in the stream can't leave a
+  stale transcript or a stuck running dot.
+- `sessionDirectoryCache` in `opencode.mjs` survives only as a lookup table
+  (session → directory, filled by `createSession`/`forkSession`/list calls) for
+  callers that want a directory without a round trip
+  (`knownSessionDirectories` for the seat-retry sweep, `cachedSessionDirectory`,
+  `listSessionStatuses`). It has no listeners and drives no streams.
+- Symptom if events stop: the user message shows optimistically, the assistant
+  turn stays blank, no JS errors, while the transcript fetch shows the reply was
+  persisted. Check manta-server's logs for the pump's reconnect lines and
+  `curl -sN -u "opencode:$(cat ~/.manta/opencode-password)" http://127.0.0.1:4096/api/event`
+  (heartbeat comments `: heartbeat`, then `data:` frames while a prompt runs).
 - Sessions persist FileParts forever. A bad-mime FilePart (e.g. `application/json`)
   in history causes every subsequent Anthropic call to fail. Fix:
   `DELETE /session/{sid}/message/{mid}/part/{pid}` on each offender.
-- `/api/model` leaks `apiKey` — never forward it. Use `/provider` instead
-  (already done in `opencode.ts`).
-- The `/question` endpoint returns 404 on older opencode servers (pre-v2). The
-  fetch in ChatPanel is wrapped in `.catch(() => {})` — non-fatal.
 - `opencodeVcsBranch` returns `null` for non-git cwds, detached HEAD,
   empty cwd, or transport failure. The renderer renders nothing for `null`
   (the `⎇ <branch>` indicator is gated on truthy branch). Don't treat
   `null` as an error.
-- `vcs.branch.updated` events carry no `sessionID` — they pass the
-  per-session filter by accident. Acceptable: there's only one branch per
-  cwd, but be aware if you ever scope event handling more strictly.
 
 ## Subagent rendering (read-only, Phase 1)
 
 When the parent agent invokes the `task` tool, opencode spawns a CHILD
-session and runs the subagent inside it. The child's events flow on the
-**same scoped `/event?directory=` stream** as the parent (child inherits
-parent cwd), but with the child's `sessionID` — so the early sessionID
-filter in `onOpencodeEvent` would drop them. Phase 1 renders the subagent
+session and runs the subagent inside it. On OpenCode V2 the child's events
+arrive on the **same single global `/api/event` stream** as the parent's, with
+the child's `sessionID`; the box interprets them (`session.created{parentID}` →
+a `childSession` frame published under the PARENT, `session.tool.progress` on a
+task tool → `subagent`/`subagent.child` frames) and the renderer keeps routing
+by the child-id allowlist below. The `{info, parts}` transcript shape in the
+wire block below is what `opencode:messages` still returns — built server-side
+from V2's timeline (`mapTimeline` in `src/shared/opencodeV2.mjs`, spec K2) —
+so the transcript-derived child-id discovery below is unchanged. Phase 1 renders the subagent
 inline (collapsed by default, expand for full child transcript) without
 spawning a tmux window for it. Phase 2 ("Open as session") is the open
 work bullet at the bottom — promotes the child into its own chat-mode
@@ -2119,28 +2114,21 @@ v2):
 1. `collectChildSessionIds(messages)` walks the transcript for
    `state.metadata.sessionId` on every task part. Used to seed the
    `childSessionIds` allowlist on initial fetch AND every refetch.
-2. `session.created` events whose `properties.info.parentID === sessionId`
-   add the new child id to the allowlist (covers the brief window before
-   the parent's task part is stamped). **GOTCHA — registration MUST run
-   BEFORE the per-session filter**, otherwise the filter drops the event
-   whose payload would register the child:
-   `EventSessionCreated.properties.sessionID` per opencode's OpenAPI is the
-   NEW child's id, which is not in the allowlist yet (this event is what
-   would add it). The pure `registerChildSessionFromCreated(ev, sessionId,
-   childIds)` helper handles registration and is called before
-   `shouldDropEventForSessionFilter(...)` in `onOpencodeEvent`. The
-   regression is locked in by `shouldDropEventForSessionFilter REGRESSION:
-   session.created for a new child …` in `chatUtils.test.ts`.
+2. The `childSession` frame (from V2 `session.created{parentID}`) is published
+   by the box under the PARENT's session id, so it passes the filter below and
+   adds the new child id to the allowlist (covers the brief window before the
+   parent's task part is stamped). The old registration-before-filter trap
+   (a raw `session.created` carrying the CHILD's id) is gone with raw-event
+   consumption.
 
-**The sessionID filter** (`shouldDropEventForSessionFilter` in
-`chatUtils.ts`, called from `onOpencodeEvent`) is 3-state, not 2-state:
-- `evSessionID === sessionId` → main session event, normal handling.
-- `evSessionID ∈ childSessionIds` → CHILD event, routed to the subagent
-  branch (re-fetches the child's transcript when its card is expanded;
-  updates `liveChildStatus` on `session.idle` / `session.status`; triggers
-  a parent refetch so the task part's `state.status` flips).
-- otherwise → dropped (unless it's a self-filtering lifecycle event:
-  `question.*` / `permission.*`).
+**The sessionID filter** (in the `useSseBus.ts` frame handler) is 3-state, not
+2-state:
+- `ev.sessionId === sessionId` → main session frame, normal handling.
+- `ev.sessionId ∈ childSessionIds` → CHILD frame, routed to `handleChildFrame`
+  (re-fetches the child's transcript when its card is expanded; updates
+  `liveChildStatus`; triggers a parent refetch so the task part's
+  `state.status` flips).
+- otherwise → dropped.
 
 **State pattern matches the "live-event preferred" rule** from the rest of
 ChatPanel:
@@ -2299,9 +2287,9 @@ Settings → AI tab → `SubagentsCard` (mounts after `ProvidersCard`; **desktop
 only**, same as BET-121 — not in `MobileSettings.tsx`). opencode's `task` tool
 has no `model` argument; the only way to run a subagent on a chosen model is a
 NAMED agent in `opencode.jsonc`'s `agent` key, dispatched via
-`task(subagent_type: "<name>")`. opencode re-scans `agent` **only at
-startup**, so a config write does nothing until opencode restarts (see the
-restart button below).
+`task(subagent_type: "<name>")`. On V2 an `agent` write is a config-file edit
+followed by `POST /api/location/reload`, so it applies live — no restart, no
+running turn ends.
 
 **Maximally permissive, not opt-in.** Every model in
 `window.api.opencodeModels()` gets an `agent` block automatically; the user
@@ -2333,32 +2321,22 @@ agent blocks — so a not-yet-registered model still shows up.
   known model is NEVER touched (a user's hand-made agent survives). The I/O
   wrapper `syncSubagents({models, deactivated})` in `src/server/providers.mjs`
   reads `opencode.jsonc`, reconciles, and applies via the EXISTING
-  `setSubagents` writer (the two config writers: upserts through
-  `PATCH /global/config`, deletions through `removeConfigKeys` + mandatory
-  opencode restart, see the AppConfig section above). A deactivated model's
-  block is removed from opencode.jsonc by that deletion path — the remove is
-  no longer a no-op. No-op diffs skip
+  `setSubagents` writer (the single config writer: file edit + reload, see
+  the AppConfig section above). A deactivated model's block is removed from
+  opencode.jsonc by the same writer — upserts and removes alike hot-apply. No-op diffs skip
   the write
   entirely, so it's safe to call on every card open AND every activation
   toggle (`opencode:sync-subagents` RPC channel — mirrors `get`/`set-subagents`
   1:1). Idempotent: running it twice against its own output is a no-op.
 - **Restart**: `opencode:restart` (`src/server/opencodeAdmin.mjs`,
-  `restartOpencode()`) was a no-op stub through BET-121; now runs
-  `systemctl --user restart opencode-serve` via `execFile` with a fixed argv
-  array (never a shell string — no injection surface, and none is possible
-  since the function takes no external input). This is opencode's OWN systemd
-  service, **separate from manta-server** — restarting it does not restart
-  manta-server, but it DOES drop every in-flight opencode turn across every
-  chat-mode window. The card's restart button is gated behind an explicit
-  confirm ("STOPS all running opencode sessions...") — restart is never
-  triggered automatically as a side effect of a subagent edit.
-  **Pre-existing callers**: `ProvidersCard.tsx` / `ProvidersStep.tsx` already
-  called `window.api.opencodeRestart()` after adding a provider (so `/provider`
-  re-auths) — that call was always a no-op before this ticket; it is now a
-  REAL restart with the same drop-all-sessions side effect. That's intentional
-  (the provider flow was designed around a working restart from the start),
-  not new scope creep — but be aware if you're debugging "why did opencode
-  restart" reports.
+  `restartOpencode()`) runs `systemctl --user restart opencode-serve` via
+  `execFile` with a fixed argv array (never a shell string — no injection
+  surface; it takes no external input). This is opencode's OWN systemd service,
+  **separate from manta-server**, and restarting it DOES drop every in-flight
+  opencode turn across every chat-mode window. Since V2 it is reserved for
+  explicit user action (the Settings restart affordance, the provider connect
+  flow that must re-auth) and the upgrade flow — a subagent or any other
+  config edit never triggers it.
 - Desktop reaches all of this the same way as every other opencode/data
   channel post-pairing: `window.api` is swapped to `httpApi` in `main.tsx`
   (`/rpc` to manta-server), so there is no separate Electron `ipcMain.handle`
@@ -3238,39 +3216,53 @@ Consequences worth knowing:
 - Two arches built from different commits is now a hard publish error rather
   than something only a version mismatch could have caught.
 
-### Self-update also upgrades the opencode binary (BET-1016)
+### The opencode binary is PINNED and ships in the release (OpenCode V2 cutover)
 
-opencode is no longer frozen at install time — `scripts/self-update.sh` now
-runs `opencode upgrade` (the CLI command on the installed binary) as part of
-every update, so a box stops drifting from whatever it was installed with
-(measured 2026-08-16: installed 1.18.10 vs latest upstream 1.18.18). Key facts:
+`opencode upgrade` is gone from self-update (and installing opencode via
+`opencode.ai/install` from install.sh): following upstream is exactly what a
+cutover can't afford. The release tarball bundles the pinned V2 binary
+(`vendor/opencode/opencode` + a `.sha256` sidecar; version in
+`scripts/opencode-v2/version.mjs`, staged by `scripts/release/pack.mjs`), and
+ONE idempotent routine — `src/server/upgradeV2Prepare.mjs` (`prepare`), run by
+install.sh, self-update.sh and manta-server's boot hook — does the box side:
 
-- **Non-fatal**: an offline box, a missing CLI, or a refused upgrade logs a
-  warning and continues — the box update must never be aborted by opencode
-  (dry-run rule: mirrors `refresh_opencode_tools()`).
-- **Runs BEFORE the packaged-install early exit**, and that early exit is now
-  conditional on BOTH the box being current AND opencode being unchanged —
-  otherwise an opencode-only upgrade would be swallowed by the cheap exit and
-  the upgraded (but un-restarted) binary would stay inert. The decision is
-  `should_skip_self_update` in `scripts/lib/release.sh` (pure, unit-tested
-  alongside `release_is_current`).
-- **opencode is unpinned by design** — never pin a version; the whole point is
-  following upstream.
-- **The upgrade is surfaced through the EXISTING shared update banner**: the
-  server maps opencode's `installation.update-available` event onto the same
-  `serverUpdateAvailable` bus event, dedup-gated per opencode version
-  (`createOpencodeUpdateForwarder` in `src/server/serverUpdate.mjs`). No second
-  banner variant, no new confirm copy — the existing "Update the box?" flow
-  already warns it restarts opencode and ends running agent turns, which is
-  exactly right for this.
+- `~/.manta/opencode-password` (32 hex, 0600) created if absent. All three
+  supervisors (systemd unit, launchd plist, nohup fallback) hand the same value
+  to opencode as `OPENCODE_PASSWORD`; the unit/plist is therefore owner-only.
+- The pinned binary → `~/.opencode/bin/opencode`, integrity-checked against the
+  sidecar (refuses to install on mismatch). The previous V1 binary is kept as
+  `~/.opencode/bin/opencode-v1` — the rollback target.
+- The V2 plugins (`manta`, `manta-claude-max`, `manta-optimizer` from
+  `docs/opencode-plugins-v2/`) → `~/.config/opencode/plugins/`; the global
+  config gets the `external_directory: ask` permission rule.
+- Manta's V1 tools (`~/.config/opencode/tools/*.ts`), the V1 plugins
+  (`manta-accounts.ts`, `manta-optimizer.ts`) and the `opencode-claude-auth*`
+  `plugin` entries are retired (backed up for rollback) — unless a V1 history
+  DB still has to be migrated, in which case that waits for the upgrade flow.
+- It never restarts anything; `opencode_restart_plan` /
+  `should_skip_self_update` in `scripts/lib/release.sh` decide that from
+  "binary changed / plugins changed / migration pending". A box with V1 history
+  to migrate must NOT have opencode restarted by the update: the service stays
+  pinned to V1 and manta-server's upgrade flow restarts it in order.
+
+Failure policy: non-fatal for a CLI-only update; **fatal after a payload swap**
+(a box on a new release with half-installed V2 pieces is worse than a failed
+update). A fresh install (no V1 DB) goes straight to V2 with no migration.
+
+There is no `installation.update-available` event on V2; the opencode-update
+forwarder in `serverUpdate.mjs` stays inert. The box update banner is driven by
+manta releases only. The pre-cutover "two-hop" caveat applies once: an installed
+box runs the self-update.sh it ALREADY had for the first update to this
+release, so the new server code (upgradeV2Service) finishes the job.
 
 ### The box tells Anthropic which Claude Code version it is (BET-1503)
 
-opencode reaches Anthropic through the `opencode-claude-auth` plugin, which
-authenticates **as Claude Code** and therefore sends a Claude Code version in
-its user-agent and billing headers. That version is HARDCODED in the plugin
-(`config.ccVersion`) and lags badly — a live box's cached `@latest` claimed
-`2.1.185`, and even the newest published plugin claims `2.1.217`.
+opencode reaches Anthropic through the Claude auth plugin — on V2 the
+`manta-claude-max` plugin (it replaced `opencode-claude-auth`; the mechanism is
+the same) — which authenticates **as Claude Code** and therefore sends a Claude
+Code version in its user-agent and billing headers. The plugin's built-in
+default lags badly (the V1 plugin's hardcoded claim was `2.1.185`, and even the
+newest published release claimed `2.1.217`), hence the env override below.
 
 **Anthropic gates new models on a minimum client version and refuses anything
 below it.** So a stale claim makes a model the user is entitled to simply
@@ -3280,8 +3272,8 @@ sends the user to update a CLI that is already current and has nothing to do
 with it. That is the whole reason this exists; the box's real `claude` binary
 was 2.1.257 at the time.
 
-The plugin honours `ANTHROPIC_CLI_VERSION` from its environment, so the box
-sets it on the opencode service. Four things about how:
+`manta-claude-max` honours `ANTHROPIC_CLI_VERSION` from its environment
+(`lib/config.ts`), so the box sets it on the opencode service. Four things about how:
 
 - **The value is DERIVED, never pinned.** `resolve_anthropic_cli_version` in
   `scripts/lib/release.sh` reads the box's own `claude --version` and uses it
@@ -3596,6 +3588,17 @@ Two layers now stand between a test and the live box; do not remove either:
   before test modules load; that's the only reason the `--import` flag (not a
   `beforeEach`) is used. Production never sets the var, so it resolves to
   `$HOME` exactly as before — this is a test seam, not a configurable state dir.
+
+**opencode's own DB is NOT covered by `MANTA_STATE_HOME`.** DB-reader tests
+(`opencodeDb`, `messageSearch`, `modelLedger`, the CTO search/context modules)
+must build their database with `src/server/fixtures/opencodeV2DbFixture.mjs`
+(`withFixtureDb()`): a synthetic OpenCode V2 store (`session_v2`,
+`session_message` with JSON `data`, copied from a real 2.0.30 server) that arms
+`MANTA_OPENCODE_DB`, resets the module-cached handle, and exports
+`assertNoLiveDbFallback()` — the canary that fails red if a reader would resolve
+the maintainer's real `~/.local/share/opencode/opencode.db` (or `OPENCODE_DB`).
+It replaced the old V1 fixture (`opencodeDbFixture`); there are no V1-schema
+readers left.
 
 Canaries fail RED if the wiring is dropped: `stateSandbox.test.mjs` (asserts
 `MANTA_STATE_HOME` is set and that `auth.mjs`'s store resolved inside it) and

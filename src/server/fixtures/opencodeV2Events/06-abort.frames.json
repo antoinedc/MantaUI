@@ -1,0 +1,14 @@
+[
+{"kind":"stream","sub":"running","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"running":true,"type":"busy","since":1000040}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad14e7001xcdHOW7QCzqWFN"}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
+{"kind":"stream","sub":"toolStarted","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","idx":"toolu_019GLqEYR7wXVxYBukBdyq19","callID":"toolu_019GLqEYR7wXVxYBukBdyq19","toolName":"bash","toolPresentationHint":null,"status":"pending"}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
+{"kind":"stream","sub":"toolEnded","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","idx":"toolu_019GLqEYR7wXVxYBukBdyq19","ok":false}},
+{"kind":"stream","sub":"toolBoundary","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM","partID":"toolu_019GLqEYR7wXVxYBukBdyq19","callID":"toolu_019GLqEYR7wXVxYBukBdyq19","tool":"bash","status":"error"}},
+{"kind":"stream","sub":"aborted","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{}},
+{"kind":"stream","sub":"running","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"running":false,"type":"idle","since":null}},
+{"kind":"stream","sub":"turnComplete","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"complete":true,"running":false,"since":null}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}}
+]

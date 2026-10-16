@@ -31,10 +31,14 @@
 //                                    place — COMPILED against the vendored
 //                                    node's ABI on Linux, or taken from the
 //                                    prebuilds node-pty ships for darwin/win32
-//     docs/opencode-tools/           manta-native opencode tool bundle
-//     docs/opencode-plugins/         manta-native opencode PLUGINS (installed to
-//                                    ~/.config/opencode/plugins/ by install /
-//                                    self-update; tools/ never gets them)
+//     docs/opencode-tools/           AGENTS.md guidance blurb (the tools themselves
+//                                    are V2 plugins now)
+//     docs/opencode-plugins-v2/      the OpenCode V2 plugins (manta,
+//                                    manta-claude-max, manta-optimizer) —
+//                                    installed to ~/.config/opencode/plugins/
+//     vendor/opencode/               the PINNED OpenCode V2 binary + .sha256 +
+//                                    VERSION (scripts/opencode-v2/version.mjs),
+//                                    installed to ~/.opencode/bin/opencode
 //     docs/opencode/skills/          primary-agent prompts (manta-plan) referenced
 //                                    by opencode.jsonc `{file:…}` — BET-984
 //     RELEASE.json                   { name, version, built_at, includes,
@@ -57,12 +61,14 @@
 // What's excluded from the tarball: the Electron desktop build, dist itself,
 // tests, dev configs, .git — none of it runs on the box.
 
-import { mkdir, rm, writeFile, cp, readFile } from "node:fs/promises";
+import { mkdir, rm, writeFile, cp, readFile, copyFile, chmod } from "node:fs/promises";
 import { chmodSync, existsSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureBinary as ensureOpencodeBinary, platformKey as opencodePlatformKey } from "../opencode-v2/fetch-binary.mjs";
+import { OPENCODE_V2_VERSION } from "../opencode-v2/version.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..", "..");
@@ -113,6 +119,45 @@ function resolveGitSha() {
   return null;
 }
 
+// The @opencode/cli-<platform> package the packer's host must be able to fetch for `--arch`. The
+// release tarballs are built natively per arch (see server-tarball-deploy.yml), so the host's own
+// platform IS the target's; a mismatch would ship a binary the box cannot execute.
+function opencodePlatformFor(arch) {
+  return { x64: "linux-x64", arm64: "linux-arm64", "darwin-arm64": "darwin-arm64" }[arch] ?? null;
+}
+
+// Stage the PINNED OpenCode V2 binary (scripts/opencode-v2/version.mjs) into
+// <stageDir>/vendor/opencode/: the binary, an `opencode.sha256` sidecar the box re-verifies on
+// install, and a VERSION file. The registry integrity (sha512) is checked by ensureBinary when it
+// downloads; the sidecar covers everything after that (extraction, tarball transit, the copy onto
+// the box). `deps` is injected so this is testable without the network.
+function stageOpencodeBinary(stageDir, arch, deps) {
+  const d = {
+    ensureBinary: ensureOpencodeBinary,
+    platformKey: opencodePlatformKey,
+    version: OPENCODE_V2_VERSION,
+    mkdir, copyFile, chmod, readFile, writeFile, createHash,
+    ...deps,
+  };
+  return (async () => {
+    const want = opencodePlatformFor(arch);
+    if (!want) throw new Error(`no OpenCode build for --arch ${arch}`);
+    const have = d.platformKey();
+    if (have !== want) {
+      throw new Error(`cannot stage the ${want} OpenCode binary on a ${have} host — build each arch natively`);
+    }
+    const bin = await d.ensureBinary({});
+    const dest = join(stageDir, "vendor", "opencode");
+    await d.mkdir(dest, { recursive: true });
+    await d.copyFile(bin, join(dest, "opencode"));
+    await d.chmod(join(dest, "opencode"), 0o755);
+    const digest = d.createHash("sha256").update(await d.readFile(join(dest, "opencode"))).digest("hex");
+    await d.writeFile(join(dest, "opencode.sha256"), `${digest}  opencode\n`);
+    await d.writeFile(join(dest, "VERSION"), `${d.version}\n`);
+    return { version: d.version, sha256: digest, platform: want };
+  })();
+}
+
 function log(msg) {
   process.stdout.write(`▸ ${msg}\n`);
 }
@@ -146,8 +191,8 @@ function parseArgs(argv) {
 const INCLUDE = [
   "src",
   "scripts",
-  "docs/opencode-tools",
-  "docs/opencode-plugins",
+  "docs/opencode-tools", // AGENTS.md guidance only — the tools themselves are V2 plugins now
+  "docs/opencode-plugins-v2",
   "docs/opencode/skills",
   "package.json",
   "package-lock.json",
@@ -176,7 +221,9 @@ const INCLUDE = [
 // it is --omit=dev, spawn-helper is repaired, and it is PROVEN by requiring
 // node-pty through the vendored node for this exact arch before we tar it.
 // Tarballs are per-arch, so the copy a box downloads always matches it.
-const OWNED_ON_BOX = [...INCLUDE, "runtime", "node_modules"];
+// `vendor` carries the PINNED OpenCode V2 binary (staged by stageOpencodeBinary below, like
+// `runtime` it is produced during staging rather than copied from the repo).
+const OWNED_ON_BOX = [...INCLUDE, "runtime", "node_modules", "vendor"];
 
 // Parse the nodejs.org SHASUMS256.txt into {filename: sha256}. Tolerates the
 // `*` prefix some lines carry for binary-mode sha.
@@ -437,6 +484,12 @@ async function main() {
   if (!existsSync(join(stageDir, "scripts/lib/release.sh"))) {
     die("release tarball is missing scripts/lib/release.sh — self-update.sh sources it");
   }
+
+  // 2b. The pinned OpenCode V2 binary → vendor/opencode/ (install.sh / self-update.sh / the box's
+  //     boot hook install it to ~/.opencode/bin/opencode, re-verifying the sha256 sidecar).
+  log(`Staging pinned OpenCode V2 ${OPENCODE_V2_VERSION}…`);
+  const oc = await stageOpencodeBinary(stageDir, args.arch).catch((e) => die(String(e?.message ?? e)));
+  ok(`opencode ${oc.version} (${oc.platform}) sha256 ${oc.sha256.slice(0, 12)}…`);
 
   // 3. Vendored Node 24.19.0 — downloaded + sha256-verified + extracted under
   //    stage/runtime/node. Tarball is cached under .cache/ so re-packs skip the

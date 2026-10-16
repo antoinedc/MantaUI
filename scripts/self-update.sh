@@ -54,6 +54,22 @@ set -euo pipefail
 
 MANTA_HOME="$(cd "$(dirname "$0")/.." && pwd)"
 
+# --to <sha> [--version <v>]: install EXACTLY that release instead of the latest (the rollback leg of
+# the V1 → V2 upgrade, src/server/upgradeV2.mjs). Git box: fetch + reset to the commit. Packaged box:
+# the release host names releases by VERSION (manta-<version>.txt / manta-<version>-<arch>.tar.gz —
+# see scripts/release/pack.mjs + merge-manifest.mjs), never by commit, so the version is taken from
+# --version, else from ~/.manta/previous-release.json, and the manifest it names must STILL carry
+# that commit; if the host no longer has the build the script fails loudly rather than guess.
+TO_SHA=""
+TO_VERSION="${MANTA_TO_VERSION:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --to) TO_SHA="${2:-}"; shift 2 || shift ;;
+    --version) TO_VERSION="${2:-}"; shift 2 || shift ;;
+    *) printf 'self-update: unknown argument %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
 # --- Own printing helpers (install.sh owns its copies; release.sh needs them) --
 log()  { printf '\033[36m▸\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -71,6 +87,12 @@ LOG_FILE="$STATE_HOME/.manta/self-update.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 : > "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
+
+if [ -n "$TO_SHA" ]; then
+  case "$TO_SHA" in *[!0-9a-fA-F]*) die "self-update: --to needs a commit sha (hex), got '$TO_SHA'" ;; esac
+  [ "${#TO_SHA}" -ge 7 ] || die "self-update: --to needs at least 7 hex characters"
+fi
+PREV_RELEASE_FILE="$STATE_HOME/.manta/previous-release.json"
 
 # --- Shared release helpers (arch + manifest + checksum + guidance sync) ------
 # Single copy lives at scripts/lib/release.sh (ships in the release tarball);
@@ -169,7 +191,7 @@ fi
 # through to the restart(s) that apply. RUNS ON THE RUNTIME NODE THE SCRIPT
 # ALREADY PINNED ON PATH ($MANTA_HOME/runtime/node/bin — NODE_CMD).
 #
-# Non-fatal throughout, mirroring refresh_opencode_tools(): an offline box, a
+# Non-fatal throughout: an offline box, a
 # missing CLI, a refused upgrade, a vendor endpoint that 500s, or even a node
 # that cannot run the script must never abort the server update.
 echo "MANTA_PROGRESS 2/7 Updating command-line tools"
@@ -210,16 +232,32 @@ if [ "$INSTALL_KIND" = "git" ]; then
   log "self-update: fetching origin/main into $MANTA_HOME"
   git -C "$MANTA_HOME" fetch origin main -q
 
+  if [ -n "$TO_SHA" ]; then
+    # Rollback / pin: the commit may be older than anything origin/main still points at.
+    if ! git -C "$MANTA_HOME" cat-file -e "${TO_SHA}^{commit}" 2>/dev/null; then
+      git -C "$MANTA_HOME" fetch origin "$TO_SHA" -q 2>/dev/null || true
+    fi
+    git -C "$MANTA_HOME" cat-file -e "${TO_SHA}^{commit}" 2>/dev/null \
+      || die "self-update: commit $TO_SHA is not available from origin — cannot install that release"
+    GIT_TARGET="$(git -C "$MANTA_HOME" rev-parse "${TO_SHA}^{commit}")"
+  else
+    GIT_TARGET="$(git -C "$MANTA_HOME" rev-parse origin/main)"
+  fi
+
   # Only mark the payload replaced when the reset actually moves the checkout.
-  # A git box already on origin/main with only a CLI changed must not restart
+  # A git box already on the target with only a CLI changed must not restart
   # both services (BET-1097 review fix): PAYLOAD_REPLACED reflects whether the
   # payload genuinely changed, not merely that the reset command ran.
-  if [ "$(git -C "$MANTA_HOME" rev-parse HEAD)" != "$(git -C "$MANTA_HOME" rev-parse origin/main)" ]; then
-    log "self-update: resetting to origin/main"
-    git -C "$MANTA_HOME" reset --hard origin/main -q
+  if [ "$(git -C "$MANTA_HOME" rev-parse HEAD)" != "$GIT_TARGET" ]; then
+    # Record what is about to be replaced BEFORE moving HEAD (rollback target).
+    _prev_ver="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||"")}catch{}' "$MANTA_HOME/package.json" 2>/dev/null || true)"
+    write_previous_release "$PREV_RELEASE_FILE" "$(git -C "$MANTA_HOME" rev-parse HEAD)" "$_prev_ver" \
+      || warn "self-update: could not record the previous release (rollback to it will not be automatic)"
+    log "self-update: resetting to ${TO_SHA:+$GIT_TARGET}${TO_SHA:-origin/main}"
+    git -C "$MANTA_HOME" reset --hard "$GIT_TARGET" -q
     PAYLOAD_REPLACED=1
   else
-    log "self-update: already at origin/main"
+    log "self-update: already at ${TO_SHA:+$GIT_TARGET}${TO_SHA:-origin/main}"
   fi
 else
   # packaged install — download + verify + extract the release tarball and
@@ -253,9 +291,23 @@ else
   # before releases carried one — handled by the fallback in the skip check.
   INSTALLED_GIT_SHA="$("$NODE_CMD" -e 'process.stdout.write((JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).git_sha)||"")' "$MANTA_HOME/RELEASE.json" 2>/dev/null || echo "")"
 
-  log "self-update: fetching manifest from $host/releases/manta-latest.txt"
-  manifest="$(curl -fsSL "$host/releases/manta-latest.txt")" \
-    || die "self-update: manifest fetch failed: $host/releases/manta-latest.txt"
+  if [ -n "$TO_SHA" ]; then
+    # Releases are named by version on the host (no per-commit URL exists). Find the version.
+    if [ -z "$TO_VERSION" ] && [ -f "$PREV_RELEASE_FILE" ]; then
+      _rec_sha="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).git_sha||"")}catch{}' "$PREV_RELEASE_FILE" 2>/dev/null || true)"
+      if release_sha_matches "$TO_SHA" "$_rec_sha"; then
+        TO_VERSION="$("$NODE_CMD" -e 'try{process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version||"")}catch{}' "$PREV_RELEASE_FILE" 2>/dev/null || true)"
+      fi
+    fi
+    [ -n "$TO_VERSION" ] \
+      || die "self-update: cannot install commit $TO_SHA: the release host names releases by version and no version is recorded for that commit (pass --version)"
+    MANIFEST_URL="$host/releases/manta-${TO_VERSION}.txt"
+  else
+    MANIFEST_URL="$host/releases/manta-latest.txt"
+  fi
+  log "self-update: fetching manifest from $MANIFEST_URL"
+  manifest="$(curl -fsSL "$MANIFEST_URL")" \
+    || die "self-update: manifest fetch failed: $MANIFEST_URL"
 
   resolve_arch
   TARBALL_FILE="$(manifest_get "$manifest" "file_${ARCH_KEY}")"
@@ -266,6 +318,17 @@ else
     die "self-update: manifest is malformed or has no ${ARCH_KEY} build"
   fi
 
+  if [ -n "$TO_SHA" ]; then
+    # The manifest for that VERSION must still be the build we were asked for: a later release
+    # that reused the version number overwrites it, and installing that would not be a rollback.
+    release_sha_matches "$TO_SHA" "$TARBALL_GIT_SHA" \
+      || die "self-update: release host no longer has commit $TO_SHA (manta-${TO_VERSION}.txt is now commit ${TARBALL_GIT_SHA:-unknown}) — cannot roll back to it"
+    if release_sha_matches "$TO_SHA" "$INSTALLED_GIT_SHA"; then
+      ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
+      exit 0
+    fi
+  fi
+
   # Cheap early exit when already current — no download, no reinstall, no
   # restart. The decision itself lives in scripts/lib/release.sh so it can be
   # unit-tested; see release_is_current for why it compares the build's commit
@@ -273,7 +336,7 @@ else
   # being current AND no CLI having changed (BET-1016, generalised in BET-1097)
   # — a CLI-only upgrade must fall through to the restart below, never be
   # swallowed here.
-  if should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$CLIS_CHANGED_FLAG"; then
+  if [ -z "$TO_SHA" ] && should_skip_self_update "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA" "$CLIS_CHANGED_FLAG"; then
     if [ -n "$INSTALLED_GIT_SHA" ] && [ -n "$TARBALL_GIT_SHA" ]; then
       ok "self-update: already at $TARBALL_VERSION ($TARBALL_GIT_SHA)"
     else
@@ -290,7 +353,7 @@ else
   # stale), not merely that the replace function ran. A current box with a
   # CLI-only upgrade must NOT set PAYLOAD_REPLACED — that would restart both
   # services and kill every running agent turn for no reason.
-  if release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
+  if [ -z "$TO_SHA" ] && release_is_current "$INSTALLED_VERSION" "$INSTALLED_GIT_SHA" "$TARBALL_VERSION" "$TARBALL_GIT_SHA"; then
     # Box is already current; we only got here because a CLI changed. Fall
     # through to deps/tools/restart WITHOUT touching the payload.
     if [ -n "$TARBALL_GIT_SHA" ]; then
@@ -332,6 +395,9 @@ else
     # `<dest>/<rel>.new` and swaps with `mv`, so a failed copy can never leave a
     # half-written tree — most important for `runtime/`, which the running server
     # executes from. It also stamps RELEASE.json so the box records its version.
+    # Record what is about to be replaced BEFORE the swap (rollback target).
+    write_previous_release "$PREV_RELEASE_FILE" "$INSTALLED_GIT_SHA" "$INSTALLED_VERSION" \
+      || warn "self-update: could not record the previous release (rollback to it will not be automatic)"
     replace_release_payload "$WORK/pkg" "$MANTA_HOME" "$NODE_CMD"
     PAYLOAD_REPLACED=1
     # Report the commit alongside the version: two releases legitimately share a
@@ -362,86 +428,42 @@ fi
 echo "MANTA_PROGRESS 4/7 Installing dependencies"
 install_prod_deps "$MANTA_HOME"
 
-# --- Refresh the manta-native opencode tools --------------------------------
-# The AI-facing tool sources (docs/opencode-tools/*.ts) are COPIED into
-# ~/.config/opencode/tools/ rather than symlinked — opencode resolves a tool's
-# imports from the file's REAL path, so a symlink back into the checkout misses
-# ~/.config/opencode/node_modules/@opencode-ai/plugin and the tool silently
-# never registers.
-#
-# WHY THIS IS HERE: install.sh does that copy, but ONLY on install. Nothing in
-# the update path did, so updating the SOURCE while every box kept running
-# whatever tool copy it was installed with left tool updates undeliverable to
-# an existing box (BET-344 / BET-640 background delegation).
-#
-# Non-fatal throughout: a tool copy failing must never abort an update that has
-# already updated the checkout and reinstalled deps.
-#
-# NOTE: we deliberately do NOT restart opencode here. Picking up a new tool
-# needs an opencode restart, but that kills every in-flight agent turn on the
-# box. Staging the files is safe and unconditional; they take effect at the
-# next opencode restart, and we say so.
-refresh_opencode_tools() {
-  local src="$MANTA_HOME/docs/opencode-tools"
-  local dest="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/tools"
-
-  if [ ! -d "$src" ]; then
-    echo "⚠ self-update: $src not found — skipping opencode tool refresh"
-    return 0
+# --- Prepare OpenCode V2 (slice C3) ---------------------------------------------
+# Replaces the V1 tool/plugin refresh steps that lived here and the
+# old `opencode upgrade`. ONE idempotent routine — src/server/upgradeV2Prepare.mjs, shared with
+# install.sh and manta-server's boot hook — now does it all:
+#   * ~/.manta/opencode-password (0600) if absent
+#   * the release's PINNED opencode binary → ~/.opencode/bin/opencode (integrity-checked; the
+#     previous V1 binary is kept as opencode-v1 for rollback)
+#   * the V2 plugins → ~/.config/opencode/plugins/
+#   * Manta's V1 tools/plugins + the opencode-claude-auth config entry retired — unless a V1
+#     history DB still has to be migrated, in which case that waits for the upgrade flow, the
+#     service is pinned to the V1 binary, and manta-server runs the migration on its next boot.
+# It never restarts anything: the conditional restart block below decides that. Non-fatal for a
+# CLI-only update (nothing to prepare); fatal when it fails after a payload swap, because a box
+# on a new release with half-installed V2 pieces is worse than a failed update.
+echo "MANTA_PROGRESS 5/7 Preparing OpenCode"
+MIGRATION_NEEDED=0
+OPENCODE_BINARY_CHANGED=0
+OPENCODE_PLUGINS_CHANGED=0
+if [ -x "$NODE_CMD" ] && [ -f "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" ]; then
+  if PREPARE_OUT="$("$NODE_CMD" "$MANTA_HOME/src/server/upgradeV2Prepare.mjs" prepare --home "$MANTA_HOME")"; then
+    eval "$PREPARE_OUT"
+    log "self-update: OpenCode prepared (migration needed: $MIGRATION_NEEDED, binary changed: $OPENCODE_BINARY_CHANGED, plugins changed: $OPENCODE_PLUGINS_CHANGED)"
+  elif [ "$PAYLOAD_REPLACED" = "1" ]; then
+    die "self-update: preparing OpenCode V2 failed (see above) — the new release is on disk; re-run the update"
+  else
+    warn "self-update: preparing OpenCode V2 failed — continuing"
   fi
-  if ! mkdir -p "$dest" 2>/dev/null; then
-    echo "⚠ self-update: cannot create $dest — skipping opencode tool refresh"
-    return 0
-  fi
-
-  # EXCLUDE *.test.ts: opencode loads EVERY file in tools/ as a tool, and a
-  # test file imports vitest (absent under ~/.config/opencode/node_modules),
-  # which makes tool resolution throw and every chat turn fail with
-  # "Cannot find package 'vitest'". Same exclusion as install.sh.
-  local copied=0 changed=0 tool base
-  for tool in "$src"/*.ts; do
-    case "$tool" in
-      *.test.ts) continue ;;
-    esac
-    [ -e "$tool" ] || continue
-    base="$(basename "$tool")"
-    if ! cmp -s "$tool" "$dest/$base" 2>/dev/null; then
-      changed=$((changed + 1))
-    fi
-    if cp -f "$tool" "$dest/" 2>/dev/null; then
-      copied=$((copied + 1))
-    else
-      echo "⚠ self-update: failed to copy opencode tool $base"
-    fi
-  done
-
-  if [ "$copied" = "0" ]; then
-    echo "⚠ self-update: no opencode tool sources found in $src"
-    return 0
-  fi
-  if [ "$changed" = "0" ]; then
-    echo "✓ self-update: opencode tools already current ($copied checked)"
-    return 0
-  fi
-  echo "✓ self-update: opencode tools refreshed ($changed of $copied changed)"
-}
-
-echo "MANTA_PROGRESS 5/7 Refreshing AI tools"
-refresh_opencode_tools
-
-# --- Sync the manta-native opencode PLUGINS ------------------------------------
-# docs/opencode-plugins/*.ts → ~/.config/opencode/plugins/ (real copies; a
-# plugin the release stopped shipping is deleted, a user's own files never are —
-# see sync_opencode_plugins in scripts/lib/release.sh). Sets PLUGINS_CHANGED,
-# which the conditional-restart block below treats like OPENCODE_CHANGED:
-# opencode loads plugins only at startup, so a changed plugin is inert until it
-# restarts. Non-fatal, and guarded on the function existing (an old lib).
-PLUGINS_CHANGED=0
-if declare -F sync_opencode_plugins >/dev/null 2>&1; then
-  sync_opencode_plugins "$MANTA_HOME/docs/opencode-plugins" \
-    "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/plugins" \
-    "$STATE_HOME/.manta/opencode-plugins.manifest" || true
+else
+  warn "self-update: node or upgradeV2Prepare.mjs unavailable — skipping OpenCode preparation"
 fi
+# The restart plan treats "binary or plugins changed" like the old OPENCODE_CHANGED/PLUGINS_CHANGED.
+OPENCODE_CHANGED="$OPENCODE_BINARY_CHANGED"
+PLUGINS_CHANGED="$OPENCODE_PLUGINS_CHANGED"
+# A box that still has V1 history to migrate must NOT have its opencode restarted by the update
+# (opencode_restart_plan → "server"): the service is pinned to V1 and manta-server's boot hook
+# (upgradeV2) restarts it itself, in order, once the disk preflight has passed.
 
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
 # Appends any top-level `## ` guidance section that is missing from the user's
@@ -463,8 +485,8 @@ sync_opencode_guidance "$MANTA_HOME/docs/opencode-tools/AGENTS.md" "${OPENCODE_C
 #   | only other CLIs changed                       | NOTHING               |
 #
 # `PAYLOAD_REPLACED` is the single flag set at the one place each install kind
-# swaps its payload. `OPENCODE_CHANGED` comes from the upgrade-clis state file.
-# `PLUGINS_CHANGED` comes from sync_opencode_plugins above. The decision itself
+# swaps its payload. `OPENCODE_CHANGED` / `PLUGINS_CHANGED` come from the OpenCode
+# preparation step above (pinned binary / service definition / V2 plugins changed). The decision itself
 # is `opencode_restart_plan` in scripts/lib/release.sh (unit-tested).
 # A skipped step emits no MANTA_PROGRESS line; the bar jumps forward (the
 # progress parser requires strictly-increasing steps).
@@ -542,13 +564,18 @@ wait_server_healthy() {
   die "server did not become healthy after the update — re-run install.sh to restore a matching prebuilt tree"
 }
 
-case "$(opencode_restart_plan "$PAYLOAD_REPLACED" "$OPENCODE_CHANGED" "$PLUGINS_CHANGED")" in
+case "$(opencode_restart_plan "$PAYLOAD_REPLACED" "$OPENCODE_CHANGED" "$PLUGINS_CHANGED" "$MIGRATION_NEEDED")" in
   both)
     echo "MANTA_PROGRESS 6/7 Restarting opencode"
     restart_opencode
     echo "MANTA_PROGRESS 7/7 Restarting box server"
     restart_server
     # Confirm the new payload actually boots before reporting success.
+    wait_server_healthy
+    ;;
+  server)
+    echo "MANTA_PROGRESS 7/7 Restarting box server"
+    restart_server
     wait_server_healthy
     ;;
   opencode)

@@ -1,0 +1,118 @@
+[
+ {
+  "id": "msg_145ad457d001Iqk7GCYxqNz6l4",
+  "time": {
+   "created": 1792170345937
+  },
+  "text": "Run exactly this shell command and nothing else: echo permission-ok . Then reply with the single word done.",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ad45ef001iYwMOSIGV8AMvp",
+  "time": {
+   "created": 1792170345997,
+   "streamed": 1792170347075,
+   "completed": 1792170347257
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "tool",
+    "id": "toolu_01RcwiYZg6rM5fJGQqSH32bT",
+    "name": "shell",
+    "executed": false,
+    "state": {
+     "status": "completed",
+     "input": {
+      "command": "echo permission-ok"
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "permission-ok\n"
+      }
+     ],
+     "metadata": {
+      "status": "completed",
+      "truncated": false,
+      "exit": 0
+     }
+    },
+    "time": {
+     "created": 1792170346774,
+     "ran": 1792170347032,
+     "completed": 1792170347216
+    }
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "tool-calls",
+  "rawFinish": "tool_use",
+  "cost": 0.0025905,
+  "tokens": {
+   "input": 3,
+   "output": 55,
+   "reasoning": 0,
+   "cache": {
+    "read": 18850,
+    "write": 342
+   }
+  }
+ },
+ {
+  "id": "msg_145ad4b2d001NyzD12GAqulZHT",
+  "time": {
+   "created": 1792170347360,
+   "streamed": 1792170347997,
+   "completed": 1792170348056
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "text",
+    "text": "done"
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "stop",
+  "rawFinish": "end_turn",
+  "cost": 0.0020302000000000002,
+  "tokens": {
+   "input": 6,
+   "output": 4,
+   "reasoning": 0,
+   "cache": {
+    "read": 19192,
+    "write": 68
+   }
+  }
+ },
+ {
+  "id": "msg_145ad4e2c001ap1MaiCyOh39eO",
+  "time": {
+   "created": 1792170348076
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ }
+]

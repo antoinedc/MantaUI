@@ -2,12 +2,19 @@
 //
 // `exec` is injected so these never actually run systemctl.
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { restartOpencode, runServerSelfUpdate, parseProgressLine } from "./opencodeAdmin.mjs";
+import {
+  restartOpencode,
+  runServerSelfUpdate,
+  parseProgressLine,
+  reloadOpencodeConfig,
+  listOpencodeModels,
+} from "./opencodeAdmin.mjs";
+import { _setApiBase } from "./opencode.mjs";
 import { statePath } from "../shared/paths.mjs";
 
 // A fake detached child that exits with `code` once the caller has attached
@@ -284,5 +291,70 @@ describe("parseProgressLine", () => {
       total: 6,
       label: "Downloading update",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config reload + model list (OpenCode V2, contract K1)
+// ---------------------------------------------------------------------------
+
+// The shared K1 helpers (opencode.mjs) supply the URL + Basic auth.
+function useSandboxedOpencode() {
+  beforeEach(() => { process.env.MANTA_OPENCODE_PASSWORD = "pw"; _setApiBase("http://127.0.0.1:5999"); });
+  afterEach(() => { delete process.env.MANTA_OPENCODE_PASSWORD; _setApiBase(null); });
+}
+
+const basic = (pw) => `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}`;
+
+describe("reloadOpencodeConfig", () => {
+  useSandboxedOpencode();
+
+  it("POSTs /api/location/reload with Basic auth and treats 204 as reloaded", async () => {
+    const seen = [];
+    const fetchFn = async (url, init) => { seen.push({ url, init }); return new Response(null, { status: 204 }); };
+    const r = await reloadOpencodeConfig({ fetchFn });
+    assert.deepEqual(r, { ok: true, reloaded: true });
+    assert.equal(seen[0].url, "http://127.0.0.1:5999/api/location/reload");
+    assert.equal(seen[0].init.method, "POST");
+    assert.equal(seen[0].init.headers.authorization, basic("pw"));
+    assert.equal(seen[0].init.body, "{}");
+  });
+
+  it("an error status is ok:false — the live config may still be the old one", async () => {
+    const fetchFn = async () => new Response("config invalid", { status: 500 });
+    const r = await reloadOpencodeConfig({ fetchFn });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /reload failed \(500\): config invalid/);
+  });
+
+  it("a 401 is ok:false too (never silently treated as 'not running')", async () => {
+    const r = await reloadOpencodeConfig({ fetchFn: async () => new Response("", { status: 401 }) });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /401/);
+  });
+
+  it("opencode not listening is ok:true reloaded:false — the edit applies at its next start", async () => {
+    const fetchFn = async () => { throw new TypeError("fetch failed: ECONNREFUSED"); };
+    const r = await reloadOpencodeConfig({ fetchFn });
+    assert.equal(r.ok, true);
+    assert.equal(r.reloaded, false);
+    assert.match(r.reason, /unreachable/);
+  });
+});
+
+describe("listOpencodeModels", () => {
+  useSandboxedOpencode();
+
+  it("GETs /api/model with Basic auth and returns data[]", async () => {
+    const seen = [];
+    const fetchFn = async (url, init) => { seen.push({ url, init }); return Response.json({ data: [{ providerID: "a", modelID: "m" }] }); };
+    assert.deepEqual(await listOpencodeModels({ fetchFn }), [{ providerID: "a", modelID: "m" }]);
+    assert.equal(seen[0].url, "http://127.0.0.1:5999/api/model");
+    assert.equal(seen[0].init.headers.authorization, basic("pw"));
+  });
+
+  it("an unexpected body is an empty list; an HTTP error throws", async () => {
+    assert.deepEqual(await listOpencodeModels({ fetchFn: async () => Response.json({}) }), []);
+    await assert.rejects(() => listOpencodeModels({ fetchFn: async () => new Response("", { status: 503 }) }), /503/);
   });
 });

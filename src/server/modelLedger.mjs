@@ -1,5 +1,10 @@
 // modelLedger.mjs — read-only spend/latency ledger over opencode's store.
 //
+// OpenCode V2 store: assistant turns are `session_message` rows of type
+// 'assistant' whose `data` is {agent, model:{providerID,id}, cost, tokens:{input,
+// output,reasoning,cache:{read,write}}, time:{created,completed}, content:[…]};
+// sessions are `session_v2`. (V1's `message`/`part`/`session` tables are gone.)
+//
 // BET-1219: the measurement half of model routing. Nobody can see where model
 // spend actually goes; on this box ~90% of it is prompt cache, not output
 // tokens, and subagents silently run on the most expensive model available.
@@ -272,9 +277,9 @@ async function assistantRows(db, since) {
            s.parent_id AS parent_id,
            s.agent AS agent,
            s.directory AS directory
-    FROM message m
-    JOIN session s ON s.id = m.session_id
-    WHERE m.time_created >= ?`;
+    FROM session_message m
+    JOIN session_v2 s ON s.id = m.session_id
+    WHERE m.type = 'assistant' AND m.time_created >= ?`;
   const stmt = db.prepare(sql);
   const out = [];
   for (const row of stmt.all(since)) {
@@ -284,15 +289,13 @@ async function assistantRows(db, since) {
     } catch {
       continue;
     }
-    if (!data || typeof data !== "object" || data.role !== "assistant") continue;
+    if (!data || typeof data !== "object") continue;
     out.push({
-      // The message id is what joins a message to its parts in the `part`
-      // table (opencode stores parts separately — see collectToolParts).
       id: row.msg_id != null ? String(row.msg_id) : null,
       sessionId: row.session_id != null ? String(row.session_id) : null,
       data,
       parentId: row.parent_id != null ? String(row.parent_id) : null,
-      agent: row.agent ?? null,
+      agent: row.agent ?? data.agent ?? null,
       directory: row.directory ?? null,
     });
   }
@@ -445,9 +448,9 @@ export const LEDGER_MAX_ROW_BYTES = 131_072;
 // back with role != 'assistant' and are filtered in JS for the same reason.
 const ledgerPageSql = (sizeFn) => `
   SELECT id AS msg_id, time_created AS created_at,
-         json_extract(d,'$.role')                    AS role,
-         json_extract(d,'$.providerID')              AS providerID,
-         json_extract(d,'$.modelID')                 AS modelID,
+         json_extract(d,'$.agent')                   AS msgAgent,
+         json_extract(d,'$.model.providerID')        AS providerID,
+         json_extract(d,'$.model.id')                AS modelID,
          json_extract(d,'$.cost')                    AS cost,
          json_extract(d,'$.tokens.input')            AS input,
          json_extract(d,'$.tokens.output')           AS output,
@@ -457,8 +460,8 @@ const ledgerPageSql = (sizeFn) => `
          json_extract(d,'$.time.created')            AS startedMs,
          json_extract(d,'$.time.completed')          AS completedMs
   FROM (SELECT id, time_created, CASE WHEN ${sizeFn}(data) <= ${LEDGER_MAX_ROW_BYTES} AND json_valid(data) = 1 THEN data END AS d
-        FROM message
-        WHERE session_id = ? AND time_created >= ?
+        FROM session_message
+        WHERE session_id = ? AND type = 'assistant' AND time_created >= ?
           AND (time_created > ? OR (time_created = ? AND id > ?))
         ORDER BY time_created, id
         LIMIT ?)
@@ -469,7 +472,7 @@ function ledgerRowFrom(r, sessionId, meta) {
     providerID: r.providerID ?? null,
     modelID: r.modelID ?? null,
     sessionID: sessionId,
-    agent: meta.agent ?? null,
+    agent: meta.agent ?? r.msgAgent ?? null,
     parentId: meta.parentId ?? null,
     directory: meta.directory ?? null,
     cost: r.cost,
@@ -487,12 +490,12 @@ function readSessionList(db) {
   let rows;
   let hasUpdated = true;
   try {
-    rows = db.prepare("SELECT id, parent_id, agent, directory, time_updated FROM session").all();
+    rows = db.prepare("SELECT id, parent_id, agent, directory, time_updated FROM session_v2").all();
   } catch {
     // Older/foreign schema without session.time_updated: every session is then
     // treated as changed (bounded by the message-time floor).
     hasUpdated = false;
-    rows = db.prepare("SELECT id, parent_id, agent, directory FROM session").all();
+    rows = db.prepare("SELECT id, parent_id, agent, directory FROM session_v2").all();
   }
   return rows.map((r) => ({
     id: String(r.id),
@@ -543,7 +546,9 @@ export function createLedgerRowCache({
     for (;;) {
       const page = stmt.all(sid, floor, curT, curT, curId, pageRows);
       for (const r of page) {
-        if (r.role !== "assistant") continue;
+        // The SQL already selects assistant rows only; a row whose JSON is
+        // malformed/oversized comes back with every field NULL and is skipped.
+        if (r.providerID == null && r.modelID == null && r.startedMs == null) continue;
         entries.push({
           id: String(r.msg_id),
           createdMs: typeof r.created_at === "number" ? r.created_at : null,
@@ -590,7 +595,7 @@ export function createLedgerRowCache({
         c.meta = s.meta;
         c.timeUpdated = s.timeUpdated;
         for (const e of c.rows.values()) {
-          e.row.agent = s.meta.agent;
+          e.row.agent = s.meta.agent ?? e.row.agent;
           e.row.parentId = s.meta.parentId;
           e.row.directory = s.meta.directory;
         }
@@ -680,45 +685,6 @@ export async function latestLedgerRowsBySession(db, sessionIds) {
   return defaultLedgerCache.latestBySession(db, sessionIds);
 }
 
-// Collect the parsed `tool`-type parts for a set of message ids from the
-// `part` table. opencode stores a message's parts — including its tool calls —
-// in the separate `part` table, NOT in `message.data` (that row only carries
-// the `finish` summary, e.g. "tool-calls"); `message.data.parts` does not
-// exist, so reading it measured zero tool-call requests on every endpoint and
-// made reliability uniformly 0. Returns a Map<message_id, object[]> of the raw
-// parsed part.data rows. A missing/unqueryable `part` table degrades to "no
-// tool parts" so latency/telemetry below still work — never the whole summary.
-function collectToolParts(db, ids) {
-  const map = new Map();
-  const list = Array.isArray(ids) ? ids : [];
-  if (list.length === 0) return map;
-  const BATCH = 500;
-  for (let i = 0; i < list.length; i += BATCH) {
-    const chunk = list.slice(i, i + BATCH);
-    let rows;
-    try {
-      const ph = chunk.map(() => "?").join(",");
-      rows = db.prepare(`SELECT message_id, data FROM part WHERE message_id IN (${ph})`).all(...chunk);
-    } catch {
-      // No `part` table (older opencode schema) — degrades to "no tool parts",
-      // matching the pre-existing behaviour, never a collapsed summary.
-      return map;
-    }
-    for (const r of rows) {
-      let d;
-      try {
-        d = JSON.parse(r.data);
-      } catch {
-        continue;
-      }
-      if (!d || typeof d !== "object" || d.type !== "tool") continue;
-      if (!map.has(r.message_id)) map.set(r.message_id, []);
-      map.get(r.message_id).push(d);
-    }
-  }
-  return map;
-}
-
 /**
  * PURE. Fold raw assistant message `data` into the tool-call reliability,
  * speed, latency and mix figures, keyed per endpoint ("providerID/modelID").
@@ -788,15 +754,14 @@ export function aggregateEndpointStats(rows) {
   return out;
 }
 
-// Extract the tool calls from a single assistant message's parts (each part of
-// type "tool" carries a name plus its arguments/input). No call follows into a
-// second pass when the message stores none.
+// Extract the tool calls from a single assistant message: V2 keeps them inline
+// in `content` (items of type "tool" carry the name and the parsed input).
 function extractToolCalls(data) {
-  const parts = Array.isArray(data.parts) ? data.parts : [];
+  const parts = Array.isArray(data.content) ? data.content : [];
   const calls = [];
   for (const p of parts) {
     if (!p || typeof p !== "object" || p.type !== "tool") continue;
-    const name = p.tool;
+    const name = p.name;
     const args = p.state && p.state.input;
     if (name == null) continue;
     calls.push({ name, arguments: args });
@@ -830,25 +795,20 @@ export async function endpointSummary({ sinceMs = 0 } = {}) {
   try {
     const since = num(sinceMs);
     const assistant = await assistantRows(db, since);
-    // Tool calls come from the `part` table (message.data has no parts array);
-    // fall back to a data-embedded `parts` only where one exists so a message
-    // format that carries them inline still works.
-    const toolParts = collectToolParts(db, assistant.map((r) => r.id));
     const rows = [];
-    for (const { id, data } of assistant) {
+    for (const { data } of assistant) {
       const tokens = data.tokens ?? {};
       const cache = tokens.cache ?? {};
-      const parts = toolParts.get(id) ?? [];
       rows.push({
-        providerID: data.providerID ?? null,
-        modelID: data.modelID ?? null,
+        providerID: data.model?.providerID ?? null,
+        modelID: data.model?.id ?? null,
         input: tokens.input,
         output: tokens.output,
         cacheRead: cache.read,
         cacheWrite: cache.write,
         startedMs: data.time?.created,
         completedMs: data.time?.completed,
-        toolCalls: Array.isArray(data?.parts) && data.parts.length > 0 ? extractToolCalls(data) : extractToolCalls({ parts }),
+        toolCalls: extractToolCalls(data),
         tools: extractTools(data),
       });
     }

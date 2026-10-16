@@ -36,7 +36,7 @@ import { createTuner, TUNE_IDLE_SWEEP_MS, GUARD_CACHE_HIT_DROP_PTS, GUARD_SUSTAI
 import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { parseTailnetHosts } from "./tailnet.mjs";
-import { getDb } from "./opencodeDb.mjs";
+import { getDb, partExists } from "./opencodeDb.mjs";
 import {
   resolvePolicy,
   validateRepoTable,
@@ -91,6 +91,7 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
@@ -125,7 +126,6 @@ import { createAccountsEvents } from "./accountsEvents.mjs";
 import { createAccountsManager } from "./accountsManager.mjs";
 import { createLimitSignalHandler } from "./seatLimitSignal.mjs";
 import { createSeatAssigner, seatMoveActivityEntry } from "./seatAssignment.mjs";
-import { runStartupPluginSync } from "./opencodePlugins.mjs";
 import { createAccountsRouteHandler, ACCOUNTS_ROUTE_PATHS } from "./accountsRoute.mjs";
 import { createSeatRetryWatch, lastUserModelFromMessages } from "./seatRetryWatch.mjs";
 import {
@@ -272,6 +272,7 @@ import {
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./version.mjs";
+import { createUpgradeV2, createDefaultDeps as createUpgradeDeps, createUpgradeRoutes } from "./upgradeV2.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..", "..");
@@ -324,7 +325,9 @@ const streamInterp = createStreamInterpreter({
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.
-  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  readCacheTtl: () => readProvidersCacheTtl(),
+  // V2 pushes no per-chunk shell event: a running shell is tailed by cursor.
+  fetchShellOutput: (a) => oc.readShellOutput(a),
 });
 // BET-913 + BET-916 + BET-922: when a client (re)connects mid-state, replay the
 // current edge-only state so frames that only fire on an edge aren't lost —
@@ -669,15 +672,6 @@ accountsService.onChange(({ provider }) => accountsEvents.updated(provider));
 const stopAccountsUsageEvents = bus.subscribe((evt) => {
   if (evt?.kind === "usage.updated") for (const p of ACCOUNT_PROVIDERS) accountsEvents.updated(p);
 });
-
-// Install Manta's opencode plugins (docs/opencode-plugins → ~/.config/opencode/
-// plugins). self-update.sh does this too, but an installed box runs the script it
-// ALREADY had, so the first update that ships a plugin would not install it; the
-// NEW server code running here is what closes that gap. Non-blocking, never
-// fatal; restarts opencode only if it was itself just restarted (see
-// opencodePlugins.mjs). index.mjs is never imported by tests, so this cannot
-// touch a developer's real config dir from the suite.
-void runStartupPluginSync();
 
 // Multi-account phase 2: which seat a conversation's requests use. Called by the
 // `manta-accounts` opencode plugin (GET /api/accounts/resolve, POST
@@ -1517,7 +1511,7 @@ const optimizerSummary = createOptimizerSummary({
   counterfactualStore: optimizerCounterfactual,
   usageSnapshots: listSnapshots,
   usageHistory: getUsageHistory,
-  readCacheTtl: () => readProvidersCacheTtl({ listProviders: oc.getProviders }),
+  readCacheTtl: () => readProvidersCacheTtl(),
   activityStore: optimizerActivity,
   // BET-1347: per-window pacing pressure (deficit / tokens-per-pct) for the
   // chips under each gauge.
@@ -2489,13 +2483,15 @@ const factSurfaces = createFactSurfaces({
     return latest?.conclusion ?? null;
   },
   // §6.6 trace resolver's message-id leg — the read-only opencode db (same
-  // handle the ⌘F search uses). ses_/msg_/part_ ids map to their tables; a
-  // null db (no Node 24 runtime) → null → no opinion.
+  // handle the ⌘F search uses). V2 store: ses_ → session_v2, msg_ → session_message,
+  // part_ → a derived id (opencodeDb.partIdFor: message + content index), resolved
+  // by partExists; a null db (no Node 24 runtime / not migrated) → null → no opinion.
   messageExists: async (id) => {
     const db = await getDb();
     if (!db) return null;
     const key = String(id);
-    const table = key.startsWith("ses_") ? "session" : key.startsWith("part_") ? "part" : "message";
+    if (key.startsWith("part_")) return partExists(db, key);
+    const table = key.startsWith("ses_") ? "session_v2" : "session_message";
     const row = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? LIMIT 1`).get(key);
     return row != null;
   },
@@ -3172,25 +3168,6 @@ const { stop: stopCredentialRefreshPoller } = oc.startCredentialRefreshPoller({ 
 // the async trust-mode logic in an immediately-invoked async function
 // with .catch() to avoid unhandled rejection warnings if the async work
 // rejects — the pump loop itself is unaffected.
-// Compute live chat-session directories once at startup (best-effort). Used to
-// eagerly open their scoped opencode event streams so the first turn streams
-// live on a fresh box. Bounded to actual chat windows (those stamped with an
-// opencode session id) — not the full catalog. Top-level `await` is available
-// in this module (index.mjs is ESM and runs top-level awaits already).
-let eagerChatDirs = [];
-try {
-  const projects = await tmux.listProjects();
-  eagerChatDirs = [
-    ...new Set(
-      (projects ?? [])
-        .flatMap((p) => p.windows ?? [])
-        .filter((w) => typeof w.opencodeSessionId === "string" && w.opencodeSessionId.length > 0)
-        .map((w) => w.paneCurrentPath)
-        .filter((d) => typeof d === "string" && d.length > 0),
-    ),
-  ];
-} catch { /* non-fatal */ }
-
 // Forward opencode's own `installation.update-available` onto the shared
 // serverUpdateAvailable banner. Dedup state is held in the forwarder closure.
 const forwardOpencodeUpdate = createOpencodeUpdateForwarder();
@@ -3204,49 +3181,36 @@ function interpretEvent(evt) {
     console.warn("[stream-interp] interpret failed:", e?.message ?? e);
   }
 }
-// eslint-disable-next-line no-unused-vars
-const stopOpencodePump = oc.subscribeEvents((evt) => {
-  // Map opencode's own installation.update-available onto the EXISTING
-  // serverUpdateAvailable banner (BET-1016). The forwarder is dedup-gated by
-  // opencode version and returns null for non-update events, so this is a no-op
-  // for everything else and never re-raises a version already shown.
-  const forwardedUpdate = forwardOpencodeUpdate(evt);
-  if (forwardedUpdate) {
-    bus.publish(forwardedUpdate);
-  }
-  // Preserve the provider HTTP status on a failed turn (BET-1230). The raw
-  // `session.error` message is "<reason phrase>: <body>" — parse the phrase
-  // back to a status so downstream (provider health, Stage 4) can tell 402
-  // (out of credit) from 429 (rate limited) from 5xx (broken) without
-  // substring-matching error text. Purely additive: `error` is replaced by an
-  // enriched copy whose `name` / `data.message` are byte-identical, so every
-  // existing consumer (renderer banner, push classification, the usage-stop
-  // enroller) keeps working unchanged.
-  if (evt && evt.type === "session.error" && evt.properties?.error) {
-    // BET-1270 6c: a transport-level 429 (prompt_async POST) carries the
-    // provider's Retry-After but is NOT a session.error on the stream — the
-    // pump bridges it here so the enrichment hands a real retryAfterMs to
-    // providerHealth instead of clamping every rate-limit to the 2-min floor.
+// V2 event pump. ONE global stream carries every session. The stream
+// interpreter reads the RAW V2 events; every other observer below (prompt
+// delivery, delegate, push, the CTO engines, seat-retry, usage-resume, …) reads
+// the small lifecycle vocabulary `createLifecycleAdapter` derives from them
+// (busy / idle / error / retry, a tool finished, an ask raised or answered, a
+// session created) — see src/shared/opencodeV2.mjs.
+const lifecycleAdapter = createLifecycleAdapter();
+
+// One lifecycle event → every observer that tracks session state.
+function observeLifecycleEvent(evt, raw) {
+  // Preserve the provider HTTP status on a failed turn (BET-1230). The V2 error
+  // already carries `status`; the transport-level refusal (a 429 on the prompt
+  // POST itself) carries the provider's Retry-After and is bridged here so the
+  // enrichment hands a real retryAfterMs to providerHealth instead of clamping
+  // every rate-limit to the 2-min floor (BET-1270 6c). Purely additive: `error`
+  // is replaced by an enriched copy whose `name` / `data.message` are
+  // byte-identical, so every existing consumer keeps working unchanged.
+  if (evt.type === "session.error" && evt.properties?.error) {
     const refusal = oc.getAndClearSessionRefusal(evt.properties?.sessionID);
-    evt.properties.error = enrichProviderError(
-      evt.properties.error,
-      refusal?.retryAfterMs,
-    );
+    const status = evt.properties.error?.data?.statusCode;
+    const enriched = enrichProviderError(evt.properties.error, refusal?.retryAfterMs);
+    evt.properties.error = typeof status === "number" && enriched.httpStatus == null ? { ...enriched, httpStatus: status } : enriched;
   }
   // Ordinary sessions' account-level refusals (429 usage limit / 402 out of
   // credit) feed the health registers too, so the router and the CTO's
   // usable-model check stop choosing a plan that is refusing turns.
-  if (evt && evt.type === "message.updated") {
+  if (evt.type === "message.updated") {
     const observed = attemptFromAssistantError(evt.properties?.info);
     if (observed) void endpointAttempts.recordProviderAttempt(observed).catch(() => {});
   }
-  // Box-side stream interpretation (BET-551 / §17): derive interpreted events
-  // from the raw opencode stream and publish them on the SAME bus (no second
-  // stream/endpoint). Consumers (S1b) demux by `kind:"stream"`.
-  // `permission.asked` is the one exception: it is interpreted inside the
-  // trust-mode branch below, only when the user actually has to act on it (see
-  // permissionAskPump.mjs). Every other event is interpreted here, as before.
-  if (!(evt && evt.type === "permission.asked")) interpretEvent(evt);
   // Track per-session busy state for the defer-until-idle queue shared by all
   // prompt senders (schedule, capability, peer, webhook). Cheap, runs for
   // every event; never throws into the pump.
@@ -3316,13 +3280,15 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   }
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
-  if (evt && evt.type === "permission.asked") {
+  if (evt.type === "permission.asked") {
+    // Trust mode answers the ask itself; the stream interpreter (and the raw
+    // publish) see it only when the user really has to act — the same event.
     handlePermissionAsk({
       evt,
       getConfig: () => local.configGet(),
       reply: (a) => oc.replyPermission(a),
-      interpret: interpretEvent,
-      publish: (e) => bus.publish({ kind: "opencode", payload: e }),
+      interpret: () => interpretEvent(raw),
+      publish: () => bus.publish({ kind: "opencode", payload: raw }),
       push: (e) => push.firePush(e),
       ledger: autoAnsweredAsks,
       warn: (...a) => console.warn(...a),
@@ -3331,13 +3297,56 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
     });
     return;
   }
-  bus.publish({ kind: "opencode", payload: evt });
   // Notify on question/error/done (and track busy→idle). firePush decides
   // what (if anything) to send; permission.asked is handled in the branch
   // above so it isn't double-fired here.
   push.firePush(evt);
+}
+
+// V2 has no event replay: after a reconnect, every session the interpreter
+// knows is re-read (running? pending asks?) and its clients told to refetch.
+async function resyncAfterReconnect() {
+  let active = null;
+  try {
+    active = new Set(await oc.listActiveSessionIds());
+  } catch { /* unknown: leave running flags alone, still ask clients to refetch */ }
+  for (const sid of streamInterp.knownSessionIds()) {
+    const [permissions, questions] = await Promise.all([
+      oc.listPermissions(sid).catch(() => undefined),
+      oc.listQuestions(sid).catch(() => undefined),
+    ]);
+    streamInterp.resync(sid, {
+      running: active ? active.has(sid) : undefined,
+      permissions,
+      questions,
+    });
+  }
+}
+
+// eslint-disable-next-line no-unused-vars
+const stopOpencodePump = oc.subscribeEvents((raw) => {
+  // (installation.update-available no longer exists on V2; the forwarder stays
+  // inert and dedup-gated, so it is a no-op for every event.)
+  const forwardedUpdate = forwardOpencodeUpdate(raw);
+  if (forwardedUpdate) bus.publish(forwardedUpdate);
+  // Box-side stream interpretation (BET-551 / §17): derive interpreted events
+  // from the raw opencode stream and publish them on the SAME bus (no second
+  // stream/endpoint). Consumers demux by `kind:"stream"`. `permission.asked`
+  // is the one exception: it is interpreted inside the trust-mode branch of
+  // observeLifecycleEvent, only when the user actually has to act on it.
+  if (raw?.type !== "permission.asked") interpretEvent(raw);
+  for (const evt of lifecycleAdapter.adapt(raw)) {
+    try {
+      observeLifecycleEvent(evt, raw);
+    } catch (e) {
+      console.warn("[opencode-pump] observer failed:", e?.message ?? e);
+    }
+  }
+  if (raw?.type !== "permission.asked") bus.publish({ kind: "opencode", payload: raw });
 }, {
-  eagerDirectories: () => eagerChatDirs,
+  onConnect: ({ reconnect }) => {
+    if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+  },
 });
 
 const PORT = Number(process.env.MANTA_MOBILE_PORT ?? 8787);
@@ -3908,6 +3917,11 @@ const handleRequest = async (req, res) => {
       return;
     }
   }
+
+  // ---------- Upgrade mode + upgrade API (K3) ----------
+  // While the V1 → V2 upgrade runs, every route except auth, version, the upgrade API, the event
+  // stream and push answers 503; GET /api/upgrade + POST …/retry|rollback live here too.
+  if (await upgradeRoutes.handle(req, res, path)) return;
 
   // ---------- Auth status (AUTHENTICATED) ----------
   // GET /auth/status → {authenticated:true, box_id, enforced}
@@ -6030,6 +6044,43 @@ const handleRequest = async (req, res) => {
   res.end("not found");
 };
 
+// ---------- OpenCode V1 → V2 upgrade (slice C3, K3) ----------
+// Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
+// MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
+// the three pollers that start turns / jobs on their own; resuming re-creates them.
+const upgradePausable = { schedule: stopSchedulePoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller };
+const upgradeV2 = createUpgradeV2(
+  createUpgradeDeps({
+    mantaHome: PROJECT_ROOT,
+    publish: (evt) => bus.publish(evt),
+    services: {
+      pauseBackground: async () => {
+        for (const k of Object.keys(upgradePausable)) {
+          try { upgradePausable[k]?.(); } catch { /* already stopped */ }
+          upgradePausable[k] = null;
+        }
+      },
+      resumeBackground: async () => {
+        if (upgradePausable.schedule) return; // never ran a pause, or already resumed
+        upgradePausable.schedule = startSchedulePoller(
+          {
+            sendPrompt: (args) => promptDelivery.deliver(args),
+            fireNotify: (args) => push.fireNotify(args),
+            publish: (evt) => bus.publish(evt),
+          },
+          { intervalMs: 30000 },
+        ).stop;
+        upgradePausable.sweeper = delegateEngine.startSweeper().stop;
+        upgradePausable.activity = delegateEngine.startActivityPoller().stop;
+      },
+    },
+  }),
+);
+const upgradeRoutes = createUpgradeRoutes(upgradeV2);
+// Resume an interrupted upgrade, or start one when this release finds a V1 history DB to migrate.
+// Never blocks startup and never throws into it.
+upgradeV2.boot().catch((e) => console.warn("[upgrade] boot hook failed:", e?.message ?? e));
+
 const server = createServer(handleRequest);
 
 // ---------- WebSocket: /events live stream + /pty terminal bridge ----------
@@ -6070,6 +6121,10 @@ const handleUpgrade = (req, socket, head) => {
     socket.destroy();
     return;
   }
+
+  // Upgrade mode (K3): /pty, /call and any other WS route get the same 503 the HTTP routes do —
+  // refused before the handshake. /events stays open (it carries the upgrade progress).
+  if (upgradeRoutes.refuseWebSocket(socket, url.pathname)) return;
 
   if (url.pathname === "/events") {
     // Live event stream over WS (SSE alternative for iOS standalone PWAs,

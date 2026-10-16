@@ -22,8 +22,79 @@ import { execFile as execFileCb } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { statePath } from "../shared/paths.mjs";
+import { apiUrl, opencodeAuthHeader } from "./opencode.mjs";
 
 const execFileAsync = promisify(execFileCb);
+
+// ---------------------------------------------------------------------------
+// Config reload (OpenCode V2)
+// ---------------------------------------------------------------------------
+//
+// V2 hot-applies config edits: the writer edits ~/.config/opencode/opencode.jsonc
+// and calls `POST /api/location/reload`, which re-reads the config files for the
+// running server WITHOUT touching an in-flight turn (proven on the pinned
+// binary: a turn running during the reload completes, zero session errors).
+// That is what removed every "restart opencode to apply this" path; restartOpencode
+// above remains only for an explicit user action and the upgrade flow.
+//
+// The endpoint and the Basic-auth header are opencode.mjs's (`apiUrl`,
+// `opencodeAuthHeader`) — the single K1 implementation; nothing here re-derives
+// them.
+
+/**
+ * The models V2 currently lists (`GET /api/model` → `data[]`, each
+ * `{providerID, modelID, package, …}`). Throws on a transport/HTTP error — callers
+ * decide whether a missing list is fatal. `fetchFn` is injectable for tests.
+ */
+export async function listOpencodeModels({ fetchFn = fetch, timeoutMs = 15_000 } = {}) {
+  const auth = await opencodeAuthHeader();
+  const res = await fetchFn(apiUrl("/api/model"), {
+    headers: auth ? { authorization: auth } : {},
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`opencode model list failed (${res.status})`);
+  const body = await res.json();
+  return Array.isArray(body?.data) ? body.data : [];
+}
+
+/**
+ * Ask the running opencode to re-read its config files (`POST /api/location/reload`,
+ * 204 on success). Never throws.
+ *
+ *   { ok:true,  reloaded:true }                — applied live
+ *   { ok:true,  reloaded:false, reason }       — opencode is not running (connection
+ *        refused/timeout): the edit is already on disk and applies at its next
+ *        start, so there is nothing stale to report
+ *   { ok:false, error }                        — opencode answered with an error:
+ *        the live server may still hold the old config, so this is NOT success
+ *
+ * `fetchFn` is injectable for tests.
+ */
+export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000 } = {}) {
+  let res;
+  try {
+    const auth = await opencodeAuthHeader();
+    res = await fetchFn(apiUrl("/api/location/reload"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) },
+      body: "{}",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn("[opencodeAdmin] config reload: opencode unreachable:", msg);
+    return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
+  }
+  if (res.ok) return { ok: true, reloaded: true };
+  let detail = "";
+  try {
+    detail = await res.text();
+  } catch {
+    /* ignore read error on the error body */
+  }
+  console.warn(`[opencodeAdmin] config reload failed: ${res.status}`, detail);
+  return { ok: false, error: `opencode config reload failed (${res.status}): ${String(detail ?? "").slice(0, 200)}` };
+}
 
 /**
  * Restart the box's opencode service via `systemctl --user restart

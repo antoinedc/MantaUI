@@ -1,0 +1,118 @@
+[
+ {
+  "id": "msg_145ac9b08001JXr3qnkV61CEYu",
+  "time": {
+   "created": 1792170302304
+  },
+  "text": "Run exactly this shell command and nothing else: for i in 1 2 3 4 5; do echo line$i; sleep 1; done . Then reply with the single word done.",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ac9bc3001A2xkZuFzeMIHb4",
+  "time": {
+   "created": 1792170302493,
+   "streamed": 1792170303762,
+   "completed": 1792170309109
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "tool",
+    "id": "toolu_01TRSHE5EAAsTPUYpnn3hkds",
+    "name": "shell",
+    "executed": false,
+    "state": {
+     "status": "completed",
+     "input": {
+      "command": "for i in 1 2 3 4 5; do echo line$i; sleep 1; done"
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "line1\nline2\nline3\nline4\nline5\n"
+      }
+     ],
+     "metadata": {
+      "status": "completed",
+      "truncated": false,
+      "exit": 0
+     }
+    },
+    "time": {
+     "created": 1792170303210,
+     "ran": 1792170303636,
+     "completed": 1792170309046
+    }
+   }
+  ],
+  "snapshot": {
+   "start": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "end": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "files": []
+  },
+  "finish": "tool-calls",
+  "rawFinish": "tool_use",
+  "cost": 0.00272175,
+  "tokens": {
+   "input": 3,
+   "output": 76,
+   "reasoning": 0,
+   "cache": {
+    "read": 18850,
+    "write": 363
+   }
+  }
+ },
+ {
+  "id": "msg_145acb653001QxsxMeLl6qcwa9",
+  "time": {
+   "created": 1792170309296,
+   "streamed": 1792170309960,
+   "completed": 1792170309994
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "text",
+    "text": "done"
+   }
+  ],
+  "snapshot": {
+   "start": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "end": "83e646e070149abd85ad5424a502bd3a574238c1",
+   "files": []
+  },
+  "finish": "stop",
+  "rawFinish": "end_turn",
+  "cost": 0.0020723,
+  "tokens": {
+   "input": 6,
+   "output": 4,
+   "reasoning": 0,
+   "cache": {
+    "read": 19213,
+    "write": 100
+   }
+  }
+ },
+ {
+  "id": "msg_145acb973001rRfr350NmYxuC5",
+  "time": {
+   "created": 1792170310003
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ }
+]

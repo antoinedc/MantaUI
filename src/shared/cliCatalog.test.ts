@@ -23,9 +23,10 @@ describe("HOME_CLI_INSTALL_DIRS", () => {
 });
 
 describe("CLI_CATALOG", () => {
-  it("has the four expected CLIs with their manual URLs", () => {
+  // opencode is pinned by the box release (OpenCode V2 cutover), so it is not a
+  // self-upgradable CLI any more: `opencode upgrade` must never be offered.
+  it("has the three expected CLIs with their manual URLs — and no opencode", () => {
     expect(CLI_CATALOG.map((c) => c.id)).toEqual([
-      "opencode",
       "claude",
       "codex",
       "kimi",
@@ -39,17 +40,8 @@ describe("CLI_CATALOG", () => {
     }
   });
 
-  it("marks opencode as the only non-npm, github-tracked CLI", () => {
-    const opencode = CLI_CATALOG.find((c) => c.id === "opencode")!;
-    expect(opencode.latest).toEqual({ kind: "github", repo: "anomalyco/opencode" });
-    expect(opencode.npmPackage).toBeNull();
-    expect(opencode.upgrade).toEqual(["opencode", "upgrade"]);
-  });
-
-  it("opencode is the only ends-turns-disruptive install", () => {
-    expect(CLI_CATALOG.filter((c) => c.disruption === "ends-turns").map((c) => c.id)).toEqual([
-      "opencode",
-    ]);
+  it("no entry offers `opencode upgrade`", () => {
+    expect(CLI_CATALOG.some((c) => c.id === "opencode" || c.upgrade.join(" ").includes("opencode upgrade"))).toBe(false);
   });
 });
 
@@ -91,13 +83,6 @@ describe("resolveUpgradeCommand", () => {
     expect(
       resolveUpgradeCommand(npmCli, "/usr/local/lib/node_modules/@anthropic-ai/claude-code/x", "/usr/local/lib/node_modules/"),
     ).toEqual(["npm", "install", "-g", "@anthropic-ai/claude-code@latest"]);
-  });
-
-  it("branch 1 — requires an npmPackage; opencode never falls into npm", () => {
-    const opencode = CLI_CATALOG.find((c) => c.id === "opencode");
-    expect(
-      resolveUpgradeCommand(opencode, "/usr/local/lib/node_modules/opencode", "/usr/local/lib/node_modules"),
-    ).toEqual(["opencode", "upgrade"]);
   });
 
   it("branch 2 — refuses a brew-managed binary even when an upgrade exists", () => {
