@@ -777,3 +777,214 @@ describe("exchange (request + response hooks)", () => {
     assert.equal(exchange.matchTarget("https://example.com/", "POST"), null);
   });
 });
+
+// ------------------------------------------------- cache_control normalisation
+
+describe("normalizeCacheControl (V2: top-level + 4 block breakpoints = HTTP 400 'Found 5')", () => {
+  const eph = (ttl) => (ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl });
+  const count = (v) => {
+    let n = 0;
+    const walk = (x) => {
+      if (Array.isArray(x)) return x.forEach(walk);
+      if (x && typeof x === "object") {
+        if ("cache_control" in x) n++;
+        Object.values(x).forEach(walk);
+      }
+    };
+    walk(v);
+    return n;
+  };
+  const blockCCs = (p) => {
+    const out = [];
+    const walk = (x) => {
+      if (Array.isArray(x)) return x.forEach(walk);
+      if (x && typeof x === "object") {
+        if (x.cache_control) out.push(x.cache_control);
+        Object.values(x).forEach(walk);
+      }
+    };
+    const { cache_control: _top, ...rest } = p;
+    walk(rest);
+    return out;
+  };
+
+  test("no top-level cache_control → untouched (even with block breakpoints)", () => {
+    const p = { system: [{ type: "text", text: "s", cache_control: eph() }], messages: [] };
+    const before = JSON.stringify(p);
+    assert.equal(body.normalizeCacheControl(p), false);
+    assert.equal(JSON.stringify(p), before);
+  });
+
+  test("top-level but ZERO block breakpoints → the top-level one is left alone", () => {
+    const p = { cache_control: eph("1h"), system: [{ type: "text", text: "s" }], messages: [{ role: "user", content: "hi" }] };
+    const before = JSON.stringify(p);
+    assert.equal(body.normalizeCacheControl(p), false);
+    assert.equal(JSON.stringify(p), before);
+  });
+
+  test("top-level + ONE block breakpoint → top-level removed, block takes its ttl", () => {
+    const p = { cache_control: eph("1h"), system: [{ type: "text", text: "s", cache_control: eph() }], messages: [] };
+    assert.equal(body.normalizeCacheControl(p), true);
+    assert.equal("cache_control" in p, false);
+    assert.deepEqual(p.system[0].cache_control, eph("1h"));
+  });
+
+  test("top-level + FOUR block breakpoints across tools/system/messages/tool_result → 4 total, all 1h, no top-level", () => {
+    const p = {
+      model: "m",
+      cache_control: eph("1h"),
+      tools: [{ name: "a", input_schema: {}, cache_control: eph() }],
+      system: [{ type: "text", text: "s", cache_control: eph() }],
+      messages: [
+        { role: "user", content: [{ type: "text", text: "u", cache_control: eph() }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "a", input: { x: 1 } }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "r", cache_control: eph() }] }],
+        },
+      ],
+    };
+    assert.equal(count(p), 5, "fixture reproduces the 5-breakpoint request");
+    assert.equal(body.normalizeCacheControl(p), true);
+    assert.equal(count(p), 4);
+    assert.equal("cache_control" in p, false);
+    assert.deepEqual(blockCCs(p), [eph("1h"), eph("1h"), eph("1h"), eph("1h")]);
+  });
+
+  test("mixed block ttls (5m after 1h, 1h after 5m, none) all become the top-level ttl, so ordering holds", () => {
+    const p = {
+      cache_control: eph("1h"),
+      system: [
+        { type: "text", text: "a", cache_control: eph("5m") },
+        { type: "text", text: "b", cache_control: eph("1h") },
+      ],
+      messages: [{ role: "user", content: [{ type: "text", text: "c", cache_control: eph("5m") }, { type: "text", text: "d", cache_control: eph() }] }],
+    };
+    body.normalizeCacheControl(p);
+    assert.deepEqual(blockCCs(p).map((c) => c.ttl), ["1h", "1h", "1h", "1h"]);
+    assert.ok(blockCCs(p).every((c) => c.type === "ephemeral"), "other fields are kept");
+  });
+
+  test("a top-level without ttl means the default: block ttls are cleared (all 5m)", () => {
+    const p = { cache_control: eph(), system: [{ type: "text", text: "a", cache_control: eph("1h") }] };
+    body.normalizeCacheControl(p);
+    assert.deepEqual(p.system[0].cache_control, eph());
+  });
+
+  test("a user tool input that happens to contain a 'cache_control' key is NOT a breakpoint", () => {
+    const p = {
+      cache_control: eph("1h"),
+      messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "n", input: { cache_control: { x: 1 } } }] }],
+    };
+    assert.equal(body.normalizeCacheControl(p), false);
+    assert.ok(p.cache_control, "top-level kept: there were no real block breakpoints");
+    assert.deepEqual(p.messages[0].content[0].input.cache_control, { x: 1 });
+  });
+
+  test("normalizeCacheControlBody: text in/out, unchanged text returned as the SAME string, garbage fails open", () => {
+    const plain = JSON.stringify({ messages: [] });
+    assert.deepEqual(body.normalizeCacheControlBody(plain), { body: plain, changed: false });
+    assert.deepEqual(body.normalizeCacheControlBody("not json cache_control"), { body: "not json cache_control", changed: false });
+    assert.deepEqual(body.normalizeCacheControlBody('"cache_control"'), { body: '"cache_control"', changed: false });
+    const five = JSON.stringify({ cache_control: eph("1h"), system: [{ type: "text", text: "s", cache_control: eph() }] });
+    const r = body.normalizeCacheControlBody(five);
+    assert.equal(r.changed, true);
+    assert.equal(JSON.parse(r.body).cache_control, undefined);
+    assert.deepEqual(JSON.parse(r.body).system[0].cache_control, eph("1h"));
+  });
+
+  test("transformBody (Max path) also normalises, after its own rewrites", () => {
+    const raw = JSON.stringify({
+      model: "claude-haiku-5-5",
+      cache_control: eph("1h"),
+      system: [{ type: "text", text: "sys", cache_control: eph() }],
+      tools: [{ name: "shell", cache_control: eph() }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: eph() }] }],
+    });
+    const out = JSON.parse(body.transformBody(raw, { ANTHROPIC_CLI_VERSION: "2.1.280" }).body);
+    assert.equal(out.cache_control, undefined);
+    assert.ok(blockCCs(out).length >= 1 && blockCCs(out).length <= 4);
+    assert.ok(blockCCs(out).every((c) => c.ttl === "1h"));
+  });
+});
+
+describe("exchange: cache fix runs for EVERY Anthropic request, incl. API-key auth (no credential → no signing)", () => {
+  const eph = (ttl) => (ttl === undefined ? { type: "ephemeral" } : { type: "ephemeral", ttl });
+  const five = () =>
+    new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": "sk-ant-keep-me", "content-type": "application/json", "content-length": "9999" },
+      body: JSON.stringify({
+        model: "claude-haiku-5-5",
+        cache_control: eph("1h"),
+        system: [{ type: "text", text: "s", cache_control: eph() }],
+        tools: [{ name: "shell", cache_control: eph() }],
+        messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: eph() }] }],
+      }),
+    });
+  const noCreds = () =>
+    exchange.createExchange({
+      resolver: { seatFor: async () => null, refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
+      credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => join(scratch, "no-live.json") }),
+      parentOf: async () => null,
+      send: async () => new Response("{}"),
+      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+    });
+
+  test("API-key request (no identity): headers + rest of body untouched, cache_control fixed", async () => {
+    const event = { request: five(), sessionID: "s", kind: "primary" };
+    const orig = event.request;
+    await noCreds().onRequest(event);
+    assert.notEqual(event.request, orig, "request replaced");
+    assert.equal(event.request.headers.get("x-api-key"), "sk-ant-keep-me", "the API key is kept");
+    assert.equal(event.request.headers.get("authorization"), null, "no Bearer injected");
+    assert.equal(event.request.headers.get("content-length"), null, "stale length dropped");
+    assert.equal(event.request.url, "https://api.anthropic.com/v1/messages", "no ?beta=true: not Claude Code identity");
+    const sent = JSON.parse(await event.request.text());
+    assert.equal(sent.cache_control, undefined);
+    assert.equal(sent.tools[0].name, "shell", "no tool prefixing");
+    assert.equal(sent.system.length, 1, "no billing header / identity injected");
+    const ccs = [sent.system[0], sent.tools[0], sent.messages[0].content[0]].map((b) => b.cache_control);
+    assert.deepEqual(ccs, [eph("1h"), eph("1h"), eph("1h")]);
+  });
+
+  test("request with no sessionID is still fixed", async () => {
+    const event = { request: five() };
+    await noCreds().onRequest(event);
+    assert.equal(JSON.parse(await event.request.text()).cache_control, undefined);
+  });
+
+  test("an API-key request with nothing to fix is left as the very same Request", async () => {
+    const plain = new Request("https://api.anthropic.com/v1/messages", { method: "POST", body: JSON.stringify({ messages: [] }) });
+    const event = { request: plain, sessionID: "s" };
+    await noCreds().onRequest(event);
+    assert.equal(event.request, plain);
+  });
+
+  test("a non-Anthropic request is never touched", async () => {
+    const other = new Request("https://example.com/v1/messages", { method: "POST", body: await five().text() });
+    const event = { request: other, sessionID: "s" };
+    await noCreds().onRequest(event);
+    assert.equal(event.request, other);
+  });
+
+  test("the Claude Max path (identity found) sends ≤4 breakpoints, all 1h, no top-level", async () => {
+    const liveFile = join(scratch, "cache-live.json");
+    writeFileSync(liveFile, JSON.stringify({ claudeAiOauth: { accessToken: "LIVE", expiresAt: Date.now() + 3_600_000 } }));
+    const ex = exchange.createExchange({
+      resolver: { seatFor: async () => ({ seatId: null, live: true }), refresh: async () => null, limit: async () => null, forget() {}, remember() {} },
+      credentials: creds.createCredentialReader({ rootDir: () => join(scratch, "no-seats"), liveFile: () => liveFile }),
+      parentOf: async () => null,
+      send: async () => new Response("{}"),
+      env: { ANTHROPIC_CLI_VERSION: "2.1.280" },
+    });
+    const event = { request: five(), sessionID: "s", kind: "primary" };
+    await ex.onRequest(event);
+    assert.equal(event.request.headers.get("authorization"), "Bearer LIVE");
+    const sent = JSON.parse(await event.request.text());
+    assert.equal(sent.cache_control, undefined);
+    const all = [...sent.system, ...sent.tools, ...sent.messages.flatMap((m) => m.content)].map((b) => b.cache_control).filter(Boolean);
+    assert.ok(all.length >= 1 && all.length <= 4);
+    assert.ok(all.every((c) => c.ttl === "1h"));
+  });
+});

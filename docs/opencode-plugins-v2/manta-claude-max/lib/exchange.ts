@@ -12,7 +12,7 @@
 
 import { createHash } from "node:crypto";
 import { LONG_CONTEXT_BETAS, isLongContextError } from "./config.ts";
-import { claudeHeaders, transformBody, withBetaParam } from "./body.ts";
+import { claudeHeaders, normalizeCacheControlBody, transformBody, withBetaParam } from "./body.ts";
 import { codexHeaders } from "./codex.ts";
 import { expiresSoon, type CredentialReader, type Provider, type SeatCredentials } from "./creds.ts";
 import type { RequestIds, Resolved, SeatResolver } from "./seats.ts";
@@ -203,11 +203,27 @@ export function createExchange(deps: ExchangeDeps) {
     try {
       const req: Request = event.request;
       const provider = matchTarget(req.url, req.method);
-      if (!provider || typeof event.sessionID !== "string" || !event.sessionID) return;
+      if (!provider) return;
 
       // R2: a Request body is a one-shot stream. Read it ONCE, from a clone.
       let text: string | null = null;
       if (req.method !== "GET" && req.method !== "HEAD" && req.body) text = await req.clone().text();
+
+      // Every Anthropic request gets the cache_control fix, whatever happens next:
+      // a request with no session, or one we sign for no identity (API-key auth,
+      // where the plugin deliberately leaves headers and the rest of the body alone),
+      // is still sent with the cache normalisation applied.
+      const cacheOnly = () => {
+        if (provider !== "claude" || text === null) return;
+        const n = normalizeCacheControlBody(text);
+        if (!n.changed) return;
+        const headers = new Headers(req.headers);
+        headers.delete("content-length"); // the body length changed
+        event.request = new Request(req.url, { method: req.method, headers, body: n.body, signal: req.signal });
+        log("cache_normalized", { sessionID: event.sessionID ?? null, signed: false });
+      };
+
+      if (typeof event.sessionID !== "string" || !event.sessionID) return cacheOnly();
 
       let model = typeof event.model?.id === "string" ? event.model.id : "";
       let body = text;
@@ -236,7 +252,7 @@ export function createExchange(deps: ExchangeDeps) {
         model: model || null,
       };
       const identity = await pickIdentity(provider, ids);
-      if (!identity) return; // fail open: send what OpenCode built
+      if (!identity) return cacheOnly(); // fail open: send what OpenCode built (cache fix aside)
       if (provider === "codex" && !identity.creds) return; // live Codex login: untouched
 
       const s: Sent = {

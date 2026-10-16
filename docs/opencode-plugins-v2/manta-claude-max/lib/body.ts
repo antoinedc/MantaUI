@@ -124,6 +124,71 @@ export function synthesizeMissingToolResults(messages: any[]): any[] {
 }
 
 // ---------------------------------------------------------------------------
+// cache_control normalisation (V2 + `options.cacheControl` = "1 hour cache")
+// ---------------------------------------------------------------------------
+//
+// Manta's 1h cache setting writes `options.cacheControl: {type:"ephemeral",
+// ttl:"1h"}` per model. On V1 that switched opencode into Anthropic's automatic
+// caching (it placed no breakpoints of its own). On V2 opencode ALSO places its
+// own block-level breakpoints, so the request carries a top-level `cache_control`
+// PLUS up to 4 block-level ones; Anthropic allows 4 in total and answers HTTP 400
+// ("Found 5"). Fix: when both exist, drop the top-level one and give its ttl to
+// the block-level breakpoints. With no block-level breakpoints the top-level one
+// is the only caching instruction and is left alone.
+
+/** Every block-level `cache_control` holder in `tools`, `system` and `messages`. */
+function collectBreakpoints(parsed: any): any[] {
+  const holders: any[] = [];
+  const visit = (blocks: unknown) => {
+    if (!Array.isArray(blocks)) return;
+    for (const b of blocks) {
+      if (!b || typeof b !== "object") continue;
+      if (b.cache_control && typeof b.cache_control === "object") holders.push(b);
+      // tool_result carries nested content blocks that can hold breakpoints too.
+      // (Never descend into tool_use.input: that is user data, not request shape.)
+      if (b.type === "tool_result") visit(b.content);
+    }
+  };
+  visit(parsed.tools);
+  visit(parsed.system);
+  if (Array.isArray(parsed.messages)) for (const m of parsed.messages) visit(m?.content);
+  return holders;
+}
+
+/**
+ * In-place on a parsed Anthropic Messages body. Returns true when it changed.
+ * All breakpoints end up with the SAME ttl, so Anthropic's ordering rule (a 1h
+ * breakpoint must not follow a 5m one) holds by construction. A top-level
+ * cache_control without a ttl means the default (5m): block ttls are cleared.
+ */
+export function normalizeCacheControl(parsed: any): boolean {
+  const top = parsed?.cache_control;
+  if (!top || typeof top !== "object") return false;
+  const holders = collectBreakpoints(parsed);
+  if (holders.length === 0) return false;
+  delete parsed.cache_control;
+  for (const h of holders) {
+    const { ttl: _old, ...rest } = h.cache_control;
+    h.cache_control = top.ttl === undefined ? rest : { ...rest, ttl: top.ttl };
+  }
+  return true;
+}
+
+/** Text → text wrapper for the exchange. Fails open: anything unparseable is returned as is. */
+export function normalizeCacheControlBody(raw: string): { body: string; changed: boolean } {
+  try {
+    // cheap pre-check: skip the parse for the (common) body with no cache_control at all
+    if (!raw.includes('"cache_control"')) return { body: raw, changed: false };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { body: raw, changed: false };
+    if (!normalizeCacheControl(parsed)) return { body: raw, changed: false };
+    return { body: JSON.stringify(parsed), changed: true };
+  } catch {
+    return { body: raw, changed: false };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // transformBody
 // ---------------------------------------------------------------------------
 
@@ -237,6 +302,7 @@ export function transformBody(
       );
       parsed.messages = synthesizeMissingToolResults(parsed.messages);
     }
+    normalizeCacheControl(parsed); // after the rewrites above, which drop some breakpoints
     return { body: JSON.stringify(parsed), nameMap, model, rewritten: true };
   } catch {
     return { body: raw, nameMap, model: null, rewritten: false };
