@@ -112,6 +112,51 @@ export function isSeatExhausted(snap) {
   return snap?.exhausted === true;
 }
 
+/**
+ * When this seat's quota next resets (epoch ms): the soonest future `resetsAt`
+ * among its ACTIVE, FRESH windows that apply to `model` (the same set `seatLoad`
+ * reads). `Infinity` when no such window is running — e.g. a 5h window that has
+ * not started, or one whose reset has already passed.
+ *
+ * @param {{windows?: Array<{resetsAt?:number, stale?:boolean, active?:boolean, scope?:string, kind?:string}>}|null|undefined} snap
+ * @param {{nowMs: number, model?: string|null}} opts
+ * @returns {number}
+ */
+export function nextResetAt(snap, { nowMs, model = null }) {
+  let best = Infinity;
+  for (const w of Array.isArray(snap?.windows) ? snap.windows : []) {
+    if (!w || !isWindowActive(w) || w.stale === true || !windowAppliesToModel(w, model)) continue;
+    if (typeof w.resetsAt === "number" && Number.isFinite(w.resetsAt) && w.resetsAt > nowMs && w.resetsAt < best) best = w.resetsAt;
+  }
+  return best;
+}
+
+/** Resets less than this far apart count as simultaneous (one org's windows
+ *  often reset within the same minute); the tie goes to the least-loaded seat. */
+const RESET_TIE_MS = 60_000;
+
+/**
+ * "Use it or lose it": among `seatSnapshots`, the seat whose quota resets SOONEST,
+ * provided that is within `withinMs` from `nowMs` — what such a seat has left is
+ * lost at the reset, while a seat that has just reset keeps its quota for later.
+ * Resets under a minute apart tie, broken like `leastLoadedSeat`. `null` when no
+ * seat resets within the horizon. Callers pass only seats with room.
+ *
+ * @template {{seatId?: string}} S
+ * @param {S[]} seatSnapshots
+ * @param {{nowMs: number, withinMs: number, activeSeatId?: string|null, model?: string|null}} opts
+ * @returns {S|null}
+ */
+export function soonestResettingSeat(seatSnapshots, { nowMs, withinMs, activeSeatId = null, model = null }) {
+  const soon = (Array.isArray(seatSnapshots) ? seatSnapshots : [])
+    .filter(Boolean)
+    .map((s) => ({ s, at: nextResetAt(s, { nowMs, model }) }))
+    .filter((x) => x.at <= nowMs + withinMs);
+  if (soon.length === 0) return null;
+  const first = Math.min(...soon.map((x) => x.at));
+  return leastLoadedSeat(soon.filter((x) => x.at - first < RESET_TIE_MS).map((x) => x.s), { activeSeatId, model });
+}
+
 // Sort key: seats with a known load first, then seats with no reading (they may
 // well have room), then exhausted seats (they certainly have none).
 function rank(snap, model) {

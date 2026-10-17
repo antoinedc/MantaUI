@@ -41,6 +41,16 @@
 //          it cannot serve, and stalling until its reset is worse than a re-send.
 //      The 95/70 split + the 5 h no-move-back is the hysteresis: a conversation
 //      that just left a seat at 91 cannot come back when that seat reads 60.
+//   4. USE IT OR LOSE IT (auto mode). What a seat has left when its window resets
+//      is lost; a seat that has just reset keeps its quota for later. So:
+//        • among the seats a placement or a move may pick, one whose quota resets
+//          within RESET_SOON_MS (and is under 95) goes first — soonest first,
+//          then least-loaded — before plain least-loaded;
+//        • a conversation whose seat is NOT under pressure (below 95) and does
+//          not itself reset within RESET_SOON_MS moves to a SAME-ORG seat (free:
+//          shared cache) that does and is under 70 — reason "reset-soon". Never
+//          to another org, never back to a seat left within 5 h; once on a seat
+//          that resets soon it stays (its own reset is soon too).
 //      Every automatic move is recorded {movedFrom, movedAt, reason, trigger,
 //      crossOrg} and announced (`onMoved`).
 //   MANUAL MODE (phase 3): every conversation uses the active seat. The stored
@@ -69,7 +79,7 @@
 
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { statePath } from "../shared/paths.mjs";
-import { leastLoadedSeat, isSeatExhausted, seatLoad, seatLoadWindow } from "../shared/seatChoice.mjs";
+import { leastLoadedSeat, isSeatExhausted, seatLoad, seatLoadWindow, nextResetAt, soonestResettingSeat } from "../shared/seatChoice.mjs";
 import { ACCOUNT_PROVIDERS, notePluginSeen } from "./accounts.mjs";
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -86,6 +96,8 @@ export const CROSS_ORG_CAP_MS = 5 * 60 * 60_000;
 export const MOVE_AT_PCT = 95;
 /** …to a seat under this load (else it stays until its seat is full). */
 export const MOVE_TARGET_BELOW_PCT = 70;
+/** Rule 4: a seat whose quota resets within this long is used first. */
+export const RESET_SOON_MS = 60 * 60_000;
 /** A seat a failed turn reported as limited is treated as full for this long,
  *  even when the usage reading (up to a poll interval old) still says otherwise. */
 export const LIMITED_MARK_MS = 5 * 60_000;
@@ -192,14 +204,15 @@ export function pruneAssignments(store, nowMs, ttlMs = ASSIGNMENT_TTL_MS) {
  *            A seat with no org info is its own org, so it never has a route.
  *
  * `model` (the conversation's model id, null = unknown) decides which model-scoped
- * windows count (see the header).
+ * windows count (see the header). In auto mode, within a tier, a seat whose quota
+ * resets within RESET_SOON_MS goes first (rule 4); that needs `nowMs`.
  *
  * @param {{mode: string, activeSeatId: string|null,
  *          seats: Array<{seatId:string, usable:boolean, accountId?:string, orgId?:string|null}>,
- *          seatSnapshots?: Array<{seatId?:string}>, model?: string|null}} args
+ *          seatSnapshots?: Array<{seatId?:string}>, model?: string|null, nowMs?: number|null}} args
  * @returns {string|null}
  */
-export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [], model = null }) {
+export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [], model = null, nowMs = null }) {
   const usable = seats.filter((s) => s.usable);
   if (usable.length === 0) return null;
   if (mode === "manual" && usable.some((s) => s.seatId === activeSeatId)) return activeSeatId;
@@ -213,10 +226,25 @@ export function chooseSeat({ mode, activeSeatId, seats, seatSnapshots = [], mode
   const hasEscapeRoute = (e) => entries.some((o) => o !== e && o.org === e.org && roomy(o));
   const tiers = mode === "manual" ? [entries] : [entries.filter((e) => roomy(e) && hasEscapeRoute(e)), entries.filter(roomy), entries];
   for (const tier of tiers) {
-    const best = leastLoadedSeat(tier.map((e) => e.snap), { activeSeatId, model });
+    const snaps = tier.map((e) => e.snap);
+    const best = (mode === "auto" ? resetSoonFirst(snaps, { nowMs, activeSeatId, model }) : null) ?? leastLoadedSeat(snaps, { activeSeatId, model });
     if (best) return best.seatId;
   }
   return usable[0].seatId;
+}
+
+/**
+ * Rule 4 inside one tier of candidates: the seat with room (not full, known load
+ * under 95) whose quota resets soonest within RESET_SOON_MS, else `null` (the
+ * caller falls back to least-loaded). No clock (`nowMs` null) → `null`. Pure.
+ */
+function resetSoonFirst(snaps, { nowMs, activeSeatId = null, model = null }) {
+  if (typeof nowMs !== "number") return null;
+  const withRoom = snaps.filter((snap) => {
+    const load = seatLoad(snap, { model });
+    return !isSeatFull(snap, { model }) && load !== null && load < MOVE_AT_PCT;
+  });
+  return soonestResettingSeat(withRoom, { nowMs, withinMs: RESET_SOON_MS, activeSeatId, model });
 }
 
 /**
@@ -253,7 +281,7 @@ export function seatOrgKey(seat) {
  * @param {number} args.nowMs
  * @param {string|null} [args.activeSeatId]  tie-break between equally loaded seats
  * @param {string|null} [args.model]  the conversation's model id (null = unknown): which scoped windows count
- * @returns {null|{seatId:string, from:string, why:"load"|"exhausted"|"unusable",
+ * @returns {null|{seatId:string, from:string, why:"load"|"exhausted"|"unusable"|"reset-soon",
  *                 trigger:{kind:string,pct:number}|null, crossOrg:boolean}}
  */
 export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeSeatId = null, model = null }) {
@@ -272,7 +300,7 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
     trigger = seatLoadWindow(own, { model }) ?? { kind: "exhausted", pct: 100 };
   } else {
     const load = seatLoad(own, { model });
-    if (load === null || load < MOVE_AT_PCT) return null;
+    if (load === null || load < MOVE_AT_PCT) return resetSoonMove({ existing, cur, own, seats, bySeat, nowMs, activeSeatId, model });
     why = "load";
     trigger = seatLoadWindow(own, { model });
   }
@@ -313,7 +341,8 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
       ? [pool.filter((c) => c.same), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT)), pool.filter((c) => !c.same)]
       : [pool.filter((c) => c.same && known(c, MOVE_AT_PCT)), pool.filter((c) => !c.same && known(c, MOVE_TARGET_BELOW_PCT))];
     for (const tier of tiers) {
-      const best = leastLoadedSeat(tier.map((c) => c.snap), { activeSeatId, model });
+      const snaps = tier.map((c) => c.snap);
+      const best = resetSoonFirst(snaps, { nowMs, activeSeatId, model }) ?? leastLoadedSeat(snaps, { activeSeatId, model });
       if (best) return pool.find((c) => c.snap === best);
     }
     return null;
@@ -338,9 +367,32 @@ export function decideMove({ existing, seats, seatSnapshots = [], nowMs, activeS
 }
 
 /**
- * Rules 1–3 for one request, with no I/O.
+ * Rule 4, the move half: a conversation whose seat is not under pressure moves to
+ * a same-org seat whose quota resets within RESET_SOON_MS (under 70, not left
+ * within 5 h), unless its own seat resets that soon too. `null` = stay. Pure.
+ */
+function resetSoonMove({ existing, cur, own, seats, bySeat, nowMs, activeSeatId = null, model = null }) {
+  if (!cur.usable || typeof nowMs !== "number") return null;
+  if (nextResetAt(own, { nowMs, model }) <= nowMs + RESET_SOON_MS) return null;
+  const left = existing.left ?? {};
+  const curOrg = seatOrgKey(cur);
+  const pool = [];
+  for (const s of seats) {
+    if (!s.usable || s.seatId === cur.seatId || seatOrgKey(s) !== curOrg) continue;
+    if (typeof left[s.seatId] === "number" && nowMs - left[s.seatId] < MOVE_BACK_BLOCK_MS) continue;
+    const snap = bySeat.get(s.seatId);
+    const load = seatLoad(snap, { model });
+    if (!snap || isSeatFull(snap, { model }) || load === null || load >= MOVE_TARGET_BELOW_PCT) continue;
+    pool.push(snap);
+  }
+  const best = soonestResettingSeat(pool, { nowMs, withinMs: RESET_SOON_MS, activeSeatId, model });
+  return best ? { seatId: best.seatId, from: cur.seatId, why: "reset-soon", trigger: null, crossOrg: false } : null;
+}
+
+/**
+ * Rules 1–4 for one request, with no I/O.
  * @returns {{seatId: string|null, reason: "kept"|"assigned"|"moved"|"none", from?: string,
- *            why?: "manual"|"load"|"exhausted"|"unusable", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean}}
+ *            why?: "manual"|"load"|"exhausted"|"unusable"|"reset-soon", trigger?: {kind:string,pct:number}|null, crossOrg?: boolean}}
  */
 export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots, nowMs = 0, model = null }) {
   if (mode === "manual") {
@@ -350,7 +402,7 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
     // existing) seat is MOVED, recorded as a manual move; one whose seat is
     // gone is simply placed. The active seat falls back exactly as `chooseSeat`
     // does when it cannot serve, so a request never fails on it.
-    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model });
+    const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model, nowMs });
     if (!seatId) return { seatId: null, reason: "none" };
     if (!existing) return { seatId, reason: "assigned" };
     if (existing.seatId === seatId) return { seatId, reason: "kept" };
@@ -369,7 +421,7 @@ export function decideSeat({ existing, mode, activeSeatId, seats, seatSnapshots,
       if (seat.usable) return { seatId: existing.seatId, reason: "kept" };
     }
   }
-  const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model });
+  const seatId = chooseSeat({ mode, activeSeatId, seats, seatSnapshots, model, nowMs });
   return seatId ? { seatId, reason: "assigned" } : { seatId: null, reason: "none" };
 }
 
@@ -384,6 +436,7 @@ export function describeSeatMove(evt) {
   const from = evt.fromLabel || evt.from || "a seat";
   const to = evt.toLabel || evt.to || "another seat";
   let why = "";
+  if (evt.reason === "reset-soon") return `Moved a conversation from ${from} to ${to} (its limit resets within the hour — its remaining quota goes first)`;
   if (evt.reason === "unusable") why = " (signed out)";
   else if (evt.trigger) {
     const win = windowWord(evt.trigger.kind);

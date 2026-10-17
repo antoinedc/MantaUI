@@ -454,7 +454,7 @@ test("seatStates (real): a seat whose credentials are unreadable is not usable a
 
 // ---- rules 3–4: 95 / 70 thresholds, same-org preference, cross-org cap ------------
 
-import { CROSS_ORG_CAP_MS, MOVE_BACK_BLOCK_MS, decideMove, describeSeatMove, isSeatFull, seatMoveActivityEntry, seatOrgKey } from "./seatAssignment.mjs";
+import { CROSS_ORG_CAP_MS, MOVE_BACK_BLOCK_MS, RESET_SOON_MS, decideMove, describeSeatMove, isSeatFull, seatMoveActivityEntry, seatOrgKey } from "./seatAssignment.mjs";
 
 const HOUR = 3_600_000;
 const full = (n) => snap(n, 100, { exhausted: true });
@@ -919,3 +919,88 @@ test("the service: a sub-agent on another model decides with its own model but n
   assert.equal(a.svc.assignments("claude").root.model, OPUS);
   assert.equal(a.saves.length, saves + 1, "only the child link is written, no model flip-flop");
 });
+
+// ---- rule 4: use it or lose it ----------------------------------------------
+
+{
+  const NOW = 100 * HOUR;
+  const MIN = 60_000;
+  // A seat whose 5h window is at `pct` and resets in `inMs` (null → not started).
+  const at = (n, pct, inMs = null, extra = {}) => ({
+    provider: "claude",
+    seatId: `seat-${n}`,
+    windows: [{ kind: "session", pct, ...(inMs == null ? {} : { resetsAt: NOW + inMs }) }],
+    ...extra,
+  });
+  const org = (n, over) => inOrg(n, "A", over);
+
+  test("rule 4: a NEW conversation takes the seat resetting within the hour over a freshly reset one", () => {
+    const seats = [org(1), org(2), org(3)];
+    const snaps = [at(1, 0), at(2, 60, 30 * MIN), at(3, 10, 3 * HOUR)];
+    assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps, nowMs: NOW }), "seat-2");
+    assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: snaps }), "seat-1", "no clock → least-loaded as before");
+    assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats, seatSnapshots: [at(1, 0), at(2, 60, 2 * HOUR), at(3, 10, 3 * HOUR)], nowMs: NOW }), "seat-1", "outside the hour → least-loaded");
+    assert.equal(chooseSeat({ mode: "manual", activeSeatId: "seat-3", seats, seatSnapshots: snaps, nowMs: NOW }), "seat-3", "manual untouched");
+    // the escape-route tier still comes first: a soon seat is only preferred within its tier
+    const lone = [org(1), org(2), inOrg(3, "B")];
+    assert.equal(chooseSeat({ mode: "auto", activeSeatId: null, seats: lone, seatSnapshots: [at(1, 20), at(2, 30), at(3, 10, 10 * MIN)], nowMs: NOW }), "seat-1");
+  });
+
+  test("rule 4: a conversation below 95 moves to a same-org seat resetting within the hour (under 70) — reason reset-soon", () => {
+    const seats = [org(1), org(2), org(3)];
+    const snaps = [at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN), at(3, 0)];
+    assert.deepEqual(move({}, seats, snaps, NOW), { seatId: "seat-2", from: "seat-1", why: "reset-soon", trigger: null, crossOrg: false });
+    assert.equal(move({}, seats, [at(1, 5), at(2, 50, 30 * MIN)], NOW)?.seatId, "seat-2", "own window not started");
+  });
+
+  test("rule 4: no reset-soon move when its own seat resets soon too, the target has no room, was left within 5h, or is another org", () => {
+    const seats = [org(1), org(2)];
+    assert.equal(move({}, seats, [at(1, 5, 40 * MIN), at(2, 50, 20 * MIN)], NOW), null, "own seat resets within the hour");
+    assert.equal(move({}, seats, [at(1, 5), at(2, 70, 20 * MIN)], NOW), null, "target at 70");
+    assert.equal(move({}, seats, [at(1, 5), at(2, 100, 20 * MIN, { exhausted: true })], NOW), null, "target full");
+    assert.equal(move({ left: { "seat-2": NOW - HOUR } }, seats, [at(1, 5), at(2, 50, 20 * MIN)], NOW), null, "left within 5h");
+    assert.equal(move({}, [org(1), inOrg(2, "B")], [at(1, 5), at(2, 50, 20 * MIN)], NOW), null, "another org: no re-send for this");
+    assert.equal(move({}, seats, [at(1, 5), at(2, 50, RESET_SOON_MS + MIN)], NOW), null, "outside the hour");
+  });
+
+  test("rule 4: a load move (95) prefers, among its targets, the one resetting within the hour", () => {
+    const seats = [org(1), org(2), org(3)];
+    const out = move({}, seats, [at(1, 96, 3 * HOUR), at(2, 10, 4 * HOUR), at(3, 50, 15 * MIN)], NOW);
+    assert.equal(out.seatId, "seat-3");
+    assert.equal(out.why, "load");
+  });
+
+  test("rule 4: describeSeatMove names a reset-soon move", () => {
+    assert.equal(
+      describeSeatMove({ fromLabel: "Seat 1", toLabel: "Seat 2", reason: "reset-soon", trigger: null }),
+      "Moved a conversation from Seat 1 to Seat 2 (its limit resets within the hour — its remaining quota goes first)",
+    );
+  });
+
+  test("rule 4, the service: a reset-soon move is recorded and announced; the conversation then stays", async () => {
+    const states = { mode: "auto", activeSeatId: "seat-1", seats: [org(1, { live: true }), org(2, { live: true })] };
+    const snaps = [at(1, 0), at(2, 80)];
+    const moved = [];
+    let saved = null;
+    let t = NOW;
+    const svc = createSeatAssigner({
+      accounts: { seatStates: async () => structuredClone(states) },
+      listSeatSnapshots: () => snaps,
+      refreshSeatCredentials: async () => ({}),
+      load: () => saved,
+      save: async (d) => (saved = structuredClone(d)),
+      now: () => t,
+      notePluginSeen: () => {},
+      onMoved: (e) => moved.push(e),
+      log: quiet,
+    });
+    assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-1");
+    snaps.splice(0, 2, at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN));
+    assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2");
+    assert.equal(saved.providers.claude.conv.reason, "reset-soon");
+    assert.equal(moved.length, 1);
+    assert.equal(moved[0].reason, "reset-soon");
+    t += 10 * MIN;
+    assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2", "on a seat that resets soon it stays");
+  });
+}
