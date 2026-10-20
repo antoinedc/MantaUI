@@ -3858,7 +3858,8 @@ export function formatSeatMoveNotice(input: SeatMoveNoticeInput): string {
   const pct = t && Number.isFinite(t.pct) ? Math.round(t.pct) : null;
   const windowName = t ? (t.kind === "weekly" ? "the weekly limit" : t.kind === "session" ? "5h" : "") : "";
   let why: string | null = null;
-  if (from) {
+  if (input.reason === "reset-soon") why = "its limit resets within the hour";
+  else if (from) {
     if (input.reason === "unusable") why = `${from} needed sign-in`;
     else if (input.reason === "load" || input.reason === "exhausted") {
       if (pct != null) why = `${from} at ${pct}%${windowName ? ` of ${windowName}` : ""}`;

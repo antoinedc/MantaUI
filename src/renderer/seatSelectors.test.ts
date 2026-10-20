@@ -270,6 +270,9 @@ describe("formatSeatMoveNotice (spec §5.3 move line)", () => {
     expect(formatSeatMoveNotice({ ...base, reason: "unusable" })).toBe("Moved to Work · Seat 2 (Seat 1 needed sign-in).");
     expect(formatSeatMoveNotice({ ...base, reason: "manual" })).toBe("Switched to Work · Seat 2.");
   });
+  it("reset-soon says the new seat's limit resets within the hour", () => {
+    expect(formatSeatMoveNotice({ ...base, reason: "reset-soon", trigger: null })).toBe("Moved to Work · Seat 2 (its limit resets within the hour).");
+  });
   it("a cross-org move appends History re-sent. (no token count), manual too", () => {
     expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: true })).toBe(
       "Moved to Work · Seat 2 (Seat 1 at 96% of 5h). History re-sent.",

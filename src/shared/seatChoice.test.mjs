@@ -8,6 +8,8 @@ import {
   leastLoadedSeat,
   aggregateSnapshot,
   windowAppliesToModel,
+  nextResetAt,
+  soonestResettingSeat,
 } from "./seatChoice.mjs";
 
 const win = (kind, pct, extra = {}) => ({ kind, label: kind, pct, ...extra });
@@ -196,4 +198,26 @@ test("leastLoadedSeat: a seat full only on a scoped window ranks by its other wi
   assert.equal(leastLoadedSeat([busy, capped], { model: "claude-opus-5-5" }).seatId, "capped");
   assert.equal(leastLoadedSeat([busy, capped]).seatId, "capped", "no model → scoped ignored");
   assert.equal(leastLoadedSeat([busy, capped], { model: "claude-fable-5" }).seatId, "busy");
+});
+
+test("nextResetAt: soonest future reset over active, fresh, applicable windows; none → Infinity", () => {
+  const now = 1_000_000;
+  assert.equal(nextResetAt(seat("a", [win("session", 40, { resetsAt: now + 30 }), win("weekly", 10, { resetsAt: now + 90 })]), { nowMs: now }), now + 30);
+  assert.equal(nextResetAt(seat("a", [win("session", 0)]), { nowMs: now }), Infinity, "a window that has not started");
+  assert.equal(nextResetAt(seat("a", [win("session", 40, { resetsAt: now - 1 })]), { nowMs: now }), Infinity, "already reset");
+  assert.equal(nextResetAt(seat("a", [win("session", 40, { resetsAt: now + 30, stale: true })]), { nowMs: now }), Infinity);
+  assert.equal(nextResetAt(seat("a", [win("session", 40, { resetsAt: now + 30, active: false })]), { nowMs: now }), Infinity);
+  const scoped = seat("a", [win("weekly_scoped:fable", 50, { resetsAt: now + 30 })]);
+  assert.equal(nextResetAt(scoped, { nowMs: now }), Infinity, "no model → scoped ignored");
+  assert.equal(nextResetAt(scoped, { nowMs: now, model: "claude-fable-5" }), now + 30);
+});
+
+test("soonestResettingSeat: soonest within the horizon; resets under a minute apart tie to least-loaded; none → null", () => {
+  const now = 10 * 3_600_000;
+  const at = (id, pct, inMs) => seat(id, [win("session", pct, { resetsAt: now + inMs })]);
+  const opts = { nowMs: now, withinMs: 3_600_000 };
+  assert.equal(soonestResettingSeat([at("late", 10, 2 * 3_600_000), at("soon", 60, 20 * 60_000)], opts).seatId, "soon");
+  assert.equal(soonestResettingSeat([at("a", 60, 20 * 60_000), at("b", 30, 20 * 60_000 + 30_000)], opts).seatId, "b", "a tie goes to the emptier seat");
+  assert.equal(soonestResettingSeat([at("a", 60, 10 * 60_000), at("b", 30, 40 * 60_000)], opts).seatId, "a");
+  assert.equal(soonestResettingSeat([at("late", 10, 2 * 3_600_000), seat("fresh", [win("session", 0)])], opts), null);
 });
