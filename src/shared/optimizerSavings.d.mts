@@ -1,38 +1,38 @@
-// Type declarations for optimizerSavings.mjs (the pure per-model savings
-// pricing shared by the optimizer series + card, BET-1370).
+// Type declarations for optimizerSavings.mjs (the pure per-report pricing and
+// window summing shared by the optimizer store + series, sticky-trims §5.2).
 
-// opencode's normalised per-model cost, $/Mtok. `undefined` means unknown
-// (NOT zero — "free" is a deliberate declared 0).
-export interface OptimizerCost {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-}
-
-// The resolved per-model prompt-side rate, plus the cache rates used for the
-// re-warm subtraction (missing cache rates bill at the full input rate).
-export interface PromptSideRate {
-  rate: number;
-  known: boolean;
+// The exact $/Mtok the plugin's gate used for one request.
+export interface TrimRates {
   cacheRead: number;
   cacheWrite: number;
 }
 
 export type SavingsBasis = "measured" | "partial" | "unpriced";
 
-// savedUsd's result. `usd` is null only for the "unpriced" set (tokens exist
-// but none are priceable); the genuinely-empty set is 0 with basis "measured".
+// A stored per-model entry of a bucket half (actual | potential).
+export interface SavingsEntry {
+  trimmed?: number;
+  rewarm?: number;
+  usd?: number;
+  pricedReports?: number;
+  unpricedReports?: number;
+}
+
+// summarizeSaved's result. `usd` is null only when reports exist but none was
+// priced; the genuinely-empty window is 0 with basis "measured". May be negative.
 export interface SavingsResult {
   usd: number | null;
   basis: SavingsBasis;
   pricedShare: number;
+  trimmed: number;
+  rewarm: number;
 }
 
-export function promptSideRate(cost?: OptimizerCost | null, mix?: unknown): PromptSideRate;
+// null when the rates are unusable (the report is then UNPRICED).
+export function reportUsd(args?: {
+  trimmed?: number;
+  rewarm?: number;
+  rates?: Partial<TrimRates> | null;
+}): number | null;
 
-export function savedUsd(args: {
-  byModel?: Record<string, number>;
-  rewarmTokens?: number;
-  rates?: Record<string, PromptSideRate>;
-}): SavingsResult;
+export function summarizeSaved(entries?: Iterable<SavingsEntry | null | undefined> | null): SavingsResult;

@@ -120,41 +120,75 @@ test("buildOptimizerSummary returns the full shape with empty counterfactual, re
   assert.ok(s.bySession.every((e) => e.savedPct === 0));
 });
 
-test("buildOptimizerSummary merges the counterfactual into dailySeries + bySession and fills the counterfactual key", async () => {
+// A complete v3 report (sticky trims): `trimmed` really removed, `potential`
+// simulated. Priced at ingest with Opus-5.5-ish rates.
+function v3report(over = {}) {
+  const { trimmed = 0, potential = 0, ...rest } = over;
+  return {
+    v: 3,
+    sessionID: "s1",
+    ts: 0,
+    providerID: "anthropic",
+    modelID: "claude-opus-5-5",
+    rates: { cacheRead: 0.2, cacheWrite: 5, source: "catalog", fetchedAt: 1 },
+    applied: { trimmedTokens: trimmed, trimmedParts: trimmed > 0 ? 1 : 0 },
+    shadow: { trimmedTokens: potential, trimmedParts: potential > 0 ? 1 : 0 },
+    change: "none",
+    shadowChange: "none",
+    rewarmTokens: 0,
+    shadowRewarmTokens: 0,
+    ...rest,
+  };
+}
+
+test("buildOptimizerSummary merges the trim store into dailySeries + bySession and fills the counterfactual key", async () => {
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   // tokensSent = 1+2+3+4 = 10 for s1.
   const rows = baseRows(now);
   const fetchRows = async () => rows;
   const store = memStore(now);
-  assert.equal((await store.record({ sessionID: "s1", maskedTokens: 5, maskedParts: 1, ts: now })).ok, true);
+  assert.equal((await store.record(v3report({ trimmed: 5, potential: 8, ts: now }))).ok, true);
 
   const s = await buildOptimizerSummary({ fetchRows, now, counterfactualStore: store });
 
-  // The day of `now` holds s1's maskedTokens (5); every other day is 0.
+  // The day of `now` holds s1's trims (5 actual, 8 potential — never pooled);
+  // every other day is 0. maskedTokens is an alias of potential.
   const today = new Date(now);
   const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const todayEntry = s.dailySeries.find((d) => d.day === key);
-  assert.equal(todayEntry.maskedTokens, 5);
-  assert.ok(s.dailySeries.filter((d) => d.day !== key).every((d) => d.maskedTokens === 0));
-  // savedPct = 5 / (5 + 10) = 1/3 on the s1 bySession entry.
+  assert.equal(todayEntry.actualTrimmedTokens, 5);
+  assert.equal(todayEntry.potentialTrimmedTokens, 8);
+  assert.equal(todayEntry.maskedTokens, 8);
+  assert.ok(
+    s.dailySeries
+      .filter((d) => d.day !== key)
+      .every((d) => d.maskedTokens === 0 && d.actualTrimmedTokens === 0 && d.potentialTrimmedTokens === 0),
+  );
+  // savedPct = 5 (actual) / (5 + 10) = 1/3 on the s1 bySession entry.
   assert.equal(s.bySession.length, 1);
   assert.equal(s.bySession[0].savedPct, 5 / 15);
   // The counterfactual placeholder is now populated with the raw store fields.
-  assert.deepEqual(s.counterfactual.bySession, { s1: { maskedTokens: 5 } });
-  assert.equal(s.counterfactual.dailySeries.find((d) => d.day === key).maskedTokens, 5);
+  assert.deepEqual(s.counterfactual.bySession, { s1: { actualTrimmedTokens: 5, maskedTokens: 5 } });
+  assert.equal(s.counterfactual.dailySeries.find((d) => d.day === key).actualTrimmedTokens, 5);
+  assert.equal(s.counterfactual.dailySeries.find((d) => d.day === key).potentialTrimmedTokens, 8);
 });
 
-test("buildOptimizerSummary: savedPct is 0 when a session has no counterfactual", async () => {
+test("buildOptimizerSummary: savedPct is 0 when a session has no trims (simulated-only does not count)", async () => {
   const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
   const rows = [row({ sessionID: "s1", input: 1, cacheRead: 2, cacheWrite: 3, output: 4, startedMs: now })];
   const fetchRows = async () => rows;
   const store = memStore(now);
   // A report for a DIFFERENT session — s1 has no counterfactual.
-  await store.record({ sessionID: "other", maskedTokens: 9, maskedParts: 1, ts: now });
+  assert.equal((await store.record(v3report({ sessionID: "other", trimmed: 9, ts: now }))).ok, true);
 
   const s = await buildOptimizerSummary({ fetchRows, now, counterfactualStore: store });
   assert.equal(s.bySession[0].sessionID, "s1");
   assert.equal(s.bySession[0].savedPct, 0);
+
+  // Simulated trims never produce a savings percentage.
+  await store.record(v3report({ sessionID: "s1", potential: 50, ts: now }));
+  const s2 = await buildOptimizerSummary({ fetchRows, now, counterfactualStore: store });
+  assert.equal(s2.bySession[0].savedPct, 0);
 });
 
 test("createOptimizerSummary returns { supported:false } when getDb resolves null", async () => {

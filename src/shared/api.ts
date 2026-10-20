@@ -795,6 +795,37 @@ export type CtoToolsRender = {
  * Do NOT change any method signature here without also updating `httpApi`
  * (which implements this interface completely, typecheck-enforced).
  */
+// Sticky-trims spec §3.2 / §6 C1: one resolved price record ($ per million
+// tokens). `source` says whether it came from the user's opencode config or the
+// models.dev catalog.
+export type OptimizerPriceRecord = {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h?: number;
+  tiers?: {
+    minPromptTokens: number;
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cacheWrite1h?: number;
+  }[];
+  source: "config" | "catalog";
+};
+
+export type OptimizerPricesResult = {
+  fetchedAt: number;
+  models: Record<string, OptimizerPriceRecord>;
+  unpriced: string[];
+};
+
+// Sticky-trims spec §6 C6: body of `opencode:set-model-cost`, $ per million.
+export type ModelCostArgs = {
+  providerID: string;
+  modelID: string;
+  cost: { input: number; output: number; cache_read?: number; cache_write?: number };
+};
+
 export interface Api {
   configGet(): Promise<AppConfig>;
   configUpdate(patch: Partial<AppConfig>): Promise<AppConfig>;
@@ -1443,6 +1474,17 @@ export interface Api {
   // fixed-30-day shared read whose memo must not be perturbed by the card's
   // selector. `supported:false` = the box can't read opencode.db.
   optimizerSeries(range: OptimizerRange): Promise<OptimizerSeries | { supported: false }>;
+  // Sticky-trims spec §6 C1: the per-model price map the optimizer's trim gate
+  // uses (`optimizer:prices` RPC), keyed "<providerID>/<modelID>" in $ per
+  // million tokens. `unpriced` lists connected models that resolve to no price
+  // — the optimizer will not trim them until the user declares one.
+  // `supported:false` = the box can't answer (older server).
+  optimizerPrices(): Promise<OptimizerPricesResult | { supported: false }>;
+  // Sticky-trims spec §6 C6: declare a model's price (opencode's own
+  // `provider.<id>.models.<id>.cost`), $ per million tokens. input + output
+  // are required; cache fields optional. Resolves {ok:false,error} on a
+  // rejected write — callers must show it.
+  opencodeSetModelCost(args: ModelCostArgs): Promise<{ ok: true } | { ok: false; error: string }>;
 
   // Slash-command execution.
   opencodeRunCommand(input: {

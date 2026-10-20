@@ -1195,9 +1195,23 @@ earns the trust.
   in-flight-guarded) read model over the opencode message ledger. Degrades to
   `{supported:false}` on a box with no Node 24 / no `opencode.db`, exactly like
   `modelLedger`.
-- `counterfactual.mjs` + `POST /api/optimizer/counterfactual` — the
-  observe-mode masking store. A report REPLACES a session's entry (each report
-  is the full would-mask for that history, never an increment).
+- `counterfactual.mjs` + `POST /api/optimizer/counterfactual` — the trim
+  report store (v3, sticky trims — spec
+  `docs/superpowers/specs/2026-10-20-optimizer-sticky-trims.md`). One report
+  per request, additive, actual vs potential kept apart, each priced AT INGEST
+  with the rates the plugin's gate used.
+- **Trimming is sticky and priced per model** (2026-10-20). The old masker
+  recomputed its mask on every request and kept a single process-wide policy
+  slot, so histories flipped between masked/unmasked and every masked request
+  re-cached the whole history (measured: 95% of cache writes). Now each
+  trimmed tool output's exact replacement is stored per session
+  (`~/.manta/optimizer-trims/<sessionID>.json`, written BEFORE the request is
+  sent) and replayed byte-for-byte; the set only grows when the re-cache pays
+  back for the model in use, using that model's list prices from
+  `GET /api/optimizer/prices` (opencode config `cost` → models.dev cache
+  `model-prices.json` → unpriced = never trim). Do not reintroduce per-request
+  recomputation or a shared policy slot. `scripts/optimizer/backtest-trims.mjs`
+  replays opencode's own history to check the economics before a change ships.
 - `forecast.mjs` — quota-window observation history + forecast-at-reset, tapped
   at the usage poller's single publish point.
 - `ttl.mjs` — the measured effective prompt-cache TTL, and the verifier that

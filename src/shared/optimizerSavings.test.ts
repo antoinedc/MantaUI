@@ -1,164 +1,74 @@
 import { describe, it, expect } from "vitest";
-import { promptSideRate, savedUsd } from "./optimizerSavings.mjs";
-import type { PromptSideRate } from "./optimizerSavings.mjs";
+import { reportUsd, summarizeSaved } from "./optimizerSavings.mjs";
 
-// The DEFAULT_MIX prompt-side weights, renormalised to input/cacheRead/cacheWrite
-// only: input 0.08, cacheRead 0.8, cacheWrite 0.07 → /0.95.
-const W_INPUT = 0.08 / 0.95;
-const W_READ = 0.8 / 0.95;
-const W_WRITE = 0.07 / 0.95;
+// Opus-5.5-ish list prices: cache read $0.2/Mtok, cache write $5/Mtok.
+const RATES = { cacheRead: 0.2, cacheWrite: 5 };
 
-// Anthropic catalogue prices ($/Mtok) — the numbers from the BET-1370 worked
-// maths. cacheWrite == input, cacheRead = input/10.
-const S = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 }; // Sonnet
-const H = { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1 }; // Haiku
-
-// With the DEFAULT_MIX these must reproduce the issue's worked figures.
-const expectedSonnet = 3 * W_INPUT + 0.3 * W_READ + 3 * W_WRITE;
-const expectedHaiku = 1 * W_INPUT + 0.1 * W_READ + 1 * W_WRITE;
-
-describe("promptSideRate", () => {
-  it("reproduces the worked Sonnet figure (~$0.78/Mtok) with the default mix", () => {
-    const r = promptSideRate(S);
-    expect(r.known).toBe(true);
-    expect(r.rate).toBeCloseTo(expectedSonnet, 6);
-    expect(r.rate).toBeGreaterThan(0.7);
-    expect(r.rate).toBeLessThan(0.85);
+describe("reportUsd — one report, priced with its own rates", () => {
+  it("usd = trimmed × r − rewarm × (w − r), per million tokens", () => {
+    // 520k trimmed, 280k re-warmed: the spec's worked example.
+    const usd = reportUsd({ trimmed: 520_000, rewarm: 280_000, rates: RATES });
+    expect(usd).toBeCloseTo((520_000 * 0.2 - 280_000 * 4.8) / 1e6, 12);
+    expect(usd).toBeLessThan(0); // the re-cache has not paid back yet
   });
 
-  it("replicates the DEFAULT_MIX blended-price figures — Haiku is a tenth of Sonnet's cacheRead, so a fraction of Sonnet", () => {
-    const s = promptSideRate(S);
-    const h = promptSideRate(H);
-    expect(h.known).toBe(true);
-    expect(h.rate).toBeCloseTo(expectedHaiku, 6);
-    expect(h.rate).toBeLessThan(s.rate);
+  it("trimmed-only is a pure gain; rewarm-only is a pure cost", () => {
+    expect(reportUsd({ trimmed: 1_000_000, rewarm: 0, rates: RATES })).toBeCloseTo(0.2, 12);
+    expect(reportUsd({ trimmed: 0, rewarm: 1_000_000, rates: RATES })).toBeCloseTo(-4.8, 12);
   });
 
-  it("a removed token is never billed as output: the rate uses only input/cacheRead/cacheWrite", () => {
-    // If output were (wrongly) included the rate would approach output*0.05;
-    // the prompt-side rate stays on the three cheap buckets no matter how
-    // expensive output is.
-    const pricey = { input: 3, output: 300, cacheRead: 0.3, cacheWrite: 3 };
-    const r = promptSideRate(pricey);
-    expect(r.rate).toBeCloseTo(expectedSonnet, 6);
+  it("a provider with no write premium (w == r) never nets a re-warm cost", () => {
+    expect(reportUsd({ trimmed: 1_000_000, rewarm: 5_000_000, rates: { cacheRead: 0.0182, cacheWrite: 0.0182 } })).toBeCloseTo(0.0182, 12);
   });
 
-  it("missing cacheWrite/cacheRead bill at the full input rate, matching blendedPrice", () => {
-    const r = promptSideRate({ input: 3, output: 300 }); // no cache rates
-    expect(r.known).toBe(true);
-    expect(r.rate).toBeCloseTo(3, 6); // all three prompt buckets at input rate
-    expect(r.cacheRead).toBe(3);
-    expect(r.cacheWrite).toBe(3);
+  it("unusable rates → null (UNPRICED), never 0", () => {
+    expect(reportUsd({ trimmed: 1, rewarm: 0 })).toBeNull();
+    expect(reportUsd({ trimmed: 1, rewarm: 0, rates: null })).toBeNull();
+    expect(reportUsd({ trimmed: 1, rewarm: 0, rates: { cacheRead: 0, cacheWrite: 5 } })).toBeNull();
+    expect(reportUsd({ trimmed: 1, rewarm: 0, rates: { cacheRead: -1, cacheWrite: 5 } })).toBeNull();
+    expect(reportUsd({ trimmed: 1, rewarm: 0, rates: { cacheRead: 0.2, cacheWrite: NaN } })).toBeNull();
+    expect(reportUsd({ trimmed: 1, rewarm: 0, rates: { cacheRead: 0.2 } as never })).toBeNull();
   });
 
-  it("a declared 0 cache rate stays 0 (free, distinct from unknown → full input)", () => {
-    const free = promptSideRate({ input: 3, output: 300, cacheRead: 0, cacheWrite: 0 });
-    const missing = promptSideRate({ input: 3, output: 300 });
-    expect(free.cacheRead).toBe(0);
-    expect(free.cacheWrite).toBe(0);
-    expect(free.rate).toBeLessThan(missing.rate);
-    expect(free.known).toBe(true);
-  });
-
-  it("unknown (missing/non-finite/negative) input → known false, never treated as free", () => {
-    expect(promptSideRate({}).known).toBe(false);
-    expect(promptSideRate({ input: Number.NaN, output: 10 }).known).toBe(false);
-    expect(promptSideRate({ input: -5, output: 10 }).known).toBe(false);
-    expect(promptSideRate({ input: 0, output: 0 }).known).toBe(true); // declared free IS known
-  });
-
-  it("a degenerate or missing mix falls back to the default prompt-side weights", () => {
-    const withDefault = promptSideRate(S);
-    const degenerate = promptSideRate(S, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-    const absent = promptSideRate(S, undefined);
-    expect(degenerate.rate).toBeCloseTo(withDefault.rate, 9);
-    expect(absent.rate).toBeCloseTo(withDefault.rate, 9);
-  });
-
-  it("a measured read-heavy mix shifts the rate down toward cacheRead", () => {
-    const r = promptSideRate(S, { input: 0.1, output: 0.1, cacheRead: 0.8, cacheWrite: 0.0 });
-    expect(r.rate).toBeLessThan(promptSideRate(S).rate);
+  it("junk token counts count as 0", () => {
+    expect(reportUsd({ trimmed: NaN, rewarm: -5, rates: RATES })).toBe(0);
   });
 });
 
-describe("savedUsd", () => {
-  const rates = (m: PromptSideRate) => ({ "claude/sonnet": m });
-
-  it("prices a single known model's token-turns at its prompt-side rate, measured basis", () => {
-    const r = savedUsd({ byModel: { "claude/sonnet": 1e6 }, rates: rates(promptSideRate(S)) });
-    expect(r.usd).toBeCloseTo(expectedSonnet, 6);
-    expect(r.basis).toBe("measured");
-    expect(r.pricedShare).toBe(1);
+describe("summarizeSaved — a window is a SUM of stored usd", () => {
+  it("sums stored dollars across models; share is report-count weighted", () => {
+    const out = summarizeSaved([
+      { trimmed: 10, rewarm: 2, usd: 0.5, pricedReports: 3, unpricedReports: 0 },
+      { trimmed: 5, rewarm: 0, usd: 0.25, pricedReports: 1, unpricedReports: 0 },
+    ]);
+    expect(out).toEqual({ usd: 0.75, basis: "measured", pricedShare: 1, trimmed: 15, rewarm: 2 });
   });
 
-  it("an empty applied set is zero savings with a measured basis (not unpriced, not null)", () => {
-    const r = savedUsd({ byModel: {}, rates: rates(promptSideRate(S)) });
-    expect(r.usd).toBe(0);
-    expect(r.pricedShare).toBe(1);
-    expect(r.basis).toBe("measured");
+  it("a cost-only window is negative and is NOT clamped", () => {
+    const out = summarizeSaved([{ trimmed: 0, rewarm: 280_000, usd: -1.344, pricedReports: 1, unpricedReports: 0 }]);
+    expect(out.usd).toBeCloseTo(-1.344, 12);
+    expect(out.basis).toBe("measured");
   });
 
-  it("tokens under 'unknown' price at the token-weighted average of the known rates", () => {
-    // 1M Sonnet at ~0.78 + 1M unknown at the same average → 2× the known figure.
-    const sonnet = promptSideRate(S);
-    const r = savedUsd({
-      byModel: { "claude/sonnet": 1e6, unknown: 1e6 },
-      rates: { "claude/sonnet": sonnet },
-    });
-    expect(r.usd).toBeCloseTo(2 * expectedSonnet, 6);
-    expect(r.basis).toBe("partial");
-    expect(r.pricedShare).toBeCloseTo(0.5, 6);
+  it("unpriced reports add tokens, never dollars; partial basis", () => {
+    const out = summarizeSaved([
+      { trimmed: 100, rewarm: 0, usd: 2, pricedReports: 1, unpricedReports: 0 },
+      { trimmed: 900, rewarm: 0, usd: 0, pricedReports: 0, unpricedReports: 3 },
+    ]);
+    expect(out.usd).toBe(2); // not imputed up to 1000 tokens
+    expect(out.trimmed).toBe(1000);
+    expect(out.basis).toBe("partial");
+    expect(out.pricedShare).toBe(0.25);
   });
 
-  it("every model unknown → usd null, basis unpriced — do not invent a figure", () => {
-    const r = savedUsd({ byModel: { unknown: 5e6 }, rates: {} });
-    expect(r.usd).toBeNull();
-    expect(r.basis).toBe("unpriced");
-    expect(r.pricedShare).toBe(0);
+  it("reports exist but none priced → usd null, unpriced, share 0", () => {
+    const out = summarizeSaved([{ trimmed: 5, rewarm: 0, usd: 0, pricedReports: 0, unpricedReports: 2 }]);
+    expect(out).toMatchObject({ usd: null, basis: "unpriced", pricedShare: 0 });
   });
 
-  it("an unpriced model key (no known rate) counts as unknown, and if none priced → null", () => {
-    const r = savedUsd({ byModel: { "openai/gpt9": 4e6 }, rates: {} });
-    expect(r.usd).toBeNull();
-    expect(r.basis).toBe("unpriced");
-  });
-
-  it("subtracts the re-warm cost using the dominant known model's cacheWrite−cacheRead delta", () => {
-    // Dominant model: cacheWrite 3, cacheRead 0.3 → delta 2.7/Mtok.
-    const sonnet = promptSideRate(S);
-    const noRewarm = savedUsd({ byModel: { "claude/sonnet": 1e6 }, rates: { "claude/sonnet": sonnet } });
-    const withRewarm = savedUsd({
-      byModel: { "claude/sonnet": 1e6 },
-      rewarmTokens: 200_000, // 0.2 Mtok × 2.7 = $0.54 re-warm
-      rates: { "claude/sonnet": sonnet },
-    });
-    expect(withRewarm.usd!).toBeCloseTo(noRewarm.usd! - (0.2 * 2.7), 6);
-  });
-
-  it("a re-warm larger than the saving yields a NEGATIVE usd — never clamped", () => {
-    // Tiny saving (100k tokens), huge re-warm (5M): 5M × 2.7 = $13.5 re-warm.
-    const sonnet = promptSideRate(S);
-    const r = savedUsd({
-      byModel: { "claude/sonnet": 100_000 },
-      rewarmTokens: 5_000_000,
-      rates: { "claude/sonnet": sonnet },
-    });
-    expect(r.usd).toBeLessThan(0);
-    expect(r.basis).toBe("measured");
-  });
-
-  it("no known rate → no re-warm subtraction (there is nothing to price against)", () => {
-    const r = savedUsd({ byModel: { unknown: 1e6 }, rewarmTokens: 5_000_000, rates: {} });
-    expect(r.usd).toBeNull(); // still unpriced — re-warm never manufactures a number
-  });
-
-  it("ignores junk token values (negative / non-numeric) without throwing", () => {
-    const sonnet = promptSideRate(S);
-    const r = savedUsd({
-      byModel: { "claude/sonnet": Number.NaN, unknown: -10 },
-      rates: { "claude/sonnet": sonnet },
-    });
-    expect(r.usd).toBe(0);
-    expect(r.basis).toBe("measured");
+  it("an empty window is the genuine zero: 0, measured, share 1", () => {
+    for (const e of [[], undefined, null, [null, undefined, {}]]) {
+      expect(summarizeSaved(e as never)).toMatchObject({ usd: 0, basis: "measured", pricedShare: 1 });
+    }
   });
 });

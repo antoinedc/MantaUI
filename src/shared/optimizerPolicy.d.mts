@@ -12,6 +12,7 @@ export type OptimizerPolicy = {
   enabled: boolean;
   maskAfterUses: number;
   batchTokens: number;
+  margin: number;
   protectTailTokens: number;
   placeholderFormat: string;
   cacheTtlMs: number;
@@ -27,6 +28,7 @@ export type OptimizerSummaryTtl = {
 
 export const MASK_AFTER_TOOL_USES: number;
 export const MIN_BATCH_TOKENS: number;
+export const GATE_MARGIN: number;
 export const PROTECT_TAIL_TOKENS: number;
 export const PLACEHOLDER_ARGS_MAX: number;
 export const POLICY_CACHE_MS: number;
