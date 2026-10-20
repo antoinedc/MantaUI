@@ -58,6 +58,8 @@ import { getDb } from "./opencodeDb.mjs";
 import { loadTopology, planRestore, executeRestore, describeRestore } from "./topology.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createOptimizerSeries } from "./optimizer/series.mjs";
+import { createOptimizerPrices, PRICES_PATH } from "./optimizer/prices.mjs";
+import { readJsonSync } from "./jsonStore.mjs";
 import { shipCtxEvent } from "./optimizer/telemetry.mjs";
 import { allModels as catalogAllModels } from "./modelCatalog.mjs";
 import { MIN_CLIENT } from "./version.mjs";
@@ -572,6 +574,15 @@ export function buildHandlers({
   // BET-1369: the shared windowed `optimizer:series` read model, hoisted to
   // index.mjs. Null when not injected → this builds its own (tests / fallback).
   optimizerSeries = null,
+  // Sticky-trims C1: the shared memoized price reader ({ get, invalidate },
+  // createOptimizerPrices) hoisted to index.mjs so the RPC channel, the
+  // GET /api/optimizer/prices route and the set-model-cost invalidation share
+  // ONE memo. Null when not injected → this builds its own (tests / fallback).
+  optimizerPrices = null,
+  // Sticky-trims C6: the writer behind `opencode:set-model-cost`. Injectable so
+  // tests never PATCH a live opencode (the default is the real PATCH /global/config
+  // writer in providers.mjs).
+  setModelCost = providers.setModelCost,
   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
   // Null when not wired (older boxes / tests that don't exercise it) → the
@@ -657,6 +668,12 @@ export function buildHandlers({
   const optimizerSeriesFn = optimizerSeries ?? createOptimizerSeries({
     getDb,
     counterfactualStore,
+  });
+
+  const optimizerPricesApi = optimizerPrices ?? createOptimizerPrices({
+    listProviders: () => oc.getProviders(),
+    readConfig: () => providers.readOpencodeConfig(),
+    loadCatalog: () => readJsonSync(PRICES_PATH, null),
   });
 
   return {
@@ -1829,6 +1846,18 @@ export function buildHandlers({
     //        remove?: string[] } — remove is rejected (no delete semantics).
     "opencode:set-references": (input) => providers.setReferences(input ?? {}),
 
+    // Sticky-trims C6: declare a model's list price in opencode's own config.
+    // Args { providerID, modelID, cost: { input, output, cache_read?,
+    // cache_write? } } ($/Mtok, finite ≥ 0, input+output required). Patches
+    // ONLY that model's `cost` subtree via PATCH /global/config. Returns
+    // { ok:true } | { ok:false, error }. On success the price memo is dropped so
+    // the next optimizer:prices reflects the new `source:"config"` record.
+    "opencode:set-model-cost": async (input) => {
+      const res = await setModelCost(input ?? {});
+      if (res.ok) optimizerPricesApi.invalidate();
+      return res;
+    },
+
     // BET-698: server-side conversation search over opencode's SQLite
     // (messageSearch.mjs). Args { query, sessionIds } — sessionIds[0] is the
     // active conversation. Degrades to { supported:false } on a box that
@@ -1855,6 +1884,14 @@ export function buildHandlers({
     // Memoized per range behind a 60s TTL. Degrades to { supported:false } on
     // a box without the Node 24 runtime / opencode.db.
     "optimizer:series": (opts) => optimizerSeriesFn(opts?.range),
+
+    // Sticky-trims C1: per-model list prices the optimizer's trim gate uses,
+    // resolved config → price cache → unpriced (optimizer/prices.mjs). No
+    // arguments. Body: { fetchedAt, models: { "<p>/<m>": {input, cacheRead,
+    // cacheWrite, cacheWrite1h?, tiers?, source} }, unpriced: string[] } —
+    // `unpriced` lists the CONNECTED models that resolve to no usable price
+    // (the Settings providers card's "No prices" notice). Memoized ~60s.
+    "optimizer:prices": () => optimizerPricesApi.get(),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape

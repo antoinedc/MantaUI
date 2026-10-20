@@ -3,6 +3,7 @@ import {
   DEFAULT_POLICY,
   MASK_AFTER_TOOL_USES,
   MIN_BATCH_TOKENS,
+  GATE_MARGIN,
   PROTECT_TAIL_TOKENS,
   resolvePolicy,
   validateRepoTable,
@@ -12,6 +13,36 @@ import {
 describe("DEFAULT_POLICY", () => {
   it("is fail-open (enabled: false)", () => {
     expect(DEFAULT_POLICY.enabled).toBe(false);
+  });
+
+  it("carries the sticky-trims gate defaults: margin 1.5, batchTokens 20 000 (C3)", () => {
+    expect(DEFAULT_POLICY.margin).toBe(1.5);
+    expect(GATE_MARGIN).toBe(1.5);
+    expect(DEFAULT_POLICY.batchTokens).toBe(20_000);
+  });
+});
+
+describe("resolvePolicy — margin (C3)", () => {
+  it("is always present and defaults to 1.5, enabled or not", () => {
+    expect(resolvePolicy({ config: {} }).margin).toBe(1.5);
+    expect(resolvePolicy({ config: { optimizerEnabled: true } }).margin).toBe(1.5);
+    expect(resolvePolicy().margin).toBe(1.5);
+  });
+
+  it("is a gate constant, not a tuner key: a repo entry cannot override it", () => {
+    const p = resolvePolicy({
+      config: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      repoTable: { repos: { "/repo": { margin: 9, batchTokens: 50_000 } } } as any,
+      directory: "/repo",
+    });
+    expect(p.margin).toBe(1.5);
+    expect(p.batchTokens).toBe(50_000);
+  });
+
+  it("validateRepoTable drops a margin key", () => {
+    const out = validateRepoTable({ repos: { "/a": { margin: 3, batchTokens: 10 } } });
+    expect(out.repos["/a"]).toEqual({ batchTokens: 10 });
   });
 });
 

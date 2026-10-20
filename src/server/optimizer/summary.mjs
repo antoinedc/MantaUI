@@ -40,11 +40,11 @@ export { WINDOW_DAYS, BUILD_BUDGET_MS, TTL_MS };
  * (fetched via the injected `fetchRows(sinceMs)`). `totals`/`cacheShare` reuse
  * the existing `aggregate` — no re-derivation. `windows` stays a `null`
  * placeholder child 4 fills; `counterfactual` (BET-1335) fills its placeholder
- * by injecting the observe-only masking counterfactual into `dailySeries` (a
- * `maskedTokens` per day, 0 where absent — the "raw vs optimized" graph's
- * second line) and into `bySession` (a `savedPct` per top-20 session, 0 when
- * no counterfactual), and by populating the `counterfactual` key itself with
- * the raw store fields.
+ * by injecting the trim store into `dailySeries` (`actualTrimmedTokens` /
+ * `potentialTrimmedTokens` per day — kept apart — plus `maskedTokens`, an alias
+ * of potential; 0 where absent) and into `bySession` (a `savedPct` per top-20
+ * session from the tokens actually removed, 0 when none), and by populating the
+ * `counterfactual` key itself with the raw store fields.
  */
 export async function buildOptimizerSummary({
   fetchRows,
@@ -85,11 +85,19 @@ export async function buildOptimizerSummary({
   const cf = counterfactualStore
     ? await summaryFields(counterfactualStore, { days: WINDOW_DAYS, now: nowMs })
     : null;
-  const cfDaily = new Map((cf?.dailySeries ?? []).map((d) => [d.day, d.maskedTokens ?? 0]));
-  const dailySeries = aggregateDailySeries(rows, WINDOW_DAYS, nowMs).map((d) => ({
-    ...d,
-    maskedTokens: cfDaily.get(d.day) ?? 0,
-  }));
+  const cfDaily = new Map((cf?.dailySeries ?? []).map((d) => [d.day, d]));
+  // Sticky-trims (v3): ACTUAL (really removed) and POTENTIAL (simulated) are
+  // separate and never pooled; `maskedTokens` stays as an ALIAS of potential
+  // (the pre-v3 field name).
+  const dailySeries = aggregateDailySeries(rows, WINDOW_DAYS, nowMs).map((d) => {
+    const c = cfDaily.get(d.day);
+    return {
+      ...d,
+      actualTrimmedTokens: c?.actualTrimmedTokens ?? 0,
+      potentialTrimmedTokens: c?.potentialTrimmedTokens ?? 0,
+      maskedTokens: c?.potentialTrimmedTokens ?? 0,
+    };
+  });
   const bySession = aggregateBySession(rows).map((e) => ({
     ...e,
     savedPct: savedPctFor(e, cf?.bySession),
@@ -221,10 +229,11 @@ function windowsFor(snapshots, history, nowMs, pressureMap = {}) {
   return out;
 }
 
-// savedPct = maskedTokens / (maskedTokens + tokensSent), 0 when there is no
-// counterfactual for the session or nothing to save against.
+// savedPct = trimmed / (trimmed + tokensSent), where `trimmed` is the session's
+// running total of tokens ACTUALLY removed (v3 — never the simulated set), 0
+// when the session has none or there is nothing to save against.
 function savedPctFor(entry, cfBySession) {
-  const m = cfBySession?.[entry.sessionID]?.maskedTokens ?? 0;
+  const m = cfBySession?.[entry.sessionID]?.actualTrimmedTokens ?? 0;
   const denom = m + entry.tokensSent;
   return denom > 0 ? m / denom : 0;
 }

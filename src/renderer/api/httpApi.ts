@@ -1384,6 +1384,8 @@ export const httpApi: Api = {
   ledgerSummary: (opts) => rpc(IPC.ledgerSummary, opts),
   optimizerSummary: () => rpc(IPC.optimizerSummary),
   optimizerSeries: (range) => rpc(IPC.optimizerSeries, { range }),
+  optimizerPrices: () => rpc(IPC.optimizerPrices),
+  opencodeSetModelCost: (args) => rpc(IPC.opencodeSetModelCost, args),
 
   // -- slash-command execution --
   opencodeRunCommand: (input) => rpc(IPC.opencodeRunCommand, input),

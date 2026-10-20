@@ -2070,3 +2070,41 @@ test("accounts:endpoint-probe reports BOTH branches and validates its input", as
   assert.equal(unwired.ok, false);
   assert.ok(unwired.message.length > 0);
 });
+
+// ---------------------------------------------------------------------------
+// Sticky trims: optimizer:prices (C1) + opencode:set-model-cost (C6)
+// ---------------------------------------------------------------------------
+
+test("optimizer:prices returns the shared price reader's body (unpriced included)", async () => {
+  const { deps } = makeDeps([]);
+  const body = { fetchedAt: 5, models: { "p/m": { input: 1, cacheRead: 0.1, cacheWrite: 1, source: "config" } }, unpriced: ["q/n"] };
+  const handlers = buildHandlers({ ...deps, optimizerPrices: { get: async () => body, invalidate: () => {} } });
+  assert.deepEqual(await handlers["optimizer:prices"](), body);
+});
+
+test("opencode:set-model-cost writes through the injected writer and drops the price memo on success only", async () => {
+  const { deps } = makeDeps([]);
+  let invalidated = 0;
+  const seen = [];
+  const handlers = buildHandlers({
+    ...deps,
+    optimizerPrices: { get: async () => ({}), invalidate: () => invalidated++ },
+    setModelCost: async (i) => (seen.push(i), i.cost?.input === 1 ? { ok: true } : { ok: false, error: "nope" }),
+  });
+  const good = { providerID: "p", modelID: "m", cost: { input: 1, output: 2 } };
+  assert.deepEqual(await handlers["opencode:set-model-cost"](good), { ok: true });
+  assert.equal(invalidated, 1);
+  assert.deepEqual(await handlers["opencode:set-model-cost"]({ ...good, cost: { input: 9, output: 2 } }), { ok: false, error: "nope" });
+  assert.equal(invalidated, 1, "a failed write leaves the memo alone");
+  assert.deepEqual(seen[0], good);
+  // a missing body is passed as {} (the real writer rejects it), never a TypeError
+  await handlers["opencode:set-model-cost"](undefined);
+  assert.deepEqual(seen.at(-1), {});
+});
+
+test("the two new channels are registered", async () => {
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  assert.equal(typeof handlers["optimizer:prices"], "function");
+  assert.equal(typeof handlers["opencode:set-model-cost"], "function");
+});

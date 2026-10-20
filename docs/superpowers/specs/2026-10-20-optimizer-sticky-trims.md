@@ -77,10 +77,14 @@ Rules:
 - **1-hour cache:** 1-hour write pricing is used ONLY when both (a) the model
   is one Manta configures for the 1-hour cache (the existing `cacheTtl:"1h"`
   setting, which applies to Anthropic-SDK models only — see
-  `selectCacheTtlTargets` in `src/server/providers.mjs`) and (b) the record
-  carries a 1-hour write price (`cache_write_1h` or equivalent). If (a) holds
-  and (b) does not, the model is **unpriced** for the gate. Never infer a
-  tariff from an observed TTL; never apply "2 × input".
+  `selectCacheTtlTargets` in `src/server/providers.mjs`) and (b) a 1-hour
+  write price is known: the record's own (`cache_write_1h` or equivalent) or,
+  since models.dev carries no such field and (a) restricts this to
+  Anthropic-SDK models, Anthropic's published 1-hour tariff of 2 × that
+  tier's input price. Never infer a tariff from an observed TTL, and never
+  apply the 2× rule outside (a). (Amended during review: the catalog has no
+  1-hour field, so without this every 1h-configured Anthropic model was
+  unpriced.)
 - Catalog copy older than **7 days** → treat source 2 as absent. The plugin
   also enforces this locally from `fetchedAt` when its refreshes fail.
 - The price cache is a **separate, versioned file**

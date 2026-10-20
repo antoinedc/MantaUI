@@ -31,6 +31,7 @@
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { PRICES_PATH, extractPriceRecords, buildPriceCache } from "./optimizer/prices.mjs";
 // The pure matching code lives in shared so the renderer's identity block and
 // the server's routing core share ONE matcher (see shared/modelCatalog.mjs).
 // Re-exporting keeps this module's public API (and its tests) unchanged, and
@@ -169,15 +170,36 @@ export function buildPriceMap(payload, knownIds) {
  * @param {object} [opts]
  * @param {typeof globalThis.fetch} [opts.fetchImpl]
  * @param {string} [opts.cachePath] defaults to `CACHE_PATH`
+ * @param {string} [opts.pricesPath] optimizer price cache; defaults to `PRICES_PATH`
+ * @param {number|(() => number)} [opts.now] clock for the price cache's fetchedAt
  * @param {number} [opts.intervalMs]
  */
 export function createModelCatalogController({
   fetchImpl,
   cachePath = CACHE_PATH,
+  pricesPath = PRICES_PATH,
+  now,
   intervalMs = DEFAULT_POLL_MS,
 } = {}) {
+  const nowMs = () => (typeof now === "function" ? now() : (now ?? Date.now()));
   const cached = readJsonSync(cachePath, null);
   let catalog = createModelIndex(normalizePayload(cached));
+
+  // Never throws: a failed price-cache write is logged and skipped so it can
+  // never fail the catalogue refresh it rides on.
+  async function persistPriceCache(apiPayload) {
+    try {
+      const records = extractPriceRecords(apiPayload);
+      if (!records) return;
+      await writeJsonAtomic(
+        pricesPath,
+        JSON.stringify(buildPriceCache(records, nowMs())),
+        { mode: 0o600 },
+      );
+    } catch (e) {
+      console.warn("[model-catalog] price cache write skipped:", e?.message ?? e);
+    }
+  }
 
   async function refresh() {
     const doFetch = fetchImpl ?? globalThis.fetch;
@@ -198,12 +220,20 @@ export function createModelCatalogController({
       try {
         const pRes = await doFetch(CATALOG_PRICE_URL);
         if (pRes && pRes.ok) {
-          const prices = buildPriceMap(await pRes.json(), new Set(next.map((e) => e.id)));
+          const apiPayload = await pRes.json();
+          const prices = buildPriceMap(apiPayload, new Set(next.map((e) => e.id)));
           if (prices.size > 0) {
             priced = next.map((e) =>
               prices.has(e.id) && !e.cost ? { ...e, cost: prices.get(e.id) } : e,
             );
           }
+          // Sticky-trims §3.3: ALSO persist the raw provider-keyed cost records
+          // (tiers / context_over_200k / 1h write included) to the optimizer's
+          // SEPARATE, versioned price cache. Only a successful, validated
+          // api.json fetch advances `fetchedAt`; a failed/garbled one leaves the
+          // previous file (and its age) untouched. The routing catalogue above is
+          // unaffected either way.
+          await persistPriceCache(apiPayload);
         }
       } catch (e) {
         console.warn("[model-catalog] price merge skipped:", e?.message ?? e);

@@ -1,17 +1,20 @@
-// Tests for optimizer/counterfactual.mjs — the observe-mode masking
-// counterfactual store (Optimizer P1.3, BET-1335). Pure/injected throughout:
-// no real state dir — `load`/`save` are in-memory and `now` is a controlled
-// clock. Run via `npm run test:server` (node:test).
+// Tests for optimizer/counterfactual.mjs — the v3 trim-report store (sticky
+// trims, spec §5). Pure/injected throughout: no real state dir — `load`/`save`
+// are in-memory and `now` is a controlled clock. Run via `npm run test:server`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   createCounterfactualStore,
   validateCounterfactualReport,
+  isLegacyReport,
   bucketSeries,
+  summaryFields,
+  sideTotals,
   MAX_SESSIONS,
   RETAIN_DAYS,
   RETAIN_HOURS,
+  STATE_VERSION,
 } from "./counterfactual.mjs";
 
 const DAY_MS = 86_400_000;
@@ -41,366 +44,334 @@ function makeStore({ initial = {}, now }) {
   return { store, saves, get: () => state };
 }
 
-function fixed(ms) {
-  return () => ms;
+const fixed = (ms) => () => ms;
+const T0 = new Date(2026, 9, 20, 12, 0, 0).getTime();
+
+// Opus-5.5-ish: r = 0.2, w = 5 ($/Mtok).
+const RATES = { cacheRead: 0.2, cacheWrite: 5, source: "catalog", fetchedAt: T0 - HOUR_MS };
+
+// A valid v3 report; override any field.
+function rep(over = {}) {
+  return {
+    v: 3,
+    sessionID: "ses_a",
+    ts: T0,
+    providerID: "anthropic",
+    modelID: "claude-opus-5-5",
+    rates: RATES,
+    applied: { trimmedTokens: 100_000, trimmedParts: 4 },
+    shadow: { trimmedTokens: 0, trimmedParts: 0 },
+    change: "none",
+    shadowChange: "none",
+    rewarmTokens: 0,
+    shadowRewarmTokens: 0,
+    ...over,
+  };
 }
 
-function makeHourStore() {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  return { t, bucket: hourKey(t), ...makeStore({ now: fixed(t) }) };
-}
+// ---------------------------------------------------------------------------
+// validator
+// ---------------------------------------------------------------------------
 
-test("validation: valid report passes, each bad field is rejected", () => {
+test("validator: a complete v3 report passes; v must be 3", () => {
+  assert.equal(validateCounterfactualReport(rep()), null);
+  assert.equal(validateCounterfactualReport(rep({ v: 2 })), "v");
+  assert.equal(validateCounterfactualReport(rep({ v: undefined })), "v");
+  assert.ok(validateCounterfactualReport(null));
+  // model + rates are optional
+  const bare = rep();
+  delete bare.providerID;
+  delete bare.modelID;
+  delete bare.rates;
+  assert.equal(validateCounterfactualReport(bare), null);
+});
+
+test("validator: each bad field is rejected by name", () => {
+  assert.equal(validateCounterfactualReport(rep({ sessionID: "" })), "sessionID");
+  assert.equal(validateCounterfactualReport(rep({ sessionID: "x".repeat(129) })), "sessionID");
+  assert.equal(validateCounterfactualReport(rep({ ts: -1 })), "ts");
+  assert.equal(validateCounterfactualReport(rep({ ts: NaN })), "ts");
+  assert.equal(validateCounterfactualReport(rep({ providerID: "" })), "providerID");
+  assert.equal(validateCounterfactualReport(rep({ modelID: 7 })), "modelID");
+  assert.equal(validateCounterfactualReport(rep({ rates: { ...RATES, source: "live" } })), "rates.source");
+  assert.equal(validateCounterfactualReport(rep({ rates: { ...RATES, cacheRead: -1 } })), "rates.cacheRead");
+  assert.equal(validateCounterfactualReport(rep({ rates: { ...RATES, cacheWrite: "5" } })), "rates.cacheWrite");
+  assert.equal(validateCounterfactualReport(rep({ rates: { ...RATES, fetchedAt: NaN } })), "rates.fetchedAt");
+  assert.equal(validateCounterfactualReport(rep({ rates: 5 })), "rates");
+  assert.equal(validateCounterfactualReport(rep({ applied: undefined })), "applied");
   assert.equal(
-    validateCounterfactualReport({ sessionID: "abc", maskedTokens: 1, maskedParts: 2, ts: 3 }),
+    validateCounterfactualReport(rep({ applied: { trimmedTokens: -1, trimmedParts: 0 } })),
+    "applied.trimmedTokens",
+  );
+  assert.equal(
+    validateCounterfactualReport(rep({ shadow: { trimmedTokens: 0, trimmedParts: NaN } })),
+    "shadow.trimmedParts",
+  );
+  assert.equal(validateCounterfactualReport(rep({ change: "shrink" })), "change");
+  assert.equal(validateCounterfactualReport(rep({ shadowChange: "clear" })), "shadowChange");
+  assert.equal(validateCounterfactualReport(rep({ rewarmTokens: -3 })), "rewarmTokens");
+  assert.equal(validateCounterfactualReport(rep({ shadowRewarmTokens: "1" })), "shadowRewarmTokens");
+});
+
+test("validator: rewarm > 0 needs a change that caused it (real and shadow)", () => {
+  assert.equal(validateCounterfactualReport(rep({ change: "none", rewarmTokens: 10 })), "rewarmTokens");
+  assert.equal(validateCounterfactualReport(rep({ change: "grow", rewarmTokens: 10 })), null);
+  assert.equal(validateCounterfactualReport(rep({ change: "clear", rewarmTokens: 10 })), null);
+  assert.equal(
+    validateCounterfactualReport(rep({ shadowChange: "none", shadowRewarmTokens: 10 })),
+    "shadowRewarmTokens",
+  );
+  assert.equal(
+    validateCounterfactualReport(rep({ shadowChange: "grow", shadowRewarmTokens: 10 })),
     null,
   );
-  // sessionID
-  assert.ok(validateCounterfactualReport({ sessionID: "", maskedTokens: 1, maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: "x".repeat(129), maskedTokens: 1, maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: 42, maskedTokens: 1, maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ maskedTokens: 1, maskedParts: 1, ts: 1 }));
-  // numeric fields
-  assert.ok(validateCounterfactualReport({ sessionID: "a", maskedTokens: -1, maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: "a", maskedTokens: NaN, maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: "a", maskedTokens: "1", maskedParts: 1, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: "a", maskedTokens: 1, maskedParts: -5, ts: 1 }));
-  assert.ok(validateCounterfactualReport({ sessionID: "a", maskedTokens: 1, maskedParts: 1, ts: NaN }));
-  assert.ok(validateCounterfactualReport(null));
 });
 
-test("store.record rejects invalid and leaves state untouched", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(now) });
-  const res = await store.record({ sessionID: "", maskedTokens: 1, maskedParts: 1, ts: 1 });
-  assert.equal(res.ok, false);
-  assert.ok(res.error);
-  assert.deepEqual(get(), {}); // no load/normalize, no mutation on an invalid report
+test("isLegacyReport: a report with no `v` is the pre-v3 shape", () => {
+  assert.equal(isLegacyReport({ sessionID: "a", maskedTokens: 1, maskedParts: 1, ts: 1 }), true);
+  assert.equal(isLegacyReport(rep()), false);
+  assert.equal(isLegacyReport(rep({ v: 2 })), false); // a wrong `v` is invalid, not legacy
+  assert.equal(isLegacyReport(null), false);
 });
 
-test("a report REPLACES the session's latest values but ADDS to the day's bucket (token-turns)", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(t) });
-  const today = dayKey(t);
+// ---------------------------------------------------------------------------
+// store: ingest, pricing, separation
+// ---------------------------------------------------------------------------
 
-  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 3, ts: t });
-  await store.record({ sessionID: "s2", maskedTokens: 200, maskedParts: 2, ts: t });
-  assert.equal(get().days[today].maskedTokens, 300, "two sessions today sum");
-  assert.equal(get().days[today].reports, 2);
-
-  // s1's newer report REPLACES its session entry (1000) but ADDS its token-turns
-  // to today's bucket (100 + 1000 from s1, 200 from s2 = 1300).
-  await store.record({ sessionID: "s1", maskedTokens: 1000, maskedParts: 4, ts: t });
-  assert.equal(get().days[today].maskedTokens, 1300);
-  assert.equal(get().sessions.s1.maskedTokens, 1000);
+test("record: invalid is rejected and leaves state untouched", async () => {
+  const { store, saves } = makeStore({ now: fixed(T0) });
+  const res = await store.record(rep({ change: "bogus" }));
+  assert.deepEqual(res, { ok: false, error: "change" });
+  assert.equal(saves.length, 0);
 });
 
-test("day entries are per-day snapshots: a session moving days updates today only", async () => {
-  // day0 t, day1 = next day.
-  const t0 = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const t1 = t0 + DAY_MS;
-  let current = t0;
-  const { store, get } = makeStore({ now: () => current });
-  const d0 = dayKey(t0);
-  const d1 = dayKey(t1);
-
-  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 1, ts: t0 });
-  await store.record({ sessionID: "s2", maskedTokens: 200, maskedParts: 1, ts: t0 });
-  // Move a full day forward (both the server clock and the report ts).
-  current = t1;
-  await store.record({ sessionID: "s1", maskedTokens: 50, maskedParts: 1, ts: t1 });
-
-  assert.equal(get().days[d0].maskedTokens, 300, "day0 keeps its snapshot (s1 100 + s2 200)");
-  assert.equal(get().days[d1].maskedTokens, 50, "day1 is just s1's latest");
+test("record: a v2-shaped report is accepted and IGNORED (nothing stored)", async () => {
+  const { store, saves } = makeStore({ now: fixed(T0) });
+  const res = await store.record({ sessionID: "old", maskedTokens: 9_999, maskedParts: 3, ts: T0, applied: true });
+  assert.deepEqual(res, { ok: true, ignored: true });
+  assert.equal(saves.length, 0);
+  const rows = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.equal(rows[0].reports, 0);
+  assert.equal(rows[0].actual.trimmed, 0);
 });
 
-test("retention prunes day entries older than RETAIN_DAYS; recent ones survive", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const oldDay = dayKey(now - (RETAIN_DAYS + 1) * DAY_MS);
-  const recentDay = dayKey(now - 10 * DAY_MS);
-  const {
-    store,
-    get,
-  } = makeStore({
-    initial: {
-      version: 2,
-      days: {
-        [oldDay]: { maskedTokens: 999, reports: 1 },
-        [recentDay]: { maskedTokens: 7, reports: 1 },
-      },
-      hours: {},
-      sessions: {},
-    },
-    now: fixed(now),
-  });
+test("pricing at ingest: usd = trimmed×r − rewarm×(w−r), per model, stored", async () => {
+  const { store, get } = makeStore({ now: fixed(T0) });
+  // 100k trimmed at r=0.2 → +$0.02; 280k re-warm at (w−r)=4.8 → −$1.344
+  await store.record(rep({ change: "grow", rewarmTokens: 280_000 }));
+  const e = get().days[dayKey(T0)].actual.byModel["anthropic/claude-opus-5-5"];
+  assert.equal(e.trimmed, 100_000);
+  assert.equal(e.rewarm, 280_000);
+  assert.ok(Math.abs(e.usd - (100_000 * 0.2 - 280_000 * 4.8) / 1e6) < 1e-12);
+  assert.equal(e.pricedReports, 1);
+  assert.equal(e.unpricedReports, 0);
+});
 
-  await store.record({ sessionID: "s1", maskedTokens: 5, maskedParts: 1, ts: now });
+test("a cost-only report (trimmed 0, rewarm > 0) is NEGATIVE", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(
+    rep({ applied: { trimmedTokens: 0, trimmedParts: 0 }, change: "grow", rewarmTokens: 50_000 }),
+  );
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.ok(row.actual.usd < 0);
+  assert.ok(Math.abs(row.actual.usd - (-50_000 * 4.8) / 1e6) < 1e-12);
+});
 
-  const days = get().days;
-  assert.equal(days[oldDay], undefined, "entries older than 90 days are pruned");
-  assert.deepEqual(days[recentDay], { maskedTokens: 7, reports: 1 }, "recent entries survive");
+test("usd is FROZEN at ingest: each report keeps the rates it carried", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(rep({ rates: { ...RATES, cacheRead: 0.2 } }));
+  await store.record(rep({ rates: { ...RATES, cacheRead: 0.5 } })); // a later price change
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.ok(Math.abs(row.actual.usd - (100_000 * 0.2 + 100_000 * 0.5) / 1e6) < 1e-12);
+  assert.equal(row.actual.pricedReports, 2);
+});
+
+test("a report without rates (or without a model) adds tokens but no usd and counts unpriced", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  const noRates = rep();
+  delete noRates.rates;
+  const noModel = rep();
+  delete noModel.providerID;
+  delete noModel.modelID;
+  await store.record(noRates);
+  await store.record(noModel);
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.equal(row.actual.trimmed, 200_000);
+  assert.equal(row.actual.usd, 0);
+  assert.equal(row.actual.pricedReports, 0);
+  assert.equal(row.actual.unpricedReports, 2);
+  assert.ok("unknown" in row.actual.byModel);
+  assert.ok("anthropic/claude-opus-5-5" in row.actual.byModel);
+});
+
+test("an idle report (nothing trimmed, nothing re-warmed) is exactly $0 and counts as priced even with no rates", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  const idle = rep({ applied: { trimmedTokens: 0, trimmedParts: 0 } });
+  delete idle.rates;
+  await store.record(idle);
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.equal(row.actual.pricedReports, 1);
+  assert.equal(row.actual.unpricedReports, 0);
+});
+
+test("actual and potential are NEVER pooled; per-model within each", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(
+    rep({
+      applied: { trimmedTokens: 10_000, trimmedParts: 1 },
+      shadow: { trimmedTokens: 500_000, trimmedParts: 9 },
+      shadowChange: "grow",
+      shadowRewarmTokens: 200_000,
+    }),
+  );
+  await store.record(
+    rep({
+      providerID: "openai",
+      modelID: "gpt-6-sol",
+      rates: { cacheRead: 0.4, cacheWrite: 0.4, source: "config", fetchedAt: 0 },
+      applied: { trimmedTokens: 7_000, trimmedParts: 1 },
+      shadow: { trimmedTokens: 0, trimmedParts: 0 },
+    }),
+  );
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.equal(row.actual.trimmed, 17_000);
+  assert.equal(row.potential.trimmed, 500_000);
+  assert.deepEqual(Object.keys(row.actual.byModel).sort(), ["anthropic/claude-opus-5-5", "openai/gpt-6-sol"]);
+  assert.equal(row.actual.byModel["openai/gpt-6-sol"].trimmed, 7_000);
+  assert.equal(row.potential.byModel["openai/gpt-6-sol"].trimmed, 0);
+  // potential's own cost: 500k×0.2 − 200k×4.8 = 100k − 960k = −860k ($·1e-6)
+  assert.ok(Math.abs(row.potential.byModel["anthropic/claude-opus-5-5"].usd - (-860_000) / 1e6) < 1e-12);
+  assert.equal(row.reports, 2);
+});
+
+test("a no-write-premium provider (w == r) never nets a re-warm cost", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(
+    rep({
+      rates: { cacheRead: 0.0182, cacheWrite: 0.0182, source: "catalog", fetchedAt: 1 },
+      change: "grow",
+      rewarmTokens: 400_000,
+    }),
+  );
+  const [row] = await bucketSeries(store, { bucket: "day", count: 1, now: T0 });
+  assert.ok(Math.abs(row.actual.usd - (100_000 * 0.0182) / 1e6) < 1e-12);
+});
+
+test("both day and hour buckets receive each report; keyed off report.ts, not the clock", async () => {
+  const { store, get } = makeStore({ now: fixed(T0) });
+  const yesterday = T0 - DAY_MS;
+  await store.record(rep({ ts: yesterday }));
+  assert.ok(get().days[dayKey(yesterday)]);
+  assert.ok(get().hours[hourKey(yesterday)]);
+  assert.equal(get().days[dayKey(T0)], undefined);
+});
+
+test("a report timestamp in the future is clamped to now", async () => {
+  const { store, get } = makeStore({ now: fixed(T0) });
+  await store.record(rep({ ts: T0 + 30 * DAY_MS }));
+  assert.deepEqual(Object.keys(get().days), [dayKey(T0)]);
+});
+
+test("session totals ADD the tokens actually removed (not the simulated set)", async () => {
+  const { store, get } = makeStore({ now: fixed(T0) });
+  await store.record(rep({ applied: { trimmedTokens: 1_000, trimmedParts: 1 }, shadow: { trimmedTokens: 9_999, trimmedParts: 1 } }));
+  await store.record(rep({ applied: { trimmedTokens: 2_500, trimmedParts: 1 } }));
+  assert.equal(get().sessions.ses_a.trimmedTokens, 3_500);
+  const f = await summaryFields(store, { days: 3, now: T0 });
+  assert.deepEqual(f.bySession.ses_a, { actualTrimmedTokens: 3_500, maskedTokens: 3_500 });
 });
 
 test("sessions are capped at MAX_SESSIONS, evicting the oldest lastTs first", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(now) });
+  const initial = { version: STATE_VERSION, days: {}, hours: {}, sessions: {} };
+  for (let i = 0; i < MAX_SESSIONS; i++) initial.sessions[`s${i}`] = { trimmedTokens: 1, lastTs: T0 - (MAX_SESSIONS - i) * 1000 };
+  const { store, get } = makeStore({ initial, now: fixed(T0) });
+  await store.record(rep({ sessionID: "fresh" }));
+  const keys = Object.keys(get().sessions);
+  assert.equal(keys.length, MAX_SESSIONS);
+  assert.ok(keys.includes("fresh"));
+  assert.ok(!keys.includes("s0"), "the oldest session was evicted");
+});
 
-  // Fill to the cap with ascending timestamps.
-  for (let i = 0; i < MAX_SESSIONS; i++) {
-    await store.record({ sessionID: `s${i}`, maskedTokens: i, maskedParts: 1, ts: now + i });
+test("retention: hours keep ≤ RETAIN_HOURS keys, days drop past RETAIN_DAYS", async () => {
+  // Old-enough reports are clamped to `now`, so seed a stored state directly
+  // and let a fresh report trigger pruning.
+  const hours = {};
+  for (let i = 0; i < RETAIN_HOURS + 40; i++) hours[hourKey(T0 - i * HOUR_MS)] = { actual: { byModel: {} }, potential: { byModel: {} }, reports: 1 };
+  const days = {};
+  days[dayKey(T0 - (RETAIN_DAYS + 5) * DAY_MS)] = { reports: 1 };
+  days[dayKey(T0 - 3 * DAY_MS)] = { reports: 1 };
+  const seeded = makeStore({ initial: { version: STATE_VERSION, days, hours, sessions: {} }, now: fixed(T0) });
+  await seeded.store.record(rep());
+  const s = seeded.get();
+  assert.ok(Object.keys(s.hours).length <= RETAIN_HOURS + 1);
+  assert.equal(s.days[dayKey(T0 - (RETAIN_DAYS + 5) * DAY_MS)], undefined);
+  assert.ok(s.days[dayKey(T0 - 3 * DAY_MS)]);
+});
+
+// ---------------------------------------------------------------------------
+// load: v3 drops v2 buckets AND the legacy sessions map
+// ---------------------------------------------------------------------------
+
+test("a v2 state loads EMPTY (buckets and the legacy sessions map dropped) and persists version 3", async () => {
+  const v2 = {
+    version: 2,
+    days: { [dayKey(T0)]: { maskedTokens: 5_000, appliedTokens: 1, rewarmTokens: 2, reports: 1, byModel: { x: 1 } } },
+    hours: { [hourKey(T0)]: { maskedTokens: 5_000, reports: 1 } },
+    sessions: { old: { maskedTokens: 77, maskedParts: 1, lastTs: T0 } },
+  };
+  const { store, get } = makeStore({ initial: v2, now: fixed(T0) });
+  const f0 = await summaryFields(store, { days: 2, now: T0 });
+  assert.deepEqual(f0.bySession, {});
+  assert.ok(f0.dailySeries.every((d) => d.potentialTrimmedTokens === 0 && d.actualTrimmedTokens === 0));
+  await store.record(rep());
+  const s = get();
+  assert.equal(s.version, 3);
+  assert.equal(s.sessions.old, undefined);
+  assert.equal(s.days[dayKey(T0)].maskedTokens, undefined, "no v2 field survives");
+});
+
+test("a v1 / garbage state also loads empty", async () => {
+  for (const initial of [{}, null, { days: { a: 1 } }, "x", { version: 1, sessions: { a: {} } }]) {
+    const { store } = makeStore({ initial, now: fixed(T0) });
+    const snap = await store.snapshot();
+    assert.equal(snap.version, 3);
+    assert.deepEqual(snap.days, {});
+    assert.deepEqual(snap.sessions, {});
   }
-  assert.equal(Object.keys(get().sessions).length, MAX_SESSIONS);
-
-  // A new, newest session pushes the OLDEST (s0) out.
-  await store.record({ sessionID: "newest", maskedTokens: MAX_SESSIONS, maskedParts: 1, ts: now + 1_000_000 });
-  const sessions = get().sessions;
-  assert.equal(Object.keys(sessions).length, MAX_SESSIONS);
-  assert.equal(sessions.s0, undefined, "oldest lastTs is evicted first");
-  assert.ok(sessions.newest, "the newest report survives");
 });
 
-test("summaryFields returns a zero-filled 30d maskedTokens series and per-session maskedTokens", async () => {
-  const { store } = makeStore({ now: fixed(new Date(2026, 7, 24, 12, 0, 0).getTime()) });
-  const { summaryFields } = await import("./counterfactual.mjs");
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  await store.record({ sessionID: "s1", maskedTokens: 123, maskedParts: 1, ts: t });
+// ---------------------------------------------------------------------------
+// readers
+// ---------------------------------------------------------------------------
 
-  // The summary window must use the same fixed clock as the stored reports;
-  // wall-clock time eventually ages the fixture out of the 30-day series.
-  const f = await summaryFields(store, { now: t });
-  assert.equal(f.dailySeries.length, 30);
-  const today = dayKey(t);
-  assert.equal(f.dailySeries.find((d) => d.day === today).maskedTokens, 123);
-  assert.ok(f.dailySeries.filter((d) => d.day !== today).every((d) => d.maskedTokens === 0));
-  assert.deepEqual(f.bySession, { s1: { maskedTokens: 123 } });
+test("bucketSeries zero-fills, is oldest→newest, length == count for both sizes", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(rep({ ts: T0 - 2 * HOUR_MS }));
+  const hours = await bucketSeries(store, { bucket: "hour", count: 5, now: T0 });
+  assert.equal(hours.length, 5);
+  assert.ok(hours[0].t < hours[4].t);
+  assert.equal(hours.filter((h) => h.actual.trimmed > 0).length, 1);
+  const days = await bucketSeries(store, { bucket: "day", count: 3, now: T0 });
+  assert.equal(days.length, 3);
+  assert.deepEqual(days[0].actual, { byModel: {}, trimmed: 0, rewarm: 0, usd: 0, pricedReports: 0, unpricedReports: 0 });
 });
 
-test("two reports from the SAME session in the same hour SUM (additive token-turns — the BET-1368 regression)", async () => {
-  const t = new Date(2026, 7, 24, 12, 30, 0).getTime(); // ts: same hour
-  const { store, get } = makeStore({ now: fixed(t) });
-  const bucket = hourKey(t);
-
-  await store.record({ sessionID: "s1", maskedTokens: 42, maskedParts: 2, ts: t });
-  await store.record({ sessionID: "s1", maskedTokens: 58, maskedParts: 2, ts: t });
-
-  // The old code kept only the latest (58); additive keeps the running total.
-  assert.equal(get().hours[bucket].maskedTokens, 100);
-  assert.equal(get().hours[bucket].reports, 2);
-  // The sessions map still holds the LATEST (replace semantics unchanged).
-  assert.equal(get().sessions.s1.maskedTokens, 58);
-  // It also landed in today's day bucket.
-  assert.equal(get().days[dayKey(t)].maskedTokens, 100);
+test("summaryFields: zero-filled daily series with actual, potential and the maskedTokens alias", async () => {
+  const { store } = makeStore({ now: fixed(T0) });
+  await store.record(rep({ shadow: { trimmedTokens: 40_000, trimmedParts: 2 } }));
+  const f = await summaryFields(store, { days: 3, now: T0 });
+  assert.equal(f.dailySeries.length, 3);
+  const today = f.dailySeries[2];
+  assert.equal(today.day, dayKey(T0));
+  assert.equal(today.actualTrimmedTokens, 100_000);
+  assert.equal(today.potentialTrimmedTokens, 40_000);
+  assert.equal(today.maskedTokens, 40_000, "alias of potential");
+  assert.equal(f.dailySeries[0].actualTrimmedTokens, 0);
 });
 
-// ----- BET-1344: applied / mode on the report -----
-
-test("validation: applied/mode accepted when present, optional when absent", () => {
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc",
-      maskedTokens: 1,
-      maskedParts: 2,
-      ts: 3,
-      applied: true,
-      mode: "act",
-    }),
-    null,
-    "valid report with applied + mode passes",
-  );
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc",
-      maskedTokens: 1,
-      maskedParts: 2,
-      ts: 3,
-      applied: false,
-      mode: "observe",
-    }),
-    null,
-  );
-  // Both absent (observe-only plugin) → still valid.
-  assert.equal(
-    validateCounterfactualReport({ sessionID: "abc", maskedTokens: 1, maskedParts: 2, ts: 3 }),
-    null,
-  );
-});
-
-test("validation: applied must be a boolean, mode must be observe|act (rejected by field name)", () => {
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, applied: "yes",
-    }),
-    "applied",
-  );
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, applied: 1,
-    }),
-    "applied",
-  );
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, mode: "bogus",
-    }),
-    "mode",
-  );
-  assert.equal(
-    validateCounterfactualReport({
-      sessionID: "abc", maskedTokens: 1, maskedParts: 1, ts: 1, mode: "observe",
-    }),
-    null,
-  );
-});
-
-test("store.record persists applied/mode on the session entry, and omits them when absent", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(t) });
-
-  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 3, ts: t, applied: true, mode: "act" });
-  assert.equal(get().sessions.s1.applied, true);
-  assert.equal(get().sessions.s1.mode, "act");
-
-  // A report without applied/mode does not resurrect them as undefined keys.
-  await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t });
-  assert.equal(Object.hasOwn(get().sessions.s2, "applied"), false);
-  assert.equal(Object.hasOwn(get().sessions.s2, "mode"), false);
-});
-
-// ----- BET-1368: additive token-turn buckets, hourly retention, model attribution -----
-
-test("a bucket is keyed off report.ts, not the injected clock (delayed report lands in yesterday's bucket)", async () => {
-  const todayMs = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const yesterdayMs = todayMs - DAY_MS;
-  const { store, get } = makeStore({ now: fixed(todayMs) });
-
-  // The server clock is TODAY, but the report's ts is YESTERDAY.
-  await store.record({ sessionID: "s1", maskedTokens: 77, maskedParts: 1, ts: yesterdayMs });
-
-  assert.equal(get().days[dayKey(yesterdayMs)].maskedTokens, 77, "goes to yesterday's day bucket");
-  assert.equal(get().days[dayKey(todayMs)], undefined, "NOT today's day bucket");
-  assert.equal(get().hours[hourKey(yesterdayMs)].maskedTokens, 77, "and to yesterday's hour bucket");
-});
-
-test("applied:true contributes to appliedTokens; applied:false/absent does not; maskedTokens counts in both", async () => {
-  const { t, store, get, bucket } = makeHourStore();
-
-  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 1, ts: t, applied: true });
-  await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t, applied: false });
-  await store.record({ sessionID: "s3", maskedTokens: 25, maskedParts: 1, ts: t });
-
-  // maskedTokens sums ALL reports; appliedTokens only the applied:true one.
-  assert.equal(get().hours[bucket].maskedTokens, 175);
-  assert.equal(get().hours[bucket].appliedTokens, 100);
-});
-
-test("rewarmTokens accumulates on a bucket; absent means 0", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(t) });
-  const bucket = hourKey(t);
-
-  await store.record({ sessionID: "s1", maskedTokens: 10, maskedParts: 1, ts: t, rewarmTokens: 30 });
-  await store.record({ sessionID: "s2", maskedTokens: 20, maskedParts: 1, ts: t, rewarmTokens: 5 });
-  // No rewarmTokens supplied → 0 contribution.
-  await store.record({ sessionID: "s3", maskedTokens: 40, maskedParts: 1, ts: t });
-
-  assert.equal(get().hours[bucket].rewarmTokens, 35);
-  assert.equal(get().days[dayKey(t)].rewarmTokens, 35);
-});
-
-test("byModel splits maskedTokens on providerID/modelID, 'unknown' when either is missing", async () => {
-  const { t, store, get, bucket } = makeHourStore();
-
-  await store.record({ sessionID: "s1", maskedTokens: 100, maskedParts: 1, ts: t, providerID: "anthropic", modelID: "claude-sonnet" });
-  await store.record({ sessionID: "s2", maskedTokens: 50, maskedParts: 1, ts: t, providerID: "anthropic", modelID: "claude-sonnet" });
-  await store.record({ sessionID: "s3", maskedTokens: 25, maskedParts: 1, ts: t, providerID: "anthropic" }); // no modelID
-  await store.record({ sessionID: "s4", maskedTokens: 15, maskedParts: 1, ts: t }); // neither
-
-  const b = get().hours[bucket];
-  assert.equal(b.byModel["anthropic/claude-sonnet"], 150, "same model sums");
-  assert.equal(b.byModel["unknown"], 40, "missing either field buckets to 'unknown'");
-});
-
-test("hour pruning keeps at most 72 keys; day pruning keeps 90", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const farHour = hourKey(t - (RETAIN_HOURS + 5) * HOUR_MS);
-  const nearHour = hourKey(t - 2 * HOUR_MS);
-  const farDay = dayKey(t - (RETAIN_DAYS + 5) * DAY_MS);
-  const nearDay = dayKey(t - 10 * DAY_MS);
-  const { store, get } = makeStore({
-    initial: {
-      version: 2,
-      days: { [farDay]: { maskedTokens: 9, reports: 1 }, [nearDay]: { maskedTokens: 1, reports: 1 } },
-      hours: { [farHour]: { maskedTokens: 9, reports: 1 }, [nearHour]: { maskedTokens: 1, reports: 1 } },
-      sessions: {},
-    },
-    now: fixed(t),
+test("sideTotals tolerates a missing or partial half", () => {
+  assert.deepEqual(sideTotals(undefined), { trimmed: 0, rewarm: 0, usd: 0, pricedReports: 0, unpricedReports: 0 });
+  assert.deepEqual(sideTotals({ byModel: { a: { trimmed: 5 }, b: null } }), {
+    trimmed: 5, rewarm: 0, usd: 0, pricedReports: 0, unpricedReports: 0,
   });
-
-  // Burst of reports across 80 hours, then a FINAL report at `t` whose ts anchors
-  // the retention cutoffs at `t` — so the OLD tail is pruned, not the new head.
-  for (let h = 0; h < 80; h++) {
-    await store.record({ sessionID: `s${h}`, maskedTokens: 1, maskedParts: 1, ts: t - h * HOUR_MS });
-  }
-  await store.record({ sessionID: "final", maskedTokens: 1, maskedParts: 1, ts: t });
-
-  // The window anchored at `t` bounds the hourly count to the 72h window (the
-  // boundary slot inclusive — the same lexicographic-comparison retention the
-  // day buckets use, "as today") and the daily count to the 90d window.
-  assert.ok(Object.keys(get().hours).length <= RETAIN_HOURS + 1, "hours bounded by the 72h window");
-  assert.ok(Object.keys(get().days).length <= RETAIN_DAYS + 1, "days bounded by the 90d window");
-  assert.equal(get().hours[farHour], undefined, "beyond-72h hour bucket pruned");
-  assert.equal(get().days[farDay], undefined, "beyond-90d day bucket pruned");
-});
-
-test("a v1 state (no version) loads with days emptied, sessions preserved, persists version 2", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const oldDay = dayKey(now - 5 * DAY_MS);
-  let saved = null;
-  const store = createCounterfactualStore({
-    load: async () => ({
-      days: { [oldDay]: { maskedTokens: 999, reports: 1 } }, // snapshot-semantics buckets
-      sessions: { s1: { maskedTokens: 42, maskedParts: 2, lastTs: now } },
-    }),
-    save: async (s) => {
-      saved = s;
-    },
-    now: fixed(now),
-  });
-
-  await store.record({ sessionID: "s2", maskedTokens: 7, maskedParts: 1, ts: now });
-
-  assert.equal(saved.version, 2);
-  assert.equal(saved.days[oldDay], undefined, "old snapshot buckets are dropped");
-  assert.equal(saved.sessions.s1.maskedTokens, 42, "sessions map is preserved");
-  assert.equal(saved.sessions.s2.maskedTokens, 7);
-});
-
-test("bucketSeries zero-fills, is oldest→newest, and its length equals count for both bucket sizes", async () => {
-  const t = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store } = makeStore({ now: fixed(t) });
-  // A single report on today, spanning a few buckets.
-  await store.record({ sessionID: "s1", maskedTokens: 123, maskedParts: 1, ts: t, applied: true });
-
-  const days = await bucketSeries(store, { bucket: "day", count: 5, now: fixed(t) });
-  assert.equal(days.length, 5);
-  for (let i = 0; i < days.length - 1; i++) assert.ok(days[i].key < days[i + 1].key, "oldest→newest");
-  const today = dayKey(t);
-  assert.equal(days.find((d) => d.key === today).maskedTokens, 123);
-  assert.ok(days.filter((d) => d.key !== today).every((d) => d.maskedTokens === 0), "zero-filled");
-  assert.ok(days.every((d) => typeof d.t === "number" && Number.isFinite(d.t)), "t is the bucket start ms");
-  assert.equal(days.find((d) => d.key === today).appliedTokens, 123);
-
-  const hours = await bucketSeries(store, { bucket: "hour", count: 3, now: fixed(t) });
-  assert.equal(hours.length, 3);
-  const thisHour = hourKey(t);
-  assert.equal(hours.find((h) => h.key === thisHour).maskedTokens, 123);
-  assert.ok(hours.filter((h) => h.key !== thisHour).every((h) => h.maskedTokens === 0));
-});
-
-test("a report timestamp in the future is clamped to now (no runaway future bucket)", async () => {
-  const now = new Date(2026, 7, 24, 12, 0, 0).getTime();
-  const { store, get } = makeStore({ now: fixed(now) });
-  await store.record({ sessionID: "s1", maskedTokens: 10, maskedParts: 1, ts: now + 365 * DAY_MS });
-  assert.equal(get().days[dayKey(now)].maskedTokens, 10, "forward-dated report lands in today's bucket");
-  assert.equal(get().sessions.s1.lastTs, now, "session lastTs is the clamped time");
 });

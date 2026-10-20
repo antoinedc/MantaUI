@@ -14,6 +14,9 @@
 
 export const MASK_AFTER_TOOL_USES   = 12;
 export const MIN_BATCH_TOKENS       = 20_000;
+// Sticky-trims gate safety factor (spec §4.4, C3): a trim set only grows when
+// the expected remaining requests cover its break-even by this multiple.
+export const GATE_MARGIN            = 1.5;
 export const PROTECT_TAIL_TOKENS    = 40_000;
 export const PLACEHOLDER_ARGS_MAX   = 200;
 export const POLICY_CACHE_MS        = 60_000;
@@ -27,6 +30,7 @@ export const DEFAULT_POLICY = Object.freeze({
   enabled: false,
   maskAfterUses: MASK_AFTER_TOOL_USES,
   batchTokens: MIN_BATCH_TOKENS,
+  margin: GATE_MARGIN,
   protectTailTokens: PROTECT_TAIL_TOKENS,
   placeholderFormat: "[manta: trimmed — re-run `{tool}` with {args} to see this again]",
   cacheTtlMs: 300_000,
@@ -36,6 +40,8 @@ export const DEFAULT_POLICY = Object.freeze({
 
 // The only keys a per-repo tuner entry may carry. Unknown keys in a repo entry
 // are ignored (never merged) — the tuner's surface is deliberately narrow.
+// `margin` is deliberately NOT here: it is a gate-safety constant, not a tuned
+// knob (the tuner is out of scope for sticky trims).
 const REPO_NUMERIC_KEYS = ["maskAfterUses", "batchTokens", "protectTailTokens"];
 
 // Coerce a knob to a positive finite number; anything else falls back to the

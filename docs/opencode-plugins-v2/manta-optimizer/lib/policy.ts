@@ -1,14 +1,19 @@
-// Policy + constraint lookups against manta-server. NEVER on the hot path: a
-// fresh cached value (same session, < 60 s) is used as-is; otherwise the stale
-// value (or the observe-only default / []) is used AND a background refresh is
-// fired that is never awaited. A failed refresh leaves the previous value; a
-// cold cache means "observe-only" / no constraints — fail open.
+// Policy + constraint lookups against manta-server. NEVER on the hot path.
+//
+// The policy is PER SESSION (a single process-wide slot let parallel sessions
+// evict each other and flip a session between trimmed and untrimmed): a fresh
+// cached policy (< 60 s) is used as-is; a stale one is used AND refreshed in the
+// background; a cold session gets a PROVISIONAL policy (the last one fetched for
+// any session, else the observe-only default) with authoritative:false while a
+// refresh is fired. Only an authoritative policy can grow or clear the trim set.
+// A failed refresh leaves the previous value — fail open.
 
 import { DEFAULT_POLICY, type Policy } from "./mask.ts";
 import { authHeaders, CALL_TIMEOUT_MS } from "./server.ts";
 
 export const POLICY_CACHE_MS = 60_000;
 export const CONSTRAINT_CACHE_MS = 60_000;
+export const MAX_POLICY_SESSIONS = 512;
 const MAX_CONSTRAINTS = 20;
 const MAX_CONSTRAINT_CHARS = 300;
 
@@ -16,11 +21,15 @@ export interface ServerDeps {
   fetch: typeof fetch;
   base: () => string;
   now?: () => number;
+  /** The plugin instance's project directory (lets the server apply the per-repo tuner table). */
+  directory?: () => string | undefined;
 }
 
 export function createPolicyClient(deps: ServerDeps) {
   const now = deps.now ?? (() => Date.now());
-  let policyCache: { policy: Policy; at: number; sessionID: string } | null = null;
+  const policies = new Map<string, { policy: Policy; at: number }>();
+  const policyInflight = new Set<string>();
+  let lastAny: Policy | null = null;
   let constraintCache: { constraints: string[]; at: number; sessionID: string } | null = null;
 
   function getJson(path: string): Promise<any> {
@@ -31,9 +40,25 @@ export function createPolicyClient(deps: ServerDeps) {
   }
 
   function refreshPolicy(sessionID: string): void {
-    void getJson(`/api/optimizer/policy?sessionID=${encodeURIComponent(sessionID)}`).then((p) => {
-      if (p && typeof p === "object") policyCache = { policy: { ...DEFAULT_POLICY, ...p }, at: now(), sessionID };
-    });
+    if (policyInflight.has(sessionID)) return;
+    policyInflight.add(sessionID);
+    const dir = deps.directory?.();
+    const q = `sessionID=${encodeURIComponent(sessionID)}${dir ? `&directory=${encodeURIComponent(dir)}` : ""}`;
+    void getJson(`/api/optimizer/policy?${q}`)
+      .then((p) => {
+        if (p && typeof p === "object") {
+          const policy = { ...DEFAULT_POLICY, ...p } as Policy;
+          policies.delete(sessionID);
+          policies.set(sessionID, { policy, at: now() });
+          while (policies.size > MAX_POLICY_SESSIONS) {
+            const oldest = policies.keys().next().value;
+            if (oldest === undefined) break;
+            policies.delete(oldest);
+          }
+          lastAny = policy;
+        }
+      })
+      .finally(() => policyInflight.delete(sessionID));
   }
 
   function refreshConstraints(sessionID: string): void {
@@ -43,12 +68,15 @@ export function createPolicyClient(deps: ServerDeps) {
   }
 
   return {
-    /** The effective policy (never null — observe-only when unknown). */
-    resolvePolicy(sessionID: string): Policy {
-      const cached = policyCache;
-      if (cached && cached.sessionID === sessionID && now() - cached.at < POLICY_CACHE_MS) return cached.policy;
+    /** The effective policy (never null) and whether it is authoritative for THIS session. */
+    resolvePolicy(sessionID: string): { policy: Policy; authoritative: boolean } {
+      const cached = policies.get(sessionID);
+      if (cached) {
+        if (now() - cached.at >= POLICY_CACHE_MS) refreshPolicy(sessionID); // stale → use it, refresh
+        return { policy: cached.policy, authoritative: true };
+      }
       refreshPolicy(sessionID);
-      return cached && cached.sessionID === sessionID ? cached.policy : DEFAULT_POLICY;
+      return { policy: lastAny ?? DEFAULT_POLICY, authoritative: false };
     },
 
     resolveConstraints(sessionID: string): string[] {
@@ -58,7 +86,7 @@ export function createPolicyClient(deps: ServerDeps) {
       return cached && cached.sessionID === sessionID ? cached.constraints : [];
     },
 
-    /** Fire-and-forget; the payload is exactly V1's. */
+    /** Fire-and-forget (contract C2: report v3). */
     reportCounterfactual(sessionID: string, body: Record<string, unknown>): void {
       void deps
         .fetch(`${deps.base()}/api/optimizer/counterfactual`, {

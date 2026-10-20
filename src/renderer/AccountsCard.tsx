@@ -41,6 +41,7 @@ import { SeatsPanel } from "./SeatsPanel";
 import { AddSeatGate } from "./AddSeatFlow";
 import { refreshAccounts } from "./accountsData";
 import { CustomProviderForm } from "./CustomProviderForm";
+import { UnpricedModelsPanel } from "./ModelPriceForm";
 import { ModelChecklist } from "./ModelChecklist";
 import { SettingsRow } from "./SettingsRow";
 import { MantaLoader } from "./MantaLoader";
@@ -994,6 +995,10 @@ export function AccountsCard() {
           })}
         </div>
       )}
+
+      {/* Sticky-trims §3.4: connected models the optimizer can't price. Renders
+          nothing when every model is priced or the box can't report prices. */}
+      <UnpricedModelsPanel names={Object.fromEntries(rows.map((r) => [r.id, r.name]))} />
 
       <CustomProviderForm onSaved={() => void refresh()} />
 
