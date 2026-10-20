@@ -130,7 +130,6 @@ export const DEMO_STREAM_PHASES = ["early", "mid", "late"] as const;
 let streamStep: number = DEMO_STREAM_PHASE_STEPS.early;
 let streamPending = false;
 let streamServed = false;
-const opencodeListeners = new Set<(ev: unknown) => void>();
 // Box-derived interpreted event subscribers (stream.running, stream.turnComplete…).
 // Mirrors httpApi's `onStreamEvent` (`/events` `kind:"stream"`), delivering the
 // `{ sub, sessionId, payload }` envelope so useSseBus's interpreted consumer
@@ -201,8 +200,10 @@ function streamTextFlushPayload(): { messageID: string; partID: string; text: st
 }
 
 /** The box-derived interpreted envelopes that a real streamInterp would emit
- *  for the demo's raw event sequence on a phase advance: the streaming `flush`
- *  for the in-flight assistant's text, a `running` and a not-complete
+ *  for the demo's raw event sequence on a phase advance: a `messageChanged` for
+ *  the in-flight assistant message (what makes the renderer splice-refetch the
+ *  grown message — the frame the box derives from `message.updated`), the
+ *  streaming `flush` for its text, a `running` and a not-complete
  *  `turnComplete`. The demo owns the stream and, like the fixture, only ever
  *  emits `message.updated` for the in-flight turn — it never emits a
  *  `session.status busy`, so the interpreter's `running` flag stays `false`.
@@ -217,6 +218,7 @@ export function buildStreamAdvanceEnvelopes(
 ): Array<{ sub: string; sessionId: string; payload: unknown }> {
   const flush = streamTextFlushPayload();
   return [
+    { sub: "messageChanged", sessionId, payload: { messageID: flush.messageID } },
     {
       sub: "flush",
       sessionId,
@@ -236,27 +238,18 @@ export function buildStreamAdvanceEnvelopes(
  *  every live subscriber the in-flight message grew, so the rendered
  *  transcript follows without a navigation. No-op once `late` is reached.
  *
- *  The demo mirrors the box here: it emits BOTH the raw opencode event that
- *  reveals new canonical message parts (the box forwards the raw stream; the
- *  renderer's spliceMessage → opencodeMessage refetch is how new tool parts
- *  appear on a live box too) AND the box-derived interpreted envelopes
- *  (running / turnComplete) consumed via onStreamEvent. */
+ *  The demo mirrors the box here: it emits the box-derived interpreted
+ *  envelopes (messageChanged / flush / running / turnComplete) consumed via
+ *  onStreamEvent — the renderer reads no raw opencode events, and
+ *  `messageChanged` is how new canonical parts appear on a live box too (the
+ *  renderer's spliceMessage → opencodeMessage refetch). */
 function streamAdvance(): void {
   const next = nextPhaseStep(streamStep);
   if (next == null) return;
   streamStep = next;
   streamPending = true;
   streamServed = false;
-  const assistant = demoState.messages.find((m) => m.info.role === "assistant");
   const sessionId = demoState.activeSessionId;
-  const ev = {
-    type: "message.updated",
-    properties: {
-      sessionID: sessionId,
-      messageID: assistant?.info?.id ?? "",
-    },
-  };
-  for (const cb of opencodeListeners) cb(ev);
   for (const env of buildStreamAdvanceEnvelopes(sessionId)) {
     for (const cb of streamListeners) cb(env);
   }
@@ -456,17 +449,10 @@ const opencodeOpenStream = (_sessionId: string): Promise<void> =>
 const opencodeCloseStream = (_sessionId: string): Promise<void> =>
   Promise.resolve();
 
-// In the `stream` state this keeps the registered assembler subscribers so
-// advance() can push message.updated events into them (the demo OWNs the
-// stream, so it drives the phases from the fixture rather than raising
-// markers from inside the app). Every other state is the pre-existing no-op.
-const onOpencodeEvent = (cb: (ev: unknown) => void): (() => void) => {
-  if (isStream) {
-    opencodeListeners.add(cb);
-    return () => opencodeListeners.delete(cb);
-  }
-  return () => {};
-};
+// @deprecated (OpenCode V2 slice A2): the renderer reads no raw opencode events
+// any more — the demo drives it through `onStreamEvent` below. Kept (a no-op
+// subscription) because it is still part of the `Api` contract.
+const onOpencodeEvent = (_cb: (ev: unknown) => void): (() => void) => () => {};
 
 // Box-interpreted stream events (BET-551 / §17). In the `stream` state the
 // demo registers the renderer's onStreamEvent consumer and drives it with the
@@ -534,6 +520,36 @@ const getServerVersion = (): Promise<{ version: string; minClient: string; openc
     opencodeVersion: "0.0.0",
   });
 
+// Box upgrade gate (OpenCode V2 cutover C4, contract K3). Every state but
+// "upgrade-failed" is a box with no upgrade in progress (the real transport
+// answers null for a box that predates the API, and idle for one that has none).
+// "upgrade-failed" is a migration that stopped at pre-flight for lack of disk —
+// the blocking screen's failed state, with the disk numbers.
+const upgradeStatus = (): Promise<unknown> => {
+  if (DEMO_STATE !== "upgrade-failed") return Promise.resolve(null);
+  const GiB = 2 ** 30;
+  return Promise.resolve({
+    state: "failed",
+    overall: 0.04,
+    etaSeconds: null,
+    steps: [
+      { id: "preflight", label: "Check disk space", status: "failed", progress: null, error: "Not enough free disk space" },
+      { id: "stop", label: "Stop running agents", status: "pending", progress: null },
+      { id: "copy", label: "Copy history", status: "pending", progress: null },
+      { id: "migrate", label: "Migrate conversations", status: "pending", progress: null },
+      { id: "verify", label: "Verify", status: "pending", progress: null },
+      { id: "cutover", label: "Switch over", status: "pending", progress: null },
+    ],
+    error: {
+      step: "preflight",
+      message: "There isn't enough free disk space to upgrade safely.",
+      retryable: true,
+      needBytes: 31 * GiB,
+      haveBytes: 3 * GiB,
+    },
+  });
+};
+
 // Desktop auto-update failure (BET-226 / shared/updateError.mjs). The real
 // transport forwards only integrity/permission-class failures the user must
 // act on; demo mode has no updater, so the fake transport reports one only for
@@ -590,6 +606,7 @@ const claudeLoginCancel = (_sessionKey: string): Promise<{ ok: boolean }> => {
 // ===========================================================================
 export const explicitMethods = {
   configGet,
+  upgradeStatus,
   syncSnapshot,
   onStatusEvent,
   opencodeMessages,

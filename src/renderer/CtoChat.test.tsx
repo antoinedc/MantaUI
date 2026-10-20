@@ -688,11 +688,17 @@ async function mountFailingSubmit(
         }),
     });
     await h.flush();
-    // The ask arrives the way the box delivers it: a permission.asked event
-    // triggers the permissions refetch (the mock returns the pending ask).
+    // The ask arrives the way the box delivers it: the interpreter turns the
+    // permission.asked event into a `permissions` frame carrying the pending ask.
     await emitAndFlush(bus, h, {
       type: "permission.asked",
-      properties: { sessionID: SESSION, id: "perm_1" },
+      properties: {
+        id: "perm_1",
+        sessionID: SESSION,
+        permission: "bash",
+        patterns: ["deploy *"],
+        metadata: { command: "deploy --prod" },
+      },
     });
     expect(h.text()).toContain("Run a shell command?");
     // A send goes out and hangs (the submit mock holds it) — the ask must

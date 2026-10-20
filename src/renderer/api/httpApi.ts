@@ -52,6 +52,8 @@ import type {
   CtoConversationState,
   CtoSubmitReceipt,
   CtoConversationInterruptResult,
+  UpgradeActionResult,
+  UpgradeStatus,
 } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
@@ -66,6 +68,7 @@ import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
+import { normalizeUpgradeStatus } from "../upgradeGate";
 import { ship } from "../log";
 
 // ---------------------------------------------------------------------------
@@ -329,14 +332,28 @@ async function rpcInner<T>(
   // layer (M1-T2) can route to the pairing screen instead of showing a raw
   // "HTTP 401" toast.
   if (res.status === 401) throw new AuthRequiredError();
-  let json: { result?: unknown; error?: string } = {};
+  let json: { result?: unknown; error?: string; upgrade?: boolean } = {};
   try { json = await res.json(); } catch { /* non-JSON body (proxy/HTML error) */ }
+  // K3: a box in upgrade mode answers every data route `503 {upgrade:true}`.
+  // Tell the upgrade gate so the user lands on the progress screen instead of an
+  // app full of unexplained errors. The call still rejects as before.
+  if (res.status === 503 && json.upgrade === true) noteBoxUpgrading();
   if (!res.ok || json.error) {
     ship("error", "rpc failed", { channel, ms, error: json.error ?? `HTTP ${res.status}` });
     throw new Error(json.error ?? `HTTP ${res.status}`);
   }
   if (ms > 1000) ship("warn", "rpc slow", { channel, ms });
   return json.result as T;
+}
+
+// Subscribers to "a call was refused 503 {upgrade:true}" (Api.onBoxUpgrading).
+// Module-level because the refusal is observed deep inside the shared dispatch,
+// far from any React tree.
+const boxUpgradingListeners = new Set<() => void>();
+function noteBoxUpgrading(): void {
+  for (const fn of Array.from(boxUpgradingListeners)) {
+    try { fn(); } catch (e) { console.error("[upgrade] onBoxUpgrading listener threw", e); }
+  }
 }
 
 // Default path — unbounded, matching historical behavior (long-lived ops).
@@ -396,6 +413,7 @@ type Kind =
   | "desktopNotify"
   | "serverUpdateAvailable"
   | "serverUpdateProgress"
+  | "upgrade"
   | "delegate.updated"
   | "usage.updated"
   | "accounts.updated"
@@ -424,6 +442,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   desktopNotify: new Set(),
   serverUpdateAvailable: new Set(),
   serverUpdateProgress: new Set(),
+  upgrade: new Set(),
   "delegate.updated": new Set(),
   "usage.updated": new Set(),
   "accounts.updated": new Set(),
@@ -462,12 +481,11 @@ let _resyncing = false;
  * WebSocket reconnects (missed a `session.idle`, a permission reply, a new
  * question, etc. while the socket was down/half-open).
  *
- * `useSseBus.ts`'s `ev.type === "server.connected"` branch already does
- * exactly this: `scheduleRefetch()` (→ opencodeMessages re-fetch, debounced)
- * + `refreshPermissions()` + `refreshQuestions()`, and re-derives `running`
- * from the refetched transcript. It carries no `sessionID`, so it passes the
- * `if (props.sessionID && props.sessionID !== sessionId) return` guard in
- * every mounted ChatPanel — each panel resyncs its own session. An inactive
+ * `useSseBus.ts`'s `resync` frame branch (formerly its `server.connected`
+ * branch) does exactly this: `scheduleRefetch()` (→ opencodeMessages re-fetch,
+ * debounced) + `refreshPermissions()` + `refreshQuestions()`, and re-derives
+ * `running` from the refetched transcript. It carries no session id, so every
+ * mounted ChatPanel resyncs its own session. An inactive
  * (unmounted-transcript) panel defers its refetch via the owed-flag path in
  * useTranscriptState and catches up on reactivation.
  *
@@ -480,12 +498,20 @@ let _resyncing = false;
  * looked frozen until Cmd+R. Reuse the existing server.connected branch
  * instead of growing new handler code in useSseBus.
  */
-function fireResync() {
+export function fireResync() {
   if (_resyncing) return;
   _resyncing = true;
   // Use setTimeout(0) so we don't fire synchronously inside onopen.
   setTimeout(() => {
     _resyncing = false;
+    // The renderer reads ONLY interpreted frames (OpenCode V2 slice A2), so the
+    // resync reaches panels as a client-synthesised `resync` stream frame (no
+    // session id — every open panel resyncs its own session). Not an opencode
+    // event and never sent by the box.
+    const resync: StreamEnvelope = { sub: "resync", sessionId: "", payload: {} };
+    for (const fn of listeners.stream) { try { fn(resync); } catch { /* listener error — ignore, see onmessage */ } }
+    // Kept for any external `onOpencodeEvent` subscriber (deprecated; the
+    // renderer has none) — same synthetic event as before.
     const set = listeners.opencode;
     const ev: OpencodeEvent = { type: "server.connected", properties: {} };
     for (const fn of set) { try { fn(ev); } catch { /* listener error — ignore, see onmessage */ } }
@@ -725,6 +751,29 @@ function on<T>(kind: Kind, cb: (p: T) => void): () => any {
 // None of these throw. If a future feature MUST use the real preload in http
 // mode (e.g. OS clipboard), reach it explicitly via window.__mantaPreload rather
 // than assuming window.api is the preload.
+
+// POST /api/upgrade/{retry,rollback}. Never rejects on a refusal or a network
+// error: the gate renders the outcome next to the button that was pressed, so
+// "the box said no" and "the box is restarting" both have to come back as text.
+async function upgradeAction(action: "retry" | "rollback"): Promise<UpgradeActionResult> {
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${serverBase()}/api/upgrade/${action}`,
+      { method: "POST", headers: authHeaders(clientToken()) },
+      15000,
+    );
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  if (res.status === 401) throw new AuthRequiredError();
+  let json: { ok?: boolean; error?: string } = {};
+  try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+  if (!res.ok || json.ok === false) {
+    return { ok: false, error: json.error || `HTTP ${res.status}` };
+  }
+  return { ok: true };
+}
 
 export const httpApi: Api = {
   // -- config --
@@ -1069,6 +1118,10 @@ export const httpApi: Api = {
     rpcOptional(IPC.opencodeOpenStream, undefined, sessionId),
   opencodeCloseStream: (sessionId) =>
     rpcOptional(IPC.opencodeCloseStream, undefined, sessionId),
+  // @deprecated (OpenCode V2 slice A2): no renderer code subscribes to raw
+  // opencode events any more — every live signal arrives as an interpreted
+  // `stream` frame (`onStreamEvent` below). Kept on the contract for external
+  // consumers; do not add new subscribers.
   onOpencodeEvent: (cb) => on<OpencodeEvent>("opencode", cb),
   // Box-side interpreted stream events (BET-551 / §17). The dispatchFrame
   // stream branch hands each listener a `{sub, sessionId, payload}` envelope
@@ -1444,6 +1497,39 @@ export const httpApi: Api = {
   // these while the update is in flight.
   onServerUpdateProgress: (cb) =>
     on<{ step: number; total: number; label: string }>("serverUpdateProgress", cb),
+
+  // -- box upgrade gate (OpenCode V2 cutover C4, contract K3) --
+  // GET /api/upgrade. 404 → null (a box that predates the API is never
+  // "upgrading"). Anything else non-OK, and any transport failure, REJECTS so
+  // the gate keeps polling through a manta-server restart instead of
+  // concluding "idle" from an error. A 5s bound keeps one hung request from
+  // starving the 1 Hz poll.
+  upgradeStatus: async (): Promise<UpgradeStatus | null> => {
+    const res = await fetchWithTimeout(
+      `${serverBase()}/api/upgrade`,
+      { method: "GET", headers: authHeaders(clientToken()) },
+      5000,
+    );
+    if (res.status === 401) throw new AuthRequiredError();
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const status = normalizeUpgradeStatus(await res.json());
+    if (!status) throw new Error("unrecognised upgrade status");
+    return status;
+  },
+  upgradeRetry: () => upgradeAction("retry"),
+  upgradeRollback: () => upgradeAction("rollback"),
+  // {kind:"upgrade", payload:<K3 object>} on every change. A payload that is not
+  // a K3 object is dropped here so a stray frame can never flip the gate.
+  onUpgrade: (cb) =>
+    on<unknown>("upgrade", (p) => {
+      const status = normalizeUpgradeStatus(p);
+      if (status) cb(status);
+    }),
+  onBoxUpgrading: (cb) => {
+    boxUpgradingListeners.add(cb);
+    return () => boxUpgradingListeners.delete(cb);
+  },
 
   // -- plugins (BET-189 / BET-190) --
   // Read the current plugin registry the Mac executor has published. The

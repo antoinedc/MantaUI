@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 // Value import — `isClientTooOld` is the pure semver compare that drives
@@ -878,6 +878,112 @@ export function isDrainAbortError(
   draining: boolean,
 ): boolean {
   return draining && errName === "MessageAbortedError";
+}
+
+// ===== Frame consumption helpers (OpenCode V2 slice A2) =====
+//
+// The desktop renderer no longer reads raw opencode events; every behaviour that
+// used to hang off one is driven by a box-interpreted `stream` frame. These are
+// the small pure pieces of that mapping, kept here so they are unit-tested.
+
+/**
+ * `stepEnded` frame -> the live `stepTokens` snapshot, or null when the frame
+ * carried no usage. The box reports all zeros for a `session.next.step.ended`
+ * that had none; the raw handler it replaces ignored such an event, so a
+ * zero snapshot must not overwrite the transcript-derived context size.
+ */
+export function stepTokensFromFrame(p: {
+  tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } };
+  cost?: number;
+}): { input: number; output: number; reasoning: number; cache: { read: number; write: number }; cost: number } | null {
+  const t = p?.tokens;
+  if (!t) return null;
+  const input = t.input ?? 0;
+  const output = t.output ?? 0;
+  const reasoning = t.reasoning ?? 0;
+  const read = t.cache?.read ?? 0;
+  const write = t.cache?.write ?? 0;
+  if (input + output + reasoning + read + write <= 0) return null;
+  return { input, output, reasoning, cache: { read, write }, cost: p.cost ?? 0 };
+}
+
+/**
+ * A `sessionError` frame -> the banner the panel shows.
+ *
+ * - `auth` is non-null when the failure is a credential problem on one of the
+ *   subscription providers (`authErrorAdvice`); the banner is then the single
+ *   reconnect nudge. It classifies against the RAW provider message
+ *   (`rawMessage`, which the box adds only when humanizing changed the text),
+ *   because its keyword match must not shift with the box's unwrapping (BET-1131).
+ * - Otherwise `message` is the typed prefix + the humanized sentence. `message`
+ *   on the frame is already humanized by the box.
+ */
+export function describeSessionError(
+  p: { name: string | null; message: string; rawMessage?: string },
+  providerID: string | null | undefined,
+): { message: string; auth: { providerID: string; label: string } | null } {
+  const name = p.name ?? undefined;
+  const auth = authErrorAdvice(name, p.rawMessage ?? p.message, providerID);
+  if (auth) return { message: `${auth.label} needs to be reconnected.`, auth };
+  const human = p.message;
+  let message: string;
+  switch (name) {
+    case "ContextOverflowError":
+      message = `Context full — try /compact: ${human}`;
+      break;
+    case "MessageOutputLengthError":
+      message = "Response truncated (hit output limit)";
+      break;
+    case "StructuredOutputError":
+      message = `Structured output failed: ${human}`;
+      break;
+    case "ApiError":
+      message = `API error: ${human}`;
+      break;
+    default:
+      message = human;
+  }
+  return { message, auth: null };
+}
+
+/**
+ * The sidebar's reading of the interpreted stream (App.tsx): per-session running
+ * dot, child → parent links and the question/permission attention badge. Pure
+ * apart from the injected store actions + timers, so it is unit-tested.
+ *
+ *   running {running}   → setChatRunning(sid, running)   (the hard signal)
+ *   sessionError/aborted→ setChatRunning(sid, false)
+ *   childSession        → setSessionParent(child, parent) (frame is published
+ *                         under the PARENT's session id)
+ *   attention {kind}    → setChatAttention(sid, kind) (the box never frames a
+ *                         trust-mode ask it auto-answers, so there is nothing
+ *                         to debounce client-side)
+ *
+ * `turnComplete` is deliberately ignored: the box derives it from the
+ * transcript, so it fires mid-turn at every tool-step boundary and would
+ * flicker the rail dot.
+ */
+export function createSidebarFrameHandler(store: {
+  setChatRunning: (sid: string, running: boolean) => void;
+  setChatAttention: (sid: string, kind: "question" | "permission" | null) => void;
+  setSessionParent: (child: string, parent: string) => void;
+}): (ev: StreamEnvelope) => void {
+  return (ev) => {
+    if (ev.sub === "childSession") {
+      const p = ev.payload as StreamChildSessionPayload;
+      if (p?.childSessionId && p.parentSessionId) store.setSessionParent(p.childSessionId, p.parentSessionId);
+      return;
+    }
+    const sid = ev.sessionId;
+    if (!sid) return;
+    if (ev.sub === "running") {
+      store.setChatRunning(sid, (ev.payload as StreamRunningPayload)?.running === true);
+    } else if (ev.sub === "sessionError" || ev.sub === "aborted") {
+      store.setChatRunning(sid, false);
+    } else if (ev.sub === "attention") {
+      store.setChatAttention(sid, (ev.payload as StreamAttentionPayload)?.kind ?? null);
+    }
+  };
 }
 
 // BET-640: server-rpc unsupported-channel predicate. manta-server throws

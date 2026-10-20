@@ -52,6 +52,21 @@ import { createSeenIdFilter } from "./seenIds.mjs";
 // configured to send (see `readCacheTtl` in createStreamInterpreter below).
 const TTL_DEFAULT = "5m";
 
+// Slice A (OpenCode V2 migration, phase 1) completed the frame vocabulary so a
+// client can stop reading raw `opencode` events altogether. The nine frames added
+// there — retry, stepEnded, toolBoundary, compaction, transcriptStale,
+// messageChanged, commandExecuted, childSession, attention — are documented
+// (payload shapes pinned) next to the `StreamEnvelope` type in
+// src/shared/types.ts and in
+// docs/superpowers/specs/2026-10-16-opencode-v2-phase1-frames-phase3-plugins.md.
+// Every one of them is derived through the same de-dup filter as the rest, so
+// the global + per-directory double delivery never doubles a frame.
+
+// At most one `messageChanged` frame per (session, message) per this window,
+// with the trailing edge guaranteed (a change that lands inside the window is
+// announced when the window closes, never dropped).
+export const MESSAGE_CHANGED_COALESCE_MS = 100;
+
 // Per-tool cap for the live tool-output tail (server half, BET-745). Once a
 // single tool has streamed this many characters to the device, further output
 // is dropped for that tool and a single "...truncated" marker is emitted so an
@@ -102,7 +117,43 @@ function newSessionState() {
     msgByMsgId: new Map(),     // messageID -> minimal message for turn detection
     userTurnCount: 0,
     contextEmitted: null,      // { totalInput, limit } of the last context emit
+    retryActive: false,        // a non-null `retry` frame is outstanding (cleared by busy/idle)
+    boundaryParts: new Set(),  // partIDs that already emitted a toolBoundary frame
+    attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
+    stepFinishParts: new Set(),   // partIDs of step-finish parts that already produced a stepEnded frame
+    stepsViaPart: new Map(),      // messageID -> number of steps announced from step-finish parts
+    stepsViaEvent: new Map(),     // messageID -> number of steps announced from session.next.step.ended
   };
+}
+
+const finiteNumber = (x) => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+
+// Normalise a usage object (a step-finish part's `tokens`, or a step.ended
+// event's `tokens`/`usage`) into the `stepEnded` payload shape. All zeros when
+// the source carried no usage.
+function stepTokensPayload(u) {
+  const t = u && typeof u === "object" ? u : {};
+  return {
+    input: finiteNumber(t.input),
+    output: finiteNumber(t.output),
+    reasoning: finiteNumber(t.reasoning),
+    cache: { read: finiteNumber(t.cache?.read), write: finiteNumber(t.cache?.write) },
+  };
+}
+
+// Bound the per-message step counters (a long-lived session accumulates one
+// entry per assistant message). Oldest-first eviction; an evicted message only
+// risks a duplicate `stepEnded` if a late event for it arrives, which is benign.
+const STEP_COUNTER_CAP = 512;
+function boundStepCounters(st) {
+  for (const m of [st.stepsViaPart, st.stepsViaEvent]) {
+    if (m.size <= STEP_COUNTER_CAP) continue;
+    let drop = m.size - STEP_COUNTER_CAP / 2;
+    for (const k of m.keys()) {
+      if (drop-- <= 0) break;
+      m.delete(k);
+    }
+  }
 }
 
 // design: live tool-output frames (server half, BET-745).
@@ -248,8 +299,19 @@ export function createStreamInterpreter({
   // this — the SAME value the desktop SessionHeader pill reads — so the two
   // pills agree on a 1h box instead of the device always assuming 5m.
   readCacheTtl = async () => null,
+  // Timer seam for the `messageChanged` trailing edge (the interpreter is
+  // otherwise purely event-driven). Production uses real, unref'd timers; tests
+  // inject a fake queue driven by the same fake clock as `now`.
+  setTimer = (fn, ms) => {
+    const h = setTimeout(fn, ms);
+    h.unref?.();
+    return h;
+  },
+  clearTimer = (h) => clearTimeout(h),
 }) {
   const sessions = new Map();
+  // `messageChanged` coalescing state, keyed by session + message.
+  const changed = new Map(); // key -> { sid, messageID, lastAt, timer }
   // The same opencode event is delivered on BOTH the global stream and the
   // per-directory scoped one, so interpret() is called twice for it. Un-deduped
   // that doubles every derived event — and because flushed text is APPENDED by
@@ -276,6 +338,79 @@ export function createStreamInterpreter({
   }
   function emit(sid, sub, payload) {
     publish({ kind: "stream", sub, sessionId: sid, payload });
+  }
+
+  // messageChanged: "the canonical copy of this message changed — refetch it".
+  // Leading edge fires immediately; anything landing inside the next 100 ms is
+  // folded into ONE trailing frame fired when the window closes, so the last
+  // change is always announced and a 30 ms tool-output stream costs ~10 frames/s
+  // instead of ~30.
+  function noteMessageChanged(sid, messageID) {
+    if (typeof messageID !== "string" || messageID.length === 0) return;
+    const key = `${sid}\u0000${messageID}`;
+    let e = changed.get(key);
+    if (!e) {
+      e = { sid, messageID, lastAt: -Infinity, timer: null };
+      changed.set(key, e);
+    }
+    if (e.timer != null) return; // the pending trailing frame will carry it
+    const t = now();
+    const wait = e.lastAt + MESSAGE_CHANGED_COALESCE_MS - t;
+    if (wait <= 0) {
+      e.lastAt = t;
+      emit(sid, "messageChanged", { messageID });
+      pruneChanged();
+      return;
+    }
+    e.timer = setTimer(() => {
+      e.timer = null;
+      e.lastAt = now();
+      emit(sid, "messageChanged", { messageID });
+      pruneChanged();
+    }, wait);
+  }
+  // Bound the map: an entry with no pending timer and an expired window carries
+  // no information (the next change would fire on the leading edge anyway).
+  function pruneChanged() {
+    if (changed.size <= 256) return;
+    const t = now();
+    for (const [k, e] of changed) {
+      if (e.timer == null && t - e.lastAt >= MESSAGE_CHANGED_COALESCE_MS) changed.delete(k);
+    }
+  }
+  // Fire every pending trailing frame now (shutdown / end of a replay).
+  function flushPending() {
+    for (const e of changed.values()) {
+      if (e.timer == null) continue;
+      clearTimer(e.timer);
+      e.timer = null;
+      e.lastAt = now();
+      emit(e.sid, "messageChanged", { messageID: e.messageID });
+    }
+  }
+  function dispose() {
+    for (const e of changed.values()) {
+      if (e.timer != null) clearTimer(e.timer);
+      e.timer = null;
+    }
+    changed.clear();
+  }
+
+  // The one "the turn is blocked on the user" badge: a pending question wins
+  // over a pending permission (same precedence as peers.mjs), null when neither
+  // is pending. Emitted on change only.
+  function emitAttention(sid, st) {
+    const kind = st.questions.length > 0 ? "question" : st.permissions.length > 0 ? "permission" : null;
+    if (kind === st.attention) return;
+    st.attention = kind;
+    emit(sid, "attention", { kind });
+  }
+
+  // Clear an outstanding retry banner (busy / idle / session.idle).
+  function clearRetry(sid, st) {
+    if (!st.retryActive) return;
+    st.retryActive = false;
+    emit(sid, "retry", null);
   }
 
   // Recompute the cached-prefix size from a usage payload and publish the
@@ -319,7 +454,9 @@ export function createStreamInterpreter({
 
   function interpret(evt) {
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
-    const sid = evt.properties?.sessionID;
+    // opencode stamps `properties.sessionID` on every session-scoped event; the
+    // info/part fallbacks cover the message.* family on a build that nests it.
+    const sid = evt.properties?.sessionID ?? evt.properties?.info?.sessionID ?? evt.properties?.part?.sessionID;
     if (typeof sid !== "string" || sid.length === 0) return; // no session to interpret for
     if (seenEventIds.seen(evt.id)) return;
 
@@ -378,6 +515,10 @@ export function createStreamInterpreter({
         // subagent (task tool) + finalize part snapshot
         const part = evt.properties?.part;
         const partID = part?.id;
+        // messageID lives on the PART for this event (properties.messageID is
+        // undefined) — resolving only the top-level path is the "debounce
+        // starvation" bug (AGENTS.md).
+        noteMessageChanged(sid, evt.properties?.messageID ?? part?.messageID ?? evt.properties?.info?.id);
         // Record the part's type BEFORE the flush-and-finalize block below, so
         // a reasoning part that finalizes is withheld correctly (BET-1209).
         // opencode creates the part via `message.part.updated` (type known)
@@ -420,6 +561,49 @@ export function createStreamInterpreter({
         // tool part, so it gets a toolStarted/…/toolEnded pair too — harmless
         // alongside the richer `subagent` frame.
         if (part?.type === "tool") updateToolFrames(st, sid, part, emit);
+        // Step boundary: a tool part reaching a terminal status. This is the
+        // trigger the queued-prompt drain keys on (the build emits no
+        // session.next.step.ended). Once per part.
+        if (
+          part?.type === "tool" &&
+          typeof partID === "string" && partID.length > 0 &&
+          (part.state?.status === "completed" || part.state?.status === "error") &&
+          !st.boundaryParts.has(partID)
+        ) {
+          st.boundaryParts.add(partID);
+          emit(sid, "toolBoundary", {
+            messageID: String(part.messageID ?? evt.properties?.messageID ?? ""),
+            partID,
+            callID: typeof part.callID === "string" && part.callID.length > 0 ? part.callID : partID,
+            tool: String(part.tool ?? ""),
+            status: part.state.status,
+          });
+        }
+        // stepEnded from the step-finish PART. The deployed V1 build never emits
+        // `session.next.step.ended`, but every step it runs ends with a
+        // `step-finish` part carrying the same usage/cost/reason — derive the
+        // frame from that (once per part id). A build that emits BOTH is
+        // reconciled per message: steps are counted from each source and a step
+        // already announced by the other source is not announced again.
+        if (
+          part?.type === "step-finish" &&
+          typeof partID === "string" && partID.length > 0 &&
+          !st.stepFinishParts.has(partID)
+        ) {
+          st.stepFinishParts.add(partID);
+          const mid = String(part.messageID ?? evt.properties?.messageID ?? "");
+          const nth = (st.stepsViaPart.get(mid) ?? 0) + 1;
+          st.stepsViaPart.set(mid, nth);
+          boundStepCounters(st);
+          if ((st.stepsViaEvent.get(mid) ?? 0) < nth) {
+            emit(sid, "stepEnded", {
+              messageID: mid,
+              tokens: stepTokensPayload(part.tokens),
+              ...(typeof part.cost === "number" && Number.isFinite(part.cost) ? { cost: part.cost } : {}),
+              ...(typeof part.reason === "string" && part.reason.length > 0 ? { finish: part.reason } : {}),
+            });
+          }
+        }
         // Plan-mode mirror (BET-977). Plan mode is NOT server state — opencode
         // switches its agent locally on plan_enter/plan_exit, so the box must
         // relay the fact for the phone's Plan chip to stay honest. Only a
@@ -445,6 +629,18 @@ export function createStreamInterpreter({
         return;
       }
       case "session.created": {
+        // A child (subagent) session announces itself. On the wire
+        // `properties.sessionID` is the NEW session's own id and the parent is
+        // `info.parentID`, so the frame is published under the PARENT's id —
+        // the session a viewer is looking at.
+        const childId = evt.properties?.info?.id;
+        const parentId = evt.properties?.info?.parentID;
+        if (
+          typeof childId === "string" && childId.length > 0 &&
+          typeof parentId === "string" && parentId.length > 0
+        ) {
+          emit(parentId, "childSession", { childSessionId: childId, parentSessionId: parentId });
+        }
         if (registerChildSessionFromCreated(evt, sid, st.childSessionIds)) {
           emit(sid, "subagent.child", {
             childSessionId: evt.properties?.info?.id,
@@ -461,6 +657,7 @@ export function createStreamInterpreter({
         // and `cache` here instead. Deduped per session so the many `updated`
         // events in a turn do not spam the stream.
         const msgInfo = evt.properties?.info ?? evt.properties?.message;
+        noteMessageChanged(sid, evt.properties?.messageID ?? evt.properties?.part?.messageID ?? msgInfo?.id);
         if (msgInfo?.role === "assistant" && msgInfo?.tokens) {
           const tokens = msgInfo.tokens;
           const totalInput =
@@ -525,6 +722,30 @@ export function createStreamInterpreter({
         // so it must report the same value the renderer's raw handler does.
         setRunning(st, type === "busy" || type === "working" || type === "retry");
         st.runningType = type ?? null;
+        if (type === "retry") {
+          // Provider is being retried (rate limit, overload, seat limit). Carry
+          // everything the banner renders; the matching `null` follows on busy/idle.
+          const status = evt.properties?.status ?? {};
+          const action = status.action;
+          st.retryActive = true;
+          emit(sid, "retry", {
+            attempt: typeof status.attempt === "number" ? status.attempt : 0,
+            message: typeof status.message === "string" ? status.message : "",
+            ...(typeof status.next === "number" ? { next: status.next } : {}),
+            ...(action && typeof action === "object"
+              ? {
+                  action: {
+                    title: String(action.title ?? ""),
+                    message: String(action.message ?? ""),
+                    label: String(action.label ?? ""),
+                    ...(action.link != null ? { link: String(action.link) } : {}),
+                  },
+                }
+              : {}),
+          });
+        } else {
+          clearRetry(sid, st);
+        }
         // `type` is ADDITIVE, not the indicator: `running` stays the single
         // source of truth for the running boolean, while `type` carries the
         // raw "busy" | "working" | "retry" (or null) so a thin client (iOS)
@@ -534,6 +755,7 @@ export function createStreamInterpreter({
         return;
       }
       case "session.idle": {
+        clearRetry(sid, st);
         emitTurnComplete(sid, st, true);
         return;
       }
@@ -542,17 +764,30 @@ export function createStreamInterpreter({
         // desktop's queued-drain abort) — NOT a failure. Same name-check the
         // push pump uses (src/server/push.mjs, classifyPushEvent session.error
         // branch): the abort carries no other marker, the name is the only
-        // signal. Do NOT emit it.
+        // signal. It is never a `sessionError` frame; it gets its own `aborted`
+        // frame below.
         const err = evt.properties?.error;
         const name = typeof err?.name === "string" ? err.name : null;
-        if (name === "MessageAbortedError") return;
+        if (name === "MessageAbortedError") {
+          // Not an error frame (iOS must show no banner for an abort), but the
+          // desktop needs to know it happened: a user Stop shows its "Aborted"
+          // banner, while its own queued-drain abort stays invisible. `aborted`
+          // carries no payload — the frame IS the signal. Same de-dup as every
+          // frame (the id filter above).
+          emit(sid, "aborted", {});
+          return;
+        }
         const message =
           typeof err?.data?.message === "string" ? err.data.message :
           typeof err?.message === "string" ? err.message : "The turn failed.";
         // Unwrap a provider rejection body down to the human sentence so the
         // native iOS transcript notice shows the same clean text desktop does
         // (BET-1131). Lossless — unrecognised messages pass through unchanged.
-        emit(sid, "sessionError", { name, message: humanizeProviderError(message) });
+        // `rawMessage` (additive, only when unwrapping changed the text) lets the
+        // desktop keep classifying credential failures against the original
+        // provider body, exactly as it did when it read the raw event.
+        const human = humanizeProviderError(message);
+        emit(sid, "sessionError", { name, message: human, ...(human !== message ? { rawMessage: message } : {}) });
         emitTurnComplete(sid, st, true);
         return;
       }
@@ -560,6 +795,22 @@ export function createStreamInterpreter({
         // truncation classification + context arithmetic
         const props = evt.properties ?? {};
         const finish = typeof props.finish === "string" ? props.finish : null;
+        {
+          const mid = String(props.messageID ?? props.info?.id ?? "");
+          const nth = (st.stepsViaEvent.get(mid) ?? 0) + 1;
+          st.stepsViaEvent.set(mid, nth);
+          boundStepCounters(st);
+          // Already announced by this step's step-finish part → don't double it.
+          if ((st.stepsViaPart.get(mid) ?? 0) < nth) {
+            emit(sid, "stepEnded", {
+              messageID: mid,
+              // All zeros when the event carried no usage.
+              tokens: stepTokensPayload(props.tokens ?? props.usage),
+              ...(typeof props.cost === "number" ? { cost: props.cost } : {}),
+              ...(finish != null ? { finish } : {}),
+            });
+          }
+        }
         const kind = classifyFinish(finish, { lastPartIsToolUse: props.lastPartIsToolUse });
         if (kind) {
           // The renderer renders truncation per-message (finishByMessageId),
@@ -597,6 +848,8 @@ export function createStreamInterpreter({
       case "question.replied":
       case "question.rejected": {
         st.questions = applyQuestionEvent(st.questions, evt.type, evt.properties, sid);
+        // attention first: the `questions` frame stays the LAST one for the event.
+        emitAttention(sid, st);
         emit(sid, "questions", { questions: st.questions });
         return;
       }
@@ -612,7 +865,43 @@ export function createStreamInterpreter({
       case "permission.replied":
       case "permission.rejected": {
         st.permissions = applyPermissionEvent(st.permissions, evt.type, evt.properties, sid);
+        emitAttention(sid, st);
         emit(sid, "permissions", { permissions: st.permissions });
+        return;
+      }
+      case "message.part.removed":
+      case "message.removed": {
+        noteMessageChanged(sid, evt.properties?.messageID ?? evt.properties?.part?.messageID ?? evt.properties?.info?.id);
+        return;
+      }
+      case "session.next.compaction.started": {
+        const p = evt.properties ?? {};
+        emit(sid, "compaction", {
+          phase: "started",
+          text: String(p.text ?? ""),
+          ...(p.reason != null ? { reason: String(p.reason) } : {}),
+        });
+        return;
+      }
+      case "session.next.compaction.delta": {
+        emit(sid, "compaction", { phase: "delta", text: String(evt.properties?.delta ?? "") });
+        return;
+      }
+      case "session.next.compaction.ended": {
+        emit(sid, "compaction", { phase: "ended" });
+        return;
+      }
+      case "session.compacted": {
+        emit(sid, "transcriptStale", {});
+        return;
+      }
+      case "command.executed": {
+        const p = evt.properties ?? {};
+        emit(sid, "commandExecuted", {
+          messageID: String(p.messageID ?? ""),
+          name: String(p.name ?? ""),
+          arguments: String(p.arguments ?? ""),
+        });
         return;
       }
       default:
@@ -622,6 +911,8 @@ export function createStreamInterpreter({
 
   return {
     interpret,
+    flushPending,
+    dispose,
     getState: (sid) => sessions.get(sid),
     // Replay current edge-only state for the bus's connect-time snapshot
     // (BET-913 + BET-916 + BET-922). These frames are emitted only on an EDGE —
@@ -654,6 +945,12 @@ export function createStreamInterpreter({
       }
       const out = [{ kind: "runningSet", payload: { sessions: running } }];
       for (const [sid, st] of sessions) {
+        // Same precedence as the live `attention` frame (question over
+        // permission) so a reconnecting sidebar shows the badge.
+        const attention = st.questions.length > 0 ? "question" : st.permissions.length > 0 ? "permission" : null;
+        if (attention) {
+          out.push({ kind: "stream", sub: "attention", sessionId: sid, payload: { kind: attention } });
+        }
         if (st.questions.length > 0) {
           out.push({
             kind: "stream",

@@ -91,6 +91,7 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
@@ -3194,6 +3195,15 @@ try {
 // serverUpdateAvailable banner. Dedup state is held in the forwarder closure.
 const forwardOpencodeUpdate = createOpencodeUpdateForwarder();
 
+// Trust-mode asks already being auto-answered (see permissionAskPump.mjs).
+const autoAnsweredAsks = createAutoAnswerLedger();
+function interpretEvent(evt) {
+  try {
+    streamInterp.interpret(evt);
+  } catch (e) {
+    console.warn("[stream-interp] interpret failed:", e?.message ?? e);
+  }
+}
 // eslint-disable-next-line no-unused-vars
 const stopOpencodePump = oc.subscribeEvents((evt) => {
   // Map opencode's own installation.update-available onto the EXISTING
@@ -3233,11 +3243,10 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   // Box-side stream interpretation (BET-551 / §17): derive interpreted events
   // from the raw opencode stream and publish them on the SAME bus (no second
   // stream/endpoint). Consumers (S1b) demux by `kind:"stream"`.
-  try {
-    streamInterp.interpret(evt);
-  } catch (e) {
-    console.warn("[stream-interp] interpret failed:", e?.message ?? e);
-  }
+  // `permission.asked` is the one exception: it is interpreted inside the
+  // trust-mode branch below, only when the user actually has to act on it (see
+  // permissionAskPump.mjs). Every other event is interpreted here, as before.
+  if (!(evt && evt.type === "permission.asked")) interpretEvent(evt);
   // Track per-session busy state for the defer-until-idle queue shared by all
   // prompt senders (schedule, capability, peer, webhook). Cheap, runs for
   // every event; never throws into the pump.
@@ -3308,42 +3317,16 @@ const stopOpencodePump = oc.subscribeEvents((evt) => {
   // Auto-recover expired Claude credentials (server-side; works with no client attached).
   oc.maybeRecoverCredentials(evt).catch(() => {});
   if (evt && evt.type === "permission.asked") {
-    (async () => {
-      try {
-        const cfg = await local.configGet();
-        if (cfg.chatAutoAllow) {
-          const permId = evt.properties?.id;
-          // Scope the reply to the permission's session directory. Without
-          // this the unscoped reply 404s (PermissionNotFoundError) — the
-          // exact failure seen in the manta-server logs — so trust-mode
-          // auto-allow never actually allowed the tool and the turn hung.
-          const permSessionId = evt.properties?.sessionID;
-          if (permId) {
-            try {
-              await oc.replyPermission({
-                requestId: permId,
-                reply: "always",
-                sessionId: permSessionId,
-              });
-            } catch (e) {
-              console.warn("[opencode-pump] auto-allow failed:", e?.message ?? e);
-              // Fall back: forward the event so the user can approve manually.
-              bus.publish({ kind: "opencode", payload: evt });
-            }
-            // Suppress: don't publish when auto-allow succeeded (mirrors desktop continue).
-            // No push either — there's nothing for the user to act on.
-            return;
-          }
-        }
-      } catch (e) {
-        console.warn("[opencode-pump] trust-mode config read failed:", e?.message ?? e);
-        // Fall back: forward the event so the user can approve manually.
-      }
-      // chatAutoAllow is false, or permId was missing, or configGet threw — publish normally.
-      bus.publish({ kind: "opencode", payload: evt });
-      // The user must approve manually → notify (best-effort, never throws).
-      push.firePush(evt);
-    })().catch((e) => {
+    handlePermissionAsk({
+      evt,
+      getConfig: () => local.configGet(),
+      reply: (a) => oc.replyPermission(a),
+      interpret: interpretEvent,
+      publish: (e) => bus.publish({ kind: "opencode", payload: e }),
+      push: (e) => push.firePush(e),
+      ledger: autoAnsweredAsks,
+      warn: (...a) => console.warn(...a),
+    }).catch((e) => {
       console.warn("[opencode-pump] unexpected error:", e?.message ?? e);
     });
     return;

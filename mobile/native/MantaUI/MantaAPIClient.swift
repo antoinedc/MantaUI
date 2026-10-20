@@ -800,6 +800,31 @@ final class MantaAPIClient: Sendable {
         _ = try await session.data(for: request)
     }
 
+    /// `GET /api/upgrade` (contract K3) — the box's upgrade status, or nil when
+    /// the box predates the API (404): an old box is never "upgrading". Throws on
+    /// a transport failure so a caller polling through a manta-server restart
+    /// keeps its last answer instead of concluding "idle" from an error.
+    func upgradeStatus() async throws -> UpgradeStatus? {
+        var request = URLRequest(url: serverURL.appendingPathComponent("api").appendingPathComponent("upgrade"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 { throw MantaError.authRequired }
+            if http.statusCode == 404 { return nil }
+            if http.statusCode >= 400 {
+                throw MantaError.server("upgrade status failed (\(http.statusCode))")
+            }
+        }
+        guard let status = UpgradeStatus.parse(data) else {
+            throw MantaError.transport("unrecognised upgrade status")
+        }
+        return status
+    }
+
     // MARK: - Transport + envelope
 
     static func makeRequest(serverURL: URL, channel: String, args: [Any], token: String?) throws -> URLRequest {
@@ -881,6 +906,14 @@ final class MantaAPIClient: Sendable {
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, http.statusCode == 401 {
             throw MantaError.authRequired
+        }
+        // K3: a box in upgrade mode answers every data route `503 {upgrade:true}`.
+        // Tell the upgrade screen so the user lands on "Your box is upgrading"
+        // instead of an app full of unexplained errors. The call still returns
+        // its body as before (the caller surfaces `error: "box upgrading"`).
+        if let http = response as? HTTPURLResponse,
+           UpgradeStatus.isUpgradeRefusal(statusCode: http.statusCode, body: data) {
+            NotificationCenter.default.post(name: .mantaBoxUpgrading, object: nil)
         }
         return data
     }
