@@ -87,3 +87,13 @@ paths = [
   # (CERTIFICATE_PRIVATE_KEY / ASC_API_KEY_P8_B64) and is never in this repo.
   '''codemagic\.yaml''',
 ]
+
+# --- curl-auth-user on `curl -u "opencode:$(cat ~/.manta/opencode-password)"`
+# (AGENTS.md, OpenCode V2 section, commit 12b08a68). The "password" is a shell
+# command substitution that reads the box's local password file at run time —
+# no secret is in the repo. Allowlisted by that exact pattern, NOT by path, so
+# a real credential anywhere in AGENTS.md still fails. Audited 2026-10-20.
+regexTarget = "match"
+regexes = [
+  '''\$\(cat ~/\.manta/opencode-password\)''',
+]
