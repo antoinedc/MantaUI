@@ -51,8 +51,13 @@
 //          shared cache) that does and is under 70 — reason "reset-soon". Never
 //          to another org, never back to a seat left within 5 h; once on a seat
 //          that resets soon it stays (its own reset is soon too).
+//        • a reset-soon move does NOT block the seat it left (the 5 h block is for
+//          pressure moves): an optional move must not shrink a later forced move's
+//          escape options. It cannot ping-pong — it only goes toward a seat that
+//          resets within the hour, and such a seat never reset-soon-moves away.
 //      Every automatic move is recorded {movedFrom, movedAt, reason, trigger,
-//      crossOrg} and announced (`onMoved`).
+//      crossOrg} and passed to `onMoved` (index.mjs announces it in the chat —
+//      except a reset-soon move, a routine optimisation that stays silent there).
 //   MANUAL MODE (phase 3): every conversation uses the active seat. The stored
 //      assignment is still kept up to date (so `sessionAssignment` answers what
 //      the NEXT request will use) and a switch is recorded as a move with reason
@@ -642,10 +647,11 @@ export function createSeatAssigner({
     } else if (decision.reason === "moved") {
       // Remember where it came from (the move notice shows it) and every seat it
       // left in the last 5 h (so it cannot bounce back).
+      const why = decision.why ?? "exhausted";
       const left = {};
       for (const [seatId, at] of Object.entries(existing.left ?? {})) if (t - at < MOVE_BACK_BLOCK_MS) left[seatId] = at;
-      left[decision.from] = t;
-      const why = decision.why ?? "exhausted";
+      // An optional reset-soon move leaves no block behind (rule 4).
+      if (why !== "reset-soon") left[decision.from] = t;
       const rec = {
         seatId: decision.seatId,
         assignedAt: t,

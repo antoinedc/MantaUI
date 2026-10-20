@@ -695,6 +695,7 @@ test("the service records an automatic move with its trigger, publishes the even
   assert.equal(rec.crossOrg, false);
   assert.equal(rec.crossOrgMovedAt, undefined);
   assert.equal(typeof rec.movedAt, "number");
+  assert.deepEqual(Object.keys(rec.left), ["seat-1"], "a pressure move blocks the seat it left");
   assert.deepEqual(events, [{ sessionId: "c", provider: "claude", from: "seat-1", to: "seat-2", fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false }]);
   // seat-2 climbs to 95 while seat-1 recovers to 60 — seat-1 was left an hour ago: stays
   a.tick(HOUR);
@@ -1000,7 +1001,32 @@ test("the service: a sub-agent on another model decides with its own model but n
     assert.equal(saved.providers.claude.conv.reason, "reset-soon");
     assert.equal(moved.length, 1);
     assert.equal(moved[0].reason, "reset-soon");
+    assert.equal(saved.providers.claude.conv.movedFrom, "seat-1");
+    assert.ok(!("seat-1" in (saved.providers.claude.conv.left ?? {})), "a reset-soon move does not block the seat it left");
     t += 10 * MIN;
     assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2", "on a seat that resets soon it stays");
+  });
+
+  test("rule 4, the service: a reset-soon move keeps the unexpired left entries it already had, and adds none", async () => {
+    const states = { mode: "auto", activeSeatId: "seat-1", seats: [org(1, { live: true }), org(2, { live: true }), org(3, { live: true })] };
+    const snaps = [at(1, 5, 4 * HOUR), at(2, 50, 30 * MIN), at(3, 99)];
+    let saved = {
+      providers: { claude: { conv: { seatId: "seat-1", assignedAt: NOW - HOUR, lastUsedAt: NOW - HOUR, left: { "seat-3": NOW - HOUR, "seat-9": NOW - 6 * HOUR } } }, codex: {} },
+      children: {},
+    };
+    const svc = createSeatAssigner({
+      accounts: { seatStates: async () => structuredClone(states) },
+      listSeatSnapshots: () => snaps,
+      refreshSeatCredentials: async () => ({}),
+      load: () => saved,
+      save: async (d) => (saved = structuredClone(d)),
+      now: () => NOW,
+      notePluginSeen: () => {},
+      log: quiet,
+    });
+    assert.equal((await svc.resolve("claude", "conv")).seatId, "seat-2");
+    const rec = saved.providers.claude.conv;
+    assert.equal(rec.reason, "reset-soon");
+    assert.deepEqual(rec.left, { "seat-3": NOW - HOUR }, "the unexpired entry survives, the expired one is dropped, seat-1 is not added");
   });
 }

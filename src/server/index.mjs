@@ -688,7 +688,8 @@ const seatAssigner = createSeatAssigner({
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
   onMoved: (evt) => {
-    accountsEvents.moved(evt);
+    // A reset-soon move is routine optimisation (the cache is shared within an org, so it costs nothing) — no in-chat notice.
+    if (evt.reason !== "reset-soon") accountsEvents.moved(evt);
     // Phase 4: every automatic move is also a line in the activity log — the
     // same trust surface the optimizer uses ("Moved a conversation from …").
     // `optimizerActivity` is declared further down; this runs long after startup.
