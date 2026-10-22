@@ -716,6 +716,59 @@ export async function setReferences(ops, deps = {}) {
   return r.ok ? { ok: true } : r;
 }
 
+// Ids that become object keys in the PATCH body. Same alphabet opencode's own
+// ids use; the `__proto__`-style names are refused on top of the regex because
+// they are legal characters but never a real provider/model.
+const COST_ID_RE = /^[A-Za-z0-9._:/@-]{1,200}$/;
+const COST_ID_FORBIDDEN = new Set(["__proto__", "constructor", "prototype"]);
+
+function isCostRate(v) {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
+/**
+ * Declare a model's list price in opencode's own config (sticky-trims C6):
+ * `provider.<providerID>.models.<modelID>.cost = { input, output, cache_read?,
+ * cache_write? }` in $/Mtok. Used for models with no published price so the
+ * optimizer's trim gate has a number to work with.
+ *
+ * Writes through the existing `patchGlobalConfig` ONLY, and the patch body is
+ * EXACTLY `{ provider: { [providerID]: { models: { [modelID]: { cost } } } } }`
+ * — opencode deep-merges it, so a built-in provider's other models and options
+ * are untouched. It deliberately never goes through `upsertProviderBlock`,
+ * which REBUILDS a provider block and would clobber a built-in provider.
+ *
+ * `input` and `output` are REQUIRED (opencode's config schema requires both);
+ * the cache fields are optional. Everything is validated before any write.
+ *
+ * Returns `{ ok:true }` or `{ ok:false, error }` — never throws. `patch` is
+ * injectable for unit tests.
+ */
+export async function setModelCost(input, deps = {}) {
+  const patch = deps.patch ?? patchGlobalConfig;
+  const { providerID, modelID, cost } = input ?? {};
+  for (const [label, id] of [["providerID", providerID], ["modelID", modelID]]) {
+    if (typeof id !== "string" || !COST_ID_RE.test(id) || COST_ID_FORBIDDEN.has(id)) {
+      return { ok: false, error: `invalid ${label}` };
+    }
+  }
+  if (cost === null || typeof cost !== "object" || Array.isArray(cost)) {
+    return { ok: false, error: "cost must be an object" };
+  }
+  const out = {};
+  for (const k of ["input", "output"]) {
+    if (!isCostRate(cost[k])) return { ok: false, error: `cost.${k} is required (a number ≥ 0, $/Mtok)` };
+    out[k] = cost[k];
+  }
+  for (const k of ["cache_read", "cache_write"]) {
+    if (cost[k] === undefined || cost[k] === null) continue;
+    if (!isCostRate(cost[k])) return { ok: false, error: `cost.${k} must be a number ≥ 0 ($/Mtok)` };
+    out[k] = cost[k];
+  }
+  const res = await patch({ provider: { [providerID]: { models: { [modelID]: { cost: out } } } } });
+  return res.ok ? { ok: true } : { ok: false, error: res.error ?? "opencode config update failed" };
+}
+
 /**
  * Reconcile the full model list against opencode.jsonc's configured agent
  * blocks + the caller-supplied deactivated set (BET-123 "auto-register every

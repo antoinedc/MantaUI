@@ -1432,7 +1432,26 @@ async function getJsonSoft(path) {
  *
  * @returns {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string> }>}
  */
-export async function getProviders() {
+export function getProviders() {
+  // Single-flight: concurrent callers share ONE in-flight read. The catalogue behind it (every
+  // provider's models) is large and opencode answers these one at a time, so N parallel callers
+  // used to queue for N × the build time. Opening Settings → Models fires ~6 of them at once
+  // (models list, config:get's cache-TTL reconcile, the identify card, the app-wide catalog),
+  // pushing config:get past the renderer's 15 s fail-fast timeout — the "model list times out"
+  // bug. Concurrent callers share the request already in flight (which may have started slightly
+  // before them); any call after it settles starts a new request — nothing is cached. Callers
+  // share the returned object and must treat it as read-only.
+  if (providersInFlight) return providersInFlight;
+  providersInFlight = fetchProviders().finally(() => {
+    providersInFlight = null;
+  });
+  return providersInFlight;
+}
+
+/** @type {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string> }>|null} */
+let providersInFlight = null;
+
+async function fetchProviders() {
   try {
     const [prov, integ, models, def] = await Promise.all([
       getJsonSoft("/api/provider"),

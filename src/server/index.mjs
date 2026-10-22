@@ -21,9 +21,10 @@ import { pipeline } from "node:stream/promises";
 import { uploadRoot, statePath } from "../shared/paths.mjs";
 import { synthesizeSpeech } from "../shared/groq.mjs";
 import { WebSocketServer } from "ws";
-import { createCounterfactualStore, validateCounterfactualReport } from "./optimizer/counterfactual.mjs";
+import { createCounterfactualStore, validateCounterfactualReport, isLegacyReport } from "./optimizer/counterfactual.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createOptimizerSeries } from "./optimizer/series.mjs";
+import { createOptimizerPrices, PRICES_PATH } from "./optimizer/prices.mjs";
 import { createActivityLog } from "./optimizer/activityLog.mjs";
 import { createPacingState } from "./optimizer/pacing.mjs";
 import {
@@ -682,7 +683,8 @@ const seatAssigner = createSeatAssigner({
   listSeatSnapshots,
   onChange: (provider) => accountsEvents.updated(provider),
   onMoved: (evt) => {
-    accountsEvents.moved(evt);
+    // A reset-soon move is routine optimisation (the cache is shared within an org, so it costs nothing) — no in-chat notice.
+    if (evt.reason !== "reset-soon") accountsEvents.moved(evt);
     // Phase 4: every automatic move is also a line in the activity log — the
     // same trust surface the optimizer uses ("Moved a conversation from …").
     // `optimizerActivity` is declared further down; this runs long after startup.
@@ -1541,30 +1543,17 @@ const optimizerSummary = createOptimizerSummary({
 const optimizerSeries = createOptimizerSeries({
   getDb,
   counterfactualStore: optimizerCounterfactual,
-  // BET-1370: the per-model cost reader that prices the window's savings. Built
-  // from oc.getProviders — each model already carries a normalised camelCase
-  // `cost` ({ input, output, cacheRead, cacheWrite } in $/Mtok) — keyed
-  // `"<providerID>/<modelID>"`, EXACTLY the key the counterfactual store's
-  // byModel split uses. Never throws: an unreadable provider list just means no
-  // window is priceable (the card renders "not priced").
-  modelRates: async () => {
-    try {
-      const { all } = await oc.getProviders();
-      const out = {};
-      for (const p of Array.isArray(all) ? all : []) {
-        if (!p || typeof p.id !== "string") continue;
-        const pModels = p.models && typeof p.models === "object" ? p.models : {};
-        for (const modelId of Object.keys(pModels)) {
-          const m = oc._normalizeProviderModel(p.id, modelId, pModels[modelId]);
-          if (!m || typeof m.id !== "string") continue;
-          out[`${p.id}/${m.id}`] = m.cost;
-        }
-      }
-      return out;
-    } catch {
-      return {};
-    }
-  },
+});
+
+// Sticky-trims C1: the memoized per-model price reader (~60s). ONE instance
+// shared by the GET /api/optimizer/prices route (plugin), the RPC
+// `optimizer:prices` channel (Settings) and `opencode:set-model-cost`'s
+// invalidation. Resolution: opencode.jsonc `cost` → Manta's own price cache
+// (written by modelCatalog.mjs) → unpriced; see optimizer/prices.mjs.
+const optimizerPrices = createOptimizerPrices({
+  listProviders: oc.getProviders,
+  readConfig: readOpencodeConfig,
+  loadCatalog: () => readJsonSync(PRICES_PATH, null),
 });
 
 // ---------------------------------------------------------------------------
@@ -1932,6 +1921,8 @@ rpcHandlers = buildHandlers({
   // BET-1369: the single shared windowed `optimizer:series` read model, built
   // above — per-range 60s memo, shared by the RPC channel (the card's selector).
   optimizerSeries,
+  // Sticky-trims C1: the single shared price reader (see above).
+  optimizerPrices,
   // BET-P3a3: the composed CTO conversation runtime (ONE binding + ONE
   // admission instance, created above). Serves the four
   // `cto:conversation-*` channels and the opencode:prompt /
@@ -4729,33 +4720,43 @@ const handleRequest = async (req, res) => {
     return;
   }
 
-  // ---------- Optimizer counterfactual ingest (OBSERVE-ONLY) ----------
-  // POST /api/optimizer/counterfactual  body {sessionID, maskedTokens,
-  //   maskedParts, ts} → {ok:true}  (400 {error:"invalid"} on bad shape)
-  // The manta-optimizer opencode plugin (docs/opencode-plugins/
-  // manta-optimizer.ts) reports what manta WOULD trim — read + report
-  // only, it never mutates the message history. The store REPLACES the
-  // session's latest counterfactual (each report is a full would-mask, not an
-  // increment). Behind the /api/* Bearer gate (no exemption). The validator is
-  // the shared PURE one from counterfactual.mjs, so the route stays ~5 lines.
+  // ---------- Optimizer trim report ingest (sticky trims, C2 v3) ----------
+  // POST /api/optimizer/counterfactual  body = one v3 report per request
+  //   {v:3, sessionID, ts, providerID?, modelID?, rates?, applied:{trimmedTokens,
+  //   trimmedParts}, shadow:{…}, change, shadowChange, rewarmTokens,
+  //   shadowRewarmTokens} → {ok:true}  (400 {error:"invalid"} on bad shape).
+  // A pre-v3 report (no `v` — an old plugin during rollout) is accepted with
+  // 200 and IGNORED ({ok:true, ignored:true}). The manta-optimizer opencode
+  // plugin reports what it actually trimmed (`applied`) and what it would have
+  // (`shadow`); the store prices each report AT INGEST with its own rates and
+  // keeps actual and potential apart. Behind the /api/* Bearer gate (no
+  // exemption). The validator is the shared PURE one from counterfactual.mjs.
   if (path === "/api/optimizer/counterfactual") {
     try {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
+        if (isLegacyReport(body)) {
+          respondJson(res, 200, { ok: true, ignored: true });
+          return;
+        }
         if (validateCounterfactualReport(body)) {
           respondJson(res, 400, { error: "invalid" });
           return;
         }
         await optimizerCounterfactual.record(body);
-        // Context telemetry — a mask application reported by the plugin. Counts
-        // only; `sessionID` is the opaque id (never a title or content).
+        // Context telemetry — a trim report from the plugin. Counts only;
+        // `sessionID` is the opaque id (never a title or content). The report
+        // is v3-validated above, so every field read here is a finite number /
+        // known literal.
         try {
           shipCtxEvent({
             kind: "mask",
-            maskedTokens: typeof body.maskedTokens === "number" && Number.isFinite(body.maskedTokens) ? body.maskedTokens : null,
-            maskedParts: typeof body.maskedParts === "number" && Number.isFinite(body.maskedParts) ? body.maskedParts : null,
-            applied: body.applied === true ? 1 : 0,
-            mode: body.mode ?? "observe",
+            maskedTokens: body.applied.trimmedTokens,
+            maskedParts: body.applied.trimmedParts,
+            applied: body.applied.trimmedTokens > 0 ? 1 : 0,
+            change: body.change,
+            shadowChange: body.shadowChange,
+            rewarmTokens: body.rewarmTokens,
             sessionID: body.sessionID,
           });
         } catch {
@@ -4766,7 +4767,32 @@ const handleRequest = async (req, res) => {
       }
       respondJson(res, 405, { error: "method not allowed" });
     } catch (e) {
-      // class-2 (BET-1460): manta-optimizer plugin hook (policy read) — relays the message to the model.
+      // class-2 (BET-1460): manta-optimizer plugin hook (trim report) — relays the message to the model.
+      respondJson(res, 500, { error: String(e?.message ?? e) });
+    }
+    return;
+  }
+
+  // ---------- Optimizer prices (sticky trims, C1, READ-ONLY) ----------
+  // GET /api/optimizer/prices → { fetchedAt, models: { "<providerID>/<modelID>":
+  //   { input, cacheRead, cacheWrite, cacheWrite1h?, tiers?, source } } } —
+  // the per-model list prices the plugin's trim gate needs, already normalised
+  // ($/Mtok, tiers ascending). Only USABLE records appear: a model not in the
+  // map is unpriced and the plugin must not grow its trim set for it. The same
+  // memoized reader backs the RPC `optimizer:prices` channel, which adds
+  // `unpriced` (omitted here — the plugin has no use for it). The plugin
+  // refreshes in the background and never awaits this. Behind the /api/* Bearer
+  // gate (no exemption).
+  if (path === "/api/optimizer/prices") {
+    try {
+      if (req.method === "GET") {
+        const { fetchedAt, models } = await optimizerPrices.get();
+        respondJson(res, 200, { fetchedAt, models });
+        return;
+      }
+      respondJson(res, 405, { error: "method not allowed" });
+    } catch (e) {
+      // class-2 (BET-1460): manta-optimizer plugin hook (price read) — the plugin fails open (no growth) on any non-200.
       respondJson(res, 500, { error: String(e?.message ?? e) });
     }
     return;

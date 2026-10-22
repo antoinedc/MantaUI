@@ -25,6 +25,13 @@
 // correctness gate, not a style regime; widening it is a separate decision so
 // that a formatting debate can never stall a crash-class guard.
 export default [
+  // Global ignores: `out/` and `dist/` are electron-vite build artifacts. They
+  // carry copied eslint-disable directives for rules this config does NOT
+  // load (the typescript-eslint plugin is intentionally absent here), so
+  // linting them reported "Definition for rule ... not found" on every
+  // machine that ran a dev/build before `npm run typecheck`. CI never has
+  // these dirs, which is why main stayed green.
+  { ignores: ["out/**", "dist/**", "mobile/android/**/build/**", "coverage/**"] },
   {
     files: ["src/server/**/*.mjs"],
     languageOptions: {

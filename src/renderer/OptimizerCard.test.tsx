@@ -22,8 +22,8 @@ function summaryFixture(over: Partial<OptimizerSummary> = {}): OptimizerSummary 
     totals: { turns: 100, cost: 12.34, input: 1000, output: 500, cacheRead: 8000, cacheWrite: 1000 },
     cacheShare: { ...CD },
     dailySeries: [
-      { day: "2026-08-01", tokensSent: 1000, maskedTokens: 0 },
-      { day: "2026-08-02", tokensSent: 1200, maskedTokens: 0 },
+      { day: "2026-08-01", tokensSent: 1000, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
+      { day: "2026-08-02", tokensSent: 1200, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
     ],
     bySession: [{ sessionID: "s1", turns: 100, cost: 12.34, tokensSent: 2200, savedPct: 0 }],
     ttl: { measuredMs: 300_000, confidence: "default", observations: 0, configuredMs: 300_000, matched: null },
@@ -58,11 +58,11 @@ function seriesFixture(over: Partial<OptimizerSeries> = {}): OptimizerSeries {
     startMs: new Date(2026, 7, 23, 14, 0, 0).getTime(),
     endMs: new Date(2026, 7, 24, 14, 0, 0).getTime(),
     series: [
-      { t: new Date(2026, 7, 23, 14, 0, 0).getTime(), tokensSent: 10, maskedTokens: 0 },
-      { t: new Date(2026, 7, 23, 15, 0, 0).getTime(), tokensSent: 20, maskedTokens: 0 },
+      { t: new Date(2026, 7, 23, 14, 0, 0).getTime(), tokensSent: 10, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
+      { t: new Date(2026, 7, 23, 15, 0, 0).getTime(), tokensSent: 20, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
     ],
     counterfactualAvailable: false,
-    totals: { turns: 100, cost: 12.34, tokensSent: 30, maskedTokens: 0 },
+    totals: { turns: 100, cost: 12.34, tokensSent: 30, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0, rewarmTokens: 0 },
     saved: { usd: 0, potentialUsd: 0, basis: "measured", pricedShare: 1 },
     ...over,
   };
@@ -113,7 +113,7 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
   it("clicking the 7d chip asks optimizerSeries for '7d' and relabels Sent", async () => {
     const { api } = setApi({
       optimizerSeries: (range) =>
-        Promise.resolve(seriesFixture({ range, bucket: "day", series: [{ t: Date.now(), tokensSent: 5, maskedTokens: 0 }] })),
+        Promise.resolve(seriesFixture({ range, bucket: "day", series: [{ t: Date.now(), tokensSent: 5, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 }] })),
     });
     h = mount(<OptimizerCard />);
     await h.flush();
@@ -142,8 +142,8 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
             bucket: "day",
             range: "7d",
             series: [
-              { t: new Date(2026, 7, 23, 0, 0, 0).getTime(), tokensSent: 10, maskedTokens: 0 },
-              { t: new Date(2026, 7, 24, 0, 0, 0).getTime(), tokensSent: 20, maskedTokens: 0 },
+              { t: new Date(2026, 7, 23, 0, 0, 0).getTime(), tokensSent: 10, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
+              { t: new Date(2026, 7, 24, 0, 0, 0).getTime(), tokensSent: 20, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0 },
             ],
           }),
         ),
@@ -156,28 +156,92 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
     expect(texts.some((t) => t.includes("Aug 24"))).toBe(true);
   });
 
-  it("the Counterfactual stat reads the series maskedTokens and shows the saved overlay", async () => {
+  it("the chart overlay reads ACTUAL trimmed tokens and shows the net saved estimate", async () => {
     setApi({
       optimizerSeries: () =>
         Promise.resolve(
           seriesFixture({
             series: [
-              { t: Date.now(), tokensSent: 1000, maskedTokens: 500 },
-              { t: Date.now(), tokensSent: 1000, maskedTokens: 500 },
+              { t: Date.now(), tokensSent: 1000, maskedTokens: 0, actualTrimmedTokens: 500, potentialTrimmedTokens: 0 },
+              { t: Date.now(), tokensSent: 1000, maskedTokens: 0, actualTrimmedTokens: 500, potentialTrimmedTokens: 0 },
             ],
             counterfactualAvailable: true,
-            totals: { turns: 10, cost: 2, tokensSent: 2000, maskedTokens: 1000 },
+            totals: { turns: 10, cost: 2, tokensSent: 2000, maskedTokens: 0, actualTrimmedTokens: 1000, potentialTrimmedTokens: 0, rewarmTokens: 0 },
             saved: { usd: 0.37, potentialUsd: 0.37, basis: "measured", pricedShare: 1 },
           }),
         ),
     });
     h = mount(<OptimizerCard />);
     await h.flush();
-    // maskedTotal 1000 → the chart overlay shows the masked total + the est.
-    // figure (two decimals from saved.usd), and the counterfactual legend line
-    // appears.
     expect(h.text()).toContain("−1k tokens · ≈ $0.37 est.");
     expect(h.text()).toContain("raw counterfactual");
+    // Raw = sent + actual only: 2000 sent + 1000 actual.
+    expect(h.text()).toContain("raw 3k");
+  });
+
+  it("raw usage never includes the potential (shadow) tokens; potential is its own line", async () => {
+    setApi({
+      optimizerSeries: () =>
+        Promise.resolve(
+          seriesFixture({
+            series: [
+              { t: Date.now(), tokensSent: 1000, maskedTokens: 800, actualTrimmedTokens: 0, potentialTrimmedTokens: 800 },
+              { t: Date.now(), tokensSent: 1000, maskedTokens: 800, actualTrimmedTokens: 0, potentialTrimmedTokens: 800 },
+            ],
+            counterfactualAvailable: true,
+            totals: { turns: 10, cost: 2, tokensSent: 2000, maskedTokens: 1600, actualTrimmedTokens: 0, potentialTrimmedTokens: 1600, rewarmTokens: 0 },
+            saved: { usd: 0, potentialUsd: 0.5, basis: "measured", pricedShare: 1 },
+          }),
+        ),
+    });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    // Nothing was actually trimmed: raw == sent, no dashed counterfactual, no
+    // "−N tokens" overlay on the chart.
+    expect(h.text()).toContain("raw 2k");
+    expect(h.text()).not.toContain("raw counterfactual");
+    expect(h.container.querySelector("svg.opt-chart")?.textContent).not.toContain("tokens ·");
+    // The shadow figure is reported separately, labelled an estimate.
+    const potential = h.container.querySelector('[data-testid="optimizer-potential"]')?.textContent ?? "";
+    expect(potential).toContain("Potential, not applied: −1.6k tokens");
+    expect(potential).toContain("≈ $0.50");
+    expect(potential).toContain("est.");
+  });
+
+  it("an older box without the actual/potential split reads as nothing applied (no shadow figure passed off as real)", async () => {
+    setApi({
+      optimizerSeries: () =>
+        Promise.resolve(
+          seriesFixture({
+            // Deliberately pre-v3 shape (no actual/potential fields): cast past the now-required types.
+            series: [{ t: Date.now(), tokensSent: 1000, maskedTokens: 400 }] as unknown as OptimizerSeries["series"],
+            totals: { turns: 1, cost: 1, tokensSent: 1000, maskedTokens: 400 } as unknown as OptimizerSeries["totals"],
+          }),
+        ),
+    });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.text()).toContain("raw 1k");
+    expect(h.text()).not.toContain("raw counterfactual");
+    expect(h.container.querySelector('[data-testid="optimizer-potential"]')?.textContent).toContain("−400 tokens");
+  });
+
+  it("a negative net saving on the chart overlay reads as a cost, never '≈ $-x'", async () => {
+    setApi({
+      optimizerSeries: () =>
+        Promise.resolve(
+          seriesFixture({
+            series: [
+              { t: Date.now(), tokensSent: 1000, maskedTokens: 0, actualTrimmedTokens: 300, potentialTrimmedTokens: 0 },
+            ],
+            saved: { usd: -1.2, potentialUsd: 0, basis: "measured", pricedShare: 1 },
+          }),
+        ),
+    });
+    h = mount(<OptimizerCard />);
+    await h.flush();
+    expect(h.container.querySelector("svg.opt-chart")?.textContent).toContain("−300 tokens · −$1.20 est.");
+    expect(h.text()).not.toContain("$-");
   });
 
   it("Cache-hit and Sessions details still say 30d while Sent and Cost/turn say 24h", async () => {
@@ -205,13 +269,15 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
     expect(h.text()).toContain("these endpoints declare no price");
   });
 
-  it("a negative Saved stat renders a warn −$ figure and the re-warm detail", async () => {
+  it("a negative Saved stat renders a warn −$ figure and the re-cache detail", async () => {
     const saved: OptimizerSeries["saved"] = { usd: -0.43, potentialUsd: 0.2, basis: "measured", pricedShare: 1 };
     setApi({ optimizerSeries: (range) => Promise.resolve(seriesFixture({ range, saved })) });
     h = mount(<OptimizerCard />);
     await h.flush();
     expect(h.text()).toContain("−$0.43");
-    expect(h.text()).toContain("re-warm cost exceeded the saving");
+    expect(h.text()).toContain("re-cache cost exceeded savings");
+    expect(h.text()).not.toContain("re-warm");
+    expect(h.text()).toContain("Saved (est.)");
     expect(h.container.querySelector(".opt-stat-v.warn")).toBeTruthy();
   });
 
@@ -287,7 +353,7 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
   it("an empty window renders the range-specific no-activity empty state and NO chart", async () => {
     setApi({
       optimizerSeries: (range) =>
-        Promise.resolve(seriesFixture({ range, series: [], totals: { turns: 0, cost: 0, tokensSent: 0, maskedTokens: 0 } })),
+        Promise.resolve(seriesFixture({ range, series: [], totals: { turns: 0, cost: 0, tokensSent: 0, maskedTokens: 0, actualTrimmedTokens: 0, potentialTrimmedTokens: 0, rewarmTokens: 0 } })),
     });
     h = mount(<OptimizerCard />);
     await h.flush();

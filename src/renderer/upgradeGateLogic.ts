@@ -1,4 +1,4 @@
-// upgradeGate.ts — the pure half of the blocking box-upgrade screen
+// upgradeGateLogic.ts — the pure half of the blocking box-upgrade screen
 // (OpenCode V2 cutover, slice C4; contracts K3 + K4 in
 // docs/superpowers/specs/2026-10-16-opencode-v2-cutover.md).
 //

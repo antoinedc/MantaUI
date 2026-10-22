@@ -1,5 +1,5 @@
 // useUpgradeGate.ts — feeds the blocking box-upgrade screen (OpenCode V2
-// cutover, slice C4). All DECISIONS live in ../upgradeGate.ts; this hook only
+// cutover, slice C4). All DECISIONS live in ../upgradeGateLogic.ts; this hook only
 // wires the producers into its reducer:
 //
 //   • `{kind:"upgrade"}` frames on /events         → window.api.onUpgrade
@@ -22,7 +22,7 @@ import {
   isGateVisible,
   selectGateView,
   type GateView,
-} from "../upgradeGate";
+} from "../upgradeGateLogic";
 
 export type UpgradeGateInputs = {
   boxNeedsUpgrade: boolean;

@@ -23,8 +23,7 @@
 import { aggregate, aggregateDailySeries, aggregateHourlySeries, fetchLedgerRows } from "../modelLedger.mjs";
 import { bucketSeries } from "./counterfactual.mjs";
 import { bucketKeyToMs } from "../../shared/timeBuckets.mjs";
-import { mixFromCounts } from "../../shared/blendedPrice.mjs";
-import { promptSideRate, savedUsd } from "../../shared/optimizerSavings.mjs";
+import { summarizeSaved } from "../../shared/optimizerSavings.mjs";
 
 // The supported ranges and their bucketing. Bucket keys zip the sent series
 // (from the ledger) with the counterfactual series (from the store) — both are
@@ -55,23 +54,26 @@ function normalizeRange(range) {
  * Reads history scoped to the range — `fetchRows(now - count * bucketMs)` — so
  * a 24h view reads one day of ledger rows, NOT thirty and slice (the cold
  * 30-day read was measured in seconds). The sent series comes from the ledger
- * bucket aggregation; the counterfactual series from `bucketSeries` on the
- * injected store (a null store yields zeros, never a throw). The two are zipped
- * on the bucket KEY so they are always the same length and aligned, even when
- * the two sources have different sparse keys.
+ * bucket aggregation; the trim series from `bucketSeries` on the injected store
+ * (a null store yields zeros, never a throw). The two are zipped on the bucket
+ * KEY so they are always the same length and aligned, even when the two
+ * sources have different sparse keys.
  *
- * `modelRates` is an injected async reader (like summary.mjs's readCacheTtl)
- * returning `{ "<providerID>/<modelID>": normalizedCost }` — the per-model cost
- * map used to price the window's savings (BET-1370). It may resolve to {} (the
- * box can't read opencode's provider list) and any missing model simply is not
- * priceable.
+ * Sticky-trims (v3): the store keeps ACTUAL (really removed from the request)
+ * and POTENTIAL (simulated while the switch is off) separately and never pools
+ * them. Each report was priced at INGEST with its own rates, so the window's
+ * dollars are a plain sum of stored values (summarizeSaved) — no re-pricing,
+ * no read-time price lookup. Raw usage is sent + ACTUAL trimmed only.
+ *
+ * Series point: { t, tokensSent, actualTrimmedTokens, potentialTrimmedTokens,
+ * maskedTokens } — `maskedTokens` is an ALIAS of potentialTrimmedTokens (the
+ * pre-v3 field name).
  */
 export async function buildOptimizerSeries({
   range,
   fetchRows,
   counterfactualStore = null,
   now = Date.now(),
-  modelRates = async () => ({}),
 }) {
   const r = normalizeRange(range);
   const { bucket, count } = RANGES[r];
@@ -87,69 +89,44 @@ export async function buildOptimizerSeries({
       ? aggregateHourlySeries(rows, count, nowMs)
       : aggregateDailySeries(rows, count, nowMs);
 
-  // Counterfactual over the same bucket keys. A null store → zeros (a series
-  // of zero maskedTokens), never a throw.
+  // Trim buckets over the same bucket keys. A null store → zeros, never a throw.
   const cf = counterfactualStore
     ? await bucketSeries(counterfactualStore, { bucket, count, now: nowMs })
     : [];
-  const cfByKey = new Map((Array.isArray(cf) ? cf : []).map((e) => [e.key, num(e.maskedTokens)]));
+  const cfByKey = new Map((Array.isArray(cf) ? cf : []).map((e) => [e.key, e]));
 
   // Zip on the bucket key so both series are the same length and aligned.
   const series = sent.map((e) => {
     const key = bucket === "hour" ? e.hour : e.day;
+    const b = cfByKey.get(key);
+    const actualTrimmedTokens = num(b?.actual?.trimmed);
+    const potentialTrimmedTokens = num(b?.potential?.trimmed);
     return {
       t: bucketKeyToMs(key),
       tokensSent: num(e.tokensSent),
-      maskedTokens: cfByKey.get(key) ?? 0,
+      actualTrimmedTokens,
+      potentialTrimmedTokens,
+      maskedTokens: potentialTrimmedTokens,
     };
   });
 
   const tokensSent = series.reduce((s, p) => s + p.tokensSent, 0);
-  const maskedTokens = series.reduce((s, p) => s + p.maskedTokens, 0);
+  const actualTrimmedTokens = series.reduce((s, p) => s + p.actualTrimmedTokens, 0);
+  const potentialTrimmedTokens = series.reduce((s, p) => s + p.potentialTrimmedTokens, 0);
 
-  // ---- BET-1370: price the window's savings (real per-model rates, not a
-  // flat per-million guess). The counterfactual store's buckets carry the
-  // token-turn sums and the per-model split; sum them across the window. ----
-  let appliedTokens = 0;
-  let rewarmTokens = 0;
-  const maskedByModel = {};
+  // The window's dollars: sum of the stored per-report usd, actual and
+  // potential separately. Unpriced reports add tokens, never dollars.
+  const actualEntries = [];
+  const potentialEntries = [];
   for (const b of Array.isArray(cf) ? cf : []) {
-    appliedTokens += num(b.appliedTokens);
-    rewarmTokens += num(b.rewarmTokens);
-    if (b.byModel && typeof b.byModel === "object") {
-      for (const [mk, tok] of Object.entries(b.byModel)) {
-        maskedByModel[mk] = (maskedByModel[mk] ?? 0) + num(tok);
-      }
-    }
+    actualEntries.push(...Object.values(b.actual?.byModel ?? {}));
+    potentialEntries.push(...Object.values(b.potential?.byModel ?? {}));
   }
-
-  // The store keys byModel on the full WOULD-mask set (every report, applied or
-  // not); there is no separate applied split. Derive the applied set by scaling
-  // the would-mask split by the applied/masked ratio: nothing applied → empty
-  // (usd 0, the optimizer is off); everything applied → equal to potential.
-  const ratio = maskedTokens > 0 ? appliedTokens / maskedTokens : 0;
-  const appliedByModel = {};
-  for (const [mk, tok] of Object.entries(maskedByModel)) appliedByModel[mk] = tok * ratio;
-  const appliedRewarm = rewarmTokens * ratio;
+  const actual = summarizeSaved(actualEntries);
+  const potential = summarizeSaved(potentialEntries);
 
   // turns/cost reuse the existing aggregate over exactly the window's rows.
-  const { totals, cacheShare } = aggregate(rows);
-
-  // Measured cache mix over the window (all-zero → DEFAULT_MIX via
-  // mixFromCounts — the single shared default, never a second one here).
-  const mix = mixFromCounts(cacheShare);
-
-  // Build the per-model prompt-side rates from the injected reader.
-  const modelCosts = await modelRates();
-  const rates = {};
-  if (modelCosts && typeof modelCosts === "object") {
-    for (const [mk, cost] of Object.entries(modelCosts)) rates[mk] = promptSideRate(cost, mix);
-  }
-
-  // potential: the full would-mask set (what trimming WOULD save); applied: the
-  // subset actually masked (what it DID save — 0 when the optimizer is off).
-  const applied = savedUsd({ byModel: appliedByModel, rewarmTokens: appliedRewarm, rates });
-  const potential = savedUsd({ byModel: maskedByModel, rewarmTokens, rates });
+  const { totals } = aggregate(rows);
 
   return {
     supported: true,
@@ -158,18 +135,25 @@ export async function buildOptimizerSeries({
     startMs: series.length ? series[0].t : nowMs,
     endMs: series.length ? series[series.length - 1].t : nowMs,
     series,
-    counterfactualAvailable: series.some((p) => p.maskedTokens > 0),
+    counterfactualAvailable: series.some((p) => p.actualTrimmedTokens > 0 || p.potentialTrimmedTokens > 0),
     totals: {
       turns: totals.turns,
       cost: totals.cost,
       tokensSent,
-      maskedTokens,
+      actualTrimmedTokens,
+      potentialTrimmedTokens,
+      maskedTokens: potentialTrimmedTokens,
+      // Tokens the ACTUAL trims forced to be re-cached (the "re-cache cost" in
+      // tokens; its dollars are already netted into saved.usd).
+      rewarmTokens: actual.rewarm,
     },
     saved: {
-      usd: applied.usd,
+      // Net of the re-cache cost; NEGATIVE when re-caches have not paid back
+      // yet; null = reports exist but none priced ("not priced").
+      usd: actual.usd,
       potentialUsd: potential.usd,
-      basis: applied.basis,
-      pricedShare: applied.pricedShare,
+      pricedShare: actual.pricedShare,
+      basis: actual.basis,
     },
   };
 }
@@ -189,13 +173,12 @@ export function _resetSeriesMemo() {
 /**
  * I/O. Wrapper factory. `getDb` resolves the read-only opencode.db handle
  * (null → { supported:false }); `counterfactualStore` is the observe-mode store
- * from counterfactual.mjs (null when not wired); `modelRates` is the injected
- * per-model cost reader (built from oc.getProviders in index.mjs); `now` (a
- * number or a zero-arg fn, for tests) is the clock. The returned async function
+ * from counterfactual.mjs (null when not wired); `now` (a number or a
+ * zero-arg fn, for tests) is the clock. The returned async function
  * takes a range and memoizes the built series per range for TTL_MS with an
  * in-flight guard.
  */
-export function createOptimizerSeries({ getDb, counterfactualStore = null, modelRates, now, fetchRows: fetchRowsDep = fetchLedgerRows }) {
+export function createOptimizerSeries({ getDb, counterfactualStore = null, now, fetchRows: fetchRowsDep = fetchLedgerRows }) {
   const nowMs = () => (typeof now === "function" ? num(now()) : num(now ?? Date.now()));
   return function optimizerSeries(range) {
     const r = normalizeRange(range);
@@ -214,7 +197,6 @@ export function createOptimizerSeries({ getDb, counterfactualStore = null, model
           range: r,
           fetchRows: (since) => fetchRowsDep(db, since),
           counterfactualStore,
-          modelRates,
           now: t,
         });
         memo.set(r, { at: t, value });

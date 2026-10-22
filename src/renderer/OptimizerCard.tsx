@@ -41,6 +41,24 @@ import type { OptimizerSummary, OptimizerRange, OptimizerSeries } from "../share
 type OptimizerData = OptimizerSummary | { supported: false };
 type OptimizerSeriesData = OptimizerSeries | { supported: false };
 
+// Sticky-trims spec §5.2: each series point splits the trimmed tokens into what
+// was ACTUALLY removed from requests and what a shadow run only WOULD have
+// removed. Declared here as optional extensions so the card tolerates a box
+// that has not shipped the split yet (it then reads as "nothing applied", never
+// as a shadow figure presented as a real saving). `maskedTokens` stays as an
+// alias of the potential figure.
+type SeriesPoint = OptimizerSeries["series"][number] & {
+  actualTrimmedTokens?: number;
+  potentialTrimmedTokens?: number;
+};
+
+// Savings are an NET ESTIMATE and may be negative (the re-cache cost of a trim
+// can exceed what it saved). A negative figure reads as a cost, never as
+// "≈ $-1.20".
+function formatSavedUsd(usd: number): string {
+  return usd < 0 ? `−$${(-usd).toFixed(2)}` : `≈ $${usd.toFixed(2)}`;
+}
+
 const wholePct = (v: number): string => `${Math.round(v)}%`;
 
 // Anthropic prompt-cache TTL label for the Cache-hit detail line — matches the
@@ -190,17 +208,22 @@ export function OptimizerCard() {
   const seriesUnsupported = series.loadError || (series.data ? !series.data.supported : false);
   const sd = !seriesUnsupported && series.data && series.data.supported ? (series.data as OptimizerSeries) : null;
 
-  // Range-scoped totals (0 until the series is readable).
+  // Range-scoped totals (0 until the series is readable). Raw usage is what
+  // would have been sent with nothing trimmed = sent + ACTUAL trimmed only.
+  // The shadow ("potential") figure is NEVER folded into it — it is a separate
+  // line, because those tokens were sent.
+  const points: SeriesPoint[] = sd ? (sd.series as SeriesPoint[]) : [];
   const sentTotal = sd ? sd.totals.tokensSent : 0;
-  const maskedTotal = sd ? sd.totals.maskedTokens : 0;
-  const rawTotal = sentTotal + maskedTotal;
-  const trimmedPct = rawTotal > 0 ? (maskedTotal / rawTotal) * 100 : 0;
+  const actualTotal = points.reduce((n, p) => n + (p.actualTrimmedTokens || 0), 0);
+  const potentialTotal = points.reduce((n, p) => n + (p.potentialTrimmedTokens ?? p.maskedTokens ?? 0), 0);
+  const rawTotal = sentTotal + actualTotal;
+  const trimmedPct = rawTotal > 0 ? (actualTotal / rawTotal) * 100 : 0;
 
   // BET-1370: the window's savings now come from the SERIES — real per-model
-  // prompt-side pricing minus the cache re-warm the mask forced, computed
+  // prompt-side pricing minus the re-cache cost the trims forced, computed
   // server-side (the old whole-dollar per-million-token guess is gone). `usd`
   // is null when the applied turns aren't priceable ("not priced"); negative
-  // when the re-warm cost exceeded the saving (never clamped). While the series
+  // when the re-cache cost exceeded the saving (never clamped). While the series
   // is in flight / unsupported, fall back to the unpriced state.
   const savedUsd = sd ? sd.saved.usd : null;
   const savedBasis = sd ? sd.saved.basis : "unpriced";
@@ -216,7 +239,7 @@ export function OptimizerCard() {
     maxTokens,
   );
   const rawPath = buildCumulativePath(
-    sd ? sd.series.map((p) => (p.tokensSent || 0) + (p.maskedTokens || 0)) : [],
+    points.map((p) => (p.tokensSent || 0) + (p.actualTrimmedTokens || 0)),
     CHART.width,
     CHART.height,
     maxTokens,
@@ -224,8 +247,9 @@ export function OptimizerCard() {
 
   // X-axis ticks (BET-1366): bucket-start epoch ms, per the range's bucket.
   const axisTicks = sd ? chartAxisTicks(sd.series.map((p) => p.t), sd.bucket) : [];
-  const hasCounterfactual = sd ? sd.counterfactualAvailable : false;
-  const noActivity = sd ? sentTotal === 0 && maskedTotal === 0 : false;
+  // The dashed raw line exists only when something was actually trimmed.
+  const hasCounterfactual = actualTotal > 0;
+  const noActivity = sd ? sentTotal === 0 && actualTotal === 0 && potentialTotal === 0 : false;
 
   const cs = d.cacheShare;
   const hitDenom = cs.cacheRead + cs.cacheWrite + cs.input;
@@ -411,10 +435,17 @@ export function OptimizerCard() {
                     stroke="none"
                   />
 
-                  {maskedTotal > 0 && (
-                    <text x={CHART.width} y="24" textAnchor="end" fill="var(--ok)" fontSize="10" fontFamily="var(--font-mono)">
-                      −{formatTokens(maskedTotal)}
-                      {savedUsd !== null ? ` · ≈ $${savedUsd.toFixed(2)} est.` : ""}
+                  {actualTotal > 0 && (
+                    <text
+                      x={CHART.width}
+                      y="24"
+                      textAnchor="end"
+                      fill={savedUsd !== null && savedUsd < 0 ? "var(--warn)" : "var(--ok)"}
+                      fontSize="10"
+                      fontFamily="var(--font-mono)"
+                    >
+                      −{formatTokens(actualTotal)}
+                      {savedUsd !== null ? ` · ${formatSavedUsd(savedUsd)} est.` : ""}
                     </text>
                   )}
                 </g>
@@ -434,6 +465,14 @@ export function OptimizerCard() {
                   <span className="text-text-faint">{noCounterfactualText(range)}</span>
                 )}
               </div>
+              {/* Potential is its own line: trims a shadow run found but that
+                  were never applied, so those tokens are inside "sent". */}
+              {potentialTotal > 0 && (
+                <div className="opt-sub" data-testid="optimizer-potential">
+                  Potential, not applied: −{formatTokens(potentialTotal)}
+                  {potentialUsd !== null ? ` · ≈ $${potentialUsd.toFixed(2)}` : ""} est.
+                </div>
+              )}
             </>
           )}
 
@@ -444,7 +483,7 @@ export function OptimizerCard() {
               <div className="opt-stat-d">raw {formatTokens(rawTotal)}</div>
             </div>
             <div className="opt-stat">
-              <div className="opt-stat-l">Saved</div>
+              <div className="opt-stat-l">Saved (est.)</div>
               {savedBasis === "unpriced" ? (
                 <>
                   <div className="opt-stat-v">not priced</div>
@@ -452,8 +491,8 @@ export function OptimizerCard() {
                 </>
               ) : savedUsd !== null && savedUsd < 0 ? (
                 <>
-                  <div className="opt-stat-v warn">−${(-savedUsd).toFixed(2)}</div>
-                  <div className="opt-stat-d">re-warm cost exceeded the saving</div>
+                  <div className="opt-stat-v warn">{formatSavedUsd(savedUsd)}</div>
+                  <div className="opt-stat-d">re-cache cost exceeded savings</div>
                 </>
               ) : (
                 <>

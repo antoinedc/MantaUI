@@ -1549,6 +1549,10 @@ export const IPC = {
   // PER-CALL (24h/7d/30d) — `optimizer:summary` remains the fixed-30-day
   // shared read whose memo must not be perturbed by the card's selector.
   optimizerSeries: "optimizer:series",
+  // Sticky-trims C1: per-model list prices (+ the unpriced connected models).
+  optimizerPrices: "optimizer:prices",
+  // Sticky-trims C6: declare a model's list price in opencode's config.
+  opencodeSetModelCost: "opencode:set-model-cost",
   // Slash-command execution: invokes POST /session/{id}/command. Distinct
   // from opencode:prompt — the server treats commands specially (templates,
   // configured agent/model, etc.).
@@ -1973,7 +1977,16 @@ export type OptimizerSummary = {
   windowDays: number;
   totals: { turns: number; cost: number; input: number; output: number; cacheRead: number; cacheWrite: number };
   cacheShare: { output: number; cacheRead: number; cacheWrite: number; input: number };
-  dailySeries: { day: string; tokensSent: number; maskedTokens: number }[]; // "YYYY-MM-DD", oldest→newest
+  // Sticky-trims (v3): `actualTrimmedTokens` = really removed from requests,
+  // `potentialTrimmedTokens` = simulated while the switch is off — never pooled.
+  // `maskedTokens` is an ALIAS of potentialTrimmedTokens (pre-v3 name).
+  dailySeries: {
+    day: string;
+    tokensSent: number;
+    actualTrimmedTokens: number;
+    potentialTrimmedTokens: number;
+    maskedTokens: number;
+  }[]; // "YYYY-MM-DD", oldest→newest
   bySession: { sessionID: string | null; turns: number; cost: number; tokensSent: number; savedPct: number }[];
   ttl: {
     measuredMs: number;
@@ -1983,8 +1996,14 @@ export type OptimizerSummary = {
     matched: boolean | null;
   } | null;
   counterfactual: {
-    dailySeries: { day: string; maskedTokens: number }[];
-    bySession: Record<string, { maskedTokens: number }>;
+    dailySeries: {
+      day: string;
+      actualTrimmedTokens: number;
+      potentialTrimmedTokens: number;
+      maskedTokens: number;
+    }[];
+    // Per-session running total of tokens ACTUALLY removed (maskedTokens = alias).
+    bySession: Record<string, { actualTrimmedTokens: number; maskedTokens: number }>;
   } | null;
   windows: {
     provider: string;
@@ -2035,32 +2054,95 @@ export type OptimizerRange = "24h" | "7d" | "30d";
 
 // BET-1369: the windowed consumption series (`optimizer:series` RPC), matched
 // to optimizer/series.mjs's buildOptimizerSeries return. `series` is zipped on
-// bucket key so the sent/counterfactual lines are always the same length;
-// `t` is the epoch-ms START of each bucket (the renderer never re-parses a
-// date string). `counterfactualAvailable` is true when any bucket has
-// maskedTokens > 0. `supported:false` = the box can't read opencode.db.
+// bucket key so the sent/trim lines are always the same length; `t` is the
+// epoch-ms START of each bucket (the renderer never re-parses a date string).
+// `supported:false` = the box can't read opencode.db.
+//
+// Sticky trims (v3): ACTUAL (really removed from requests) and POTENTIAL
+// (simulated while the switch is off) are separate and never pooled. Raw usage
+// = tokensSent + actualTrimmedTokens only; potential is its own line.
+// `maskedTokens` is an ALIAS of potentialTrimmedTokens (the pre-v3 name).
+// `counterfactualAvailable` is true when any bucket has actual or potential > 0.
 export type OptimizerSeries = {
   supported: boolean;
   range: OptimizerRange;
   bucket: "hour" | "day";
   startMs: number;
   endMs: number;
-  series: { t: number; tokensSent: number; maskedTokens: number }[];
+  series: {
+    t: number;
+    tokensSent: number;
+    actualTrimmedTokens: number;
+    potentialTrimmedTokens: number;
+    maskedTokens: number; // alias of potentialTrimmedTokens
+  }[];
   counterfactualAvailable: boolean;
-  totals: { turns: number; cost: number; tokensSent: number; maskedTokens: number };
-  // BET-1370: the window's savings, priced at REAL per-model prompt-side rates
-  // (not a flat per-million guess) minus the cache re-warm the mask forced.
-  // `usd` is null when the window's applied turns have no known price ("not
-  // priced"); otherwise it may be negative (re-warm exceeded the saving) and is
-  // never clamped. `potentialUsd` prices the full WOULD-mask set. `basis` /
-  // `pricedShare` describe how completely the APPLIED set was priced.
+  totals: {
+    turns: number;
+    cost: number;
+    tokensSent: number;
+    actualTrimmedTokens: number;
+    potentialTrimmedTokens: number;
+    maskedTokens: number; // alias of potentialTrimmedTokens
+    // Tokens the ACTUAL trims forced to be re-cached ("re-cache cost" in
+    // tokens; its dollars are already netted into saved.usd).
+    rewarmTokens: number;
+  };
+  // The window's savings: the SUM of per-report dollars priced AT INGEST with
+  // each report's own rates (usd = trimmed×r − rewarm×(w−r)); nothing is
+  // re-priced or imputed. An ESTIMATE (hook-time, not billing-verified).
+  //   usd          — ACTUAL, net of re-cache cost. May be NEGATIVE (a re-cache
+  //                  that hasn't paid back yet); never clamped. null = reports
+  //                  exist but none could be priced ("not priced"); 0 with
+  //                  basis "measured" = nothing trimmed in the window.
+  //   potentialUsd — the simulated (POTENTIAL) set, same rules.
+  //   pricedShare  — share of the ACTUAL reports that were priced (REPORT-count
+  //                  weighted; 1 for an empty window).
+  //   basis        — "measured" (all priced) | "partial" | "unpriced".
   saved: {
     usd: number | null;
     potentialUsd: number | null;
-    basis: "measured" | "partial" | "unpriced";
     pricedShare: number;
+    basis: "measured" | "partial" | "unpriced";
   };
 };
+
+// Sticky-trims C1 (`optimizer:prices` RPC; the same body minus `unpriced` is
+// served at GET /api/optimizer/prices to the plugin). Per-model list prices in
+// $/Mtok, already normalised: `cacheWrite` defaulted to `input` when the source
+// has no write premium, tiers sorted ascending by `minPromptTokens` (a tier
+// applies when the prompt is STRICTLY GREATER than its minPromptTokens; the
+// highest applying tier wins). `cacheWrite1h` appears only for a model Manta
+// configures for the 1-hour cache: the record's own 1-hour write price, else
+// Anthropic's published 1-hour tariff of 2 × input (base and per tier).
+export type OptimizerPriceRates = {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheWrite1h?: number;
+};
+export type OptimizerPriceRecord = OptimizerPriceRates & {
+  tiers?: (OptimizerPriceRates & { minPromptTokens: number })[];
+  source: "config" | "catalog";
+};
+export type OptimizerPrices = {
+  // ms epoch of the price-catalogue copy (0 when none); the plugin enforces the
+  // 7-day staleness rule locally from this.
+  fetchedAt: number;
+  // Keyed "<providerID>/<modelID>"; only USABLE records (input > 0, cacheRead > 0).
+  models: Record<string, OptimizerPriceRecord>;
+  // Connected models ("<providerID>/<modelID>") that resolve to no usable price.
+  unpriced: string[];
+};
+
+// Sticky-trims C6 (`opencode:set-model-cost`): declare a model's list price in
+// opencode's own config ($/Mtok, finite ≥ 0; input + output required).
+export type OpencodeSetModelCostInput = {
+  providerID: string;
+  modelID: string;
+  cost: { input: number; output: number; cache_read?: number; cache_write?: number };
+};
+export type OpencodeSetModelCostResult = { ok: true } | { ok: false; error: string };
 
 // A secret's METADATA — what the UI and `secret_list` see. NEVER carries the
 // value (manta-server strips it; only secret_provide materializes the value, to a

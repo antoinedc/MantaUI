@@ -284,6 +284,95 @@ test("a failing price fetch leaves entries byte-identical to the models.json res
 });
 
 // ---------------------------------------------------------------------------
+// Sticky trims §3.3: the optimizer's SEPARATE price cache
+// ---------------------------------------------------------------------------
+
+const TIERED_PAYLOAD = {
+  openai: {
+    models: {
+      "gpt-6-sol": {
+        cost: {
+          input: 2,
+          output: 10,
+          cache_read: 0.2,
+          cache_write: 2.5,
+          tiers: [{ input: 4, output: 15, cache_read: 0.4, cache_write: 5, tier: { type: "context", size: 272000 } }],
+          context_over_200k: { input: 4, output: 15, cache_read: 0.4, cache_write: 5 },
+        },
+      },
+    },
+  },
+  openrouter: {
+    models: { "deepseek/deepseek-v4-flash": { cost: { input: 0.091, output: 0.182, cache_read: 0.0182 } } },
+  },
+};
+
+test("a successful refresh also writes the raw provider-keyed cost records to the price cache (fetchedAt = now)", async () => {
+  const cachePath = statePath("model-catalog.test-pc-ok.json");
+  const pricesPath = statePath("model-prices.test-ok.json");
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ priceBody: TIERED_PAYLOAD }),
+    cachePath,
+    pricesPath,
+    now: () => 1_700_000_123_456,
+  });
+  assert.equal((await ctl.refresh()).ok, true);
+  const doc = JSON.parse(readFileSync(pricesPath, "utf-8"));
+  assert.equal(doc.version, 1);
+  assert.equal(doc.fetchedAt, 1_700_000_123_456);
+  // tiers + context_over_200k survive, keyed exactly as api.json keys them
+  assert.equal(doc.providers.openai["gpt-6-sol"].tiers[0].tier.size, 272000);
+  assert.deepEqual(doc.providers.openai["gpt-6-sol"].context_over_200k.input, 4);
+  assert.ok(doc.providers.openrouter["deepseek/deepseek-v4-flash"]);
+  // routing behaviour is unchanged (the existing buildPriceMap merge still ran)
+  assert.equal(ctl.allModels().length, FIXTURE.length);
+});
+
+test("price-cache fetchedAt advances only on a SUCCESSFUL validated api.json fetch", async () => {
+  const pricesPath = statePath("model-prices.test-advance.json");
+  let t = 1_000;
+  const mk = (extra) =>
+    createModelCatalogController({
+      cachePath: statePath("model-catalog.test-pc-adv.json"),
+      pricesPath,
+      now: () => t,
+      ...extra,
+    });
+  await mk({ fetchImpl: stagedFetch({ priceBody: TIERED_PAYLOAD }) }).refresh();
+  assert.equal(JSON.parse(readFileSync(pricesPath, "utf-8")).fetchedAt, 1_000);
+
+  t = 2_000;
+  // HTTP failure on api.json → file (and its age) untouched
+  await mk({ fetchImpl: stagedFetch({ priceBody: TIERED_PAYLOAD, priceOk: false }) }).refresh();
+  assert.equal(JSON.parse(readFileSync(pricesPath, "utf-8")).fetchedAt, 1_000);
+
+  // 200 but garbage (not an api.json shape) → not "validated" → untouched
+  for (const bad of [[], "nope", {}, { a: { models: {} } }, null]) {
+    await mk({ fetchImpl: stagedFetch({ priceBody: bad }) }).refresh();
+    assert.equal(JSON.parse(readFileSync(pricesPath, "utf-8")).fetchedAt, 1_000, JSON.stringify(bad));
+  }
+
+  // models.json itself failing → the whole refresh fails; price cache untouched
+  await mk({ fetchImpl: failingFetch() }).refresh();
+  assert.equal(JSON.parse(readFileSync(pricesPath, "utf-8")).fetchedAt, 1_000);
+
+  t = 3_000;
+  await mk({ fetchImpl: stagedFetch({ priceBody: TIERED_PAYLOAD }) }).refresh();
+  assert.equal(JSON.parse(readFileSync(pricesPath, "utf-8")).fetchedAt, 3_000);
+});
+
+test("a price-cache write failure never fails the catalogue refresh", async () => {
+  const ctl = createModelCatalogController({
+    fetchImpl: stagedFetch({ priceBody: TIERED_PAYLOAD }),
+    cachePath: statePath("model-catalog.test-pc-wfail.json"),
+    pricesPath: "/dev/null/cannot/write/here.json",
+  });
+  const res = await ctl.refresh();
+  assert.equal(res.ok, true);
+  assert.equal(res.size, FIXTURE.length);
+});
+
+// ---------------------------------------------------------------------------
 // I/O: refresh → cache → degrade
 // ---------------------------------------------------------------------------
 

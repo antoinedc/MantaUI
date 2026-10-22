@@ -859,6 +859,25 @@ test("getProviders returns {connected:[]} on a non-2xx response and on a transpo
   _setOcTransport(null);
 });
 
+test("getProviders coalesces concurrent callers into ONE read of the catalogue, and refetches afterwards", async () => {
+  // Settings → Models fires ~6 of these at once; opencode answers them serially, which used to
+  // queue past the renderer's 15 s timeout.
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const routes = PROVIDER_ROUTES({ "GET /api/provider": async () => { await gate; return PROVIDER_ROUTES()["GET /api/provider"]; } });
+  const calls = await withV2(routes, async (calls) => {
+    const pending = Array.from({ length: 6 }, () => getProviders());
+    release();
+    const results = await Promise.all(pending);
+    assert.equal(only(calls, "GET", "/api/provider").length, 1, "six concurrent callers share one read");
+    for (const r of results) assert.deepEqual(r.connected, ["anthropic", "fake"]);
+    // Nothing is cached past completion: the next call reads opencode again.
+    await getProviders();
+    assert.equal(only(calls, "GET", "/api/provider").length, 2);
+  });
+  assert.equal(only(calls, "GET", "/api/model").length, 2);
+});
+
 test("getDefaultModel: the default of the first connected provider that has one; null otherwise (never re-throws)", async () => {
   await withV2(PROVIDER_ROUTES(), async () => {
     assert.deepEqual(await getDefaultModel(), { providerID: "anthropic", modelID: "claude-haiku-4-5" });

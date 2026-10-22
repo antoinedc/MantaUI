@@ -68,7 +68,7 @@ import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
-import { normalizeUpgradeStatus } from "../upgradeGate";
+import { normalizeUpgradeStatus } from "../upgradeGateLogic";
 import { ship } from "../log";
 
 // ---------------------------------------------------------------------------
@@ -1384,6 +1384,8 @@ export const httpApi: Api = {
   ledgerSummary: (opts) => rpc(IPC.ledgerSummary, opts),
   optimizerSummary: () => rpc(IPC.optimizerSummary),
   optimizerSeries: (range) => rpc(IPC.optimizerSeries, { range }),
+  optimizerPrices: () => rpc(IPC.optimizerPrices),
+  opencodeSetModelCost: (args) => rpc(IPC.opencodeSetModelCost, args),
 
   // -- slash-command execution --
   opencodeRunCommand: (input) => rpc(IPC.opencodeRunCommand, input),
