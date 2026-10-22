@@ -218,6 +218,21 @@ export function createOpencodeService({
       return false;
     },
 
+    /** Cheap liveness probe, for callers that must not bounce a running V2. */
+    async isRunning() {
+      if (supervisor === "systemd") {
+        // is-active exits non-zero for every state but "active" — that is an answer, not an error.
+        const r = await exec("systemctl", ["--user", "is-active", "opencode-serve"]).catch(() => null);
+        return r ? String(r.stdout ?? "").trim() === "active" : false;
+      }
+      if (supervisor === "launchd") {
+        const r = await exec("launchctl", ["print", `gui/${uid}/${OPENCODE_PLIST_LABEL}`]).catch(() => null);
+        return r ? /state = running|pid = \d/.test(r.stdout) : false;
+      }
+      // nohup has no cheap probe; a start() restart there is cheap anyway
+      return false;
+    },
+
     async stop() {
       if (supervisor === "systemd") return void (await exec("systemctl", ["--user", "stop", "opencode-serve"]));
       if (supervisor === "launchd") {
