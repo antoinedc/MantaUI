@@ -17,7 +17,7 @@ import { installMockApi, resetStore, mount, type Harness } from "./testHarness";
 import { useStore } from "./store";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
 import { UpgradeGate } from "./UpgradeGate";
-import { DESKTOP_DOWNLOAD_URL } from "./upgradeGate";
+import { DESKTOP_DOWNLOAD_URL } from "./upgradeGateLogic";
 import type { UpgradeActionResult, UpgradeStatus, UpgradeStep } from "../shared/api";
 
 const GiB = 2 ** 30;

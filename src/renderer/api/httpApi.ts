@@ -68,7 +68,7 @@ import { WsReconnectController, type WsLike } from "../net/wsTransport.js";
 import { getMantaPreload } from "../preloadAccess.js";
 import { useStore } from "../store.js";
 import { shouldForceReconnect } from "../chatUtils";
-import { normalizeUpgradeStatus } from "../upgradeGate";
+import { normalizeUpgradeStatus } from "../upgradeGateLogic";
 import { ship } from "../log";
 
 // ---------------------------------------------------------------------------
