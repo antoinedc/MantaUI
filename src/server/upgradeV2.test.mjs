@@ -460,17 +460,8 @@ describe("migrate: do not bounce a running V2 when RESUMING (large-DB migration)
     await runToIdle(m2);
     assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
     assert.equal(migrateStarts(second), 0, "the in-flight migration was not restarted");
-  });
-
-  test("a resumed run on an unchanged, running service restarts exactly once overall (cutover's)", async () => {
-    const store = await crashedInMigrate();
-    const second = makeBox({ store, serviceChanged: false, running: true });
-    const m2 = createUpgradeV2(second.deps);
-    assert.deepEqual(await m2.boot(), { action: "resume" });
-    await runToIdle(m2);
-    assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
     const n = second.names();
-    assert.equal(n.filter((x) => x === "opencode.start").length, 1, `starts: ${n}`);
+    assert.equal(n.filter((x) => x === "opencode.start").length, 1, `only cutover's restart remains: ${n}`);
     assert.ok(n.lastIndexOf("opencode.configure") < n.indexOf("opencode.start"));
   });
 
