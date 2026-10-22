@@ -16,9 +16,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import http from "node:http";
+import { OPENCODE_V2_VERSION } from "../../scripts/opencode-v2/version.mjs";
 import {
   readServerVersion,
-  readOpencodeVersion,
   writeVersionResponse,
   FALLBACK_VERSION,
   MIN_CLIENT,
@@ -84,59 +84,6 @@ test("readServerVersion returns FALLBACK_VERSION when version field is missing o
 });
 
 // ---------------------------------------------------------------------------
-// readOpencodeVersion (BET-428)
-// ---------------------------------------------------------------------------
-// opencode's HTTP API exposes no version endpoint, so the server shells out
-// to `opencode --version` once at startup. `exec` is injectable (mirrors the
-// fs-injection contract readServerVersion uses) so no real subprocess runs
-// during the test. The stub returns a Buffer/string the same way execFileSync
-// would; we assert parsing + every failure path falls back to FALLBACK_VERSION.
-
-test("readOpencodeVersion parses a clean version string from execFileSync stdout", () => {
-  const exec = () => "1.18.10\n";
-  assert.equal(readOpencodeVersion(exec), "1.18.10");
-});
-
-test("readOpencodeVersion takes the last token when stdout has a prefix", () => {
-  // Robust to a future `opencode version 1.18.10`-style output without
-  // coupling to a fixed format.
-  const exec = () => "opencode version 1.18.10\n";
-  assert.equal(readOpencodeVersion(exec), "1.18.10");
-});
-
-test("readOpencodeVersion trims trailing whitespace / newlines", () => {
-  const exec = () => "  1.2.3  \n\n";
-  assert.equal(readOpencodeVersion(exec), "1.2.3");
-});
-
-test("readOpencodeVersion returns FALLBACK_VERSION when the command throws (ENOENT — opencode not installed)", () => {
-  const exec = () => {
-    const err = new Error("spawn opencode ENOENT");
-    err.code = "ENOENT";
-    throw err;
-  };
-  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
-});
-
-test("readOpencodeVersion returns FALLBACK_VERSION when stdout is empty", () => {
-  const exec = () => "";
-  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
-});
-
-test("readOpencodeVersion returns FALLBACK_VERSION when stdout is only whitespace", () => {
-  const exec = () => "   \n\t\n";
-  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
-});
-
-test("readOpencodeVersion returns FALLBACK_VERSION on non-zero exit (child returns empty)", () => {
-  // execFileSync throws on non-zero exit; the catch maps it to FALLBACK.
-  const exec = () => {
-    throw new Error("Command failed: opencode --version");
-  };
-  assert.equal(readOpencodeVersion(exec), FALLBACK_VERSION);
-});
-
-// ---------------------------------------------------------------------------
 // writeVersionResponse (pure)
 // ---------------------------------------------------------------------------
 
@@ -167,11 +114,10 @@ test("writeVersionResponse writes 200 + JSON { version, minClient, opencodeVersi
   assert.equal(body.opencodeVersion, "1.18.10");
 });
 
-test("writeVersionResponse defaults opencodeVersion to FALLBACK_VERSION when omitted", () => {
-  // Backward-compat: the BET-180 callers (and the existing route test below)
-  // pass only { version }. The response must still carry opencodeVersion so
-  // the renderer's destructure never hits `undefined`; it falls back to
-  // "0.0.0" which the About block hides.
+test("writeVersionResponse defaults opencodeVersion to the pinned OpenCode version (never the 0.0.0 fallback)", () => {
+  // The field used to come from an `opencode --version` shell-out that fails
+  // under the service's PATH, so a healthy V2 box reported "0.0.0" next to
+  // `opencode: { major: 2, version }`. It now tracks the pinned version.
   let captured = null;
   const fakeRes = {
     writeHead() {},
@@ -179,7 +125,10 @@ test("writeVersionResponse defaults opencodeVersion to FALLBACK_VERSION when omi
   };
   writeVersionResponse(fakeRes, { version: "1.2.3" });
   const body = JSON.parse(captured);
-  assert.equal(body.opencodeVersion, FALLBACK_VERSION);
+  assert.equal(body.opencodeVersion, OPENCODE_V2_VERSION);
+  assert.notEqual(body.opencodeVersion, FALLBACK_VERSION);
+  assert.equal(body.opencodeVersion, body.opencode.version);
+  assert.equal(body.opencode.major, 2);
 });
 
 // ---------------------------------------------------------------------------

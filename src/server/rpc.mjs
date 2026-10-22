@@ -442,11 +442,10 @@ export async function dispatch(handlers, channel, args) {
 //                         value `GET /api/version` returns). The `server:version`
 //                         channel returns it in-process so the renderer avoids an
 //                         HTTP round-trip on every Settings mount.
-//   opencodeVersion     — string, the box's `opencode --version` output read once
-//                         at startup (BET-428). Surfaced in the same `server:version`
+//   opencodeVersion     — string, the pinned OpenCode version this release ships
+//                         (BET-428). Surfaced in the same `server:version`
 //                         response so Settings → About can render it without a new
-//                         IPC channel; falls back to FALLBACK_VERSION when opencode
-//                         isn't installed.
+//                         IPC channel.
 //   runServerSelfUpdate — the box's self-update spawner (BET-366 reviewer return).
 //                         Injected so the regression guard in rpc.test.mjs can
 //                         stub the spawn and assert the `server:update-apply`
@@ -2378,7 +2377,7 @@ export function buildHandlers({
     // MobileSettings. Also includes `minClient` so the version-skew guard
     // (BET-225 stage 3, renderer side) can compute `isClientTooOld` from a
     // single response — no second poll, no parallel endpoint. BET-428 added
-    // `opencodeVersion` (the box's `opencode --version`, read once at startup)
+    // `opencodeVersion` (the pinned OpenCode version this release ships)
     // so Settings → About renders it in the same trip — no new IPC channel.
     // The JSON-RPC envelope wraps the body as
     // { result: { version, minClient, opencodeVersion } }.

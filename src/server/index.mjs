@@ -272,7 +272,7 @@ import {
 } from "./pairPage.mjs";
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
-import { readServerVersion, readOpencodeVersion, writeVersionResponse } from "./version.mjs";
+import { readServerVersion, opencodeInfo, writeVersionResponse } from "./version.mjs";
 import { createUpgradeV2, createDefaultDeps as createUpgradeDeps, createUpgradeRoutes } from "./upgradeV2.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1397,13 +1397,11 @@ if (!authEnforced) {
 // (in-process, no HTTP round-trip); curl + future non-renderer clients use the
 // REST route.
 const SERVER_VERSION = await readServerVersion(PROJECT_ROOT);
-// BET-428: opencode's HTTP API exposes no version endpoint, so shell out to
-// `opencode --version` ONCE at startup (sync, cached here — never per-request).
-// Falls back to FALLBACK_VERSION if opencode isn't installed / errors, so the
-// boot sequence is never blocked. Surfaced in the same `server:version` RPC
-// response + `/api/version` body as `version` + `minClient` — no new IPC
-// channel; Settings → About reads it in the single getServerVersion trip.
-const OPENCODE_VERSION = readOpencodeVersion();
+// BET-428: the opencode version surfaced in the same `server:version` RPC
+// response + `/api/version` body. It is the PINNED version this release ships
+// (never a `opencode --version` shell-out — the binary is not on the service's
+// PATH, which made this read "0.0.0" on a healthy V2 box).
+const OPENCODE_VERSION = opencodeInfo().version;
 
 // BET-1335: the observe-mode masking counterfactual store. Reads/writes
 // `optimizer-counterfactual.json` through the shared jsonStore atomic writer

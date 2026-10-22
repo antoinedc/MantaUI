@@ -1427,10 +1427,9 @@ export const httpApi: Api = {
   // only for backward compat with the BET-180 callers; new consumers
   // should destructure all three fields off the response.
   //
-  // BET-428: response also carries `opencodeVersion` — the box's
-  // `opencode --version` (read once at server startup; opencode's HTTP API
-  // has no version endpoint). Settings → About renders it in this same
-  // round-trip — no new IPC channel.
+  // BET-428: response also carries `opencodeVersion` — the pinned OpenCode
+  // version the box's release ships. Settings → About may render it in this
+  // same round-trip — no new IPC channel.
   getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string }>(IPC.getServerVersion),
 
   // -- client version (BET-225 stage 3) --
