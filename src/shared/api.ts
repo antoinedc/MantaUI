@@ -1454,11 +1454,12 @@ export interface Api {
   // BET-698: server-side conversation search. `sessionIds` is the search scope
   // in priority order (sessionIds[0] = the active conversation). Hit caps stay
   // server-side defaults. `supported:false` = the box can't search (needs the
-  // Node 24 runtime / opencode.db).
+  // Node 24 runtime / opencode.db). `truncated:true` = the search hit its time
+  // budget on a very large history and covers only the newest matches.
   opencodeSearchMessages(input: {
     query: string;
     sessionIds: string[];
-  }): Promise<{ supported: boolean; hits: TranscriptHit[] }>;
+  }): Promise<{ supported: boolean; hits: TranscriptHit[]; truncated?: boolean }>;
   // BET-1219: read-only spend/latency ledger over opencode's store.
   // `sinceMs` filters assistant rows to time_created >= sinceMs (default 0 =
   // all). Measurement only — no routing. `supported:false` = the box can't

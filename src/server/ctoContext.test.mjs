@@ -1057,3 +1057,22 @@ test("U04: passive reads observe ZERO side effects — no fetch/prompt dispatch,
     globalThis.fetch = realFetch;
   }
 });
+
+test("ctoSearch: a scan that runs out of time budget degrades to truncated + a cursor that resumes (never a hang, never a silent end)", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  await withFixture(seedRows(), async () => {
+    const starved = await ctoSearch({ query: "lease", budgetMs: -1 });
+    assert.equal(starved.status, "ok");
+    assert.equal(starved.truncated, true, "the budget ran out before the history did — said so");
+    assert.deepEqual(starved.hits, []);
+    assert.equal(typeof starved.nextCursor, "string", "and the rest is reachable");
+
+    const resumed = await ctoSearch({ query: "lease", cursor: starved.nextCursor });
+    assert.ok(resumed.hits.length >= 1, "resuming from the cursor reads the history that was left");
+    const full = await ctoSearch({ query: "lease" });
+    assert.deepEqual(resumed.hits.map((h) => h.partId), full.hits.map((h) => h.partId));
+    // a caller can only shorten the budget, never extend it
+    const huge = await ctoSearch({ query: "lease", budgetMs: 1e12 });
+    assert.deepEqual(huge.hits.map((h) => h.partId), full.hits.map((h) => h.partId));
+  });
+});

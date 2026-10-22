@@ -806,8 +806,7 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     assert.equal(r1.length, 2);
     assert.equal(r2.length, 2);
     assert.equal(r3.size, 1);
-    assert.equal(counts.sessions, 1, "one session listing");
-    assert.equal(counts.pages, 2, "each session paged once, not once per caller");
+    assert.equal(counts.pages, 3, "each session paged once for the two fetchRows callers (not once per caller), plus latestBySession's own seek");
   });
 
   test("ledger cache: warm load yields to the event loop between pages", async (t) => {
@@ -884,6 +883,139 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     } finally {
       console.warn = warn;
       f.db.prepare = orig;
+    }
+  });
+
+  test("ledger cache: the cache holds a HORIZON, not the whole history — a cold read touches only sessions that can hold rows in the window", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const DAY = 86_400_000;
+    const T = 100 * DAY;
+    f.session("recent", { updated: T - 1000 });
+    f.session("old", { updated: T - 40 * DAY });
+    f.msg("r1", "recent", T - 2000, asst({ created: 1, completed: 2 }));
+    f.msg("r0", "recent", T - 30 * DAY, asst({ created: 1, completed: 2 }));
+    f.msg("o1", "old", T - 40 * DAY, asst({ created: 1, completed: 2 }));
+    const legacy = { day: await legacyFetchLedgerRows(f.db, T - DAY), d35: await legacyFetchLedgerRows(f.db, T - 35 * DAY), all: await legacyFetchLedgerRows(f.db, 0) };
+    const counts = spy(f.db);
+    const cache = createLedgerRowCache({ now: () => T });
+    // 1-day window: only `recent` is read, and only from the horizon forward (r0 is older)
+    let rows = await cache.fetchRows(f.db, T - DAY);
+    assert.deepEqual(rows.map((r) => r.sessionID), ["recent"]);
+    assert.equal(counts.pages, 1, "the old session was never paged");
+    assert.deepEqual(sortRows(rows), sortRows(legacy.day));
+
+    // a window inside the horizon is served from memory
+    await cache.fetchRows(f.db, T - 100);
+    assert.equal(counts.pages, 1);
+
+    // an OLDER window extends the horizon: only the gap is read, results match the legacy query
+    rows = await cache.fetchRows(f.db, T - 35 * DAY);
+    assert.deepEqual(sortRows(rows), sortRows(legacy.d35));
+    assert.equal(rows.length, 2, "recent's two rows; `old` (40d) is still outside");
+    // and the all-history read finally reaches the old session
+    rows = await cache.fetchRows(f.db, 0);
+    assert.deepEqual(sortRows(rows), sortRows(legacy.all));
+    assert.equal(rows.length, 3);
+    // already complete down to 0: a repeat read inside the TTL touches nothing
+    const before = counts.pages;
+    await cache.fetchRows(f.db, 0);
+    assert.equal(counts.pages, before);
+  });
+
+  test("ledger cache: an extension keeps the rows already read (no duplicates, no drops) and a later refresh still sees new rows", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const clk = clockNow();
+    clk.t = 50_000_000;
+    f.session("s1", { updated: clk.t - 100 });
+    for (let i = 0; i < 6; i++) f.msg(`a${i}`, "s1", clk.t - 6000 + i * 1000, asst({ created: i, completed: i + 1 }));
+    const cache = createLedgerRowCache({ ttlMs: 1000, now: clk.now, pageRows: 2 });
+    assert.equal((await cache.fetchRows(f.db, clk.t - 2500)).length, 2);
+    assert.equal((await cache.fetchRows(f.db, clk.t - 10_000)).length, 6, "extended over the gap, nothing double counted");
+    f.msg("a9", "s1", clk.t - 5, asst({ created: 9, completed: 10 }));
+    f.touch("s1", clk.t);
+    clk.t += 5000;
+    assert.equal((await cache.fetchRows(f.db, clk.t - 20_000)).length, 7);
+  });
+
+  test("ledger cache: a cold WIDE read publishes the recent tier first — a narrow read does not wait for the long extension", async (t) => {
+    if (skip(t)) return;
+    const f = memDb();
+    const DAY = 86_400_000;
+    const T = 100 * DAY;
+    f.session("recent", { updated: T - 3_600_000 });
+    f.msg("r1", "recent", T - 3_600_000, asst({ created: 1, completed: 2 }));
+    for (let i = 0; i < 150; i++) {
+      f.session(`old${i}`, { updated: T - 10 * DAY });
+      f.msg(`o${i}`, `old${i}`, T - 10 * DAY, asst({ created: 1, completed: 2 }));
+    }
+    let tick = 0;
+    const cache = createLedgerRowCache({ now: () => T, yieldBudgetMs: 0, clock: () => ++tick, yieldFn: () => new Promise((r) => setImmediate(r)) });
+    let wideDone = false;
+    const wide = cache.fetchRows(f.db, T - 30 * DAY).then((rows) => {
+      wideDone = true;
+      return rows;
+    });
+    const narrow = await cache.fetchRows(f.db, T - DAY);
+    assert.equal(narrow.length, 1);
+    assert.equal(wideDone, false, "the narrow read returned while the 30-day extension was still running");
+    assert.equal((await wide).length, 151);
+  });
+
+  test("ledger cache: pure helpers honour the horizon (select skips sessions older than it; merge only drops inside [floor, ceil))", () => {
+    const sel = selectSessionsToScan({
+      sessionList: [{ id: "new", timeUpdated: 9_000_000 }, { id: "stale", timeUpdated: 10 }, { id: "unknown", timeUpdated: null }],
+      cached: new Map(),
+      lastRefreshMs: 0,
+      nowMs: 9_100_000,
+      horizonMs: 8_000_000,
+    });
+    assert.deepEqual(sel.map((x) => x.id).sort(), ["new", "unknown"]);
+    assert.ok(sel.every((x) => x.floor === 8_000_000), "new sessions are read from the horizon, not from 0");
+    const rows = new Map([["x", { createdMs: 5, row: { completedMs: 1 } }], ["y", { createdMs: 50, row: { completedMs: 1 } }]]);
+    mergeLedgerEntries(rows, [], 0, 10);
+    assert.deepEqual([...rows.keys()], ["y"], "x is inside [0,10) and gone; y (50) is outside the re-read range and kept");
+  });
+
+  test("ledger cache: through the db worker (shared handle) gives the same rows as inline, and latestBySession works off-thread", async (t) => {
+    if (skip(t)) return;
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { getDb } = await import("./opencodeDb.mjs");
+    const { _shutdownOffload } = await import("./dbOffload.mjs");
+    const dir = mkdtempSync(join(tmpdir(), "manta-ledger-worker-"));
+    const dbPath = join(dir, "opencode.db");
+    const seed = new SqliteMod.DatabaseSync(dbPath);
+    seed.exec(V2_LEDGER_SCHEMA);
+    seed.prepare("INSERT INTO session_v2 VALUES (?,?,?,?,?)").run("s1", null, "build", "/w", 5000);
+    for (let i = 0; i < 9; i++) {
+      const created = 1000 + i;
+      seed
+        .prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)")
+        .run(`m${i}`, "s1", "assistant", i + 1, created, created, JSON.stringify({ model: { providerID: "p", id: "m" }, tokens: { input: 1, output: 1, cache: { read: 0, write: 0 } }, time: { created, completed: created + i } }));
+    }
+    seed.close();
+    const prev = process.env.MANTA_OPENCODE_DB;
+    process.env.MANTA_OPENCODE_DB = dbPath;
+    _resetDbHandle();
+    try {
+      const shared = await getDb();
+      const viaWorker = createLedgerRowCache({ offload: true, pageRows: 2, now: clockNow().now });
+      const inline = createLedgerRowCache({ pageRows: 2, now: clockNow().now });
+      const w = await viaWorker.fetchRows(shared, 0);
+      assert.equal(w.length, 9);
+      assert.deepEqual(sortRows(w), sortRows(await inline.fetchRows(shared, 0)));
+      const latest = await viaWorker.latestBySession(shared, ["s1", "nope"]);
+      assert.equal(latest.size, 1);
+      assert.equal(latest.get("s1").completedMs, 1008 + 8, "highest completedMs wins");
+    } finally {
+      await _shutdownOffload();
+      if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
+      else process.env.MANTA_OPENCODE_DB = prev;
+      _resetDbHandle();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -1028,5 +1160,30 @@ test("endpointSummary never memoizes a degraded result: the next call retries", 
     _resetDbHandle();
     const recovered = await endpointSummary({ sinceMs: since });
     assert.equal(recovered.supported, true, "the unsupported reading was not served from the memo");
+  });
+});
+
+test("endpointSummary: stale-while-revalidate — a caller never waits past its budget, and a stale reading is served while one refresh runs", async (t) => {
+  await withLedgerDb(t, async ({ addTurn }) => {
+    addTurn("m1");
+    const since = Date.now() - 60 * 60_000;
+    // No reading yet and the caller will not wait: degraded NOW, the scan keeps going and fills the memo.
+    const none = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
+    assert.deepEqual(none, { supported: false });
+    const first = await endpointSummary({ sinceMs: since });
+    assert.equal(first.supported, true, "the background scan finished and was memoized (or is awaited)");
+    // Age the entry past its freshness window but inside the stale window: served instantly.
+    const realNow = Date.now;
+    Date.now = () => realNow() + 5 * 60_000;
+    try {
+      addTurn("m2");
+      const stale = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
+      assert.equal(stale, first, "the stale reading is returned without waiting");
+      await new Promise((r) => setTimeout(r, 400)); // let the single background refresh land
+      const refreshed = await endpointSummary({ sinceMs: since, callerWaitMs: 0 });
+      assert.notEqual(refreshed, first, "the background refresh replaced the reading");
+    } finally {
+      Date.now = realNow;
+    }
   });
 });

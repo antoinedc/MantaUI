@@ -43,6 +43,10 @@
 //     rows and never end the walk while the scan window was full.
 
 import { getDb, getDbOpenFailure, PART_SQL, MESSAGE_SQL } from "./opencodeDb.mjs";
+import { runDbTask } from "./dbOffload.mjs";
+
+// Wall-clock budget of one ctoSearch scan (runs in the db worker, off the event loop).
+export const CTO_SEARCH_BUDGET_MS = 20_000;
 
 export const CTO_CONTEXT_LIMITS = Object.freeze({
   searchHitsDefault: 20,
@@ -622,7 +626,7 @@ function buildHit(row, part, msg, q, query) {
   return { hit, fieldBytes: byteLen(matched) };
 }
 
-export async function ctoSearch({ query, projectId, directory, sessionId, limit, cursor, ...rest } = {}) {
+export async function ctoSearch({ query, projectId, directory, sessionId, limit, cursor, budgetMs, ...rest } = {}) {
   if (hasForbiddenWorkspaceKey(rest)) {
     return invalidInput("project identity mapping is unresolved; pass observed projectId/directory/sessionId, never a Manta workspace key");
   }
@@ -667,10 +671,23 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
              ${MATCHED_ATOM_SQL} AS match_fullkey
       FROM ${PART_SQL} p
       LEFT JOIN session_v2 s ON s.id = p.session_id
-      WHERE ${where.join(" AND ")}
-      ORDER BY p.time_created DESC, p.id DESC
-      LIMIT ?`;
-    const rows = db.prepare(sql).all(...params, CTO_CONTEXT_LIMITS.scanLimit);
+      WHERE ${where.join(" AND ")} /*RANGE*/
+      ORDER BY p.time_created DESC, p.id DESC`;
+    // The decoded-atom match walks json_tree of every candidate part — it cannot be
+    // answered from an index, so over a multi-GB history it is a multi-minute scan.
+    // It runs in the db worker, newest time-window first, under a hard budget; a
+    // scan that runs out of budget returns what it found with `truncated:true` and a
+    // cursor that resumes below the last window it read.
+    const scan = await runDbTask("windowedRows", {
+      sql,
+      params,
+      limit: CTO_CONTEXT_LIMITS.scanLimit,
+      sessionId: sessionId ?? undefined,
+      windowMessages: 50,
+      // A caller may only SHORTEN the budget, never extend it.
+      budgetMs: Math.min(Number.isFinite(budgetMs) ? budgetMs : CTO_SEARCH_BUDGET_MS, CTO_SEARCH_BUDGET_MS),
+    });
+    const rows = scan.rows;
 
     const result = { ...envelope("ok"), hits: [], truncated: false, omittedCount: 0, nextCursor: null };
     let earlyBreak = false;
@@ -712,8 +729,14 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
       finishPage(result, page);
       if (serializedBytes(result) <= CTO_CONTEXT_LIMITS.textBudgetBytes) break;
     }
+    if (!scan.complete && !scan.limited) {
+      // Budget exhausted before the history was: say so, and make the rest reachable.
+      result.truncated = true;
+      result.nextCursor ??= encodeCursor((scan.resumeAt ?? 0) + 1, "");
+    }
     return result;
   } catch (e) {
+    if (e?.code === "no_db") return sourceUnavailable();
     return queryFailed(e);
   }
 }

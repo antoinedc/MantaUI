@@ -6191,6 +6191,17 @@ server.on("upgrade", handleUpgrade);
 server.listen(PORT, HOST, () => {
   console.log(`manta listening on http://${HOST}:${PORT}`);
 
+  // Warm the model ledger's 30-day horizon a few seconds after boot. The load runs in the
+  // db worker thread (modelLedger → dbOffload), so it costs the event loop nothing, and the
+  // first optimizer / routing read then finds it ready instead of degrading to
+  // { supported:false } while a cold load runs. Best-effort: no db yet (an upgrade in
+  // progress) or any failure just means the first reader pays the cold load as before.
+  setTimeout(() => {
+    getDb()
+      .then((db) => (db ? fetchLedgerRows(db, Date.now() - 30 * 24 * 60 * 60 * 1000) : null))
+      .catch(() => {});
+  }, 5000).unref?.();
+
   // Register this box with the hosted gateway so push (APNs) works and so the
   // gateway can publish the per-box DNS A record (BET-198 / BET-199).
   // Fire-and-forget: the call is best-effort (it never throws) and a slow /

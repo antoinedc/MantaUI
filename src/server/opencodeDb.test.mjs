@@ -377,3 +377,23 @@ test("lookupProjectIdByDirectory reads project_directory, project.worktree and s
     fixture.close();
   }
 });
+
+test("PART_SQL does not throw on a tool call whose input is a plain (non-JSON) string — the whole scan used to abort with 'malformed JSON'", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const { PART_SQL } = await import("./opencodeDb.mjs");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  db.exec("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)");
+  const ins = (id, content, seq) =>
+    db.prepare("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)").run(id, "s1", "assistant", seq, seq, seq, JSON.stringify({ content }));
+  ins("msg_a", [{ type: "tool", name: "bash", state: { status: "completed", input: "ls -la {not json", metadata: "also a string", content: [{ type: "text", text: "out" }] } }], 1);
+  ins("msg_b", [{ type: "tool", name: "read", state: { status: "completed", input: { path: "/a" } } }], 2);
+  const rows = db.prepare(`SELECT id, data FROM ${PART_SQL} p ORDER BY p.time_created`).all();
+  assert.equal(rows.length, 2);
+  const a = JSON.parse(rows[0].data);
+  assert.equal(a.state.input, "ls -la {not json", "a string input survives as a JSON string");
+  assert.equal(a.state.metadata, "also a string");
+  assert.deepEqual(JSON.parse(rows[1].data).state.input, { path: "/a" }, "an object input is unchanged");
+  assert.deepEqual(JSON.parse(rows[0].data).state.output, "out");
+  db.close();
+});

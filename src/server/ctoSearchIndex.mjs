@@ -83,6 +83,10 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { statePath } from "../shared/paths.mjs";
 import { getDb, getDbOpenFailure, resolveDbPath, PART_SQL, MESSAGE_SQL, partExists } from "./opencodeDb.mjs";
+import { runOnHandle } from "./dbOffload.mjs";
+
+// Wall-clock budget of one sync batch's windowed source reads (db worker, off the event loop).
+const SYNC_READ_BUDGET_MS = 30_000;
 import { internalSessionIds } from "./internalSessions.mjs";
 import { ftsMatchExpression } from "./ftsQuery.mjs";
 
@@ -457,30 +461,37 @@ export function createCtoSearchIndex(deps = {}) {
     }
   }
 
-  // Cycling keyset over (COALESCE(time_updated,0), id) — re-reads EVERY row
-  // each cycle: same-timestamp edits and late rows are reflected eventually
-  // (bounded, no watermark CDC). Column lists are code-owned constants;
-  // `session_v2` has no `data` column (verified V2 schema). The message and part
-  // streams read the V2 projections (MESSAGE_SQL / PART_SQL) — a part's
-  // time_updated is its message's, so editing a message re-indexes its parts.
-  function sweepSql(table, cols, withData) {
-    return `SELECT id, ${cols} COALESCE(time_updated, 0) AS t, time_updated${withData ? ", data" : ""}
-            FROM ${table}
+  // Cycling keyset sweeps — re-reads EVERY row each cycle: same-timestamp edits and
+  // late rows are reflected eventually (bounded, no watermark CDC). Column lists are
+  // code-owned constants; `session_v2` has no `data` column (verified V2 schema).
+  //   • session: keyed (COALESCE(time_updated,0), id) — a few thousand rows, one query.
+  //   • message / part: keyed (time_created, id). They read the V2 projections
+  //     (MESSAGE_SQL / PART_SQL), whose rows have NO index on time_updated: a
+  //     time_updated keyset forced a full scan + sort of the multi-GB message table per
+  //     batch (>150 s on the real history). time_created IS indexed, so these streams
+  //     walk it in WINDOWS (dbTasks.scanWindows) off the main thread. A part's
+  //     time_updated is still its message's, so an edited message is re-indexed the
+  //     next time the cycle passes its time_created.
+  const SESSION_SWEEP_SQL = `SELECT id, parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived, COALESCE(time_updated, 0) AS t
+            FROM session_v2
             WHERE (COALESCE(time_updated, 0) > ?) OR (COALESCE(time_updated, 0) = ? AND id > ?)
             ORDER BY COALESCE(time_updated, 0) ASC, id ASC
             LIMIT ?`;
-  }
+  const timeSweepSql = (table, cols, withData) =>
+    `SELECT id, ${cols} time_created AS t, time_updated${withData ? ", data" : ""}
+            FROM ${table} p
+            WHERE (p.time_created > ? OR (p.time_created = ? AND p.id > ?)) /*RANGE*/
+            ORDER BY p.time_created ASC, p.id ASC`;
   const STREAMS = {
-    session: {
-      sql: sweepSql("session_v2", "parent_id, project_id, workspace_id, directory, title, time_created, time_updated, time_archived,", false),
-    },
-    message: { sql: sweepSql(MESSAGE_SQL, "session_id, role,", false) },
-    part: { sql: sweepSql(PART_SQL, "session_id, message_id,", true) },
+    session: { sql: SESSION_SWEEP_SQL },
+    message: { sql: timeSweepSql(MESSAGE_SQL, "session_id, role,", false), windowed: true },
+    part: { sql: timeSweepSql(PART_SQL, "session_id, message_id,", true), windowed: true },
   };
   const SWEEP_START = { t: -1, i: "" };
 
-  function advanceOrCycle(pos, rows, batch) {
-    if (rows.length < batch) return { ...SWEEP_START }; // cycle complete
+  function advanceOrCycle(pos, rows, atEnd) {
+    if (atEnd) return { ...SWEEP_START }; // cycle complete
+    if (rows.length === 0) return pos; // budget ran out before any row: try again from here
     const last = rows[rows.length - 1];
     return { t: last.t, i: last.id };
   }
@@ -669,12 +680,35 @@ export function createCtoSearchIndex(deps = {}) {
 
       const counts = zeroCounts();
       try {
-        indexDb.exec("BEGIN IMMEDIATE");
+        // Source reads FIRST (the windowed ones run in the db worker and are awaited);
+        // the index write transaction then opens and closes synchronously.
         const sweep = sweepPosition(indexDb);
-        const next = {};
+        const read = {};
         for (const [name, stream] of Object.entries(STREAMS)) {
+          if (stream.windowed) {
+            const scan = await runOnHandle(src, "windowedRows", {
+              sql: stream.sql,
+              params: [sweep[name].t, sweep[name].t, sweep[name].i],
+              dir: "asc",
+              from: Math.max(0, sweep[name].t),
+              col: "p.time_created",
+              limit: batch,
+              windowMessages: 200,
+              budgetMs: SYNC_READ_BUDGET_MS,
+            });
+            // `atEnd`: the walk reached the end of time — the cycle is complete. A scan that hit
+            // its budget (neither complete nor full) just resumes from the last row next batch.
+            read[name] = { rows: scan.rows, atEnd: scan.complete };
+          } else {
+            const rows = src.prepare(stream.sql).all(sweep[name].t, sweep[name].t, sweep[name].i, batch);
+            read[name] = { rows, atEnd: rows.length < batch };
+          }
+        }
+        indexDb.exec("BEGIN IMMEDIATE");
+        const next = {};
+        for (const name of Object.keys(STREAMS)) {
           const countsKey = name === "session" ? "sessions" : name === "message" ? "messages" : "parts";
-          const rows = src.prepare(stream.sql).all(sweep[name].t, sweep[name].t, sweep[name].i, batch);
+          const { rows, atEnd } = read[name];
           for (const row of rows) {
             if (name === "session") upsertSession(row, excluded);
             else if (name === "message") upsertMessage(row);
@@ -689,7 +723,7 @@ export function createCtoSearchIndex(deps = {}) {
           }
           counts[countsKey].scanned = rows.length;
           if (name !== "part") counts[countsKey].upserted = rows.length;
-          next[name] = advanceOrCycle(sweep[name], rows, batch);
+          next[name] = advanceOrCycle(sweep[name], rows, atEnd);
         }
         const rec = reconcileDeletions(src);
         counts.parts.removed = rec.removed;

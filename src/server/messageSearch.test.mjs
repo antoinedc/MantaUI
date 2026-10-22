@@ -270,3 +270,27 @@ test("timeCreated is carried through (null-safe)", () => {
   assert.equal(hits.find((h) => h.messageId === "m1").timeCreated, 1234);
   assert.equal(hits.find((h) => h.messageId === "m2").timeCreated, null);
 });
+
+import { searchMessages } from "./messageSearch.mjs";
+import { createFixtureDb, sqliteAvailable, withFixtureDb } from "./fixtures/opencodeV2DbFixture.mjs";
+
+test("searchMessages: a spent time budget returns what it has with truncated:true; a normal one is not truncated", async (t) => {
+  if (!(await sqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
+  const fixture = await createFixtureDb({
+    sessions: [{ id: "s1", directory: "/a", timeUpdated: 100 }],
+    messages: [{ id: "m1", sessionId: "s1", timeCreated: 50, data: { role: "user" } }],
+    parts: [{ id: "p1", messageId: "m1", sessionId: "s1", timeCreated: 50, data: { type: "text", text: "needle in a haystack" } }],
+  });
+  try {
+    await withFixtureDb(fixture, async () => {
+      const ok = await searchMessages({ query: "needle", sessionIds: ["s1"] });
+      assert.equal(ok.hits.length, 1);
+      assert.equal(ok.truncated, undefined);
+      const starved = await searchMessages({ query: "needle", sessionIds: ["s1"], budgetMs: -1 });
+      assert.equal(starved.supported, true);
+      assert.equal(starved.truncated, true);
+    });
+  } finally {
+    fixture.close();
+  }
+});

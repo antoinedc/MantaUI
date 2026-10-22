@@ -19,6 +19,10 @@
 
 import { internalSessionIds } from "./internalSessions.mjs";
 import { PART_SQL } from "./opencodeDb.mjs";
+import { runOnHandle } from "./dbOffload.mjs";
+
+// Wall-clock budget of one tool-scan page (runs in the db worker, off the event loop).
+export const SCAN_BUDGET_MS = 60_000;
 import { readConversationSessionId, CONVERSATION_ROLE } from "./ctoBinding.mjs";
 import {
   matchCliIdentity,
@@ -338,15 +342,29 @@ export function extractFromDbRows(rows) {
 export async function collectDbRows(db, { sinceTs, afterId = "", untilTs, cap = SCAN_ROW_CAP } = {}) {
   if (!db || typeof db.prepare !== "function") throw codedError("db-handle-invalid", "discovery-db-unavailable");
   const range = `(p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?)) AND p.time_created <= ?`;
-  const order = ` ORDER BY p.time_created ASC, p.id ASC LIMIT ?`;
   let rows;
   try {
-    const stmt = db.prepare(
-      `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created, p.role AS role
-         FROM ${PART_SQL} p
-        WHERE ${range}${order}`,
-    );
-    rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
+    // Ascending time windows (the time_created index), off the main thread: the V2
+    // part view explodes every assistant message's JSON, so a sparse range over a
+    // multi-GB history is far too slow for one synchronous query.
+    const scan = await runOnHandle(db, "windowedRows", {
+      sql: `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created, p.role AS role
+              FROM ${PART_SQL} p
+             WHERE ${range} /*RANGE*/
+             ORDER BY p.time_created ASC, p.id ASC`,
+      params: [sinceTs, sinceTs, afterId, afterId, untilTs],
+      dir: "asc",
+      from: sinceTs,
+      to: untilTs,
+      limit: cap,
+      windowMessages: 100,
+      budgetMs: SCAN_BUDGET_MS,
+    });
+    // A scan that ran out of budget returns an OLDEST-first prefix that is not a
+    // full page; handing that back would read as "exhausted" and skip the rest of
+    // the range. Fail the scan instead — the registry retries it on the next tick.
+    if (!scan.complete && !scan.limited) throw Object.assign(new Error("tool scan exceeded its time budget"), { code: "scan_budget" });
+    rows = scan.rows ?? [];
   } catch (error) {
     throw withCode(error, "db-query-failed");
   }
