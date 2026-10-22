@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, fetchLedgerRows } from "./modelLedger.mjs";
+import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, _resetEndpointSummaryCache, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
 
 // ---- V2 store helpers -----------------------------------------------------
@@ -941,3 +941,99 @@ test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as t
     assert.equal(inc, 80, "the only unfinished row is `new`");
   });
 }
+
+// ---- endpointSummary memo + single-flight (2026-10-19 wedge incident) -------
+
+async function withLedgerDb(t, fn) {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"));
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime");
+    return;
+  }
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "manta-ledger-memo-"));
+  const dbPath = join(dir, "opencode.db");
+  const prev = process.env.MANTA_OPENCODE_DB;
+  try {
+    const seed = new DatabaseSync(dbPath);
+    seed.exec(V2_LEDGER_SCHEMA);
+    seed.prepare("INSERT INTO session_v2 (id, parent_id, agent, directory) VALUES (?,?,?,?)").run("s1", null, "build", "/w");
+    const addTurn = (id) => {
+      const now = Date.now();
+      seed
+        .prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)")
+        .run(
+          id,
+          "s1",
+          "assistant",
+          ++v2Seq,
+          now,
+          now,
+          JSON.stringify({
+            model: { providerID: "anthropic", id: "claude-sonnet" },
+            tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } },
+            time: { created: now - 2000, completed: now - 1000 },
+            content: [{ type: "text", text: "hi" }],
+          }),
+        );
+    };
+    process.env.MANTA_OPENCODE_DB = dbPath;
+    _resetDbHandle();
+    _resetEndpointSummaryCache();
+    await fn({ dbPath, addTurn });
+    seed.close();
+  } finally {
+    if (prev === undefined) delete process.env.MANTA_OPENCODE_DB;
+    else process.env.MANTA_OPENCODE_DB = prev;
+    _resetDbHandle();
+    _resetEndpointSummaryCache();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("endpointSummary memoizes a good reading: a second call in the window does not rescan", async (t) => {
+  await withLedgerDb(t, async ({ addTurn }) => {
+    const since = Date.now() - 60 * 60_000;
+    addTurn("m1");
+    const first = await endpointSummary({ sinceMs: since });
+    assert.equal(first.supported, true);
+    const before = JSON.stringify(first);
+    addTurn("m2"); // a rescan would now see a second turn
+    const second = await endpointSummary({ sinceMs: since });
+    assert.equal(second, first, "served from the memo (same object)");
+    assert.equal(JSON.stringify(second), before);
+    // Dropping the memo proves the DB really did change underneath it.
+    _resetEndpointSummaryCache();
+    const third = await endpointSummary({ sinceMs: since });
+    assert.notEqual(JSON.stringify(third), before);
+  });
+});
+
+test("endpointSummary single-flights concurrent calls onto one scan", async (t) => {
+  await withLedgerDb(t, async ({ addTurn }) => {
+    addTurn("m1");
+    const since = Date.now() - 60 * 60_000;
+    const [a, b, c] = await Promise.all([endpointSummary({ sinceMs: since }), endpointSummary({ sinceMs: since }), endpointSummary({ sinceMs: since })]);
+    assert.equal(a.supported, true);
+    assert.equal(b, a, "the second caller shares the first scan's result object");
+    assert.equal(c, a);
+  });
+});
+
+test("endpointSummary never memoizes a degraded result: the next call retries", async (t) => {
+  await withLedgerDb(t, async ({ dbPath, addTurn }) => {
+    addTurn("m1");
+    const since = Date.now() - 60 * 60_000;
+    process.env.MANTA_OPENCODE_DB = "/nonexistent/opencode.db";
+    _resetDbHandle();
+    assert.deepEqual(await endpointSummary({ sinceMs: since }), { supported: false });
+    process.env.MANTA_OPENCODE_DB = dbPath;
+    _resetDbHandle();
+    const recovered = await endpointSummary({ sinceMs: since });
+    assert.equal(recovered.supported, true, "the unsupported reading was not served from the memo");
+  });
+});

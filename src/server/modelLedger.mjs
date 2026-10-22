@@ -787,8 +787,52 @@ function extractTools(data) {
  * endpoints: {…} }`. `endpoints` is 7a's map keyed by "providerID/modelID";
  * the flag being distinct is what lets a caller tell "no ledger"
  * ({supported:false}) from "a ledger with nothing measured" ({endpoints:{}}).
+ *
+ * TTL memo (2026-10-19 wedge incident): the assistantRows scan underneath is
+ * SYNCHRONOUS node:sqlite over a row table that has grown into tens of GB; a
+ * fresh scan per call froze the event loop past the watchdog's no-answer
+ * threshold (the same starvation class already fixed for fetchLedgerRows via
+ * the incremental cache below). Caller contract is unchanged — successful
+ * readings are memoized briefly (60s) and concurrent same-window calls share
+ * one in-flight scan; degraded values are NOT memoized so callers retry.
  */
+const ENDPOINT_SUMMARY_TTL_MS = 60_000;
+const endpointSummaryCache = new Map(); // floored `since` → { t, summary }
+const endpointSummaryInFlight = new Map(); // floored `since` → promise
+
+/** Test-only: forget memoized endpoint summaries. Not runtime API. */
+export function _resetEndpointSummaryCache() {
+  endpointSummaryCache.clear();
+}
+
 export async function endpointSummary({ sinceMs = 0 } = {}) {
+  const key = Math.floor(num(sinceMs) / ENDPOINT_SUMMARY_TTL_MS);
+  const hit = endpointSummaryCache.get(key);
+  if (hit && Date.now() - hit.t < ENDPOINT_SUMMARY_TTL_MS) return hit.summary;
+  const busy = endpointSummaryInFlight.get(key);
+  if (busy) return busy;
+  const run = endpointSummaryCompute({ sinceMs })
+    .then((summary) => {
+      if (summary && summary.supported === true) {
+        endpointSummaryCache.set(key, { t: Date.now(), summary });
+        // Bound the cache: one entry per distinct window bucket, pruned on write.
+        if (endpointSummaryCache.size > 16) {
+          const now = Date.now();
+          for (const [k, v] of endpointSummaryCache) {
+            if (now - v.t >= ENDPOINT_SUMMARY_TTL_MS) endpointSummaryCache.delete(k);
+          }
+        }
+      }
+      return summary;
+    })
+    .finally(() => {
+      endpointSummaryInFlight.delete(key);
+    });
+  endpointSummaryInFlight.set(key, run);
+  return run;
+}
+
+async function endpointSummaryCompute({ sinceMs = 0 } = {}) {
   const db = await getDb();
   if (!db) return { supported: false };
 
