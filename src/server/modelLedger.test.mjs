@@ -3,6 +3,9 @@
 // `npm run test:server` (node:test).
 
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { aggregate, aggregateEndpointStats, aggregateBySession, aggregateDailySeries, aggregateHourlySeries, endpointSummary, _resetEndpointSummaryCache, fetchLedgerRows } from "./modelLedger.mjs";
 import { _resetDbHandle } from "./opencodeDb.mjs";
@@ -952,9 +955,6 @@ async function withLedgerDb(t, fn) {
     t.skip("node:sqlite unavailable on this runtime");
     return;
   }
-  const { mkdtempSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
   const dir = mkdtempSync(join(tmpdir(), "manta-ledger-memo-"));
   const dbPath = join(dir, "opencode.db");
   const prev = process.env.MANTA_OPENCODE_DB;
@@ -964,22 +964,15 @@ async function withLedgerDb(t, fn) {
     seed.prepare("INSERT INTO session_v2 (id, parent_id, agent, directory) VALUES (?,?,?,?)").run("s1", null, "build", "/w");
     const addTurn = (id) => {
       const now = Date.now();
-      seed
-        .prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)")
-        .run(
-          id,
-          "s1",
-          "assistant",
-          ++v2Seq,
-          now,
-          now,
-          JSON.stringify({
-            model: { providerID: "anthropic", id: "claude-sonnet" },
-            tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } },
-            time: { created: now - 2000, completed: now - 1000 },
-            content: [{ type: "text", text: "hi" }],
-          }),
-        );
+      const turn = {
+        role: "assistant",
+        providerID: "anthropic",
+        modelID: "claude-sonnet",
+        tokens: { input: 10, output: 20, cache: { read: 0, write: 0 } },
+        time: { created: now - 2000, completed: now - 1000 },
+        content: [{ type: "text", text: "hi" }],
+      };
+      insertV2Message(seed, id, "s1", now, JSON.stringify(turn));
     };
     process.env.MANTA_OPENCODE_DB = dbPath;
     _resetDbHandle();
