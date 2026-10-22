@@ -145,19 +145,12 @@ test("the release ships the V2 plugins and no longer the V1 plugin directory", (
 
 // --- stageOpencodeBinary: the pinned OpenCode V2 binary rides in the tarball ----------------
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { stageOpencodeBinary } from "./stage-opencode.mjs";
 
 function stager() {
-  return evalFunctionDecl("stageOpencodeBinary", {
-    // the helpers the function closes over
-    join,
-    mkdir, copyFile, chmod, readFile, writeFile, createHash,
-    opencodePlatformFor: evalFunctionDecl("opencodePlatformFor"),
-    OPENCODE_V2_VERSION: "2.0.30",
-    ensureOpencodeBinary: null,
-    opencodePlatformKey: null,
-  });
+  return stageOpencodeBinary;
 }
 
 test("stageOpencodeBinary: copies the binary executable, with a sha256 sidecar + VERSION, into vendor/opencode", async () => {
