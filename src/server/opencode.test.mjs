@@ -1275,6 +1275,34 @@ test("getProviders coerces a non-array connected[] to []", async () => {
   );
 });
 
+test("getProviders coalesces concurrent callers into ONE /provider fetch, and refetches afterwards", async () => {
+  // opencode serves /provider serially at ~2.5 s each; Settings → Models
+  // fires ~6 at once, which used to queue past the renderer's 15 s timeout.
+  let calls = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  await withMockFetch(
+    async () => {
+      calls += 1;
+      await gate;
+      return new Response(JSON.stringify({ connected: ["anthropic"], all: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+    async () => {
+      const pending = Array.from({ length: 6 }, () => getProviders());
+      release();
+      const results = await Promise.all(pending);
+      assert.equal(calls, 1);
+      for (const r of results) assert.deepEqual(r.connected, ["anthropic"]);
+      // Nothing is cached past completion: the next call hits opencode again.
+      await getProviders();
+      assert.equal(calls, 2);
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // getDefaultModel — picks the first connected provider with a default model.
 //
