@@ -94,7 +94,11 @@ export function ToolCard({
     <>
       {tone != null && <StatusDot tone={tone} />}
       <span className={NAME}>{name}</span>
-      {arg != null && <span className={ARG}>{arg}</span>}
+      {arg != null && (
+        <span className={ARG} title={arg}>
+          {arg}
+        </span>
+      )}
     </>
   );
 

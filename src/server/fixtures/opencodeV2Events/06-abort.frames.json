@@ -4,6 +4,7 @@
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
 {"kind":"stream","sub":"toolStarted","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","idx":"toolu_019GLqEYR7wXVxYBukBdyq19","callID":"toolu_019GLqEYR7wXVxYBukBdyq19","toolName":"bash","toolPresentationHint":null,"status":"pending"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
+{"kind":"stream","sub":"toolStarted","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","idx":"toolu_019GLqEYR7wXVxYBukBdyq19","callID":"toolu_019GLqEYR7wXVxYBukBdyq19","toolName":"bash","toolPresentationHint":"for i in 1 2 3 4 5 6 7 8 9 10; do echo tick$i; sleep 1; done","status":"running"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM"}},
 {"kind":"stream","sub":"toolEnded","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","idx":"toolu_019GLqEYR7wXVxYBukBdyq19","ok":false}},
 {"kind":"stream","sub":"toolBoundary","sessionId":"ses_eba52ec19ffe2fFb4Kw7dFnN5j","payload":{"messageID":"msg_145ad1555001b1ZQcKwrUkjptM","partID":"toolu_019GLqEYR7wXVxYBukBdyq19","callID":"toolu_019GLqEYR7wXVxYBukBdyq19","tool":"bash","status":"error"}},

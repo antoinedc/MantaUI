@@ -4,6 +4,7 @@
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"messageID":"msg_145ad45ef001iYwMOSIGV8AMvp"}},
 {"kind":"stream","sub":"toolStarted","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","idx":"toolu_01RcwiYZg6rM5fJGQqSH32bT","callID":"toolu_01RcwiYZg6rM5fJGQqSH32bT","toolName":"bash","toolPresentationHint":null,"status":"pending"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"messageID":"msg_145ad45ef001iYwMOSIGV8AMvp"}},
+{"kind":"stream","sub":"toolStarted","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","idx":"toolu_01RcwiYZg6rM5fJGQqSH32bT","callID":"toolu_01RcwiYZg6rM5fJGQqSH32bT","toolName":"bash","toolPresentationHint":"echo permission-ok","status":"running"}},
 {"kind":"stream","sub":"attention","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"kind":"permission"}},
 {"kind":"stream","sub":"permissions","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"permissions":[{"id":"per_145ad4a3d001JKuHLNWbFEs11d","sessionID":"ses_eba52bbb3ffezOePWd24oGBJDA","permission":"bash","patterns":["echo permission-ok"],"always":["echo *"],"metadata":{"command":"echo permission-ok"},"tool":{"messageID":"msg_145ad45ef001iYwMOSIGV8AMvp","callID":"toolu_01RcwiYZg6rM5fJGQqSH32bT"}}]}},
 {"kind":"stream","sub":"attention","sessionId":"ses_eba52bbb3ffezOePWd24oGBJDA","payload":{"kind":null}},

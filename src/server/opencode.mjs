@@ -467,6 +467,11 @@ async function hydrateRunningShells(messages, sessionId) {
   return messages;
 }
 
+/** The session's directory (cache first, one lookup on a miss); undefined when unknown. */
+async function directoryForTitles(sessionId) {
+  return cachedSessionDirectory(sessionId) ?? (await getSessionInfo(sessionId))?.directory ?? undefined;
+}
+
 /** Fetch a session's message transcript, in the `{info, parts}[]` shape every client reads.
  *
  *  @param {string} sessionId
@@ -480,7 +485,7 @@ async function hydrateRunningShells(messages, sessionId) {
 export async function listMessages(sessionId, opts = {}) {
   const limit = Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : null;
   const timeline = await readTimeline(sessionId, { limit });
-  let mapped = mapTimeline(timeline, { sessionID: sessionId });
+  let mapped = mapTimeline(timeline, { sessionID: sessionId, directory: await directoryForTitles(sessionId) });
   if (limit != null && mapped.length > limit) mapped = mapped.slice(mapped.length - limit);
   await hydrateRunningShells(mapped, sessionId);
   const stripped = mapped.map(stripDuplicateToolOutput);
@@ -501,7 +506,7 @@ export async function getMessage(sessionId, messageId) {
       return null;
     }
     const record = (await res.json())?.data;
-    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId }), sessionId);
+    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId);
     return mapped ? stripDuplicateToolOutput(mapped) : null;
   } catch {
     return null;
