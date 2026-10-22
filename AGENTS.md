@@ -1284,6 +1284,25 @@ box is in upgrade mode:** every route except `/auth/*`, `/api/version`,
 upgrading","upgrade":true}` (`isUpgradeExemptPath`; a WS twin guards `/pty`).
 Clients show the blocking `UpgradeGate` (desktop) / read-only state (iOS).
 
+**Large archives (measured on a 34 GB DB).** OpenCode 2.0.30's
+`GET /api/experimental/migration/v1` blocks for the WHOLE migration, and
+restarting opencode discards an in-flight migration. So `migrate` (a) does NOT
+restart opencode when its service definition is unchanged and it is already
+running (a crash/resume must not throw away hours of work), (b) holds the status
+request for up to 30 min, and (c) runs a time-based ticker that publishes the V2
+session count so the UI does not look hung. A status failure that took ≥ 2 s
+means opencode is alive and busy and resets the start deadline; only instant
+failures (connection refused) mean it never came up.
+
+**Where the readers find the DB on a copy-mode box.** opencode-serve gets
+`OPENCODE_DB=<targetDb>` in its own service env; manta-server does not.
+`opencodeDb.mjs` `resolveDbPath()` therefore resolves `MANTA_OPENCODE_DB` →
+`OPENCODE_DB` → the upgrade state file's `targetDb` (only when `state` is
+`completed`, `mode` is `copy` and the file exists) → the XDG/default path. Without
+that step every history reader (search, ledger, optimizer, CTO) hit the untouched V1
+file, failed the V2-schema guard and answered `supported:false`. Every reader goes
+through `resolveDbPath()` — never locate the DB independently.
+
 **Rollback** (only from `failed`): stop V2 → drop the V2 copy → restore the V1
 tools/plugins/config from the backup → start the preserved V1 binary
 (`~/.opencode/bin/opencode-v1`) on the untouched V1 DB → re-install the previous

@@ -18,16 +18,22 @@ test("resolveDbPath returns MANTA_OPENCODE_DB verbatim when set", () => {
 });
 
 test("resolveDbPath returns null when XDG_DATA_HOME is set but the file is absent", () => {
+  // OPENCODE_DB is inherited from the opencode service when the suite runs inside an agent session.
+  const savedO = process.env.OPENCODE_DB;
+  delete process.env.OPENCODE_DB;
   process.env.XDG_DATA_HOME = "/nonexistent/xdg-data-home-for-test";
   try {
     assert.equal(resolveDbPath(), null);
   } finally {
     delete process.env.XDG_DATA_HOME;
+    if (savedO !== undefined) process.env.OPENCODE_DB = savedO;
   }
 });
 
 test("getDb() returns null (and does not throw) when resolveDbPath yields null", async () => {
   _resetDbHandle();
+  const savedO = process.env.OPENCODE_DB;
+  delete process.env.OPENCODE_DB;
   process.env.XDG_DATA_HOME = "/nonexistent/xdg-data-home-for-test";
   delete process.env.MANTA_OPENCODE_DB;
   try {
@@ -35,6 +41,7 @@ test("getDb() returns null (and does not throw) when resolveDbPath yields null",
     assert.equal(db, null);
   } finally {
     delete process.env.XDG_DATA_HOME;
+    if (savedO !== undefined) process.env.OPENCODE_DB = savedO;
     _resetDbHandle();
   }
 });
@@ -173,6 +180,135 @@ test("a database without the V2 schema (an unmigrated V1 file) degrades to null 
     if (saved === undefined) delete process.env.MANTA_OPENCODE_DB; else process.env.MANTA_OPENCODE_DB = saved;
     _resetDbHandle();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Copy-mode migration: opencode-serve gets OPENCODE_DB, manta-server does not.
+// The upgrade state file is how the readers find the migrated copy.
+// ---------------------------------------------------------------------------
+
+async function withStateSandbox(fn) {
+  const { mkdtempSync, rmSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "manta-dbstate-"));
+  const saved = {};
+  for (const k of ["MANTA_STATE_HOME", "MANTA_OPENCODE_DB", "OPENCODE_DB", "XDG_DATA_HOME"]) saved[k] = process.env[k];
+  try {
+    process.env.MANTA_STATE_HOME = dir;
+    delete process.env.MANTA_OPENCODE_DB;
+    delete process.env.OPENCODE_DB;
+    // An empty XDG home: the "default" is a known-absent file, never the real box's DB.
+    process.env.XDG_DATA_HOME = join(dir, "xdg");
+    mkdirSync(join(dir, ".manta"), { recursive: true });
+    const writeState = (st) => writeFileSync(join(dir, ".manta", "v2-migration.json"), typeof st === "string" ? st : JSON.stringify(st));
+    _resetDbHandle();
+    return await fn({ dir, join, writeState, writeFileSync, mkdirSync });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    _resetDbHandle();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a completed copy-mode migration points the readers at targetDb (manta-server never sees OPENCODE_DB)", async () => {
+  await withStateSandbox(async ({ dir, join, writeState, writeFileSync }) => {
+    const target = join(dir, "opencode-v2.db");
+    writeFileSync(target, "");
+    writeState({ state: "completed", mode: "copy", targetDb: target });
+    assert.equal(resolveDbPath(), target);
+  });
+});
+
+test("only a completed copy-mode migration counts: absent / running / failed / rolled back / in-place / missing target → default", async () => {
+  await withStateSandbox(async ({ dir, join, writeState, writeFileSync, mkdirSync }) => {
+    const target = join(dir, "opencode-v2.db");
+    writeFileSync(target, "");
+    assert.equal(resolveDbPath(), null, "no state file: the (absent) default");
+    for (const st of [
+      { state: "running", mode: "copy", targetDb: target },
+      { state: "failed", mode: "copy", targetDb: target },
+      { state: "rolled_back", mode: "copy", targetDb: target },
+      { state: "idle", mode: null, targetDb: null },
+      { state: "completed", mode: "in-place", targetDb: target },
+      { state: "completed", mode: "copy", targetDb: join(dir, "gone.db") },
+      { state: "completed", mode: "copy", targetDb: "" },
+      { state: "completed", mode: "copy" },
+    ]) {
+      writeState(st);
+      assert.equal(resolveDbPath(), null, JSON.stringify(st));
+    }
+    writeState("{ not json");
+    assert.equal(resolveDbPath(), null, "an unreadable state file has no opinion");
+    // With a real default present, the default is what an in-place box resolves to.
+    const def = join(dir, "xdg", "opencode", "opencode.db");
+    mkdirSync(join(dir, "xdg", "opencode"), { recursive: true });
+    writeFileSync(def, "");
+    writeState({ state: "completed", mode: "in-place", targetDb: def });
+    assert.equal(resolveDbPath(), def);
+  });
+});
+
+test("env overrides still beat the migration state; the state beats the default", async () => {
+  await withStateSandbox(async ({ dir, join, writeState, writeFileSync, mkdirSync }) => {
+    const target = join(dir, "opencode-v2.db");
+    writeFileSync(target, "");
+    const def = join(dir, "xdg", "opencode", "opencode.db");
+    mkdirSync(join(dir, "xdg", "opencode"), { recursive: true });
+    writeFileSync(def, "");
+    writeState({ state: "completed", mode: "copy", targetDb: target });
+    assert.equal(resolveDbPath(), target, "state beats the V1 default");
+    process.env.OPENCODE_DB = "/env/opencode.db";
+    assert.equal(resolveDbPath(), "/env/opencode.db");
+    process.env.MANTA_OPENCODE_DB = "/test/hook.db";
+    assert.equal(resolveDbPath(), "/test/hook.db");
+  });
+});
+
+test("the state is re-read on change: an upgrade that completes while the server runs is picked up without a restart", async () => {
+  await withStateSandbox(async ({ dir, join, writeState, writeFileSync }) => {
+    const target = join(dir, "opencode-v2.db");
+    writeFileSync(target, "");
+    writeState({ state: "running", mode: "copy", targetDb: target });
+    assert.equal(resolveDbPath(), null);
+    writeState({ state: "completed", mode: "copy", targetDb: target }); // different size → cache invalidated
+    assert.equal(resolveDbPath(), target);
+    writeState({ state: "rolled_back", mode: "copy", targetDb: target });
+    assert.equal(resolveDbPath(), null);
+  });
+});
+
+test("getDb on a copy-mode box: a V1 default is rejected, then the migrated copy opens once the state says completed, and the handle follows it", async (t) => {
+  if (!hasSqlite) return t.skip("node:sqlite unavailable on this runtime");
+  const { DatabaseSync } = await import("node:sqlite");
+  const v2 = await createFixtureDb({ sessions: [{ id: "s_v2", directory: "/v2" }] });
+  try {
+    await withStateSandbox(async ({ dir, join, writeState, mkdirSync }) => {
+      // the untouched V1 file at the default path
+      mkdirSync(join(dir, "xdg", "opencode"), { recursive: true });
+      const v1 = new DatabaseSync(join(dir, "xdg", "opencode", "opencode.db"));
+      v1.exec("CREATE TABLE session (id TEXT); CREATE TABLE message (id TEXT); CREATE TABLE part (id TEXT)");
+      v1.close();
+
+      assert.equal(await getDb(), null, "the V1 file fails the V2 schema guard");
+      assert.equal(getDbOpenFailure().reason, "source_unavailable");
+
+      writeState({ state: "completed", mode: "copy", targetDb: v2.dbPath });
+      const db = await getDb();
+      assert.ok(db, "the migrated copy opens without any env override");
+      assert.deepEqual(db.prepare("SELECT id FROM session_v2").all().map((r) => r.id), ["s_v2"]);
+      assert.equal(await getDb(), db, "unchanged path keeps the handle");
+
+      writeState({ state: "rolled_back", mode: "copy", targetDb: v2.dbPath });
+      assert.equal(await getDb(), null, "path went back to the V1 default → old handle dropped, schema guard rejects it");
+      assert.equal(db.isOpen, false);
+    });
+  } finally {
+    v2.close();
   }
 });
 
