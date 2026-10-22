@@ -1805,15 +1805,26 @@ export async function setProviderApiKey(providerID, key) {
  * login when a seat sign-in borrowed the live slot. Only the fields opencode's
  * credential schema knows are forwarded.
  *
- * SECURITY: like `setProviderApiKey`, the entry is NEVER echoed back and NEVER
- * logged; the result is `{ok}` / `{ok:false, error}` only.
+ * `accountId` (the ChatGPT/Codex account) and `enterpriseUrl` travel as `metadata.accountID` /
+ * `metadata.enterpriseUrl` — the slots V2's own legacy-credential import writes and its OpenAI
+ * provider reads (`chatgpt-account-id` header). A top-level `accountId` is NOT an error in V2: the
+ * server answers 200 and silently drops it, so it must be placed explicitly or the id is lost.
+ *
+ * V2 has no in-place token replace (PATCH only renames), so this CREATES a credential and activates
+ * it; the previous one stays as an inactive row.
+ *
+ * SECURITY: like `setProviderApiKey`, the entry is NEVER echoed back and NEVER logged; the result is
+ * `{ok}` / `{ok:false, error}` only.
  * @param {string} providerID
- * @param {{type:string, access?:string, refresh?:string, expires?:number, key?:string}} entry
+ * @param {{type:string, access?:string, refresh?:string, expires?:number, accountId?:string, enterpriseUrl?:string, key?:string}} entry
  */
 export async function setProviderAuthEntry(providerID, entry) {
   try {
     if (entry?.type === "api" || entry?.type === "key") return setProviderApiKey(providerID, entry.key);
     const oauth = (await integrationMethods(providerID)).find((m) => m?.type === "oauth");
+    const metadata = {};
+    if (typeof entry?.accountId === "string" && entry.accountId) metadata.accountID = entry.accountId;
+    if (typeof entry?.enterpriseUrl === "string" && entry.enterpriseUrl) metadata.enterpriseUrl = entry.enterpriseUrl;
     const res = await ocFetch(apiUrl("/api/credential"), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1825,6 +1836,7 @@ export async function setProviderAuthEntry(providerID, entry) {
           refresh: entry?.refresh,
           access: entry?.access,
           expires: entry?.expires,
+          ...(Object.keys(metadata).length ? { metadata } : {}),
         },
       }),
     });
