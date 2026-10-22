@@ -2207,97 +2207,114 @@ describe("readCacheTtl", () => {
 
 // ---------------------------------------------------------------------------
 // setModelCost — sticky-trims C6. Declares ONE model's list price through the
-// single PATCH /global/config writer, and touches nothing else.
+// single editConfig writer, and touches nothing else.
 // ---------------------------------------------------------------------------
 
 describe("setModelCost", () => {
   const ok = { providerID: "openrouter", modelID: "deepseek/deepseek-v4-flash", cost: { input: 0.09, output: 0.18, cache_read: 0.018, cache_write: 0.09 } };
+  const COST = { input: 0.09, output: 0.18, cache_read: 0.018, cache_write: 0.09 };
 
-  it("PATCHes ONLY the cost subtree of that one model", async () => {
-    const patches = [];
-    const res = await setModelCost(ok, { patch: async (b) => (patches.push(b), { ok: true }) });
+  it("writes ONLY the cost key of that one model, then reloads once", async () => {
+    const { state, deps } = memConfig();
+    const res = await setModelCost(ok, deps);
     assert.deepEqual(res, { ok: true });
-    assert.equal(patches.length, 1);
-    assert.deepEqual(patches[0], {
-      provider: {
-        openrouter: {
-          models: {
-            "deepseek/deepseek-v4-flash": {
-              cost: { input: 0.09, output: 0.18, cache_read: 0.018, cache_write: 0.09 },
-            },
-          },
-        },
-      },
-    });
+    assert.deepEqual(state.config(), { provider: { openrouter: { models: { "deepseek/deepseek-v4-flash": { cost: COST } } } } });
+    assert.equal(state.writes, 1);
+    assert.equal(state.reloads, 1);
   });
 
-  it("never rebuilds a provider block: no npm/options/apiKey/name/baseURL/id keys in the body", async () => {
-    let body;
-    await setModelCost(ok, { patch: async (b) => ((body = b), { ok: true }) });
-    const text = JSON.stringify(body);
-    for (const k of ["npm", "options", "apiKey", "baseURL", "name", "\"id\""]) {
-      assert.ok(!text.includes(k), `body must not carry ${k}`);
+  it("never rebuilds a provider block: everything else in it (and in the file) survives, comments included", async () => {
+    const before = `{
+  // my providers
+  "provider": {
+    "openrouter": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenRouter",
+      "options": { "baseURL": "https://openrouter.ai/api/v1", "apiKey": "sk-keep" },
+      "models": { "deepseek/deepseek-v4-flash": { "name": "Flash", "limit": { "context": 1000 } }, "other": { "name": "Other" } }
     }
+  },
+  "skills": { "urls": ["https://example.test"] }
+}`;
+    const { state, deps } = memConfig(before);
+    await setModelCost(ok, deps);
+    assert.match(state.text, /\/\/ my providers/);
+    const cfg = state.config();
+    assert.deepEqual(cfg.provider.openrouter.models["deepseek/deepseek-v4-flash"], { name: "Flash", limit: { context: 1000 }, cost: COST });
+    assert.deepEqual(cfg.provider.openrouter.models.other, { name: "Other" });
+    assert.equal(cfg.provider.openrouter.options.apiKey, "sk-keep");
+    assert.equal(cfg.provider.openrouter.npm, "@ai-sdk/openai-compatible");
+    assert.deepEqual(cfg.skills, { urls: ["https://example.test"] });
+  });
+
+  it("a re-declared price REPLACES the old one (no stale cache rates left behind); an identical one is a no-op", async () => {
+    const { state, deps } = memConfig(JSON.stringify({ provider: { p: { models: { m: { cost: { input: 9, output: 9, cache_read: 9, cache_write: 9 } } } } } }));
+    assert.deepEqual(await setModelCost({ providerID: "p", modelID: "m", cost: { input: 1, output: 2 } }, deps), { ok: true });
+    assert.deepEqual(state.config().provider.p.models.m.cost, { input: 1, output: 2 });
+    const writes = state.writes;
+    assert.deepEqual(await setModelCost({ providerID: "p", modelID: "m", cost: { input: 1, output: 2 } }, deps), { ok: true });
+    assert.equal(state.writes, writes, "nothing differs → no write, no reload");
   });
 
   it("cache fields are optional; input and output are required", async () => {
-    const patches = [];
-    const patch = async (b) => (patches.push(b), { ok: true });
-    assert.deepEqual(
-      await setModelCost({ providerID: "p", modelID: "m", cost: { input: 1, output: 2 } }, { patch }),
-      { ok: true },
-    );
-    assert.deepEqual(patches[0].provider.p.models.m.cost, { input: 1, output: 2 });
+    const { state, deps } = memConfig();
+    assert.deepEqual(await setModelCost({ providerID: "p", modelID: "m", cost: { input: 1, output: 2 } }, deps), { ok: true });
+    assert.deepEqual(state.config().provider.p.models.m.cost, { input: 1, output: 2 });
+    const writes = state.writes;
     for (const cost of [{ input: 1 }, { output: 2 }, {}, { input: "1", output: 2 }, { input: 1, output: -2 }]) {
-      const r = await setModelCost({ providerID: "p", modelID: "m", cost }, { patch });
+      const r = await setModelCost({ providerID: "p", modelID: "m", cost }, deps);
       assert.equal(r.ok, false, JSON.stringify(cost));
     }
-    assert.equal(patches.length, 1, "nothing is written for an invalid body");
+    assert.equal(state.writes, writes, "nothing is written for an invalid body");
   });
 
   it("numbers must be finite and >= 0 (cache fields too)", async () => {
-    let called = 0;
-    const patch = async () => (called++, { ok: true });
+    const { state, deps } = memConfig();
     for (const bad of [NaN, Infinity, -0.01, "3", true]) {
       for (const k of ["input", "output", "cache_read", "cache_write"]) {
         const cost = { input: 1, output: 2, [k]: bad };
-        const r = await setModelCost({ providerID: "p", modelID: "m", cost }, { patch });
+        const r = await setModelCost({ providerID: "p", modelID: "m", cost }, deps);
         assert.equal(r.ok, false, `${k}=${String(bad)}`);
       }
     }
-    assert.equal(called, 0);
+    assert.equal(state.writes, 0);
     // zero is a legitimate declared price
-    assert.deepEqual(
-      await setModelCost({ providerID: "p", modelID: "m", cost: { input: 0, output: 0, cache_read: 0 } }, { patch }),
-      { ok: true },
-    );
+    assert.deepEqual(await setModelCost({ providerID: "p", modelID: "m", cost: { input: 0, output: 0, cache_read: 0 } }, deps), { ok: true });
+    assert.deepEqual(state.config().provider.p.models.m.cost, { input: 0, output: 0, cache_read: 0 });
   });
 
   it("rejects invalid ids before any write", async () => {
-    let called = 0;
-    const patch = async () => (called++, { ok: true });
+    const { state, deps } = memConfig();
     const cost = { input: 1, output: 2 };
     for (const bad of ["", "a b", "a;b", "x".repeat(201), "ünï", "a\nb", "../x\u0000", "__proto__", "constructor", 5, null, undefined]) {
-      assert.equal((await setModelCost({ providerID: bad, modelID: "m", cost }, { patch })).ok, false, `providerID ${String(bad)}`);
-      assert.equal((await setModelCost({ providerID: "p", modelID: bad, cost }, { patch })).ok, false, `modelID ${String(bad)}`);
+      assert.equal((await setModelCost({ providerID: bad, modelID: "m", cost }, deps)).ok, false, `providerID ${String(bad)}`);
+      assert.equal((await setModelCost({ providerID: "p", modelID: bad, cost }, deps)).ok, false, `modelID ${String(bad)}`);
     }
-    assert.equal(called, 0);
-    // ids with the allowed punctuation pass
+    assert.equal(state.writes, 0);
+    // ids with the allowed punctuation pass, each as ONE key (a "." or "/" never splits a path)
     for (const good of ["deepseek/deepseek-v4-flash", "claude-opus-4.7", "a:b@c_d-e", "x".repeat(200)]) {
-      assert.equal((await setModelCost({ providerID: "p", modelID: good, cost }, { patch })).ok, true, good);
+      assert.equal((await setModelCost({ providerID: "p", modelID: good, cost }, deps)).ok, true, good);
+      assert.deepEqual(state.config().provider.p.models[good].cost, cost, good);
     }
   });
 
   it("a non-object body / cost is rejected, never thrown", async () => {
-    const patch = async () => ({ ok: true });
-    assert.equal((await setModelCost(undefined, { patch })).ok, false);
-    assert.equal((await setModelCost(null, { patch })).ok, false);
-    assert.equal((await setModelCost({ providerID: "p", modelID: "m", cost: [1, 2] }, { patch })).ok, false);
-    assert.equal((await setModelCost({ providerID: "p", modelID: "m", cost: "x" }, { patch })).ok, false);
+    const { state, deps } = memConfig();
+    assert.equal((await setModelCost(undefined, deps)).ok, false);
+    assert.equal((await setModelCost(null, deps)).ok, false);
+    assert.equal((await setModelCost({ providerID: "p", modelID: "m", cost: [1, 2] }, deps)).ok, false);
+    assert.equal((await setModelCost({ providerID: "p", modelID: "m", cost: "x" }, deps)).ok, false);
+    assert.equal(state.writes, 0);
   });
 
-  it("surfaces the writer's error verbatim; never falls back to writing the file", async () => {
-    const r = await setModelCost(ok, { patch: async () => ({ ok: false, error: "opencode config update failed (500): nope" }) });
-    assert.deepEqual(r, { ok: false, error: "opencode config update failed (500): nope" });
+  it("surfaces the writer's error; an unparseable file is refused and left untouched", async () => {
+    const rejected = memConfig("{}", { reload: async () => ({ ok: false, error: "reload rejected (500)" }) });
+    assert.deepEqual(await setModelCost(ok, rejected.deps), { ok: false, error: "reload rejected (500)" });
+    const broken = memConfig("{ not json");
+    const r = await setModelCost(ok, broken.deps);
+    assert.equal(r.ok, false);
+    assert.ok(r.error);
+    assert.equal(broken.state.text, "{ not json", "never overwritten");
+    assert.equal(broken.state.writes, 0);
   });
 });

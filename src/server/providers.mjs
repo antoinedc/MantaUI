@@ -716,7 +716,7 @@ export async function setReferences(ops, deps = {}) {
   return r.ok ? { ok: true } : r;
 }
 
-// Ids that become object keys in the PATCH body. Same alphabet opencode's own
+// Ids that become object keys in the config edit. Same alphabet opencode's own
 // ids use; the `__proto__`-style names are refused on top of the regex because
 // they are legal characters but never a real provider/model.
 const COST_ID_RE = /^[A-Za-z0-9._:/@-]{1,200}$/;
@@ -732,20 +732,23 @@ function isCostRate(v) {
  * cache_write? }` in $/Mtok. Used for models with no published price so the
  * optimizer's trim gate has a number to work with.
  *
- * Writes through the existing `patchGlobalConfig` ONLY, and the patch body is
- * EXACTLY `{ provider: { [providerID]: { models: { [modelID]: { cost } } } } }`
- * — opencode deep-merges it, so a built-in provider's other models and options
- * are untouched. It deliberately never goes through `upsertProviderBlock`,
- * which REBUILDS a provider block and would clobber a built-in provider.
+ * Writes through the single `editConfig` writer ONLY, and the edit touches
+ * EXACTLY the `provider.<providerID>.models.<modelID>.cost` key — a surgical
+ * jsonc edit, so a built-in provider's other models and options (and every
+ * comment) are untouched. It deliberately never goes through
+ * `upsertProviderBlock`, which REBUILDS a provider block and would clobber a
+ * built-in provider. V2 re-reads the config on reload and honours the same
+ * `{input, output, cache_read, cache_write}` shape (verified against 2.0.30).
  *
  * `input` and `output` are REQUIRED (opencode's config schema requires both);
- * the cache fields are optional. Everything is validated before any write.
+ * the cache fields are optional. Everything is validated before any write. The
+ * declared `cost` REPLACES the previous one for that model (a price is one
+ * statement, not a merge of stale rates).
  *
- * Returns `{ ok:true }` or `{ ok:false, error }` — never throws. `patch` is
- * injectable for unit tests.
+ * Returns `{ ok:true }` or `{ ok:false, error }` — never throws. The writer's
+ * file/reload hooks are injectable (`deps`) for unit tests.
  */
 export async function setModelCost(input, deps = {}) {
-  const patch = deps.patch ?? patchGlobalConfig;
   const { providerID, modelID, cost } = input ?? {};
   for (const [label, id] of [["providerID", providerID], ["modelID", modelID]]) {
     if (typeof id !== "string" || !COST_ID_RE.test(id) || COST_ID_FORBIDDEN.has(id)) {
@@ -765,7 +768,7 @@ export async function setModelCost(input, deps = {}) {
     if (!isCostRate(cost[k])) return { ok: false, error: `cost.${k} must be a number ≥ 0 ($/Mtok)` };
     out[k] = cost[k];
   }
-  const res = await patch({ provider: { [providerID]: { models: { [modelID]: { cost: out } } } } });
+  const res = await editConfig([{ path: ["provider", providerID, "models", modelID, "cost"], value: out }], deps);
   return res.ok ? { ok: true } : { ok: false, error: res.error ?? "opencode config update failed" };
 }
 
@@ -1314,7 +1317,7 @@ export function selectCacheTtlTargets(models = []) {
 }
 
 // The cacheControl configured for one model, whichever spelling the file uses.
-function configuredCacheControl(cfg, providerID, modelID) {
+export function configuredCacheControl(cfg, providerID, modelID) {
   return (
     cfg?.provider?.[providerID]?.models?.[modelID]?.options?.cacheControl ??
     cfg?.providers?.[providerID]?.models?.[modelID]?.settings?.cacheControl

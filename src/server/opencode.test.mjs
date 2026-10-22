@@ -828,7 +828,7 @@ const PROVIDER_ROUTES = (extra = {}) => ({
   "GET /api/integration": { data: [{ id: "anthropic", methods: [], connections: [{ type: "env", name: "K" }] }, { id: "idle", methods: [], connections: [] }] },
   "GET /api/model": {
     data: [
-      { id: "claude-haiku-4-5", modelID: "claude-haiku-4-5", providerID: "anthropic", name: "Haiku", family: "claude-haiku", status: "active", enabled: true, limit: { context: 200000, output: 64000 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, cost: [{ input: 1, output: 5, cache: { read: 0.1, write: 1.25 } }, { tier: { type: "context", size: 1 }, input: 9, output: 9, cache: { read: 9, write: 9 } }], variants: [{ id: "high" }] },
+      { id: "claude-haiku-4-5", modelID: "claude-haiku-4-5", providerID: "anthropic", package: "@opencode/ai/providers/anthropic", name: "Haiku", family: "claude-haiku", status: "active", enabled: true, limit: { context: 200000, output: 64000 }, capabilities: { tools: true, input: ["text", "image"], output: ["text"] }, cost: [{ input: 1, output: 5, cache: { read: 0.1, write: 1.25 } }, { tier: { type: "context", size: 1 }, input: 9, output: 9, cache: { read: 9, write: 9 } }], variants: [{ id: "high" }] },
       { id: "fm", modelID: "fm", providerID: "fake", name: "fm" },
     ],
   },
@@ -846,6 +846,8 @@ test("getProviders: connected = credential/env-backed or always-enabled; all car
     assert.equal(m.capabilities.attachment, true);
     assert.equal(m.capabilities.reasoning, true, "variants imply reasoning");
     assert.deepEqual(m.cost, { input: 1, output: 5, cache: { read: 0.1, write: 1.25 } }, "the base tier");
+    assert.equal(m.package, "@opencode/ai/providers/anthropic", "the serving package survives (the Anthropic-SDK signal the 1h cache price needs)");
+    assert.equal(p.all[1].models.fm.package, undefined);
     assert.deepEqual(p.default, { anthropic: "claude-haiku-4-5" });
   });
 });

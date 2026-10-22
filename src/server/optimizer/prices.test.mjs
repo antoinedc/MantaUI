@@ -257,7 +257,7 @@ test("price cache document: versioned; readPriceCache rejects wrong version / sh
 function provider(id, models, npm) {
   return {
     id,
-    models: Object.fromEntries(models.map((m) => [m, { id: m, api: npm ? { npm } : {} }])),
+    models: Object.fromEntries(models.map((m) => [m, { id: m, ...(npm ? { package: npm } : {}) }])),
   };
 }
 

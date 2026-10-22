@@ -1395,6 +1395,9 @@ export function _modelFromV2(m) {
     family: m.family,
     status: m.status,
     enabled: m.enabled,
+    // The provider package V2 serves this model through — the signal that tells an Anthropic-SDK
+    // model (the only kind the 1h cache TTL applies to) from the rest.
+    package: m.package,
     limit: m.limit,
     // The first cost entry is the base tier; context-tiered pricing is not modelled.
     cost: costs.find((c) => !c?.tier) ?? costs[0],
