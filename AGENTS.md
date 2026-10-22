@@ -1284,6 +1284,64 @@ box is in upgrade mode:** every route except `/auth/*`, `/api/version`,
 upgrading","upgrade":true}` (`isUpgradeExemptPath`; a WS twin guards `/pty`).
 Clients show the blocking `UpgradeGate` (desktop) / read-only state (iOS).
 
+**Large archives (measured on a 34 GB DB).** OpenCode 2.0.30's
+`GET /api/experimental/migration/v1` blocks for the WHOLE migration, and
+restarting opencode discards an in-flight migration. So `migrate` (a) does NOT
+restart opencode when it is RESUMING an interrupted migrate step (progress already
+published) with an unchanged service definition and opencode already running — a
+crash/resume must not throw away hours of work; a fresh run or a retry after a
+failure always restarts, since the service may be wedged — (b) holds the status
+request for up to 30 min, and (c) runs a time-based ticker that publishes the V2
+session count so the UI does not look hung. A status failure that took ≥ 2 s
+means opencode is alive and busy and resets the start deadline; only instant
+failures (connection refused) mean it never came up.
+
+**Where the readers find the DB on a copy-mode box.** opencode-serve gets
+`OPENCODE_DB=<targetDb>` in its own service env; manta-server does not.
+`opencodeDb.mjs` `resolveDbPath()` therefore resolves `MANTA_OPENCODE_DB` →
+`OPENCODE_DB` → the upgrade state file's `targetDb` (only when `state` is
+`completed`, `mode` is `copy` and the file exists) → the XDG/default path. Without
+that step every history reader (search, ledger, optimizer, CTO) hit the untouched V1
+file, failed the V2-schema guard and answered `supported:false`. Every reader goes
+through `resolveDbPath()` — never locate the DB independently.
+
+**Heavy history reads never run on the main thread (post-cutover perf pass).**
+manta-server's event loop is shared by every client (desktop, iOS, push), and
+`node:sqlite` is synchronous, so a slow query IS a frozen server (the
+2026-10-19 wedge). The real V2 history is ~34 GB and its tables have no index for
+text search, tool-call scans or per-message JSON walks, so those reads are written
+to be bounded instead of fast:
+
+- `dbTasks.mjs` holds the heavy readers as `(db, args)` functions; `dbOffload.mjs`
+  runs them in a `worker_thread` with its own read-only handle (`dbWorker.mjs`).
+  A hard timeout abandons a wedged worker and replaces it (a native sqlite call
+  cannot be interrupted); at most 2 live + 3 abandoned workers, then jobs fail
+  fast and the caller degrades. `runOnHandle` runs inline for any handle that is
+  not the shared one (fixtures, tests).
+- `scanWindows` walks the message table in ~50-400-message TIME WINDOWS on the
+  `time_created` index and stops at a deadline. A reader that runs out of budget
+  returns the NEWEST part of the answer plus how to continue (`truncated:true`,
+  a resume cursor) — never nothing, never a hang. Callers: ⌘F search
+  (`truncated`), `ctoSearch` (cursor), the daily tool scan (fails retryably: a
+  short page would read as "exhausted"), the search-index sweep, endpoint stats.
+- The model ledger cache holds a HORIZON, not the whole history: a read loads
+  the recent 48 h first, publishes it, then steps down through 7 d / 14 d / 30 d
+  / target (each tier published), reading only the gap. It leans on
+  `session.time_updated >= newest message` (measured: lag ≤ 300 ms; skipped
+  sessions get a 10-minute slack). Cold wide reads: all-history 120 s in the
+  worker (was 5-7 min of main-thread page queries).
+- `endpointSummary` is stale-while-revalidate: a fresh reading (≥ 60 s, longer
+  after a slow scan) is returned as-is, a stale one (≤ 1 h) is returned while ONE
+  background refresh runs, and with nothing cached a caller waits ≤ 8 s then gets
+  `{supported:false}` while the scan fills the memo.
+- When adding a reader: if its SQL cannot be answered from an index within ~100 ms
+  on a 34 GB DB, it belongs in `dbTasks` behind a time budget — measure it against
+  the real DB read-only first (`EXPLAIN QUERY PLAN`, and a throwaway process).
+
+A tool call whose input is a plain (non-JSON) string used to abort ANY scan that
+reached it ("malformed JSON" from `json(json_extract(...))` in the part view); the
+view now uses `->`, which always yields valid JSON.
+
 **Rollback** (only from `failed`): stop V2 → drop the V2 copy → restore the V1
 tools/plugins/config from the backup → start the preserved V1 binary
 (`~/.opencode/bin/opencode-v1`) on the untouched V1 DB → re-install the previous

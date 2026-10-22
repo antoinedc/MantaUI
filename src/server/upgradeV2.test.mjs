@@ -17,6 +17,7 @@ import {
   STEP_IDS,
   computeOverall,
   createUpgradeV2,
+  createDefaultDeps,
   decideMode,
   isUpgradeExemptPath,
 } from "./upgradeV2.mjs";
@@ -62,6 +63,7 @@ function makeBox(opts = {}) {
       clock += ms;
     },
     pollMs: 1000,
+    ...(o.tickSleep ? { tickSleep: o.tickSleep } : {}),
     turnPollMs: 2000,
     stopWaitMs: 60_000,
     startTimeoutMs: 10_000,
@@ -89,7 +91,11 @@ function makeBox(opts = {}) {
         rec("opencode.stop");
         return hook("opencode.stop");
       },
-      configure: async (variant, args) => rec("opencode.configure", variant, args?.db ?? null),
+      configure: async (variant, args) => {
+        rec("opencode.configure", variant, args?.db ?? null);
+        return o.serviceChanged;
+      },
+      ...(o.running === undefined ? {} : { isRunning: async () => o.running }),
       start: async () => {
         rec("opencode.start");
         return hook("opencode.start");
@@ -147,6 +153,15 @@ function makeBox(opts = {}) {
     },
   };
   return { deps, store, calls, events, o, names: () => calls.map((c) => c[0]), resetMigrate: () => (migrateIdx = 0) };
+}
+
+/** Boot a machine and wait until it is wedged inside the `stop` step (upgrade mode on). */
+async function bootWedgedInStop(box) {
+  const m = createUpgradeV2(box.deps);
+  await m.boot();
+  for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(m.isUpgradeMode(), true);
+  return m;
 }
 
 async function runToIdle(machine) {
@@ -420,6 +435,233 @@ describe("crash and resume at every step", () => {
   }
 });
 
+describe("migrate: do not bounce a running V2 when RESUMING (large-DB migration)", () => {
+  // Restarting opencode discards an in-flight v1 migration, so migrate skips the restart only when
+  // resuming an interrupted migrate step (progress already published), the definition is unchanged
+  // and the service is up. The cutover's own restart is unrelated (always 1).
+  const migrateStarts = (box) => box.calls.filter((c) => c[0] === "opencode.start").length - 1;
+
+  /** Run a first process until it dies inside the migrate step; returns the shared store. */
+  async function crashedInMigrate() {
+    const store = { data: null };
+    const first = makeBox({ store, crashOn: "v2.migrationStatus" });
+    await createUpgradeV2(first.deps).boot();
+    for (let i = 0; i < 200 && store.data?.steps?.migrate?.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(store.data.steps.migrate.status, "running");
+    assert.ok(store.data.steps.migrate.progress, "the interrupted run had published progress");
+    return store;
+  }
+
+  test("resume + definition unchanged + already running → no restart, and it finishes", async () => {
+    const store = await crashedInMigrate();
+    const second = makeBox({ store, serviceChanged: false, running: true });
+    const m2 = createUpgradeV2(second.deps);
+    assert.deepEqual(await m2.boot(), { action: "resume" });
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
+    assert.equal(migrateStarts(second), 0, "the in-flight migration was not restarted");
+  });
+
+  test("resume but definition changed, not running, or no liveness probe → restarts", async () => {
+    for (const opts of [{ serviceChanged: true, running: true }, { serviceChanged: false, running: false }, { serviceChanged: false }]) {
+      const store = await crashedInMigrate();
+      const second = makeBox({ store, ...opts });
+      const m2 = createUpgradeV2(second.deps);
+      await m2.boot();
+      await runToIdle(m2);
+      assert.equal(m2.status().state, "completed", JSON.stringify(opts));
+      assert.equal(migrateStarts(second), 1, JSON.stringify(opts));
+    }
+  });
+
+  test("a fresh run always restarts, even when the service looks up and unchanged", async () => {
+    const box = makeBox({ serviceChanged: false, running: true });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    assert.equal(migrateStarts(box), 1);
+  });
+
+  test("a retry after the migrate step FAILED restarts the service (it may be wedged)", async () => {
+    const box = makeBox({ serviceChanged: false, running: true, migrateScript: [{ status: "error", error: { message: "boom" } }] });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "failed");
+    assert.equal(m.status().error.step, "migrate");
+    const startsAfterFail = box.calls.filter((c) => c[0] === "opencode.start").length;
+    assert.equal(startsAfterFail, 1);
+    box.resetMigrate();
+    box.o.migrateScript = [{ status: "completed" }];
+    assert.deepEqual(await m.retry(), { ok: true });
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    // retry restart + cutover restart
+    assert.equal(box.calls.filter((c) => c[0] === "opencode.start").length, startsAfterFail + 2);
+  });
+});
+
+describe("migrate: time-based progress ticker + slow status requests", () => {
+  /** A hand-driven ticker clock plus a status request that stays parked until released. */
+  function gated(opts = {}) {
+    const ticks = [];
+    const tickSleep = () => new Promise((resolve) => ticks.push(resolve));
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const box = makeBox({ tickSleep, ...opts });
+    box.deps.v2.migrationStatus = async () => {
+      await gate;
+      return { status: "completed" };
+    };
+    const tick = async () => {
+      await box.deps.sleep(60_000); // a minute passes, so each heartbeat label differs and is published
+      ticks.shift()?.();
+      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+    };
+    const migrateProgress = () => box.events.map((e) => e.payload.steps.find((x) => x.id === "migrate").progress).filter(Boolean);
+    return { box, tick, release, ticks, migrateProgress };
+  }
+
+  test("publishes the V2 session count while the status request is parked: monotonic, clamped, then stops", async () => {
+    const g = gated({ v1Sessions: 10 });
+    const v2Counts = [3, 2, 99]; // 2 would regress; 99 exceeds the V1 total
+    g.box.deps.countSessions = async (db, which) => (which === "v1" ? 10 : (v2Counts.shift() ?? 10));
+    const m = createUpgradeV2(g.box.deps);
+    await m.boot();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(m.status().state, "running");
+
+    await g.tick();
+    await g.tick();
+    await g.tick();
+    const seen = g.migrateProgress().filter((p) => /min elapsed/.test(p.label ?? ""));
+    assert.deepEqual(seen.map((p) => [p.numerator, p.denominator]), [[3, 10], [3, 10], [10, 10]], "never regresses, never exceeds the total");
+
+    g.release();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    const after = g.box.events.length;
+    await g.tick(); // a stray late tick must not write over the finished step
+    assert.equal(g.box.events.length, after);
+  });
+
+  test("an unreadable V2 database (count → null) still publishes a label-only heartbeat", async () => {
+    const g = gated();
+    g.box.deps.countSessions = async (db, which) => (which === "v1" ? 29 : null);
+    const m = createUpgradeV2(g.box.deps);
+    await m.boot();
+    await new Promise((r) => setTimeout(r, 20));
+    await g.tick();
+    const beat = g.migrateProgress().filter((p) => /min elapsed/.test(p.label ?? ""));
+    assert.equal(beat.length, 1);
+    assert.equal(beat[0].numerator, undefined);
+    g.release();
+    await runToIdle(m);
+  });
+
+  test("a failing count never kills the ticker or the migration", async () => {
+    const g = gated();
+    let n = 0;
+    g.box.deps.countSessions = async (db, which) => {
+      if (which === "v1") return 29;
+      if (++n === 1) throw new Error("locked");
+      return n <= 2 ? 12 : 29; // 29 = what verify must see once the migration is done
+    };
+    const m = createUpgradeV2(g.box.deps);
+    await m.boot();
+    await new Promise((r) => setTimeout(r, 20));
+    await g.tick();
+    await g.tick();
+    assert.ok(g.migrateProgress().some((p) => p.numerator === 12));
+    g.release();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+  });
+
+  test("slow failures (V2 up but busy) widen the start deadline; instant failures still trip it", async () => {
+    const slow = makeBox();
+    let calls = 0;
+    slow.deps.v2.migrationStatus = async () => {
+      if (++calls <= 4) {
+        await slow.deps.sleep(3_000); // 4 x 3s = 12s > startTimeoutMs (10s)
+        throw new Error("socket hang up");
+      }
+      return { status: "completed" };
+    };
+    const m = createUpgradeV2(slow.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+
+    const dead = makeBox();
+    dead.deps.v2.migrationStatus = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const m2 = createUpgradeV2(dead.deps);
+    await m2.boot();
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "failed");
+    assert.match(m2.status().error.message, /did not come up/);
+  });
+});
+
+describe("default deps: long-poll timeout + read-only session counts", () => {
+  test("migrationStatus waits up to 30 min (the migration runs inside the request); other calls keep 10 s", async () => {
+    const timeouts = [];
+    const real = AbortSignal.timeout;
+    AbortSignal.timeout = (ms) => {
+      timeouts.push(ms);
+      return real.call(AbortSignal, ms);
+    };
+    try {
+      const deps = createDefaultDeps({
+        env: { MANTA_OPENCODE_PASSWORD: "pw" },
+        home: "/nonexistent-home",
+        opencodeService: {},
+        fetchImpl: async () => new Response(JSON.stringify({ status: "completed" }), { status: 200 }),
+      });
+      assert.deepEqual(await deps.v2.migrationStatus(), { status: "completed" });
+      assert.deepEqual(await deps.v2.pluginIds(), []);
+      assert.deepEqual(timeouts, [30 * 60_000, 10_000]);
+    } finally {
+      AbortSignal.timeout = real;
+    }
+  });
+
+  test("countSessions is read-only and never throws", async (t) => {
+    let DatabaseSync;
+    try {
+      ({ DatabaseSync } = await import("node:sqlite"));
+    } catch {
+      t.skip("node:sqlite unavailable");
+      return;
+    }
+    const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "manta-count-"));
+    try {
+      const dbPath = join(dir, "x.db");
+      const seed = new DatabaseSync(dbPath);
+      seed.exec("CREATE TABLE session (id TEXT); CREATE TABLE session_v2 (id TEXT); INSERT INTO session VALUES ('a'),('b'),('c'); INSERT INTO session_v2 VALUES ('a'),('b');");
+      seed.close();
+      const deps = createDefaultDeps({ env: {}, home: dir, opencodeService: {} });
+      assert.equal(await deps.countSessions(dbPath, "v1"), 3);
+      assert.equal(await deps.countSessions(dbPath, "v2"), 2);
+      assert.equal(await deps.countSessions(join(dir, "missing.db"), "v2"), null);
+      assert.equal(await deps.countSessions(null, "v2"), null);
+      writeFileSync(join(dir, "junk.db"), "not a database");
+      assert.equal(await deps.countSessions(join(dir, "junk.db"), "v2"), null);
+      const emptyDb = join(dir, "empty.db");
+      new DatabaseSync(emptyDb).close();
+      assert.equal(await deps.countSessions(emptyDb, "v2"), null, "missing table → null, not a throw");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("failure, retry", () => {
   test("verify finds a missing plugin → failed + retryable; fixing it and retrying completes without redoing the migration", async () => {
     const box = makeBox({ pluginIds: ["manta"] });
@@ -686,10 +928,7 @@ describe("HTTP surface (real server): upgrade-mode 503 gate + K3 routes", () => 
 
   test("while running: gated routes 503 with {error,upgrade:true}; exempt routes pass; /api/upgrade answers", async () => {
     const box = makeBox({ crashOn: "opencode.stop" }); // wedge in `stop` so it stays running
-    const m = createUpgradeV2(box.deps);
-    await m.boot();
-    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
-    assert.equal(m.isUpgradeMode(), true);
+    const m = await bootWedgedInStop(box);
     await withServer(m, async (call) => {
       for (const [method, p] of [["POST", "/rpc/tmux:list"], ["GET", "/api/schedule"], ["POST", "/api/upload"], ["POST", "/hook/abc"]]) {
         const r = await call(method, p);
@@ -797,10 +1036,7 @@ describe("WebSocket gate in upgrade mode", () => {
 
   test("while running: /pty and /call are refused with HTTP 503 {error,upgrade:true} before the handshake; /events is allowed", async () => {
     const box = makeBox({ crashOn: "opencode.stop" });
-    const m = createUpgradeV2(box.deps);
-    await m.boot();
-    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
-    assert.equal(m.isUpgradeMode(), true);
+    const m = await bootWedgedInStop(box);
     const srv = await wsServer(m);
     try {
       for (const p of ["/pty?session=a", "/call", "/anything-else"]) {

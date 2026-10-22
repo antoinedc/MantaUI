@@ -28,6 +28,7 @@ import { DAY_MS, HOUR_MS, WEEK_MS, createRollupRunner, defaultExists, startOfDay
 import { createSegmenter } from "./ctoSegments.mjs";
 import { engineStateStore, segmentsStore, rollupsStore, ledgerStore, patchEngineState } from "./ctoStores.mjs";
 import { fetchLedgerRows } from "./modelLedger.mjs";
+import { runOnHandle } from "./dbOffload.mjs";
 
 export const DEFAULT_BACKFILL_CAP_USD = 3;
 export const DEFAULT_BACKFILL_DAYS = 30;
@@ -290,14 +291,9 @@ export function createCtoBackfill(deps = {}) {
     // schemas. Oldest-(message-)first gives the depth-ordered replay order.
     let rows = [];
     try {
-      rows = db
-        .prepare(
-          "SELECT m.session_id AS sid, s.directory AS directory, s.agent AS agent, MIN(m.time_created) AS first_ts " +
-            "FROM session_message m LEFT JOIN session_v2 s ON s.id = m.session_id " +
-            "WHERE m.type IN ('user', 'assistant') AND m.time_created >= ? AND m.time_created < ? " +
-            "GROUP BY m.session_id ORDER BY first_ts ASC",
-        )
-        .all(win.start, win.end);
+      // Off the main thread, one index seek per recently-updated session (dbTasks.sessionsInRange):
+      // the old GROUP BY over every message in the window took 25 s on the real history.
+      rows = await runOnHandle(db, "sessionsInRange", { start: win.start, end: win.end });
     } catch {
       return out;
     }

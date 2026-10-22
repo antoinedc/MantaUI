@@ -127,6 +127,26 @@ describe("systemd controller", () => {
   });
 });
 
+describe("isRunning (liveness probe, so migrate never bounces a running V2)", () => {
+  test("systemd: only `active` counts; the non-zero exit of every other state is an answer, not an error", async () => {
+    const mk = (exec) => createOpencodeService({ platform: "linux", ...fakeIO().opts, exec });
+    assert.equal(await mk(async () => ({ stdout: "active\n", stderr: "" })).isRunning(), true);
+    assert.equal(await mk(async () => ({ stdout: "activating\n", stderr: "" })).isRunning(), false);
+    assert.equal(await mk(async () => Promise.reject(new Error("exit 3"))).isRunning(), false);
+  });
+  test("launchd: running state or a pid; a missing job is not running", async () => {
+    const mk = (exec) => createOpencodeService({ platform: "darwin", home: "/Users/u", uid: 501, exec, exists: (p) => p.endsWith(".plist"), readPassword: async () => "x" });
+    assert.equal(await mk(async () => ({ stdout: "state = running\n", stderr: "" })).isRunning(), true);
+    assert.equal(await mk(async () => ({ stdout: "state = waiting\n", stderr: "" })).isRunning(), false);
+    assert.equal(await mk(async () => Promise.reject(new Error("Could not find service"))).isRunning(), false);
+  });
+  test("nohup has no probe → false (start() restarts there, which is cheap)", async () => {
+    const svc = createOpencodeService({ platform: "linux", home: "/h", exists: () => false, exec: async () => ({ stdout: "", stderr: "" }) });
+    assert.equal(svc.supervisor, "nohup");
+    assert.equal(await svc.isRunning(), false);
+  });
+});
+
 describe("launchd controller", () => {
   test("edits via PlistBuddy and restarts with bootout+bootstrap (never kickstart -k — it reuses the stale definition)", async () => {
     const execs = [];

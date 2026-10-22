@@ -28,6 +28,7 @@
 // unchanged: only text parts that are not synthetic are searched.
 
 import { getDb, PART_SQL } from "./opencodeDb.mjs";
+import { runDbTask } from "./dbOffload.mjs";
 
 const SNIPPET_PRE_CHARS = 60;
 const SNIPPET_POST_CHARS = 200;
@@ -35,6 +36,17 @@ const SNIPPET_POST_CHARS = 200;
 // MAX_LIMIT over-fetch bounds a LIKE scan before the JS text-part filter
 // drops non-text rows (tool arguments etc.).
 const MAX_LIMIT = 800;
+// Wall-clock budget of one search scan (in the db worker, not on the event loop).
+export const SEARCH_BUDGET_MS = 8_000;
+// One session's text parts matching the pattern, newest first. `/*RANGE*/` is where the
+// worker injects the time window (dbTasks.scanWindows); params: session id, LIKE pattern.
+const PART_SEARCH_SQL = `
+  SELECT p.id AS part_id, p.session_id, p.message_id, p.data AS part_data,
+         json_object('role', p.role) AS msg_data, p.time_created
+  FROM ${PART_SQL} p
+  WHERE p.session_id = ?
+    AND json_extract(p.data, '$.text') LIKE ? ESCAPE '\\' /*RANGE*/
+  ORDER BY p.time_created DESC, p.id DESC`;
 
 // The only exported entry point used by rpc.mjs.
 export async function searchMessages({
@@ -43,6 +55,7 @@ export async function searchMessages({
   maxPrimary = 50,
   maxPerSession = 3,
   maxTotal = 200,
+  budgetMs = SEARCH_BUDGET_MS,
 } = {}) {
   const q = typeof query === "string" ? query : "";
   const scope = Array.isArray(sessionIds) ? sessionIds.filter(Boolean) : [];
@@ -54,17 +67,20 @@ export async function searchMessages({
 
   try {
     const pattern = likePattern(q);
-    const placeholders = scope.map(() => "?").join(", ");
     const limit = Math.min(maxTotal * 4, MAX_LIMIT);
-    const sql = `
-      SELECT p.session_id, p.message_id, p.data AS part_data,
-             json_object('role', p.role) AS msg_data, p.time_created
-      FROM ${PART_SQL} p
-      WHERE p.session_id IN (${placeholders})
-        AND json_extract(p.data, '$.text') LIKE ? ESCAPE '\\'
-      ORDER BY p.time_created DESC, p.id DESC
-      LIMIT ?`;
-    const rows = db.prepare(sql).all(...scope, pattern, limit);
+    // The scan runs OFF the main thread (dbOffload → dbTasks.sessionSearch): a text
+    // search over parts can't be answered from an index, and on a multi-GB history
+    // it takes seconds to minutes. Newest first, per session, in time windows, under
+    // a hard budget — a hit-poor query on a huge history returns the newest matches
+    // with `truncated:true` instead of freezing the server.
+    const { rows, complete } = await runDbTask("sessionSearch", {
+      scope,
+      sql: PART_SEARCH_SQL,
+      pattern,
+      limit,
+      perSessionLimit: Math.min(limit, Math.max(maxPrimary, maxPerSession) * 4),
+      budgetMs: Math.min(Number.isFinite(budgetMs) ? budgetMs : SEARCH_BUDGET_MS, SEARCH_BUDGET_MS),
+    });
     const hits = buildHits(rows, q, {
       sessionIds: scope,
       primarySessionId: scope[0],
@@ -72,16 +88,12 @@ export async function searchMessages({
       maxPerSession,
       maxTotal,
     });
-    return { supported: true, hits };
+    return complete ? { supported: true, hits } : { supported: true, hits, truncated: true };
   } catch (e) {
-    // Query error: log once, drop the handle so the next call reopens, and
-    // degrade to an empty (but supported) result — never an exception.
+    if (e?.code === "no_db") return { supported: false, hits: [] };
+    // Query error / worker trouble: log once and degrade to an empty (but
+    // supported) result — never an exception.
     console.error("[messageSearch] query failed:", e?.message ?? e);
-    try {
-      db.close();
-    } catch {
-      /* already closed */
-    }
     return { supported: true, hits: [] };
   }
 }

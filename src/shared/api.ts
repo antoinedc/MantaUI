@@ -1454,11 +1454,12 @@ export interface Api {
   // BET-698: server-side conversation search. `sessionIds` is the search scope
   // in priority order (sessionIds[0] = the active conversation). Hit caps stay
   // server-side defaults. `supported:false` = the box can't search (needs the
-  // Node 24 runtime / opencode.db).
+  // Node 24 runtime / opencode.db). `truncated:true` = the search hit its time
+  // budget on a very large history and covers only the newest matches.
   opencodeSearchMessages(input: {
     query: string;
     sessionIds: string[];
-  }): Promise<{ supported: boolean; hits: TranscriptHit[] }>;
+  }): Promise<{ supported: boolean; hits: TranscriptHit[]; truncated?: boolean }>;
   // BET-1219: read-only spend/latency ledger over opencode's store.
   // `sinceMs` filters assistant rows to time_created >= sinceMs (default 0 =
   // all). Measurement only — no routing. `supported:false` = the box can't
@@ -1539,12 +1540,10 @@ export interface Api {
   // BET-180 callers (MobileSettings); new consumers should destructure
   // both.
   //
-  // BET-428: response also carries `opencodeVersion` — the box's
-  // `opencode --version` output, read once at server startup (opencode's
-  // HTTP API exposes no version endpoint, so a shell-out is the only
-  // source). Settings → About renders it alongside the desktop + server
-  // versions in this single round-trip — no new IPC channel. Falls back to
-  // "0.0.0" when opencode isn't installed.
+  // BET-428: response also carries `opencodeVersion` — the pinned OpenCode
+  // version the box's release ships (the same string as `/api/version`'s
+  // `opencode.version`). Rendered alongside the desktop + server versions in
+  // this single round-trip — no new IPC channel.
   getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version

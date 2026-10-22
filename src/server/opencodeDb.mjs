@@ -31,7 +31,8 @@
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { migrationStatePath } from "./upgradeV2Prepare.mjs";
 
 let dbHandle = null;
 // The path the cached handle was opened against. The migration cutover changes
@@ -54,13 +55,51 @@ export function _setSqliteModuleOverride(mod) {
   _modOverride = mod;
 }
 
+// The database a COMPLETED copy-mode V1→V2 migration left behind
+// (`<stateHome>/.manta/v2-migration.json`: state "completed", mode "copy",
+// targetDb). On such a box opencode-serve runs with OPENCODE_DB=<targetDb> in its
+// OWN service environment while manta-server's environment never sees it, so
+// without this the readers would fall back to the untouched V1 `opencode.db`,
+// fail the V2-schema guard and report `supported:false` for everything. Any other
+// state (absent, mid-flight, failed, rolled back, in-place — where the DB IS the
+// default path) contributes nothing. Read per resolve, invalidated on the state
+// file's mtime/size, so a box that completes the upgrade while manta-server runs is
+// picked up without a restart. The target must still exist on disk.
+let stateTargetCache = { file: null, mtimeMs: -1, size: -1, target: null };
+function migratedTargetDb() {
+  const file = migrationStatePath();
+  let st;
+  try {
+    st = statSync(file);
+  } catch {
+    stateTargetCache = { file, mtimeMs: -1, size: -1, target: null };
+    return null;
+  }
+  const c = stateTargetCache;
+  if (c.file !== file || c.mtimeMs !== st.mtimeMs || c.size !== st.size) {
+    let target = null;
+    try {
+      const s = JSON.parse(readFileSync(file, "utf8"));
+      if (s && s.state === "completed" && s.mode === "copy" && typeof s.targetDb === "string" && s.targetDb) target = s.targetDb;
+    } catch {
+      /* unreadable / half-written state file: no opinion */
+    }
+    stateTargetCache = { file, mtimeMs: st.mtimeMs, size: st.size, target };
+  }
+  const target = stateTargetCache.target;
+  return target && existsSync(target) ? target : null;
+}
+
 // Resolve opencode's SQLite path. `MANTA_OPENCODE_DB` (test/override hook) wins
 // as-is, then `OPENCODE_DB` — the variable opencode itself honours, which the
-// V1→V2 migration sets when it points V2 at a COPY of the V1 database — then the
-// first existing default. null → the box cannot search.
+// V1→V2 migration sets for opencode when it points V2 at a COPY of the V1 database
+// — then the copy recorded by a completed copy-mode migration (see
+// migratedTargetDb), then the first existing default. null → the box cannot search.
 export function resolveDbPath() {
   if (process.env.MANTA_OPENCODE_DB) return process.env.MANTA_OPENCODE_DB;
   if (process.env.OPENCODE_DB && process.env.OPENCODE_DB !== ":memory:") return process.env.OPENCODE_DB;
+  const migrated = migratedTargetDb();
+  if (migrated) return migrated;
   if (process.env.XDG_DATA_HOME) {
     const p = join(process.env.XDG_DATA_HOME, "opencode", "opencode.db");
     if (existsSync(p)) return p;
@@ -157,6 +196,17 @@ export async function getDb() {
   }
 }
 
+// The path the live shared handle is open against (null when none). Worker
+// threads (dbOffload.mjs) open the same file by path with their own read-only handle.
+export function currentDbPath() {
+  return dbHandle && dbHandle.isOpen !== false ? dbHandlePath : null;
+}
+
+// Is `db` the shared handle getDb() hands out (so a worker opening currentDbPath() reads the same file)?
+export function isSharedHandle(db) {
+  return db != null && db === dbHandle && dbHandle.isOpen !== false;
+}
+
 // Why the last getDb() returned null: {reason: "unsupported"|"source_unavailable",
 // detail} — or null when the handle is available / no attempt was made.
 // Additive read; existing null-returning contract unchanged.
@@ -211,6 +261,10 @@ const PART_ID_SQL = (idx) =>
 const TOOL_OUTPUT_SQL = (v) =>
   `COALESCE((SELECT group_concat(json_extract(x.value, '$.text'), char(10)) FROM json_each(${v}, '$.state.content') x WHERE json_extract(x.value, '$.type') = 'text'), json_extract(${v}, '$.state.error.message'))`;
 
+// NOTE the `->` (not json_extract) on input/metadata: json_extract returns a JSON STRING value
+// as bare SQL text, and json() of that throws "malformed JSON" — which aborted any scan that
+// reached a tool call whose input is a plain string (a model emitting non-JSON arguments;
+// present in the real history). `->` always yields valid JSON text (strings come back quoted).
 // One V2 content item as a V1-shaped part `data` JSON. Written in SQL (not JS) so
 // the json_tree/json_extract candidate queries keep working over the SAME paths:
 //   text      → {type:"text", text}
@@ -221,9 +275,9 @@ const ITEM_DATA_SQL = (v) => `CASE json_extract(${v}, '$.type')
     WHEN 'reasoning' THEN json_object('type', 'reasoning', 'text', json_extract(${v}, '$.text'))
     WHEN 'tool' THEN json_object('type', 'tool', 'tool', json_extract(${v}, '$.name'),
       'state', json_object('status', json_extract(${v}, '$.state.status'),
-                           'input', json(COALESCE(json_extract(${v}, '$.state.input'), '{}')),
+                           'input', json(COALESCE(${v} -> '$.state.input', '{}')),
                            'output', ${TOOL_OUTPUT_SQL(v)},
-                           'metadata', json(COALESCE(json_extract(${v}, '$.state.metadata'), '{}'))))
+                           'metadata', json(COALESCE(${v} -> '$.state.metadata', '{}'))))
     ELSE json_object('type', COALESCE(json_extract(${v}, '$.type'), 'unknown'))
   END`;
 

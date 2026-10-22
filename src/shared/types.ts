@@ -1790,8 +1790,8 @@ export const IPC = {
   // RPC channel for the renderer — single source of truth on the box, never
   // drifts between surfaces). Display-only foundation for client/server skew
   // detection; gating / banner / force-update logic lands in a later phase.
-  // BET-428 added `opencodeVersion` (the box's `opencode --version`, read once
-  // at startup) so Settings → About can render it without a new IPC channel.
+  // BET-428 added `opencodeVersion` (the pinned OpenCode version the release
+  // ships) so Settings → About can render it without a new IPC channel.
   getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string }
 
   // ---- server self-update apply (BET-225 stage 3) ----

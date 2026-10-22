@@ -20,7 +20,8 @@
 // { supported:false } and never throws. Read-only is a hard invariant; the
 // shared handle from opencodeDb.mjs is opened read-only and stays so.
 
-import { getDb } from "./opencodeDb.mjs";
+import { getDb, isSharedHandle } from "./opencodeDb.mjs";
+import { runDbTask } from "./dbOffload.mjs";
 import { aggregateReliability } from "../shared/toolReliability.mjs";
 import { dayKey, hourKey, recentBucketKeys } from "../shared/timeBuckets.mjs";
 
@@ -263,45 +264,6 @@ function aggregateSeriesByBucket(rows, bucket, count, now) {
   return out;
 }
 
-/**
- * I/O. Reads the raw assistant message rows over the rolling window via the
- * shared getDb() handle. Shared by `ledgerSummary` and `endpointSummary` so
- * the SQL + parse + role-filter lives in exactly one place. Returns the parsed
- * `data` object plus the joined session fields. Never throws.
- */
-async function assistantRows(db, since) {
-  const sql = `
-    SELECT m.id AS msg_id,
-           m.data AS msg_data,
-           s.id AS session_id,
-           s.parent_id AS parent_id,
-           s.agent AS agent,
-           s.directory AS directory
-    FROM session_message m
-    JOIN session_v2 s ON s.id = m.session_id
-    WHERE m.type = 'assistant' AND m.time_created >= ?`;
-  const stmt = db.prepare(sql);
-  const out = [];
-  for (const row of stmt.all(since)) {
-    let data;
-    try {
-      data = JSON.parse(row.msg_data);
-    } catch {
-      continue;
-    }
-    if (!data || typeof data !== "object") continue;
-    out.push({
-      id: row.msg_id != null ? String(row.msg_id) : null,
-      sessionId: row.session_id != null ? String(row.session_id) : null,
-      data,
-      parentId: row.parent_id != null ? String(row.parent_id) : null,
-      agent: row.agent ?? data.agent ?? null,
-      directory: row.directory ?? null,
-    });
-  }
-  return out;
-}
-
 // tokensSent counts total context processed through the model (all input buckets + output), not billing-weighted cost — the dashboard graph shows weight, the Saved stat shows money.
 function tokensSent(row) {
   return num(row.input) + num(row.cacheRead) + num(row.cacheWrite) + num(row.output);
@@ -314,15 +276,13 @@ function tokensSent(row) {
  * `aggregate`/aggregate* fold inputs) from assistant messages over `sinceMs`.
  * Projected query: the role filter + JSON parsing run in SQLite via
  * `json_extract`, so the SELECT streams only the fields the flat shape needs
- * instead of the full `data` blob (which kept `assistantRows`'s parse+filter
- * at ~3 s on a cold 30-day read). Returns the role-filtered flat rows, mapped
+ * instead of the full `data` blob (parsing it in JS was ~3 s on a cold 30-day read). Returns the role-filtered flat rows, mapped
  * into the exact same shape the old JS-parse path produced (same field names,
  * same typing) so `aggregate`, `aggregateBySession`, `aggregateDailySeries`,
  * `measureEffectiveTtl` and the routing fold consume them unchanged.
  *
- * `assistantRows` is deliberately NOT used here (it stays for
- * `aggregateEndpointStats`, which needs the raw `data` blob + the `part` join
- * for tool reliability). Degradation matches the old path: a row whose `data`
+ * Tool-call reliability needs the raw `data` blob, so it is NOT read here: see
+ * `endpointSummary` (an off-thread windowed scan, dbTasks.mjs). Degradation matches the old path: a row whose `data`
  * is malformed JSON or lacks `role === "assistant"` is skipped silently. The
  * `json_valid(m.data)` guard filters malformed rows out BEFORE `json_extract`
  * runs (json_extract throws on invalid JSON rather than returning NULL, so the
@@ -370,6 +330,17 @@ export const LEDGER_REFRESH_OVERLAP_MS = 60 * 60 * 1000;
 // never completes) and stops forcing re-scans of its session.
 export const LEDGER_ABANDONED_MS = 24 * 60 * 60 * 1000;
 export const LEDGER_PAGE_ROWS = 100;
+// A cold read of a wide window loads this recent tier FIRST and publishes it, then
+// extends to the full window — so a small read (the optimizer's 24 h series) never waits
+// for a 30-day load that happens to be running.
+export const LEDGER_FIRST_TIER_MS = 48 * 60 * 60 * 1000;
+// Further horizons an extension steps through (publishing each), so a 7-day read does
+// not wait for the 30-day one: 48 h → 7 d → 14 d (the routing window) → 30 d → target.
+export const LEDGER_TIERS_MS = Object.freeze([48 * 3_600_000, 7 * 86_400_000, 14 * 86_400_000, 30 * 86_400_000]);
+// A session's time_updated can trail its newest message's time_created by a few
+// hundred ms (measured on the real box: 9 of 289 recent sessions, worst 300 ms).
+// Skipping a session as "older than the horizon" therefore leaves this much slack.
+export const LEDGER_HORIZON_SLACK_MS = 10 * 60 * 1000;
 export const LEDGER_YIELD_BUDGET_MS = 30;
 
 /**
@@ -389,12 +360,15 @@ export function ledgerRescanFloor({ known, lastRefreshMs, incompleteFromMs, over
  * A session is re-read when it is new, its `time_updated` moved (or is unknown),
  * or it still holds a recent unfinished row. Returns Array<{ id, floor }>.
  */
-export function selectSessionsToScan({ sessionList, cached, lastRefreshMs, nowMs, overlapMs = LEDGER_REFRESH_OVERLAP_MS, abandonedMs = LEDGER_ABANDONED_MS }) {
+export function selectSessionsToScan({ sessionList, cached, lastRefreshMs, nowMs, overlapMs = LEDGER_REFRESH_OVERLAP_MS, abandonedMs = LEDGER_ABANDONED_MS, horizonMs = 0 }) {
   const out = [];
   for (const s of sessionList) {
     const c = cached.get(s.id);
     if (!c) {
-      out.push({ id: s.id, floor: 0 });
+      // The cache holds rows created >= horizonMs. A session last touched before
+      // that has none to add; a session that moved (or whose update time is unknown) is read from the horizon.
+      if (horizonMs > 0 && typeof s.timeUpdated === "number" && s.timeUpdated < horizonMs - LEDGER_HORIZON_SLACK_MS) continue;
+      out.push({ id: s.id, floor: horizonMs });
       continue;
     }
     const live = typeof c.incompleteFromMs === "number" && c.incompleteFromMs > nowMs - abandonedMs;
@@ -410,16 +384,17 @@ export function selectSessionsToScan({ sessionList, cached, lastRefreshMs, nowMs
  * Map<msgId, { createdMs, row }>; `fetched` the entries read for messages with
  * created >= `floor`. Upserts by id, and drops cached rows inside the re-read
  * range that no longer exist (deleted upstream). Returns the oldest created
- * time among still-unfinished rows (undefined when none).
+ * time among still-unfinished rows (undefined when none). Rows are dropped only
+ * inside the re-read range [floor, ceil).
  */
-export function mergeLedgerEntries(rows, fetched, floor) {
+export function mergeLedgerEntries(rows, fetched, floor, ceil = Infinity) {
   const seen = new Set();
   for (const e of fetched) {
     seen.add(e.id);
     rows.set(e.id, { createdMs: e.createdMs, row: e.row });
   }
   for (const [id, e] of rows) {
-    if (!seen.has(id) && typeof e.createdMs === "number" && e.createdMs >= floor) rows.delete(id);
+    if (!seen.has(id) && typeof e.createdMs === "number" && e.createdMs >= floor && e.createdMs < ceil) rows.delete(id);
   }
   let incompleteFromMs;
   for (const e of rows.values()) {
@@ -461,7 +436,7 @@ const ledgerPageSql = (sizeFn) => `
          json_extract(d,'$.time.completed')          AS completedMs
   FROM (SELECT id, time_created, CASE WHEN ${sizeFn}(data) <= ${LEDGER_MAX_ROW_BYTES} AND json_valid(data) = 1 THEN data END AS d
         FROM session_message
-        WHERE session_id = ? AND type = 'assistant' AND time_created >= ?
+        WHERE session_id = ? AND type = 'assistant' AND time_created >= ? AND time_created < ?
           AND (time_created > ? OR (time_created = ? AND id > ?))
         ORDER BY time_created, id
         LIMIT ?)
@@ -509,10 +484,90 @@ function readSessionList(db) {
 }
 
 /**
+ * SYNC. Read one session's assistant rows with message time_created in
+ * [floor, ceil), in keyset pages. Pure over `db` — it is what the db worker runs
+ * (dbTasks.ledgerScan) and what the inline (test) path wraps with a pacer.
+ */
+export function scanSessionSync(db, sid, meta, floor, ceil, pageRows = LEDGER_PAGE_ROWS) {
+  const entries = [];
+  for (const page of scanSessionPages(db, sid, meta, floor, ceil, pageRows)) for (const e of page) entries.push(e);
+  return entries;
+}
+
+/** The generator behind scanSessionSync: one array of entries per page, so a caller can pace itself between pages. */
+export function* scanSessionPages(db, sid, meta, floor, ceil, pageRows = LEDGER_PAGE_ROWS) {
+  const ceilBound = Number.isFinite(ceil) ? ceil : Number.MAX_SAFE_INTEGER;
+  let stmt;
+  try {
+    stmt = db.prepare(ledgerPageSql("octet_length"));
+  } catch {
+    stmt = db.prepare(ledgerPageSql("length")); // SQLite < 3.43: no octet_length
+  }
+  let curT = Number.MIN_SAFE_INTEGER;
+  let curId = "";
+  for (;;) {
+    const page = stmt.all(sid, floor, ceilBound, curT, curT, curId, pageRows);
+    const entries = [];
+    for (const r of page) {
+      // The SQL already selects assistant rows only; a row whose JSON is
+      // malformed/oversized comes back with every field NULL and is skipped.
+      if (r.providerID == null && r.modelID == null && r.startedMs == null) continue;
+      entries.push({
+        id: String(r.msg_id),
+        createdMs: typeof r.created_at === "number" ? r.created_at : null,
+        row: ledgerRowFrom(r, sid, meta),
+      });
+    }
+    yield entries;
+    if (page.length < pageRows) return;
+    const last = page[page.length - 1];
+    curT = last.created_at;
+    curId = String(last.msg_id);
+  }
+}
+
+/** SYNC. The newest assistant rows of one session (any age), as ledger rows. */
+export function latestRowsSync(db, sid, meta = {}, n = 50) {
+  const rows = db
+    .prepare(
+      `SELECT id AS msg_id, time_created AS created_at,
+              json_extract(data,'$.agent') AS msgAgent, json_extract(data,'$.model.providerID') AS providerID,
+              json_extract(data,'$.model.id') AS modelID, json_extract(data,'$.cost') AS cost,
+              json_extract(data,'$.tokens.input') AS input, json_extract(data,'$.tokens.output') AS output,
+              json_extract(data,'$.tokens.reasoning') AS reasoning, json_extract(data,'$.tokens.cache.read') AS cacheRead,
+              json_extract(data,'$.tokens.cache.write') AS cacheWrite, json_extract(data,'$.time.created') AS startedMs,
+              json_extract(data,'$.time.completed') AS completedMs
+       FROM (SELECT id, time_created, CASE WHEN length(data) <= ${LEDGER_MAX_ROW_BYTES} AND json_valid(data) = 1 THEN data END AS data
+             FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY time_created DESC, id DESC LIMIT ?)`,
+    )
+    .all(sid, n);
+  const out = [];
+  for (const r of rows) {
+    if (r.providerID == null && r.modelID == null && r.startedMs == null) continue;
+    out.push({ id: String(r.msg_id), createdMs: typeof r.created_at === "number" ? r.created_at : null, row: ledgerRowFrom(r, sid, meta) });
+  }
+  return out;
+}
+
+/**
  * Build a ledger row cache. One instance per process in production
  * (`defaultLedgerCache`); tests build their own with a fake clock / small
  * pages. State is keyed by db HANDLE, so a reopened handle (query-error
  * recovery) starts from a fresh warm load and the old cache is collectable.
+ *
+ * HORIZON. The cache holds every row created >= `horizonMs` (complete), for
+ * every session — not the whole history. The first read loads exactly the
+ * window asked for; a later read of an OLDER window extends the horizon by
+ * reading only the gap. This is what keeps a cold start proportional to the
+ * window instead of to 34 GB of history (the all-history warm-up was ~5-7
+ * minutes of back-to-back synchronous page queries, single pages up to 1.6 s).
+ * It leans on the invariant `session.time_updated >= max(message.time_created)`
+ * to skip sessions that cannot hold rows in range.
+ *
+ * WHERE THE SCAN RUNS. With `offload` (production) the page queries run in the
+ * db worker thread (dbTasks.ledgerScan, in time-budgeted chunks of sessions) and
+ * the main thread only merges the results; without it (tests, non-shared
+ * handles) they run inline, paced by `yieldBudgetMs` as before.
  */
 export function createLedgerRowCache({
   ttlMs = LEDGER_CACHE_TTL_MS,
@@ -521,50 +576,85 @@ export function createLedgerRowCache({
   yieldBudgetMs = LEDGER_YIELD_BUDGET_MS,
   clock = () => performance.now(),
   yieldFn = () => new Promise((r) => setImmediate(r)),
+  offload = false,
+  chunkBudgetMs = 750, // small chunks keep each result message (and its main-thread deserialize + merge) short
+  run = runDbTask,
 } = {}) {
   const states = new WeakMap();
 
   function stateFor(db) {
     let st = states.get(db);
     if (!st) {
-      st = { sessions: new Map(), warmed: false, refreshedAt: 0, checkedAt: 0, inflight: null };
+      st = { sessions: new Map(), warmed: false, horizonMs: Infinity, refreshedAt: 0, checkedAt: 0, inflight: null, tierWaiters: [] };
       states.set(db, st);
     }
     return st;
   }
 
-  async function scanSession(db, sid, meta, floor, pacer) {
-    let stmt;
-    try {
-      stmt = db.prepare(ledgerPageSql("octet_length"));
-    } catch {
-      stmt = db.prepare(ledgerPageSql("length")); // SQLite < 3.43: no octet_length
-    }
-    const entries = [];
-    let curT = Number.MIN_SAFE_INTEGER;
-    let curId = "";
-    for (;;) {
-      const page = stmt.all(sid, floor, curT, curT, curId, pageRows);
-      for (const r of page) {
-        // The SQL already selects assistant rows only; a row whose JSON is
-        // malformed/oversized comes back with every field NULL and is skipped.
-        if (r.providerID == null && r.modelID == null && r.startedMs == null) continue;
-        entries.push({
-          id: String(r.msg_id),
-          createdMs: typeof r.created_at === "number" ? r.created_at : null,
-          row: ledgerRowFrom(r, sid, meta),
-        });
+  // Merge one session's freshly read entries into the cache.
+  function applyEntries(st, s, entries, floor, ceil) {
+    let c = st.sessions.get(s.id);
+    if (!c) {
+      c = { meta: s.meta, timeUpdated: s.timeUpdated, incompleteFromMs: undefined, rows: new Map() };
+      st.sessions.set(s.id, c);
+    } else {
+      c.meta = s.meta;
+      c.timeUpdated = s.timeUpdated;
+      for (const e of c.rows.values()) {
+        e.row.agent = s.meta.agent ?? e.row.agent;
+        e.row.parentId = s.meta.parentId;
+        e.row.directory = s.meta.directory;
       }
-      if (page.length < pageRows) break;
-      const last = page[page.length - 1];
-      curT = last.created_at;
-      curId = String(last.msg_id);
-      await pacer();
     }
-    return entries;
+    // Computed over ALL the session's rows (not just the re-read range), so an
+    // extension that only re-read the older gap still reports the true oldest unfinished row.
+    c.incompleteFromMs = mergeLedgerEntries(c.rows, entries, floor, ceil);
   }
 
-  async function refresh(db, st) {
+  // Read `todo` ([{id, floor, ceil}]) and merge each result as it arrives.
+  async function scanAll(db, st, todo, byId, pacer) {
+    if (todo.length === 0) return;
+    if (offload && isSharedHandle(db)) {
+      let i = 0;
+      while (i < todo.length) {
+        const chunk = todo.slice(i, i + 200).map((t) => ({ ...t, meta: byId.get(t.id).meta }));
+        const r = await run("ledgerScan", { items: chunk, pageRows, budgetMs: chunkBudgetMs }, { timeoutMs: chunkBudgetMs + 60_000 });
+        for (const res of r.results) {
+          const t = todo[i + res.index];
+          applyEntries(st, byId.get(t.id), res.entries, t.floor, t.ceil);
+          await pacer();
+        }
+        i += Math.max(1, r.processed);
+        await pacer();
+      }
+      return;
+    }
+    for (const t of todo) {
+      const s = byId.get(t.id);
+      const entries = [];
+      for (const page of scanSessionPages(db, t.id, s.meta, t.floor, t.ceil, pageRows)) {
+        for (const e of page) entries.push(e);
+        await pacer();
+      }
+      applyEntries(st, s, entries, t.floor, t.ceil);
+      await pacer();
+    }
+  }
+
+  // Lower the horizon from where it is to `target`, one published tier at a time.
+  async function extendTo(db, st, list, byId, target, pacer) {
+    const steps = LEDGER_TIERS_MS.map((d) => now() - d).filter((h) => h > target && h < st.horizonMs);
+    steps.push(target);
+    for (const h of steps) {
+      if (h >= st.horizonMs) continue;
+      const gap = list.filter((x) => x.timeUpdated === null || x.timeUpdated >= h - LEDGER_HORIZON_SLACK_MS).map((x) => ({ id: x.id, floor: h, ceil: st.horizonMs }));
+      await scanAll(db, st, gap, byId, pacer);
+      st.horizonMs = h;
+      for (const wake of st.tierWaiters.splice(0)) wake();
+    }
+  }
+
+  async function refresh(db, st, target) {
     const startedAt = now();
     let lastYield = clock();
     const pacer = async () => {
@@ -575,70 +665,88 @@ export function createLedgerRowCache({
     };
     const list = readSessionList(db);
     await pacer();
-    const present = new Set(list.map((s) => s.id));
+    const present = new Set(list.map((x) => x.id));
     for (const sid of [...st.sessions.keys()]) if (!present.has(sid)) st.sessions.delete(sid);
-    const todo = selectSessionsToScan({
-      sessionList: list.map((s) => ({ id: s.id, timeUpdated: s.timeUpdated })),
-      cached: st.sessions,
-      lastRefreshMs: st.refreshedAt,
-      nowMs: startedAt,
-    });
-    const byId = new Map(list.map((s) => [s.id, s]));
-    for (const { id, floor } of todo) {
-      const s = byId.get(id);
-      const entries = await scanSession(db, id, s.meta, floor, pacer);
-      let c = st.sessions.get(id);
-      if (!c) {
-        c = { meta: s.meta, timeUpdated: s.timeUpdated, incompleteFromMs: undefined, rows: new Map() };
-        st.sessions.set(id, c);
-      } else {
-        c.meta = s.meta;
-        c.timeUpdated = s.timeUpdated;
-        for (const e of c.rows.values()) {
-          e.row.agent = s.meta.agent ?? e.row.agent;
-          e.row.parentId = s.meta.parentId;
-          e.row.directory = s.meta.directory;
-        }
-      }
-      c.incompleteFromMs = mergeLedgerEntries(c.rows, entries, floor);
-      await pacer();
+    const byId = new Map(list.map((x) => [x.id, x]));
+    if (!st.warmed) {
+      // Cold. Load the recent tier first (when the window is wider), publish it, then extend.
+      const tier = now() - LEDGER_FIRST_TIER_MS;
+      const first = target < tier ? tier : target;
+      st.horizonMs = first;
+      const todo = list.filter((x) => x.timeUpdated === null || x.timeUpdated >= first - LEDGER_HORIZON_SLACK_MS).map((x) => ({ id: x.id, floor: first, ceil: Infinity }));
+      await scanAll(db, st, todo, byId, pacer);
+      st.warmed = true;
+      st.refreshedAt = startedAt;
+      st.checkedAt = now();
+      for (const wake of st.tierWaiters.splice(0)) wake();
+      if (target < first) await extendTo(db, st, list, byId, target, pacer);
+    } else {
+      const todo = selectSessionsToScan({
+        sessionList: list.map((x) => ({ id: x.id, timeUpdated: x.timeUpdated })),
+        cached: st.sessions,
+        lastRefreshMs: st.refreshedAt,
+        nowMs: startedAt,
+        horizonMs: st.horizonMs,
+      }).map((t) => ({ ...t, ceil: Infinity }));
+      await scanAll(db, st, todo, byId, pacer);
+      if (target < st.horizonMs) await extendTo(db, st, list, byId, target, pacer);
     }
     st.refreshedAt = startedAt;
   }
 
-  async function ensureFresh(db) {
+  async function ensureFresh(db, sinceMs = 0) {
     const st = stateFor(db);
-    if (st.inflight) return st.inflight;
-    if (st.warmed && now() - st.checkedAt < ttlMs) return undefined;
-    const wasWarm = st.warmed;
-    st.inflight = (async () => {
-      try {
-        await refresh(db, st);
-        st.warmed = true;
-      } catch (e) {
-        if (!wasWarm) {
-          // Half-loaded cache would serve a silently truncated ledger — drop
-          // it and let the caller see the failure; the next call retries.
-          st.sessions = new Map();
-          st.refreshedAt = 0;
-          throw e;
-        }
-        // A failed refresh keeps serving the (slightly stale) cache; the TTL
-        // below stops it from retrying on every call.
-        console.warn("[modelLedger] ledger cache refresh failed:", e?.message ?? e);
-      } finally {
-        st.checkedAt = now();
-        st.inflight = null;
+    const want = Math.max(0, num(sinceMs));
+    for (;;) {
+      const covered = st.warmed && want >= st.horizonMs;
+      // Serve what is cached while a refresh / extension of a WIDER window is still running.
+      if (covered && (st.inflight || now() - st.checkedAt < ttlMs)) return;
+      if (st.inflight) {
+        // Wait for the pass to finish OR for it to publish a tier that covers this window.
+        await new Promise((resolve) => {
+          st.tierWaiters.push(() => {
+            if (st.warmed && want >= st.horizonMs) resolve();
+          });
+          st.inflight.then(resolve, resolve);
+        });
+        continue;
       }
-    })();
-    return st.inflight;
+      const target = st.warmed ? Math.min(st.horizonMs, want) : want;
+      let failed = null;
+      st.inflight = (async () => {
+        try {
+          await refresh(db, st, target);
+        } catch (e) {
+          if (!st.warmed) {
+            // Half-loaded cache would serve a silently truncated ledger — drop
+            // it and let the caller see the failure; the next call retries.
+            st.sessions = new Map();
+            st.refreshedAt = 0;
+            st.horizonMs = Infinity;
+            failed = e;
+            return;
+          }
+          // A failed refresh keeps serving the (slightly stale) cache; the TTL
+          // below stops it from retrying on every call.
+          console.warn("[modelLedger] ledger cache refresh failed:", e?.message ?? e);
+          if (want < st.horizonMs) failed = e; // an extension that failed leaves the window uncovered
+        } finally {
+          st.checkedAt = now();
+          st.inflight = null;
+          for (const wake of st.tierWaiters.splice(0)) wake();
+        }
+      })();
+      await st.inflight;
+      if (failed) throw failed;
+      if (st.warmed && want >= st.horizonMs) return;
+    }
   }
 
   return {
     /** Same contract as the old query: flat rows with message time_created >= sinceMs. */
     async fetchRows(db, sinceMs) {
       const since = num(sinceMs);
-      await ensureFresh(db);
+      await ensureFresh(db, since);
       const out = [];
       for (const c of stateFor(db).sessions.values()) {
         for (const e of c.rows.values()) {
@@ -649,32 +757,40 @@ export function createLedgerRowCache({
     },
     /**
      * The newest row per session (highest completedMs, later row wins ties) for
-     * a small set of session ids, at ANY age. Map<sessionId, row>.
+     * a small set of session ids, at ANY age. Map<sessionId, row>. Read straight
+     * from each session's newest rows (an index seek) — NOT from the horizon
+     * cache, so asking about an idle session never loads its history.
      */
     async latestBySession(db, sessionIds) {
-      await ensureFresh(db);
-      const st = stateFor(db);
+      const ids = [...new Set(sessionIds ?? [])];
       const out = new Map();
-      for (const sid of sessionIds ?? []) {
-        const c = st.sessions.get(sid);
-        if (!c) continue;
+      if (ids.length === 0) return out;
+      const meta = new Map(readSessionList(db).map((x) => [x.id, x.meta]));
+      let fetched;
+      if (offload && isSharedHandle(db)) {
+        fetched = (await run("ledgerLatest", { items: ids.filter((id) => meta.has(id)).map((id) => ({ id, meta: meta.get(id) })) })).results;
+      } else {
+        fetched = ids.filter((id) => meta.has(id)).map((id) => ({ id, entries: latestRowsSync(db, id, meta.get(id)) }));
+      }
+      for (const { id, entries } of fetched) {
         let best = null;
         let bestCompleted = 0;
-        for (const e of c.rows.values()) {
+        // entries are newest-first; the old contract was "later row wins ties" in time order.
+        for (const e of [...entries].reverse()) {
           const completed = typeof e.row.completedMs === "number" ? e.row.completedMs : 0;
           if (best === null || completed >= bestCompleted) {
             best = e.row;
             bestCompleted = completed;
           }
         }
-        if (best) out.set(sid, { ...best });
+        if (best) out.set(id, { ...best });
       }
       return out;
     },
   };
 }
 
-const defaultLedgerCache = createLedgerRowCache();
+const defaultLedgerCache = createLedgerRowCache({ offload: true });
 
 /**
  * I/O. Latest ledger row per session for `sessionIds`, from the cache (no
@@ -778,51 +894,131 @@ function extractTools(data) {
 }
 
 /**
+ * PURE. One stored assistant message (`session_message.data` JSON text) → the
+ * flat row `aggregateEndpointStats` folds; null for malformed JSON / a
+ * non-object. Runs inside the db worker (dbTasks.endpointStats).
+ */
+export function extractEndpointRow(dataJson) {
+  let data;
+  try {
+    data = JSON.parse(dataJson);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== "object") return null;
+  const tokens = data.tokens ?? {};
+  const cache = tokens.cache ?? {};
+  return {
+    providerID: data.model?.providerID ?? null,
+    modelID: data.model?.id ?? null,
+    input: tokens.input,
+    output: tokens.output,
+    cacheRead: cache.read,
+    cacheWrite: cache.write,
+    startedMs: data.time?.created,
+    completedMs: data.time?.completed,
+    toolCalls: extractToolCalls(data),
+    tools: extractTools(data),
+  };
+}
+
+/**
  * I/O. Per-endpoint measurement (reliability, speed, latency, mix) over a
- * rolling window of assistant rows, via the shared getDb() handle. Degrades
- * exactly like `ledgerSummary`: returns { supported:false } — never throws —
- * when getDb() yields null, and a failed query also degrades. Read-only.
+ * rolling window of assistant rows. Degrades exactly like `ledgerSummary`:
+ * returns { supported:false } — never throws — when there is no readable
+ * opencode.db or the scan fails. Read-only.
  *
  * On success the flag is separated from the data: `{ supported: true,
  * endpoints: {…} }`. `endpoints` is 7a's map keyed by "providerID/modelID";
  * the flag being distinct is what lets a caller tell "no ledger"
  * ({supported:false}) from "a ledger with nothing measured" ({endpoints:{}}).
+ * `partial:true` marks a scan that hit its time budget: the figures then cover
+ * only the newest part of the window.
+ *
+ * WHERE IT RUNS (2026-10-19 wedge; V2 history ≈ 34 GB): the per-message JSON
+ * walk can't be answered from an index, so it is a multi-minute scan. It runs in
+ * a worker thread (dbOffload → dbTasks.endpointStats), window by window, newest
+ * first, under a hard budget — the main thread only awaits a promise. Caller
+ * contract: a fresh reading (< 60 s) is returned as-is; a stale one is returned
+ * immediately while ONE background refresh runs (stale-while-revalidate, up to
+ * 1 h old); with no reading at all a caller waits at most CALLER_WAIT_MS and
+ * then gets { supported:false } while the scan keeps filling the cache. Degraded
+ * values are never memoized.
  */
-export async function endpointSummary({ sinceMs = 0 } = {}) {
-  const db = await getDb();
-  if (!db) return { supported: false };
+const ENDPOINT_SUMMARY_TTL_MS = 60_000;
+const ENDPOINT_SUMMARY_STALE_MS = 60 * 60_000;
+const ENDPOINT_SUMMARY_BUCKET_MS = 15 * 60_000; // `since` drifts every call; one scan serves a bucket
+export const ENDPOINT_SCAN_BUDGET_MS = 240_000; // a 14-day scan measured ~90 s on the real 34 GB history
+export const ENDPOINT_CALLER_WAIT_MS = 8_000;
+const endpointSummaryCache = new Map(); // bucketed `since` → { t, summary }
+const endpointSummaryInFlight = new Map(); // bucketed `since` → promise
 
-  try {
-    const since = num(sinceMs);
-    const assistant = await assistantRows(db, since);
-    const rows = [];
-    for (const { data } of assistant) {
-      const tokens = data.tokens ?? {};
-      const cache = tokens.cache ?? {};
-      rows.push({
-        providerID: data.model?.providerID ?? null,
-        modelID: data.model?.id ?? null,
-        input: tokens.input,
-        output: tokens.output,
-        cacheRead: cache.read,
-        cacheWrite: cache.write,
-        startedMs: data.time?.created,
-        completedMs: data.time?.completed,
-        toolCalls: extractToolCalls(data),
-        tools: extractTools(data),
+/** Test-only: forget memoized endpoint summaries. Not runtime API. */
+export function _resetEndpointSummaryCache() {
+  endpointSummaryCache.clear();
+}
+
+export async function endpointSummary({ sinceMs = 0, callerWaitMs = ENDPOINT_CALLER_WAIT_MS } = {}) {
+  const since = num(sinceMs);
+  const key = Math.floor(since / ENDPOINT_SUMMARY_BUCKET_MS);
+  const hit = endpointSummaryCache.get(key);
+  const now = Date.now();
+  // A slow scan earns a longer freshness window: re-scanning every minute would keep a
+  // worker thread permanently busy.
+  if (hit && now - hit.t < hit.ttl) return hit.summary;
+  let run = endpointSummaryInFlight.get(key);
+  if (!run) {
+    const startedAt = Date.now();
+    run = endpointSummaryCompute({ sinceMs: since })
+      .then((summary) => {
+        if (summary && summary.supported === true) {
+          const took = Date.now() - startedAt;
+          endpointSummaryCache.set(key, { t: Date.now(), ttl: Math.min(ENDPOINT_SUMMARY_STALE_MS / 2, Math.max(ENDPOINT_SUMMARY_TTL_MS, 5 * took)), summary });
+          // Bound the cache: one entry per distinct window bucket, pruned on write.
+          if (endpointSummaryCache.size > 16) {
+            const t = Date.now();
+            for (const [k, v] of endpointSummaryCache) {
+              if (t - v.t >= ENDPOINT_SUMMARY_STALE_MS) endpointSummaryCache.delete(k);
+            }
+          }
+        }
+        return summary;
+      })
+      .finally(() => {
+        endpointSummaryInFlight.delete(key);
       });
-    }
-    return { supported: true, endpoints: aggregateEndpointStats(rows) };
+    endpointSummaryInFlight.set(key, run);
+  }
+  if (hit && now - hit.t < ENDPOINT_SUMMARY_STALE_MS) return hit.summary; // revalidating in the background
+  return awaitWithin(run, callerWaitMs, { supported: false });
+}
+
+function awaitWithin(promise, ms, fallback) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    timer.unref?.();
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
+async function endpointSummaryCompute({ sinceMs = 0 } = {}) {
+  try {
+    const r = await runDbTask("endpointStats", { sinceMs, budgetMs: ENDPOINT_SCAN_BUDGET_MS });
+    return r.complete ? { supported: true, endpoints: r.endpoints } : { supported: true, endpoints: r.endpoints, partial: true, coveredFromMs: r.coveredFromMs };
   } catch (e) {
-    // Query error: log once, drop the handle so the next call reopens, and
-    // degrade to { supported:false } — never an exception, never zeros (a card
-    // full of 0.00 would read as "perfect reliability", which is a lie).
-    console.error("[modelLedger] endpoint query failed:", e?.message ?? e);
-    try {
-      db.close();
-    } catch {
-      /* already closed */
-    }
+    // No database → quietly unsupported. Anything else: log once and degrade to
+    // { supported:false } — never an exception, never zeros (a card full of
+    // 0.00 would read as "perfect reliability", which is a lie).
+    if (e?.code !== "no_db") console.error("[modelLedger] endpoint query failed:", e?.message ?? e);
     return { supported: false };
   }
 }
