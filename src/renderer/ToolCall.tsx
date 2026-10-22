@@ -16,6 +16,7 @@ import { memo, useState } from "react";
 import { motion } from "framer-motion";
 import { MESSAGE_IN_ENTER, MESSAGE_IN_IDLE } from "./chatMotion";
 import type { OpencodePart } from "../shared/types";
+import { toolTitle } from "../shared/opencodeV2.mjs";
 import { filePartToMediaEntry, isMediaMime, resolveToolOutput } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { renderMarkdown } from "./MarkdownBody";
@@ -237,6 +238,9 @@ export const ToolCall = memo(function ToolCall({
         ? ((meta.filediff as Record<string, unknown>).patch as string)
         : null;
 
+  // A card is never blank while its input exists: the server sets `state.title`,
+  // and this derives the same text for a part that arrived without one.
+  const title = state.title || toolTitle(rawTool, state.input) || undefined;
   const status = state.status;
   const tone = status === "completed" ? "ok" : status === "error" ? "error" : "running";
   const summary =
@@ -271,7 +275,7 @@ export const ToolCall = memo(function ToolCall({
       <ToolCard
         tone={tone}
         name={toolName}
-        arg={state.title}
+        arg={title}
         meta={metaNode}
         copyText={copyText || undefined}
         expanded={expanded}

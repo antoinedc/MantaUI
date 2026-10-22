@@ -252,10 +252,31 @@ test("toolStarted fires once per tool with the V1 tool name; toolEnded + toolBou
   interp.interpret(success("toolu_1", "a\nb\n", {}));
   assert.deepEqual(subs(events, "toolStarted").map((e) => e.payload), [
     { sessionId: SID, idx: "toolu_1", callID: "toolu_1", toolName: "bash", toolPresentationHint: null, status: "pending" },
+    { sessionId: SID, idx: "toolu_1", callID: "toolu_1", toolName: "bash", toolPresentationHint: "ls", status: "running" },
   ]);
   assert.deepEqual(subs(events, "toolOutput").map((e) => e.payload.text), ["a\nb\n"]);
   assert.equal(subs(events, "toolEnded")[0].payload.ok, true);
   assert.deepEqual(subs(events, "toolBoundary")[0].payload, { messageID: MID, partID: "toolu_1", callID: "toolu_1", tool: "bash", status: "completed" });
+});
+
+test("toolStarted carries the card header as toolPresentationHint once the input is known (command / relative path)", () => {
+  const { interp, events } = make();
+  const withDir = (e) => ({ ...e, location: { directory: "/w" } });
+  for (const e of called("t1", "shell", { command: "npm test" })) interp.interpret(withDir(e));
+  for (const e of called("t2", "read", { path: "/w/src/a.ts" })) interp.interpret(withDir(e));
+  for (const e of called("t3", "my_custom_tool", { x: 1 })) interp.interpret(withDir(e));
+  const started = subs(events, "toolStarted").map((e) => [e.payload.idx, e.payload.toolPresentationHint, e.payload.status]);
+  assert.deepEqual(started, [
+    ["t1", null, "pending"], ["t1", "npm test", "running"],
+    ["t2", null, "pending"], ["t2", "src/a.ts", "running"],
+    ["t3", null, "pending"],
+  ]);
+});
+
+test("a tool first seen at tool.called is announced once, already carrying its hint", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.tool.called", { assistantMessageID: MID, id: "t1", name: "shell", input: { command: "ls" } }));
+  assert.deepEqual(subs(events, "toolStarted").map((e) => e.payload.toolPresentationHint), ["ls"]);
 });
 
 test("tool.failed -> toolEnded ok:false and a boundary with status error", () => {

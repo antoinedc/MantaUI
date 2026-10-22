@@ -3,6 +3,7 @@
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"messageID":"msg_145ac9b08001JXr3qnkV61CEYu"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"messageID":"msg_145ac9bc3001A2xkZuFzeMIHb4"}},
 {"kind":"stream","sub":"toolStarted","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"sessionId":"ses_eba536644ffehp53hcxultWtB5","idx":"toolu_01TRSHE5EAAsTPUYpnn3hkds","callID":"toolu_01TRSHE5EAAsTPUYpnn3hkds","toolName":"bash","toolPresentationHint":null,"status":"pending"}},
+{"kind":"stream","sub":"toolStarted","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"sessionId":"ses_eba536644ffehp53hcxultWtB5","idx":"toolu_01TRSHE5EAAsTPUYpnn3hkds","callID":"toolu_01TRSHE5EAAsTPUYpnn3hkds","toolName":"bash","toolPresentationHint":"for i in 1 2 3 4 5; do echo line$i; sleep 1; done","status":"running"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"messageID":"msg_145ac9bc3001A2xkZuFzeMIHb4"}},
 {"kind":"stream","sub":"messageChanged","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"messageID":"msg_145ac9bc3001A2xkZuFzeMIHb4"}},
 {"kind":"stream","sub":"toolOutput","sessionId":"ses_eba536644ffehp53hcxultWtB5","payload":{"sessionId":"ses_eba536644ffehp53hcxultWtB5","idx":"toolu_01TRSHE5EAAsTPUYpnn3hkds","text":"line1\nline2\nline3\nline4\nline5\n"}},

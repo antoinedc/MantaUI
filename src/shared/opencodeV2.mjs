@@ -44,6 +44,60 @@ export function normalizeToolInput(v2Name, input) {
   return out;
 }
 
+// ===== tool card titles =====
+//
+// V1 computed `state.title` (the card header's command/target) itself; V2 does
+// not, so manta derives it from the tool input. Accepts V2 and V1 tool names
+// (migrated history still carries `bash` / `task` / `todowrite` / `filePath`).
+
+const nonEmpty = (v) => (typeof v === "string" && v.trim() !== "" ? v : undefined);
+
+/** `p` relative to `directory` when inside it, else as given. */
+function relativeToDirectory(p, directory) {
+  if (typeof directory !== "string" || directory === "") return p;
+  const dir = directory.length > 1 ? directory.replace(/\/+$/, "") : directory;
+  if (p === dir) return ".";
+  return p.startsWith(`${dir}/`) ? p.slice(dir.length + 1) : p;
+}
+
+/**
+ * The card-header text for a tool call, or undefined when there is nothing
+ * sensible to show (Manta's own tools, MCP tools, input not known yet).
+ * @param {string} name  V2 or V1 tool name
+ * @param {any} input
+ * @param {{directory?: string}} [opts]  the session's directory, for relative file paths
+ */
+export function toolTitle(name, input, { directory } = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+  switch (toolNameFromV2(String(name ?? ""))) {
+    case "bash":
+      return nonEmpty(input.command);
+    case "read":
+    case "edit":
+    case "write": {
+      const p = nonEmpty(input.filePath) ?? nonEmpty(input.path);
+      return p === undefined ? undefined : relativeToDirectory(p, directory);
+    }
+    case "grep":
+    case "glob":
+      return nonEmpty(input.pattern);
+    case "task":
+      return nonEmpty(input.description);
+    case "todo_write":
+    case "todowrite": {
+      if (!Array.isArray(input.todos)) return undefined;
+      const pending = input.todos.filter((t) => t?.status !== "completed").length;
+      return `${pending} todos`;
+    }
+    case "webfetch":
+      return nonEmpty(input.url);
+    case "websearch":
+      return nonEmpty(input.query);
+    default:
+      return undefined;
+  }
+}
+
 // ===== errors =====
 
 const ERROR_NAME_FROM_V2 = {
@@ -125,12 +179,14 @@ const clean = (o) => {
 };
 
 /** Map one V2 tool block (assistant `content[]` entry) to a V1-shaped tool part. */
-export function mapToolBlock(block, { messageID, sessionID }) {
+export function mapToolBlock(block, { messageID, sessionID, directory }) {
   const v2Name = String(block.name ?? "");
   const st = block.state ?? {};
   const input = normalizeToolInput(v2Name, st.input && typeof st.input === "object" ? st.input : {});
   const time = block.time ?? {};
   const start = time.ran ?? time.created;
+  const title = nonEmpty(st.title) ?? toolTitle(v2Name, input, { directory });
+  const withTitle = title === undefined ? {} : { title };
   let state;
   switch (st.status) {
     case "streaming":
@@ -138,7 +194,7 @@ export function mapToolBlock(block, { messageID, sessionID }) {
       state = { status: "pending", input: {}, raw: typeof st.input === "string" ? st.input : "" };
       break;
     case "running":
-      state = { status: "running", input, metadata: normalizeToolMetadata(v2Name, st.metadata, input), time: { start } };
+      state = { status: "running", input, ...withTitle, metadata: normalizeToolMetadata(v2Name, st.metadata, input), time: { start } };
       break;
     case "completed":
       state = {
@@ -146,7 +202,7 @@ export function mapToolBlock(block, { messageID, sessionID }) {
         input,
         output: toolOutputText(v2Name, st.content),
         metadata: normalizeToolMetadata(v2Name, st.metadata, input),
-        ...(v2Name === "subagent" && typeof input.description === "string" ? { title: input.description } : {}),
+        ...withTitle,
         time: { start, end: time.completed },
       };
       break;
@@ -154,6 +210,7 @@ export function mapToolBlock(block, { messageID, sessionID }) {
       state = {
         status: "error",
         input,
+        ...withTitle,
         error: typeof st.error?.message === "string" ? st.error.message : "The tool failed.",
         ...(Array.isArray(st.content) ? { output: toolOutputText(v2Name, st.content) } : {}),
         metadata: normalizeToolMetadata(v2Name, st.metadata, input),
@@ -174,7 +231,7 @@ export function mapToolBlock(block, { messageID, sessionID }) {
   };
 }
 
-function mapAssistant(m, { sessionID, parentID }) {
+function mapAssistant(m, { sessionID, parentID, directory }) {
   const completed = m.time?.completed;
   const info = clean({
     id: m.id,
@@ -213,7 +270,7 @@ function mapAssistant(m, { sessionID, parentID }) {
         time: block.time ? { start: block.time.created, end: block.time.completed } : undefined,
       });
     } else if (block?.type === "tool") {
-      parts.push(mapToolBlock(block, { messageID: m.id, sessionID }));
+      parts.push(mapToolBlock(block, { messageID: m.id, sessionID, directory }));
     }
   }
   if (m.tokens) {
@@ -265,10 +322,11 @@ function mapUser(m, { sessionID }) {
  * V2 timeline records (CHRONOLOGICAL) → the `{info, parts}[]` shape every
  * client reads (src/shared/types.ts OpencodeMessage). Records that are not
  * conversation (idle, agent/model/location switches, system, skill, shell,
- * synthetic) are dropped. A completed compaction becomes a `summary:true`
+ * synthetic) are dropped. `directory` (the session's) lets file tools' card
+ * titles show paths relative to it. A completed compaction becomes a `summary:true`
  * assistant message holding the summary text.
  */
-export function mapTimeline(items, { sessionID } = {}) {
+export function mapTimeline(items, { sessionID, directory } = {}) {
   const out = [];
   let lastUser = null;
   for (const m of Array.isArray(items) ? items : []) {
@@ -277,7 +335,7 @@ export function mapTimeline(items, { sessionID } = {}) {
       lastUser = m.id;
       out.push(mapUser(m, { sessionID }));
     } else if (m.type === "assistant") {
-      out.push(mapAssistant(m, { sessionID, parentID: lastUser }));
+      out.push(mapAssistant(m, { sessionID, parentID: lastUser, directory }));
     } else if (m.type === "compaction" && m.status === "completed") {
       out.push({
         info: clean({
@@ -408,6 +466,7 @@ export function createLifecycleAdapter() {
     const known = tools.get(d.id) ?? {};
     const v2Name = known.name ?? "";
     const input = normalizeToolInput(v2Name, known.input ?? {});
+    const title = toolTitle(v2Name, input, { directory: known.directory });
     return {
       type: "message.part.updated",
       properties: {
@@ -419,7 +478,7 @@ export function createLifecycleAdapter() {
           sessionID,
           type: "tool",
           tool: toolNameFromV2(v2Name),
-          state: { status, input, ...extra },
+          state: { status, input, ...(title === undefined ? {} : { title }), ...extra },
         },
       },
     };
@@ -496,12 +555,12 @@ export function createLifecycleAdapter() {
           }),
         ];
       case "session.tool.input.started":
-        tools.set(d.id, { name: d.name, input: {}, messageID: d.assistantMessageID });
+        tools.set(d.id, { name: d.name, input: {}, messageID: d.assistantMessageID, directory: evt.location?.directory });
         bound(tools);
         return [];
       case "session.tool.called": {
         const k = tools.get(d.id) ?? { messageID: d.assistantMessageID };
-        tools.set(d.id, { ...k, input: d.input ?? {} });
+        tools.set(d.id, { ...k, input: d.input ?? {}, directory: evt.location?.directory ?? k.directory });
         return [toolPart(sid, d, "running")];
       }
       case "session.tool.progress": {

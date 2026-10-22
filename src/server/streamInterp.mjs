@@ -56,6 +56,7 @@ import {
   questionFromForm,
   toolNameFromV2,
   toolOutputText,
+  toolTitle,
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 
@@ -278,7 +279,21 @@ export function createStreamInterpreter({
   // `idx` is the tool id (the part id the transcript mapper gives the same tool),
   // identical on started/output/ended, so a duplicate is a no-op.
 
-  function ensureTool(sid, st, d) {
+  // The card header text (command / path / pattern …) is only known once the
+  // tool's input is; `toolPresentationHint` carries it, same as the transcript
+  // part's `state.title`.
+  function announceTool(sid, tool, status) {
+    emit(sid, "toolStarted", {
+      sessionId: sid,
+      idx: tool.idx,
+      callID: tool.callID,
+      toolName: tool.name,
+      toolPresentationHint: tool.hint ?? null,
+      status,
+    });
+  }
+
+  function ensureTool(sid, st, d, directory) {
     const id = String(d.id ?? "");
     if (!id) return null;
     let tool = st.tools.get(id);
@@ -305,14 +320,8 @@ export function createStreamInterpreter({
     }
     if (!tool.started && tool.name) {
       tool.started = true;
-      emit(sid, "toolStarted", {
-        sessionId: sid,
-        idx: tool.idx,
-        callID: tool.callID,
-        toolName: tool.name,
-        toolPresentationHint: null,
-        status: "pending",
-      });
+      tool.hint = toolTitle(tool.v2Name, d.input, { directory }) ?? null;
+      announceTool(sid, tool, "pending");
     }
     return tool;
   }
@@ -541,10 +550,19 @@ export function createStreamInterpreter({
         return;
       }
       case "session.tool.called": {
-        const tool = ensureTool(sid, st, d);
+        const directory = evt.location?.directory;
+        const tool = ensureTool(sid, st, d, directory);
         if (!tool) return;
         tool.input = d.input && typeof d.input === "object" ? d.input : {};
         tool.status = "running";
+        // The tool was announced (pending, no hint) when its input began to
+        // stream; now the input is complete, re-announce it with the hint. The
+        // client upserts by idx and no output has arrived yet.
+        const hint = toolTitle(tool.v2Name, tool.input, { directory }) ?? null;
+        if (hint && hint !== tool.hint) {
+          tool.hint = hint;
+          announceTool(sid, tool, "running");
+        }
         if (tool.name === "todo_write" || tool.name === "todowrite") emitTodos(sid, st, tool.input.todos);
         noteMessageChanged(sid, d.assistantMessageID);
         return;

@@ -133,6 +133,21 @@ describe("tool card chrome", () => {
     expect(rows.map((r) => r.textContent)).toEqual(["To github.com", "  main -> main"]);
   });
 
+  it("shows a running bash card's command in its header (from state.title, or from the input when absent)", () => {
+    installMockApi();
+    const running = (state: Record<string, unknown>) =>
+      ({ type: "tool", tool: "bash", state: { status: "running", ...state } }) as unknown as OpencodePart;
+    const header = () => h!.container.querySelector("button[aria-expanded]")!;
+    h = mount(<ToolCall part={running({ title: "npm test", input: { command: "npm test" } })} verbose={false} />);
+    expect(header().textContent).toContain("Bash");
+    expect(header().textContent).toContain("npm test");
+    h.unmount();
+    h = mount(<ToolCall part={running({ input: { command: "npm run build\n&& echo done" } })} verbose={false} />);
+    expect(header().textContent).toContain("npm run build");
+    // The full text rides along as the tooltip for the truncated one-line header.
+    expect(header().querySelector("[title]")?.getAttribute("title")).toBe("npm run build\n&& echo done");
+  });
+
   it("puts the copy button in the card header, not floating over the body", () => {
     installMockApi();
     h = mount(<ToolCall part={outputPart("hello")} verbose={false} />);

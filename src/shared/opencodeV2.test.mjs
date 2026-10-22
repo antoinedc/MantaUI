@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   mapTimeline,
+  mapToolBlock,
+  toolTitle,
   toolNameFromV2,
   permissionKeyToV2,
   normalizeToolInput,
@@ -251,4 +253,92 @@ test("lifecycle: events the adapter does not translate produce nothing; junk is 
   for (const t of ["session.text.delta", "project.updated", "shell.created", "session.usage.updated"]) assert.deepEqual(a.adapt({ id: "x", type: t, data: { sessionID: "s" } }), []);
   assert.deepEqual(a.adapt(null), []);
   assert.deepEqual(a.adapt({ type: 5 }), []);
+});
+
+// ---- tool card titles ----
+
+test("toolTitle: shell/bash → the full command (multi-line kept as-is)", () => {
+  assert.equal(toolTitle("shell", { command: "npm test" }), "npm test");
+  assert.equal(toolTitle("bash", { command: "a\nb" }), "a\nb");
+  assert.equal(toolTitle("shell", { command: "  " }), undefined);
+  assert.equal(toolTitle("shell", {}), undefined);
+});
+
+test("toolTitle: file tools → the path relative to the session directory when inside it, else as given", () => {
+  const directory = "/home/dev/proj";
+  for (const tool of ["read", "edit", "write"]) {
+    assert.equal(toolTitle(tool, { path: "/home/dev/proj/src/a.ts" }, { directory }), "src/a.ts");
+    assert.equal(toolTitle(tool, { filePath: "/home/dev/proj/b.js" }, { directory: "/home/dev/proj/" }), "b.js");
+    assert.equal(toolTitle(tool, { path: "/etc/hosts" }, { directory }), "/etc/hosts");
+    assert.equal(toolTitle(tool, { path: "/home/dev/project2/x" }, { directory }), "/home/dev/project2/x");
+    assert.equal(toolTitle(tool, { path: "notes.txt" }, { directory }), "notes.txt");
+    assert.equal(toolTitle(tool, { path: "/home/dev/proj/a" }), "/home/dev/proj/a");
+  }
+  assert.equal(toolTitle("read", { path: "/home/dev/proj" }, { directory }), ".");
+  assert.equal(toolTitle("read", {}), undefined);
+});
+
+test("toolTitle: grep/glob → pattern; task/subagent → description; web tools → url / query", () => {
+  assert.equal(toolTitle("grep", { pattern: "^def greet", path: "/x" }), "^def greet");
+  assert.equal(toolTitle("glob", { pattern: "**/*.ts" }), "**/*.ts");
+  assert.equal(toolTitle("subagent", { description: "Find greet" }), "Find greet");
+  assert.equal(toolTitle("task", { description: "Find greet" }), "Find greet");
+  assert.equal(toolTitle("webfetch", { url: "https://a.b/c" }), "https://a.b/c");
+  assert.equal(toolTitle("websearch", { query: "node test runner" }), "node test runner");
+});
+
+test("toolTitle: todo_write/todowrite → '<n> todos' counting the not-completed ones", () => {
+  const todos = [{ status: "completed" }, { status: "in_progress" }, { status: "pending" }];
+  assert.equal(toolTitle("todo_write", { todos }), "2 todos");
+  assert.equal(toolTitle("todowrite", { todos }), "2 todos");
+  assert.equal(toolTitle("todo_write", { todos: [{ status: "completed" }] }), "0 todos");
+  assert.equal(toolTitle("todo_write", {}), undefined);
+});
+
+test("toolTitle: other tools and junk input have no title", () => {
+  assert.equal(toolTitle("schedule_create", { cron: "* * * * *" }), undefined);
+  assert.equal(toolTitle("mcp_x", { command: "ls" }), undefined);
+  assert.equal(toolTitle("shell", null), undefined);
+  assert.equal(toolTitle("shell", "ls"), undefined);
+  assert.equal(toolTitle(undefined, { command: "ls" }), undefined);
+});
+
+test("mapToolBlock: running, completed and error tool parts all carry the title", () => {
+  const base = { id: "toolu_1", name: "shell", time: { created: 1 } };
+  const input = { command: "npm test" };
+  const running = mapToolBlock({ ...base, state: { status: "running", input } }, { messageID: "m", sessionID: "s" });
+  const done = mapToolBlock({ ...base, state: { status: "completed", input, content: [] } }, { messageID: "m", sessionID: "s" });
+  const err = mapToolBlock({ ...base, state: { status: "error", input, error: { message: "x" } } }, { messageID: "m", sessionID: "s" });
+  for (const p of [running, done, err]) assert.equal(p.state.title, "npm test");
+  assert.deepEqual([running.state.status, done.state.status, err.state.status], ["running", "completed", "error"]);
+});
+
+test("mapToolBlock: file paths are made relative to the directory; a streaming block has no title; a V2-provided title wins", () => {
+  const edit = { id: "t", name: "edit", state: { status: "running", input: { path: "/w/src/a.ts" } } };
+  assert.equal(mapToolBlock(edit, { messageID: "m", sessionID: "s", directory: "/w" }).state.title, "src/a.ts");
+  const streaming = { id: "t", name: "shell", state: { status: "streaming", input: '{"comm' } };
+  assert.equal(mapToolBlock(streaming, { messageID: "m", sessionID: "s" }).state.title, undefined);
+  const own = { id: "t", name: "shell", state: { status: "running", input: { command: "ls" }, title: "Listing" } };
+  assert.equal(mapToolBlock(own, { messageID: "m", sessionID: "s" }).state.title, "Listing");
+});
+
+test("mapTimeline threads the directory to tool titles (recorded edit)", () => {
+  const tl = timeline("03-edit-todo");
+  const dir = "/tmp/manta-rec/dirs/repo";
+  const parts = mapTimeline(tl, { sessionID: "s", directory: dir }).flatMap((m) => m.parts).filter((p) => p.type === "tool");
+  const byTool = Object.fromEntries(parts.map((p) => [p.tool, p.state.title]));
+  assert.equal(byTool.read, "notes.txt");
+  assert.equal(byTool.edit, "notes.txt");
+  assert.equal(byTool.todo_write, "0 todos");
+});
+
+test("lifecycle: a live running tool part carries the title (and keeps it when it completes)", () => {
+  const parts = adaptAll("02-slow-bash").filter((e) => e.type === "message.part.updated").map((e) => e.properties.part);
+  assert.equal(parts[0].state.status, "running");
+  assert.equal(parts[0].state.title, parts[0].state.input.command);
+  assert.equal(parts[1].state.title, parts[0].state.title);
+  const edit = adaptAll("03-edit-todo").filter((e) => e.type === "message.part.updated").map((e) => e.properties.part);
+  assert.equal(edit.find((p) => p.tool === "edit" && p.state.status === "running").state.title, "notes.txt");
+  const grep = adaptAll("04-task-subagent").filter((e) => e.type === "message.part.updated").map((e) => e.properties.part);
+  assert.equal(grep.find((p) => p.tool === "grep").state.title, "^def greet|^function greet|^export.*greet|^const greet");
 });

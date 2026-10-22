@@ -176,10 +176,12 @@ test("01-plain-text: running edge, streamed flushes, stepEnded, turnComplete", a
   assert.equal(only(f, "sessionError").length, 0);
 });
 
-test("02-slow-bash: toolStarted -> live toolOutput tail (polled) -> toolEnded + toolBoundary, once each", async () => {
+test("02-slow-bash: toolStarted (pending, then re-announced with the command) -> live toolOutput tail (polled) -> toolEnded + toolBoundary", async () => {
   const f = await replay(readEvents("02-slow-bash"));
-  assert.equal(only(f, "toolStarted").length, 1);
+  assert.equal(only(f, "toolStarted").length, 2);
   assert.equal(only(f, "toolStarted")[0].payload.toolName, "bash");
+  assert.equal(only(f, "toolStarted")[0].payload.toolPresentationHint, null);
+  assert.match(only(f, "toolStarted")[1].payload.toolPresentationHint, /^for i in 1 2 3 4 5; do echo line/);
   assert.equal(only(f, "toolEnded").length, 1);
   assert.equal(only(f, "toolBoundary").length, 1);
   assert.equal(only(f, "toolBoundary")[0].payload.tool, "bash");
@@ -197,7 +199,12 @@ test("03-edit-todo: todos frames follow each todo_write call", async () => {
   assert.equal(todos.length, 2);
   assert.equal(todos[0].payload.allTerminal, false);
   assert.equal(todos[1].payload.allTerminal, true);
-  assert.deepEqual(only(f, "toolStarted").map((x) => x.payload.toolName), ["todo_write", "read", "edit", "todo_write"]);
+  const started = only(f, "toolStarted");
+  assert.deepEqual([...new Set(started.map((x) => x.payload.toolName))], ["todo_write", "read", "edit"]);
+  assert.deepEqual(
+    started.filter((x) => x.payload.toolPresentationHint).map((x) => [x.payload.toolName, x.payload.toolPresentationHint]),
+    [["todo_write", "2 todos"], ["read", "notes.txt"], ["edit", "notes.txt"], ["todo_write", "0 todos"]],
+  );
   assert.equal(only(f, "toolBoundary").length, 4);
 });
 
