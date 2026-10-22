@@ -1559,10 +1559,10 @@ export function getProviders() {
   // used to queue for N × 2.5 s. Opening Settings → Models fires ~6 of them
   // at once (models list, config:get's cache-TTL reconcile, the identify
   // card, the app-wide catalog), pushing config:get past the renderer's 15 s
-  // fail-fast timeout — the "model list times out" bug. No result is reused
-  // once the request completes, so freshness is unchanged: a caller can only
-  // ever receive a response that was started while it was waiting. Callers
-  // share the returned object and must treat it as read-only.
+  // fail-fast timeout — the "model list times out" bug. Concurrent callers
+  // share the request already in flight (which may have started slightly
+  // before them); any call after it settles starts a new request — nothing is
+  // cached. Callers share the returned object and must treat it as read-only.
   if (providersInFlight) return providersInFlight;
   providersInFlight = fetchProviders().finally(() => {
     providersInFlight = null;
