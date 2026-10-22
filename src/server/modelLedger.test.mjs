@@ -29,6 +29,15 @@ function v2Row(dataStr) {
   const { role: _r, providerID, modelID, ...rest } = d;
   return { type: "assistant", data: JSON.stringify({ ...rest, model: { providerID, id: modelID }, content: rest.content ?? [] }) };
 }
+// node:sqlite's DatabaseSync, or (after t.skip) null on a runtime without it.
+async function sqliteOrSkip(t) {
+  try {
+    return (await import("node:sqlite")).DatabaseSync;
+  } catch {
+    t.skip("node:sqlite unavailable on this runtime");
+    return null;
+  }
+}
 const V2_LEDGER_SCHEMA = `
   CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, agent TEXT, directory TEXT, time_updated INTEGER);
   CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
@@ -542,16 +551,8 @@ function openLedgerFixture(DatabaseSync, dbPath, messages, sessions) {
 }
 
 test("fetchLedgerRows projected query deep-compares to the legacy JS-parse shape on well-formed rows (BET-1358)", async (t) => {
-  let DatabaseSync;
-  try {
-    ({ DatabaseSync } = await import("node:sqlite"));
-  } catch {
-    t.skip("node:sqlite unavailable on this runtime");
-    return;
-  }
-  const { mkdtempSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
+  const DatabaseSync = await sqliteOrSkip(t);
+  if (!DatabaseSync) return;
   const dir = mkdtempSync(join(tmpdir(), "manta-ledger-shape-"));
   const now = Date.now();
   const messages = [
@@ -580,16 +581,8 @@ test("fetchLedgerRows projected query deep-compares to the legacy JS-parse shape
 });
 
 test("fetchLedgerRows: absent/null cost+token fields aggregate to 0 exactly as today; non-assistant and malformed rows excluded (BET-1358)", async (t) => {
-  let DatabaseSync;
-  try {
-    ({ DatabaseSync } = await import("node:sqlite"));
-  } catch {
-    t.skip("node:sqlite unavailable on this runtime");
-    return;
-  }
-  const { mkdtempSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
+  const DatabaseSync = await sqliteOrSkip(t);
+  if (!DatabaseSync) return;
   const dir = mkdtempSync(join(tmpdir(), "manta-ledger-mixed-"));
   const now = Date.now();
   const messages = [

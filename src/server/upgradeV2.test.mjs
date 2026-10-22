@@ -155,6 +155,15 @@ function makeBox(opts = {}) {
   return { deps, store, calls, events, o, names: () => calls.map((c) => c[0]), resetMigrate: () => (migrateIdx = 0) };
 }
 
+/** Boot a machine and wait until it is wedged inside the `stop` step (upgrade mode on). */
+async function bootWedgedInStop(box) {
+  const m = createUpgradeV2(box.deps);
+  await m.boot();
+  for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(m.isUpgradeMode(), true);
+  return m;
+}
+
 async function runToIdle(machine) {
   await machine.whenIdle();
 }
@@ -919,10 +928,7 @@ describe("HTTP surface (real server): upgrade-mode 503 gate + K3 routes", () => 
 
   test("while running: gated routes 503 with {error,upgrade:true}; exempt routes pass; /api/upgrade answers", async () => {
     const box = makeBox({ crashOn: "opencode.stop" }); // wedge in `stop` so it stays running
-    const m = createUpgradeV2(box.deps);
-    await m.boot();
-    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
-    assert.equal(m.isUpgradeMode(), true);
+    const m = await bootWedgedInStop(box);
     await withServer(m, async (call) => {
       for (const [method, p] of [["POST", "/rpc/tmux:list"], ["GET", "/api/schedule"], ["POST", "/api/upload"], ["POST", "/hook/abc"]]) {
         const r = await call(method, p);
@@ -1030,10 +1036,7 @@ describe("WebSocket gate in upgrade mode", () => {
 
   test("while running: /pty and /call are refused with HTTP 503 {error,upgrade:true} before the handshake; /events is allowed", async () => {
     const box = makeBox({ crashOn: "opencode.stop" });
-    const m = createUpgradeV2(box.deps);
-    await m.boot();
-    for (let i = 0; i < 100 && m._state().steps.stop.status !== "running"; i++) await new Promise((r) => setImmediate(r));
-    assert.equal(m.isUpgradeMode(), true);
+    const m = await bootWedgedInStop(box);
     const srv = await wsServer(m);
     try {
       for (const p of ["/pty?session=a", "/call", "/anything-else"]) {
