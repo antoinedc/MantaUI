@@ -426,45 +426,71 @@ describe("crash and resume at every step", () => {
   }
 });
 
-describe("migrate: do not bounce a running V2 (large-DB migration)", () => {
-  // Restarting opencode discards an in-flight v1 migration, so the migrate step restarts it only
-  // when its definition changed or it is not up. The cutover's own restart is unrelated (always 1).
+describe("migrate: do not bounce a running V2 when RESUMING (large-DB migration)", () => {
+  // Restarting opencode discards an in-flight v1 migration, so migrate skips the restart only when
+  // resuming an interrupted migrate step (progress already published), the definition is unchanged
+  // and the service is up. The cutover's own restart is unrelated (always 1).
   const migrateStarts = (box) => box.calls.filter((c) => c[0] === "opencode.start").length - 1;
 
-  test("definition unchanged + already running → no restart in migrate", async () => {
-    const box = makeBox({ serviceChanged: false, running: true });
-    const m = createUpgradeV2(box.deps);
-    await m.boot();
-    await runToIdle(m);
-    assert.equal(m.status().state, "completed");
-    assert.equal(migrateStarts(box), 0);
-  });
-
-  test("definition changed, or not running, or no liveness probe → restarts", async () => {
-    for (const opts of [{ serviceChanged: true, running: true }, { serviceChanged: false, running: false }, { serviceChanged: false }]) {
-      const box = makeBox(opts);
-      const m = createUpgradeV2(box.deps);
-      await m.boot();
-      await runToIdle(m);
-      assert.equal(m.status().state, "completed", JSON.stringify(opts));
-      assert.equal(migrateStarts(box), 1, JSON.stringify(opts));
-    }
-  });
-
-  test("crash during migrate → resume with V2 still up does not restart it, and finishes", async () => {
+  /** Run a first process until it dies inside the migrate step; returns the shared store. */
+  async function crashedInMigrate() {
     const store = { data: null };
     const first = makeBox({ store, crashOn: "v2.migrationStatus" });
     await createUpgradeV2(first.deps).boot();
     for (let i = 0; i < 200 && store.data?.steps?.migrate?.status !== "running"; i++) await new Promise((r) => setImmediate(r));
     await new Promise((r) => setTimeout(r, 20));
     assert.equal(store.data.steps.migrate.status, "running");
+    assert.ok(store.data.steps.migrate.progress, "the interrupted run had published progress");
+    return store;
+  }
 
+  test("resume + definition unchanged + already running → no restart, and it finishes", async () => {
+    const store = await crashedInMigrate();
     const second = makeBox({ store, serviceChanged: false, running: true });
     const m2 = createUpgradeV2(second.deps);
     assert.deepEqual(await m2.boot(), { action: "resume" });
     await runToIdle(m2);
     assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
     assert.equal(migrateStarts(second), 0, "the in-flight migration was not restarted");
+  });
+
+  test("resume but definition changed, not running, or no liveness probe → restarts", async () => {
+    for (const opts of [{ serviceChanged: true, running: true }, { serviceChanged: false, running: false }, { serviceChanged: false }]) {
+      const store = await crashedInMigrate();
+      const second = makeBox({ store, ...opts });
+      const m2 = createUpgradeV2(second.deps);
+      await m2.boot();
+      await runToIdle(m2);
+      assert.equal(m2.status().state, "completed", JSON.stringify(opts));
+      assert.equal(migrateStarts(second), 1, JSON.stringify(opts));
+    }
+  });
+
+  test("a fresh run always restarts, even when the service looks up and unchanged", async () => {
+    const box = makeBox({ serviceChanged: false, running: true });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    assert.equal(migrateStarts(box), 1);
+  });
+
+  test("a retry after the migrate step FAILED restarts the service (it may be wedged)", async () => {
+    const box = makeBox({ serviceChanged: false, running: true, migrateScript: [{ status: "error", error: { message: "boom" } }] });
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "failed");
+    assert.equal(m.status().error.step, "migrate");
+    const startsAfterFail = box.calls.filter((c) => c[0] === "opencode.start").length;
+    assert.equal(startsAfterFail, 1);
+    box.resetMigrate();
+    box.o.migrateScript = [{ status: "completed" }];
+    assert.deepEqual(await m.retry(), { ok: true });
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    // retry restart + cutover restart
+    assert.equal(box.calls.filter((c) => c[0] === "opencode.start").length, startsAfterFail + 2);
   });
 });
 

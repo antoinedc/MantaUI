@@ -267,15 +267,20 @@ export function createUpgradeV2(deps) {
       await commit();
     },
 
-    async migrate() {
+    async migrate({ resuming = false } = {}) {
       const db = state.mode === "copy" ? state.targetDb : null;
+      // A previous run of THIS step already published progress: opencode may be mid-migration.
+      const hadProgress = state.steps.migrate.progress != null;
       const serviceChanged = await deps.opencode.configure("v2", { db });
       // start() means RESTART everywhere, and restarting opencode discards an
       // in-flight v1 migration (its progress lives only in the WAL until it
-      // commits). When the definition is unchanged and the service is already
-      // up, skip the restart entirely.
+      // commits). So when RESUMING an interrupted migrate (the step was running
+      // and had progress when this process started) with the definition
+      // unchanged and the service already up, skip the restart. A fresh run or a
+      // retry after a failure always restarts: the service may be wedged.
       const alreadyUp = (await deps.opencode.isRunning?.()) === true;
-      if (serviceChanged || !alreadyUp) await deps.opencode.start();
+      const keepRunning = resuming && hadProgress && !serviceChanged && alreadyUp;
+      if (!keepRunning) await deps.opencode.start();
       eta.firstNum = null;
       eta.firstAt = null;
       eta.seconds = null;
@@ -447,12 +452,15 @@ export function createUpgradeV2(deps) {
     for (const id of STEP_IDS) {
       if (state.steps[id].status === "done") continue;
       const step = state.steps[id];
+      // "running" here means a previous process died mid-step (resume); a retry resets failed steps
+      // to pending first.
+      const resuming = step.status === "running";
       step.status = "running";
       step.error = undefined;
       step.startedAt = now();
       await commit();
       try {
-        await handlers[id]();
+        await handlers[id]({ resuming });
       } catch (e) {
         const err = e instanceof UpgradeError ? e : new UpgradeError(String(e?.message ?? e), { retryable: true });
         step.status = "failed";
