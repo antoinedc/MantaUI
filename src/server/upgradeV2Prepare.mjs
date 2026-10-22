@@ -348,10 +348,13 @@ export async function prepareOpencodeV2({
   env = process.env,
   fs = nodeFs,
   exec = defaultExec,
+  // `log` MUST be declared before `service`: default parameters evaluate left to right, and the
+  // `service` default reads `log` — declared after it, every call that did not inject a service
+  // (i.e. the real CLI, on every box) died with "Cannot access 'log' before initialization".
+  log = () => {},
   service = createOpencodeService({ home, exec: (c, a) => exec(c, a).then((stdout) => ({ stdout, stderr: "" })), log }),
   readState = () => readJson(nodeFs, migrationStatePath()),
   writeState = (s) => nodeFs.writeFile(migrationStatePath(), `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 }),
-  log = () => {},
 } = {}) {
   const binDir = join(home, ".opencode", "bin");
   const v2Bin = join(binDir, "opencode");

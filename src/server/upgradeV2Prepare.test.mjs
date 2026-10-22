@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   V1_PLUGIN_FILES,
   V1_TOOL_FILES,
@@ -370,5 +372,114 @@ describe("prepareOpencodeV2 (the whole decision)", () => {
     assert.equal(r.migrationNeeded, false);
     assert.equal(r.bin, join(b.home, ".opencode", "bin", "opencode"));
     assert.deepEqual(b.configured, [["v2", "/x/opencode-v2.db"]], "the chosen copy DB is carried into the rendered service");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The REAL entry point, exactly as scripts/install.sh runs it on a fresh box.
+//
+// Every test above injects a fake `service`, so none of them ever evaluated prepareOpencodeV2's
+// DEFAULT `service` — whose initializer read `log` before `log`'s own default parameter had run
+// ("Cannot access 'log' before initialization"). That is the only path a real box takes (the CLI
+// never injects one), and it killed every fresh install on macOS CI. These tests run the CLI as a
+// subprocess in a throwaway HOME + state dir and `eval` its stdout the way install.sh does.
+// ---------------------------------------------------------------------------------------------
+describe("prepare CLI on a FRESH box (nothing injected — the install.sh path)", () => {
+  const CLI = join(dirname(fileURLToPath(import.meta.url)), "upgradeV2Prepare.mjs");
+  const FAKE_V2 = "#!/bin/sh\necho 2.0.30\n";
+
+  // A release checkout with the pinned binary + the three V2 plugin dirs, and a HOME/state dir
+  // that has NEVER seen Manta: no ~/.manta, no ~/.opencode, no ~/.config/opencode, no opencode DB.
+  function freshBox({ vendorBin = true } = {}) {
+    const home = join(root, "fresh-home");
+    const state = join(root, "fresh-state");
+    const mantaHome = join(root, "fresh-release");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(state, { recursive: true });
+    mkdirSync(mantaHome, { recursive: true });
+    if (vendorBin) {
+      mkdirSync(join(mantaHome, "vendor", "opencode"), { recursive: true });
+      writeFileSync(join(mantaHome, "vendor", "opencode", "opencode"), FAKE_V2);
+      writeFileSync(join(mantaHome, "vendor", "opencode", "opencode.sha256"), `${sha(FAKE_V2)}  opencode\n`);
+    }
+    for (const name of V2_PLUGINS) {
+      mkdirSync(join(mantaHome, "docs", "opencode-plugins-v2", name), { recursive: true });
+      writeFileSync(join(mantaHome, "docs", "opencode-plugins-v2", name, "index.ts"), "x");
+    }
+    // PATH is kept (node + sh), everything Manta-specific is pointed at the sandbox. No
+    // XDG_DATA_HOME → the DB lookup falls back to $HOME/.local/share, which is empty.
+    const env = { PATH: process.env.PATH, HOME: home, MANTA_STATE_HOME: state };
+    return { home, state, mantaHome, env };
+  }
+  const cli = (b, ...args) => spawnSync(process.execPath, [CLI, ...args], { env: b.env, encoding: "utf8", timeout: 60_000 });
+
+  test("exits 0, never trips a temporal-dead-zone, and its stdout evals to the variables install.sh reads", () => {
+    const b = freshBox();
+    const r = cli(b, "prepare", "--home", b.mantaHome);
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /before initialization|ReferenceError/);
+
+    // Evaluate it the way install.sh does: PREPARE_OUT="$(node …)"; eval "$PREPARE_OUT".
+    const out = execFileSync(
+      "bash",
+      ["-c", 'eval "$1"; printf "%s|%s|%s|%s|%s" "$MIGRATION_NEEDED" "$OPENCODE_BIN" "$OPENCODE_PASSWORD_FILE" "$OPENCODE_BINARY_CHANGED" "$OPENCODE_PLUGINS_CHANGED"', "_", r.stdout],
+      { encoding: "utf8" },
+    );
+    const [migration, bin, pwFile, binChanged, pluginsChanged] = out.split("|");
+    assert.equal(migration, "0", "a fresh box has no V1 history to migrate");
+    assert.equal(bin, join(b.home, ".opencode", "bin", "opencode"));
+    assert.equal(pwFile, join(b.state, ".manta", "opencode-password"));
+    assert.equal(binChanged, "1");
+    assert.equal(pluginsChanged, "1");
+
+    // …and the disk is what install.sh then relies on.
+    assert.equal(mode(bin), 0o755);
+    assert.equal(execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(), "2.0.30");
+    assert.match(readFileSync(pwFile, "utf8"), /^[0-9a-f]{32}\n$/);
+    assert.equal(mode(pwFile), 0o600);
+    for (const n of V2_PLUGINS) assert.ok(existsSync(join(b.home, ".config", "opencode", "plugins", n, "index.ts")), n);
+    assert.ok(!existsSync(join(b.state, ".manta", "v2-migration.json")), "no migration state for a box with nothing to migrate");
+  });
+
+  test("a second run (re-install / self-update) is a clean no-op that keeps the same password", () => {
+    const b = freshBox();
+    assert.equal(cli(b, "prepare", "--home", b.mantaHome).status, 0);
+    const pw = readFileSync(join(b.state, ".manta", "opencode-password"), "utf8");
+    const r = cli(b, "prepare", "--home", b.mantaHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^OPENCODE_BINARY_CHANGED=0$/m);
+    assert.match(r.stdout, /^OPENCODE_PLUGINS_CHANGED=0$/m);
+    assert.equal(readFileSync(join(b.state, ".manta", "opencode-password"), "utf8"), pw);
+  });
+
+  test("a release with no vendored binary still exits 0 and installs nothing (install.sh then refuses on its own check)", () => {
+    const b = freshBox({ vendorBin: false });
+    const r = cli(b, "prepare", "--home", b.mantaHome);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^MIGRATION_NEEDED=0$/m);
+    assert.ok(!existsSync(join(b.home, ".opencode", "bin", "opencode")));
+  });
+
+  test("db-env on a fresh box prints nothing and exits 0 (install.sh renders the service with no OPENCODE_DB)", () => {
+    const b = freshBox();
+    const r = cli(b, "db-env");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, "");
+  });
+
+  test("prepareOpencodeV2 with NO injected service builds its default one (the exact expression that threw)", async () => {
+    const b = freshBox();
+    const logs = [];
+    const prev = { HOME: process.env.HOME };
+    process.env.HOME = b.home; // homedir() inside the default service must stay in the sandbox
+    try {
+      const r = await prepareOpencodeV2({ mantaHome: b.mantaHome, home: b.home, env: b.env, log: (m) => logs.push(m) });
+      assert.equal(r.migrationNeeded, false);
+      assert.equal(r.binaryChanged, true);
+      // The default service must be wired to the caller's logger (nohup on a box with no unit/plist).
+      assert.ok(logs.some((l) => /service → v2/.test(l)), `service log line missing: ${JSON.stringify(logs)}`);
+    } finally {
+      process.env.HOME = prev.HOME;
+    }
   });
 });
