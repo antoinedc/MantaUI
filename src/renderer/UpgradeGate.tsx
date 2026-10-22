@@ -29,7 +29,7 @@ import {
   stepFraction,
   type ActionOutcome,
   type GateView,
-} from "./upgradeGate";
+} from "./upgradeGateLogic";
 import type { UpgradeStep } from "../shared/api";
 
 export type UpgradeGateProps = {

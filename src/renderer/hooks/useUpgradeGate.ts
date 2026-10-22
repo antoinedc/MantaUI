@@ -22,7 +22,7 @@ import {
   isGateVisible,
   selectGateView,
   type GateView,
-} from "../upgradeGate";
+} from "../upgradeGateLogic";
 
 export type UpgradeGateInputs = {
   boxNeedsUpgrade: boolean;

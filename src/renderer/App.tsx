@@ -29,7 +29,7 @@ import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChanne
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
 import { UpgradeGate } from "./UpgradeGate";
-import { boxNeedsMajorUpgrade } from "./upgradeGate";
+import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
 import { ConfirmModal } from "./ConfirmModal";
 import { UsageResumeModal } from "./UsageResumeModal";

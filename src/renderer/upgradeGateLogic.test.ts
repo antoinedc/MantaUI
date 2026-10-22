@@ -1,4 +1,4 @@
-// upgradeGate.test.ts — the pure half of the blocking box-upgrade screen
+// upgradeGateLogic.test.ts — the pure half of the blocking box-upgrade screen
 // (OpenCode V2 cutover, slice C4). Everything the gate DECIDES is tested here
 // with no DOM: the K3 parser, the reducer's ordering rules, the view selector
 // and the formatting.
@@ -19,7 +19,7 @@ import {
   stepFraction,
   type GateInputs,
   type GateState,
-} from "./upgradeGate";
+} from "./upgradeGateLogic";
 
 const step = (id: UpgradeStep["id"], status: UpgradeStep["status"], extra: Partial<UpgradeStep> = {}): UpgradeStep => ({
   id,
