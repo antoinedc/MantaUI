@@ -8,8 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLiveCodexRefresher, createUnauthorizedHandler } from "./codexLiveRefresh.mjs";
 import { readCodexEntry } from "./codexRefresh.mjs";
-import { createCredentialRefreshSweep } from "./opencode.mjs";
-import { createAccountsService } from "./accounts.mjs";
+import { createCredentialRefreshSweep, createLiveCodexRefresher as createProdLiveRefresher, readLiveCodexEntry, _setOcTransport } from "./opencode.mjs";
+import { createAccountsService, readCodexEntryFile } from "./accounts.mjs";
 import { createUsagePoller } from "./usage.mjs";
 import { codexAdapter } from "./usageAdapters/codex.mjs";
 
@@ -428,7 +428,7 @@ test("after the live login is refreshed, mirrorLiveLogin updates the seat direct
       storePath: join(root, "state", "accounts.json"),
       seatsRoot: join(root, "secrets", "accounts"),
       claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
-      codexAuthPath: liveFile,
+      readLiveCodex: () => readCodexEntryFile(liveFile),
       fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
       log: quiet,
     });
@@ -450,6 +450,124 @@ test("after the live login is refreshed, mirrorLiveLogin updates the seat direct
     assert.equal(mirrored.refresh, "NEW-REFRESH");
     assert.equal(mirrored.access, "NEW-ACCESS");
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// The LIVE login on V2: read from, and persisted to, opencode's credential store
+// (`GET/POST /api/credential`). A fake of exactly that API: POST CREATES a credential and (like the
+// real server, verified against the pinned 2.0.30) activates it, deactivating the others — the
+// previous rows stay behind holding rotated-out tokens.
+// ---------------------------------------------------------------------------------------------
+function fakeCredentialStore(initialRows, { activateOnPost = true } = {}) {
+  const store = { rows: initialRows.map((r) => structuredClone(r)), posts: [], gets: 0, activateOnPost };
+  let n = 0;
+  const json = (d) => new Response(JSON.stringify(d), { status: 200, headers: { "content-type": "application/json" } });
+  _setOcTransport(async (url, init = {}) => {
+    const u = new URL(String(url));
+    const m = init.method ?? "GET";
+    if (m === "GET" && u.pathname === "/api/credential") {
+      store.gets++;
+      return json({ data: store.rows });
+    }
+    if (m === "GET" && u.pathname === "/api/integration/openai") return json({ data: { id: "openai", methods: [{ type: "key" }, { id: "chatgpt-token-sharing", type: "oauth" }] } });
+    if (m === "POST" && u.pathname === "/api/credential") {
+      const body = JSON.parse(init.body);
+      store.posts.push(body);
+      if (store.activateOnPost) for (const r of store.rows) if (r.integrationID === body.integrationID) r.active = false;
+      store.rows.push({ id: `cred_new${++n}`, integrationID: body.integrationID, label: "default", active: store.activateOnPost, value: body.value });
+      return json({ data: { id: `cred_new${n}` } });
+    }
+    return new Response(`unexpected ${m} ${u.pathname}`, { status: 599 });
+  });
+  return store;
+}
+const row = (id, access, refresh, { active = false, expires = NOW - 3_600_000, accountID = "acct-1" } = {}) => ({
+  id, integrationID: "openai", label: "default", active,
+  value: { type: "oauth", methodID: "chatgpt-token-sharing", access, refresh, expires, ...(accountID ? { metadata: { accountID } } : {}) },
+});
+const activeRows = (st) => st.rows.filter((r) => r.active);
+
+test("V2 live refresh cycle: read the ACTIVE credential → refresh once → persist (creates + activates) → read back the NEW active one → mirror", async () => {
+  const st = fakeCredentialStore([row("cred_burned", "BURNED-A", "BURNED-R"), row("cred_live", "OLD-ACCESS", "OLD-REFRESH", { active: true })]);
+  try {
+    const tokenCalls = [];
+    const mirrored = [];
+    const r = createProdLiveRefresher(
+      { mirrorLiveLogin: async () => mirrored.push((await readLiveCodexEntry()).access) },
+      { fetchImpl: async (url, init) => (tokenCalls.push(new URLSearchParams(init.body).get("refresh_token")), tokenOk()), now: () => NOW, log: quiet, sleep: async () => {} },
+    );
+    // Two concurrent callers share ONE refresh (the rotating refresh token is spent once).
+    const [a, b] = await Promise.all([r.refresh(), r.refresh()]);
+    assert.deepEqual(a, { ok: true, expiresAt: NOW + 3_600_000 });
+    assert.deepEqual(b, a);
+    assert.deepEqual(tokenCalls, ["OLD-REFRESH"], "refreshed with the ACTIVE credential's refresh token, never a burned row's, and only once");
+    assert.equal(st.posts.length, 1);
+    assert.equal(st.posts[0].activate, true);
+    assert.equal(st.posts[0].value.metadata.accountID, "acct-1", "the account id travels with the rotated login");
+    assert.equal(st.rows.length, 3, "a new credential was created (V2 has no in-place replace)");
+    assert.deepEqual(activeRows(st).map((x) => x.value.access), ["NEW-ACCESS"], "exactly one active row, the new one");
+    const back = await readLiveCodexEntry();
+    assert.deepEqual(back, { type: "oauth", access: "NEW-ACCESS", refresh: "NEW-REFRESH", expires: NOW + 3_600_000, accountId: "acct-1" });
+    assert.deepEqual(mirrored, ["NEW-ACCESS"], "the mirror runs after the persist and sees the new login");
+    assert.doesNotMatch(JSON.stringify([a, b]), /ACCESS|REFRESH/, "no token in a result");
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("V2 live refresh: a fresh active credential is left alone (no token call, no write)", async () => {
+  const st = fakeCredentialStore([row("cred_live", "FRESH-A", "FRESH-R", { active: true, expires: NOW + 3 * 3_600_000 })]);
+  try {
+    let tokenCalls = 0;
+    const r = createProdLiveRefresher(null, { fetchImpl: async () => (tokenCalls++, tokenOk()), now: () => NOW, log: quiet, sleep: async () => {} });
+    assert.deepEqual(await r.refresh(), { ok: true, skipped: "fresh" });
+    assert.equal(tokenCalls, 0);
+    assert.equal(st.posts.length, 0);
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("V2 live refresh: if the new credential does NOT become the active one, the read-back catches it; the rotated login is kept and re-persisted next time without burning another refresh token", async () => {
+  const st = fakeCredentialStore([row("cred_live", "OLD-ACCESS", "OLD-REFRESH", { active: true })], { activateOnPost: false });
+  try {
+    const tokenCalls = [];
+    const r = createProdLiveRefresher(null, { fetchImpl: async (url, init) => (tokenCalls.push(new URLSearchParams(init.body).get("refresh_token")), tokenOk()), now: () => NOW, log: quiet, sleep: async () => {} });
+    assert.deepEqual(await r.refresh(), { ok: false, reason: "verify-failed" });
+    assert.equal(st.posts.length, 3, "persisting was retried");
+    assert.equal(tokenCalls.length, 1);
+    // The store now behaves: the next call re-persists the held rotated entry instead of refreshing again.
+    st.activateOnPost = true;
+    const again = await r.refresh();
+    assert.equal(again.ok, true);
+    assert.equal(tokenCalls.length, 1, "the burned refresh token is not spent twice");
+    assert.equal((await readLiveCodexEntry()).access, "NEW-ACCESS");
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("the accounts service reads the live Codex login from V2 by default: discovery creates seat 1 from the ACTIVE credential (account id from metadata)", async () => {
+  fakeCredentialStore([row("cred_burned", "BURNED-A", "BURNED-R", { accountID: "acct-OLD" }), row("cred_live", "LIVE-A", "LIVE-R", { active: true, expires: NOW + 3_600_000, accountID: "acct-live" })]);
+  const root = await mkdtemp(join(tmpdir(), "codex-v2-live-"));
+  try {
+    const accounts = createAccountsService({
+      storePath: join(root, "state", "accounts.json"),
+      seatsRoot: join(root, "secrets", "accounts"),
+      claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
+      fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+      log: quiet,
+    }); // no readLiveCodex injected: the production default
+    await accounts.discover({ force: true });
+    const store = await accounts.getStore();
+    assert.equal(store.providers.codex.accounts[0].seats[0].accountUuid, "acct-live");
+    const seatFile = JSON.parse(await readFile(join(root, "secrets", "accounts", "codex", "seat-1", "auth.json"), "utf-8"));
+    assert.equal(seatFile.openai.access, "LIVE-A", "the seat copy is the active login, not a rotated-out row");
+    assert.equal(seatFile.openai.accountId, "acct-live");
+  } finally {
+    _setOcTransport(null);
     await rm(root, { recursive: true, force: true });
   }
 });

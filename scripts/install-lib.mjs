@@ -320,168 +320,12 @@ async function fetchWithTimeout(fetchFn, url, timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
-// opencode.jsonc merge — pure, used by install.sh step C (BET-153)
+// opencode.jsonc — NOT merged here any more (slice C3). The V1 plugin seeding
+// (`opencode-claude-auth`) is gone: Claude auth is the `manta-claude-max` V2
+// plugin, and the config rules V2 needs are applied by
+// src/server/upgradeV2Prepare.mjs (mergeV2Config), which install.sh,
+// self-update.sh and manta-server's boot hook all share.
 // ---------------------------------------------------------------------------
-//
-// opencode.jsonc allows `//` line comments and trailing commas (JSONC). The
-// plugin we seed lives in the top-level `plugin: string[]`. We MERGE — never
-// clobber — so any other config the user has set (theme, model, mcp, …) is
-// preserved across re-installs.
-//
-// Behavior:
-//   * Strip `//` line comments (respecting strings — "//" inside a quoted
-//     value must survive).
-//   * JSON.parse the remainder. On parse failure → caller backs the file up
-//     to `.pre-manta` and starts from `{}` (matches the documented
-//     skills.urls merge pattern in src/server/local.mjs).
-//   * Append `opencode-claude-auth@latest` to the `plugin` array IF not
-//     already present (any version — re-installs are no-ops).
-//   * Serialize with 2-space indent + trailing newline.
-//
-// Pure: no fs/network/sleep. Returns { text, corrupt }. `corrupt` is true
-// only when the input text was non-empty but unparseable; an empty input
-// is treated as `{}` (first install) and is not "corrupt".
-
-// Strip `//` line comments without eating `//` inside strings. Pure, single-
-// pass; matches the behavior of providers.mjs's stripLineComments (same rule,
-// kept independent so the install lib has zero dependency on the server
-// modules — install.sh runs even before the tarball is unpacked).
-export function stripJsoncLineComments(text) {
-  let out = "";
-  let inStr = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inStr) {
-      out += c;
-      if (c === "\\" && i + 1 < text.length) {
-        out += text[i + 1];
-        i += 1;
-        continue;
-      }
-      if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') {
-      out += c;
-      inStr = true;
-      continue;
-    }
-    if (c === "/" && text[i + 1] === "/") {
-      const nl = text.indexOf("\n", i);
-      if (nl === -1) break;
-      i = nl;
-      continue;
-    }
-    out += c;
-  }
-  return out;
-}
-
-// Plugin we seed into every opencode.jsonc. The `@latest` is the official
-// installer's version tag — we use the official opencode plugin registry
-// (no version pinning in v1; the install is the source of truth for what
-// version is "current"). This is the DEFAULT target for public/end-user
-// installs.
-//
-// Dev/CI boxes that need the internal `-bui` build override the target via
-// the `MANTA_CLAUDE_AUTH_PLUGIN` env var (read by the `merge-opencode-config`
-// CLI bridge below, NOT by this pure function). The override is opt-in: end
-// users never set it and always get `@latest`. Convention: installer env
-// vars are `MANTA_*` (`MANTA_HOME`, `MANTA_RELEASE_HOST`, …).
-//
-// The merge is FAMILY-AWARE: every variant of this plugin shares the prefix
-// `opencode-claude-auth` (`opencode-claude-auth@latest`,
-// `opencode-claude-auth-bui@1.5.4-bui.1`, any future variant). The merge
-// REPLACES any existing family member with the target instead of appending
-// alongside it (which used to leave both variants loaded — the dev-box bug
-// BET-319 fixes). All OTHER plugins are preserved untouched.
-//
-// Why this stays SINGULAR (not a list-shaped API): of the providers tracked
-// by BET-308 (Claude, Codex, Kimi), only Claude needs an opencode plugin at
-// all. Codex and Kimi are NATIVE to opencode — their auth methods are
-// reachable via `opencode auth login -p <id>` (Codex) or `PUT /auth/<id>`
-// (Kimi) without any runtime plugin installation. Generalizing this into a
-// multi-plugin list would be a list-shaped API with exactly one element
-// forever; the constant stays as-is. Runtime plugin installation is out of
-// scope epic-wide.
-export const OPENCODE_CLAUDE_AUTH_PLUGIN = "opencode-claude-auth@latest";
-
-// Shared prefix of every variant of the Claude auth plugin. Used by
-// mergeOpencodeConfig to recognize the whole family so a re-install
-// REPLACES an existing variant instead of appending a second one.
-export const CLAUDE_AUTH_FAMILY = "opencode-claude-auth";
-
-/**
- * Merge the Claude auth plugin into the top-level `plugin` array of an
- * existing opencode.jsonc. Pure: receives raw text, returns raw text.
- *
- * Family-aware REPLACE, not append: every variant of this plugin shares the
- * prefix `opencode-claude-auth` (`@latest`, `-bui@x.y.z-bui.1`, …). Any
- * existing family member that DIFFERS from the target is removed, then the
- * target is appended only if it isn't already present (so a re-run with the
- * same target is a byte-identical no-op, and the target's position is
- * preserved when it's already there). All OTHER plugins are preserved
- * untouched — only the `opencode-claude-auth*` slot is touched.
- *
- * @param {string} existingText  Raw file contents (possibly empty, possibly
- *                               containing JSONC `//` comments).
- * @param {string} [targetPlugin]  The plugin string to seed; defaults to
- *                                 `OPENCODE_CLAUDE_AUTH_PLUGIN` (`@latest`).
- *                                 The CLI bridge passes
- *                                 `process.env.MANTA_CLAUDE_AUTH_PLUGIN`
- *                                 so dev/CI boxes can pin the `-bui` build;
- *                                 this function stays pure (no env read).
- * @returns {{ text: string, corrupt: boolean, plugin: string[] }}
- *   - text    — the new file contents (always well-formed JSON, 2-space
- *               indent, trailing newline). The caller writes this to disk.
- *   - corrupt — true iff the input was non-empty AND failed to parse.
- *               Caller decides whether to back the original up to
- *               `.pre-manta` before overwriting. An empty input is treated
- *               as `{}` and is NOT corrupt (first install).
- *   - plugin  — the post-merge plugin array (handy for tests + the summary
- *               log in install.sh).
- */
-export function mergeOpencodeConfig(
-  existingText,
-  targetPlugin = OPENCODE_CLAUDE_AUTH_PLUGIN,
-) {
-  const target =
-    typeof targetPlugin === "string" && targetPlugin !== ""
-      ? targetPlugin
-      : OPENCODE_CLAUDE_AUTH_PLUGIN;
-  const raw = typeof existingText === "string" ? existingText : "";
-  const stripped = stripJsoncLineComments(raw).trim();
-  let cfg = {};
-  let corrupt = false;
-  if (stripped.length > 0) {
-    try {
-      cfg = JSON.parse(stripped);
-      if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) {
-        cfg = {};
-        corrupt = true;
-      }
-    } catch {
-      cfg = {};
-      corrupt = true;
-    }
-  }
-  // Deep-merge ONLY the `plugin` key. Every other key is spread through
-  // untouched (theme, model, mcp, provider, …).
-  const plugins = Array.isArray(cfg.plugin) ? cfg.plugin.filter((p) => typeof p === "string") : [];
-  // Family-aware REPLACE: drop any existing family member that is NOT the
-  // target (a different variant), then append the target only if it isn't
-  // already present. The target itself is never moved — so a re-run with the
-  // same target (and no other variant) is a byte-identical no-op.
-  const withoutOtherFamily = plugins.filter(
-    (p) => !(p.startsWith(CLAUDE_AUTH_FAMILY) && p !== target),
-  );
-  if (!withoutOtherFamily.includes(target)) {
-    withoutOtherFamily.push(target);
-  }
-  const next = { ...cfg, plugin: withoutOtherFamily };
-  const text = JSON.stringify(next, null, 2) + "\n";
-  return { text, corrupt, plugin: withoutOtherFamily };
-}
 
 // ---------------------------------------------------------------------------
 // Per-provider detection summary (BET-313) — install-time replacement for
@@ -507,7 +351,7 @@ export function mergeOpencodeConfig(
 // still validates the file shape, and so the gateway identity is
 // atomic with the box identity (one file, one 0600 permission).
 //
-// Behavior (mirrors mergeOpencodeConfig's safety contract):
+// Behavior (same safety contract as the opencode config merge it replaced):
 //   * missing/empty text → seeds {gateway_token, gateway_host} alongside a
 //     freshly-created box. In practice the server's ensureAuth() runs first
 //     (the install waits for health after enabling the server unit), so
@@ -1324,10 +1168,6 @@ export function renderShellConfig(cfg, { version } = {}) {
     MANTA_AUTH_FILE: cfg.authFile,
     MANTA_PORT: String(cfg.port),
     MANTA_HEALTH_URL: cfg.healthUrl,
-    // The default Claude auth plugin target, so install.sh can log it
-    // without hardcoding the string. MANTA_CLAUDE_AUTH_PLUGIN (when set)
-    // overrides this at merge time; the value emitted here is the DEFAULT.
-    OPENCODE_CLAUDE_AUTH_PLUGIN,
   };
   return Object.entries(kv)
     .map(([k, v]) => `${k}=${shellQuote(String(v))}`)
@@ -1367,25 +1207,6 @@ async function cliMain(argv) {
     }
     const missing = findMissingDependencies(pkg, { modulesDir: join(home, "node_modules") });
     if (missing.length) process.stdout.write(missing.join("\n") + "\n");
-    return 0;
-  }
-  if (cmd === "merge-opencode-config") {
-    // Read raw text from stdin, write the merged text to stdout, and the
-    // `corrupt` flag to stderr (so install.sh can branch on it for the
-    // `.pre-manta` backup). Pure: no fs writes here.
-    //
-    // The target plugin defaults to OPENCODE_CLAUDE_AUTH_PLUGIN (`@latest`).
-    // Dev/CI boxes override it with `MANTA_CLAUDE_AUTH_PLUGIN` (e.g.
-    // `opencode-claude-auth-bui@1.5.4-bui.1`) so a re-install pins that
-    // variant instead. mergeOpencodeConfig stays pure — the env read lives
-    // here in the CLI bridge only.
-    const chunks = [];
-    for await (const c of process.stdin) chunks.push(c);
-    const raw = Buffer.concat(chunks).toString("utf-8");
-    const targetPlugin = envVal(process.env, "MANTA_CLAUDE_AUTH_PLUGIN");
-    const { text, corrupt } = mergeOpencodeConfig(raw, targetPlugin);
-    if (corrupt) process.stderr.write("corrupt=1\n");
-    process.stdout.write(text);
     return 0;
   }
   if (cmd === "render-systemd-unit") {
@@ -1719,7 +1540,7 @@ async function cliMain(argv) {
   }
   process.stderr.write(
     `install-lib: unknown command ${JSON.stringify(cmd)}\n` +
-      "  usage: node install-lib.mjs <print-config|check-identity|merge-opencode-config|merge-gateway|wait-for-dns|render-caddy-vhost|upsert-caddy-block|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--tailnet-hostname H] [--field ip|dns-name] [--placeholder K=V]\n",
+      "  usage: node install-lib.mjs <print-config|check-identity|merge-gateway|wait-for-dns|render-caddy-vhost|upsert-caddy-block|detect-distro|render-systemd-unit|parse-tailscale-status|write-ingress> [--version X] [--file P] [--template P] [--hostname H] [--expected-ip IP] [--max-attempts N] [--interval-ms MS] [--box-id ID] [--port N] [--mode M] [--os-release PATH] [--tailnet-ip IP] [--tailnet-hostname H] [--field ip|dns-name] [--placeholder K=V]\n",
   );
   return 2;
 }

@@ -163,35 +163,107 @@ test("pollClaudeLogin isolated: reads the given path; no restart, no rollback, n
 
 // ---- setProviderAuthEntry --------------------------------------------------------
 
-test("setProviderAuthEntry: PUT /auth/<id> with ONLY the known auth fields; result carries no secret", async () => {
+// V2 shapes (pinned 2.0.30, verified against a sandboxed server): the OAuth methods are looked up
+// at GET /api/integration/<id>, and the entry is stored with POST /api/credential
+// `{integrationID, value:{type:"oauth", methodID, refresh, access, expires, metadata?}}`. V2 answers
+// 200 and silently DROPS a top-level `accountId`, so the account id must ride in `metadata.accountID`.
+const OPENAI_INTEGRATION = { data: { id: "openai", methods: [{ type: "key" }, { id: "chatgpt-token-sharing", type: "oauth" }] } };
+
+/** A fake opencode: records every request, answers the integration lookup and the credential write. */
+function fakeV2({ credential = () => new Response(JSON.stringify({ data: { id: "cred_1" } }), { status: 200 }) } = {}) {
   const calls = [];
   _setOcTransport(async (url, init) => {
-    calls.push({ url: String(url), method: init?.method, body: JSON.parse(init.body) });
-    return new Response(null, { status: 204 });
+    const u = new URL(String(url));
+    const call = { path: u.pathname, method: init?.method ?? "GET", body: init?.body ? JSON.parse(init.body) : undefined };
+    calls.push(call);
+    if (call.method === "GET" && call.path === "/api/integration/openai") return new Response(JSON.stringify(OPENAI_INTEGRATION), { status: 200 });
+    return credential(call);
   });
+  return calls;
+}
+
+test("setProviderAuthEntry: oauth entry → POST /api/credential with ONLY the known fields, the account id in metadata; result carries no secret", async () => {
+  const calls = fakeV2();
   try {
-    const r = await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5, accountId: "gpt-1", sneaky: "x" });
+    const r = await setProviderAuthEntry("openai", {
+      type: "oauth", access: "SECRET-A", refresh: "SECRET-R", expires: 5, accountId: "gpt-1", enterpriseUrl: "https://ent.example", sneaky: "x",
+    });
     assert.deepEqual(r, { ok: true });
-    assert.equal(calls[0].method, "PUT");
-    assert.match(calls[0].url, /\/auth\/openai$/);
-    assert.deepEqual(calls[0].body, { type: "oauth", access: "A", refresh: "R", expires: 5, accountId: "gpt-1" });
+    assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /api/integration/openai", "POST /api/credential"]);
+    assert.deepEqual(calls[1].body, {
+      integrationID: "openai",
+      activate: true,
+      value: {
+        type: "oauth", methodID: "chatgpt-token-sharing", refresh: "SECRET-R", access: "SECRET-A", expires: 5,
+        metadata: { accountID: "gpt-1", enterpriseUrl: "https://ent.example" },
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(r), /SECRET/);
+    // The V1 shape must be gone: nothing at the top level of the value, and no unknown field forwarded.
+    assert.equal("accountId" in calls[1].body.value, false);
+    assert.doesNotMatch(JSON.stringify(calls[1].body), /sneaky/);
   } finally {
     _setOcTransport(null);
   }
-  _setOcTransport(async () => new Response("nope", { status: 500 }));
+});
+
+test("setProviderAuthEntry: an entry with no account id sends no metadata at all", async () => {
+  const calls = fakeV2();
   try {
-    const bad = await setProviderAuthEntry("openai", { type: "oauth", access: "A" });
+    assert.deepEqual(await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5 }), { ok: true });
+    assert.equal("metadata" in calls[1].body.value, false);
+    // An empty / non-string id is not an id.
+    await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5, accountId: "", enterpriseUrl: 7 });
+    assert.equal("metadata" in calls[3].body.value, false);
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("setProviderAuthEntry: an api/key entry goes to connect/key with ONLY the key (no integration lookup, no credential POST)", async () => {
+  const calls = fakeV2();
+  try {
+    assert.deepEqual(await setProviderAuthEntry("openai", { type: "api", key: "sk-secret", sneaky: "x" }), { ok: true });
+    assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["POST /api/integration/openai/connect/key"]);
+    assert.deepEqual(calls[0].body, { key: "sk-secret" });
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("setProviderAuthEntry: a rejected write → bad_response / unauthorized, never carrying the entry", async () => {
+  fakeV2({ credential: () => new Response("nope", { status: 500 }) });
+  try {
+    const bad = await setProviderAuthEntry("openai", { type: "oauth", access: "SECRET-A", refresh: "SECRET-R", expires: 5 });
     assert.equal(bad.ok, false);
     assert.equal(bad.error, "bad_response");
-    assert.doesNotMatch(JSON.stringify(bad), /"A"/);
+    assert.doesNotMatch(JSON.stringify(bad), /SECRET/);
   } finally {
     _setOcTransport(null);
   }
+  fakeV2({ credential: () => new Response("no", { status: 401 }) });
+  try {
+    assert.equal((await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5 })).error, "unauthorized");
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("setProviderAuthEntry: opencode unreachable → unreachable (on the lookup, and on the write)", async () => {
   _setOcTransport(async () => {
     throw new Error("down");
   });
   try {
-    assert.equal((await setProviderAuthEntry("openai", { type: "oauth" })).error, "unreachable");
+    assert.equal((await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5 })).error, "unreachable");
+  } finally {
+    _setOcTransport(null);
+  }
+  _setOcTransport(async (url) => {
+    if (new URL(String(url)).pathname === "/api/credential") throw new Error("reset");
+    return new Response(JSON.stringify(OPENAI_INTEGRATION), { status: 200 });
+  });
+  try {
+    assert.equal((await setProviderAuthEntry("openai", { type: "oauth", access: "A", refresh: "R", expires: 5 })).error, "unreachable");
   } finally {
     _setOcTransport(null);
   }

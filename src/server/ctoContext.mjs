@@ -42,7 +42,7 @@
 //     arguments: hit/message/part limits, keyset cursors that cannot repeat
 //     rows and never end the walk while the scan window was full.
 
-import { getDb, getDbOpenFailure } from "./opencodeDb.mjs";
+import { getDb, getDbOpenFailure, PART_SQL, MESSAGE_SQL } from "./opencodeDb.mjs";
 
 export const CTO_CONTEXT_LIMITS = Object.freeze({
   searchHitsDefault: 20,
@@ -398,7 +398,7 @@ export async function ctoListSessions({
       where.push("((time_updated < ?) OR (time_updated = ? AND id < ?))");
       params.push(cur.t, cur.t, cur.i);
     }
-    const sql = `SELECT ${SESSION_COLS} FROM session ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY time_updated DESC, id DESC LIMIT ?`;
+    const sql = `SELECT ${SESSION_COLS} FROM session_v2 ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY time_updated DESC, id DESC LIMIT ?`;
     const rows = db.prepare(sql).all(...params, CTO_CONTEXT_LIMITS.scanLimit);
 
     const result = { ...envelope("ok"), sessions: [], truncated: false, omittedCount: 0, nextCursor: null };
@@ -662,12 +662,11 @@ export async function ctoSearch({ query, projectId, directory, sessionId, limit,
     }
     const sql = `
       SELECT p.id AS part_id, p.session_id, p.message_id, p.time_created,
-             p.data AS part_data, m.data AS msg_data,
+             p.data AS part_data, json_object('role', p.role) AS msg_data,
              json_extract(p.data, ${MATCHED_ATOM_SQL}) AS match_value,
              ${MATCHED_ATOM_SQL} AS match_fullkey
-      FROM part p
-      JOIN message m ON m.id = p.message_id
-      LEFT JOIN session s ON s.id = p.session_id
+      FROM ${PART_SQL} p
+      LEFT JOIN session_v2 s ON s.id = p.session_id
       WHERE ${where.join(" AND ")}
       ORDER BY p.time_created DESC, p.id DESC
       LIMIT ?`;
@@ -775,7 +774,7 @@ function buildPartItem(row) {
   return item;
 }
 
-const MSG_COLS = "id, time_created, time_updated, data";
+const MSG_COLS = "id, time_created, time_updated, role";
 const PART_READ_LIMIT = CTO_CONTEXT_LIMITS.partsPerMessageMax + 1; // +1 detects overflow
 // When anchored at a partId, the part window is centered: this many parts on
 // EACH side of the anchor part (+ the part itself) — all keyset reads, never
@@ -785,14 +784,7 @@ const PART_ANCHOR_SIDE = Math.floor((CTO_CONTEXT_LIMITS.partsPerMessageMax - 1) 
 function messageRecord(row, { anchor = false } = {}) {
   return {
     id: row.id,
-    role: (() => {
-      try {
-        const d = JSON.parse(row.data);
-        return d && d.role === "user" ? "user" : "assistant";
-      } catch {
-        return "assistant";
-      }
-    })(),
+    role: row.role === "user" ? "user" : "assistant",
     timeCreated: row.time_created ?? null,
     anchor,
     parts: [],
@@ -818,11 +810,11 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
   if (!db) return sourceUnavailable();
 
   try {
-    const sess = db.prepare(`SELECT ${SESSION_COLS} FROM session WHERE id = ?`).get(sessionId);
+    const sess = db.prepare(`SELECT ${SESSION_COLS} FROM session_v2 WHERE id = ?`).get(sessionId);
     if (!sess) {
       return envelope("reference_expired", { detail: `session ${sessionId} not found in source`, messages: [], truncated: false, omittedCount: 0 });
     }
-    const anchorRow = db.prepare(`SELECT ${MSG_COLS} FROM message WHERE id = ? AND session_id = ?`).get(messageId, sessionId);
+    const anchorRow = db.prepare(`SELECT ${MSG_COLS} FROM ${MESSAGE_SQL} WHERE id = ? AND session_id = ?`).get(messageId, sessionId);
     if (!anchorRow) {
       return envelope("reference_expired", { detail: `message ${messageId} not found in source session ${sessionId}`, messages: [], truncated: false, omittedCount: 0 });
     }
@@ -832,7 +824,7 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
     // even beyond the first bounded part read).
     let anchorPartRow = null;
     if (partId != null) {
-      anchorPartRow = db.prepare("SELECT id, time_created, data FROM part WHERE id = ? AND message_id = ? AND session_id = ?").get(partId, messageId, sessionId);
+      anchorPartRow = db.prepare(`SELECT id, time_created, data FROM ${PART_SQL} WHERE message_id = ? AND id = ? AND session_id = ?`).get(messageId, partId, sessionId);
       if (!anchorPartRow) {
         return envelope("reference_expired", { detail: `part ${partId} not found in source message ${messageId}`, messages: [], truncated: false, omittedCount: 0 });
       }
@@ -841,7 +833,7 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
     const beforeRows = useBefore > 0
       ? db
           .prepare(
-            `SELECT ${MSG_COLS} FROM message WHERE session_id = ? AND ((time_created < ?) OR (time_created = ? AND id < ?)) ORDER BY time_created DESC, id DESC LIMIT ?`,
+            `SELECT ${MSG_COLS} FROM ${MESSAGE_SQL} WHERE session_id = ? AND ((time_created < ?) OR (time_created = ? AND id < ?)) ORDER BY time_created DESC, id DESC LIMIT ?`,
           )
           .all(sessionId, anchorRow.time_created ?? 0, anchorRow.time_created ?? 0, anchorRow.id, useBefore)
       : [];
@@ -852,7 +844,7 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
     const afterRows = useAfter > 0
       ? db
           .prepare(
-            `SELECT ${MSG_COLS} FROM message WHERE session_id = ? AND ((time_created > ?) OR (time_created = ? AND id > ?)) ORDER BY time_created ASC, id ASC LIMIT ?`,
+            `SELECT ${MSG_COLS} FROM ${MESSAGE_SQL} WHERE session_id = ? AND ((time_created > ?) OR (time_created = ? AND id > ?)) ORDER BY time_created ASC, id ASC LIMIT ?`,
           )
           .all(sessionId, anchorRow.time_created ?? 0, anchorRow.time_created ?? 0, anchorRow.id, useAfter)
       : [];
@@ -880,12 +872,12 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
         const side = PART_ANCHOR_SIDE;
         const beforeParts = db
           .prepare(
-            "SELECT id, time_created, data FROM part WHERE message_id = ? AND ((time_created < ?) OR (time_created = ? AND id < ?)) ORDER BY time_created DESC, id DESC LIMIT ?",
+            `SELECT id, time_created, data FROM ${PART_SQL} WHERE message_id = ? AND ((time_created < ?) OR (time_created = ? AND id < ?)) ORDER BY time_created DESC, id DESC LIMIT ?`,
           )
           .all(rec.id, anchorPartRow.time_created ?? 0, anchorPartRow.time_created ?? 0, anchorPartRow.id, side + 1);
         const afterParts = db
           .prepare(
-            "SELECT id, time_created, data FROM part WHERE message_id = ? AND ((time_created > ?) OR (time_created = ? AND id > ?)) ORDER BY time_created ASC, id ASC LIMIT ?",
+            `SELECT id, time_created, data FROM ${PART_SQL} WHERE message_id = ? AND ((time_created > ?) OR (time_created = ? AND id > ?)) ORDER BY time_created ASC, id ASC LIMIT ?`,
           )
           .all(rec.id, anchorPartRow.time_created ?? 0, anchorPartRow.time_created ?? 0, anchorPartRow.id, side + 1);
         if (beforeParts.length > side || afterParts.length > side) readCapped = true;
@@ -893,12 +885,12 @@ export async function ctoAround({ sessionId, messageId, partId, before, after } 
         // A centered window may still leave parts of this message outside it
         // (e.g. 60 parts, window 49) — one bounded COUNT says so honestly.
         if (!readCapped) {
-          const total = db.prepare("SELECT count(*) AS n FROM part WHERE message_id = ?").get(rec.id).n;
+          const total = db.prepare(`SELECT count(*) AS n FROM ${PART_SQL} WHERE message_id = ?`).get(rec.id).n;
           readCapped = total > itemsSource.length;
         }
       } else {
         const fetched = db
-          .prepare("SELECT id, time_created, data FROM part WHERE message_id = ? ORDER BY time_created ASC, id ASC LIMIT ?")
+          .prepare(`SELECT id, time_created, data FROM ${PART_SQL} WHERE message_id = ? ORDER BY time_created ASC, id ASC LIMIT ?`)
           .all(rec.id, PART_READ_LIMIT);
         readCapped = fetched.length > CTO_CONTEXT_LIMITS.partsPerMessageMax;
         itemsSource = readCapped ? fetched.slice(0, CTO_CONTEXT_LIMITS.partsPerMessageMax) : fetched;

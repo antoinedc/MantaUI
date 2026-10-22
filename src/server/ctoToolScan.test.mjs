@@ -3,6 +3,7 @@ import "./ctoTestGuard.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { partIdFor } from "./opencodeDb.mjs";
 import {
   parseToolPart,
   cliTokens,
@@ -27,6 +28,19 @@ const TS = 1_700_000_000_000;
 
 function partData(tool, input) {
   return JSON.stringify({ type: "tool", tool, callID: "c1", state: { status: "completed", input } });
+}
+
+// OpenCode V2 store: parts live inside `session_message.data` (no `part` table).
+const V2_SCHEMA =
+  "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, title TEXT);" +
+  "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)";
+let seqCounter = 0;
+function addMessage(db, id, sessionId, ts, type, data) {
+  db.prepare("INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)").run(id, sessionId, type, ++seqCounter, ts, ts, JSON.stringify(data));
+}
+// An assistant message holding one tool call (what V1 stored as a message + a tool part).
+function addToolMessage(db, id, sessionId, ts, tool, input) {
+  addMessage(db, id, sessionId, ts, "assistant", { agent: "build", content: [{ type: "tool", id: `toolu_${id}`, name: tool, state: { status: "completed", input, content: [{ type: "text", text: "ok" }] } }] });
 }
 
 // ---------------------------------------------------------------------------
@@ -234,27 +248,22 @@ async function openFixture() {
   return { db, sqlite: { DatabaseSync }, close: () => db.close() };
 }
 
-test("collectDbRows queries the part table in the half-open window", async () => {
+test("collectDbRows queries the V2 parts in the half-open window", async () => {
   const fx = await openFixture();
   if (!fx) {
     test.skip("node:sqlite unavailable on this runtime");
     return;
   }
   const { db } = fx;
-  db.exec("CREATE TABLE session (id TEXT, title TEXT); INSERT INTO session VALUES ('s1','work'),('s2','work'),('s3','work')");
-  db.exec(
-    "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
-  );
-  const ins = db.prepare(
-    "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)",
-  );
-  ins.run("p1", "m1", "s1", 100, 100, partData("bash", { command: "gh pr list" }));
-  ins.run("p2", "m2", "s2", 200, 200, partData("bash", { command: "aws s3 ls" }));
-  ins.run("p3", "m3", "s3", 300, 300, partData("bash", { command: "vercel deploy" }));
+  db.exec(V2_SCHEMA);
+  addToolMessage(db, "m1", "s1", 100, "bash", { command: "gh pr list" });
+  addToolMessage(db, "m2", "s2", 200, "bash", { command: "aws s3 ls" });
+  addToolMessage(db, "m3", "s3", 300, "bash", { command: "vercel deploy" });
 
   const rows = await collectDbRows(db, { sinceTs: 100, untilTs: 299 });
-  assert.equal(rows.length, 1); // (100, 299] — p2 only
+  assert.equal(rows.length, 1); // (100, 299] — m2 only
   assert.equal(JSON.parse(rows[0].data).state.input.command, "aws s3 ls");
+  assert.equal(rows[0].id, partIdFor("m2", 0));
 
   const all = await collectDbRows(db, { sinceTs: 0, untilTs: 1000 });
   assert.equal(all.length, 3);
@@ -273,7 +282,7 @@ test("collectDbRows: a valid handle with a throwing statement reports db-query-f
     return;
   }
   const { DatabaseSync } = fx.sqlite;
-  // Real sqlite handle, but no part table — prepare/execute throws.
+  // Real sqlite handle, but no session_message table — prepare/execute throws.
   const db = new DatabaseSync(":memory:");
   await assert.rejects(collectDbRows(db, { sinceTs: 0, untilTs: 10 }), (e) => e.code === "db-query-failed");
 });
@@ -382,22 +391,14 @@ test("DB pipeline integration: distinct provenance tags rows; the conversation's
     return;
   }
   const { db } = fx;
-  // Seed a message table WITH role-bearing data (like the real opencode db).
-  db.exec(
-    "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);" +
-      "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
-  );
-  const insMsg = db.prepare("INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?)");
-  const insPart = db.prepare("INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?,?,?,?,?,?)");
-  insMsg.run("m1", "ordinary", 1, 1, JSON.stringify({ role: "assistant" }));
-  insMsg.run("m2", "ephemeral", 1, 1, JSON.stringify({ role: "assistant" }));
-  insMsg.run("m3", "convo", 1, 1, JSON.stringify({ role: "assistant" }));
-  insMsg.run("m4", "convo", 1, 1, JSON.stringify({ role: "user" }));
-  insPart.run("p1", "m1", "ordinary", 10, 10, partData("bash", { command: "gh pr list" }));
-  insPart.run("p2", "m2", "ephemeral", 20, 20, partData("bash", { command: "aws s3 ls" }));
-  insPart.run("p3", "m3", "convo", 30, 30, partData("bash", { command: "vercel deploy" }));
-  // A CEO instruction text part in the conversation (user message row).
-  insPart.run("p4", "m4", "convo", 40, 40, JSON.stringify({ type: "text", text: "ship the release" }));
+  // Seed the V2 store: assistant messages hold the tool calls inline; the CEO's
+  // instruction is a `user` message (role-bearing, like the real opencode db).
+  db.exec(V2_SCHEMA);
+  addToolMessage(db, "m1", "ordinary", 10, "bash", { command: "gh pr list" });
+  addToolMessage(db, "m2", "ephemeral", 20, "bash", { command: "aws s3 ls" });
+  addToolMessage(db, "m3", "convo", 30, "bash", { command: "vercel deploy" });
+  // A CEO instruction text in the conversation (user message row).
+  addMessage(db, "m4", "convo", 40, "user", { text: "ship the release", time: { created: 40 } });
 
   // Sandbox provenance: the ephemeral session in the generic tombstones; the
   // durable conversation ONLY in the binding record (never the tombstones).
@@ -420,13 +421,13 @@ test("DB pipeline integration: distinct provenance tags rows; the conversation's
     const rows = await collectDbRows(db, { sinceTs: 0, untilTs: 1000 });
     const byId = new Map(rows.map((r) => [r.id, r]));
     // Distinct provenance, resolved from the two SEPARATE registers.
-    assert.equal(byId.get("p1").provenance, null);
-    assert.equal(byId.get("p1").role, "assistant");
-    assert.equal(byId.get("p2").provenance, "cto_internal");
-    assert.equal(byId.get("p3").provenance, CONVERSATION_ROLE);
-    assert.equal(byId.get("p3").role, "assistant");
-    assert.equal(byId.get("p4").provenance, CONVERSATION_ROLE);
-    assert.equal(byId.get("p4").role, "user");
+    assert.equal(byId.get(partIdFor("m1", 0)).provenance, null);
+    assert.equal(byId.get(partIdFor("m1", 0)).role, "assistant");
+    assert.equal(byId.get(partIdFor("m2", 0)).provenance, "cto_internal");
+    assert.equal(byId.get(partIdFor("m3", 0)).provenance, CONVERSATION_ROLE);
+    assert.equal(byId.get(partIdFor("m3", 0)).role, "assistant");
+    assert.equal(byId.get(partIdFor("m4", 0)).provenance, CONVERSATION_ROLE);
+    assert.equal(byId.get(partIdFor("m4", 0)).role, "user");
     // The conversation is NOT in the generic tombstones.
     assert.ok(!priorTombstones.ids?.includes && true);
     const tomb = await internalSessionsStore.load();

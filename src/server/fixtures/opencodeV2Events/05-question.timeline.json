@@ -1,0 +1,140 @@
+[
+ {
+  "id": "msg_145ad0423001yAx6gIFMlUHvyg",
+  "time": {
+   "created": 1792170329255
+  },
+  "text": "Use the question tool to ask me which colour I prefer (options: Red, Green, Blue), then tell me the colour I picked.",
+  "type": "user"
+ },
+ {
+  "id": "msg_145ad04ec001voNrWgXen5Old1",
+  "time": {
+   "created": 1792170329359,
+   "streamed": 1792170330865,
+   "completed": 1792170330970
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "tool",
+    "id": "toolu_01XkCsvTCWKZ2eBd1kWNoTAe",
+    "name": "question",
+    "executed": false,
+    "state": {
+     "status": "completed",
+     "input": {
+      "questions": [
+       {
+        "question": "Which colour do you prefer?",
+        "header": "Colour preference",
+        "options": [
+         {
+          "label": "Red",
+          "description": "The colour red"
+         },
+         {
+          "label": "Green",
+          "description": "The colour green"
+         },
+         {
+          "label": "Blue",
+          "description": "The colour blue"
+         }
+        ]
+       }
+      ]
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "User has answered your questions: \"Which colour do you prefer?\"=\"Red\". You can now continue with the user's answers in mind."
+      }
+     ],
+     "metadata": {
+      "answers": [
+       [
+        "Red"
+       ]
+      ],
+      "truncated": false
+     }
+    },
+    "time": {
+     "created": 1792170330125,
+     "ran": 1792170330845,
+     "completed": 1792170330931
+    }
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "tool-calls",
+  "rawFinish": "tool_use",
+  "cost": 0.002928,
+  "tokens": {
+   "input": 3,
+   "output": 121,
+   "reasoning": 0,
+   "cache": {
+    "read": 18850,
+    "write": 348
+   }
+  }
+ },
+ {
+  "id": "msg_145ad0b9600101irNOzYd99e7s",
+  "time": {
+   "created": 1792170331088,
+   "streamed": 1792170331812,
+   "completed": 1792170331862
+  },
+  "type": "assistant",
+  "agent": "build",
+  "model": {
+   "id": "claude-haiku-4-5",
+   "providerID": "anthropic",
+   "variant": "default"
+  },
+  "content": [
+   {
+    "type": "text",
+    "text": "You picked **Red**! 🔴"
+   }
+  ],
+  "snapshot": {
+   "start": "44711bad997af517cb7880a58218c75747349b81",
+   "end": "44711bad997af517cb7880a58218c75747349b81",
+   "files": []
+  },
+  "finish": "stop",
+  "rawFinish": "end_turn",
+  "cost": 0.0021873,
+  "tokens": {
+   "input": 5,
+   "output": 13,
+   "reasoning": 0,
+   "cache": {
+    "read": 19198,
+    "write": 158
+   }
+  }
+ },
+ {
+  "id": "msg_145ad0ef6001sDw2JTEJtUbJhZ",
+  "time": {
+   "created": 1792170331894
+  },
+  "type": "idle",
+  "outcome": "succeeded"
+ }
+]

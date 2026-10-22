@@ -1,19 +1,21 @@
 // codexLiveRefresh.mjs — keeps the LIVE ChatGPT (Codex) login fresh while Codex
 // is idle.
 //
-// The live login is the `openai` entry in opencode's auth store. opencode only
+// The live login is the active `openai` credential in opencode's store. opencode only
 // refreshes it when a model request needs it, so a box that has not used Codex
 // for a day sits on an expired token: the usage poll 401s every time, no
 // snapshot is published and the usage dial disappears. This refreshes it
 // ahead of expiry (the proactive sweep) and on a 401 (the usage poller).
 //
 // RULES this is written to (do not loosen):
-//   • The refresh token ROTATES. It is single-flight per login (shared with
-//     every other refresh of the same file through codexRefresh.singleFlight), and
-//     the new entry is persisted BEFORE anything else happens.
+//   • The refresh token ROTATES. It is single-flight per login (one stable key for
+//     "the live openai login", through codexRefresh.singleFlight), and the new
+//     entry is persisted BEFORE anything else happens.
 //   • Persisting goes through opencode's OWN API (injected `persist`, in
-//     production `setProviderAuthEntry("openai", …)`) — never by writing
-//     auth.json ourselves — and is verified by reading the entry back.
+//     production `setProviderAuthEntry("openai", …)`) — never by writing a file
+//     ourselves — and is verified by reading the entry back. Each persist creates a
+//     new credential and activates it, so the read-back MUST be the ACTIVE one
+//     (`readLiveCodexEntry`); older rows hold rotated-out tokens.
 //   • The entry is RE-READ right before refreshing: if opencode already has a
 //     fresher one (it refreshed meanwhile, or the login changed) nothing is spent.
 //   • If the token endpoint accepted the refresh but persisting then failed, the
@@ -37,7 +39,7 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
  * @param {() => Promise<object|null>} deps.readEntry  opencode's current `openai` oauth entry (re-read every time)
  * @param {(entry: object) => Promise<{ok:boolean}>} deps.persist  write it THROUGH opencode's API
  * @param {(entry: object) => Promise<unknown>} [deps.afterPersist]  e.g. mirror into the seat directory
- * @param {string} [deps.flightKey]  the file that holds the login (single-flight key)
+ * @param {string} [deps.flightKey]  stable name of the login (single-flight key)
  */
 export function createLiveCodexRefresher({
   readEntry,

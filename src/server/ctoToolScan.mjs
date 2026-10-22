@@ -18,6 +18,7 @@
 // evidence is raw (kept for the LLM fallback; never fused until classified).
 
 import { internalSessionIds } from "./internalSessions.mjs";
+import { PART_SQL } from "./opencodeDb.mjs";
 import { readConversationSessionId, CONVERSATION_ROLE } from "./ctoBinding.mjs";
 import {
   matchCliIdentity,
@@ -333,25 +334,17 @@ export function extractFromDbRows(rows) {
 // each tagged with distinct provenance: "cto_internal" (generic tombstones),
 // "cto_conversation" (the durable CEO channel — via the binding record, NOT
 // the tombstones), or null (ordinary pipeline sessions). The row's message
-// role is joined from the message table when one exists.
+// role comes with the part row (user | assistant).
 export async function collectDbRows(db, { sinceTs, afterId = "", untilTs, cap = SCAN_ROW_CAP } = {}) {
   if (!db || typeof db.prepare !== "function") throw codedError("db-handle-invalid", "discovery-db-unavailable");
   const range = `(p.time_created > ? OR (p.time_created = ? AND ? != '' AND p.id > ?)) AND p.time_created <= ?`;
   const order = ` ORDER BY p.time_created ASC, p.id ASC LIMIT ?`;
   let rows;
   try {
-    const withMessage = db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='message'`)
-      .all().length > 0;
     const stmt = db.prepare(
-      withMessage
-        ? `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created,
-                CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END AS role
-           FROM part p LEFT JOIN message m ON m.id = p.message_id
-          WHERE ${range}${order}`
-        : `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created
-           FROM part p
-          WHERE ${range}${order}`,
+      `SELECT p.id AS id, p.session_id AS session_id, p.data AS data, p.time_created AS time_created, p.role AS role
+         FROM ${PART_SQL} p
+        WHERE ${range}${order}`,
     );
     rows = stmt.all(sinceTs, sinceTs, afterId, afterId, untilTs, cap) ?? [];
   } catch (error) {

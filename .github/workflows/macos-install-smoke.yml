@@ -33,7 +33,13 @@
 # WHAT A GREEN RUN PROVES
 #   1. Prereq detection works with BSD tooling (shasum, no coreutils).
 #   2. The darwin-arm64 tarball downloads, sha256-verifies and extracts.
-#   3. opencode installs and comes up on 127.0.0.1:4096.
+#   3. The PINNED OpenCode V2 binary (scripts/opencode-v2/version.mjs) lands in
+#      ~/.opencode/bin, runs as the opencode LaunchAgent with OPENCODE_PASSWORD,
+#      answers GET /api/info 200 with Basic auth from ~/.manta/opencode-password
+#      and 401 without, and Manta's three plugins load (scripts/smoke/assert-
+#      opencode-v2.sh). In branch mode the binary is STAGED into the release tree
+#      first (see "Stage the pinned OpenCode V2 binary"), because the last
+#      published tarball predates V2 and carries no vendor/opencode.
 #   4. Both LaunchAgents load into the GUI domain and keep their process alive.
 #   5. manta-server answers /auth/status on 127.0.0.1:8787.
 #   6. The install writes ~/.manta/pairing.json (the machine-readable sidecar
@@ -83,6 +89,11 @@ on:
       - "scripts/install-lib.mjs"
       - "scripts/launchd/**"
       - "scripts/manta-pair.mjs"
+      - "scripts/release/stage-opencode.mjs"
+      - "scripts/smoke/assert-opencode-v2.sh"
+      - "scripts/opencode-v2/version.mjs"
+      - "src/server/upgradeV2Prepare.mjs"
+      - "src/server/upgradeV2Service.mjs"
       - ".github/workflows/macos-install-smoke.yml"
 
 concurrency:
@@ -163,39 +174,60 @@ jobs:
       - name: Assert a clean slate (no prior box identity)
         run: |
           set -euo pipefail
-          for p in "$HOME/.manta" "$HOME/manta" "$HOME/.local/share/manta" "$HOME/Library/LaunchAgents/com.mantaui.server.plist"; do
+          for p in "$HOME/.manta" "$HOME/manta" "$HOME/.local/share/manta" "$HOME/.opencode" "$HOME/.config/opencode" "$HOME/Library/LaunchAgents/com.mantaui.server.plist"; do
             if [ -e "$p" ]; then echo "unexpected leftover: $p"; exit 1; fi
           done
           echo "clean."
 
-      - name: Pre-install opencode (works around GitHub's anonymous API rate limit)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Resolve the pinned OpenCode V2 version
         run: |
           set -euo pipefail
-          # WHY: opencode's own installer resolves "latest" through the
-          # UNAUTHENTICATED GitHub API (api.github.com/repos/anomalyco/opencode/
-          # releases/latest). GitHub-hosted runners share egress IPs and are
-          # routinely rate-limited there, so the call returns nothing and the
-          # installer dies with "Failed to fetch version information" — which
-          # install.sh can only report as "opencode install failed". Verified on
-          # this runner: the fetch of the install script itself is a clean 200 in
-          # 40ms; only the API call fails.
+          want="$(node --input-type=module -e 'import { OPENCODE_V2_VERSION as v } from "./scripts/opencode-v2/version.mjs"; console.log(v)')"
+          [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FAIL: could not read the pinned version (got '$want')"; exit 1; }
+          echo "WANT_OPENCODE_VERSION=$want" >> "$GITHUB_ENV"
+          echo "pinned OpenCode V2: $want"
+
+      - name: Stage the pinned OpenCode V2 binary into the release tree (branch mode only)
+        if: env.INSTALLER == 'branch'
+        run: |
+          set -euo pipefail
+          # WHY: OpenCode is no longer downloaded by the installer — the RELEASE
+          # TARBALL carries the exact binary (vendor/opencode/opencode + a sha256
+          # sidecar that install re-verifies). This job deploys the PR's source over
+          # the LAST PUBLISHED tarball, which predates V2 and has no vendor/opencode,
+          # so without this step prepare would log "no vendor/opencode binary … leaving
+          # opencode as it is" and the smoke test would run whatever opencode was lying
+          # around. (Before this step existed, that is exactly what it did: it
+          # pre-installed a V1-line opencode and passed against it.)
           #
-          # Resolving the tag with the job's GITHUB_TOKEN and passing --version
-          # skips that API call entirely. install.sh then takes its
-          # "opencode already installed" branch, which is a legitimate real-world
-          # state (a box that already had opencode) — everything downstream of it
-          # is still exercised for real.
-          ver="$(gh api repos/anomalyco/opencode/releases/latest --jq .tag_name | sed 's/^v//')"
-          echo "pinning opencode $ver"
-          # Script from a FILE, stdin from /dev/null — `curl … | bash -s -- …
-          # </dev/null` starves bash of its own script (the same trap install.sh
-          # itself hit).
-          curl -fsSL https://opencode.ai/install -o "$RUNNER_TEMP/oc-install.sh"
-          bash "$RUNNER_TEMP/oc-install.sh" --version "$ver" </dev/null
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-          "$HOME/.opencode/bin/opencode" --version
+          # HOW: take the published darwin-arm64 tarball (runtime + node_modules, as
+          # before), stage the pinned binary into it with the SAME code the release
+          # packer runs (scripts/release/stage-opencode.mjs: pinned version from
+          # scripts/opencode-v2/version.mjs, darwin-arm64 package from the npm registry,
+          # registry sha512 verified, sha256 sidecar written), re-tar it, and point the
+          # installer at it with MANTA_TARBALL_URL (a file:// URL is supported).
+          work="$RUNNER_TEMP/staged-release"
+          rm -rf "$work"; mkdir -p "$work/extract"
+          manifest="$(curl -fsSL https://mantaui.com/releases/manta-latest.txt)"
+          file="$(printf '%s\n' "$manifest" | sed -n 's/^file_darwin_arm64=//p' | head -n1)"
+          sha="$(printf '%s\n' "$manifest" | sed -n 's/^sha256_darwin_arm64=//p' | head -n1)"
+          [ -n "$file" ] && [ -n "$sha" ] || { echo "FAIL: manifest has no darwin_arm64 entry"; printf '%s\n' "$manifest"; exit 1; }
+          curl -fsSL "https://mantaui.com/releases/$file" -o "$work/release.tar.gz"
+          [ "$(shasum -a 256 "$work/release.tar.gz" | awk '{print $1}')" = "$sha" ] \
+            || { echo "FAIL: published tarball sha256 mismatch"; exit 1; }
+          tar -xzf "$work/release.tar.gz" -C "$work/extract"
+          top="$(ls "$work/extract")"
+          [ "$(printf '%s\n' "$top" | wc -l | tr -d ' ')" = "1" ] || { echo "FAIL: expected one top-level dir, got: $top"; exit 1; }
+          root="$work/extract/$top"
+          [ ! -e "$root/vendor/opencode" ] && echo "(the published tarball $file has no vendor/opencode — staging one)"
+          # the tarball's own Node runs the stager (the script itself comes from this checkout)
+          "$root/runtime/node/bin/node" scripts/release/stage-opencode.mjs --arch darwin-arm64 --dest "$root"
+          staged="$(tr -d '\n' < "$root/vendor/opencode/VERSION")"
+          [ "$staged" = "$WANT_OPENCODE_VERSION" ] || { echo "FAIL: staged $staged, pinned $WANT_OPENCODE_VERSION"; exit 1; }
+          (cd "$root/vendor/opencode" && shasum -a 256 -c opencode.sha256)
+          COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/manta-staged.tar.gz" -C "$work/extract" "$top"
+          echo "MANTA_TARBALL_URL=file://$RUNNER_TEMP/manta-staged.tar.gz" >> "$GITHUB_ENV"
+          echo "staged tarball: $(du -h "$RUNNER_TEMP/manta-staged.tar.gz" | awk '{print $1}') with vendor/opencode $staged"
 
       - name: Run the installer
         run: |
@@ -257,6 +289,48 @@ jobs:
               || { echo "FAIL: $label has no running pid"; sed -n '1,40p' "$RUNNER_TEMP/$label.print.txt"; exit 1; }
             echo "$label: $(grep -E '^[[:space:]]*(pid|state) = ' "$RUNNER_TEMP/$label.print.txt" | tr -d '\n')"
           done
+
+      - name: Assert — the PINNED OpenCode V2 runs, with the box password, and Manta's plugins load
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          plist="$HOME/Library/LaunchAgents/com.mantaui.opencode.plist"
+          pwfile="$HOME/.manta/opencode-password"
+          [ -s "$pwfile" ] || { echo "FAIL: $pwfile missing"; exit 1; }
+          pw="$(tr -d '\r\n' < "$pwfile")"
+          echo "::add-mask::$pw"
+
+          # The release tree this install came from must carry the pinned binary (a published release
+          # that predates V2 has none: say so instead of asserting against nothing).
+          mh="$HOME/.local/share/manta"; [ -d "$mh" ] || mh="$HOME/manta"
+          if [ ! -f "$mh/vendor/opencode/VERSION" ]; then
+            if [ "$INSTALLER" = "branch" ]; then echo "FAIL: branch install has no vendor/opencode"; exit 1; fi
+            echo "::notice::the published release has no vendor/opencode (it predates OpenCode V2) — V2 assertions skipped"
+            exit 0
+          fi
+          [ "$(tr -d '\n' < "$mh/vendor/opencode/VERSION")" = "$WANT_OPENCODE_VERSION" ] \
+            || { echo "FAIL: the release carries $(cat "$mh/vendor/opencode/VERSION"), pinned $WANT_OPENCODE_VERSION"; exit 1; }
+          # What is installed is byte-for-byte the staged/vendored binary.
+          [ "$(shasum -a 256 "$HOME/.opencode/bin/opencode" | awk '{print $1}')" = "$(awk '{print $1}' "$mh/vendor/opencode/opencode.sha256")" ] \
+            || { echo "FAIL: ~/.opencode/bin/opencode differs from the release's vendored binary"; exit 1; }
+          echo "ok: ~/.opencode/bin/opencode is byte-identical to the release's vendored binary"
+
+          # The SERVICE definition carries the password and the pinned binary…
+          [ "$(plutil -extract ProgramArguments.0 raw -o - "$plist")" = "$HOME/.opencode/bin/opencode" ] \
+            || { echo "FAIL: the LaunchAgent does not run ~/.opencode/bin/opencode"; exit 1; }
+          [ "$(plutil -extract EnvironmentVariables.OPENCODE_PASSWORD raw -o - "$plist")" = "$pw" ] \
+            || { echo "FAIL: the LaunchAgent's OPENCODE_PASSWORD differs from ~/.manta/opencode-password"; exit 1; }
+          echo "ok: the LaunchAgent runs the pinned binary with OPENCODE_PASSWORD = the box password file"
+          # …and the RUNNING process actually has it in its environment (key only — never the value).
+          launchctl print "gui/$uid/com.mantaui.opencode" > "$RUNNER_TEMP/oc.print.txt"
+          pid="$(sed -nE 's/^[[:space:]]*pid = ([0-9]+)$/\1/p' "$RUNNER_TEMP/oc.print.txt" | head -n1)"
+          [ -n "$pid" ] || { echo "FAIL: the opencode agent has no pid"; exit 1; }
+          ps eww -p "$pid" | tr ' ' '\n' | grep -q '^OPENCODE_PASSWORD=.' \
+            || { echo "FAIL: running opencode (pid $pid) has no OPENCODE_PASSWORD in its environment"; exit 1; }
+          echo "ok: running opencode (pid $pid) has OPENCODE_PASSWORD in its environment"
+
+          # Behaviour: version, 401/200 on /api/info, plugins active (polls: plugins load lazily).
+          WANT_VERSION="$WANT_OPENCODE_VERSION" bash scripts/smoke/assert-opencode-v2.sh
 
       - name: Assert — servers answer on loopback
         run: |
@@ -404,6 +478,17 @@ jobs:
             || { echo "FAIL: server not listening after re-install"; exit 1; }
           echo "identity preserved: $after"
 
+      - name: Assert — the pinned OpenCode V2 + its auth survive a re-install
+        run: |
+          set -euo pipefail
+          mh="$HOME/.local/share/manta"; [ -d "$mh" ] || mh="$HOME/manta"
+          if [ ! -f "$mh/vendor/opencode/VERSION" ] && [ "$INSTALLER" != "branch" ]; then
+            echo "::notice::the published release has no vendor/opencode — V2 assertions skipped"; exit 0
+          fi
+          # Same assertions, second run of the prepare routine: the binary is unchanged, the password
+          # file is kept (a rotated password would break every client), the service came back on V2.
+          WANT_VERSION="$WANT_OPENCODE_VERSION" bash scripts/smoke/assert-opencode-v2.sh
+
       - name: Collect diagnostics
         if: always()
         run: |
@@ -423,6 +508,12 @@ jobs:
           done
           ls -la "$HOME/manta" > "$d/manta-home.txt" 2>&1
           tmux list-sessions > "$d/tmux.txt" 2>&1
+          # The opencode LaunchAgent plist and `launchctl print` carry OPENCODE_PASSWORD, and this
+          # artifact is downloadable: scrub the value from everything collected.
+          pw="$(tr -d '\r\n' < "$HOME/.manta/opencode-password" 2>/dev/null)"
+          if [ -n "$pw" ]; then
+            for f in "$d"/*; do [ -f "$f" ] && sed -i '' -e "s|$pw|<redacted>|g" "$f"; done
+          fi
           true
 
       - uses: actions/upload-artifact@v4

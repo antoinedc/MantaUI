@@ -224,124 +224,55 @@ sync_opencode_guidance() {
   fi
 }
 
-# sync_opencode_plugins <src_dir> <dest_dir> <manifest_file>
+# write_previous_release <file> <git_sha> <version>
 #
-# Install Manta's opencode PLUGINS (docs/opencode-plugins/*.ts) into opencode's
-# plugins/ directory, as REAL copies (a symlink back into the checkout would
-# fail to resolve @opencode-ai/plugin — same rule as the tools), and keep that
-# directory in step with what the release ships.
-#
-#   * every non-test *.ts in <src_dir> is copied to <dest_dir>; *.test.ts is
-#     skipped (opencode loads EVERY file in plugins/, and a test imports vitest);
-#   * <manifest_file> lists the basenames Manta installed, one per line. A
-#     plugin in the manifest that the release no longer ships is DELETED, and
-#     nothing outside the manifest is ever deleted — a user's own plugins are
-#     left alone. A shipped plugin whose name collides with an existing file is
-#     overwritten (the names are manta-*; the collision is our own earlier
-#     manual copy), and from then on it is tracked;
-#   * a missing <src_dir> changes nothing at all (deleting on the strength of a
-#     broken payload would remove working plugins);
-#   * sets PLUGINS_CHANGED=1 when any file was added, rewritten or deleted,
-#     otherwise leaves it 0 (the caller reads it to decide on an opencode
-#     restart — opencode loads plugins only at startup). It is a global, so call
-#     this in the main shell, not a subshell.
-#
-# NON-FATAL on every error: a failed copy/delete warns and the rest carries on;
-# the function always returns 0.
-sync_opencode_plugins() {
-  local src="$1" dest="$2" manifest="$3"
-  PLUGINS_CHANGED=0
-  if [ ! -d "$src" ]; then
-    warn "sync_opencode_plugins: source not found: $src — leaving installed plugins as they are"
-    return 0
-  fi
-  if ! mkdir -p "$dest" 2>/dev/null; then
-    warn "sync_opencode_plugins: cannot create $dest — skipping plugin sync"
-    return 0
-  fi
-
-  local plugin base tmp installed=0 updated=0 removed=0 shipped="" owned=""
-  for plugin in "$src"/*.ts; do
-    [ -e "$plugin" ] || continue
-    case "$plugin" in *.test.ts) continue ;; esac
-    base="$(basename "$plugin")"
-    shipped="${shipped}${base}
-"
-    if [ -f "$dest/$base" ] && [ ! -L "$dest/$base" ] && cmp -s "$plugin" "$dest/$base" 2>/dev/null; then
-      owned="${owned}${base}
-"
-      installed=$((installed + 1))
-      continue
-    fi
-    # Temp file + mv: atomic, and replaces a symlink with a real file rather
-    # than writing through it.
-    tmp="$dest/.${base}.manta-tmp.$$"
-    if cp -f "$plugin" "$tmp" 2>/dev/null && mv -f "$tmp" "$dest/$base" 2>/dev/null; then
-      owned="${owned}${base}
-"
-      installed=$((installed + 1))
-      updated=$((updated + 1))
-    else
-      rm -f "$tmp" 2>/dev/null
-      warn "sync_opencode_plugins: failed to copy $base"
-    fi
-  done
-
-  # Remove what a previous sync installed and this release no longer ships.
-  if [ -f "$manifest" ]; then
-    while IFS= read -r base || [ -n "$base" ]; do
-      case "$base" in
-        ''|*/*|.*|*.test.ts) continue ;;   # a hand-edited manifest must not point outside dest
-        *.ts) ;;
-        *) continue ;;
-      esac
-      if printf '%s' "$shipped" | grep -qFx -- "$base"; then continue; fi
-      if [ -e "$dest/$base" ] || [ -L "$dest/$base" ]; then
-        if rm -f "$dest/$base" 2>/dev/null; then
-          removed=$((removed + 1))
-        else
-          warn "sync_opencode_plugins: failed to remove $base"
-          owned="${owned}${base}
-"   # still ours, still on disk
-        fi
-      fi
-    done < "$manifest"
-  fi
-
-  # Rewrite the manifest only when it differs (sorted, so order never churns it).
-  local want
-  want="$(printf '%s' "$owned" | LC_ALL=C sort -u)"
-  if [ "$want" != "$( [ -f "$manifest" ] && cat "$manifest" 2>/dev/null )" ]; then
-    if mkdir -p "$(dirname "$manifest")" 2>/dev/null \
-       && printf '%s\n' "$want" | sed '/^$/d' > "$manifest.tmp.$$" 2>/dev/null \
-       && mv -f "$manifest.tmp.$$" "$manifest" 2>/dev/null; then
-      :
-    else
-      rm -f "$manifest.tmp.$$" 2>/dev/null
-      warn "sync_opencode_plugins: could not write $manifest"
-    fi
-  fi
-
-  if [ "$updated" -gt 0 ] || [ "$removed" -gt 0 ]; then
-    PLUGINS_CHANGED=1
-    ok "opencode plugins synced ($installed installed, $updated updated, $removed removed)"
-  else
-    ok "opencode plugins already current ($installed checked)"
-  fi
-  return 0
+# Record the release a box is ABOUT TO REPLACE, so a failed V1 → V2 upgrade can put it back
+# (`self-update.sh --to <sha>`, driven by src/server/upgradeV2.mjs rollback). Written BEFORE the
+# payload swap — afterwards the old RELEASE.json / HEAD is gone. JSON `{git_sha, version, at}`,
+# temp file + mv, 0600. No sha → writes nothing and returns 1 (a box installed before releases
+# carried a commit cannot be rolled back by commit; the caller says so rather than inventing one).
+# Values are restricted to safe characters, so plain printf JSON is exact.
+write_previous_release() {
+  local file="$1" sha="$2" version="$3" tmp
+  case "$sha" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  case "$version" in *[!0-9A-Za-z.+_-]*) version="" ;; esac
+  mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
+  tmp="$file.tmp.$$"
+  printf '{"git_sha":"%s","version":"%s","at":"%s"}\n' "$sha" "$version" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" 2>/dev/null \
+    && chmod 600 "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$file" 2>/dev/null \
+    || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
 
-# opencode_restart_plan <payload_replaced> <opencode_changed> <plugins_changed>
+# release_sha_matches <wanted> <actual> — a (possibly abbreviated) commit matches a full one when
+# either is a prefix of the other and both are non-empty hex of >= 7 chars. Pure.
+release_sha_matches() {
+  local want="$1" have="$2"
+  case "$want$have" in *[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#want}" -ge 7 ] && [ "${#have}" -ge 7 ] || return 1
+  case "$have" in "$want"*) return 0 ;; esac
+  case "$want" in "$have"*) return 0 ;; esac
+  return 1
+}
+
+# opencode_restart_plan <payload_replaced> <opencode_changed> <plugins_changed> [migration_pending]
 #
 # The updater's conditional-restart decision, extracted so it is testable.
 # Echoes exactly one of:
 #   both      the box payload was replaced → restart opencode AND the server
 #   opencode  payload untouched, but opencode itself or a plugin changed
 #             (opencode loads plugins only at startup) → opencode only
+#   server    a V1 → V2 migration is pending → restart ONLY the server: the
+#             opencode service is pinned to the V1 binary until manta-server's
+#             upgrade flow (src/server/upgradeV2.mjs) takes it through the disk
+#             preflight and the migration in order, so the updater must not
+#             bounce it (that would also end running turns for nothing)
 #   none      nothing that needs a restart changed
 # Pure: no I/O, no globals.
 opencode_restart_plan() {
-  if [ "$1" = "1" ]; then
+  if [ "${4:-0}" = "1" ]; then
+    if [ "$1" = "1" ]; then echo server; else echo none; fi
+  elif [ "$1" = "1" ]; then
     echo both
   elif [ "$2" = "1" ] || [ "$3" = "1" ]; then
     echo opencode

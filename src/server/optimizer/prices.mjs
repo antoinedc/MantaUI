@@ -44,7 +44,7 @@
 // (injected I/O, ~60s memo). Nothing here writes anything.
 
 import { statePath } from "../../shared/paths.mjs";
-import { selectCacheTtlTargets } from "../providers.mjs";
+import { configuredCacheControl, selectCacheTtlTargets } from "../providers.mjs";
 
 export const PRICES_PATH = statePath("model-prices.json");
 export const PRICE_CACHE_VERSION = 1;
@@ -237,9 +237,7 @@ export function resolveModelPrice({ providerID, modelID, config, catalog, now, o
 // the config is the mechanism, the box setting only the intent.
 function isOneHour(config, targets, providerID, modelID) {
   if (!targets.has(`${providerID}/${modelID}`)) return false;
-  const p = config?.provider;
-  if (!has(p, providerID) || !has(p[providerID]?.models, modelID)) return false;
-  return p[providerID].models[modelID]?.options?.cacheControl?.ttl === "1h";
+  return configuredCacheControl(config, providerID, modelID)?.ttl === "1h";
 }
 
 /**
@@ -253,8 +251,14 @@ function isOneHour(config, targets, providerID, modelID) {
 export function computePrices({ providers, config, catalog, now }) {
   const all = Array.isArray(providers?.all) ? providers.all : null;
   const connected = new Set(Array.isArray(providers?.connected) ? providers.connected : []);
+  // The Anthropic-SDK models among the connected providers' models. V2 reports the serving package
+  // per model (`getProviders` keeps it as `package`); selectCacheTtlTargets reads exactly that.
   const targets = new Set(
-    selectCacheTtlTargets({ all: all ?? [], connected: [...connected] }).map((t) => `${t.providerID}/${t.modelID}`),
+    selectCacheTtlTargets(
+      (all ?? [])
+        .filter((p) => p && typeof p.id === "string" && connected.has(p.id))
+        .flatMap((p) => Object.entries(isObj(p.models) ? p.models : {}).map(([modelID, m]) => ({ providerID: p.id, modelID, package: m?.package }))),
+    ).map((t) => `${t.providerID}/${t.modelID}`),
   );
 
   const universe = [];

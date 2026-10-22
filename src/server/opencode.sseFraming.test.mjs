@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createSseFramer, stripMessageSummaryDiffs } from "./opencode.mjs";
+import { createSseFramer } from "./opencode.mjs";
 
 // Reference: the old quadratic framer, kept here only as a behavioural oracle.
 function oldFrame(pieces) {
@@ -70,28 +70,4 @@ test("sse framer: a 5 MB event in 64 KB pieces is framed correctly and fast", ()
   assert.equal(out[0], big);
   assert.equal(out[1], '{"after":1}');
   assert.ok(ms < 500, `framing took ${ms.toFixed(0)} ms`);
-});
-
-test("stripMessageSummaryDiffs: drops summary.diffs from message.updated only", () => {
-  const ev = {
-    type: "message.updated",
-    properties: { info: { id: "m", summary: { title: "t", additions: 3, diffs: [{ file: "a", patch: "..." }] } } },
-  };
-  stripMessageSummaryDiffs(ev);
-  assert.deepEqual(ev.properties.info.summary, { title: "t", additions: 3 });
-
-  const other = { type: "session.updated", properties: { info: { summary: { diffs: [1] } } } };
-  stripMessageSummaryDiffs(other);
-  assert.deepEqual(other.properties.info.summary.diffs, [1]);
-
-  const noSummary = { type: "message.updated", properties: { info: { id: "m" } } };
-  assert.deepEqual(stripMessageSummaryDiffs(noSummary), { type: "message.updated", properties: { info: { id: "m" } } });
-
-  const nonArray = { type: "message.updated", properties: { info: { summary: { diffs: "x" } } } };
-  stripMessageSummaryDiffs(nonArray);
-  assert.equal(nonArray.properties.info.summary.diffs, "x");
-
-  for (const odd of [null, undefined, 42, "s", { type: "message.updated" }, { type: "message.updated", properties: null }]) {
-    assert.doesNotThrow(() => stripMessageSummaryDiffs(odd));
-  }
 });

@@ -16,10 +16,25 @@
 // This matches what src/shared/types.ts declares and what Terminal.tsx
 // expects (via onPtyEvent / IPC.ptyEvent).
 
-import { spawn as ptySpawnNative } from "node-pty";
+import { createRequire } from "node:module";
 import { expandTilde } from "../shared/paths.mjs";
 import { findLauncher } from "./launcherRegistry.mjs";
 import { tmuxSpawnEnv } from "./tmux.mjs";
+
+// node-pty is native (it needs a compiled binding), and it is used at exactly ONE place: the
+// moment a real pty is spawned. It is therefore loaded THERE, not at import time. A top-level
+// import made every module that merely imports this file (pty.test.mjs, accountsWiring.test.mjs,
+// anything pulling in the pure helpers below) fail on a machine without the binding — which is
+// how two test files went unrun on the dev box for weeks and hid real failures behind a
+// "known pty native-module failure". Boxes are unaffected: the release packer verifies node-pty
+// loads under the box's own Node before it tars, and a missing binding still fails loudly — on
+// the first spawn, with node-pty's own error.
+const requireNative = createRequire(import.meta.url);
+let ptySpawnNativeImpl = null;
+function ptySpawnNative(file, args, opts) {
+  ptySpawnNativeImpl ??= requireNative("node-pty").spawn;
+  return ptySpawnNativeImpl(file, args, opts);
+}
 
 // Test-only hook: replace spawnShellPty with a spy/stub so a regression
 // test can assert that `spawn(opts, onEvent)` correctly forwards

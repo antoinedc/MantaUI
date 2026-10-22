@@ -1,0 +1,13 @@
+[
+{"kind":"stream","sub":"running","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"running":true,"type":"busy","since":1000040}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac87e30013czLwqNBTiCmFg"}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac8eea001P1u96klw6D6mXV"}},
+{"kind":"stream","sub":"flush","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac8eea001P1u96klw6D6mXV","partID":"msg_145ac8eea001P1u96klw6D6mXV:text:0","field":"text","text":"The corpus says hello."}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac8eea001P1u96klw6D6mXV"}},
+{"kind":"stream","sub":"stepEnded","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac8eea001P1u96klw6D6mXV","tokens":{"input":3,"output":8,"reasoning":0,"cache":{"read":0,"write":19181}},"cost":0.02401925,"finish":"end_turn"}},
+{"kind":"stream","sub":"context","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"freshInput":3,"cacheRead":0,"cacheWrite":19181,"totalInput":19184,"pct":null,"hasLimit":false,"segments":[]}},
+{"kind":"stream","sub":"cache","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"isStale":false,"idleMs":0,"staleTokens":19181,"ttlMs":300000}},
+{"kind":"stream","sub":"running","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"running":false,"type":"idle","since":null}},
+{"kind":"stream","sub":"turnComplete","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"complete":true,"running":false,"since":null}},
+{"kind":"stream","sub":"messageChanged","sessionId":"ses_eba537fd4ffepf1poTzFox873L","payload":{"messageID":"msg_145ac8eea001P1u96klw6D6mXV"}}
+]

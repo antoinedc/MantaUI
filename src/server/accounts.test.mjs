@@ -19,8 +19,7 @@ import {
   renameInState,
   removeSeatInState,
   planSeatPlacement,
-  addSeatToState,
-} from "./accounts.mjs";
+  addSeatToState, readCodexEntryFile } from "./accounts.mjs";
 
 const quiet = { warn() {}, log() {} };
 
@@ -51,6 +50,7 @@ async function sandbox() {
     seatsRoot: join(root, "secrets", "accounts"),
     claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
     codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
   };
   await mkdir(join(root, "home", ".claude"), { recursive: true });
   return paths;
