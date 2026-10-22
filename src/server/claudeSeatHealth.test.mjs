@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applySeatReadingOk, applySeatSignedOut, createAccountsService, emptyStore } from "./accounts.mjs";
+import { applySeatReadingOk, applySeatSignedOut, createAccountsService, emptyStore, readCodexEntryFile } from "./accounts.mjs";
 import { createClaudeSeatHealth } from "./claudeSeatHealth.mjs";
 import { createUsagePoller } from "./usage.mjs";
 import { refreshClaudeSeatAndNote } from "./opencode.mjs";
@@ -24,6 +24,7 @@ async function rig() {
     seatsRoot: join(root, "secrets", "accounts"),
     claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
     codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
   };
   await mkdir(join(root, "home", ".claude"), { recursive: true });
   for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {

@@ -717,7 +717,7 @@ const accountsManager = createAccountsManager({
   codex: {
     startConnect: () => providerAuthStart(oc, "openai"),
     oauthEpoch: () => oauthEpochFor("openai"),
-    livePath: () => oc.opencodeAuthPath(),
+    readLive: () => oc.readLiveCodexEntry(),
     restoreEntry: (entry) => oc.setProviderAuthEntry("openai", entry),
   },
   // A seat that just landed or was re-signed shows its usage straight away.

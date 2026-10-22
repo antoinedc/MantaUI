@@ -1,7 +1,7 @@
 // codexRefresh.mjs — OAuth refresh for a Codex (ChatGPT) SEAT that is NOT the
 // live login (multi-account spec §3/§4, phase 2).
 //
-// The live login lives in opencode's auth.json, and opencode refreshes it. A
+// The live login is the active `openai` credential in opencode's own store, and opencode refreshes it. A
 // seat's own copy (~/.manta-secrets/accounts/codex/<seatId>/auth.json) is ours to
 // keep fresh, because the manta-accounts plugin sends that seat's access token
 // on requests for conversations assigned to it.

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAccountsService, identityFromProfile, allSeats } from "./accounts.mjs";
+import { createAccountsService, identityFromProfile, allSeats, readCodexEntryFile } from "./accounts.mjs";
 import { createSeatAssigner } from "./seatAssignment.mjs";
 import { createAccountsManager, ACCOUNTS_SAFE_ERROR_MESSAGE } from "./accountsManager.mjs";
 
@@ -34,6 +34,7 @@ async function rig({ codex = false, claude = true } = {}) {
     seatsRoot: join(root, "secrets", "accounts"),
     claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
     codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
   };
   await mkdir(join(root, "home", ".claude"), { recursive: true });
   const profiles = { "tok-A": profileOf("u-A", "a@example.com"), "tok-B": profileOf("u-B", "b@example.com") };
@@ -84,7 +85,7 @@ async function rig({ codex = false, claude = true } = {}) {
         return { action: "start", shape: state.codexShape, url: "https://auth.example/device", methodIndex: 0 };
       },
       oauthEpoch: () => state.epoch,
-      livePath: () => paths.codexAuthPath,
+      readLive: () => readCodexEntryFile(paths.codexAuthPath),
       restoreEntry: async (entry) => {
         calls.restore.push(entry.access);
         if (!state.restoreOk) return { ok: false };

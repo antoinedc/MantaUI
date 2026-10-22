@@ -19,7 +19,7 @@ import {
   resolveRoot,
   seatResult,
 } from "./seatAssignment.mjs";
-import { createAccountsService } from "./accounts.mjs";
+import { createAccountsService, readCodexEntryFile } from "./accounts.mjs";
 
 const quiet = { warn() {}, log() {} };
 const seat = (n, over = {}) => ({
@@ -375,6 +375,7 @@ test("seatStates (real accounts service): a live seat has no credential; a direc
       seatsRoot: join(root, "secrets", "accounts"),
       claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
       codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
     };
     await mkdir(join(root, "home", ".claude"), { recursive: true });
     for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {
@@ -428,6 +429,7 @@ test("seatStates (real): a seat whose credentials are unreadable is not usable a
       seatsRoot: join(root, "secrets", "accounts"),
       claudeLivePath: join(root, "home", ".claude", ".credentials.json"),
       codexAuthPath: join(root, "home", "opencode-auth.json"),
+    readLiveCodex: () => readCodexEntryFile(join(root, "home", "opencode-auth.json")),
     };
     await mkdir(join(root, "home", ".claude"), { recursive: true });
     for (const [id, tok] of [["seat-1", "tok-A"], ["seat-2", "tok-B"]]) {

@@ -34,7 +34,7 @@ import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { endpointAttempts, newAttemptId } from "./endpointAttempts.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
-import { readCodexEntry, readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
+import { readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
 import { createLiveCodexRefresher as createLiveCodexRefresherCore } from "./codexLiveRefresh.mjs";
 import {
   CREDENTIALS_PATH,
@@ -1833,7 +1833,8 @@ export async function setProviderApiKey(providerID, key) {
  * server answers 200 and silently drops it, so it must be placed explicitly or the id is lost.
  *
  * V2 has no in-place token replace (PATCH only renames), so this CREATES a credential and activates
- * it; the previous one stays as an inactive row.
+ * it (`activate: true`, explicitly: the live-login readers select the ACTIVE credential); the
+ * previous one stays as an inactive row.
  *
  * SECURITY: like `setProviderApiKey`, the entry is NEVER echoed back and NEVER logged; the result is
  * `{ok}` / `{ok:false, error}` only.
@@ -1852,6 +1853,7 @@ export async function setProviderAuthEntry(providerID, entry) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         integrationID: providerID,
+        activate: true,
         value: {
           type: "oauth",
           methodID: oauth?.id ?? "oauth",
@@ -1887,18 +1889,6 @@ export async function removeProviderAuth(providerID) {
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
   }
-}
-
-/**
- * Where the V1 opencode kept provider auth: `~/.local/share/opencode/auth.json`.
- * V2 keeps credentials in its own database (read through `GET /api/credential`
- * below); this path survives only for the Codex/Claude seat code that still
- * reads and writes that file directly (see accounts.mjs / codexRefresh.mjs).
- * @returns {string}
- */
-export function opencodeAuthPath() {
-  const base = process.env.XDG_DATA_HOME || path.join(homedir(), ".local", "share");
-  return path.join(base, "opencode", "auth.json");
 }
 
 /** Every stored credential: `[{id, integrationID, label, active, value:{type:"key"|"oauth"|…, …}}]`. */
@@ -1953,6 +1943,50 @@ export async function readProviderOAuthToken(providerId, { listCredentials: list
     return v?.type === "oauth" && typeof v.access === "string" ? v.access : "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Map a V2 credential back to the V1-shaped entry the accounts/usage/refresh code works with:
+ * `{type:"oauth", access, refresh, expires, accountId?, enterpriseUrl?}`. The two optional
+ * fields live in V2's `metadata` (`accountID`, `enterpriseUrl` — the slots `setProviderAuthEntry`
+ * writes and V2's own import fills). Anything that is not a usable oauth credential is `null`.
+ * Pure. The result carries tokens: never log it.
+ * @param {{value?: any}|null|undefined} credential
+ * @returns {{type:"oauth", access:string, refresh?:string, expires?:number, accountId?:string, enterpriseUrl?:string}|null}
+ */
+export function codexEntryFromCredential(credential) {
+  const v = credential?.value;
+  if (v?.type !== "oauth" || typeof v.access !== "string" || !v.access) return null;
+  const entry = { type: "oauth", access: v.access };
+  if (typeof v.refresh === "string") entry.refresh = v.refresh;
+  if (typeof v.expires === "number") entry.expires = v.expires;
+  const accountId = v.metadata?.accountID;
+  if (typeof accountId === "string" && accountId) entry.accountId = accountId;
+  const enterpriseUrl = v.metadata?.enterpriseUrl;
+  if (typeof enterpriseUrl === "string" && enterpriseUrl) entry.enterpriseUrl = enterpriseUrl;
+  return entry;
+}
+
+/**
+ * The LIVE ChatGPT (Codex) login: the ACTIVE `openai` credential in opencode's own store
+ * (`GET /api/credential`), as a V1-shaped entry. Strictly the active one — every write creates a
+ * new credential and activates it, and the previous ones stay behind as inactive rows holding
+ * rotated-out tokens, so "the first openai credential" would be a stale (burned) login. An active
+ * credential that is an API key (or anything but oauth) is not a ChatGPT login → `null`.
+ *
+ * Replaces the reads of V1's `auth.json`, which V2 imported once and never updates. `null` when
+ * there is none or opencode cannot be asked; NEVER throws. `listCredentials` is injectable.
+ *
+ * SECURITY: the result carries live tokens; callers must not log it.
+ * @param {{ listCredentials?: () => Promise<any[]> }} [opts]
+ */
+export async function readLiveCodexEntry({ listCredentials: list = listCredentials } = {}) {
+  try {
+    const active = (await list()).find((c) => c?.integrationID === "openai" && c.active === true);
+    return codexEntryFromCredential(active);
+  } catch {
+    return null;
   }
 }
 
@@ -2309,10 +2343,11 @@ export async function refreshCodexSeatAndNote(seats, target, refresh = refreshCo
  */
 export function createLiveCodexRefresher(seats = null, overrides = {}) {
   return createLiveCodexRefresherCore({
-    readEntry: () => readCodexEntry(opencodeAuthPath()),
+    readEntry: () => readLiveCodexEntry(),
     persist: (entry) => setProviderAuthEntry("openai", entry),
     afterPersist: () => seats?.mirrorLiveLogin?.("codex"),
-    flightKey: opencodeAuthPath(),
+    // The login is not a file any more: a stable name for "the live openai login".
+    flightKey: "opencode:openai",
     ...overrides,
   });
 }

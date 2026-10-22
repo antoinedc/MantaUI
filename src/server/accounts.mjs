@@ -37,7 +37,7 @@ import { join, resolve as resolvePath, sep } from "node:path";
 import { secretsRoot, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic, createMutex } from "./jsonStore.mjs";
 import { CREDENTIALS_PATH, parseCredentials } from "./claudeAuth.mjs";
-import { opencodeAuthPath } from "./opencode.mjs";
+import { readLiveCodexEntry } from "./opencode.mjs";
 
 export const ACCOUNT_PROVIDERS = ["claude", "codex"];
 
@@ -708,15 +708,15 @@ export function createAccountsService({
   storePath = statePath("accounts.json"),
   seatsRoot = join(secretsRoot(), "accounts"),
   claudeLivePath = CREDENTIALS_PATH,
-  codexAuthPath = null,
+  // The LIVE ChatGPT login, as a V1-shaped entry (or null). Production: the active `openai`
+  // credential in opencode's own store. Injectable so tests never talk to opencode.
+  readLiveCodex = () => readLiveCodexEntry(),
   fetchImpl = fetch,
   now = () => Date.now(),
   liveIdentityTtlMs = LIVE_IDENTITY_TTL_MS,
   rediscoverMs = REDISCOVER_MS,
   log = console,
 } = {}) {
-  const codexLivePath = () => codexAuthPath ?? opencodeAuthPath();
-
   /** @type {AccountsStore|null} */
   let store = null;
   // Writers of the store serialize here. Discovery computes from a snapshot over
@@ -775,7 +775,7 @@ export function createAccountsService({
 
   /** The live Codex login's account id (no network: it is in the entry). */
   async function codexLiveIdentity() {
-    const entry = await readCodexEntryFile(codexLivePath());
+    const entry = await readLiveCodex();
     if (!entry) return { present: false, identity: null };
     return {
       present: true,
@@ -853,7 +853,7 @@ export function createAccountsService({
 
   async function discoverCodex(prov) {
     if (allSeats(prov).length > 0) return prov;
-    const entry = await readCodexEntryFile(codexLivePath());
+    const entry = await readLiveCodex();
     if (!entry) return prov;
     const dir = join(seatsRoot, "codex", "seat-1");
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -957,7 +957,7 @@ export function createAccountsService({
         if (shortHash(creds.refreshToken ?? creds.accessToken) !== liveCache.key) return false;
         want = raw;
       } else {
-        const entry = await readCodexEntryFile(codexLivePath());
+        const entry = await readLiveCodex();
         if (!entry || entry.accountId !== seat.accountUuid) return false;
         want = JSON.stringify({ openai: entry });
       }
@@ -1000,7 +1000,8 @@ export function createAccountsService({
   }
 
   function pathForSource(provider, source) {
-    if (source.kind === "live") return provider === "claude" ? claudeLivePath : codexLivePath();
+    // A live Codex login is not a file (it is opencode's active credential): no path.
+    if (source.kind === "live") return provider === "claude" ? claudeLivePath : null;
     if (source.kind === "dir") return join(source.dir, provider === "claude" ? ".credentials.json" : "auth.json");
     return null;
   }
@@ -1109,9 +1110,9 @@ export function createAccountsService({
         } else {
           const entry = await readCodexEntryFile(join(seat.credentialDir, "auth.json"));
           if (!entry || typeof writeCodexEntry !== "function") return { ok: false };
-          const prev = await readCodexEntryFile(codexLivePath());
+          const prev = await readLiveCodex();
           const r = await writeCodexEntry(entry);
-          const now_ = r?.ok ? await readCodexEntryFile(codexLivePath()) : null;
+          const now_ = r?.ok ? await readLiveCodex() : null;
           if (!now_ || now_.access !== entry.access) {
             // Did not take: put the previous login back (best effort) so the box
             // is not left on a half-applied one.
@@ -1202,11 +1203,14 @@ export function createAccountsService({
       const seats = [];
       for (const { account, seat, source } of resolved) {
         const file = pathForSource(provider, source);
-        if (!file) continue;
+        const liveCodex = provider === "codex" && source.kind === "live";
+        if (!file && !liveCodex) continue;
         const deps =
           provider === "claude"
             ? { readCredentials: () => readClaudeCredentialsFile(file) }
-            : { readToken: async () => (await readCodexEntryFile(file))?.access ?? "" };
+            : liveCodex
+              ? { readToken: async () => (await readLiveCodex())?.access ?? "" }
+              : { readToken: async () => (await readCodexEntryFile(file))?.access ?? "" };
         seats.push({
           accountId: account.id,
           accountLabel: account.label,
@@ -1347,7 +1351,7 @@ export function createAccountsService({
 
     /**
      * Codex seats the refresh sweep must refresh itself — the ones NOT read from
-     * opencode's live auth.json (opencode owns that entry and its rotation).
+     * opencode's live login (opencode owns that credential and its rotation).
      * @returns {Promise<Array<{seatId:string, file:string}>>}
      */
     async codexRefreshTargets() {

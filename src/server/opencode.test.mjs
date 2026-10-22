@@ -67,7 +67,8 @@ import {
   listProviderAuthMethods,
   startProviderOauth,
   completeProviderOauth,
-  opencodeAuthPath,
+  readLiveCodexEntry,
+  codexEntryFromCredential,
 } from "./opencode.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -228,16 +229,49 @@ test("the credential readers go through GET /api/credential by default", async (
   assert.equal(calls.length, 1);
 });
 
-test("opencodeAuthPath still resolves the legacy auth.json used by the seat code (XDG_DATA_HOME honoured)", () => {
-  assert.equal(opencodeAuthPath(), join(homedir(), ".local", "share", "opencode", "auth.json"));
-  const saved = process.env.XDG_DATA_HOME;
-  process.env.XDG_DATA_HOME = "/tmp/xdg-test-home";
-  try {
-    assert.equal(opencodeAuthPath(), join("/tmp/xdg-test-home", "opencode", "auth.json"));
-  } finally {
-    if (saved === undefined) delete process.env.XDG_DATA_HOME;
-    else process.env.XDG_DATA_HOME = saved;
+// ---- the LIVE Codex login lives in V2's credential store, not in V1's auth.json -----------------
+
+const cred = (over = {}) => ({ id: "cred_1", integrationID: "openai", label: "default", active: true, value: { type: "oauth", methodID: "chatgpt-token-sharing", refresh: "R", access: "A", expires: 123, metadata: { accountID: "acct-1" } }, ...over });
+
+test("codexEntryFromCredential: V2 credential → the V1-shaped entry (metadata.accountID → accountId, enterpriseUrl kept)", () => {
+  assert.deepEqual(codexEntryFromCredential(cred()), { type: "oauth", access: "A", refresh: "R", expires: 123, accountId: "acct-1" });
+  assert.deepEqual(
+    codexEntryFromCredential(cred({ value: { type: "oauth", methodID: "m", refresh: "R", access: "A", expires: 1, metadata: { enterpriseUrl: "https://e.example", accountID: "" } } })),
+    { type: "oauth", access: "A", refresh: "R", expires: 1, enterpriseUrl: "https://e.example" },
+    "an empty account id is not an id",
+  );
+  assert.deepEqual(codexEntryFromCredential(cred({ value: { type: "oauth", methodID: "m", refresh: "R", access: "A", expires: 1 } })), { type: "oauth", access: "A", refresh: "R", expires: 1 });
+  // not a usable ChatGPT login
+  for (const bad of [null, undefined, {}, cred({ value: { type: "key", key: "sk" } }), cred({ value: { type: "external", methodID: "x" } }), cred({ value: { type: "oauth", refresh: "R", access: "", expires: 1 } })]) {
+    assert.equal(codexEntryFromCredential(bad), null);
   }
+});
+
+test("readLiveCodexEntry: the ACTIVE openai credential wins over stale (rotated-out) rows, whatever the order", async () => {
+  const stale = (n) => cred({ id: `cred_old${n}`, active: false, value: { type: "oauth", methodID: "m", refresh: `OLD-R${n}`, access: `OLD-A${n}`, expires: 1, metadata: { accountID: "acct-1" } } });
+  const live = cred({ id: "cred_live", value: { type: "oauth", methodID: "m", refresh: "LIVE-R", access: "LIVE-A", expires: 9, metadata: { accountID: "acct-1" } } });
+  const other = cred({ id: "cred_x", integrationID: "anthropic", value: { type: "oauth", methodID: "m", refresh: "X", access: "X", expires: 1 } });
+  for (const rows of [[stale(1), live, stale(2), other], [other, stale(1), stale(2), live], [live, stale(1)]]) {
+    const e = await readLiveCodexEntry({ listCredentials: async () => rows });
+    assert.equal(e.access, "LIVE-A");
+    assert.equal(e.refresh, "LIVE-R");
+  }
+});
+
+test("readLiveCodexEntry: no active openai oauth → null (none, only stale rows, an active API key, other providers); a failing store → null, never a throw", async () => {
+  const none = (rows) => readLiveCodexEntry({ listCredentials: async () => rows });
+  assert.equal(await none([]), null);
+  assert.equal(await none([cred({ active: false })]), null, "inactive rows hold burned tokens");
+  assert.equal(await none([cred({ value: { type: "key", key: "sk-1" } })]), null, "an API key is not a ChatGPT login");
+  assert.equal(await none([cred({ integrationID: "anthropic" })]), null);
+  assert.equal(await readLiveCodexEntry({ listCredentials: async () => { throw new Error("down"); } }), null);
+});
+
+test("readLiveCodexEntry reads GET /api/credential (the default source) and nothing else", async () => {
+  const calls = await withV2({ "GET /api/credential": { data: [cred({ active: false }), cred({ id: "cred_2", value: { type: "oauth", methodID: "m", refresh: "R2", access: "A2", expires: 2 } })] } }, async () => {
+    assert.equal((await readLiveCodexEntry()).access, "A2");
+  });
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /api/credential"]);
 });
 
 // ---------------------------------------------------------------------------

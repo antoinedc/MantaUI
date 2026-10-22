@@ -110,7 +110,7 @@ const isNonEmptyString = (v) => typeof v === "string" && v.length > 0;
  * @param {{
  *   startConnect: () => Promise<object>,
  *   oauthEpoch: () => number|undefined,
- *   livePath: () => string,
+ *   readLive: () => Promise<object|null>,  the LIVE login as a V1-shaped entry (active credential)
  *   restoreEntry: (entry: object) => Promise<{ok: boolean}>,
  * }} deps.codex  opencode's OpenAI OAuth flow + its auth store
  */
@@ -429,7 +429,7 @@ export function createAccountsManager({
     try {
       const r = await codex.restoreEntry(entry);
       if (!r?.ok) return false;
-      const now_ = await readCodexEntry(codex.livePath());
+      const now_ = await codex.readLive();
       return Boolean(now_) && now_.access === entry.access;
     } catch {
       return false;
@@ -482,7 +482,7 @@ export function createAccountsManager({
     if (rec.state !== "pending" || rec.processing) return;
     rec.processing = true;
     try {
-      const entry = await readCodexEntry(codex.livePath());
+      const entry = await codex.readLive();
       const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
       if (!isNew) {
         await failFlow(rec, "login-failed");
@@ -518,7 +518,7 @@ export function createAccountsManager({
 
   /** An ABANDONED wait landed after all: put the live login back if it changed hands. */
   async function processGuard(g) {
-    const entry = await readCodexEntry(codex.livePath());
+    const entry = await codex.readLive();
     if (!entry || entry.accountId === g.prev.accountId) return;
     const prev = await freshestPrevious(g.prev);
     if (!(await restoreLive(prev))) log.warn?.("[accounts] an abandoned Codex sign-in replaced the live login and it could not be restored");
@@ -706,7 +706,7 @@ export function createAccountsManager({
     if (rec.state !== "pending" || rec.processing) return;
     rec.processing = true;
     try {
-      const entry = await readCodexEntry(codex.livePath());
+      const entry = await codex.readLive();
       const isNew = Boolean(entry) && (!rec.prev || entry.access !== rec.prev.access || entry.refresh !== rec.prev.refresh);
       if (!isNew) {
         await failResign(rec, "login-failed");
@@ -882,7 +882,7 @@ export function createAccountsManager({
   async function addCodexSeat({ accountId, label }) {
     // Make sure the live login's own seat copy is fresh BEFORE we borrow the slot.
     await accounts.seatStates("codex");
-    const prev = await readCodexEntry(codex.livePath());
+    const prev = await codex.readLive();
     // One OAuth wait per provider: a new add supersedes an older pending one.
     await supersedeCodexWaits();
     const seatId = nextId("seat", [...(await accounts.takenSeatIds("codex")), ...pending.keys()]);
@@ -1025,7 +1025,7 @@ export function createAccountsManager({
   async function resignCodexSeat(seatId) {
     // Make sure the live login's own seat copy is fresh BEFORE we borrow the slot.
     await accounts.seatStates("codex");
-    const prev = await readCodexEntry(codex.livePath());
+    const prev = await codex.readLive();
     await supersedeCodexWaits();
     let connect;
     try {

@@ -1,11 +1,11 @@
 // codex.mjs — usage adapter for Codex / ChatGPT Plus-Pro (BET-737).
 //
-// Credential: opencode's OWN OpenAI sign-in — `~/.local/share/opencode/
-// auth.json`, the `openai` entry, oauth `access` token. This adapter is a
+// Credential: opencode's OWN OpenAI sign-in — the active `openai` OAuth credential in its
+// credential store (`GET /api/credential`), `access` token. This adapter is a
 // READER of opencode's connection, not a second place to enter it — no config
 // field, no secrets-store entry, no new credentials file (`readProviderOAuthToken`
-// in opencode.mjs resolves the store path and returns "" on any read/parse
-// failure or a missing/wrong-type entry — never throws). opencode is the only
+// in opencode.mjs asks opencode's API and returns "" on any failure or a
+// missing/wrong-type credential — never throws). opencode is the only
 // thing on the box that runs models, so an OpenAI session opencode does not
 // hold is not usage worth reporting; opencode also owns the token's refresh
 // lifecycle (an expired token simply 401s and the poller's carry-forward

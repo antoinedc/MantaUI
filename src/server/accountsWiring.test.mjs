@@ -192,6 +192,7 @@ test("setProviderAuthEntry: oauth entry → POST /api/credential with ONLY the k
     assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /api/integration/openai", "POST /api/credential"]);
     assert.deepEqual(calls[1].body, {
       integrationID: "openai",
+      activate: true,
       value: {
         type: "oauth", methodID: "chatgpt-token-sharing", refresh: "SECRET-R", access: "SECRET-A", expires: 5,
         metadata: { accountID: "gpt-1", enterpriseUrl: "https://ent.example" },
