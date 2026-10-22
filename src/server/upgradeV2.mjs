@@ -144,10 +144,6 @@ export function createUpgradeV2(deps) {
     now = () => Date.now(),
     sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
     pollMs = 1000,
-    // The migrate-progress ticker has its OWN clock: it must tick on real time while the status
-    // request is parked inside V2, and must not share (or advance) an injected fake `sleep`.
-    progressTickMs = 30_000,
-    tickSleep = (ms) => new Promise((r) => setTimeout(r, ms).unref?.()),
     turnPollMs = 2000,
     stopWaitMs = STOP_WAIT_MS,
     startTimeoutMs = 120_000,
@@ -284,100 +280,94 @@ export function createUpgradeV2(deps) {
       eta.firstNum = null;
       eta.firstAt = null;
       eta.seconds = null;
-      let startedAt = now();
+      let startedAt = now(); // start-deadline reference, reset when OpenCode proves alive
+      const migrateStartedAt = startedAt; // wall-clock anchor for the elapsed label, never reset
       let requiredSince = null;
       await setProgress("migrate", { label: "Starting OpenCode" });
       // OpenCode 2.0.30 blocks /api/experimental/migration/v1 until its lazy v1 migration finishes
-      // (measured on a 34G archive: every request spans the whole migration), so real per-item
-      // counts are unavailable while we wait. A ticker publishes honest time-based progress so the
-      // UI cannot read as hung. Delayed fetch failures (>=2s) prove OpenCode is up and busy and
-      // reset the start deadline; only instant failures (connection refused) mean it never came up.
-      const migrateTickerStop = { stopped: false };
-      void (async () => {
-        for (;;) {
-          await tickSleep(progressTickMs);
-          if (migrateTickerStop.stopped) return;
-          const mins = Math.floor((now() - startedAt) / 60_000);
-          try {
-            const cur = state.steps.migrate.progress ?? {};
-            const curNum = Number.isFinite(cur.numerator) ? cur.numerator : -1;
-            const v2Sessions = await deps.countSessions(state.targetDb, "v2");
-            // The step may have completed (or failed) while the count ran: never write over it.
-            if (migrateTickerStop.stopped) return;
-            const denom = Number.isFinite(state.v1Sessions) ? state.v1Sessions : null;
-            const label =
-              "Migrating conversation history (OpenCode V2) - " + mins + " min elapsed; very large archives take tens of minutes";
-            // Progress must never regress: only publish counts above what the
-            // status poll already surfaced, else carry the surfaced counts.
-            if (v2Sessions !== null && denom > 0 && v2Sessions > curNum) {
-              await setProgress("migrate", { label, numerator: Math.min(v2Sessions, denom), denominator: denom });
-            } else if (curNum >= 0) {
-              await setProgress("migrate", { label, numerator: curNum, denominator: cur.denominator });
-            } else {
-              await setProgress("migrate", { label });
-            }
-          } catch {
-            // a failed publish must not stop polling
-          }
+      // (measured on a 34G archive: every request spans the whole migration), so per-item counts are
+      // unavailable while we wait. Each poll is capped at 60 s (see migrationStatus): the cap turns every
+      // long hold into a failed request — which is the "alive and busy" signal — and lets the loop
+      // publish elapsed-time labels and session counts between holds. NO side timer runs, so a
+      // step abandoned mid-poll leaves nothing spinning. A
+      // delayed fetch failure (>=2s) resets the start deadline; only an instant failure
+      // (connection refused) means it never came up.
+      const elapsedLabel = (mins) =>
+        "Migrating conversation history (OpenCode V2) - " + mins + " min elapsed; very large archives take tens of minutes";
+      for (;;) {
+        // Elapsed-time liveness label, published only while the blocked endpoint has surfaced no
+        // counts of its own (once counts exist they are the better display — numerator/denominator
+        // — and the status poll owns publishing them; nothing here may race it).
+        let cur = state.steps.migrate.progress ?? {};
+        const mins = Math.floor((now() - migrateStartedAt) / 60_000);
+        const label = elapsedLabel(mins);
+        if (!Number.isFinite(cur.numerator) && cur.label !== label) {
+          await setProgress("migrate", { label });
         }
-      })();
-      try {
-        for (;;) {
-          let r;
-          const fetchStartedAt = now();
-          try {
-            r = await deps.v2.migrationStatus();
-          } catch {
-            r = null;
-          }
-          // Request-level progress may exist only once the migration is serving status; a response
-          // with real counts takes over from the ticker.
-          if (r && r.status !== "required") migrateTickerStop.stopped = true;
-          if (r === null && now() - fetchStartedAt >= 2_000) startedAt = now(); // alive and busy, widen grace
-          if (r === null) {
-            if (now() - startedAt > startTimeoutMs) {
-              throw new UpgradeError("OpenCode did not come up after the upgrade started. Retry, or roll back.", { retryable: true });
-            }
-          } else if (r.status === "completed") {
-            const prev = state.steps.migrate.progress;
-            // Keep the real count V2 last reported (300/300) rather than inventing a 1/1.
-            await setProgress(
-              "migrate",
-              Number.isFinite(prev?.denominator) && prev.denominator > 0
-                ? { label: prev.label, numerator: prev.denominator, denominator: prev.denominator }
-                : { label: "Migrated" },
-            );
-            return;
-          } else if (r.status === "error") {
-            throw new UpgradeError(`Conversation migration failed: ${r.error?.message ?? r.error ?? "unknown error"}`, { retryable: true });
-          } else if (r.status === "running") {
-            requiredSince = null;
-            const p = r.progress ?? {};
-            const progress = { label: p.label ?? "Migrating" };
-            if (Number.isFinite(p.numerator)) progress.numerator = p.numerator;
-            if (Number.isFinite(p.denominator)) progress.denominator = p.denominator;
-            if (progress.numerator !== undefined && progress.denominator > 0) {
-              if (eta.firstNum === null) {
-                eta.firstNum = progress.numerator;
-                eta.firstAt = now();
-              } else if (progress.numerator > eta.firstNum) {
-                const rate = (progress.numerator - eta.firstNum) / ((now() - eta.firstAt) / 1000);
-                eta.seconds = rate > 0 ? Math.max(0, Math.round((progress.denominator - progress.numerator) / rate)) : null;
+        let r;
+        const fetchStartedAt = now();
+        try {
+          r = await deps.v2.migrationStatus();
+        } catch {
+          r = null;
+        }
+        if (r === null) {
+          // A request that failed after a long hold means the endpoint was blocked behind the
+          // migration: OpenCode is up and busy — widen the start grace and surface real count
+          // progress from the read-only row counts (never below what is already surfaced).
+          if (now() - fetchStartedAt >= 2_000) {
+            startedAt = now();
+            try {
+              const v2Sessions = await deps.countSessions(state.targetDb, "v2");
+              const denom = Number.isFinite(state.v1Sessions) ? state.v1Sessions : null;
+              const curNum = Number.isFinite(cur.numerator) ? cur.numerator : -1;
+              if (v2Sessions !== null && denom > 0 && v2Sessions > curNum) {
+                await setProgress("migrate", { label, numerator: Math.min(v2Sessions, denom), denominator: denom });
               }
+            } catch {
+              // counts are best-effort
             }
-            await setProgress("migrate", progress);
-          } else if (r.status === "required") {
-            // V2 sees V1 tables but has not begun; serve normally auto-runs the migration.
-            requiredSince ??= now();
-            if (now() - requiredSince > requiredStallMs) {
-              throw new UpgradeError("OpenCode did not start migrating. Retry, or roll back.", { retryable: true });
-            }
-            await setProgress("migrate", { label: "Preparing migration" });
           }
-          await sleep(pollMs);
+          if (now() - startedAt > startTimeoutMs) {
+            throw new UpgradeError("OpenCode did not come up after the upgrade started. Retry, or roll back.", { retryable: true });
+          }
+        } else if (r.status === "completed") {
+          const prev = state.steps.migrate.progress;
+          // Keep the real count V2 last reported (300/300) rather than inventing a 1/1.
+          await setProgress(
+            "migrate",
+            Number.isFinite(prev?.denominator) && prev.denominator > 0
+              ? { label: prev.label, numerator: prev.denominator, denominator: prev.denominator }
+              : { label: "Migrated" },
+          );
+          return;
+        } else if (r.status === "error") {
+          throw new UpgradeError(`Conversation migration failed: ${r.error?.message ?? r.error ?? "unknown error"}`, { retryable: true });
+        } else if (r.status === "running") {
+          requiredSince = null;
+          const p = r.progress ?? {};
+          const progress = { label: p.label ?? "Migrating" };
+          if (Number.isFinite(p.numerator)) progress.numerator = p.numerator;
+          if (Number.isFinite(p.denominator)) progress.denominator = p.denominator;
+          if (progress.numerator !== undefined && progress.denominator > 0) {
+            if (eta.firstNum === null) {
+              eta.firstNum = progress.numerator;
+              eta.firstAt = now();
+            } else if (progress.numerator > eta.firstNum) {
+              const rate = (progress.numerator - eta.firstNum) / ((now() - eta.firstAt) / 1000);
+              eta.seconds = rate > 0 ? Math.max(0, Math.round((progress.denominator - progress.numerator) / rate)) : null;
+            }
+          }
+          await setProgress("migrate", progress);
+        } else if (r.status === "required") {
+          // V2 sees V1 tables but has not begun; serve normally auto-runs the migration.
+          requiredSince ??= now();
+          if (now() - requiredSince > requiredStallMs) {
+            throw new UpgradeError("OpenCode did not start migrating. Retry, or roll back.", { retryable: true });
+          }
+          await setProgress("migrate", { label: "Preparing migration" });
         }
-      } finally {
-        migrateTickerStop.stopped = true;
+        await sleep(pollMs);
       }
     },
 
@@ -838,7 +828,12 @@ export function createDefaultDeps({
     v2: {
       // 30 min: V2's lazy v1 migration runs inside this request, so on a huge DB each poll must
       // hold until it completes instead of aborting at the 10 s default.
-      migrationStatus: () => v2Fetch("/api/experimental/migration/v1", { timeoutMs: 30 * 60_000 }),
+      // Capped at 60 s, not a long hold: V2's lazy v1 migration runs inside this request on huge
+      // DBs, so a hold can span the whole migration. Aborting at the cap turns each hold into the
+      // loop's "alive and busy" delayed failure and lets elapsed/count progress publish between
+      // holds; a dead opencode is noticed within a minute. The migration itself is boot-triggered
+      // server-side and unaffected by the abort.
+      migrationStatus: () => v2Fetch("/api/experimental/migration/v1", { timeoutMs: 60_000 }),
       // Only ACTIVE plugins count: a plugin that failed to load still appears in the list.
       pluginIds: async () => {
         const r = await v2Fetch(`/api/plugin?location[directory]=${encodeURIComponent(home)}`);

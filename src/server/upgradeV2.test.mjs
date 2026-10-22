@@ -63,7 +63,6 @@ function makeBox(opts = {}) {
       clock += ms;
     },
     pollMs: 1000,
-    ...(o.tickSleep ? { tickSleep: o.tickSleep } : {}),
     turnPollMs: 2000,
     stopWaitMs: 60_000,
     startTimeoutMs: 10_000,
@@ -463,6 +462,18 @@ describe("migrate: do not bounce a running V2 when RESUMING (large-DB migration)
     assert.equal(migrateStarts(second), 0, "the in-flight migration was not restarted");
   });
 
+  test("a resumed run on an unchanged, running service restarts exactly once overall (cutover's)", async () => {
+    const store = await crashedInMigrate();
+    const second = makeBox({ store, serviceChanged: false, running: true });
+    const m2 = createUpgradeV2(second.deps);
+    assert.deepEqual(await m2.boot(), { action: "resume" });
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "completed", JSON.stringify(m2.status().error));
+    const n = second.names();
+    assert.equal(n.filter((x) => x === "opencode.start").length, 1, `starts: ${n}`);
+    assert.ok(n.lastIndexOf("opencode.configure") < n.indexOf("opencode.start"));
+  });
+
   test("resume but definition changed, not running, or no liveness probe → restarts", async () => {
     for (const opts of [{ serviceChanged: true, running: true }, { serviceChanged: false, running: false }, { serviceChanged: false }]) {
       const store = await crashedInMigrate();
@@ -503,84 +514,98 @@ describe("migrate: do not bounce a running V2 when RESUMING (large-DB migration)
   });
 });
 
-describe("migrate: time-based progress ticker + slow status requests", () => {
-  /** A hand-driven ticker clock plus a status request that stays parked until released. */
-  function gated(opts = {}) {
-    const ticks = [];
-    const tickSleep = () => new Promise((resolve) => ticks.push(resolve));
-    let release;
-    const gate = new Promise((r) => (release = r));
-    const box = makeBox({ tickSleep, ...opts });
+describe("migrate: loop-owned progress + slow / blocked status requests", () => {
+  /**
+   * OpenCode 2.0.30 holds /api/experimental/migration/v1 until its lazy v1 migration finishes.
+   * The default deps cap each poll at 60 s, so a hold surfaces as a failure that arrives LATE.
+   * `holds` such polls (each `holdMs` on the fake clock) fail, then the script resumes.
+   */
+  function blocked({ holds, holdMs = 60_000, ...opts }) {
+    const box = makeBox(opts);
+    const base = box.deps.v2.migrationStatus;
+    let n = 0;
     box.deps.v2.migrationStatus = async () => {
-      await gate;
-      return { status: "completed" };
-    };
-    const tick = async () => {
-      await box.deps.sleep(60_000); // a minute passes, so each heartbeat label differs and is published
-      ticks.shift()?.();
-      for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+      if (n++ < holds) {
+        await box.deps.sleep(holdMs);
+        throw new Error("aborted");
+      }
+      return base();
     };
     const migrateProgress = () => box.events.map((e) => e.payload.steps.find((x) => x.id === "migrate").progress).filter(Boolean);
-    return { box, tick, release, ticks, migrateProgress };
+    return { box, migrateProgress };
   }
 
-  test("publishes the V2 session count while the status request is parked: monotonic, clamped, then stops", async () => {
-    const g = gated({ v1Sessions: 10 });
-    const v2Counts = [3, 2, 99]; // 2 would regress; 99 exceeds the V1 total
-    g.box.deps.countSessions = async (db, which) => (which === "v1" ? 10 : (v2Counts.shift() ?? 10));
-    const m = createUpgradeV2(g.box.deps);
+  const timeouts = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+  };
+
+  test("status endpoint blocked behind the migration → held polls are alive, count progress surfaces mid-flight, run completes", async () => {
+    const { box, migrateProgress } = blocked({ holds: 3, holdMs: 5000, v1Sessions: 30, v2Sessions: 30, migrateScript: [{ status: "completed" }] });
+    // the count visible while the sweep is mid-flight (10 of 30) vs after it commits
+    const baseCount = box.deps.countSessions;
+    let countedMidFlight = false;
+    box.deps.countSessions = async (db, which) => {
+      if (which === "v2" && !countedMidFlight) {
+        countedMidFlight = true;
+        return 10;
+      }
+      return baseCount(db, which);
+    };
+    const m = createUpgradeV2(box.deps);
     await m.boot();
-    await new Promise((r) => setTimeout(r, 20));
-    assert.equal(m.status().state, "running");
-
-    await g.tick();
-    await g.tick();
-    await g.tick();
-    const seen = g.migrateProgress().filter((p) => /min elapsed/.test(p.label ?? ""));
-    assert.deepEqual(seen.map((p) => [p.numerator, p.denominator]), [[3, 10], [3, 10], [10, 10]], "never regresses, never exceeds the total");
-
-    g.release();
     await runToIdle(m);
     assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
-    const after = g.box.events.length;
-    await g.tick(); // a stray late tick must not write over the finished step
-    assert.equal(g.box.events.length, after);
+    // 3 holds x 5s = 15s > startTimeoutMs (10s): only the alive-signal reset keeps this from failing.
+    const counted = migrateProgress().filter((p) => p.numerator !== undefined);
+    assert.ok(counted.some((p) => p.numerator === 10 && p.denominator === 30), `no count progress while holding: ${JSON.stringify(counted)}`.slice(0, 300));
+    const overalls = box.events.map((e) => e.payload.overall);
+    for (let i = 1; i < overalls.length; i++) assert.ok(overalls[i] >= overalls[i - 1], `overall regressed at ${i}: ${overalls}`);
   });
 
-  test("an unreadable V2 database (count → null) still publishes a label-only heartbeat", async () => {
-    const g = gated();
-    g.box.deps.countSessions = async (db, which) => (which === "v1" ? 29 : null);
-    const m = createUpgradeV2(g.box.deps);
+  test("count progress is monotonic and clamped to the V1 total; the label carries elapsed minutes", async () => {
+    const { box, migrateProgress } = blocked({ holds: 3, v1Sessions: 10, migrateScript: [{ status: "completed" }] });
+    const v2Counts = [3, 2, 99, 10]; // 2 would regress; 99 exceeds the V1 total
+    box.deps.countSessions = async (db, which) => (which === "v1" ? 10 : (v2Counts.shift() ?? 10));
+    const m = createUpgradeV2(box.deps);
     await m.boot();
-    await new Promise((r) => setTimeout(r, 20));
-    await g.tick();
-    const beat = g.migrateProgress().filter((p) => /min elapsed/.test(p.label ?? ""));
-    assert.equal(beat.length, 1);
-    assert.equal(beat[0].numerator, undefined);
-    g.release();
     await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    const seen = migrateProgress().filter((p) => /min elapsed/.test(p.label ?? "") && p.numerator !== undefined);
+    const counts = seen.map((p) => [p.numerator, p.denominator]).filter((c, i, a) => i === 0 || c[0] !== a[i - 1][0]); // events repeat the standing progress
+    assert.deepEqual(counts, [[3, 10], [10, 10]], "never regresses, never exceeds the total");
+    assert.ok(seen.every((p) => /\d+ min elapsed/.test(p.label)));
   });
 
-  test("a failing count never kills the ticker or the migration", async () => {
-    const g = gated();
+  test("an unreadable V2 database (count → null) still publishes label-only elapsed-time heartbeats", async () => {
+    const { box, migrateProgress } = blocked({ holds: 3, migrateScript: [{ status: "completed" }] });
+    box.deps.countSessions = async (db, which) => (which === "v1" ? 29 : null);
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    const beats = migrateProgress().filter((p) => /min elapsed/.test(p.label ?? ""));
+    assert.ok(beats.length >= 2, "a heartbeat before each poll");
+    assert.ok(beats.every((p) => p.numerator === undefined));
+    assert.equal(new Set(beats.map((p) => p.label)).size, beats.length, "each heartbeat label differs (minutes advance)");
+  });
+
+  test("a failing count never kills the migration", async () => {
+    const { box, migrateProgress } = blocked({ holds: 3, migrateScript: [{ status: "completed" }] });
     let n = 0;
-    g.box.deps.countSessions = async (db, which) => {
+    box.deps.countSessions = async (db, which) => {
       if (which === "v1") return 29;
       if (++n === 1) throw new Error("locked");
       return n <= 2 ? 12 : 29; // 29 = what verify must see once the migration is done
     };
-    const m = createUpgradeV2(g.box.deps);
+    const m = createUpgradeV2(box.deps);
     await m.boot();
-    await new Promise((r) => setTimeout(r, 20));
-    await g.tick();
-    await g.tick();
-    assert.ok(g.migrateProgress().some((p) => p.numerator === 12));
-    g.release();
     await runToIdle(m);
     assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
+    assert.ok(migrateProgress().some((p) => p.numerator === 12));
   });
 
-  test("slow failures (V2 up but busy) widen the start deadline; instant failures still trip it", async () => {
+  test("slow failures (V2 up but busy) widen the start deadline; instant failures still trip it after startTimeoutMs", async () => {
     const slow = makeBox();
     let calls = 0;
     slow.deps.v2.migrationStatus = async () => {
@@ -596,7 +621,9 @@ describe("migrate: time-based progress ticker + slow status requests", () => {
     assert.equal(m.status().state, "completed", JSON.stringify(m.status().error));
 
     const dead = makeBox();
+    let polls = 0;
     dead.deps.v2.migrationStatus = async () => {
+      polls++;
       throw new Error("ECONNREFUSED");
     };
     const m2 = createUpgradeV2(dead.deps);
@@ -604,11 +631,51 @@ describe("migrate: time-based progress ticker + slow status requests", () => {
     await runToIdle(m2);
     assert.equal(m2.status().state, "failed");
     assert.match(m2.status().error.message, /did not come up/);
+    assert.ok(polls >= 10 && polls <= 13, `dead opencode noticed after ~startTimeoutMs, polls=${polls}`);
+  });
+
+  test("no timer or fiber survives a finished, failed, or abandoned migrate step", async () => {
+    const baseline = timeouts();
+    // finished
+    const done = blocked({ holds: 2, migrateScript: [{ status: "completed" }] });
+    const m1 = createUpgradeV2(done.box.deps);
+    await m1.boot();
+    await runToIdle(m1);
+    assert.equal(m1.status().state, "completed", JSON.stringify(m1.status().error));
+    let n = done.box.events.length;
+    await done.box.deps.sleep(10 * 60_000);
+    await settle();
+    assert.equal(done.box.events.length, n, "nothing publishes after the run finished");
+
+    // failed
+    const failed = blocked({ holds: 2, migrateScript: [{ status: "error", error: { message: "boom" } }] });
+    const m2 = createUpgradeV2(failed.box.deps);
+    await m2.boot();
+    await runToIdle(m2);
+    assert.equal(m2.status().state, "failed");
+    n = failed.box.events.length;
+    await failed.box.deps.sleep(10 * 60_000);
+    await settle();
+    assert.equal(failed.box.events.length, n, "nothing publishes after the step failed");
+
+    // abandoned: the process "dies" inside the status request
+    const store = { data: null };
+    const crashed = makeBox({ store, crashOn: "v2.migrationStatus" });
+    await createUpgradeV2(crashed.deps).boot();
+    for (let i = 0; i < 200 && store.data?.steps?.migrate?.status !== "running"; i++) await new Promise((r) => setImmediate(r));
+    await settle();
+    n = crashed.events.length;
+    await crashed.deps.sleep(10 * 60_000);
+    await settle();
+    assert.equal(crashed.events.length, n, "an abandoned step publishes nothing on its own");
+    assert.equal(store.data.steps.migrate.status, "running");
+
+    assert.equal(timeouts(), baseline, "no pending timers left behind");
   });
 });
 
 describe("default deps: long-poll timeout + read-only session counts", () => {
-  test("migrationStatus waits up to 30 min (the migration runs inside the request); other calls keep 10 s", async () => {
+  test("migrationStatus is capped at 60 s (a hold becomes an alive signal); other calls keep 10 s", async () => {
     const timeouts = [];
     const real = AbortSignal.timeout;
     AbortSignal.timeout = (ms) => {
@@ -624,7 +691,7 @@ describe("default deps: long-poll timeout + read-only session counts", () => {
       });
       assert.deepEqual(await deps.v2.migrationStatus(), { status: "completed" });
       assert.deepEqual(await deps.v2.pluginIds(), []);
-      assert.deepEqual(timeouts, [30 * 60_000, 10_000]);
+      assert.deepEqual(timeouts, [60_000, 10_000]);
     } finally {
       AbortSignal.timeout = real;
     }
