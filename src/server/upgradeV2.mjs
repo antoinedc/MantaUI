@@ -265,22 +265,64 @@ export function createUpgradeV2(deps) {
 
     async migrate() {
       const db = state.mode === "copy" ? state.targetDb : null;
-      await deps.opencode.configure("v2", { db });
-      await deps.opencode.start();
+      const serviceChanged = await deps.opencode.configure("v2", { db });
+      // start() means RESTART everywhere, and restarting opencode discards an
+      // in-flight v1 migration (its progress lives only in the WAL until it
+      // commits). When the definition is unchanged and the service is already
+      // up, skip the restart entirely.
+      const alreadyUp = (await deps.opencode.isRunning?.()) === true;
+      if (serviceChanged || !alreadyUp) await deps.opencode.start();
       eta.firstNum = null;
       eta.firstAt = null;
       eta.seconds = null;
-      const startedAt = now();
+      let startedAt = now(); // start-deadline reference, reset when OpenCode proves alive
+      const migrateStartedAt = startedAt; // wall-clock anchor for the elapsed label, never reset
       let requiredSince = null;
       await setProgress("migrate", { label: "Starting OpenCode" });
+      // OpenCode 2.0.30 blocks /api/experimental/migration/v1 until its lazy v1 migration finishes
+      // (measured on a 34G archive: every request spans the whole migration), so per-item counts are
+      // unavailable while we wait. Each poll is capped at statusTimeoutMs (60s): the cap turns every
+      // long hold into a failed request — which is the "alive and busy" signal — and lets the loop
+      // publish elapsed-time labels and session counts between holds. NO side timer runs, so a
+      // machine abandoned mid-poll (the crash model in the tests) leaves nothing spinning. A
+      // delayed fetch failure (>=2s) resets the start deadline; only an instant failure
+      // (connection refused) means it never came up.
+      const elapsedLabel = (mins) =>
+        "Migrating conversation history (OpenCode V2) - " + mins + " min elapsed; very large archives take tens of minutes";
       for (;;) {
+        // Elapsed-time liveness label, published only while the blocked endpoint has surfaced no
+        // counts of its own (once counts exist they are the better display — numerator/denominator
+        // — and the status poll owns publishing them; nothing here may race it).
+        let cur = state.steps.migrate.progress ?? {};
+        const mins = Math.floor((now() - migrateStartedAt) / 60_000);
+        const label = elapsedLabel(mins);
+        if (!Number.isFinite(cur.numerator) && cur.label !== label) {
+          await setProgress("migrate", { label });
+        }
         let r;
+        const fetchStartedAt = now();
         try {
           r = await deps.v2.migrationStatus();
         } catch {
           r = null;
         }
         if (r === null) {
+          // A request that failed after a long hold means the endpoint was blocked behind the
+          // migration: OpenCode is up and busy — widen the start grace and surface real count
+          // progress from the read-only row counts (never below what is already surfaced).
+          if (now() - fetchStartedAt >= 2_000) {
+            startedAt = now();
+            try {
+              const v2Sessions = await deps.countSessions(state.targetDb, "v2");
+              const denom = Number.isFinite(state.v1Sessions) ? state.v1Sessions : null;
+              const curNum = Number.isFinite(cur.numerator) ? cur.numerator : -1;
+              if (v2Sessions !== null && denom > 0 && v2Sessions > curNum) {
+                await setProgress("migrate", { label, numerator: v2Sessions, denominator: denom });
+              }
+            } catch {
+              // counts are best-effort
+            }
+          }
           if (now() - startedAt > startTimeoutMs) {
             throw new UpgradeError("OpenCode did not come up after the upgrade started. Retry, or roll back.", { retryable: true });
           }
@@ -768,7 +810,14 @@ export function createDefaultDeps({
     hasClaudeLogin: async () => existsSync(join(home, ".claude", ".credentials.json")),
 
     v2: {
-      migrationStatus: () => v2Fetch("/api/experimental/migration/v1"),
+      migrationStatus: () =>
+      v2Fetch("/api/experimental/migration/v1", {
+        // 60s cap, not a long hold: V2's lazy v1 migration runs inside this request on huge DBs,
+        // so a hold can span the whole migration — aborting at the cap turns each hold into the
+        // loop's "alive and busy" delayed failure and lets elapsed/count progress publish
+        // between holds. The migration itself is unaffected (it is boot-triggered server-side).
+        timeoutMs: 60_000,
+      }),
       // Only ACTIVE plugins count: a plugin that failed to load still appears in the list.
       pluginIds: async () => {
         const r = await v2Fetch(`/api/plugin?location[directory]=${encodeURIComponent(home)}`);

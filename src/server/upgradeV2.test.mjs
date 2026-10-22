@@ -769,6 +769,65 @@ describe("runSelfUpdateTo (the real re-install call)", () => {
   });
 });
 
+describe("huge-archive migrate: the blocked status endpoint and the running service", () => {
+  test("service already up on an unchanged definition → migrate skips the restart; cutover still restarts", async () => {
+    const box = makeBox();
+    box.deps.opencode.isRunning = async () => true;
+    // makeBox's configure mock returns the recorded call (truthy). The real
+    // contract is "whether the definition changed": for a resumed run on the
+    // same unit it is false, which is what makes the skip branch reachable.
+    box.deps.opencode.configure = async (variant, args) => {
+      box.calls.push(["opencode.configure", variant, args?.db ?? null]);
+      return false;
+    };
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+    // restart() discards an in-flight v1 migration (progress lives only in the
+    // WAL until commit), so when the definition is unchanged and the service is
+    // up, migrate must NOT restart: exactly one start remains — cutover's.
+    const n = box.names();
+    assert.equal(n.filter((x) => x === "opencode.start").length, 1, `starts: ${n}`);
+    assert.ok(n.indexOf("opencode.configure") < n.indexOf("opencode.start"));
+  });
+
+  test("status endpoint blocked behind the migration → held polls are alive, ticker surfaces count progress, run completes", async () => {
+    const box = makeBox({ v1Sessions: 30, v2Sessions: 30 });
+    box.o.migrateScript = [new Error("aborted"), new Error("aborted"), new Error("aborted"), { status: "completed" }];
+    // the count visible while the sweep is mid-flight (10 of 30) vs after it commits
+    const baseCount = box.deps.countSessions;
+    let countedMidFlight = false;
+    box.deps.countSessions = async (db, which) => {
+      if (which === "v2" && !countedMidFlight) {
+        countedMidFlight = true;
+        return 10;
+      }
+      return baseCount(db, which);
+    };
+    // OpenCode 2.0.30 blocks /api/experimental/migration/v1 until its lazy v1
+    // migration finishes: hold every request 5s (any cap-poll aborts as a
+    // dropped connection, the shape the box produced on a 34G archive).
+    const base = box.deps.v2.migrationStatus;
+    box.deps.v2.migrationStatus = async () => {
+      await box.deps.sleep(5000);
+      return base();
+    };
+    const m = createUpgradeV2(box.deps);
+    await m.boot();
+    await runToIdle(m);
+    assert.equal(m.status().state, "completed");
+
+    // While the endpoint holds, the ticker publishes REAL count-based progress
+    // (read-only row counts), never below what was already surfaced.
+    const running = box.events.map((e) => e.payload).filter((p) => p.steps.find((x) => x.id === "migrate").status === "running");
+    const counted = running.map((p) => p.steps.find((x) => x.id === "migrate").progress).filter((p) => p?.numerator !== undefined);
+    assert.ok(counted.some((p) => p.numerator === 10 && p.denominator === 30), `no count progress while holding: ${counted}`.slice(0, 300));
+    const overalls = box.events.map((e) => e.payload.overall);
+    for (let i = 1; i < overalls.length; i++) assert.ok(overalls[i] >= overalls[i - 1], `overall regressed at ${i}: ${overalls}`);
+  });
+});
+
 describe("WebSocket gate in upgrade mode", () => {
   // The real wiring shape from index.mjs: an http server whose `upgrade` handler asks the gate first.
   async function wsServer(engine) {

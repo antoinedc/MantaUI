@@ -218,6 +218,20 @@ export function createOpencodeService({
       return false;
     },
 
+    /** Cheap liveness probe, for callers that must not bounce a running V2. */
+    async isRunning() {
+      if (supervisor === "systemd") {
+        const { stdout } = await exec("systemctl", ["--user", "is-active", "opencode-serve"]);
+        return stdout.trim() === "active";
+      }
+      if (supervisor === "launchd") {
+        const r = await exec("launchctl", ["print", `gui/${uid}/${OPENCODE_PLIST_LABEL}`]).catch(() => null);
+        return r ? /state = running|pid = \d/.test(r.stdout) : false;
+      }
+      // nohup has no cheap probe; a start() restart there is cheap anyway
+      return false;
+    },
+
     async stop() {
       if (supervisor === "systemd") return void (await exec("systemctl", ["--user", "stop", "opencode-serve"]));
       if (supervisor === "launchd") {
