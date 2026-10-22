@@ -6,7 +6,7 @@ import XCTest
 // upgrading" screen. Pure decisions only: decoding the box's K3 object
 // (`GET /api/upgrade` and `{kind:"upgrade"}` frames), the tolerance rules, the
 // 503 refusal test, the state transitions, and what the screen says. No view,
-// no HTTP, no box. Mirrors src/renderer/upgradeGate.test.ts on the desktop.
+// no HTTP, no box. Mirrors src/renderer/upgradeGateLogic.test.ts on the desktop.
 //
 // Foundation-only on purpose (UpgradeModels.swift is in the Linux SwiftPM
 // package), so these run under `./verify.sh` as well as on the Mac.

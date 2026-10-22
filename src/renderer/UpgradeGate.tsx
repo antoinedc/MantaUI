@@ -1,6 +1,6 @@
 // UpgradeGate.tsx — the blocking "upgrade your box" screen (OpenCode V2
 // cutover, slice C4). Pure presentation: `hooks/useUpgradeGate.ts` decides what
-// is true, `upgradeGate.ts` turns it into a `GateView`, this file paints it.
+// is true, `upgradeGateLogic.ts` turns it into a `GateView`, this file paints it.
 //
 // It covers the whole window and is NOT dismissible — no ×, no Escape, no
 // backdrop click. While a box migrates, every data route answers 503, so there

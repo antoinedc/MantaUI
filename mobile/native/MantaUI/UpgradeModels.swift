@@ -13,7 +13,7 @@ import Foundation
 // The iPhone shows this READ-ONLY. Retry and Roll back are desktop actions —
 // there is no button here and no API call that mutates anything.
 //
-// Mirrors src/renderer/upgradeGate.ts (the desktop's pure half). Keep the two
+// Mirrors src/renderer/upgradeGateLogic.ts (the desktop's pure half). Keep the two
 // in step: same tolerance, same wording for the shared facts.
 // ===========================================================================
 
