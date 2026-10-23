@@ -105,17 +105,30 @@ export function summarizeTranscript(messages) {
   return { lastUser, lastAssistant, todos, lastToolNames: recentTools.slice(-5) };
 }
 
-// Best-effort live status of a chat-mode peer. Blocked beats working beats idle.
-// "working" heuristic: the last message is an assistant turn with no completion
-// timestamp (still streaming). This is best-effort — the server keeps no live
-// per-session running flag (that lives in the renderer's SSE handler).
-export function classifyChatStatus(messages, permissions, questions) {
+// Live status of a chat-mode peer. Blocked beats working beats idle. `active`
+// is whether V2 reports the session as running (`GET /api/session/active`, read
+// once per list/inspect call): a boolean decides working vs idle outright. Only
+// when it is `undefined` (the active-set read failed) does this fall back to the
+// transcript heuristic: the last message is an assistant turn with no completion
+// timestamp (still streaming) — a guess, and wrong for a turn parked on a tool.
+export function classifyChatStatus(messages, permissions, questions, active) {
   if ((questions?.length || 0) > 0) return "blocked-question";
   if ((permissions?.length || 0) > 0) return "blocked-permission";
+  if (typeof active === "boolean") return active ? "working" : "idle";
   const msgs = messages || [];
   const last = msgs[msgs.length - 1];
   if (last?.info?.role === "assistant" && !last?.info?.time?.completed) return "working";
   return "idle";
+}
+
+// The set of running session ids, or `undefined` when it can't be read (the
+// caller then passes `active: undefined` and classifyChatStatus falls back).
+async function readActiveSet(deps) {
+  try {
+    return new Set(await (deps.listActiveSessionIds || oc.listActiveSessionIds)());
+  } catch {
+    return undefined;
+  }
 }
 
 // A short human description of what a chat peer is doing: prefer the in-progress
@@ -220,6 +233,8 @@ export async function listPeers({ sessionID, directory }, deps = {}) {
     };
   }
   const peerWins = selectPeers(loc.project, loc.self);
+  // ONE read of V2's running set per call, only when a chat peer needs it.
+  const active = peerWins.some((w) => w.opencodeSessionId) ? await readActiveSet(deps) : undefined;
 
   const peers = await Promise.all(
     peerWins.map(async (w) => {
@@ -245,7 +260,7 @@ export async function listPeers({ sessionID, directory }, deps = {}) {
         const sum = summarizeTranscript(msgs);
         return {
           ...base,
-          status: classifyChatStatus(msgs, perms, qs),
+          status: classifyChatStatus(msgs, perms, qs, active?.has(w.opencodeSessionId)),
           activity: describeChatActivity(sum),
         };
       }
@@ -307,10 +322,11 @@ export async function inspectPeer({ sessionID, directory, target }, deps = {}) {
   };
 
   if (w.opencodeSessionId) {
-    const [msgs, perms, qs] = await Promise.all([
+    const [msgs, perms, qs, active] = await Promise.all([
       oc.listMessages(w.opencodeSessionId).catch(() => []),
       oc.listPermissions(w.opencodeSessionId).catch(() => []),
       oc.listQuestions(w.opencodeSessionId).catch(() => []),
+      readActiveSet(deps),
     ]);
     const sum = summarizeTranscript(msgs);
     return {
@@ -318,7 +334,7 @@ export async function inspectPeer({ sessionID, directory, target }, deps = {}) {
       workspace: loc.project.tmuxSession,
       peer: {
         ...base,
-        status: classifyChatStatus(msgs, perms, qs),
+        status: classifyChatStatus(msgs, perms, qs, active?.has(w.opencodeSessionId)),
         todos: sum.todos,
         turns: recentTurns(msgs, 6),
       },

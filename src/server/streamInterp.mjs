@@ -27,7 +27,8 @@
 //   session.compaction.started/delta/ended   compaction; transcriptStale once the compaction's execution settles
 //   form.created (kind question) / .replied / .cancelled   questions + attention
 //   permission.asked / .replied          permissions + attention
-//   session.inbox.delivered              messageChanged (the user message now exists)
+//   session.inbox.delivered              messageChanged (the user message now exists) + inbox
+//   session.inbox.enqueued / .cancelled / .delivery.changed   inbox (the pending-user-message list, K3)
 // `session.usage.updated` is CUMULATIVE for the session, so context/cache come
 // from the per-step `session.step.ended` tokens instead (the size of the last
 // request, which is what the context bar means).
@@ -59,6 +60,7 @@ import {
   toolTitle,
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { randomUUID } from "node:crypto";
 
 // opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
 // its default 5-minute TTL — measured on the wire, see AppConfig.cacheTtl.
@@ -81,6 +83,70 @@ const MAX_TOOL_OUTPUT_CHARS = 20_000;
 // How often a running shell's output is read (V2 pushes no per-chunk event).
 export const SHELL_POLL_MS = 250;
 
+// ---------------------------------------------------------------------------
+// The pending-user-message list (K2/K3) — pure core.
+//
+// The interpreter owns the list; clients never build it from raw events. An
+// inbox item is surfaced only when it is a `user` item (synthetic / compaction /
+// move entries are never shown). Ops are the three things an inbox event can do.
+// ---------------------------------------------------------------------------
+
+/** `Session.Inbox.User` (GET) or an `enqueued` event's `data.item` → the K2 item, else null (not a user item). */
+export function inboxItemFromV2(raw, { id, created } = {}) {
+  if (!raw || typeof raw !== "object" || raw.type !== "user") return null;
+  const itemId = typeof id === "string" && id ? id : raw.id;
+  if (typeof itemId !== "string" || !itemId) return null;
+  const createdAt = Number.isFinite(raw.time?.created) ? raw.time.created : Number.isFinite(created) ? created : 0;
+  return {
+    id: itemId,
+    text: typeof raw.payload?.text === "string" ? raw.payload.text : "",
+    // V2's default when omitted is steer.
+    delivery: raw.delivery === "queue" ? "queue" : "steer",
+    createdAt,
+    attachmentCount: Array.isArray(raw.payload?.files) ? raw.payload.files.length : 0,
+  };
+}
+
+/** An inbox event → `{op:"add", item} | {op:"remove", id} | {op:"delivery", id, delivery}`, or null when it changes nothing we show. */
+export function inboxOpFromEvent(evt) {
+  const d = evt?.data ?? {};
+  const id = d.inboxID;
+  if (typeof id !== "string" || !id) return null;
+  switch (evt.type) {
+    case "session.inbox.enqueued": {
+      const item = inboxItemFromV2(d.item, { id, created: evt.created });
+      return item ? { op: "add", item } : null;
+    }
+    case "session.inbox.delivered":
+    case "session.inbox.cancelled":
+      return { op: "remove", id };
+    case "session.inbox.delivery.changed":
+      return d.delivery === "steer" || d.delivery === "queue" ? { op: "delivery", id, delivery: d.delivery } : null;
+    default:
+      return null;
+  }
+}
+
+/** Apply one op. Idempotent: an `add` of a present id, a `remove` of an absent one, and a repeated `delivery` are no-ops (`changed:false`). */
+export function applyInboxOp(items, op) {
+  switch (op.op) {
+    case "add":
+      return items.some((i) => i.id === op.item.id) ? { items, changed: false } : { items: [...items, op.item], changed: true };
+    case "remove":
+      return items.some((i) => i.id === op.id) ? { items: items.filter((i) => i.id !== op.id), changed: true } : { items, changed: false };
+    case "delivery": {
+      const cur = items.find((i) => i.id === op.id);
+      if (!cur || cur.delivery === op.delivery) return { items, changed: false };
+      return { items: items.map((i) => (i.id === op.id ? { ...i, delivery: op.delivery } : i)), changed: true };
+    }
+    default:
+      return { items, changed: false };
+  }
+}
+
+// How long a cancel waits for V2 to confirm (an event) after the DELETE returns.
+export const INBOX_CANCEL_WAIT_MS = 3000;
+
 function newSessionState() {
   return {
     tools: new Map(),          // toolID -> { idx, callID, v2Name, name, input, status, sent, truncated, ended, messageID, childSessionId?, shellID? }
@@ -99,6 +165,9 @@ function newSessionState() {
     retryActive: false,        // a non-null `retry` frame is outstanding
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
     compacted: false,          // a compaction ended; the transcript goes stale when its execution settles
+    // The pending-user-message list (K3). `known` only after a hydration; `rev`
+    // survives a reset to unknown so a re-hydrated snapshot always outranks the old one.
+    inbox: { known: false, items: [], rev: 0, hyd: null }, // hyd: { log: op[], valid: boolean, promise }
   };
 }
 
@@ -134,6 +203,11 @@ export function createStreamInterpreter({
     return h;
   },
   clearTimer = (h) => clearTimeout(h),
+  // Reads a session's raw V2 inbox (`oc.listInbox`); null disables the `inbox`
+  // frame (no hydration is possible, so the list stays unknown).
+  listInbox = null,
+  // Minted once per manta-server process: a restarted server is "newer" to a client.
+  epoch = randomUUID(),
 }) {
   const sessions = new Map();
   const childParent = new Map(); // child session id -> parent session id
@@ -442,6 +516,155 @@ export function createStreamInterpreter({
     noteMessageChanged(sid, d.assistantMessageID ?? tool.messageID);
   }
 
+  // ---- the pending-user-message list (K3) ---------------------------------------
+  //
+  // Server algorithm: a session's list is `unknown` or `known`. It becomes known
+  // ONLY by hydration (`listInbox`). While a hydration is in flight, inbox events
+  // are logged in arrival order; when the GET returns, the log is replayed over
+  // it (idempotently) and the result is emitted with rev+1. A disconnect
+  // invalidates an in-flight hydration (the reconnect resync re-hydrates).
+  const inboxSnapshot = (st) => ({ epoch, rev: st.inbox.rev, items: st.inbox.items.map((i) => ({ ...i })) });
+  function emitInbox(sid, st) {
+    emit(sid, "inbox", inboxSnapshot(st));
+  }
+
+  // Authoritative-evidence waiters for the cancel outcome: the first
+  // `cancelled` / `delivered` event for an id decides it.
+  const outcomeWaiters = new Map(); // `${sid}\u0000${id}` -> Set<{ result, wake }>
+  function noteInboxOutcome(sid, id, type) {
+    const set = outcomeWaiters.get(`${sid}\u0000${id}`);
+    if (!set) return;
+    const result = type === "session.inbox.cancelled" ? "cancelled" : "delivered";
+    for (const w of set) {
+      if (w.result) continue;
+      w.result = result;
+      w.wake?.();
+    }
+  }
+
+  function startInboxHydration(sid, st) {
+    const hyd = { log: [], valid: true, promise: null };
+    st.inbox.hyd = hyd;
+    hyd.promise = (async () => {
+      let raw;
+      try {
+        raw = await listInbox(sid);
+      } catch (e) {
+        if (st.inbox.hyd === hyd) st.inbox.hyd = null;
+        throw e;
+      }
+      if (!hyd.valid || st.inbox.hyd !== hyd || sessions.get(sid) !== st) {
+        throw new Error("inbox hydration invalidated (event stream reconnected or session removed)");
+      }
+      let items = (Array.isArray(raw) ? raw : []).map((r) => inboxItemFromV2(r)).filter(Boolean);
+      for (const op of hyd.log) items = applyInboxOp(items, op).items;
+      st.inbox.items = items;
+      st.inbox.known = true;
+      st.inbox.hyd = null;
+      st.inbox.rev++;
+      emitInbox(sid, st);
+    })();
+    hyd.promise.catch(() => {}); // an event-triggered hydration has no awaiter; a failure just leaves the list unknown
+    return hyd.promise;
+  }
+
+  // The shared hydration promise for a session (starting one if needed).
+  function hydrateInbox(sid) {
+    if (typeof listInbox !== "function") return Promise.reject(new Error("inbox is not available on this box"));
+    const st = state(sid);
+    if (st.inbox.known) return Promise.resolve();
+    return st.inbox.hyd?.promise ?? startInboxHydration(sid, st);
+  }
+
+  function onInboxEvent(sid, st, evt) {
+    const id = evt.data?.inboxID;
+    if (typeof id === "string" && (evt.type === "session.inbox.cancelled" || evt.type === "session.inbox.delivered")) {
+      noteInboxOutcome(sid, id, evt.type);
+    }
+    const op = inboxOpFromEvent(evt);
+    if (!op) return;
+    const ib = st.inbox;
+    if (ib.known) {
+      const r = applyInboxOp(ib.items, op);
+      if (!r.changed) return;
+      ib.items = r.items;
+      ib.rev++;
+      emitInbox(sid, st);
+      return;
+    }
+    if (typeof listInbox !== "function") return;
+    if (!ib.hyd) startInboxHydration(sid, st);
+    ib.hyd.log.push(op);
+  }
+
+  async function getInbox(sid) {
+    await hydrateInbox(sid);
+    return inboxSnapshot(state(sid));
+  }
+
+  // Cancel one pending item and decide the outcome from authoritative evidence
+  // ONLY. V2's DELETE is a 204 no-op for an item that is no longer pending, so
+  // "absent afterwards" proves nothing: `cancelled` iff we observe
+  // `session.inbox.cancelled` for the id; `delivered` iff we observe
+  // `.delivered` or the message exists; otherwise `unknown`.
+  async function cancelInbox(sid, id, { deleteItem, getMessage, waitMs = INBOX_CANCEL_WAIT_MS }) {
+    const snap = await getInbox(sid);
+    const before = snap.items.find((i) => i.id === id);
+    const key = `${sid}\u0000${id}`;
+    const w = { result: null, wake: null };
+    if (!outcomeWaiters.has(key)) outcomeWaiters.set(key, new Set());
+    outcomeWaiters.get(key).add(w);
+    try {
+      await deleteItem();
+      if (!w.result) {
+        let found = null;
+        try {
+          found = await getMessage();
+        } catch {
+          /* not proof either way */
+        }
+        if (!w.result && found) w.result = "delivered";
+      }
+      if (!w.result && waitMs > 0) {
+        await new Promise((resolve) => {
+          const timer = setTimer(resolve, waitMs);
+          w.wake = () => {
+            clearTimer(timer);
+            resolve();
+          };
+          if (w.result) w.wake();
+        });
+      }
+    } finally {
+      const set = outcomeWaiters.get(key);
+      set?.delete(w);
+      if (set?.size === 0) outcomeWaiters.delete(key);
+    }
+    if (w.result === "cancelled") return { outcome: "cancelled", ...(before ? { item: before } : {}) };
+    return { outcome: w.result ?? "unknown" };
+  }
+
+  // The event stream dropped: an in-flight hydration may have missed events.
+  // Discard it — the session stays unknown and the reconnect resync re-hydrates.
+  function inboxDisconnected() {
+    for (const st of sessions.values()) {
+      if (!st.inbox.hyd) continue;
+      st.inbox.hyd.valid = false;
+      st.inbox.hyd = null;
+    }
+  }
+
+  // Back to `unknown` (rev kept, so the next snapshot outranks the old one) and re-read.
+  function resyncInbox(sid) {
+    const st = sessions.get(sid);
+    if (!st) return Promise.resolve();
+    if (st.inbox.hyd) st.inbox.hyd.valid = false;
+    st.inbox.hyd = null;
+    st.inbox.known = false;
+    st.inbox.items = [];
+    return hydrateInbox(sid).catch(() => {});
+  }
+
   function interpret(evt) {
     if (!evt || typeof evt !== "object" || typeof evt.type !== "string") return;
     const d = evt.data && typeof evt.data === "object" ? evt.data : {};
@@ -522,7 +745,14 @@ export function createStreamInterpreter({
       }
       case "session.inbox.delivered": {
         // The user's message id IS the inbox id; it joins the timeline now.
+        onInboxEvent(sid, st, evt);
         noteMessageChanged(sid, d.inboxID);
+        return;
+      }
+      case "session.inbox.enqueued":
+      case "session.inbox.cancelled":
+      case "session.inbox.delivery.changed": {
+        onInboxEvent(sid, st, evt);
         return;
       }
       case "session.text.started":
@@ -752,6 +982,17 @@ export function createStreamInterpreter({
     resync,
     flushPending,
     dispose,
+    // The K3 pending-user-message list.
+    epoch,
+    getInbox,
+    cancelInbox,
+    hydrateInbox,
+    resyncInbox,
+    inboxDisconnected,
+    // A correlated slash-command user message (K6) — published as `commandExecuted`.
+    emitCommandExecuted(sid, { messageID, name, arguments: args }) {
+      emit(sid, "commandExecuted", { messageID, name, arguments: args ?? "" });
+    },
     getState: (sid) => sessions.get(sid),
     knownSessionIds: () => [...sessions.keys()],
     // Replay current edge-only state for the bus's connect-time snapshot

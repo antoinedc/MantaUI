@@ -13,7 +13,10 @@ import {
   recentTurns,
   formatPeerMessage,
   sendPeerMessage,
+  listPeers,
+  inspectPeer,
 } from "./peers.mjs";
+import { _setOcTransport } from "./opencode.mjs";
 
 // ---------------------------------------------------------------------------
 // resolveWorkspace
@@ -148,6 +151,60 @@ test("classifyChatStatus reports working when last assistant turn is incomplete"
 test("classifyChatStatus reports idle when last assistant turn completed", () => {
   const msgs = [{ info: { role: "assistant", time: { created: 1, completed: 2 } } }];
   assert.equal(classifyChatStatus(msgs, [], []), "idle");
+});
+
+test("classifyChatStatus: a boolean `active` (V2's running set) decides working vs idle, whatever the transcript says", () => {
+  const streaming = [{ info: { role: "assistant", time: { created: 1 } } }];
+  const done = [{ info: { role: "assistant", time: { created: 1, completed: 2 } } }];
+  assert.equal(classifyChatStatus(done, [], [], true), "working", "a turn parked on a tool has a finished-looking tail");
+  assert.equal(classifyChatStatus(streaming, [], [], false), "idle", "an interrupted turn leaves an incomplete tail");
+  assert.equal(classifyChatStatus(streaming, [], [], undefined), "working", "unknown active set → the heuristic");
+  assert.equal(classifyChatStatus(done, [], [], undefined), "idle");
+});
+
+test("classifyChatStatus: blocked states still win over `active`", () => {
+  assert.equal(classifyChatStatus([], [], [{ id: "q" }], false), "blocked-question");
+  assert.equal(classifyChatStatus([], [{ id: "p" }], [], true), "blocked-permission");
+});
+
+// listPeers / inspectPeer read V2's running set ONCE per call (injected dep).
+const LIVE_PROJECTS = async () => [
+  {
+    tmuxSession: "ws",
+    windows: [
+      { index: 0, name: "me", opencodeSessionId: "ses_me", paneCurrentPath: "/nonexistent/me" },
+      { index: 1, name: "p1", opencodeSessionId: "ses_p1", paneCurrentPath: "/nonexistent/p1" },
+      { index: 2, name: "p2", opencodeSessionId: "ses_p2", paneCurrentPath: "/nonexistent/p2" },
+    ],
+  },
+];
+test("listPeers: one active-set read per call; peers are working/idle from it", async () => {
+  _setOcTransport(async () => new Response("unreachable", { status: 599 })); // no transcript, no permissions
+  try {
+    let reads = 0;
+    const out = await listPeers({ sessionID: "ses_me" }, { listProjects: LIVE_PROJECTS, listActiveSessionIds: async () => (reads++, ["ses_p1"]) });
+    assert.equal(reads, 1);
+    assert.deepEqual(out.peers.map((p) => [p.name, p.status]), [["p1", "working"], ["p2", "idle"]]);
+  } finally {
+    _setOcTransport(null);
+  }
+});
+
+test("listPeers / inspectPeer: a failed active-set read falls back instead of failing the call", async () => {
+  _setOcTransport(async () => new Response("unreachable", { status: 599 }));
+  try {
+    const deps = { listProjects: LIVE_PROJECTS, listActiveSessionIds: async () => { throw new Error("down"); } };
+    const list = await listPeers({ sessionID: "ses_me" }, deps);
+    assert.equal(list.ok, true);
+    assert.deepEqual(list.peers.map((p) => p.status), ["idle", "idle"], "no transcript → the heuristic says idle");
+    const one = await inspectPeer({ sessionID: "ses_me", target: "p2" }, deps);
+    assert.equal(one.ok, true);
+    assert.equal(one.peer.status, "idle");
+    const busy = await inspectPeer({ sessionID: "ses_me", target: "p1" }, { ...deps, listActiveSessionIds: async () => ["ses_p1"] });
+    assert.equal(busy.peer.status, "working");
+  } finally {
+    _setOcTransport(null);
+  }
 });
 
 // ---------------------------------------------------------------------------

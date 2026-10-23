@@ -92,6 +92,7 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
 import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError } from "../shared/streamInterpretation.mjs";
@@ -329,7 +330,25 @@ const streamInterp = createStreamInterpreter({
   readCacheTtl: () => readProvidersCacheTtl(),
   // V2 pushes no per-chunk shell event: a running shell is tailed by cursor.
   fetchShellOutput: (a) => oc.readShellOutput(a),
+  // K3: the pending-user-message list is hydrated from V2's inbox.
+  listInbox: (sid) => oc.listInbox(sid),
 });
+// Slash-command origin (spec 2026-10-23 §3): the durable messageID → command
+// record + the correlator that fills it. runCommand (opencode.mjs) opens a
+// window per command POST, the pump below feeds it every raw
+// `session.inbox.enqueued`, and a successful tag is announced as a
+// `commandExecuted` frame by the interpreter.
+const COMMAND_ORIGINS_PATH = statePath("command-origins.json");
+const commandCorrelator = createCommandCorrelator({
+  origins: createOriginStore({
+    load: () => readJsonSync(COMMAND_ORIGINS_PATH, {}),
+    save: (o) => writeJsonAtomic(COMMAND_ORIGINS_PATH, JSON.stringify(o)),
+    log: (...a) => console.warn(...a),
+  }),
+  log: (...a) => console.log(...a),
+  onTag: (t) => streamInterp.emitCommandExecuted(t.sessionId, t),
+});
+oc.setCommandCorrelator(commandCorrelator);
 // BET-913 + BET-916 + BET-922: when a client (re)connects mid-state, replay the
 // current edge-only state so frames that only fire on an edge aren't lost —
 // the COMPLETE running picture as one authoritative `runningSet` frame (the
@@ -1882,6 +1901,7 @@ rpcHandlers = buildHandlers({
   oc,
   pty,
   bus,
+  streamInterp,
   accountsManager,
   local,
   syncState,
@@ -3309,6 +3329,8 @@ async function resyncAfterReconnect() {
       permissions,
       questions,
     });
+    // The pending-message list is only known by re-reading it (K3).
+    await streamInterp.resyncInbox(sid);
   }
 }
 
@@ -3323,8 +3345,19 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   // stream/endpoint). Consumers demux by `kind:"stream"`. `permission.asked`
   // is the one exception: it is interpreted inside the trust-mode branch of
   // observeLifecycleEvent, only when the user actually has to act on it.
+  // Command correlation reads the RAW enqueue, before the interpreter (§3).
+  if (raw?.type === "session.inbox.enqueued") {
+    try {
+      commandCorrelator.observeEnqueued(raw.data?.sessionID, raw.data?.inboxID, raw.data?.item?.type);
+    } catch (e) {
+      console.warn("[command-origins] observeEnqueued failed:", e?.message ?? e);
+    }
+  }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
   for (const evt of lifecycleAdapter.adapt(raw)) {
+    // "Idle" proves every earlier submission has been enqueued (command correlation).
+    if (evt.type === "session.idle" && evt.properties?.sessionID) commandCorrelator.noteIdle(evt.properties.sessionID);
+    if (evt.type === "session.deleted" && evt.properties?.sessionID) commandCorrelator.forgetSession(evt.properties.sessionID);
     try {
       observeLifecycleEvent(evt, raw);
     } catch (e) {
@@ -3333,6 +3366,12 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   }
   if (raw?.type !== "permission.asked") bus.publish({ kind: "opencode", payload: raw });
 }, {
+  // Enqueues may have been missed: open command windows can no longer prove
+  // anything, and an in-flight inbox hydration is stale.
+  onDisconnect: () => {
+    commandCorrelator.noteDisconnect();
+    streamInterp.inboxDisconnected();
+  },
   onConnect: ({ reconnect }) => {
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
   },

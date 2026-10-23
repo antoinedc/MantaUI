@@ -7,8 +7,8 @@
 //   - question.asked     → "Question"          (blocking; always notify)
 //   - session.error      → "Error"             (always notify, EXCEPT a
 //                          MessageAbortedError, which is an intentional abort
-//                          — user abort or mid-flight queued-message drain —
-//                          and must NOT push)
+//                          — the user's Stop or an internal interrupt — and
+//                          must NOT push)
 //   - session.idle       → "Claude is done"    (only if the session was busy
 //                          AND the user isn't actively viewing that session)
 //
@@ -415,18 +415,13 @@ export function classifyPushEvent(evt, ctx) {
       return out;
     }
     case "session.error": {
-      // A MessageAbortedError is NOT a failure — it's the signal opencode
-      // emits when the running turn was intentionally aborted. manta aborts on
-      // purpose in two cases: an explicit user abort, and the mid-flight
-      // queued-message DRAIN (user submits while running → manta aborts the
-      // in-flight turn and resubmits the queued prompt transparently; see
-      // ChatPanel `maybeDrainQueuedPrompt` + `isDrainAbortError`). The
-      // renderer swallows this error's banner client-side, but that
-      // suppression is renderer-only and never reaches the server push path,
-      // so without this check every drain fired a spurious "Error — The turn
-      // failed." push. Neither abort flavour should ever notify, so we drop
-      // the push for ANY MessageAbortedError. opencode nests the class name at
-      // properties.error.name (the renderer reads the same field).
+      // A MessageAbortedError is NOT a failure — it's what the lifecycle
+      // adapter emits when V2 reports an interrupted turn
+      // (`session.execution.interrupted`): the user's Stop, or an internal
+      // interrupt (seat retry, delegate pause, usage stop, CTO). Neither flavour
+      // should ever notify, and the name is the server's only signal, so the
+      // push is dropped for ANY MessageAbortedError. The error name sits at
+      // properties.error.name.
       const errName =
         props.error && typeof props.error === "object"
           ? props.error.name

@@ -37,11 +37,8 @@ export function enrichProviderError(
   retryAfterMs?: number,
 ): Record<string, any>;
 
+/** DEAD — no live caller (V2 deltas are phrase-level). Kept only for the renderer's chatUtils re-export. */
 export function findFlushBoundary(buffer: string): number;
-
-/** Max time a chunk may be withheld before the caller flushes at the latest
- *  safe cut (BET-649). */
-export const FLUSH_MAX_AGE_MS: number;
 
 /** Whether `prefix` ends outside every markdown construct that would render
  *  wrong if split there (inline code, link, bold). Conservative. */

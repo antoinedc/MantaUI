@@ -233,45 +233,14 @@ export function enrichProviderError(error, retryAfterMs) {
   };
 }
 
-// ===== Streamed-text flush boundaries =====
+// ===== Streamed-text flush boundaries — DEAD CODE =====
 //
-// opencode streams text/reasoning content via `message.part.delta` events
-// that arrive ~character-by-character (one or a few tokens per frame).
-// The naive policy of "apply every delta immediately" produces visible
-// jitter on partially-formed markdown: a bullet appears before its content;
-// a code fence opens and renders as inline-code briefly before closing; the
-// cursor at the end of a half-finished line flickers as Prism re-tokenizes a
-// growing code block on every keystroke.
-//
-// Instead, buffer deltas in-memory and FLUSH at natural section boundaries:
-// paragraph breaks (`\n\n`) outside a code block, the newline that follows a
-// closing ``` fence, and — since BET-649 — the end of a SENTENCE. Plus a
-// max-age fallback (`FLUSH_MAX_AGE_MS`, handled at the caller) so a single
-// long paragraph doesn't stall indefinitely.
-//
-// WHY SENTENCES. Paragraph-only flushing is why streamed prose lands in slabs:
-// a whole paragraph is withheld and then committed at once, so the text does
-// not arrive, it appears. Cutting at sentence ends makes the same content
-// arrive in roughly sentence-sized pieces, which is the single biggest change
-// to how streaming FEELS. It costs more commits per turn (more re-renders,
-// more scroll work), which is why the max age came down rather than to zero —
-// per-character rendering was never the goal.
-//
-// A sentence end is only a boundary when the prefix is SAFE TO CUT — see
-// `isSafeCut`. Splitting inside an inline code span, a link, or a `**bold**`
-// run renders the half-finished markup literally for a frame, which is the
-// exact jitter this buffer exists to prevent. Code blocks are unchanged: they
-// still flush whole, never mid-fence.
-//
-// `findFlushBoundary(buffer)` returns the byte index AFTER which the buffer
-// is safe to flush, or -1 if no boundary is present yet. The caller slices
-// `buffer.slice(0, idx)` and keeps the remainder buffered for the next round.
-//
-// Maximum time a buffered chunk may be withheld before the caller flushes it
-// at the latest safe cut. Was 250ms when only paragraph breaks could flush;
-// with sentence boundaries carrying most of the traffic this is the fallback
-// for a long unpunctuated run, so it can be tighter without thrashing.
-export const FLUSH_MAX_AGE_MS = 120;
+// V2 deltas are phrase-level already and are forwarded as they arrive
+// (streamInterp.mjs), so nothing buffers deltas any more: `findFlushBoundary`
+// and its helper `isSafeCut` have no live caller, and `FLUSH_MAX_AGE_MS` is gone.
+// They stay ONLY because `src/renderer/chatUtils.ts` still re-exports
+// `findFlushBoundary` (the renderer slice removes that line); delete both
+// functions, their `.d.mts` declarations and their tests together with it.
 
 /**
  * Is `prefix` safe to cut at — i.e. does it end outside every markdown
