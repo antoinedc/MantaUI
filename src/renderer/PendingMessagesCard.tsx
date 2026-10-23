@@ -70,14 +70,14 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
         </button>
       </div>
       <div>
-        {items.map((item) => {
+        {items.map((item, idx) => {
           const busy = busyIds.has(item.id);
           const note = inboxRowNote(item, running);
           const now = item.delivery === "steer";
           return (
             <div
               key={item.id}
-              className="flex items-center gap-2 px-3 py-1 border-b border-border-subtle last:border-b-0"
+              className={`flex items-center gap-2 px-3 py-1${idx > 0 ? " border-t border-border-subtle" : ""}`}
               data-testid="inbox-row"
               data-delivery={item.delivery}
             >
