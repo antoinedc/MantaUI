@@ -19,8 +19,6 @@ import {
   countUserTurns,
   describeTruncation,
   extractSubagentInfo,
-  findFlushBoundary,
-  isSafeCut,
   hydrateQuestion,
   isAssistantTurnComplete,
   isAssistantTurnInProgress,
@@ -233,156 +231,6 @@ describe("selectLatestTokenUsage", () => {
     if (!bareFound) throw new Error("expected a billed assistant message");
     expect(bareFound.providerID).toBeNull();
     expect(bareFound.modelID).toBeNull();
-  });
-});
-
-describe("findFlushBoundary", () => {
-  it("returns -1 for empty / no-boundary input", () => {
-    expect(findFlushBoundary("")).toBe(-1);
-    expect(findFlushBoundary("hello world")).toBe(-1);
-    expect(findFlushBoundary("single line\n")).toBe(-1);
-  });
-
-  it("returns position after \\n\\n for a paragraph break", () => {
-    const buf = "first paragraph\n\nsecond";
-    const idx = findFlushBoundary(buf);
-    // Should slice the "first paragraph\n\n" prefix (length 17).
-    expect(idx).toBe("first paragraph\n\n".length);
-    expect(buf.slice(0, idx)).toBe("first paragraph\n\n");
-    expect(buf.slice(idx)).toBe("second");
-  });
-
-  it("returns the LAST boundary when multiple paragraph breaks exist", () => {
-    const buf = "one\n\ntwo\n\nthree";
-    const idx = findFlushBoundary(buf);
-    // Should flush through "one\n\ntwo\n\n".
-    expect(idx).toBe("one\n\ntwo\n\n".length);
-    expect(buf.slice(0, idx)).toBe("one\n\ntwo\n\n");
-    expect(buf.slice(idx)).toBe("three");
-  });
-
-  it("does NOT flush \\n\\n inside an open code block", () => {
-    // The blank line is inside an open ```fence, so we mustn't flush
-    // (the user wants the whole code block at once, and rendering
-    // half a fence as inline code is the jitter we're fixing).
-    const buf = "intro\n\n```\nfunction foo() {\n\n  return 1;";
-    const idx = findFlushBoundary(buf);
-    // Only the "intro\n\n" prefix is safe to flush.
-    expect(idx).toBe("intro\n\n".length);
-  });
-
-  it("flushes through the closing ``` fence + trailing newline", () => {
-    const buf = "intro\n\n```\nconst x = 1;\n```\nafter";
-    const idx = findFlushBoundary(buf);
-    // Should flush through the entire code block AND the newline after
-    // the closing fence: "intro\n\n```\nconst x = 1;\n```\n".
-    const expected = "intro\n\n```\nconst x = 1;\n```\n";
-    expect(idx).toBe(expected.length);
-    expect(buf.slice(0, idx)).toBe(expected);
-    expect(buf.slice(idx)).toBe("after");
-  });
-
-  it("does NOT flush a closing ``` without its trailing newline yet", () => {
-    // The closing fence has arrived but no newline followed yet —
-    // we don't know if the next char is part of the same line (it
-    // shouldn't be, but defensive).
-    const buf = "intro\n\n```\nconst x = 1;\n```";
-    const idx = findFlushBoundary(buf);
-    // Only the leading paragraph is flushable.
-    expect(idx).toBe("intro\n\n".length);
-  });
-
-  it("treats ``` as a toggle: open / close / open / close", () => {
-    // Two complete code blocks with intervening paragraph.
-    const buf = "```\nA\n```\n\nbetween\n\n```\nB\n```\nend";
-    const idx = findFlushBoundary(buf);
-    // Should flush through the SECOND closing fence's trailing newline:
-    // "```\nA\n```\n\nbetween\n\n```\nB\n```\n".
-    const expected = "```\nA\n```\n\nbetween\n\n```\nB\n```\n";
-    expect(idx).toBe(expected.length);
-    expect(buf.slice(idx)).toBe("end");
-  });
-
-  it("coalesces consecutive newlines past \\n\\n", () => {
-    // "\n\n\n" (three newlines) should flush through all three.
-    const buf = "para\n\n\nnext";
-    const idx = findFlushBoundary(buf);
-    expect(buf.slice(0, idx)).toBe("para\n\n\n");
-    expect(buf.slice(idx)).toBe("next");
-  });
-
-  // ===== sentence boundaries (BET-649) =====
-  //
-  // The change that makes streamed prose arrive rather than appear: a
-  // paragraph-only policy withholds a whole paragraph and commits it at once.
-
-  it("flushes at a sentence end followed by a space", () => {
-    const buf = "First sentence. Second one is still arriving";
-    const idx = findFlushBoundary(buf);
-    expect(buf.slice(0, idx)).toBe("First sentence. ");
-    expect(buf.slice(idx)).toBe("Second one is still arriving");
-  });
-
-  it("takes the LAST sentence end when several have arrived", () => {
-    const buf = "One. Two. Three is partial";
-    const idx = findFlushBoundary(buf);
-    expect(buf.slice(0, idx)).toBe("One. Two. ");
-  });
-
-  it("treats ! and ? as sentence ends, and carries a closing quote with them", () => {
-    expect(findFlushBoundary("Stop! Now")).toBe("Stop! ".length);
-    expect(findFlushBoundary("Really? Yes")).toBe("Really? ".length);
-    expect(findFlushBoundary('He said "go." Then left')).toBe('He said "go." '.length);
-  });
-
-  it("does NOT flush a trailing '.' with no whitespace after it yet", () => {
-    // Could be mid-number ("1.5") or mid-abbreviation — the next delta decides.
-    expect(findFlushBoundary("version 1.")).toBe(-1);
-    expect(findFlushBoundary("version 1.5 is out")).toBe(-1);
-  });
-
-  it("does NOT flush a sentence end inside a code block", () => {
-    const buf = "intro\n\n```\nconst x = 1. Done\nmore";
-    // Only the paragraph before the fence is flushable.
-    expect(findFlushBoundary(buf)).toBe("intro\n\n".length);
-  });
-
-  it("does NOT cut inside an inline code span", () => {
-    // Splitting here would render "`see the file." as a literal backtick.
-    const buf = "run `a.b. c` next";
-    expect(findFlushBoundary(buf)).toBe(-1);
-  });
-
-  it("does NOT cut inside a link or a bold run", () => {
-    expect(findFlushBoundary("see [the docs. here](http://x) next")).toBe(-1);
-    expect(findFlushBoundary("**bold. text** after")).toBe(-1);
-  });
-
-  it("cuts once the construct closes", () => {
-    const buf = "run `a.b` first. Then more";
-    const idx = findFlushBoundary(buf);
-    expect(buf.slice(0, idx)).toBe("run `a.b` first. ");
-  });
-
-  it("handles ``` at the very start of the buffer", () => {
-    // Open code block at position 0.
-    const buf = "```js\nconst x = 1;";
-    expect(findFlushBoundary(buf)).toBe(-1);
-  });
-
-  it("handles ``` immediately followed by ``` (empty code block)", () => {
-    const buf = "```\n```\nafter";
-    const idx = findFlushBoundary(buf);
-    // Should flush through the closing fence's newline.
-    const expected = "```\n```\n";
-    expect(idx).toBe(expected.length);
-  });
-
-  it("ignores stray single backticks (inline code chars)", () => {
-    // Single ` is not a fence start; should not toggle the in-code flag.
-    const buf = "Use `foo` and `bar`\n\nafter";
-    const idx = findFlushBoundary(buf);
-    expect(buf.slice(0, idx)).toBe("Use `foo` and `bar`\n\n");
   });
 });
 
@@ -2050,26 +1898,6 @@ describe("resolveContextLimit", () => {
   });
 });
 
-
-describe("isSafeCut", () => {
-  it("accepts a prefix that closes every construct it opened", () => {
-    expect(isSafeCut("plain text. ")).toBe(true);
-    expect(isSafeCut("with `code` in it. ")).toBe(true);
-    expect(isSafeCut("**bold** and [link](url). ")).toBe(true);
-  });
-
-  it("rejects an unclosed inline code span, link or bold run", () => {
-    expect(isSafeCut("open `code. ")).toBe(false);
-    expect(isSafeCut("see [text. ")).toBe(false);
-    expect(isSafeCut("see [text](http://x. ")).toBe(false);
-    expect(isSafeCut("**bold. ")).toBe(false);
-  });
-
-  it("ignores underscores — they are constant in paths and identifiers", () => {
-    // Counting them would block almost every cut.
-    expect(isSafeCut("see src/foo_bar.ts and _baz. ")).toBe(true);
-  });
-});
 
 describe("humanizeProviderError", () => {
   const screenshot =

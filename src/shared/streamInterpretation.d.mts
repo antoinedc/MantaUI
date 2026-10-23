@@ -37,13 +37,6 @@ export function enrichProviderError(
   retryAfterMs?: number,
 ): Record<string, any>;
 
-/** DEAD — no live caller (V2 deltas are phrase-level). Kept only for the renderer's chatUtils re-export. */
-export function findFlushBoundary(buffer: string): number;
-
-/** Whether `prefix` ends outside every markdown construct that would render
- *  wrong if split there (inline code, link, bold). Conservative. */
-export function isSafeCut(prefix: string): boolean;
-
 export type PendingDelta = {
   messageID: string;
   field: string;
