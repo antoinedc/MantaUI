@@ -6,7 +6,7 @@ import {
   deriveName,
   resolveOwner,
   resolveForgeOwner,
-  startJob,
+  startJob as startJobEngine,
   observeEvent,
   finishJob,
   listJobs,
@@ -30,6 +30,11 @@ import {
   isToolStepBoundary,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
+
+// This file covers the LEGACY engine path — the one a CTO-dispatched job (actor
+// "cto") keeps until C2. Every other job runs on V2 (delegateV2Jobs.test.mjs), so
+// these inputs say who they are.
+const startJob = (input, deps) => startJobEngine({ actor: "cto", ...input }, deps);
 
 // Shared routing-test fixtures (BET-1535 Block 3: one factory, no per-file
 // re-derivations for the duplication gate to flag).
@@ -2205,6 +2210,7 @@ function approvalInput(over = {}) {
     parentSessionID: "ses_p",
     parentDirectory: "/proj",
     tools: [{ permission: "bash", pattern: "pytest *" }],
+    actor: "cto",
     ...over,
   };
 }
@@ -2265,6 +2271,7 @@ test("§A4: a job omitting bash receives the catch-all deny at the session-creat
     parentSessionID: "ses_p",
     parentDirectory: "/proj",
     tools: [{ permission: "write", pattern: "**/*.md" }], // NO bash-allow
+    actor: "cto",
     trustMode: true, // skip the card; we are testing the ruleset, not approval
   });
   assert.equal(res.ok, true);

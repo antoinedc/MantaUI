@@ -129,7 +129,7 @@ test("concurrent delegate starts never exceed MAX_RUNNING_JOBS", async () => {
 
   const N = del.MAX_RUNNING_JOBS + 3;
   const attempt = (i) =>
-    del.startJob({ prompt: `job ${i}`, parentSessionID: "PARENT", parentDirectory: "/repo" }, deps);
+    del.startJob({ prompt: `job ${i}`, parentSessionID: "PARENT", parentDirectory: "/repo", actor: "cto" }, deps);
   const results = await Promise.all(Array.from({ length: N }, (_, i) => attempt(i)));
 
   const okCount = results.filter((r) => r.ok).length;

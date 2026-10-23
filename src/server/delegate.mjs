@@ -814,6 +814,70 @@ export function chooseSubagentModel({
   return model;
 }
 
+// The two refusals every launch checks before it creates anything: nesting (no
+// background job from inside a background job's session) and the box-wide cap.
+function launchRefusal(jobs, parentSessionID) {
+  if (jobs.find((j) => j.childSessionID === parentSessionID && j.status === "running")) {
+    return { ok: false, error: "a background job cannot start another background job" };
+  }
+  if (jobs.filter((j) => j.status === "running").length >= MAX_RUNNING_JOBS) {
+    return { ok: false, error: CAP_ERROR };
+  }
+  return null;
+}
+
+// The job name — an explicit `name` (e.g. the work item's objective, so CTO
+// workers aren't all "you-are-the-implementation") wins over the first words of
+// the prompt.
+function jobNameFor(input, prompt) {
+  return (typeof input?.name === "string" && slugifyProjectName(input.name.trim().split(/\s+/).slice(0, 6).join(" "))) ||
+    deriveName(prompt);
+}
+
+// Create the job's worktree + record its baseSha. A worktree failure continues
+// with worktree = branch = baseSha = null and cwd = parentDirectory — UNLESS the
+// caller demands isolation (§8.1: for implementation work, isolationRequired is
+// true and a worktree failure must fail BEFORE prompting, never fall back to the
+// original repository directory), which returns `{ refusal }`.
+async function prepareWorktree({ input, name, parentDirectory }, deps) {
+  const { gitAddWorktree, gitRun } = deps;
+  let worktree = null;
+  let branch = null;
+  let baseSha = null;
+  let cwd = parentDirectory;
+  try {
+    const wt = await gitAddWorktree({ cwd: parentDirectory, name });
+    worktree = wt.path;
+    branch = wt.branch;
+    cwd = wt.path;
+  } catch (e) {
+    if (input?.isolationRequired) {
+      return {
+        refusal: {
+          ok: false,
+          code: "worktree_failed",
+          error:
+            `worktree creation failed, refusing to fall back to the original repository directory ` +
+            `(isolationRequired): ${e?.message ?? e}`,
+        },
+      };
+    }
+    worktree = null;
+    branch = null;
+    baseSha = null;
+    cwd = parentDirectory;
+  }
+  if (worktree) {
+    try {
+      const { stdout } = await gitRun(["-C", worktree, "rev-parse", "HEAD"]);
+      baseSha = String(stdout ?? "").trim() || null;
+    } catch {
+      baseSha = null;
+    }
+  }
+  return { worktree, branch, baseSha, cwd };
+}
+
 /**
  * @param {{prompt:string, model?:string|{providerID:string, modelID:string, variant?:string}, modelHint?:string|{providerID:string, modelID:string, variant?:string}, subagent_type?:string, parentSessionID:string, parentDirectory:string,
  *          link?: {issue?:{repoKey:string,number:number}, pr?:{repoKey:string,number:number}}|null}} input
@@ -1030,6 +1094,16 @@ export async function startJob(input, deps = {}) {
     }
   }
 
+  const effectiveModel = input?.model ? deliverModel : routedModel;
+
+  // C1: every job except the CTO's runs on the V2 engine — a real child session
+  // moved into its worktree, completing from raw execution outcomes. The gate is
+  // the ACTOR (a CTO job is origin "delegate" too), and CTO jobs stay on the
+  // legacy path below, untouched, until C2.
+  if (input?.actor !== "cto") {
+    return startJobV2({ input, prompt, parentSessionID, parentDirectory, requestedModel, effectiveModel }, deps);
+  }
+
   // The whole creation — nesting + cap checks, worktree, window, record append —
   // runs inside the jobs-store lock so a concurrent `delegate` POST cannot pass
   // the (read-then-act) MAX_RUNNING_JOBS check at the same moment as another
@@ -1037,76 +1111,21 @@ export async function startJob(input, deps = {}) {
   // another writer's read-modify-write. The prompt is delivered AFTER the lock
   // releases.
   const reg = await jobsLock.runExclusive(async () => {
-    const { load = loadJobs, gitAddWorktree, gitRun } = deps;
+    const { load = loadJobs } = deps;
 
-    // 1. Refuse if nesting.
-    {
-      const jobs = await load();
-      const nesting = jobs.find(
-        (j) => j.childSessionID === parentSessionID && j.status === "running",
-      );
-      if (nesting) {
-        return { ok: false, error: "a background job cannot start another background job" };
-      }
-    }
+    // 1 + 2. Refuse if nesting, or at cap. Checked here, inside the lock and
+    //    BEFORE any worktree/window is created, so a burst of concurrent POSTs
+    //    cannot exceed MAX_RUNNING_JOBS without leaking created worktrees.
+    const refused = launchRefusal(await load(), parentSessionID);
+    if (refused) return refused;
 
-    // 2. Refuse if at cap. Checked here, inside the lock and BEFORE any
-    //    worktree/window is created, so a burst of concurrent POSTs cannot
-    //    exceed MAX_RUNNING_JOBS without leaking created worktrees.
-    {
-      const jobs = await load();
-      const running = jobs.filter((j) => j.status === "running").length;
-      if (running >= MAX_RUNNING_JOBS) {
-        return { ok: false, error: CAP_ERROR };
-      }
-    }
+    // 3. Derive the name.
+    const name = jobNameFor(input, prompt);
 
-    // 3. Derive the name — an explicit `name` (e.g. the work item's objective,
-    // so CTO workers aren't all "you-are-the-implementation") wins over the
-    // first words of the prompt.
-    const name = (typeof input?.name === "string" && slugifyProjectName(input.name.trim().split(/\s+/).slice(0, 6).join(" "))) ||
-      deriveName(prompt);
-
-    // 4. Create the worktree. On throw, catch and continue with
-    //    worktree = branch = baseSha = null and cwd = parentDirectory —
-    //    UNLESS the caller demands isolation (§8.1: for implementation work,
-    //    isolationRequired is true and a worktree failure must fail BEFORE
-    //    prompting, never fall back to the original repository directory).
-    let worktree = null;
-    let branch = null;
-    let baseSha = null;
-    let cwd = parentDirectory;
-    try {
-      const wt = await gitAddWorktree({ cwd: parentDirectory, name });
-      worktree = wt.path;
-      branch = wt.branch;
-      cwd = wt.path;
-    } catch (e) {
-      if (input?.isolationRequired) {
-        return {
-          ok: false,
-          code: "worktree_failed",
-          error:
-            `worktree creation failed, refusing to fall back to the original repository directory ` +
-            `(isolationRequired): ${e?.message ?? e}`,
-        };
-      }
-      worktree = null;
-      branch = null;
-      baseSha = null;
-      cwd = parentDirectory;
-    }
-
-    // 5. Record baseSha — git -C <worktree> rev-parse HEAD, trimmed. Skip when
-    //    there is no worktree.
-    if (worktree) {
-      try {
-        const { stdout } = await gitRun(["-C", worktree, "rev-parse", "HEAD"]);
-        baseSha = String(stdout ?? "").trim() || null;
-      } catch {
-        baseSha = null;
-      }
-    }
+    // 4 + 5. The worktree + baseSha.
+    const wt = await prepareWorktree({ input, name, parentDirectory }, deps);
+    if (wt.refusal) return wt.refusal;
+    const { worktree, branch, baseSha, cwd } = wt;
 
     // 6+7. Register the window + record + publish.
     return registerJob(
@@ -1144,7 +1163,6 @@ export async function startJob(input, deps = {}) {
   //    effective model was decided above, before the lock: a caller-named
   //    model is used VERBATIM (11b), and silence was routed with the same
   //    never-break-a-spawn degradation contract (11a/11e, BET-1535).
-  const effectiveModel = input?.model ? deliverModel : routedModel;
   try {
     await deliver({
       sessionId: reg.job.childSessionID,
@@ -1325,13 +1343,24 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
   }
 
   // engine:"v2" jobs complete from the RAW execution outcomes (observeRaw), not
-  // from this adapted lifecycle — which reads an interrupt as success.
-  const job = jobs.find((j) => j.childSessionID === sid && j.status === "running" && j.engine !== "v2");
+  // from this adapted lifecycle — which reads an interrupt as success. The
+  // lifecycle still tells a pausing V2 job where its step boundary is.
+  const job = jobs.find((j) => j.childSessionID === sid && j.status === "running");
   if (!job) {
     // Not a tracked background job — but still keep the sawBusy flag honest so
     // a job that starts later in this same session id isn't instantly
     // completed by a stale idle. (Session ids are unique per opencode
     // session, so this is defensive only.)
+    return;
+  }
+  if (job.engine === "v2") {
+    if (
+      job.pauseRequested &&
+      evt.type === "message.part.updated" &&
+      isToolStepBoundary(evt?.properties?.part)
+    ) {
+      await interruptForPause(job, deps);
+    }
     return;
   }
 
@@ -1797,6 +1826,11 @@ export async function sweepDelegateJobs(deps = {}) {
     }
     // Paused-expired jobs → stopped.
     for (const job of pausedExpired) {
+      // A V2 job still owes its parent the job's one result, even a stopped one.
+      if (job.engine === "v2") {
+        await stopJob(job.id, deps, { error: "paused for over 7 days, stopped" });
+        continue;
+      }
       await stopExpiredPausedJob(job, {
         load, save, publish, now,
         killWindow: deps.killWindow,
@@ -1939,7 +1973,7 @@ async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
  * nothing to abort and no completion notice is sent — the caller already
  * knows it is ending it.
  */
-export async function stopJob(id, deps = {}) {
+export async function stopJob(id, deps = {}, { error: stopError } = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -1954,8 +1988,11 @@ export async function stopJob(id, deps = {}) {
   const stopped = await withRunningJob(id, deps, async (jobs, idx, job) => {
     if (job.engine === "v2") {
       // V2 job: one terminal write (result-delivery fields included); the N7
-      // result, when Manta owns it, is posted after the lock is released.
-      if (abortSession && job.childSessionID && job.launchState !== "creating") {
+      // result, when Manta owns it, is posted after the lock is released. A
+      // PAUSED job has no turn in flight, so there is nothing to interrupt — but
+      // it still emits its `stopped` result: a job reports exactly one result, at
+      // its final terminal state.
+      if (job.status === "running" && abortSession && job.childSessionID && job.launchState !== "creating") {
         try {
           await abortSession(job.childSessionID);
         } catch (e) {
@@ -1966,19 +2003,22 @@ export async function stopJob(id, deps = {}) {
       const updated = {
         ...job,
         status: "stopped",
-        error: "stopped by user",
+        error: stopError ?? "stopped by user",
+        stopRequested: true,
         finishedAt: now(),
         pauseRequested: false,
+        pausedAt: null,
         completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : (job.completionMessageId ?? null),
         completionDelivery: manta ? "pending" : null,
       };
       jobs[idx] = updated;
       await save(jobs);
+      pauseInterrupts.delete(updated.id);
       publish?.({
         kind: "delegate.updated",
         payload: { id: updated.id, status: updated.status, activity: updated.activity },
       });
-      return { ok: true, deliverV2: manta };
+      return { ok: true, deliverV2: manta, v2Stopped: updated };
     }
     const wasPaused = job.status === "paused";
     if (!wasPaused && abortSession && job.childSessionID) {
@@ -2033,8 +2073,9 @@ export async function stopJob(id, deps = {}) {
     void listMessages;
     return { ok: true };
   }, { allowPaused: true });
-  if (stopped?.deliverV2) {
-    await deliverJobResult(id, deps);
+  if (stopped?.v2Stopped) {
+    if (stopped.deliverV2) await deliverJobResult(id, deps);
+    await finishV2Cleanup(stopped.v2Stopped, deps);
     return { ok: true };
   }
   return stopped;
@@ -2279,6 +2320,23 @@ export async function resumeJob(id, deps = {}) {
     now = () => Date.now(),
   } = deps;
 
+  // A V2 job's resume prompt (git + progress reads) is built BEFORE the lock, from a
+  // peek at the record; the lock then checks it is still about the same attempt.
+  let preparedResume = null;
+  {
+    const peek = (await load()).find((j) => j.id === id);
+    if (peek?.engine === "v2" && peek.status === "paused") {
+      preparedResume = {
+        childId: peek.childSessionID,
+        text: buildJobPrompt({
+          prompt: await buildResumePrompt(peek, deps, peek.childSessionID),
+          worktree: peek.worktree,
+          branch: peek.branch,
+        }),
+      };
+    }
+  }
+
   const reg = await jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === id);
@@ -2294,6 +2352,7 @@ export async function resumeJob(id, deps = {}) {
     if (running >= MAX_RUNNING_JOBS) {
       return { ok: false, error: CAP_ERROR, retriable: true };
     }
+    if (job.engine === "v2") return registerV2Resume(jobs, idx, job, preparedResume, deps);
 
     const oldChildSessionID = job.childSessionID;
     const oldWindow = { sessionName: job.tmuxSession, windowIndex: job.windowIndex };
@@ -2371,6 +2430,15 @@ export async function resumeJob(id, deps = {}) {
   });
 
   if (!reg.ok) return reg;
+  if (reg.v2) {
+    // Fresh child the same way a first launch makes one (create → move → window →
+    // prompt); the job id, result id and worktree are unchanged.
+    try {
+      return await launchDelegate(reg.job, deps);
+    } finally {
+      inLaunch.delete(reg.job.id);
+    }
+  }
   // Build + deliver the resume prompt to the fresh session. The progress read
   // targets the OLD (aborted) child session, captured before the record's
   // childSessionID was overwritten.
@@ -2642,6 +2710,46 @@ async function closeJobWindow(job, deps = {}) {
   }
 }
 
+// ---- pause + resume bookkeeping -------------------------------------------
+
+// Jobs whose child was interrupted for a pause request (job id → child id), so the
+// several tool boundaries a busy child can emit before the interrupt lands send one
+// interrupt, not many. Cleared when the job parks or ends; a failed interrupt is not
+// recorded, so the next boundary tries again.
+const pauseInterrupts = new Map();
+
+/**
+ * A pause was requested and the child just finished a tool: interrupt it. Only the
+ * interrupt happens here — it is the child's raw `interrupted` outcome that parks the
+ * job (finishV2Job), so a child that completes in the same instant is simply done.
+ */
+async function interruptForPause(job, deps = {}) {
+  if (!deps.abortSession || !job.childSessionID) return;
+  if (pauseInterrupts.get(job.id) === job.childSessionID) return;
+  try {
+    await deps.abortSession(job.childSessionID);
+    pauseInterrupts.set(job.id, job.childSessionID);
+    while (pauseInterrupts.size > 200) pauseInterrupts.delete(pauseInterrupts.keys().next().value);
+  } catch (e) {
+    console.warn(`[delegate] pause interrupt failed for ${job.id}:`, e?.message ?? e);
+  }
+}
+
+/**
+ * A resumed attempt keeps the paused attempt's window until the new one is known to
+ * be running (so a refused launch can put the job back as it was). Once it is, the
+ * old window goes — stamp-checked, so a reused index never closes somebody else's.
+ */
+async function dropResumeRestore(job, deps = {}) {
+  const restore = job?.launch?.restore;
+  if (!restore) return;
+  await closeJobWindow(
+    { id: job.id, tmuxSession: restore.tmuxSession, windowIndex: restore.windowIndex, childSessionID: restore.childSessionID },
+    deps,
+  );
+  await patchJob(job.id, (live) => ({ launch: { ...live.launch, restore: undefined } }), deps);
+}
+
 // ---- terminal transition --------------------------------------------------
 
 /**
@@ -2650,9 +2758,18 @@ async function closeJobWindow(job, deps = {}) {
  * `completionDelivery:"pending"`, so a crash right after can never lose the
  * result nor post it twice. The first terminal transition wins; later ones are
  * no-ops. The N7 post (if any) happens AFTER the write. A job without a
- * worktree keeps its window and record (the row shows done).
+ * worktree keeps its window and record (the row shows done); a job WITH one is
+ * cleaned up like a legacy job (worktree + window removed, a dirty one kept).
+ *
+ * `interrupted:true` says the child's raw outcome was an interruption. What that
+ * means is decided against the LIVE record, under the lock: a pause that was
+ * requested parks the job (`paused` — a non-terminal state that emits NOTHING), a
+ * stop that was requested makes it `stopped`, anything else is `failed:
+ * "interrupted"`. Only a job that is still `running` can be finished at all: a
+ * stale snapshot (a timeout sweep that read the store before a pause landed)
+ * must neither time out a paused job nor resurrect one.
  */
-export async function finishV2Job(job, status, error, deps = {}) {
+export async function finishV2Job(job, status, error, deps = {}, { interrupted = false } = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -2662,31 +2779,47 @@ export async function finishV2Job(job, status, error, deps = {}) {
     now = () => Date.now(),
   } = deps;
 
-  // The child's last text is read BEFORE the lock: one opencode HTTP read must
-  // not hold up every job write on the box. The record is re-checked under the
-  // lock, so a racing finish still produces exactly one terminal write.
+  // The child's last text (and the worktree's file count) are read BEFORE the
+  // lock: one opencode / git read must not hold up every job write on the box.
+  // The record is re-checked under the lock, so a racing finish still produces
+  // exactly one terminal write.
   let result = null;
+  let filesChanged = null;
   if (status === "done" && job.childSessionID) {
     try {
       result = await lastAssistantText(listMessages ? await listMessages(job.childSessionID) : []);
     } catch (e) {
       console.warn("[delegate] listMessages failed:", e?.message ?? e);
     }
+    if (job.worktree && deps.gitRun) filesChanged = await countFilesChanged(job, deps);
   }
 
+  let paused = null;
   const updated = await jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === job.id);
     if (idx === -1) return null;
     const live = jobs[idx];
-    if (isTerminal(live)) return null;
+    if (live.status !== "running") return null;
+
+    if (interrupted && live.pauseRequested && completionOwnerOf(live) === "manta") {
+      const parked = { ...live, status: "paused", pauseRequested: false, pausedAt: now() };
+      jobs[idx] = parked;
+      await save(jobs);
+      publish?.({ kind: "delegate.updated", payload: { id: parked.id, status: "paused" } });
+      paused = parked;
+      return null;
+    }
+    let outcome = { status, error };
+    if (interrupted) outcome = live.stopRequested ? { status: "stopped", error: "stopped by user" } : { status: "failed", error: "interrupted" };
 
     const manta = completionOwnerOf(live) === "manta";
     const next = {
       ...live,
-      status,
-      error: status === "done" ? null : (error ?? null),
-      result: status === "done" ? result : null,
+      status: outcome.status,
+      error: outcome.status === "done" ? null : (outcome.error ?? null),
+      result: outcome.status === "done" ? result : null,
+      filesChanged: outcome.status === "done" ? filesChanged : null,
       finishedAt: now(),
       pauseRequested: false,
       completionMessageId: manta ? (live.completionMessageId ?? mintMessageId()) : (live.completionMessageId ?? null),
@@ -2700,6 +2833,10 @@ export async function finishV2Job(job, status, error, deps = {}) {
     });
     return next;
   });
+  if (paused) {
+    pauseInterrupts.delete(paused.id);
+    return { ok: true, paused: true };
+  }
   if (!updated) return { ok: true, alreadyTerminal: true };
 
   if (typeof deps.onJobTerminal === "function") {
@@ -2716,8 +2853,25 @@ export async function finishV2Job(job, status, error, deps = {}) {
       console.warn(`[delegate] clearProgress failed for ${updated.id}:`, e?.message ?? e);
     }
   }
+  pauseInterrupts.delete(updated.id);
   if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
+  await finishV2Cleanup(updated, deps);
   return { ok: true };
+}
+
+// What a finished V2 job leaves behind: a worktree job is cleaned up exactly like a
+// legacy one (worktree + window removed, a dirty worktree keeps both and the record
+// says so, so retention never prunes it); an unfinished resume's old window goes.
+async function finishV2Cleanup(job, deps) {
+  await dropResumeRestore(job, deps);
+  if (!job.worktree) return;
+  let cleanedUp = false;
+  try {
+    cleanedUp = !!(await cleanupTerminalJob(job, deps)).cleanedUp;
+  } catch (e) {
+    console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
+  }
+  await patchJob(job.id, { cleanedUp }, deps);
 }
 
 // ---- N7: the one result posted to the parent ------------------------------
@@ -2770,11 +2924,32 @@ export async function deliverJobResult(id, deps = {}) {
       cto = false;
     }
     if (cto) {
+      // The CTO conversation keeps promptDelivery + its admission redirect. The
+      // job's persisted `completionMessageId` is the admission dedupe identity
+      // (`ctoKey`), so a retry of this very result — after a refusal, or a boot
+      // mid-delivery — is recognised and admitted once, whatever the text.
+      //
+      // Marking `delivered` after this call is safe because `deliver` NEVER
+      // rejects (promptDelivery.mjs: the redirect and every send failure are
+      // caught inside it) and says what happened in its RESULT: a redirect result
+      // means admission durably holds the result (queued, or already settled under
+      // that id, `deduped`); only an explicit refusal (`rejected`, or neither
+      // delivered nor queued) leaves the record `pending` for the next retry.
+      let outcome;
       try {
-        await deliver?.({ sessionId: job.parentSessionID, text: buildCompletionText(job) });
+        outcome = await deliver?.({ sessionId: job.parentSessionID, text: buildCompletionText(job), ctoKey: job.completionMessageId });
       } catch (e) {
         console.warn(`[delegate] completion delivery failed for ${id}:`, e?.message ?? e);
+        return { ok: false, error: String(e?.message ?? e) };
       }
+      if (outcome && (outcome.rejected === true || (outcome.delivered === false && outcome.queued === false && !outcome.deduped))) {
+        if (!loggedDeliveryFailures.has(id)) {
+          loggedDeliveryFailures.add(id);
+          console.warn(`[delegate] result delivery for ${id} to the CTO conversation was refused (will retry):`, outcome.error ?? "not queued");
+        }
+        return { ok: false, error: String(outcome.error ?? "not queued") };
+      }
+      loggedDeliveryFailures.delete(id);
       await markIfPending("delivered");
       return { ok: true, delivered: true };
     }
@@ -2824,7 +2999,9 @@ export async function retryPendingDeliveries(deps = {}) {
 async function hasAdmissionEvidence(job, deps) {
   const child = job.childSessionID;
   const tries = [
-    async () => ((await deps.listInbox?.(child)) ?? []).length > 0,
+    // (a pending `move` item is Manta's own doing — a delegate child is moved into its
+    // worktree before the prompt — and proves nothing about the prompt)
+    async () => ((await deps.listInbox?.(child)) ?? []).filter((i) => i?.type !== "move").length > 0,
     async () => ((await deps.listRawTimeline?.(child, { type: "user" })) ?? []).length > 0,
     async () => ((await deps.listChildSessions?.(child)) ?? []).length > 0,
   ];
@@ -2922,6 +3099,9 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   const { listActiveIds, readSession } = deps;
   if (typeof listActiveIds !== "function" || typeof readSession !== "function") return { settled: false, reason: "no-readers" };
   if (isTerminal(job)) return { settled: false, reason: "terminal" };
+  // A paused job's last child ended `interrupted` — that is WHY it is paused. Only a
+  // running job has a run to settle.
+  if (job.status !== "running") return { settled: false, reason: "not-running" };
   let active;
   try {
     active = new Set(await listActiveIds());
@@ -2955,11 +3135,14 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
       active.has(job.childSessionID) || (outcome && fresh) || (await hasAdmissionEvidence(job, deps));
     if (!evidence) return { settled: false, reason: "uncertain" };
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
+    await dropResumeRestore(job, deps);
   }
   if (active.has(job.childSessionID)) return { settled: false, reason: "active" };
   if (!outcome || !fresh) return { settled: false, reason: "no-outcome" };
 
-  if (manta) {
+  // (An interrupted run is never going to reply to a descendant's result, so the
+  // descendant predicate doesn't apply to it: a pause must not wait on a subagent.)
+  if (manta && outcome !== "interrupted") {
     let tree;
     try {
       tree = await descendantEvidence(job, active, deps);
@@ -2979,7 +3162,7 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   if (job.launchState !== "running") {
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
   }
-  await finishV2Job(job, t.status, t.error, deps);
+  await finishV2Job(job, t.status, t.error, deps, { interrupted: outcome === "interrupted" });
   return { settled: true, status: t.status };
 }
 
@@ -3001,6 +3184,15 @@ async function resumeUnsentLaunch(job, deps) {
   try {
     const { listProjects, newWindow, stampOwner } = deps;
     let current = job;
+    // A delegate job's child is moved into its worktree before anything else; the
+    // move is re-issued only when neither the session nor its inbox shows it.
+    if (current.launch) {
+      const moved = await ensureMoved(current, deps);
+      if (!moved.ok) {
+        if (moved.definite) await abandonLaunch(current, `could not move the session into its worktree: ${moved.error}`, deps, { reconciled: true });
+        return;
+      }
+    }
     if (current.windowIndex == null) {
       const projects = typeof listProjects === "function" ? await listProjects() : [];
       // A restart between the window's creation and the patch recording its index
@@ -3020,10 +3212,11 @@ async function resumeUnsentLaunch(job, deps) {
         if (!owner) return;
         const created = await newWindow({
           sessionName: owner.tmuxSession,
-          windowName: windowNameFor(current.name),
-          cwd: current.parentDirectory,
+          windowName: current.launch ? current.name : windowNameFor(current.name),
+          cwd: current.executionDirectory ?? current.parentDirectory,
           chatMode: true,
           existingSessionId: current.childSessionID,
+          ...(current.worktree ? { worktreePath: current.worktree } : {}),
           oc: deps.oc,
         });
         if (stampOwner) {
@@ -3043,7 +3236,7 @@ async function resumeUnsentLaunch(job, deps) {
       { onlyIf: (j) => j.status === "running" && j.submittedAt == null },
     );
     if (!claimed) return;
-    await submitCommand(claimed, deps);
+    await submitCommand(claimed, deps, { reconciled: true });
   } catch (e) {
     console.warn(`[delegate] resuming the launch of ${job.id} failed:`, e?.message ?? e);
   } finally {
@@ -3058,7 +3251,8 @@ async function resumeUnsentLaunch(job, deps) {
 export async function reconcileV2Jobs(deps = {}) {
   const { load = loadJobs } = deps;
   if (typeof deps.listActiveIds !== "function") return 0;
-  const targets = (await load()).filter((j) => j.engine === "v2" && !isTerminal(j) && j.childSessionID);
+  // (a paused job has no run to re-check: it is parked until someone resumes it)
+  const targets = (await load()).filter((j) => j.engine === "v2" && j.status === "running" && j.childSessionID);
   for (let job of targets) {
     try {
       if (inLaunch.has(job.id) || resuming.has(job.id)) continue;
@@ -3095,6 +3289,7 @@ export function commandDisplayName(command, args) {
 
 // Undo a launch proven not admitted: the child, its window and the record.
 async function rollbackLaunch(job, deps) {
+  if (job.launch) return rollbackDelegateLaunch(job, deps);
   if (deps.deleteSession && job.childSessionID) {
     try {
       await deps.deleteSession(job.childSessionID);
@@ -3113,26 +3308,49 @@ async function rollbackLaunch(job, deps) {
  * admitted, so the record, child and window stay, marked `uncertain`, and the
  * sweeper keeps reconciling them.
  */
-async function submitCommand(job, deps) {
+async function submitCommand(job, deps, { reconciled = false } = {}) {
+  const delegate = !!job.launch;
   const run = job.commandRun ?? {};
   try {
-    await deps.runCommandOnChild({
-      sessionId: job.childSessionID,
-      command: run.command,
-      arguments: run.arguments ?? "",
-      model: run.model,
-      agent: run.agent,
-      attachments: run.attachments,
-    });
+    if (delegate) {
+      // A delegate job's opening prompt goes straight to the child (never through
+      // promptDelivery, which swallows the failure this has to classify). The
+      // persisted message id makes a retry after an unknown outcome admit once.
+      await deps.sendChildPrompt({
+        sessionId: job.childSessionID,
+        text: job.launch.text,
+        ...(job.launch.model ? { model: job.launch.model } : {}),
+        agent: job.agent,
+        messageID: job.launch.messageId,
+      });
+    } else {
+      await deps.runCommandOnChild({
+        sessionId: job.childSessionID,
+        command: run.command,
+        arguments: run.arguments ?? "",
+        model: run.model,
+        agent: run.agent,
+        attachments: run.attachments,
+      });
+    }
   } catch (e) {
     if (isDefiniteRefusal(e)) {
-      await rollbackLaunch(job, deps);
+      // A delegate whose launch was finished by a RECONCILE (not by the call that
+      // started it) was reported to its caller as started: it must not vanish, so
+      // it ends `failed` with its one result — unless it is a resume, which simply
+      // goes back to being paused.
+      if (reconciled && delegate && !job.launch.restore) {
+        await finishV2Job(job, "failed", `could not start: ${String(e?.message ?? e)}`, deps);
+      } else {
+        await rollbackLaunch(job, deps);
+      }
       return { ok: false, error: String(e?.message ?? e) };
     }
     const kept = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
     return { ok: true, job: kept, uncertain: true };
   }
   const running = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) && j.launchState !== "running" })) ?? job;
+  if (delegate) await dropResumeRestore(running, deps);
   return { ok: true, job: running };
 }
 
@@ -3319,6 +3537,365 @@ async function launchRegistered(job, { owner, parentSessionID, parentDirectory, 
   return submitCommand(job, deps);
 }
 
+// ---- delegate jobs on V2 (Stage C1) ---------------------------------------
+//
+// Every job except the CTO's (`actor:"cto"`, still legacy until C2) is a real V2
+// child session: created under the parent with a client-minted id, moved into the
+// job's worktree, given a window, and sent its opening prompt. It completes from the
+// child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
+// use) and reports ONE result through N7, whatever route it takes to a terminal state.
+
+// The agent every delegate child runs. Today's jobs always ran the default agent; a
+// child created under a parent would otherwise be free to inherit a plan-mode one.
+const V2_JOB_AGENT = "build";
+
+/**
+ * Register a delegate job and launch it (spec C1 steps 1–5).
+ *
+ * Everything before the first network call happens under the jobs lock: the nesting
+ * and cap refusals, the worktree + branch, and the job record itself — registered
+ * FIRST, with a minted child session id and result id, so every later step is
+ * reconcilable by id. Then (outside the lock) launchDelegate runs create → move →
+ * window → send. A definite refusal at any step undoes what was made; an UNKNOWN
+ * outcome never rolls anything back (see launchDelegate).
+ */
+async function startJobV2({ input, prompt, parentSessionID, parentDirectory, requestedModel, effectiveModel }, deps) {
+  const { load = loadJobs, save = saveJobs, publish, listProjects, gitRemoveWorktree, now = () => Date.now() } = deps;
+  for (const dep of ["createChildSession", "moveSession", "sendChildPrompt", "newWindow", "listProjects"]) {
+    if (typeof deps[dep] !== "function") return { ok: false, error: `background jobs are not wired in this server (${dep} is missing)` };
+  }
+
+  const reg = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const refused = launchRefusal(jobs, parentSessionID);
+    if (refused) return refused;
+    const name = jobNameFor(input, prompt);
+
+    // Which workspace hosts the window — resolved before anything is created.
+    let tmuxSession = input?.targetProject ?? null;
+    if (!tmuxSession) {
+      const owner = resolveOwner(await listProjects(), parentSessionID);
+      if (!owner) return { ok: false, error: `could not resolve the tmux session owning ${parentSessionID}` };
+      tmuxSession = owner.tmuxSession;
+    }
+
+    const wt = await prepareWorktree({ input, name, parentDirectory }, deps);
+    if (wt.refusal) return wt.refusal;
+    const { worktree, branch, baseSha } = wt;
+    // THE execution directory, resolved once and persisted: the worktree, or the
+    // parent's own directory when none could be made and isolation isn't required.
+    const executionDirectory = worktree ?? parentDirectory;
+
+    const t = now();
+    const launchModel = toDeliverModel(effectiveModel);
+    const job = {
+      id: genId(),
+      name,
+      prompt,
+      model: requestedModel ?? null,
+      requestedModel: requestedModel ?? null,
+      parentSessionID,
+      parentDirectory,
+      childSessionID: mintSessionId(),
+      tmuxSession,
+      windowIndex: null,
+      worktree,
+      branch,
+      baseSha,
+      origin: "delegate",
+      link: input?.link ?? null,
+      actor: input?.actor ?? "user",
+      correlation: input?.correlation ?? null,
+      sweepAllowanceMs: input?.sweepAllowanceMs ?? null,
+      permission: input?.permission ?? null,
+      status: "running",
+      activity: null,
+      createdAt: t,
+      startedAt: t,
+      finishedAt: null,
+      result: null,
+      error: null,
+      filesChanged: null,
+      engine: "v2",
+      completionOwner: "manta",
+      attempt: 1,
+      launchState: "creating",
+      submittedAt: null,
+      // minted once per JOB: a resume keeps it, so the job's one result has one id
+      completionMessageId: mintMessageId(),
+      completionDelivery: null,
+      agent: V2_JOB_AGENT,
+      executionDirectory,
+      // what the launch sends, persisted so a reconcile can finish a launch this
+      // process never got to (and a resume reuses the first attempt's model)
+      launch: {
+        text: buildJobPrompt({ prompt, worktree, branch }),
+        model: launchModel,
+        messageId: mintMessageId(),
+      },
+    };
+    inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
+    try {
+      await save([...jobs, job]);
+    } catch (e) {
+      inLaunch.delete(job.id);
+      if (worktree && gitRemoveWorktree) {
+        try {
+          await gitRemoveWorktree({ path: worktree, force: false });
+        } catch {
+          /* best-effort; the failed save is the headline error */
+        }
+      }
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running", launchState: "creating" } });
+    return { ok: true, job };
+  });
+  if (!reg.ok) return reg;
+  try {
+    return await launchDelegate(reg.job, deps);
+  } finally {
+    inLaunch.delete(reg.job.id);
+  }
+}
+
+// The job's record, if it is still the running attempt this launch is for. A stop (or
+// a timeout) that lands mid-launch ends the job; the launch must then not go on to
+// give a finished job a window and a prompt.
+async function launchStillWanted(job, deps) {
+  const live = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === job.id);
+  return !!live && live.status === "running" && live.childSessionID === job.childSessionID;
+}
+
+// A launch that stopped because the job was ended meanwhile: take back what it made
+// (never the record — that now carries the job's terminal state and its one result).
+async function dropHaltedLaunch(job, deps) {
+  if (deps.deleteSession && job.childSessionID) {
+    try {
+      await deps.deleteSession(job.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] deleting the child of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  await closeJobWindow(job, deps);
+  return { ok: false, error: "the job was stopped before it started" };
+}
+
+/**
+ * Steps (b)–(c) of a delegate launch, for a job already registered (also a resume's):
+ * create the child → move it into the execution directory (when that isn't where it
+ * was created) → its window → persist submittedAt → send the opening prompt.
+ *
+ * A DEFINITE refusal (4xx) undoes what this launch made and reports it. An UNKNOWN
+ * outcome (network, timeout, 5xx) on the create, the move or the send keeps
+ * everything — child, worktree, window, record — marked `launchState:"uncertain"`:
+ * no read proves the original request can't still be admitted, so the sweeper keeps
+ * reconciling it instead.
+ */
+async function launchDelegate(job, deps) {
+  const { createChildSession, moveSession, newWindow, stampOwner, now = () => Date.now() } = deps;
+  const uncertain = async () => {
+    const kept = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
+    return { ok: true, job: kept, uncertain: true };
+  };
+
+  // (b) the child session — created under the parent, which places it at the parent's location
+  try {
+    await createChildSession({
+      directory: job.parentDirectory,
+      id: job.childSessionID,
+      parentID: job.parentSessionID,
+      title: job.name,
+      agent: job.agent,
+      model: job.launch.model ?? undefined,
+      permission: Array.isArray(job.permission) && job.permission.length > 0 ? job.permission : undefined,
+    });
+  } catch (e) {
+    if (isDefiniteRefusal(e)) {
+      await abandonLaunch(job, String(e?.message ?? e), deps, { childExists: false });
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    return uncertain();
+  }
+
+  // …into the execution directory
+  if (job.executionDirectory && job.executionDirectory !== job.parentDirectory) {
+    if (!(await launchStillWanted(job, deps))) return dropHaltedLaunch(job, deps);
+    try {
+      await moveSession(job.childSessionID, job.executionDirectory);
+    } catch (e) {
+      if (isDefiniteRefusal(e)) {
+        await abandonLaunch(job, String(e?.message ?? e), deps);
+        return { ok: false, error: `could not move the session into its worktree: ${String(e?.message ?? e)}` };
+      }
+      return uncertain();
+    }
+  }
+
+  // …its window / sidebar row
+  if (!(await launchStillWanted(job, deps))) return dropHaltedLaunch(job, deps);
+  let windowIndex = null;
+  try {
+    const created = await newWindow({
+      sessionName: job.tmuxSession,
+      windowName: job.name,
+      cwd: job.executionDirectory ?? job.parentDirectory,
+      chatMode: true,
+      existingSessionId: job.childSessionID,
+      worktreePath: job.worktree ?? undefined,
+      oc: deps.oc,
+    });
+    windowIndex = created.windowIndex ?? null;
+  } catch (e) {
+    await abandonLaunch(job, String(e?.message ?? e), deps);
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+  if (stampOwner && windowIndex != null) {
+    try {
+      await stampOwner(job.tmuxSession, windowIndex, "job");
+    } catch {
+      /* advisory */
+    }
+  }
+
+  // (c) persist submittedAt BEFORE sending; never rewritten for this attempt. A job
+  // that was ended while the window was being made gets nothing sent.
+  const submitting = await patchJob(
+    job.id,
+    { windowIndex, launchState: "submitting", submittedAt: now() },
+    deps,
+    { onlyIf: (j) => j.status === "running" && j.childSessionID === job.childSessionID },
+  );
+  if (!submitting) return dropHaltedLaunch({ ...job, windowIndex }, deps);
+  return submitCommand(submitting, deps);
+}
+
+/**
+ * Undo a delegate launch that was REFUSED before anything ran: the child (when it
+ * exists), the window, the worktree and the record — or, for a resume, just put the
+ * paused job back exactly as it was (its old window was never closed).
+ */
+async function rollbackDelegateLaunch(job, deps, { childExists = true } = {}) {
+  if (childExists && deps.deleteSession && job.childSessionID) {
+    try {
+      await deps.deleteSession(job.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] deleting the child of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  await closeJobWindow(job, deps);
+  const restore = job.launch?.restore;
+  if (restore) {
+    await patchJob(job.id, { ...restore, launch: restore.launch ?? null }, deps);
+    return;
+  }
+  if (job.worktree && deps.gitRemoveWorktree) {
+    try {
+      await deps.gitRemoveWorktree({ path: job.worktree, force: false });
+    } catch (e) {
+      console.warn(`[delegate] removing the worktree of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  await removeJobRecord(job.id, deps);
+}
+
+// A launch that can't go on. Called synchronously by the launch that was refused
+// (nothing was promised yet: undo it all) and by a reconcile finishing a launch that
+// was reported as started — that one must end `failed` with its one result, unless it
+// is a resume, which just goes back to paused.
+async function abandonLaunch(job, message, deps, { childExists = true, reconciled = false } = {}) {
+  if (reconciled && !job.launch?.restore) {
+    await finishV2Job(job, "failed", `could not start: ${message}`, deps);
+    return;
+  }
+  await rollbackDelegateLaunch(job, deps, { childExists });
+}
+
+/**
+ * Has the child been moved into the job's execution directory (or is the move
+ * already queued)? Re-issues it only when neither the session nor its inbox shows
+ * it — V2 applies a move as an inbox item at the session's next execution, so the
+ * session's own directory lags the request.
+ */
+async function ensureMoved(job, deps) {
+  const dir = job.executionDirectory;
+  if (!job.launch || !dir || dir === job.parentDirectory) return { ok: true };
+  try {
+    const rs = await deps.readSession(job.childSessionID);
+    if (rs.state !== "found") return { ok: false };
+    if (rs.session?.directory === dir) return { ok: true };
+    const inbox = (await deps.listInbox?.(job.childSessionID)) ?? [];
+    if (inbox.some((i) => i?.type === "move" && i?.payload?.location?.directory === dir)) return { ok: true };
+    await deps.moveSession(job.childSessionID, dir);
+    return { ok: true };
+  } catch (e) {
+    return isDefiniteRefusal(e) ? { ok: false, definite: true, error: String(e?.message ?? e) } : { ok: false };
+  }
+}
+
+/**
+ * Register a paused delegate job's next attempt (spec C1 step 8): the SAME job — id,
+ * result id and worktree unchanged — with `attempt` bumped, a new client-minted child
+ * and a launch to run. What it replaces is kept in `launch.restore`, so a refused
+ * launch puts the job back as it was and the old window outlives the swap until the
+ * new attempt is known to be running. Runs under the jobs lock.
+ */
+async function registerV2Resume(jobs, idx, job, prepared, deps) {
+  const { save = saveJobs, publish, now = () => Date.now() } = deps;
+  if (job.origin === "command" || completionOwnerOf(job) === "opencode") return { ok: false, error: "resume isn't available for this job" };
+  if (!prepared || prepared.childId !== job.childSessionID) return { ok: false, error: "the job changed while it was being resumed — try again", retriable: true };
+  let tmuxSession = job.tmuxSession ?? null;
+  if (!tmuxSession) {
+    const owner = resolveOwner(await deps.listProjects(), job.parentSessionID);
+    if (!owner) return { ok: false, error: `could not resolve the tmux session owning ${job.parentSessionID}` };
+    tmuxSession = owner.tmuxSession;
+  }
+  const updated = {
+    ...job,
+    status: "running",
+    tmuxSession,
+    childSessionID: mintSessionId(),
+    attempt: (job.attempt ?? 1) + 1,
+    windowIndex: null,
+    pauseRequested: false,
+    pausedAt: null,
+    stopRequested: false,
+    // Reset the running-timeout clock: a resumed job re-acquires a cap slot AND a
+    // fresh allowance window "like a fresh start".
+    startedAt: now(),
+    launchState: "creating",
+    submittedAt: null,
+    executionDirectory: job.executionDirectory ?? job.worktree ?? job.parentDirectory,
+    launch: {
+      text: prepared.text,
+      model: job.launch?.model ?? null,
+      messageId: mintMessageId(),
+      restore: {
+        status: "paused",
+        childSessionID: job.childSessionID,
+        attempt: job.attempt ?? 1,
+        tmuxSession: job.tmuxSession ?? null,
+        windowIndex: job.windowIndex ?? null,
+        pausedAt: job.pausedAt ?? null,
+        startedAt: job.startedAt ?? null,
+        submittedAt: job.submittedAt ?? null,
+        launchState: job.launchState ?? "running",
+        launch: job.launch ? { ...job.launch, restore: undefined } : null,
+      },
+    },
+  };
+  jobs[idx] = updated;
+  inLaunch.add(updated.id);
+  try {
+    await save(jobs);
+  } catch (e) {
+    inLaunch.delete(updated.id);
+    throw e;
+  }
+  publish?.({ kind: "delegate.updated", payload: { id: updated.id, status: "running", launchState: "creating" } });
+  return { ok: true, v2: true, job: updated };
+}
+
 // ---- open a job's session -------------------------------------------------
 
 /**
@@ -3497,7 +4074,7 @@ export function createDelegateEngine(baseDeps) {
     const outcome = rawOutcome(type);
     const jobs = await (deps.load ?? loadJobs)();
     for (const job of jobs) {
-      if (job.engine !== "v2" || isTerminal(job) || !job.childSessionID) continue;
+      if (job.engine !== "v2" || job.status !== "running" || !job.childSessionID) continue;
       const own = job.childSessionID === sid;
       if (!own && treeIndex.get(sid) !== job.id) continue;
       // A start only matters as proof an uncertain launch was admitted.
