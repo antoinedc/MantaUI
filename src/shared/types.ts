@@ -1451,8 +1451,16 @@ export const IPC = {
   // Send a user prompt to a session. Returns when the server has accepted
   // the message (immediate); the assistant response streams via opencodeEvent.
   opencodePrompt: "opencode:prompt",
-  // Interrupt the running generation for a session.
+  // Interrupt the running generation for a session. The user's Stop: V2 then
+  // runs pending STEERING input (interrupt?resume=true); queued prompts stay parked.
   opencodeAbort: "opencode:abort",
+  // The session's pending user messages (V2 inbox), as the box interpreter's
+  // snapshot `{epoch, rev, items}` — never a raw pass-through. Refused for the
+  // CTO conversation session.
+  opencodeInbox: "opencode:inbox",
+  // Cancel one pending inbox item; the outcome is decided from authoritative
+  // evidence only (`cancelled` | `delivered` | `unknown`).
+  opencodeInboxCancel: "opencode:inbox-cancel",
   // Permission approval flow — tools like Write/Edit/Bash pause until a reply.
   opencodePermissions: "opencode:permissions",
   opencodePermissionReply: "opencode:permission-reply",
@@ -2721,6 +2729,9 @@ export type OpencodeMessageInfo = {
   id: string;             // msg_...
   sessionID: string;      // ses_...
   role: OpencodeRole;
+  // User messages produced by a slash command carry its origin (K6). Stamped
+  // by the box from its durable command-origin record; absent when unknown.
+  command?: { name: string; arguments: string };
   time?: { created?: number; completed?: number };
   // assistant-only fields surfaced here for the model/cost line in the UI:
   modelID?: string;
@@ -2888,8 +2899,32 @@ export type StreamTranscriptStalePayload = Record<string, never>;
 /** `messageChanged`: a message (or one of its parts) changed — refetch it. Coalesced to ≤1 frame per message per 100 ms, trailing edge guaranteed. */
 export type StreamMessageChangedPayload = { messageID: string };
 
-/** `commandExecuted`: command.executed (origin of a slash-command user message). */
+/** `commandExecuted`: the origin of a slash-command user message — emitted by the box once it has correlated the command's user message (K6). */
 export type StreamCommandExecutedPayload = { messageID: string; name: string; arguments: string };
+
+/** Prompt delivery mode (V2 inbox): `steer` joins the running turn at its next step, `queue` waits for the turn to end. */
+export type OpencodeDelivery = "steer" | "queue";
+
+/** K2 — one pending user message in a session's V2 inbox. `id` is the user message id it will become. */
+export type OpencodeInboxItem = {
+  id: string;
+  text: string;
+  delivery: OpencodeDelivery;
+  createdAt: number;
+  attachmentCount: number;
+};
+
+/** K3 — the `inbox` frame payload / the `opencode:inbox` result: the FULL list of pending user items, oldest first. `epoch` is minted once per manta-server process; `rev` increases on every change within an epoch. */
+export type OpencodeInboxSnapshot = { epoch: string; rev: number; items: OpencodeInboxItem[] };
+
+/** K4 — the result of `opencode:inbox-cancel`. Only `cancelled` lets a client restore the text; `item` is the pre-cancel copy and is present only then. */
+export type OpencodeInboxCancelResult = {
+  outcome: "cancelled" | "delivered" | "unknown";
+  item?: OpencodeInboxItem;
+};
+
+/** `inbox`: the interpreter's full pending-user-message list for a session (K3). */
+export type StreamInboxPayload = OpencodeInboxSnapshot;
 
 /** `childSession`: a subagent session was created; published under the PARENT's sessionId. */
 export type StreamChildSessionPayload = { childSessionId: string; parentSessionId: string };
@@ -2934,6 +2969,7 @@ export type StreamEnvelope = {
     | "transcriptStale"
     | "messageChanged"
     | "commandExecuted"
+    | "inbox"
     | "childSession"
     | "attention"
     | "aborted"
@@ -2945,11 +2981,8 @@ export type StreamEnvelope = {
 };
 
 // Slash command exposed by opencode (`/init`, user-defined templates, etc.).
-// `template` is the raw prompt body opencode injects as the user message when
-// the command runs (with `$ARGUMENTS` / `$1` etc. substituted at run time).
-// Used by ChatPanel to detect command-origin user messages retroactively
-// (the live `command.executed` event only tags messages created during this
-// panel's lifetime; older transcripts have no live-event provenance).
+// V2 returns no `template`; the origin of a command's user message comes from
+// the box (`info.command` on the message + the `commandExecuted` frame).
 export type OpencodeCommand = {
   name: string;
   description?: string;

@@ -9,6 +9,9 @@ import type {
   DesktopNotifyPayload,
   OpencodeAgent,
   OpencodeCommand,
+  OpencodeDelivery,
+  OpencodeInboxCancelResult,
+  OpencodeInboxSnapshot,
   OpencodeEvent,
   OpencodeMessage,
   OpencodeReference,
@@ -1083,8 +1086,19 @@ export interface Api {
     attachments?: PromptAttachment[],
     mentions?: PromptAgentMention[],
     agent?: string,
+    // K1: how the message joins a RUNNING turn. `steer` = into the turn at its
+    // next step; `queue` = after the turn. Set → the box leaves the session's
+    // model/agent alone. Omit for an ordinary idle send.
+    opts?: { delivery?: OpencodeDelivery },
   ): Promise<void>;
+  // The user's Stop: ends the turn; pending steered input then runs (K5).
   opencodeAbort(sessionId: string): Promise<void>;
+  // K4: the session's pending user messages — the box interpreter's snapshot.
+  // Rejects for the CTO conversation session.
+  opencodeInbox(sessionId: string): Promise<OpencodeInboxSnapshot>;
+  // K4: cancel one pending message. Only `outcome: "cancelled"` proves it will
+  // not be sent; `item` (the pre-cancel copy) comes back only with it.
+  opencodeInboxCancel(input: { sessionId: string; id: string }): Promise<OpencodeInboxCancelResult>;
   // `sessionId` scopes the list to the session's workspace directory —
   // without it the server returns [] for sessions outside the default
   // workspace (see listPermissions in opencode.ts).
@@ -1498,6 +1512,8 @@ export interface Api {
     model?: PromptModel;
     agent?: string;
     attachments?: PromptAttachment[];
+    // K1: see opencodePrompt's `opts.delivery`.
+    delivery?: OpencodeDelivery;
   }): Promise<void>;
 
   // /clear: create new opencode session in same dir, re-stamp tmux window.
