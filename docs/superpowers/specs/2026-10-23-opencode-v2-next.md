@@ -243,23 +243,34 @@ state, manta: { jobId: job.id } }, delivery: "queue", resume: true }`.
       reconcilable by id;
    b. `POST /api/session { id, parentID, title: "/<name> <args>", agent, model, permissions }` (F7, F8);
       then the window/sidebar row; `launchState:"submitting"`;
-   c. run the command **in the child** (`runCommand` on the child id; skills keep their prompt branch);
-      `launchState:"running"` once the POST returns 2xx (record `submittedAt`);
+   c. persist `submittedAt` (and `launchState:"submitting"`) **before** sending, then run the command
+      **in the child** (`runCommand` on the child id; skills keep their prompt branch); `launchState:"running"`
+      once the POST returns 2xx. `submittedAt` is never rewritten for this attempt, also not after an
+      uncertain response;
    d. completion: from the child's raw `session.execution.succeeded|failed|interrupted` (§C1 step 6 —
       the same detection C1 uses), mark terminal, deliver N7 with the child's last assistant text.
    **Failure handling — roll back only what is proven not admitted.** A definite 4xx on create → delete the
    record, report. A definite 4xx on the command POST → delete the child + window + record, report. An
    uncertain failure (timeout, network, 5xx) on either POST → keep everything, mark
-   `launchState:"uncertain"` and reconcile (§B-server 4 reconnect rules): if the child exists and shows a
-   user message / activity it is running; if after a 60 s grace the child is missing, or exists with no
-   messages and is not active, it never started → mark `failed: "didn't start"` (deleting an empty child)
-   and show that on the card. The user can't start a second run of the same record while it is uncertain.
+   `launchState:"uncertain"` and reconcile (§B-server 4 reconnect rules). **Not-admitted is proven only
+   by:** the child session doesn't exist; OR it exists, is not active, has no user message in its timeline,
+   an empty inbox (`GET /api/session/{child}/inbox`), and no descendant sessions. Only then → `failed:
+   "didn't start"` (deleting the empty child). Elapsed time alone never proves it: after a 60 s grace an
+   unproven run stays `uncertain`, and its card says "Couldn't confirm this started — open the session to
+   check" with the Open session link (not a spinner). Any evidence of admission (a user message, an inbox
+   item, activity, a descendant) → `running`. The user can't start a second run of the same record while
+   it is uncertain. Tests: lost create response; lost command response with the input still queued in the
+   child's inbox; lost response while a grandchild runs.
    **Nested children:** if the wrapped command turns out to background itself (N3 said "unknown"), V2
-   creates a grandchild under the wrapper child and reports into the wrapper child, which replies. So a
-   wrapped job is complete only when the wrapper child is idle **and** none of its descendants (children
-   seen via `session.created` with `parentID` = a session of this job) is active; the result text is the
-   wrapper child's last assistant text after that point. Tested with a background-defined command N3
-   can't read.
+   creates a grandchild under the wrapper child, posts the grandchild's result into the wrapper child as a
+   synthetic, and the wrapper child then runs a turn that replies. **The completion predicate** (used
+   identically by live processing and by reconnect/boot reconcile) is: (1) the wrapper child is not active;
+   (2) no descendant (sessions whose `parentID` chain leads to the wrapper child) is active; (3) for every
+   descendant, its result synthetic (`metadata.childID` = that descendant) is present in its parent's
+   timeline and that parent's inbox is empty; (4) the wrapper child's latest execution outcome is set with
+   `time.idle` later than the newest such synthetic. Only then is the job terminal; the result text is the
+   wrapper child's last assistant text. Tested with a background-defined command N3 can't read, including
+   the gap between grandchild completion and the wrapper's reply.
 4. **V2-native background commands (N3 says background, or V2 turns out to background it anyway).**
    Run the command normally on the parent; adopt the child it creates:
    - **Provisional adoption:** a `session.created` with `data.parentID === P` while a command window for P
@@ -274,8 +285,9 @@ state, manta: { jobId: job.id } }, delivery: "queue", resume: true }`.
    - **Reconnect / boot reconcile** for every non-terminal `engine:"v2"` job, using only these authoritative
      fields: `GET /api/session/active` (is it running), `GET /api/session/{child}` → `outcome`
      (`succeeded|failed|interrupted`) and `time.idle`, and the job's persisted `launchState` /
-     `submittedAt`. Active → still running. Not active, `outcome` set and `time.idle ≥ submittedAt` → that
-     terminal state (and N7 for `completionOwner:"manta"`). Not active and no qualifying outcome → if
+     `submittedAt`. Active → still running. For `completionOwner:"manta"` wrapped runs, terminal only when the §B-server 3
+     completion predicate holds (descendants included); otherwise: not active, `outcome` set and
+     `time.idle ≥ submittedAt` → that terminal state (and N7 for `completionOwner:"manta"`). Not active and no qualifying outcome → if
      `launchState` is `uncertain` or `submitting`, apply the never-started grace rule above; otherwise keep
      it running and re-check on the next sweep (never guess a terminal state).
    - opencode posts the result itself (F5) — Manta posts nothing (N6).
@@ -343,7 +355,9 @@ Applies to `startJob` / `resumeJob` for every job **except** those with `actor:"
 8. pause / resume / stop / timeout / sweep / reconcile-on-boot keep their behaviour on `engine:"v2"`
    records with `completionOwner:"manta"`. Pause / resume are **not offered** for `completionOwner:"opencode"`
    rows (V2 owns that lifecycle — the controls are not rendered for them, AGENTS.md outcome 3); stop is
-   offered and interrupts the child. Each resumed attempt reports its own N7 result. Resume creates a fresh child the same way (create → move → stamp), bumps `attempt`, keeps
+   offered and interrupts the child. A job reports **exactly one** result, at its final terminal state: a paused attempt emits nothing; a
+   resumed attempt that finishes emits the job's single N7 result (same `completionMessageId`); stopping a
+   paused job emits a `stopped` result. Cards pair by `jobId` only. Resume creates a fresh child the same way (create → move → stamp), bumps `attempt`, keeps
    `jobId` — cards pair by `jobId` (N5), so a resumed job's running card still turns into its result;
 9. B's wrapped command runs keep their own launch (`startCommandJob`) but share steps 6–7.
 Records created before C1 have no `engine` field = legacy, and finish on the legacy path.
