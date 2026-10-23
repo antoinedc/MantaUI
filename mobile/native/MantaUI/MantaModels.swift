@@ -241,16 +241,26 @@ struct SendPromptInput: Sendable {
     /// `opencode:prompt`, structurally identical to the `variant` field. Omitted
     /// → the body carries no `agent` key (BET-949/BET-952).
     var agent: String?
+    /// The caller-minted V2 message id (`msg_…`). The box posts it verbatim and
+    /// V2 treats a repeated id as idempotent, so a retry of the same send can
+    /// never enqueue twice. Omitted → the box mints one.
+    var messageID: String?
+    /// `"steer"` (into the running turn) or `"queue"` (after it) — only for a
+    /// send made while a turn runs. Omitted → an ordinary idle send, which
+    /// also applies the model / agent choice.
+    var delivery: String?
 
     init(sessionId: String, text: String, model: Model? = nil,
          attachments: [Attachment]? = nil, mentions: [Mention]? = nil,
-         agent: String? = nil) {
+         agent: String? = nil, messageID: String? = nil, delivery: String? = nil) {
         self.sessionId = sessionId
         self.text = text
         self.model = model
         self.attachments = attachments
         self.mentions = mentions
         self.agent = agent
+        self.messageID = messageID
+        self.delivery = delivery
     }
 }
 

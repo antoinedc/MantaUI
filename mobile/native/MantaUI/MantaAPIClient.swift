@@ -78,6 +78,12 @@ final class MantaAPIClient: Sendable {
         if let agent = input.agent {
             argsDict["agent"] = agent
         }
+        if let messageID = input.messageID {
+            argsDict["messageID"] = messageID
+        }
+        if let delivery = input.delivery {
+            argsDict["delivery"] = delivery
+        }
         if let attachments = input.attachments {
             argsDict["attachments"] = attachments.map { attachment in
                 var dict: [String: Any] = [
@@ -149,6 +155,35 @@ final class MantaAPIClient: Sendable {
 
     func abort(sessionId: String) async throws {
         _ = try await callVoid("opencode:abort", args: [sessionId])
+    }
+
+    // MARK: - Pending messages (K4 / N1)
+
+    /// `opencode:inbox` — the session's pending-message snapshot
+    /// `{epoch, rev, items}` (K4). nil when the box answers null.
+    func inbox(sessionId: String) async throws -> InboxSnapshot? {
+        try await call("opencode:inbox", args: [sessionId], as: InboxSnapshot.self)
+    }
+
+    /// `opencode:inbox-cancel` — cancel one pending message (K4). The outcome
+    /// comes from the box's authoritative evidence; an unrecognised outcome
+    /// string decodes as `.unknown`.
+    func inboxCancel(sessionId: String, id: String) async throws -> InboxCancelResult {
+        try await callRequired(
+            "opencode:inbox-cancel",
+            args: [["sessionId": sessionId, "id": id]],
+            as: InboxCancelResult.self
+        )
+    }
+
+    /// `opencode:inbox-set-delivery` — move a pending message between "Now"
+    /// (`steer`) and "After this turn" (`queue`) (N1).
+    func inboxSetDelivery(sessionId: String, id: String, delivery: InboxDelivery) async throws -> InboxSetDeliveryResult {
+        try await callRequired(
+            "opencode:inbox-set-delivery",
+            args: [["sessionId": sessionId, "id": id, "delivery": delivery.wire]],
+            as: InboxSetDeliveryResult.self
+        )
     }
 
     // MARK: - Session list + creation (S3 / BET-595)

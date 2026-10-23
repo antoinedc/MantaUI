@@ -1228,7 +1228,23 @@ private struct ChatScreenContent: View {
             if let notice = accountsStore.moveNotice {
                 seatMoveBanner(notice)
             }
-            // Only things that BLOCK the turn and need a tap stay here. Live
+            // Messages sent during a turn that the box is still holding: "Now"
+            // (read at the agent's next step) and "After this turn". Pinned here,
+            // not in the transcript, so they stay in view and actionable however
+            // far the conversation is scrolled.
+            if !store.inboxItems.isEmpty {
+                PendingMessagesCard(
+                    items: store.inboxItems,
+                    running: store.running,
+                    busyIDs: store.inboxBusyIDs,
+                    tokens: tokens,
+                    onSendNow: { store.setInboxDelivery(id: $0, to: .steer) },
+                    onWait: { store.setInboxDelivery(id: $0, to: .queue) },
+                    onCancel: { store.cancelInboxItem(id: $0) }
+                )
+            }
+            // Only things that BLOCK the turn and need a tap stay here (plus the
+            // pending-messages card above). Live
             // running tools render INSIDE the transcript (in the run they belong
             // to); sessionError / truncation / queued prompts AND the blocking
             // cards (permission / plan / question) all moved into the transcript
