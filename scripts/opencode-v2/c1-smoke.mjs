@@ -17,8 +17,8 @@
 // client is pointed at the sandbox with _setApiBase and the password comes from
 // MANTA_OPENCODE_PASSWORD.
 
-import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, execSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +83,8 @@ const saveJobsB = (jobs) => delegateMod.saveJobs(jobs, jobsFile);
 const fakeWindows = []; // { index, opencodeSessionId }
 const killed = [];
 let postedByManta = 0;
+const localMod = await import("../../src/server/local.mjs");
+let legacyDeliveries = 0;
 const engine = delegateMod.createDelegateEngine({
   load: loadJobsB,
   save: saveJobsB,
@@ -107,6 +109,17 @@ const engine = delegateMod.createDelegateEngine({
   listRawTimeline: (sid, o) => oc.listRawTimeline(sid, o),
   listInbox: (sid) => oc.listInbox(sid),
   createChildSession: (i) => oc.createSession(i),
+  // Stage C1: delegate jobs — a REAL git worktree (a sibling of the sandbox repo, so inside the
+  // sandbox dir), the real move + direct opening prompt.
+  moveSession: (sid, dir) => oc.moveSession(sid, dir),
+  sendChildPrompt: (i) => oc.sendPrompt(i),
+  gitAddWorktree: (i) => localMod.gitAddWorktree(i),
+  gitRemoveWorktree: (i) => localMod.gitRemoveWorktree(i),
+  gitRun: async (args) => ({ stdout: execFileSync("git", args, { encoding: "utf8" }) }),
+  sessionExists: (sid) => oc.sessionExists(sid),
+  deliver: async () => {
+    legacyDeliveries += 1; // a V2 delegate job must NEVER take the legacy promptDelivery route
+  },
   runCommandOnChild: (i) => oc.runCommand(i),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   postSynthetic: (sid, body) => {
@@ -782,6 +795,163 @@ try {
     const syn = tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
     check("(16) exactly ONE result in the parent (Manta's, under its job id) and ONE reply", syn.length === 1 && syn[0].metadata.manta?.jobId === res.job.id && tl.slice(tl.findIndex((r) => r.id === syn[0].id) + 1).filter((r) => r.type === "assistant").length === 1, j(syn.map((x) => x.metadata)));
     void doneAt;
+  }
+
+  // ================================================================ Stage C1 — delegate jobs on V2
+  const delegateJob = (p, command, extra = {}) =>
+    engine.startJobWithApproval({
+      prompt: `Run exactly this shell command and nothing else: ${command} . Then reply with the single word done.`,
+      parentSessionID: p.id,
+      parentDirectory: sb.dirs.repo,
+      model: MODEL,
+      tools: [{ permission: "bash", pattern: "**" }, { permission: "edit", pattern: "**" }],
+      trustMode: true,
+      ...extra,
+    });
+  const jobById = (id) => jobBy((x) => x.id === id);
+  const resultsIn = (tl, jobId) => tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent" && r.metadata?.manta?.jobId === jobId);
+  const repliesAfter = (tl, syntheticId) => tl.slice(tl.findIndex((r) => r.id === syntheticId) + 1).filter((r) => r.type === "assistant");
+  legacyDeliveries = 0;
+
+  // ---------------------------------------------------------------- 17. U3 + N7 + U1 (idle parent)
+  console.log("\n[17] delegate job: child moved into its worktree (U3), result via N7 (rendered via N4), parent replies (U1 idle)");
+  let jobA;
+  {
+    const p = await newParent();
+    postedByManta = 0;
+    const res = await delegateJob(p, "pwd > cwd.txt; echo U3 > u3.txt");
+    check("(17) startJob resolves a running V2 job (the actor is not cto)", res.ok === true && res.job.engine === "v2" && res.job.completionOwner === "manta" && res.job.origin === "delegate" && res.job.launchState === "running", j(res));
+    jobA = res.job;
+    sessions.push(jobA.childSessionID);
+    const child = (await oc.readSession(jobA.childSessionID)).session;
+    check("(17) the child is a V2 child of the parent with a client-minted id and the preflight ruleset (catch-all deny first)", child.parentID === p.id && /^ses_[0-9a-f]{32}$/.test(child.id) && child.agent === "build" && child.permissions?.[0]?.effect === "deny" && child.permissions.length >= 2, j({ parentID: child.parentID, agent: child.agent, permissions: child.permissions }));
+    check("(17) a real worktree was made and the job record carries it as the execution directory", !!jobA.worktree && existsSync(jobA.worktree) && jobA.executionDirectory === jobA.worktree && jobA.worktree !== sb.dirs.repo, j(jobA));
+    check("(17) its window is stamped with the child id", fakeWindows.some((w) => w.opencodeSessionId === jobA.childSessionID));
+    await wait("(17) the job finished", async () => (await jobById(jobA.id))?.status === "done", 90_000);
+    const done = await jobById(jobA.id);
+    check("(17) completion from the raw outcome: done, result = the child's reply", done.status === "done" && /done/.test(done.result ?? ""), j({ status: done.status, result: done.result, error: done.error }));
+    // U3: a moved child runs its tools in the NEW directory
+    const cwdFile = join(jobA.worktree, "cwd.txt");
+    console.log(`  [U3] child shell pwd → ${existsSync(cwdFile) ? readFileSync(cwdFile, "utf8").trim() : "(no file)"}  worktree=${jobA.worktree}`);
+    check("(U3) the moved child's shell `pwd` is the WORKTREE", existsSync(cwdFile) && readFileSync(cwdFile, "utf8").trim() === jobA.worktree);
+    check("(U3) a file the child wrote landed in the worktree, NOT in the parent checkout", existsSync(join(jobA.worktree, "u3.txt")) && !existsSync(join(sb.dirs.repo, "u3.txt")) && !existsSync(join(sb.dirs.repo, "cwd.txt")));
+    await wait("(17) the result was posted and the terminal cleanup ran", async () => {
+      const x = await jobById(jobA.id);
+      return x?.completionDelivery === "delivered" && x.cleanedUp !== undefined;
+    }, 60_000);
+    const cleaned = await jobById(jobA.id);
+    check("(17) the worktree held uncommitted files, so cleanup kept it AND the window (like a legacy job)", cleaned.cleanedUp === false && existsSync(jobA.worktree) && !killed.some((k) => k.windowIndex === done.windowIndex), j({ cleanedUp: cleaned.cleanedUp, killed }));
+    await until("(17) the parent replied and settled", async () => !(await oc.listActiveSessionIds()).includes(p.id) && execStarts(p.id).length >= 1, 60_000);
+    await sleep(1200);
+    const tl = await rawTl(p.id);
+    const syn = resultsIn(tl, jobA.id);
+    console.log(`  [17] parent timeline: ${tl.map((r) => r.type + (r.type === "synthetic" ? `(${r.metadata?.source ?? "reminder"})` : "")).join(" → ")}`);
+    check("(17) exactly ONE result in the parent, under the job's persisted completionMessageId, with the N7 metadata", syn.length === 1 && syn[0].id === jobA.completionMessageId && syn[0].metadata.childID === jobA.childSessionID && syn[0].metadata.state === "completed" && syn[0].metadata.manta.jobId === jobA.id, j(syn.map((s) => [s.id, s.metadata])));
+    check("(17) …Branch/Worktree lines are in the result text, and exactly ONE parent reply follows it", /Branch: /.test(syn[0]?.text ?? "") && repliesAfter(tl, syn[0]?.id).length === 1, `replies=${repliesAfter(tl, syn[0]?.id).length}`);
+    const enq = rawLog.find((e) => e.raw.type === "session.inbox.enqueued" && e.raw.data.inboxID === jobA.completionMessageId);
+    const started = rawLog.find((e) => e.raw.type === "session.execution.started" && e.raw.data.sessionID === p.id && e.t >= (enq?.t ?? Infinity));
+    check("(U1 idle) a result posted to an IDLE parent starts a turn at once (< 3 s)", !!enq && !!started && started.t - enq.t < 3000, `${started && enq ? started.t - enq.t : "none"} ms`);
+    check("(17) Manta posted exactly once and promptDelivery was never used", postedByManta === 1 && legacyDeliveries === 0, `posted=${postedByManta} legacy=${legacyDeliveries}`);
+    const tx = await oc.listMessages(p.id);
+    const bg = tx.filter((m) => m.parts?.some((x) => x.type === "background-result" && x.jobId === jobA.id));
+    check("(N4) the parent transcript renders the result as ONE background-result part paired by jobId", bg.length === 1, j(tx.map((m) => m.parts?.map((x) => x.type))));
+    await engine.reconcileV2();
+    await engine.sweep();
+    check("(17) re-running the boot reconcile + sweep posts nothing more", postedByManta === 1 && resultsIn(await rawTl(p.id), jobA.id).length === 1);
+  }
+
+  // ---------------------------------------------------------------- 17b. U1 busy parent
+  console.log("\n[17b] delegate job finishing while the parent is BUSY: the result waits for the turn (U1 busy)");
+  {
+    const p = await newParent();
+    postedByManta = 0;
+    await oc.sendPrompt({ sessionId: p.id, text: loop(14, "pc"), model: MODEL });
+    await until("(17b) parent busy with live output", () => of(p.id, "toolOutput").length >= 1);
+    const res = await delegateJob(p, "echo quick > quick.txt");
+    check("(17b) a background job never steers the parent's turn (started while it is busy)", res.ok === true, j(res));
+    sessions.push(res.job.childSessionID);
+    await wait("(17b) the child finished", async () => (await jobById(res.job.id))?.status === "done", 60_000);
+    const busyWhenDone = (await oc.listActiveSessionIds()).includes(p.id);
+    await wait("(17b) the result was posted", async () => (await jobById(res.job.id))?.completionDelivery === "delivered");
+    const enq = rawOf("session.inbox.enqueued", (d) => d.sessionID === p.id && d.inboxID === res.job.completionMessageId);
+    check("(17b) the result was enqueued as `queue` while the parent was still busy", busyWhenDone && enq.length === 1 && enq[0].raw.data.item.delivery === "queue", j(enq.map((e) => e.raw.data.item)));
+    await until("(17b) the parent finished its loop turn and the follow-up", async () => rawOf("session.inbox.delivered", (d) => d.sessionID === p.id && d.inboxID === res.job.completionMessageId).length === 1 && !(await oc.listActiveSessionIds()).includes(p.id), 120_000);
+    await sleep(1500);
+    const tl = await rawTl(p.id);
+    const at = tl.findIndex((r) => r.id === res.job.completionMessageId);
+    const before = tl.slice(0, at).filter((r) => r.type === "assistant");
+    check("(U1 busy) the result landed AFTER the busy parent's turn (its tool step and its final answer precede it), then ONE reply", at > 0 && before.some((r) => (r.content ?? []).some((c) => c.type === "tool")) && /done/.test(assistantTexts(before).at(-1) ?? "") && repliesAfter(tl, tl[at].id).length === 1, `at=${at} replies=${repliesAfter(tl, tl[at]?.id).length}`);
+    check("(17b) one result, posted once, no legacy notice", resultsIn(tl, res.job.id).length === 1 && postedByManta === 1 && legacyDeliveries === 0);
+  }
+
+  // ---------------------------------------------------------------- 18. pause → resume → completion
+  console.log("\n[18] pause at a tool boundary → paused (nothing emitted) → resume → one result");
+  {
+    const p = await newParent();
+    postedByManta = 0;
+    mock?.setDelay(4000); // each model request is slow, so the interrupt lands while a request is pending
+    const res = await delegateJob(p, "pwd > pause-cwd.txt; for i in 1 2 3 4 5 6; do echo q$i; sleep 1; done");
+    check("(18) the job started", res.ok === true, j(res));
+    const job = res.job;
+    sessions.push(job.childSessionID);
+    await until("(18) the child's tool is running (live output)", () => of(job.childSessionID, "toolOutput").length >= 1, 60_000);
+    const pr = await engine.pauseJob(job.id);
+    check("(18) pause is accepted and only flags the running job", pr.ok === true && (await jobById(job.id)).pauseRequested === true && (await jobById(job.id)).status === "running", j(pr));
+    await wait("(18) the job parks: the interrupt at the tool boundary became `paused`", async () => (await jobById(job.id))?.status === "paused", 60_000);
+    mock?.setDelay(0);
+    const paused = await jobById(job.id);
+    const c1 = (await oc.readSession(job.childSessionID)).session;
+    check("(18) the first child ended `interrupted` (the raw outcome that parks it) — not failed, not done", c1.outcome === "interrupted" && paused.status === "paused" && paused.pauseRequested === false && paused.error === null, j({ outcome: c1.outcome, status: paused.status, error: paused.error }));
+    await sleep(2500);
+    check("(18) a paused attempt emits NOTHING (no result, no reply) and keeps its worktree + window", postedByManta === 0 && resultsIn(await rawTl(p.id), job.id).length === 0 && existsSync(job.worktree) && !killed.some((k) => k.windowIndex === paused.windowIndex) && (await jobById(job.id)).completionDelivery === null);
+    await engine.sweep();
+    await engine.reconcileV2();
+    check("(18) sweeps and reconciles leave the paused job paused", (await jobById(job.id)).status === "paused" && postedByManta === 0);
+
+    const rr = await engine.resumeJob(job.id);
+    check("(18) resume starts a FRESH child: attempt 2, same job id + result id + worktree", rr.ok === true && rr.job.attempt === 2 && rr.job.id === job.id && rr.job.childSessionID !== job.childSessionID && rr.job.completionMessageId === job.completionMessageId && rr.job.worktree === job.worktree, j(rr));
+    sessions.push(rr.job.childSessionID);
+    const c2 = (await oc.readSession(rr.job.childSessionID)).session;
+    check("(18) the resumed child is a child of the parent too", c2.parentID === p.id);
+    await wait("(18) the resumed job finished", async () => (await jobById(job.id))?.status === "done", 90_000);
+    const done = await jobById(job.id);
+    const cwd2 = join(job.worktree, "pause-cwd.txt");
+    check("(18) the resumed child ran in the SAME worktree (its pwd is the worktree)", existsSync(cwd2) && readFileSync(cwd2, "utf8").trim() === job.worktree, existsSync(cwd2) ? readFileSync(cwd2, "utf8") : "no file");
+    await wait("(18) the result was posted", async () => (await jobById(job.id))?.completionDelivery === "delivered", 60_000);
+    await until("(18) parent settled", async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1200);
+    const tl = await rawTl(p.id);
+    const syn = resultsIn(tl, job.id);
+    check("(18) exactly ONE result for the whole job, under the original result id, naming the child that finished, and ONE reply", syn.length === 1 && syn[0].id === job.completionMessageId && syn[0].metadata.childID === done.childSessionID && repliesAfter(tl, syn[0].id).length === 1 && postedByManta === 1 && legacyDeliveries === 0, j(syn.map((s) => [s.id, s.metadata.childID])));
+    check("(18) the paused attempt's old window was closed once the new attempt ran", killed.some((k) => k.windowIndex === paused.windowIndex) || done.cleanedUp === false);
+  }
+
+  // ---------------------------------------------------------------- 19. timeout (shortened allowance)
+  console.log("\n[19] timeout path: the running allowance (shortened to 3 s) elapses → failed, the child is interrupted, ONE result");
+  {
+    const p = await newParent();
+    postedByManta = 0;
+    const res = await delegateJob(p, "for i in $(seq 1 40); do echo t$i; sleep 1; done", { sweepAllowanceMs: 3000 });
+    check("(19) the job started with the injected allowance", res.ok === true && res.job.sweepAllowanceMs === 3000, j(res));
+    const job = res.job;
+    sessions.push(job.childSessionID);
+    await until("(19) the child is running", async () => (await oc.listActiveSessionIds()).includes(job.childSessionID), 30_000);
+    await sleep(3500);
+    await engine.sweep();
+    const t = await jobById(job.id);
+    check("(19) the sweep failed it as timed out (the 30-minute rule, shortened)", t.status === "failed" && /^timed out after \d+ minutes$/.test(t.error ?? ""), j({ status: t.status, error: t.error }));
+    await until("(19) the timed-out child was interrupted (no longer active)", async () => !(await oc.listActiveSessionIds()).includes(job.childSessionID), 30_000);
+    check("(19) its raw outcome was `interrupted`", (await oc.readSession(job.childSessionID)).session.outcome === "interrupted");
+    await wait("(19) the result was posted", async () => (await jobById(job.id))?.completionDelivery === "delivered", 60_000);
+    await until("(19) parent settled", async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await engine.sweep();
+    await engine.reconcileV2();
+    await sleep(1200);
+    const syn = resultsIn(await rawTl(p.id), job.id);
+    await wait("(19) the terminal cleanup ran", async () => (await jobById(job.id))?.cleanedUp !== undefined, 30_000);
+    const cl = await jobById(job.id);
+    check("(19) a CLEAN worktree is removed with its window (real git), like a legacy job", cl.cleanedUp === true && !existsSync(job.worktree) && killed.some((k) => k.windowIndex === cl.windowIndex), j({ cleanedUp: cl.cleanedUp, exists: existsSync(job.worktree), killed }));
+    check("(19) exactly ONE result (state failed) — the child's late interrupted outcome added nothing", syn.length === 1 && syn[0].metadata.state === "failed" && postedByManta === 1 && (await jobById(job.id)).status === "failed" && legacyDeliveries === 0, j(syn.map((s) => s.metadata)));
   }
 
   // ---------------------------------------------------------------- 15. N4 over the real timeline (if the mapper has landed)

@@ -47,10 +47,27 @@ function world({ jobs: seed = [], git = true } = {}) {
   const windows = [{ index: 0, opencodeSessionId: PARENT, paneCurrentPath: REPO }];
   const records = new Map(); // parent synthetic records, deduped by id like V2 does (U2)
   const fail = { create: null, move: null, send: null, window: null, synth: [], dirty: false, addWorktree: null };
-  const state = { now: T0, nextWindow: 5, cto: false, ctoResult: undefined, git };
+  const state = { now: T0, nextWindow: 5, cto: false, ctoResult: undefined, git, moveLag: 0, pendingMove: null, readPolls: 0 };
   const storeAt = (label) => log.push({ label, store: jobs.map((j) => ({ ...j })) });
 
+  // V2 applies a move as an inbox item run by an execution of its own, so the child's
+  // directory changes (and its first outcome appears) a little AFTER the 204.
+  const applyMove = (sid, { poll = false } = {}) => {
+    const pm = state.pendingMove;
+    if (!pm || pm.sid !== sid) return;
+    if (poll && pm.lag-- > 0) return;
+    state.pendingMove = null;
+    const s = sessions.get(sid);
+    if (!s) return;
+    s.directory = pm.directory;
+    s.outcome = "succeeded";
+    s.time = { ...(s.time ?? {}), idle: state.now };
+    active.delete(sid);
+    inboxes.set(sid, (inboxes.get(sid) ?? []).filter((i) => i.type !== "move"));
+  };
+
   const deps = {
+    sleep: async () => {},
     load: async () => jobs.map((j) => structuredClone(j)),
     save: async (next) => {
       jobs.splice(0, jobs.length, ...next.map((j) => structuredClone(j)));
@@ -87,6 +104,8 @@ function world({ jobs: seed = [], git = true } = {}) {
       return { stdout: "" };
     },
     readSession: async (sid) => {
+      state.readPolls++;
+      applyMove(sid, { poll: true });
       const s = sessions.get(sid);
       return s ? { state: "found", session: structuredClone(s) } : { state: "missing" };
     },
@@ -105,19 +124,18 @@ function world({ jobs: seed = [], git = true } = {}) {
       calls.move.push({ sid, directory });
       storeAt("move");
       if (fail.move) throw fail.move;
-      // V2 applies a move as an inbox item at the session's next execution
       inboxes.set(sid, [...(inboxes.get(sid) ?? []), { id: `msg_move_${calls.move.length}`, type: "move", payload: { location: { directory } } }]);
+      state.pendingMove = { sid, directory, lag: state.moveLag };
+      if (state.moveLag === 0) applyMove(sid);
     },
     sendChildPrompt: async (input) => {
       calls.send.push(input);
       storeAt("send");
       if (fail.send) throw fail.send;
-      // the move lands with the first execution
-      const s = sessions.get(input.sessionId);
-      const mv = (inboxes.get(input.sessionId) ?? []).filter((i) => i.type === "move").at(-1);
-      if (s && mv) s.directory = mv.payload.location.directory;
-      inboxes.set(input.sessionId, (inboxes.get(input.sessionId) ?? []).filter((i) => i.type !== "move"));
+      state.sentAfterMoveApplied = state.pendingMove === null;
       active.add(input.sessionId);
+      const s = sessions.get(input.sessionId);
+      if (s) delete s.outcome; // a new execution is running
     },
     deleteSession: async (sid) => {
       calls.del.push(sid);
@@ -491,9 +509,11 @@ test("C1 reconcile: a move already queued in the child's inbox is not re-issued,
   });
   w.sessions.set("ses_c1", { id: "ses_c1", parentID: PARENT, directory: REPO });
   w.inboxes.set("ses_c1", [{ id: "msg_m", type: "move", payload: { location: { directory: WT } } }]);
+  w.state.pendingMove = { sid: "ses_c1", directory: WT, lag: 2 }; // lands after two polls
   await reconcileV2Jobs(w.deps);
   assert.equal(w.calls.move.length, 0, "the move is already queued");
   assert.equal(w.calls.send.length, 1);
+  assert.equal(w.state.sentAfterMoveApplied, true, "…and the prompt waited for it to land");
   // a launch whose prompt outcome is unknown, with only the move item pending, has no admission evidence
   const w2 = world();
   w2.jobs.push({ ...w.jobs[0], launchState: "uncertain", submittedAt: T0, windowIndex: 5 });
@@ -534,6 +554,61 @@ test("C1 stop mid-launch: a job ended while its window was being made never gets
   assert.deepEqual(w.calls.del, [w.calls.create[0].id]);
   assert.equal(w.jobs[0].status, "stopped", "the record keeps the terminal state");
   assert.equal(w.records.size, 1);
+});
+
+// ---------------------------------------------------------------------------
+// the move runs an execution of its own
+// ---------------------------------------------------------------------------
+
+test("C1 move: the opening prompt waits until the move has LANDED and its execution is over", async () => {
+  const w = world();
+  w.state.moveLag = 3; // the child's directory changes only after three polls
+  const id = await start(w);
+  assert.equal(w.state.sentAfterMoveApplied, true, "no prompt while the move was still pending");
+  assert.ok(w.state.readPolls >= 3);
+  assert.equal(w.job(id).launchState, "running");
+  assert.deepEqual(w.log.map((l) => l.label), ["create", "move", "window", "send"]);
+  assert.equal(w.sessions.get(w.job(id).childSessionID).directory, WT);
+});
+
+test("C1 move: a move that never lands in time is an UNKNOWN launch — kept, nothing sent, nothing rolled back", async () => {
+  const w = world();
+  w.state.moveLag = 10_000;
+  w.deps.moveWait = { attempts: 4, intervalMs: 0 };
+  const res = await startJob(input(), w.deps);
+  assert.equal(res.ok, true);
+  assert.equal(res.uncertain, true);
+  keptEverything(w);
+  assert.equal(w.calls.window.length + w.calls.send.length, 0, "no window and no prompt before the move landed");
+});
+
+test("C1 move: the move's own execution outcome is never read as the job finishing", async () => {
+  // a job whose opening input has not been submitted yet, over a child whose move-applying
+  // execution already `succeeded`: that outcome is not the job's
+  for (const launchState of ["creating", "submitting", "uncertain"]) {
+    const w = world();
+    const id = await start(w);
+    w.job(id).launchState = launchState;
+    w.job(id).submittedAt = null;
+    w.job(id).status = "running";
+    const child = w.job(id).childSessionID;
+    w.finish(child, "succeeded", T0 + 5); // the move's execution
+    const res = await settleV2Job(w.job(id), w.deps);
+    assert.equal(res.settled, false, launchState);
+    assert.equal(res.reason, "unsent");
+    assert.equal(w.job(id).status, "running");
+    assert.equal(w.records.size, 0);
+    await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child));
+    assert.equal(w.job(id).status, "running", "nor does the pump's raw event finish it");
+  }
+  // once submitted, the child's own outcome finishes it
+  const w = world();
+  const id = await start(w);
+  w.say(w.job(id).childSessionID, "real work");
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 50);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  assert.equal(w.job(id).status, "done");
+  assert.equal(w.job(id).result, "real work");
 });
 
 // ---------------------------------------------------------------------------

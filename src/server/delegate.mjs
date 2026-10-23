@@ -3125,6 +3125,11 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
     return { settled: true, status: "failed" };
   }
 
+  // A job Manta starts has no run to settle until its opening input was submitted:
+  // whatever execution the child showed before that (V2 runs one just to apply the
+  // move into the worktree) is not the job finishing.
+  if (manta && job.submittedAt == null) return { settled: false, reason: "unsent" };
+
   const session = rs.session ?? {};
   const outcome = session.outcome ?? hint?.outcome ?? null;
   const idleAt = session.time?.idle ?? hint?.at ?? null;
@@ -3718,7 +3723,10 @@ async function launchDelegate(job, deps) {
     return uncertain();
   }
 
-  // …into the execution directory
+  // …into the execution directory. V2 applies a move as an inbox item run by an
+  // execution of its own (which "succeeds" ~half a second later), so the prompt is
+  // held back until the move has landed and that execution is over: otherwise its
+  // outcome would read as the job finishing.
   if (job.executionDirectory && job.executionDirectory !== job.parentDirectory) {
     if (!(await launchStillWanted(job, deps))) return dropHaltedLaunch(job, deps);
     try {
@@ -3730,6 +3738,7 @@ async function launchDelegate(job, deps) {
       }
       return uncertain();
     }
+    if (!(await awaitMoveApplied(job, deps))) return uncertain();
   }
 
   // …its window / sidebar row
@@ -3812,10 +3821,34 @@ async function abandonLaunch(job, message, deps, { childExists = true, reconcile
 }
 
 /**
- * Has the child been moved into the job's execution directory (or is the move
- * already queued)? Re-issues it only when neither the session nor its inbox shows
- * it — V2 applies a move as an inbox item at the session's next execution, so the
- * session's own directory lags the request.
+ * Wait (bounded) until the move has LANDED: the child's own directory is the
+ * execution directory and the execution that applied the move is over. V2 answers
+ * the move with a 204 and applies it as an inbox item, so neither is true right away.
+ * Any unreadable poll just counts as "not yet".
+ */
+async function awaitMoveApplied(job, deps) {
+  const { attempts = 75, intervalMs = 200 } = deps.moveWait ?? {};
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const rs = await deps.readSession(job.childSessionID);
+      if (rs.state === "found" && rs.session?.directory === job.executionDirectory) {
+        const active = await deps.listActiveIds();
+        if (!active.includes(job.childSessionID)) return true;
+      }
+    } catch {
+      /* not yet */
+    }
+    if (i < attempts - 1) await sleep(intervalMs);
+  }
+  return false;
+}
+
+/**
+ * Has the child been moved into the job's execution directory? Re-issues the move
+ * only when neither the session nor its inbox shows it, and answers `ok` only once
+ * the move has landed (awaitMoveApplied) — a launch that goes on before that would
+ * mistake the move's own execution for the job finishing.
  */
 async function ensureMoved(job, deps) {
   const dir = job.executionDirectory;
@@ -3823,14 +3856,16 @@ async function ensureMoved(job, deps) {
   try {
     const rs = await deps.readSession(job.childSessionID);
     if (rs.state !== "found") return { ok: false };
-    if (rs.session?.directory === dir) return { ok: true };
-    const inbox = (await deps.listInbox?.(job.childSessionID)) ?? [];
-    if (inbox.some((i) => i?.type === "move" && i?.payload?.location?.directory === dir)) return { ok: true };
-    await deps.moveSession(job.childSessionID, dir);
-    return { ok: true };
+    if (rs.session?.directory !== dir) {
+      const inbox = (await deps.listInbox?.(job.childSessionID)) ?? [];
+      if (!inbox.some((i) => i?.type === "move" && i?.payload?.location?.directory === dir)) {
+        await deps.moveSession(job.childSessionID, dir);
+      }
+    }
   } catch (e) {
     return isDefiniteRefusal(e) ? { ok: false, definite: true, error: String(e?.message ?? e) } : { ok: false };
   }
+  return { ok: await awaitMoveApplied(job, deps) };
 }
 
 /**

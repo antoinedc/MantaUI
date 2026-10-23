@@ -54,6 +54,7 @@ import {
   listChildSessions,
   listRawTimeline,
   postSynthetic,
+  moveSession,
   listAgents,
   _pooledOcRequest,
   discardBody,
@@ -1899,6 +1900,21 @@ test("postSynthetic POSTs the body verbatim (explicit id, queue, resume) and car
   await withV2({ "POST /api/session/ses_gone/synthetic": () => new Response("nf", { status: 404 }) }, async () => {
     await assert.rejects(postSynthetic("ses_gone", body), (e) => e.status === 404);
   });
+});
+
+test("moveSession POSTs {directory}, primes the directory cache, and carries err.status for a refusal", async () => {
+  let cached;
+  const calls = await withV2({ "POST /api/session/ses_c/move": null }, async () => {
+    await moveSession("ses_c", "/work/wt-one");
+    cached = cachedSessionDirectory("ses_c");
+  });
+  assert.deepEqual(calls[0].body, { directory: "/work/wt-one" });
+  assert.equal(cached, "/work/wt-one", "shell polling must look in the new directory");
+  await withV2({ "POST /api/session/ses_bad/move": () => new Response("outside the project", { status: 400 }) }, async () => {
+    await assert.rejects(moveSession("ses_bad", "/elsewhere"), (e) => e.status === 400);
+    cached = cachedSessionDirectory("ses_bad");
+  });
+  assert.equal(cached, null, "a refused move changes nothing");
 });
 
 test("listCommands with a directory scopes commands + skills to it, and marks background names (never a skill)", async () => {
