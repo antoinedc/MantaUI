@@ -1214,3 +1214,44 @@ test("observeEvent still adopts a background task subagent into the new V2 shape
   assert.equal(w.jobs[0].completionOwner, "opencode");
   assert.equal(w.jobs[0].worktree, null);
 });
+
+// ---------------------------------------------------------------------------
+// A launch cut off by a restart is uncertain; one this process is running is left alone
+// ---------------------------------------------------------------------------
+
+test("a record left mid-launch by a restart becomes `uncertain` on reconcile — and is then never timed out", async () => {
+  const w = world();
+  const sent = seedWrapped(w, { id: "cut00001", launchState: "submitting", submittedAt: T0 });
+  const unsent = v2Job({ id: "cut00002", childSessionID: "ses_c2", launchState: "creating", submittedAt: null, windowIndex: null });
+  w.jobs.push(unsent);
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.job(sent.id).launchState, "uncertain");
+  assert.equal(w.job(unsent.id).launchState, "uncertain");
+  w.setNow(T0 + 40 * 60_000);
+  w.deps.sessionExists = async () => true;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(sent.id).status, "running", "no guessed failure on a clock");
+  assert.equal(w.job(unsent.id).status, "running");
+  assert.equal(w.calls.synth.length, 0);
+});
+
+test("a launch THIS process is running is not touched by a concurrent reconcile", async () => {
+  const w = world();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const create = w.deps.createChildSession;
+  w.deps.createChildSession = async (i) => {
+    await gate;
+    return create(i);
+  };
+  const started = startCommandJob(startInput(), w.deps);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(w.jobs.length, 1);
+  assert.equal(w.jobs[0].launchState, "creating");
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.jobs[0].launchState, "creating", "still its launch's to settle");
+  release();
+  const res = await started;
+  assert.equal(res.ok, true);
+  assert.equal(w.job(res.job.id).launchState, "running");
+});

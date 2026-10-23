@@ -2961,6 +2961,10 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
 }
 
 const resuming = new Set();
+// Jobs this process is launching right now (between registration and the send):
+// a reconcile must leave them alone, and any other record still mid-launch was
+// interrupted (a restart) and is therefore uncertain.
+const inLaunch = new Set();
 
 /**
  * A wrapped run whose command was NEVER sent (the create response was lost, or
@@ -3018,8 +3022,14 @@ export async function reconcileV2Jobs(deps = {}) {
   const { load = loadJobs } = deps;
   if (typeof deps.listActiveIds !== "function") return 0;
   const targets = (await load()).filter((j) => j.engine === "v2" && !isTerminal(j) && j.childSessionID);
-  for (const job of targets) {
+  for (let job of targets) {
     try {
+      if (inLaunch.has(job.id) || resuming.has(job.id)) continue;
+      // A record still mid-launch that no launch in THIS process owns was cut off
+      // (a restart): what happened to its requests is unknown, so say so.
+      if (job.launchState === "creating" || job.launchState === "submitting") {
+        job = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) && (j.launchState === "creating" || j.launchState === "submitting") })) ?? job;
+      }
       if (completionOwnerOf(job) === "manta" && job.submittedAt == null && (job.launchState === "creating" || job.launchState === "uncertain")) {
         const rs = await deps.readSession(job.childSessionID);
         if (rs.state === "found") await resumeUnsentLaunch(job, deps);
@@ -3107,17 +3117,7 @@ async function submitCommand(job, deps) {
  * @returns {Promise<{ok:true, job:object, uncertain?:true}|{ok:false, error:string}>}
  */
 export async function startCommandJob(input, deps = {}) {
-  const {
-    load = loadJobs,
-    save = saveJobs,
-    publish,
-    listProjects,
-    newWindow,
-    stampOwner,
-    readSession,
-    createChildSession,
-    now = () => Date.now(),
-  } = deps;
+  const { load = loadJobs, save = saveJobs, publish, listProjects, readSession, now = () => Date.now() } = deps;
   const command = typeof input?.command === "string" ? input.command.trim() : "";
   const parentSessionID = input?.parentSessionID;
   if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
@@ -3210,12 +3210,27 @@ export async function startCommandJob(input, deps = {}) {
       commandRun: { command, arguments: args, model, agent, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
     };
     jobs.push(job);
-    await save(jobs);
+    inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
+    try {
+      await save(jobs);
+    } catch (e) {
+      inLaunch.delete(job.id);
+      throw e;
+    }
     publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running", launchState: "creating" } });
     return { ok: true, job };
   });
   if (!reg.ok) return reg;
-  let job = reg.job;
+  try {
+    return await launchRegistered(reg.job, { owner, parentSessionID, parentDirectory, agent, model, permissions, name }, deps);
+  } finally {
+    inLaunch.delete(reg.job.id);
+  }
+}
+
+// Steps (b)–(c) of startCommandJob, for a job already registered.
+async function launchRegistered(job, { owner, parentSessionID, parentDirectory, agent, model, permissions, name }, deps) {
+  const { newWindow, stampOwner, createChildSession, now = () => Date.now() } = deps;
 
   // (b) the child session
   try {
