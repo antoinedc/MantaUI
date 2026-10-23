@@ -813,7 +813,6 @@ function CtoConversation(props: {
     return null;
   }, [messages]);
 
-  const submitRef = useRef<(textOverride?: string) => void>(() => {});
 
   const bus = useSseBus({
     sessionId,
@@ -848,10 +847,9 @@ function CtoConversation(props: {
     setPlanOn: () => {
       /* plan mode is not a CTO surface */
     },
-    submit: () => {
-      /* dormant — CTO sends never enqueue client-side */
-    },
-    submitRef,
+    // The CTO conversation's pending messages are admission-owned: its
+    // opencode:inbox is refused by design, so no inbox is read or shown.
+    inbox: false,
   });
 
   // Register the receipt hook: after a submit resolves, reconcile the

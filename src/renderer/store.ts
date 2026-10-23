@@ -1578,7 +1578,7 @@ export const useStore = create<State>((set, get) => ({
 
           // opencode's pending question/permission lists are cumulative and
           // never expire — a question whose turn was aborted (explicit abort,
-          // queued-message drain-abort, opencode restart, app closed mid-ask)
+          // opencode restart, app closed mid-ask)
           // stays "pending" forever unless something explicitly rejects it.
           // Trusting the list alone re-latches the red "?" glyph on every
           // launch for these orphans (BET-116). Validate against the

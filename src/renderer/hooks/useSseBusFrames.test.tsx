@@ -14,9 +14,10 @@
 //     exercised with no hand-written frame to drift from it.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
-import { act, useRef } from "react";
+import { act } from "react";
 import { useSseBus, type SseBus } from "./useSseBus";
 import { installMockApi, resetStore, mount } from "../testHarness";
+import { resetRetiredInboxEpochs } from "../inboxState";
 import type { StreamEnvelope } from "../../shared/types";
 
 const SID = "ses_test";
@@ -30,7 +31,6 @@ type Stubs = {
   spliceMessage: Fn;
   scheduleChildRefetch: Fn;
   applyStreamFlush: Fn;
-  submit: Fn;
   setPlanOn: Fn;
   childSessionIds: { current: Set<string> };
   expandedTasksRef: { current: Set<string> };
@@ -41,8 +41,6 @@ let stubs!: Stubs;
 let providerID: string | null = "anthropic";
 
 function Probe() {
-  const submitRef = useRef<(t?: string) => void>(() => {});
-  submitRef.current = (t) => stubs.submit(t);
   bus = useSseBus({
     sessionId: SID,
     cwd: "/x",
@@ -60,8 +58,6 @@ function Probe() {
     refetchOwedWhileInactive: { current: false },
     applyStreamFlush: stubs.applyStreamFlush as never,
     providerID,
-    submit: (() => {}) as never,
-    submitRef,
     setPlanOn: stubs.setPlanOn as never,
   });
   return null;
@@ -91,6 +87,7 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
   }
 
   beforeEach(() => {
+    resetRetiredInboxEpochs();
     providerID = "anthropic";
     stubs = {
       setMessages: vi.fn(),
@@ -99,7 +96,6 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       spliceMessage: vi.fn(),
       scheduleChildRefetch: vi.fn(),
       applyStreamFlush: vi.fn(() => 0),
-      submit: vi.fn(),
       setPlanOn: vi.fn(),
       childSessionIds: { current: new Set() },
       expandedTasksRef: { current: new Set() },
@@ -253,7 +249,7 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       expect(bus.authReconnect).toBe("Claude");
     });
 
-    it("a user Stop (aborted frame, no drain in progress) shows the Aborted banner and ends the turn", async () => {
+    it("a user Stop (aborted frame) shows the Aborted banner and ends the turn", async () => {
       await mountProbe();
       await emit(frame("running", { running: true }));
       await emit(frame("aborted", {}));
@@ -261,63 +257,143 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       expect(bus.running).toBe(false);
       expect(bus.authReconnect).toBeNull();
     });
+  });
 
-    it("our own queued-drain abort is invisible: no banner, running false", async () => {
+  describe("pending-message inbox (K3)", () => {
+    const snap = (epoch: string, rev: number, ids: string[]) => ({
+      epoch,
+      rev,
+      items: ids.map((id) => ({ id, text: `t-${id}`, delivery: "steer", createdAt: 1, attachmentCount: 0 })),
+    });
+
+    it("seeds from opencode:inbox on open", async () => {
+      await mountProbe({ opencodeInbox: () => Promise.resolve(snap("e1", 3, ["msg_a"])) });
+      expect(api.calls.opencodeInbox).toEqual([[SID]]);
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_a"]);
+    });
+
+    it("an inbox frame replaces the list; a lower or equal rev in the same epoch is dropped", async () => {
       await mountProbe();
-      await emit(frame("running", { running: true }));
-      bus.drainAbortRef.current = true;
-      await emit(frame("aborted", {}));
-      expect(bus.sendError).toBeNull();
-      expect(bus.running).toBe(false);
+      await emit(frame("inbox", snap("e1", 2, ["msg_a", "msg_b"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_a", "msg_b"]);
+      await emit(frame("inbox", snap("e1", 2, ["msg_x"])));
+      await emit(frame("inbox", snap("e1", 1, [])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_a", "msg_b"]);
+      await emit(frame("inbox", snap("e1", 3, ["msg_b"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_b"]);
+    });
+
+    it("an empty full list clears the card", async () => {
+      await mountProbe();
+      await emit(frame("inbox", snap("e1", 1, ["msg_a"])));
+      await emit(frame("inbox", snap("e1", 2, [])));
+      expect(bus.inboxItems).toEqual([]);
+    });
+
+    it("a new epoch (restarted server) replaces even at a lower rev, and the old epoch is retired", async () => {
+      await mountProbe();
+      await emit(frame("inbox", snap("old", 9, ["msg_a"])));
+      await emit(frame("inbox", snap("new", 1, ["msg_b"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_b"]);
+      await emit(frame("inbox", snap("old", 99, ["msg_zombie"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_b"]);
+    });
+
+    it("frames for another session never touch this panel's inbox", async () => {
+      await mountProbe();
+      await emit(frame("inbox", snap("e1", 1, ["msg_other"]), "ses_other"));
+      expect(bus.inboxItems).toEqual([]);
+    });
+
+    it("a resync re-seeds from opencode:inbox", async () => {
+      let n = 0;
+      await mountProbe({ opencodeInbox: () => Promise.resolve(n++ === 0 ? snap("e1", 1, ["msg_a"]) : snap("e2", 1, ["msg_b"])) });
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_a"]);
+      await emit(frame("resync", {}, ""));
+      expect(api.calls.opencodeInbox).toHaveLength(2);
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_b"]);
+    });
+
+    it("an answer requested before a resync is dropped (a late reply from a dead server)", async () => {
+      const pending: Array<(v: unknown) => void> = [];
+      await mountProbe({ opencodeInbox: () => new Promise((res) => pending.push(res)) });
+      expect(pending).toHaveLength(1);
+      await emit(frame("resync", {}, ""));
+      expect(pending).toHaveLength(2);
+      // The NEW answer lands first, the OLD (pre-resync) one after it.
+      await act(async () => pending[1](snap("new", 1, ["msg_new"])));
+      await act(async () => pending[0](snap("dead", 50, ["msg_dead"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_new"]);
+    });
+
+    it("an answer that lands after the panel left the session is dropped", async () => {
+      let resolve!: (v: unknown) => void;
+      await mountProbe({ opencodeInbox: () => new Promise((res) => (resolve = res)) });
+      h!.unmount();
+      h = null;
+      await act(async () => resolve(snap("e1", 1, ["msg_late"])));
+      expect(bus.inboxItems).toEqual([]);
+    });
+
+    it("a failed seed read leaves the inbox empty and the panel working (the next frame re-seeds)", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await mountProbe({ opencodeInbox: () => Promise.reject(new Error("boom")) });
+      expect(bus.inboxItems).toEqual([]);
+      await emit(frame("inbox", snap("e1", 1, ["msg_a"])));
+      expect(bus.inboxItems.map((i) => i.id)).toEqual(["msg_a"]);
+      warn.mockRestore();
     });
   });
 
-  describe("queued-prompt drain (abort at the next step boundary, submit on idle)", () => {
-    async function withQueuedPrompt() {
-      await mountProbe();
-      await emit(frame("running", { running: true }));
-      act(() => bus.setMessageQueue(["second"]));
-      await h!.flush();
+  describe("rejectPendingQuestions", () => {
+    const q = (id: string, sessionID = SID) => ({ id, sessionID, requestId: `que_${id}`, questions: [] });
+    async function withQuestions(overrides: Record<string, unknown>, list: unknown[]) {
+      await mountProbe(overrides);
+      await emit(frame("questions", { questions: list }));
     }
 
-    it("a toolBoundary frame aborts the in-flight turn once, even if several boundaries arrive before the abort lands", async () => {
-      await withQueuedPrompt();
-      await emit(frame("toolBoundary", { messageID: "m", partID: "p1", callID: "c1", tool: "bash", status: "completed" }));
-      await emit(frame("toolBoundary", { messageID: "m", partID: "p2", callID: "c2", tool: "read", status: "error" }));
-      expect(api.calls.opencodeAbort).toEqual([[SID]]);
-      expect(bus.drainAbortRef.current).toBe(true);
-    });
-
-    it("a stepEnded frame is a step boundary too", async () => {
-      await withQueuedPrompt();
-      await emit(frame("stepEnded", { messageID: "m", tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } }));
-      expect(api.calls.opencodeAbort).toEqual([[SID]]);
-    });
-
-    it("no queued prompt → no abort", async () => {
-      await mountProbe();
-      await emit(frame("running", { running: true }));
-      await emit(frame("toolBoundary", { messageID: "m", partID: "p", callID: "c", tool: "bash", status: "completed" }));
-      expect(api.calls.opencodeAbort ?? []).toEqual([]);
-    });
-
-    it("end to end: boundary → abort → V1 abort error (no frame) → idle → the queued prompt is submitted exactly once, drain re-armed", async () => {
-      await withQueuedPrompt();
-      await emitRaw({
-        type: "message.part.updated",
-        properties: { sessionID: SID, part: { id: "prt_t", type: "tool", messageID: "m", callID: "c", tool: "bash", state: { status: "completed" } } },
+    it("awaits every rejection and removes the cards once they succeeded", async () => {
+      await withQuestions({}, [q("a"), q("b")]);
+      let r!: { ok: boolean; error?: string };
+      await act(async () => {
+        r = await bus.rejectPendingQuestions();
       });
-      expect(api.calls.opencodeAbort).toEqual([[SID]]);
-      // opencode's V1 abort: session.error(MessageAbortedError) → status idle → session.idle
-      await emitRaw({ type: "session.error", properties: { sessionID: SID, error: { name: "MessageAbortedError", data: { message: "Aborted" } } } });
-      await emitRaw({ type: "session.status", properties: { sessionID: SID, status: { type: "idle" } } });
-      await emitRaw({ type: "session.idle", properties: { sessionID: SID } });
-      expect(bus.sendError).toBeNull();
-      expect(bus.running).toBe(false);
-      expect(stubs.submit).toHaveBeenCalledTimes(1);
-      expect(stubs.submit).toHaveBeenCalledWith("second");
-      expect(bus.messageQueue).toEqual([]);
-      expect(bus.drainAbortRef.current).toBe(false);
+      expect(r).toEqual({ ok: true });
+      expect(api.calls.opencodeQuestionReject).toEqual([["que_a", SID], ["que_b", SID]]);
+      expect(bus.questions).toEqual([]);
+    });
+
+    it("scopes to this session only", async () => {
+      await withQuestions({}, [q("a"), q("x", "ses_other")]);
+      await act(async () => {
+        await bus.rejectPendingQuestions();
+      });
+      expect(api.calls.opencodeQuestionReject).toEqual([["que_a", SID]]);
+      expect(bus.questions.map((x) => x.id)).toEqual(["x"]);
+    });
+
+    it("a failed rejection keeps ITS card and reports the error; the others are removed", async () => {
+      await withQuestions(
+        { opencodeQuestionReject: (id: string) => (id === "que_b" ? Promise.reject(new Error("nope")) : Promise.resolve()) },
+        [q("a"), q("b")],
+      );
+      let r!: { ok: boolean; error?: string };
+      await act(async () => {
+        r = await bus.rejectPendingQuestions();
+      });
+      expect(r.ok).toBe(false);
+      expect(r.error).toContain("nope");
+      expect(bus.questions.map((x) => x.id)).toEqual(["b"]);
+    });
+
+    it("nothing pending → ok, no calls", async () => {
+      await mountProbe();
+      let r!: { ok: boolean };
+      await act(async () => {
+        r = await bus.rejectPendingQuestions();
+      });
+      expect(r.ok).toBe(true);
+      expect(api.calls.opencodeQuestionReject ?? []).toEqual([]);
     });
   });
 

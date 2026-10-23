@@ -726,11 +726,11 @@ describe("ChatPanel composer submit", () => {
     expect(textarea.value).toBe("previous prompt");
   });
 
-  it("while running with an EMPTY client queue, ArrowUp still recalls prompt history (fall-through, never a swallowed keypress)", async () => {
-    // The queue-pop branch (running + empty composer) must fall through to
-    // prompt history when the surface owns no client queue item to pop — the
-    // CTO surface (no client queue at all) and the session surface (queue
-    // currently empty) both inherit this from the shared InputArea.
+  it("while running with NOTHING pending, ArrowUp still recalls prompt history (fall-through, never a swallowed keypress)", async () => {
+    // The pop-last branch (running + empty composer) must fall through to
+    // prompt history when there is no pending message to pop — the CTO surface
+    // (no inbox at all) and the session surface (inbox currently empty) both
+    // inherit this from the shared InputArea.
     const transcript = [
       {
         info: { id: "msg_u1", sessionID: "ses_test", role: "user" as const },
