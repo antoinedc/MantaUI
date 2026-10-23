@@ -1100,6 +1100,11 @@ const delegateEngine = createDelegateEngine({
   listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
   listInbox: (sid) => oc.listInbox(sid),
   createChildSession: (input) => oc.createSession(input),
+  // C1: a delegate job's child is moved into its worktree, then gets its opening
+  // prompt DIRECTLY (not through promptDelivery, which swallows the failure the
+  // launch has to classify as refused-vs-unknown).
+  moveSession: (sid, directory) => oc.moveSession(sid, directory),
+  sendChildPrompt: (input) => oc.sendPrompt(input),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
   postSynthetic: (sid, body) => oc.postSynthetic(sid, body),
