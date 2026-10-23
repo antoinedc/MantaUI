@@ -555,6 +555,40 @@ test("runCommand non-2xx carries err.status (admission: definitive 4xx vs unknow
   );
 });
 
+test("runCommand on a skill sends `/<skill> <args>` as a prompt with the skill attached, not to the command route", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", path: "/s", content: "c" }] },
+      "GET /api/session/ses_a": { data: SESSION() },
+      "POST /api/session/ses_a/prompt": null,
+      "POST /api/session/ses_a/command": null,
+    },
+    async () => {
+      await runCommand({ sessionId: "ses_a", command: "impeccable", arguments: "init" });
+    },
+  );
+  assert.equal(only(calls, "POST", "/api/session/ses_a/command").length, 0);
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/prompt")[0].body, {
+    text: "/impeccable init",
+    skills: [{ id: "impeccable", mention: { start: 0, end: 11, text: "/impeccable" } }],
+  });
+});
+
+test("listCommands appends skills, and a skill hides a same-named command wrapper", async () => {
+  await withV2(
+    {
+      "GET /api/command": { data: [{ name: "init", description: "setup" }, { name: "impeccable", description: "wrapper" }] },
+      "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", description: "design", path: "/s", content: "c" }] },
+    },
+    async () => {
+      assert.deepEqual(
+        (await listCommands()).map((c) => [c.name, c.description, c.source]),
+        [["init", "setup", undefined], ["impeccable", "design", "skill"]],
+      );
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // running state
 // ---------------------------------------------------------------------------
