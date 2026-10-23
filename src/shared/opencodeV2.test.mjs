@@ -404,6 +404,29 @@ test("mapTimeline: background-result name — metadata.manta.name, else a '/…'
   assert.equal(part(rec({ description: "/review HEAD~1" })).text, "boom");
 });
 
+test("mapTimeline: a Manta-posted result's card text drops the '[background job …]' header + its blank line only", () => {
+  const part = (text, manta = { jobId: "job1" }) =>
+    mapTimeline(
+      [{ id: "msg_m", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", ...(manta ? { manta } : {}) }, text }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  assert.equal(part('[background job "/review HEAD~1" done]\n\nall good\nsecond line').text, "all good\nsecond line");
+  assert.equal(part('[background job "x" failed]\n\nError: timed out after 30 minutes').text, "Error: timed out after 30 minutes");
+  // a delegate job: the Branch/Worktree lines stay
+  assert.equal(
+    part('[background job "fix-it" done]\nBranch: b (2 files changed)\nWorktree: /w\n\ndone it').text,
+    "Branch: b (2 files changed)\nWorktree: /w\n\ndone it",
+  );
+  // a name holding quotes still matches; an empty body leaves an empty text
+  assert.equal(part('[background job "say "hi" now" done]\n\nbody').text, "body");
+  assert.equal(part('[background job "n" done]\n\n').text, "");
+  // not that shape → untouched
+  assert.equal(part("[background job n done]\n\nbody").text, "[background job n done]\n\nbody");
+  assert.equal(part('see [background job "n" done]\n\nbody').text, 'see [background job "n" done]\n\nbody');
+  // without metadata.manta.jobId the text is never touched
+  assert.equal(part('[background job "n" done]\n\nbody', null).text, '[background job "n" done]\n\nbody');
+});
+
 test("mapTimeline: background-result tolerates a missing/odd envelope and missing metadata fields", () => {
   const part = (r) => mapTimeline([{ id: "m", type: "synthetic", time: { created: 1 }, ...r }], { sessionID: "s" })[0]?.parts[0];
   assert.equal(part({ metadata: { source: "subagent", childID: "c", state: "completed" }, text: "plain result" }).text, "plain result");

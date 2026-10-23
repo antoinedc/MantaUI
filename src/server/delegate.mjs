@@ -1738,6 +1738,10 @@ export async function sweepDelegateJobs(deps = {}) {
       // An uncertain launch is never failed on a clock: nothing proves the run
       // did not start, so it stays (and is re-checked every sweep) until there
       // is evidence either way.
+      // A V2 child opencode owns (an adopted subagent, a native background
+      // command) has no running timeout: opencode runs its lifecycle and
+      // settleV2Job finishes it from the real outcome.
+      if (job.engine === "v2" && completionOwnerOf(job) === "opencode") continue;
       if (job.status === "running" && job.startedAt != null && job.launchState !== "uncertain") {
         // Per-job running-sweep allowance: default 30 min, or the caller's
         // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
@@ -1779,7 +1783,17 @@ export async function sweepDelegateJobs(deps = {}) {
     // the legacy "timed out after 30 minutes".
     for (const { job, allowance } of transitioned) {
       const mins = Math.round(allowance / 60_000);
-      await finishJob(job, "failed", `timed out after ${mins} minutes`, deps, new Map());
+      const res = await finishJob(job, "failed", `timed out after ${mins} minutes`, deps, new Map());
+      // A V2 child Manta started keeps running (and spending) after its result
+      // said "failed" unless it is interrupted. The record is already terminal
+      // here, so the interrupt's own outcome event finds nothing left to do.
+      if (job.engine === "v2" && !res?.alreadyTerminal && abortSession && job.childSessionID) {
+        try {
+          await abortSession(job.childSessionID);
+        } catch (e) {
+          console.warn(`[delegate] interrupting the timed-out child of ${job.id} failed:`, e?.message ?? e);
+        }
+      }
     }
     // Paused-expired jobs → stopped.
     for (const job of pausedExpired) {
@@ -2648,6 +2662,18 @@ export async function finishV2Job(job, status, error, deps = {}) {
     now = () => Date.now(),
   } = deps;
 
+  // The child's last text is read BEFORE the lock: one opencode HTTP read must
+  // not hold up every job write on the box. The record is re-checked under the
+  // lock, so a racing finish still produces exactly one terminal write.
+  let result = null;
+  if (status === "done" && job.childSessionID) {
+    try {
+      result = await lastAssistantText(listMessages ? await listMessages(job.childSessionID) : []);
+    } catch (e) {
+      console.warn("[delegate] listMessages failed:", e?.message ?? e);
+    }
+  }
+
   const updated = await jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === job.id);
@@ -2655,14 +2681,6 @@ export async function finishV2Job(job, status, error, deps = {}) {
     const live = jobs[idx];
     if (isTerminal(live)) return null;
 
-    let result = null;
-    if (status === "done") {
-      try {
-        result = await lastAssistantText(listMessages ? await listMessages(live.childSessionID) : []);
-      } catch (e) {
-        console.warn("[delegate] listMessages failed:", e?.message ?? e);
-      }
-    }
     const manta = completionOwnerOf(live) === "manta";
     const next = {
       ...live,
@@ -2985,24 +3003,38 @@ async function resumeUnsentLaunch(job, deps) {
     let current = job;
     if (current.windowIndex == null) {
       const projects = typeof listProjects === "function" ? await listProjects() : [];
-      const owner = current.tmuxSession ? { tmuxSession: current.tmuxSession } : resolveOwner(projects, current.parentSessionID);
-      if (!owner) return;
-      const created = await newWindow({
-        sessionName: owner.tmuxSession,
-        windowName: windowNameFor(current.name),
-        cwd: current.parentDirectory,
-        chatMode: true,
-        existingSessionId: current.childSessionID,
-        oc: deps.oc,
-      });
-      if (stampOwner) {
-        try {
-          await stampOwner(owner.tmuxSession, created.windowIndex, "job");
-        } catch {
-          /* advisory */
+      // A restart between the window's creation and the patch recording its index
+      // leaves a live window stamped with this child but a null index: reuse it.
+      let existing = null;
+      for (const p of Array.isArray(projects) ? projects : []) {
+        const win = (p.windows || []).find((w) => w.opencodeSessionId === current.childSessionID);
+        if (win) {
+          existing = { tmuxSession: p.tmuxSession, windowIndex: win.index };
+          break;
         }
       }
-      current = (await patchJob(current.id, { tmuxSession: owner.tmuxSession, windowIndex: created.windowIndex ?? null }, deps)) ?? current;
+      if (existing) {
+        current = (await patchJob(current.id, existing, deps)) ?? current;
+      } else {
+        const owner = current.tmuxSession ? { tmuxSession: current.tmuxSession } : resolveOwner(projects, current.parentSessionID);
+        if (!owner) return;
+        const created = await newWindow({
+          sessionName: owner.tmuxSession,
+          windowName: windowNameFor(current.name),
+          cwd: current.parentDirectory,
+          chatMode: true,
+          existingSessionId: current.childSessionID,
+          oc: deps.oc,
+        });
+        if (stampOwner) {
+          try {
+            await stampOwner(owner.tmuxSession, created.windowIndex, "job");
+          } catch {
+            /* advisory */
+          }
+        }
+        current = (await patchJob(current.id, { tmuxSession: owner.tmuxSession, windowIndex: created.windowIndex ?? null }, deps)) ?? current;
+      }
     }
     const claimed = await patchJob(
       current.id,

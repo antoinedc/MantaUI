@@ -9,8 +9,9 @@
 //   - "Open session": the RPC + window selection, with both outcomes reported.
 //
 // The contract types below mirror the orchestrator-pinned seams (b-contracts
-// P1, P3–P6) exactly; the server slice adds the same names to src/shared.
+// P1, P3–P6); the RPC-facing ones come straight from the shared `Api`.
 
+import type { Api } from "../shared/api";
 import type { OpencodeMessage, OpencodePart } from "../shared/types";
 
 // ===== Contract types (P1, P3–P6) =====
@@ -44,33 +45,17 @@ export type BackgroundJob = {
   completionDelivery?: "pending" | "delivered" | "abandoned" | null;
 };
 
-/** P5: `opencode:run-command` input widened with `background`, result widened with `{ jobId }`. */
-export type RunCommandInput = {
-  sessionId: string;
-  command: string;
-  arguments: string;
-  model?: { providerID: string; modelID: string; variant?: string };
-  agent?: string;
-  attachments?: Array<{ remotePath: string; mime: string; filename: string }>;
-  background?: boolean;
-};
-export type RunCommandResult = void | { jobId: string };
+/** P5: the shared `Api`'s run-command input (it carries `background`) and result (`void | { jobId }`). */
+export type RunCommandInput = Parameters<Api["opencodeRunCommand"]>[0];
 
-/** P6. */
-export type OpenSessionResult =
-  | { ok: true; tmuxSession: string; windowIndex: number }
-  | { ok: false; error: string };
+/** P6 — the shared `Api`'s answer. */
+export type OpenSessionResult = Awaited<ReturnType<Api["delegateOpenSession"]>>;
 
-/** The slice of window.api this feature needs, typed to the contracts. */
-export type BackgroundApi = {
-  opencodeCommands(opts?: { directory?: string }): Promise<SlashCommand[]>;
-  opencodeRunCommand(input: RunCommandInput): Promise<RunCommandResult>;
-  delegateOpenSession(input: { jobId: string }): Promise<OpenSessionResult>;
-};
+/** The slice of window.api this feature needs. */
+export type BackgroundApi = Pick<Api, "opencodeCommands" | "opencodeRunCommand" | "delegateOpenSession">;
 
-/** window.api, typed to the contracts (the shared `Api` gains these members from the server slice). */
 export function backgroundApi(): BackgroundApi {
-  return window.api as unknown as BackgroundApi;
+  return window.api;
 }
 
 // ===== Highlight + box =====

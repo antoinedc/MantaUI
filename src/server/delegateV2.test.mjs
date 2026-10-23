@@ -1274,3 +1274,154 @@ test("a run that finishes before its send's response is recorded still ends with
   assert.equal(j.launchState, "running");
   assert.equal(w.calls.synth.length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Review round 1
+// ---------------------------------------------------------------------------
+
+test("resume: a window already stamped with the child (restart before its index was recorded) is reused, never duplicated", async () => {
+  const w = world();
+  const job = v2Job({ id: "win00001", launchState: "uncertain", submittedAt: null, windowIndex: null, tmuxSession: null });
+  w.jobs.push(job);
+  w.sessions.set(job.childSessionID, { id: job.childSessionID, parentID: PARENT, directory: "/repo", time: {} });
+  w.windows.push({ index: 9, opencodeSessionId: job.childSessionID, paneCurrentPath: "/repo" });
+
+  await reconcileV2Jobs(w.deps);
+  await reconcileV2Jobs(w.deps);
+
+  assert.equal(w.calls.window.length, 0, "no second window");
+  assert.equal(w.job(job.id).windowIndex, 9, "the live window's index is recorded");
+  assert.equal(w.job(job.id).tmuxSession, "proj");
+  assert.equal(w.calls.run.length, 1, "the launch still finishes with exactly one send");
+  assert.equal(w.job(job.id).launchState, "running");
+});
+
+test("resume: with no window stamped with the child, one is created (unchanged)", async () => {
+  const w = world();
+  const job = v2Job({ id: "win00002", launchState: "uncertain", submittedAt: null, windowIndex: null, tmuxSession: null });
+  w.jobs.push(job);
+  w.sessions.set(job.childSessionID, { id: job.childSessionID, parentID: PARENT, directory: "/repo", time: {} });
+  await reconcileV2Jobs(w.deps);
+  assert.equal(w.calls.window.length, 1);
+  assert.equal(w.job(job.id).windowIndex, 5);
+});
+
+test("timeout: a Manta-owned V2 job's child is interrupted; the job fails with the timeout text; the interrupt's own outcome adds nothing", async () => {
+  const w = world({ jobs: [v2Job({ startedAt: T0 })] });
+  w.sessions.set("ses_child", { id: "ses_child", parentID: PARENT, time: {} });
+  w.active.add("ses_child");
+  const aborted = [];
+  w.deps.abortSession = async (sid) => {
+    aborted.push(sid);
+    // the interrupt lands as an interrupted outcome
+    w.finish(sid, "interrupted", w.state.now + 1);
+  };
+  w.deps.sessionExists = async () => true;
+  w.setNow(T0 + 31 * 60_000);
+  await sweepDelegateJobs(w.deps);
+
+  assert.deepEqual(aborted, ["ses_child"]);
+  const j = w.job("aaaa1111");
+  assert.equal(j.status, "failed");
+  assert.equal(j.error, "timed out after 30 minutes");
+  assert.equal(w.calls.synth.length, 1);
+
+  // the interrupt's raw outcome reaches the settler afterwards: the job is already terminal
+  const res = await settleV2Job(w.job("aaaa1111"), w.deps, { hint: { outcome: "interrupted", at: w.state.now + 1 } });
+  assert.equal(res.settled, false);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job("aaaa1111").error, "timed out after 30 minutes");
+  assert.equal(w.calls.synth.length, 1, "still exactly one result");
+  assert.deepEqual(aborted, ["ses_child"], "interrupted once");
+});
+
+test("timeout: a failing interrupt is logged, not thrown — the job still fails once", async () => {
+  const w = world({ jobs: [v2Job({ startedAt: T0 })] });
+  w.sessions.set("ses_child", { id: "ses_child", parentID: PARENT, time: {} });
+  w.active.add("ses_child");
+  w.deps.abortSession = async () => {
+    throw netErr();
+  };
+  w.deps.sessionExists = async () => true;
+  w.setNow(T0 + 31 * 60_000);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job("aaaa1111").status, "failed");
+  assert.equal(w.calls.synth.length, 1);
+});
+
+test("timeout: opencode-owned V2 jobs (adopted subagents / native background commands) are exempt from the running timeout", async () => {
+  const w = world({
+    jobs: [v2Job({ id: "oc000001", completionOwner: "opencode", origin: "subagent", startedAt: T0, childSessionID: "ses_oc" })],
+  });
+  w.sessions.set("ses_oc", { id: "ses_oc", parentID: PARENT, time: {} });
+  w.active.add("ses_oc");
+  const aborted = [];
+  w.deps.abortSession = async (sid) => aborted.push(sid);
+  w.deps.sessionExists = async () => true;
+  w.setNow(T0 + 3 * 60 * 60_000);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job("oc000001").status, "running");
+  assert.equal(aborted.length, 0);
+  assert.equal(w.calls.synth.length, 0, "Manta posts nothing for it");
+
+  // …and it still finishes from its real outcome
+  w.say("ses_oc", "sub done");
+  w.finish("ses_oc", "succeeded", w.state.now + 1);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job("oc000001").status, "done");
+  assert.equal(w.calls.synth.length, 0);
+});
+
+test("timeout: a legacy job (no engine) is failed exactly as before, with no interrupt from the sweep", async () => {
+  const legacy = { ...v2Job({ id: "leg00001", startedAt: T0 }), engine: undefined, completionOwner: undefined, launchState: undefined, submittedAt: undefined };
+  delete legacy.engine;
+  const w = world({ jobs: [legacy] });
+  const aborted = [];
+  w.deps.abortSession = async (sid) => aborted.push(sid);
+  w.deps.sessionExists = async () => true;
+  w.setNow(T0 + 31 * 60_000);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job("leg00001").status, "failed");
+  assert.equal(w.job("leg00001").error, "timed out after 30 minutes");
+  assert.equal(aborted.length, 0);
+});
+
+test("finishV2Job reads the child's transcript OUTSIDE the jobs lock: another job write is not held up by a slow read", async () => {
+  const w = world();
+  const a = seedWrapped(w, { id: "slow0001", childSessionID: "ses_a" });
+  const b = seedWrapped(w, { id: "fast0001", childSessionID: "ses_b" });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  w.deps.listMessages = async (sid) => {
+    if (sid === "ses_a") await gate;
+    return [{ info: { role: "assistant" }, parts: [{ type: "text", text: `from ${sid}` }] }];
+  };
+  const slow = finishV2Job(w.job(a.id), "done", null, w.deps);
+  await new Promise((r) => setTimeout(r, 20));
+  const other = await Promise.race([
+    finishV2Job(w.job(b.id), "failed", "boom", w.deps).then(() => "finished"),
+    new Promise((r) => setTimeout(() => r("blocked"), 500)),
+  ]);
+  assert.equal(other, "finished", "the lock is free while the slow transcript read is in flight");
+  assert.equal(w.job(b.id).status, "failed");
+  release();
+  await slow;
+  assert.equal(w.job(a.id).status, "done");
+  assert.equal(w.job(a.id).result, "from ses_a");
+});
+
+test("finishV2Job race: two concurrent finishes → ONE terminal write, ONE N7 post", async () => {
+  const w = world();
+  const job = seedWrapped(w);
+  w.say(job.childSessionID, "result text");
+  const [r1, r2] = await Promise.all([
+    finishV2Job(w.job(job.id), "done", null, w.deps),
+    finishV2Job(w.job(job.id), "failed", "late loser", w.deps),
+  ]);
+  assert.equal([r1, r2].filter((r) => r.alreadyTerminal).length, 1);
+  const terminalWrites = w.saves.filter((s) => s.find((j) => j.id === job.id)?.status !== "running" && s.find((j) => j.id === job.id)?.completionDelivery === "pending");
+  assert.equal(terminalWrites.length, 1);
+  assert.equal(w.calls.synth.length, 1);
+  assert.equal(w.job(job.id).completionDelivery, "delivered");
+  assert.equal(w.calls.synth[0].body.metadata.state, w.job(job.id).status === "done" ? "completed" : "failed", "the one result matches the one winner");
+});

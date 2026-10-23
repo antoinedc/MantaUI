@@ -353,6 +353,16 @@ function backgroundResultText(raw, { childID, state, description }) {
   return inner;
 }
 
+// Manta posts its results as `[background job "<name>" <status>]` + a blank line
+// + the body. The card already shows the name and state, so its text drops that
+// header (the model still receives the full text). Anything else is untouched.
+function stripMantaResultHeader(text) {
+  const m = text.match(/^\[background job ".*" [^\]\n]*\](?:\n|$)/);
+  if (!m) return text;
+  const rest = text.slice(m[0].length);
+  return rest.startsWith("\n") ? rest.slice(1) : rest;
+}
+
 function envelopeAttr(text, name) {
   const m = typeof text === "string" ? text.match(new RegExp(`^<subagent[^>]*?\\s${name}="([^"]*)"`)) : null;
   return m ? m[1] : undefined;
@@ -369,6 +379,9 @@ function mapBackgroundResult(m, { sessionID }) {
   const name =
     (typeof manta.name === "string" && manta.name) ||
     (description !== undefined && description.startsWith("/") ? description : undefined);
+  const jobId = typeof manta.jobId === "string" && manta.jobId ? manta.jobId : undefined;
+  let text = backgroundResultText(m.text, { childID: childSessionId, state, description });
+  if (jobId) text = stripMantaResultHeader(text);
   return {
     // `completed` is stamped too: several readers (isAssistantTurnInProgress,
     // peers' classifyChatStatus, the CTO run outcome) read an assistant message
@@ -387,11 +400,11 @@ function mapBackgroundResult(m, { sessionID }) {
         sessionID,
         type: "background-result",
         childSessionId,
-        jobId: typeof manta.jobId === "string" && manta.jobId ? manta.jobId : undefined,
+        jobId,
         state,
         name,
         agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
-        text: backgroundResultText(m.text, { childID: childSessionId, state, description }),
+        text,
       }),
     ],
   };

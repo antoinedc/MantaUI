@@ -11,6 +11,7 @@ import {
   dispatchFrame,
   fireResync,
 } from "./httpApi.js";
+import { IPC } from "../../shared/types";
 
 // Mock browser APIs for tests that touch the WebSocket stream.
 const mockLocalStorage: Record<string, string> = {};
@@ -583,6 +584,41 @@ describe("httpApi bootstrap metadata fail-fast timeout", () => {
     await httpApi.opencodeModels();
 
     expect(fetchMock.mock.calls[0][1]?.signal).toBeUndefined();
+  });
+});
+
+describe("httpApi background-run calls use the shared channel names", () => {
+  beforeEach(() => {
+    mockLocalStorage["manta_server"] = "https://example.com";
+    mockLocalStorage["manta_token"] = HEX32;
+  });
+
+  const bodyOf = (init?: RequestInit) => JSON.parse(String(init?.body ?? "null"));
+
+  it("delegateOpenSession → the shared IPC channel, returning the box's answer untouched", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: true, tmuxSession: "proj", windowIndex: 4 }));
+    const res = await httpApi.delegateOpenSession({ jobId: "job1" });
+    expect(res).toEqual({ ok: true, tmuxSession: "proj", windowIndex: 4 });
+    expect(fetchMock.mock.calls[0][0]).toContain(`/rpc/${encodeURIComponent(IPC.delegateOpenSession)}`);
+    expect(IPC.delegateOpenSession).toBe("delegate:open-session");
+    expect(JSON.stringify(bodyOf(fetchMock.mock.calls[0][1]))).toContain("job1");
+  });
+
+  it("opencodeCommands: the directory is sent when given, and a no-arg call still works", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse([]));
+    await httpApi.opencodeCommands({ directory: "/repo" });
+    await httpApi.opencodeCommands();
+    expect(fetchMock.mock.calls[0][0]).toContain(`/rpc/${encodeURIComponent(IPC.opencodeCommands)}`);
+    expect(JSON.stringify(bodyOf(fetchMock.mock.calls[0][1]))).toContain("/repo");
+    expect(JSON.stringify(bodyOf(fetchMock.mock.calls[1][1]))).not.toContain("/repo");
+  });
+
+  it("opencodeRunCommand sends `background` and resolves the box's { jobId }", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ jobId: "j9" }));
+    const res = await httpApi.opencodeRunCommand({ sessionId: "ses_a", command: "review", arguments: "x", background: true });
+    expect(res).toEqual({ jobId: "j9" });
+    expect(fetchMock.mock.calls[0][0]).toContain(`/rpc/${encodeURIComponent(IPC.opencodeRunCommand)}`);
+    expect(JSON.stringify(bodyOf(fetchMock.mock.calls[0][1]))).toContain('"background":true');
   });
 });
 
