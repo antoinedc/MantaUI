@@ -169,6 +169,7 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeGetSubagents",
   "opencodeInbox",
   "opencodeInboxCancel",
+  "opencodeInboxSetDelivery",
   "opencodeModelCatalog",
   "opencodePermissionReply",
   "opencodePrompt",

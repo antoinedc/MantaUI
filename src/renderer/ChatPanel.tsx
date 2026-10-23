@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { VirtuosoHandle } from "react-virtuoso";
-import { ArrowDown, Clock, X } from "lucide-react";
+import { ArrowDown, X } from "lucide-react";
 import type {
   AvailableLauncher,
   CheckRollup,
@@ -112,7 +112,8 @@ import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, isReadOnlyJob } from "./chatUtils";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
-import { describeInboxCancel, planBusySend, shouldClearDraft } from "./inboxState";
+import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
+import { PendingMessagesCard } from "./PendingMessagesCard";
 import type { PendingVoiceNote } from "./VoiceNote";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
@@ -703,16 +704,24 @@ export function ChatPanel({
 
 
   // ===== Pending messages (V2 inbox) =====
+  // One action in flight per row: cancel (×, ↑ edit last) and the delivery
+  // change (Send now / Wait) share the busy set, so a row's controls are all
+  // disabled while any of them is awaiting the box.
+  const [inboxBusyIds, setInboxBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const rowBusyRef = useRef<Set<string>>(new Set());
+  const markRowBusy = useCallback((id: string, busy: boolean) => {
+    if (busy) rowBusyRef.current.add(id);
+    else rowBusyRef.current.delete(id);
+    setInboxBusyIds(new Set(rowBusyRef.current));
+  }, []);
+
   // Cancel one pending message (K4) and report EVERY outcome. Never rejects.
   // `restore` = the pop-last gesture: on `cancelled` the text goes back into
   // the composer. The row × just removes the message (the row vanishing is its
   // confirmation) but still reports `delivered` / `unknown`.
-  const [cancellingInboxIds, setCancellingInboxIds] = useState<ReadonlySet<string>>(() => new Set());
-  const cancellingInboxRef = useRef<Set<string>>(new Set());
   const cancelInboxItem = useCallback(async (item: OpencodeInboxItem, restore: boolean) => {
-    if (cancellingInboxRef.current.has(item.id)) return;
-    cancellingInboxRef.current.add(item.id);
-    setCancellingInboxIds(new Set(cancellingInboxRef.current));
+    if (rowBusyRef.current.has(item.id)) return;
+    markRowBusy(item.id, true);
     try {
       const result = await window.api.opencodeInboxCancel({ sessionId, id: item.id });
       const report = describeInboxCancel(result, item, { restore });
@@ -734,10 +743,31 @@ export function ChatPanel({
     } catch (e) {
       setSendError(`Couldn't cancel the pending message: ${String((e as Error)?.message ?? e)}`);
     } finally {
-      cancellingInboxRef.current.delete(item.id);
-      setCancellingInboxIds(new Set(cancellingInboxRef.current));
+      markRowBusy(item.id, false);
     }
-  }, [sessionId, setSendError, setInput, inputRef, refreshInbox]);
+  }, [sessionId, setSendError, setInput, inputRef, refreshInbox, markRowBusy]);
+
+  // Send now / Wait (N1): flip one pending message between Now (steer) and
+  // After this turn (queue). Reports EVERY outcome; never rejects. `changed`
+  // needs nothing more — the next inbox frame flips the badge.
+  const changeInboxDelivery = useCallback(async (item: OpencodeInboxItem, delivery: "steer" | "queue") => {
+    if (rowBusyRef.current.has(item.id)) return;
+    markRowBusy(item.id, true);
+    try {
+      const result = await window.api.opencodeInboxSetDelivery({ sessionId, id: item.id, delivery });
+      const report = describeInboxSetDelivery(result);
+      if (report.error) setSendError(report.error);
+      if (report.notice) useStore.getState().setSystemNotice(report.notice);
+      if (result?.outcome !== "changed") refreshInbox();
+    } catch (e) {
+      setSendError(`Couldn't change the pending message: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      markRowBusy(item.id, false);
+    }
+  }, [sessionId, setSendError, refreshInbox, markRowBusy]);
+  const sendInboxNow = useCallback((item: OpencodeInboxItem) => void changeInboxDelivery(item, "steer"), [changeInboxDelivery]);
+  const waitInboxItem = useCallback((item: OpencodeInboxItem) => void changeInboxDelivery(item, "queue"), [changeInboxDelivery]);
+  const cancelInboxRow = useCallback((item: OpencodeInboxItem) => void cancelInboxItem(item, false), [cancelInboxItem]);
 
   // Assign the composer controller's forward-declared bridges now that useSseBus
   // has produced their real targets (setSendError, the pending-message inbox).
@@ -745,15 +775,17 @@ export function ChatPanel({
   // callbacks, so wiring them here — not during the controller's render — is
   // race-free.
   setSendErrorRef.current = setSendError;
-  queuePopRef.current = () => {
-    // Newest pending message that isn't already being cancelled. Nothing
-    // pending → report the miss so the shared gesture falls through to prompt
-    // history instead of silently eating the keypress.
-    const last = [...inboxItems].reverse().find((i) => !cancellingInboxRef.current.has(i.id));
+  // ↑ edit last (the empty-composer gesture AND the card's header button): the
+  // newest pending message that isn't already being acted on goes back into the
+  // composer. Nothing pending → report the miss so the shared gesture falls
+  // through to prompt history instead of silently eating the keypress.
+  const editLastInboxItem = useCallback((): boolean => {
+    const last = [...inboxItems].reverse().find((i) => !rowBusyRef.current.has(i.id));
     if (!last) return false;
     void cancelInboxItem(last, true); // reports every branch itself, never rejects
     return true;
-  };
+  }, [inboxItems, cancelInboxItem]);
+  queuePopRef.current = editLastInboxItem;
 
   // BET-1248: latch a completed compaction into `justCompactedRef` so the
   // NEXT submit re-evaluates routing at the (now free) compacted boundary. The
@@ -1297,9 +1329,11 @@ export function ChatPanel({
     /** The composer text being submitted; null when the text came from an override (voice, /clear bridge), so there is no composer draft to clear. */
     draft: string | null;
     submitAttachments: Attachment[];
+    /** "steer" = Now (Enter, the default); "queue" = After this turn (⌥Enter). */
+    delivery?: "steer" | "queue";
   }) => {
     if (busyInFlightRef.current) return; // a second Enter while one is in flight: no side effect
-    const { text, draft, submitAttachments } = args;
+    const { text, draft, submitAttachments, delivery = "steer" } = args;
     const plan = planBusySend(text, MANTA_BUILTIN_NAMES, commandsRef.current);
     if (plan.kind === "refuse") {
       setSendError(plan.message);
@@ -1335,7 +1369,7 @@ export function ChatPanel({
           command: plan.name,
           arguments: plan.args,
           attachments: readyAttachments,
-          delivery: "steer",
+          delivery,
         });
       } else {
         const resolvedMentions = resolveAgentMentions(text, agentMentions);
@@ -1346,7 +1380,7 @@ export function ChatPanel({
           readyAttachments,
           resolvedMentions.length > 0 ? resolvedMentions : undefined,
           undefined,
-          { delivery: "steer" },
+          { delivery },
         );
       }
       // Accepted. Clear only what was submitted: the chips always; the text
@@ -1369,7 +1403,11 @@ export function ChatPanel({
     }
   }, [sessionId, tmuxSession, windowIndex, agentMentions, unsupportedAttachmentsMessage, rejectPendingQuestions, refreshInbox, setAttachments, setInput, setAgentMentions, setSendError, inputRef]);
 
-  const submit = useCallback(async (textOverride?: string, attachmentsOverride?: Attachment[]) => {
+  const submit = useCallback(async (
+    textOverride?: string,
+    attachmentsOverride?: Attachment[],
+    opts?: { delivery?: "steer" | "queue" },
+  ) => {
     const submitAttachments = attachmentsOverride ?? attachments;
     // Block submit while any attachment is still uploading.
     if (submitAttachments.some((a) => a.status === "uploading")) {
@@ -1396,6 +1434,7 @@ export function ChatPanel({
         text,
         draft: textOverride === undefined ? input : null,
         submitAttachments,
+        delivery: opts?.delivery,
       });
       return;
     }
@@ -1669,6 +1708,13 @@ export function ChatPanel({
   // latest version without adding submit to the effect's dependency array
   // (which would re-arm the effect on every keystroke).
   submitRef.current = submit;
+
+  // ⌥Enter / Alt+Enter: "After this turn". While the agent runs it is the same
+  // busy send with delivery:"queue"; idle it is an ordinary send (submit
+  // ignores `delivery` outside the busy branch), identical to Enter.
+  const submitAfterTurn = useCallback(() => {
+    void submit(undefined, undefined, { delivery: "queue" });
+  }, [submit]);
 
   // Post-commit half of submit()'s force-pin. Runs once per submit (the ref
   // gate), after React has committed the optimistic user row and after the
@@ -2600,7 +2646,7 @@ export function ChatPanel({
     retry: { order: 7, label: "↻ retry" },
     compaction: { order: 6, label: "↧ compaction" },
     "send-error": { order: 5, label: "⚠ error" },
-    queued: { order: 4, label: "⏳ queued" },
+    pending: { order: 4, label: "⏳ pending" },
     "compaction-notice": { order: 3, label: "⟳ compaction" },
     schedules: { order: 3, label: "⏰ schedule" },
     secrets: { order: 2, label: "🔑 secret" },
@@ -2899,29 +2945,18 @@ export function ChatPanel({
           <X size={14} aria-hidden="true" />
         </button>
       </div>));
-    if (inboxItems.length > 0) list.push(amb("queued",
+    if (inboxItems.length > 0) list.push(amb("pending",
       <MeasureColumn>
-        <div className="shrink-0 pb-2 flex flex-col text-meta text-text-faint" style={{ gap: "var(--block-gap)" }} data-testid="inbox-card">
-          {inboxItems.map((item) => (
-            <div key={item.id} className="flex items-baseline gap-1" data-testid="inbox-row">
-              <Clock size={14} aria-hidden="true" className="shrink-0 self-center" />
-              <span className="italic flex-1 truncate">{item.text}</span>
-              {item.attachmentCount > 0 && (
-                <span className="shrink-0">
-                  +{item.attachmentCount} attachment{item.attachmentCount === 1 ? "" : "s"}
-                </span>
-              )}
-              <button
-                onClick={() => void cancelInboxItem(item, false)}
-                disabled={cancellingInboxIds.has(item.id)}
-                className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center disabled:opacity-50"
-                title="Cancel this message"
-                aria-label="Cancel this message"
-              >
-                <X size={14} aria-hidden="true" />
-              </button>
-            </div>
-          ))}
+        <div className="shrink-0 pb-2">
+          <PendingMessagesCard
+            items={inboxItems}
+            running={running}
+            busyIds={inboxBusyIds}
+            onSendNow={sendInboxNow}
+            onWait={waitInboxItem}
+            onCancel={cancelInboxRow}
+            onEditLast={() => void editLastInboxItem()}
+          />
         </div>
       </MeasureColumn>));
     if (!jobOwnership) {
@@ -2984,7 +3019,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, inboxItems, cancellingInboxIds, cancelInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, inboxItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -3223,6 +3258,7 @@ export function ChatPanel({
         // pop-last gesture (onQueuePop) is already wired in the controller
         // config to ChatPanel's pending-message inbox via queuePopRef.
         submit={submit}
+        onSubmitAfterTurn={submitAfterTurn}
         sendBusy={busySending}
         abort={abort}
         running={running}
