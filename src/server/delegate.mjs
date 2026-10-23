@@ -3162,6 +3162,19 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   }
   const t = outcomeToTerminal(outcome, { error: hint?.error });
   if (!t) return { settled: false, reason: "no-outcome" };
+  // A delegate job has run only once the child holds the user message its opening
+  // prompt became: an outcome without one belongs to something else (a move-applying
+  // execution that finished late). Unreadable proves nothing, so it stays unsettled —
+  // the sweep's running timeout is the backstop.
+  if (job.launch && typeof deps.listRawTimeline === "function") {
+    let sawInput = false;
+    try {
+      sawInput = ((await deps.listRawTimeline(job.childSessionID, { type: "user" })) ?? []).length > 0;
+    } catch {
+      sawInput = false;
+    }
+    if (!sawInput) return { settled: false, reason: "no-input" };
+  }
   // A fresh outcome proves the run happened, whatever the launch bookkeeping
   // says (it can finish before the send's own response is recorded).
   if (job.launchState !== "running") {

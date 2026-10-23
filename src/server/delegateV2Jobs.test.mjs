@@ -133,6 +133,7 @@ function world({ jobs: seed = [], git = true } = {}) {
       storeAt("send");
       if (fail.send) throw fail.send;
       state.sentAfterMoveApplied = state.pendingMove === null;
+      timelines.set(input.sessionId, [...(timelines.get(input.sessionId) ?? []), { type: "user", id: input.messageID }]);
       active.add(input.sessionId);
       const s = sessions.get(input.sessionId);
       if (s) delete s.outcome; // a new execution is running
@@ -467,7 +468,8 @@ test("C1 uncertain opening prompt: admission evidence (the child ran) makes it r
   await startJob(input(), w.deps);
   const job = w.jobs[0];
   assert.equal(job.launchState, "uncertain");
-  // admitted after all: the child is active
+  // admitted after all: the child holds the user message and is running
+  w.timelines.set(job.childSessionID, [{ type: "user", id: "msg_late" }]);
   w.active.add(job.childSessionID);
   await reconcileV2Jobs(w.deps);
   assert.equal(w.job(job.id).launchState, "running");
@@ -609,6 +611,21 @@ test("C1 move: the move's own execution outcome is never read as the job finishi
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
   assert.equal(w.job(id).status, "done");
   assert.equal(w.job(id).result, "real work");
+});
+
+test("C1 completion: a fresh outcome on a child that never received the prompt (a late move execution) does not finish the job", async () => {
+  const w = world();
+  const id = await start(w);
+  const child = w.job(id).childSessionID;
+  w.timelines.set(child, []); // no user message on the child
+  w.finish(child, "succeeded", T0 + 5);
+  const res = await settleV2Job(w.job(id), w.deps);
+  assert.equal(res.settled, false);
+  assert.equal(res.reason, "no-input");
+  assert.equal(w.job(id).status, "running");
+  w.timelines.set(child, [{ type: "user", id: "msg_x" }]);
+  assert.equal((await settleV2Job(w.job(id), w.deps)).settled, true);
+  assert.equal(w.job(id).status, "done");
 });
 
 // ---------------------------------------------------------------------------
