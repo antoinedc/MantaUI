@@ -71,13 +71,20 @@ export function createOriginStore({ load = () => ({}), save = () => {}, now = ()
       for (const [id] of oldest.slice(0, map.size - ORIGIN_MAX_ENTRIES)) map.delete(id);
     }
   }
+  // Coalesced: a burst of records costs one write.
+  let dirty = false;
   function persist() {
-    try {
-      const r = save(Object.fromEntries(map));
-      if (r && typeof r.catch === "function") r.catch((e) => log("[command-origins] save failed:", e?.message ?? e));
-    } catch (e) {
-      log("[command-origins] save failed:", e?.message ?? e);
-    }
+    if (dirty) return;
+    dirty = true;
+    queueMicrotask(() => {
+      dirty = false;
+      try {
+        const r = save(Object.fromEntries(map));
+        if (r && typeof r.catch === "function") r.catch((e) => log("[command-origins] save failed:", e?.message ?? e));
+      } catch (e) {
+        log("[command-origins] save failed:", e?.message ?? e);
+      }
+    });
   }
 
   return {
