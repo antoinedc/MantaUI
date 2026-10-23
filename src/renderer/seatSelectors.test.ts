@@ -325,6 +325,13 @@ describe("combinedSeatWindows (automatic-mode ring)", () => {
     expect(byKind(r, "session")).not.toHaveProperty("binding");
   });
 
+  it("a seat with only inactive windows is not counted", () => {
+    const a = seat("a", "A", 40);
+    const b = seat("b", "B", 0, 0, { windows: [win("weekly", 95, { active: false })] });
+    const r = combinedSeatWindows(view([null], [a, b]));
+    expect(r!.seatCount).toBe(1);
+  });
+
   it("null when nothing qualifies", () => {
     expect(combinedSeatWindows(null)).toBeNull();
     expect(combinedSeatWindows(view([null], [seat("a", "A", null)]))).toBeNull();

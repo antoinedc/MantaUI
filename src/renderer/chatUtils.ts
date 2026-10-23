@@ -3797,7 +3797,7 @@ export function combinedSeatWindows(
     for (const s of account.seats) {
       if (!seatUsable(s)) continue;
       const windows = s.windows.filter((w) => w.active !== false);
-      if (s.windows.length === 0) continue;
+      if (windows.length === 0) continue;
       included.push({ weight, windows });
     }
   }
