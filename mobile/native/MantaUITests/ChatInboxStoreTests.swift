@@ -260,7 +260,7 @@ final class ChatInboxStoreTests: XCTestCase {
         XCTAssertFalse(h.store.running)
 
         h.store.retry(promptID: row?.id ?? "")
-        await waitUntil { promptCalls().count == 2 }
+        await waitUntil { self.promptCalls().count == 2 }
 
         let calls = promptCalls()
         XCTAssertEqual(calls.count, 2)
