@@ -1488,6 +1488,21 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   For the CTO conversation `delivery` is dropped — admission owns ordering
   there, and the CTO surface passes `inbox: false` to `useSseBus`.
 
+  **Enter = Now, ⌥Enter = After this turn (v2-next, D-A1).** While the agent
+  runs, Enter is the steer send above ("Now"); **⌥Enter** (Alt+Enter on
+  Windows/Linux) is the SAME busy send with `delivery: "queue"` — the message
+  waits for the turn to end. Same refusals, same question-rejection, same one
+  in flight, same draft-clearing rule: `submit(…, { delivery })` just threads the
+  choice into `sendWhileBusy`. Idle, ⌥Enter is an ordinary send (identical to
+  Enter; `submit` ignores `delivery` outside the busy branch). `InputArea`
+  consumes the chord with `preventDefault` so macOS Option+Enter inserts nothing.
+  The chord, the running hint row (`⏎ send now · ⌥⏎ after this turn`, `Alt+⏎` off
+  macOS), the **Send** label (not "Queue") and the running placeholder
+  ("Message the agent…") all key off one optional prop, `onSubmitAfterTurn`,
+  which only the session composer passes. The CTO conversation does not, so its
+  composer is untouched: its own placeholder copy, "Queue" Send label, no hint,
+  and Alt+Enter is not handled (its queue is server-owned admission).
+
   **The busy send is its own path** (`sendWhileBusy` in `ChatPanel.tsx`, the
   pure decisions in `src/renderer/inboxState.ts`), not the idle `submit()`:
   it never touches `running`, adds no optimistic transcript row (the pending
@@ -1504,11 +1519,13 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   only once ITS rejection succeeded); if that fails NOTHING is sent and the
   error is shown. A pending permission is left alone.
 
-  **The pending card is the box's `inbox` frame, not local state.** The "⏳
-  queued" ambient card lists `inboxItems` — the box interpreter's FULL list of
-  pending user messages for the session (`{epoch, rev, items}`), so it survives
-  a reload and shows on a second desktop. It is seeded by `opencode:inbox` on
-  open and on every `resync` (the client-synthesised events-reconnect frame).
+  **The pending card is the box's `inbox` frame, not local state.**
+  `PendingMessagesCard` (`src/renderer/PendingMessagesCard.tsx`, in the same
+  ambient-stack slot and priority the old "⏳ queued" card had) lists
+  `inboxItems` — the box interpreter's FULL list of pending user messages for
+  the session (`{epoch, rev, items}`), so it survives a reload and shows on a
+  second desktop. It is seeded by `opencode:inbox` on open and on every
+  `resync` (the client-synthesised events-reconnect frame).
   **Acceptance rule (K3, `acceptInbox` / `createInboxTracker`):** per session
   keep the `{epoch, rev}` shown plus a client-wide set of retired epochs; the
   same epoch replaces only with a higher `rev`; a new non-retired epoch (a
@@ -1517,10 +1534,35 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   dropped (a late reply from a dead server must not overwrite the new one); and
   an answer arriving after the panel moved to another session is dropped (the
   tracker is disposed with the effect). Clients never build the list from raw
-  events. Each row has an **×** and the composer's ↑-on-empty pops the newest:
-  both call `opencode:inbox-cancel`, whose outcome comes from authoritative
-  evidence only — `cancelled` (the text goes back to the composer for pop-last;
-  an attachments note says to re-attach), `delivered` ("Already sent to the
+  events.
+
+  **The card's shape (approved mockup, no reordering — D-A2).** Header
+  `Pending · N message(s)` + **↑ edit last**; one row per item, oldest first:
+  a badge — **Now** (accent, `delivery: "steer"`) or **After this turn**
+  (neutral, `"queue"`) — the text on one line with an ellipsis, then per kind:
+  a Now row shows a quiet `at next step` (`runs next` once the agent is not
+  running) and a **Wait** link; an After row shows a primary **Send now**
+  button; every row has **×**. When the agent is NOT running and at least one
+  After item remains, a footer reads "Agent stopped — these are waiting. Send
+  now, or ×." (`showStoppedFooter`). The text/label rules are pure helpers in
+  `inboxState.ts`.
+
+  **Send now / Wait are N1** (`opencode:inbox-set-delivery`,
+  `window.api.opencodeInboxSetDelivery({ sessionId, id, delivery })`): Send now
+  asks for `steer`, Wait for `queue`. The outcome comes from authoritative
+  evidence on the server and `describeInboxSetDelivery` maps it: `changed` →
+  nothing more to do (the next `inbox` frame flips the badge); `delivered` →
+  toast "Already sent to the agent"; `unknown` → error banner "Couldn't confirm
+  the change — check the pending list"; a thrown error → an error banner with
+  its message. One action in flight per row: cancel and delivery changes share
+  one busy set, and a busy row's controls are all disabled.
+
+  **× and ↑ edit last keep the cleanup spec's semantics.** Both call
+  `opencode:inbox-cancel` (the ↑ key on an empty composer and the header's
+  "↑ edit last" button are the same `editLastInboxItem`: the newest item not
+  already being acted on), whose outcome comes from authoritative evidence only
+  — `cancelled` (the text goes back to the composer for edit-last; an
+  attachments note says to re-attach), `delivered` ("Already sent to the
   agent"), `unknown` ("Couldn't confirm it was cancelled — it may still be
   sent", and NOTHING is restored, since restoring could make the user send it
   twice). `describeInboxCancel` owns that mapping. Every branch reports.

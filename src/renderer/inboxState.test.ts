@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   ATTACHMENTS_NOT_RESTORED,
+  SET_DELIVERY_UNCONFIRMED,
   acceptInbox,
+  busySendHint,
+  describeInboxSetDelivery,
+  inboxBadgeLabel,
+  inboxRowNote,
+  pendingHeaderText,
+  showStoppedFooter,
   createInboxTracker,
   describeInboxCancel,
   parseInboxSnapshot,
@@ -165,5 +172,47 @@ describe("describeInboxCancel", () => {
   it("a missing/garbled result is treated as unknown, never as cancelled", () => {
     expect(describeInboxCancel(null, item, { restore: true }).restoreText).toBeNull();
     expect(describeInboxCancel(undefined, item, { restore: true }).error).toContain("may still be sent");
+  });
+});
+
+describe("pending card helpers", () => {
+  it("pendingHeaderText: singular and plural", () => {
+    expect(pendingHeaderText(1)).toBe("Pending · 1 message");
+    expect(pendingHeaderText(2)).toBe("Pending · 2 messages");
+  });
+  it("badge: Now for steer, After this turn for queue", () => {
+    expect(inboxBadgeLabel({ delivery: "steer" })).toBe("Now");
+    expect(inboxBadgeLabel({ delivery: "queue" })).toBe("After this turn");
+  });
+  it("row note: only Now rows, 'at next step' while running, 'runs next' once stopped", () => {
+    expect(inboxRowNote({ delivery: "steer" }, true)).toBe("at next step");
+    expect(inboxRowNote({ delivery: "steer" }, false)).toBe("runs next");
+    expect(inboxRowNote({ delivery: "queue" }, true)).toBeNull();
+    expect(inboxRowNote({ delivery: "queue" }, false)).toBeNull();
+  });
+  it("stopped footer: not running AND an After item", () => {
+    const now = { delivery: "steer" as const };
+    const after = { delivery: "queue" as const };
+    expect(showStoppedFooter([after], false)).toBe(true);
+    expect(showStoppedFooter([now, after], false)).toBe(true);
+    expect(showStoppedFooter([after], true)).toBe(false);
+    expect(showStoppedFooter([now], false)).toBe(false);
+    expect(showStoppedFooter([], false)).toBe(false);
+  });
+  it("busySendHint: ⌥ on mac, Alt+ elsewhere", () => {
+    expect(busySendHint(true)).toBe("⏎ send now · ⌥⏎ after this turn");
+    expect(busySendHint(false)).toBe("⏎ send now · Alt+⏎ after this turn");
+  });
+});
+
+describe("describeInboxSetDelivery (N1)", () => {
+  it("changed: nothing to show", () => {
+    expect(describeInboxSetDelivery({ outcome: "changed" })).toEqual({ error: null, notice: null });
+  });
+  it("delivered: a toast", () => {
+    expect(describeInboxSetDelivery({ outcome: "delivered" })).toEqual({ error: null, notice: "Already sent to the agent" });
+  });
+  it.each([{ outcome: "unknown" as const }, null, undefined, {} as never])("%j: an error, never silent", (r) => {
+    expect(describeInboxSetDelivery(r)).toEqual({ error: SET_DELIVERY_UNCONFIRMED, notice: null });
   });
 });

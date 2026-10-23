@@ -920,6 +920,34 @@ async function mountFailingSubmit(
     expect(h.container.querySelector(STOP_SELECTOR)).toBeNull();
   });
 
+  it("while running, the CTO composer keeps its own queue copy: no ⌥Enter hint, Alt+Enter is not a send, Send still says Queue", async () => {
+    // The CTO composer is "running" while the admission queue holds something
+    // interruptible (an accepted record), not from the box's running frame.
+    const q = emptyQueue();
+    q.submissions = [submission("evt_run_1", "accepted")];
+    q.counts.unresolved = 1;
+    h = mountCto(q, {
+      opencodeMessages: () =>
+        Promise.resolve(userTranscriptRows([{ messageID: "msg_evt_run_1", text: "working" }])),
+    });
+    await h.flush();
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    expect(ta.placeholder).toBe("Queue a message after the current turn…");
+    expect(h.container.querySelector('[data-testid="busy-send-hint"]')).toBeNull();
+    await act(async () => {
+      typeInto(ta, "later");
+    });
+    expect(h.container.querySelector('button[aria-label="Queue message while running"]')).not.toBeNull();
+    await act(async () => {
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", altKey: true, bubbles: true, cancelable: true }));
+    });
+    await h.flush();
+    expect(api.calls.ctoConversationSubmit ?? []).toEqual([]);
+    expect(ta.value).toBe("later");
+  });
+
   it("a NORMAL successful Stop with the turn still running does not claim the turn is permanently unstoppable", async () => {
     // SERVER-REALISTIC: the normal Stop path — interrupt on the accepted
     // record → interrupt_pending with abortState claimed (the abort has been

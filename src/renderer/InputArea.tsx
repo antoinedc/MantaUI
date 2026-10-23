@@ -49,6 +49,8 @@ import {
 } from "./ComposerParts";
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
+import { BUSY_PLACEHOLDER, busySendHint } from "./inboxState";
+import { IS_MAC } from "./platform";
 import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
@@ -135,6 +137,7 @@ export function InputArea({
   setInput,
   inputRef,
   submit,
+  onSubmitAfterTurn,
   abort,
   running,
   refreshing,
@@ -192,6 +195,12 @@ export function InputArea({
   setInput: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
   submit: () => void;
+  // ⌥Enter / Alt+Enter: "After this turn" (a busy send with delivery:"queue";
+  // idle it is an ordinary send). Supplied only by a surface whose running
+  // sends go through the session's pending list — absent (the CTO conversation,
+  // whose queue is server-owned admission) the chord is not handled here, and
+  // the running hint, Send label and placeholder keep their historical copy.
+  onSubmitAfterTurn?: () => void;
   abort: () => void;
   running: boolean;
   // True while the canonical transcript is being refetched in the background.
@@ -289,7 +298,7 @@ export function InputArea({
   // seam replaces the placeholder with hold/queue copy that has no equivalent
   // on a session composer (there is no server-owned queue there), so it is
   // computed by the host and passed in. Unset → the session's own two-state
-  // placeholder (compose / "Queue a message…" while running) is used, unchanged.
+  // placeholder (compose / "Message the agent…" while running) is used.
   placeholderOverride?: string;
   // True while a send into a running turn is in flight (the session composer's
   // steer path): the send button is disabled so a second click can't double up.
@@ -508,6 +517,14 @@ export function InputArea({
               submit();
               return;
             }
+            // ⌥Enter: preventDefault so macOS Option+Enter can't insert a
+            // newline / special character. Idle it is the same as Enter.
+            if (e.key === "Enter" && e.altKey && !e.shiftKey && !e.metaKey && !e.ctrlKey && onSubmitAfterTurn) {
+              e.preventDefault();
+              if (running) onSubmitAfterTurn();
+              else submit();
+              return;
+            }
             if (e.key === "ArrowUp" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
               const el = e.currentTarget;
               const row = caretRowInfo(el);
@@ -538,7 +555,7 @@ export function InputArea({
           onPaste={onPaste}
           placeholder={
             placeholderOverride ??
-            (running ? "Queue a message…  (⏎ to queue · Esc to stop)" : "Reply, or describe the next task…")
+            (running ? BUSY_PLACEHOLDER : "Reply, or describe the next task…")
           }
           aria-label={textareaAriaLabel}
           rows={1}
@@ -564,8 +581,8 @@ export function InputArea({
               type="button"
               onClick={() => submit()}
               disabled={sendBusy}
-              aria-label={running ? "Queue message while running" : "Send message"}
-              title={running ? "Queue (Enter)" : "Send (Enter)"}
+              aria-label={running && !onSubmitAfterTurn ? "Queue message while running" : "Send message"}
+              title={running ? (onSubmitAfterTurn ? "Send now (Enter)" : "Queue (Enter)") : "Send (Enter)"}
               initial={{ opacity: 0, x: 8 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 8 }}
@@ -671,6 +688,11 @@ export function InputArea({
             onSecrets={onSecrets}
             onWebhooks={onWebhooks}
           />
+          {running && onSubmitAfterTurn && !voiceActive && (
+            <span className="text-meta text-text-faint whitespace-nowrap" data-testid="busy-send-hint">
+              {busySendHint(IS_MAC)}
+            </span>
+          )}
           {voiceActive && (
             <span className="text-meta text-text-faint">
               {voiceProcessing ? (
