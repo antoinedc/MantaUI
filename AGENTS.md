@@ -1100,6 +1100,21 @@ and worktree all belong to it.
   `filesChanged`) and delivers the completion to the parent session through
   the shared prompt-delivery engine (`src/server/promptDelivery.mjs`), which
   defers until the parent is idle so a notice never aborts the parent's turn.
+  **That is now the LEGACY path, used only by CTO-dispatched jobs
+  (`actor:"cto"`) and old records with no `engine` field.** Every other job
+  is `engine:"v2"` (opencode-v2-next spec, Stage C1): a real V2 child session
+  created under the parent with a client-minted id, moved into its worktree
+  (`POST /api/session/{id}/move`; the launch waits for the move's own short
+  execution to end, which must never read as the job finishing), given a
+  window, then sent its opening prompt. It completes from the child's RAW
+  execution outcome (`settleV2Job`, the same evaluator Stage B's background
+  command runs use — never the lifecycle adapter, which reads an interrupt as
+  success) and reports exactly ONE result to the parent as a V2 `synthetic`
+  (`delivery:"queue"`, persisted `completionMessageId`, retried until
+  delivered; the CTO conversation keeps promptDelivery + admission). A pause
+  interrupts at the next tool boundary and the `interrupted` outcome parks the
+  job; resume makes a fresh child (`attempt++`, same job id and result id).
+  An uncertain launch is never rolled back.
 - **Cap of five concurrent `running` jobs** box-wide (`MAX_RUNNING_JOBS`);
   a sixth is refused with a clear error (do not retry). No `queued` state —
   a job either starts immediately or is refused. Running jobs older than 30
