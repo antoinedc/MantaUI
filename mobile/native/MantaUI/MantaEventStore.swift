@@ -268,6 +268,8 @@ enum MantaStreamRouter {
             }
         case "subagent.child", "autoRename":
             break // registration / rename triggers consumed by later stages
+        case "inbox":
+            break // the pending list is not session stream state: see `MantaEventStore.inboxFrames`
         default:
             break
         }
@@ -436,6 +438,14 @@ final class MantaEventStore: ObservableObject {
     /// unsubscribe. The frame still reaches the raw handlers too.
     let delegateUpdates = PassthroughSubject<Void, Never>()
 
+    /// Fires for every `inbox` stream frame (the session's pending messages,
+    /// K3). A `Subject`, not part of `sessionStates`: the pending list carries
+    /// its own `(epoch, rev)` and is accepted or dropped by the observing
+    /// session's `InboxTracker`, so a frame replayed from stored state could
+    /// only ever be stale. Frames for a session nobody observes are dropped —
+    /// the observer seeds itself with `opencode:inbox` when it opens.
+    let inboxFrames = PassthroughSubject<InboxFrameEvent, Never>()
+
     /// Fires once for every `accounts.updated` / `accounts.moved` frame — a seat
     /// list, mode, active seat, status or assignment changed, or the box moved
     /// a conversation to another seat. A `Subject` for the same reason as
@@ -571,6 +581,10 @@ final class MantaEventStore: ObservableObject {
     }
 
     private func routeStream(_ frame: MantaStreamFrame) {
+        if frame.sub == "inbox" {
+            inboxFrames.send(InboxFrameEvent(sessionId: frame.sessionId ?? "", payload: frame.payload))
+            return
+        }
         // Degraded mode (§17): only *new* interpretation stops. Nothing already
         // delivered is cleared or re-derived; the composer stays usable and the
         // transcript + scroll are untouched because we simply don't mutate the

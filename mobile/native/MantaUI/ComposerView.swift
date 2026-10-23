@@ -752,24 +752,48 @@ struct ComposerView: View {
                 attachButton
                 Spacer(minLength: 0)
                 if micAvailable { micButton }
-                Button {
-                    submit()
-                    showExpanded = false
-                } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: Metrics.type.body, weight: .semibold))
-                        .foregroundColor(canSend ? tokens.onAccent : tokens.tx4)
-                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                        .background(canSend ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .accessibilityLabel("Send")
+                expandedSendButton
             }
         }
         .padding(Metrics.spacing.sp4)
         .background(tokens.panel.ignoresSafeArea())
         .presentationDetents([.large])
+    }
+
+    /// The expanded editor's send. Idle: Send. While a turn runs the same two
+    /// ways out as the compact composer: tap = Send now, long-press = Send after
+    /// this turn.
+    @ViewBuilder
+    private var expandedSendButton: some View {
+        if store.running {
+            Menu {
+                Button {
+                    submit(delivery: .queue)
+                    showExpanded = false
+                } label: {
+                    Label("Send after this turn", systemImage: "text.append")
+                }
+            } label: {
+                sendGlyph(filled: canSend, systemName: "arrow.up")
+            } primaryAction: {
+                submit(delivery: .steer)
+                showExpanded = false
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .accessibilityLabel("Send now")
+            .accessibilityHint("Long press for Send after this turn")
+        } else {
+            Button {
+                submit()
+                showExpanded = false
+            } label: {
+                sendGlyph(filled: canSend, systemName: "arrow.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .accessibilityLabel("Send")
+        }
     }
 
     // MARK: - Model pill → cockpit sheet (BET-894)
@@ -1256,18 +1280,53 @@ struct ComposerView: View {
 
     // MARK: - Send
 
+    /// The send control. Idle: Send. While a turn runs: Stop — until there is
+    /// something to send, when it becomes the send arrow with two ways out
+    /// (tap = Send now, long-press = Send after this turn). Stop stays reachable
+    /// from the keyboard bar's esc key and returns the moment the draft is empty.
+    @ViewBuilder
     private var sendButton: some View {
-        Button(action: { store.running ? store.abort() : submit() }) {
-            Image(systemName: store.running ? "stop.fill" : "arrow.up")
-                .font(.system(size: Metrics.type.body, weight: .semibold))
-                .foregroundColor(store.running || canSend ? tokens.onAccent : tokens.tx4)
-                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                .background(store.running || canSend ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
+        if store.running && canSend {
+            runningSendMenu
+        } else {
+            Button(action: { store.running ? store.abort() : submit() }) {
+                sendGlyph(filled: store.running || canSend, systemName: store.running ? "stop.fill" : "arrow.up")
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.running && !canSend)
+            .accessibilityLabel(store.running ? "Stop" : "Send")
+            .accessibilityIdentifier("send-button")
+        }
+    }
+
+    /// While a turn runs and a message is ready: tap sends it into the running
+    /// turn ("Now"), long-press offers "Send after this turn". Both post at once
+    /// — nothing waits on this device for the turn to end.
+    private var runningSendMenu: some View {
+        Menu {
+            Button {
+                submit(delivery: .queue)
+            } label: {
+                Label("Send after this turn", systemImage: "text.append")
+            }
+        } label: {
+            sendGlyph(filled: true, systemName: "arrow.up")
+        } primaryAction: {
+            submit(delivery: .steer)
         }
         .buttonStyle(.plain)
-        .disabled(!store.running && !canSend)
-        .accessibilityLabel(store.running ? "Stop" : "Send")
+        .accessibilityLabel("Send now")
+        .accessibilityHint("Long press for Send after this turn")
+        .accessibilityAction(named: "Send after this turn") { submit(delivery: .queue) }
         .accessibilityIdentifier("send-button")
+    }
+
+    private func sendGlyph(filled: Bool, systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: Metrics.type.body, weight: .semibold))
+            .foregroundColor(filled ? tokens.onAccent : tokens.tx4)
+            .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            .background(filled ? AnyShapeStyle(tokens.accentSolid) : AnyShapeStyle(tokens.inset), in: Circle())
     }
 
     private var canSend: Bool {
@@ -1306,7 +1365,9 @@ struct ComposerView: View {
         if let value = navigator.down() { text = value }
     }
 
-    private func submit() {
+    /// `delivery` only matters while a turn runs: "Now" (the default) or "After
+    /// this turn". When idle the message is an ordinary send.
+    private func submit(delivery: InboxDelivery = .steer) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // Never send while an attachment is still uploading (the button is
         // disabled too; this guards the non-button paths like voice submit).
@@ -1331,7 +1392,7 @@ struct ComposerView: View {
             // Failure is surfaced by the failed pending-prompt row in the
             // transcript with its own tap-to-retry — the composer is not a
             // second recovery path (BET-1263).
-            await store.send(text: trimmed, attachments: sendAttachments, model: model, mentions: mentions, agent: agent)
+            await store.sendOrSteer(text: trimmed, attachments: sendAttachments, model: model, mentions: mentions, agent: agent, delivery: delivery)
         }
         text = ""
         attachments = []

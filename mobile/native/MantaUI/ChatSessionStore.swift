@@ -214,6 +214,15 @@ final class ChatSessionStore: ObservableObject {
     /// `PendingPromptStore`; drained one per idle edge — never POSTed while
     /// `running`, which is what used to implicitly abort the in-flight turn.
     @Published private(set) var pendingPrompts: [PendingPrompt] = []
+    /// The messages the box is holding for this session — sent while a turn
+    /// ran ("Now" / "After this turn") and not yet delivered. Rendered by the
+    /// pending card from the box's `inbox` frame + `opencode:inbox`, under the
+    /// K3 acceptance rule (`InboxTracker`); never built from raw events.
+    /// Always empty for a read-only (child) session.
+    @Published private(set) var inboxItems: [InboxItem] = []
+    /// Pending messages with an action (Send now / Wait / ×) in flight — their
+    /// buttons are disabled so a double tap cannot fire the action twice.
+    @Published private(set) var inboxBusyIDs: Set<String> = []
     @Published private(set) var loading = false
     @Published private(set) var loadFailed = false
     /// True while the box was connected and the stream dropped (mirrors
@@ -306,6 +315,8 @@ final class ChatSessionStore: ObservableObject {
     private(set) var transcriptFetchCount = 0
     private var lastRunning: Bool?
     private var lastComplete: Bool?
+    /// What the pending card shows and which answers it may still accept (K3).
+    private var inboxTracker = InboxTracker()
     /// Monotonic count of FULL turned completions (BET-752 task 5). Increments
     /// at most once per turn: a multi-message turn emits a `turnComplete`
     /// frame per `message.updated`, so the raw `turnComplete` value flaps
@@ -408,6 +419,18 @@ final class ChatSessionStore: ObservableObject {
 
         todosExpanded = TodoCardExpansion.shared.isExpanded(sessionId)
 
+        // The pending-message list rides its own frame (K3), not the session's
+        // stream state: each frame is the FULL list stamped (epoch, rev) and
+        // `InboxTracker` decides whether it supersedes what is shown. A read-only
+        // child session has no composer and so no pending messages.
+        if !isReadOnly {
+            eventStore.inboxFrames
+                .filter { $0.sessionId == sessionId }
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] frame in self?.handleInboxFrame(frame) }
+                .store(in: &cancellables)
+        }
+
         // Degraded state feeds the chat banner; distinct values only, so a
         // republished identical value does not re-render the banner.
         eventStore.$degraded
@@ -438,6 +461,7 @@ final class ChatSessionStore: ObservableObject {
             didRunOnce = true
             load()
             refreshContextFromTranscript()
+            refreshInbox()
         }
         // Register as an observer so the event store knows a consumer is
         // attached (BET-672): a session it completes with NO observer has its
@@ -695,7 +719,13 @@ final class ChatSessionStore: ObservableObject {
         let connected = state == .connected
         let wasDisconnected = wasConnected == false
         wasConnected = connected
-        if connected && wasDisconnected { scheduleRefetch() }
+        if connected && wasDisconnected {
+            scheduleRefetch()
+            // Anything asked of the box before the reconnect may be a dead
+            // server's word: invalidate those answers, then re-read (K3).
+            inboxTracker.markResync()
+            refreshInbox()
+        }
     }
 
     // MARK: - Task status inputs (spec §5)
@@ -820,7 +850,9 @@ final class ChatSessionStore: ObservableObject {
         // ones until the turn completes.
         let streamState = eventStore.sessionStates[sessionId]
         let liveTools = streamState?.turnTools ?? []
-        let hasTailContent = !inProgressText.isEmpty || pendingPrompts.contains { $0.state == .sending }
+        // A send made while the turn runs never owns the tail: it joins the box's
+        // inbox, and the turn's own tail is unaffected.
+        let hasTailContent = !inProgressText.isEmpty || pendingPrompts.contains { $0.state == .sending && !$0.isBusySend }
         let merge = ChatTranscriptMapper.mergingLive(
             tools: liveTools,
             subagents: subagents,
@@ -1018,6 +1050,10 @@ final class ChatSessionStore: ObservableObject {
                     // just-hydrated transcript to blank. Assign to the PROPERTY
                     // (self.messages), not the shadowed local.
                     self.messages = loaded
+                    // A sent-while-running message whose id is now in the
+                    // transcript was received after all: its "may have been
+                    // sent" row has nothing left to say.
+                    settlePendingPrompts()
                     // Everything the todo card and the task rows derive from the
                     // raw transcript is recomputed HERE, once per fetch, rather
                     // than on every stream frame.
@@ -1209,13 +1245,7 @@ final class ChatSessionStore: ObservableObject {
     /// drain if a turn is running). Failure is surfaced by the pending row in
     /// the transcript with its own tap-to-retry — never retried automatically.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil, agent: String? = nil) async {
-        // A finished checklist is dismissed by the user's next prompt, like the
-        // desktop: it stays hidden until the list changes.
-        if let items = TodoCardLogic.select(live: todos, transcript: transcriptTodos, dismissed: nil),
-           TodoCardLogic.allTerminal(items) {
-            todosDismissed = items
-            rebuildBlocks()
-        }
+        dismissFinishedTodos()
         let prompt = PendingPrompt(
             id: UUID().uuidString,
             sessionId: sessionId,
@@ -1227,11 +1257,206 @@ final class ChatSessionStore: ObservableObject {
             state: .waiting
         )
         pendingPrompts = PendingPromptStore.upsert(prompt, into: pendingPrompts)
-        PendingPromptStore.save(pendingPrompts)
-        // A send while the turn runs must not reach opencode — it would abort
-        // the in-flight turn implicitly. The idle drain picks it up.
+        persistPending()
+        // A send while the turn runs must not reach opencode through THIS path —
+        // it would abort the in-flight turn implicitly. The idle drain picks it
+        // up. (The composer's own sends use `sendOrSteer`, which joins the
+        // running turn through the inbox instead; this hold-until-idle path is
+        // for the callers that need the picker's model / agent applied — a
+        // steered message never switches them.)
         if running { return }
         await deliver(prompt)
+    }
+
+    /// The composer's send. Idle → the ordinary send. While a turn runs →
+    /// `sendWhileRunning`, which delivers the message into V2's inbox at once.
+    /// Decided here, on the main actor, rather than by the caller: the turn can
+    /// end between a tap and this call, and a message must never be routed by a
+    /// stale `running`.
+    func sendOrSteer(
+        text: String,
+        attachments: [SendPromptInput.Attachment],
+        model: SendPromptInput.Model?,
+        mentions: [SendPromptInput.Mention]? = nil,
+        agent: String? = nil,
+        delivery: InboxDelivery = .steer
+    ) async {
+        if running {
+            await sendWhileRunning(text: text, attachments: attachments, model: model,
+                                   mentions: mentions, agent: agent, delivery: delivery)
+        } else {
+            await send(text: text, attachments: attachments, model: model, mentions: mentions, agent: agent)
+        }
+    }
+
+    /// A finished checklist is dismissed by the user's next prompt, like the
+    /// desktop: it stays hidden until the list changes.
+    private func dismissFinishedTodos() {
+        if let items = TodoCardLogic.select(live: todos, transcript: transcriptTodos, dismissed: nil),
+           TodoCardLogic.allTerminal(items) {
+            todosDismissed = items
+            rebuildBlocks()
+        }
+    }
+
+    /// Send a message into the turn that is already running — "Now" (`steer`,
+    /// read at the agent's next step) or "After this turn" (`queue`).
+    ///
+    /// A SEPARATE path from `deliver` on purpose: `deliver` starts a turn (it
+    /// resets the completion latch, mints a new streaming tail and rolls
+    /// `running` back on failure) — all wrong for a turn that is already
+    /// running. This one never touches `running`, the tail or the completion
+    /// state.
+    ///
+    /// The message carries a client-minted id, kept on its outbox row and reused
+    /// on every retry (V2 treats a repeated id as idempotent), so a retry after
+    /// an uncertain failure cannot enqueue it twice. The outbox row exists only
+    /// until the box answers: success removes it (the pending card takes over),
+    /// a definite refusal marks it failed with the reason, and an uncertain
+    /// failure marks it "may have been sent" — which clears itself if the id
+    /// turns up in the pending list or the transcript.
+    ///
+    /// The model / agent are not sent: V2 never applies them to a message
+    /// joining a running turn. The row keeps them so a retry made after the
+    /// turn has ended goes out as an ordinary send with them applied.
+    func sendWhileRunning(
+        text: String,
+        attachments: [SendPromptInput.Attachment],
+        model: SendPromptInput.Model?,
+        mentions: [SendPromptInput.Mention]? = nil,
+        agent: String? = nil,
+        delivery: InboxDelivery
+    ) async {
+        dismissFinishedTodos()
+        let prompt = PendingPrompt(
+            id: UUID().uuidString,
+            sessionId: sessionId,
+            text: text,
+            attachments: attachments,
+            model: model,
+            mentions: mentions,
+            agent: agent,
+            state: .sending,
+            messageID: PendingPrompt.mintMessageID(),
+            delivery: delivery == .steer ? InboxDelivery.steer.wire : InboxDelivery.queue.wire
+        )
+        pendingPrompts = PendingPromptStore.upsert(prompt, into: pendingPrompts)
+        persistPending()
+        rebuildBlocks()
+        await postWhileRunning(prompt)
+    }
+
+    /// POST one busy-send row and record the verdict on it.
+    private func postWhileRunning(_ prompt: PendingPrompt) async {
+        update(prompt.id) { $0.state = .sending; $0.failureReason = nil }
+        do {
+            try await withBackgroundAssertion("send-prompt") {
+                try await api.sendPrompt(SendPromptInput(
+                    sessionId: sessionId,
+                    text: prompt.text,
+                    attachments: prompt.attachments.isEmpty ? nil : prompt.attachments,
+                    mentions: prompt.mentions,
+                    messageID: prompt.messageID,
+                    delivery: prompt.delivery
+                ))
+            }
+            // In the box's inbox now: the pending card (from the `inbox` frame)
+            // is what shows it from here on.
+            remove(prompt.id)
+            Task { await refreshVoiceNotes() }
+        } catch {
+            switch BusySendClassifier.classify(error) {
+            case .delivered:
+                remove(prompt.id)
+            case .refused(let reason):
+                update(prompt.id) { $0.state = .failed; $0.failureReason = reason }
+            case .uncertain:
+                update(prompt.id) { $0.state = .uncertain; $0.failureReason = nil }
+                // It may have landed: ask the box, so the row clears itself if so.
+                refreshInbox()
+            }
+        }
+        rebuildBlocks()
+    }
+
+    // MARK: - Pending messages (the box's inbox)
+
+    private func handleInboxFrame(_ frame: InboxFrameEvent) {
+        if inboxTracker.offerFrame(frame.payload, retired: &InboxRetiredEpochs.shared.epochs) {
+            applyInbox()
+        }
+    }
+
+    /// Re-read the pending list (`opencode:inbox`) under the same acceptance
+    /// rule as a pushed frame. Seeds a session on open and re-seeds it after a
+    /// reconnect. Not a user action: a failure here is recovered by the next
+    /// frame or resync, and is logged rather than shown.
+    func refreshInbox() {
+        guard !isReadOnly else { return }
+        let stamp = inboxTracker.beginRequest()
+        Task {
+            do {
+                let snapshot = try await api.inbox(sessionId: sessionId)
+                if inboxTracker.offerResponse(stamp: stamp, snapshot: snapshot, retired: &InboxRetiredEpochs.shared.epochs) {
+                    applyInbox()
+                }
+            } catch {
+                NSLog("[inbox] couldn't read the pending messages for %@: %@", sessionId, String(describing: error))
+            }
+        }
+    }
+
+    private func applyInbox() {
+        inboxItems = inboxTracker.shown?.items ?? []
+        settlePendingPrompts()
+    }
+
+    /// Drop the outbox rows the box has since shown to hold (inbox) or contain
+    /// (transcript) — see `PendingPromptStore.settling`.
+    private func settlePendingPrompts() {
+        var seen = Set(inboxItems.map(\.id))
+        seen.formUnion(messages.map(\.info.id))
+        let settled = PendingPromptStore.settling(pendingPrompts, seenIDs: seen)
+        guard settled.count != pendingPrompts.count else { return }
+        pendingPrompts = settled
+        persistPending()
+        rebuildBlocks()
+    }
+
+    /// Send now (`steer`) / Wait (`queue`) on a pending message (N1). Every
+    /// outcome is reported: `changed` is confirmed by the next `inbox` frame; the
+    /// rest say what happened.
+    func setInboxDelivery(id: String, to delivery: InboxDelivery) {
+        guard !isReadOnly, inboxBusyIDs.insert(id).inserted else { return }
+        Task {
+            defer { inboxBusyIDs.remove(id) }
+            do {
+                let result = try await api.inboxSetDelivery(sessionId: sessionId, id: id, delivery: delivery)
+                if let message = InboxActionReport.setDelivery(result) {
+                    actionHint = message
+                    refreshInbox()
+                }
+            } catch {
+                actionHint = InboxActionReport.setDeliveryFailed
+            }
+        }
+    }
+
+    /// × on a pending message (K4).
+    func cancelInboxItem(id: String) {
+        guard !isReadOnly, inboxBusyIDs.insert(id).inserted else { return }
+        Task {
+            defer { inboxBusyIDs.remove(id) }
+            do {
+                let result = try await api.inboxCancel(sessionId: sessionId, id: id)
+                if let message = InboxActionReport.cancel(result) {
+                    actionHint = message
+                    refreshInbox()
+                }
+            } catch {
+                actionHint = InboxActionReport.cancelFailed
+            }
+        }
     }
 
     /// Run `work` inside a background-task assertion so an in-flight send is not
@@ -1275,7 +1500,8 @@ final class ChatSessionStore: ObservableObject {
                     model: prompt.model,
                     attachments: prompt.attachments.isEmpty ? nil : prompt.attachments,
                     mentions: prompt.mentions,
-                    agent: prompt.agent
+                    agent: prompt.agent,
+                    messageID: prompt.messageID
                 ))
             }
             // Success: nothing is outstanding any more. Drop the pending row;
@@ -1314,15 +1540,28 @@ final class ChatSessionStore: ObservableObject {
         Task { @MainActor in await deliver(next) }
     }
 
-    /// User-initiated retry of a failed prompt. The ONLY path out of `.failed`.
-    /// Reuses the prompt's id — row identity survives the retry.
+    /// User-initiated retry of a failed (or "may have been sent") prompt. The
+    /// ONLY path out of `.failed` / `.uncertain`. Reuses the prompt's id — row
+    /// identity survives the retry — and its message id, so a message that did
+    /// reach the box is not enqueued a second time.
+    ///
+    /// A send-while-running row retried while the turn still runs goes back out
+    /// the same way (same delivery); retried after the turn ended it is an
+    /// ordinary idle send, so the model / agent choice applies.
     func retry(promptID: String) {
         guard let index = pendingPrompts.firstIndex(where: { $0.id == promptID }),
-              pendingPrompts[index].state == .failed else { return }
+              pendingPrompts[index].state == .failed || pendingPrompts[index].state == .uncertain else { return }
+        if pendingPrompts[index].isBusySend, running {
+            let busyRow = pendingPrompts[index]
+            Task { @MainActor in await postWhileRunning(busyRow) }
+            return
+        }
         var prompt = pendingPrompts[index]
+        prompt.delivery = nil
+        prompt.failureReason = nil
         prompt.state = .waiting
         pendingPrompts[index] = prompt
-        PendingPromptStore.save(pendingPrompts)
+        persistPending()
         if !running {
             Task { @MainActor in await deliver(prompt) }
         }
@@ -1330,17 +1569,28 @@ final class ChatSessionStore: ObservableObject {
 
     /// Set a pending row's state, persisting and publishing it.
     private func mark(_ prompt: PendingPrompt, _ state: PendingPrompt.State) {
-        guard let index = pendingPrompts.firstIndex(where: { $0.id == prompt.id }) else { return }
+        update(prompt.id) { $0.state = state }
+    }
+
+    /// Edit one pending row in place, persisting and publishing the result. A
+    /// row that has already left the outbox is left alone.
+    private func update(_ id: String, _ edit: (inout PendingPrompt) -> Void) {
+        guard let index = pendingPrompts.firstIndex(where: { $0.id == id }) else { return }
         var updated = pendingPrompts[index]
-        updated.state = state
+        edit(&updated)
         pendingPrompts[index] = updated
-        PendingPromptStore.save(pendingPrompts)
+        persistPending()
     }
 
     /// Remove a pending row, persisting and publishing the result.
     private func remove(_ id: String) {
         pendingPrompts = PendingPromptStore.remove(id: id, from: pendingPrompts)
-        PendingPromptStore.save(pendingPrompts)
+        persistPending()
+    }
+
+    /// Write this session's rows without erasing any other session's.
+    private func persistPending() {
+        PendingPromptStore.persist(pendingPrompts, sessionId: sessionId)
     }
 
     /// Interrupt the running turn.

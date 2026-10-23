@@ -408,7 +408,8 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
                 } label: {
                     HStack(spacing: Metrics.spacing.sp2) {
                         Image(systemName: "arrow.clockwise")
-                        Text("Couldn't send — tap to retry")
+                        Text(PendingPromptNotice.failed(reason: prompt.failureReason))
+                            .multilineTextAlignment(.leading)
                     }
                     .font(.manta(size: Metrics.type.twoXS))
                     .foregroundColor(tokens.danger)
@@ -417,6 +418,29 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
                 .padding(.horizontal, Metrics.spacing.sp3)
                 .padding(.bottom, Metrics.spacing.sp4)
                 .accessibilityIdentifier("pending-prompt-retry")
+            }
+        case .uncertain:
+            // No verdict from the box: it may have the message already. This row
+            // clears itself the moment the message shows up in the pending list
+            // or the transcript; the tap resends under the SAME message id, so a
+            // message that did land is not delivered twice.
+            VStack(alignment: .leading, spacing: 0) {
+                UserBand(text: prompt.text, tokens: tokens)
+                    .opacity(0.7)
+                Button {
+                    onRetry(prompt.id)
+                } label: {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        Image(systemName: "arrow.clockwise")
+                        Text(PendingPromptNotice.uncertain)
+                    }
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.warn)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.bottom, Metrics.spacing.sp4)
+                .accessibilityIdentifier("pending-prompt-uncertain")
             }
         }
     case .permission(let permission):
