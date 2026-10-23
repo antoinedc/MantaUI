@@ -70,10 +70,13 @@ Refused for CTO conversation sessions (same error as K4). `Api.opencodeInboxSetD
 **N2 — background run input (B).** `opencode:run-command` input gains `background?: boolean`.
 `Api.opencodeRunCommand` input type gains the field. `background:true` is refused (clear error) for CTO
 conversation sessions and for names that are not an opencode command or skill. For a command N3 marks
-`background: true`, the server **ignores** `background` and runs it normally on the parent — V2 makes the
-child itself (F4/F5); wrapping it again would create two children. The resolved composer `model` and
-`agent` in the input are the child's controls (§B-server 3), unless the command definition sets its own
-(V2 applies a command's own `agent`/`model` over them).
+`background: true`, the server **ignores** `background` and runs it on the parent — V2 makes the child
+itself (F4/F5); wrapping it again would create two children. For such a command the server **never syncs
+the parent's controls** (no `syncSessionControls` call, the parent's agent/model stay exactly as they are,
+even mid-turn): the child's agent/model come from the command definition, else V2's own inheritance; the
+composer's picker does not apply to always-background commands (stated in the box's disabled title). For
+a wrapped run (§B-server 3) the resolved composer `model`/`agent` in the input are the child's controls,
+unless the command definition sets its own (V2 applies a command's own `agent`/`model` over them).
 
 **N3 — command list (B).** `OpencodeCommand` gains `background?: true` — set only when manta-server can
 prove the definition runs in the background (§B3); absent means "unknown / foreground".
@@ -233,31 +236,57 @@ state, manta: { jobId: job.id } }, delivery: "queue", resume: true }`.
      the child create AND to the `runCommand` call on the child, so `syncSessionControls`' omitted-agent rule
      can never flip it. The model is whatever the user already uses in this conversation, so no delegate
      model-whitelist check;
-   then, in order, undoing everything already done on any failure (no orphan record, child or window):
-   a. `POST /api/session { parentID, title: "/<name> <args>", agent, model, permissions }` (F7, F8);
-   b. register the job (`origin:"command"`, `engine:"v2"`, `completionOwner:"manta"`, no worktree, cwd =
-      parent's directory, mint `completionMessageId`) and its window/sidebar row;
+   then, in order:
+   a. **register the job first** (`origin:"command"`, `engine:"v2"`, `completionOwner:"manta"`, no
+      worktree, cwd = parent's directory, `launchState:"creating"`) with a **client-minted child session
+      id** (`ses_…`, V2 accepts `id` on create) and a minted `completionMessageId`, so every later step is
+      reconcilable by id;
+   b. `POST /api/session { id, parentID, title: "/<name> <args>", agent, model, permissions }` (F7, F8);
+      then the window/sidebar row; `launchState:"submitting"`;
    c. run the command **in the child** (`runCommand` on the child id; skills keep their prompt branch);
+      `launchState:"running"` once the POST returns 2xx (record `submittedAt`);
    d. completion: from the child's raw `session.execution.succeeded|failed|interrupted` (§C1 step 6 —
-      the same detection C1 uses), take the child's last assistant text, mark terminal, deliver N7.
+      the same detection C1 uses), mark terminal, deliver N7 with the child's last assistant text.
+   **Failure handling — roll back only what is proven not admitted.** A definite 4xx on create → delete the
+   record, report. A definite 4xx on the command POST → delete the child + window + record, report. An
+   uncertain failure (timeout, network, 5xx) on either POST → keep everything, mark
+   `launchState:"uncertain"` and reconcile (§B-server 4 reconnect rules): if the child exists and shows a
+   user message / activity it is running; if after a 60 s grace the child is missing, or exists with no
+   messages and is not active, it never started → mark `failed: "didn't start"` (deleting an empty child)
+   and show that on the card. The user can't start a second run of the same record while it is uncertain.
+   **Nested children:** if the wrapped command turns out to background itself (N3 said "unknown"), V2
+   creates a grandchild under the wrapper child and reports into the wrapper child, which replies. So a
+   wrapped job is complete only when the wrapper child is idle **and** none of its descendants (children
+   seen via `session.created` with `parentID` = a session of this job) is active; the result text is the
+   wrapper child's last assistant text after that point. Tested with a background-defined command N3
+   can't read.
 4. **V2-native background commands (N3 says background, or V2 turns out to background it anyway).**
    Run the command normally on the parent; adopt the child it creates:
-   - **Adopt immediately** on `session.created` with `data.parentID === P` while a command window for P is
-     open (`origin:"command"`, `completionOwner:"opencode"`, name = the command). If a `task` tool part later
-     claims that child (a background `task` started concurrently), relabel the record
-     (`origin:"subagent"`) — same row, no second record.
+   - **Provisional adoption:** a `session.created` with `data.parentID === P` while a command window for P
+     is open becomes a *candidate*. It is held (no row yet) until a `task` tool part claims it or 2 s after
+     the window closes, whichever is first. Claimed by a foreground `task` → dropped (inline-only, per the
+     TERMINOLOGY rule); claimed by a background `task` → the existing subagent adoption; unclaimed → adopted
+     (`origin:"command"`, `completionOwner:"opencode"`). Name = the window's command when exactly one
+     command window was open for P; with overlapping windows the row is named "Background command".
    - **No lost lifecycle:** the pump keeps a short-lived (10 min, capped) map of child sessions' latest
      raw execution outcome, fed for every `session.execution.*`. Adoption (here and in the existing
      `task` path) reads it, so a child that finished before it was adopted is recorded as finished at once.
-   - **Reconnect:** `resyncAfterReconnect` reconciles every `running` job with `engine:"v2"` against
-     `GET /api/session/active` + the child's last execution record; a child no longer running gets its
-     terminal state (and, for `completionOwner:"manta"`, its N7 delivery).
+   - **Reconnect / boot reconcile** for every non-terminal `engine:"v2"` job, using only these authoritative
+     fields: `GET /api/session/active` (is it running), `GET /api/session/{child}` → `outcome`
+     (`succeeded|failed|interrupted`) and `time.idle`, and the job's persisted `launchState` /
+     `submittedAt`. Active → still running. Not active, `outcome` set and `time.idle ≥ submittedAt` → that
+     terminal state (and N7 for `completionOwner:"manta"`). Not active and no qualifying outcome → if
+     `launchState` is `uncertain` or `submitting`, apply the never-started grace rule above; otherwise keep
+     it running and re-check on the next sweep (never guess a terminal state).
    - opencode posts the result itself (F5) — Manta posts nothing (N6).
 5. **Finished rows stay.** Today `finishJob` → `cleanupTerminalJob` kills the window even when there is no
    worktree, so a finished background row would vanish and "Open session →" would have nothing to open.
    For jobs **without a worktree** (`origin` `command` / `subagent`): keep the window and record after
-   finishing (row shows done) until the user closes the row or the existing 7-day / 50-record retention
-   sweep removes it. Worktree jobs keep today's behaviour. "Open session →" calls a new RPC
+   finishing (row shows done) until the user closes the row or the retention sweep removes it. The sweep
+   (age 7 days / count 50, both tested) must, for each pruned no-worktree record, close its window first
+   and then delete the record; it never prunes a record whose `completionDelivery` is `pending`. If the
+   parent session was deleted (N7 POST answers 404), `completionDelivery` becomes `abandoned` (stop
+   retrying, log once) and the record becomes prunable. Worktree jobs keep today's behaviour. "Open session →" calls a new RPC
    `delegate:open-session({ jobId })` → focuses the job's window, re-creating a chat window stamped with the
    child session id if it was closed; it reports a visible error if the child session no longer exists.
 6. **N4 mapping** in `mapTimeline` + the iOS decode check (§1 N4).
@@ -293,8 +322,12 @@ Applies to `startJob` / `resumeJob` for every job **except** those with `actor:"
 2. `POST /api/session { parentID: parentSessionID, title: job.name, agent, model, permissions: <today's
    preflight ruleset> }` (F8) — replaces the session that `newWindow` chat-mode creation makes today; the
    model still goes through today's whitelist resolution first;
-3. `POST /api/session/{child}/move { directory: worktree }` (F7) — verify U3 in the smoke (shell `pwd`).
-   If the move fails, undo (delete the child session, remove the worktree) and report;
+3. resolve the execution directory ONCE as `worktree ?? parentDirectory` (today's launch falls back to the
+   parent directory when a worktree can't be made and isolation isn't required — keep that), persist it,
+   and use it for create, move, stamp and resume. When it differs from the parent's directory:
+   `POST /api/session/{child}/move { directory }` (F7) — verify U3 in the smoke (shell `pwd`); if the
+   move fails definitively, undo (delete the child, remove the worktree) and report. Tested for a
+   non-repository job (no move);
 4. `newWindow` with `existingSessionId: child` so the sidebar row/window behave as today;
 5. opening prompt via `sendPrompt` on the child, as today; record `engine:"v2"`,
    `completionOwner:"manta"`, `attempt`, `completionMessageId`;
@@ -308,7 +341,9 @@ Applies to `startJob` / `resumeJob` for every job **except** those with `actor:"
 7. then **N7** instead of `promptDelivery.deliver` — except when the parent is the CTO conversation session
    (N7 says why); `promptDelivery` keeps serving schedules / webhooks / peers / capabilities;
 8. pause / resume / stop / timeout / sweep / reconcile-on-boot keep their behaviour on `engine:"v2"`
-   records. Resume creates a fresh child the same way (create → move → stamp), bumps `attempt`, keeps
+   records with `completionOwner:"manta"`. Pause / resume are **not offered** for `completionOwner:"opencode"`
+   rows (V2 owns that lifecycle — the controls are not rendered for them, AGENTS.md outcome 3); stop is
+   offered and interrupts the child. Each resumed attempt reports its own N7 result. Resume creates a fresh child the same way (create → move → stamp), bumps `attempt`, keeps
    `jobId` — cards pair by `jobId` (N5), so a resumed job's running card still turns into its result;
 9. B's wrapped command runs keep their own launch (`startCommandJob`) but share steps 6–7.
 Records created before C1 have no `engine` field = legacy, and finish on the legacy path.
@@ -338,9 +373,11 @@ shortened timeout injected.
    installs without `effect`/`solid-js` and lands in the server release tarball (`scripts/release/pack.mjs`
    ships production deps — verify the tarball contains it, per the AGENTS.md "a dependency reaches a box
    only through a new tarball" rule).
-2. Create the client once in `opencode.mjs` with the Basic-auth header from `opencodeAuthHeader()` and the
-   existing pooled `ocFetch` transport passed as its `fetch` (keep keep-alive pooling, timeouts, the
-   `_setApiBase` test seam).
+2. Create the client in `opencode.mjs` with a custom `fetch` that wraps the existing pooled transport and
+   applies `opencodeAuthHeader()` **per request** (today's code re-reads the password on every request —
+   keep that; do not bake the header into the client at creation), and resolves the base URL per request
+   so `_setApiBase` keeps working after the client exists. Keep pooling and timeouts. Tests: password
+   rotation and `_setApiBase` changes after client creation both take effect.
 3. Move every request/response call in `opencode.mjs` (and `upgradeV2.mjs`'s opencode calls) to typed
    client methods. **Keep** the hand-written SSE pump (`subscribeEvents`) — the client has no reconnect /
    `onDisconnect` (F13) and the pump's semantics are load-bearing.
