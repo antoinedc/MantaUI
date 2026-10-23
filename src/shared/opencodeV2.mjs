@@ -319,10 +319,90 @@ function mapUser(m, { sessionID }) {
 }
 
 /**
+ * A background child's result, posted into its parent as a `synthetic` record
+ * (metadata.source "subagent"; opencode posts it for V2-native background
+ * commands and `task` subagents, Manta posts it for runs it wrapped). The text
+ * is `<subagent sessionID="…" state="…" description="…">\n…\n</subagent>` —
+ * V2 does NOT entity-encode either the attributes or the body (recorded: a
+ * body containing `</subagent>` and a description containing `<`/`>`/`"` come
+ * back raw), so the envelope is peeled by exact prefix/suffix, never by
+ * parsing. A missing or unrecognised envelope yields the raw text.
+ */
+function backgroundResultText(raw, { childID, state, description }) {
+  const text = typeof raw === "string" ? raw : "";
+  if (!text.startsWith("<subagent")) return text;
+  const attrs = (d) => `<subagent sessionID="${childID}" state="${state}"${d === undefined ? "" : ` description="${d}"`}>`;
+  const candidates = [];
+  if (childID && state) {
+    if (typeof description === "string") candidates.push(attrs(description));
+    candidates.push(attrs(undefined));
+  }
+  let open = candidates.find((c) => text.startsWith(c));
+  if (open === undefined) {
+    // Metadata missing: the envelope's own attributes (description is the one
+    // unescaped free-text attribute, so it ends at the first `">`).
+    const m = text.match(/^<subagent\s+sessionID="[^"]*"\s+state="[^"]*"(?:\s+description="[\s\S]*?")?>/);
+    if (!m) return text;
+    open = m[0];
+  }
+  let inner = text.slice(open.length);
+  if (inner.endsWith("</subagent>")) inner = inner.slice(0, -"</subagent>".length);
+  else return text;
+  if (inner.startsWith("\n")) inner = inner.slice(1);
+  if (inner.endsWith("\n")) inner = inner.slice(0, -1);
+  return inner;
+}
+
+function envelopeAttr(text, name) {
+  const m = typeof text === "string" ? text.match(new RegExp(`^<subagent[^>]*?\\s${name}="([^"]*)"`)) : null;
+  return m ? m[1] : undefined;
+}
+
+function mapBackgroundResult(m, { sessionID }) {
+  const md = m.metadata;
+  const childSessionId =
+    (typeof md.childID === "string" && md.childID) || envelopeAttr(m.text, "sessionID");
+  if (!childSessionId) return null; // nothing to pair or open it by
+  const state = (typeof md.state === "string" && md.state) || envelopeAttr(m.text, "state") || "unknown";
+  const manta = md.manta && typeof md.manta === "object" ? md.manta : {};
+  const description = typeof m.description === "string" ? m.description : undefined;
+  const name =
+    (typeof manta.name === "string" && manta.name) ||
+    (description !== undefined && description.startsWith("/") ? description : undefined);
+  return {
+    // `completed` is stamped too: several readers (isAssistantTurnInProgress,
+    // peers' classifyChatStatus, the CTO run outcome) read an assistant message
+    // without it as a turn still running — and a result is by nature finished.
+    info: {
+      id: m.id,
+      sessionID,
+      role: "assistant",
+      time: { created: m.time?.created, completed: m.time?.created },
+      background: true,
+    },
+    parts: [
+      clean({
+        id: `${m.id}:bg`,
+        messageID: m.id,
+        sessionID,
+        type: "background-result",
+        childSessionId,
+        jobId: typeof manta.jobId === "string" && manta.jobId ? manta.jobId : undefined,
+        state,
+        name,
+        agent: typeof md.agent === "string" && md.agent ? md.agent : undefined,
+        text: backgroundResultText(m.text, { childID: childSessionId, state, description }),
+      }),
+    ],
+  };
+}
+
+/**
  * V2 timeline records (CHRONOLOGICAL) → the `{info, parts}[]` shape every
  * client reads (src/shared/types.ts OpencodeMessage). Records that are not
  * conversation (idle, agent/model/location switches, system, skill, shell,
- * synthetic) are dropped. `directory` (the session's) lets file tools' card
+ * other synthetic input) are dropped; a background child's result (synthetic,
+ * metadata.source "subagent") becomes a `background-result` message. `directory` (the session's) lets file tools' card
  * titles show paths relative to it. A completed compaction becomes a `summary:true`
  * assistant message holding the summary text.
  */
@@ -336,6 +416,9 @@ export function mapTimeline(items, { sessionID, directory } = {}) {
       out.push(mapUser(m, { sessionID }));
     } else if (m.type === "assistant") {
       out.push(mapAssistant(m, { sessionID, parentID: lastUser, directory }));
+    } else if (m.type === "synthetic" && m.metadata?.source === "subagent") {
+      const mapped = mapBackgroundResult(m, { sessionID });
+      if (mapped) out.push(mapped);
     } else if (m.type === "compaction" && m.status === "completed") {
       out.push({
         info: clean({

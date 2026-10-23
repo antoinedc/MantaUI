@@ -2760,6 +2760,9 @@ export type OpencodeMessageInfo = {
   // User messages produced by a slash command carry its origin (K6). Stamped
   // by the box from its durable command-origin record; absent when unknown.
   command?: { name: string; arguments: string };
+  // True on a background child's result message (a `background-result` part,
+  // OpencodeBackgroundResultPart below) — not something the model said.
+  background?: true;
   time?: { created?: number; completed?: number };
   // assistant-only fields surfaced here for the model/cost line in the UI:
   modelID?: string;
@@ -2788,8 +2791,28 @@ export type OpencodePart = {
   [k: string]: unknown;
 };
 
+// A background child's result, as the parent's transcript shows it (spec N4).
+// Mapped from V2's `synthetic` record with metadata.source "subagent";
+// `jobId` is present when Manta posted it (metadata.manta.jobId), `name` is
+// the "/command args" display name when known, `text` is the inner text of
+// the <subagent> envelope.
+export type OpencodeBackgroundResultPart = {
+  id: string;
+  messageID: string;
+  sessionID: string;
+  type: "background-result";
+  childSessionId: string;
+  jobId?: string;
+  state: string;          // "completed" | "failed" | "cancelled" | other
+  name?: string;
+  agent?: string;
+  text: string;
+};
+
 export type OpencodeMessage = {
   info: OpencodeMessageInfo;
+  // OpencodePart is open (index signature), so an OpencodeBackgroundResultPart
+  // is already a member; renderers narrow on `type === "background-result"`.
   parts: OpencodePart[];
 };
 
@@ -3022,6 +3045,9 @@ export type OpencodeCommand = {
   agent?: string;
   model?: string;
   template?: string;
+  // Set only when manta-server can prove the definition always runs in a
+  // background child session (spec N3); absent = unknown / foreground.
+  background?: true;
 };
 
 // Agent definition exposed by opencode (build/plan/general-purpose + user

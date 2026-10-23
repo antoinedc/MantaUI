@@ -87,6 +87,52 @@ final class MantaTransportTests: XCTestCase {
         }
     }
 
+    // N4 (opencode-v2-next): a background child's result reaches the transcript
+    // as an assistant message flagged `info.background` holding one
+    // `background-result` part. The app has no card for it yet — it must keep
+    // decoding the whole transcript, keep the part's fields as extras, and draw
+    // nothing for it while the messages around it render as before.
+    func testDecodesTranscriptWithBackgroundResultMessageAndDrawsNothingForIt() throws {
+        let payload = """
+        {"result": [
+          { "info": { "id": "msg_1", "sessionID": "ses_p", "role": "user", "time": { "created": 1750000000 } },
+            "parts": [ { "type": "text", "id": "p1", "messageID": "msg_1", "text": "run it in the background" } ] },
+          { "info": { "id": "msg_2", "sessionID": "ses_p", "role": "assistant",
+                      "time": { "created": 1750000001, "completed": 1750000002 } },
+            "parts": [ { "type": "text", "id": "p2", "messageID": "msg_2", "text": "started" } ] },
+          { "info": { "id": "msg_3", "sessionID": "ses_p", "role": "assistant", "background": true,
+                      "time": { "created": 1750000030, "completed": 1750000030 } },
+            "parts": [ { "id": "msg_3:bg", "messageID": "msg_3", "sessionID": "ses_p",
+                         "type": "background-result", "childSessionId": "ses_child",
+                         "jobId": "job1", "state": "completed", "name": "/review HEAD~1",
+                         "agent": "build", "text": "all good" } ] },
+          { "info": { "id": "msg_4", "sessionID": "ses_p", "role": "assistant",
+                      "time": { "created": 1750000031, "completed": 1750000040 } },
+            "parts": [ { "type": "text", "id": "p4", "messageID": "msg_4", "text": "the review passed" } ] }
+        ]}
+        """
+        let messages = try XCTUnwrap(try MantaAPIClient.decode(json(payload), as: [OpencodeMessage].self))
+        XCTAssertEqual(messages.count, 4)
+        let result = messages[2].parts[0]
+        XCTAssertEqual(result.type, "background-result")
+        XCTAssertEqual(result.text, "all good")
+        XCTAssertEqual(result.extra["childSessionId"], .string("ses_child"))
+        XCTAssertEqual(result.extra["jobId"], .string("job1"))
+        XCTAssertEqual(result.extra["state"], .string("completed"))
+        XCTAssertEqual(result.extra["name"], .string("/review HEAD~1"))
+
+        let blocks = ChatTranscriptMapper.blocks(from: messages)
+        XCTAssertEqual(blocks.count, 3, "user + two prose blocks; the result message draws nothing")
+        guard case .user(let first, _) = blocks[0],
+              case .prose(let second, _) = blocks[1],
+              case .prose(let third, _) = blocks[2] else {
+            return XCTFail("unexpected blocks: \(blocks)")
+        }
+        XCTAssertEqual(first, "run it in the background")
+        XCTAssertEqual(second, "started")
+        XCTAssertEqual(third, "the review passed")
+    }
+
     func testDecodesRealCapturedPermissionsPayload() throws {
         let payload = """
         {"result": [{
