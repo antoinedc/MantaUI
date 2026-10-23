@@ -596,9 +596,9 @@ function fileInputs(attachments) {
  * `delivery` ("steer" | "queue") is passed through when given; today's callers
  * leave it unset (V2's default is steer) — native use is a later phase.
  *
- * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
+ * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
  */
-export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, messageID, delivery, signal }) {
+export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, signal }) {
   await syncSessionControls(sessionId, { model, agent, signal });
   const body = { text };
   const files = fileInputs(attachments);
@@ -608,6 +608,9 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
       name: m.name,
       mention: { start: m.source.start, end: m.source.end, text: m.source.value },
     }));
+  }
+  if (skills?.length) {
+    body.skills = skills.map((s) => ({ id: s.id, mention: { start: s.start, end: s.end, text: s.value } }));
   }
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
@@ -2498,10 +2501,37 @@ export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_M
 // Commands, agents, file search
 // ---------------------------------------------------------------------------
 
-/** List built-in and user-defined slash commands (V2 reports only name + description).
- *  @returns {Promise<Array<{ name: string, description?: string }>>}
+/** Skills opencode knows about (GET /api/skill). V2 no longer lists skills as
+ *  commands, so the composer's slash menu gets them from here. A failure is
+ *  reported as "no skills" — commands must keep working without them. */
+async function listSkills() {
+  try {
+    const raw = (await ocJson("listSkills", "GET", "/api/skill")) ?? [];
+    return raw
+      .filter((s) => typeof s?.id === "string" && s.id)
+      .map((s) => ({ id: s.id, description: typeof s.description === "string" ? s.description : undefined }));
+  } catch {
+    return [];
+  }
+}
+
+/** List slash commands plus skills (V2 reports only name + description).
+ *  A skill hides a command of the same name: the command would be a wrapper
+ *  (e.g. one an installer generates with `subtask: true`), which runs the skill
+ *  in an isolated subagent that can't see the conversation, while the skill
+ *  itself runs inline in the session — what typing `/<skill>` means.
+ *  @returns {Promise<Array<{ name: string, description?: string, source?: string }>>}
  */
 export async function listCommands() {
+  const [commands, skills] = await Promise.all([listRawCommands(), listSkills()]);
+  const skillNames = new Set(skills.map((s) => s.id));
+  return [
+    ...commands.filter((c) => !skillNames.has(c.name)),
+    ...skills.map((s) => ({ name: s.id, description: s.description, source: "skill" })),
+  ];
+}
+
+async function listRawCommands() {
   const raw = (await ocJson("listCommands", "GET", "/api/command")) ?? [];
   return raw.map((c) => ({
     name: String(c.name ?? ""),
@@ -2590,6 +2620,23 @@ export async function listReferences() {
  * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, signal?: AbortSignal }} opts
  */
 export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, signal }) {
+  // A skill isn't a V2 command (the command route 404s it, or runs a same-named
+  // wrapper as a subagent): send `/<skill> <args>` as a prompt with the skill
+  // attached, the way opencode's own composer does — opencode inlines the
+  // skill's content into that user message.
+  if ((await listSkills()).some((s) => s.id === command)) {
+    const head = `/${command}`;
+    const args = (argumentsStr ?? "").trim();
+    return sendPrompt({
+      sessionId,
+      text: args ? `${head} ${args}` : head,
+      model,
+      agent,
+      attachments,
+      skills: [{ id: command, start: 0, end: head.length, value: head }],
+      signal,
+    });
+  }
   await syncSessionControls(sessionId, { model, agent, signal });
   const body = { name: command, text: argumentsStr ?? "" };
   const files = fileInputs(attachments);
