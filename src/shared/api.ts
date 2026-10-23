@@ -1415,6 +1415,12 @@ export interface Api {
   // No create channel — jobs are started by the AI's `delegate` opencode tool.
   delegateList(sessionId?: string): Promise<DelegateJob[]>;
   delegateStart(input: DelegateStartInput): Promise<DelegateStartResult>;
+  // P6: focus the job's chat window (re-created, stamped with the child session
+  // id, when it was closed). The caller then selects the returned window like
+  // any sidebar row; `ok:false` carries a message to show (e.g. the session is gone).
+  delegateOpenSession(input: { jobId: string }): Promise<
+    { ok: true; tmuxSession: string; windowIndex: number } | { ok: false; error: string }
+  >;
   delegateStop(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   delegateDelete(id: string): Promise<{ ok: boolean; error?: string; reason?: string }>;
   // BET-418 §A pre-flight approval: the renderer polls pending approvals for
@@ -1477,7 +1483,9 @@ export interface Api {
   connectionRetryNow(): void;
 
   // Typeahead sources.
-  opencodeCommands(): Promise<OpencodeCommand[]>;
+  // P1: `directory` (the session's) lists that project's own commands and lets
+  // the box mark the ones that always run in the background (`background`).
+  opencodeCommands(opts?: { directory?: string }): Promise<OpencodeCommand[]>;
   opencodeAgents(): Promise<OpencodeAgent[]>;
   opencodeFindFiles(input: { query: string; directory: string }): Promise<string[]>;
   // BET-1023: configured opencode references (GET /api/reference) + the
@@ -1532,7 +1540,14 @@ export interface Api {
     attachments?: PromptAttachment[];
     // K1: see opencodePrompt's `opts.delivery`.
     delivery?: OpencodeDelivery;
-  }): Promise<void>;
+    // N2/P5: run in its own background session, without this chat's history; the
+    // result comes back to this conversation. Refused for the CTO conversation
+    // and for names that are not an opencode command or skill. A Manta-wrapped
+    // run resolves `{ jobId }` once its job exists and the launch reached
+    // `running` or `uncertain` (an uncertain launch still resolves); an
+    // always-background command (N3) resolves void; definite refusals reject.
+    background?: boolean;
+  }): Promise<void | { jobId: string }>;
 
   // /clear: create new opencode session in same dir, re-stamp tmux window.
   opencodeClearSession(input: {

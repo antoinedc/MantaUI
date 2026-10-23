@@ -91,6 +91,10 @@ export type TranscriptContext = {
   // tail the same way as question cards. Built by ChatPanel (closures over the
   // plan data + session); Transcript just mounts it.
   planCard?: React.ReactNode;
+  // The running / uncertain / failed background-run cards (v2-next N5), built
+  // by ChatPanel from the job store. Rendered first in the tail, right under
+  // the last message, so they read as transcript entries.
+  backgroundCards?: React.ReactNode;
   // BET-837: the pending voice-note row (upload/transcribe in flight) renders
   // here — after the message list, before the working indicator. When it
   // resolves into a real note it lands as a VoicePlayer on its message row.
@@ -388,6 +392,11 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         paddingBottom: "var(--sp-6)",
       }}
     >
+      {context.backgroundCards && (
+        <ErrorBoundary>
+          {context.backgroundCards}
+        </ErrorBoundary>
+      )}
       {(context.pendingVoiceNote != null) && (
         <PendingVoiceRow
           pending={context.pendingVoiceNote}
@@ -481,6 +490,8 @@ export type TranscriptProps = {
   onRejectQuestion: (q: QuestionRequest) => void;
   // The plan_exit card, mounted in the tail (see TranscriptContext.planCard).
   planCard?: React.ReactNode;
+  // Background-run cards, mounted first in the tail (see TranscriptContext.backgroundCards).
+  backgroundCards?: React.ReactNode;
   // The Virtuoso scroll container, published upward so ChatPanel's
   // scrollToTail can address the real bottom (Footer included).
   scrollerElRef: React.MutableRefObject<HTMLElement | null>;
@@ -526,6 +537,7 @@ export function Transcript({
   onReplyQuestion,
   onRejectQuestion,
   planCard,
+  backgroundCards,
   scrollerElRef,
   followingRef,
   onFollowingChange,
@@ -688,6 +700,7 @@ export function Transcript({
     onReplyQuestion,
     onRejectQuestion,
     planCard,
+    backgroundCards,
     pendingVoiceNote,
     onRetryVoiceNote,
   };
@@ -829,9 +842,14 @@ export function Transcript({
                 paddingInline: "var(--transcript-inset)",
               }}
             >
-              <div className="mt-auto text-text-faint">
-                <span style={{ color: "var(--accent)" }}>✻</span>{" "}
-                Welcome. Type a message below to start.
+              <div className="mt-auto flex flex-col" style={{ gap: "var(--block-gap)" }}>
+                <div className="text-text-faint">
+                  <span style={{ color: "var(--accent)" }}>✻</span>{" "}
+                  Welcome. Type a message below to start.
+                </div>
+                {/* A background run can be the very first thing a session does;
+                    its card must not wait for a first message to exist. */}
+                {backgroundCards && <ErrorBoundary>{backgroundCards}</ErrorBoundary>}
               </div>
             </div>
           </motion.div>

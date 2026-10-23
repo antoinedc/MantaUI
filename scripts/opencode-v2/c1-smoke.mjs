@@ -18,7 +18,8 @@
 // MANTA_OPENCODE_PASSWORD.
 
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureBinary } from "./fetch-binary.mjs";
@@ -56,6 +57,9 @@ const sb = await startSandbox({
   // a one-line custom command for the slash-command origin checks (§3)
   config: {
     command: { smokecmd: { template: "Reply with exactly these words: command ran $ARGUMENTS", description: "smoke command" } },
+    // Stage B: a NATIVE `commands` entry (the key is `commands`, not `command` — F4) whose
+    // definition runs in a child session.
+    commands: { bgnative: { template: "Reply with exactly these words: native bg ran $ARGUMENTS", description: "native background command", subagent: true } },
     ...(MOCK ? { provider: { anthropic: { options: { baseURL: `${mock.url}/v1`, apiKey: "mock" } } } } : {}),
   },
   env: { ANTHROPIC_API_KEY: MOCK ? "mock" : process.env.ANTHROPIC_API_KEY, MANTA_SERVER_URL: fake.url, MANTA_BOX_TOKEN: "ab12".repeat(8) },
@@ -69,6 +73,51 @@ const { createStreamInterpreter } = await import("../../src/server/streamInterp.
 const { createLifecycleAdapter } = await import("../../src/shared/opencodeV2.mjs");
 const { createCommandCorrelator, createOriginStore } = await import("../../src/server/commandOrigins.mjs");
 oc._setApiBase(sb.url);
+const delegateMod = await import("../../src/server/delegate.mjs");
+
+// ---- Stage B: the REAL delegate engine, driven with the real opencode client but a TEMP jobs
+// file and fake tmux (the smoke never touches the live store or the live tmux) ----
+const jobsFile = join(mkdtempSync(join(tmpdir(), "c1-smoke-jobs-")), "jobs.json");
+const loadJobsB = () => delegateMod.loadJobs(jobsFile);
+const saveJobsB = (jobs) => delegateMod.saveJobs(jobs, jobsFile);
+const fakeWindows = []; // { index, opencodeSessionId }
+const killed = [];
+let postedByManta = 0;
+const engine = delegateMod.createDelegateEngine({
+  load: loadJobsB,
+  save: saveJobsB,
+  publish: () => {},
+  listProjects: async () => [{ tmuxSession: "smoke", defaultCwd: sb.dirs.repo, windows: fakeWindows.map((w) => ({ ...w, paneCurrentPath: sb.dirs.repo })) }],
+  newWindow: async ({ existingSessionId }) => {
+    const index = 10 + fakeWindows.length;
+    fakeWindows.push({ index, opencodeSessionId: existingSessionId });
+    return { sessionId: existingSessionId, windowIndex: index };
+  },
+  killWindow: async (w) => {
+    killed.push(w);
+  },
+  stampOwner: async () => {},
+  clearProgress: async () => {},
+  readProgress: async () => null,
+  listMessages: (sid) => oc.listMessages(sid),
+  abortSession: (sid) => oc.abortSession(sid),
+  readSession: (sid) => oc.readSession(sid),
+  listActiveIds: () => oc.listActiveSessionIds(),
+  listChildSessions: (sid) => oc.listChildSessions(sid),
+  listRawTimeline: (sid, o) => oc.listRawTimeline(sid, o),
+  listInbox: (sid) => oc.listInbox(sid),
+  createChildSession: (i) => oc.createSession(i),
+  runCommandOnChild: (i) => oc.runCommand(i),
+  deleteSession: (sid) => oc.deleteSessionRaw(sid),
+  postSynthetic: (sid, body) => {
+    postedByManta += 1;
+    return oc.postSynthetic(sid, body);
+  },
+  isCtoConversationSession: async () => false,
+  openCommandWindows: (sid) => correlatorRef.current.openWindows(sid),
+  oc,
+});
+const correlatorRef = { current: null };
 
 // ---- the production pump, minus the bus: raw → correlator + interpreter + lifecycle adapter ----
 const frames = [];
@@ -85,7 +134,9 @@ const correlator = createCommandCorrelator({
   origins: createOriginStore(),
   log: (...a) => console.log("  [correlator]", ...a),
   onTag: (t) => interp.emitCommandExecuted(t.sessionId, t),
+  onWindowClosed: (w) => engine.windowClosed(w),
 });
+correlatorRef.current = correlator;
 oc.setCommandCorrelator(correlator);
 const connects = [];
 const stop = oc.subscribeEvents(
@@ -93,9 +144,11 @@ const stop = oc.subscribeEvents(
     rawLog.push({ t: Date.now(), raw });
     if (raw?.type === "session.inbox.enqueued") correlator.observeEnqueued(raw.data?.sessionID, raw.data?.inboxID, raw.data?.item?.type);
     interp.interpret(raw);
+    engine.observeRaw(raw).catch((e) => console.log("  [engine] observeRaw failed:", e?.message ?? e));
     for (const e of adapter.adapt(raw)) {
       lifecycle.push(e);
       if (e.type === "session.idle") correlator.noteIdle(e.properties.sessionID);
+      engine.observeEvent(e).catch(() => {});
     }
   },
   { onConnect: (i) => connects.push(i), onDisconnect: () => { correlator.noteDisconnect(); interp.inboxDisconnected(); } },
@@ -283,6 +336,8 @@ try {
 
   } // end of the real-model sections (skipped under C1_SMOKE_MOCK=1)
 
+  // C1_SMOKE_B_ONLY=1 skips the cleanup-spec block below (faster iteration on Stage B).
+  if (!process.env.C1_SMOKE_B_ONLY) {
   // ================================================================ cleanup spec §8 (S1 a–h + the 20-command check)
   const loopText = (n, tag = "tick") => `Run exactly this shell command and nothing else: for i in ${Array.from({ length: n }, (_, k) => k + 1).join(" ")}; do echo ${tag}$i; sleep 1; done . Then reply with the single word done.`;
   const inboxOf = (sid) => of(sid, "inbox").at(-1)?.payload;
@@ -521,6 +576,222 @@ try {
   const k3 = await setDelivery(sk.id, kItem.id, "queue");
   console.log(`  [i] to the delivery the item ALREADY has (queue→queue): raw PATCH ${k3raw}; N1 ${j(k3)}`);
   await cancel(sk.id, kItem.id);
+
+  } // end of the cleanup-spec block (skipped under C1_SMOKE_B_ONLY=1)
+
+  // ================================================================ Stage B (§B-server 8)
+  const B = delegateMod;
+  const jobsNow = () => loadJobsB();
+  const jobBy = async (pred) => (await jobsNow()).find(pred);
+  const rawTl = (sid, type) => oc.listRawTimeline(sid, type ? { type } : {});
+  const assistantTexts = (tl) =>
+    tl.filter((r) => r.type === "assistant").map((r) => (r.content ?? []).filter((c) => c.type === "text").map((c) => c.text).join(""));
+  const wait = (label, pred, ms = 60_000) => until(label, pred, ms);
+  const loop = (n, tag = "b") => `Run exactly this shell command and nothing else: for i in ${Array.from({ length: n }, (_, k) => k + 1).join(" ")}; do echo ${tag}$i; sleep 1; done . Then reply with the single word done.`;
+  // a parent conversation with its own permission ruleset and a window the engine can resolve
+  async function newParent(opts = {}) {
+    // (an explicit model: a session with none would fall back to V2's own default, which is not the mock)
+    const s = await newSession({ model: MODEL, permissions: [{ action: "shell", resource: "echo *", effect: "allow" }, { action: "edit", resource: "*", effect: "deny" }], ...opts });
+    fakeWindows.push({ index: 100 + fakeWindows.length, opencodeSessionId: s.id });
+    return s;
+  }
+  const execStarts = (sid) => rawLog.filter((e) => e.raw.type === "session.execution.started" && e.raw.data.sessionID === sid);
+  const rawOf = (type, pred) => rawLog.filter((e) => e.raw.type === type && pred(e.raw.data));
+
+  // ---------------------------------------------------------------- 10. launch checks (wrapped run)
+  console.log("\n[10] startCommandJob: cap + nesting refusals create nothing");
+  {
+    const p = await newParent();
+    const saved = await jobsNow();
+    const fiveRunning = Array.from({ length: B.MAX_RUNNING_JOBS }, (_, i) => ({ id: `cap0000${i}`, name: "x", parentSessionID: "ses_other", childSessionID: `ses_cap${i}`, status: "running", origin: "delegate" }));
+    await saveJobsB([...saved, ...fiveRunning]);
+    const before = (await oc.listSessions(sb.dirs.repo)).length;
+    const capRes = await engine.startCommandJob({ parentSessionID: p.id, command: "smokecmd", arguments: "cap" });
+    check("(10) at the cap → refused with startJob's message, no child created", capRes.ok === false && capRes.error === B.CAP_ERROR && (await oc.listSessions(sb.dirs.repo)).length === before, j(capRes));
+    await saveJobsB([...saved, { id: "nest0001", name: "n", parentSessionID: "ses_other", childSessionID: p.id, status: "running", origin: "delegate" }]);
+    const nestRes = await engine.startCommandJob({ parentSessionID: p.id, command: "smokecmd", arguments: "nest" });
+    check("(10) a run from inside a background job's session → refused (no nesting), nothing created", nestRes.ok === false && /cannot start another background job/.test(nestRes.error) && (await oc.listSessions(sb.dirs.repo)).length === before, j(nestRes));
+    await saveJobsB(saved);
+  }
+
+  // ---------------------------------------------------------------- 11. wrapped run, IDLE parent
+  console.log("\n[11] wrapped run on an IDLE parent: child config, completion, N7 result, one reply (U1 idle)");
+  let wrappedJob;
+  {
+    const p = await newParent();
+    const parentPerms = (await oc.readSession(p.id)).session.permissions;
+    const res = await engine.startCommandJob({ parentSessionID: p.id, parentDirectory: sb.dirs.repo, command: "smokecmd", arguments: "wrapped", model: MODEL });
+    check("(11) startCommandJob resolves a job at `running`", res.ok === true && res.job.launchState === "running" && res.job.origin === "command" && res.job.completionOwner === "manta", j(res));
+    wrappedJob = res.job;
+    const child = (await oc.readSession(wrappedJob.childSessionID)).session;
+    sessions.push(child.id);
+    check("(11) the child is a real V2 child of the parent (client-minted id, parentID, title = /cmd args)", child.id === wrappedJob.childSessionID && /^ses_[0-9a-f]{32}$/.test(child.id) && child.parentID === p.id && child.title === "/smokecmd wrapped", j({ id: child.id, parentID: child.parentID, title: child.title }));
+    check("(11) the child has exactly the parent's permission ruleset", JSON.stringify(child.permissions) === JSON.stringify(parentPerms) && parentPerms.length === 2, j({ child: child.permissions, parent: parentPerms }));
+    check("(11) the job is registered with a window stamped for the child and a persisted result id", fakeWindows.some((w) => w.opencodeSessionId === child.id) && /^msg_/.test(wrappedJob.completionMessageId) && wrappedJob.submittedAt > 0);
+    await wait("(11) the job finished", async () => (await jobBy((x) => x.id === wrappedJob.id))?.status === "done");
+    const done = await jobBy((x) => x.id === wrappedJob.id);
+    check("(11) completion from the raw outcome: done, result = the child's reply, window kept", done.status === "done" && /command ran wrapped/.test(done.result ?? "") && !killed.some((k) => k.windowIndex === done.windowIndex), j({ status: done.status, result: done.result, error: done.error, killed }));
+    await wait("(11) the result was posted", async () => (await jobBy((x) => x.id === wrappedJob.id))?.completionDelivery === "delivered", 60_000);
+    await until("(11) parent idle after the reply", async () => !(await oc.listActiveSessionIds()).includes(p.id) && execStarts(p.id).length >= 1, 60_000);
+    await sleep(1200);
+    const tl = await rawTl(p.id);
+    const syn = tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    console.log(`  [11] parent timeline: ${tl.map((r) => r.type + (r.type === "synthetic" ? `(${r.metadata?.source ?? "reminder"})` : "")).join(" → ")}`);
+    check("(11) exactly ONE result synthetic in the parent, under the job's persisted completionMessageId", syn.length === 1 && syn[0].id === wrappedJob.completionMessageId, j(syn.map((s) => s.id)));
+    check("(11) the synthetic carries source=subagent, childID and our jobId (N7)", syn[0]?.metadata?.source === "subagent" && syn[0].metadata.childID === wrappedJob.childSessionID && syn[0].metadata.manta?.jobId === wrappedJob.id && syn[0].metadata.state === "completed", j(syn[0]));
+    const after = tl.slice(tl.findIndex((r) => r.id === syn[0]?.id) + 1).filter((r) => r.type === "assistant");
+    check("(11) exactly ONE parent reply after the result", after.length === 1, `replies=${after.length}`);
+    const enq = rawLog.find((e) => e.raw.type === "session.inbox.enqueued" && e.raw.data.inboxID === wrappedJob.completionMessageId);
+    const started = rawLog.find((e) => e.raw.type === "session.execution.started" && e.raw.data.sessionID === p.id && e.t >= (enq?.t ?? Infinity));
+    console.log(`  [U1 idle] enqueue → execution.started on the idle parent: ${started && enq ? started.t - enq.t : "?"} ms`);
+    check("(U1 idle) a result posted to an IDLE parent starts a turn at once (< 3 s)", !!enq && !!started && started.t - enq.t < 3000, `${started && enq ? started.t - enq.t : "none"} ms`);
+    check("(11) Manta posted exactly once", postedByManta === 1, `posted=${postedByManta}`);
+    // a second sweep / boot reconcile must not post again
+    await engine.reconcileV2();
+    await engine.sweep();
+    check("(11) re-running the boot reconcile + sweep posts nothing more", postedByManta === 1 && (await rawTl(p.id, "synthetic")).filter((r) => r.metadata?.source === "subagent").length === 1);
+    wrappedJob.parent = p.id;
+  }
+
+  // ---------------------------------------------------------------- 11b. a plan-agent parent
+  console.log("\n[11b] wrapped run on a PLAN-agent parent: the child runs plan too; the parent is never switched");
+  {
+    const p = await newParent({ agent: "plan" });
+    const res = await engine.startCommandJob({ parentSessionID: p.id, parentDirectory: sb.dirs.repo, command: "smokecmd", arguments: "planned", model: MODEL });
+    sessions.push(res.job?.childSessionID);
+    const child = (await oc.readSession(res.job.childSessionID)).session;
+    check("(11b) the child runs the plan agent (the parent's own, explicit on create AND run) and the parent still does", child.agent === "plan" && (await oc.getSessionAgent(p.id)) === "plan", j([child.agent, await oc.getSessionAgent(p.id)]));
+    await wait("(11b) the job finished", async () => (await jobBy((x) => x.id === res.job.id))?.status === "done");
+    await until("(11b) parent settled", async () => (await jobBy((x) => x.id === res.job.id))?.completionDelivery === "delivered" && !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    check("(11b) after the whole round trip the parent's agent is still plan", (await oc.getSessionAgent(p.id)) === "plan");
+  }
+
+  // ---------------------------------------------------------------- 12. U1 busy parent + U2
+  console.log("\n[12] wrapped run while the parent is BUSY: the result waits for the turn (U1 busy); U2 same synthetic id twice → one record");
+  {
+    const p = await newParent();
+    await oc.sendPrompt({ sessionId: p.id, text: loop(8, "pb"), model: MODEL });
+    await until("(12) parent busy with live output", () => of(p.id, "toolOutput").length >= 1);
+    const res = await engine.startCommandJob({ parentSessionID: p.id, parentDirectory: sb.dirs.repo, command: "smokecmd", arguments: "busy", model: MODEL });
+    check("(12) a background run never steers the parent's turn (started while it is busy)", res.ok === true, j(res));
+    sessions.push(res.job.childSessionID);
+    await wait("(12) the child finished", async () => (await jobBy((x) => x.id === res.job.id))?.status === "done", 40_000);
+    const parentBusyWhenChildDone = (await oc.listActiveSessionIds()).includes(p.id);
+    await wait("(12) the result was posted", async () => (await jobBy((x) => x.id === res.job.id))?.completionDelivery === "delivered");
+    const enq = rawOf("session.inbox.enqueued", (d) => d.sessionID === p.id && d.inboxID === res.job.completionMessageId);
+    check("(12) the result was enqueued as `queue` while the parent was still busy", parentBusyWhenChildDone && enq.length === 1 && enq[0].raw.data.item.delivery === "queue", j(enq.map((e) => e.raw.data.item)));
+    await until("(12) the parent finished its loop turn and the follow-up", async () => rawOf("session.inbox.delivered", (d) => d.sessionID === p.id && d.inboxID === res.job.completionMessageId).length === 1 && !(await oc.listActiveSessionIds()).includes(p.id), 120_000);
+    await sleep(1500);
+    const tl = await rawTl(p.id);
+    const at = tl.findIndex((r) => r.id === res.job.completionMessageId);
+    const before = tl.slice(0, at).filter((r) => r.type === "assistant");
+    const after = tl.slice(at + 1).filter((r) => r.type === "assistant");
+    const finalBefore = assistantTexts(before).at(-1) ?? "";
+    console.log(`  [12] parent timeline: ${tl.map((r) => r.type + (r.type === "synthetic" ? `(${r.metadata?.source ?? "reminder"})` : "")).join(" → ")}; executions started: ${execStarts(p.id).length}`);
+    check("(U1 busy) the queued result landed AFTER the busy parent's turn finished (its tool step AND its final answer precede it) — never steered mid-turn", at > 0 && before.some((r) => (r.content ?? []).some((c) => c.type === "tool")) && /done/.test(finalBefore) && (before.at(-1)?.time?.completed ?? Infinity) <= tl[at].time.created, `at=${at} finalBefore=${finalBefore}`);
+    check("(U1 busy) …and it started a turn of its own: exactly one parent reply to it", after.length === 1, `replies=${after.length}`);
+    const syn = tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    check("(12) exactly one result in the busy parent", syn.length === 1);
+
+    // U2: the same explicit id twice → one record
+    const body = { id: "msg_u2_dup_0001", text: "dup result", description: "u2", metadata: { source: "subagent", childID: "ses_none", state: "completed" }, delivery: "queue", resume: true };
+    const r1 = await oc.postSynthetic(p.id, body).then(() => "2xx", (e) => `${e.status}`);
+    await until("(U2) the first post's turn ran", async () => rawOf("session.inbox.delivered", (d) => d.sessionID === p.id && d.inboxID === body.id).length === 1 && !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1000);
+    const startsMid = execStarts(p.id).length;
+    const asstMid = assistantTexts(await rawTl(p.id)).length;
+    const r2 = await oc.postSynthetic(p.id, body).then(() => "2xx", (e) => `${e.status}`);
+    await sleep(3500);
+    await until("(U2) idle", async () => !(await oc.listActiveSessionIds()).includes(p.id), 30_000);
+    const dups = (await rawTl(p.id, "synthetic")).filter((r) => r.id === body.id);
+    const asstEnd = assistantTexts(await rawTl(p.id)).length;
+    console.log(`  [U2] first post ${r1}, second post ${r2}; records with that id: ${dups.length}; executions after the 2nd post: ${execStarts(p.id).length - startsMid}; assistant replies added by it: ${asstEnd - asstMid}`);
+    check("(U2) the same synthetic id posted twice is admitted ONCE (one record)", r1 === "2xx" && dups.length === 1, `r2=${r2} records=${dups.length}`);
+    check("(U2) …and the duplicate adds no extra reply (a re-run of an idle session has nothing to answer)", asstEnd === asstMid, `executions +${execStarts(p.id).length - startsMid}, replies +${asstEnd - asstMid}`);
+  }
+
+  // ---------------------------------------------------------------- 13. NATIVE background commands (subagent:true) — F4/F5 + adoption
+  console.log("\n[13] V2-native background command (`commands` key, subagent:true): adopted row, no Manta result, one opencode result, one reply, row stays");
+  const nativeRun = async (command, label, directory) => {
+    const p = await newParent(directory ? { directory } : {});
+    const jobsBefore = (await jobsNow()).length;
+    postedByManta = 0;
+    await oc.runCommand({ sessionId: p.id, command, arguments: "n1", noSync: true });
+    await wait(`(${label}) a row appeared for the command's child`, async () => (await jobsNow()).length > jobsBefore, 30_000);
+    const row = await jobBy((x) => x.parentSessionID === p.id);
+    if (row) sessions.push(row.childSessionID);
+    await wait(`(${label}) the row is recorded finished`, async () => (await jobBy((x) => x.parentSessionID === p.id))?.status === "done", 40_000);
+    await until(`(${label}) the parent settled`, async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1500);
+    const done = await jobBy((x) => x.parentSessionID === p.id);
+    const tl = await rawTl(p.id);
+    const syn = tl.filter((r) => r.type === "synthetic");
+    const replies = tl.slice(tl.findIndex((r) => r.id === syn[0]?.id) + 1).filter((r) => r.type === "assistant");
+    const users = tl.filter((r) => r.type === "user");
+    if (process.env.C1_SMOKE_VERBOSE) {
+      console.log(`  [${label}] parent timeline:`, JSON.stringify(tl.map((r) => ({ type: r.type, id: r.id, text: (r.text ?? "").slice(0, 80), md: r.metadata?.source, content: (r.content ?? []).map((c) => c.type + (c.name ? `:${c.name}` : "") + (c.text ? `:${c.text.slice(0, 40)}` : "")) }))));
+      console.log(`  [${label}] raw events for the parent:`, rawLog.filter((e) => e.raw.data?.sessionID === p.id && /execution|inbox/.test(e.raw.type)).map((e) => `${e.raw.type}${e.raw.data.item ? `(${e.raw.data.item.type}/${e.raw.data.item.delivery})` : ""}`).join(" "));
+    }
+    return { p, row, done, syn, replies, users, tl };
+  };
+  {
+    const n = await nativeRun("bgnative", "13");
+    check("(13) the parent got no user message and no tool part for the command (F5)", n.users.length === 0 && n.tl.every((r) => r.type !== "assistant" || !(r.content ?? []).some((c) => c.type === "tool")), j(n.tl.map((r) => r.type)));
+    check("(13) adopted as a row: origin command, opencode-owned, engine v2, no worktree, named from the command window", n.row?.origin === "command" && n.row.completionOwner === "opencode" && n.row.engine === "v2" && n.row.worktree === null && n.row.name === "/bgnative n1", j(n.row));
+    check("(13) the row finished (it was adopted AFTER the child ended — the raw outcome map covered the gap) and stays", n.done?.status === "done" && /native bg ran n1/.test(n.done.result ?? "") && !killed.some((k) => k.windowIndex === n.done.windowIndex), j(n.done));
+    check("(13) Manta posted NOTHING for it", postedByManta === 0 && n.done?.completionDelivery === null && n.done?.completionMessageId === null);
+    check("(13) exactly ONE opencode-posted result in the parent (source=subagent, not ours) and ONE reply", n.syn.length === 1 && n.syn[0].metadata?.source === "subagent" && n.syn[0].metadata?.childID === n.row?.childSessionID && !n.syn[0].metadata?.manta && n.replies.length === 1, `syn=${n.syn.length} replies=${n.replies.length} md=${j(n.syn[0]?.metadata)}`);
+  }
+
+  // ---------------------------------------------------------------- 14. U5: a .md command with `subagent: true`
+  console.log("\n[14] U5: a .md command with `subagent: true` frontmatter behaves like the native one");
+  {
+    // (a project's .opencode/commands is read when opencode first opens that directory: use a fresh one)
+    const mdDir = join(sb.root, "dirs", "repo-md");
+    mkdirSync(join(mdDir, ".opencode", "commands"), { recursive: true });
+    execSync("git init -q", { cwd: mdDir, stdio: "ignore" });
+    writeFileSync(join(mdDir, ".opencode", "commands", "bgmd.md"), "---\ndescription: md background command\nsubagent: true\n---\nReply with exactly these words: md bg ran $ARGUMENTS\n");
+    const n = await nativeRun("bgmd", "14", mdDir);
+    const listed = await oc.listCommands({ directory: mdDir });
+    console.log(`  [U5] commands visible for the project once opened: ${j(listed.map((c) => c.name))}`);
+    check("(U5) the project's own .md command is listed for its directory", listed.some((c) => c.name === "bgmd"), j(listed.map((c) => c.name)));
+    check("(U5) the .md command ran in a CHILD session (row adopted, parent got no user message/tool part)", !!n.row && n.users.length === 0, j(n.row));
+    check("(U5) …finished, no Manta result, exactly one opencode result + one reply", n.done?.status === "done" && postedByManta === 0 && n.syn.length === 1 && n.replies.length === 1, `syn=${n.syn.length} replies=${n.replies.length}`);
+  }
+
+  // ---------------------------------------------------------------- 16. a wrapped run whose command backgrounds itself (N3 could not tell)
+  console.log("\n[16] wrapped run of a command that turns out to run in the background: the job ends only when the grandchild's result AND the wrapper's reply are in");
+  {
+    const p = await newParent();
+    const res = await engine.startCommandJob({ parentSessionID: p.id, parentDirectory: sb.dirs.repo, command: "bgnative", arguments: "nested", model: MODEL });
+    check("(16) the wrapped launch resolved", res.ok === true, j(res));
+    sessions.push(res.job.childSessionID);
+    await wait("(16) the wrapped job finished", async () => (await jobBy((x) => x.id === res.job.id))?.status === "done", 90_000);
+    const doneAt = Date.now();
+    const W = res.job.childSessionID;
+    const kids = await oc.listChildSessions(W);
+    const wtl = await rawTl(W);
+    const wsyn = wtl.findIndex((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    const wAfter = wtl.slice(wsyn + 1).filter((r) => r.type === "assistant");
+    check("(16) the wrapper made a grandchild whose result reached the wrapper, and the wrapper REPLIED to it before the job ended", kids.length === 1 && wsyn >= 0 && wAfter.length >= 1, `kids=${kids.length} syn@${wsyn} replies=${wAfter.length}`);
+    check("(16) the grandchild never got a row of its own (it is inside the wrapped run's tree)", (await jobsNow()).filter((x) => x.childSessionID === kids[0]?.id).length === 0);
+    await wait("(16) the result reached the parent", async () => (await jobBy((x) => x.id === res.job.id))?.completionDelivery === "delivered", 60_000);
+    await until("(16) parent settled", async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1000);
+    const tl = await rawTl(p.id);
+    const syn = tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    check("(16) exactly ONE result in the parent (Manta's, under its job id) and ONE reply", syn.length === 1 && syn[0].metadata.manta?.jobId === res.job.id && tl.slice(tl.findIndex((r) => r.id === syn[0].id) + 1).filter((r) => r.type === "assistant").length === 1, j(syn.map((x) => x.metadata)));
+    void doneAt;
+  }
+
+  // ---------------------------------------------------------------- 15. N4 over the real timeline (if the mapper has landed)
+  console.log("\n[15] the parent transcript: the result renders as a background-result message (N4) once the mapper is on this branch");
+  {
+    const tx = await oc.listMessages(wrappedJob.parent);
+    const bg = tx.filter((m) => m.parts?.some((p) => p.type === "background-result"));
+    if (bg.length === 0) console.log("  [N4] SKIPPED — the B1a mapper is not on this branch yet (the raw synthetic was verified above)");
+    else check("(N4) the wrapped run's result maps to ONE background-result part paired by jobId", bg.length === 1 && bg[0].parts.find((p) => p.type === "background-result").jobId === wrappedJob.id, j(bg.map((m) => m.parts)));
+  }
 
   // ---------------------------------------------------------------- spend
   for (const id of sessions.filter(Boolean)) {

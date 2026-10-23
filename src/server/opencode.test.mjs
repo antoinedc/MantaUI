@@ -51,6 +51,9 @@ import {
   listReferences,
   findFiles,
   listCommands,
+  listChildSessions,
+  listRawTimeline,
+  postSynthetic,
   listAgents,
   _pooledOcRequest,
   discardBody,
@@ -1798,4 +1801,138 @@ test("claudeCliStatus prefers ~/.local/bin/claude over /usr/local/bin/claude", (
   // resolveClaudeBinExists walks candidates in order; the home-dir path wins.
   assert.match(status.path, /\.local\/bin\/claude$/);
   assert.equal(status.installed, true);
+});
+
+// ---------------------------------------------------------------------------
+// Stage B: child sessions, raw timeline, synthetic, background command routing
+// ---------------------------------------------------------------------------
+
+test("createSession sends a client-minted id, parentID, agent, model and a V2 ruleset verbatim", async () => {
+  const rules = [{ action: "*", resource: "*", effect: "deny" }, { action: "shell", resource: "git *", effect: "allow" }];
+  const calls = await withV2({ "POST /api/session": ({ body }) => ({ data: SESSION({ id: body.id, location: { directory: "/repo" } }) }) }, async () => {
+    const s = await createSession({
+      directory: "/repo",
+      id: "ses_mine",
+      parentID: "ses_parent",
+      title: "/review HEAD~1",
+      agent: "plan",
+      model: { providerID: "anthropic", modelID: "claude-sonnet-5-5", variant: "high" },
+      permissions: rules,
+    });
+    assert.equal(s.id, "ses_mine");
+  });
+  assert.deepEqual(calls[0].body, {
+    location: { directory: "/repo" },
+    id: "ses_mine",
+    parentID: "ses_parent",
+    title: "/review HEAD~1",
+    agent: "plan",
+    model: { providerID: "anthropic", id: "claude-sonnet-5-5", variant: "high" },
+    permissions: rules,
+  });
+});
+
+test("createSession: an empty V2 ruleset sends no permissions; the Manta-spelled `permission` still converts; a V2 one wins when both are given", async () => {
+  const calls = await withV2({ "POST /api/session": { data: SESSION() } }, async () => {
+    await createSession({ directory: "/repo", permissions: [] });
+    await createSession({ directory: "/repo", permission: [{ permission: "bash", pattern: "**", action: "allow" }] });
+    await createSession({ directory: "/repo", permission: [{ permission: "bash", pattern: "**", action: "allow" }], permissions: [{ action: "x", resource: "*", effect: "deny" }] });
+  });
+  assert.equal("permissions" in calls[0].body, false);
+  assert.deepEqual(calls[1].body.permissions, [{ action: "shell", resource: "*", effect: "allow" }]);
+  assert.deepEqual(calls[2].body.permissions, [{ action: "x", resource: "*", effect: "deny" }]);
+});
+
+test("createSession / runCommand carry err.status so a definite 4xx is told from an unknown outcome", async () => {
+  await withV2({ "POST /api/session": () => new Response("bad", { status: 400 }) }, async () => {
+    await assert.rejects(createSession({ directory: "/repo", id: "ses_x", parentID: "ses_p" }), (e) => e.status === 400);
+  });
+});
+
+test("listChildSessions asks for the parent's children and follows the cursor", async () => {
+  const page1 = Array.from({ length: 100 }, (_, i) => SESSION({ id: `ses_c${i}`, parentID: "ses_p" }));
+  const calls = await withV2(
+    {
+      "GET /api/session": ({ query }) => (query.cursor ? { data: [SESSION({ id: "ses_last", parentID: "ses_p" })] } : { data: page1, cursor: { next: "c2" } }),
+    },
+    async () => {
+      const kids = await listChildSessions("ses_p");
+      assert.equal(kids.length, 101);
+      assert.equal(kids[0].directory, "/work/proj");
+    },
+  );
+  assert.equal(calls[0].query.parentID, "ses_p");
+  assert.equal(calls[1].query.cursor, "c2");
+});
+
+test("listChildSessions throws on failure — 'no children' and 'could not ask' must not be confused", async () => {
+  await withV2({ "GET /api/session": () => new Response("nope", { status: 500 }) }, async () => {
+    await assert.rejects(listChildSessions("ses_p"), /listChildSessions 500/);
+  });
+});
+
+test("listRawTimeline returns the raw records chronologically, filters by type, and pages by cursor", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/session/ses_a/message": ({ query }) =>
+        query.cursor
+          ? { data: [{ id: "m1", type: "synthetic" }] }
+          : { data: [{ id: "m3", type: "synthetic" }, { id: "m2", type: "synthetic" }], cursor: { next: "n" } },
+    },
+    async () => {
+      const rows = await listRawTimeline("ses_a", { type: "synthetic" });
+      assert.deepEqual(rows.map((r) => r.id), ["m1", "m2", "m3"]);
+    },
+  );
+  assert.equal(calls[0].query.type, "synthetic");
+  assert.equal(calls[0].query.order, "desc");
+  assert.equal(calls[1].query.cursor, "n");
+  assert.equal(calls[1].query.type, "synthetic");
+});
+
+test("postSynthetic POSTs the body verbatim (explicit id, queue, resume) and carries err.status (404 = the parent is gone)", async () => {
+  const body = { id: "msg_abc", text: "t", description: "/review", metadata: { source: "subagent" }, delivery: "queue", resume: true };
+  const calls = await withV2({ "POST /api/session/ses_p/synthetic": null }, async () => {
+    await postSynthetic("ses_p", body);
+  });
+  assert.deepEqual(calls[0].body, body);
+  await withV2({ "POST /api/session/ses_gone/synthetic": () => new Response("nf", { status: 404 }) }, async () => {
+    await assert.rejects(postSynthetic("ses_gone", body), (e) => e.status === 404);
+  });
+});
+
+test("listCommands with a directory scopes commands + skills to it, and marks background names (never a skill)", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/command": { data: [{ name: "review", description: "r" }, { name: "init", description: "i" }, { name: "wrap", description: "w" }] },
+      "GET /api/skill": { data: [{ id: "wrap", description: "skill wins" }, { id: "docs", description: "d" }] },
+    },
+    async () => {
+      const list = await listCommands({ directory: "/repo", backgroundNames: async () => new Set(["review", "wrap", "docs"]) });
+      assert.deepEqual(
+        list.map((c) => [c.name, c.source ?? null, c.background ?? null]),
+        [["review", null, true], ["init", null, null], ["wrap", "skill", null], ["docs", "skill", null]],
+      );
+    },
+  );
+  assert.equal(calls[0].query["location[directory]"], "/repo");
+  assert.equal(calls[1].query["location[directory]"], "/repo");
+});
+
+test("listCommands: an unreadable N3 source never fails the list; no directory means the old unscoped routes", async () => {
+  const calls = await withV2({ "GET /api/command": { data: [{ name: "init" }] } }, async () => {
+    const list = await listCommands({ backgroundNames: async () => { throw new Error("config unreadable"); } });
+    assert.deepEqual(list.map((c) => c.name), ["init"]);
+    assert.equal(list[0].background, undefined);
+  });
+  assert.equal(calls.find((c) => c.path === "/api/command").query["location[directory]"], undefined);
+});
+
+test("runCommand with noSync leaves the session's agent and model alone (always-background commands)", async () => {
+  const calls = await withV2({ "POST /api/session/ses_a/command": null }, async () => {
+    await runCommand({ sessionId: "ses_a", command: "bg", arguments: "x", agent: "build", model: { providerID: "anthropic", modelID: "m" }, noSync: true });
+  });
+  assert.equal(calls.filter((c) => c.method === "GET" && c.path === "/api/session/ses_a").length, 0, "no session read");
+  assert.equal(calls.filter((c) => /\/(agent|model)$/.test(c.path)).length, 0, "no agent/model POST");
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "bg", text: "x" });
 });

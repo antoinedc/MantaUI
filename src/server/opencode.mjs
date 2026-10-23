@@ -304,9 +304,19 @@ async function ocJson(label, method, path, body, { signal } = {}) {
 // paths. The server runs ON the opencode host, so `expandTilde` from
 // src/shared/paths.mjs expands against this process's own $HOME before
 // opencode sees the path.
-export async function createSession({ directory, title = "", permission, metadata, signal }) {
+export async function createSession({ directory, title = "", permission, metadata, signal, id, parentID, agent, model, permissions }) {
   const absDir = expandTilde(directory);
   const body = { location: { directory: absDir } };
+  // A caller-minted id makes a create reconcilable after a lost response; a
+  // parentID links the new session as a child (V2 places it at the parent's
+  // location). `agent`/`model` are set explicitly so the session never falls
+  // back to inheritance.
+  if (id) body.id = id;
+  if (parentID) body.parentID = parentID;
+  if (agent) body.agent = agent;
+  if (model?.providerID && model?.modelID) {
+    body.model = { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) };
+  }
   // An empty title is left unset so V2 titles the session itself.
   if (title) body.title = title;
   // BET-418 §A: a background job is created with a permission ruleset so it
@@ -321,6 +331,9 @@ export async function createSession({ directory, title = "", permission, metadat
       effect: r.action,
     }));
   }
+  // An already-V2 ruleset (a session's own `permissions`, copied verbatim to a
+  // child) wins over the Manta-spelled one.
+  if (Array.isArray(permissions) && permissions.length > 0) body.permissions = permissions;
   // P3a1 (unified-cto-spec §3.1): a free-form `metadata` object stamped at
   // create — the role-session identity marker; it round-trips verbatim through
   // GET /api/session/{id}. Only plain objects are forwarded.
@@ -921,6 +934,73 @@ export async function readSession(sessionId, { signal } = {}) {
   } catch {
     return { state: "unknown" };
   }
+}
+
+/**
+ * The direct children of a session (`GET /api/session?parentID=…`), mapped.
+ * Throws on a non-2xx / network error: "no children" and "couldn't ask" must
+ * never be confused by a caller deciding whether work is finished.
+ * @param {string} parentId
+ * @returns {Promise<any[]>}
+ */
+export async function listChildSessions(parentId, { signal } = {}) {
+  const out = [];
+  let cursor = null;
+  for (let page = 0; page < 5; page++) {
+    const q = [`parentID=${encodeURIComponent(parentId)}`, "limit=100"];
+    if (cursor) q.push(`cursor=${encodeURIComponent(cursor)}`);
+    const res = await ocFetch(apiUrl(`/api/session?${q.join("&")}`), { signal });
+    if (!res.ok) throw new Error(`opencode listChildSessions ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    const rows = Array.isArray(body?.data) ? body.data : [];
+    for (const s of rows) {
+      const mapped = sessionFromV2(s);
+      rememberSessionDirectory(mapped.id, mapped.directory);
+      out.push(mapped);
+    }
+    cursor = body?.cursor?.next ?? null;
+    if (!cursor || rows.length < 100) break;
+  }
+  return out;
+}
+
+/**
+ * A session's RAW V2 timeline records, chronological (nothing mapped or
+ * dropped): job-completion evidence needs the `synthetic` records and the
+ * `subagent` tool blocks that the message mapper hides or reshapes. `type`
+ * narrows server-side ("synthetic", "assistant", "user", …). Throws on failure.
+ * @param {string} sessionId
+ * @param {{ type?: string, signal?: AbortSignal }} [opts]
+ * @returns {Promise<any[]>}
+ */
+export async function listRawTimeline(sessionId, { type, signal } = {}) {
+  const base = `/api/session/${encodeURIComponent(sessionId)}/message`;
+  const desc = [];
+  let cursor = null;
+  for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
+    const typeQs = type ? `&type=${encodeURIComponent(type)}` : "";
+    const qs = cursor ? `cursor=${encodeURIComponent(cursor)}&limit=${TIMELINE_PAGE}${typeQs}` : `order=desc&limit=${TIMELINE_PAGE}${typeQs}`;
+    const res = await ocFetch(apiUrl(`${base}?${qs}`), { signal });
+    if (!res.ok) throw new Error(`opencode listRawTimeline ${res.status}: ${await res.text()}`);
+    const body = await res.json();
+    const rows = Array.isArray(body?.data) ? body.data : [];
+    desc.push(...rows);
+    cursor = body?.cursor?.next ?? null;
+    if (!cursor || rows.length === 0) break;
+  }
+  return desc.reverse();
+}
+
+/**
+ * `POST /api/session/{id}/synthetic` — durable synthetic input (N7: a finished
+ * job's result, posted to its parent). The explicit `id` makes a retry after an
+ * uncertain response admit once. `err.status` carries a refusal (404 = the
+ * parent session is gone).
+ * @param {string} sessionId
+ * @param {{ id: string, text: string, description?: string, metadata?: object, delivery?: "steer"|"queue", resume?: boolean }} body
+ */
+export async function postSynthetic(sessionId, body, { signal } = {}) {
+  await ocJson("postSynthetic", "POST", `/api/session/${encodeURIComponent(sessionId)}/synthetic`, body, { signal });
 }
 
 /**
@@ -2570,9 +2650,13 @@ export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_M
 /** Skills opencode knows about (GET /api/skill). V2 no longer lists skills as
  *  commands, so the composer's slash menu gets them from here. A failure is
  *  reported as "no skills" — commands must keep working without them. */
-async function listSkills() {
+// Commands, skills and agents are LOCATION-scoped: a project's own
+// `.opencode/commands` only show up when the request names its directory.
+const locationQs = (directory) => (typeof directory === "string" && directory ? `?location%5Bdirectory%5D=${encodeURIComponent(directory)}` : "");
+
+async function listSkills(directory) {
   try {
-    const raw = (await ocJson("listSkills", "GET", "/api/skill")) ?? [];
+    const raw = (await ocJson("listSkills", "GET", `/api/skill${locationQs(directory)}`)) ?? [];
     return raw
       .filter((s) => typeof s?.id === "string" && s.id)
       .map((s) => ({ id: s.id, description: typeof s.description === "string" ? s.description : undefined }));
@@ -2586,19 +2670,35 @@ async function listSkills() {
  *  (e.g. one an installer generates with `subtask: true`), which runs the skill
  *  in an isolated subagent that can't see the conversation, while the skill
  *  itself runs inline in the session — what typing `/<skill>` means.
- *  @returns {Promise<Array<{ name: string, description?: string, source?: string }>>}
+ *  With a `directory` the project's own commands are included, and each entry
+ *  is decorated `background: true` when `backgroundNames(directory)` (the N3
+ *  reader) proves its definition runs in the background. An unreadable N3
+ *  source never fails the list — nothing is marked.
+ *  @param {{ directory?: string, backgroundNames?: (directory?: string) => Promise<Set<string>> }} [opts]
+ *  @returns {Promise<Array<{ name: string, description?: string, source?: string, background?: true }>>}
  */
-export async function listCommands() {
-  const [commands, skills] = await Promise.all([listRawCommands(), listSkills()]);
+export async function listCommands({ directory, backgroundNames } = {}) {
+  const [commands, skills] = await Promise.all([listRawCommands(directory), listSkills(directory)]);
   const skillNames = new Set(skills.map((s) => s.id));
-  return [
+  const list = [
     ...commands.filter((c) => !skillNames.has(c.name)),
     ...skills.map((s) => ({ name: s.id, description: s.description, source: "skill" })),
   ];
+  if (typeof backgroundNames !== "function") return list;
+  let names;
+  try {
+    names = await backgroundNames(directory);
+  } catch (e) {
+    console.warn("[opencode] background command names unavailable:", e?.message ?? e);
+    return list;
+  }
+  if (!(names instanceof Set) || names.size === 0) return list;
+  // A skill always runs inline, whatever a same-named command definition says.
+  return list.map((c) => (c.source !== "skill" && names.has(c.name) ? { ...c, background: true } : c));
 }
 
-async function listRawCommands() {
-  const raw = (await ocJson("listCommands", "GET", "/api/command")) ?? [];
+async function listRawCommands(directory) {
+  const raw = (await ocJson("listCommands", "GET", `/api/command${locationQs(directory)}`)) ?? [];
   return raw.map((c) => ({
     name: String(c.name ?? ""),
     description: typeof c.description === "string" ? c.description : undefined,
@@ -2683,9 +2783,13 @@ export async function listReferences() {
  * no delivery receipt; the admission engine's reconciliation treats it as
  * unknown (never resent), the safe direction.
  *
- * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, signal?: AbortSignal }} opts
+ * `noSync` skips the model/agent sync (N2): a command whose definition always
+ * runs in the background makes its own child session, and the parent's
+ * agent/model must stay exactly as they are, even mid-turn.
+ *
+ * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, noSync?: boolean, signal?: AbortSignal }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, delivery, signal }) {
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, delivery, noSync, signal }) {
   // A skill isn't a V2 command (the command route 404s it, or runs a same-named
   // wrapper as a subagent): send `/<skill> <args>` as a prompt with the skill
   // attached, the way opencode's own composer does — opencode inlines the
@@ -2706,7 +2810,7 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     });
   }
   // A set `delivery` joins the running turn: never switch its model/agent (see sendPrompt).
-  if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
+  if (!delivery && !noSync) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { name: command, text: argumentsStr ?? "" };
   const files = fileInputs(attachments);
   if (files.length) body.files = files;

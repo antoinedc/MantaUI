@@ -23,6 +23,7 @@ import {
   formAnswerFromAnswers,
   createLifecycleAdapter,
 } from "./opencodeV2.mjs";
+import { isAssistantTurnComplete, isAssistantTurnInProgress } from "./streamInterpretation.mjs";
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "fixtures", "opencodeV2Events");
 const timeline = (n) => JSON.parse(readFileSync(join(DIR, `${n}.timeline.json`), "utf8"));
@@ -341,4 +342,106 @@ test("lifecycle: a live running tool part carries the title (and keeps it when i
   assert.equal(edit.find((p) => p.tool === "edit" && p.state.status === "running").state.title, "notes.txt");
   const grep = adaptAll("04-task-subagent").filter((e) => e.type === "message.part.updated").map((e) => e.properties.part);
   assert.equal(grep.find((p) => p.tool === "grep").state.title, "^def greet|^function greet|^export.*greet|^const greet");
+});
+
+// ---- N4: a background child's result (recorded on 2.0.30: native `subagent: true` command, `.md` command, command with a subagent `agent`) ----
+
+test("mapTimeline: a subagent synthetic becomes a background-result message; other synthetics stay dropped", () => {
+  const msgs = mapTimeline(timeline("09-background-result"), { sessionID: "ses_p" });
+  assert.equal(msgs.length, 3, "the plan-mode reminder synthetic is dropped");
+  const [md] = msgs;
+  assert.deepEqual(md.info, { id: "msg_16a2009810019mUinCPlKl6Rwm", sessionID: "ses_p", role: "assistant", time: { created: 1792781849736, completed: 1792781849736 }, background: true });
+  assert.deepEqual(md.parts, [
+    {
+      id: "msg_16a2009810019mUinCPlKl6Rwm:bg",
+      messageID: "msg_16a2009810019mUinCPlKl6Rwm",
+      sessionID: "ses_p",
+      type: "background-result",
+      childSessionId: "ses_e95dff694ffe223zzHtDhYP5y3",
+      state: "completed",
+      agent: "build",
+      text: "md ran X",
+    },
+  ]);
+  assert.equal(msgs[2].parts[0].agent, "explore");
+});
+
+test("mapTimeline: a background result is never read as an assistant turn still in flight", () => {
+  const msgs = mapTimeline(
+    [{ id: "msg_u", type: "user", time: { created: 1 }, text: "go" }, ...timeline("09-background-result").slice(0, 1)],
+    { sessionID: "s" },
+  );
+  assert.equal(isAssistantTurnComplete(msgs), true);
+  assert.equal(isAssistantTurnInProgress(msgs), false);
+});
+
+test("mapTimeline: V2 does not entity-encode the envelope, so the body is returned raw (even containing </subagent>)", () => {
+  const [, native] = mapTimeline(timeline("09-background-result"), { sessionID: "s" });
+  assert.equal(native.parts[0].text, 'native ran a<b & "c" </subagent> d');
+  assert.equal(native.parts[0].name, undefined, "a description that is not a /command is not a name");
+});
+
+test("mapTimeline: background-result name — metadata.manta.name, else a '/…' description; jobId from metadata.manta", () => {
+  const rec = (over) => ({
+    id: "msg_x",
+    type: "synthetic",
+    time: { created: 5 },
+    description: "/review HEAD~1",
+    metadata: { source: "subagent", childID: "ses_c", agent: "build", state: "failed" },
+    text: '<subagent sessionID="ses_c" state="failed" description="/review HEAD~1">\nboom\n</subagent>',
+    ...over,
+  });
+  const part = (r) => mapTimeline([r], { sessionID: "s" })[0].parts[0];
+  assert.equal(part(rec()).name, "/review HEAD~1");
+  assert.equal(part(rec()).state, "failed");
+  assert.equal(part(rec()).jobId, undefined);
+  const withManta = part(rec({ metadata: { source: "subagent", childID: "ses_c", state: "completed", manta: { jobId: "job1", name: "/review HEAD~1 deep" } } }));
+  assert.equal(withManta.jobId, "job1");
+  assert.equal(withManta.name, "/review HEAD~1 deep");
+  assert.equal(withManta.agent, undefined);
+  assert.equal(part(rec({ description: undefined })).name, undefined);
+  assert.equal(part(rec({ description: "task: find it" })).name, undefined);
+  assert.equal(part(rec({ description: "/review HEAD~1" })).text, "boom");
+});
+
+test("mapTimeline: a Manta-posted result's card text drops the '[background job …]' header + its blank line only", () => {
+  const part = (text, manta = { jobId: "job1" }) =>
+    mapTimeline(
+      [{ id: "msg_m", type: "synthetic", time: { created: 1 }, metadata: { source: "subagent", childID: "ses_c", state: "completed", ...(manta ? { manta } : {}) }, text }],
+      { sessionID: "s" },
+    )[0].parts[0];
+  assert.equal(part('[background job "/review HEAD~1" done]\n\nall good\nsecond line').text, "all good\nsecond line");
+  assert.equal(part('[background job "x" failed]\n\nError: timed out after 30 minutes').text, "Error: timed out after 30 minutes");
+  // a delegate job: the Branch/Worktree lines stay
+  assert.equal(
+    part('[background job "fix-it" done]\nBranch: b (2 files changed)\nWorktree: /w\n\ndone it').text,
+    "Branch: b (2 files changed)\nWorktree: /w\n\ndone it",
+  );
+  // a name holding quotes still matches; an empty body leaves an empty text
+  assert.equal(part('[background job "say "hi" now" done]\n\nbody').text, "body");
+  assert.equal(part('[background job "n" done]\n\n').text, "");
+  // not that shape → untouched
+  assert.equal(part("[background job n done]\n\nbody").text, "[background job n done]\n\nbody");
+  assert.equal(part('see [background job "n" done]\n\nbody').text, 'see [background job "n" done]\n\nbody');
+  // without metadata.manta.jobId the text is never touched
+  assert.equal(part('[background job "n" done]\n\nbody', null).text, '[background job "n" done]\n\nbody');
+});
+
+test("mapTimeline: background-result tolerates a missing/odd envelope and missing metadata fields", () => {
+  const part = (r) => mapTimeline([{ id: "m", type: "synthetic", time: { created: 1 }, ...r }], { sessionID: "s" })[0]?.parts[0];
+  assert.equal(part({ metadata: { source: "subagent", childID: "c", state: "completed" }, text: "plain result" }).text, "plain result");
+  assert.equal(part({ metadata: { source: "subagent", childID: "c", state: "completed" }, text: "<subagent sessionID=\"c\" state=\"completed\">no close" }).text, '<subagent sessionID="c" state="completed">no close');
+  assert.equal(part({ metadata: { source: "subagent", childID: "c", state: "completed" }, text: '<subagent sessionID="c" state="completed">\nx\n</subagent>' }).text, "x", "envelope without a description attribute");
+  // metadata without childID/state: read them from the envelope
+  const fromEnv = part({ metadata: { source: "subagent" }, text: '<subagent sessionID="ses_e" state="cancelled" description="a > b">\nbody\n</subagent>' });
+  assert.equal(fromEnv.childSessionId, "ses_e");
+  assert.equal(fromEnv.state, "cancelled");
+  assert.equal(fromEnv.text, "body");
+  // no child id anywhere → nothing to pair by → dropped; no text → empty text
+  assert.equal(part({ metadata: { source: "subagent" }, text: "orphan" }), undefined);
+  assert.equal(part({ metadata: { source: "subagent", childID: "c" } }).text, "");
+  assert.equal(part({ metadata: { source: "subagent", childID: "c" } }).state, "unknown");
+  // a synthetic that is not a subagent result is still dropped
+  assert.equal(part({ metadata: { source: "other" }, text: "x" }), undefined);
+  assert.equal(part({ text: "x" }), undefined);
 });

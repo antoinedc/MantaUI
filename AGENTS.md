@@ -1574,6 +1574,50 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   parked. Internal callers of the abort path keep `resume=false`. Nothing in the
   renderer issues an abort any more except the user's Stop, so the `aborted`
   frame is always shown.
+- **Slash-command highlight + "Run in background" (v2-next Stage B, desktop).**
+  Pure logic is `backgroundRun.ts` (tested); the pieces are
+  `SlashComposerParts.tsx` (overlay + box) and `BackgroundCards.tsx`.
+  - **Valid = `/name` at index 0** and `name` is a Manta built-in, an opencode
+    command or a skill (`parseSlashToken`; a leading space, a mid-text slash, an
+    unknown or partial name is not). The command list is loaded WITH the
+    session directory (`opencodeCommands({directory})`, so a project's own
+    commands and the box's `background` marker apply) and eagerly whenever the
+    text starts with `/` — not only while the popup is open.
+  - **The highlight is an overlay, never a replacement input.** The textarea
+    stays the input; `SlashHighlight` mirrors it (same font / size /
+    line-height / wrapping, aria-hidden, pointer-events none, scroll synced) and
+    colours only the token. The token must NOT change weight or get horizontal
+    padding — that moves its width and breaks character-for-character
+    alignment — and its box is opaque (card colour under the accent tint) so the
+    textarea's own glyphs are covered rather than doubled. Only mounted while the
+    text is valid, so ordinary typing pays nothing.
+  - **The box exists only for an opencode command / skill**, never a Manta
+    built-in, and only where the host passes `slash` to the composer — the CTO
+    conversation does not, so it gets neither highlight nor box. Its checked
+    state lives in ChatPanel (submit reads it) and resets whenever the box
+    disappears. A command the box proved always-background (`background: true`)
+    shows it checked + disabled, titled "This command always runs in the
+    background".
+  - **A background send is its own path** (`sendBackgroundCommand`), idle or
+    busy, Enter or ⌥Enter: `opencodeRunCommand({…, background: true})` with the
+    composer's model / plan agent, and NEVER a `delivery` — it must not steer the
+    turn it runs beside. No optimistic row, no `setRunning`. The draft clears
+    only after the box accepted it (and only if unchanged); a refusal shows its
+    message and keeps the draft. It resolves `{jobId}` (the card comes from the
+    job store) or nothing (an always-background command).
+  - **Cards.** Running / uncertain / failed cards come from the job store
+    (`jobs` with `parentSessionID === session`), rendered first in the transcript
+    tail (and under the Welcome line of an empty one). "Couldn't confirm this
+    started" is a card, never a spinner. A finished run is the N4
+    `background-result` PART rendered by `BackgroundResultCard`; it REPLACES the
+    running card, paired by `jobId` (fallback `childSessionId`), so a job never
+    shows twice. A result message is a turn boundary for `computeTurnInfo` /
+    `computeLiveTurn`. **Open session** calls `delegate:open-session({jobId})`
+    and, on `{ok:true}`, re-lists projects and selects the window; a refusal, a
+    throw or an unexpected answer shows an inline error on the card.
+  - Until the shared `Api` type carries the contract members, `backgroundApi()`
+    is the one typed accessor for them (`delegateOpenSession` is a literal
+    channel in `httpApi.ts`).
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
