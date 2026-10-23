@@ -53,6 +53,10 @@ function expectPromptSent(api: MockApi, text: string): void {
 // optimistic user row is committed) is asserted against the scroller element
 // in the test below.
 
+// The secrets card's "is it open" probe: its header link (the add form is
+// collapsed behind "+ Add secret" until pressed).
+const SECRETS_CARD = 'button[title="Open Settings → Secrets"]';
+
 describe("ChatPanel render harness", () => {
   let bus: MockEventBus;
   let h: Harness | null = null;
@@ -299,7 +303,7 @@ describe("ChatPanel session resources", () => {
     await h.flush();
     // The secrets card fetched its (empty) list once opened.
     expect((api?.calls?.secretsList?.length ?? 0) >= 0).toBe(true);
-    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
+    expect(h.container.querySelector(SECRETS_CARD)).not.toBeNull();
   });
 
   // Mobile keyboard bar → /clear (BET-259). The KeyboardBar's `clear` key
@@ -495,11 +499,11 @@ describe("ChatPanel panel cards one-open-at-a-time", () => {
     resetStore();
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
-    expect(h.container.querySelector("input[type=password]")).toBeNull();
+    expect(h.container.querySelector(SECRETS_CARD)).toBeNull();
     await clickToolbar(h, "secrets");
-    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
+    expect(h.container.querySelector(SECRETS_CARD)).not.toBeNull();
     await clickToolbar(h, "secrets");
-    expect(h.container.querySelector("input[type=password]")).toBeNull();
+    expect(h.container.querySelector(SECRETS_CARD)).toBeNull();
   });
 
   it("opening secrets closes the schedules card", async () => {
@@ -513,7 +517,7 @@ describe("ChatPanel panel cards one-open-at-a-time", () => {
     await clickToolbar(h, "schedules");
     expect(h.text()).toContain(SCHEDULES);
     await clickToolbar(h, "secrets");
-    expect(h.container.querySelector("input[type=password]")).not.toBeNull();
+    expect(h.container.querySelector(SECRETS_CARD)).not.toBeNull();
     expect(h.text()).not.toContain(SCHEDULES);
   });
 

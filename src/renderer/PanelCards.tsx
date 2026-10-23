@@ -5,24 +5,28 @@
 //   - ScheduledTasksCard: scheduled prompts (⏰) with per-row cancel.
 //   - WebhooksCard: inbound webhooks (🪝) with per-row revoke + URL copy.
 //   - SecretsCard: agent-usable secrets (🔑) — add form + metadata-only list
-//     (values never re-enter the renderer).
+//     with inline editing (values never re-enter the renderer).
 //
 // All three are cards (not footer items) so they render on BOTH desktop and
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Square, X } from "lucide-react";
+import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Pencil, Square, Trash2, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
   DelegateJob,
   ScheduledJob,
   SecretMeta,
+  SecretPatch,
   SecretScope,
   WebhookMeta,
 } from "../shared/types";
 import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
+import { ConfirmInline } from "./ConfirmInline";
+import { SecretEditor, secretScopeLabel, type SecretSaveResult } from "./SecretEditor";
+import { KEY_ERROR, isValidSecretKey } from "./secretsView";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
@@ -215,16 +219,18 @@ export const WebhooksCard = memo(function WebhooksCard({
 // SecretsCard — pinned card above the composer for managing the secrets the
 // agent can use. The user types a key + value here; the value travels to the
 // box (renderer → IPC/RPC → manta-server store) and is NEVER returned or shown
-// again — the list is metadata only (key, scope, hint). Agents read secrets via
-// the secret_list / secret_provide opencode tools, which materialize the value
-// to a 0600 file on the box and hand the agent only the path, so the value
-// never enters the AI transcript.
+// again — the list is metadata only (key, scope, hint). Rows are editable in
+// place (name, hint, and REPLACING the value — see SecretEditor). Agents read
+// secrets via the secret_list / secret_provide opencode tools, which
+// materialize the value to a 0600 file on the box and hand the agent only the
+// path, so the value never enters the AI transcript.
 export const SecretsCard = memo(function SecretsCard({
   secrets,
   error,
   sessionId,
   prefillKey,
   onSave,
+  onUpdate,
   onDelete,
   onClose,
 }: {
@@ -243,6 +249,7 @@ export const SecretsCard = memo(function SecretsCard({
     sessionID?: string | null;
     hint?: string;
   }) => Promise<boolean>;
+  onUpdate: (id: string, patch: SecretPatch) => Promise<SecretSaveResult>;
   onDelete: (id: string) => void;
   onClose: () => void;
 }) {
@@ -251,17 +258,31 @@ export const SecretsCard = memo(function SecretsCard({
   const [scope, setScope] = useState<SecretScope>("shared");
   const [hint, setHint] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showAdd, setShowAdd] = useState(!!prefillKey);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const valueRef = useRef<HTMLInputElement>(null);
+  const focusPending = useRef(false);
 
   // Deep-link pre-fill (BET-1437). Re-runs when the hint changes (the card
-  // mounts only when open, so this fires once per open in practice).
+  // mounts only when open, so this fires once per open in practice). The add
+  // form now sits behind "+ Add secret", so open it first; its value input
+  // does not exist until the next commit when it was collapsed.
   useEffect(() => {
     if (!prefillKey) return;
     setKey(prefillKey);
-    valueRef.current?.focus();
+    setShowAdd(true);
+    if (valueRef.current) valueRef.current.focus();
+    else focusPending.current = true;
   }, [prefillKey]);
+  useEffect(() => {
+    if (showAdd && focusPending.current && valueRef.current) {
+      valueRef.current.focus();
+      focusPending.current = false;
+    }
+  }, [showAdd]);
 
-  const keyValid = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key);
+  const keyValid = isValidSecretKey(key);
   const canSave = keyValid && value.length > 0 && !saving;
 
   const submit = () => {
@@ -283,9 +304,12 @@ export const SecretsCard = memo(function SecretsCard({
         setKey("");
         setValue("");
         setHint("");
+        setShowAdd(false);
       }
     });
   };
+
+  const now = Date.now();
 
   return (
     <div
@@ -297,10 +321,19 @@ export const SecretsCard = memo(function SecretsCard({
           <Key size={16} aria-hidden="true" />
         </span>
         <span className="text-text">Secrets</span>
-        {secrets.length > 0 && <span className="text-text-faint">· {secrets.length}</span>}
+        {secrets.length > 0 && <span className="text-text-faint">· {secrets.length} available here</span>}
+        <button
+          onClick={() =>
+            window.dispatchEvent(new CustomEvent("manta-open-settings", { detail: { section: "secrets" } }))
+          }
+          className="ml-auto px-2 py-px rounded-xs text-text-faint hover:text-text hover:bg-fill-hover"
+          title="Open Settings → Secrets"
+        >
+          Manage all in Settings ↗
+        </button>
         <button
           onClick={onClose}
-          className="ml-auto px-1 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
+          className="px-1 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
           title="Close"
           aria-label="Close"
         >
@@ -308,78 +341,98 @@ export const SecretsCard = memo(function SecretsCard({
         </button>
       </div>
 
-      {/* Add / update form */}
-      <div className="flex flex-col gap-2 mb-2">
-        <div className="flex flex-wrap gap-2">
+      {showAdd ? (
+        <div className="flex flex-col gap-2 mb-2">
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="KEY (e.g. GITHUB_PAT)"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              autoFocus={!prefillKey}
+              className={`min-w-0 flex-1 rounded-xs border bg-bg px-2 py-1 font-mono text-text outline-none ${
+                key && !keyValid ? "border-danger/60" : "border-border"
+              }`}
+              style={
+                prefillKey
+                  ? { borderColor: "rgb(var(--accent-rgb) / 0.7)" }
+                  : undefined
+              }
+            />
+            <select
+              value={scope}
+              onChange={(e) => setScope(e.target.value as SecretScope)}
+              className="rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
+              title="shared = every session · project = every chat in this workspace · session = only this chat"
+            >
+              <option value="shared">shared</option>
+              <option value="project">this project</option>
+              <option value="session">this session</option>
+            </select>
+          </div>
           <input
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="KEY (e.g. GITHUB_PAT)"
+            ref={valueRef}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            placeholder="value (stored on the server; never shown again)"
+            type="password"
             spellCheck={false}
             autoCapitalize="off"
             autoCorrect="off"
-            className={`min-w-0 flex-1 rounded-xs border bg-bg px-2 py-1 font-mono text-text outline-none ${
-              key && !keyValid ? "border-danger/60" : "border-border"
-            }`}
-            style={
-              prefillKey
-                ? { borderColor: "rgb(var(--accent-rgb) / 0.7)" }
-                : undefined
-            }
+            className="w-full rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
           />
-          <select
-            value={scope}
-            onChange={(e) => setScope(e.target.value as SecretScope)}
-            className="rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
-            title="shared = every session · project = every chat in this workspace · session = only this chat"
-          >
-            <option value="shared">shared</option>
-            <option value="project">this project</option>
-            <option value="session">this session</option>
-          </select>
-        </div>
-        <input
-          ref={valueRef}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              submit();
-            }
-          }}
-          placeholder="value (stored on the server; never shown again)"
-          type="password"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          className="w-full rounded-xs border border-border bg-bg px-2 py-1 font-mono text-text outline-none"
-        />
-        <div className="flex flex-wrap gap-2">
-          <input
-            value={hint}
-            onChange={(e) => setHint(e.target.value)}
-            placeholder="hint for the agent (optional, e.g. 'git push token')"
-            className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
-          />
-          <button
-            onClick={submit}
-            disabled={!canSave}
-            className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40"
-            style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
-            title="Store this secret on the server"
-          >
-            {saving ? "saving…" : "Save"}
-          </button>
-        </div>
-        {key && !keyValid && (
-          <div className="text-danger text-label">
-            Key must start with a letter/underscore, then letters/digits/underscores (max 64).
+          <div className="flex flex-wrap gap-2">
+            <input
+              value={hint}
+              onChange={(e) => setHint(e.target.value)}
+              placeholder="hint for the agent (optional, e.g. 'git push token')"
+              className="min-w-0 flex-1 rounded-xs border border-border bg-bg px-2 py-1 text-text outline-none"
+            />
+            <button
+              onClick={() => { setShowAdd(false); setKey(""); setValue(""); setHint(""); }}
+              disabled={saving}
+              className="shrink-0 px-2 py-1 rounded-xs text-text-faint hover:text-text disabled:opacity-40"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={!canSave}
+              className="shrink-0 px-2 py-1 rounded-xs border disabled:opacity-40"
+              style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
+              title="Store this secret on the server"
+            >
+              {saving ? "saving…" : "Save"}
+            </button>
           </div>
-        )}
-      </div>
+          {key && !keyValid && (
+            <div className="text-danger text-label">{KEY_ERROR}</div>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 mb-2">
+          <button
+            onClick={() => setShowAdd(true)}
+            className="shrink-0 px-2 py-1 rounded-xs border"
+            style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
+          >
+            + Add secret
+          </button>
+          <span className="text-text-faint text-label">
+            Agents use these via secret_provide without seeing the value.
+          </span>
+        </div>
+      )}
 
-      {error && <div className="text-danger break-words mb-1">{error}</div>}
+      {error && <div role="alert" className="text-danger break-words mb-1">{error}</div>}
 
       {/* Existing secrets (metadata only — no values) */}
       {secrets.length === 0 ? (
@@ -388,55 +441,92 @@ export const SecretsCard = memo(function SecretsCard({
           without ever seeing the value.
         </div>
       ) : (
-        <div className="flex flex-col gap-2 border-t border-border pt-2 max-h-[40vh] overflow-y-auto">
-          {secrets.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-center gap-2 rounded-xs px-1 -mx-1"
-              style={
-                s.key === prefillKey
-                  ? {
-                      backgroundColor: "rgb(var(--accent-rgb) / 0.08)",
-                      boxShadow: "inset 2px 0 0 rgb(var(--accent-rgb) / 0.53)",
-                    }
-                  : undefined
-              }
-            >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-text font-mono truncate">{s.key}</span>
-                  <MetaBadge
-                    title={
-                      s.scope === "shared"
-                        ? "Available to every session"
-                        : s.scope === "project"
-                          ? `Available to every chat in project "${s.project ?? ""}"`
-                          : "Available only to this session"
-                    }
+        <div className="flex flex-col gap-1 border-t border-border pt-2 max-h-[40vh] overflow-y-auto">
+          {secrets.map((s) =>
+            editingId === s.id ? (
+              <SecretEditor
+                key={s.id}
+                secret={s}
+                now={now}
+                onSave={(patch) => onUpdate(s.id, patch)}
+                onClose={() => setEditingId(null)}
+              />
+            ) : (
+              <div
+                key={s.id}
+                onDoubleClick={() => { setConfirmingId(null); setEditingId(s.id); }}
+                className="group flex items-center gap-2 rounded-xs px-1 -mx-1 py-1 hover:bg-fill focus-within:bg-fill"
+                style={
+                  s.key === prefillKey
+                    ? {
+                        backgroundColor: "rgb(var(--accent-rgb) / 0.08)",
+                        boxShadow: "inset 2px 0 0 rgb(var(--accent-rgb) / 0.53)",
+                      }
+                    : undefined
+                }
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-text font-mono truncate">{s.key}</span>
+                    <MetaBadge
+                      title={
+                        s.scope === "shared"
+                          ? "Available to every session"
+                          : s.scope === "project"
+                            ? `Available to every chat in project "${s.project ?? ""}"`
+                            : "Available only to this session"
+                      }
+                    >
+                      {secretScopeLabel(s)}
+                    </MetaBadge>
+                    {s.overrides && (
+                      <MetaBadge
+                        tone="warn"
+                        title={`This ${s.scope === "session" ? "session" : "project"}'s value is used instead of the ${s.overrides} one`}
+                      >
+                        overrides {s.overrides}
+                      </MetaBadge>
+                    )}
+                  </div>
+                  <div
+                    className={`text-label truncate ${s.hint ? "text-text-faint" : "text-text-faint italic"}`}
+                    title={s.hint || undefined}
                   >
-                    {s.scope === "shared"
-                      ? "shared"
-                      : s.scope === "project"
-                        ? `project:${s.project ?? "?"}`
-                        : "session"}
-                  </MetaBadge>
+                    {s.hint || "no hint"}
+                  </div>
                 </div>
-                {s.hint && (
-                  <div className="text-text-faint text-label truncate" title={s.hint}>
-                    {s.hint}
+                {confirmingId === s.id ? (
+                  <div className="shrink-0 flex items-center gap-1">
+                    <ConfirmInline
+                      label="Delete"
+                      busy={false}
+                      onConfirm={() => { setConfirmingId(null); onDelete(s.id); }}
+                      onCancel={() => setConfirmingId(null)}
+                    />
+                  </div>
+                ) : (
+                  <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+                    <button
+                      onClick={() => { setConfirmingId(null); setEditingId(s.id); }}
+                      className="px-1 py-px rounded-xs text-text-faint hover:text-text hover:bg-fill-hover inline-flex items-center focus-visible:opacity-100"
+                      title="Edit this secret"
+                      aria-label={`Edit ${s.key}`}
+                    >
+                      <Pencil size={14} aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => setConfirmingId(s.id)}
+                      className="px-1 py-px rounded-xs text-danger hover:bg-danger-bg inline-flex items-center focus-visible:opacity-100"
+                      title="Delete this secret"
+                      aria-label={`Delete ${s.key}`}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                    </button>
                   </div>
                 )}
               </div>
-              <button
-                onClick={() => onDelete(s.id)}
-                className="shrink-0 px-2 py-px rounded-xs text-danger hover:bg-danger-bg border border-danger/30 inline-flex items-center"
-                title="Delete this secret"
-                aria-label="Delete this secret"
-              >
-                <X size={14} aria-hidden="true" />
-              </button>
-            </div>
-          ))}
+            ),
+          )}
         </div>
       )}
     </div>

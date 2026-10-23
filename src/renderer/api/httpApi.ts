@@ -1238,6 +1238,8 @@ export const httpApi: Api = {
   // -- secrets (manta-server owned; in-process on mobile) --
   secretsList: (sessionId, all) => rpc(IPC.secretsList, sessionId, all),
   secretsSet: (input) => rpc(IPC.secretsSet, input),
+  secretsUpdate: (id, patch) => rpc(IPC.secretsUpdate, id, patch),
+  secretsSessionInfo: (ids) => rpc(IPC.secretsSessionInfo, ids),
   secretsDelete: (id) => rpc(IPC.secretsDelete, id),
 
   // -- inbound webhooks (manta-server owned; in-process on mobile) --

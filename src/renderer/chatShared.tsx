@@ -588,13 +588,15 @@ export function MetaBadge({
   title,
 }: {
   children: ReactNode;
-  tone?: "neutral" | "danger";
+  tone?: "neutral" | "danger" | "warn";
   title?: string;
 }) {
   const toneClass =
     tone === "danger"
       ? "text-danger border-danger/30"
-      : "text-text-faint border-border";
+      : tone === "warn"
+        ? "text-warn border-warn/40"
+        : "text-text-faint border-border";
   return (
     <span className={"shrink-0 rounded-xs border px-1 text-meta font-mono " + toneClass} title={title}>
       {children}

@@ -1383,17 +1383,41 @@ function CtoConversation(props: {
               window.api
                 .secretsSet(secretInput)
                 .then((r) => {
-                  if (r && r.ok === false) return false;
+                  if (r && r.ok === false) {
+                    resources.setSecretError(r.error || "save failed");
+                    return false;
+                  }
+                  resources.setSecretError(null);
                   void resources.refreshSecrets();
                   return true;
                 })
-                .catch(() => false)
+                .catch((e: unknown) => {
+                  resources.setSecretError(e instanceof Error ? e.message : "save failed");
+                  return false;
+                })
+            }
+            onUpdate={(id, patch) =>
+              window.api
+                .secretsUpdate(id, patch)
+                .then((r) => {
+                  if (r && r.ok === false) return { ok: false, error: r.error || "save failed" };
+                  resources.setSecretError(null);
+                  void resources.refreshSecrets();
+                  return { ok: true };
+                })
+                .catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : "save failed" }))
             }
             onDelete={(id) => {
               window.api
                 .secretsDelete(id)
-                .then(() => resources.refreshSecrets())
-                .catch(() => resources.refreshSecrets());
+                .then(() => {
+                  resources.setSecretError(null);
+                  return resources.refreshSecrets();
+                })
+                .catch((e: unknown) => {
+                  const msg = e instanceof Error ? e.message : "delete failed";
+                  void resources.refreshSecrets().then(() => resources.setSecretError(msg));
+                });
             }}
           />
         </div>

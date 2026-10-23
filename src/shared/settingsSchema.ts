@@ -27,6 +27,7 @@ export const PRESETS = ["economy", "balanced", "performance"];
 //   Sessions                   ← per-session behaviour
 //   Files                      ← agent ↔ laptop file flow
 //   Extensions                 ← plugins, skill registries, AI-CLI flags
+//   Secrets                    ← credentials agents can use (desktop only)
 //   Voice                      ← Groq STT
 //
 // Four things fall out of this schema (all implemented in BET-419):
@@ -53,6 +54,7 @@ export type SettingSectionId =
   | "sessions"
   | "files"
   | "extensions"
+  | "secrets"
   | "voice"
   | "cto";
 
@@ -103,6 +105,8 @@ export const SETTING_SECTIONS: SettingSection[] = [
   { id: "sessions", label: "Sessions", group: "AGENT" },
   { id: "files", label: "Files", group: "AGENT" },
   { id: "extensions", label: "Extensions", group: "AGENT" },
+  // Wide: the grouped tables (name · hint · updated · actions) need the room.
+  { id: "secrets", label: "Secrets", group: "AGENT", wide: true },
   { id: "voice", label: "Voice", group: "AGENT" },
   { id: "cto", label: "On-call CTO", group: "AGENT" },
 ];
@@ -344,6 +348,20 @@ export const SETTINGS: SettingEntry[] = [
     default: "",
     group: "Speech to text (Groq)",
     placeholder: "whisper-large-v3-turbo",
+  },
+
+  // ----- secrets (desktop only) -----
+  // `custom`: the whole section is one surface (SecretsSettings) — this entry
+  // exists so settings search lists it.
+  {
+    id: "secretsList",
+    section: "secrets",
+    label: "Secrets",
+    help: "Credentials your agents can use without ever seeing them. Add, rename, replace a value, or delete — shared, per project, or per chat.",
+    control: "custom",
+    configKey: null,
+    platform: "desktop",
+    default: null,
   },
 
   // ----- on-call CTO (BET-1166) -----

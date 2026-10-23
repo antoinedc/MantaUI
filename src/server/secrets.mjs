@@ -99,7 +99,22 @@ export function visibleSecrets(secrets, sessionID, project) {
     : [];
   const shadowed = new Set([...sessionKeys, ...projectScoped.map((s) => s.key)]);
   const shared = list.filter((s) => s.scope === "shared" && !shadowed.has(s.key));
-  return [...sessionScoped, ...projectScoped, ...shared].map(toMeta);
+  // `overrides` names the highest-precedence tier a visible entry shadows, so a
+  // UI can flag that the value an agent gets is not the same-named one below.
+  const sharedKeys = new Set(list.filter((s) => s.scope === "shared").map((s) => s.key));
+  const projectKeys = new Set(
+    project ? list.filter((s) => s.scope === "project" && s.project === project).map((s) => s.key) : [],
+  );
+  const withOverrides = (entry) => {
+    let overrides = null;
+    if (entry.scope === "session") {
+      overrides = projectKeys.has(entry.key) ? "project" : sharedKeys.has(entry.key) ? "shared" : null;
+    } else if (entry.scope === "project") {
+      overrides = sharedKeys.has(entry.key) ? "shared" : null;
+    }
+    return { ...toMeta(entry), overrides };
+  };
+  return [...sessionScoped, ...projectScoped, ...shared].map(withOverrides);
 }
 
 // Display order for every secrets listing: alphabetical by key, case-
@@ -245,6 +260,101 @@ export async function setSecret(
   return { ok: true, meta: toMeta(entry) };
 }
 
+// Edit an existing secret by store id: rename (key), replace the value, and/or
+// change the hint. Scope and owner are immutable here. Absent/null `value`
+// keeps the stored one — the value is only ever REPLACED, never read back. The
+// previously materialized file is removed when the key or value changes so a
+// stale name/value can't be re-read off disk. Returns { ok, meta } or
+// { ok:false, error }; the meta never includes the value.
+export async function updateSecret(
+  id,
+  patch,
+  { load = loadSecrets, save = saveSecrets, publish, now = () => Date.now(), dir = SECRETS_DIR } = {},
+) {
+  const p = patch ?? {};
+  const secrets = load();
+  const idx = secrets.findIndex((s) => s.id === id);
+  if (idx === -1) return { ok: false, error: "Secret not found." };
+  const current = secrets[idx];
+
+  let nextKey = current.key;
+  if (p.key !== undefined && p.key !== null && p.key !== current.key) {
+    if (!isValidKey(p.key)) {
+      return {
+        ok: false,
+        error: `Invalid key "${p.key}". Use 1-64 chars: a letter or underscore, then letters/digits/underscores (env-var style).`,
+      };
+    }
+    const owner = current.scope === "session" ? (current.sessionID ?? null) : current.scope === "project" ? (current.project ?? null) : null;
+    if (secrets.some((s) => s.id !== current.id && sameSlot(s, current.scope, owner, p.key))) {
+      return { ok: false, error: `A ${current.scope} secret named "${p.key}" already exists here.` };
+    }
+    nextKey = p.key;
+  }
+
+  let nextValue = current.value;
+  if (p.value !== undefined && p.value !== null) {
+    if (typeof p.value !== "string" || p.value.length === 0) {
+      return { ok: false, error: "value cannot be empty" };
+    }
+    nextValue = p.value;
+  }
+
+  const currentHint = typeof current.hint === "string" ? current.hint : "";
+  const nextHint = typeof p.hint === "string" ? p.hint.trim() : currentHint;
+
+  const nameOrValueChanged = nextKey !== current.key || nextValue !== current.value;
+  const changed = nameOrValueChanged || nextHint !== currentHint;
+  const entry = changed
+    ? { ...current, key: nextKey, value: nextValue, hint: nextHint, updatedAt: now() }
+    : current;
+
+  if (changed) {
+    secrets[idx] = entry;
+    await save(secrets);
+    if (nameOrValueChanged) {
+      try {
+        await rm(materializedPath(current, dir), { force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  if (changed) {
+    publish?.({ kind: "secrets.updated", payload: { sessionID: entry.sessionID ?? null, project: entry.project ?? null } });
+  }
+  return { ok: true, meta: toMeta(entry) };
+}
+
+// Whether each opencode session a secret is scoped to still exists, so the
+// Settings page can tell a closed chat from a session that simply has no tmux
+// window (the On-call CTO conversation, background jobs). `readSession` is the
+// three-state opencode read — only a definitive "missing" proves absence; a
+// thrown or unrecognised lookup is "unknown". Ids are deduped, non-strings and
+// blanks dropped, and the batch capped. Returns { [id]: { state, title } }.
+export const SESSION_INFO_MAX = 200;
+
+export async function sessionInfoFor(ids, readSession, { max = SESSION_INFO_MAX } = {}) {
+  const unique = [
+    ...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id.trim() !== "")),
+  ].slice(0, max);
+  const settled = await Promise.allSettled(unique.map((id) => Promise.resolve().then(() => readSession(id))));
+  const out = {};
+  unique.forEach((id, i) => {
+    const r = settled[i];
+    const v = r.status === "fulfilled" ? r.value : null;
+    if (v?.state === "found") {
+      const title = v.session?.title;
+      out[id] = { state: "found", title: typeof title === "string" && title.trim() !== "" ? title : null };
+    } else if (v?.state === "missing") {
+      out[id] = { state: "missing", title: null };
+    } else {
+      out[id] = { state: "unknown", title: null };
+    }
+  });
+  return out;
+}
+
 // Delete by store id (the UI passes the id from a listed meta). Also removes
 // any materialized value file. Returns { ok, deleted }.
 export async function deleteSecret(id, { load = loadSecrets, save = saveSecrets, publish } = {}) {
@@ -274,7 +384,7 @@ export async function deleteSecret(id, { load = loadSecrets, save = saveSecrets,
 // client needs its own sort.
 export function listSecrets({ sessionID, project, includeAll = false } = {}, { load = loadSecrets } = {}) {
   const secrets = load();
-  if (includeAll) return sortSecretMetas(secrets.map(toMeta));
+  if (includeAll) return sortSecretMetas(secrets.map((s) => ({ ...toMeta(s), overrides: null })));
   return sortSecretMetas(visibleSecrets(secrets, sessionID, project));
 }
 

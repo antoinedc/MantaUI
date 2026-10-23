@@ -2108,3 +2108,39 @@ test("the two new channels are registered", async () => {
   assert.equal(typeof handlers["optimizer:prices"], "function");
   assert.equal(typeof handlers["opencode:set-model-cost"], "function");
 });
+
+test("secrets:update dispatches to the store (sandboxed store: unknown id → not found, nothing written)", async () => {
+  const { deps } = makeDeps([]);
+  const published = [];
+  const handlers = buildHandlers({ ...deps, bus: { publish: (e) => published.push(e) } });
+  assert.equal(typeof handlers["secrets:update"], "function");
+  const r = await dispatch(handlers, "secrets:update", ["no_such_id", { hint: "x" }]);
+  assert.deepEqual(r, { ok: false, error: "Secret not found." });
+  assert.deepEqual(published, []);
+});
+
+test("secrets:session-info dispatches through oc.readSession (three states; a throwing read is unknown)", async () => {
+  const { deps } = makeDeps([]);
+  const reads = [];
+  deps.oc.readSession = async (id) => {
+    reads.push(id);
+    if (id === "ses_found") return { state: "found", session: { title: "CTO" } };
+    if (id === "ses_gone") return { state: "missing" };
+    throw new Error("opencode down");
+  };
+  const handlers = buildHandlers(deps);
+  const out = await dispatch(handlers, "secrets:session-info", [["ses_found", "ses_gone", "ses_err", "ses_found", ""]]);
+  assert.deepEqual(out, {
+    ses_found: { state: "found", title: "CTO" },
+    ses_gone: { state: "missing", title: null },
+    ses_err: { state: "unknown", title: null },
+  });
+  assert.equal(reads.filter((r) => r === "ses_found").length, 1);
+});
+
+test("secrets:session-info with an oc that has no readSession answers unknown, never missing", async () => {
+  const { deps } = makeDeps([]);
+  const handlers = buildHandlers(deps);
+  const out = await dispatch(handlers, "secrets:session-info", [["ses_x"]]);
+  assert.deepEqual(out, { ses_x: { state: "unknown", title: null } });
+});

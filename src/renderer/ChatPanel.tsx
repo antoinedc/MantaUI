@@ -2863,11 +2863,15 @@ export function ChatPanel({
             }).catch((e: unknown) => {
               setSecretError(e instanceof Error ? e.message : "save failed"); return false;
             })}
+            onUpdate={(id, patch) => window.api.secretsUpdate(id, patch).then((r) => {
+              if (r && r.ok === false) return { ok: false, error: r.error || "save failed" };
+              void refreshSecrets(); setSecretError(null); return { ok: true };
+            }).catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : "save failed" }))}
             onDelete={(id) => {
               setSecrets((prev) => prev.filter((s) => s.id !== id));
               window.api.secretsDelete(id).then(() => refreshSecrets()).catch((e: unknown) => {
-                setSecretError(e instanceof Error ? e.message : "delete failed");
-                void refreshSecrets();
+                const msg = e instanceof Error ? e.message : "delete failed";
+                void refreshSecrets().then(() => setSecretError(msg));
               });
             }}
           />

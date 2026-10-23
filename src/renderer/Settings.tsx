@@ -5,6 +5,7 @@ import {
   Settings as SettingsIcon,
   Terminal,
   KeyRound,
+  Key,
   Sparkles,
   GitBranch,
   Folder,
@@ -26,6 +27,7 @@ import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
 import { AddPhonePanel } from "./AddPhonePanel";
+import { SecretsSettings } from "./SecretsSettings";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
@@ -112,6 +114,8 @@ function useDialog(onClose: () => void) {
     if (!root) return;
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // An inline editor (e.g. a secret's) owns its own Esc = "cancel".
+      if ((e.target as Element | null)?.closest?.("[data-esc-owned]")) return;
       // Bail only if another dialog is currently open in the document —
       // portalled to document.body or rendered inline as a child of Settings
       // — so that dialog's own Escape handler owns the key. Otherwise close
@@ -241,6 +245,7 @@ const SECTION_ICONS: Record<SettingSectionId, typeof SettingsIcon> = {
   sessions: GitBranch,
   files: Folder,
   extensions: Plug,
+  secrets: Key,
   voice: Mic,
   cto: PhoneCall,
 };
@@ -986,6 +991,14 @@ export function Settings({
         </SettingsRow>
       );
     }
+    if (entry.id === "secretsList") {
+      // Search hit for the Secrets section (a `custom` entry): jump to it.
+      return (
+        <SettingsRow name={entry.label} help={entry.help}>
+          <Button tone="default" onClick={() => { setQuery(""); setActiveTab("secrets"); }}>Open Secrets</Button>
+        </SettingsRow>
+      );
+    }
     const cur = entry.configKey ? values[entry.configKey] : undefined;
     switch (entry.control) {
       case "toggle":
@@ -1399,6 +1412,7 @@ export function Settings({
         </>
       );
     }
+    if (section === "secrets") return <SecretsSettings onNavigated={onClose} />;
     return null;
   };
 

@@ -42,6 +42,8 @@ import type {
   ProgressRecord,
   SecretMeta,
   SecretInput,
+  SecretPatch,
+  SecretSessionInfo,
   ServerUpdateAvailablePayload,
   ServerUpdateCheck,
   DesktopUpdateCheck,
@@ -1348,6 +1350,8 @@ export interface Api {
   // channels.
   secretsList(sessionId?: string, all?: boolean): Promise<SecretMeta[]>;
   secretsSet(input: SecretInput): Promise<{ ok: boolean; meta?: SecretMeta; error?: string }>;
+  secretsUpdate(id: string, patch: SecretPatch): Promise<{ ok: boolean; meta?: SecretMeta; error?: string }>;
+  secretsSessionInfo(ids: string[]): Promise<Record<string, SecretSessionInfo>>;
   secretsDelete(id: string): Promise<{ deleted: boolean }>;
 
   // Inbound webhooks (manta-server owned; desktop reaches it over -L 18787).
