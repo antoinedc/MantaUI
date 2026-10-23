@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OpencodeCommand, OpencodeReference } from "../../shared/types";
+import { backgroundApi } from "../backgroundRun";
 import {
   filterCommands,
   dedupeAgainstBuiltins,
@@ -94,13 +95,33 @@ export function useTypeahead(params: {
   const fileSearchSeqRef = useRef(0);
   const fileSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // The list is the session's own (P1): a project can define commands the
+  // global list lacks, and `background` is only decided against its directory.
+  // `commandsCwdRef` is the directory the loaded list belongs to, so a session
+  // that moves directory reloads instead of keeping a stale list.
+  const commandsCwdRef = useRef<string | null>(null);
+  const commandsInFlightRef = useRef<string | null>(null);
   const ensureCommands = useCallback(async () => {
-    if (commands) return;
+    if (commands && commandsCwdRef.current === cwd) return;
+    if (commandsInFlightRef.current === cwd) return;
+    const forCwd = cwd;
+    commandsInFlightRef.current = forCwd;
     try {
-      const c = await window.api.opencodeCommands();
-      setCommands(c);
-    } catch { /* non-fatal */ }
-  }, [commands]);
+      const c = await backgroundApi().opencodeCommands(forCwd ? { directory: forCwd } : undefined);
+      commandsCwdRef.current = forCwd;
+      setCommands(c as OpencodeCommand[]);
+    } catch { /* non-fatal */ } finally {
+      if (commandsInFlightRef.current === forCwd) commandsInFlightRef.current = null;
+    }
+  }, [commands, cwd]);
+
+  // The highlight needs the list as soon as the text is a slash command, not
+  // only while the typeahead popup is open (a pasted `/review x`, or text
+  // recalled from history, never opens it).
+  const startsWithSlash = input.startsWith("/");
+  useEffect(() => {
+    if (startsWithSlash) void ensureCommands();
+  }, [startsWithSlash, ensureCommands]);
 
   // File search: sequence-tracked so stale responses don't clobber the
   // latest. Empty query is passed through — opencode's /find/file returns a

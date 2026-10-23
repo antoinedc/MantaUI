@@ -948,6 +948,27 @@ async function mountFailingSubmit(
     expect(ta.value).toBe("later");
   });
 
+  it("a valid slash command in the CTO composer gets neither the highlight nor a Run in background box", async () => {
+    h = mountCto(emptyQueue(), {
+      opencodeCommands: () => Promise.resolve([{ name: "review", description: "review changes" }]),
+    });
+    await h.flush();
+    const ta = h.container.querySelector(
+      'textarea[aria-label="Message the CTO"]',
+    ) as HTMLTextAreaElement;
+    await act(async () => {
+      typeInto(ta, "/");
+    });
+    await h.flush();
+    await act(async () => {
+      typeInto(ta, "/review HEAD~1");
+    });
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="slash-highlight"]')).toBeNull();
+    expect(h.container.querySelector('[data-testid="background-run-box"]')).toBeNull();
+    expect(h.container.querySelector('button[aria-label="Run in background"]')).toBeNull();
+  });
+
   it("a NORMAL successful Stop with the turn still running does not claim the turn is permanently unstoppable", async () => {
     // SERVER-REALISTIC: the normal Stop path — interrupt on the accepted
     // record → interrupt_pending with abortState claimed (the abort has been

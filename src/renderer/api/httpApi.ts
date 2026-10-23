@@ -1296,6 +1296,9 @@ export const httpApi: Api = {
   // job through the existing delegate engine (own worktree + window + rail).
   delegateStart: (input) => rpc(IPC.delegateStart, input),
   delegateStop: (id) => rpc(IPC.delegateStop, id),
+  // P6: focus (or re-create) a background job's chat window and say where it
+  // is. The literal channel name stays until the shared IPC table carries it.
+  delegateOpenSession: (input: { jobId: string }) => rpc("delegate:open-session", input),
   delegateDelete: (id) => rpc(IPC.delegateDelete, id),
   // BET-418 §A: pre-flight approval poll + approve/decline. The renderer polls
   // pending-approvals for the viewed parent session and shows ONE card.
@@ -1405,7 +1408,9 @@ export const httpApi: Api = {
   onAutoUpdateProgress: (cb) => getMantaPreload()?.onAutoUpdateProgress(cb) ?? (() => {}),
 
   // -- typeahead --
-  opencodeCommands: () => rpc(IPC.opencodeCommands),
+  // P1: the optional directory scopes the list to the session's project (its
+  // own commands, and the `background` marker decided against them).
+  opencodeCommands: (opts?: { directory?: string }) => (opts ? rpc(IPC.opencodeCommands, opts) : rpc(IPC.opencodeCommands)),
   opencodeAgents: () => rpc(IPC.opencodeAgents),
   opencodeFindFiles: (input) => rpc(IPC.opencodeFindFiles, input),
   opencodeReferences: () => rpc(IPC.opencodeReferences),
@@ -1418,6 +1423,9 @@ export const httpApi: Api = {
   opencodeSetModelCost: (args) => rpc(IPC.opencodeSetModelCost, args),
 
   // -- slash-command execution --
+  // P5: a Manta-wrapped background run (`background: true`) resolves
+  // `{ jobId }`; a foreground run (and an always-background command) resolves
+  // nothing. The caller reads the box's answer as-is.
   opencodeRunCommand: (input) => rpc(IPC.opencodeRunCommand, input),
 
   // -- /clear --
