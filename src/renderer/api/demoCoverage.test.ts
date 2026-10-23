@@ -167,6 +167,8 @@ export const DEMO_UNIMPLEMENTED = [
   "opencodeGenerateTitle",
   "opencodeGetProviders",
   "opencodeGetSubagents",
+  "opencodeInbox",
+  "opencodeInboxCancel",
   "opencodeModelCatalog",
   "opencodePermissionReply",
   "opencodePrompt",

@@ -186,6 +186,7 @@ export function InputArea({
   onPaste,
   textareaAriaLabel,
   placeholderOverride,
+  sendBusy = false,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -290,6 +291,9 @@ export function InputArea({
   // computed by the host and passed in. Unset → the session's own two-state
   // placeholder (compose / "Queue a message…" while running) is used, unchanged.
   placeholderOverride?: string;
+  // True while a send into a running turn is in flight (the session composer's
+  // steer path): the send button is disabled so a second click can't double up.
+  sendBusy?: boolean;
 }) {
   const { voiceEnabled, voiceRecording, voiceProcessing, voiceAnnouncement } =
     voice;
@@ -559,6 +563,7 @@ export function InputArea({
               key="send"
               type="button"
               onClick={() => submit()}
+              disabled={sendBusy}
               aria-label={running ? "Queue message while running" : "Send message"}
               title={running ? "Queue (Enter)" : "Send (Enter)"}
               initial={{ opacity: 0, x: 8 }}
@@ -568,7 +573,7 @@ export function InputArea({
               className={
                 "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
                 "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
-                "bg-accent text-on-accent hover:bg-accent/90"
+                "bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50"
               }
             >
               <SendFilled size={14} />

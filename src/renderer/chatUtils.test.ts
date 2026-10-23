@@ -26,18 +26,12 @@ import {
   todoStatusOf,
   buildQuestionAnswers,
   canSubmitQuestion,
-  commandPrefixKey,
-  detectCommandFromText,
-  MIN_COMMAND_PREFIX_LEN,
   formatAge,
   QUOTE_MAX,
   QUOTE_HEAD,
   QUOTE_TAIL,
   truncateMiddle,
   buildQuoteBlock,
-  shouldAbortForQueuedDrain,
-  isToolStepBoundary,
-  isDrainAbortError,
   isUnknownChannelError,
   describeCron,
   nextCronRun,
@@ -642,9 +636,6 @@ describe("moveMenuHighlight", () => {
 // ===== computeContextBreakdown =====
 
 
-// ===== findFlushBoundary =====
-
-
 // ===== mergeBufferedDeltas =====
 
 
@@ -1019,104 +1010,6 @@ describe("canSubmitQuestion", () => {
   });
 });
 
-// ===== commandPrefixKey =====
-
-describe("commandPrefixKey", () => {
-  it("returns the full template when there are no placeholders", () => {
-    const tpl = "# Refactor\n\nDo a refactoring session, no args.";
-    expect(commandPrefixKey(tpl)).toBe(tpl);
-  });
-
-  it("truncates at the first $ARGUMENTS placeholder", () => {
-    const tpl = "Create a component named $ARGUMENTS with TypeScript.";
-    expect(commandPrefixKey(tpl)).toBe("Create a component named");
-  });
-
-  it("truncates at the first $N positional placeholder", () => {
-    const tpl = "Create a file named $1 in $2 with content $3.";
-    expect(commandPrefixKey(tpl)).toBe("Create a file named");
-  });
-
-  it("returns null for templates shorter than MIN_COMMAND_PREFIX_LEN", () => {
-    // Even with a long template, if the prefix before the first $ is short,
-    // it would generate too many false positives. Reject.
-    expect(commandPrefixKey("$1 do thing")).toBeNull();
-    expect(commandPrefixKey("Run $1 do thing")).toBeNull(); // "Run" < 12
-  });
-
-  it("strips trailing whitespace from the prefix", () => {
-    const tpl = "Some prefix here   $ARGUMENTS more stuff";
-    expect(commandPrefixKey(tpl)).toBe("Some prefix here");
-  });
-
-  it("handles non-string input defensively", () => {
-    expect(commandPrefixKey(undefined as unknown as string)).toBeNull();
-  });
-
-  it("treats sentinel length correctly", () => {
-    // Exactly MIN_COMMAND_PREFIX_LEN chars → accepted.
-    const exact = "a".repeat(MIN_COMMAND_PREFIX_LEN);
-    expect(commandPrefixKey(exact)).toBe(exact);
-    // One char shorter → rejected.
-    expect(commandPrefixKey("a".repeat(MIN_COMMAND_PREFIX_LEN - 1))).toBeNull();
-  });
-});
-
-// ===== detectCommandFromText =====
-
-describe("detectCommandFromText", () => {
-  const commands = [
-    { name: "refactor", template: "# Refactor\n\nYou are doing a focused refactoring session." },
-    { name: "deploy", template: "# Deploy\n\nDeploy the project to production using ./scripts/deploy.sh." },
-    { name: "component", template: "Create a new React component named $ARGUMENTS with TypeScript." },
-    { name: "short", template: "$1 foo" }, // prefix too short, ignored
-  ];
-
-  it("returns null for empty / missing text", () => {
-    expect(detectCommandFromText("", commands)).toBeNull();
-    expect(detectCommandFromText(undefined as unknown as string, commands)).toBeNull();
-  });
-
-  it("returns null when no command matches", () => {
-    expect(detectCommandFromText("Just a plain user prompt.", commands)).toBeNull();
-  });
-
-  it("matches a no-argument command on full template equality", () => {
-    expect(detectCommandFromText(commands[0].template!, commands)).toBe("refactor");
-  });
-
-  it("matches a placeholder command on its static prefix", () => {
-    expect(
-      detectCommandFromText("Create a new React component named Button with TypeScript.", commands),
-    ).toBe("component");
-  });
-
-  it("ignores commands whose prefix is too short", () => {
-    // The "short" command has a sub-MIN_COMMAND_PREFIX_LEN prefix and must
-    // not match arbitrary user prompts that happen to start similarly.
-    expect(detectCommandFromText("any text whatsoever", commands)).toBeNull();
-  });
-
-  it("picks the longest matching prefix when multiple commands would match", () => {
-    const overlap = [
-      { name: "general", template: "# Header line that is long enough." },
-      { name: "specific", template: "# Header line that is long enough. With more detail here." },
-    ];
-    // Text matches both prefixes; the more specific one wins.
-    const text = "# Header line that is long enough. With more detail here. and trailing text";
-    expect(detectCommandFromText(text, overlap)).toBe("specific");
-  });
-
-  it("returns null for empty commands list", () => {
-    expect(detectCommandFromText("# Refactor\n\nYou are doing...", [])).toBeNull();
-  });
-
-  it("skips commands without a template", () => {
-    const noTemplate = [{ name: "x" }, { name: "refactor", template: commands[0].template }];
-    expect(detectCommandFromText(commands[0].template!, noTemplate)).toBe("refactor");
-  });
-});
-
 // ===== isAssistantTurnComplete =====
 //
 // Regression: SSE UI completion gap. The spinner is cleared only by live
@@ -1154,68 +1047,6 @@ describe("detectCommandFromText", () => {
 // behind the dead turn. This helper drives `running` true at mount so the
 // abort button appears.
 
-
-describe("shouldAbortForQueuedDrain", () => {
-  it("aborts at a step boundary when a prompt is queued and not already draining", () => {
-    expect(shouldAbortForQueuedDrain(1, false)).toBe(true);
-    expect(shouldAbortForQueuedDrain(3, false)).toBe(true);
-  });
-
-  it("does nothing when the queue is empty", () => {
-    expect(shouldAbortForQueuedDrain(0, false)).toBe(false);
-  });
-
-  it("does not re-fire while a drain-abort is already in flight (re-entrancy guard)", () => {
-    // Several session.next.step.ended events can arrive before the abort POST
-    // lands; only the first should issue the abort.
-    expect(shouldAbortForQueuedDrain(1, true)).toBe(false);
-    expect(shouldAbortForQueuedDrain(5, true)).toBe(false);
-  });
-});
-
-describe("isToolStepBoundary", () => {
-  it("is true for a completed tool part (the real mid-turn step boundary)", () => {
-    expect(isToolStepBoundary({ type: "tool", state: { status: "completed" } })).toBe(true);
-  });
-
-  it("is true for an errored tool part (turn is about to recover/continue)", () => {
-    expect(isToolStepBoundary({ type: "tool", state: { status: "error" } })).toBe(true);
-  });
-
-  it("is false for a tool part still pending/running (not a boundary yet)", () => {
-    expect(isToolStepBoundary({ type: "tool", state: { status: "pending" } })).toBe(false);
-    expect(isToolStepBoundary({ type: "tool", state: { status: "running" } })).toBe(false);
-  });
-
-  it("is false for non-tool parts (text/reasoning stream mid-step)", () => {
-    expect(isToolStepBoundary({ type: "text", state: { status: "completed" } })).toBe(false);
-    expect(isToolStepBoundary({ type: "reasoning", state: { status: "completed" } })).toBe(false);
-  });
-
-  it("is false for malformed / missing input", () => {
-    expect(isToolStepBoundary(null)).toBe(false);
-    expect(isToolStepBoundary(undefined)).toBe(false);
-    expect(isToolStepBoundary({})).toBe(false);
-    expect(isToolStepBoundary({ type: "tool" })).toBe(false);
-    expect(isToolStepBoundary("tool")).toBe(false);
-  });
-});
-
-describe("isDrainAbortError", () => {
-  it("swallows the MessageAbortedError produced by our own drain-abort", () => {
-    expect(isDrainAbortError("MessageAbortedError", true)).toBe(true);
-  });
-
-  it("does NOT swallow a manual abort (draining=false) — that error is real to the user", () => {
-    expect(isDrainAbortError("MessageAbortedError", false)).toBe(false);
-  });
-
-  it("never swallows other error names even while draining", () => {
-    expect(isDrainAbortError("ApiError", true)).toBe(false);
-    expect(isDrainAbortError("ContextOverflowError", true)).toBe(false);
-    expect(isDrainAbortError(undefined, true)).toBe(false);
-  });
-});
 
 describe("isUnknownChannelError", () => {
   it("matches the exact message manta-server's rpc dispatcher throws", () => {

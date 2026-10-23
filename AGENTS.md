@@ -704,8 +704,8 @@ suppression logic lives in `classifyPushEvent` / `firePush`.
     both devices immediately, mobile suppressed only when the phone is
     foregrounded on that same session. Do not touch it.
   - **EXCEPTION — `MessageAbortedError` never pushes.** `classifyPushEvent`'s
-    `session.error` branch returns `null` for `MessageAbortedError` (user abort
-    or the queued-message drain). Do NOT regress: the name-check is the server's
+    `session.error` branch returns `null` for `MessageAbortedError` (a user Stop or
+    an internal interrupt). Do NOT regress: the name-check is the server's
     only signal. Regression test in `src/server/push.test.mjs`.
   - Observability: the server logs `[push] desktop-presence idle=…s locked=…`
     on each heartbeat and `[push] route kind=… sid=… → desktop=… mobileNow=…
@@ -1472,72 +1472,66 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
     BOTH classes.
   When adding a route, decide the class first; a class-1 conversion needs
   the safe literal + warn, a class-2 route needs the marker comment.
-- **Queued message drain — abort at the next step boundary, then submit on
-  idle.** When the user submits while `running` is true, the text gets pushed
-  to `messageQueue` and the input clears. MantaUI does NOT wait for the whole
-  (possibly many-step) turn to finish: the moment a prompt is queued, the
-  next mid-turn **step boundary** triggers a **drain-abort**
-  (`maybeDrainQueuedPrompt` in ChatPanel, gated by `shouldAbortForQueuedDrain`
-  in `chatUtils.ts`) — `window.api.opencodeAbort` on the in-flight turn. The
-  abort flips the session idle, and the existing `[running, messageQueue]`
-  effect submits the queued prompt as a fresh turn via `submit()` (so slash
-  commands, attachments, and model resolution all go through the normal path).
+- **Messages sent while the agent is working — native steer + the server
+  inbox (no abort, no client queue).** When the user submits while `running`
+  is true, the message is delivered INTO the running turn by opencode itself:
+  `opencodePrompt(..., { delivery: "steer" })` / `opencodeRunCommand({ ...,
+  delivery: "steer" })` (`POST /api/session/{id}/prompt|command` with
+  `delivery`). V2 injects it at the turn's next step, so the agent reads it
+  without waiting for the whole turn and **nothing is aborted**. This replaced
+  the old drain (abort at the next tool boundary + a client `messageQueue` +
+  a `[running, messageQueue]` drain effect + `isDrainAbortError` suppression);
+  all of that is deleted — do NOT reintroduce an abort-to-send or a client-side
+  queue. Server side: `src/server/opencode.mjs` forwards `delivery` and, when
+  it is set, SKIPS `syncSessionControls` (a steered message never switches the
+  session's model/agent mid-turn; the pickers apply from the next idle send).
+  For the CTO conversation `delivery` is dropped — admission owns ordering
+  there, and the CTO surface passes `inbox: false` to `useSseBus`.
 
-  **What counts as a "step boundary" — the box's `toolBoundary` frame (also
-  `stepEnded`).** The renderer consumes only box-interpreted `stream` frames
-  (`src/renderer/hooks/useSseBus.ts`); it never sees raw opencode events. The box
-  (`src/server/streamInterp.mjs`) emits `toolBoundary` when a tool reaches a
-  terminal state (V2 `session.tool.success` / `.failed`) and `stepEnded` on
-  `session.step.ended`; both call `maybeDrainQueuedPrompt` (idempotent via
-  `drainAbortRef`). The older events-based triggers (`message.part.updated`
-  tool parts, `session.next.step.ended`) are gone with the V1 event
-  vocabulary. If the drain regresses to "waits for whole turn", check that the
-  box still emits those two frames for the turn.
+  **The busy send is its own path** (`sendWhileBusy` in `ChatPanel.tsx`, the
+  pure decisions in `src/renderer/inboxState.ts`), not the idle `submit()`:
+  it never touches `running`, adds no optimistic transcript row (the pending
+  card shows the message until it is delivered), and applies no model/agent.
+  Local slash commands (`/clear`, `/fork`, `/compact`, `/help`) are REFUSED
+  with a visible message ("Stop the agent or wait for it to finish before
+  /clear"); an opencode `/name args` goes as a steered command. One busy send
+  is in flight per panel (a second Enter is ignored; the Send button is
+  disabled). The composer is cleared only AFTER the box accepted the message,
+  and only if it still holds exactly the submitted draft — otherwise just the
+  submitted attachments are removed and the user's newer text stays; on failure
+  nothing is cleared and the error is shown. A pending **question** is rejected
+  first, awaited (`rejectPendingQuestions` in `useSseBus.ts`; a card is removed
+  only once ITS rejection succeeded); if that fails NOTHING is sent and the
+  error is shown. A pending permission is left alone.
 
-  The abort is `window.api.opencodeAbort` → V2 `POST
-  /api/session/{id}/interrupt?resume=false`, and the box surfaces it as an
-  **`aborted` frame** (from `session.execution.interrupted`), never as a
-  `sessionError`. The abort is made INVISIBLE to the user:
-  - `drainAbortRef` is set when the drain-abort POSTs. It guards re-entrancy
-    (several boundary frames can arrive before the abort lands — only the
-    first fires) AND tags the resulting `aborted` frame.
-  - The `aborted` frame handler swallows it silently via
-    `isDrainAbortError("MessageAbortedError", drainAbortRef.current)` — no
-    "Aborted" banner. It just flips `running` false so the drain effect runs.
-    An abort the user triggered (`drainAbortRef` false) shows the banner.
-  - The drain effect re-arms `drainAbortRef = false` before submitting, so a
-    SECOND queued item can again abort the freshly-submitted turn at its next
-    step boundary (FIFO, each interrupting at a tool boundary).
+  **The pending card is the box's `inbox` frame, not local state.** The "⏳
+  queued" ambient card lists `inboxItems` — the box interpreter's FULL list of
+  pending user messages for the session (`{epoch, rev, items}`), so it survives
+  a reload and shows on a second desktop. It is seeded by `opencode:inbox` on
+  open and on every `resync` (the client-synthesised events-reconnect frame).
+  **Acceptance rule (K3, `acceptInbox` / `createInboxTracker`):** per session
+  keep the `{epoch, rev}` shown plus a client-wide set of retired epochs; the
+  same epoch replaces only with a higher `rev`; a new non-retired epoch (a
+  restarted server) replaces and retires the old one; a retired epoch's payload
+  is always dropped; an RPC answer requested before the latest `resync` is
+  dropped (a late reply from a dead server must not overwrite the new one); and
+  an answer arriving after the panel moved to another session is dropped (the
+  tracker is disposed with the effect). Clients never build the list from raw
+  events. Each row has an **×** and the composer's ↑-on-empty pops the newest:
+  both call `opencode:inbox-cancel`, whose outcome comes from authoritative
+  evidence only — `cancelled` (the text goes back to the composer for pop-last;
+  an attachments note says to re-attach), `delivered` ("Already sent to the
+  agent"), `unknown` ("Couldn't confirm it was cancelled — it may still be
+  sent", and NOTHING is restored, since restoring could make the user send it
+  twice). `describeInboxCancel` owns that mapping. Every branch reports.
 
-  This REPLACES the older "drain ONLY on idle, never mid-turn" rule: posting a
-  prompt mid-turn WITHOUT a preceding explicit abort makes opencode abort
-  implicitly and mark the assistant message aborted. The fix is the explicit
-  abort + `isDrainAbortError` suppression — NOT avoiding mid-turn sends. Do NOT
-  reintroduce an idle-only drain. The partial assistant output generated
-  before the abort legitimately stays in the transcript; only the abort
-  *indication* is hidden. The predicates (`shouldAbortForQueuedDrain`,
-  `isDrainAbortError`) are pure + tested in `chatUtils.test.ts`. (V2's native
-  `delivery: "steer" | "queue"` would make this machinery unnecessary; adopting
-  it is deliberately a later change.)
-
-  **The drain effect is the SOLE owner and lives in `useSseBus.ts` — do NOT
-  duplicate it.** The BET-64 hook extraction left an IDENTICAL
-  `[running, messageQueue]` drain effect in BOTH `useSseBus.ts` AND
-  `ChatPanel.tsx`. Both fired on the same `running→false` edge against the
-  shared `messageQueue` + `submitRef`, submitting the same queued prompt
-  **TWICE** ("queued message sent twice"). The ChatPanel copy was removed;
-  a `no double send` regression test in `useSseBus.test.tsx` guards it.
-
-  **Ordering inside the drain effect is load-bearing:** `setInput(queued)`
-  runs synchronously in the effect body, and ONLY the `submitRef.current()`
-  call is deferred to `setTimeout(0)`. `submit()` reads `input` from its
-  render closure (not a ref), so the deferred submit must run AFTER the
-  input-set re-render has reassigned `submitRef.current` to a fresh closure.
-  The hook version originally did `setInput(queued); submitRef.current()`
-  BOTH inside the timeout back-to-back — no re-render gap — so submit read
-  the stale empty input and **silently dropped the queued prompt**
-  (a contributor to "queued messages seem to wait / never send"). Do NOT
-  collapse `setInput` back into the timeout next to the submit call.
+  **Stop is unchanged for the user.** Esc / the stop button →
+  `opencodeAbort` → V2 `POST /api/session/{id}/interrupt?resume=true`: the turn
+  stops (the box's `aborted` frame shows the "Aborted" notice, as always) and
+  pending *steering* input then runs as the next turn; *queued* prompts stay
+  parked. Internal callers of the abort path keep `resume=false`. Nothing in the
+  renderer issues an abort any more except the user's Stop, so the `aborted`
+  frame is always shown.
 - **TodoWrite checklist auto-dismissal** — when every item in the pinned
   `ActiveTodos` is terminal (`completed` or `cancelled`) at the moment the
   user submits their next prompt, `todosDismissed` flips true and the card
@@ -1864,9 +1858,13 @@ what the implementation depends on.
     the card.
   - `retry` — drives the `RetryCard` (`attempt`, `message`, optional `action`);
     cleared on the next running/step frame.
-  - `commandExecuted` — populates `commandByMessageId` so `MessageRow` shows the
-    collapsed `› ▸ /name args` `UserCommandBar` instead of the expanded skill
-    template as the user's turn.
+  - `commandExecuted` — `{messageID, name, arguments}` for a slash command's USER
+    message, emitted by the box once it has attributed that message (see
+    "Command origin" below); populates `commandByMessageId` so `MessageRow`
+    shows the collapsed `› ▸ /name args` `UserCommandBar` instead of the
+    expanded template as the user's turn.
+  - `inbox` — the full pending-message list (see "Messages sent while the agent
+    is working"); applied under the epoch/rev acceptance rule.
   - `questions` / `permissions` / `attention` — the Question and Permission
     cards and the sidebar badge.
   - `childSession` / `subagent.child` — subagent wiring (see "Subagent rendering").
@@ -1897,13 +1895,27 @@ and fall back to the message scan:
   see `/vcs` note above)
 - `finishByMessageId` is pure state (from `truncation` frames) — survives refetch because the canonical messages
   payload doesn't carry per-step finish metadata.
-- `commandByMessageId` is pure state (from the `commandExecuted` frame) — same
-  reason: the canonical messages payload has no command-origin field, so
-  re-fetch can't restore the `/name args` collapsed view.
+- `commandByMessageId` is pure state (from the `commandExecuted` frame) — it
+  covers the moment between the frame and the next refetch; the durable source
+  is `info.command` on the message itself (below).
 When adding a new live-event consumer in ChatPanel, follow the same shape:
 `useState` reset on session change, set in the frame handler, consumed via a
 `liveX ?? transcript-derived` selector. Don't try to mutate messages
 in-place — the canonical refetch will overwrite you.
+
+**Command origin — recorded by the box, not guessed by the renderer.** V2
+stores a slash command's message as a plain user message holding the expanded
+template, with no marker (and `GET /api/command` returns no template). The box
+therefore records, per command it runs, which user message came from which
+`/name args` (`src/server/commandOrigins.mjs`, durable), and stamps
+`info.command = { name, arguments }` onto that message in `opencode:messages` /
+`opencode:message`; it also emits the `commandExecuted` frame. `userCommandInfo`
+(ChatPanel, panel-scope memo) prefers `info.command`, then the live
+`commandByMessageId` entry for the USER message id. There is NO text-matching
+fallback any more (`detectCommandFromText` / template-prefix matching are
+deleted: V2 has no templates). A command message the box could not attribute
+unambiguously is deliberately left untagged and shows its full text — wrong
+attribution is worse than none, so do not add a renderer-side heuristic.
 
 **ContextBar — lives in the SessionHeader (`SessionHeader.tsx`, the row at
 the top of the pane), not the composer footer.** What AGENTS.md calls the
@@ -2023,44 +2035,23 @@ sits on its own row beneath the footer. Status that describes the SESSION
 (branch, context pill, stale-cache warning, fork/compact/clear/delete) lives
 in the SessionHeader, not here — BET-415's organising split.
 
-**Buffered text-delta streaming.** *(V2 note: V2's deltas are phrase-level and
-the box forwards them as `flush`/`messageChanged` frames; the renderer-side
-buffer below is kept for frame semantics and is a Phase-6 deletion candidate.
-The event names in the force-flush list are the V1 ones — read them as "the
-equivalent frame".)* opencode emitted `message.part.delta`
-events ~character-by-character for text/reasoning parts. The naive
-"setMessages on every delta" policy produces visible markdown jitter:
-bullets appear before their content, code fences flash as inline-code
-before closing, Prism re-tokenizes a growing code block on every
-keystroke. Instead, deltas accumulate in `pendingDeltas: Map<partID,
-{messageID, field, text}>` (a ref in ChatPanel) and flush at section
-boundaries computed by the pure `findFlushBoundary(buffer)` helper in
-`chatUtils.ts`:
+**Text-delta streaming (V2: phrase-level, no renderer buffer).** V2 emits text
+deltas at phrase level, not character-by-character, so the old renderer-side
+buffering (accumulate deltas, flush on paragraph / closed-fence boundaries with
+a max-age fallback, force-flush before refetches) is gone — do not reintroduce
+it. The box interpreter (`src/server/streamInterp.mjs`, "V2 deltas are
+phrase-level: no buffering") forwards each delta as a `flush` frame
+`{messageID, partID, field, text}`, and `useSseBus` applies it directly through
+`applyStreamFlush` (`useTranscriptState.ts`), which splices the text into the
+loaded part with the pure `mergeBufferedDeltas` (`src/shared/streamInterpretation.mjs`).
 
-- Paragraph breaks (`\n\n`) **outside** an open code block.
-- The newline immediately after a closing ` ``` ` fence (so whole code
-  blocks appear at once — no half-formed fence rendered as inline code).
-- The largest valid boundary wins (deepest flushable prefix).
-- 250ms max-age fallback (FLUSH_MAX_AGE_MS) so a single long paragraph
-  doesn't stall.
-
-Force-flushed on: `session.next.step.ended` (step narration complete —
-flush before next step starts), `message.part.updated` /
-`session.idle` / `session.status` / `session.compacted` /
-`session.error` / `message.updated` (BEFORE the refetch, otherwise the
-canonical-transcript pull races the buffer's max-age timer and the
-trailing paragraph gets discarded), and on session change / unmount.
-
-Race tolerance: if a delta arrives before the part's `message.part.updated`
-snapshot (so `mergeBufferedDeltas` reports the partID as unmatched), the
-flush scheduler triggers `scheduleRefetch()` and the buffered text waits
-for the next flush — the refetch creates the part in state, the next
-flush merges the buffer cleanly.
-
-Pure logic (`findFlushBoundary`, `mergeBufferedDeltas`) lives in
-`chatUtils.ts` with full unit-test coverage including the tricky cases
-(open code block suppresses `\n\n` boundaries, empty code block, multiple
-fences in one buffer, inline backticks don't toggle fence state).
+Race tolerance: if a `flush` arrives before the part's snapshot is loaded
+(`mergeBufferedDeltas` reports the partID as unmatched), the handler calls
+`scheduleRefetch()`; the refetch creates the part, and the next frame merges
+cleanly. A panel that is not the active one records `refetchOwedWhileInactive`
+instead of re-rendering a transcript nobody sees, and catches up on
+re-activation. `messageChanged` frames (coalesced to ≤1 per message per 100 ms)
+drive the targeted per-message refetch for everything that is not streamed text.
 
 **Transcript row memoization — REQUIRED for input perf.** The chat
 input's `input` state lives in `ChatPanel`, so every keystroke

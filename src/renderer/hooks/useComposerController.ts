@@ -22,19 +22,18 @@
 // PARAMETERISED OVER EXACTLY WHAT DIFFERS, AND NOTHING ELSE:
 //   - `submit` / `abort` / `running` / `refreshing` / `sendError` — the send
 //     transport and its status, host-owned. A session composer wires these to
-//     opencode + its client-side queue; the CTO conversation wires them to the
+//     opencode (messages sent mid-turn are steered into it and listed from the box's inbox); the CTO conversation wires them to the
 //     durable server-side admission seam (docs/cto-admission-contract.md).
 //     The CTO chat can use the SAME send CALL as a session because
 //     `src/server/ctoConversation.mjs` already reroutes an `opencode:prompt`
 //     aimed at the CTO session through the admission queue — but its rich
 //     per-state errors are host-owned, so `sendError` is supplied, not owned.
-//   - Queue semantics (the ONE real divergence). A session composer owns a
-//     CLIENT-side queue and pops the last queued message back into the box
-//     (`onQueuePop`). The CTO conversation's queue is SERVER-owned and
-//     deliberately NOT client-drainable — its `onQueuePop` is a no-op and it
+//   - Pending-message semantics (the ONE real divergence). A session composer
+//     pops the newest pending (inbox) message back into the box (`onQueuePop`).
+//     The CTO conversation's queue is SERVER-owned by the admission engine and
+//     deliberately NOT client-drainable — its `onQueuePop` is omitted and it
 //     renders the server's queue projection as pending bubbles itself. This
-//     hook keeps that difference explicit; it never gives the CTO a client
-//     queue nor strips the session's.
+//     hook keeps that difference explicit.
 //   - `historyScope` — prompt history is keyed by tmux session + window index
 //     (`historyKey` in chatShared). The CTO conversation has NO tmux window, so
 //     the host supplies a stable SYNTHETIC scope (a reserved sentinel session
@@ -138,12 +137,12 @@ export type ComposerControllerConfig = {
   onSchedules: () => void;
   onSecrets: () => void;
   onWebhooks: () => void;
-  // Pop the last CLIENT-queued message back into the box. Session: wired to
-  // the client queue, returning true IFF a queued item was actually popped.
+  // Pop the newest pending message back into the box. Session: wired to the
+  // pending-message inbox, returning true IFF there was an item to cancel.
   // CTO: omitted entirely (the queue is server-owned and not client-drainable).
   // Either way the shared ArrowUp gesture falls through to prompt history
-  // when nothing was popped — a surface with no client queue item never
-  // swallows the keypress.
+  // when nothing was popped — a surface with nothing pending never swallows
+  // the keypress.
   onQueuePop?: () => boolean;
   // Only the ACTIVE panel renders pending screenshots + drives the OS detector
   // toast. A hidden/secondary surface passes false so it neither shows nor
@@ -676,12 +675,12 @@ export function useComposerController(config: ComposerControllerConfig): Compose
     onTypeaheadCancel: () => setTypeaheadFromHook(null),
     onHistoryUp: () => navigateHistory(-1),
     onHistoryDown: () => navigateHistory(1),
-    // ArrowUp on an empty box while running (the queue-pop gesture, shared
-    // with InputArea): pop the client-queued message when the surface HAS
+    // ArrowUp on an empty box while running (the pop-last gesture, shared
+    // with InputArea): cancel the newest pending message when the surface HAS
     // one; otherwise the honest gesture is prompt history — exactly what the
     // same keypress does when idle. Never a swallowed no-op that also steals
-    // history from a surface whose queue is server-owned (the CTO) or whose
-    // client queue is momentarily empty (a session).
+    // history from a surface whose queue is server-owned (the CTO) or with
+    // nothing pending (a session).
     onQueuePop: () => {
       if (onQueuePop?.() === true) return;
       navigateHistory(-1);

@@ -48,7 +48,6 @@ import {
   buildTitleInstruction,
   sanitizeGeneratedTitle,
   findSessionTitle,
-  detectCommandFromText,
   type EntryMotionState,
   type StaleCacheResult,
   type PendingScrollWin,
@@ -112,7 +111,8 @@ import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, isReadOnlyJob } from "./chatUtils";
 import type { RowLocation } from "./toolActivity";
-import type { VoiceNoteRecord } from "../shared/types";
+import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
+import { describeInboxCancel, planBusySend, shouldClearDraft } from "./inboxState";
 import type { PendingVoiceNote } from "./VoiceNote";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
@@ -368,14 +368,13 @@ export function ChatPanel({
   // after useSseBus is constructed. Until then it is a harmless no-op.
   const setSendErrorRef = useRef<(v: string | null) => void>(() => {});
   const setSendErrorBridge = useCallback((v: string | null) => setSendErrorRef.current(v), []);
-  // Same bridge shape for the client-queue pop: the composer's ↑-on-empty pops
-  // the last CLIENT-queued message back into the box, but the message queue is
-  // owned by useSseBus (constructed after the controller). Assigned right after
-  // useSseBus; a no-op until then.
-  // The queue-pop gesture (ArrowUp on an empty box while running). Returns
-  // true IFF a queued item was popped — the shared controller falls through
-  // to prompt history when it didn't (an empty client queue must never
-  // swallow the keypress AND steal history).
+  // Same bridge shape for the pop-last gesture: the composer's ↑-on-empty
+  // cancels the newest pending (inbox) message and puts its text back in the
+  // box, but the inbox is owned by useSseBus (constructed after the
+  // controller). Assigned right after useSseBus; a no-op until then.
+  // Returns true IFF there was a pending item to pop — the shared controller
+  // falls through to prompt history when there wasn't (an empty inbox must
+  // never swallow the keypress AND steal history).
   const queuePopRef = useRef<() => boolean>(() => false);
   // Bumped after each submit so useInputHistory re-reads localStorage and the
   // freshly-persisted prompt becomes immediately cyclable (BET-257). The hook
@@ -448,11 +447,10 @@ export function ChatPanel({
     onSchedules: () => togglePanel("schedules"),
     onSecrets: () => togglePanel("secrets"),
     onWebhooks: () => togglePanel("webhooks"),
-    // The session composer owns a CLIENT-side queue — pop the last queued
-    // message back into the box, returning whether anything was popped (the
-    // shared controller falls through to prompt history on a miss).
-    // setMessageQueue is owned by useSseBus (below), so the pop is wired
-    // through a bridge assigned right after useSseBus.
+    // Pop the newest pending (inbox) message back into the box, returning
+    // whether there was one (the shared controller falls through to prompt
+    // history on a miss). The inbox is owned by useSseBus (below), so the pop
+    // is wired through a bridge assigned right after useSseBus.
     onQueuePop: () => queuePopRef.current(),
     isActive,
     historyEpoch,
@@ -620,8 +618,8 @@ export function ChatPanel({
     setSendError,
     authReconnect,
     openAuthReconnect,
-    messageQueue,
-    setMessageQueue,
+    inboxItems,
+    refreshInbox,
     permissions,
     setPermissions,
     questions,
@@ -638,7 +636,7 @@ export function ChatPanel({
     retryInfo,
     compactionState,
     compactionNotice,
-    rejectAllPendingQuestions,
+    rejectPendingQuestions,
     refreshPermissions,
     refreshQuestions,
     transcriptLoadError,
@@ -680,8 +678,6 @@ export function ChatPanel({
     applyStreamFlush,
     providerID,
     setPlanOn: syncPlan,
-    submit: () => {}, // placeholder — ChatPanel's submit is used below
-    submitRef,
   });
 
   // BET-1537 (W9): the verdict's inline reset — the W8 manual reset (clear +
@@ -706,32 +702,56 @@ export function ChatPanel({
   }, [verdictReset, verdictResetBusy, setSendError]);
 
 
+  // ===== Pending messages (V2 inbox) =====
+  // Cancel one pending message (K4) and report EVERY outcome. Never rejects.
+  // `restore` = the pop-last gesture: on `cancelled` the text goes back into
+  // the composer. The row × just removes the message (the row vanishing is its
+  // confirmation) but still reports `delivered` / `unknown`.
+  const [cancellingInboxIds, setCancellingInboxIds] = useState<ReadonlySet<string>>(() => new Set());
+  const cancellingInboxRef = useRef<Set<string>>(new Set());
+  const cancelInboxItem = useCallback(async (item: OpencodeInboxItem, restore: boolean) => {
+    if (cancellingInboxRef.current.has(item.id)) return;
+    cancellingInboxRef.current.add(item.id);
+    setCancellingInboxIds(new Set(cancellingInboxRef.current));
+    try {
+      const result = await window.api.opencodeInboxCancel({ sessionId, id: item.id });
+      const report = describeInboxCancel(result, item, { restore });
+      if (report.error) setSendError(report.error);
+      if (report.notice) useStore.getState().setSystemNotice(report.notice);
+      if (report.restoreText !== null) {
+        const text = report.restoreText;
+        setInput(text);
+        requestAnimationFrame(() => {
+          const el = inputRef.current;
+          if (!el) return;
+          el.focus();
+          el.setSelectionRange(text.length, text.length);
+        });
+      }
+      // `delivered` / `unknown` mean the list may be stale; the frame for a
+      // real change already arrived, so this is just a cheap reconcile.
+      if (result?.outcome !== "cancelled") refreshInbox();
+    } catch (e) {
+      setSendError(`Couldn't cancel the pending message: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      cancellingInboxRef.current.delete(item.id);
+      setCancellingInboxIds(new Set(cancellingInboxRef.current));
+    }
+  }, [sessionId, setSendError, setInput, inputRef, refreshInbox]);
+
   // Assign the composer controller's forward-declared bridges now that useSseBus
-  // has produced their real targets (setSendError, the client-side message
-  // queue). The controller (constructed above, before useSseBus) reaches these
-  // ONLY from callbacks, so wiring them here — not during the controller's
-  // render — is race-free.
+  // has produced their real targets (setSendError, the pending-message inbox).
+  // The controller (constructed above, before useSseBus) reaches these ONLY from
+  // callbacks, so wiring them here — not during the controller's render — is
+  // race-free.
   setSendErrorRef.current = setSendError;
   queuePopRef.current = () => {
-    // The setMessageQueue updater must stay pure (double-invoked under
-    // StrictMode). Compute the popped value inside it, then run the setInput +
-    // focus side effects AFTER — otherwise setInput and the rAF fire twice.
-    let last: string | undefined;
-    setMessageQueue((q) => {
-      if (q.length === 0) return q;
-      last = q[q.length - 1];
-      return q.slice(0, -1);
-    });
-    // Nothing queued → report the miss so the shared gesture falls through
-    // to prompt history instead of silently eating the keypress.
-    if (last === undefined) return false;
-    setInput(last);
-    requestAnimationFrame(() => {
-      const el = inputRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(last!.length, last!.length);
-    });
+    // Newest pending message that isn't already being cancelled. Nothing
+    // pending → report the miss so the shared gesture falls through to prompt
+    // history instead of silently eating the keypress.
+    const last = [...inboxItems].reverse().find((i) => !cancellingInboxRef.current.has(i.id));
+    if (!last) return false;
+    void cancelInboxItem(last, true); // reports every branch itself, never rejects
     return true;
   };
 
@@ -1240,6 +1260,115 @@ export function ChatPanel({
     refreshPermissions();
   }, [isActive, scheduleRefetch, refreshQuestions, refreshPermissions]);
 
+  // Why a set of attachments can't go to the active model, or null when they can.
+  // Refuse only what the model positively declares it cannot take. A file
+  // that maps to no media mode ("other") is refused on its own — that is a
+  // property of the file, not the model. But a modality check requires
+  // capability information to exist: when we know nothing, we send and let
+  // the provider answer, rather than asserting "accepted: none". Shared by the
+  // idle send and the busy (steer) send so they cannot drift.
+  const unsupportedAttachmentsMessage = useCallback(
+    (ready: Array<{ filename: string; mime: string }>): string | null => {
+      if (ready.length === 0) return null;
+      const modes = modelInputModes(activeModel);
+      const unsupported = ready
+        .map((a) => ({ filename: a.filename, mime: a.mime, mode: mimeToInputMode(a.mime) }))
+        .filter((a) => a.mode === "other" || !acceptsModality(activeModel, a.mode));
+      if (unsupported.length === 0) return null;
+      const detail = unsupported.map((u) => `${u.filename} (${u.mime})`).join(", ");
+      return `${currentModelName} doesn't accept ${detail}. Accepted: ${
+        modes.filter((m) => m !== "text").join(", ") || "none"
+      }.`;
+    },
+    [activeModel, currentModelName],
+  );
+
+  // ===== Busy send (cleanup spec §2) =====
+  // A message sent while the agent is working is delivered INTO the running
+  // turn by opencode (V2 steer) and listed in the pending card from the box's
+  // inbox. It is its own path, not the idle submit(): it never touches
+  // `running`, adds no optimistic transcript row, applies no model/agent
+  // (those take effect from the next idle send), and clears the composer only
+  // after the box accepted it. One in flight per panel.
+  const busyInFlightRef = useRef(false);
+  const [busySending, setBusySending] = useState(false);
+  const sendWhileBusy = useCallback(async (args: {
+    text: string;
+    /** The composer text being submitted; null when the text came from an override (voice, /clear bridge), so there is no composer draft to clear. */
+    draft: string | null;
+    submitAttachments: Attachment[];
+  }) => {
+    if (busyInFlightRef.current) return; // a second Enter while one is in flight: no side effect
+    const { text, draft, submitAttachments } = args;
+    const plan = planBusySend(text, MANTA_BUILTIN_NAMES, commandsRef.current);
+    if (plan.kind === "refuse") {
+      setSendError(plan.message);
+      return;
+    }
+    // Only media chips become multimodal FileParts; path-ref chips were
+    // already folded into `text`.
+    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
+    const readyAttachments = sentAttachments
+      .filter((a) => !a.asPathRef)
+      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const unsupported = unsupportedAttachmentsMessage(readyAttachments);
+    if (unsupported) {
+      setSendError(unsupported);
+      return;
+    }
+    busyInFlightRef.current = true;
+    setBusySending(true);
+    try {
+      // A pending question blocks the turn: dismiss it first (awaited). On any
+      // failure NOTHING is sent and the composer keeps its text + attachments.
+      const dismissed = await rejectPendingQuestions();
+      if (!dismissed.ok) {
+        setSendError(dismissed.error ?? "Couldn't dismiss the pending question");
+        return;
+      }
+      setSendError(null);
+      appendPromptHistory(tmuxSession, windowIndex, text);
+      setHistoryEpoch((e) => e + 1);
+      if (plan.kind === "command") {
+        await window.api.opencodeRunCommand({
+          sessionId,
+          command: plan.name,
+          arguments: plan.args,
+          attachments: readyAttachments,
+          delivery: "steer",
+        });
+      } else {
+        const resolvedMentions = resolveAgentMentions(text, agentMentions);
+        await window.api.opencodePrompt(
+          sessionId,
+          text,
+          undefined,
+          readyAttachments,
+          resolvedMentions.length > 0 ? resolvedMentions : undefined,
+          undefined,
+          { delivery: "steer" },
+        );
+      }
+      // Accepted. Clear only what was submitted: the chips always; the text
+      // only if the composer still holds exactly the submitted draft.
+      if (sentAttachments.length > 0) {
+        const ids = new Set(sentAttachments.map((a) => a.id));
+        setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
+      }
+      if (shouldClearDraft(draft, inputRef.current?.value ?? "")) {
+        setInput("");
+        setAgentMentions([]);
+      }
+      refreshInbox();
+    } catch (e) {
+      // Nothing cleared: the draft and its attachments stay for another try.
+      setSendError(String((e as Error)?.message ?? e));
+    } finally {
+      busyInFlightRef.current = false;
+      setBusySending(false);
+    }
+  }, [sessionId, tmuxSession, windowIndex, agentMentions, unsupportedAttachmentsMessage, rejectPendingQuestions, refreshInbox, setAttachments, setInput, setAgentMentions, setSendError, inputRef]);
+
   const submit = useCallback(async (textOverride?: string, attachmentsOverride?: Attachment[]) => {
     const submitAttachments = attachmentsOverride ?? attachments;
     // Block submit while any attachment is still uploading.
@@ -1260,23 +1389,20 @@ export function ChatPanel({
     // mid-turn must apply to the turn that actually runs (BET-949). Only send
     // it when plan is genuinely available AND on.
     const planAgent = plan.available && plan.on ? plan.agent : undefined;
-    // Record the prompt into the per-window localStorage list BEFORE the
-    // running-queue early-return so queued prompts also persist (a queued
-    // prompt still belongs to this tmux window — `/clear` shouldn't lose it).
-    // epoch bump drives useInputHistory to re-read storage on its next render.
-    appendPromptHistory(tmuxSession, windowIndex, text);
-    setHistoryEpoch((e) => e + 1);
-    // If the AI is already running, push to the queue instead of aborting.
+    // The AI is already working: deliver into the running turn (steer). Its own
+    // path — see sendWhileBusy.
     if (running) {
-      setMessageQueue((q) => [...q, text]);
-      setInput("");
-      // Drop path-ref chips so they aren't appended a second time on next submit.
-      if (pathRefAttachments.length > 0) {
-        const ids = new Set(pathRefAttachments.map((a) => a.id));
-        setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
-      }
+      await sendWhileBusy({
+        text,
+        draft: textOverride === undefined ? input : null,
+        submitAttachments,
+      });
       return;
     }
+    // Record the prompt into the per-window localStorage list. epoch bump
+    // drives useInputHistory to re-read storage on its next render.
+    appendPromptHistory(tmuxSession, windowIndex, text);
+    setHistoryEpoch((e) => e + 1);
     setSendError(null);
     setRunning(true); // optimistic — session.status will confirm
     setInput("");
@@ -1363,25 +1489,15 @@ export function ChatPanel({
     // property of the file, not the model. But a modality check requires
     // capability information to exist: when we know nothing, we send and let
     // the provider answer, rather than asserting "accepted: none".
-    if (readyAttachments.length > 0) {
-      const modes = modelInputModes(activeModel);
-      const unsupported = readyAttachments
-        .map((a) => ({ filename: a.filename, mime: a.mime, mode: mimeToInputMode(a.mime) }))
-        .filter((a) => a.mode === "other" || !acceptsModality(activeModel, a.mode));
-      if (unsupported.length > 0) {
+    {
+      const unsupported = unsupportedAttachmentsMessage(readyAttachments);
+      if (unsupported) {
         setRunning(false);
         // Strip the optimistic user message — the send is being refused.
         setMessages((prev) =>
           prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
         );
-        const detail = unsupported
-          .map((u) => `${u.filename} (${u.mime})`)
-          .join(", ");
-        setSendError(
-          `${currentModelName} doesn't accept ${detail}. Accepted: ${
-            modes.filter((m) => m !== "text").join(", ") || "none"
-          }.`,
-        );
+        setSendError(unsupported);
         return;
       }
     }
@@ -1547,7 +1663,7 @@ export function ChatPanel({
     // (clear/fork/compact) are read via their ref mirror below (declared after
     // submit in this file — the established commandsRef pattern) so submit
     // always sees their current value without them re-rotating this callback.
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted]);
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted, sendWhileBusy, unsupportedAttachmentsMessage]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -1638,15 +1754,6 @@ export function ChatPanel({
     };
   }, [seedPrompt, setInput]);
 
-  // When the AI goes idle (running flips false) and there are queued
-  // messages, dispatch the next one. We restore it into `input` and call
-  // NOTE: the queued-message drain effect (submit next queued prompt when
-  // running flips false) lives in useSseBus (useSseBus.ts). It used to be
-  // ALSO duplicated here — both effects fired on the same running→false
-  // transition against the shared messageQueue/submitRef and submitted the
-  // same queued item TWICE. The duplicate was removed; the hook's effect is
-  // the single owner. Do NOT reintroduce a drain effect here.
-
   const abort = useCallback(async () => {
     try {
       await window.api.opencodeAbort(sessionId);
@@ -1655,9 +1762,12 @@ export function ChatPanel({
     }
     // Any question that was blocking this turn is dead now — reject it
     // server-side so it can't re-latch the sidebar's stale "?" glyph on a
-    // later replay (BET-116). Best-effort; the helper never throws.
-    rejectAllPendingQuestions();
-  }, [sessionId, rejectAllPendingQuestions]);
+    // later replay (BET-116). Cleanup, not the user's request: a card whose
+    // rejection failed simply stays on screen (it is only removed on success).
+    void rejectPendingQuestions().then((r) => {
+      if (!r.ok) console.warn("[abort] pending question cleanup failed:", r.error);
+    });
+  }, [sessionId, rejectPendingQuestions]);
 
   // Permissions/questions replies — the ONE shared implementation
   // (makePermissionReplyHandler / makeQuestionReplyHandler in chatShared),
@@ -2311,57 +2421,36 @@ export function ChatPanel({
     }
   }, [liveProgress, sessionId]);
 
-  // Slash-command provenance per USER message id. Two-source resolution:
+  // Slash-command provenance per USER message id. Two sources:
   //
-  //   (1) Live: opencode emits `command.executed.messageID` pointing at the
-  //       ASSISTANT message the command kicked off. The expanded user
-  //       message sits at messages[idx], the assistant at messages[idx+1].
-  //       So a user message is command-origin when the NEXT message's id
-  //       is in `commandByMessageId`.
-  //   (2) Historical: live events only fire for commands invoked during
-  //       this panel's lifetime. For older transcripts, detect by matching
-  //       the user-message text against the static prefix of every known
-  //       command template (`detectCommandFromText`). When the live map
-  //       doesn't have it, fall back to this.
+  //   (1) The box's durable command-origin record, stamped onto the message as
+  //       `info.command` (K6) — survives a reload and is what history shows.
+  //   (2) The live `commandExecuted` frame (`commandByMessageId`), keyed by the
+  //       USER message id the frame names — covers the moment between the frame
+  //       and the next transcript refetch.
   //
-  // This memo MUST live at panel scope (NOT inside messages.map), because
-  // the map runs on every keystroke (the InputArea's `input` state lives
-  // in ChatPanel and forces a re-render). The map callback used to
-  // recompute `userText` and call `detectCommandFromText` for every user
-  // message every render — O(user_messages × commands) per keystroke and
-  // a fresh `{name, arguments}` object that defeated React.memo on
-  // MessageRow. The memo's key is the user-message id; lookup inside the
-  // map is O(1) and the returned object is stable across renders.
+  // V2 has no command templates and emits no command.executed of its own, so
+  // there is no text-matching fallback: a command message the box could not
+  // attribute simply shows its full text.
+  //
+  // This memo MUST live at panel scope (NOT inside messages.map), because the
+  // map runs on every keystroke (the InputArea's `input` state lives in
+  // ChatPanel and forces a re-render). The memo's key is the user-message id;
+  // lookup inside the map is O(1) and the returned object is stable across
+  // renders (a fresh `{name, arguments}` per render would defeat React.memo on
+  // MessageRow).
   const userCommandInfo = useMemo<
     Map<string, { name: string; arguments: string }>
   >(() => {
     const out = new Map<string, { name: string; arguments: string }>();
     if (!messages) return out;
-    for (let i = 0; i < messages.length; i++) {
-      const m = messages[i];
+    for (const m of messages) {
       if (m.info.role !== "user") continue;
-      // (1) Live map first — most authoritative, has the run-time
-      // `arguments` string the historical-prefix match can't recover.
-      const nextMsg = messages[i + 1];
-      if (nextMsg && nextMsg.info.role === "assistant") {
-        const live = commandByMessageId.get(nextMsg.info.id);
-        if (live) {
-          out.set(m.info.id, live);
-          continue;
-        }
-      }
-      // (2) Historical fallback.
-      if (commands && commands.length > 0) {
-        const userText = m.parts
-          .filter((p) => p.type === "text" && !p.synthetic && !p.ignored)
-          .map((p) => p.text ?? "")
-          .join("\n");
-        const detected = detectCommandFromText(userText, commands);
-        if (detected) out.set(m.info.id, { name: detected, arguments: "" });
-      }
+      const origin = m.info.command ?? commandByMessageId.get(m.info.id);
+      if (origin) out.set(m.info.id, origin);
     }
     return out;
-  }, [messages, commandByMessageId, commands]);
+  }, [messages, commandByMessageId]);
 
   // BET-837: user-message-id → voice-note map. Passed to MessageRow exactly
   // like userCommandInfo — an O(1) Map lookup in messages.map, never an object
@@ -2810,14 +2899,25 @@ export function ChatPanel({
           <X size={14} aria-hidden="true" />
         </button>
       </div>));
-    if (running && messageQueue.length > 0) list.push(amb("queued",
+    if (inboxItems.length > 0) list.push(amb("queued",
       <MeasureColumn>
-        <div className="shrink-0 pb-2 flex flex-col text-meta text-text-faint" style={{ gap: "var(--block-gap)" }}>
-          {messageQueue.map((msg, i) => (
-            <div key={i} className="flex items-baseline gap-1">
+        <div className="shrink-0 pb-2 flex flex-col text-meta text-text-faint" style={{ gap: "var(--block-gap)" }} data-testid="inbox-card">
+          {inboxItems.map((item) => (
+            <div key={item.id} className="flex items-baseline gap-1" data-testid="inbox-row">
               <Clock size={14} aria-hidden="true" className="shrink-0 self-center" />
-              <span className="italic flex-1 truncate">{msg}</span>
-              <button onClick={() => setMessageQueue((q) => q.filter((_, j) => j !== i))} className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center" title="Remove from queue" aria-label="Remove from queue">
+              <span className="italic flex-1 truncate">{item.text}</span>
+              {item.attachmentCount > 0 && (
+                <span className="shrink-0">
+                  +{item.attachmentCount} attachment{item.attachmentCount === 1 ? "" : "s"}
+                </span>
+              )}
+              <button
+                onClick={() => void cancelInboxItem(item, false)}
+                disabled={cancellingInboxIds.has(item.id)}
+                className="ml-1 text-text-faint hover:text-text leading-none shrink-0 inline-flex items-center disabled:opacity-50"
+                title="Cancel this message"
+                aria-label="Cancel this message"
+              >
                 <X size={14} aria-hidden="true" />
               </button>
             </div>
@@ -2884,7 +2984,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, messageQueue, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setMessageQueue, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, inboxItems, cancellingInboxIds, cancelInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {
@@ -3120,9 +3220,10 @@ export function ChatPanel({
         // The send transport is ChatPanel's own — its `submit` is entangled with
         // routing / optimistic transcript / compaction and is NOT composer state,
         // so it is spread on top of the controller's ready-to-render bundle. The
-        // client-side queue pop (onQueuePop) is already wired in the controller
-        // config to ChatPanel's message queue via queuePopRef.
+        // pop-last gesture (onQueuePop) is already wired in the controller
+        // config to ChatPanel's pending-message inbox via queuePopRef.
         submit={submit}
+        sendBusy={busySending}
         abort={abort}
         running={running}
       />
