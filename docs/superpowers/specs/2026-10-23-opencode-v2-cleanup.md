@@ -71,11 +71,18 @@ never shown to clients.
 
 **K3 — `inbox` stream frame.** New sub `"inbox"` added to the stream sub union in
 `src/shared/types.ts`:
-`{ sub: "inbox", sessionId, payload: { rev: number, items: OpencodeInboxItem[] } }` —
-always the FULL current list of pending user items for that session, oldest first (empty
-list = nothing pending). `rev` is a per-session counter that increases on every change; a
-client keeps the payload with the highest `rev` it has seen for the session and ignores
-older ones (that is the stale-response rule for the RPC below too).
+`{ sub: "inbox", sessionId, payload: { epoch: string, rev: number, items: OpencodeInboxItem[] } }`
+— always the FULL current list of pending user items for that session, oldest first (empty
+list = nothing pending). `epoch` is a random id minted once per manta-server process; `rev`
+is a per-session counter within that epoch that increases on every change.
+
+**Client acceptance rule** (S2, pure + tested): for each session keep `{epoch, rev}` of the
+payload shown. A frame or RPC result with the SAME epoch replaces it only if its `rev` is
+higher. One with a DIFFERENT epoch always replaces it (a restarted server is newer by
+definition). An RPC response is dropped if it was requested before the most recent
+`resync` (the client-synthesised events-reconnect frame) — that is what stops a late
+answer from a dead server overwriting the new one. On `resync` the client refetches with
+`opencode:inbox`.
 
 The **interpreter is the single source of truth**; clients never build the list from raw
 events. Server algorithm (pure, unit-tested in isolation):
@@ -84,13 +91,17 @@ events. Server algorithm (pure, unit-tested in isolation):
   event for an unknown session, by `opencode:inbox` for an unknown session, and for every
   known session on reconnect resync (`resyncAfterReconnect`), which resets them to
   `unknown` first. One hydration in flight per session (shared promise).
-- While a hydration is in flight, inbox events for that session are recorded in a window
-  log. When the GET returns: start from its items, remove every id seen `delivered` or
-  `cancelled` in the window, add every `enqueued` item from the window not already present
-  (and not removed), apply `delivery.changed`. Set operations, so order inside the window
-  doesn't matter. Then `rev++` and emit.
-- Once `known`: `enqueued` (user items, from `data.item`) adds, `delivered` / `cancelled`
-  (by `data.inboxID`) remove, `delivery.changed` updates — each `rev++` + emit.
+- While a hydration is in flight, inbox events for that session are appended, **in
+  arrival order**, to a window log. When the GET returns: start from its items (V2 orders
+  them by enqueue sequence), then replay the window log in order with the same rules as
+  the `known` state below. Replay is idempotent: an `enqueued` id already present is
+  ignored; removing an absent id is a no-op; `delivery.changed` sets the value (last one
+  wins). Then `rev++` and emit.
+- A disconnect of the event stream while a hydration is in flight invalidates it: its
+  result is discarded and the session stays `unknown` (the reconnect resync re-hydrates).
+- Once `known`: `enqueued` (user items, from `data.item`) appends to the end;
+  `delivered` / `cancelled` (by `data.inboxID`) remove; `delivery.changed` sets the
+  item's delivery — each `rev++` + emit.
 - A failed hydration leaves the session `unknown`, emits nothing, and is retried on the
   next trigger.
 It is additive for iOS: the implementer must confirm every Swift `switch` over frame subs
@@ -98,7 +109,7 @@ falls through to a `default:` that ignores unknown subs (`MantaEventStore.swift`
 `ChatSessionStore.swift`).
 
 **K4 — inbox RPCs** (new channels in `rpc.mjs`, methods on `Api` + `httpApi.ts`):
-- `opencode:inbox` `(sessionId)` → `{ rev: number, items: OpencodeInboxItem[] }` — the
+- `opencode:inbox` `(sessionId)` → `{ epoch: string, rev: number, items: OpencodeInboxItem[] }` — the
   interpreter snapshot (hydrating first if `unknown`), never a raw pass-through.
 - `opencode:inbox-cancel` `({ sessionId, id })` →
   `{ outcome: "cancelled" | "delivered" | "unknown", item?: OpencodeInboxItem }`.
@@ -171,8 +182,12 @@ returned by `opencode:messages` / `opencode:message`. The live `commandExecuted`
     composer handles itself) are refused while running with a visible message ("Stop the
     agent or wait for it to finish before /clear") — never run mid-turn, never dropped
     silently.
-  - It never changes `running`. The composer clears only after the RPC resolves; on
-    failure the text and attachments stay and the error is shown.
+  - It never changes `running`. Send is disabled while a busy send is in flight (one
+    in flight per panel; a second Enter is ignored with no side effect). The submitted
+    draft (text + attachment list) is captured at submit; on success the composer is
+    cleared only if it still holds exactly that draft — otherwise only the submitted
+    attachments are removed and the user's newer text is left alone. On failure nothing is
+    cleared and the error is shown.
   - No optimistic transcript row: the pending card shows the message until delivery.
   - Model / agent pickers are not applied to a steered message (K1); they apply from the
     next idle send.
@@ -203,8 +218,8 @@ Delete, with their tests: `messageQueue` / `setMessageQueue` / `messageQueueRef`
 call site (`chatUtils.ts`, `useSseBus.ts`, `ChatPanel.tsx`). Replace with:
 - `inboxItems` state per session, set from the `inbox` frame, seeded by `opencode:inbox`
   on open and on `resync`.
-- `inboxItems` keeps the highest-`rev` payload per session (K3); a response or frame for a
-  session that is no longer the panel's session is dropped.
+- `inboxItems` follows the K3 client acceptance rule; a response or frame for a session
+  that is no longer the panel's session is dropped.
 - The busy-send path per §2 behaviour; idle submit is unchanged.
 - `rejectPendingQuestions` (awaited) replaces the fire-and-forget drain call.
 - The ambient card + pop-last + × per §2 behaviour. Every branch of every action is
@@ -227,12 +242,26 @@ stores a plain user message whose `text` is the expanded template, with no metad
    durable map `messageID → { name, arguments, sessionId, at }` in
    `statePath("command-origins.json")`, atomic writes, capped at 5,000 entries and 90 days
    (oldest evicted first).
-2. **Correlation rule — tag only when unambiguous, otherwise leave untagged** (an untagged
-   command message just shows its full text, i.e. today's behaviour; a wrongly tagged
-   message is worse). `runCommand` (the single chokepoint; the CTO `admitCommand` path also
-   ends there) opens a **command window** for the session when its POST starts and closes
-   it 3 s after the POST returns. Every manta prompt carries an id that is in "our prompt
-   ids" (K1). The pump (`index.mjs`, raw V2 events, before the interpreter) collects every
+2. **Why correlation is sound here — a closed set of writers.** A `user`-type inbox item
+   can only be created by an HTTP client holding the opencode password (`OPENCODE_PASSWORD`,
+   loopback-only, known to manta-server and the service). Plugins' subagent results arrive
+   as `synthetic` items and are excluded. So every user enqueue on the box comes from
+   manta-server, and manta-server knows the id of every one it creates — except the one a
+   `/command` POST creates. This holds only if **every** manta-server `/prompt` POST carries
+   an id recorded in "our prompt ids": `sendPrompt`, the second prompt POST in
+   `opencode.mjs` (~line 1161, the generate/throwaway path) and the upgrade verify turn in
+   `upgradeV2.mjs` (runs only in upgrade mode, before cutover — it is exempt, but the
+   window logic must not run during upgrade mode). S1 adds a test that greps
+   `src/server/**/*.mjs` for `/prompt` POST sites and fails if a new one appears outside
+   the recording helper. If the user opens opencode's own web UI with the password, the
+   heuristic can mis-tag a message typed there during a command window — accepted, stated
+   in a code comment.
+
+   **Correlation rule — tag only when unambiguous, otherwise leave untagged** (an untagged
+   command message just shows its full text, i.e. today's behaviour). `runCommand` (the
+   single chokepoint; the CTO `admitCommand` path also ends there) opens a **command
+   window** for the session when its POST starts and closes it 3 s after the POST returns.
+   The pump (`index.mjs`, raw V2 events, before the interpreter) collects every
    `session.inbox.enqueued` user item for that session during the window whose id is NOT
    one of our prompt ids. At window close: exactly one such id → record it; zero or more
    than one → record nothing and log one line. Additionally record nothing if:
@@ -293,20 +322,25 @@ kept V1 binary exist only for rollback. Deleting them is a one-way, user-initiat
 The state file supplies the deletion targets, so it is NOT trusted to also prove they are
 safe to delete. Safety comes from independent checks, and every uncertainty fails closed.
 
-1. **Live DB identity, determined independently of the state file.** The live V2 DB is
-   `$OPENCODE_DB` as configured in the installed opencode **service definition** (systemd
-   unit / launchd plist / nohup fallback env — read via the helpers `upgradeV2Service.mjs`
-   already uses to write it), else opencode's default path. It must exist. If it can't be
-   determined or doesn't exist → not available ("Couldn't confirm which database is in
-   use").
+1. **Live DB identity, taken from the RUNNING opencode process** — not from the state file
+   and not from the service definition (which can be edited without a restart, and launchd
+   can run a stale loaded copy). Find the running opencode PID: systemd →
+   `systemctl --user show opencode-serve -p MainPID`; launchd → `launchctl list` for the
+   opencode label; nohup → unavailable (no reliable PID; reason "Couldn't confirm which
+   database is in use"). Read the set of files that process has open: Linux →
+   `/proc/<pid>/fd` symlinks; macOS → `lsof -Fn -p <pid>`. The live DB is the open file
+   whose basename matches `opencode*.db` (exactly one, else unavailable). Any failure → not
+   available. The reclaim **also** refuses if any allowed target (by `dev, ino`) appears in
+   that open-file set.
 2. **Allowed targets — a closed list, nothing else is ever deleted:** `V`, `V-wal`, `V-shm`
    where `V = realpath(state.v1Db)`, and `realpath(~/.opencode/bin/opencode-v1)`. Each target
    must: have basename exactly `opencode.db` / `opencode.db-wal` / `opencode.db-shm` /
    `opencode-v1`; for the DB files, live in the same directory as the live DB (after
-   realpath); be a regular file (`lstat` of the unresolved path is not a symlink, and the resolved path
-   is a regular file); and differ from
-   the live DB and its `-wal` / `-shm` both by realpath AND by `(dev, ino)`. Any check
-   failing → not available, nothing deleted.
+   realpath); be a regular file (`lstat` of the unresolved path is not a symlink, and the
+   resolved path is a regular file); and differ from the live DB and its `-wal` / `-shm`
+   both by realpath AND by `(dev, ino)`. Any check failing → not available, nothing
+   deleted. These checks run when building the manifest (step 4); a resumed reclaim uses
+   the manifest and never re-resolves deleted paths.
 3. **Availability** (`GET`): migration `state === "completed"`, `mode === "copy"`, no
    upgrade/retry/rollback in progress, `reclaim.state` not `done`, at least one allowed
    target present. `bytes` = sum of present targets. `reason` is a plain sentence when not
@@ -315,23 +349,36 @@ safe to delete. Safety comes from independent checks, and every uncertainty fail
    "Couldn't confirm which database is in use"). `state` mirrors `reclaim.state` (`none`
    when absent).
 4. **Durable, resumable reclaim** (`POST`): serialized with the upgrade engine's own lock
-   (no reclaim while retry/rollback runs, and vice versa). Re-run the checks, then write
-   `reclaim: { state: "running", startedAt, targets: [...] }` to the state file BEFORE the
-   first deletion. Delete targets one by one, recording each as removed. All removed →
-   `state: "done"`, `doneAt`, `freedBytes`. Any error → `state: "failed"` with the remaining
-   targets; `GET` stays `available` for the remaining ones so the user can retry. A
-   manta-server restart mid-reclaim leaves `running` → treated as `failed` on load. A
-   target already missing counts as removed. Never stops opencode.
+   (no reclaim while retry/rollback runs, and vice versa). First run (`reclaim` absent):
+   run steps 1–2, then persist a **manifest** BEFORE the first deletion:
+   `reclaim: { state: "running", startedAt, targets: [{ path /* canonical */, dev, ino, size, removed: false }] }`.
+   Delete targets one by one; after each, set `removed: true` and persist. All removed →
+   `state: "done"`, `doneAt`, `freedBytes`. Any error → `state: "failed"`.
+   **Resume** (`reclaim.state` is `running` from a crash, or `failed`): never re-derive
+   targets. For each not-yet-removed manifest entry: missing (`lstat` ENOENT) → mark removed;
+   present → it must still be a regular non-symlink file with the SAME `(dev, ino)` and must
+   not be in the running opencode's open-file set (step 1; if step 1 fails, stop with
+   `failed`), else stop with `failed` and a message naming the file. When every entry is
+   removed → finalize `done`. On load, a `running` reclaim is reported as `failed` (so the
+   user sees Retry), and `GET` stays `available` while `state` is `failed` with remaining
+   entries — or with every entry removed but `done` not yet recorded, so a retry finalizes.
+   Never stops opencode.
 5. **Rollback is refused from the first destructive step**: once `reclaim` exists in any
    state, `POST /api/upgrade/rollback` answers
    `{ok:false, error:"Rollback is no longer possible: the old history was deleted to free space."}`
    without touching anything.
-6. Deps (fs incl. realpath/stat/unlink, service-env reader, paths) injected like the rest
-   of `upgradeV2.mjs`. Tests: every availability reason; state file pointing `v1Db` at the
-   live DB (by same path, by a symlinked parent, by a hard link / same inode); a target
-   with a wrong basename or outside the DB dir; a symlink target; live DB undeterminable;
-   partial failure then retry; restart while `running`; rollback refused in each reclaim
-   state; reclaim refused while a rollback runs.
+6. Deps (fs incl. realpath/lstat/stat/unlink, running-PID lookup, open-file reader, home
+   dir, paths) injected like the rest of `upgradeV2.mjs`. Tests: every availability reason;
+   state file pointing `v1Db` at the live DB (same path, symlinked parent, hard link / same
+   inode); a target with a wrong basename or outside the DB dir; a symlink target; PID or
+   open-file set undeterminable (incl. nohup); a target held open by opencode; configured
+   service env disagreeing with the running process (the running process wins); partial
+   failure then retry; crash after the last unlink but before `done`; a manifest entry
+   replaced by a different file (different inode → refused); rollback refused in each
+   reclaim state; reclaim refused while a rollback runs. One integration test on the REAL
+   filesystem inside a temp dir with home, PID lookup and open-file reader injected to
+   point only at fixture files; before every unlink the test-mode deps assert the path is
+   inside that temp root.
 
 ### Desktop (Settings)
 A "Old conversation history (from before the OpenCode 2 upgrade)" row in Settings →
@@ -381,8 +428,10 @@ shape it needs is missing, it reports that instead of adding it.
   working around it silently.
 - S2: vitest for the new inbox reducer / pop-last / cancel branches; the renderer harness
   (`tests/visual/`) still passes; `npm run build` succeeds.
-- S3: unit tests per §6; one manual run against a sandbox copy of a migration state file
-  in a temp `MANTA_STATE_HOME` — never the real `~/.manta`.
+- S3: the unit + temp-dir integration tests in §6.6. **No manual run against this box's
+  real files**: never call the reclaim route on the dev box, never point any dependency at
+  the real `~/.manta`, `~/.local/share/opencode` or `~/.opencode`. A read-only
+  `GET /api/upgrade/reclaim` against a sandboxed manta-server is fine.
 
 ## 9. Follow-ups (not this spec)
 
