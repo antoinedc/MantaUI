@@ -1461,6 +1461,7 @@ export const IPC = {
   // Cancel one pending inbox item; the outcome is decided from authoritative
   // evidence only (`cancelled` | `delivered` | `unknown`).
   opencodeInboxCancel: "opencode:inbox-cancel",
+  opencodeInboxSetDelivery: "opencode:inbox-set-delivery",
   // Permission approval flow — tools like Write/Edit/Bash pause until a reply.
   opencodePermissions: "opencode:permissions",
   opencodePermissionReply: "opencode:permission-reply",
@@ -2922,6 +2923,9 @@ export type OpencodeInboxCancelResult = {
   outcome: "cancelled" | "delivered" | "unknown";
   item?: OpencodeInboxItem;
 };
+
+/** N1 — the result of `opencode:inbox-set-delivery`. `changed` only when the box observed V2 confirm the requested delivery; `delivered` when the item had already been sent. */
+export type OpencodeInboxSetDeliveryResult = { outcome: "changed" | "delivered" | "unknown" };
 
 /** `inbox`: the interpreter's full pending-user-message list for a session (K3). */
 export type StreamInboxPayload = OpencodeInboxSnapshot;

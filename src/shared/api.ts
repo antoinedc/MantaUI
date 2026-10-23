@@ -11,6 +11,7 @@ import type {
   OpencodeCommand,
   OpencodeDelivery,
   OpencodeInboxCancelResult,
+  OpencodeInboxSetDeliveryResult,
   OpencodeInboxSnapshot,
   OpencodeEvent,
   OpencodeMessage,
@@ -1113,6 +1114,9 @@ export interface Api {
   // K4: cancel one pending message. Only `outcome: "cancelled"` proves it will
   // not be sent; `item` (the pre-cancel copy) comes back only with it.
   opencodeInboxCancel(input: { sessionId: string; id: string }): Promise<OpencodeInboxCancelResult>;
+  // N1: switch one pending message between steer ("Now") and queue ("After this
+  // turn"). Only `changed` proves the switch; `delivered` = already sent.
+  opencodeInboxSetDelivery(input: { sessionId: string; id: string; delivery: OpencodeDelivery }): Promise<OpencodeInboxSetDeliveryResult>;
   // `sessionId` scopes the list to the session's workspace directory —
   // without it the server returns [] for sessions outside the default
   // workspace (see listPermissions in opencode.ts).

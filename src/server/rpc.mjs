@@ -1316,6 +1316,22 @@ export function buildHandlers({
       });
     },
 
+    // N1: switch one pending message between "steer" (Now) and "queue" (after
+    // this turn). `changed` only on a delivery.changed event for that value —
+    // see streamInterp.setInboxDelivery.
+    "opencode:inbox-set-delivery": async (input) => {
+      const sessionId = input?.sessionId;
+      const id = input?.id;
+      const delivery = input?.delivery;
+      await requireInbox(sessionId);
+      if (typeof id !== "string" || !id) throw new Error("id is required");
+      if (delivery !== "steer" && delivery !== "queue") throw new Error('delivery must be "steer" or "queue"');
+      return streamInterp.setInboxDelivery(sessionId, id, delivery, {
+        patchItem: () => oc.setInboxDelivery(sessionId, id, delivery),
+        getMessage: () => oc.getMessage(sessionId, id),
+      });
+    },
+
     // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
     // Scope the list to the session's directory — opencode returns [] for a
     // non-default-directory session on the unscoped endpoint, so an unpassed

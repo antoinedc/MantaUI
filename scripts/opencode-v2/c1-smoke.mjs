@@ -457,6 +457,71 @@ try {
   const xm = await oc.listMessages(sx.id);
   check("(x) 20 command messages carry info.command with the right arguments", xm.filter((m) => m.info.command?.name === "smokecmd").map((m) => m.info.command.arguments).join() === Array.from({ length: 20 }, (_, k) => `n${k + 1}`).join());
 
+  // ---------------------------------------------------------------- (i) N1: change a pending item's delivery
+  console.log("\n[9i] N1 setInboxDelivery: queue→steer changed + delivered in the SAME execution; delivered id → delivered; Stop parks the queue item; U4 steer on the idle session starts a turn; round-trip");
+  const setDelivery = (sid, id, delivery) => interp.setInboxDelivery(sid, id, delivery, { patchItem: () => oc.setInboxDelivery(sid, id, delivery), getMessage: () => oc.getMessage(sid, id) });
+  const rawPatch = (sid, id, delivery) => oc.setInboxDelivery(sid, id, delivery).then(() => "2xx", (e) => `${e.status ?? "net"}: ${String(e.message).slice(0, 160)}`);
+
+  // 1 + 2: a queue item posted mid-turn is switched to steer and runs inside the running execution
+  const si = await newSession();
+  await oc.sendPrompt({ sessionId: si.id, text: loopText(12), model: MODEL });
+  await until("(i) live output", () => of(si.id, "toolOutput").length >= 1);
+  const iText = "Reply with exactly these words: N1 SWITCHED";
+  await oc.sendPrompt({ sessionId: si.id, text: iText, delivery: "queue" });
+  await until("(i) the queue item is pending", () => itemsOf(si.id).length === 1, 15_000);
+  const iItem = itemsOf(si.id)[0];
+  check("(i) the pending item starts as `queue`", iItem?.delivery === "queue", j(itemsOf(si.id)));
+  const i1 = await setDelivery(si.id, iItem.id, "steer");
+  check("(i.1) N1 steer on a queue item → outcome `changed`", i1.outcome === "changed", j(i1));
+  check("(i.1) the snapshot flipped to `steer` (one item, same id)", itemsOf(si.id).length === 1 && itemsOf(si.id)[0].id === iItem.id && itemsOf(si.id)[0].delivery === "steer", j(itemsOf(si.id)));
+  check("(i.1) a delivery.changed event with `steer` for that id arrived", rawLog.some((e) => e.raw.type === "session.inbox.delivery.changed" && e.raw.data.inboxID === iItem.id && e.raw.data.delivery === "steer"));
+  await until("(i) turn complete", idleWith(si.id), 120_000);
+  check("(i.1) the switched item ran inside the SAME execution (one execution start) and the inbox is empty", starts(si.id) === 1 && itemsOf(si.id).length === 0 && (await userTexts(si.id)).includes(iText), `starts=${starts(si.id)} items=${j(itemsOf(si.id))}`);
+  const i2 = await setDelivery(si.id, iItem.id, "steer");
+  check("(i.2) N1 on an id that was already delivered → `delivered`", i2.outcome === "delivered", j(i2));
+  console.log(`  [i] V2's raw PATCH answers — delivered id: ${await rawPatch(si.id, iItem.id, "queue")}; unknown id: ${await rawPatch(si.id, "msg_does_not_exist", "queue")}`);
+  const i2b = await setDelivery(si.id, "msg_does_not_exist", "steer");
+  check("(i.2) N1 on an id that never existed → `unknown` (never `changed`)", i2b.outcome === "unknown", j(i2b));
+
+  // 3 + 4: Stop with one steer + one queue item pending, then U4
+  const sj = await newSession();
+  await oc.sendPrompt({ sessionId: sj.id, text: loopText(20), model: MODEL });
+  await until("(i3) live output", () => of(sj.id, "toolOutput").length >= 1);
+  await oc.sendPrompt({ sessionId: sj.id, text: "Reply with exactly these words: steer after stop", delivery: "steer" });
+  await oc.sendPrompt({ sessionId: sj.id, text: "Reply with exactly these words: U4 PARKED RAN", delivery: "queue" });
+  await until("(i3) both pending", () => itemsOf(sj.id).length === 2, 15_000);
+  await oc.interruptSession(sj.id, { resume: true }); // what `opencode:abort` does
+  await until("(i3) the steer item ran as the next turn and the session is idle", () => starts(sj.id) >= 2 && idleWith(sj.id)(), 90_000);
+  const jPending = itemsOf(sj.id);
+  check("(i.3) Stop with a steer + a queue item: the steer item ran next, the queue item stays parked (snapshot)", /steer after stop/i.test(await asstText(sj.id)) && jPending.length === 1 && jPending[0].delivery === "queue" && jPending[0].text.includes("U4 PARKED RAN") && !(await userTexts(sj.id)).includes("Reply with exactly these words: U4 PARKED RAN"), j(jPending));
+  check("(i.3) the session is idle (not in the active set) before U4", !(await oc.listActiveSessionIds()).includes(sj.id));
+  const startsBefore = starts(sj.id);
+  const parked = jPending[0];
+  const j1 = await setDelivery(sj.id, parked.id, "steer");
+  check("(U4) N1 steer on the parked item of the IDLE session → outcome `changed`", j1.outcome === "changed", j(j1));
+  console.log(`  [U4] N1 outcome: ${j(j1)}`);
+  const u4Started = await until("(U4) a new turn started", () => starts(sj.id) > startsBefore, 30_000);
+  check("(U4) a NEW turn started: a running(true) frame + a new execution.started for the session", u4Started && rawLog.filter((e) => e.raw.type === "session.execution.started" && e.raw.data.sessionID === sj.id).length >= 3, `starts ${startsBefore}→${starts(sj.id)}`);
+  await until("(U4) the new turn completed", idleWith(sj.id), 90_000);
+  check("(U4) the parked message was delivered by that turn: inbox empty, message exists, the model answered it", itemsOf(sj.id).length === 0 && (await oc.getMessage(sj.id, parked.id))?.info.id === parked.id && /u4 parked ran/i.test(await asstText(sj.id)), `items=${j(itemsOf(sj.id))}`);
+  check("(U4) lifecycle shows busy then idle again for the session after the N1", lifecycle.filter((e) => e.type === "session.status" && e.properties.sessionID === sj.id && e.properties.status.type === "busy").length >= 3 && !(await oc.listActiveSessionIds()).includes(sj.id));
+
+  // 5: queue → steer → queue keeps one inbox item with the last delivery
+  const sk = await newSession();
+  await oc.sendPrompt({ sessionId: sk.id, text: loopText(12), model: MODEL });
+  await until("(i5) live output", () => of(sk.id, "toolOutput").length >= 1);
+  await oc.sendPrompt({ sessionId: sk.id, text: "Reply with exactly: round trip", delivery: "queue" });
+  await until("(i5) pending", () => itemsOf(sk.id).length === 1, 15_000);
+  const kItem = itemsOf(sk.id)[0];
+  const k1 = await setDelivery(sk.id, kItem.id, "steer");
+  const k2 = await setDelivery(sk.id, kItem.id, "queue");
+  const kRaw = await oc.listInbox(sk.id);
+  check("(i.5) queue → steer → queue: both `changed`, ONE inbox item (snapshot + raw GET) with the last delivery", k1.outcome === "changed" && k2.outcome === "changed" && itemsOf(sk.id).length === 1 && itemsOf(sk.id)[0].id === kItem.id && itemsOf(sk.id)[0].delivery === "queue" && kRaw.filter((r) => r.id === kItem.id).length === 1 && kRaw.find((r) => r.id === kItem.id)?.delivery === "queue", j([k1, k2, itemsOf(sk.id), kRaw.map((r) => [r.id, r.delivery])]));
+  const k3raw = await rawPatch(sk.id, kItem.id, "queue");
+  const k3 = await setDelivery(sk.id, kItem.id, "queue");
+  console.log(`  [i] to the delivery the item ALREADY has (queue→queue): raw PATCH ${k3raw}; N1 ${j(k3)}`);
+  await cancel(sk.id, kItem.id);
+
   // ---------------------------------------------------------------- spend
   for (const id of sessions.filter(Boolean)) {
     const s = await oc.readSession(id);

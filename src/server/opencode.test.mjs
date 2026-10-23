@@ -41,6 +41,7 @@ import {
   interruptSession,
   listInbox,
   cancelInboxItem,
+  setInboxDelivery,
   getCommandCorrelator,
   setCommandCorrelator,
   _resetSessionDirectoryCache,
@@ -470,6 +471,18 @@ test("listInbox / cancelInboxItem hit the V2 inbox routes", async () => {
   assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /api/session/ses_a/inbox", "DELETE /api/session/ses_a/inbox/msg_1"]);
   await withV2({ "GET /api/session/ses_a/inbox": () => new Response("no", { status: 500 }) }, async () => {
     await assert.rejects(listInbox("ses_a"), /listInbox 500/);
+  });
+});
+
+test("setInboxDelivery PATCHes the inbox item with {delivery}; a refusal throws with its status", async () => {
+  const calls = await withV2({ "PATCH /api/session/ses_a/inbox/msg_1": null }, async () => {
+    await setInboxDelivery("ses_a", "msg_1", "steer");
+    await setInboxDelivery("ses_a", "msg_1", "queue");
+  });
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["PATCH /api/session/ses_a/inbox/msg_1", "PATCH /api/session/ses_a/inbox/msg_1"]);
+  assert.deepEqual(calls.map((c) => c.body), [{ delivery: "steer" }, { delivery: "queue" }]);
+  await withV2({ "PATCH /api/session/ses_a/inbox/msg_2": () => new Response("{}", { status: 409 }) }, async () => {
+    await assert.rejects(setInboxDelivery("ses_a", "msg_2", "queue"), (e) => e.status === 409 && /setInboxDelivery 409/.test(e.message));
   });
 });
 
