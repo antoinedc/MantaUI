@@ -219,6 +219,8 @@ export const DEMO_UNIMPLEMENTED = [
   "tmuxRestoreTopology",
   "tmuxSelectWindow",
   "tmuxSetupConfig",
+  "upgradeReclaim",
+  "upgradeReclaimStatus",
   "upgradeRetry",
   "upgradeRollback",
   "uploadBuffer",

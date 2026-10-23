@@ -143,6 +143,20 @@ export type UpgradeStatus = {
 /** `POST /api/upgrade/retry` and `/rollback` outcome. */
 export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
 
+// Reclaim disk space after a copy-mode migration (cleanup spec K7). `GET /api/upgrade/reclaim`
+// says whether the old V1 history can be deleted and how much that frees; `POST` deletes it.
+export type ReclaimState = "none" | "running" | "failed" | "done";
+export type ReclaimStatus = {
+  available: boolean;
+  /** A plain sentence when not available, else null. */
+  reason: string | null;
+  mode: "copy" | "in-place" | null;
+  /** Bytes the delete frees; null when unknown / not applicable. */
+  bytes: number | null;
+  state: ReclaimState;
+};
+export type ReclaimResult = { ok: true; freedBytes: number } | { ok: false; error: string };
+
 type PromptModel = { providerID: string; modelID: string; variant?: string };
 // BET-1244: the generic, read-only routing decision (`routing:choose`) — the
 // routing decision carries no `incumbent` but adds
@@ -1630,6 +1644,12 @@ export interface Api {
   // can show it next to the button that was pressed.
   upgradeRetry(): Promise<UpgradeActionResult>;
   upgradeRollback(): Promise<UpgradeActionResult>;
+  // Reclaim disk space (K7). `upgradeReclaimStatus` resolves `null` when the box
+  // answers 404 (it predates the route); other failures reject. `upgradeReclaim`
+  // never rejects on a refusal or a network error — `{ok:false, error}` — and a
+  // 401 throws AuthRequiredError, like every other call here.
+  upgradeReclaimStatus(): Promise<ReclaimStatus | null>;
+  upgradeReclaim(): Promise<ReclaimResult>;
   // `{kind:"upgrade"}` frames on /events: the whole K3 object on every change.
   onUpgrade(cb: (status: UpgradeStatus) => void): () => void;
   // Fires when ANY data call is answered `503 {upgrade:true}` — the box is in
