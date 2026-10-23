@@ -1372,20 +1372,6 @@ test("timeout: opencode-owned V2 jobs (adopted subagents / native background com
   assert.equal(w.calls.synth.length, 0);
 });
 
-test("timeout: a legacy job (no engine) is failed exactly as before, with no interrupt from the sweep", async () => {
-  const legacy = { ...v2Job({ id: "leg00001", startedAt: T0 }), engine: undefined, completionOwner: undefined, launchState: undefined, submittedAt: undefined };
-  delete legacy.engine;
-  const w = world({ jobs: [legacy] });
-  const aborted = [];
-  w.deps.abortSession = async (sid) => aborted.push(sid);
-  w.deps.sessionExists = async () => true;
-  w.setNow(T0 + 31 * 60_000);
-  await sweepDelegateJobs(w.deps);
-  assert.equal(w.job("leg00001").status, "failed");
-  assert.equal(w.job("leg00001").error, "timed out after 30 minutes");
-  assert.equal(aborted.length, 0);
-});
-
 test("finishV2Job reads the child's transcript OUTSIDE the jobs lock: another job write is not held up by a slow read", async () => {
   const w = world();
   const a = seedWrapped(w, { id: "slow0001", childSessionID: "ses_a" });

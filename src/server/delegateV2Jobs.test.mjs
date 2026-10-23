@@ -11,11 +11,11 @@ import {
   resumeJob,
   pauseJob,
   stopJob,
-  finishJob,
   finishV2Job,
   settleV2Job,
   observeEvent,
   reconcileV2Jobs,
+  reconcileJobsOnBoot,
   retryPendingDeliveries,
   sweepDelegateJobs,
   buildCompletionText,
@@ -291,20 +291,7 @@ test("C1 startJob: isolationRequired + a worktree failure refuses BEFORE anythin
   assert.equal(w.jobs.length, 0);
 });
 
-test("C1 startJob: the gate is the ACTOR — a CTO job stays on the legacy path, untouched", async () => {
-  const w = world();
-  const res = await startJob(input({ actor: "cto" }), w.deps);
-  assert.equal(res.ok, true);
-  assert.equal(res.job.engine, undefined, "legacy record: no engine field");
-  assert.equal(res.job.completionOwner, undefined);
-  assert.equal(res.job.actor, "cto");
-  assert.deepEqual([w.calls.create, w.calls.move, w.calls.send].map((c) => c.length), [0, 0, 0], "no V2 child, no move, no direct send");
-  assert.equal(w.calls.window[0].existingSessionId, undefined, "the window makes its own session, as today");
-  assert.equal(w.calls.deliver.length, 1, "the opening prompt goes through promptDelivery, as today");
-  assert.match(w.calls.deliver[0].text, /Fix the bug in the parser/);
-});
-
-test("C1 startJob: origin is irrelevant to the gate (a forge/inbox style call without an actor is V2)", async () => {
+test("C1 startJob: a forge/inbox style call without an actor is V2 too", async () => {
   const w = world();
   const res = await startJob(input({ link: { issue: { repoKey: "github.com/a/b", number: 4 } } }), w.deps);
   assert.equal(res.ok, true);
@@ -335,7 +322,7 @@ test("C1 startJob: concurrent starts never exceed the cap and never leak a workt
   assert.equal(w.calls.addWorktree.length, MAX_RUNNING_JOBS, "refused starts made no worktree");
 });
 
-test("C1 startJob: a missing V2 dependency fails loudly instead of silently falling back to legacy", async () => {
+test("C1 startJob: a missing V2 dependency fails loudly instead of silently doing nothing", async () => {
   const w = world();
   delete w.deps.moveSession;
   const res = await startJob(input(), w.deps);
@@ -739,9 +726,8 @@ test("C1 completion: the activity-poller / legacy adapter path cannot finish a V
   const w = world();
   const id = await start(w);
   const child = w.job(id).childSessionID;
-  const sawBusy = new Map();
-  await observeEvent({ type: "session.status", properties: { sessionID: child, status: { type: "busy" } } }, w.deps, sawBusy);
-  await observeEvent({ type: "session.idle", properties: { sessionID: child } }, w.deps, sawBusy);
+  await observeEvent({ type: "session.status", properties: { sessionID: child, status: { type: "busy" } } }, w.deps);
+  await observeEvent({ type: "session.idle", properties: { sessionID: child } }, w.deps);
   assert.equal(w.job(id).status, "running", "completion comes only from raw outcomes");
   assert.equal(w.records.size, 0);
 });
@@ -1046,26 +1032,6 @@ test("C1 exactly one result — a pause that outlives its 7 days is stopped WITH
   assert.equal(w.job(id).error, "paused for over 7 days, stopped");
 });
 
-test("C1 exactly one result — a legacy record (no engine) still finishes on the legacy path, untouched", async () => {
-  const legacy = {
-    id: "leg1", name: "old", prompt: "p", parentSessionID: PARENT, parentDirectory: REPO, childSessionID: "ses_leg", tmuxSession: "proj", windowIndex: 3,
-    worktree: null, branch: null, baseSha: null, origin: "delegate", actor: "user", status: "running", createdAt: T0, startedAt: T0, finishedAt: null,
-  };
-  const w = world({ jobs: [legacy] });
-  w.say("ses_leg", "legacy result");
-  await finishJob(w.job("leg1"), "done", null, w.deps, new Map());
-  assert.equal(w.job("leg1").status, "done");
-  assert.equal(w.job("leg1").completionDelivery, undefined);
-  assert.equal(w.calls.deliver.length, 1, "the legacy completion notice");
-  assert.match(w.calls.deliver[0].text, /legacy result/);
-  assert.equal(w.calls.synth.length, 0, "never an N7 post for a legacy record");
-  // a raw outcome for it does nothing
-  w.sessions.set("ses_leg", { id: "ses_leg", directory: REPO });
-  w.finish("ses_leg", "succeeded");
-  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", "ses_leg"));
-  assert.equal(w.calls.deliver.length, 1);
-});
-
 // ---------------------------------------------------------------------------
 // first terminal transition wins
 // ---------------------------------------------------------------------------
@@ -1094,7 +1060,7 @@ test("C1 race: completion beats a timeout, and a timeout beats a late completion
   const stale = structuredClone(w.job(id));
   await settleV2Job(w.job(id), w.deps);
   assert.equal(w.job(id).status, "done");
-  const res = await finishJob(stale, "failed", "timed out after 2 minutes", w.deps, new Map());
+  const res = await finishV2Job(stale, "failed", "timed out after 2 minutes", w.deps);
   assert.equal(res.alreadyTerminal, true);
   assert.equal(w.job(id).status, "done");
   oneResult(w, id, "completed");
@@ -1243,4 +1209,414 @@ test("C1: the activity poller leaves a launch that has no child yet alone", asyn
   const { tickActivity } = await import("./delegate.mjs");
   await tickActivity(w.deps);
   assert.equal(listed, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Stage C2: the CTO's own workers run on the V2 engine (actor "cto"), and the
+// pre-C2 records a box can still hold are settled once, at boot.
+// ---------------------------------------------------------------------------
+
+const CTO = "ses_cto";
+const CTO_HOME = "/home/cto";
+
+// A world where the parent is the headless CTO conversation: a session that exists
+// in opencode but has NO tmux window (so the workspace can only come from targetProject),
+// and which sits in the CTO's own directory, not in the repository a worker is sent to.
+function ctoWorld(opts) {
+  const w = world(opts);
+  w.sessions.set(CTO, { id: CTO, directory: CTO_HOME, agent: "build" });
+  w.state.cto = true;
+  w.projectReads = 0;
+  const listProjects = w.deps.listProjects;
+  w.deps.listProjects = async () => {
+    w.projectReads++;
+    return listProjects();
+  };
+  w.terminal = [];
+  w.deps.onJobTerminal = async (job) => w.terminal.push({ id: job.id, status: job.status });
+  // like the real create: the child sits at its parent's location
+  w.deps.createChildSession = async (i) => {
+    w.calls.create.push(i);
+    w.log.push({ label: "create", store: w.jobs.map((j) => ({ ...j })) });
+    w.sessions.set(i.id, { id: i.id, parentID: i.parentID, directory: w.sessions.get(i.parentID)?.directory ?? REPO, agent: i.agent });
+    return { id: i.id, directory: w.sessions.get(i.id).directory };
+  };
+  return w;
+}
+
+// What ctoWorkTools hands startJob for a tracked-work dispatch (and a review).
+const ctoInput = (extra = {}) => ({
+  prompt: "Implement the parser change",
+  name: "fix the bug",
+  parentSessionID: CTO,
+  parentDirectory: REPO,
+  targetProject: "proj",
+  isolationRequired: true,
+  correlation: { kind: "work", workId: "w1", receiptId: "r1", op: "work.dispatch" },
+  actor: "cto",
+  sweepAllowanceMs: 3_600_000,
+  permission: [{ permission: "*", pattern: "**", action: "deny" }, { permission: "bash", pattern: "**", action: "allow" }],
+  ...extra,
+});
+const ctoStart = async (w, extra) => {
+  const res = await startJob(ctoInput(extra), w.deps);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  return res.job.id;
+};
+// the CTO conversation hears of a job exactly once, through admission (never a synthetic)
+const ctoOneResult = (w, id, status) => {
+  assert.equal(w.calls.deliver.length, 1, "exactly one delivery to admission");
+  assert.equal(w.calls.synth.length, 0, "never an N7 post into the CTO conversation");
+  const d = w.calls.deliver[0];
+  assert.equal(d.sessionId, CTO);
+  assert.equal(d.ctoKey, w.job(id).completionMessageId, "the job's result id is the admission dedupe identity");
+  assert.match(d.text, new RegExp(`^\\[background job "[^"]*" ${status}\\]`));
+  assert.equal(w.job(id).completionDelivery, "delivered");
+};
+
+test("C2 startJob: a CTO job is a V2 child, with everything the CTO relies on persisted", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w);
+  const job = w.job(id);
+  assert.equal(job.engine, "v2");
+  assert.equal(job.completionOwner, "manta");
+  assert.equal(job.actor, "cto");
+  assert.equal(job.origin, "delegate");
+  assert.deepEqual(job.correlation, { kind: "work", workId: "w1", receiptId: "r1", op: "work.dispatch" });
+  assert.equal(job.sweepAllowanceMs, 3_600_000);
+  assert.equal(job.tmuxSession, "proj", "the window goes where targetProject says");
+  assert.equal(w.projectReads, 0, "a windowless CTO conversation is never looked up in tmux");
+  assert.equal(job.parentSessionID, CTO);
+  assert.equal(job.worktree, WT);
+  assert.equal(job.branch, "job/fix-the-bug");
+  assert.equal(job.baseSha, "abc123");
+  assert.deepEqual(job.permission, ctoInput().permission, "the preflight ruleset is kept for a resume");
+  assert.equal(job.status, "running");
+  assert.equal(job.launchState, "running");
+
+  assert.equal(w.calls.create[0].parentID, CTO);
+  assert.deepEqual(w.calls.create[0].permission, job.permission);
+  assert.deepEqual(w.calls.move, [{ sid: job.childSessionID, directory: WT }], "moved from the CTO's directory into the worktree");
+  assert.equal(w.calls.window[0].sessionName, "proj");
+  assert.equal(w.calls.window[0].existingSessionId, job.childSessionID);
+  assert.equal(w.calls.send[0].sessionId, job.childSessionID);
+  assert.deepEqual(w.calls.deliver, [], "the opening prompt never goes through promptDelivery");
+});
+
+test("C2 startJob: isolationRequired never falls back to the repository — the refusal creates nothing and leaves no record", async () => {
+  const w = ctoWorld({ git: false });
+  const res = await startJob(ctoInput(), w.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "worktree_failed");
+  assert.match(res.error, /refusing to fall back to the original repository directory/);
+  assert.deepEqual([w.calls.create, w.calls.move, w.calls.window, w.calls.send].map((c) => c.length), [0, 0, 0, 0]);
+  assert.equal(w.jobs.length, 0, "no correlated job for the reconciler to adopt");
+});
+
+test("C2 startJob: the cap refuses with the exact CAP_ERROR the CTO maps to capacity_wait", async () => {
+  const running = Array.from({ length: MAX_RUNNING_JOBS }, (_, i) => ({ id: `cap${i}`, name: "x", parentSessionID: "ses_other", childSessionID: `ses_cap${i}`, status: "running", origin: "delegate" }));
+  const w = ctoWorld({ jobs: running });
+  const res = await startJob(ctoInput(), w.deps);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, CAP_ERROR);
+  assert.equal(w.calls.addWorktree.length, 0);
+});
+
+test("C2 startJob: a child created away from the job's directory is moved there even with no worktree", async () => {
+  const w = ctoWorld({ git: false });
+  const res = await startJob(ctoInput({ isolationRequired: false }), w.deps);
+  assert.equal(res.ok, true);
+  assert.equal(res.job.worktree, null);
+  assert.equal(res.job.executionDirectory, REPO);
+  assert.deepEqual(w.calls.move, [{ sid: res.job.childSessionID, directory: REPO }], "the CTO conversation sits in the CTO's directory");
+});
+
+test("C2 startJob: a child created AT the job's directory is not moved (a trailing slash is the same place)", async () => {
+  const w = ctoWorld({ git: false });
+  w.sessions.get(CTO).directory = `${REPO}/`;
+  const res = await startJob(ctoInput({ isolationRequired: false }), w.deps);
+  assert.equal(res.ok, true);
+  assert.deepEqual(w.calls.move, []);
+});
+
+test("C2 exactly one result — done (through admission; the work coordinator hears the outcome once)", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w);
+  const child = w.job(id).childSessionID;
+  w.say(child, "implemented");
+  w.finish(child, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child));
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child));
+  ctoOneResult(w, id, "done");
+  assert.match(w.calls.deliver[0].text, /implemented/);
+  assert.deepEqual(w.terminal, [{ id, status: "done" }]);
+  assert.deepEqual(w.calls.rmWorktree.map((r) => r.path), [WT], "a finished worker's clean worktree is cleaned up");
+  await retryPendingDeliveries(w.deps);
+  assert.equal(w.calls.deliver.length, 1);
+});
+
+test("C2 exactly one result — failed", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w);
+  const child = w.job(id).childSessionID;
+  w.finish(child, "failed", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.failed", child, { error: { message: "boom" } }));
+  ctoOneResult(w, id, "failed");
+  assert.match(w.calls.deliver[0].text, /Error: boom/);
+  assert.deepEqual(w.terminal, [{ id, status: "failed" }]);
+});
+
+test("C2 exactly one result — stopped (the cancel path: abort, one `stopped` result, a late outcome adds nothing)", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w);
+  const child = w.job(id).childSessionID;
+  assert.equal((await stopJob(id, w.deps)).ok, true);
+  assert.deepEqual(w.calls.abort, [child]);
+  w.finish(child, "interrupted", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
+  ctoOneResult(w, id, "stopped");
+  assert.equal(w.job(id).status, "stopped");
+  assert.equal((await stopJob(id, w.deps)).ok, false);
+  assert.equal(w.calls.deliver.length, 1);
+});
+
+test("C2 exactly one result — timed out on the job's OWN allowance (the overnight window), the child interrupted", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w, { sweepAllowanceMs: 90 * 60_000 });
+  const child = w.job(id).childSessionID;
+  w.state.now = T0 + 89 * 60_000;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "running", "the 30-minute default does not apply");
+  w.state.now = T0 + 91 * 60_000;
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.job(id).status, "failed");
+  assert.equal(w.job(id).error, "timed out after 90 minutes");
+  assert.deepEqual(w.calls.abort, [child]);
+  w.finish(child, "interrupted", T0 + 92 * 60_000);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
+  await sweepDelegateJobs(w.deps);
+  ctoOneResult(w, id, "failed");
+  assert.deepEqual(w.terminal, [{ id, status: "failed" }]);
+});
+
+test("C2 exactly one result — paused → resumed → done: the pause and the resume emit nothing", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w);
+  const child = w.job(id).childSessionID;
+  assert.equal((await pauseJob(id, w.deps)).ok, true);
+  await observeEvent(toolDone(child), w.deps);
+  w.finish(child, "interrupted", T0 + 3);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
+  assert.equal(w.job(id).status, "paused");
+  assert.equal(w.calls.deliver.length, 0, "a pause is not an outcome");
+  assert.deepEqual(w.terminal, [], "the work coordinator is told nothing yet");
+
+  const resumed = await resumeJob(id, w.deps);
+  assert.equal(resumed.ok, true);
+  assert.equal(w.job(id).attempt, 2);
+  assert.equal(w.job(id).tmuxSession, "proj", "the persisted workspace is reused: the CTO conversation owns no window to look up");
+  assert.equal(w.calls.deliver.length, 0);
+  const child2 = w.job(id).childSessionID;
+  assert.notEqual(child2, child);
+  assert.equal(w.calls.create[1].parentID, CTO);
+  assert.deepEqual(w.calls.create[1].permission, ctoInput().permission, "the resumed child is scoped exactly like the first");
+  w.say(child2, "finished on attempt two");
+  w.finish(child2, "succeeded", T0 + 9);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", child2));
+  ctoOneResult(w, id, "done");
+  assert.deepEqual(w.terminal, [{ id, status: "done" }]);
+});
+
+test("C2 admission is never bypassed: a tracked-work job goes through admission even when classifying the parent fails open", async () => {
+  const w = ctoWorld();
+  w.state.cto = false; // the conversation store was unreadable: the classifier says "ordinary session"
+  const id = await ctoStart(w);
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await settleV2Job(w.job(id), w.deps);
+  assert.equal(w.calls.synth.length, 0, "no straight post into the CTO conversation");
+  assert.equal(w.calls.deliver.length, 1);
+  assert.equal(w.calls.deliver[0].ctoKey, w.job(id).completionMessageId);
+});
+
+test("C2 admission is never bypassed: a classifier that cannot answer leaves the result pending, then it is delivered once", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w, { correlation: null });
+  w.deps.isCtoConversationSession = async () => {
+    throw new Error("binding store down");
+  };
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await settleV2Job(w.job(id), w.deps);
+  assert.equal(w.job(id).status, "done");
+  assert.equal(w.job(id).completionDelivery, "pending");
+  assert.equal(w.calls.synth.length, 0, "never a guess at N7");
+  assert.equal(w.calls.deliver.length, 0);
+  w.deps.isCtoConversationSession = async () => true;
+  await retryPendingDeliveries(w.deps);
+  ctoOneResult(w, id, "done");
+});
+
+test("C2 a CTO job whose parent is NOT the CTO conversation (a plan / overnight job in a project session) gets N7 like any other", async () => {
+  const w = ctoWorld();
+  w.state.cto = false;
+  const id = await ctoStart(w, { parentSessionID: PARENT, correlation: null, targetProject: undefined, isolationRequired: false });
+  assert.equal(w.job(id).actor, "cto");
+  assert.equal(w.job(id).tmuxSession, "proj", "its workspace comes from the parent's own window");
+  w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
+  oneResult(w, id, "completed");
+  assert.deepEqual(w.terminal, [{ id, status: "done" }]);
+});
+
+test("C2 an overnight preempt (pauseJob with the engine's own default store access) parks a CTO job at its next tool boundary", async () => {
+  const w = ctoWorld();
+  const id = await ctoStart(w, { correlation: null, actor: "cto", parentSessionID: PARENT });
+  const child = w.job(id).childSessionID;
+  const { pauseJob: bare } = await import("./delegate.mjs");
+  // the preempt flags the job through the module's own pauseJob (no engine deps) …
+  assert.equal((await bare(id, { load: w.deps.load, save: w.deps.save })).ok, true);
+  // … and the pump's tool boundary does the interrupt
+  await createDelegateEngine(w.deps).observeEvent(toolDone(child));
+  w.finish(child, "interrupted", T0 + 2);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.interrupted", child));
+  assert.equal(w.job(id).status, "paused");
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 });
+});
+
+// ---- pre-C2 records, settled once at boot -----------------------------------
+
+const legacyRecord = (extra = {}) => ({
+  id: "leg00001", name: "old job", prompt: "do the old thing", model: "anthropic/claude-sonnet-5-5", requestedModel: null,
+  parentSessionID: PARENT, parentDirectory: REPO, childSessionID: "ses_leg", tmuxSession: "proj", windowIndex: 3,
+  worktree: WT, branch: "job/old", baseSha: "abc123", origin: "delegate", link: null, actor: "user", correlation: null, sweepAllowanceMs: null, permission: null,
+  status: "running", activity: null, createdAt: T0, startedAt: T0, finishedAt: null, result: null, error: null, filesChanged: null,
+  ...extra,
+});
+const legacyWorld = (jobs) => {
+  const w = world({ jobs });
+  for (const j of jobs) {
+    w.sessions.set(j.childSessionID, { id: j.childSessionID, directory: j.worktree ?? REPO });
+    w.windows.push({ index: j.windowIndex, opencodeSessionId: j.childSessionID, paneCurrentPath: j.worktree ?? REPO });
+  }
+  return w;
+};
+
+test("C2 boot: a legacy running job is failed \"interrupted by upgrade\", its child interrupted, and it reports its ONE result", async () => {
+  const w = legacyWorld([legacyRecord()]);
+  const terminal = [];
+  w.deps.onJobTerminal = async (j) => terminal.push(j.status);
+  const res = await reconcileJobsOnBoot(w.deps);
+  assert.deepEqual(res, { ok: true, reconciled: 1 });
+  const job = w.job("leg00001");
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "interrupted by upgrade");
+  assert.equal(job.engine, "v2");
+  assert.equal(job.completionOwner, "manta");
+  assert.deepEqual(w.calls.abort, ["ses_leg"]);
+  assert.equal(w.records.size, 1, "one N7 result");
+  const rec = [...w.records.values()][0];
+  assert.equal(rec.sid, PARENT);
+  assert.equal(rec.body.id, job.completionMessageId);
+  assert.equal(rec.body.metadata.state, "failed");
+  assert.match(rec.body.text, /interrupted by upgrade/);
+  assert.equal(job.completionDelivery, "delivered");
+  assert.deepEqual(terminal, ["failed"]);
+  assert.deepEqual(w.calls.rmWorktree.map((r) => r.path), [WT], "its worktree is cleaned up like any finished job's");
+  // a second boot, and the sweeper's own pass, add nothing
+  assert.deepEqual(await reconcileJobsOnBoot(w.deps), { ok: true, reconciled: 0 });
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.records.size, 1);
+  assert.deepEqual(terminal, ["failed"]);
+});
+
+test("C2 boot: a legacy running job of the CTO conversation reports through admission, once", async () => {
+  const w = legacyWorld([legacyRecord({ actor: "cto", parentSessionID: CTO, correlation: { kind: "work", workId: "w1", receiptId: "r1", op: "work.dispatch" } })]);
+  w.state.cto = true;
+  await reconcileJobsOnBoot(w.deps);
+  assert.equal(w.job("leg00001").status, "failed");
+  assert.equal(w.calls.synth.length, 0);
+  assert.equal(w.calls.deliver.length, 1);
+  assert.equal(w.calls.deliver[0].sessionId, CTO);
+  assert.equal(w.calls.deliver[0].ctoKey, w.job("leg00001").completionMessageId);
+  assert.match(w.calls.deliver[0].text, /interrupted by upgrade/);
+});
+
+test("C2 boot: the boot call and the sweeper's first tick overlapping settle a legacy job once", async () => {
+  const w = legacyWorld([legacyRecord()]);
+  await Promise.all([reconcileJobsOnBoot(w.deps), sweepDelegateJobs(w.deps), reconcileV2Jobs(w.deps)]);
+  assert.equal(w.job("leg00001").status, "failed");
+  assert.equal(w.job("leg00001").error, "interrupted by upgrade");
+  assert.equal(w.records.size, 1);
+});
+
+test("C2 boot: a result that cannot be posted yet (opencode still starting) stays pending and is retried", async () => {
+  const w = legacyWorld([legacyRecord()]);
+  w.fail.synth.push("refuse");
+  await reconcileJobsOnBoot(w.deps);
+  assert.equal(w.job("leg00001").completionDelivery, "pending");
+  assert.equal(w.records.size, 0);
+  await retryPendingDeliveries(w.deps);
+  assert.equal(w.job("leg00001").completionDelivery, "delivered");
+  assert.equal(w.records.size, 1);
+});
+
+test("C2 boot: a legacy adopted subagent that was running fails with no result (opencode reports its own)", async () => {
+  const w = legacyWorld([legacyRecord({ id: "sub00001", origin: "subagent", worktree: null, branch: null, baseSha: null, childSessionID: "ses_sub", windowIndex: 4 })]);
+  await reconcileJobsOnBoot(w.deps);
+  assert.equal(w.job("sub00001").status, "failed");
+  assert.equal(w.job("sub00001").completionOwner, "opencode");
+  assert.equal(w.records.size, 0);
+  assert.equal(w.calls.deliver.length, 0);
+});
+
+test("C2 boot: a legacy PAUSED job is upgraded in place, still paused, and can be resumed on the V2 path", async () => {
+  const w = legacyWorld([legacyRecord({ status: "paused", pausedAt: T0 + 5, pauseRequested: false })]);
+  const res = await reconcileJobsOnBoot(w.deps);
+  assert.deepEqual(res, { ok: true, reconciled: 1 });
+  const job = w.job("leg00001");
+  assert.equal(job.status, "paused");
+  assert.equal(job.engine, "v2");
+  assert.equal(job.completionOwner, "manta");
+  assert.equal(job.attempt, 1);
+  assert.match(job.completionMessageId, /^msg_/);
+  assert.equal(job.executionDirectory, WT);
+  assert.deepEqual(job.launch.model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
+  assert.equal(job.childSessionID, "ses_leg", "history is untouched");
+  assert.equal(job.worktree, WT);
+  assert.deepEqual(results(w), { records: 0, deliveries: 0 }, "an upgrade emits nothing");
+  assert.deepEqual(w.calls.abort, []);
+
+  const resumed = await resumeJob("leg00001", w.deps);
+  assert.equal(resumed.ok, true, JSON.stringify(resumed));
+  const after = w.job("leg00001");
+  assert.equal(after.attempt, 2);
+  assert.equal(after.status, "running");
+  assert.notEqual(after.childSessionID, "ses_leg");
+  assert.deepEqual(w.calls.create[0].model, { providerID: "anthropic", modelID: "claude-sonnet-5-5" });
+  assert.deepEqual(w.calls.move, [{ sid: after.childSessionID, directory: WT }], "a fresh child in the SAME worktree");
+  assert.equal(w.calls.addWorktree.length, 0, "never a new worktree");
+  assert.deepEqual(w.calls.kill.map((k) => k.windowIndex), [3], "the old window goes once the new attempt runs");
+  w.say(after.childSessionID, "done after the upgrade");
+  w.finish(after.childSessionID, "succeeded", T0 + 9);
+  await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", after.childSessionID));
+  assert.equal(w.records.size, 1, "the resumed job's one result");
+  assert.equal([...w.records.values()][0].body.id, after.completionMessageId);
+});
+
+test("C2 boot: a legacy paused job without a worktree resumes in its parent's directory", async () => {
+  const w = legacyWorld([legacyRecord({ status: "paused", pausedAt: T0 + 5, worktree: null, branch: null, baseSha: null, model: null, requestedModel: null })]);
+  await reconcileJobsOnBoot(w.deps);
+  assert.equal(w.job("leg00001").executionDirectory, REPO);
+  assert.equal(w.job("leg00001").launch.model, null);
+  assert.equal((await resumeJob("leg00001", w.deps)).ok, true);
+  assert.deepEqual(w.calls.move, []);
+});
+
+test("C2 boot: finished legacy records and V2 records are left exactly as they are", async () => {
+  const done = legacyRecord({ id: "old00001", status: "done", finishedAt: T0 + 1, childSessionID: "ses_o1", windowIndex: 6 });
+  const v2 = { ...legacyRecord({ id: "new00001", childSessionID: "ses_n1", windowIndex: 7 }), engine: "v2", completionOwner: "manta", attempt: 1, launchState: "running", submittedAt: T0, completionMessageId: "msg_x", completionDelivery: null };
+  const w = legacyWorld([done, v2]);
+  const before = structuredClone(w.jobs);
+  assert.deepEqual(await reconcileJobsOnBoot(w.deps), { ok: true, reconciled: 0 });
+  assert.deepEqual(w.jobs, before);
+  assert.deepEqual(w.calls.abort, []);
 });
