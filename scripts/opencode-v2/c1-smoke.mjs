@@ -759,6 +759,31 @@ try {
     check("(U5) …finished, no Manta result, exactly one opencode result + one reply", n.done?.status === "done" && postedByManta === 0 && n.syn.length === 1 && n.replies.length === 1, `syn=${n.syn.length} replies=${n.replies.length}`);
   }
 
+  // ---------------------------------------------------------------- 16. a wrapped run whose command backgrounds itself (N3 could not tell)
+  console.log("\n[16] wrapped run of a command that turns out to run in the background: the job ends only when the grandchild's result AND the wrapper's reply are in");
+  {
+    const p = await newParent();
+    const res = await engine.startCommandJob({ parentSessionID: p.id, parentDirectory: sb.dirs.repo, command: "bgnative", arguments: "nested", model: MODEL });
+    check("(16) the wrapped launch resolved", res.ok === true, j(res));
+    sessions.push(res.job.childSessionID);
+    await wait("(16) the wrapped job finished", async () => (await jobBy((x) => x.id === res.job.id))?.status === "done", 90_000);
+    const doneAt = Date.now();
+    const W = res.job.childSessionID;
+    const kids = await oc.listChildSessions(W);
+    const wtl = await rawTl(W);
+    const wsyn = wtl.findIndex((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    const wAfter = wtl.slice(wsyn + 1).filter((r) => r.type === "assistant");
+    check("(16) the wrapper made a grandchild whose result reached the wrapper, and the wrapper REPLIED to it before the job ended", kids.length === 1 && wsyn >= 0 && wAfter.length >= 1, `kids=${kids.length} syn@${wsyn} replies=${wAfter.length}`);
+    check("(16) the grandchild never got a row of its own (it is inside the wrapped run's tree)", (await jobsNow()).filter((x) => x.childSessionID === kids[0]?.id).length === 0);
+    await wait("(16) the result reached the parent", async () => (await jobBy((x) => x.id === res.job.id))?.completionDelivery === "delivered", 60_000);
+    await until("(16) parent settled", async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1000);
+    const tl = await rawTl(p.id);
+    const syn = tl.filter((r) => r.type === "synthetic" && r.metadata?.source === "subagent");
+    check("(16) exactly ONE result in the parent (Manta's, under its job id) and ONE reply", syn.length === 1 && syn[0].metadata.manta?.jobId === res.job.id && tl.slice(tl.findIndex((r) => r.id === syn[0].id) + 1).filter((r) => r.type === "assistant").length === 1, j(syn.map((x) => x.metadata)));
+    void doneAt;
+  }
+
   // ---------------------------------------------------------------- 15. N4 over the real timeline (if the mapper has landed)
   console.log("\n[15] the parent transcript: the result renders as a background-result message (N4) once the mapper is on this branch");
   {
