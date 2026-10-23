@@ -18,7 +18,7 @@
 // `exec` / fs are passed in — tests inject fakes.
 
 import { execFile } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, readdir, readFile, readlink, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -60,6 +60,84 @@ export async function readOpencodePassword({ env = process.env, file = passwordF
   }
   if (!text) throw new Error(`OpenCode password file is empty (${file})`);
   return text;
+}
+
+// ------------------------------------------------- the RUNNING process (reclaim, K7)
+//
+// Read-only. The reclaim action must know which database the opencode that is running RIGHT NOW
+// has open — not what the unit file or plist says (editable without a restart; launchd can run a
+// stale loaded copy). These two helpers answer "which PID?" and "which files does it hold open?".
+
+/**
+ * PID of the running opencode, or null when it can't be determined (not running, or the nohup
+ * fallback, which has no reliable PID). Throws only when the supervisor tool itself fails; the
+ * caller treats a throw exactly like null.
+ */
+export async function readOpencodeMainPid({ supervisor, exec = defaultExec } = {}) {
+  if (supervisor === "systemd") {
+    const r = await exec("systemctl", ["--user", "show", "opencode-serve", "-p", "MainPID"]);
+    const m = /^MainPID=(\d+)\s*$/m.exec(String(r.stdout ?? ""));
+    const pid = m ? Number(m[1]) : 0;
+    return pid > 1 ? pid : null;
+  }
+  if (supervisor === "launchd") {
+    const r = await exec("launchctl", ["list", OPENCODE_PLIST_LABEL]);
+    const m = /"PID"\s*=\s*(\d+);/.exec(String(r.stdout ?? ""));
+    const pid = m ? Number(m[1]) : 0;
+    return pid > 1 ? pid : null;
+  }
+  return null;
+}
+
+/** `lsof -Fn` output → the absolute paths on its `n` lines. */
+export function parseLsofNames(stdout) {
+  const out = [];
+  for (const line of String(stdout ?? "").split("\n")) {
+    if (line.startsWith("n/")) out.push(line.slice(1));
+  }
+  return out;
+}
+
+/**
+ * The files `pid` holds open, as `[{ path, dev?, ino? }]`. Linux reads `/proc/<pid>/fd` (identity
+ * comes from stat-ing the fd link itself, so a file whose name was unlinked while open still has an
+ * identity); macOS runs `lsof -Fn -p <pid>` (names only — the caller stats them). Any failure
+ * throws; the caller treats that as "can't confirm".
+ */
+export async function readOpenFiles(pid, { platform = process.platform, exec = defaultExec, fsOps = null } = {}) {
+  if (!Number.isInteger(pid) || pid <= 1) throw new Error("no usable pid");
+  if (platform === "linux") {
+    const ops = fsOps ?? {
+      readdir: (p) => readdir(p),
+      readlink: (p) => readlink(p),
+      stat: (p) => stat(p, { bigint: true }),
+    };
+    const dir = `/proc/${pid}/fd`;
+    const out = [];
+    for (const fd of await ops.readdir(dir)) {
+      const link = join(dir, fd);
+      let target;
+      try {
+        target = await ops.readlink(link);
+      } catch {
+        continue; // the fd closed between readdir and readlink
+      }
+      if (!target.startsWith("/")) continue; // socket:[…], anon_inode:…, pipe:[…]
+      let st = null;
+      try {
+        st = await ops.stat(link);
+      } catch {
+        /* closed meanwhile, or not statable: the caller falls back to the path */
+      }
+      out.push(st ? { path: target, dev: String(st.dev), ino: String(st.ino) } : { path: target });
+    }
+    return out;
+  }
+  if (platform === "darwin") {
+    const r = await exec("lsof", ["-Fn", "-p", String(pid)]);
+    return parseLsofNames(r.stdout).map((path) => ({ path }));
+  }
+  throw new Error(`reading open files is not supported on ${platform}`);
 }
 
 // ---------------------------------------------------------------- systemd text

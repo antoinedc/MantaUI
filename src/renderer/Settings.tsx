@@ -27,6 +27,7 @@ import { ModelsCard } from "./ModelsCard";
 import { ModelLedgerCard } from "./ModelLedgerCard";
 import { OptimizerCard } from "./OptimizerCard";
 import { AddPhonePanel } from "./AddPhonePanel";
+import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveLauncherFlags } from "./chatShared";
@@ -1070,6 +1071,7 @@ export function Settings({
                 />
               ))}
             </div>
+            <ReclaimRow />
           </GroupCard>
           <GroupCard title="Backup">
             <div className="space-y-3">
