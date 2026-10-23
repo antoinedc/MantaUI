@@ -339,7 +339,11 @@ const streamInterp = createStreamInterpreter({
 // `session.inbox.enqueued`, and a successful tag is announced as a
 // `commandExecuted` frame by the interpreter.
 const COMMAND_ORIGINS_PATH = statePath("command-origins.json");
+// Late-bound: the delegate engine (below) adopts a command's child session once
+// the last open command window of its parent has closed.
+let onCommandWindowClosed = () => {};
 const commandCorrelator = createCommandCorrelator({
+  onWindowClosed: (w) => onCommandWindowClosed(w),
   origins: createOriginStore({
     load: () => readJsonSync(COMMAND_ORIGINS_PATH, {}),
     save: (o) => writeJsonAtomic(COMMAND_ORIGINS_PATH, JSON.stringify(o)),
@@ -1088,6 +1092,20 @@ const delegateEngine = createDelegateEngine({
   // on, mirroring the main-panel routing:choose wiring in rpc.mjs).
   pacing: optimizerPacing,
   abortSession: (sid) => oc.abortSession(sid),
+  // V2 jobs (Stage B): authoritative reads for completion / reconcile, the
+  // wrapped command run's launch, and the one result posted to the parent (N7).
+  readSession: (sid) => oc.readSession(sid),
+  listActiveIds: () => oc.listActiveSessionIds(),
+  listChildSessions: (sid) => oc.listChildSessions(sid),
+  listRawTimeline: (sid, opts) => oc.listRawTimeline(sid, opts),
+  listInbox: (sid) => oc.listInbox(sid),
+  createChildSession: (input) => oc.createSession(input),
+  runCommandOnChild: (input) => oc.runCommand(input),
+  deleteSession: (sid) => oc.deleteSessionRaw(sid),
+  postSynthetic: (sid, body) => oc.postSynthetic(sid, body),
+  // The CTO conversation keeps promptDelivery + admission for results (N7).
+  isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
+  openCommandWindows: (sid) => commandCorrelator.openWindows(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
   // Direct lookup, NOT a listSessions scan: `GET /session` is capped at 100
@@ -1109,6 +1127,13 @@ const delegateEngine = createDelegateEngine({
 // boot (C3).
 delegateEngine.reconcileJobsOnBoot().catch((e) =>
   console.warn("[delegate] boot reconciliation failed:", e?.message ?? e),
+);
+onCommandWindowClosed = (w) => delegateEngine.windowClosed(w);
+// V2 jobs: re-check every unfinished one from authoritative reads and retry any
+// result not yet posted to its parent. opencode may not be up yet at boot — the
+// sweeper repeats this every minute and the stream's (re)connect triggers it too.
+delegateEngine.reconcileV2().catch((e) =>
+  console.warn("[delegate] boot V2 reconciliation failed:", e?.message ?? e),
 );
 
 // §7 `work` control-tool family (record + dispatch half): composed from the
@@ -3354,6 +3379,9 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     }
   }
   if (raw?.type !== "permission.asked") interpretEvent(raw);
+  // Delegate engine: raw child creation + execution outcomes (V2 jobs complete
+  // from these, not from the adapted lifecycle below).
+  delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
     if (evt.type === "session.idle" && evt.properties?.sessionID) commandCorrelator.noteIdle(evt.properties.sessionID);
@@ -3374,6 +3402,9 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   },
   onConnect: ({ reconnect }) => {
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+    // Events may have been missed while disconnected (or before the first
+    // connect): re-check every unfinished V2 job from authoritative reads.
+    delegateEngine.reconcileV2().catch((e) => console.warn("[delegate] reconnect reconciliation failed:", e?.message ?? e));
   },
 });
 

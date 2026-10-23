@@ -1751,6 +1751,7 @@ export const IPC = {
   // {ok:false, reason:"dirty"}) and drops the record.
   delegateList: "delegate:list", // (sessionId?) → DelegateJob[]
   delegateStart: "delegate:start", // ({prompt, sessionID, directory, model?}) → { ok, error? } — BET-795 inbox Delegate in background
+  delegateOpenSession: "delegate:open-session", // ({ jobId }) → { ok: true, tmuxSession, windowIndex } | { ok: false, error } — focuses (or re-creates) the job's chat window
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
@@ -2538,7 +2539,17 @@ export type ProgressRecord = {
   detail: string;
   updatedAt: number; // epoch ms
 };
-export type DelegateJobStatus = "running" | "done" | "failed" | "stopped";
+export type DelegateJobStatus = "running" | "paused" | "done" | "failed" | "stopped";
+// P4: how far a V2 job's launch got. "uncertain" = a POST's outcome is unknown
+// (timeout / network / 5xx): the job is kept and reconciled, never rolled back,
+// and its card says "Couldn't confirm this started — open the session to check".
+export type DelegateLaunchState = "creating" | "submitting" | "running" | "uncertain";
+// P4: who reports the job's result to its parent. "opencode" = a child V2
+// started and reports itself (Manta only tracks the row); "manta" = Manta posts
+// the one result.
+export type DelegateCompletionOwner = "manta" | "opencode";
+// P4: whether Manta's own result post (completionOwner "manta") reached the parent.
+export type DelegateCompletionDelivery = "pending" | "delivered" | "abandoned";
 export type DelegateJob = {
   id: string; // 8-char hex
   name: string; // slug of the first 4 words of the prompt
@@ -2571,6 +2582,22 @@ export type DelegateJob = {
   // Those workers open as ordinary, writable sessions (the user can talk to
   // them); plain delegate jobs stay read-only.
   correlation?: { kind?: string; workId?: string } | null;
+  // P4 — all optional, absent on records from before Stage B.
+  // "delegate" | "subagent" | "command" (a background slash command, wrapped or V2-native).
+  origin?: string;
+  // "cto" marks CTO-dispatched jobs.
+  actor?: string;
+  // "v2" = a real V2 child session; absent / "legacy" = the pre-V2 engine.
+  engine?: "v2" | "legacy";
+  completionOwner?: DelegateCompletionOwner;
+  // Resume counter; `childSessionID` may change across attempts, the job id never does.
+  attempt?: number;
+  launchState?: DelegateLaunchState;
+  // When the command was sent to the child (never rewritten for an attempt).
+  submittedAt?: number | null;
+  // The id the result is posted under (minted once); retrying a post is harmless.
+  completionMessageId?: string | null;
+  completionDelivery?: DelegateCompletionDelivery | null;
 };
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF

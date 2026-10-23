@@ -500,6 +500,14 @@ async function knownOpencodeSessionIds(oc) {
   } catch { return null; }
 }
 
+// The N3 reader lives in commandBackground.mjs; loaded on first use so a box
+// without it (or a test that never lists commands) never pays for the import.
+let commandBackgroundModule = null;
+async function defaultBackgroundNames(directory) {
+  commandBackgroundModule ??= await import("./commandBackground.mjs");
+  return commandBackgroundModule.backgroundCommandNames(directory);
+}
+
 export function buildHandlers({
   tmux,
   oc,
@@ -604,6 +612,10 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // N3: `backgroundCommandNames(directory) → Promise<Set<string>>` — the names
+  // whose definitions provably run in the background (commandBackground.mjs).
+  // Injectable for tests; the default reads the real definitions.
+  backgroundCommandNames = defaultBackgroundNames,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -626,6 +638,62 @@ export function buildHandlers({
   function withoutDelivery(input) {
     const { delivery: _dropped, ...rest } = input;
     return rest;
+  }
+  function withoutBackground(input) {
+    const { background: _dropped, ...rest } = input;
+    return rest;
+  }
+  // The names N3 marks background for a directory. Never throws: an unreadable
+  // source just means nothing is marked.
+  async function safeBackgroundNames(directory) {
+    try {
+      const names = await backgroundCommandNames(directory);
+      return names instanceof Set ? names : new Set();
+    } catch (e) {
+      console.warn("[rpc] background command names unavailable:", e?.message ?? e);
+      return new Set();
+    }
+  }
+  async function sessionDirectoryOrUndefined(sessionId) {
+    try {
+      return (await oc.getSessionDirectory(sessionId)) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  // N2: a command that always runs in the background makes its OWN child
+  // session, so it runs on the parent as-is — and the parent's agent/model must
+  // not be touched (no control sync), even mid-turn.
+  async function isAlwaysBackground(sessionId, command) {
+    const directory = await sessionDirectoryOrUndefined(sessionId);
+    if (!(await safeBackgroundNames(directory)).has(command)) return false;
+    const entry = (await oc.listCommands({ directory })).find((c) => c.name === command);
+    return entry ? entry.source !== "skill" : true;
+  }
+  // N2 `background:true` (never for the CTO conversation — refused by the caller).
+  async function runBackgroundCommand(input) {
+    if (!delegate) throw new Error("background runs aren't available on this box");
+    const command = typeof input.command === "string" ? input.command.trim() : "";
+    if (!command) throw new Error("a command name is required");
+    const directory = await sessionDirectoryOrUndefined(input.sessionId);
+    const entry = (await oc.listCommands({ directory, backgroundNames: safeBackgroundNames })).find((c) => c.name === command);
+    if (!entry) throw new Error(`"/${command}" isn't an opencode command or skill, so it can't run in the background`);
+    if (entry.background === true) {
+      // Always-background: V2 makes the child itself; wrapping it again would make two.
+      await oc.runCommand({ ...withoutBackground(input), noSync: true });
+      return undefined;
+    }
+    const res = await delegate.startCommandJob({
+      parentSessionID: input.sessionId,
+      parentDirectory: directory,
+      command,
+      arguments: input.arguments,
+      model: input.model,
+      agent: input.agent,
+      attachments: input.attachments,
+    });
+    if (!res.ok) throw new Error(res.error);
+    return { jobId: res.job.id };
   }
   // K4: the pending-message list belongs to ordinary sessions only.
   async function requireInbox(sessionId) {
@@ -1887,7 +1955,13 @@ export function buildHandlers({
     "opencode:compact-session": (sessionId) => oc.compactSession(sessionId),
 
     // preload: ipcRenderer.invoke(IPC.opencodeCommands)  → no args
-    "opencode:commands": () => oc.listCommands(),
+    // P1: optional `{ directory }` — the session's directory, so the project's own
+    // commands are listed and N3's `background` mark is decided for them.
+    "opencode:commands": (opts) =>
+      oc.listCommands({
+        directory: typeof opts?.directory === "string" && opts.directory ? opts.directory : undefined,
+        backgroundNames: safeBackgroundNames,
+      }),
 
     // preload: ipcRenderer.invoke(IPC.opencodeAgents)  → no args
     "opencode:agents": () => oc.listAgents(),
@@ -1968,9 +2042,16 @@ export function buildHandlers({
     "opencode:run-command": async (input) => {
       checkDelivery(input);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
-        return ctoConversation.admitCommand(withoutDelivery(input));
+        // N2: the CTO conversation never runs a command in the background.
+        if (input.background === true) throw new Error("Background runs aren't available for the CTO conversation");
+        return ctoConversation.admitCommand(withoutBackground(withoutDelivery(input)));
       }
-      return oc.runCommand(input);
+      // N2: resolves { jobId } (a Manta-wrapped run) or void (always-background).
+      if (input?.background === true) return runBackgroundCommand(input);
+      if (input && (await isAlwaysBackground(input.sessionId, String(input.command ?? "").trim()))) {
+        return oc.runCommand({ ...withoutBackground(input), noSync: true });
+      }
+      return oc.runCommand(input && "background" in input ? withoutBackground(input) : input);
     },
 
     // ---- cto: the conversation channels (P3a3, spec §8.3) ----
@@ -2320,6 +2401,10 @@ export function buildHandlers({
       delegate ? delegate.listJobs({ sessionID: sessionId || undefined }) : { jobs: [] },
     // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
+    // P6: where a job's chat window is (re-created, stamped with the child
+    // session id, when it was closed) → { ok, tmuxSession, windowIndex } | { ok:false, error }.
+    "delegate:open-session": (input) =>
+      delegate ? delegate.openSession(input?.jobId) : { ok: false, error: "no engine" },
     // preload: ipcRenderer.invoke(IPC.delegateDelete, id) → args[0] = id
     "delegate:delete": (id) => (delegate ? delegate.deleteJob(id) : { ok: false, error: "no engine" }),
     // preload: ipcRenderer.invoke(IPC.delegateStart, input) → args[0] = { prompt, sessionID, directory, model? }

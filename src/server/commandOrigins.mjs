@@ -145,6 +145,7 @@ export function createCommandCorrelator({
   onTag = () => {},
   closeMs = COMMAND_WINDOW_CLOSE_MS,
   retireMs = PROMPT_ID_RETIRE_MS,
+  onWindowClosed = () => {},
 } = {}) {
   /** @type {Map<string, { ours: Map<string, number>, windows: Set<any>, ineligible: boolean }>} */
   const sessions = new Map();
@@ -166,7 +167,21 @@ export function createCommandCorrelator({
     }
   }
 
+  // A window's close is also announced (background-command adoption waits for
+  // the last open window of a session to close). A hook failure never throws
+  // into the timer.
   function close(sid, win) {
+    const wasOpen = !win.closed && sessions.has(sid);
+    closeWindow(sid, win);
+    if (!wasOpen) return;
+    try {
+      onWindowClosed({ sessionId: sid, name: win.name, arguments: win.arguments });
+    } catch (e) {
+      log("[command-origins] onWindowClosed failed:", e?.message ?? e);
+    }
+  }
+
+  function closeWindow(sid, win) {
     const s = sessions.get(sid);
     if (!s || win.closed) return;
     win.closed = true;
@@ -251,6 +266,15 @@ export function createCommandCorrelator({
           win.timer = setTimer(() => close(sid, win), closeMs);
         },
       };
+    },
+    /**
+     * The command windows currently open for a session (opened by a command POST
+     * that has not yet closed): `[{name, arguments}]`, oldest first. A child
+     * session born while one is open may belong to that command.
+     */
+    openWindows(sid) {
+      const s = sessions.get(sid);
+      return s ? [...s.windows].map((w) => ({ name: w.name, arguments: w.arguments })) : [];
     },
     /** The session went idle: every earlier submission has been enqueued by now. */
     noteIdle(sid) {

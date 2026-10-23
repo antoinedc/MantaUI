@@ -25,7 +25,7 @@
 // until the parent is idle so a completion notice never aborts the parent's
 // in-flight turn.
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
@@ -434,6 +434,9 @@ async function registerJob(
     // the matching worker instead of creating another blindly.
     targetTmuxSession,
     correlation,
+    // V2 job fields (engine, completionOwner, launchState, …) merged onto the
+    // record. Absent for the legacy delegate path.
+    extra,
   },
   deps = {},
 ) {
@@ -559,6 +562,7 @@ async function registerJob(
     result: null,
     error: null,
     filesChanged: null,
+    ...(extra ?? {}),
   };
   {
     const jobs = await load();
@@ -1173,7 +1177,7 @@ export async function startJob(input, deps = {}) {
  * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string}>}
  */
 export async function adoptSubagentJob(
-  { parentSessionID, parentDirectory, childSessionID, name, prompt, model },
+  { parentSessionID, parentDirectory, childSessionID, name, prompt, model, origin = "subagent" },
   deps = {},
 ) {
   const { load = loadJobs } = deps;
@@ -1185,7 +1189,7 @@ export async function adoptSubagentJob(
   // Under the jobs-store lock: the idempotency read + the record append happen
   // as one atomic unit, so a repeated adoption event cannot interleave with
   // another writer.
-  return jobsLock.runExclusive(async () => {
+  const adopted = await jobsLock.runExclusive(async () => {
     // Idempotent — the detecting event fires repeatedly as the tool part updates.
     {
       const jobs = await load();
@@ -1213,11 +1217,31 @@ export async function adoptSubagentJob(
         branch: null,
         baseSha: null,
         existingSessionId: childSessionID,
-        origin: "subagent",
+        origin,
+        // opencode started this child and reports its result to the parent
+        // itself: Manta only tracks the row and never posts a result for it.
+        extra: {
+          engine: "v2",
+          completionOwner: "opencode",
+          attempt: 1,
+          launchState: "running",
+          submittedAt: null,
+          completionMessageId: null,
+          completionDelivery: null,
+        },
       },
       deps,
     );
   });
+
+  // No lost lifecycle: a child that finished before it was adopted is recorded
+  // as finished at once, from the raw outcome the pump remembered for it.
+  if (adopted.ok && adopted.job && typeof deps.lifecycleGet === "function") {
+    const seen = deps.lifecycleGet(childSessionID);
+    const t = seen ? outcomeToTerminal(seen.outcome, { error: seen.error }) : null;
+    if (t) await finishV2Job(adopted.job, t.status, t.error, deps);
+  }
+  return adopted;
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1283,10 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
   if (evt.type === "message.part.updated") {
     try {
       const info = extractSubagentInfo(evt?.properties?.part);
+      // A `task` tool part naming a child CLAIMS it (provisional adoption of a
+      // command's child waits for exactly this): foreground → inline only,
+      // background → the adoption just below.
+      if (info?.childSessionId) deps.onSubagentClaim?.(info.childSessionId, info.background === true);
       if (
         info &&
         info.background === true &&
@@ -1296,7 +1324,9 @@ export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
     }
   }
 
-  const job = jobs.find((j) => j.childSessionID === sid && j.status === "running");
+  // engine:"v2" jobs complete from the RAW execution outcomes (observeRaw), not
+  // from this adapted lifecycle — which reads an interrupt as success.
+  const job = jobs.find((j) => j.childSessionID === sid && j.status === "running" && j.engine !== "v2");
   if (!job) {
     // Not a tracked background job — but still keep the sawBusy flag honest so
     // a job that starts later in this same session id isn't instantly
@@ -1440,6 +1470,7 @@ export async function cleanupTerminalJob(job, deps = {}) {
 }
 
 export async function finishJob(job, status, error, deps = {}, sawBusy) {
+  if (job?.engine === "v2") return finishV2Job(job, status, error, deps);
   const {
     load = loadJobs,
     save = saveJobs,
@@ -1672,6 +1703,12 @@ export async function sweepDelegateJobs(deps = {}) {
     abortSession,
   } = deps;
   try {
+    // V2 jobs: the authoritative re-check of every unfinished one (reconnect /
+    // boot / a missed event all end here) and the retry of every result not yet
+    // posted to its parent. Both are no-ops without their readers injected.
+    await reconcileV2Jobs(deps);
+    await retryPendingDeliveries(deps);
+
     const jobs = await load();
     if (jobs.length === 0) return;
     const nowMs = now();
@@ -1695,7 +1732,10 @@ export async function sweepDelegateJobs(deps = {}) {
 
     const transitioned = [];
     for (const job of jobs) {
-      if (job.status === "running" && job.startedAt != null) {
+      // An uncertain launch is never failed on a clock: nothing proves the run
+      // did not start, so it stays (and is re-checked every sweep) until there
+      // is evidence either way.
+      if (job.status === "running" && job.startedAt != null && job.launchState !== "uncertain") {
         // Per-job running-sweep allowance: default 30 min, or the caller's
         // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
         // overnightWindowRemainingMs). User-started jobs keep the 30-min rule.
@@ -1718,7 +1758,7 @@ export async function sweepDelegateJobs(deps = {}) {
     }
 
     if (transitioned.length === 0 && orphaned.length === 0 && pausedExpired.length === 0) {
-      await persistRetention({ load, save }, nowMs);
+      await persistRetention({ load, save, deps }, nowMs);
       return;
     }
 
@@ -1728,7 +1768,7 @@ export async function sweepDelegateJobs(deps = {}) {
     // gone is the more precise reason); finishJob is idempotent on the
     // already-terminal record.
     for (const job of orphaned) {
-      await stopJob(job.id, { load, save, publish, deliver, abortSession, now, killWindow: deps.killWindow, gitRemoveWorktree: deps.gitRemoveWorktree });
+      await stopJob(job.id, deps);
     }
     // Timed-out jobs → failed. Pass the FULL deps so finishJob's terminal
     // cleanup (killWindow + gitRemoveWorktree) actually runs. The error
@@ -1746,7 +1786,7 @@ export async function sweepDelegateJobs(deps = {}) {
         gitRemoveWorktree: deps.gitRemoveWorktree,
       });
     }
-    await persistRetention({ load, save }, nowMs);
+    await persistRetention({ load, save, deps }, nowMs);
   } catch (e) {
     console.warn("[delegate] sweep failed:", e?.message ?? e);
   }
@@ -1795,12 +1835,19 @@ async function stopExpiredPausedJob(job, deps = {}) {
 // Retention prune under the jobs-store lock: re-read the store fresh so the
 // prune cannot clobber a write a concurrent writer persisted while this sweep
 // was inspecting a stale snapshot.
-async function persistRetention({ load, save }, nowMs) {
+async function persistRetention({ load, save, deps }, nowMs) {
   await jobsLock.runExclusive(async () => {
     const jobs = await load();
     if (jobs.length === 0) return;
-    const retained = applyRetention(jobs, nowMs);
-    if (retained.length !== jobs.length) await save(retained);
+    const { retained, pruned } = applyRetention(jobs, nowMs);
+    if (pruned.length === 0) return;
+    // A V2 row with no worktree keeps its window after it finishes, so pruning
+    // its record closes that window FIRST — a window left without a record
+    // would reappear as an ordinary top-level session.
+    for (const j of pruned) {
+      if (j.engine === "v2" && !j.worktree) await closeJobWindow(j, deps ?? {});
+    }
+    await save(retained);
   });
 }
 
@@ -1810,30 +1857,28 @@ function applyRetention(jobs, nowMs) {
   // pruned — its tmux window is still live and the record is what keeps it
   // recognisable as a job (pruning it would let the stale window reappear as
   // an ordinary top-level session). cleanedUp===false is set only by the new
-  // cleanup path; undefined (old records) prunes as before.
-  let out = jobs.filter(
-    (j) =>
-      !(
-        (j.status === "done" || j.status === "failed" || j.status === "stopped") &&
-        j.finishedAt != null &&
-        j.finishedAt < cutoff &&
-        j.cleanedUp !== false
-      ),
-  );
-  const terminal = out.filter(
-    (j) => j.status === "done" || j.status === "failed" || j.status === "stopped",
-  );
+  // cleanup path; undefined (old records) prunes as before. A record whose
+  // result has not been posted to its parent yet is never pruned either.
+  const keeps = (j) => j.cleanedUp === false || j.completionDelivery === "pending";
+  const isTerm = (j) => j.status === "done" || j.status === "failed" || j.status === "stopped";
+  const pruned = new Set();
+  for (const j of jobs) {
+    if (isTerm(j) && j.finishedAt != null && j.finishedAt < cutoff && !keeps(j)) pruned.add(j.id);
+  }
+  let out = jobs.filter((j) => !pruned.has(j.id));
+  const terminal = out.filter(isTerm);
   if (terminal.length > MAX_TERMINAL_JOBS) {
     const sorted = [...terminal].sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0));
     const dropped = new Set(
       sorted
-        .filter((j) => j.cleanedUp !== false)
+        .filter((j) => !keeps(j))
         .slice(0, Math.max(0, terminal.length - MAX_TERMINAL_JOBS))
         .map((j) => j.id),
     );
+    for (const id of dropped) pruned.add(id);
     out = out.filter((j) => !dropped.has(j.id));
   }
-  return out;
+  return { retained: out, pruned: jobs.filter((j) => pruned.has(j.id)) };
 }
 
 export function startSweeper(deps = {}, { intervalMs = SWEEP_INTERVAL_MS } = {}) {
@@ -1889,7 +1934,35 @@ export async function stopJob(id, deps = {}) {
   } = deps;
   // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
   // atomic, so a stop cannot race another writer into a half-state.
-  return withRunningJob(id, deps, async (jobs, idx, job) => {
+  const stopped = await withRunningJob(id, deps, async (jobs, idx, job) => {
+    if (job.engine === "v2") {
+      // V2 job: one terminal write (result-delivery fields included); the N7
+      // result, when Manta owns it, is posted after the lock is released.
+      if (abortSession && job.childSessionID && job.launchState !== "creating") {
+        try {
+          await abortSession(job.childSessionID);
+        } catch (e) {
+          console.warn(`[delegate] abortSession failed for ${id}:`, e?.message ?? e);
+        }
+      }
+      const manta = completionOwnerOf(job) === "manta";
+      const updated = {
+        ...job,
+        status: "stopped",
+        error: "stopped by user",
+        finishedAt: now(),
+        pauseRequested: false,
+        completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : (job.completionMessageId ?? null),
+        completionDelivery: manta ? "pending" : null,
+      };
+      jobs[idx] = updated;
+      await save(jobs);
+      publish?.({
+        kind: "delegate.updated",
+        payload: { id: updated.id, status: updated.status, activity: updated.activity },
+      });
+      return { ok: true, deliverV2: manta };
+    }
     const wasPaused = job.status === "paused";
     if (!wasPaused && abortSession && job.childSessionID) {
       try {
@@ -1911,7 +1984,8 @@ export async function stopJob(id, deps = {}) {
       kind: "delegate.updated",
       payload: { id: updated.id, status: updated.status, activity: updated.activity },
     });
-    if (!wasPaused && deliver && job.parentSessionID) {
+    // opencode reports an adopted subagent's end to the parent itself.
+    if (!wasPaused && deliver && job.parentSessionID && job.origin !== "subagent") {
       try {
         await deliver({
           sessionId: job.parentSessionID,
@@ -1942,6 +2016,11 @@ export async function stopJob(id, deps = {}) {
     void listMessages;
     return { ok: true };
   }, { allowPaused: true });
+  if (stopped?.deliverV2) {
+    await deliverJobResult(id, deps);
+    return { ok: true };
+  }
+  return stopped;
 }
 
 /**
@@ -1969,6 +2048,23 @@ export async function deleteJob(id, deps = {}, opts = {}) {
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return { ok: false, error: "not found" };
     const job = jobs[idx];
+
+    // V2 rows with no worktree (background commands / subagents): closing the
+    // row of work that is still running, unresolved, or holds an unposted result
+    // closes the WINDOW only — the record stays, and still reports when the work
+    // ends, until retention prunes it. A finished, delivered row is closed for
+    // good (window + record) as before.
+    if (
+      job.engine === "v2" &&
+      !job.worktree &&
+      (!isTerminal(job) || job.launchState === "uncertain" || job.completionDelivery === "pending")
+    ) {
+      await closeJobWindow(job, deps);
+      jobs[idx] = { ...job, windowIndex: null };
+      await save(jobs);
+      publish?.({ kind: "delegate.updated", payload: { id, status: job.status, launchState: job.launchState } });
+      return { ok: true, retained: true };
+    }
 
     // 1. Remove the tmux window (best-effort).
     if (killWindow && job.tmuxSession != null && job.windowIndex != null) {
@@ -2028,6 +2124,11 @@ export async function deleteJob(id, deps = {}, opts = {}) {
 export async function pauseJob(id, deps = {}) {
   const { load = loadJobs, save = saveJobs, publish } = deps;
   return withRunningJob(id, deps, async (jobs, idx, job) => {
+    // V2 owns a background command's / subagent's lifecycle: there is nothing
+    // to park, so the control is refused rather than half-working.
+    if (job.engine === "v2" && (job.origin === "command" || completionOwnerOf(job) === "opencode")) {
+      return { ok: false, error: "pause isn't available for this job" };
+    }
     const updated = { ...job, pauseRequested: true };
     jobs[idx] = updated;
     await save(jobs);
@@ -2292,7 +2393,9 @@ export async function reconcileJobsOnBoot(deps = {}) {
     let reconciled = 0;
     const next = [];
     for (const job of jobs) {
-      if (job.status === "running" && job.childSessionID) {
+      // engine:"v2" jobs are reconciled by reconcileV2Jobs (authoritative
+      // reads, never a guessed state); parking one as paused would strand it.
+      if (job.status === "running" && job.childSessionID && job.engine !== "v2") {
         let alive = true;
         try {
           alive = await sessionExists(job.childSessionID);
@@ -2390,12 +2493,844 @@ export function createApprovalState({ now = () => Date.now() } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// V2 jobs (Stage B): background command runs, adoption, raw completion, N7
+//
+// A job with `engine:"v2"` is a real V2 child session. Two kinds exist here:
+//   • completionOwner "manta"    — Manta started the child (a wrapped command run,
+//     startCommandJob) and posts the ONE result to the parent (N7).
+//   • completionOwner "opencode" — opencode started the child (a background
+//     `task` subagent, a V2-native background command) and reports its result
+//     itself; Manta only tracks the row and NEVER posts a result for it.
+// Completion comes from the child's RAW execution outcome, never from the
+// lifecycle adapter (which reads an interrupt as success). Every unfinished job
+// is also re-checked from authoritative reads on each sweep (settleV2Job), which
+// is what makes a missed event, a reconnect and a boot all converge.
+// ---------------------------------------------------------------------------
+
+/** How long a child's latest raw execution outcome is remembered. */
+export const LIFECYCLE_TTL_MS = 10 * 60_000;
+const LIFECYCLE_MAX = 500;
+/** A command's child that no `task` tool part claims is adopted this long after its window closes. */
+export const ADOPT_GRACE_MS = 2_000;
+const TREE_MAX_SESSIONS = 64;
+const TREE_MAX_DEPTH = 6;
+const TREE_INDEX_MAX = 2000;
+
+const isTerminal = (j) => j?.status === "done" || j?.status === "failed" || j?.status === "stopped";
+
+/** Who reports this job's result to its parent. Records from before the field existed: adopted subagents were always opencode's. */
+export function completionOwnerOf(job) {
+  return job?.completionOwner ?? (job?.origin === "subagent" ? "opencode" : "manta");
+}
+
+/** V2 session ids are `ses…`, message ids `msg…`; both are minted here so a lost response stays reconcilable by id. */
+export function mintSessionId() {
+  return `ses_${randomUUID().replaceAll("-", "")}`;
+}
+export function mintMessageId() {
+  return `msg_${randomUUID().replaceAll("-", "")}`;
+}
+
+/** A refusal opencode gave definitively (4xx) — nothing was admitted. Anything else (network, timeout, 5xx) is unknown. */
+const isDefiniteRefusal = (e) => typeof e?.status === "number" && e.status >= 400 && e.status < 500;
+
+/** Raw V2 execution outcome → the job's terminal state. `null` for an unknown outcome. */
+export function outcomeToTerminal(outcome, { error } = {}) {
+  if (outcome === "succeeded") return { status: "done", error: null };
+  if (outcome === "failed") return { status: "failed", error: error || "The run failed." };
+  if (outcome === "interrupted") return { status: "failed", error: "interrupted" };
+  return null;
+}
+
+/**
+ * The short-lived map of each session's latest RAW execution outcome the pump
+ * feeds, so a child that finished before it was adopted is recorded finished at
+ * once. Entries expire after `ttlMs` and the map is capped (oldest evicted).
+ */
+export function createLifecycleMap({ now = () => Date.now(), ttlMs = LIFECYCLE_TTL_MS, max = LIFECYCLE_MAX } = {}) {
+  const map = new Map();
+  function prune() {
+    const cutoff = now() - ttlMs;
+    for (const [sid, v] of map) if (v.at < cutoff) map.delete(sid);
+    while (map.size > max) map.delete(map.keys().next().value);
+  }
+  return {
+    record(sid, { outcome, error = null }) {
+      map.delete(sid); // re-insert at the tail so eviction is oldest-first
+      map.set(sid, { outcome, error, at: now() });
+      prune();
+    },
+    get(sid) {
+      prune();
+      return map.get(sid) ?? null;
+    },
+    size: () => map.size,
+  };
+}
+
+// A guarded patch of one record under the jobs lock. `patch` is an object or a
+// function of the live record; `onlyIf` (when given) must accept the live
+// record or nothing is written. Publishes the same bus event every job change
+// uses, so a card driven by launchState updates without polling (P7).
+async function patchJob(id, patch, deps = {}, { onlyIf } = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === id);
+    if (idx === -1) return null;
+    if (onlyIf && !onlyIf(jobs[idx])) return null;
+    const next = { ...jobs[idx], ...(typeof patch === "function" ? patch(jobs[idx]) : patch) };
+    jobs[idx] = next;
+    await save(jobs);
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id, status: next.status, launchState: next.launchState, activity: next.activity },
+    });
+    return next;
+  });
+}
+
+async function removeJobRecord(id, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    if (!jobs.some((j) => j.id === id)) return;
+    await save(jobs.filter((j) => j.id !== id));
+    publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
+  });
+}
+
+/**
+ * Close a job's tmux window, only if the window at its recorded index is STILL
+ * the one stamped with this job's child session: indexes get reused, and a
+ * stale one must never close somebody else's window. Best-effort; never throws.
+ */
+async function closeJobWindow(job, deps = {}) {
+  const { killWindow, listProjects } = deps;
+  if (!killWindow || job?.tmuxSession == null || job?.windowIndex == null) return false;
+  try {
+    if (typeof listProjects === "function") {
+      const projects = await listProjects();
+      const win = (Array.isArray(projects) ? projects : [])
+        .filter((p) => p.tmuxSession === job.tmuxSession)
+        .flatMap((p) => p.windows || [])
+        .find((w) => w.index === job.windowIndex);
+      if (!win || win.opencodeSessionId !== job.childSessionID) return false;
+    }
+    await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
+    return true;
+  } catch (e) {
+    console.warn(`[delegate] closing the window of ${job?.id} failed:`, e?.message ?? e);
+    return false;
+  }
+}
+
+// ---- terminal transition --------------------------------------------------
+
+/**
+ * Make a V2 job terminal. ONE write holds the status, the result and — for a job
+ * whose result Manta posts — the minted `completionMessageId` with
+ * `completionDelivery:"pending"`, so a crash right after can never lose the
+ * result nor post it twice. The first terminal transition wins; later ones are
+ * no-ops. The N7 post (if any) happens AFTER the write. A job without a
+ * worktree keeps its window and record (the row shows done).
+ */
+export async function finishV2Job(job, status, error, deps = {}) {
+  const {
+    load = loadJobs,
+    save = saveJobs,
+    publish,
+    listMessages,
+    clearProgress = defaultClearProgress,
+    now = () => Date.now(),
+  } = deps;
+
+  const updated = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const idx = jobs.findIndex((j) => j.id === job.id);
+    if (idx === -1) return null;
+    const live = jobs[idx];
+    if (isTerminal(live)) return null;
+
+    let result = null;
+    if (status === "done") {
+      try {
+        result = await lastAssistantText(listMessages ? await listMessages(live.childSessionID) : []);
+      } catch (e) {
+        console.warn("[delegate] listMessages failed:", e?.message ?? e);
+      }
+    }
+    const manta = completionOwnerOf(live) === "manta";
+    const next = {
+      ...live,
+      status,
+      error: status === "done" ? null : (error ?? null),
+      result: status === "done" ? result : null,
+      finishedAt: now(),
+      pauseRequested: false,
+      completionMessageId: manta ? (live.completionMessageId ?? mintMessageId()) : (live.completionMessageId ?? null),
+      completionDelivery: manta ? "pending" : null,
+    };
+    jobs[idx] = next;
+    await save(jobs);
+    publish?.({
+      kind: "delegate.updated",
+      payload: { id: next.id, status: next.status, launchState: next.launchState, activity: next.activity },
+    });
+    return next;
+  });
+  if (!updated) return { ok: true, alreadyTerminal: true };
+
+  if (typeof deps.onJobTerminal === "function") {
+    try {
+      await deps.onJobTerminal(updated);
+    } catch (e) {
+      console.warn(`[delegate] onJobTerminal failed for ${updated.id}:`, e?.message ?? e);
+    }
+  }
+  if (updated.childSessionID) {
+    try {
+      await clearProgress(updated.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] clearProgress failed for ${updated.id}:`, e?.message ?? e);
+    }
+  }
+  if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
+  return { ok: true };
+}
+
+// ---- N7: the one result posted to the parent ------------------------------
+
+const deliveringIds = new Set();
+const loggedDeliveryFailures = new Set();
+
+const STATE_FOR_STATUS = { done: "completed", failed: "failed", stopped: "cancelled" };
+
+/** The N7 body for a finished job — a pure function of the record, so a retry posts the same thing. */
+export function buildResultSynthetic(job) {
+  return {
+    id: job.completionMessageId,
+    text: buildCompletionText(job),
+    description: job.name,
+    metadata: {
+      source: "subagent",
+      childID: job.childSessionID,
+      agent: job.agent ?? null,
+      state: STATE_FOR_STATUS[job.status] ?? job.status,
+      manta: { jobId: job.id, name: job.name },
+    },
+    delivery: "queue",
+    resume: true,
+  };
+}
+
+/**
+ * Post a finished job's result to its parent (N7): `delivery:"queue"` (never
+ * steers a running parent turn), `resume:true`, the job's persisted
+ * `completionMessageId` (a retry after an uncertain POST admits once). Marks the
+ * record `delivered` on success and `abandoned` when the parent is gone (404);
+ * any other failure leaves it `pending` for the next retry (sweep / boot). A CTO
+ * conversation parent keeps the admission path (`deliver`), never N7.
+ */
+export async function deliverJobResult(id, deps = {}) {
+  const { load = loadJobs, postSynthetic, deliver, isCtoConversationSession } = deps;
+  if (deliveringIds.has(id)) return { ok: true, skipped: "in-flight" };
+  deliveringIds.add(id);
+  try {
+    const job = (await load()).find((j) => j.id === id);
+    if (!job || !isTerminal(job) || job.completionDelivery !== "pending") return { ok: true, skipped: "not-pending" };
+    const markIfPending = (completionDelivery) =>
+      patchJob(id, { completionDelivery }, deps, { onlyIf: (j) => j.completionDelivery === "pending" });
+
+    let cto = false;
+    try {
+      cto = !!(await isCtoConversationSession?.(job.parentSessionID));
+    } catch {
+      cto = false;
+    }
+    if (cto) {
+      try {
+        await deliver?.({ sessionId: job.parentSessionID, text: buildCompletionText(job) });
+      } catch (e) {
+        console.warn(`[delegate] completion delivery failed for ${id}:`, e?.message ?? e);
+      }
+      await markIfPending("delivered");
+      return { ok: true, delivered: true };
+    }
+    if (typeof postSynthetic !== "function") return { ok: false, error: "no synthetic poster" };
+    try {
+      await postSynthetic(job.parentSessionID, buildResultSynthetic(job));
+    } catch (e) {
+      if (e?.status === 404) {
+        if (!loggedDeliveryFailures.has(id)) {
+          loggedDeliveryFailures.add(id);
+          console.warn(`[delegate] parent session of ${id} is gone — result abandoned`);
+        }
+        await markIfPending("abandoned");
+        return { ok: true, abandoned: true };
+      }
+      if (!loggedDeliveryFailures.has(id)) {
+        loggedDeliveryFailures.add(id);
+        console.warn(`[delegate] result delivery for ${id} failed (will retry):`, e?.message ?? e);
+      }
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    loggedDeliveryFailures.delete(id);
+    await markIfPending("delivered");
+    return { ok: true, delivered: true };
+  } finally {
+    deliveringIds.delete(id);
+  }
+}
+
+/** Retry every result still `pending` (the sweeper tick and boot). Sequential; a failure never stops the rest. */
+export async function retryPendingDeliveries(deps = {}) {
+  const { load = loadJobs } = deps;
+  if (typeof deps.postSynthetic !== "function" && typeof deps.deliver !== "function") return 0;
+  const pending = (await load()).filter((j) => isTerminal(j) && j.completionDelivery === "pending");
+  for (const j of pending) {
+    try {
+      await deliverJobResult(j.id, deps);
+    } catch (e) {
+      console.warn(`[delegate] delivery retry failed for ${j.id}:`, e?.message ?? e);
+    }
+  }
+  return pending.length;
+}
+
+// ---- completion: authoritative reads --------------------------------------
+
+async function hasAdmissionEvidence(job, deps) {
+  const child = job.childSessionID;
+  const tries = [
+    async () => ((await deps.listInbox?.(child)) ?? []).length > 0,
+    async () => ((await deps.listRawTimeline?.(child, { type: "user" })) ?? []).length > 0,
+    async () => ((await deps.listChildSessions?.(child)) ?? []).length > 0,
+  ];
+  for (const t of tries) {
+    try {
+      if (await t()) return true;
+    } catch {
+      /* an unreadable source proves nothing */
+    }
+  }
+  return false;
+}
+
+// A `subagent` tool block in an assistant record that names `childId`.
+function toolBlockFor(assistantRecords, childId) {
+  for (const rec of assistantRecords) {
+    for (const block of Array.isArray(rec?.content) ? rec.content : []) {
+      if (block?.type !== "tool") continue;
+      const md = block.state?.metadata;
+      if ((md?.sessionID ?? md?.sessionId) === childId) return block;
+    }
+  }
+  return null;
+}
+
+/**
+ * The completion predicate's descendant part (spec B-server 3): every session
+ * below the wrapper child is finished AND its completion evidence is present —
+ * a FOREGROUND child by its `task` tool block being completed/error in its
+ * parent's timeline, a BACKGROUND child by its result synthetic
+ * (`metadata.childID`) in its parent's timeline — and every such parent's inbox
+ * is empty. Returns `{complete, newestSyntheticAt}`; throws when something could
+ * not be read (the caller treats that as "unknown", never "finished").
+ */
+async function descendantEvidence(job, active, deps) {
+  if (typeof deps.listChildSessions !== "function") return { complete: true, newestSyntheticAt: null };
+  const nodes = [];
+  const seen = new Set([job.childSessionID]);
+  let layer = [job.childSessionID];
+  for (let depth = 0; layer.length > 0; depth++) {
+    if (depth >= TREE_MAX_DEPTH) throw new Error("descendant tree too deep");
+    const next = [];
+    for (const parent of layer) {
+      for (const kid of await deps.listChildSessions(parent)) {
+        if (seen.has(kid.id)) continue;
+        seen.add(kid.id);
+        if (seen.size > TREE_MAX_SESSIONS) throw new Error("too many descendants");
+        nodes.push({ id: kid.id, parent });
+        next.push(kid.id);
+      }
+    }
+    layer = next;
+  }
+  if (nodes.length === 0) return { complete: true, newestSyntheticAt: null };
+  if (nodes.some((n) => active.has(n.id))) return { complete: false, newestSyntheticAt: null };
+
+  const synthetics = new Map();
+  const assistants = new Map();
+  for (const parent of new Set(nodes.map((n) => n.parent))) {
+    if ((((await deps.listInbox?.(parent)) ?? []).length) > 0) return { complete: false, newestSyntheticAt: null };
+    synthetics.set(parent, (await deps.listRawTimeline(parent, { type: "synthetic" })) ?? []);
+    assistants.set(parent, (await deps.listRawTimeline(parent, { type: "assistant" })) ?? []);
+  }
+  let newest = null;
+  for (const n of nodes) {
+    const block = toolBlockFor(assistants.get(n.parent), n.id);
+    const st = block?.state;
+    const background = st?.input?.background === true || st?.metadata?.background === true;
+    if (block && !background) {
+      if (st?.status !== "completed" && st?.status !== "error") return { complete: false, newestSyntheticAt: null };
+      continue;
+    }
+    const syn = synthetics.get(n.parent).filter((r) => r?.metadata?.childID === n.id);
+    if (syn.length === 0) return { complete: false, newestSyntheticAt: null };
+    for (const r of syn) newest = Math.max(newest ?? 0, r?.time?.created ?? 0);
+  }
+  return { complete: true, newestSyntheticAt: newest };
+}
+
+/**
+ * Decide, from authoritative reads only, what state a V2 job is in — the ONE
+ * evaluator behind the live pump, reconnect, boot and the sweeper. Never guesses:
+ * anything unreadable or inconclusive leaves the record exactly as it is.
+ *
+ *  • `GET /api/session/active` — is the child running?
+ *  • `GET /api/session/{child}` — `outcome` and `time.idle`.
+ *  • the job's persisted `launchState` / `submittedAt`.
+ *
+ * For a `completionOwner:"manta"` job the run is finished only when the whole
+ * tree is (descendantEvidence) AND the child's latest outcome came after the
+ * newest descendant result — a wrapper that backgrounded itself replies to that
+ * result in a turn of its own. `hint` is the raw outcome the pump just saw.
+ */
+export async function settleV2Job(job, deps = {}, { hint } = {}) {
+  const { listActiveIds, readSession } = deps;
+  if (typeof listActiveIds !== "function" || typeof readSession !== "function") return { settled: false, reason: "no-readers" };
+  let active;
+  try {
+    active = new Set(await listActiveIds());
+  } catch {
+    return { settled: false, reason: "unknown" };
+  }
+  let rs;
+  try {
+    rs = await readSession(job.childSessionID);
+  } catch {
+    rs = { state: "unknown" };
+  }
+  if (rs.state === "unknown") return { settled: false, reason: "unknown" };
+  const manta = completionOwnerOf(job) === "manta";
+
+  if (rs.state === "missing") {
+    // A child that was never confirmed to exist (create lost / never sent) stays
+    // as it is; one that DID exist and is gone was deleted.
+    if (job.launchState === "creating" || (manta && job.submittedAt == null)) return { settled: false, reason: "unsent" };
+    await finishV2Job(job, "failed", "the session no longer exists", deps);
+    return { settled: true, status: "failed" };
+  }
+
+  const session = rs.session ?? {};
+  const outcome = session.outcome ?? hint?.outcome ?? null;
+  const idleAt = session.time?.idle ?? hint?.at ?? null;
+  const fresh = job.submittedAt == null || (idleAt != null && idleAt >= job.submittedAt);
+
+  if (job.launchState === "uncertain") {
+    const evidence =
+      active.has(job.childSessionID) || (outcome && fresh) || (await hasAdmissionEvidence(job, deps));
+    if (!evidence) return { settled: false, reason: "uncertain" };
+    job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
+  }
+  if (active.has(job.childSessionID)) return { settled: false, reason: "active" };
+  if (!outcome || !fresh) return { settled: false, reason: "no-outcome" };
+
+  if (manta) {
+    let tree;
+    try {
+      tree = await descendantEvidence(job, active, deps);
+    } catch (e) {
+      console.warn(`[delegate] could not read the descendants of ${job.id}:`, e?.message ?? e);
+      return { settled: false, reason: "unknown" };
+    }
+    if (!tree.complete) return { settled: false, reason: "descendants" };
+    if (tree.newestSyntheticAt != null && !(idleAt != null && idleAt > tree.newestSyntheticAt)) {
+      return { settled: false, reason: "reply-pending" };
+    }
+  }
+  const t = outcomeToTerminal(outcome, { error: hint?.error });
+  if (!t) return { settled: false, reason: "no-outcome" };
+  await finishV2Job(job, t.status, t.error, deps);
+  return { settled: true, status: t.status };
+}
+
+const resuming = new Set();
+
+/**
+ * A wrapped run whose command was NEVER sent (the create response was lost, or
+ * the process died before the send) and whose child now provably exists:
+ * finish the launch — window, then the one send. Claimed under the lock so two
+ * triggers can't both send. Nothing was ever submitted, so this cannot double-run.
+ */
+async function resumeUnsentLaunch(job, deps) {
+  if (resuming.has(job.id)) return;
+  resuming.add(job.id);
+  try {
+    const { listProjects, newWindow, stampOwner } = deps;
+    let current = job;
+    if (current.windowIndex == null) {
+      const projects = typeof listProjects === "function" ? await listProjects() : [];
+      const owner = current.tmuxSession ? { tmuxSession: current.tmuxSession } : resolveOwner(projects, current.parentSessionID);
+      if (!owner) return;
+      const created = await newWindow({
+        sessionName: owner.tmuxSession,
+        windowName: windowNameFor(current.name),
+        cwd: current.parentDirectory,
+        chatMode: true,
+        existingSessionId: current.childSessionID,
+        oc: deps.oc,
+      });
+      if (stampOwner) {
+        try {
+          await stampOwner(owner.tmuxSession, created.windowIndex, "job");
+        } catch {
+          /* advisory */
+        }
+      }
+      current = (await patchJob(current.id, { tmuxSession: owner.tmuxSession, windowIndex: created.windowIndex ?? null }, deps)) ?? current;
+    }
+    const claimed = await patchJob(
+      current.id,
+      () => ({ launchState: "submitting", submittedAt: (deps.now ?? Date.now)() }),
+      deps,
+      { onlyIf: (j) => j.status === "running" && j.submittedAt == null },
+    );
+    if (!claimed) return;
+    await submitCommand(claimed, deps);
+  } catch (e) {
+    console.warn(`[delegate] resuming the launch of ${job.id} failed:`, e?.message ?? e);
+  } finally {
+    resuming.delete(job.id);
+  }
+}
+
+/**
+ * Re-check every unfinished `engine:"v2"` job (boot, reconnect, each sweep).
+ * Sequential: a box with a handful of background rows must not fan out reads.
+ */
+export async function reconcileV2Jobs(deps = {}) {
+  const { load = loadJobs } = deps;
+  if (typeof deps.listActiveIds !== "function") return 0;
+  const targets = (await load()).filter((j) => j.engine === "v2" && !isTerminal(j) && j.childSessionID);
+  for (const job of targets) {
+    try {
+      if (completionOwnerOf(job) === "manta" && job.submittedAt == null && (job.launchState === "creating" || job.launchState === "uncertain")) {
+        const rs = await deps.readSession(job.childSessionID);
+        if (rs.state === "found") await resumeUnsentLaunch(job, deps);
+        continue;
+      }
+      await settleV2Job(job, deps);
+    } catch (e) {
+      console.warn(`[delegate] reconcile of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  return targets.length;
+}
+
+// ---- startCommandJob: a Manta-wrapped background command run --------------
+
+// tmux window names: manta's own rename rule — 1–40 chars, no ':' or control characters.
+function windowNameFor(displayName) {
+  const clean = String(displayName ?? "").replace(/[:\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim();
+  return clean || "background-command";
+}
+
+/** The row's display name: `/<name> <args>` trimmed. */
+export function commandDisplayName(command, args) {
+  return `/${command} ${String(args ?? "").trim()}`.trim();
+}
+
+// Undo a launch proven not admitted: the child, its window and the record.
+async function rollbackLaunch(job, deps) {
+  if (deps.deleteSession && job.childSessionID) {
+    try {
+      await deps.deleteSession(job.childSessionID);
+    } catch (e) {
+      console.warn(`[delegate] deleting the child of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  await closeJobWindow(job, deps);
+  await removeJobRecord(job.id, deps);
+}
+
+/**
+ * Send the command to the child (step c). `submittedAt` was persisted BEFORE this
+ * call and is never rewritten. A definite refusal rolls the whole launch back; an
+ * UNCERTAIN failure never does — no snapshot proves the request can't still be
+ * admitted, so the record, child and window stay, marked `uncertain`, and the
+ * sweeper keeps reconciling them.
+ */
+async function submitCommand(job, deps) {
+  const run = job.commandRun ?? {};
+  try {
+    await deps.runCommandOnChild({
+      sessionId: job.childSessionID,
+      command: run.command,
+      arguments: run.arguments ?? "",
+      model: run.model,
+      agent: run.agent,
+      attachments: run.attachments,
+    });
+  } catch (e) {
+    if (isDefiniteRefusal(e)) {
+      await rollbackLaunch(job, deps);
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    const kept = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
+    return { ok: true, job: kept, uncertain: true };
+  }
+  const running = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) && j.launchState !== "running" })) ?? job;
+  return { ok: true, job: running };
+}
+
+/**
+ * Launch a slash command in a background child session (N2, a command N3 could
+ * not prove runs in the background). A NEW entry point — not adoptSubagentJob,
+ * which skips launch checks because opencode already started that child.
+ *
+ * Checked BEFORE anything is created: the box-wide running cap and the
+ * no-nesting rule (same refusals as startJob), and the parent's own permission
+ * ruleset (the child gets exactly it, never wider). Then, in order: register the
+ * job (client-minted child id + result id) → create the child (explicit
+ * agent/model/permissions) → its window → persist submittedAt → send. Roll back
+ * only what is proven not admitted (see submitCommand).
+ *
+ * @param {{ parentSessionID: string, parentDirectory?: string, command: string, arguments?: string,
+ *           model?: {providerID:string, modelID:string, variant?:string}, agent?: string,
+ *           attachments?: Array<object> }} input
+ * @returns {Promise<{ok:true, job:object, uncertain?:true}|{ok:false, error:string}>}
+ */
+export async function startCommandJob(input, deps = {}) {
+  const {
+    load = loadJobs,
+    save = saveJobs,
+    publish,
+    listProjects,
+    newWindow,
+    stampOwner,
+    readSession,
+    createChildSession,
+    now = () => Date.now(),
+  } = deps;
+  const command = typeof input?.command === "string" ? input.command.trim() : "";
+  const parentSessionID = input?.parentSessionID;
+  if (!parentSessionID) return { ok: false, error: "parentSessionID is required" };
+  if (!command) return { ok: false, error: "command is required" };
+  const args = String(input?.arguments ?? "");
+
+  const refusal = (jobs) => {
+    if (jobs.find((j) => j.childSessionID === parentSessionID && j.status === "running")) {
+      return { ok: false, error: "a background job cannot start another background job" };
+    }
+    if (jobs.filter((j) => j.status === "running").length >= MAX_RUNNING_JOBS) return { ok: false, error: CAP_ERROR };
+    return null;
+  };
+  // Cheap early refusal (re-checked atomically below, before anything is created).
+  {
+    const early = refusal(await load());
+    if (early) return early;
+  }
+
+  let parent;
+  try {
+    parent = await readSession(parentSessionID);
+  } catch {
+    parent = { state: "unknown" };
+  }
+  if (parent.state === "missing") return { ok: false, error: "this conversation no longer exists" };
+  if (parent.state !== "found") return { ok: false, error: "Couldn't read this conversation's settings — try again" };
+  const parentInfo = parent.session ?? {};
+  const parentDirectory = input.parentDirectory || parentInfo.directory;
+  if (!parentDirectory) return { ok: false, error: "parentDirectory is required" };
+
+  const owner = resolveOwner(await listProjects(), parentSessionID);
+  if (!owner) return { ok: false, error: `could not resolve the tmux session owning ${parentSessionID}` };
+
+  // The child's controls: what the composer shows, else the parent's own —
+  // passed EXPLICITLY (create AND run) so nothing can flip them afterwards.
+  const agent = (typeof input.agent === "string" && input.agent) || (typeof parentInfo.agent === "string" && parentInfo.agent) || "build";
+  const model =
+    input.model?.providerID && input.model?.modelID
+      ? { providerID: input.model.providerID, modelID: input.model.modelID, ...(input.model.variant ? { variant: input.model.variant } : {}) }
+      : parentInfo.model?.providerID && parentInfo.model?.id
+        ? { providerID: parentInfo.model.providerID, modelID: parentInfo.model.id, ...(parentInfo.model.variant ? { variant: parentInfo.model.variant } : {}) }
+        : undefined;
+  const permissions = Array.isArray(parentInfo.permissions) ? parentInfo.permissions : [];
+  const name = commandDisplayName(command, args);
+  const modelString = model ? `${model.providerID}/${model.modelID}` : null;
+
+  // (a) Register FIRST, under the lock that also enforces the cap and nesting.
+  const reg = await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const refused = refusal(jobs);
+    if (refused) return refused;
+    const t = now();
+    const job = {
+      id: genId(),
+      name,
+      prompt: name,
+      model: modelString,
+      requestedModel: modelString,
+      parentSessionID,
+      parentDirectory,
+      childSessionID: mintSessionId(),
+      tmuxSession: owner.tmuxSession,
+      windowIndex: null,
+      worktree: null,
+      branch: null,
+      baseSha: null,
+      origin: "command",
+      link: null,
+      actor: "user",
+      correlation: null,
+      sweepAllowanceMs: null,
+      permission: null,
+      status: "running",
+      activity: null,
+      createdAt: t,
+      startedAt: t,
+      finishedAt: null,
+      result: null,
+      error: null,
+      filesChanged: null,
+      engine: "v2",
+      completionOwner: "manta",
+      attempt: 1,
+      launchState: "creating",
+      submittedAt: null,
+      completionMessageId: mintMessageId(),
+      completionDelivery: null,
+      agent,
+      commandRun: { command, arguments: args, model, agent, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+    };
+    jobs.push(job);
+    await save(jobs);
+    publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running", launchState: "creating" } });
+    return { ok: true, job };
+  });
+  if (!reg.ok) return reg;
+  let job = reg.job;
+
+  // (b) the child session
+  try {
+    await createChildSession({
+      directory: parentDirectory,
+      id: job.childSessionID,
+      parentID: parentSessionID,
+      title: name,
+      agent,
+      model,
+      permissions,
+    });
+  } catch (e) {
+    if (isDefiniteRefusal(e)) {
+      await removeJobRecord(job.id, deps);
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+    const kept = (await patchJob(job.id, { launchState: "uncertain" }, deps)) ?? job;
+    return { ok: true, job: kept, uncertain: true };
+  }
+
+  // …then the window / sidebar row
+  let windowIndex = null;
+  try {
+    const created = await newWindow({
+      sessionName: owner.tmuxSession,
+      windowName: windowNameFor(name),
+      cwd: parentDirectory,
+      chatMode: true,
+      existingSessionId: job.childSessionID,
+      oc: deps.oc,
+    });
+    windowIndex = created.windowIndex ?? null;
+  } catch (e) {
+    // The child exists but nothing was sent: undo it all, report.
+    await rollbackLaunch(job, deps);
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+  if (stampOwner && windowIndex != null) {
+    try {
+      await stampOwner(owner.tmuxSession, windowIndex, "job");
+    } catch {
+      /* advisory */
+    }
+  }
+
+  // (c) persist submittedAt BEFORE sending; never rewritten for this attempt.
+  job = (await patchJob(job.id, { windowIndex, launchState: "submitting", submittedAt: now() }, deps)) ?? job;
+  return submitCommand(job, deps);
+}
+
+// ---- open a job's session -------------------------------------------------
+
+/**
+ * `delegate:open-session`: where the job's chat window is — re-created, stamped
+ * with the child session id, if it was closed. A child that no longer exists is
+ * a visible error, never a window onto nothing.
+ * @returns {Promise<{ok:true, tmuxSession:string, windowIndex:number}|{ok:false, error:string}>}
+ */
+export async function openJobSession(id, deps = {}) {
+  const { load = loadJobs, listProjects, newWindow, stampOwner, readSession } = deps;
+  const job = (await load()).find((j) => j.id === id);
+  if (!job) return { ok: false, error: "that background job no longer exists" };
+  if (!job.childSessionID) return { ok: false, error: "this background job has no session yet" };
+
+  let rs;
+  try {
+    rs = await readSession(job.childSessionID);
+  } catch {
+    rs = { state: "unknown" };
+  }
+  if (rs.state === "missing") return { ok: false, error: "The session no longer exists" };
+  if (rs.state !== "found") return { ok: false, error: "Couldn't reach opencode to open the session — try again" };
+
+  try {
+    const projects = (await listProjects()) ?? [];
+    for (const p of projects) {
+      const win = (p.windows || []).find((w) => w.opencodeSessionId === job.childSessionID);
+      if (win) {
+        if (win.index !== job.windowIndex || p.tmuxSession !== job.tmuxSession) {
+          await patchJob(id, { tmuxSession: p.tmuxSession, windowIndex: win.index }, deps);
+        }
+        return { ok: true, tmuxSession: p.tmuxSession, windowIndex: win.index };
+      }
+    }
+    const owner = job.tmuxSession
+      ? { tmuxSession: job.tmuxSession }
+      : resolveOwner(projects, job.parentSessionID);
+    if (!owner) return { ok: false, error: `could not find the workspace that owns this job` };
+    const created = await newWindow({
+      sessionName: owner.tmuxSession,
+      windowName: windowNameFor(job.name),
+      cwd: job.worktree || job.parentDirectory,
+      chatMode: true,
+      existingSessionId: job.childSessionID,
+      worktreePath: job.worktree ?? undefined,
+      oc: deps.oc,
+    });
+    if (stampOwner && created.windowIndex != null) {
+      try {
+        await stampOwner(owner.tmuxSession, created.windowIndex, "job");
+      } catch {
+        /* advisory */
+      }
+    }
+    await patchJob(id, { tmuxSession: owner.tmuxSession, windowIndex: created.windowIndex ?? null }, deps);
+    return { ok: true, tmuxSession: owner.tmuxSession, windowIndex: created.windowIndex };
+  } catch (e) {
+    return { ok: false, error: `Couldn't open the session: ${String(e?.message ?? e)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Engine factory — wires the runtime deps once (in src/server/index.mjs) and
 // returns bound methods the REST/RPC handlers + the pump call. Mirrors the
 // createPromptDelivery / createWebhookEngine pattern.
 // ---------------------------------------------------------------------------
 
-export function createDelegateEngine(deps) {
+export function createDelegateEngine(baseDeps) {
   const sawBusy = new Map();
   // Per-session promise chain. opencode emits several events per turn boundary
   // and the pump calls observeEvent without awaiting it, so two invocations can
@@ -2407,7 +3342,135 @@ export function createDelegateEngine(deps) {
   // second idle event find no running job. Per-session, not global: different
   // sessions share no state, and a global chain would queue every session
   // behind one slow transcript read.
-  const chains = new Map(); // sessionID -> tail promise
+  const chains = new Map(); // key -> tail promise
+  const serialize = (key, fn) => {
+    const tail = (chains.get(key) ?? Promise.resolve())
+      .then(fn)
+      .catch((e) => console.warn("[delegate] event handling failed:", e?.message ?? e));
+    chains.set(key, tail);
+    // Drop the chain tail from the map only if it is still the current one,
+    // so the map cannot grow without bound and a live chain is never removed
+    // from under a queued event.
+    const drop = () => { if (chains.get(key) === tail) chains.delete(key); };
+    tail.then(drop, drop);
+    return tail;
+  };
+
+  // ---- V2 state: raw outcomes, the descendant index, provisional adoption ----
+  const nowFn = baseDeps.now ?? (() => Date.now());
+  const lifecycle = baseDeps.lifecycle ?? createLifecycleMap({ now: nowFn });
+  const treeIndex = new Map(); // descendant session id -> root job id (Manta-owned wrapped runs)
+  const candidates = new Map(); // child session id -> { parentID, name, timer }
+  const claims = new Map(); // child session id -> { background, at }
+  const setTimer = baseDeps.setTimer ?? ((fn, ms) => { const h = setTimeout(fn, ms); h.unref?.(); return h; });
+  const clearTimer = baseDeps.clearTimer ?? ((h) => clearTimeout(h));
+  const boundMap = (m, cap) => { while (m.size > cap) m.delete(m.keys().next().value); };
+
+  // A `task` tool part named this child: foreground → inline only (never a row),
+  // background → the existing subagent adoption. Either way it is no longer a
+  // candidate for command adoption.
+  function noteClaim(childId, background) {
+    const cutoff = nowFn() - LIFECYCLE_TTL_MS;
+    for (const [id, v] of claims) if (v.at < cutoff) claims.delete(id);
+    claims.set(childId, { background, at: nowFn() });
+    boundMap(claims, 500);
+    const c = candidates.get(childId);
+    if (c) {
+      if (c.timer) clearTimer(c.timer);
+      candidates.delete(childId);
+    }
+  }
+  const deps = { ...baseDeps, lifecycleGet: (sid) => lifecycle.get(sid), onSubagentClaim: noteClaim };
+
+  async function adoptCandidate(childId) {
+    const c = candidates.get(childId);
+    if (!c) return;
+    candidates.delete(childId);
+    if (claims.has(childId)) return;
+    const owner = resolveOwner(await deps.listProjects(), c.parentID);
+    if (!owner) {
+      console.warn("[delegate] could not resolve the owning window to adopt a background command:", c.parentID);
+      return;
+    }
+    await adoptSubagentJob(
+      { parentSessionID: c.parentID, parentDirectory: owner.cwd, childSessionID: childId, name: c.name, prompt: c.name, model: null, origin: "command" },
+      deps,
+    );
+  }
+
+  // The last open command window of a session closed: its unclaimed candidates
+  // are adopted ADOPT_GRACE_MS later (a claiming tool part may still arrive).
+  function windowClosed({ sessionId }) {
+    const open = deps.openCommandWindows?.(sessionId) ?? [];
+    if (open.length > 0) return;
+    for (const [childId, c] of candidates) {
+      if (c.parentID !== sessionId || c.timer) continue;
+      c.timer = setTimer(() => { void serialize(`adopt:${childId}`, () => adoptCandidate(childId)); }, ADOPT_GRACE_MS);
+    }
+  }
+
+  const rawOutcome = (type) =>
+    type === "session.execution.succeeded" ? "succeeded" : type === "session.execution.failed" ? "failed" : type === "session.execution.interrupted" ? "interrupted" : null;
+
+  async function onSessionCreated(raw) {
+    const d = raw.data ?? {};
+    const childId = d.sessionID;
+    const parentID = d.parentID;
+    if (typeof childId !== "string" || typeof parentID !== "string") return;
+    const jobs = await (deps.load ?? loadJobs)();
+    // A descendant of a Manta-owned wrapped run: remember whose tree it is.
+    const root = jobs.find((j) => j.engine === "v2" && completionOwnerOf(j) === "manta" && !isTerminal(j) && j.childSessionID === parentID);
+    const rootId = root?.id ?? treeIndex.get(parentID);
+    if (rootId) {
+      treeIndex.set(childId, rootId);
+      boundMap(treeIndex, TREE_INDEX_MAX);
+      return; // inside a wrapped run's tree: never a row of its own
+    }
+    if (jobs.some((j) => j.childSessionID === childId || j.childSessionID === parentID)) return;
+    if (claims.has(childId)) return;
+    const open = deps.openCommandWindows?.(parentID) ?? [];
+    if (open.length === 0) return;
+    const name = open.length === 1 ? commandDisplayName(open[0].name, open[0].arguments) : "Background command";
+    candidates.set(childId, { parentID, name, timer: null });
+    boundMap(candidates, 200);
+  }
+
+  async function onExecutionEvent(raw) {
+    const sid = raw.data?.sessionID;
+    const type = raw.type;
+    const outcome = rawOutcome(type);
+    const jobs = await (deps.load ?? loadJobs)();
+    for (const job of jobs) {
+      if (job.engine !== "v2" || isTerminal(job) || !job.childSessionID) continue;
+      const own = job.childSessionID === sid;
+      if (!own && treeIndex.get(sid) !== job.id) continue;
+      // A start only matters as proof an uncertain launch was admitted.
+      if (!outcome && !(own && job.launchState === "uncertain")) continue;
+      await settleV2Job(job, deps, { hint: own && outcome ? lifecycle.get(sid) : undefined });
+    }
+  }
+
+  // observeRaw: the pump hands every RAW V2 event here (alongside the lifecycle
+  // adapter's). Only a child's creation and its execution boundaries matter.
+  const observeRaw = (raw) => {
+    const type = raw?.type;
+    const sid = raw?.data?.sessionID;
+    if (typeof sid !== "string" || !sid) return Promise.resolve();
+    if (type === "session.created") return serialize(`raw:${sid}`, () => onSessionCreated(raw));
+    if (
+      type === "session.execution.started" ||
+      type === "session.execution.succeeded" ||
+      type === "session.execution.failed" ||
+      type === "session.execution.interrupted"
+    ) {
+      // A raw outcome is remembered synchronously — adoption may read it any moment.
+      const outcome = rawOutcome(type);
+      if (outcome) lifecycle.record(sid, { outcome, error: raw.data?.error?.message ?? null });
+      return serialize(`raw:${sid}`, () => onExecutionEvent(raw));
+    }
+    return Promise.resolve();
+  };
+
   const approvals = deps.approvals ?? createApprovalState({ now: deps.now });
   // startJobWithApproval: the REST handler's entry point (BET-418 §A). Builds
   // the ruleset, requests approval when trust mode is OFF + tools were
@@ -2440,30 +3503,30 @@ export function createDelegateEngine(deps) {
   const bound = {
     startJob: (input) => startJob(input, deps),
     startJobWithApproval,
+    startCommandJob: (input) => startCommandJob(input, deps),
+    openSession: (id) => openJobSession(id, deps),
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id, opts) => deleteJob(id, deps, opts),
     pauseJob: (id) => pauseJob(id, deps),
     resumeJob: (id) => resumeJob(id, deps),
     runningJobCount: () => runningJobCount(deps),
     reconcileJobsOnBoot: () => reconcileJobsOnBoot(deps),
+    // Boot / (re)connect: the authoritative re-check of every unfinished V2 job
+    // and the retry of every result not yet posted to its parent.
+    reconcileV2: async () => {
+      await reconcileV2Jobs(deps);
+      await retryPendingDeliveries(deps);
+    },
+    observeRaw,
+    windowClosed,
+    lifecycle,
     observeEvent: (evt) => {
       const sid = evt?.properties?.sessionID;
       if (typeof sid !== "string" || !sid) {
         // Nothing to serialise on — call through unchanged.
         return observeEvent(evt, deps, sawBusy);
       }
-      const tail = (chains.get(sid) ?? Promise.resolve())
-        .then(() => observeEvent(evt, deps, sawBusy))
-        .catch((e) => console.warn("[delegate] observeEvent failed:", e?.message ?? e));
-      chains.set(sid, tail);
-      // Drop the chain tail from the map only if it is still the current one,
-      // so the map cannot grow without bound and a live chain is never removed
-      // from under a queued event.
-      tail.then(
-        () => { if (chains.get(sid) === tail) chains.delete(sid); },
-        () => { if (chains.get(sid) === tail) chains.delete(sid); },
-      );
-      return tail;
+      return serialize(sid, () => observeEvent(evt, deps, sawBusy));
     },
     sweep: () => sweepDelegateJobs(deps),
     listJobs: (filter) => listJobs(filter, deps),
@@ -2474,6 +3537,8 @@ export function createDelegateEngine(deps) {
     approve: (id, tools) => approvals.resolve(id, "approve", tools),
     decline: (id) => approvals.resolve(id, "declined"),
     listPendingApprovals: (parentSessionID) => approvals.list(parentSessionID),
+    /** Test seam. */
+    _state: { candidates, claims, treeIndex },
   };
   return bound;
 }
