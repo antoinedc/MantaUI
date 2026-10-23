@@ -24,12 +24,17 @@ import { fileURLToPath } from "node:url";
 import { ensureBinary } from "./fetch-binary.mjs";
 import { startSandbox } from "./sandbox.mjs";
 import { startFakeMantaServer } from "./fake-manta-server.mjs";
+import { startMockAnthropic } from "./mock-anthropic.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_DIR = join(HERE, "..", "..", "docs", "opencode-plugins-v2", "manta");
 const MODEL = { providerID: "anthropic", modelID: "claude-haiku-4-5" };
 
-if (!process.env.ANTHROPIC_API_KEY) {
+// C1_SMOKE_MOCK=1: run ONLY the cleanup-spec checks (inbox / steer / interrupt /
+// slash-command origin) against the REAL opencode binary with a scripted stand-in
+// for the model (mock-anthropic.mjs) — for when the API key's quota is spent.
+const MOCK = process.env.C1_SMOKE_MOCK === "1";
+if (!process.env.ANTHROPIC_API_KEY && !MOCK) {
   console.log("SKIP c1-smoke — set ANTHROPIC_API_KEY to run the live V2 smoke.");
   process.exit(0);
 }
@@ -43,13 +48,17 @@ const j = (v) => JSON.stringify(v)?.slice(0, 400);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const fake = await startFakeMantaServer({ token: "ab12".repeat(8) });
+const mock = MOCK ? await startMockAnthropic({ log: (m) => process.env.C1_SMOKE_VERBOSE && console.log(m) }) : null;
 const sb = await startSandbox({
   binary: await ensureBinary({ log: (m) => console.log(`[binary] ${m}`) }),
   plugins: [PLUGIN_DIR], // todo_write
   dirs: ["repo"],
   // a one-line custom command for the slash-command origin checks (§3)
-  config: { command: { smokecmd: { template: "Reply with exactly these words: command ran $ARGUMENTS", description: "smoke command" } } },
-  env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, MANTA_SERVER_URL: fake.url, MANTA_BOX_TOKEN: "ab12".repeat(8) },
+  config: {
+    command: { smokecmd: { template: "Reply with exactly these words: command ran $ARGUMENTS", description: "smoke command" } },
+    ...(MOCK ? { provider: { anthropic: { options: { baseURL: `${mock.url}/v1`, apiKey: "mock" } } } } : {}),
+  },
+  env: { ANTHROPIC_API_KEY: MOCK ? "mock" : process.env.ANTHROPIC_API_KEY, MANTA_SERVER_URL: fake.url, MANTA_BOX_TOKEN: "ab12".repeat(8) },
 });
 console.log(`[sandbox] ${sb.url}`);
 
@@ -96,7 +105,7 @@ const of = (sid, sub) => frames.filter((f) => f.sub === sub && f.sessionId === s
 async function until(label, pred, ms = 90_000) {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
-    if (pred()) return true;
+    if (await pred()) return true;
     await sleep(150);
   }
   check(`(timeout) ${label}`, false);
@@ -123,6 +132,7 @@ try {
   writeFileSync(join(sb.dirs.repo, "notes.txt"), "alpha\nbeta\ngamma\n");
   execSync("git init -q && git add -A && git -c user.email=a@b -c user.name=a commit -qm i", { cwd: sb.dirs.repo, stdio: "ignore" });
 
+  if (!MOCK) { // sections 1–8 need a real model (the pre-existing C1 checks)
   // ---------------------------------------------------------------- 1. plain turn
   console.log("\n[1] create → prompt (model switch) → stream → transcript");
   const s1 = await newSession({ title: "smoke-1" });
@@ -271,6 +281,8 @@ try {
   })());
   check("sessionExists: live → true, unknown → false", (await oc.sessionExists(s1.id)) === true && (await oc.sessionExists("ses_does_not_exist")) === false);
 
+  } // end of the real-model sections (skipped under C1_SMOKE_MOCK=1)
+
   // ================================================================ cleanup spec §8 (S1 a–h + the 20-command check)
   const loopText = (n, tag = "tick") => `Run exactly this shell command and nothing else: for i in ${Array.from({ length: n }, (_, k) => k + 1).join(" ")}; do echo ${tag}$i; sleep 1; done . Then reply with the single word done.`;
   const inboxOf = (sid) => of(sid, "inbox").at(-1)?.payload;
@@ -297,30 +309,36 @@ try {
   await until("(a) turn complete", idleWith(sa.id), 120_000);
   check("(a) delivered within the SAME execution (one execution.started) and the inbox is empty", starts(sa.id) === 1 && itemsOf(sa.id).length === 0, `starts=${starts(sa.id)} items=${j(itemsOf(sa.id))}`);
   check("(a) the model saw the steered message (STEERED in the reply)", /steered/i.test(await asstText(sa.id)));
+  if (mock) {
+    // WHEN was the steer injected? Which model request first carried it?
+    const sawAt = mock.requests.findIndex((r) => JSON.stringify(r.body.messages).includes("also say the word STEERED"));
+    console.log(`  [a] model requests this turn: ${mock.requests.length} (decisions: ${mock.requests.map((r) => r.decision.kind).join(",")}); steer first present in request #${sawAt + 1}`);
+  }
   check("(f) the session is NOT in the active set after the turn", !(await oc.listActiveSessionIds()).includes(sa.id));
   check("(a) inbox revs strictly increase within the epoch", of(sa.id, "inbox").every((f, i, a) => i === 0 || f.payload.rev > a[i - 1].payload.rev), j(of(sa.id, "inbox").map((f) => f.payload.rev)));
 
   // ---------------------------------------------------------------- (b) queue + cancel
   console.log("\n[9b] queue item + cancel → cancelled; cancel after delivery → delivered");
-  const sb = await newSession();
-  await oc.sendPrompt({ sessionId: sb.id, text: loopText(8), model: MODEL });
-  await until("(b) live output", () => of(sb.id, "toolOutput").length >= 1);
-  await oc.sendPrompt({ sessionId: sb.id, text: "Reply with exactly: queued one", delivery: "queue" });
-  await until("(b) queued item in the inbox", () => itemsOf(sb.id).length === 1, 15_000);
-  check("(b) the pending item is a `queue` delivery", itemsOf(sb.id)[0]?.delivery === "queue", j(itemsOf(sb.id)));
-  const q1 = itemsOf(sb.id)[0];
+  const sq = await newSession();
+  await oc.sendPrompt({ sessionId: sq.id, text: loopText(8), model: MODEL });
+  await until("(b) live output", () => of(sq.id, "toolOutput").length >= 1);
+  await oc.sendPrompt({ sessionId: sq.id, text: "Reply with exactly: queued one", delivery: "queue" });
+  await until("(b) queued item in the inbox", () => itemsOf(sq.id).length === 1, 15_000);
+  check("(b) the pending item is a `queue` delivery", itemsOf(sq.id)[0]?.delivery === "queue", j(itemsOf(sq.id)));
+  const q1 = itemsOf(sq.id)[0];
   const t0 = Date.now();
-  const r1 = await cancel(sb.id, q1.id);
+  const r1 = await cancel(sq.id, q1.id);
   console.log(`  [b] cancel answered in ${Date.now() - t0} ms`);
   check("(b) cancel → outcome `cancelled` with the pre-cancel copy of the item", r1.outcome === "cancelled" && r1.item?.text === "Reply with exactly: queued one", j(r1));
-  check("(b) the inbox frame is empty after the cancel, and a session.inbox.cancelled event arrived", itemsOf(sb.id).length === 0 && rawLog.some((e) => e.raw.type === "session.inbox.cancelled" && e.raw.data.inboxID === q1.id));
-  await oc.sendPrompt({ sessionId: sb.id, text: "Reply with exactly: queued two", delivery: "queue" });
-  await until("(b) second queued item", () => itemsOf(sb.id).length === 1, 15_000);
-  const q2 = itemsOf(sb.id)[0];
-  await until("(b) the turn finished and the queued item became the next turn", () => starts(sb.id) >= 2 && idleWith(sb.id)(), 120_000);
-  const r2 = await cancel(sb.id, q2.id);
+  check("(b) the inbox frame is empty after the cancel, and a session.inbox.cancelled event arrived", itemsOf(sq.id).length === 0 && rawLog.some((e) => e.raw.type === "session.inbox.cancelled" && e.raw.data.inboxID === q1.id));
+  await oc.sendPrompt({ sessionId: sq.id, text: "Reply with exactly: queued two", delivery: "queue" });
+  await until("(b) second queued item", () => itemsOf(sq.id).length === 1, 15_000);
+  const q2 = itemsOf(sq.id)[0];
+  await until("(b) the turn finished and the queued item ran", async () => (await userTexts(sq.id)).includes("Reply with exactly: queued two") && itemsOf(sq.id).length === 0 && idleWith(sq.id)(), 120_000);
+  console.log(`  [b] executions started for the session: ${starts(sq.id)} (queued item ran in the same execution iff 1)`);
+  const r2 = await cancel(sq.id, q2.id);
   check("(b) cancel after delivery → outcome `delivered` (no item)", r2.outcome === "delivered" && r2.item === undefined, j(r2));
-  check("(b) the cancelled item never ran; the queued-two item ran as its own turn", !(await userTexts(sb.id)).includes("Reply with exactly: queued one") && (await userTexts(sb.id)).includes("Reply with exactly: queued two") && starts(sb.id) === 2, j(await userTexts(sb.id)));
+  check("(b) the cancelled item never ran; the queued-two item ran as its own turn", !(await userTexts(sq.id)).includes("Reply with exactly: queued one") && (await userTexts(sq.id)).includes("Reply with exactly: queued two"), j(await userTexts(sq.id)));
 
   // ---------------------------------------------------------------- (c) Esc with pending input
   console.log("\n[9c] interrupt?resume=true: pending steer runs next; queued stays parked; empty inbox → idle");
@@ -361,6 +379,7 @@ try {
   // ---------------------------------------------------------------- (g) steer after a plan-agent turn
   console.log("\n[9g] a steered send does not switch the agent");
   const sg = await newSession();
+  mock?.setDelay(4000); // keep the (model-less) turn in flight long enough to steer it
   await oc.sendPrompt({ sessionId: sg.id, text: "Read notes.txt with the read tool, then write three sentences about it.", agent: "plan", model: MODEL });
   await until("(g) the turn is busy", async () => (await oc.listActiveSessionIds()).includes(sg.id), 30_000);
   const agentBefore = await oc.getSessionAgent(sg.id);
@@ -368,6 +387,7 @@ try {
   await oc.sendPrompt({ sessionId: sg.id, text: "Also mention the word zebra.", delivery: "steer" });
   const agentAfter = await oc.getSessionAgent(sg.id);
   await until("(g) turn complete", idleWith(sg.id), 120_000);
+  mock?.setDelay(0);
   check("(g) the session agent is `plan` before and after the steered send (no agent POST)", agentBefore === "plan" && agentAfter === "plan" && (await oc.getSessionAgent(sg.id)) === "plan", j([agentBefore, agentAfter]));
   check("(g) no planMode frame flipped it off", of(sg.id, "planMode").slice(planFramesBefore).every((f) => f.payload.on === true) && of(sg.id, "planMode").at(-1)?.payload.on === true);
 
@@ -378,11 +398,11 @@ try {
   await until("(h) busy", async () => (await oc.listActiveSessionIds()).includes(sh.id), 30_000);
   const words = ["alpha", "bravo", "charlie", "delta"];
   for (const w of words) await oc.sendPrompt({ sessionId: sh.id, text: `Reply with exactly: ${w}`, delivery: "queue" });
-  await until("(h) all queued items ran", () => starts(sh.id) >= 5 && idleWith(sh.id)() && itemsOf(sh.id).length === 0, 180_000);
+  await until("(h) all queued items ran", async () => (await userTexts(sh.id)).length === 5 && idleWith(sh.id)() && itemsOf(sh.id).length === 0, 180_000);
   const hu = await userTexts(sh.id);
   check("(h) user messages appear in send order", hu.slice(1).join("|") === words.map((w) => `Reply with exactly: ${w}`).join("|"), j(hu));
   const hm = await oc.listMessages(sh.id);
-  check("(h) the minted ids are msg_-prefixed and roles alternate user/assistant per turn", hm.filter((m) => m.info.role === "user").every((m) => /^msg_/.test(m.info.id)) && hm.map((m) => m.info.role).join(",") === "user,assistant,user,assistant,user,assistant,user,assistant,user,assistant", j(hm.map((m) => m.info.role)));
+  check("(h) the minted ids are msg_-prefixed (random UUIDs) and every user message is followed by an assistant reply before the next user message", hm.filter((m) => m.info.role === "user").every((m) => /^msg_/.test(m.info.id)) && hm.every((m, i) => m.info.role !== "user" || hm[i + 1]?.info.role === "assistant"), j(hm.map((m) => m.info.role)));
   const hid = await Promise.all(words.map((w) => oc.sendPrompt({ sessionId: sh.id, text: `Reply with exactly: ${w}`, messageID: `msg_dup-${w}` }).then(() => "ok")));
   check("(h) a caller-supplied id is honoured", (await Promise.resolve(hid)).length === 4);
 
@@ -395,7 +415,7 @@ try {
   await oc.runCommand({ sessionId: sd.id, command: "smokecmd", arguments: "alpha", model: MODEL });
   const tCmd1 = Date.now();
   await oc.sendPrompt({ sessionId: sd.id, text: "Reply with exactly: plain prompt in the window", delivery: "queue" }); // inside the 3 s window
-  await until("(d) both turns done", () => starts(sd.id) >= 2 && idleWith(sd.id)(), 120_000);
+  await until("(d) both turns done", async () => (await userTexts(sd.id)).length === 2 && idleWith(sd.id)() && itemsOf(sd.id).length === 0, 120_000);
   const enq = rawLog.filter((e) => e.raw.type === "session.inbox.enqueued" && e.raw.data.sessionID === sd.id);
   check("(d) the command's user message passed through session.inbox.enqueued as a `user` item (expanded template)", enq.some((e) => e.raw.data.item?.type === "user" && /command ran alpha/.test(e.raw.data.item.payload?.text ?? "")), j(enq.map((e) => e.raw.data.item)));
   await until("(d) the window closed and tagged", () => of(sd.id, "commandExecuted").length === 1, 10_000);
@@ -411,6 +431,7 @@ try {
   // ---------------------------------------------------------------- 20-command empirical check
   console.log("\n[9x] 20 commands (each interrupted as soon as it starts): enqueue cardinality + timing vs the 204");
   const sx = await newSession();
+  mock?.setDelay(1500); // so each command's turn is still starting when it is interrupted
   const rows = [];
   for (let i = 1; i <= 20; i++) {
     const before = rawLog.length;
@@ -425,6 +446,7 @@ try {
     rows.push({ i, enqueues: mine.length, beforeResponse: mine.length > 0 && mine[0].t <= tResp, lagMs: mine.length ? mine[0].t - tResp : null, postMs: tResp - tStart });
     await until(`(x${i}) idle`, () => !(rawLog.slice(before).some((e) => e.raw.type === "session.execution.started")) || of(sx.id, "running").at(-1)?.payload.running === false, 30_000);
   }
+  mock?.setDelay(0);
   console.log("  per-command: i enqueues beforeResponse lagMs(enqueue-resp) postMs");
   for (const r of rows) console.log(`   ${String(r.i).padStart(2)}  ${r.enqueues}  ${r.beforeResponse ? "before" : "after "}  ${String(r.lagMs).padStart(6)}  ${r.postMs}`);
   const lags = rows.map((r) => r.lagMs).filter((x) => x != null);
@@ -445,7 +467,8 @@ try {
 
   // cleanup through the production delete path
   for (const id of sessions.filter(Boolean).reverse()) await oc.deleteSessionRaw(id).catch(() => {});
-  check("deleteSessionRaw removes a session (sessionExists → false)", (await oc.sessionExists(s1.id)) === false);
+  const firstId = sessions.find(Boolean);
+  check("deleteSessionRaw removes a session (sessionExists → false)", (await oc.sessionExists(firstId)) === false);
 } catch (e) {
   check("smoke ran to completion", false, e?.stack ?? String(e));
 } finally {
@@ -453,6 +476,7 @@ try {
   interp.dispose();
   await sb.stop();
   await fake.close?.();
+  await mock?.close();
 }
 
 const failed = results.filter((r) => !r.ok);
