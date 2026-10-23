@@ -389,7 +389,7 @@ final class ChatInboxStoreTests: XCTestCase {
         await waitUntil { InboxRPCStub.calls.contains { $0.channel == "opencode:inbox-set-delivery" } }
         h.store.setInboxDelivery(id: "m2", to: .queue)
         await waitUntil { InboxRPCStub.calls.filter { $0.channel == "opencode:inbox-set-delivery" }.count == 2 }
-        let args = InboxRPCStub.calls.filter { $0.channel == "opencode:inbox-set-delivery" }.compactMap(\.arg)
+        let args = InboxRPCStub.calls.filter { $0.channel == "opencode:inbox-set-delivery" }.compactMap { $0.arg }
         XCTAssertEqual(args.map { $0["id"] as? String }, ["m1", "m2"])
         XCTAssertEqual(args.map { $0["delivery"] as? String }, ["steer", "queue"])
         XCTAssertEqual(args.first?["sessionId"] as? String, "ses")
