@@ -2956,6 +2956,11 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   }
   const t = outcomeToTerminal(outcome, { error: hint?.error });
   if (!t) return { settled: false, reason: "no-outcome" };
+  // A fresh outcome proves the run happened, whatever the launch bookkeeping
+  // says (it can finish before the send's own response is recorded).
+  if (job.launchState !== "running") {
+    job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
+  }
   await finishV2Job(job, t.status, t.error, deps);
   return { settled: true, status: t.status };
 }

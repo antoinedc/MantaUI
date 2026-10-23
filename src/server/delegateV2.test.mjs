@@ -1255,3 +1255,22 @@ test("a launch THIS process is running is not touched by a concurrent reconcile"
   assert.equal(res.ok, true);
   assert.equal(w.job(res.job.id).launchState, "running");
 });
+
+test("a run that finishes before its send's response is recorded still ends with launchState `running`", async () => {
+  const w = world();
+  const engine = createDelegateEngine(w.deps);
+  const run = w.deps.runCommandOnChild;
+  w.deps.runCommandOnChild = async (i) => {
+    await run(i);
+    // the child finishes and its raw outcome is handled while the POST is still "in flight"
+    w.say(i.sessionId, "fast");
+    w.finish(i.sessionId, "succeeded", w.state.now + 1);
+    await engine.observeRaw(rawExec("session.execution.succeeded", i.sessionId));
+  };
+  const res = await startCommandJob(startInput(), w.deps);
+  assert.equal(res.ok, true);
+  const j = w.job(res.job.id);
+  assert.equal(j.status, "done");
+  assert.equal(j.launchState, "running");
+  assert.equal(w.calls.synth.length, 1);
+});
