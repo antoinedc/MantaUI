@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pending messages — mockup</title>
+<style>
+:root{
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;--inset:#070B16;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-bg:#5A88FF1f;--accent-rgb:90 136 255;
+  --ok:#3DD9A4;--ok-bg:#3DD9A41f;--warn:#FACC15;--warn-bg:#FACC151f;--danger:#FF6B7A;--danger-bg:#FF6B7A1f;
+  --fill:rgba(255,255,255,.04);--fill-hover:rgba(255,255,255,.07);
+  --r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-full:999px;
+  --font-sans:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --ease:cubic-bezier(.22,1,.36,1);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-sans);font-size:14px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 24px 40px}
+h1{font-size:19px;color:var(--tx1);margin:0 0 4px;font-weight:600;letter-spacing:-.01em}
+.sub{color:var(--tx4);font-size:13px;margin:0 0 18px}
+.sub kbd,.cap kbd,.hint kbd,.legend kbd{font-family:var(--font-mono);font-size:11px;background:var(--raised);border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--tx2)}
+
+/* ---------- player bar ---------- */
+.player{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:10px 14px;margin-bottom:16px}
+.player button{background:var(--raised);color:var(--tx1);border:1px solid var(--border);border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12.5px;cursor:pointer}
+.player button:hover{border-color:var(--border-strong)}
+.player .cap{flex:1;min-width:0;color:var(--tx1);font-size:13.5px}
+.player .cap .n{color:var(--accent-tx);font-family:var(--font-mono);font-size:12px;margin-right:8px}
+.dots{display:flex;gap:5px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--border);display:block;cursor:pointer;transition:background .2s}
+.dots i.on{background:var(--accent)}
+.dots i.done{background:var(--accent-tx);opacity:.45}
+
+.stage{display:grid;grid-template-columns:1fr 300px;gap:22px;align-items:start}
+
+/* ---------- desktop chat pane ---------- */
+.pane{background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-xl);overflow:hidden;display:flex;flex-direction:column;height:640px}
+.hdr{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border-subtle);font-size:13px}
+.hdr b{color:var(--tx1);font-weight:600}
+.hdr .br{font-family:var(--font-mono);font-size:11.5px;color:var(--tx4)}
+.hdr .sp{flex:1}
+.pill{font-size:11px;padding:2px 9px;border-radius:var(--r-full);border:1px solid var(--border);color:var(--tx3)}
+.transcript{flex:1;overflow:hidden;padding:16px 22px;display:flex;flex-direction:column;gap:12px;justify-content:flex-end}
+.msg{max-width:88%;animation:in .35s var(--ease) both}
+.msg.user{align-self:flex-end;background:var(--raised);border:1px solid var(--border-subtle);color:var(--tx1);border-radius:14px 14px 4px 14px;padding:8px 12px}
+.msg.user .tag{display:block;font-size:10.5px;color:var(--tx4);margin-bottom:2px}
+.msg.ai{color:var(--tx2)}
+.tool{font-family:var(--font-mono);font-size:12px;background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:7px 10px;display:flex;align-items:center;gap:8px;animation:in .35s var(--ease) both}
+.tool .st{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.tool.run .st{animation:pulse 1s ease-in-out infinite}
+.tool.ok .st{background:var(--ok)}
+.tool .nm{color:var(--tx1)}
+.tool .rt{margin-left:auto;color:var(--tx4);font-size:11px}
+.working{display:flex;align-items:center;gap:8px;color:var(--tx3);font-size:12.5px;height:20px}
+.working .sp{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+.working.hide{visibility:hidden}
+.notice{align-self:center;font-size:12px;color:var(--warn);background:var(--warn-bg);border:1px solid #FACC1540;border-radius:var(--r-full);padding:2px 10px;animation:in .3s var(--ease) both}
+
+/* ---------- pending card ---------- */
+.pending{margin:0 16px;border:1px solid var(--border);background:var(--card);border-radius:var(--r-lg);overflow:hidden;transition:max-height .4s var(--ease),opacity .3s,margin .3s;max-height:0;opacity:0}
+.pending.show{max-height:260px;opacity:1;margin-bottom:8px}
+.pending .ph{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:11.5px;color:var(--tx3);border-bottom:1px solid var(--border-subtle)}
+.pending .ph b{color:var(--tx1);font-weight:600}
+.pending .ph .sp{flex:1}
+.rows{position:relative}
+.row{display:flex;align-items:center;gap:8px;padding:7px 10px 7px 8px;border-bottom:1px solid var(--border-subtle);font-size:13px;background:var(--card);transition:transform .45s var(--ease),opacity .3s,background .3s}
+.row:last-child{border-bottom:0}
+.row.enter{animation:rowin .4s var(--ease) both}
+.row.leave{animation:rowout .45s var(--ease) both}
+.row.lift{background:var(--raised);box-shadow:0 8px 24px rgb(0 0 0/.5);z-index:2;position:relative}
+.grip{width:14px;color:var(--tx4);font-size:12px;cursor:grab;text-align:center;letter-spacing:-2px;flex:none}
+.grip.off{visibility:hidden}
+.badge{font-size:10.5px;font-weight:600;letter-spacing:.02em;padding:1px 7px;border-radius:var(--r-full);flex:none;white-space:nowrap;transition:background .3s,color .3s}
+.badge.now{background:var(--accent-bg);color:var(--accent-tx);border:1px solid rgb(var(--accent-rgb)/.4)}
+.badge.after{background:var(--fill);color:var(--tx3);border:1px solid var(--border)}
+.row .tx{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx1)}
+.row .eta{font-size:11px;color:var(--tx4);white-space:nowrap}
+.act{font:inherit;font-size:11.5px;border-radius:var(--r-sm);padding:2px 8px;cursor:pointer;white-space:nowrap;border:1px solid var(--border);background:var(--raised);color:var(--tx2);transition:transform .15s,box-shadow .2s}
+.act.primary{background:var(--accent-bg);color:var(--accent-tx);border-color:rgb(var(--accent-rgb)/.45)}
+.act.link{background:none;border-color:transparent;color:var(--tx4);padding:2px 4px}
+.x{background:none;border:0;color:var(--tx4);font-size:15px;cursor:pointer;width:20px;line-height:1}
+.press{animation:press .35s ease}
+.pending .foot{padding:5px 12px;font-size:11px;color:var(--tx4);border-top:1px solid var(--border-subtle);display:none}
+.pending.stopped .foot{display:block;color:var(--warn)}
+
+/* ---------- composer ---------- */
+.composer{margin:0 16px 14px;border:1px solid var(--border);background:var(--inset);border-radius:var(--r-lg);padding:10px 12px 8px;transition:border-color .2s,box-shadow .2s}
+.composer.focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
+.input{min-height:22px;color:var(--tx1);font-size:14px;white-space:pre-wrap}
+.input .ph{color:var(--tx4)}
+.caret{display:inline-block;width:1.5px;height:16px;background:var(--accent-tx);vertical-align:-3px;animation:blink 1s steps(1) infinite}
+.meta{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:11.5px;color:var(--tx4)}
+.meta .model{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px;color:var(--tx3)}
+.meta .sp{flex:1}
+.hint{white-space:nowrap}
+.btn-send,.btn-stop{font:inherit;font-size:12px;border-radius:var(--r-md);padding:4px 11px;border:1px solid var(--border);cursor:pointer}
+.btn-send{background:var(--accent);color:#0B1020;border-color:var(--accent);font-weight:600}
+.btn-stop{background:var(--danger-bg);color:var(--danger);border-color:#FF6B7A55}
+.btn-stop.hide{display:none}
+
+/* key flash */
+.keyflash{position:absolute;right:26px;bottom:76px;font-family:var(--font-mono);font-size:13px;color:var(--tx1);background:var(--raised);border:1px solid var(--border-strong);border-bottom-width:3px;border-radius:7px;padding:4px 10px;opacity:0;transform:translateY(6px);transition:opacity .2s,transform .2s;pointer-events:none}
+.keyflash.on{opacity:1;transform:none}
+.panewrap{position:relative}
+
+/* cursor */
+.cursor{position:absolute;width:18px;height:18px;pointer-events:none;z-index:20;transition:left .7s var(--ease),top .7s var(--ease),opacity .3s;opacity:0}
+.cursor svg{filter:drop-shadow(0 2px 3px rgb(0 0 0/.6))}
+.cursor.click::after{content:"";position:absolute;left:-8px;top:-8px;width:20px;height:20px;border-radius:50%;border:2px solid var(--accent-tx);animation:ripple .45s ease-out}
+
+/* ---------- phone ---------- */
+.phonecol .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx4);margin:0 0 8px 4px}
+.phone{width:300px;height:600px;border-radius:38px;border:8px solid #1a2036;background:var(--canvas);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 50px rgb(0 0 0/.5)}
+.phone .notch{height:26px;display:flex;justify-content:center;align-items:flex-end}
+.phone .notch i{width:90px;height:20px;border-radius:12px;background:#000;display:block}
+.phone .ph-hdr{padding:8px 14px;font-size:13px;color:var(--tx1);font-weight:600;border-bottom:1px solid var(--border-subtle);display:flex;gap:6px;align-items:center}
+.phone .ph-hdr .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite}
+.phone .ph-hdr .dot.idle{background:var(--tx4);animation:none}
+.phone .ph-body{flex:1;padding:10px;display:flex;flex-direction:column;justify-content:flex-end;gap:8px;overflow:hidden}
+.phone .ph-body .msg{font-size:12.5px}
+.phone .ph-body .tool{font-size:10.5px}
+.ph-pending{border:1px solid var(--border);background:var(--card);border-radius:14px;overflow:hidden;transition:max-height .4s var(--ease),opacity .3s;max-height:0;opacity:0}
+.ph-pending.show{max-height:240px;opacity:1}
+.ph-pending .ph{padding:6px 10px;font-size:10.5px;color:var(--tx3);border-bottom:1px solid var(--border-subtle)}
+.ph-row{display:flex;align-items:center;gap:6px;padding:7px 9px;border-bottom:1px solid var(--border-subtle);font-size:12px;transition:transform .45s var(--ease)}
+.ph-row:last-child{border-bottom:0}
+.ph-row .tx{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--tx1)}
+.ph-row .badge{font-size:9.5px;padding:0 6px}
+.ph-row .act{font-size:10.5px;padding:1px 6px}
+.phone .ph-comp{margin:8px 10px 12px;border:1px solid var(--border);border-radius:18px;padding:8px 12px;color:var(--tx4);font-size:12.5px;display:flex;align-items:center}
+.phone .ph-comp .sp{flex:1}
+.phone .ph-comp .send{width:24px;height:24px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;color:#0B1020;font-weight:700;font-size:13px}
+.phonecol .note{font-size:11.5px;color:var(--tx4);margin:10px 4px 0;line-height:1.45}
+
+/* ---------- legend ---------- */
+.legend{margin-top:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.legend div{background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:12px 14px;font-size:12.5px;color:var(--tx3)}
+.legend b{display:block;color:var(--tx1);font-size:13px;margin-bottom:4px}
+
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes rowin{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes rowout{to{opacity:0;transform:translateY(-14px);height:0;padding-top:0;padding-bottom:0}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{50%{opacity:0}}
+@keyframes press{50%{transform:scale(.92)}}
+@keyframes ripple{from{opacity:1;transform:scale(.4)}to{opacity:0;transform:scale(1.6)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pending messages: send now by default, or keep for after this turn</h1>
+  <p class="sub">Mockup of the proposed design. <kbd>Enter</kbd> sends into the running turn (the agent reads it at its next step). <kbd>⌥ Enter</kbd> keeps it for after this turn. The same list shows on the phone, because it lives on the box.</p>
+
+  <div class="player">
+    <button id="bPrev">◀</button>
+    <button id="bPlay">❚❚ Pause</button>
+    <button id="bNext">▶</button>
+    <button id="bReplay">↺ Replay</button>
+    <div class="cap" id="cap"></div>
+    <div class="dots" id="dots"></div>
+  </div>
+
+  <div class="stage">
+    <div class="panewrap">
+      <div class="pane">
+        <div class="hdr"><b>api-refactor</b><span class="br">⎇ feat/payments</span><span class="sp"></span><span class="pill">ctx 41%</span></div>
+        <div class="transcript" id="tr"></div>
+        <div class="pending" id="pend">
+          <div class="ph"><b>Pending</b><span id="pcount">1 message</span><span class="sp"></span><span><kbd style="font-size:10px">↑</kbd> edit last</span></div>
+          <div class="rows" id="rows"></div>
+          <div class="foot">Agent stopped — these are waiting. Send now, or ×.</div>
+        </div>
+        <div class="composer" id="comp">
+          <div class="input" id="inp"></div>
+          <div class="meta">
+            <span class="model">sonnet 5.5</span>
+            <span class="hint" id="hint">⏎ send now · ⌥⏎ after this turn</span>
+            <span class="sp"></span>
+            <button class="btn-stop" id="stop">■ Stop</button>
+            <button class="btn-send" id="send">Send</button>
+          </div>
+        </div>
+      </div>
+      <div class="keyflash" id="kf"></div>
+      <div class="cursor" id="cur"><svg width="18" height="18" viewBox="0 0 18 18"><path d="M2 1l13 7-6 1.5L6 16z" fill="#fff" stroke="#0B1020" stroke-width="1"/></svg></div>
+    </div>
+
+    <div class="phonecol">
+      <div class="lbl">Same session on iPhone</div>
+      <div class="phone">
+        <div class="notch"><i></i></div>
+        <div class="ph-hdr"><span class="dot" id="phdot"></span>api-refactor</div>
+        <div class="ph-body" id="phbody">
+          <div class="ph-pending" id="phpend"><div class="ph">Pending</div><div id="phrows"></div></div>
+        </div>
+        <div class="ph-comp"><span>Message</span><span class="sp"></span><span class="send">↑</span></div>
+      </div>
+      <p class="note">On the phone each row gets the same <b>Send now</b> and ×. Reordering is a long-press drag. The phone no longer keeps its own hidden queue.</p>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div><b><span class="badge now">Now</span> — reaches the agent at its next step</b>Usually leaves the list within seconds, as soon as the current command finishes. "Wait" moves it to after this turn.</div>
+    <div><b><span class="badge after">After this turn</span> — runs when the turn ends</b>Has <b style="display:inline;color:var(--accent-tx)">Send now</b>, × and a drag handle to reorder. Reordering applies to these only.</div>
+    <div><b>Stop</b>Stop ends the turn; a "Now" message then runs as the next turn. "After this turn" messages stay in the list with Send now / × — never stuck out of sight.</div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const tr = $("tr"), rows = $("rows"), pend = $("pend"), inp = $("inp"), comp = $("comp");
+const phrows = $("phrows"), phpend = $("phpend"), phbody = $("phbody"), cur = $("cur"), kf = $("kf");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let token = 0; // cancels a running scene when the user jumps
+
+// ---------- state ----------
+let items = []; // {id, text, mode:"now"|"after"}
+let stopped = false;
+
+function render() {
+  const keep = new Map([...rows.children].map((el) => [el.dataset.id, el]));
+  const firstTop = new Map([...rows.children].map((el) => [el.dataset.id, el.getBoundingClientRect().top]));
+  for (const it of items) {
+    let el = keep.get(it.id);
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "row enter"; el.dataset.id = it.id;
+      el.innerHTML = `<span class="grip">⋮⋮</span><span class="badge"></span><span class="tx"></span><span class="eta"></span><button class="act"></button><button class="x" title="Cancel">×</button>`;
+    }
+    el.querySelector(".tx").textContent = it.text;
+    const b = el.querySelector(".badge"); b.className = "badge " + it.mode; b.textContent = it.mode === "now" ? "Now" : "After this turn";
+    el.querySelector(".grip").className = "grip" + (it.mode === "after" ? "" : " off");
+    el.querySelector(".eta").textContent = it.mode === "now" ? (stopped ? "runs next" : "at next step") : "";
+    const a = el.querySelector(".act");
+    if (it.mode === "now") { a.className = "act link"; a.textContent = "Wait"; } else { a.className = "act primary"; a.textContent = "Send now"; }
+    rows.appendChild(el); keep.delete(it.id);
+  }
+  for (const el of keep.values()) el.remove();
+  // FLIP for reorders
+  for (const el of rows.children) {
+    const before = firstTop.get(el.dataset.id); if (before == null) continue;
+    const dy = before - el.getBoundingClientRect().top;
+    if (dy) { el.style.transition = "none"; el.style.transform = `translateY(${dy}px)`; requestAnimationFrame(() => { el.style.transition = ""; el.style.transform = ""; }); }
+  }
+  pend.classList.toggle("show", items.length > 0);
+  pend.classList.toggle("stopped", stopped && items.some((i) => i.mode === "after"));
+  $("pcount").textContent = items.length === 1 ? "1 message" : `${items.length} messages`;
+  // phone mirror
+  phrows.innerHTML = items.map((it) => `<div class="ph-row"><span class="badge ${it.mode}">${it.mode === "now" ? "Now" : "After"}</span><span class="tx">${it.text}</span>${it.mode === "after" ? '<span class="act primary">Send now</span>' : ""}<span class="x" style="font-size:13px">×</span></div>`).join("");
+  phpend.classList.toggle("show", items.length > 0);
+}
+function rowEl(id) { return rows.querySelector(`[data-id="${id}"]`); }
+async function removeItem(id) {
+  const el = rowEl(id); if (el) { el.classList.add("leave"); await sleep(420); }
+  items = items.filter((i) => i.id !== id); render();
+}
+
+// ---------- transcript helpers ----------
+function add(html, cls, phone = true) {
+  const d = document.createElement("div"); d.className = cls; d.innerHTML = html; tr.appendChild(d);
+  while (tr.children.length > 9) tr.firstChild.remove();
+  if (phone) { const p = d.cloneNode(true); phbody.insertBefore(p, phpend); while (phbody.children.length > 6) phbody.firstChild.remove(); }
+  return d;
+}
+let toolEls = [];
+function tool(name, cmd) {
+  const h = `<span class="st"></span><span class="nm">${name}</span><span>${cmd}</span><span class="rt">running…</span>`;
+  const d = add(h, "tool run", false); const p = d.cloneNode(true); phbody.insertBefore(p, phpend);
+  while (phbody.children.length > 6) phbody.firstChild.remove();
+  toolEls = [d, p]; return toolEls;
+}
+function toolDone(sec) { for (const t of toolEls) { t.className = "tool ok"; t.querySelector(".rt").textContent = `${sec}s`; } }
+function working(on) {
+  let w = tr.querySelector(".working");
+  if (!w) { w = document.createElement("div"); w.className = "working"; w.innerHTML = '<span class="sp"></span>Working…'; }
+  tr.appendChild(w); w.classList.toggle("hide", !on);
+  $("stop").classList.toggle("hide", !on);
+  $("phdot").classList.toggle("idle", !on);
+  $("hint").innerHTML = on ? "⏎ send now · ⌥⏎ after this turn" : "⏎ send";
+}
+
+// ---------- input / pointer ----------
+function setInput(t, caret = true) { inp.innerHTML = t ? escapeHtml(t) + (caret ? '<span class="caret"></span>' : "") : '<span class="ph">Message the agent…</span>' + (caret ? '<span class="caret"></span>' : ""); }
+function escapeHtml(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]); }
+async function type(text, t) { comp.classList.add("focus"); for (let i = 1; i <= text.length; i++) { if (t !== token) return; setInput(text.slice(0, i)); await sleep(32); } }
+async function key(label) { kf.textContent = label; kf.classList.add("on"); await sleep(650); kf.classList.remove("on"); }
+async function pointTo(el, t) {
+  const host = document.querySelector(".panewrap").getBoundingClientRect(); const r = el.getBoundingClientRect();
+  cur.style.opacity = 1; cur.style.left = r.left - host.left + r.width / 2 + "px"; cur.style.top = r.top - host.top + r.height / 2 + "px";
+  await sleep(750); if (t !== token) return;
+  cur.classList.remove("click"); void cur.offsetWidth; cur.classList.add("click"); el.classList.add("press"); setTimeout(() => el.classList.remove("press"), 360);
+  await sleep(300);
+}
+function hidePointer() { cur.style.opacity = 0; }
+
+// ---------- scenes ----------
+let seq = 0; const nid = () => "m" + ++seq;
+function reset() {
+  tr.innerHTML = ""; [...phbody.children].forEach((c) => c !== phpend && c.remove());
+  items = []; stopped = false; render(); setInput(""); comp.classList.remove("focus"); hidePointer();
+  add("Run the payment tests and fix anything failing.", "msg user");
+  add("Running the test suite first.", "msg ai");
+  tool("bash", "npm test -- payments"); working(true);
+}
+const scenes = [
+  { cap: "The agent is working. You notice it's pointed at the wrong database.", run: async (t) => { await sleep(1600); } },
+  { cap: "<kbd>Enter</kbd> while it works: the message goes in as <b>Now</b> — no interruption, no hidden abort.", run: async (t) => {
+      await type("use the staging DB, not prod", t); if (t !== token) return; await key("⏎ Enter");
+      setInput(""); items.push({ id: nid(), text: "use the staging DB, not prod", mode: "now" }); render(); await sleep(1600);
+  } },
+  { cap: "The current command finishes — at that next step the agent reads it and changes course.", run: async (t) => {
+      toolDone(14); await sleep(500); const id = items[0]?.id; if (id) await removeItem(id); if (t !== token) return;
+      add('<span class="tag">sent mid-turn</span>use the staging DB, not prod', "msg user"); working(true); await sleep(700);
+      add("Good catch — switching to the staging database and re-running.", "msg ai"); tool("bash", "DB=staging npm test -- payments"); working(true); await sleep(1400);
+  } },
+  { cap: "<kbd>⌥ Enter</kbd> keeps a message for <b>after this turn</b>. Queue a couple of follow-ups.", run: async (t) => {
+      await type("then update the CHANGELOG", t); if (t !== token) return; await key("⌥ ⏎"); setInput("");
+      items.push({ id: nid(), text: "then update the CHANGELOG", mode: "after" }); render(); await sleep(900);
+      await type("and bump the version to 2.4.0", t); if (t !== token) return; await key("⌥ ⏎"); setInput("");
+      items.push({ id: nid(), text: "and bump the version to 2.4.0", mode: "after" }); render(); await sleep(1300);
+  } },
+  { cap: "Drag to reorder messages that wait for the turn to end.", run: async (t) => {
+      const last = items[items.length - 1]; const el = rowEl(last.id); if (!el) return;
+      await pointTo(el.querySelector(".grip"), t); if (t !== token) return; el.classList.add("lift"); await sleep(350);
+      items = [last, ...items.filter((i) => i !== last)]; render(); await sleep(600); el.classList.remove("lift"); hidePointer(); await sleep(900);
+  } },
+  { cap: "<b>Send now</b> promotes one: it reaches the agent at its next step instead of waiting.", run: async (t) => {
+      const it = items.find((i) => i.text.startsWith("then update")); const el = it && rowEl(it.id); if (!el) return;
+      await pointTo(el.querySelector(".act"), t); if (t !== token) return; it.mode = "now"; render(); hidePointer(); await sleep(1100);
+      toolDone(9); await sleep(400); await removeItem(it.id); add('<span class="tag">sent mid-turn</span>then update the CHANGELOG', "msg user");
+      await sleep(500); add("Tests pass on staging. Updating the CHANGELOG now.", "msg ai"); tool("edit", "CHANGELOG.md"); await sleep(1300);
+  } },
+  { cap: "You press <b>Stop</b>. The turn ends; the waiting message stays in the list — not lost, not sent behind your back.", run: async (t) => {
+      await pointTo($("stop"), t); if (t !== token) return; hidePointer(); toolDone(3); working(false); stopped = true;
+      add("Stopped", "notice", true); render(); await sleep(2200);
+  } },
+  { cap: "From there: <b>Send now</b> to run it, × to drop it, or <kbd>↑</kbd> to pull it back into the composer and edit.", run: async (t) => {
+      const it = items[0]; if (!it) return; comp.classList.add("focus"); await key("↑"); if (t !== token) return;
+      await removeItem(it.id); setInput(it.text); await sleep(900);
+      await type(it.text + " and tag the release", t); await sleep(1400);
+  } },
+];
+
+// ---------- player ----------
+let idx = 0, playing = true;
+const dots = $("dots");
+dots.innerHTML = scenes.map((_, i) => `<i data-i="${i}"></i>`).join("");
+dots.onclick = (e) => { const i = e.target.dataset?.i; if (i != null) jump(+i); };
+function paintDots() { [...dots.children].forEach((d, i) => { d.className = i === idx ? "on" : i < idx ? "done" : ""; }); $("cap").innerHTML = `<span class="n">${idx + 1}/${scenes.length}</span>${scenes[idx].cap}`; }
+
+async function jump(target) {
+  const t = ++token; reset();
+  // fast-forward silently through earlier scenes
+  for (let i = 0; i < target; i++) await fastForward(i);
+  idx = target; paintDots(); await play(t);
+}
+async function fastForward(i) {
+  // replay the end-state of scene i without waiting
+  const s = [
+    () => {},
+    () => { items.push({ id: nid(), text: "use the staging DB, not prod", mode: "now" }); },
+    () => { toolDone(14); items = []; add('<span class="tag">sent mid-turn</span>use the staging DB, not prod', "msg user"); add("Good catch — switching to the staging database and re-running.", "msg ai"); tool("bash", "DB=staging npm test -- payments"); working(true); },
+    () => { items.push({ id: nid(), text: "then update the CHANGELOG", mode: "after" }, { id: nid(), text: "and bump the version to 2.4.0", mode: "after" }); },
+    () => { items = [items[1], items[0]]; },
+    () => { items = items.filter((i) => !i.text.startsWith("then update")); toolDone(9); add('<span class="tag">sent mid-turn</span>then update the CHANGELOG', "msg user"); add("Tests pass on staging. Updating the CHANGELOG now.", "msg ai"); tool("edit", "CHANGELOG.md"); },
+    () => { toolDone(3); working(false); stopped = true; add("Stopped", "notice"); },
+  ][i]; s && s(); render();
+}
+async function play(t) {
+  while (idx < scenes.length) {
+    paintDots(); await scenes[idx].run(t); if (t !== token) return;
+    if (!playing) return;
+    if (idx === scenes.length - 1) { await sleep(2500); if (t !== token || !playing) return; jump(0); return; }
+    idx++;
+  }
+}
+$("bPlay").onclick = () => { playing = !playing; $("bPlay").textContent = playing ? "❚❚ Pause" : "▶ Play"; if (playing) { const t = ++token; idx = Math.min(idx + 1, scenes.length - 1); jump(idx); } };
+$("bNext").onclick = () => jump(Math.min(idx + 1, scenes.length - 1));
+$("bPrev").onclick = () => jump(Math.max(idx - 1, 0));
+$("bReplay").onclick = () => { playing = true; $("bPlay").textContent = "❚❚ Pause"; jump(0); };
+jump(0);
+</script>
+</body>
+</html>
