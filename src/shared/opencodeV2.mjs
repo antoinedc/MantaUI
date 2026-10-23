@@ -370,7 +370,16 @@ function mapBackgroundResult(m, { sessionID }) {
     (typeof manta.name === "string" && manta.name) ||
     (description !== undefined && description.startsWith("/") ? description : undefined);
   return {
-    info: { id: m.id, sessionID, role: "assistant", time: { created: m.time?.created }, background: true },
+    // `completed` is stamped too: several readers (isAssistantTurnInProgress,
+    // peers' classifyChatStatus, the CTO run outcome) read an assistant message
+    // without it as a turn still running — and a result is by nature finished.
+    info: {
+      id: m.id,
+      sessionID,
+      role: "assistant",
+      time: { created: m.time?.created, completed: m.time?.created },
+      background: true,
+    },
     parts: [
       clean({
         id: `${m.id}:bg`,

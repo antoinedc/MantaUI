@@ -23,6 +23,7 @@ import {
   formAnswerFromAnswers,
   createLifecycleAdapter,
 } from "./opencodeV2.mjs";
+import { isAssistantTurnComplete, isAssistantTurnInProgress } from "./streamInterpretation.mjs";
 
 const DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "fixtures", "opencodeV2Events");
 const timeline = (n) => JSON.parse(readFileSync(join(DIR, `${n}.timeline.json`), "utf8"));
@@ -349,7 +350,7 @@ test("mapTimeline: a subagent synthetic becomes a background-result message; oth
   const msgs = mapTimeline(timeline("09-background-result"), { sessionID: "ses_p" });
   assert.equal(msgs.length, 3, "the plan-mode reminder synthetic is dropped");
   const [md] = msgs;
-  assert.deepEqual(md.info, { id: "msg_16a2009810019mUinCPlKl6Rwm", sessionID: "ses_p", role: "assistant", time: { created: 1792781849736 }, background: true });
+  assert.deepEqual(md.info, { id: "msg_16a2009810019mUinCPlKl6Rwm", sessionID: "ses_p", role: "assistant", time: { created: 1792781849736, completed: 1792781849736 }, background: true });
   assert.deepEqual(md.parts, [
     {
       id: "msg_16a2009810019mUinCPlKl6Rwm:bg",
@@ -363,6 +364,15 @@ test("mapTimeline: a subagent synthetic becomes a background-result message; oth
     },
   ]);
   assert.equal(msgs[2].parts[0].agent, "explore");
+});
+
+test("mapTimeline: a background result is never read as an assistant turn still in flight", () => {
+  const msgs = mapTimeline(
+    [{ id: "msg_u", type: "user", time: { created: 1 }, text: "go" }, ...timeline("09-background-result").slice(0, 1)],
+    { sessionID: "s" },
+  );
+  assert.equal(isAssistantTurnComplete(msgs), true);
+  assert.equal(isAssistantTurnInProgress(msgs), false);
 });
 
 test("mapTimeline: V2 does not entity-encode the envelope, so the body is returned raw (even containing </subagent>)", () => {
