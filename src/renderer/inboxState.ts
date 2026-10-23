@@ -145,6 +145,61 @@ export function shouldClearDraft(submittedDraft: string | null, currentText: str
   return submittedDraft !== null && submittedDraft === currentText;
 }
 
+// ===== Pending card =====
+
+/** The composer's hint row while the agent runs (session surface only). */
+export function busySendHint(isMac: boolean): string {
+  return isMac ? "⏎ send now · ⌥⏎ after this turn" : "⏎ send now · Alt+⏎ after this turn";
+}
+
+/** The composer placeholder while the agent runs (session surface; the CTO passes its own). */
+export const BUSY_PLACEHOLDER = "Message the agent…";
+
+/** "Pending · 1 message" / "Pending · 3 messages". */
+export function pendingHeaderText(count: number): string {
+  return `Pending · ${count} ${count === 1 ? "message" : "messages"}`;
+}
+
+/** The row badge: a steer item reaches the agent at its next step, a queue item waits for the turn to end. */
+export function inboxBadgeLabel(item: Pick<OpencodeInboxItem, "delivery">): "Now" | "After this turn" {
+  return item.delivery === "steer" ? "Now" : "After this turn";
+}
+
+/** The quiet note on a Now row; After rows carry none (their action is Send now). */
+export function inboxRowNote(item: Pick<OpencodeInboxItem, "delivery">, running: boolean): string | null {
+  if (item.delivery !== "steer") return null;
+  return running ? "at next step" : "runs next";
+}
+
+/** The stopped footer: the agent is not running and at least one After item is still parked. */
+export function showStoppedFooter(items: ReadonlyArray<Pick<OpencodeInboxItem, "delivery">>, running: boolean): boolean {
+  return !running && items.some((i) => i.delivery === "queue");
+}
+
+export const STOPPED_FOOTER_TEXT = "Agent stopped — these are waiting. Send now, or ×.";
+export const SET_DELIVERY_UNCONFIRMED = "Couldn't confirm the change — check the pending list";
+
+/** N1: the result of `opencode:inbox-set-delivery`. */
+export type InboxSetDeliveryResult = { outcome: "changed" | "delivered" | "unknown" };
+
+/**
+ * Turn an N1 result into what the user sees. `changed` needs nothing (the next
+ * inbox frame flips the badge); `delivered` is a toast; anything else —
+ * `unknown`, or a malformed answer — is an error banner. Never silent.
+ */
+export function describeInboxSetDelivery(
+  result: InboxSetDeliveryResult | null | undefined,
+): { error: string | null; notice: string | null } {
+  switch (result?.outcome) {
+    case "changed":
+      return { error: null, notice: null };
+    case "delivered":
+      return { error: null, notice: "Already sent to the agent" };
+    default:
+      return { error: SET_DELIVERY_UNCONFIRMED, notice: null };
+  }
+}
+
 // ===== Cancel outcome =====
 
 export const ATTACHMENTS_NOT_RESTORED = "Attachments weren't restored — re-attach them";

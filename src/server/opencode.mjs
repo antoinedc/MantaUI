@@ -721,6 +721,11 @@ export async function cancelInboxItem(sessionId, inboxId, { signal } = {}) {
   await ocJson("cancelInboxItem", "DELETE", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`, undefined, { signal });
 }
 
+/** `PATCH /api/session/{id}/inbox/{inboxID} {delivery}` — switch a pending item between steer and queue (N1). The interpreter decides the outcome from events. */
+export async function setInboxDelivery(sessionId, inboxId, delivery, { signal } = {}) {
+  await ocJson("setInboxDelivery", "PATCH", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`, { delivery }, { signal });
+}
+
 /** The set of sessions with a turn in flight: GET /api/session/active → `{[sessionId]: {type:"running"}}`. */
 async function readActive() {
   const res = await ocFetch(apiUrl("/api/session/active"), { signal: AbortSignal.timeout(8000) });

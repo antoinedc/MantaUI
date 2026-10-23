@@ -1166,6 +1166,7 @@ export const httpApi: Api = {
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
   opencodeInbox: (sessionId) => rpc(IPC.opencodeInbox, sessionId),
   opencodeInboxCancel: (input) => rpc(IPC.opencodeInboxCancel, input),
+  opencodeInboxSetDelivery: (input) => rpc(IPC.opencodeInboxSetDelivery, input),
   opencodePermissions: (sessionId) =>
     rpc(IPC.opencodePermissions, sessionId),
 

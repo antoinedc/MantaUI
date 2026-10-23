@@ -528,15 +528,21 @@ export function createStreamInterpreter({
     emit(sid, "inbox", inboxSnapshot(st));
   }
 
-  // Authoritative-evidence waiters for the cancel outcome: the first
-  // `cancelled` / `delivered` event for an id decides it.
-  const outcomeWaiters = new Map(); // `${sid}\u0000${id}` -> Set<{ result, wake }>
-  function noteInboxOutcome(sid, id, type) {
+  // Authoritative-evidence waiters for an inbox action's outcome (cancel, N1
+  // delivery change): the first event a waiter accepts decides it. A waiter is
+  // `{ accept(type, data) -> result | null, result, wake }`.
+  const outcomeWaiters = new Map(); // `${sid}\u0000${id}` -> Set<waiter>
+  const acceptCancelEvent = (type) =>
+    type === "session.inbox.cancelled" ? "cancelled" : type === "session.inbox.delivered" ? "delivered" : null;
+  const acceptDeliveryEvent = (want) => (type, data) =>
+    type === "session.inbox.delivered" ? "delivered" : type === "session.inbox.delivery.changed" && data?.delivery === want ? "changed" : null;
+  function noteInboxOutcome(sid, id, type, data) {
     const set = outcomeWaiters.get(`${sid}\u0000${id}`);
     if (!set) return;
-    const result = type === "session.inbox.cancelled" ? "cancelled" : "delivered";
     for (const w of set) {
       if (w.result) continue;
+      const result = w.accept(type, data);
+      if (!result) continue;
       w.result = result;
       w.wake?.();
     }
@@ -578,8 +584,11 @@ export function createStreamInterpreter({
 
   function onInboxEvent(sid, st, evt) {
     const id = evt.data?.inboxID;
-    if (typeof id === "string" && (evt.type === "session.inbox.cancelled" || evt.type === "session.inbox.delivered")) {
-      noteInboxOutcome(sid, id, evt.type);
+    if (
+      typeof id === "string" &&
+      (evt.type === "session.inbox.cancelled" || evt.type === "session.inbox.delivered" || evt.type === "session.inbox.delivery.changed")
+    ) {
+      noteInboxOutcome(sid, id, evt.type, evt.data);
     }
     const op = inboxOpFromEvent(evt);
     if (!op) return;
@@ -610,12 +619,48 @@ export function createStreamInterpreter({
   async function cancelInbox(sid, id, { deleteItem, getMessage, waitMs = INBOX_CANCEL_WAIT_MS }) {
     const snap = await getInbox(sid);
     const before = snap.items.find((i) => i.id === id);
+    const w = await runInboxAction(sid, id, acceptCancelEvent, { act: deleteItem, getMessage, waitMs });
+    if (w.result === "cancelled") return { outcome: "cancelled", ...(before ? { item: before } : {}) };
+    return { outcome: w.result ?? "unknown" };
+  }
+
+  // N1: switch a pending item between steer and queue. `changed` iff we observe
+  // `session.inbox.delivery.changed` carrying the requested delivery (an event
+  // for the other delivery proves nothing); `delivered` iff `.delivered` or the
+  // message exists; else `unknown`. A refused PATCH (4xx) can never be
+  // `changed`: only the message lookup can still decide, and there is nothing to
+  // wait for. Measured on V2 2.0.30 (c1-smoke [9i]): for an id that is no longer
+  // pending — already delivered OR never existed — and for an item already at
+  // the requested delivery, the PATCH answers 409 ConflictError "Pending input
+  // cannot change to <delivery>", not 404 (so a no-op change is `unknown`). Any other failure (5xx, network)
+  // may have been applied, so it waits for evidence like a success does.
+  async function setInboxDelivery(sid, id, delivery, { patchItem, getMessage, waitMs = INBOX_CANCEL_WAIT_MS }) {
+    await hydrateInbox(sid);
+    const w = await runInboxAction(sid, id, acceptDeliveryEvent(delivery), {
+      act: patchItem,
+      getMessage,
+      waitMs,
+      tolerate: (e) => (e?.status >= 400 && e?.status < 500 ? { wait: false } : { wait: true }),
+    });
+    return { outcome: w.result ?? "unknown" };
+  }
+
+  // Register a waiter BEFORE the action (an event that lands while the request
+  // is in flight must not be lost), run it, then look for evidence: an event
+  // already seen, else the message itself, else wait up to `waitMs`.
+  async function runInboxAction(sid, id, accept, { act, getMessage, waitMs, tolerate }) {
     const key = `${sid}\u0000${id}`;
-    const w = { result: null, wake: null };
+    const w = { accept, result: null, wake: null };
     if (!outcomeWaiters.has(key)) outcomeWaiters.set(key, new Set());
     outcomeWaiters.get(key).add(w);
     try {
-      await deleteItem();
+      let wait = true;
+      try {
+        await act();
+      } catch (e) {
+        if (!tolerate) throw e;
+        wait = tolerate(e).wait;
+      }
       if (!w.result) {
         let found = null;
         try {
@@ -625,7 +670,7 @@ export function createStreamInterpreter({
         }
         if (!w.result && found) w.result = "delivered";
       }
-      if (!w.result && waitMs > 0) {
+      if (!w.result && wait && waitMs > 0) {
         await new Promise((resolve) => {
           const timer = setTimer(resolve, waitMs);
           w.wake = () => {
@@ -640,8 +685,7 @@ export function createStreamInterpreter({
       set?.delete(w);
       if (set?.size === 0) outcomeWaiters.delete(key);
     }
-    if (w.result === "cancelled") return { outcome: "cancelled", ...(before ? { item: before } : {}) };
-    return { outcome: w.result ?? "unknown" };
+    return w;
   }
 
   // The event stream dropped: an in-flight hydration may have missed events.
@@ -986,6 +1030,7 @@ export function createStreamInterpreter({
     epoch,
     getInbox,
     cancelInbox,
+    setInboxDelivery,
     hydrateInbox,
     resyncInbox,
     inboxDisconnected,

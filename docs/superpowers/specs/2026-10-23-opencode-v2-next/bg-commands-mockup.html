@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Background slash commands — mockup</title>
+<style>
+:root{
+  --canvas:#0B1020;--panel:#0F1526;--card:#151C33;--raised:#1C2440;--inset:#070B16;
+  --border-subtle:#222C49;--border:#33406B;--border-strong:#5E6C9B;
+  --tx1:#E3E8F2;--tx2:#BDC7DB;--tx3:#939FB8;--tx4:#6B7690;
+  --accent:#5A88FF;--accent-tx:#7BA0FF;--accent-bg:#5A88FF1f;--accent-rgb:90 136 255;
+  --ok:#3DD9A4;--ok-bg:#3DD9A41f;--warn:#FACC15;--danger:#FF6B7A;--danger-bg:#FF6B7A1f;
+  --fill:rgba(255,255,255,.04);
+  --r-sm:6px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-full:999px;
+  --font-sans:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono","SF Mono",Menlo,Consolas,monospace;
+  --ease:cubic-bezier(.22,1,.36,1);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--tx2);font-family:var(--font-sans);font-size:14px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 24px 40px}
+h1{font-size:19px;color:var(--tx1);margin:0 0 4px;font-weight:600;letter-spacing:-.01em}
+.sub{color:var(--tx4);font-size:13px;margin:0 0 18px;max-width:110ch}
+kbd{font-family:var(--font-mono);font-size:11px;background:var(--raised);border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:0 5px;color:var(--tx2)}
+
+.player{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:10px 14px;margin-bottom:16px}
+.player button{background:var(--raised);color:var(--tx1);border:1px solid var(--border);border-radius:var(--r-md);padding:5px 11px;font:inherit;font-size:12.5px;cursor:pointer}
+.player .cap{flex:1;min-width:0;color:var(--tx1);font-size:13.5px;min-height:21px}
+.player .cap .n{color:var(--accent-tx);font-family:var(--font-mono);font-size:12px;margin-right:8px}
+.dots{display:flex;gap:5px}
+.dots i{width:7px;height:7px;border-radius:50%;background:var(--border);display:block;cursor:pointer}
+.dots i.on{background:var(--accent)}.dots i.done{background:var(--accent-tx);opacity:.45}
+
+.app{display:grid;grid-template-columns:230px 1fr;height:640px;background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-xl);overflow:hidden;position:relative}
+/* sidebar */
+.side{background:var(--inset);border-right:1px solid var(--border-subtle);padding:12px 8px;font-size:13px}
+.side .proj{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx4);padding:4px 8px 6px}
+.srow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--r-md);color:var(--tx2)}
+.srow.on{background:var(--raised);color:var(--tx1)}
+.srow .d{width:7px;height:7px;border-radius:50%;background:var(--tx4);flex:none}
+.srow .d.run{background:var(--accent);animation:pulse 1s infinite}
+.srow .d.ok{background:var(--ok)}
+.child{margin-left:18px;font-size:12.5px;border-left:1px solid var(--border);border-radius:0 var(--r-md) var(--r-md) 0;padding-left:10px;overflow:hidden;max-height:0;opacity:0;transition:max-height .4s var(--ease),opacity .3s}
+.child.show{max-height:40px;opacity:1}
+.child .bg{font-size:10px;color:var(--accent-tx);border:1px solid rgb(var(--accent-rgb)/.4);border-radius:var(--r-full);padding:0 6px;margin-left:auto}
+.child .bg.done{color:var(--ok);border-color:#3DD9A455}
+
+/* chat */
+.chat{display:flex;flex-direction:column;min-width:0}
+.hdr{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border-subtle);font-size:13px}
+.hdr b{color:var(--tx1)}
+.hdr .br{font-family:var(--font-mono);font-size:11.5px;color:var(--tx4)}
+.transcript{flex:1;overflow:hidden;padding:16px 22px;display:flex;flex-direction:column;gap:12px;justify-content:flex-end}
+.msg{max-width:86%;animation:in .35s var(--ease) both}
+.msg.user{align-self:flex-end;background:var(--raised);border:1px solid var(--border-subtle);color:var(--tx1);border-radius:14px 14px 4px 14px;padding:8px 12px}
+.msg.ai{color:var(--tx2)}
+.cmdchip{align-self:flex-end;display:flex;align-items:center;gap:8px;background:var(--raised);border:1px solid rgb(var(--accent-rgb)/.35);border-radius:14px 14px 4px 14px;padding:7px 12px;color:var(--tx1);animation:in .35s var(--ease) both;font-size:13.5px}
+.cmdchip .c{font-family:var(--font-mono);color:var(--accent-tx)}
+.cmdchip .tag{font-size:10.5px;color:var(--accent-tx);background:var(--accent-bg);border-radius:var(--r-full);padding:1px 7px;display:flex;align-items:center;gap:5px}
+.cmdchip .tag .sp{width:9px;height:9px;border:2px solid rgb(var(--accent-rgb)/.35);border-top-color:var(--accent-tx);border-radius:50%;animation:spin .8s linear infinite}
+.cmdchip.done .tag{color:var(--ok);background:var(--ok-bg)}
+.result{border:1px solid var(--border);background:var(--card);border-radius:var(--r-lg);padding:10px 12px;animation:in .4s var(--ease) both;max-width:86%}
+.result .rh{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tx3);margin-bottom:6px}
+.result .rh .ok{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+.result .rh b{color:var(--tx1);font-weight:600}
+.result .rh .c{font-family:var(--font-mono);color:var(--accent-tx)}
+.result .rh a{margin-left:auto;color:var(--accent-tx);text-decoration:none;font-size:11.5px}
+.result ul{margin:0;padding-left:18px;color:var(--tx2);font-size:13px}
+.tool{font-family:var(--font-mono);font-size:12px;background:var(--card);border:1px solid var(--border-subtle);border-radius:var(--r-md);padding:7px 10px;display:flex;align-items:center;gap:8px;animation:in .35s var(--ease) both}
+.tool .st{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1s infinite}
+.tool.ok .st{background:var(--ok);animation:none}
+.tool .rt{margin-left:auto;color:var(--tx4);font-size:11px}
+
+/* composer */
+.cwrap{position:relative;margin:0 16px 14px}
+.typeahead{position:absolute;left:0;right:0;bottom:calc(100% + 6px);background:var(--raised);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:0 12px 32px rgb(0 0 0/.5);padding:4px;opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s;pointer-events:none}
+.typeahead.show{opacity:1;transform:none}
+.ta{display:flex;gap:10px;padding:6px 10px;border-radius:var(--r-md);font-size:13px}
+.ta.sel{background:var(--accent-bg)}
+.ta .n{font-family:var(--font-mono);color:var(--tx1);min-width:92px}
+.ta.sel .n{color:var(--accent-tx)}
+.ta .d{color:var(--tx4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ta .k{margin-left:auto;font-size:10.5px;color:var(--tx4);border:1px solid var(--border);border-radius:var(--r-full);padding:0 6px;white-space:nowrap}
+.composer{border:1px solid var(--accent);background:var(--inset);border-radius:var(--r-lg);padding:10px 12px 8px;box-shadow:0 0 0 3px var(--accent-bg)}
+.input{min-height:22px;color:var(--tx1);font-size:14px;white-space:pre-wrap;font-family:var(--font-sans)}
+.input .ph{color:var(--tx4)}
+.input .cmd{color:var(--accent-tx);font-weight:500;background:var(--accent-bg);border-radius:4px;padding:0 2px;margin:0 -2px;transition:background .2s,color .2s}
+.caret{display:inline-block;width:1.5px;height:16px;background:var(--accent-tx);vertical-align:-3px;animation:blink 1s steps(1) infinite}
+.bgopt{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tx2);overflow:hidden;max-height:0;opacity:0;margin-top:0;transition:max-height .28s var(--ease),opacity .2s,margin .28s}
+.bgopt.show{max-height:28px;opacity:1;margin-top:8px}
+.box{width:15px;height:15px;border-radius:4px;border:1.5px solid var(--border-strong);display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;flex:none}
+.box.on{background:var(--accent);border-color:var(--accent)}
+.box.on::after{content:"";width:4px;height:8px;border:solid #0B1020;border-width:0 2px 2px 0;transform:rotate(45deg) translate(-1px,-1px)}
+.bgopt .why{color:var(--tx4);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;visibility:hidden}
+.bgopt .why.show{visibility:visible}
+.meta{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:11.5px;color:var(--tx4)}
+.meta .model{border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px;color:var(--tx3)}
+.meta .sp{flex:1}
+.btn-send{font:inherit;font-size:12px;border-radius:var(--r-md);padding:4px 11px;border:1px solid var(--accent);background:var(--accent);color:#0B1020;font-weight:600;transition:all .2s}
+.btn-send.bg{background:var(--accent-bg);color:var(--accent-tx)}
+
+.keyflash{position:absolute;right:26px;bottom:90px;font-family:var(--font-mono);font-size:13px;color:var(--tx1);background:var(--raised);border:1px solid var(--border-strong);border-bottom-width:3px;border-radius:7px;padding:4px 10px;opacity:0;transform:translateY(6px);transition:opacity .2s,transform .2s;pointer-events:none;z-index:5}
+.keyflash.on{opacity:1;transform:none}
+.cursor{position:absolute;width:18px;height:18px;pointer-events:none;z-index:20;transition:left .7s var(--ease),top .7s var(--ease),opacity .3s;opacity:0}
+.cursor svg{filter:drop-shadow(0 2px 3px rgb(0 0 0/.6))}
+.cursor.click::after{content:"";position:absolute;left:-8px;top:-8px;width:20px;height:20px;border-radius:50%;border:2px solid var(--accent-tx);animation:ripple .45s ease-out}
+
+.legend{margin-top:20px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.legend div{background:var(--panel);border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:12px 14px;font-size:12.5px;color:var(--tx3)}
+.legend b{display:block;color:var(--tx1);font-size:13px;margin-bottom:4px}
+.legend code{font-family:var(--font-mono);font-size:12px;color:var(--accent-tx);background:var(--accent-bg);border-radius:4px;padding:0 3px}
+.legend code.no{color:var(--tx2);background:none}
+
+@keyframes in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{50%{opacity:0}}
+@keyframes ripple{from{opacity:1;transform:scale(.4)}to{opacity:0;transform:scale(1.6)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Slash commands: highlight when valid, “Run in background” when it applies</h1>
+  <p class="sub">While the text is a recognised command, the command name turns the primary colour and a <b>Run in background</b> box appears under the input. It disappears the moment the text stops being a valid command. A background run happens in its own session, shown under this one in the sidebar, and its result comes back into this conversation.</p>
+
+  <div class="player">
+    <button id="bPrev">◀</button><button id="bPlay">❚❚ Pause</button><button id="bNext">▶</button><button id="bReplay">↺ Replay</button>
+    <div class="cap" id="cap"></div><div class="dots" id="dots"></div>
+  </div>
+
+  <div class="app" id="app">
+    <div class="side">
+      <div class="proj">api-refactor</div>
+      <div class="srow on"><span class="d" id="mainDot"></span>payments work</div>
+      <div class="child" id="child"><div class="srow"><span class="d run" id="childDot"></span><span id="childName">review HEAD~1</span><span class="bg" id="childTag">background</span></div></div>
+      <div class="srow"><span class="d"></span>docs cleanup</div>
+      <div class="srow"><span class="d"></span>flaky test hunt</div>
+    </div>
+    <div class="chat">
+      <div class="hdr"><b>payments work</b><span class="br">⎇ feat/payments</span></div>
+      <div class="transcript" id="tr"></div>
+      <div class="cwrap">
+        <div class="typeahead" id="ta"></div>
+        <div class="composer">
+          <div class="input" id="inp"></div>
+          <div class="bgopt" id="bgopt"><span class="box" id="box"></span><span>Run in background</span><span class="why" id="why">— runs in its own session, without this chat’s history; the result comes back here</span></div>
+          <div class="meta"><span class="model">sonnet 5.5</span><span id="hint">⏎ send</span><span class="sp"></span><button class="btn-send" id="send">Send</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="keyflash" id="kf"></div>
+    <div class="cursor" id="cur"><svg width="18" height="18" viewBox="0 0 18 18"><path d="M2 1l13 7-6 1.5L6 16z" fill="#fff" stroke="#0B1020" stroke-width="1"/></svg></div>
+  </div>
+
+  <div class="legend">
+    <div><b>Highlighted (valid)</b><code>/review</code> HEAD~1 — the first word is a known opencode command or skill. Only the command name is coloured, not its arguments.</div>
+    <div><b>Not highlighted</b><code class="no">/revie</code> (unknown), <code class="no">please run /review</code> (slash not at the start). No box: these are sent as ordinary messages.</div>
+    <div><b>Highlighted, no box</b><code>/clear</code>, <code>/fork</code>, <code>/compact</code> — Manta’s own commands act on this window, so they can’t run in the background.</div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const tr = $("tr"), inp = $("inp"), ta = $("ta"), bgopt = $("bgopt"), box = $("box"), why = $("why"), cur = $("cur"), kf = $("kf");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let token = 0;
+const OPENCODE = { review: "review changes [commit|branch|pr]", init: "guided AGENTS.md setup", impeccable: "skill · design / polish a UI", deploy: "deploy the current branch" };
+const LOCAL = { clear: "start a fresh session", fork: "fork this conversation", compact: "compact the context" };
+let checked = false;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]); }
+function parse(text) {
+  const m = text.match(/^\/(\S+)(\s[\s\S]*)?$/);
+  if (!m) return null;
+  const name = m[1];
+  if (OPENCODE[name]) return { name, rest: m[2] ?? "", kind: "opencode" };
+  if (LOCAL[name]) return { name, rest: m[2] ?? "", kind: "local" };
+  return { name, rest: m[2] ?? "", kind: "unknown" };
+}
+function setText(text) {
+  const p = parse(text);
+  let html;
+  if (!text) html = '<span class="ph">Message the agent…  ( / for commands )</span>';
+  else if (p && p.kind !== "unknown") html = `<span class="cmd">/${esc(p.name)}</span>${esc(p.rest)}`;
+  else html = esc(text);
+  inp.innerHTML = html + '<span class="caret"></span>';
+  // background option: only for a valid opencode command / skill
+  const show = !!p && p.kind === "opencode";
+  bgopt.classList.toggle("show", show);
+  if (!show) { checked = false; paintBox(); }
+  // typeahead while typing the command word
+  const typing = /^\/\S*$/.test(text);
+  if (typing) {
+    const q = text.slice(1);
+    const all = [...Object.entries(OPENCODE).map(([n, d]) => [n, d, "opencode"]), ...Object.entries(LOCAL).map(([n, d]) => [n, d, "manta"])];
+    const hits = all.filter(([n]) => n.startsWith(q)).slice(0, 4);
+    ta.innerHTML = hits.map(([n, d, k], i) => `<div class="ta${i === 0 ? " sel" : ""}"><span class="n">/${n}</span><span class="d">${d}</span><span class="k">${k === "manta" ? "this window" : n === "impeccable" ? "skill" : "command"}</span></div>`).join("");
+    ta.classList.toggle("show", hits.length > 0);
+  } else ta.classList.remove("show");
+}
+function paintBox() { box.classList.toggle("on", checked); why.classList.toggle("show", checked); $("send").classList.toggle("bg", checked); $("send").textContent = checked ? "Run in background" : "Send"; }
+async function type(text, from, t, speed = 70) { for (let i = from.length + 1; i <= text.length; i++) { if (t !== token) return false; setText(text.slice(0, i)); await sleep(speed); } return true; }
+async function back(from, to, t) { for (let i = from.length - 1; i >= to.length; i--) { if (t !== token) return false; setText(from.slice(0, i)); await sleep(90); } return true; }
+async function key(label) { kf.textContent = label; kf.classList.add("on"); await sleep(600); kf.classList.remove("on"); }
+async function click(el, t) {
+  const host = $("app").getBoundingClientRect(), r = el.getBoundingClientRect();
+  cur.style.opacity = 1; cur.style.left = r.left - host.left + r.width / 2 + "px"; cur.style.top = r.top - host.top + r.height / 2 + "px";
+  await sleep(750); if (t !== token) return; cur.classList.remove("click"); void cur.offsetWidth; cur.classList.add("click"); await sleep(250);
+}
+function add(html, cls) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; tr.appendChild(d); while (tr.children.length > 8) tr.firstChild.remove(); return d; }
+
+function reset() {
+  tr.innerHTML = ""; checked = false; paintBox(); setText(""); cur.style.opacity = 0;
+  $("child").classList.remove("show"); $("childDot").className = "d run"; $("childTag").className = "bg"; $("childTag").textContent = "background"; $("mainDot").className = "d";
+  add("Refactor the payment retry logic into its own module.", "msg user");
+  add("Done — moved it into <code>payments/retry.ts</code> and updated the three callers. Tests pass.", "msg ai");
+}
+let chip, toolEl;
+const scenes = [
+  { cap: "Type <kbd>/</kbd>: the command list opens as today. A partial name isn’t highlighted yet.", run: async (t) => { await sleep(500); await type("/rev", "", t, 180); await sleep(1200); } },
+  { cap: "Once it’s a valid command, the name turns the primary colour and <b>Run in background</b> appears.", run: async (t) => { await type("/review", "/rev", t, 220); await sleep(1500); } },
+  { cap: "Arguments stay normal text — only the command name is coloured.", run: async (t) => { await type("/review HEAD~1", "/review", t, 110); await sleep(1300); } },
+  { cap: "Make it invalid and both go away instantly: no colour, no box.", run: async (t) => {
+      await back("/review HEAD~1", "/revie", t); await sleep(1300); if (t !== token) return;
+      await type("/review", "/revie", t, 200); await type("/review HEAD~1", "/review", t, 90); await sleep(800);
+  } },
+  { cap: "Tick it. The box explains what that means, and Send becomes “Run in background”.", run: async (t) => { await click(box, t); if (t !== token) return; checked = true; paintBox(); cur.style.opacity = 0; await sleep(2200); } },
+  { cap: "Send: the command runs in its own session (new row in the sidebar). This chat stays free.", run: async (t) => {
+      await key("⏎ Enter"); if (t !== token) return;
+      chip = add('<span class="c">/review</span> HEAD~1 <span class="tag"><span class="sp"></span>running in background</span>', "cmdchip");
+      checked = false; paintBox(); setText(""); $("child").classList.add("show"); await sleep(1600);
+      await type("meanwhile, add retries to the refund path too", "", t, 38); await key("⏎ Enter"); if (t !== token) return;
+      setText(""); add("meanwhile, add retries to the refund path too", "msg user"); $("mainDot").className = "d run";
+      await sleep(600); add("On it — wiring <code>retry()</code> into <code>refunds.ts</code>.", "msg ai");
+      toolEl = add('<span class="st"></span><span>edit</span><span>payments/refunds.ts</span><span class="rt">running…</span>', "tool"); await sleep(1800);
+  } },
+  { cap: "When the background run finishes, its result lands here and its sidebar row turns green.", run: async (t) => {
+      chip.classList.add("done"); chip.querySelector(".tag").innerHTML = "✓ finished in background";
+      $("childDot").className = "d ok"; $("childTag").className = "bg done"; $("childTag").textContent = "done";
+      add('<div class="rh"><span class="ok"></span><b>Background</b><span class="c">/review HEAD~1</span><span>· 48s</span><a href="#">Open session →</a></div><ul><li>retry.ts: backoff has no upper bound (could sleep for minutes)</li><li>Callers swallow the final error instead of surfacing it</li></ul>', "result");
+      await sleep(900); toolEl.className = "tool ok"; toolEl.querySelector(".rt").textContent = "4s"; $("mainDot").className = "d"; await sleep(2200);
+  } },
+  { cap: "Manta’s own commands are highlighted but never offer the box — they act on this window.", run: async (t) => { await type("/clear", "", t, 160); await sleep(1800); if (t !== token) return; await back("/clear", "", t); await type("please run /review later", "", t, 45); await sleep(1800); } },
+];
+
+let idx = 0, playing = true; const dots = $("dots");
+dots.innerHTML = scenes.map((_, i) => `<i data-i="${i}"></i>`).join("");
+dots.onclick = (e) => { const i = e.target.dataset?.i; if (i != null) jump(+i); };
+function paint() { [...dots.children].forEach((d, i) => (d.className = i === idx ? "on" : i < idx ? "done" : "")); $("cap").innerHTML = `<span class="n">${idx + 1}/${scenes.length}</span>${scenes[idx].cap}`; }
+const ff = [
+  () => setText("/rev"), () => setText("/review"), () => setText("/review HEAD~1"), () => setText("/review HEAD~1"),
+  () => { checked = true; paintBox(); },
+  () => { chip = add('<span class="c">/review</span> HEAD~1 <span class="tag"><span class="sp"></span>running in background</span>', "cmdchip"); checked = false; paintBox(); setText(""); $("child").classList.add("show"); add("meanwhile, add retries to the refund path too", "msg user"); add("On it — wiring <code>retry()</code> into <code>refunds.ts</code>.", "msg ai"); toolEl = add('<span class="st"></span><span>edit</span><span>payments/refunds.ts</span><span class="rt">running…</span>', "tool"); },
+  () => { chip.classList.add("done"); chip.querySelector(".tag").innerHTML = "✓ finished in background"; $("childDot").className = "d ok"; $("childTag").className = "bg done"; $("childTag").textContent = "done"; add('<div class="rh"><span class="ok"></span><b>Background</b><span class="c">/review HEAD~1</span><span>· 48s</span><a href="#">Open session →</a></div><ul><li>retry.ts: backoff has no upper bound (could sleep for minutes)</li><li>Callers swallow the final error instead of surfacing it</li></ul>', "result"); toolEl.className = "tool ok"; toolEl.querySelector(".rt").textContent = "4s"; setText(""); },
+];
+async function jump(target) { const t = ++token; reset(); for (let i = 0; i < target; i++) ff[i] && ff[i](); idx = target; await play(t); }
+async function play(t) {
+  while (idx < scenes.length) {
+    paint(); await scenes[idx].run(t); if (t !== token || !playing) return;
+    if (idx === scenes.length - 1) { await sleep(2200); if (t === token && playing) jump(0); return; }
+    idx++;
+  }
+}
+$("bPlay").onclick = () => { playing = !playing; $("bPlay").textContent = playing ? "❚❚ Pause" : "▶ Play"; if (playing) jump(Math.min(idx + 1, scenes.length - 1)); };
+$("bNext").onclick = () => jump(Math.min(idx + 1, scenes.length - 1));
+$("bPrev").onclick = () => jump(Math.max(idx - 1, 0));
+$("bReplay").onclick = () => { playing = true; $("bPlay").textContent = "❚❚ Pause"; jump(0); };
+jump(0);
+</script>
+</body>
+</html>

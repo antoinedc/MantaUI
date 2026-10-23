@@ -325,6 +325,128 @@ test("waiters for one id don't leak into another, and are released afterwards", 
   assert.equal((await p).outcome, "unknown");
 });
 
+// ---- delivery change outcome (N1) ------------------------------------------------
+
+const setDeliv = (interp, id, delivery, { patchItem = async () => {}, getMessage = async () => null } = {}) =>
+  interp.setInboxDelivery(SID, id, delivery, { patchItem, getMessage });
+const refused409 = () => Object.assign(new Error("opencode setInboxDelivery 409: Pending input cannot change"), { status: 409 });
+
+test("N1 → `changed` iff delivery.changed with the REQUESTED delivery is observed; the snapshot flips too", async () => {
+  const { interp, frames } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  const r = await setDeliv(interp, "msg_1", "steer", {
+    patchItem: async () => interp.interpret(changed("msg_1", "steer")),
+    getMessage: async () => { throw new Error("must not be consulted once the event is in"); },
+  });
+  assert.deepEqual(r, { outcome: "changed" });
+  assert.equal(frames().at(-1).items[0].delivery, "steer");
+});
+
+test("N1: the changed event arriving AFTER the PATCH returns (inside the wait) still counts", async () => {
+  const { interp } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  const p = setDeliv(interp, "msg_1", "steer");
+  await tick();
+  await tick();
+  interp.interpret(changed("msg_1", "steer"));
+  assert.deepEqual(await p, { outcome: "changed" });
+});
+
+test("N1: an event for the OTHER delivery value does not count as changed", async () => {
+  const { interp, advance } = make({ listInbox: async () => [rawItem("msg_1", "x", "steer")] });
+  let done = null;
+  const p = setDeliv(interp, "msg_1", "steer", { patchItem: async () => interp.interpret(changed("msg_1", "queue")) }).then((r) => (done = r));
+  await tick();
+  await tick();
+  assert.equal(done, null, "an event for `queue` must not decide a request for `steer`");
+  advance(3000);
+  await p;
+  assert.deepEqual(done, { outcome: "unknown" });
+});
+
+test("N1 → `delivered` when the delivered event is observed", async () => {
+  const { interp } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  const r = await setDeliv(interp, "msg_1", "steer", { patchItem: async () => interp.interpret(delivered("msg_1")) });
+  assert.deepEqual(r, { outcome: "delivered" });
+});
+
+test("N1 → `delivered` when the message already exists (the PATCH was refused: nothing pending)", async () => {
+  const { interp } = make({ listInbox: async () => [] });
+  const r = await setDeliv(interp, "msg_1", "steer", { patchItem: async () => { throw refused409(); }, getMessage: async () => ({ info: { id: "msg_1" } }) });
+  assert.deepEqual(r, { outcome: "delivered" });
+});
+
+test("N1 → `unknown` after 3 s with no evidence (injected timer)", async () => {
+  const { interp, advance } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  let done = null;
+  const p = setDeliv(interp, "msg_1", "steer").then((r) => (done = r));
+  await tick();
+  await tick();
+  assert.equal(done, null, "still waiting for the 3 s window");
+  advance(2999);
+  await tick();
+  assert.equal(done, null);
+  advance(1);
+  await p;
+  assert.deepEqual(done, { outcome: "unknown" });
+});
+
+test("N1: a refused PATCH (4xx) is never `changed` and does not wait; no message → `unknown` at once", async () => {
+  const { interp } = make({ listInbox: async () => [] });
+  // no advance(): a 4xx must answer without the 3 s wait
+  const r = await setDeliv(interp, "msg_gone", "steer", { patchItem: async () => { throw refused409(); } });
+  assert.deepEqual(r, { outcome: "unknown" });
+});
+
+test("N1: a changed event observed for the requested value decides `changed` even if the PATCH answer was a 4xx", async () => {
+  const { interp } = make({ listInbox: async () => [] });
+  const r = await setDeliv(interp, "msg_1", "steer", {
+    patchItem: async () => { interp.interpret(changed("msg_1", "steer")); throw refused409(); },
+  });
+  // the event is authoritative evidence that arrived in the window, whatever the HTTP answer said
+  assert.deepEqual(r, { outcome: "changed" });
+});
+
+test("N1: a 5xx / network failure may have been applied, so it still waits for evidence", async () => {
+  const { interp } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  let done = null;
+  const p = setDeliv(interp, "msg_1", "steer", { patchItem: async () => { throw Object.assign(new Error("502"), { status: 502 }); } }).then((r) => (done = r));
+  await tick();
+  await tick();
+  assert.equal(done, null);
+  interp.interpret(changed("msg_1", "steer"));
+  assert.deepEqual(await p, { outcome: "changed" });
+});
+
+test("N1: the waiter is registered BEFORE the PATCH (an event emitted during it is seen) and released afterwards", async () => {
+  const { interp, advance } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  assert.deepEqual(await setDeliv(interp, "msg_1", "steer", { patchItem: async () => interp.interpret(changed("msg_1", "steer")) }), { outcome: "changed" });
+  // a later request with no evidence must not inherit the old result
+  const p = setDeliv(interp, "msg_1", "queue");
+  await tick();
+  await tick();
+  advance(3000);
+  assert.deepEqual(await p, { outcome: "unknown" });
+});
+
+test("N1: waiters for one id don't leak into another id", async () => {
+  const { interp, advance } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue"), rawItem("msg_2", "y", "queue")] });
+  const p = setDeliv(interp, "msg_1", "steer", { patchItem: async () => interp.interpret(changed("msg_2", "steer")) });
+  await tick();
+  await tick();
+  advance(3000);
+  assert.deepEqual(await p, { outcome: "unknown" });
+});
+
+test("N1: a cancel waiter and a delivery waiter on one id each decide from their own events", async () => {
+  const { interp } = make({ listInbox: async () => [rawItem("msg_1", "x", "queue")] });
+  const c = interp.cancelInbox(SID, "msg_1", { deleteItem: async () => {}, getMessage: async () => null });
+  await tick();
+  await tick();
+  // delivery.changed must not decide a cancel
+  interp.interpret(changed("msg_1", "steer"));
+  interp.interpret(cancelled("msg_1"));
+  assert.equal((await c).outcome, "cancelled");
+});
+
 test("emitCommandExecuted publishes the commandExecuted frame (K6)", () => {
   const { interp, events } = make();
   interp.emitCommandExecuted(SID, { messageID: "msg_c", name: "review", arguments: "HEAD~1" });

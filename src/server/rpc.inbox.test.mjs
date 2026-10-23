@@ -26,6 +26,7 @@ function rig({ withInterp = true } = {}) {
     runCommand: async (i) => log.push(["runCommand", i]),
     interruptSession: async (sid, o) => log.push(["interrupt", sid, o]),
     cancelInboxItem: async (sid, id) => log.push(["cancelInboxItem", sid, id]),
+    setInboxDelivery: async (sid, id, d) => log.push(["setInboxDelivery", sid, id, d]),
     getMessage: async (sid, id) => (log.push(["getMessage", sid, id]), null),
   };
   const ctoConversation = {
@@ -41,6 +42,12 @@ function rig({ withInterp = true } = {}) {
           await deps.getMessage();
           log.push(["cancelInbox", sid, id]);
           return { outcome: "cancelled" };
+        },
+        setInboxDelivery: async (sid, id, delivery, deps) => {
+          await deps.patchItem();
+          await deps.getMessage();
+          log.push(["interpSetDelivery", sid, id, delivery]);
+          return { outcome: "changed" };
         },
       }
     : null;
@@ -95,8 +102,25 @@ test("opencode:inbox-cancel wires DELETE + message lookup into the interpreter; 
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a" }]), /id is required/);
 });
 
+test("opencode:inbox-set-delivery wires PATCH + message lookup into the interpreter; validates input; refuses CTO", async () => {
+  const { handlers, log } = rig();
+  assert.deepEqual(await dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "steer" }]), { outcome: "changed" });
+  assert.deepEqual(log, [["setInboxDelivery", "ses_a", "msg_1", "steer"], ["getMessage", "ses_a", "msg_1"], ["interpSetDelivery", "ses_a", "msg_1", "steer"]]);
+  await dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "queue" }]);
+  assert.deepEqual(log.at(-1), ["interpSetDelivery", "ses_a", "msg_1", "queue"]);
+  const n = log.length;
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_cto", id: "msg_1", delivery: "steer" }]), /not available for the CTO conversation/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "now" }]), /delivery must be "steer" or "queue"/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1" }]), /delivery must be "steer" or "queue"/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", delivery: "steer" }]), /id is required/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "", delivery: "steer" }]), /id is required/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "", id: "msg_1", delivery: "steer" }]), /sessionId is required/);
+  assert.equal(log.length, n, "a refused request never reaches V2");
+});
+
 test("without the interpreter wired the inbox channels fail clearly (never an empty list)", async () => {
   const { handlers } = rig({ withInterp: false });
   await assert.rejects(dispatch(handlers, "opencode:inbox", ["ses_a"]), /not available on this box/);
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a", id: "x" }]), /not available on this box/);
+  await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "x", delivery: "steer" }]), /not available on this box/);
 });
