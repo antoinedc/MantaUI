@@ -1,10 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  combinedSeatWindows,
   describeSeatLine,
   formatLastMove,
-  formatSeatMoveNotice,
-  seatDisplayName,
-  seatMoveNoticeKey,
   hasSeatChoice,
   isMoveComing,
   isSameOrgMove,
@@ -22,6 +20,7 @@ import {
   findSeat,
 } from "./chatUtils";
 import { NOW, claudeSnapshot, codexSnapshot, oneSeatView, seat, threeSeatView, win } from "./seatFixtures";
+import type { ProviderView } from "../shared/types";
 import { leastLoadedSeat } from "../shared/seatChoice.mjs";
 
 describe("seatLoad (re-exported from seatChoice)", () => {
@@ -245,52 +244,97 @@ describe("misc", () => {
   });
 });
 
-describe("formatSeatMoveNotice (spec §5.3 move line)", () => {
-  const base = { fromLabel: "Seat 1", toLabel: "Work · Seat 2" };
-  it("load / exhausted with a 5h trigger", () => {
-    const t = { kind: "session", pct: 96 };
-    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: t })).toBe("Moved to Work · Seat 2 (Seat 1 at 96% of 5h).");
-    expect(formatSeatMoveNotice({ ...base, reason: "exhausted", trigger: { kind: "session", pct: 100 } })).toBe(
-      "Moved to Work · Seat 2 (Seat 1 at 100% of 5h).",
+describe("combinedSeatWindows (automatic-mode ring)", () => {
+  const view = (plans: (string | null)[], seats: ReturnType<typeof seat>[]): ProviderView => ({
+    ...threeSeatView(),
+    accounts: seats.map((s, i) => ({ id: `a${i}`, label: `A${i}`, orgName: null, plan: plans[i], seats: [s] })),
+  });
+  const byKind = (r: ReturnType<typeof combinedSeatWindows>, kind: string) => r!.windows.find((w) => w.kind === kind)!;
+
+  it("equal weights when plans are unknown: plain mean, rounded, session before weekly", () => {
+    const r = combinedSeatWindows(view([null, null], [seat("a", "A", 10, 30), seat("b", "B", 21, 41)]));
+    expect(r!.seatCount).toBe(2);
+    expect(r!.windows.map((w) => w.kind)).toEqual(["session", "weekly"]);
+    expect(byKind(r, "session").pct).toBe(16); // 15.5 → 16
+    expect(byKind(r, "weekly").pct).toBe(36);
+    expect(byKind(r, "session").label).toBe("5h");
+  });
+
+  it("weights by plan: Pro 1 + Max 20x 20; Max 5x 5; matches inside 'Team · Max 5x'", () => {
+    const pro20 = combinedSeatWindows(view(["Pro", "Max 20x"], [seat("a", "A", 100, 0), seat("b", "B", 0, 0)]));
+    expect(byKind(pro20, "session").pct).toBe(5); // 100·1 / 21
+    const five = combinedSeatWindows(view(["Team · Max 5x", "Pro"], [seat("a", "A", 60, 0), seat("b", "B", 0, 0)]));
+    expect(byKind(five, "session").pct).toBe(50); // 60·5 / 6
+  });
+
+  it("one unknown plan (or null / plain Team) makes every seat weigh 1", () => {
+    const r = combinedSeatWindows(view(["Max 20x", "Team"], [seat("a", "A", 100, 0), seat("b", "B", 0, 0)]));
+    expect(byKind(r, "session").pct).toBe(50);
+    expect(byKind(combinedSeatWindows(view(["Max 20x", null], [seat("a", "A", 100, 0), seat("b", "B", 0, 0)])), "session").pct).toBe(50);
+  });
+
+  it("leaves out signed-out / expired seats and seats with no reading", () => {
+    const r = combinedSeatWindows(
+      view(
+        [null, null, null, null],
+        [
+          seat("a", "A", 40),
+          { ...seat("b", "B", 90), status: "signed-out" },
+          { ...seat("c", "C", 90), status: "expired" },
+          seat("d", "D", null),
+        ],
+      ),
     );
+    expect(r!.seatCount).toBe(1);
+    expect(byKind(r, "session").pct).toBe(40);
+    expect(combinedSeatWindows(view([null], [{ ...seat("e", "E", 10), status: "unknown" }]))!.seatCount).toBe(1);
   });
-  it("weekly trigger names the weekly limit; rounds the percentage", () => {
-    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "weekly", pct: 95.6 } })).toBe(
-      "Moved to Work · Seat 2 (Seat 1 at 96% of the weekly limit).",
-    );
+
+  it("a stale window counts as 0%; reset is the earliest non-stale; all-stale → stale, no reset", () => {
+    const stale = seat("a", "A", 80, 0, { windows: [win("session", 80, { stale: true, resetsAt: NOW - 1000 }), win("weekly", 0)] });
+    const live = seat("b", "B", 40, 0);
+    live.windows[0] = win("session", 40, { resetsAt: NOW + 7_200_000 });
+    const r = combinedSeatWindows(view([null, null], [stale, live]));
+    expect(byKind(r, "session").pct).toBe(20); // (0 + 40) / 2
+    expect(byKind(r, "session").resetsAt).toBe(NOW + 7_200_000);
+    expect(byKind(r, "session").stale).toBeUndefined();
+
+    const s1 = seat("c", "C", 0, 0, { windows: [win("session", 70, { stale: true })] });
+    const s2 = seat("d", "D", 0, 0, { windows: [win("session", 90, { stale: true })] });
+    const all = combinedSeatWindows(view([null, null], [s1, s2]));
+    expect(byKind(all, "session").stale).toBe(true);
+    expect(byKind(all, "session").pct).toBe(0);
+    expect(byKind(all, "session").resetsAt).toBeUndefined();
   });
-  it("an unknown trigger kind keeps the percentage without inventing a window", () => {
-    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "opus", pct: 97 } })).toBe(
-      "Moved to Work · Seat 2 (Seat 1 at 97%).",
-    );
+
+  it("a kind reported by only some seats averages over just those seats", () => {
+    const a = seat("a", "A", 20, 0, { windows: [win("session", 20)] });
+    const b = seat("b", "B", 40, 60);
+    const r = combinedSeatWindows(view([null, null], [a, b]));
+    expect(byKind(r, "session").pct).toBe(30);
+    expect(byKind(r, "weekly").pct).toBe(60);
   });
-  it("exhausted without a trigger / load without a trigger / unusable / manual", () => {
-    expect(formatSeatMoveNotice({ ...base, reason: "exhausted" })).toBe("Moved to Work · Seat 2 (Seat 1 was at its limit).");
-    expect(formatSeatMoveNotice({ ...base, reason: "load" })).toBe("Moved to Work · Seat 2 (Seat 1 was near its limit).");
-    expect(formatSeatMoveNotice({ ...base, reason: "unusable" })).toBe("Moved to Work · Seat 2 (Seat 1 needed sign-in).");
-    expect(formatSeatMoveNotice({ ...base, reason: "manual" })).toBe("Switched to Work · Seat 2.");
+
+  it("ignores inactive windows; drops used/limit/binding detail", () => {
+    const a = seat("a", "A", 0, 0, {
+      windows: [win("session", 50, { used: 5, limit: 10, binding: true }), win("weekly", 95, { active: false })],
+    });
+    const r = combinedSeatWindows(view([null], [a]));
+    expect(r!.windows.map((w) => w.kind)).toEqual(["session"]);
+    expect(byKind(r, "session")).not.toHaveProperty("used");
+    expect(byKind(r, "session")).not.toHaveProperty("binding");
   });
-  it("reset-soon says the new seat's limit resets within the hour", () => {
-    expect(formatSeatMoveNotice({ ...base, reason: "reset-soon", trigger: null })).toBe("Moved to Work · Seat 2 (its limit resets within the hour).");
+
+  it("a seat with only inactive windows is not counted", () => {
+    const a = seat("a", "A", 40);
+    const b = seat("b", "B", 0, 0, { windows: [win("weekly", 95, { active: false })] });
+    const r = combinedSeatWindows(view([null], [a, b]));
+    expect(r!.seatCount).toBe(1);
   });
-  it("a cross-org move appends History re-sent. (no token count), manual too", () => {
-    expect(formatSeatMoveNotice({ ...base, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: true })).toBe(
-      "Moved to Work · Seat 2 (Seat 1 at 96% of 5h). History re-sent.",
-    );
-    expect(formatSeatMoveNotice({ ...base, reason: "manual", crossOrg: true })).toBe("Switched to Work · Seat 2. History re-sent.");
-  });
-  it("tolerates missing labels and unknown reasons", () => {
-    expect(formatSeatMoveNotice({ reason: "load", trigger: { kind: "session", pct: 96 } })).toBe("Moved to another seat.");
-    expect(formatSeatMoveNotice({ toLabel: "B", reason: "weird", fromLabel: "A" })).toBe("Moved to B.");
-    expect(formatSeatMoveNotice({})).toBe("Moved to another seat.");
-  });
-  it("key ignores the timestamp; display name follows the live view", () => {
-    expect(seatMoveNoticeKey("s", "a", "b")).toBe("s|a|b");
-    expect(seatMoveNoticeKey("s", undefined, null)).toBe("s||");
-    const v = threeSeatView();
-    expect(seatDisplayName([v], "claude", "s2")).toBe("Work · Seat 2");
-    expect(seatDisplayName([v], "claude", "s3")).toBe("Personal");
-    expect(seatDisplayName([], "claude", "s2", "Work", "Seat 2")).toBe("Work · Seat 2");
-    expect(seatDisplayName([], "claude", "s2")).toBe("");
+
+  it("null when nothing qualifies", () => {
+    expect(combinedSeatWindows(null)).toBeNull();
+    expect(combinedSeatWindows(view([null], [seat("a", "A", null)]))).toBeNull();
+    expect(combinedSeatWindows(view([null], [{ ...seat("a", "A", 50), status: "signed-out" }]))).toBeNull();
   });
 });

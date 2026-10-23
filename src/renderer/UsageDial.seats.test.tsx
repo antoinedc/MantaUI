@@ -75,14 +75,20 @@ describe("UsageDial — one seat (unchanged)", () => {
 });
 
 describe("UsageDial — three seats, automatic", () => {
-  it("shows the conversation's seat on the ring and popover, next tag, mode chip, ↷ badge", async () => {
+  it("the ring shows the combined figure; the popover keeps the conversation's seat, next tag, mode chip, ↷ badge", async () => {
     const { popover } = await open([threeSeatView()], { seatId: "s1" });
-    // The ring reports THIS conversation's seat (s1 = 96%), not the aggregate (42%).
+    // Automatic mode: the ring + tooltip report all three seats (weighted 20/20/1 →
+    // 58% of the 5h), not this conversation's seat (s1 = 96%) and not a seat name.
     const trigger = h!.container.querySelector("button") as HTMLButtonElement;
-    expect(trigger.getAttribute("title")).toContain("Work · Seat 1");
-    expect(trigger.getAttribute("title")).toContain("96%");
+    const title = trigger.getAttribute("title")!;
+    expect(title).toContain("Claude · 58% of the 5h across 3 seats — next reset in");
+    expect(title).not.toContain("Work · Seat 1");
+    expect(title).toContain("this conversation will move to another seat soon");
     expect(h!.container.querySelector('[data-move-coming="true"]')).toBeTruthy();
 
+    // The popover is untouched: this conversation's seat windows (96%), its name.
+    expect(popover.textContent).toContain("96%");
+    expect(popover.textContent).not.toContain("58%");
     expect(popover.textContent).toContain("Automatic");
     expect(popover.querySelector('[data-testid="usage-conversation-seat"]')?.textContent).toContain("Work · Seat 1");
     expect(popover.textContent).toContain("Other seats");
@@ -96,6 +102,23 @@ describe("UsageDial — three seats, automatic", () => {
     expect(popover.textContent).toContain("Manage seats");
     // auto mode: no Use buttons
     expect(Array.from(popover.querySelectorAll("button")).some((b) => b.textContent === "Use")).toBe(false);
+  });
+
+  it("every seat mid-reset: the ring is an empty pulsing track and the tooltip says so", async () => {
+    const v = threeSeatView();
+    for (const a of v.accounts) for (const s of a.seats) s.windows = s.windows.map((w) => ({ ...w, stale: true }));
+    await open([v], { seatId: "s1" });
+    const trigger = h!.container.querySelector("button") as HTMLButtonElement;
+    expect(trigger.getAttribute("title")).toContain("Claude · the 5h quota is resetting on every seat");
+    expect(h!.container.querySelector(".animate-pulse")).toBeTruthy();
+  });
+
+  it("a signed-out seat is left out of the ring's count", async () => {
+    const v = threeSeatView();
+    v.accounts[1].seats[0] = { ...seat("s3", "Seat 1", 55), status: "signed-out" };
+    await open([v], { seatId: "s1" });
+    const trigger = h!.container.querySelector("button") as HTMLButtonElement;
+    expect(trigger.getAttribute("title")).toContain("of the 5h across 2 seats");
   });
 
   it("no ↷ badge below the move line", async () => {
@@ -179,6 +202,7 @@ describe("UsageDial — manual mode", () => {
     const { popover } = await open([manual()], { seatId: "s3" });
     const trigger = h!.container.querySelector("button") as HTMLButtonElement;
     expect(trigger.getAttribute("title")).toContain("96%"); // active seat s1, not the stored s3
+    expect(trigger.getAttribute("title")).not.toContain("across");
     expect(h!.container.querySelector("[data-move-coming]")).toBeNull();
     expect(popover.textContent).toContain("Manual");
     expect(popover.querySelector(".manta-seat-next")).toBeNull();
