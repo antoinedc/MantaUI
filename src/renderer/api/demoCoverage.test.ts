@@ -202,6 +202,7 @@ export const DEMO_UNIMPLEMENTED = [
   "secretsDelete",
   "secretsList",
   "secretsSet",
+  "secretsUpdate",
   "serverCliUpdate",
   "serverUpdateApply",
   "serverUpdateCheck",

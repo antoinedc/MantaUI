@@ -13,6 +13,7 @@ import {
   materializedPath,
   setSecret,
   deleteSecret,
+  updateSecret,
   listSecrets,
   listSecretKeys,
   sortSecretMetas,
@@ -620,6 +621,214 @@ test("ordinary provideSecret scope behavior is UNCHANGED — a session-less call
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// ----------------------------------------------------------------------------
+// updateSecret — rename / replace value / hint, scope + owner immutable
+// ----------------------------------------------------------------------------
+
+function memStore(initial) {
+  const store = initial.map((e) => ({ ...e }));
+  let saves = 0;
+  return {
+    store,
+    saves: () => saves,
+    load: () => store.map((e) => ({ ...e })),
+    save: async (s) => {
+      saves++;
+      store.length = 0;
+      store.push(...s.map((e) => ({ ...e })));
+    },
+  };
+}
+
+const seed = () => [
+  { id: "a", key: "GITHUB_PAT", value: "ghp_1", scope: "shared", sessionID: null, project: null, hint: "git", createdAt: 1, updatedAt: 1 },
+  { id: "b", key: "OPENAI_API_KEY", value: "sk_1", scope: "shared", sessionID: null, project: null, hint: "", createdAt: 1, updatedAt: 1 },
+  { id: "c", key: "GITHUB_PAT", value: "ghp_s", scope: "session", sessionID: "ses_1", project: null, hint: "", createdAt: 1, updatedAt: 1 },
+  { id: "d", key: "STRIPE", value: "st_1", scope: "project", sessionID: null, project: "manta", hint: "", createdAt: 1, updatedAt: 1 },
+];
+
+test("updateSecret renames, keeps value/id/createdAt, bumps updatedAt, publishes, no value in meta", async () => {
+  const m = memStore(seed());
+  const published = [];
+  const r = await updateSecret("a", { key: "GH_TOKEN" }, { load: m.load, save: m.save, publish: (e) => published.push(e), now: () => 99 });
+  assert.equal(r.ok, true);
+  assert.equal(r.meta.key, "GH_TOKEN");
+  assert.equal(r.meta.id, "a");
+  assert.equal(r.meta.createdAt, 1);
+  assert.equal(r.meta.updatedAt, 99);
+  assert.equal("value" in r.meta, false);
+  assert.equal(m.store.find((e) => e.id === "a").value, "ghp_1");
+  assert.deepEqual(published, [{ kind: "secrets.updated", payload: { sessionID: null, project: null } }]);
+});
+
+test("updateSecret rename collides within the same slot, not across slots", async () => {
+  const m = memStore(seed());
+  const deps = { load: m.load, save: m.save };
+  const clash = await updateSecret("a", { key: "OPENAI_API_KEY" }, deps);
+  assert.equal(clash.ok, false);
+  assert.equal(clash.error, 'A shared secret named "OPENAI_API_KEY" already exists here.');
+  assert.equal(m.saves(), 0);
+  // GITHUB_PAT exists as shared AND session; renaming the session one to a
+  // shared-only name is a different slot, so it succeeds.
+  const ok = await updateSecret("c", { key: "OPENAI_API_KEY" }, deps);
+  assert.equal(ok.ok, true);
+  // ...but renaming a session secret onto another secret in ITS slot is refused.
+  const m2 = memStore([...seed(), { id: "e", key: "OTHER", value: "x", scope: "session", sessionID: "ses_1", project: null, hint: "" }]);
+  const clash2 = await updateSecret("c", { key: "OTHER" }, { load: m2.load, save: m2.save });
+  assert.equal(clash2.error, 'A session secret named "OTHER" already exists here.');
+  // Same name in another session's slot is not a collision.
+  const m3 = memStore([...seed(), { id: "f", key: "OTHER", value: "x", scope: "session", sessionID: "ses_2", project: null, hint: "" }]);
+  assert.equal((await updateSecret("c", { key: "OTHER" }, { load: m3.load, save: m3.save })).ok, true);
+  // project slot
+  const m4 = memStore([...seed(), { id: "g", key: "P2", value: "x", scope: "project", sessionID: null, project: "manta", hint: "" }]);
+  assert.equal((await updateSecret("d", { key: "P2" }, { load: m4.load, save: m4.save })).error, 'A project secret named "P2" already exists here.');
+});
+
+test("updateSecret rejects an invalid key and an unknown id", async () => {
+  const m = memStore(seed());
+  const bad = await updateSecret("a", { key: "2FA-CODE" }, { load: m.load, save: m.save });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /Invalid key/);
+  const missing = await updateSecret("zzz", { hint: "x" }, { load: m.load, save: m.save });
+  assert.deepEqual(missing, { ok: false, error: "Secret not found." });
+  assert.equal(m.saves(), 0);
+});
+
+test("updateSecret replaces the value only when given; empty string is rejected", async () => {
+  const m = memStore(seed());
+  const deps = { load: m.load, save: m.save, now: () => 50 };
+  const keep = await updateSecret("a", { hint: "new hint" }, deps);
+  assert.equal(keep.ok, true);
+  assert.equal(m.store.find((e) => e.id === "a").value, "ghp_1");
+  const keep2 = await updateSecret("a", { value: undefined, hint: "new hint 2" }, deps);
+  assert.equal(keep2.ok, true);
+  assert.equal(m.store.find((e) => e.id === "a").value, "ghp_1");
+  const empty = await updateSecret("a", { value: "" }, deps);
+  assert.deepEqual(empty, { ok: false, error: "value cannot be empty" });
+  const rep = await updateSecret("a", { value: "ghp_NEW" }, deps);
+  assert.equal(rep.ok, true);
+  assert.equal(m.store.find((e) => e.id === "a").value, "ghp_NEW");
+  assert.equal("value" in rep.meta, false);
+});
+
+test("updateSecret hint-only change trims and keeps key + value", async () => {
+  const m = memStore(seed());
+  const r = await updateSecret("a", { hint: "  push token  " }, { load: m.load, save: m.save, now: () => 7 });
+  assert.equal(r.meta.hint, "push token");
+  assert.equal(r.meta.key, "GITHUB_PAT");
+  assert.equal(r.meta.updatedAt, 7);
+  assert.equal(m.store.find((e) => e.id === "a").value, "ghp_1");
+});
+
+test("updateSecret never changes scope or owner", async () => {
+  const m = memStore(seed());
+  const r = await updateSecret(
+    "c",
+    { key: "RENAMED", scope: "shared", sessionID: "ses_other", project: "x" },
+    { load: m.load, save: m.save },
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.meta.scope, "session");
+  assert.equal(r.meta.sessionID, "ses_1");
+  assert.equal(r.meta.project, null);
+  const d = await updateSecret("d", { hint: "h", project: "other", scope: "shared" }, { load: m.load, save: m.save });
+  assert.equal(d.meta.scope, "project");
+  assert.equal(d.meta.project, "manta");
+});
+
+test("updateSecret no-op leaves updatedAt and the store untouched", async () => {
+  const m = memStore(seed());
+  const r = await updateSecret("a", { key: "GITHUB_PAT", hint: "git" }, { load: m.load, save: m.save, now: () => 1234 });
+  assert.equal(r.ok, true);
+  assert.equal(r.meta.updatedAt, 1);
+  assert.equal(m.saves(), 0);
+});
+
+test("updateSecret removes the stale materialized file on rename and on value change, not on hint-only", async () => {
+  const { dir } = await tmpStore();
+  try {
+    const m = memStore(seed());
+    const deps = { load: m.load, save: m.save, dir };
+    await provideSecret({ key: "OPENAI_API_KEY", dir }, { load: m.load, recordUsage: null });
+    const file = join(dir, "OPENAI_API_KEY");
+    assert.equal(await readFile(file, "utf-8"), "sk_1");
+
+    await updateSecret("b", { hint: "just a hint" }, deps);
+    assert.equal(await readFile(file, "utf-8"), "sk_1", "hint-only change keeps the file");
+
+    await updateSecret("b", { value: "sk_2" }, deps);
+    await assert.rejects(() => stat(file), /ENOENT/, "value change removes the old file");
+
+    await provideSecret({ key: "OPENAI_API_KEY", dir }, { load: m.load, recordUsage: null });
+    assert.equal(await readFile(file, "utf-8"), "sk_2");
+    await updateSecret("b", { key: "OPENAI_KEY_2" }, deps);
+    await assert.rejects(() => stat(file), /ENOENT/, "rename removes the file at the old name");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("updateSecret removes the old session-scoped materialized file at its own path", async () => {
+  const { dir } = await tmpStore();
+  try {
+    const m = memStore(seed());
+    await provideSecret({ key: "GITHUB_PAT", sessionID: "ses_1", dir }, { load: m.load, recordUsage: null });
+    const file = join(dir, "sessions", "ses_1", "GITHUB_PAT");
+    assert.equal(await readFile(file, "utf-8"), "ghp_s");
+    await updateSecret("c", { value: "ghp_s2" }, { load: m.load, save: m.save, dir });
+    await assert.rejects(() => stat(file), /ENOENT/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// visibleSecrets `overrides`
+// ----------------------------------------------------------------------------
+
+test("visibleSecrets flags what a session/project secret overrides", () => {
+  const list = [
+    { id: "1", key: "A", value: "x", scope: "shared" },
+    { id: "2", key: "A", value: "x", scope: "project", project: "manta" },
+    { id: "3", key: "A", value: "x", scope: "session", sessionID: "ses_1" },
+    { id: "4", key: "B", value: "x", scope: "shared" },
+    { id: "5", key: "B", value: "x", scope: "session", sessionID: "ses_1" },
+    { id: "6", key: "C", value: "x", scope: "project", project: "manta" },
+    { id: "7", key: "C", value: "x", scope: "shared" },
+    { id: "8", key: "D", value: "x", scope: "session", sessionID: "ses_1" },
+  ];
+  const out = Object.fromEntries(visibleSecrets(list, "ses_1", "manta").map((m) => [m.key, m]));
+  assert.equal(out.A.scope, "session");
+  assert.equal(out.A.overrides, "project", "session shadowing both reports the highest tier");
+  assert.equal(out.B.overrides, "shared");
+  assert.equal(out.C.scope, "project");
+  assert.equal(out.C.overrides, "shared");
+  assert.equal(out.D.overrides, null);
+  for (const m of Object.values(out)) assert.equal("value" in m, false);
+});
+
+test("visibleSecrets: shared is never an override; session only sees its own project's tier", () => {
+  const list = [
+    { id: "1", key: "A", value: "x", scope: "shared" },
+    { id: "2", key: "A", value: "x", scope: "project", project: "other" },
+    { id: "3", key: "A", value: "x", scope: "session", sessionID: "ses_1" },
+  ];
+  const shared = visibleSecrets(list, null, null);
+  assert.equal(shared[0].overrides, null);
+  const s = visibleSecrets(list, "ses_1", "manta");
+  assert.equal(s[0].overrides, "shared", "other project's secret is not shadowed");
+});
+
+test("includeAll listing reports overrides: null on every row", () => {
+  const list = [
+    { id: "1", key: "A", value: "x", scope: "shared" },
+    { id: "3", key: "A", value: "x", scope: "session", sessionID: "ses_1" },
+  ];
+  const metas = listSecrets({ includeAll: true }, { load: () => list });
+  assert.equal(metas.length, 2);
+  for (const m of metas) assert.equal(m.overrides, null);
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

@@ -2108,3 +2108,13 @@ test("the two new channels are registered", async () => {
   assert.equal(typeof handlers["optimizer:prices"], "function");
   assert.equal(typeof handlers["opencode:set-model-cost"], "function");
 });
+
+test("secrets:update dispatches to the store (sandboxed store: unknown id → not found, nothing written)", async () => {
+  const { deps } = makeDeps([]);
+  const published = [];
+  const handlers = buildHandlers({ ...deps, bus: { publish: (e) => published.push(e) } });
+  assert.equal(typeof handlers["secrets:update"], "function");
+  const r = await dispatch(handlers, "secrets:update", ["no_such_id", { hint: "x" }]);
+  assert.deepEqual(r, { ok: false, error: "Secret not found." });
+  assert.deepEqual(published, []);
+});

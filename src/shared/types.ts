@@ -1698,6 +1698,7 @@ export const IPC = {
   // (src/server/rpc.mjs → secrets.mjs).
   secretsList: "secrets:list", // (sessionId?, all?) → SecretMeta[]
   secretsSet: "secrets:set", // (SecretInput) → { ok, meta? , error? }
+  secretsUpdate: "secrets:update", // (id, SecretPatch) → { ok, meta?, error? }
   secretsDelete: "secrets:delete", // (id) → { deleted: boolean }
 
   // ---- inbound webhooks (manta-server owned) ----
@@ -2158,6 +2159,9 @@ export type SecretMeta = {
   hasValue: boolean; // a value is stored (always true for persisted secrets)
   createdAt: number | null;
   updatedAt: number | null;
+  // Highest-precedence tier this entry shadows in a session-scoped listing
+  // (null/absent = overrides nothing; always null in the includeAll listing).
+  overrides?: "project" | "shared" | null;
 };
 
 // A published serve-page registry entry — what the artifacts panel sees via
@@ -2201,6 +2205,10 @@ export type SecretInput = {
   project?: string | null;
   hint?: string;
 };
+
+// Patch for secretsUpdate (UI → store). Absent value = keep the stored one;
+// scope and owner are immutable.
+export type SecretPatch = { key?: string; value?: string; hint?: string };
 
 // An inbound webhook's METADATA — what the UI and `webhook_list` see. NEVER
 // carries the signing secret (returned once at create, then stripped). Store:
