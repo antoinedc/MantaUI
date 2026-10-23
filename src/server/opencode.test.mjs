@@ -638,7 +638,8 @@ test("runCommand with a delivery forwards it and skips the model/agent sync", as
     await runCommand({ sessionId: "ses_a", command: "review", arguments: "HEAD~1", delivery: "steer", agent: "build" });
   });
   assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "review", text: "HEAD~1", delivery: "steer" });
-  assert.equal(calls.filter((c) => c.method === "GET").length, 0);
+  // The only read is the skill lookup (is `review` a skill?) — no session read for a model/agent sync.
+  assert.equal(calls.filter((c) => c.method === "GET" && c.path !== "/api/skill").length, 0);
 });
 
 test("runCommand opens a correlation window around the POST and finishes it on success AND on failure", async () => {
@@ -693,6 +694,42 @@ test("runCommand non-2xx carries err.status (admission: definitive 4xx vs unknow
     { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": () => new Response("bad", { status: 400 }) },
     async () => {
       await assert.rejects(runCommand({ sessionId: "ses_a", command: "nope", arguments: "" }), (e) => e.status === 400);
+    },
+  );
+});
+
+test("runCommand on a skill sends `/<skill> <args>` as a prompt with the skill attached, not to the command route", async () => {
+  const calls = await withV2(
+    {
+      "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", path: "/s", content: "c" }] },
+      "GET /api/session/ses_a": { data: SESSION() },
+      "POST /api/session/ses_a/prompt": null,
+      "POST /api/session/ses_a/command": null,
+    },
+    async () => {
+      await runCommand({ sessionId: "ses_a", command: "impeccable", arguments: "init" });
+    },
+  );
+  assert.equal(only(calls, "POST", "/api/session/ses_a/command").length, 0);
+  const { id: skillPromptId, ...skillPromptBody } = only(calls, "POST", "/api/session/ses_a/prompt")[0].body;
+  assert.match(skillPromptId, /^msg_/);
+  assert.deepEqual(skillPromptBody, {
+    text: "/impeccable init",
+    skills: [{ id: "impeccable", mention: { start: 0, end: 11, text: "/impeccable" } }],
+  });
+});
+
+test("listCommands appends skills, and a skill hides a same-named command wrapper", async () => {
+  await withV2(
+    {
+      "GET /api/command": { data: [{ name: "init", description: "setup" }, { name: "impeccable", description: "wrapper" }] },
+      "GET /api/skill": { data: [{ id: "impeccable", name: "impeccable", description: "design", path: "/s", content: "c" }] },
+    },
+    async () => {
+      assert.deepEqual(
+        (await listCommands()).map((c) => [c.name, c.description, c.source]),
+        [["init", "setup", undefined], ["impeccable", "design", "skill"]],
+      );
     },
   );
 });
