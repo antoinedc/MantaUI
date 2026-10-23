@@ -66,22 +66,23 @@ export function ReclaimRow() {
     setError(null);
     try {
       const r = await window.api.upgradeReclaim();
-      if (!alive.current) {
-        // Settings closed mid-delete: the toast is still the confirmation.
-        if (r.ok) push({ message: reclaimDoneMessage(r.freedBytes) });
-        else push({ message: `Couldn't free the space: ${r.error}`, tone: "error" });
-        return;
-      }
       if (r.ok) {
         push({ message: reclaimDoneMessage(r.freedBytes) });
-        setStatus(null); // the row disappears
-      } else {
+        if (alive.current) setStatus(null); // the row disappears
+        return;
+      }
+      // A failure is ALWAYS toasted: the follow-up status read may report the row unavailable
+      // (and so remove it), which would otherwise take the inline message with it.
+      push({ message: `Couldn't free the space: ${r.error}`, tone: "error" });
+      if (alive.current) {
         setError(r.error);
         await load(); // the box may now report a partial run it can resume
       }
     } catch (e) {
       // upgradeReclaim never rejects on a refusal; a 401 does (AuthRequiredError).
-      if (alive.current) setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      push({ message: `Couldn't free the space: ${message}`, tone: "error" });
+      if (alive.current) setError(message);
     } finally {
       if (alive.current) setBusy(false);
     }

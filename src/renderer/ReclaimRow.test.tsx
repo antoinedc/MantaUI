@@ -130,7 +130,31 @@ describe("ReclaimRow", () => {
     expect(rowText()).toContain("4 GB");
     expect(rowText()).toContain("didn't finish");
     expect(button("Delete to free space")?.disabled).toBe(false);
-    expect(useStore.getState().appToasts).toHaveLength(0);
+    const toasts = useStore.getState().appToasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe("error");
+    expect(String(toasts[0].message)).toBe("Couldn't free the space: Couldn't delete opencode-v1: permission denied");
+  });
+
+  it("failure AND the follow-up status is unavailable: the row goes away but the error toast is still pushed", async () => {
+    let reads = 0;
+    installMockApi({
+      upgradeReclaimStatus: async () =>
+        ((reads += 1), reads > 1 ? available({ available: false, reason: "Couldn't confirm which database is in use", bytes: null }) : available()),
+      upgradeReclaim: async (): Promise<ReclaimResult> => ({ ok: false, error: "Couldn't confirm which database is in use" }),
+    });
+    h = mount(<ReclaimRow />);
+    await h.flush();
+    act(() => button("Delete to free space")!.click());
+    await h.flush();
+    act(() => button("Delete")!.click());
+    await settle();
+    expect(reads).toBe(2);
+    expect(rowText()).toBeNull();
+    const toasts = useStore.getState().appToasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].tone).toBe("error");
+    expect(String(toasts[0].message)).toBe("Couldn't free the space: Couldn't confirm which database is in use");
   });
 
   it("a rejection (e.g. sign-in expired) is shown too, never swallowed", async () => {
@@ -145,6 +169,7 @@ describe("ReclaimRow", () => {
     act(() => button("Delete")!.click());
     await settle();
     expect(h.container.querySelector('[role="alert"]')?.textContent).toContain("auth required");
+    expect(useStore.getState().appToasts.map((t) => [t.tone, String(t.message)])).toEqual([["error", "Couldn't free the space: auth required"]]);
   });
 
   it("copy helpers degrade gracefully with no size", () => {
