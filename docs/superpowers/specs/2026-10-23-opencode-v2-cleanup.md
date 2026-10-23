@@ -52,9 +52,12 @@ ordering there.
 `sendPrompt` must always post a message `id`: the caller's `messageID` when given, else a
 freshly minted one (V2 requires `^msg_`; reuse whatever generator the composer's
 optimistic messageID / the admission path already uses — `ctoAdmission.mjs` mints
-`msg_${randomUUID()}`). It records every id it posted in a short-lived per-session set
-("our prompt ids", TTL 60 s) used by §3. The smoke (§8) must confirm transcript order is
-unchanged with minted ids.
+`msg_${randomUUID()}`). It registers the id in a per-session set ("our prompt ids")
+**before** the POST, and the id stays there until its `session.inbox.enqueued` is observed
+(then it is retired) or the POST fails with a definitive 4xx (removed). There is no time
+expiry; an id still unobserved after 10 minutes is retired with a log line AND marks the
+session ineligible for command correlation (§3) until it next goes idle. The smoke (§8)
+must confirm transcript order is unchanged with minted ids.
 
 **K2 — inbox item shape** (shared type `OpencodeInboxItem` in `src/shared/types.ts`):
 ```ts
@@ -77,9 +80,11 @@ list = nothing pending). `epoch` is a random id minted once per manta-server pro
 is a per-session counter within that epoch that increases on every change.
 
 **Client acceptance rule** (S2, pure + tested): for each session keep `{epoch, rev}` of the
-payload shown. A frame or RPC result with the SAME epoch replaces it only if its `rev` is
-higher. One with a DIFFERENT epoch always replaces it (a restarted server is newer by
-definition). An RPC response is dropped if it was requested before the most recent
+payload shown, plus a client-wide set of **retired epochs**. A frame or RPC result with the
+SAME epoch replaces it only if its `rev` is higher. One with a new, non-retired epoch
+replaces it (a restarted server is newer by definition) and the previous epoch is added to
+the retired set; a payload from a retired epoch is always dropped. An RPC response is also
+dropped if it was requested before the most recent
 `resync` (the client-synthesised events-reconnect frame) — that is what stops a late
 answer from a dead server overwriting the new one. On `resync` the client refetches with
 `opencode:inbox`.
@@ -264,7 +269,25 @@ stores a plain user message whose `text` is the expanded template, with no metad
    The pump (`index.mjs`, raw V2 events, before the interpreter) collects every
    `session.inbox.enqueued` user item for that session during the window whose id is NOT
    one of our prompt ids. At window close: exactly one such id → record it; zero or more
-   than one → record nothing and log one line. Additionally record nothing if:
+   than one → record nothing and log one line.
+
+   **Eligibility — a window may only tag if nothing earlier is unresolved.** A session is
+   *eligible* when it has no registered-but-unobserved prompt ids from before the window
+   opened and no earlier command window that closed with zero unexplained enqueues (a
+   late enqueue from that command could land in this window). An earlier zero-result
+   command keeps the session ineligible until the session next goes idle (lifecycle
+   `session.idle`), at which point every earlier submission has necessarily been enqueued.
+   An ineligible window records nothing. Tests: delayed enqueue of command A arriving in
+   command B's window (B untagged); a prompt whose enqueue is still unobserved when a
+   command starts (command untagged); a prompt retired at 10 minutes (session ineligible
+   until idle).
+
+   **Empirical check required before relying on it:** the smoke runs 20 commands (each interrupted as soon as it starts, to keep cost down) and
+   records, for each, whether its user enqueue arrived before the POST's 204 and how many
+   user enqueues it produced. If any run shows more than one enqueue, or an enqueue later
+   than 3 s after the response, stop and report — do not ship the tagging.
+
+   Additionally record nothing if:
    - two command windows overlap on the same session (both stay untagged);
    - the event stream disconnected at any point during the window;
    - the POST failed.
@@ -355,10 +378,15 @@ safe to delete. Safety comes from independent checks, and every uncertainty fail
    Delete targets one by one; after each, set `removed: true` and persist. All removed →
    `state: "done"`, `doneAt`, `freedBytes`. Any error → `state: "failed"`.
    **Resume** (`reclaim.state` is `running` from a crash, or `failed`): never re-derive
-   targets. For each not-yet-removed manifest entry: missing (`lstat` ENOENT) → mark removed;
-   present → it must still be a regular non-symlink file with the SAME `(dev, ino)` and must
-   not be in the running opencode's open-file set (step 1; if step 1 fails, stop with
-   `failed`), else stop with `failed` and a message naming the file. When every entry is
+   targets. The persisted manifest is as untrusted as the rest of the state file. For each
+   not-yet-removed manifest entry: missing (`lstat` ENOENT) → mark removed; present → it
+   must pass ALL of step 2's allowlist checks again against a freshly determined live DB
+   (step 1; if step 1 fails, stop with `failed`) — basename, same directory as the live DB
+   (or the exact `~/.opencode/bin/opencode-v1` path), regular non-symlink file, not the live
+   DB or its sidecars by realpath or `(dev, ino)`, not in opencode's open-file set — AND
+   still have the manifest's `(dev, ino)`; otherwise stop with `failed` and a message
+   naming the file. Add a forged-manifest test (an unrelated file with its real inode
+   written into the manifest → refused). When every entry is
    removed → finalize `done`. On load, a `running` reclaim is reported as `failed` (so the
    user sees Retry), and `GET` stays `available` while `state` is `failed` with remaining
    entries — or with every entry removed but `done` not yet recorded, so a retry finalizes.
