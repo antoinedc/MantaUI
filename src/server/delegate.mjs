@@ -2900,6 +2900,7 @@ async function descendantEvidence(job, active, deps) {
 export async function settleV2Job(job, deps = {}, { hint } = {}) {
   const { listActiveIds, readSession } = deps;
   if (typeof listActiveIds !== "function" || typeof readSession !== "function") return { settled: false, reason: "no-readers" };
+  if (isTerminal(job)) return { settled: false, reason: "terminal" };
   let active;
   try {
     active = new Set(await listActiveIds());

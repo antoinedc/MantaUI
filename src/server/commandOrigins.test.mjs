@@ -362,3 +362,59 @@ test("every manta-server `/prompt` POST goes through the recording helper (postP
   assert.ok(helperStart > 0 && at > helperStart && at < helperEnd, "the one /prompt POST lives inside postPrompt");
   assert.match(src.slice(helperStart, helperEnd), /registerPromptId\(/);
 });
+
+// ---------------------------------------------------------------------------
+// Stage B: the window hooks background-command adoption needs
+// ---------------------------------------------------------------------------
+
+test("openWindows lists the windows open for a session (name + arguments), and closes with the window", () => {
+  const timers = [];
+  const closed = [];
+  const c = createCommandCorrelator({
+    origins: createOriginStore(),
+    setTimer: (fn) => { timers.push(fn); return timers.length; },
+    onWindowClosed: (w) => closed.push(w),
+  });
+  assert.deepEqual(c.openWindows("s1"), []);
+  const a = c.openWindow("s1", { name: "review", arguments: "HEAD~1" });
+  const b = c.openWindow("s1", { name: "init", arguments: "" });
+  assert.deepEqual(c.openWindows("s1"), [{ name: "review", arguments: "HEAD~1" }, { name: "init", arguments: "" }]);
+  assert.deepEqual(c.openWindows("s2"), [], "scoped per session");
+  a.finish({ ok: true });
+  assert.equal(c.openWindows("s1").length, 2, "still open until the close timer fires");
+  timers[0]();
+  assert.deepEqual(c.openWindows("s1"), [{ name: "init", arguments: "" }]);
+  assert.deepEqual(closed, [{ sessionId: "s1", name: "review", arguments: "HEAD~1" }]);
+  b.finish({ ok: false, status: 500 });
+  timers[1]();
+  assert.deepEqual(c.openWindows("s1"), []);
+  assert.equal(closed.length, 2, "a failed POST's window announces its close too");
+});
+
+test("onWindowClosed fires once per window, and a throwing hook never breaks the close", () => {
+  const timers = [];
+  let calls = 0;
+  const c = createCommandCorrelator({
+    origins: createOriginStore(),
+    setTimer: (fn) => { timers.push(fn); return timers.length; },
+    onWindowClosed: () => { calls += 1; throw new Error("hook bug"); },
+    log: () => {},
+  });
+  const w = c.openWindow("s1", { name: "x" });
+  w.finish({ ok: true });
+  timers[0]();
+  timers[0]();
+  assert.equal(calls, 1);
+  assert.deepEqual(c.openWindows("s1"), []);
+});
+
+test("a forgotten session announces nothing and has no open windows", () => {
+  const timers = [];
+  let closed = 0;
+  const c = createCommandCorrelator({ origins: createOriginStore(), setTimer: (fn) => { timers.push(fn); return 1; }, clearTimer: () => {}, onWindowClosed: () => { closed += 1; } });
+  c.openWindow("s1", { name: "x" }).finish({ ok: true });
+  c.forgetSession("s1");
+  timers[0]?.();
+  assert.equal(closed, 0);
+  assert.deepEqual(c.openWindows("s1"), []);
+});

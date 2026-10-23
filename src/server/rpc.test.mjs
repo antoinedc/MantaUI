@@ -2144,3 +2144,120 @@ test("secrets:session-info with an oc that has no readSession answers unknown, n
   const out = await dispatch(handlers, "secrets:session-info", [["ses_x"]]);
   assert.deepEqual(out, { ses_x: { state: "unknown", title: null } });
 });
+
+// ---------------------------------------------------------------------------
+// Stage B: background command runs (N2), the command list (P1), open-session (P6)
+// ---------------------------------------------------------------------------
+
+function bgDeps({ commands, background = [], cto = false } = {}) {
+  const { deps } = makeDeps([]);
+  const calls = { run: [], start: [], admit: [], open: [], list: [] };
+  const list = commands ?? [
+    { name: "review", description: "r" },
+    { name: "bgcmd", description: "always background" },
+    { name: "impeccable", description: "skill", source: "skill" },
+  ];
+  deps.oc = {
+    ...deps.oc,
+    getSessionDirectory: async () => "/repo",
+    listCommands: async (opts) => {
+      calls.list.push(opts);
+      const names = opts?.backgroundNames ? await opts.backgroundNames(opts.directory) : new Set();
+      return list.map((c) => (c.source !== "skill" && names.has(c.name) ? { ...c, background: true } : c));
+    },
+    runCommand: async (i) => { calls.run.push(i); },
+  };
+  deps.backgroundCommandNames = async () => new Set(background);
+  deps.delegate = {
+    startCommandJob: async (i) => { calls.start.push(i); return { ok: true, job: { id: "job00001" } }; },
+    openSession: async (id) => { calls.open.push(id); return { ok: true, tmuxSession: "proj", windowIndex: 3 }; },
+  };
+  deps.ctoConversation = {
+    isConversationSession: async (sid) => cto && sid === "ses_cto",
+    admitCommand: async (i) => { calls.admit.push(i); },
+  };
+  return { handlers: buildHandlers(deps), calls, deps };
+}
+
+test("opencode:commands passes the session directory through and marks N3's background names", async () => {
+  const { handlers, calls } = bgDeps({ background: ["bgcmd", "impeccable"] });
+  const out = await handlers["opencode:commands"]({ directory: "/repo" });
+  assert.equal(calls.list[0].directory, "/repo");
+  assert.deepEqual(out.map((c) => [c.name, c.background ?? null]), [["review", null], ["bgcmd", true], ["impeccable", null]]);
+  await handlers["opencode:commands"]();
+  assert.equal(calls.list[1].directory, undefined, "an old no-arg call keeps working");
+});
+
+test("run-command background:true is refused for the CTO conversation — nothing admitted, nothing run", async () => {
+  const { handlers, calls } = bgDeps({ cto: true });
+  await assert.rejects(
+    handlers["opencode:run-command"]({ sessionId: "ses_cto", command: "review", arguments: "", background: true }),
+    /Background runs aren't available for the CTO conversation/,
+  );
+  assert.equal(calls.admit.length + calls.run.length + calls.start.length, 0);
+  // a plain command in the CTO conversation still goes through admission, without the flag
+  await handlers["opencode:run-command"]({ sessionId: "ses_cto", command: "review", arguments: "", delivery: "steer", background: false });
+  assert.deepEqual(calls.admit, [{ sessionId: "ses_cto", command: "review", arguments: "" }]);
+});
+
+test("run-command background:true for a name that is not a command or skill is refused with a clear message", async () => {
+  const { handlers, calls } = bgDeps();
+  await assert.rejects(
+    handlers["opencode:run-command"]({ sessionId: "ses_a", command: "clear", arguments: "", background: true }),
+    /"\/clear" isn't an opencode command or skill/,
+  );
+  assert.equal(calls.start.length + calls.run.length, 0);
+});
+
+test("run-command background:true wraps the run: startCommandJob with the composer's controls, resolves { jobId }, never touches the parent", async () => {
+  const { handlers, calls } = bgDeps();
+  const model = { providerID: "anthropic", modelID: "claude-sonnet-5-5" };
+  const out = await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "review", arguments: "HEAD~1", model, agent: "plan", background: true, delivery: "steer" });
+  assert.deepEqual(out, { jobId: "job00001" });
+  assert.deepEqual(calls.start, [{ parentSessionID: "ses_a", parentDirectory: "/repo", command: "review", arguments: "HEAD~1", model, agent: "plan", attachments: undefined }]);
+  assert.equal(calls.run.length, 0, "the parent session got no command");
+});
+
+test("run-command background:true resolves a refusal from the engine as a rejection (cap, nesting, …)", async () => {
+  const { handlers, deps } = bgDeps();
+  deps.delegate.startCommandJob = async () => ({ ok: false, error: "too many background jobs running (5)." });
+  const h2 = buildHandlers(deps);
+  await assert.rejects(h2["opencode:run-command"]({ sessionId: "ses_a", command: "review", arguments: "", background: true }), /too many background jobs/);
+  void handlers;
+});
+
+test("run-command: an always-background command runs on the parent as-is, with NO control sync, flag or not; resolves void", async () => {
+  const { handlers, calls } = bgDeps({ background: ["bgcmd"] });
+  const withFlag = await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "bgcmd", arguments: "x", background: true, agent: "plan" });
+  assert.equal(withFlag, undefined);
+  const noFlag = await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "bgcmd", arguments: "y", agent: "plan" });
+  assert.equal(noFlag, undefined);
+  assert.equal(calls.start.length, 0, "never wrapped a second time");
+  assert.equal(calls.run.length, 2);
+  assert.ok(calls.run.every((r) => r.noSync === true && !("background" in r)));
+});
+
+test("run-command: an ordinary command (and a same-named skill) keeps the normal synced path", async () => {
+  const { handlers, calls } = bgDeps({ background: ["bgcmd", "impeccable"] });
+  await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "review", arguments: "", agent: "build" });
+  await handlers["opencode:run-command"]({ sessionId: "ses_a", command: "impeccable", arguments: "init" });
+  assert.equal(calls.run.length, 2);
+  assert.ok(calls.run.every((r) => r.noSync === undefined));
+});
+
+test("run-command: an unreadable N3 source never blocks a command", async () => {
+  const { deps, calls } = bgDeps();
+  deps.backgroundCommandNames = async () => { throw new Error("config unreadable"); };
+  const h = buildHandlers(deps);
+  await h["opencode:run-command"]({ sessionId: "ses_a", command: "review", arguments: "" });
+  assert.equal(calls.run.length, 1);
+});
+
+test("delegate:open-session hands the job id to the engine and returns its answer", async () => {
+  const { handlers, calls } = bgDeps();
+  assert.deepEqual(await handlers["delegate:open-session"]({ jobId: "job00001" }), { ok: true, tmuxSession: "proj", windowIndex: 3 });
+  assert.deepEqual(calls.open, ["job00001"]);
+  const { deps } = bgDeps();
+  deps.delegate = undefined;
+  assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
+});
