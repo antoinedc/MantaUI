@@ -601,6 +601,9 @@ export function buildHandlers({
   // (src/server/accountsManager.mjs). Null when not wired (tests that do not
   // exercise it) → those channels are simply absent.
   accountsManager = null,
+  // K3/K4: the stream interpreter that owns the pending-user-message list.
+  // Null when not wired (tests) → opencode:inbox* answer a clear error.
+  streamInterp = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -609,6 +612,28 @@ export function buildHandlers({
       throw new Error("cto conversation APIs are not wired on this box");
     }
     return ctoConversation;
+  }
+
+  // K1: `delivery` is "steer" | "queue" or absent; anything else is refused
+  // here rather than forwarded for V2 to reject with an opaque 400.
+  function checkDelivery(input) {
+    const d = input?.delivery;
+    if (d === undefined || d === null) return;
+    if (d !== "steer" && d !== "queue") throw new Error(`invalid delivery "${String(d)}" (expected "steer" or "queue")`);
+  }
+  // CTO conversation sessions are ordered by the admission engine: a caller's
+  // `delivery` is dropped before it reaches admission (K1).
+  function withoutDelivery(input) {
+    const { delivery: _dropped, ...rest } = input;
+    return rest;
+  }
+  // K4: the pending-message list belongs to ordinary sessions only.
+  async function requireInbox(sessionId) {
+    if (!streamInterp) throw new Error("the pending-message list is not available on this box");
+    if (typeof sessionId !== "string" || !sessionId) throw new Error("sessionId is required");
+    if (ctoConversation && (await ctoConversation.isConversationSession(sessionId))) {
+      throw new Error("not available for the CTO conversation");
+    }
   }
 
   // The sole resolver for project cwd — no longer mirrored to a desktop-main
@@ -1241,8 +1266,9 @@ export function buildHandlers({
     // resolveAgent — the caller still can never pick an arbitrary agent).
     // Ordinary project sessions take the byte-identical raw path.
     "opencode:prompt": async (input) => {
+      checkDelivery(input);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
-        return ctoConversation.admitDirect(input);
+        return ctoConversation.admitDirect(withoutDelivery(input));
       }
       return oc.sendPrompt(input);
     },
@@ -1257,7 +1283,38 @@ export function buildHandlers({
     // (silent no-op on a marker) or cancelled the wrong turn (raw fallback).
     // Main's plain raw abort is exactly what this PR ships; nothing consumes
     // the admission engine's interrupt yet.
-    "opencode:abort": (sessionId) => oc.abortSession(sessionId),
+    //
+    // K5: this channel is the USER's Stop. On an ordinary session it resumes
+    // pending STEERING input afterwards (interrupt?resume=true; queued prompts
+    // stay parked) — matching the old "Stop, then the queued message goes out".
+    // The CTO conversation session keeps the plain resume=false interrupt: its
+    // inbox is owned by the admission engine, and a resumed admitted turn would
+    // be exactly the stray-turn hazard described above.
+    "opencode:abort": async (sessionId) => {
+      const cto = ctoConversation && (await ctoConversation.isConversationSession(sessionId));
+      return oc.interruptSession(sessionId, { resume: !cto });
+    },
+
+    // K4: the session's pending user messages — the interpreter's snapshot
+    // ({epoch, rev, items}), hydrating first when it isn't known yet.
+    "opencode:inbox": async (sessionId) => {
+      await requireInbox(sessionId);
+      return streamInterp.getInbox(sessionId);
+    },
+
+    // K4: cancel one pending message. The outcome comes from authoritative
+    // evidence only (see streamInterp.cancelInbox): V2's DELETE answers 204
+    // even for an item that was already delivered.
+    "opencode:inbox-cancel": async (input) => {
+      const sessionId = input?.sessionId;
+      const id = input?.id;
+      await requireInbox(sessionId);
+      if (typeof id !== "string" || !id) throw new Error("id is required");
+      return streamInterp.cancelInbox(sessionId, id, {
+        deleteItem: () => oc.cancelInboxItem(sessionId, id),
+        getMessage: () => oc.getMessage(sessionId, id),
+      });
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
     // Scope the list to the session's directory — opencode returns [] for a
@@ -1893,8 +1950,9 @@ export function buildHandlers({
     // than a prompt), never bypassing the queue. Ordinary project sessions
     // take the byte-identical raw route.
     "opencode:run-command": async (input) => {
+      checkDelivery(input);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
-        return ctoConversation.admitCommand(input);
+        return ctoConversation.admitCommand(withoutDelivery(input));
       }
       return oc.runCommand(input);
     },
