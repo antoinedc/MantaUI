@@ -1,7 +1,7 @@
 // ===== Background-run cards (v2-next Stage B, N4 + N5) =====
 //
-// Two surfaces, one visual language (docs/superpowers/specs/
-// 2026-10-23-opencode-v2-next/bg-commands-mockup.html):
+// Two surfaces, one visual language (the "background commands" mockup under
+// docs/superpowers/specs/2026-10-23-opencode-v2-next/):
 //
 //   - BackgroundRunCards: the running / uncertain / failed cards under the
 //     transcript, driven by the box's job store (N5). A job's card is REPLACED

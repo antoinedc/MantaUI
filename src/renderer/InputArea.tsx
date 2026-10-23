@@ -631,7 +631,7 @@ export function InputArea({
               transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
               className={
                 (bgActive
-                  ? "h-7 px-2.5 rounded-sm text-meta font-semibold whitespace-nowrap border border-accent/45 bg-accent-bg text-accent-tx hover:bg-fill-hover disabled:opacity-50 "
+                  ? "h-7 px-2 rounded-sm text-meta font-semibold whitespace-nowrap border border-accent/45 bg-accent-bg text-accent-tx hover:bg-fill-hover disabled:opacity-50 "
                   : "w-7 h-7 rounded-sm grid place-items-center bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50 ") +
                 "shrink-0 transition-colors " +
                 "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"

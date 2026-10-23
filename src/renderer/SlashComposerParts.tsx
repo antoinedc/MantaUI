@@ -1,8 +1,8 @@
 // ===== Slash-command composer parts (v2-next Stage B) =====
 //
 // The two pieces the composer shows around a valid slash command (visual
-// source: docs/superpowers/specs/2026-10-23-opencode-v2-next/
-// bg-commands-mockup.html):
+// source: the "background commands" mockup under
+// docs/superpowers/specs/2026-10-23-opencode-v2-next/):
 //
 //   - SlashHighlight: a mirrored overlay that paints the `/name` token in the
 //     primary colour. The textarea STAYS the input (caret, IME, selection,
