@@ -1166,13 +1166,7 @@ export const httpApi: Api = {
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
   opencodeInbox: (sessionId) => rpc(IPC.opencodeInbox, sessionId),
   opencodeInboxCancel: (input) => rpc(IPC.opencodeInboxCancel, input),
-  // N1 (v2-next spec §1). The channel is a literal until the server slice's
-  // `IPC.opencodeInboxSetDelivery` / `Api` member land in src/shared.
-  opencodeInboxSetDelivery: (input: {
-    sessionId: string;
-    id: string;
-    delivery: "steer" | "queue";
-  }) => rpc<{ outcome: "changed" | "delivered" | "unknown" }>("opencode:inbox-set-delivery", input),
+  opencodeInboxSetDelivery: (input) => rpc(IPC.opencodeInboxSetDelivery, input),
   opencodePermissions: (sessionId) =>
     rpc(IPC.opencodePermissions, sessionId),
 
