@@ -47,6 +47,8 @@ const sb = await startSandbox({
   binary: await ensureBinary({ log: (m) => console.log(`[binary] ${m}`) }),
   plugins: [PLUGIN_DIR], // todo_write
   dirs: ["repo"],
+  // a one-line custom command for the slash-command origin checks (§3)
+  config: { command: { smokecmd: { template: "Reply with exactly these words: command ran $ARGUMENTS", description: "smoke command" } } },
   env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, MANTA_SERVER_URL: fake.url, MANTA_BOX_TOKEN: "ab12".repeat(8) },
 });
 console.log(`[sandbox] ${sb.url}`);
@@ -56,24 +58,38 @@ process.env.MANTA_OPENCODE_PASSWORD = sb.password;
 const oc = await import("../../src/server/opencode.mjs");
 const { createStreamInterpreter } = await import("../../src/server/streamInterp.mjs");
 const { createLifecycleAdapter } = await import("../../src/shared/opencodeV2.mjs");
+const { createCommandCorrelator, createOriginStore } = await import("../../src/server/commandOrigins.mjs");
 oc._setApiBase(sb.url);
 
-// ---- the production pump, minus the bus: raw → interpreter + lifecycle adapter ----
+// ---- the production pump, minus the bus: raw → correlator + interpreter + lifecycle adapter ----
 const frames = [];
 const lifecycle = [];
+const rawLog = []; // { t, raw } — for the timing measurements
 const adapter = createLifecycleAdapter();
 const interp = createStreamInterpreter({
   publish: (f) => frames.push(f),
   fetchShellOutput: (a) => oc.readShellOutput(a),
   contextLimitFor: () => 200_000,
+  listInbox: (sid) => oc.listInbox(sid),
 });
+const correlator = createCommandCorrelator({
+  origins: createOriginStore(),
+  log: (...a) => console.log("  [correlator]", ...a),
+  onTag: (t) => interp.emitCommandExecuted(t.sessionId, t),
+});
+oc.setCommandCorrelator(correlator);
 const connects = [];
 const stop = oc.subscribeEvents(
   (raw) => {
+    rawLog.push({ t: Date.now(), raw });
+    if (raw?.type === "session.inbox.enqueued") correlator.observeEnqueued(raw.data?.sessionID, raw.data?.inboxID, raw.data?.item?.type);
     interp.interpret(raw);
-    for (const e of adapter.adapt(raw)) lifecycle.push(e);
+    for (const e of adapter.adapt(raw)) {
+      lifecycle.push(e);
+      if (e.type === "session.idle") correlator.noteIdle(e.properties.sessionID);
+    }
   },
-  { onConnect: (i) => connects.push(i) },
+  { onConnect: (i) => connects.push(i), onDisconnect: () => { correlator.noteDisconnect(); interp.inboxDisconnected(); } },
 );
 
 const of = (sid, sub) => frames.filter((f) => f.sub === sub && f.sessionId === sid);
@@ -254,6 +270,170 @@ try {
     return a1 === "plan" && (a2 ?? "build") === "build" && of(s2.id, "planMode").map((f) => f.payload.on).join() === "true,false";
   })());
   check("sessionExists: live → true, unknown → false", (await oc.sessionExists(s1.id)) === true && (await oc.sessionExists("ses_does_not_exist")) === false);
+
+  // ================================================================ cleanup spec §8 (S1 a–h + the 20-command check)
+  const loopText = (n, tag = "tick") => `Run exactly this shell command and nothing else: for i in ${Array.from({ length: n }, (_, k) => k + 1).join(" ")}; do echo ${tag}$i; sleep 1; done . Then reply with the single word done.`;
+  const inboxOf = (sid) => of(sid, "inbox").at(-1)?.payload;
+  const itemsOf = (sid) => inboxOf(sid)?.items ?? [];
+  const starts = (sid) => of(sid, "running").filter((f) => f.payload.running === true).length;
+  const userTexts = async (sid) => (await oc.listMessages(sid)).filter((m) => m.info.role === "user").map((m) => m.parts.filter((p) => p.type === "text").map((p) => p.text).join(""));
+  const asstText = async (sid) => (await oc.listMessages(sid)).filter((m) => m.info.role === "assistant").flatMap((m) => m.parts).filter((p) => p.type === "text").map((p) => p.text).join(" ");
+  const cancel = (sid, id) => interp.cancelInbox(sid, id, { deleteItem: () => oc.cancelInboxItem(sid, id), getMessage: () => oc.getMessage(sid, id) });
+
+  // ---------------------------------------------------------------- (a) steer mid-turn
+  console.log("\n[9a] steer mid-turn → inbox frame (1 item) → delivered in the SAME execution → inbox empty; (f) active set");
+  const sa = await newSession();
+  await oc.sendPrompt({ sessionId: sa.id, text: loopText(12), model: MODEL });
+  await until("(a) live output", () => of(sa.id, "toolOutput").length >= 1);
+  check("(f) listActiveSessionIds contains the session mid-turn", (await oc.listActiveSessionIds()).includes(sa.id));
+  const steerText = "After the shell command finishes, also say the word STEERED.";
+  await oc.sendPrompt({ sessionId: sa.id, text: steerText, delivery: "steer" });
+  await until("(a) inbox frame with the steered item", () => itemsOf(sa.id).length === 1, 15_000);
+  check("(a) the inbox frame carries exactly the steered item (K2 shape, epoch/rev)", itemsOf(sa.id)[0]?.text === steerText && itemsOf(sa.id)[0]?.delivery === "steer" && /^msg_/.test(itemsOf(sa.id)[0]?.id) && itemsOf(sa.id)[0]?.attachmentCount === 0 && inboxOf(sa.id).epoch === interp.epoch && inboxOf(sa.id).rev >= 2, j(inboxOf(sa.id)));
+  const snapA = await interp.getInbox(sa.id);
+  check("(a) opencode:inbox (interpreter snapshot) agrees with the last frame", snapA.rev === inboxOf(sa.id).rev && snapA.items.length === 1);
+  const rawA = await oc.listInbox(sa.id);
+  check("(a) the raw V2 inbox GET lists it as a user item with the same id", rawA.some((r) => r.id === itemsOf(sa.id)[0]?.id && r.type === "user"), j(rawA));
+  await until("(a) turn complete", idleWith(sa.id), 120_000);
+  check("(a) delivered within the SAME execution (one execution.started) and the inbox is empty", starts(sa.id) === 1 && itemsOf(sa.id).length === 0, `starts=${starts(sa.id)} items=${j(itemsOf(sa.id))}`);
+  check("(a) the model saw the steered message (STEERED in the reply)", /steered/i.test(await asstText(sa.id)));
+  check("(f) the session is NOT in the active set after the turn", !(await oc.listActiveSessionIds()).includes(sa.id));
+  check("(a) inbox revs strictly increase within the epoch", of(sa.id, "inbox").every((f, i, a) => i === 0 || f.payload.rev > a[i - 1].payload.rev), j(of(sa.id, "inbox").map((f) => f.payload.rev)));
+
+  // ---------------------------------------------------------------- (b) queue + cancel
+  console.log("\n[9b] queue item + cancel → cancelled; cancel after delivery → delivered");
+  const sb = await newSession();
+  await oc.sendPrompt({ sessionId: sb.id, text: loopText(8), model: MODEL });
+  await until("(b) live output", () => of(sb.id, "toolOutput").length >= 1);
+  await oc.sendPrompt({ sessionId: sb.id, text: "Reply with exactly: queued one", delivery: "queue" });
+  await until("(b) queued item in the inbox", () => itemsOf(sb.id).length === 1, 15_000);
+  check("(b) the pending item is a `queue` delivery", itemsOf(sb.id)[0]?.delivery === "queue", j(itemsOf(sb.id)));
+  const q1 = itemsOf(sb.id)[0];
+  const t0 = Date.now();
+  const r1 = await cancel(sb.id, q1.id);
+  console.log(`  [b] cancel answered in ${Date.now() - t0} ms`);
+  check("(b) cancel → outcome `cancelled` with the pre-cancel copy of the item", r1.outcome === "cancelled" && r1.item?.text === "Reply with exactly: queued one", j(r1));
+  check("(b) the inbox frame is empty after the cancel, and a session.inbox.cancelled event arrived", itemsOf(sb.id).length === 0 && rawLog.some((e) => e.raw.type === "session.inbox.cancelled" && e.raw.data.inboxID === q1.id));
+  await oc.sendPrompt({ sessionId: sb.id, text: "Reply with exactly: queued two", delivery: "queue" });
+  await until("(b) second queued item", () => itemsOf(sb.id).length === 1, 15_000);
+  const q2 = itemsOf(sb.id)[0];
+  await until("(b) the turn finished and the queued item became the next turn", () => starts(sb.id) >= 2 && idleWith(sb.id)(), 120_000);
+  const r2 = await cancel(sb.id, q2.id);
+  check("(b) cancel after delivery → outcome `delivered` (no item)", r2.outcome === "delivered" && r2.item === undefined, j(r2));
+  check("(b) the cancelled item never ran; the queued-two item ran as its own turn", !(await userTexts(sb.id)).includes("Reply with exactly: queued one") && (await userTexts(sb.id)).includes("Reply with exactly: queued two") && starts(sb.id) === 2, j(await userTexts(sb.id)));
+
+  // ---------------------------------------------------------------- (c) Esc with pending input
+  console.log("\n[9c] interrupt?resume=true: pending steer runs next; queued stays parked; empty inbox → idle");
+  const sc = await newSession();
+  await oc.sendPrompt({ sessionId: sc.id, text: loopText(20), model: MODEL });
+  await until("(c) live output", () => of(sc.id, "toolOutput").length >= 1);
+  await oc.sendPrompt({ sessionId: sc.id, text: "Reply with exactly these words: after the stop", delivery: "steer" });
+  await oc.sendPrompt({ sessionId: sc.id, text: "Reply with exactly these words: parked queue", delivery: "queue" });
+  await until("(c) both pending", () => itemsOf(sc.id).length === 2, 15_000);
+  await oc.interruptSession(sc.id, { resume: true });
+  await until("(c) the steered item ran as the next turn", () => starts(sc.id) >= 2 && idleWith(sc.id)(), 90_000);
+  check("(c) an `aborted` frame, then the steered message ran as the NEXT turn", of(sc.id, "aborted").length === 1 && /after the stop/i.test(await asstText(sc.id)), j(await asstText(sc.id)));
+  const pendingC = itemsOf(sc.id);
+  console.log(`  [c] after the resumed turn the inbox holds: ${j(pendingC.map((i) => [i.delivery, i.text]))}; executions=${starts(sc.id)}`);
+  check("(c) the QUEUED prompt stayed parked (resume runs steering input only)", pendingC.length === 1 && pendingC[0].delivery === "queue" && !(await userTexts(sc.id)).includes("Reply with exactly these words: parked queue"), j(pendingC));
+  await cancel(sc.id, pendingC[0]?.id);
+  const sc2 = await newSession();
+  await oc.sendPrompt({ sessionId: sc2.id, text: loopText(15), model: MODEL });
+  await until("(c2) live output", () => of(sc2.id, "toolOutput").length >= 1);
+  await oc.interruptSession(sc2.id, { resume: true });
+  await until("(c2) stopped", idleWith(sc2.id));
+  await sleep(3000);
+  check("(c) Esc with an EMPTY inbox leaves the session idle (no new execution)", starts(sc2.id) === 1 && !(await oc.listActiveSessionIds()).includes(sc2.id) && itemsOf(sc2.id).length === 0);
+
+  // ---------------------------------------------------------------- (e) question + composer send
+  console.log("\n[9e] pending question + composer send: reject the question, then steer");
+  const se = await newSession();
+  await oc.sendPrompt({ sessionId: se.id, text: "Use the question tool to ask me which fruit I prefer (options: Apple, Pear), then tell me my choice. If the question is dismissed, follow whatever I say next.", model: MODEL });
+  await until("(e) question frame", () => of(se.id, "questions").some((f) => f.payload.questions.length === 1));
+  const eq = of(se.id, "questions").find((f) => f.payload.questions.length === 1).payload.questions[0];
+  await oc.rejectQuestion({ requestId: eq.requestId, sessionId: se.id });
+  await oc.sendPrompt({ sessionId: se.id, text: "Skip the question. Reply with exactly these words: COMPOSER-OK", delivery: "steer" });
+  await until("(e) turn complete", idleWith(se.id), 120_000);
+  check("(e) the question card cleared and the turn continued", of(se.id, "questions").at(-1).payload.questions.length === 0 && of(se.id, "attention").at(-1)?.payload.kind === null);
+  check("(e) the steered message was read (reply mentions COMPOSER-OK)", /composer-ok/i.test(await asstText(se.id)), (await asstText(se.id)).slice(0, 300));
+  console.log(`  [e] executions=${starts(se.id)}; inbox after: ${j(itemsOf(se.id))}`);
+
+  // ---------------------------------------------------------------- (g) steer after a plan-agent turn
+  console.log("\n[9g] a steered send does not switch the agent");
+  const sg = await newSession();
+  await oc.sendPrompt({ sessionId: sg.id, text: "Read notes.txt with the read tool, then write three sentences about it.", agent: "plan", model: MODEL });
+  await until("(g) the turn is busy", async () => (await oc.listActiveSessionIds()).includes(sg.id), 30_000);
+  const agentBefore = await oc.getSessionAgent(sg.id);
+  const planFramesBefore = of(sg.id, "planMode").length;
+  await oc.sendPrompt({ sessionId: sg.id, text: "Also mention the word zebra.", delivery: "steer" });
+  const agentAfter = await oc.getSessionAgent(sg.id);
+  await until("(g) turn complete", idleWith(sg.id), 120_000);
+  check("(g) the session agent is `plan` before and after the steered send (no agent POST)", agentBefore === "plan" && agentAfter === "plan" && (await oc.getSessionAgent(sg.id)) === "plan", j([agentBefore, agentAfter]));
+  check("(g) no planMode frame flipped it off", of(sg.id, "planMode").slice(planFramesBefore).every((f) => f.payload.on === true) && of(sg.id, "planMode").at(-1)?.payload.on === true);
+
+  // ---------------------------------------------------------------- (h) transcript order with minted ids
+  console.log("\n[9h] transcript order with minted prompt ids");
+  const sh = await newSession();
+  await oc.sendPrompt({ sessionId: sh.id, text: loopText(4, "h"), model: MODEL });
+  await until("(h) busy", async () => (await oc.listActiveSessionIds()).includes(sh.id), 30_000);
+  const words = ["alpha", "bravo", "charlie", "delta"];
+  for (const w of words) await oc.sendPrompt({ sessionId: sh.id, text: `Reply with exactly: ${w}`, delivery: "queue" });
+  await until("(h) all queued items ran", () => starts(sh.id) >= 5 && idleWith(sh.id)() && itemsOf(sh.id).length === 0, 180_000);
+  const hu = await userTexts(sh.id);
+  check("(h) user messages appear in send order", hu.slice(1).join("|") === words.map((w) => `Reply with exactly: ${w}`).join("|"), j(hu));
+  const hm = await oc.listMessages(sh.id);
+  check("(h) the minted ids are msg_-prefixed and roles alternate user/assistant per turn", hm.filter((m) => m.info.role === "user").every((m) => /^msg_/.test(m.info.id)) && hm.map((m) => m.info.role).join(",") === "user,assistant,user,assistant,user,assistant,user,assistant,user,assistant", j(hm.map((m) => m.info.role)));
+  const hid = await Promise.all(words.map((w) => oc.sendPrompt({ sessionId: sh.id, text: `Reply with exactly: ${w}`, messageID: `msg_dup-${w}` }).then(() => "ok")));
+  check("(h) a caller-supplied id is honoured", (await Promise.resolve(hid)).length === 4);
+
+  // ---------------------------------------------------------------- (d) slash command origin
+  console.log("\n[9d] slash command → inbox enqueue → commandExecuted → info.command; a plain prompt in the window is NOT tagged");
+  const cmds2 = await oc.listCommands();
+  check("(d) the sandbox command `smokecmd` is registered", cmds2.some((c) => c.name === "smokecmd"), j(cmds2.map((c) => c.name)));
+  const sd = await newSession();
+  const tCmd0 = Date.now();
+  await oc.runCommand({ sessionId: sd.id, command: "smokecmd", arguments: "alpha", model: MODEL });
+  const tCmd1 = Date.now();
+  await oc.sendPrompt({ sessionId: sd.id, text: "Reply with exactly: plain prompt in the window", delivery: "queue" }); // inside the 3 s window
+  await until("(d) both turns done", () => starts(sd.id) >= 2 && idleWith(sd.id)(), 120_000);
+  const enq = rawLog.filter((e) => e.raw.type === "session.inbox.enqueued" && e.raw.data.sessionID === sd.id);
+  check("(d) the command's user message passed through session.inbox.enqueued as a `user` item (expanded template)", enq.some((e) => e.raw.data.item?.type === "user" && /command ran alpha/.test(e.raw.data.item.payload?.text ?? "")), j(enq.map((e) => e.raw.data.item)));
+  await until("(d) the window closed and tagged", () => of(sd.id, "commandExecuted").length === 1, 10_000);
+  const ce = of(sd.id, "commandExecuted")[0]?.payload;
+  const dm = await oc.listMessages(sd.id);
+  const cmdMsg = dm.find((m) => m.info.role === "user" && m.info.id === ce?.messageID);
+  check("(d) a commandExecuted frame {messageID,name,arguments}", ce?.name === "smokecmd" && ce?.arguments === "alpha" && /^msg_/.test(ce?.messageID ?? ""), j(ce));
+  check("(d) info.command is stamped on the command's message on refetch (listMessages + getMessage)", cmdMsg?.info.command?.name === "smokecmd" && (await oc.getMessage(sd.id, ce.messageID))?.info.command?.arguments === "alpha", j(cmdMsg?.info));
+  const plainMsg = dm.find((m) => m.info.role === "user" && m.parts.some((p) => /plain prompt in the window/.test(p.text ?? "")));
+  check("(d) the plain prompt sent during the window is NOT tagged", plainMsg && !plainMsg.info.command);
+  console.log(`  [d] runCommand POST ${tCmd1 - tCmd0} ms; enqueues in session: ${enq.length}`);
+
+  // ---------------------------------------------------------------- 20-command empirical check
+  console.log("\n[9x] 20 commands (each interrupted as soon as it starts): enqueue cardinality + timing vs the 204");
+  const sx = await newSession();
+  const rows = [];
+  for (let i = 1; i <= 20; i++) {
+    const before = rawLog.length;
+    const tStart = Date.now();
+    await oc.runCommand({ sessionId: sx.id, command: "smokecmd", arguments: `n${i}`, model: MODEL });
+    const tResp = Date.now();
+    // as soon as the turn starts, interrupt it (cheap), then let everything settle
+    await until(`(x${i}) turn started`, () => rawLog.slice(before).some((e) => e.raw.type === "session.execution.started" && e.raw.data.sessionID === sx.id), 30_000);
+    await oc.interruptSession(sx.id, { resume: false }).catch(() => {});
+    await sleep(3500); // the full 3 s window + margin: any late enqueue would show up here
+    const mine = rawLog.slice(before).filter((e) => e.raw.type === "session.inbox.enqueued" && e.raw.data.sessionID === sx.id && e.raw.data.item?.type === "user");
+    rows.push({ i, enqueues: mine.length, beforeResponse: mine.length > 0 && mine[0].t <= tResp, lagMs: mine.length ? mine[0].t - tResp : null, postMs: tResp - tStart });
+    await until(`(x${i}) idle`, () => !(rawLog.slice(before).some((e) => e.raw.type === "session.execution.started")) || of(sx.id, "running").at(-1)?.payload.running === false, 30_000);
+  }
+  console.log("  per-command: i enqueues beforeResponse lagMs(enqueue-resp) postMs");
+  for (const r of rows) console.log(`   ${String(r.i).padStart(2)}  ${r.enqueues}  ${r.beforeResponse ? "before" : "after "}  ${String(r.lagMs).padStart(6)}  ${r.postMs}`);
+  const lags = rows.map((r) => r.lagMs).filter((x) => x != null);
+  console.log(`  summary: enqueues/command = ${[...new Set(rows.map((r) => r.enqueues))].join(",")}; before the 204: ${rows.filter((r) => r.beforeResponse).length}/20; lag min/max = ${Math.min(...lags)}/${Math.max(...lags)} ms`);
+  check("(x) EVERY command produced exactly ONE user enqueue", rows.every((r) => r.enqueues === 1), j(rows.map((r) => r.enqueues)));
+  check("(x) no enqueue later than 3 s after the response", rows.every((r) => r.lagMs == null || r.lagMs <= 3000), j(rows.map((r) => r.lagMs)));
+  check("(x) all 20 were tagged by the correlator (sequential, idle between)", of(sx.id, "commandExecuted").length === 20, `tagged=${of(sx.id, "commandExecuted").length}`);
+  const xm = await oc.listMessages(sx.id);
+  check("(x) 20 command messages carry info.command with the right arguments", xm.filter((m) => m.info.command?.name === "smokecmd").map((m) => m.info.command.arguments).join() === Array.from({ length: 20 }, (_, k) => `n${k + 1}`).join());
 
   // ---------------------------------------------------------------- spend
   for (const id of sessions.filter(Boolean)) {

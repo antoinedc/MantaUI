@@ -179,9 +179,9 @@ export function buildCompletionText(job) {
   return lines.join("\n");
 }
 
-// Mirrors the renderer's isToolStepBoundary (chatUtils.ts) exactly: a tool
-// part that has reached `completed` or `error`. This is the step boundary at
-// which a `pauseRequested` job's session is safely drain-aborted — the current
+// A tool part that has reached `completed` or `error` (the lifecycle adapter
+// reports each finished tool in this shape). This is the step boundary at
+// which a `pauseRequested` job's session is safely interrupted — the current
 // tool has already finished, so no tool's half-written work is lost (spec
 // §11.6-1: "aborted ... at its next completed-tool-part boundary"). Pure.
 export function isToolStepBoundary(part) {
