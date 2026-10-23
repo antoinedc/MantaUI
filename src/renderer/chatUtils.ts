@@ -8,6 +8,7 @@ import type { ConnectionStateName } from "../shared/net/state.js";
 import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
+import { isBackgroundResultMessage } from "./backgroundRun";
 // Value import — `isClientTooOld` is the pure semver compare that drives
 // the renderer-side version-skew banner (BET-225 stage 3). Lives in
 // shared/versionCompare.mjs so both src/server/*.mjs and the renderer share
@@ -3076,7 +3077,11 @@ export function computeTurnInfo(
   if (!messages) return out;
   let i = 0;
   while (i < messages.length) {
-    if (messages[i].info.role === "user") {
+    // A finished background run (v2-next N4) is not part of the turn before it
+    // and starts the agent's reply to it, exactly like a user message does —
+    // otherwise the earlier turn's footer would move onto the reply and its
+    // duration would span the idle gap between them.
+    if (messages[i].info.role === "user" || isBackgroundResultMessage(messages[i])) {
       // Walk forward over the run of assistant messages that follow.
       let j = i + 1;
       let firstStart: number | null = null;
@@ -3084,7 +3089,11 @@ export function computeTurnInfo(
       let turnTokens = 0;
       let lastAssistantId: string | null = null;
       let verbSeedId: string | null = null;
-      while (j < messages.length && messages[j].info.role === "assistant") {
+      while (
+        j < messages.length &&
+        messages[j].info.role === "assistant" &&
+        !isBackgroundResultMessage(messages[j])
+      ) {
         const t = messages[j].info.time;
         if (firstStart == null && t?.created != null) firstStart = t.created;
         if (t?.completed != null) lastEnd = t.completed;
@@ -3133,9 +3142,10 @@ export type LiveTurn = { startedAt: number; tokens: number; verbSeedId: string }
  */
 export function computeLiveTurn(messages: OpencodeMessage[] | null): LiveTurn | null {
   if (!messages) return null;
+  // A finished background run (N4) starts the reply to it, like a user message.
   let lastUserIndex = -1;
   for (let i = 0; i < messages.length; i++) {
-    if (messages[i].info.role === "user") lastUserIndex = i;
+    if (messages[i].info.role === "user" || isBackgroundResultMessage(messages[i])) lastUserIndex = i;
   }
   if (lastUserIndex < 0) return null;
   const userInfo = messages[lastUserIndex].info;

@@ -33,6 +33,8 @@ import { ToolCard } from "./ToolCard";
 import { MediaBody } from "./MediaBody";
 import { OutputWell } from "./OutputWell";
 import { TaskCard } from "./TaskCard";
+import { BackgroundResultCard } from "./BackgroundCards";
+import { isBackgroundResultPart } from "./backgroundRun";
 import { CardMount } from "./components/CardMount";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
@@ -133,6 +135,12 @@ function renderAssistantPart(
 
   if (part.type === "tool") {
     return <ToolCall part={part} verbose={showThinking} defaultExpanded={defaultExpanded} />;
+  }
+
+  // A finished background run (v2-next N4): a command / skill / `task`
+  // subagent that ran in its own session and posted its result back here.
+  if (isBackgroundResultPart(part)) {
+    return <BackgroundResultCard part={part} />;
   }
 
   // Patch (savepoint after one or more file edits): show the files touched.

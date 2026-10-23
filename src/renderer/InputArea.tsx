@@ -50,6 +50,8 @@ import {
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
 import { BUSY_PLACEHOLDER, busySendHint } from "./inboxState";
+import { backgroundBoxVisible, backgroundRequested, type SlashToken } from "./backgroundRun";
+import { BackgroundRunBox, SlashHighlight } from "./SlashComposerParts";
 import { IS_MAC } from "./platform";
 import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
@@ -190,6 +192,7 @@ export function InputArea({
   textareaAriaLabel,
   placeholderOverride,
   sendBusy = false,
+  slash,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -303,6 +306,16 @@ export function InputArea({
   // True while a send into a running turn is in flight (the session composer's
   // steer path): the send button is disabled so a second click can't double up.
   sendBusy?: boolean;
+  // Slash-command highlight + the "Run in background" box (v2-next Stage B).
+  // Supplied only by a surface that runs slash commands itself (the session
+  // composer): the host resolves the token against its command list and owns
+  // the checkbox state, because its send path reads it. Absent (the CTO
+  // conversation) → no highlight and no box, byte-for-byte as before.
+  slash?: {
+    token: SlashToken | null;
+    background: boolean;
+    onBackgroundChange: (v: boolean) => void;
+  };
 }) {
   const { voiceEnabled, voiceRecording, voiceProcessing, voiceAnnouncement } =
     voice;
@@ -361,6 +374,13 @@ export function InputArea({
     },
     [models, modelOverride, defaultModel],
   );
+  // Slash highlight + background box. The overlay is only mounted while the
+  // text is a valid command, so ordinary typing pays nothing for it.
+  const slashToken = slash?.token ?? null;
+  const boxOpen = backgroundBoxVisible(slashToken);
+  const bgLocked = boxOpen && slashToken!.alwaysBackground;
+  const bgActive = backgroundRequested(slashToken, slash?.background ?? false);
+  const highlightRef = useRef<HTMLDivElement | null>(null);
   return (
     <div className="manta-composer shrink-0" ref={rowRef}>
       {/* Mobile push-to-talk FAB (WhatsApp-style, bottom-right above the
@@ -466,10 +486,17 @@ export function InputArea({
             moment the first keystroke made Send appear (and never fully shrank
             back). The textarea is centred in that slot so one line sits level
             with the button; taller drafts fill the row as before. */}
+        <div className="relative flex-1 self-center min-w-0">
+        {slashToken && (
+          <SlashHighlight ref={highlightRef} text={input} token={slashToken} />
+        )}
         <textarea
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onScroll={(e) => {
+            if (highlightRef.current) highlightRef.current.scrollTop = e.currentTarget.scrollTop;
+          }}
           onKeyDown={(e) => {
             // ⇧Tab toggles plan mode (BET-949). The composer textarea owns its
             // focus, so overriding reverse tab-traversal here is safe — this is
@@ -560,9 +587,10 @@ export function InputArea({
           aria-label={textareaAriaLabel}
           rows={1}
           spellCheck={false}
-          className="flex-1 self-center resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
+          className="block w-full resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
           style={{ maxHeight: "140px", lineHeight: "1.5" }}
         />
+        </div>
         {/* The desktop mic + attach buttons moved DOWN into the meta row
             beside the model picker; the box now holds only the message and
             Send. The mobile PTT FAB is still rendered above the composer. */}
@@ -581,19 +609,35 @@ export function InputArea({
               type="button"
               onClick={() => submit()}
               disabled={sendBusy}
-              aria-label={running && !onSubmitAfterTurn ? "Queue message while running" : "Send message"}
-              title={running ? (onSubmitAfterTurn ? "Send now (Enter)" : "Queue (Enter)") : "Send (Enter)"}
+              aria-label={
+                bgActive
+                  ? "Run in background"
+                  : running && !onSubmitAfterTurn
+                    ? "Queue message while running"
+                    : "Send message"
+              }
+              title={
+                bgActive
+                  ? "Run in background (Enter)"
+                  : running
+                    ? onSubmitAfterTurn
+                      ? "Send now (Enter)"
+                      : "Queue (Enter)"
+                    : "Send (Enter)"
+              }
               initial={{ opacity: 0, x: 8 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: 8 }}
               transition={{ duration: MOTION_BASE, ease: MOTION_EASE }}
               className={
-                "w-7 h-7 rounded-sm grid place-items-center shrink-0 transition-colors " +
-                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent " +
-                "bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50"
+                (bgActive
+                  ? "h-7 px-2.5 rounded-sm text-meta font-semibold whitespace-nowrap border border-accent/45 bg-accent-bg text-accent-tx hover:bg-fill-hover disabled:opacity-50 "
+                  : "w-7 h-7 rounded-sm grid place-items-center bg-accent text-on-accent hover:bg-accent/90 disabled:opacity-50 ") +
+                "shrink-0 transition-colors " +
+                "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
               }
             >
-              <SendFilled size={14} />
+              {bgActive ? "Run in background" : <SendFilled size={14} />}
             </motion.button>
           )}
           {running && (
@@ -620,6 +664,14 @@ export function InputArea({
           )}
         </AnimatePresence>
         </div>
+        )}
+        {slash && (
+          <BackgroundRunBox
+            open={boxOpen}
+            checked={bgActive}
+            locked={bgLocked}
+            onChange={slash.onBackgroundChange}
+          />
         )}
       </div>
       {/* Meta footer — model ▸ effort split on the left, resource toolbar +
@@ -690,7 +742,7 @@ export function InputArea({
           />
           {running && onSubmitAfterTurn && !voiceActive && (
             <span className="text-meta text-text-faint whitespace-nowrap" data-testid="busy-send-hint">
-              {busySendHint(IS_MAC)}
+              {bgActive ? "⏎ run in background" : busySendHint(IS_MAC)}
             </span>
           )}
           {voiceActive && (

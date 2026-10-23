@@ -114,6 +114,19 @@ import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
 import { PendingMessagesCard } from "./PendingMessagesCard";
+import { BackgroundRunCards } from "./BackgroundCards";
+import {
+  backgroundApi,
+  backgroundRequested,
+  collectFinishedKeys,
+  deriveBackgroundCards,
+  isCardCandidate,
+  parseSlashToken,
+  sameBackgroundCards,
+  splitSlashText,
+  type BackgroundCard,
+  type RunCommandInput,
+} from "./backgroundRun";
 import type { PendingVoiceNote } from "./VoiceNote";
 
 // Attachment / AgentMention / TypeaheadState / TypeaheadRow are shared with
@@ -502,6 +515,26 @@ export function ChatPanel({
   // in its deps (submit is defined before `commands` is stable across renders).
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+
+  // ===== Slash highlight + "Run in background" (v2-next Stage B) =====
+  // The token is resolved against the session's own command list; the box's
+  // checked state lives HERE because submit() reads it. It resets whenever the
+  // box disappears (the text stopped being a valid opencode command / skill),
+  // and a Manta built-in never opens the box.
+  const slashToken = useMemo(
+    () => parseSlashToken(input, commands, MANTA_BUILTIN_NAMES),
+    [input, commands],
+  );
+  const [runInBackground, setRunInBackground] = useState(false);
+  const backgroundBoxOpen = slashToken?.kind === "opencode";
+  useEffect(() => {
+    if (!backgroundBoxOpen) setRunInBackground(false);
+  }, [backgroundBoxOpen]);
+  // submit() reads the DERIVED value (box open AND checked/locked) through a
+  // ref assigned during render, so a send in the render that just closed the
+  // box can never still see a stale tick.
+  const backgroundActiveRef = useRef(false);
+  backgroundActiveRef.current = backgroundRequested(slashToken, runInBackground);
 
   // ===== Virtualized scroll (BET-679) =====
   // react-virtuoso owns the transcript scroller (see Transcript.tsx). This
@@ -1403,6 +1436,63 @@ export function ChatPanel({
     }
   }, [sessionId, tmuxSession, windowIndex, agentMentions, unsupportedAttachmentsMessage, rejectPendingQuestions, refreshInbox, setAttachments, setInput, setAgentMentions, setSendError, inputRef]);
 
+  // A background run (v2-next B-behaviour 3). Its own path, like sendWhileBusy:
+  // it never steers or touches the running turn (so NEVER a `delivery`), adds
+  // no optimistic row (the card comes from the job store), and clears the
+  // composer only after the box accepted the run. A refusal (cap, nesting,
+  // not a command) shows its message and keeps the draft + attachments.
+  const sendBackgroundCommand = useCallback(async (args: {
+    text: string;
+    draft: string | null;
+    submitAttachments: Attachment[];
+    agent?: string;
+  }) => {
+    if (busyInFlightRef.current) return; // a second Enter while one is in flight: no side effect
+    const { text, draft, submitAttachments, agent } = args;
+    const slashText = splitSlashText(text);
+    if (!slashText) return;
+    const sentAttachments = submitAttachments.filter((a) => a.status === "ready" && a.remotePath);
+    const readyAttachments = sentAttachments
+      .filter((a) => !a.asPathRef)
+      .map((a) => ({ remotePath: a.remotePath!, mime: a.mime, filename: a.filename }));
+    const unsupported = unsupportedAttachmentsMessage(readyAttachments);
+    if (unsupported) {
+      setSendError(unsupported);
+      return;
+    }
+    busyInFlightRef.current = true;
+    setBusySending(true);
+    try {
+      setSendError(null);
+      appendPromptHistory(tmuxSession, windowIndex, text);
+      setHistoryEpoch((e) => e + 1);
+      const input: RunCommandInput = {
+        sessionId,
+        command: slashText.name,
+        arguments: slashText.args,
+        model: modelOverride ?? undefined,
+        agent,
+        attachments: readyAttachments,
+        background: true,
+      };
+      await backgroundApi().opencodeRunCommand(input);
+      if (sentAttachments.length > 0) {
+        const ids = new Set(sentAttachments.map((a) => a.id));
+        setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
+      }
+      if (shouldClearDraft(draft, inputRef.current?.value ?? "")) {
+        setInput("");
+        setAgentMentions([]);
+      }
+    } catch (e) {
+      // Nothing cleared: the draft and its attachments stay for another try.
+      setSendError(String((e as Error)?.message ?? e));
+    } finally {
+      busyInFlightRef.current = false;
+      setBusySending(false);
+    }
+  }, [sessionId, tmuxSession, windowIndex, modelOverride, unsupportedAttachmentsMessage, setAttachments, setInput, setAgentMentions, setSendError, inputRef]);
+
   const submit = useCallback(async (
     textOverride?: string,
     attachmentsOverride?: Attachment[],
@@ -1427,6 +1517,13 @@ export function ChatPanel({
     // mid-turn must apply to the turn that actually runs (BET-949). Only send
     // it when plan is genuinely available AND on.
     const planAgent = plan.available && plan.on ? plan.agent : undefined;
+    // "Run in background" ticked (or the command always runs there): idle or
+    // busy, the run goes to its own session and never steers this turn. Only
+    // the composer's own text qualifies — a voice / bridge override has no box.
+    if (textOverride === undefined && backgroundActiveRef.current && splitSlashText(text)) {
+      await sendBackgroundCommand({ text, draft: input, submitAttachments, agent: planAgent });
+      return;
+    }
     // The AI is already working: deliver into the running turn (steer). Its own
     // path — see sendWhileBusy.
     if (running) {
@@ -1702,7 +1799,7 @@ export function ChatPanel({
     // (clear/fork/compact) are read via their ref mirror below (declared after
     // submit in this file — the established commandsRef pattern) so submit
     // always sees their current value without them re-rotating this callback.
-  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted, sendWhileBusy, unsupportedAttachmentsMessage]);
+  }, [input, running, sessionId, modelOverride, attachments, agentMentions, tmuxSession, windowIndex, plan, autoActive, models, applyRouted, sendWhileBusy, sendBackgroundCommand, unsupportedAttachmentsMessage]);
 
   // Always-current ref to submit — lets the queued-message effect call the
   // latest version without adding submit to the effect's dependency array
@@ -2844,6 +2941,23 @@ export function ChatPanel({
     return null;
   }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
 
+  // Background-run cards under the transcript (v2-next N5), from the job store.
+  // The transcript is only scanned for finished results when some job of this
+  // session could still need a card, and the derived list keeps its identity
+  // while it is unchanged, so streaming deltas never re-render the tail.
+  const backgroundCardsRef = useRef<BackgroundCard[]>([]);
+  const backgroundCards = useMemo<BackgroundCard[]>(() => {
+    const mine = jobOwnership ? [] : Object.values(jobs).filter((j) => isCardCandidate(j, sessionId));
+    const next = mine.length === 0 ? [] : deriveBackgroundCards(mine, sessionId, collectFinishedKeys(messages));
+    if (sameBackgroundCards(backgroundCardsRef.current, next)) return backgroundCardsRef.current;
+    backgroundCardsRef.current = next;
+    return next;
+  }, [jobs, sessionId, messages, jobOwnership]);
+  const backgroundCardsNode = useMemo(
+    () => (backgroundCards.length > 0 ? <BackgroundRunCards cards={backgroundCards} /> : undefined),
+    [backgroundCards],
+  );
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
@@ -3177,6 +3291,7 @@ export function ChatPanel({
             onReplyQuestion={replyQuestion}
             onRejectQuestion={rejectQuestion}
             planCard={planCard}
+            backgroundCards={backgroundCardsNode}
             scrollerElRef={scrollerElRef}
             followingRef={followingRef}
             onFollowingChange={setFollowing}
@@ -3260,6 +3375,7 @@ export function ChatPanel({
         submit={submit}
         onSubmitAfterTurn={submitAfterTurn}
         sendBusy={busySending}
+        slash={{ token: slashToken, background: runInBackground, onBackgroundChange: setRunInBackground }}
         abort={abort}
         running={running}
       />
