@@ -9,6 +9,9 @@ import type {
   DesktopNotifyPayload,
   OpencodeAgent,
   OpencodeCommand,
+  OpencodeDelivery,
+  OpencodeInboxCancelResult,
+  OpencodeInboxSnapshot,
   OpencodeEvent,
   OpencodeMessage,
   OpencodeReference,
@@ -142,6 +145,20 @@ export type UpgradeStatus = {
 };
 /** `POST /api/upgrade/retry` and `/rollback` outcome. */
 export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
+
+// Reclaim disk space after a copy-mode migration (cleanup spec K7). `GET /api/upgrade/reclaim`
+// says whether the old V1 history can be deleted and how much that frees; `POST` deletes it.
+export type ReclaimState = "none" | "running" | "failed" | "done";
+export type ReclaimStatus = {
+  available: boolean;
+  /** A plain sentence when not available, else null. */
+  reason: string | null;
+  mode: "copy" | "in-place" | null;
+  /** Bytes the delete frees; null when unknown / not applicable. */
+  bytes: number | null;
+  state: ReclaimState;
+};
+export type ReclaimResult = { ok: true; freedBytes: number } | { ok: false; error: string };
 
 type PromptModel = { providerID: string; modelID: string; variant?: string };
 // BET-1244: the generic, read-only routing decision (`routing:choose`) — the
@@ -1083,8 +1100,19 @@ export interface Api {
     attachments?: PromptAttachment[],
     mentions?: PromptAgentMention[],
     agent?: string,
+    // K1: how the message joins a RUNNING turn. `steer` = into the turn at its
+    // next step; `queue` = after the turn. Set → the box leaves the session's
+    // model/agent alone. Omit for an ordinary idle send.
+    opts?: { delivery?: OpencodeDelivery },
   ): Promise<void>;
+  // The user's Stop: ends the turn; pending steered input then runs (K5).
   opencodeAbort(sessionId: string): Promise<void>;
+  // K4: the session's pending user messages — the box interpreter's snapshot.
+  // Rejects for the CTO conversation session.
+  opencodeInbox(sessionId: string): Promise<OpencodeInboxSnapshot>;
+  // K4: cancel one pending message. Only `outcome: "cancelled"` proves it will
+  // not be sent; `item` (the pre-cancel copy) comes back only with it.
+  opencodeInboxCancel(input: { sessionId: string; id: string }): Promise<OpencodeInboxCancelResult>;
   // `sessionId` scopes the list to the session's workspace directory —
   // without it the server returns [] for sessions outside the default
   // workspace (see listPermissions in opencode.ts).
@@ -1498,6 +1526,8 @@ export interface Api {
     model?: PromptModel;
     agent?: string;
     attachments?: PromptAttachment[];
+    // K1: see opencodePrompt's `opts.delivery`.
+    delivery?: OpencodeDelivery;
   }): Promise<void>;
 
   // /clear: create new opencode session in same dir, re-stamp tmux window.
@@ -1630,6 +1660,12 @@ export interface Api {
   // can show it next to the button that was pressed.
   upgradeRetry(): Promise<UpgradeActionResult>;
   upgradeRollback(): Promise<UpgradeActionResult>;
+  // Reclaim disk space (K7). `upgradeReclaimStatus` resolves `null` when the box
+  // answers 404 (it predates the route); other failures reject. `upgradeReclaim`
+  // never rejects on a refusal or a network error — `{ok:false, error}` — and a
+  // 401 throws AuthRequiredError, like every other call here.
+  upgradeReclaimStatus(): Promise<ReclaimStatus | null>;
+  upgradeReclaim(): Promise<ReclaimResult>;
   // `{kind:"upgrade"}` frames on /events: the whole K3 object on every change.
   onUpgrade(cb: (status: UpgradeStatus) => void): () => void;
   // Fires when ANY data call is answered `503 {upgrade:true}` — the box is in

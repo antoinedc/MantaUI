@@ -38,6 +38,11 @@ import {
   replyQuestion,
   rejectQuestion,
   subscribeEvents,
+  interruptSession,
+  listInbox,
+  cancelInboxItem,
+  getCommandCorrelator,
+  setCommandCorrelator,
   _resetSessionDirectoryCache,
   _setOcTransport,
   _setEventStreamTransport,
@@ -444,6 +449,51 @@ test("abortSession carries a caller's bounded signal and throws on non-2xx", asy
   });
 });
 
+test("interruptSession passes resume through; abortSession is the resume=false wrapper", async () => {
+  const calls = await withV2({ "POST /api/session/ses_a/interrupt": { data: { interrupted: true } } }, async () => {
+    await interruptSession("ses_a", { resume: true });
+    await interruptSession("ses_a");
+    await abortSession("ses_a");
+  });
+  assert.deepEqual(calls.map((c) => c.query.resume), ["true", "false", "false"]);
+});
+
+test("listInbox / cancelInboxItem hit the V2 inbox routes", async () => {
+  const items = [{ id: "msg_1", type: "user", payload: { text: "hi" }, delivery: "steer", time: { created: 5 } }];
+  const calls = await withV2(
+    { "GET /api/session/ses_a/inbox": { data: items }, "DELETE /api/session/ses_a/inbox/msg_1": null },
+    async () => {
+      assert.deepEqual(await listInbox("ses_a"), items);
+      await cancelInboxItem("ses_a", "msg_1");
+    },
+  );
+  assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /api/session/ses_a/inbox", "DELETE /api/session/ses_a/inbox/msg_1"]);
+  await withV2({ "GET /api/session/ses_a/inbox": () => new Response("no", { status: 500 }) }, async () => {
+    await assert.rejects(listInbox("ses_a"), /listInbox 500/);
+  });
+});
+
+test("subscribeEvents calls onDisconnect when an established stream drops", async () => {
+  const events = [];
+  let n = 0;
+  _setEventStreamTransport(async () => {
+    n++;
+    if (n === 1) {
+      const enc = new TextEncoder();
+      return new Response(new ReadableStream({ start(c) { c.enqueue(enc.encode("data: {\"type\":\"x\"}\n\n")); c.close(); } }), { status: 200 });
+    }
+    return new Promise(() => {}); // the reconnect hangs
+  });
+  const stop = subscribeEvents(() => events.push("event"), { reconnectMs: 5, onConnect: () => events.push("connect"), onDisconnect: () => events.push("disconnect") });
+  try {
+    await new Promise((r) => setTimeout(r, 120));
+  } finally {
+    stop();
+    _setEventStreamTransport(null);
+  }
+  assert.deepEqual(events.slice(0, 3), ["connect", "event", "disconnect"]);
+});
+
 // ---------------------------------------------------------------------------
 // prompts
 // ---------------------------------------------------------------------------
@@ -455,8 +505,45 @@ test("sendPrompt POSTs {text} to /api/session/{id}/prompt; no model/agent → no
       await sendPrompt({ sessionId: "ses_a", text: "hi" });
     },
   );
-  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/prompt")[0].body, { text: "hi" });
+  const body = only(calls, "POST", "/api/session/ses_a/prompt")[0].body;
+  assert.match(body.id, /^msg_./, "a prompt always carries a message id (minted when the caller gave none)");
+  assert.deepEqual({ ...body, id: undefined }, { text: "hi", id: undefined });
   assert.equal(calls.filter((c) => c.method === "POST").length, 1);
+});
+
+test("sendPrompt with a delivery skips the model/agent sync entirely (a steered message never switches the session)", async () => {
+  const calls = await withV2(
+    { "GET /api/session/ses_a": { data: SESSION({ agent: "plan" }) }, "POST /api/session/ses_a/prompt": { data: {} } },
+    async () => {
+      await sendPrompt({ sessionId: "ses_a", text: "steer", delivery: "steer", model: { providerID: "anthropic", modelID: "claude-opus-4-8" }, agent: "build" });
+    },
+  );
+  assert.equal(calls.filter((c) => c.method === "GET").length, 0, "the session is not even read");
+  assert.equal(calls.filter((c) => c.path.endsWith("/model") || c.path.endsWith("/agent")).length, 0);
+  assert.equal(only(calls, "POST", "/api/session/ses_a/prompt")[0].body.delivery, "steer");
+});
+
+test("sendPrompt registers its id as ours BEFORE the POST; a definitive 4xx drops it, a 5xx keeps it", async () => {
+  const c = getCommandCorrelator();
+  const seen = [];
+  await withV2(
+    {
+      "GET /api/session/ses_a": { data: SESSION() },
+      "POST /api/session/ses_a/prompt": (call) => {
+        seen.push(c.isOurPromptId("ses_a", call.body.id));
+        return call.body.id === "msg_bad" ? new Response("no", { status: 400 }) : call.body.id === "msg_5xx" ? new Response("boom", { status: 503 }) : { data: {} };
+      },
+    },
+    async () => {
+      await sendPrompt({ sessionId: "ses_a", text: "ok", messageID: "msg_ok" });
+      await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "x", messageID: "msg_bad" }), (e) => e.status === 400);
+      await assert.rejects(sendPrompt({ sessionId: "ses_a", text: "x", messageID: "msg_5xx" }), (e) => e.status === 503);
+    },
+  );
+  assert.deepEqual(seen, [true, true, true], "registered before each POST went out");
+  assert.equal(c.isOurPromptId("ses_a", "msg_ok"), true, "stays until its enqueue is observed");
+  assert.equal(c.isOurPromptId("ses_a", "msg_bad"), false, "a definitive refusal never reached the inbox");
+  assert.equal(c.isOurPromptId("ses_a", "msg_5xx"), true, "a 5xx might have been accepted");
 });
 
 test("sendPrompt: attachments → files, mentions → agents, messageID → id, delivery passed through", async () => {
@@ -546,6 +633,62 @@ test("runCommand POSTs {name, text} to the command route", async () => {
   assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "init", text: "now" });
 });
 
+test("runCommand with a delivery forwards it and skips the model/agent sync", async () => {
+  const calls = await withV2({ "POST /api/session/ses_a/command": null }, async () => {
+    await runCommand({ sessionId: "ses_a", command: "review", arguments: "HEAD~1", delivery: "steer", agent: "build" });
+  });
+  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/command")[0].body, { name: "review", text: "HEAD~1", delivery: "steer" });
+  // The only read is the skill lookup (is `review` a skill?) — no session read for a model/agent sync.
+  assert.equal(calls.filter((c) => c.method === "GET" && c.path !== "/api/skill").length, 0);
+});
+
+test("runCommand opens a correlation window around the POST and finishes it on success AND on failure", async () => {
+  const log = [];
+  const prev = getCommandCorrelator();
+  setCommandCorrelator({
+    openWindow: (sid, a) => {
+      log.push(["open", sid, a.name, a.arguments]);
+      return { finish: (r) => log.push(["finish", r.ok, r.status]) };
+    },
+    originOf: () => null,
+  });
+  try {
+    await withV2({ "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": null }, async () => {
+      await runCommand({ sessionId: "ses_a", command: "init", arguments: "now" });
+    });
+    await withV2({ "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": () => new Response("bad", { status: 404 }) }, async () => {
+      await assert.rejects(runCommand({ sessionId: "ses_a", command: "nope", arguments: "" }));
+    });
+    await withV2({ "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": () => { throw new Error("socket hang up"); } }, async () => {
+      await assert.rejects(runCommand({ sessionId: "ses_a", command: "net", arguments: "" }));
+    });
+  } finally {
+    setCommandCorrelator(prev);
+  }
+  assert.deepEqual(log, [
+    ["open", "ses_a", "init", "now"], ["finish", true, undefined],
+    ["open", "ses_a", "nope", ""], ["finish", false, 404],
+    ["open", "ses_a", "net", ""], ["finish", false, undefined],
+  ]);
+});
+
+test("listMessages / getMessage stamp info.command on user messages with a recorded origin", async () => {
+  const prev = getCommandCorrelator();
+  setCommandCorrelator({ ...prev, originOf: (id) => (id === "msg_u" ? { name: "review", arguments: "HEAD~1" } : null) });
+  try {
+    const record = { id: "msg_u", type: "user", text: "expanded template", time: { created: 1 } };
+    const timeline = { "GET /api/session/ses_a": { data: SESSION() }, "GET /api/session/ses_a/message": { data: [record] }, "GET /api/session/ses_a/message/msg_u": { data: record } };
+    await withV2(timeline, async () => {
+      const list = await listMessages("ses_a");
+      assert.deepEqual(list[0].info.command, { name: "review", arguments: "HEAD~1" });
+      const one = await getMessage("ses_a", "msg_u");
+      assert.deepEqual(one.info.command, { name: "review", arguments: "HEAD~1" });
+    });
+  } finally {
+    setCommandCorrelator(prev);
+  }
+});
+
 test("runCommand non-2xx carries err.status (admission: definitive 4xx vs unknown)", async () => {
   await withV2(
     { "GET /api/session/ses_a": { data: SESSION() }, "POST /api/session/ses_a/command": () => new Response("bad", { status: 400 }) },
@@ -568,7 +711,9 @@ test("runCommand on a skill sends `/<skill> <args>` as a prompt with the skill a
     },
   );
   assert.equal(only(calls, "POST", "/api/session/ses_a/command").length, 0);
-  assert.deepEqual(only(calls, "POST", "/api/session/ses_a/prompt")[0].body, {
+  const { id: skillPromptId, ...skillPromptBody } = only(calls, "POST", "/api/session/ses_a/prompt")[0].body;
+  assert.match(skillPromptId, /^msg_/);
+  assert.deepEqual(skillPromptBody, {
     text: "/impeccable init",
     skills: [{ id: "impeccable", mention: { start: 0, end: 11, text: "/impeccable" } }],
   });

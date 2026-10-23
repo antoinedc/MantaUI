@@ -1,9 +1,10 @@
 // ===== useSseBus =====
 //
-// Extracted from ChatPanel.tsx (BET-64). Owns the SSE connection/drain/queue
-// state machine. Subscribes to the box-interpreted `stream` frames, routes them
-// to the appropriate state setters, and manages the drain-abort logic for
-// queued prompts.
+// Extracted from ChatPanel.tsx (BET-64). Owns the SSE connection state machine.
+// Subscribes to the box-interpreted `stream` frames and routes them to the
+// appropriate state setters. Messages sent while a turn runs are delivered by
+// opencode itself (V2 steer) and listed from the box's `inbox` frame — there is
+// no client-side queue and no abort-to-drain any more (cleanup spec §2).
 //
 // OpenCode V2 slice A2: this hook no longer reads raw opencode events at all
 // (`onOpencodeEvent` has no renderer subscriber). Every behaviour that used to
@@ -16,17 +17,11 @@
 //   - The frame handler that routes frames to state setters
 //   - All event-driven state: running, permissions, questions, stepTokens,
 //     compactionState, liveTodos, todosDismissed, retryInfo, finishByMessageId,
-//     commandByMessageId, sendError, messageQueue, drainAbortRef
-//   - The drain effect ([running, messageQueue] → submit queued prompt)
-//   - The abort callback
+//     commandByMessageId, sendError, inboxItems
 // Dependencies injected via params:
 //   - setMessages (from useTranscriptState)
 //   - scheduleRefetch / spliceMessage / etc. (from useTranscriptState)
-//   - input (for submit)
-//   - inputRef (for submit)
 //   - running, setRunning (owned by this hook)
-//   - messageQueue, setMessageQueue (owned by this hook)
-//   - drainAbortRef (owned by this hook)
 //   - setSendError (owned by this hook)
 //   - permissions, setPermissions (owned by this hook)
 //   - questions, setQuestions (owned by this hook)
@@ -46,8 +41,6 @@
 //   - isActiveRef (from useTranscriptState)
 //   - refetchOwedWhileInactive (from useTranscriptState)
 //   - pendingDeltas, flushPendingDeltas, scheduleFlush (from useTranscriptState)
-//   - submit (for drain effect)
-//   - submitRef (for drain effect)
 //   - compactSession, forkSession (for voice dispatch, but we'll skip that)
 //   - selectModel (for voice dispatch, but we'll skip that)
 //   - refreshPermissions, refreshQuestions (for server.connected)
@@ -55,6 +48,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  OpencodeInboxItem,
   OpencodeMessage,
   PermissionRequest,
   QuestionRequest,
@@ -76,14 +70,13 @@ import type {
   StreamSubagentChildPayload,
 } from "../../shared/types";
 import {
-  isDrainAbortError,
-  shouldAbortForQueuedDrain,
   collectChildSessionIds,
   hydrateQuestion,
   describeSessionError,
   stepTokensFromFrame,
   fetchTranscriptWithRetry,
 } from "../chatUtils";
+import { createInboxTracker, type InboxTracker } from "../inboxState";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
@@ -125,8 +118,12 @@ export type SseBus = {
   // Subscriptions card (BET-314). Until that ships the dispatch is a no-op
   // visible to the user.
   openAuthReconnect: () => void;
-  messageQueue: string[];
-  setMessageQueue: React.Dispatch<React.SetStateAction<string[]>>;
+  // The session's pending user messages (V2 inbox), oldest first, from the
+  // box's `inbox` frame under the K3 acceptance rule. Always [] for a surface
+  // that opts out (the CTO conversation: its inbox is admission-owned).
+  inboxItems: OpencodeInboxItem[];
+  // Re-read the snapshot (opencode:inbox) under the same acceptance rule.
+  refreshInbox: () => void;
   permissions: PermissionRequest[];
   setPermissions: React.Dispatch<React.SetStateAction<PermissionRequest[]>>;
   questions: QuestionRequest[];
@@ -150,16 +147,14 @@ export type SseBus = {
   setCommandByMessageId: React.Dispatch<React.SetStateAction<Map<string, { name: string; arguments: string }>>>;
   liveChildStatus: Map<string, "running" | "idle">;
   setLiveChildStatus: React.Dispatch<React.SetStateAction<Map<string, "running" | "idle">>>;
-  drainAbortRef: React.MutableRefObject<boolean>;
   branch: string | null;
   refreshBranch: (cwd: string) => void;
-  submit: () => void;
-  submitRef: React.RefObject<(textOverride?: string) => void>;
-  // Best-effort cleanup for any question(s) blocking an aborted turn — see
-  // BET-116. Owned here (not ChatPanel) because this hook owns `questions`
-  // state; exposed so ChatPanel's own user-facing abort path can call the
-  // SAME loop instead of duplicating it.
-  rejectAllPendingQuestions: () => void;
+  // Reject THIS session's pending questions (the same filter as the abort
+  // cleanup, BET-116) and AWAIT every request. A card is removed only once its
+  // rejection succeeded; on any failure the result says so (the busy send then
+  // sends nothing). A question that arrives after this pass is left alone.
+  // Owned here because this hook owns `questions`.
+  rejectPendingQuestions: () => Promise<{ ok: boolean; error?: string }>;
   refreshPermissions: () => Promise<void>;
   refreshQuestions: () => Promise<void>;
   // Whether the initial mount transcript fetch failed (timeout + retry both
@@ -201,8 +196,9 @@ export function useSseBus(params: {
   // active (initial load, no default chosen, etc.) — the banner then falls
   // through to the raw-message path.
   providerID: string | null;
-  submit: () => void;
-  submitRef: React.RefObject<(textOverride?: string) => void>;
+  // Whether this surface has a V2 inbox to show. Default true; the CTO
+  // conversation passes false (its opencode:inbox is refused by design).
+  inbox?: boolean;
   // Plan-mode honesty sync (BET-949). Called when opencode reports its own
   // agent switching (plan_enter/plan_exit tool parts, session.next.agent.
   // switched) so the composer chip never claims a mode the next turn won't run.
@@ -222,8 +218,7 @@ export function useSseBus(params: {
     refetchOwedWhileInactive,
     applyStreamFlush,
     providerID,
-    submit,
-    submitRef,
+    inbox: inboxEnabled = true,
     setPlanOn,
   } = params;
 
@@ -244,13 +239,10 @@ export function useSseBus(params: {
   // `manta-open-subscriptions`. Tied 1:1 with `sendError`: cleared together
   // by openAuthReconnect and by the dismiss × button in ChatPanel.
   const [authReconnect, setAuthReconnect] = useState<string | null>(null);
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  const messageQueueRef = useRef<string[]>([]);
-  useEffect(() => {
-    messageQueueRef.current = messageQueue;
-  }, [messageQueue]);
-  const drainAbortRef = useRef(false);
-  const drainingRef = useRef(false);
+  const [inboxItems, setInboxItems] = useState<OpencodeInboxItem[]>([]);
+  // The current session's inbox re-seed (set by the frame effect below, a
+  // no-op when the surface has no inbox). `refreshInbox` calls through it.
+  const inboxFetchRef = useRef<() => void>(() => {});
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [questions, setQuestions] = useState<QuestionRequest[]>([]);
   const questionsRef = useRef<QuestionRequest[]>([]);
@@ -345,32 +337,44 @@ export function useSseBus(params: {
       .catch(() => { /* non-fatal — non-git cwd or transport blip */ });
   }, []);
 
-  // Any question that was blocking an aborted turn is dead — opencode's
-  // pending list never expires on its own (see BET-116), so it would
-  // re-latch the sidebar's red "?" glyph on a later replay unless we reject
-  // it here. Best-effort, fire-and-forget: cleanup must never surface an
-  // error. Called from BOTH abort paths below (user-facing abort and the
-  // queued-drain abort) via a single shared helper — do not duplicate the
-  // loop.
-  // Scope rejection to THIS panel's own session only (BET-418 §F). The panel's
-  // `questions` state can hold asks from more than one session (a background
-  // job's child, or any record the server's filter widened in), and rejecting
-  // every pending question on abort silently dismissed an UNRELATED session's
-  // ask. Only the viewed session's turn is being aborted, so only its asks are
-  // dead; leave the rest intact for their owning panel.
-  const rejectAllPendingQuestions = useCallback(() => {
-    const pending = questionsRef.current;
-    if (pending.length === 0) return;
-    const own = pending.filter((q) => q.sessionID === sessionId);
-    if (own.length === 0) return;
-    for (const q of own) {
-      if (!q.requestId) continue;
-      void window.api.opencodeQuestionReject
-        ?.(q.requestId, q.sessionID)
-        .catch(() => { /* best-effort cleanup */ });
+  // Reject this session's pending questions, awaiting every request. Used by
+  // BOTH the user's Stop (a question blocking an aborted turn is dead — opencode's
+  // pending list never expires on its own, so it would re-latch the sidebar's red
+  // "?" glyph on a later replay, BET-116) and the busy send (a message typed while
+  // a question blocks the turn dismisses the question first).
+  //
+  // Scope rejection to THIS panel's own session only (BET-418 §F): the panel's
+  // `questions` state can hold asks from more than one session, and only the
+  // viewed session's turn is being acted on. A card is removed only once ITS
+  // rejection succeeded, and only the cards this pass rejected — a question that
+  // arrives afterwards (or one that failed) stays for the user.
+  const rejectPendingQuestions = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const own = questionsRef.current.filter((q) => q.sessionID === sessionId);
+    if (own.length === 0) return { ok: true };
+    const rejected = new Set<string>();
+    let error: string | undefined;
+    await Promise.all(
+      own.map(async (q) => {
+        // Nothing to tell the server without a request id; just clear the card.
+        if (!q.requestId) {
+          rejected.add(q.id);
+          return;
+        }
+        try {
+          await window.api.opencodeQuestionReject(q.requestId, q.sessionID);
+          rejected.add(q.id);
+        } catch (e) {
+          error ??= e instanceof Error ? e.message : String(e);
+        }
+      }),
+    );
+    if (rejected.size > 0) {
+      setQuestions((prev) => prev.filter((q) => !rejected.has(q.id)));
+      if (rejected.size === own.length) useStore.getState().setChatAttention(sessionId, null);
     }
-    setQuestions((prev) => prev.filter((q) => q.sessionID !== sessionId));
-    useStore.getState().setChatAttention(sessionId, null);
+    return error === undefined
+      ? { ok: true }
+      : { ok: false, error: `Couldn't dismiss the pending question: ${error}` };
   }, [sessionId]);
 
   // Open the Settings → AI → Subscriptions card from outside ChatPanel's
@@ -413,25 +417,33 @@ export function useSseBus(params: {
 
   // Frame subscription effect
   useEffect(() => {
-    // Drain-abort helper
-    const maybeDrainQueuedPrompt = () => {
-      if (!shouldAbortForQueuedDrain(messageQueueRef.current.length, drainAbortRef.current)) {
-        return;
-      }
-      cancelTurnSettle();
-      drainAbortRef.current = true;
-      void window.api.opencodeAbort(sessionId)
-        .catch((e: unknown) => {
-          // Surface, never silently swallow (AGENTS.md: a swallowed catch on
-          // a user action reads as a dead button). The queued prompt STAYS
-          // queued and the drain re-arms at the next tool boundary — e.g. the
-          // CTO seam's mid-dispatch refusal or a transport error must be
-          // visible in the console, not dropped.
-          console.warn("[drain] queued-prompt abort failed; keeping the queued prompt:", e);
-          drainAbortRef.current = false;
+    // The inbox tracker for THIS session (K3). Disposed in the cleanup, which
+    // is what drops an RPC answer that lands after the panel moved to another
+    // session. Seeded by `opencode:inbox` now and on every `resync`.
+    let tracker: InboxTracker | null = null;
+    const fetchInbox = () => {
+      const t = tracker;
+      if (!t) return;
+      const stamp = t.beginRequest();
+      window.api
+        .opencodeInbox(sessionId)
+        .then((snap) => {
+          t.offerResponse(stamp, snap);
         })
-        .then(() => rejectAllPendingQuestions());
+        .catch((e: unknown) => {
+          // Not a user action: the next `inbox` frame or resync re-seeds. Say
+          // so in the console rather than swallowing it.
+          console.warn("[inbox] couldn't read the pending messages:", e);
+        });
     };
+    setInboxItems([]);
+    if (inboxEnabled) {
+      tracker = createInboxTracker(setInboxItems);
+      inboxFetchRef.current = fetchInbox;
+      fetchInbox();
+    } else {
+      inboxFetchRef.current = () => {};
+    }
 
     // Initial fetch. Arm `refreshing` here (not just in scheduleRefetch) so the
     // ambient loading divider shows during the REAL transcript load when a
@@ -518,6 +530,10 @@ export function useSseBus(params: {
       // Client-synthesised by httpApi when the events socket reconnects (frames
       // may have been missed): resync this panel. Carries no session id.
       if (ev.sub === "resync") {
+        // Answers still in flight predate the reconnect: stale, drop them, then
+        // re-seed the inbox (K3).
+        tracker?.markResync();
+        fetchInbox();
         scheduleRefetch();
         void refreshPermissions();
         void refreshQuestions();
@@ -600,13 +616,6 @@ export function useSseBus(params: {
         case "aborted": {
           // session.error MessageAbortedError — the box publishes it as its own
           // frame (never as a `sessionError`, so iOS shows no banner).
-          // Our own queued-drain abort must be invisible: the queued prompt is
-          // submitted on the upcoming idle.
-          if (isDrainAbortError("MessageAbortedError", drainAbortRef.current)) {
-            cancelTurnSettle();
-            setRunning(false);
-            return;
-          }
           // A user Stop (or the box aborting a seat-limit retry): show the
           // "Aborted" banner; the next busy/retry clears it (abortedBannerRef).
           setSendError("Aborted");
@@ -628,18 +637,10 @@ export function useSseBus(params: {
           return;
         }
         case "stepEnded": {
-          // Step boundary: drain a queued prompt, and refresh the live token
-          // snapshot so the context pill updates between tool calls.
-          maybeDrainQueuedPrompt();
+          // Step boundary: refresh the live token snapshot so the context pill
+          // updates between tool calls.
           const t = stepTokensFromFrame(ev.payload as StreamStepEndedPayload);
           if (t) setStepTokens(t);
-          return;
-        }
-        case "toolBoundary": {
-          // Primary drain trigger — the real step boundary the deployed opencode
-          // build actually emits (a tool part reaching a terminal status; see
-          // BET-131). Child sessions never get here (routed above).
-          maybeDrainQueuedPrompt();
           return;
         }
         case "planMode": {
@@ -672,6 +673,12 @@ export function useSseBus(params: {
           // session.compacted: the canonical transcript changed wholesale.
           setCompactionState(null);
           scheduleRefetch();
+          return;
+        }
+        case "inbox": {
+          // The box's FULL pending-message list for this session (K3). The
+          // tracker applies the epoch/rev acceptance rule.
+          tracker?.offerFrame(ev.payload);
           return;
         }
         case "commandExecuted": {
@@ -767,34 +774,17 @@ export function useSseBus(params: {
 
     return () => {
       offStream();
+      tracker?.dispose();
+      inboxFetchRef.current = () => {};
       cancelTurnSettle();
       if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
       if (compactionNoticeTimer.current) clearTimeout(compactionNoticeTimer.current);
     };
-  }, [sessionId]);
+  }, [sessionId, inboxEnabled]);
 
-  // Drain effect: when running flips false and there's a queued prompt, submit
-  // it — EXACTLY ONE item per idle edge. The queued text is passed explicitly
-  // via submit's textOverride (same pattern as ChatPanel's autoSubmit), so the
-  // old setInput + setTimeout(0) re-render dance is gone and a second queued
-  // item can no longer overwrite the first before its deferred submit fires.
-  // drainingRef gates re-entrancy: setMessageQueue re-triggers this effect
-  // synchronously (before running flips true), and without the gate the second
-  // item would submit mid-turn. It re-arms when running goes true (submit sets
-  // it synchronously on the non-error path). This is the SOLE drain effect (a
-  // duplicate in ChatPanel was removed — see the "no double send" test).
-  useEffect(() => {
-    if (running) {
-      drainingRef.current = false;
-      return;
-    }
-    if (drainingRef.current || messageQueue.length === 0) return;
-    drainingRef.current = true;
-    const queued = messageQueue[0];
-    setMessageQueue((prev) => prev.slice(1));
-    drainAbortRef.current = false;
-    submitRef.current?.(queued);
-  }, [running, messageQueue]);
+  // Same acceptance rule as the seed fetch (it IS the seed fetch), so a late
+  // answer for another session or from before a resync is dropped.
+  const refreshInbox = useCallback(() => inboxFetchRef.current(), []);
 
   return {
     running,
@@ -803,8 +793,8 @@ export function useSseBus(params: {
     setSendError,
     authReconnect,
     openAuthReconnect,
-    messageQueue,
-    setMessageQueue,
+    inboxItems,
+    refreshInbox,
     permissions,
     setPermissions,
     questions,
@@ -828,10 +818,7 @@ export function useSseBus(params: {
     setLiveChildStatus,
     branch,
     refreshBranch,
-    drainAbortRef,
-    submit,
-    submitRef,
-    rejectAllPendingQuestions,
+    rejectPendingQuestions,
     refreshPermissions,
     refreshQuestions,
     transcriptLoadError,

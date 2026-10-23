@@ -22,11 +22,11 @@
 // `createDefaultDeps` is the real thing. NOTHING here talks to the opencode API of a
 // V1 service except the single running-turns probe.
 
-import { copyFile, rename, rm, stat, statfs } from "node:fs/promises";
+import { copyFile, lstat, realpath, rename, rm, stat, statfs, unlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { STATE_DIRNAME, stateHome } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import {
@@ -38,7 +38,14 @@ import {
   opencodeConfigDir,
   V2_PLUGIN_IDS,
 } from "./upgradeV2Prepare.mjs";
-import { createOpencodeService, readOpencodePassword } from "./upgradeV2Service.mjs";
+import { respondSafe500 } from "./safeApiError.mjs";
+import {
+  createOpencodeService,
+  opencodeBinPath,
+  readOpencodeMainPid,
+  readOpencodePassword,
+  readOpenFiles,
+} from "./upgradeV2Service.mjs";
 
 export const STEP_IDS = Object.freeze(["preflight", "stop", "copy", "migrate", "verify", "cutover"]);
 export const STEP_LABELS = Object.freeze({
@@ -137,6 +144,73 @@ function normaliseState(raw) {
   return s;
 }
 
+// ------------------------------------------------------------- reclaim (K7, spec §6)
+//
+// After a COPY-mode migration the untouched V1 history and the kept V1 binary exist only for
+// rollback. Deleting them is a one-way, user-initiated choice. The state file supplies the
+// deletion targets, so it is NOT trusted to also prove they are safe to delete: every target must
+// pass an allowlist checked against the live DB identity read from the RUNNING opencode process,
+// and every uncertainty fails closed.
+
+export const RECLAIM_REASONS = Object.freeze({
+  unfinished: "Only available after the upgrade finishes",
+  inPlace: "This box migrated in place; reclaiming space isn't supported yet",
+  done: "Already reclaimed",
+  nothing: "Nothing to reclaim",
+  live: "Couldn't confirm which database is in use",
+  busy: "Another upgrade operation is still running",
+  running: "Reclaiming space is already in progress",
+  damaged: "The record of what to delete is damaged, so nothing more will be deleted",
+  unexpected: "The old history isn't where the upgrade record says, so nothing will be deleted",
+  checkFailed: "Couldn't check the old history files",
+});
+export const ROLLBACK_REFUSED_AFTER_RECLAIM = "Rollback is no longer possible: the old history was deleted to free space.";
+const RETRY_REFUSED_AFTER_RECLAIM = "Retry is no longer possible: the old history was deleted to free space.";
+
+const DB_NAMES = new Set(["opencode.db", "opencode.db-wal", "opencode.db-shm"]);
+const BIN_NAME = "opencode-v1";
+const LIVE_DB_RE = /^opencode.*\.db$/;
+const DELETED_SUFFIX = " (deleted)";
+
+const idOf = (st) => `${st.dev}:${st.ino}`;
+
+/** User-facing words for an fs error — never the raw errno text or a full path (HTTP 500-body contract). */
+function describeFsError(e) {
+  switch (e?.code) {
+    case "EACCES":
+    case "EPERM":
+      return "permission denied";
+    case "EBUSY":
+      return "the file is busy";
+    case "EROFS":
+      return "the disk is read-only";
+    case "EIO":
+      return "a disk error occurred";
+    default:
+      return "an unexpected error occurred";
+  }
+}
+
+/** lstat, or null when the path (or a parent) simply doesn't exist. Anything else throws. */
+async function lstatOrNull(fsOps, p) {
+  try {
+    return await fsOps.lstat(p);
+  } catch (e) {
+    if (e?.code === "ENOENT" || e?.code === "ENOTDIR") return null;
+    throw e;
+  }
+}
+
+/** The real filesystem the reclaim reads and deletes through. Stats are bigint so inode numbers stay exact. */
+export function createReclaimFs() {
+  return {
+    lstat: (p) => lstat(p, { bigint: true }),
+    stat: (p) => stat(p, { bigint: true }),
+    realpath: (p) => realpath(p),
+    unlink: (p) => unlink(p),
+  };
+}
+
 // -------------------------------------------------------------------- machine
 
 export function createUpgradeV2(deps) {
@@ -155,11 +229,20 @@ export function createUpgradeV2(deps) {
 
   let state = normaliseState(null);
   let inFlight = null;
+  let reclaiming = false;
+  const rc = deps.reclaim ?? null;
   let lastPublished = "";
   const eta = { firstNum: null, firstAt: null, seconds: null };
 
   async function load() {
     state = normaliseState(await deps.loadState());
+    // A reclaim recorded as "running" by a process that is gone was interrupted: report it as
+    // failed so the user sees Retry (the manifest is what a retry resumes from).
+    if (state.reclaim && typeof state.reclaim === "object" && state.reclaim.state === "running") {
+      state.reclaim.state = "failed";
+      state.reclaim.error = "Interrupted before it finished";
+      await commit();
+    }
   }
 
   function status() {
@@ -488,10 +571,267 @@ export function createUpgradeV2(deps) {
     return inFlight;
   }
 
+  // ----------------------------------------------------------------- reclaim
+
+  const hasReclaim = () => state.reclaim !== undefined && state.reclaim !== null;
+
+  function reclaimState() {
+    const r = state.reclaim;
+    if (!hasReclaim()) return "none";
+    if (typeof r !== "object") return "failed";
+    if (r.state === "done") return "done";
+    if (r.state === "running" && reclaiming) return "running";
+    return "failed"; // a crashed "running", a recorded failure, or anything unrecognised
+  }
+
+  async function persistReclaim({ strict = false } = {}) {
+    state.updatedAt = now();
+    const p = deps.saveState(state);
+    if (strict) await p;
+    else await p.catch((e) => log(`[upgrade] could not persist reclaim progress: ${e?.message ?? e}`));
+  }
+
+  /**
+   * The live DB, from the RUNNING opencode process: its PID (supervisor), then the files that PID
+   * holds open. Null on any failure or ambiguity — the caller then refuses.
+   */
+  async function identifyLive() {
+    if (!rc) return null;
+    const f = rc.fs;
+    try {
+      const pid = await rc.runningPid();
+      if (!Number.isInteger(pid) || pid <= 1) return null;
+      const files = await rc.openFiles(pid);
+      if (!Array.isArray(files)) return null;
+      const openIds = new Set();
+      const openPaths = new Set();
+      const dbs = new Set();
+      for (const file of files) {
+        const path = String(file?.path ?? "");
+        if (!path) continue;
+        const deleted = path.endsWith(DELETED_SUFFIX);
+        openPaths.add(path);
+        let id = file.dev !== undefined && file.ino !== undefined ? `${file.dev}:${file.ino}` : null;
+        if (!id && !deleted) {
+          const st = await f.stat(path).catch(() => null);
+          if (st) id = idOf(st);
+        }
+        if (id) openIds.add(id);
+        if (deleted || !isAbsolute(path)) continue;
+        const real = await f.realpath(path).catch(() => null);
+        if (real) openPaths.add(real);
+        if (real && LIVE_DB_RE.test(basename(real))) dbs.add(real);
+      }
+      if (dbs.size !== 1) return null;
+      const [db] = [...dbs];
+      const paths = new Set([db, `${db}-wal`, `${db}-shm`]);
+      const ids = new Set();
+      for (const p of paths) {
+        const st = await f.stat(p).catch(() => null);
+        if (st) ids.add(idOf(st));
+      }
+      return { db, dir: dirname(db), paths, ids, openIds, openPaths };
+    } catch (e) {
+      log(`[upgrade] reclaim: could not read the running opencode: ${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  /**
+   * One target through the FULL allowlist (spec §6.2) against `live`. `expected` (a manifest entry)
+   * adds the inode pin. Returns {missing:true} | {ok:false,message} | {ok:true,entry}.
+   */
+  async function validateTarget(path, live, expected) {
+    const f = rc.fs;
+    const name = basename(path);
+    const refuse = (why) => ({ ok: false, message: `${name} ${why}, so it won't be deleted` });
+    if (!isAbsolute(path)) return refuse("has an unexpected location");
+    const isDb = DB_NAMES.has(name);
+    if (!isDb && name !== BIN_NAME) return refuse("is not on the list of files that can be deleted");
+    const st = await lstatOrNull(f, path);
+    if (!st) return { missing: true };
+    if (st.isSymbolicLink() || !st.isFile()) return refuse("is not a regular file");
+    if ((await f.realpath(path)) !== path) return refuse("is not at its canonical location");
+    if (isDb) {
+      if (dirname(path) !== live.dir) return refuse("is not in the folder of the database in use");
+    } else if (path !== (await f.realpath(rc.binPath()).catch(() => null))) {
+      return refuse("is not the preserved old OpenCode program");
+    }
+    if (live.paths.has(path) || live.ids.has(idOf(st))) return refuse("is the database in use");
+    if (live.openPaths.has(path) || live.openIds.has(idOf(st))) return refuse("is open by OpenCode");
+    if (expected && (String(expected.dev) !== String(st.dev) || String(expected.ino) !== String(st.ino))) {
+      return refuse("was replaced by a different file");
+    }
+    return { ok: true, entry: { path, dev: String(st.dev), ino: String(st.ino), size: Number(st.size), removed: false } };
+  }
+
+  /** Step 1+2 on a fresh reclaim: pick the candidate files, then allowlist every one. */
+  async function deriveTargets() {
+    const fail = (reason) => ({ ok: false, reason });
+    if (!rc) return fail(RECLAIM_REASONS.live);
+    try {
+      const f = rc.fs;
+      const paths = [];
+      const v1Db = state.v1Db;
+      if (typeof v1Db !== "string" || !isAbsolute(v1Db)) return fail(RECLAIM_REASONS.unexpected);
+      const vL = await lstatOrNull(f, v1Db);
+      if (vL) {
+        if (vL.isSymbolicLink() || !vL.isFile()) return fail(`${basename(v1Db)} is not a regular file, so it won't be deleted`);
+        const V = await f.realpath(v1Db);
+        for (const suffix of ["", "-wal", "-shm"]) {
+          if (await lstatOrNull(f, V + suffix)) paths.push(V + suffix);
+        }
+      }
+      const binL = await lstatOrNull(f, rc.binPath());
+      if (binL) {
+        if (binL.isSymbolicLink() || !binL.isFile()) return fail(`${BIN_NAME} is not a regular file, so it won't be deleted`);
+        paths.push(await f.realpath(rc.binPath()));
+      }
+      if (paths.length === 0) return fail(RECLAIM_REASONS.nothing);
+      const live = await identifyLive();
+      if (!live) return fail(RECLAIM_REASONS.live);
+      const targets = [];
+      for (const p of paths) {
+        const v = await validateTarget(p, live, null);
+        if (v.missing) continue;
+        if (!v.ok) return fail(v.message);
+        targets.push(v.entry);
+      }
+      if (targets.length === 0) return fail(RECLAIM_REASONS.nothing);
+      return { ok: true, targets, bytes: targets.reduce((n, t) => n + t.size, 0) };
+    } catch (e) {
+      log(`[upgrade] reclaim: check failed: ${e?.message ?? e}`);
+      return fail(RECLAIM_REASONS.checkFailed);
+    }
+  }
+
+  /** Why reclaim can't run at all right now (independent of what's on disk), or null. */
+  function reclaimGate() {
+    if (state.state !== "completed") return RECLAIM_REASONS.unfinished;
+    if (state.mode === "in-place") return RECLAIM_REASONS.inPlace;
+    if (state.mode !== "copy") return RECLAIM_REASONS.nothing;
+    if (reclaimState() === "done") return RECLAIM_REASONS.done;
+    return null;
+  }
+
+  async function reclaimStatus() {
+    const mk = (available, reason, mode = null, bytes = null) => ({ available, reason, mode, bytes, state: reclaimState() });
+    if (state.state !== "completed") return mk(false, RECLAIM_REASONS.unfinished);
+    const mode = state.mode === "copy" || state.mode === "in-place" ? state.mode : null;
+    const gate = reclaimGate();
+    if (gate) return mk(false, gate, mode);
+    if (reclaiming) return mk(false, RECLAIM_REASONS.running, mode);
+    if (inFlight) return mk(false, RECLAIM_REASONS.busy, mode);
+    if (hasReclaim()) {
+      const entries = manifestEntries();
+      if (!entries) return mk(false, RECLAIM_REASONS.damaged, mode);
+      const bytes = entries.reduce((n, t) => n + (t?.removed === true || !Number.isFinite(t?.size) ? 0 : t.size), 0);
+      return mk(true, null, mode, bytes);
+    }
+    const d = await deriveTargets();
+    return d.ok ? mk(true, null, mode, d.bytes) : mk(false, d.reason, mode);
+  }
+
+  function manifestEntries() {
+    const r = state.reclaim;
+    return r && typeof r === "object" && Array.isArray(r.targets) ? r.targets : null;
+  }
+
+  /** Delete (or resume deleting) the manifest's targets. Never throws. */
+  async function runReclaim() {
+    const r = state.reclaim;
+    const fail = async (message) => {
+      r.state = "failed";
+      r.error = message;
+      log(`[upgrade] reclaim failed: ${message}`);
+      await persistReclaim();
+      return { ok: false, error: message };
+    };
+    const f = rc.fs;
+    try {
+      for (const t of r.targets) {
+        if (t?.removed === true) continue;
+        if (!t || typeof t.path !== "string" || !isAbsolute(t.path)) return await fail(RECLAIM_REASONS.damaged);
+        if (!(await lstatOrNull(f, t.path))) {
+          t.removed = true; // already gone (deleted just before a crash)
+          await persistReclaim();
+          continue;
+        }
+        const live = await identifyLive();
+        if (!live) return await fail(RECLAIM_REASONS.live);
+        const v = await validateTarget(t.path, live, t);
+        if (v.missing) {
+          t.removed = true;
+          await persistReclaim();
+          continue;
+        }
+        if (!v.ok) return await fail(v.message);
+        try {
+          await f.unlink(t.path);
+        } catch (e) {
+          if (e?.code !== "ENOENT") {
+            log(`[upgrade] reclaim: could not delete ${t.path}: ${e?.message ?? e}`);
+            return await fail(`Couldn't delete ${basename(t.path)}: ${describeFsError(e)}`);
+          }
+        }
+        t.removed = true;
+        await persistReclaim();
+      }
+      r.state = "done";
+      r.doneAt = now();
+      delete r.error;
+      r.freedBytes = r.targets.reduce((n, t) => n + (Number.isFinite(t.size) ? t.size : 0), 0);
+      await persistReclaim();
+      return { ok: true, freedBytes: r.freedBytes };
+    } catch (e) {
+      return await fail(`Couldn't finish reclaiming space: ${describeFsError(e)}`);
+    }
+  }
+
+  async function reclaim() {
+    if (inFlight) return { ok: false, error: reclaiming ? RECLAIM_REASONS.running : RECLAIM_REASONS.busy };
+    const gate = reclaimGate();
+    if (gate) return { ok: false, error: gate };
+    if (!rc) return { ok: false, error: RECLAIM_REASONS.live };
+    reclaiming = true;
+    const task = (async () => {
+      try {
+        if (!hasReclaim()) {
+          const d = await deriveTargets();
+          if (!d.ok) return { ok: false, error: d.reason };
+          state.reclaim = { state: "running", startedAt: now(), targets: d.targets };
+          // The manifest must be durable BEFORE the first deletion: a crash then resumes from it.
+          try {
+            await persistReclaim({ strict: true });
+          } catch (e) {
+            state.reclaim = undefined;
+            log(`[upgrade] reclaim: could not persist the manifest: ${e?.message ?? e}`);
+            return { ok: false, error: "Couldn't record what will be deleted, so nothing was deleted" };
+          }
+        } else if (!manifestEntries()) {
+          return { ok: false, error: RECLAIM_REASONS.damaged };
+        } else {
+          state.reclaim.state = "running";
+          delete state.reclaim.error;
+          await persistReclaim();
+        }
+        return await runReclaim();
+      } finally {
+        reclaiming = false;
+      }
+    })();
+    inFlight = task.catch(() => {}).finally(() => {
+      inFlight = null;
+    });
+    return task;
+  }
+
   // -------------------------------------------------------------------- API
 
   return {
     status,
+    reclaimStatus,
+    reclaim,
     isUpgradeMode: () => state.state === "running",
     whenIdle: () => inFlight ?? Promise.resolve(),
     _state: () => state, // tests
@@ -520,7 +860,8 @@ export function createUpgradeV2(deps) {
     },
 
     async retry() {
-      if (inFlight) return { ok: false, error: "The upgrade is already running." };
+      if (hasReclaim()) return { ok: false, error: RETRY_REFUSED_AFTER_RECLAIM };
+      if (inFlight) return { ok: false, error: reclaiming ? RECLAIM_REASONS.running : "The upgrade is already running." };
       if (state.state !== "failed") return { ok: false, error: "There is no failed upgrade to retry." };
       for (const id of STEP_IDS) {
         if (state.steps[id].status === "failed") {
@@ -533,7 +874,9 @@ export function createUpgradeV2(deps) {
     },
 
     async rollback() {
-      if (inFlight) return { ok: false, error: "The upgrade is still running." };
+      // From the first destructive reclaim step on, the V1 history is (partly) gone: nothing to roll back to.
+      if (hasReclaim()) return { ok: false, error: ROLLBACK_REFUSED_AFTER_RECLAIM };
+      if (inFlight) return { ok: false, error: reclaiming ? RECLAIM_REASONS.running : "The upgrade is still running." };
       if (state.state !== "failed") return { ok: false, error: "There is nothing to roll back — the upgrade is not in a failed state." };
       const task = (async () => {
         let note = null;
@@ -631,6 +974,8 @@ export function runSelfUpdateTo({ script, sha, version, spawnFn = spawn, logPath
 
 // ------------------------------------------------------------------- HTTP surface
 
+const RECLAIM_SAFE_500_MESSAGE = "Couldn't check the old conversation history on the box.";
+
 const json = (res, status, body, extra = {}) => {
   res.writeHead(status, { "content-type": "application/json", ...extra });
   res.end(JSON.stringify(body));
@@ -643,6 +988,8 @@ const json = (res, status, body, extra = {}) => {
  *   * GET  /api/upgrade          → K3 status
  *   * POST /api/upgrade/retry    → {ok:true} | {ok:false,error}
  *   * POST /api/upgrade/rollback → {ok:true} | {ok:false,error}
+ *   * GET  /api/upgrade/reclaim  → K7 ReclaimStatus
+ *   * POST /api/upgrade/reclaim  → K7 ReclaimResult
  */
 export function createUpgradeRoutes(engine) {
   return {
@@ -669,6 +1016,15 @@ export function createUpgradeRoutes(engine) {
       }
       if (req.method === "GET" && path === "/api/upgrade") {
         json(res, 200, engine.status());
+        return true;
+      }
+      if (path === "/api/upgrade/reclaim" && (req.method === "GET" || req.method === "POST")) {
+        try {
+          json(res, 200, req.method === "GET" ? await engine.reclaimStatus() : await engine.reclaim());
+        } catch (e) {
+          // class-1 (BET-1460): the Settings row shows this to the user — safe literal, raw error to the log.
+          respondSafe500(res, "upgrade/reclaim", RECLAIM_SAFE_500_MESSAGE, e);
+        }
         return true;
       }
       if (req.method === "POST" && (path === "/api/upgrade/retry" || path === "/api/upgrade/rollback")) {
@@ -704,6 +1060,9 @@ export function createDefaultDeps({
   opencodeUrl = OPENCODE_V2_URL, // overridable ONLY for rehearsals/tests; production is always :4096
   opencodeService = null,
   spawnFn = spawn,
+  // Overridable ONLY for tests, so the reclaim can be pointed at fixture files: any of
+  // { binPath, runningPid, openFiles, fs }.
+  reclaimIo = {},
   log = (m) => console.log(m),
 } = {}) {
   const statePathFile = migrationStatePath();
@@ -865,6 +1224,15 @@ export function createDefaultDeps({
           if (id) await v2Fetch(`/api/session/${id}`, { method: "DELETE" }).catch(() => {});
         }
       },
+    },
+
+    // Reclaim disk space (K7). The live DB identity comes from the RUNNING opencode process.
+    reclaim: {
+      binPath: () => opencodeBinPath("v1", home),
+      runningPid: () => readOpencodeMainPid({ supervisor: opencode.supervisor ?? "nohup" }),
+      openFiles: (pid) => readOpenFiles(pid),
+      fs: createReclaimFs(),
+      ...reclaimIo,
     },
 
     readPreviousRelease: async () => readJsonSync(statePath("previous-release.json"), null),

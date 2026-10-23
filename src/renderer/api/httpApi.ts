@@ -54,6 +54,8 @@ import type {
   CtoConversationInterruptResult,
   UpgradeActionResult,
   UpgradeStatus,
+  ReclaimResult,
+  ReclaimStatus,
 } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
@@ -775,6 +777,29 @@ async function upgradeAction(action: "retry" | "rollback"): Promise<UpgradeActio
   return { ok: true };
 }
 
+// POST /api/upgrade/reclaim (K7). Never rejects on a refusal or a network error — the Settings
+// row shows the outcome either way. Deleting tens of GB can take a while, so the bound is
+// generous; if it ever expires the server keeps going and a retry resumes from its manifest.
+async function upgradeReclaimAction(): Promise<ReclaimResult> {
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${serverBase()}/api/upgrade/reclaim`,
+      { method: "POST", headers: authHeaders(clientToken()) },
+      10 * 60_000,
+    );
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  if (res.status === 401) throw new AuthRequiredError();
+  let json: { ok?: boolean; error?: string; freedBytes?: number } = {};
+  try { json = (await res.json()) as typeof json; } catch { /* non-JSON body */ }
+  if (res.ok && json.ok === true) {
+    return { ok: true, freedBytes: typeof json.freedBytes === "number" ? json.freedBytes : 0 };
+  }
+  return { ok: false, error: json.error || `HTTP ${res.status}` };
+}
+
 export const httpApi: Api = {
   // -- config --
   // configGet gates the app shell; a stalled connection must fail fast (and be
@@ -1135,10 +1160,12 @@ export const httpApi: Api = {
    *   ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
    * We mirror that packing exactly.
    */
-  opencodePrompt: (sessionId, text, model, attachments, mentions, agent) =>
-    rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions, agent }),
+  opencodePrompt: (sessionId, text, model, attachments, mentions, agent, opts) =>
+    rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions, agent, delivery: opts?.delivery }),
 
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
+  opencodeInbox: (sessionId) => rpc(IPC.opencodeInbox, sessionId),
+  opencodeInboxCancel: (input) => rpc(IPC.opencodeInboxCancel, input),
   opencodePermissions: (sessionId) =>
     rpc(IPC.opencodePermissions, sessionId),
 
@@ -1522,6 +1549,26 @@ export const httpApi: Api = {
   },
   upgradeRetry: () => upgradeAction("retry"),
   upgradeRollback: () => upgradeAction("rollback"),
+  upgradeReclaimStatus: async (): Promise<ReclaimStatus | null> => {
+    const res = await fetchWithTimeout(
+      `${serverBase()}/api/upgrade/reclaim`,
+      { method: "GET", headers: authHeaders(clientToken()) },
+      15000,
+    );
+    if (res.status === 401) throw new AuthRequiredError();
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const b = (await res.json()) as Partial<ReclaimStatus> | null;
+    if (!b || typeof b.available !== "boolean") throw new Error("unrecognised reclaim status");
+    return {
+      available: b.available,
+      reason: typeof b.reason === "string" ? b.reason : null,
+      mode: b.mode === "copy" || b.mode === "in-place" ? b.mode : null,
+      bytes: typeof b.bytes === "number" ? b.bytes : null,
+      state: b.state === "running" || b.state === "failed" || b.state === "done" ? b.state : "none",
+    };
+  },
+  upgradeReclaim: () => upgradeReclaimAction(),
   // {kind:"upgrade", payload:<K3 object>} on every change. A payload that is not
   // a K3 object is dropped here so a stray frame can never flip the gate.
   onUpgrade: (cb) =>

@@ -2,8 +2,7 @@
 //
 // Streaming-behavior tests for useSseBus hook (BET-64).
 //
-// Tests the SSE event routing, drain-abort logic, step boundary handling,
-// child-session routing, and state transitions. Uses the render harness to
+// Tests the SSE event routing, child-session routing, and state transitions. Uses the render harness to
 // mount ChatPanel and emit events through the mock bus.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -452,272 +451,6 @@ describe("useSseBus via ChatPanel", () => {
   });
 });
 
-// ===== Queued-message drain at the next tool boundary (BET-131 regression) =====
-//
-// The deployed opencode build never emits `session.next.step.*`, so the
-// drain trigger on that event is dead in production. The real, primary
-// trigger is a `message.part.updated` event whose part is a tool that just
-// completed/errored (`isToolStepBoundary`). This regression was introduced
-// when the SSE handler moved from ChatPanel.tsx into useSseBus.ts (BET-64)
-// and the tool-boundary call site was dropped. Verify it fires the abort
-// immediately at the next tool completion instead of waiting for full idle.
-describe("useSseBus queued-message drain on tool step boundary", () => {
-  let api: MockApi;
-  let bus: MockEventBus;
-  let h: Harness | null = null;
-
-  afterEach(() => {
-    h?.unmount();
-    h = null;
-  });
-
-  // Same controlled-input helper as ChatPanel.harness.test.tsx.
-  function typeInto(el: HTMLTextAreaElement, value: string) {
-    const setter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      "value",
-    )?.set;
-    setter?.call(el, value);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-
-  async function queueASecondMessage(container: HTMLElement, text = "second message") {
-    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
-    await act(async () => {
-      typeInto(textarea, text);
-    });
-    await act(async () => {
-      textarea.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-      );
-    });
-  }
-
-  // Shared 4-line setup prologue for the drain tests: install the mock API
-  // with a no-op opencodePrompt, reset the store, mount ChatPanel, and flush.
-  // Returns the harness so each test's `h =` assignment keeps TS narrowing.
-  async function mountDrainHarness(): Promise<Harness> {
-    ({ api, bus } = installMockApi({
-      opencodePrompt: () => Promise.resolve({ ok: true }),
-    }));
-    resetStore();
-    const harness = mount(<ChatPanel {...PROPS} />);
-    await harness.flush();
-    return harness;
-  }
-
-  it("aborts and drains at the next completed tool part, not at full idle", async () => {
-    h = await mountDrainHarness();
-
-    // Turn is already running.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-
-    // User submits a second message mid-turn — it queues instead of sending.
-    await queueASecondMessage(h.container);
-    await h.flush();
-    expect(api.calls.opencodeAbort ?? []).toEqual([]);
-
-    // A tool call completes — this is the ONLY step-boundary event the
-    // deployed opencode build actually emits. It must trigger the drain
-    // immediately, not wait for session.idle.
-    await emitAndFlush(bus, h, {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "ses_test",
-        messageID: "msg_1",
-        part: { id: "prt_tool1", type: "tool", state: { status: "completed" } },
-      },
-    });
-
-    expect(api.calls.opencodeAbort).toEqual([["ses_test"]]);
-  });
-
-  it("does not abort on a running (non-boundary) tool part", async () => {
-    h = await mountDrainHarness();
-
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await queueASecondMessage(h.container);
-    await h.flush();
-
-    await emitAndFlush(bus, h, {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "ses_test",
-        messageID: "msg_1",
-        part: { type: "tool", state: { status: "running" } },
-      },
-    });
-
-    expect(api.calls.opencodeAbort ?? []).toEqual([]);
-  });
-
-  it("does not drain the parent queue on a subagent child's tool completion", async () => {
-    h = await mountDrainHarness();
-
-    // Register a subagent child session under the main session.
-    await emitAndFlush(bus, h, {
-      type: "session.created",
-      properties: {
-        sessionID: "ses_test",
-        info: { id: "child_boundary", parentID: "ses_test" },
-      },
-    });
-
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await queueASecondMessage(h.container);
-    await h.flush();
-
-    // A tool completes inside the CHILD session — must not drain the
-    // parent's queue.
-    await emitAndFlush(bus, h, {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "child_boundary",
-        messageID: "msg_child_1",
-        part: { type: "tool", state: { status: "completed" } },
-      },
-    });
-
-    expect(api.calls.opencodeAbort ?? []).toEqual([]);
-  });
-
-  // REGRESSION: a queued message must be submitted EXACTLY ONCE on drain.
-  // There used to be TWO identical `[running, messageQueue]` drain effects —
-  // one in useSseBus, one in ChatPanel — both firing on the same running→false
-  // transition against the shared queue + submitRef, submitting the same
-  // queued prompt twice. The ChatPanel duplicate was removed; the hook's
-  // effect is the sole owner. If a duplicate is ever reintroduced this test
-  // sees two opencodePrompt calls for "second message".
-  it("submits a queued message exactly once when it drains (no double send)", async () => {
-    h = await mountDrainHarness();
-
-    // Turn running; queue a second message mid-turn.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await queueASecondMessage(h.container);
-    await h.flush();
-
-    // A tool completes → drain-abort fires opencodeAbort.
-    await emitAndFlush(bus, h, {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "ses_test",
-        messageID: "msg_1",
-        part: { type: "tool", state: { status: "completed" } },
-      },
-    });
-    // The abort flips the session idle → the drain effect submits the queued
-    // prompt. Emit the turn-complete the abort would produce (BET-551 / §17
-    // — the box reports completion via stream.turnComplete).
-    await emitStreamAndFlush(bus, h, {
-      sub: "turnComplete",
-      sessionId: "ses_test",
-      payload: { complete: true, running: false },
-    });
-    // BET-692: a turnComplete running:false is settled only after TURN_SETTLE_MS,
-    // so wait out the settle window before the drain effect can run.
-    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
-    await h.flush();
-
-    const promptCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
-      JSON.stringify(args).includes("second message"),
-    );
-    expect(promptCalls.length).toBe(1);
-  });
-
-  // REGRESSION (BET-709): queue drain silently dropped all but the last queued
-  // prompt. The old drain did `setInput(queued)` then deferred the actual
-  // submit to `setTimeout(0)`; with ≥2 items queued at the running→false edge,
-  // the effect re-ran (React's scheduler beats setTimeout(0)) and the second
-  // run overwrote the input before the first submit fired — "a" was never
-  // sent, with no error. The drain now submits the queued text EXPLICITLY via
-  // submitRef(textOverride), one item per idle edge, so every can be drained.
-  it("drains ≥2 queued messages exactly once, in FIFO order (no first-message loss)", async () => {
-    h = await mountDrainHarness();
-
-    // Turn running; queue TWO distinct messages mid-turn.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await queueASecondMessage(h.container, "first queued");
-    await queueASecondMessage(h.container, "second queued");
-    await h.flush();
-
-    // A tool completes → drain-abort fires opencodeAbort.
-    await emitAndFlush(bus, h, {
-      type: "message.part.updated",
-      properties: {
-        sessionID: "ses_test",
-        messageID: "msg_1",
-        part: { type: "tool", state: { status: "completed" } },
-      },
-    });
-    // The abort flips the session idle; wait out the settle window then flush
-    // so the FIRST drain edge runs.
-    await emitStreamAndFlush(bus, h, {
-      sub: "turnComplete",
-      sessionId: "ses_test",
-      payload: { complete: true, running: false },
-    });
-    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
-    await h.flush();
-
-    // First idle edge: the FIRST queued text is submitted exactly once, the
-    // second not at all yet. submit() flips running true synchronously, so the
-    // drain effect re-arms and the second item waits for the NEXT idle edge.
-    let firstCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
-      JSON.stringify(args).includes("first queued"),
-    );
-    const secondCallsSoFar = (api.calls.opencodePrompt ?? []).filter((args) =>
-      JSON.stringify(args).includes("second queued"),
-    );
-    expect(firstCalls.length).toBe(1);
-    expect(secondCallsSoFar.length).toBe(0);
-
-    // Start a second turn, then let it complete idle.
-    await emitStreamAndFlush(bus, h, {
-      sub: "running",
-      sessionId: "ses_test",
-      payload: { running: true },
-    });
-    await emitStreamAndFlush(bus, h, {
-      sub: "turnComplete",
-      sessionId: "ses_test",
-      payload: { complete: true, running: false },
-    });
-    await new Promise((r) => setTimeout(r, TURN_SETTLE_MS + 50));
-    await h.flush();
-
-    // Second idle edge: the SECOND queued text is now submitted exactly once,
-    // and the first is still exactly once (no double send).
-    firstCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
-      JSON.stringify(args).includes("first queued"),
-    );
-    const secondCalls = (api.calls.opencodePrompt ?? []).filter((args) =>
-      JSON.stringify(args).includes("second queued"),
-    );
-    expect(firstCalls.length).toBe(1);
-    expect(secondCalls.length).toBe(1);
-  });
-});
-
 // BET-692 — running must only flip false on a SETTLED completion. The box
 // derives turnComplete from the transcript, so at every tool-step boundary the
 // just-finished step's message is momentarily the transcript tail and a
@@ -737,7 +470,6 @@ describe("useSseBus running settle on turnComplete (BET-692)", () => {
     const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const isActiveRef = useRef<boolean>(true);
     const refetchOwedWhileInactive = useRef<boolean>(false);
-    const submitRef = useRef<() => void>(() => {});
     const sse: SseBus = useSseBus({
       sessionId: "ses_test",
       cwd: "/home/dev/projects/x",
@@ -756,8 +488,6 @@ describe("useSseBus running settle on turnComplete (BET-692)", () => {
       applyStreamFlush: () => 0,
       providerID: null,
       setPlanOn: () => {},
-      submit: () => {},
-      submitRef,
     });
     probe = { running: sse.running };
     return <div data-testid="running-probe" />;
@@ -888,9 +618,9 @@ describe("useSseBus question.asked refetch gating (BET-418)", () => {
 // BET-973 — the plan-mode mirror must only react to a COMPLETED plan_enter/
 // plan_exit. "Keep planning" answers the plan question "No", which REJECTS the
 // plan_exit tool, so its part lands in `error` — an errored switch did NOT
-// happen and must not flip the chip. The old block reused isToolStepBoundary
-// (which accepts `error` on purpose for the drain), reading an errored
-// plan_exit as a real exit and silently dropping the session out of plan mode.
+// happen and must not flip the chip. The old block treated an errored tool
+// part as a real boundary, reading an errored plan_exit as a real exit and
+// silently dropping the session out of plan mode.
 // PlanProbe owns useSseBus directly and captures the plan setter so the tests
 // can assert exactly when it is (or isn't) called.
 describe("useSseBus plan-mode mirror (BET-973)", () => {
@@ -917,7 +647,6 @@ describe("useSseBus plan-mode mirror (BET-973)", () => {
     const childRefetchTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const isActiveRef = useRef<boolean>(true);
     const refetchOwedWhileInactive = useRef<boolean>(false);
-    const submitRef = useRef<() => void>(() => {});
     useSseBus({
       sessionId: "ses_test",
       cwd: "/home/dev/projects/x",
@@ -936,8 +665,6 @@ describe("useSseBus plan-mode mirror (BET-973)", () => {
       applyStreamFlush: () => 0,
       providerID: null,
       setPlanOn: (next: boolean) => { planCalls?.push(next); },
-      submit: () => {},
-      submitRef,
     });
     return <div />;
   }

@@ -32,6 +32,7 @@ import { startPoller } from "./startPoller.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
 import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs";
 import { endpointKey } from "../shared/endpointKey.mjs";
+import { createCommandCorrelator, createOriginStore, mintPromptId, stampCommandOrigins } from "./commandOrigins.mjs";
 import { endpointAttempts, newAttemptId } from "./endpointAttempts.mjs";
 import { parseRetryAfterMs } from "./usageAdapters/httpError.mjs";
 import { readCodexExpiry, refreshCodexSeat, shouldRefreshCodexAhead } from "./codexRefresh.mjs";
@@ -488,6 +489,7 @@ export async function listMessages(sessionId, opts = {}) {
   let mapped = mapTimeline(timeline, { sessionID: sessionId, directory: await directoryForTitles(sessionId) });
   if (limit != null && mapped.length > limit) mapped = mapped.slice(mapped.length - limit);
   await hydrateRunningShells(mapped, sessionId);
+  mapped = stampCommandOrigins(mapped, commandCorrelator.originOf);
   const stripped = mapped.map(stripDuplicateToolOutput);
   return opts.slim ? slimTranscript(stripped) : stripped;
 }
@@ -506,7 +508,7 @@ export async function getMessage(sessionId, messageId) {
       return null;
     }
     const record = (await res.json())?.data;
-    const [mapped] = await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId);
+    const [mapped] = stampCommandOrigins(await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId), commandCorrelator.originOf);
     return mapped ? stripDuplicateToolOutput(mapped) : null;
   } catch {
     return null;
@@ -536,6 +538,44 @@ export function getAndClearSessionRefusal(sessionId) {
   const r = _transportRefusalBySession.get(sessionId);
   if (r) _transportRefusalBySession.delete(sessionId);
   return r;
+}
+
+// Slash-command origin correlation (commandOrigins.mjs). The default is an
+// in-memory instance so a bare import never touches state; index.mjs installs
+// the durable one with setCommandCorrelator().
+let commandCorrelator = createCommandCorrelator({ origins: createOriginStore() });
+
+/** Install the (durable) command correlator. index.mjs, at boot. */
+export function setCommandCorrelator(c) {
+  commandCorrelator = c;
+}
+/** The active correlator — the pump feeds it enqueues / idles / disconnects. */
+export function getCommandCorrelator() {
+  return commandCorrelator;
+}
+
+/**
+ * THE one place manta-server POSTs `/api/session/{id}/prompt`. It always sends a
+ * message id (the caller's, else a freshly minted `msg_…`) and records it in
+ * "our prompt ids" BEFORE the request, which is what lets the command
+ * correlator tell a command's user message from ours. A definitive 4xx drops
+ * the id again (it never reached the inbox). commandOrigins.test.mjs fails if a
+ * `/prompt` POST appears anywhere else in src/server.
+ * @returns {Promise<Response>}
+ */
+async function postPrompt(sessionId, body, { signal } = {}) {
+  const id = typeof body.id === "string" && body.id ? body.id : mintPromptId();
+  commandCorrelator.registerPromptId(sessionId, id);
+  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/prompt`), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, id }),
+    ...(signal ? { signal } : {}),
+  });
+  // (A transport failure / abort throws past here with the id still registered:
+  // the server may have accepted it after all.)
+  if (!res.ok && res.status >= 400 && res.status < 500) commandCorrelator.unregisterPromptId(sessionId, id);
+  return res;
 }
 
 const DEFAULT_AGENT = "build";
@@ -593,13 +633,15 @@ function fileInputs(attachments) {
  * client request does NOT prove the server didn't accept; the admission layer
  * classifies an abort as uncertainty (unknown), never a refusal.
  *
- * `delivery` ("steer" | "queue") is passed through when given; today's callers
- * leave it unset (V2's default is steer) — native use is a later phase.
+ * `delivery` ("steer" | "queue") is passed through when given. A set `delivery`
+ * means "join the RUNNING turn": the model/agent sync is skipped entirely so a
+ * steered message can never switch the session's model or agent mid-turn
+ * (unset = an ordinary idle send, which syncs them as before).
  *
  * @param {{ sessionId: string, text: string, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, mentions?: Array<{ name: string, source: { value: string, start: number, end: number } }>, skills?: Array<{ id: string, value: string, start: number, end: number }>, messageID?: string, delivery?: "steer"|"queue", signal?: AbortSignal }} opts
  */
 export async function sendPrompt({ sessionId, text, model, agent, attachments, mentions, skills, messageID, delivery, signal }) {
-  await syncSessionControls(sessionId, { model, agent, signal });
+  if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { text };
   const files = fileInputs(attachments);
   if (files.length) body.files = files;
@@ -615,12 +657,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
 
-  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/prompt`), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    ...(signal ? { signal } : {}),
-  });
+  const res = await postPrompt(sessionId, body, { signal });
   if (!res.ok) {
     const err = new Error(`opencode sendPrompt ${res.status}: ${await res.text()}`);
     // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):
@@ -654,6 +691,34 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
  */
 export async function abortSession(sessionId, { signal } = {}) {
   await ocJson("abortSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=false`, undefined, { signal });
+}
+
+/**
+ * Interrupt with an explicit resume policy. `resume:true` is the USER's Stop:
+ * V2 ends the turn, then runs pending STEERING input while queued prompts stay
+ * parked. Every internal caller (seat retry, delegate pause, admission, usage
+ * stop, CTO) keeps `abortSession` (resume=false).
+ * @param {string} sessionId
+ * @param {{ resume?: boolean, signal?: AbortSignal }} [opts]
+ */
+export async function interruptSession(sessionId, { resume = false, signal } = {}) {
+  await ocJson("interruptSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=${resume ? "true" : "false"}`, undefined, { signal });
+}
+
+/**
+ * The session's raw V2 inbox (`GET /api/session/{id}/inbox`): durable enqueued
+ * work not yet delivered, oldest first — user, synthetic, compaction and move
+ * items. The stream interpreter maps and filters it; nothing else reads it.
+ * @returns {Promise<any[]>}
+ */
+export async function listInbox(sessionId, { signal } = {}) {
+  const data = await ocJson("listInbox", "GET", `/api/session/${encodeURIComponent(sessionId)}/inbox`, undefined, { signal });
+  return Array.isArray(data) ? data : [];
+}
+
+/** `DELETE /api/session/{id}/inbox/{inboxID}` — a 204 whether or not the item was still pending (the interpreter decides the outcome from events). */
+export async function cancelInboxItem(sessionId, inboxId, { signal } = {}) {
+  await ocJson("cancelInboxItem", "DELETE", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`, undefined, { signal });
 }
 
 /** The set of sessions with a turn in flight: GET /api/session/active → `{[sessionId]: {type:"running"}}`. */
@@ -1161,11 +1226,7 @@ export async function runSynchronousSession({
     } catch {
       return finish({ text: "", sid, ok: false, code: "prompt-http" });
     }
-    const promptRes = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sid)}/prompt`), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: instruction }),
-    });
+    const promptRes = await postPrompt(sid, { text: instruction });
     if (!promptRes.ok) {
       // §4.1a: preserve the refusal's status and Retry-After, mirroring sendPrompt.
       const status = promptRes.status;
@@ -2619,11 +2680,12 @@ export async function listReferences() {
  *
  * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, signal?: AbortSignal }} opts
  */
-export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, signal }) {
+export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, delivery, signal }) {
   // A skill isn't a V2 command (the command route 404s it, or runs a same-named
   // wrapper as a subagent): send `/<skill> <args>` as a prompt with the skill
   // attached, the way opencode's own composer does — opencode inlines the
-  // skill's content into that user message.
+  // skill's content into that user message. (A prompt carries its own id, so
+  // it needs no command-origin correlation.)
   if ((await listSkills()).some((s) => s.id === command)) {
     const head = `/${command}`;
     const args = (argumentsStr ?? "").trim();
@@ -2634,23 +2696,36 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
       agent,
       attachments,
       skills: [{ id: command, start: 0, end: head.length, value: head }],
+      delivery,
       signal,
     });
   }
-  await syncSessionControls(sessionId, { model, agent, signal });
+  // A set `delivery` joins the running turn: never switch its model/agent (see sendPrompt).
+  if (!delivery) await syncSessionControls(sessionId, { model, agent, signal });
   const body = { name: command, text: argumentsStr ?? "" };
   const files = fileInputs(attachments);
   if (files.length) body.files = files;
-  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/command`), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-    // Propagate the caller's bounded deadline signal to the actual POST (the
-    // admission engine bounds every oc call; without this a hung command POST
-    // would never surface as the "unknown" uncertainty it is).
-    ...(signal ? { signal } : {}),
-  });
+  if (delivery) body.delivery = delivery;
+  // The command's user message is created by V2 itself, so it carries an id
+  // manta-server did not choose: open a correlation window for it (§3).
+  const win = commandCorrelator.openWindow(sessionId, { name: command, arguments: argumentsStr ?? "" });
+  let res;
+  try {
+    res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/command`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      // Propagate the caller's bounded deadline signal to the actual POST (the
+      // admission engine bounds every oc call; without this a hung command POST
+      // would never surface as the "unknown" uncertainty it is).
+      ...(signal ? { signal } : {}),
+    });
+  } catch (e) {
+    win.finish({ ok: false });
+    throw e;
+  }
   if (!res.ok) {
+    win.finish({ ok: false, status: res.status });
     const err = new Error(`opencode runCommand ${res.status}: ${await res.text()}`);
     // Carry the real HTTP status so admission can tell a DEFINITIVE 4xx
     // refusal (→ failed, proven not accepted) from anything else (→ unknown,
@@ -2658,6 +2733,7 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
     err.status = res.status;
     throw err;
   }
+  win.finish({ ok: true });
   await discardBody(res);
 }
 
@@ -2747,7 +2823,10 @@ export function createSseFramer() {
  * (`reconnect` is false for the very first connect).
  *
  * @param {(event: object) => void} onEvent
- * @param {{ onConnect?: (info: { reconnect: boolean }) => void, reconnectMs?: number }} [opts]
+ * `opts.onDisconnect()` fires when an established stream drops (events may have
+ * been missed until the next `onConnect`).
+ *
+ * @param {{ onConnect?: (info: { reconnect: boolean }) => void, onDisconnect?: () => void, reconnectMs?: number }} [opts]
  * @returns {() => void} stop
  */
 export function subscribeEvents(onEvent, opts = {}) {
@@ -2796,6 +2875,11 @@ export function subscribeEvents(onEvent, opts = {}) {
       }
       if (!stopped) {
         console.log("[opencode-bus] stream DISCONNECTED");
+        try {
+          opts.onDisconnect?.();
+        } catch (e) {
+          console.warn("[opencode-bus] onDisconnect failed:", e?.message ?? e);
+        }
         await sleep(reconnectMs);
       }
     }

@@ -1573,10 +1573,11 @@ test("production composition: real opencode.mjs sendPrompt carries the caller me
     assert.ok(post, "prompt hit the wire");
     assert.equal(post.body.id, "msg_probe", "the client messageID rides the prompt body as `id`");
     assert.equal(post.signal, undefined, "no signal given → none on the wire (pre-P3a2 compat)");
-    // And WITHOUT a messageID the body omits it entirely (pre-P3a2 behavior).
+    // WITHOUT a messageID the client mints one: every manta-server prompt carries
+    // a recorded id (command-origin correlation relies on it).
     await ocModule.sendPrompt({ sessionId: "ses_live", text: "bare" });
     const bare = calls.filter((c) => c.method === "POST" && c.path === "/api/session/ses_live/prompt")[1];
-    assert.equal(bare.body.id, undefined);
+    assert.match(bare.body.id, /^msg_./);
 
     const receipt = await ocModule.getMessage("ses_live", "msg_probe");
     assert.equal(receipt.info.id, "msg_probe", "the receipt read-back round-trips");

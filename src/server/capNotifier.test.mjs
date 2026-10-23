@@ -65,8 +65,10 @@ test("notifyCapSession embeds the text in the request body as a parts array", as
   });
   assert.ok(captured, "transport was called");
   const parsed = JSON.parse(captured.body);
-  // V2: oc.sendPrompt posts {text} to /api/session/{id}/prompt
-  assert.deepEqual(parsed, { text: "build finished" });
+  // V2: oc.sendPrompt posts {text, id} to /api/session/{id}/prompt — the id is
+  // always present (minted when the caller gave none; see postPrompt).
+  assert.match(parsed.id, /^msg_./);
+  assert.deepEqual({ ...parsed, id: undefined }, { text: "build finished", id: undefined });
 });
 
 test("notifyCapSession would have produced /session/undefined before the fix", async () => {
