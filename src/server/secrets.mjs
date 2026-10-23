@@ -320,8 +320,39 @@ export async function updateSecret(
       }
     }
   }
-  publish?.({ kind: "secrets.updated", payload: { sessionID: entry.sessionID ?? null, project: entry.project ?? null } });
+  if (changed) {
+    publish?.({ kind: "secrets.updated", payload: { sessionID: entry.sessionID ?? null, project: entry.project ?? null } });
+  }
   return { ok: true, meta: toMeta(entry) };
+}
+
+// Whether each opencode session a secret is scoped to still exists, so the
+// Settings page can tell a closed chat from a session that simply has no tmux
+// window (the On-call CTO conversation, background jobs). `readSession` is the
+// three-state opencode read — only a definitive "missing" proves absence; a
+// thrown or unrecognised lookup is "unknown". Ids are deduped, non-strings and
+// blanks dropped, and the batch capped. Returns { [id]: { state, title } }.
+export const SESSION_INFO_MAX = 200;
+
+export async function sessionInfoFor(ids, readSession, { max = SESSION_INFO_MAX } = {}) {
+  const unique = [
+    ...new Set((Array.isArray(ids) ? ids : []).filter((id) => typeof id === "string" && id.trim() !== "")),
+  ].slice(0, max);
+  const settled = await Promise.allSettled(unique.map((id) => Promise.resolve().then(() => readSession(id))));
+  const out = {};
+  unique.forEach((id, i) => {
+    const r = settled[i];
+    const v = r.status === "fulfilled" ? r.value : null;
+    if (v?.state === "found") {
+      const title = v.session?.title;
+      out[id] = { state: "found", title: typeof title === "string" && title.trim() !== "" ? title : null };
+    } else if (v?.state === "missing") {
+      out[id] = { state: "missing", title: null };
+    } else {
+      out[id] = { state: "unknown", title: null };
+    }
+  });
+  return out;
 }
 
 // Delete by store id (the UI passes the id from a listed meta). Also removes

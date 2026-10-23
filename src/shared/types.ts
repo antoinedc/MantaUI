@@ -1699,6 +1699,7 @@ export const IPC = {
   secretsList: "secrets:list", // (sessionId?, all?) → SecretMeta[]
   secretsSet: "secrets:set", // (SecretInput) → { ok, meta? , error? }
   secretsUpdate: "secrets:update", // (id, SecretPatch) → { ok, meta?, error? }
+  secretsSessionInfo: "secrets:session-info", // (ids: string[]) → Record<id, SecretSessionInfo>
   secretsDelete: "secrets:delete", // (id) → { deleted: boolean }
 
   // ---- inbound webhooks (manta-server owned) ----
@@ -2208,6 +2209,10 @@ export type SecretInput = {
 
 // Patch for secretsUpdate (UI → store). Absent value = keep the stored one;
 // scope and owner are immutable.
+// Whether the opencode session a secret is scoped to still exists. Only a
+// definitive "missing" means the chat is gone; "unknown" = couldn't tell.
+export type SecretSessionInfo = { state: "found" | "missing" | "unknown"; title: string | null };
+
 export type SecretPatch = { key?: string; value?: string; hint?: string };
 
 // An inbound webhook's METADATA — what the UI and `webhook_list` see. NEVER

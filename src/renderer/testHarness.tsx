@@ -152,6 +152,7 @@ function defaultApiImpl(): Record<string, unknown> {
     secretsList: () => Promise.resolve([]),
     secretsSet: () => Promise.resolve({ ok: true }),
     secretsUpdate: () => Promise.resolve({ ok: true }),
+    secretsSessionInfo: () => Promise.resolve({}),
     secretsDelete: () => Promise.resolve(),
     webhookList: () => Promise.resolve([]),
     webhookDelete: () => Promise.resolve(),

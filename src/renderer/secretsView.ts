@@ -3,7 +3,7 @@
 // relative age, and the inline editor's dirty/valid state. No React, no I/O.
 // Values never appear here — everything operates on SecretMeta.
 
-import type { Project, SecretInput, SecretMeta, SecretPatch, SecretScope } from "../shared/types";
+import type { Project, SecretInput, SecretMeta, SecretPatch, SecretScope, SecretSessionInfo } from "../shared/types";
 
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
@@ -111,13 +111,36 @@ export function listChatWindows(projects: Project[]): ChatWindowOption[] {
 // ---------- grouping ----------
 
 export type ProjectGroup = { project: string; items: SecretMeta[] };
+/** What we know about a session group's chat:
+ *  - "window":  an open tmux window carries it.
+ *  - "found":   no window, but opencode still has the session (the On-call CTO
+ *               conversation, background jobs) — its secrets are live.
+ *  - "missing": no window and opencode answered 404 — the chat is gone.
+ *  - "unknown": no window and we couldn't tell (lookup failed / not loaded). */
+export type SessionKind = "window" | "found" | "missing" | "unknown";
+
 export type SessionGroup = {
   sessionID: string;
   items: SecretMeta[];
-  /** Resolved chat window, or null when the chat is closed. */
+  kind: SessionKind;
+  /** Resolved chat window (kind "window" only). */
   window: SessionLabel | null;
   label: string;
+  /** The label is a human name (window / session title), not a short id. */
+  titled: boolean;
 };
+
+/** Session ids that have secrets but no open window — the ones whose
+ *  existence must be asked of the server. */
+export function sessionsWithoutWindow(all: SecretMeta[], projects: Project[]): string[] {
+  const ids = new Set<string>();
+  for (const s of all) {
+    if (s.scope === "session" && s.sessionID && !resolveSessionLabel(projects, s.sessionID)) ids.add(s.sessionID);
+  }
+  return [...ids].sort();
+}
+
+const KIND_RANK: Record<SessionKind, number> = { window: 0, found: 1, missing: 2, unknown: 2 };
 
 export type SecretGroups = {
   shared: SecretMeta[];
@@ -126,9 +149,22 @@ export type SecretGroups = {
 };
 
 /** Shared / Projects / Sessions for the Settings list. Projects alphabetical;
- *  sessions with an open chat first (by label), closed chats after (by id).
- *  Rows keep the order they arrive in (the server sorts by key). */
-export function groupSecrets(all: SecretMeta[], projects: Project[]): SecretGroups {
+ *  sessions ordered windowed, then found-without-window (each by label), then
+ *  missing/unknown (by id). Rows keep the order they arrive in (the server
+ *  sorts by key).
+ *
+ *  `info` is the server's per-session existence answer for windowless ids.
+ *  `windowsKnown` is false while the tmux listing hasn't loaded (an empty
+ *  `projects` then means "not loaded", not "no windows"): a "found" answer is
+ *  not trusted to mean "no window" yet, so it degrades to "unknown". A
+ *  "missing" answer holds either way — no window can carry a nonexistent
+ *  session. */
+export function groupSecrets(
+  all: SecretMeta[],
+  projects: Project[],
+  info: Record<string, SecretSessionInfo> = {},
+  windowsKnown = true,
+): SecretGroups {
   const shared = all.filter((s) => s.scope === "shared");
 
   const projMap = new Map<string, SecretMeta[]>();
@@ -150,12 +186,18 @@ export function groupSecrets(all: SecretMeta[], projects: Project[]): SecretGrou
   const sessions = [...sesMap.entries()]
     .map(([sessionID, items]): SessionGroup => {
       const window = resolveSessionLabel(projects, sessionID);
-      return { sessionID, items, window, label: window?.label ?? shortSessionId(sessionID) };
+      if (window) return { sessionID, items, kind: "window", window, label: window.label, titled: true };
+      const answer = info[sessionID];
+      const kind: SessionKind =
+        answer?.state === "missing" ? "missing" : answer?.state === "found" && windowsKnown ? "found" : "unknown";
+      const titled = kind === "found" && !!answer?.title;
+      const label = titled ? (answer!.title as string) : shortSessionId(sessionID);
+      return { sessionID, items, kind, window: null, label, titled };
     })
     .sort((a, b) => {
-      if (!!a.window !== !!b.window) return a.window ? -1 : 1;
-      return a.window
-        ? a.label.localeCompare(b.label, "en", { sensitivity: "base" })
+      if (KIND_RANK[a.kind] !== KIND_RANK[b.kind]) return KIND_RANK[a.kind] - KIND_RANK[b.kind];
+      return a.kind === "window" || a.kind === "found"
+        ? a.label.localeCompare(b.label, "en", { sensitivity: "base" }) || a.sessionID.localeCompare(b.sessionID, "en")
         : a.sessionID.localeCompare(b.sessionID, "en");
     });
 

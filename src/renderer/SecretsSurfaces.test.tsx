@@ -215,17 +215,30 @@ describe("SecretsSettings (Settings → Secrets)", () => {
     meta({ id: "3", key: "STRIPE_TEST_KEY", scope: "project", project: "manta" }),
     meta({ id: "4", key: "AWS_KEY", scope: "session", sessionID: "ses_a", hint: "staging" }),
     meta({ id: "5", key: "TMP_DB_URL", scope: "session", sessionID: "ses_gone_1234567890" }),
+    meta({ id: "6", key: "CTO_TOKEN", scope: "session", sessionID: "ses_cto" }),
   ];
+  const sessionInfo = (ids: string[]) =>
+    Promise.resolve(
+      Object.fromEntries(
+        ids.map((id) => [
+          id,
+          id === "ses_cto"
+            ? { state: "found", title: "On-call CTO" }
+            : { state: "missing", title: null },
+        ]),
+      ),
+    );
 
-  async function mountSettings(over: Record<string, unknown> = {}, onNavigated = () => {}) {
+  async function mountSettings(over: Record<string, unknown> = {}, onNavigated = () => {}, projectsOverride?: Project[]) {
     ({ api } = installMockApi({
       secretsList: () => Promise.resolve(list),
+      secretsSessionInfo: sessionInfo,
       secretsUpdate: () => Promise.resolve({ ok: true }),
       secretsDelete: () => Promise.resolve({ deleted: true }),
       tmuxSelectWindow: () => Promise.resolve(),
       ...over,
     }));
-    act(() => useStore.setState({ projects }));
+    act(() => useStore.setState({ projects: projectsOverride ?? projects }));
     h = mount(<SecretsSettings onNavigated={onNavigated} />);
     await h.flush();
   }
@@ -239,10 +252,45 @@ describe("SecretsSettings (Settings → Secrets)", () => {
     expect(text).toContain("manta / secrets-ui");
     expect(text).toContain("ses_gone…7890");
     expect(text).toContain("chat closed");
+    expect(text).toContain("On-call CTO");
+    expect(text).toContain("no open window");
     expect(text).toContain("overrides shared");
     expect(text).toContain("no hint");
-    expect(text).toContain("All 5");
+    expect(text).toContain("All 6");
     expect(text).toContain("Shared 2");
+  });
+
+  it("asks the server only about sessions with no window", async () => {
+    await mountSettings();
+    expect(api.calls.secretsSessionInfo[0]).toEqual([["ses_cto", "ses_gone_1234567890"]]);
+  });
+
+  it("a live session with no window (the CTO chat) is labelled by its title and cannot be 'Delete all'-ed; a closed chat can", async () => {
+    await mountSettings();
+    const deleteAll = Array.from(h!.container.querySelectorAll("button")).filter((b) => b.textContent?.trim() === "Delete all");
+    expect(deleteAll).toHaveLength(1);
+    const ctoHeader = Array.from(h!.container.querySelectorAll("div")).find(
+      (d) => d.textContent?.startsWith("On-call CTO") && d.textContent.includes("no open window"),
+    )!;
+    expect(ctoHeader.textContent).not.toContain("Delete all");
+    expect(ctoHeader.textContent).not.toContain("chat closed");
+    // its own row is still individually deletable
+    expect(h!.container.querySelector('button[aria-label="Delete CTO_TOKEN"]')).not.toBeNull();
+  });
+
+  it("when the existence check fails, windowless sessions show no badge and no 'Delete all', and the failure is said", async () => {
+    await mountSettings({ secretsSessionInfo: () => Promise.reject(new Error("opencode down")) });
+    expect(h!.text()).not.toContain("chat closed");
+    expect(h!.text()).not.toContain("no open window");
+    expect(buttonIn(h!.container, "Delete all")).toBeNull();
+    expect(h!.text()).toContain("ses_gone…7890");
+    expect(h!.container.querySelector('[role="status"]')?.textContent).toContain("opencode down");
+  });
+
+  it("while the tmux listing is still empty, a 'found' answer is not trusted to mean 'no window'", async () => {
+    await mountSettings({}, () => {}, []);
+    expect(h!.text()).not.toContain("no open window");
+    expect(h!.text()).toContain("chat closed"); // a 404 still holds
   });
 
   it("search matches key or hint; the filter narrows to one scope", async () => {

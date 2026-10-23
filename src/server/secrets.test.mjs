@@ -14,6 +14,8 @@ import {
   setSecret,
   deleteSecret,
   updateSecret,
+  sessionInfoFor,
+  SESSION_INFO_MAX,
   listSecrets,
   listSecretKeys,
   sortSecretMetas,
@@ -738,12 +740,14 @@ test("updateSecret never changes scope or owner", async () => {
   assert.equal(d.meta.project, "manta");
 });
 
-test("updateSecret no-op leaves updatedAt and the store untouched", async () => {
+test("updateSecret no-op leaves updatedAt and the store untouched, and publishes nothing", async () => {
   const m = memStore(seed());
-  const r = await updateSecret("a", { key: "GITHUB_PAT", hint: "git" }, { load: m.load, save: m.save, now: () => 1234 });
+  const published = [];
+  const r = await updateSecret("a", { key: "GITHUB_PAT", hint: "git" }, { load: m.load, save: m.save, now: () => 1234, publish: (e) => published.push(e) });
   assert.equal(r.ok, true);
   assert.equal(r.meta.updatedAt, 1);
   assert.equal(m.saves(), 0);
+  assert.deepEqual(published, []);
 });
 
 test("updateSecret removes the stale materialized file on rename and on value change, not on hint-only", async () => {
@@ -829,6 +833,73 @@ test("includeAll listing reports overrides: null on every row", () => {
   const metas = listSecrets({ includeAll: true }, { load: () => list });
   assert.equal(metas.length, 2);
   for (const m of metas) assert.equal(m.overrides, null);
+});
+
+// ----------------------------------------------------------------------------
+// sessionInfoFor — found / missing / unknown per session id
+// ----------------------------------------------------------------------------
+
+test("sessionInfoFor maps the three states and takes the title only from a found session", async () => {
+  const reads = {
+    ses_found: { state: "found", session: { title: "On-call CTO" } },
+    ses_untitled: { state: "found", session: { title: "" } },
+    ses_notitle: { state: "found", session: {} },
+    ses_gone: { state: "missing" },
+    ses_unk: { state: "unknown" },
+    ses_weird: { state: "banana" },
+    ses_null: null,
+  };
+  const out = await sessionInfoFor(Object.keys(reads), async (id) => reads[id]);
+  assert.deepEqual(out, {
+    ses_found: { state: "found", title: "On-call CTO" },
+    ses_untitled: { state: "found", title: null },
+    ses_notitle: { state: "found", title: null },
+    ses_gone: { state: "missing", title: null },
+    ses_unk: { state: "unknown", title: null },
+    ses_weird: { state: "unknown", title: null },
+    ses_null: { state: "unknown", title: null },
+  });
+});
+
+test("sessionInfoFor: a thrown or rejected lookup is unknown and does not sink the others", async () => {
+  const out = await sessionInfoFor(["ok", "boom", "sync"], (id) => {
+    if (id === "sync") throw new Error("sync throw");
+    if (id === "boom") return Promise.reject(new Error("net"));
+    return Promise.resolve({ state: "missing" });
+  });
+  assert.deepEqual(out, {
+    ok: { state: "missing", title: null },
+    boom: { state: "unknown", title: null },
+    sync: { state: "unknown", title: null },
+  });
+});
+
+test("sessionInfoFor dedupes, drops non-string/blank ids, caps the batch, and reads concurrently", async () => {
+  const seen = [];
+  let inFlight = 0;
+  let peak = 0;
+  const read = async (id) => {
+    seen.push(id);
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 5));
+    inFlight--;
+    return { state: "missing" };
+  };
+  const out = await sessionInfoFor(["a", "a", "", "  ", null, 7, undefined, {}, "b"], read);
+  assert.deepEqual(Object.keys(out).sort(), ["a", "b"]);
+  assert.deepEqual(seen.sort(), ["a", "b"], "each id read once");
+  assert.equal(peak, 2, "lookups overlap");
+
+  const many = Array.from({ length: SESSION_INFO_MAX + 50 }, (_, i) => `ses_${i}`);
+  const capped = await sessionInfoFor(many, async () => ({ state: "missing" }));
+  assert.equal(Object.keys(capped).length, SESSION_INFO_MAX);
+  assert.ok(capped.ses_0 && !capped[`ses_${SESSION_INFO_MAX}`], "first N kept");
+});
+
+test("sessionInfoFor tolerates a non-array input", async () => {
+  assert.deepEqual(await sessionInfoFor(undefined, async () => ({ state: "found", session: {} })), {});
+  assert.deepEqual(await sessionInfoFor("ses_a", async () => ({ state: "found", session: {} })), {});
 });
 
 // --- tiny file-backed helpers for the round-trip tests above ---

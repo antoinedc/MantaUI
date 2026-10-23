@@ -32,6 +32,7 @@ import {
   listSecrets as secretsListStore,
   setSecret as secretsSetStore,
   updateSecret as secretsUpdateStore,
+  sessionInfoFor as secretsSessionInfoStore,
   deleteSecret as secretsDeleteStore,
 } from "./secrets.mjs";
 import { resolveWorkspace } from "./peers.mjs";
@@ -2307,6 +2308,8 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.secretsUpdate, id, patch) → args = [id, {key?,value?,hint?}]
     "secrets:update": (id, patch) =>
       secretsUpdateStore(id, patch, { publish: (evt) => bus.publish(evt) }),
+    // preload: ipcRenderer.invoke(IPC.secretsSessionInfo, ids) → args[0] = string[]
+    "secrets:session-info": (ids) => secretsSessionInfoStore(ids, (id) => oc.readSession(id)),
     // preload: ipcRenderer.invoke(IPC.secretsDelete, id) → args[0] = id
     "secrets:delete": (id) =>
       secretsDeleteStore(id, { publish: (evt) => bus.publish(evt) }),

@@ -201,6 +201,7 @@ export const DEMO_UNIMPLEMENTED = [
   "scheduleList",
   "secretsDelete",
   "secretsList",
+  "secretsSessionInfo",
   "secretsSet",
   "secretsUpdate",
   "serverCliUpdate",

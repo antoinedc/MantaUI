@@ -9,9 +9,9 @@
 // mutation shows an error banner (role=alert); a successful one is visible as
 // the row/editor/dialog closing and the list refetching.
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Folder, MessageSquare, Pencil, Trash2 } from "lucide-react";
-import type { SecretMeta, SecretPatch, SecretScope } from "../shared/types";
+import type { SecretMeta, SecretPatch, SecretScope, SecretSessionInfo } from "../shared/types";
 import { useStore } from "./store";
 import { Button } from "./Button";
 import { ChipGroup } from "./Chip";
@@ -37,6 +37,7 @@ import {
   listChatWindows,
   overriddenInCount,
   relativeAge,
+  sessionsWithoutWindow,
   type AddDraft,
   type ScopeFilter,
   type SessionGroup,
@@ -64,6 +65,12 @@ export function SecretsSettings({ onNavigated }: {
   const [addOpen, setAddOpen] = useState(false);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Whether each windowless session still exists (see groupSecrets). Until it
+  // answers — or if it can't — those groups stay "unknown": no badge, no
+  // Delete all.
+  const [sessionInfo, setSessionInfo] = useState<Record<string, SecretSessionInfo>>({});
+  const [infoError, setInfoError] = useState<string | null>(null);
+  const infoSeq = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
@@ -84,10 +91,36 @@ export function SecretsSettings({ onNavigated }: {
   }, [refresh]);
 
   const list = all ?? [];
+  // An empty tmux listing means "not loaded yet" as much as "no windows".
+  const windowsKnown = projects.length > 0;
+  const windowless = useMemo(() => sessionsWithoutWindow(list, projects), [list, projects]);
+  // Re-ask after every list load (`all` is a new array each time) and whenever
+  // the set of windowless sessions changes — not on every projects tick.
+  const windowlessKey = windowless.join("\n");
+  useEffect(() => {
+    const seq = ++infoSeq.current;
+    if (windowless.length === 0) {
+      setSessionInfo({});
+      setInfoError(null);
+      return;
+    }
+    window.api
+      .secretsSessionInfo(windowless)
+      .then((info) => {
+        if (seq !== infoSeq.current) return;
+        setSessionInfo(info && typeof info === "object" ? info : {});
+        setInfoError(null);
+      })
+      .catch((e: unknown) => {
+        if (seq !== infoSeq.current) return;
+        setInfoError(e instanceof Error ? e.message : "request failed");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the id set + each list load
+  }, [all, windowlessKey]);
   const now = Date.now();
   const counts = useMemo(() => countByScope(list, query), [list, query]);
   const visible = useMemo(() => filterSecrets(list, query, filter), [list, query, filter]);
-  const groups = useMemo(() => groupSecrets(visible, projects), [visible, projects]);
+  const groups = useMemo(() => groupSecrets(visible, projects, sessionInfo, windowsKnown), [visible, projects, sessionInfo, windowsKnown]);
   const overrides = useMemo(() => computeOverrides(list, projects), [list, projects]);
 
   const saveRow = async (id: string, patch: SecretPatch): Promise<SecretSaveResult> => {
@@ -259,6 +292,11 @@ export function SecretsSettings({ onNavigated }: {
           <Button tone="default" onClick={() => void refresh()}>Retry</Button>
         </div>
       )}
+      {infoError && (
+        <div role="status" className="text-meta text-text-faint">
+          Couldn&apos;t check which chats still exist ({infoError}); &ldquo;Delete all&rdquo; for closed chats is unavailable until it can.
+        </div>
+      )}
       {actionError && (
         <div role="alert" className="flex items-center gap-3 rounded-md border border-danger/40 bg-danger-bg px-4 py-3 text-body text-danger">
           <span className="flex-1 break-words">{actionError}</span>
@@ -304,16 +342,20 @@ export function SecretsSettings({ onNavigated }: {
                       g.items,
                       groupHeader(
                         <MessageSquare size={14} aria-hidden="true" />,
-                        g.window ? <span className="text-text">{g.label}</span> : <span className="font-mono">{g.label}</span>,
+                        g.titled
+                          ? <span className="text-text">{g.label}</span>
+                          : <span className="font-mono">{g.label}</span>,
                         countLabel(g.items.length),
-                        g.window ? (
+                        g.kind === "window" ? (
                           <Button tone="ghost" onClick={() => void openChat(g)}>Open chat ↗</Button>
-                        ) : (
+                        ) : g.kind === "found" ? (
+                          <MetaBadge title="This chat still exists but has no open window (e.g. the On-call CTO conversation) — its secrets are live">no open window</MetaBadge>
+                        ) : g.kind === "missing" ? (
                           <>
-                            <MetaBadge title="No open chat window carries this session">chat closed</MetaBadge>
+                            <MetaBadge title="opencode no longer has this chat">chat closed</MetaBadge>
                             <Button tone="danger" onClick={() => askDeleteGroup(g)}>Delete all</Button>
                           </>
-                        ),
+                        ) : null,
                       ),
                     )}
                   </div>

@@ -15,6 +15,7 @@ import {
   overriddenInCount,
   relativeAge,
   resolveSessionLabel,
+  sessionsWithoutWindow,
   shortSessionId,
 } from "./secretsView";
 
@@ -114,21 +115,73 @@ describe("groupSecrets", () => {
     meta({ id: "7", key: "G", scope: "session", sessionID: "ses_a" }),
     meta({ id: "8", key: "H", scope: "session", sessionID: "ses_a" }),
     meta({ id: "9", key: "I", scope: "session", sessionID: "ses_gone1" }),
+    meta({ id: "10", key: "J", scope: "session", sessionID: "ses_cto" }),
+    meta({ id: "11", key: "K", scope: "session", sessionID: "ses_flaky" }),
   ];
-  const g = groupSecrets(all, projects);
+  const info = {
+    ses_cto: { state: "found" as const, title: "On-call CTO" },
+    ses_gone1: { state: "missing" as const, title: null },
+    ses_gone2: { state: "missing" as const, title: null },
+    ses_flaky: { state: "unknown" as const, title: null },
+    // ses_a / ses_b have windows — an answer for them must be ignored.
+    ses_a: { state: "missing" as const, title: null },
+  };
+  const g = groupSecrets(all, projects, info);
+  const byId = (id: string) => g.sessions.find((s) => s.sessionID === id)!;
+
   it("splits into shared / projects / sessions", () => {
     expect(g.shared.map((s) => s.id)).toEqual(["1"]);
     expect(g.projects.map((p) => [p.project, p.items.length])).toEqual([["manta", 2], ["ronda", 1]]);
   });
-  it("orders sessions: open chats by label, then closed by id, with labels", () => {
-    expect(g.sessions.map((s) => s.sessionID)).toEqual(["ses_a", "ses_b", "ses_gone1", "ses_gone2"]);
-    expect(g.sessions[0].label).toBe("manta / secrets-ui");
-    expect(g.sessions[0].items.map((s) => s.id)).toEqual(["7", "8"]);
-    expect(g.sessions[2].window).toBeNull();
-    expect(g.sessions[2].label).toBe("ses_gone1");
+  it("window: labelled workspace / window, regardless of any server answer", () => {
+    expect(byId("ses_a")).toMatchObject({ kind: "window", label: "manta / secrets-ui" });
+    expect(byId("ses_a").window).not.toBeNull();
+    expect(byId("ses_a").items.map((s) => s.id)).toEqual(["7", "8"]);
+  });
+  it("no window + found: titled by the session, no window", () => {
+    expect(byId("ses_cto")).toMatchObject({ kind: "found", label: "On-call CTO", window: null, titled: true });
+  });
+  it("found without a title falls back to the short id", () => {
+    const g2 = groupSecrets(all, projects, { ses_cto: { state: "found", title: null } });
+    expect(g2.sessions.find((s) => s.sessionID === "ses_cto")).toMatchObject({ kind: "found", label: "ses_cto", titled: false });
+  });
+  it("no window + missing (404): closed chat", () => {
+    expect(byId("ses_gone1")).toMatchObject({ kind: "missing", label: "ses_gone1", window: null });
+  });
+  it("no window + unknown, or info not loaded yet: unknown, never missing", () => {
+    expect(byId("ses_flaky").kind).toBe("unknown");
+    const none = groupSecrets(all, projects);
+    expect(none.sessions.find((s) => s.sessionID === "ses_gone1")!.kind).toBe("unknown");
+    expect(none.sessions.find((s) => s.sessionID === "ses_cto")!.kind).toBe("unknown");
+  });
+  it("orders windowed, then found, then the rest (by id)", () => {
+    expect(g.sessions.map((s) => s.sessionID)).toEqual([
+      "ses_a", "ses_b", "ses_cto", "ses_flaky", "ses_gone1", "ses_gone2",
+    ]);
+  });
+  it("while the tmux listing is still loading, 'found' degrades to unknown but 'missing' holds", () => {
+    const loading = groupSecrets(all, [], info, false);
+    const kinds = Object.fromEntries(loading.sessions.map((s) => [s.sessionID, s.kind]));
+    expect(kinds.ses_cto).toBe("unknown");
+    expect(kinds.ses_gone1).toBe("missing");
+    expect(kinds.ses_a).toBe("missing"); // no windows known, server says 404
   });
   it("is empty-safe", () => {
     expect(groupSecrets([], projects)).toEqual({ shared: [], projects: [], sessions: [] });
+  });
+});
+
+describe("sessionsWithoutWindow", () => {
+  it("lists session ids with no window, deduped and sorted", () => {
+    const all = [
+      meta({ id: "1", key: "A", scope: "session", sessionID: "ses_z" }),
+      meta({ id: "2", key: "B", scope: "session", sessionID: "ses_z" }),
+      meta({ id: "3", key: "C", scope: "session", sessionID: "ses_a" }), // has a window
+      meta({ id: "4", key: "D", scope: "session", sessionID: "ses_cto" }),
+      meta({ id: "5", key: "E", scope: "shared" }),
+    ];
+    expect(sessionsWithoutWindow(all, projects)).toEqual(["ses_cto", "ses_z"]);
+    expect(sessionsWithoutWindow(all, [])).toEqual(["ses_a", "ses_cto", "ses_z"]);
   });
 });
 
