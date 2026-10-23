@@ -353,6 +353,23 @@ export async function createSession({ directory, title = "", permission, metadat
   return sess;
 }
 
+/**
+ * `POST /api/session/{id}/move {directory}` — re-point a session at another directory
+ * of its project (a background job's child is created at its parent's location, then
+ * moved into the job's worktree). V2 answers 204 and applies the move as an inbox item
+ * at the session's next execution, so the session's own `directory` only changes once
+ * its first turn starts; the cache is updated now because shell polling for that turn
+ * must look in the new directory. `err.status` separates a definitive refusal (4xx)
+ * from an unknown outcome.
+ * @param {string} sessionId
+ * @param {string} directory
+ */
+export async function moveSession(sessionId, directory, { signal } = {}) {
+  const absDir = expandTilde(directory);
+  await ocJson("moveSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/move`, { directory: absDir }, { signal });
+  rememberSessionDirectory(sessionId, absDir);
+}
+
 // Part types NO client renders. `slim` drops them from the wire.
 //
 // The desktop renderer DOES render `reasoning` (ctrl+O) and `patch`/`file`
