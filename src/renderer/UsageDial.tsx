@@ -14,6 +14,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { ProviderView, SeatProviderId, SeatView, UsageWindow } from "../shared/types";
 import {
+  combinedSeatWindows,
   cssVar,
   findSeat,
   formatLastMove,
@@ -118,7 +119,11 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
   const current = multi ? selectConversationSeat(view, sessionSeat) : null;
   const base = selectUsageSnapshot(snapshots, providerID);
   const snapshot = base ? seatDialSnapshot(base, current) : null;
-  const state = usageDialState(snapshot, alwaysShow);
+  // The popover keeps this conversation's seat; only the ring and its tooltip
+  // switch to the all-seats figure, and only in automatic mode.
+  const combined = multi && view?.mode === "auto" ? combinedSeatWindows(view) : null;
+  const popoverState = usageDialState(snapshot, alwaysShow);
+  const state = snapshot && combined ? usageDialState({ ...snapshot, windows: combined.windows }, alwaysShow) : popoverState;
   const moveComing = isMoveComing(view, current);
 
   // Learn which seat this conversation is on (cached in the store; kept
@@ -158,10 +163,16 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
       : current.account.label
     : null;
   const lead = seatName ? `${label} · ${seatName}` : label;
+  const nextReset = resetLine?.startsWith("resets ") ? `next reset ${resetLine.slice(7)}` : resetLine;
   const title =
-    (state.awaitingReset
-      ? `${lead} · the ${windowLabel} quota is resetting`
-      : `${lead} · ${pctClamped}% of the ${windowLabel}` + (resetLine ? ` — ${resetLine}` : "")) +
+    (combined
+      ? state.awaitingReset
+        ? `${label} · the ${windowLabel} quota is resetting on every seat`
+        : `${label} · ${pctClamped}% of the ${windowLabel} across ${combined.seatCount} seats` +
+          (nextReset ? ` — ${nextReset}` : "")
+      : state.awaitingReset
+        ? `${lead} · the ${windowLabel} quota is resetting`
+        : `${lead} · ${pctClamped}% of the ${windowLabel}` + (resetLine ? ` — ${resetLine}` : "")) +
     (moveComing ? " · this conversation will move to another seat soon" : "") +
     " · click for details";
 
@@ -268,7 +279,7 @@ export const UsageDial = memo(function UsageDial({ providerID, sessionId = null 
       >
         <UsagePopoverBody
           snapshot={snapshot}
-          state={state}
+          state={popoverState}
           label={label}
           view={view}
           multi={multi}

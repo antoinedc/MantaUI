@@ -3770,6 +3770,65 @@ export function seatDialSnapshot(
   };
 }
 
+/** A plan's relative size for the combined ring: Max 20x = 20, Max 5x = 5, plain
+ *  Pro = 1. Null when the plan is unknown (absent, "Team", a new tier…). */
+function planWeight(plan: string | null | undefined): number | null {
+  if (!plan) return null;
+  if (/\bmax\s*20x\b/i.test(plan)) return 20;
+  if (/\bmax\s*5x\b/i.test(plan)) return 5;
+  if (/\bpro\b/i.test(plan)) return 1;
+  return null;
+}
+
+/**
+ * Automatic mode's ring: every seat's usage folded into one set of windows. Seats
+ * that are signed out / expired or have no reading are left out. Each window kind
+ * is the plan-weighted mean of the seats that report it (equal weights unless
+ * EVERY included seat has a known plan); a mid-reset window counts as 0%, the
+ * reset shown is the earliest one still ahead, and the combined window is stale
+ * only when all of them are. Null when no seat qualifies.
+ */
+export function combinedSeatWindows(
+  view: ProviderView | null | undefined,
+): { windows: UsageWindow[]; seatCount: number } | null {
+  const included: { weight: number | null; windows: UsageWindow[] }[] = [];
+  for (const account of view?.accounts ?? []) {
+    const weight = planWeight(account.plan);
+    for (const s of account.seats) {
+      if (!seatUsable(s)) continue;
+      const windows = s.windows.filter((w) => w.active !== false);
+      if (s.windows.length === 0) continue;
+      included.push({ weight, windows });
+    }
+  }
+  if (included.length === 0) return null;
+  const weighted = included.every((s) => s.weight != null);
+
+  const kinds: string[] = [];
+  for (const s of included) for (const w of s.windows) if (!kinds.includes(w.kind)) kinds.push(w.kind);
+
+  const windows = kinds.map((kind): UsageWindow => {
+    const parts = included.flatMap((s) => {
+      const w = s.windows.find((x) => x.kind === kind);
+      return w ? [{ w, weight: weighted ? (s.weight as number) : 1 }] : [];
+    });
+    const total = parts.reduce((n, p) => n + p.weight, 0);
+    const sum = parts.reduce((n, p) => n + (p.w.stale === true ? 0 : p.w.pct) * p.weight, 0);
+    const resets = parts
+      .filter((p) => p.w.stale !== true && p.w.resetsAt != null)
+      .map((p) => p.w.resetsAt as number);
+    const first = parts[0].w;
+    return {
+      kind: first.kind,
+      label: first.label,
+      pct: Math.round(sum / total),
+      ...(resets.length > 0 ? { resetsAt: Math.min(...resets) } : {}),
+      ...(parts.every((p) => p.w.stale === true) ? { stale: true } : {}),
+    };
+  });
+  return windows.length > 0 ? { windows, seatCount: included.length } : null;
+}
+
 export type OtherSeatGroup = {
   accountId: string;
   label: string;
@@ -3830,70 +3889,6 @@ export function formatLastMove(
       ? `history re-sent: ${formatTokensCompact(move.resentTokens)}`
       : null;
   return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
-}
-
-/** A move notice is offered on open only while the move is this fresh. */
-export const SEAT_MOVE_NOTICE_FRESH_MS = 30 * 60_000;
-/** ...and hides itself this long after it first appears. */
-export const SEAT_MOVE_NOTICE_AUTOHIDE_MS = 5 * 60_000;
-
-/** What the in-conversation "moved to another seat" line is built from. */
-export type SeatMoveNoticeInput = {
-  reason?: string | null;
-  fromLabel?: string | null;
-  toLabel?: string | null;
-  trigger?: { kind: string; pct: number } | null;
-  crossOrg?: boolean | null;
-};
-
-/** "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." — the one-line notice shown
- *  in the conversation when it changes seat (spec §5.3). The parenthetical says
- *  why; a cross-org move appends " History re-sent." (no token count — the box
- *  does not send one). Unknown reasons / missing labels degrade to the plain
- *  "Moved to X." rather than guessing. */
-export function formatSeatMoveNotice(input: SeatMoveNoticeInput): string {
-  const to = (input.toLabel ?? "").trim() || "another seat";
-  const from = (input.fromLabel ?? "").trim();
-  const t = input.trigger;
-  const pct = t && Number.isFinite(t.pct) ? Math.round(t.pct) : null;
-  const windowName = t ? (t.kind === "weekly" ? "the weekly limit" : t.kind === "session" ? "5h" : "") : "";
-  let why: string | null = null;
-  if (input.reason === "reset-soon") why = "its limit resets within the hour";
-  else if (from) {
-    if (input.reason === "unusable") why = `${from} needed sign-in`;
-    else if (input.reason === "load" || input.reason === "exhausted") {
-      if (pct != null) why = `${from} at ${pct}%${windowName ? ` of ${windowName}` : ""}`;
-      else why = input.reason === "exhausted" ? `${from} was at its limit` : `${from} was near its limit`;
-    }
-  }
-  const head = input.reason === "manual" ? `Switched to ${to}` : `Moved to ${to}`;
-  const sentence = `${head}${why ? ` (${why})` : ""}.`;
-  return input.crossOrg ? `${sentence} History re-sent.` : sentence;
-}
-
-/** The key a notice is dismissed / auto-hidden under: the conversation plus the
- *  seats it moved between. Deliberately NOT the timestamp — the bus event and the
- *  box's `lastMove` stamp the same move with different clocks, and a dismissal
- *  must survive that handover. */
-export function seatMoveNoticeKey(sessionId: string, fromSeatId: string | null | undefined, toSeatId: string | null | undefined): string {
-  return `${sessionId}|${fromSeatId ?? ""}|${toSeatId ?? ""}`;
-}
-
-/** A seat's display name — "Work · Seat 2", or the account label alone for a
- *  single-seat account. Reads the live view first so a rename shows at once. */
-export function seatDisplayName(
-  providers: ProviderView[] | null | undefined,
-  provider: string,
-  seatId: string,
-  fallbackAccountLabel?: string | null,
-  fallbackSeatLabel?: string | null,
-): string {
-  const found = findSeat(providers?.find((p) => p.provider === provider), seatId);
-  const accountLabel = found?.account.label ?? fallbackAccountLabel ?? "";
-  const seatLabel = found?.seat.label ?? fallbackSeatLabel ?? "";
-  const single = found ? found.account.seats.length <= 1 : false;
-  if (single || !seatLabel) return accountLabel || seatLabel;
-  return accountLabel ? `${accountLabel} · ${seatLabel}` : seatLabel;
 }
 
 /** "Seat: Work · Seat 2" — the session header's context-popover line. Names come
