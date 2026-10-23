@@ -1647,6 +1647,9 @@ export async function tickActivity(deps) {
     await Promise.all(
       jobs.map(async (job) => {
         if (job.status !== "running") return;
+        // A launch whose child may not exist yet (create lost / not yet sent) has no
+        // transcript to summarise — skip it rather than warn every tick.
+        if (job.launchState === "creating" || (job.launchState === "uncertain" && job.submittedAt == null)) return;
         let activity = null;
         let activityChanged = false;
         let modelChanged = false;

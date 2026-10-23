@@ -1,6 +1,7 @@
 // Channel -> handler dispatch. Handlers are async (...args) => result.
 // Mirrors Electron ipcMain.handle semantics.
 
+import { backgroundCommandNames as defaultBackgroundCommandNames } from "./commandBackground.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -500,14 +501,6 @@ async function knownOpencodeSessionIds(oc) {
   } catch { return null; }
 }
 
-// The N3 reader lives in commandBackground.mjs; loaded on first use so a box
-// without it (or a test that never lists commands) never pays for the import.
-let commandBackgroundModule = null;
-async function defaultBackgroundNames(directory) {
-  commandBackgroundModule ??= await import("./commandBackground.mjs");
-  return commandBackgroundModule.backgroundCommandNames(directory);
-}
-
 export function buildHandlers({
   tmux,
   oc,
@@ -615,7 +608,7 @@ export function buildHandlers({
   // N3: `backgroundCommandNames(directory) → Promise<Set<string>>` — the names
   // whose definitions provably run in the background (commandBackground.mjs).
   // Injectable for tests; the default reads the real definitions.
-  backgroundCommandNames = defaultBackgroundNames,
+  backgroundCommandNames = defaultBackgroundCommandNames,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.

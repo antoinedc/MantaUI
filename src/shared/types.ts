@@ -2598,6 +2598,8 @@ export type DelegateJob = {
   // The id the result is posted under (minted once); retrying a post is harmless.
   completionMessageId?: string | null;
   completionDelivery?: DelegateCompletionDelivery | null;
+  // The agent the job's session runs (shown in its result).
+  agent?: string | null;
 };
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF
