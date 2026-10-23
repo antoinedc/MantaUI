@@ -50,8 +50,9 @@ Product decisions already taken by the owner (do not re-open):
 
 Facts **not yet verified** — each stage's smoke must prove or refute them before relying on them (if refuted:
 stop and report, do not work around silently):
-- U1 A `queue` synthetic posted while the parent runs waits for the turn to end and then starts its own turn.
-- U2 A `synthetic` with `resume:false` posted to an idle session adds a timeline record and starts nothing.
+- U1 A `queue` synthetic posted while the parent runs waits for the turn to end and then starts its own turn;
+  posted to an idle (or stopped) parent it starts a turn at once.
+- U2 A `synthetic` posted twice with the same explicit `id` is admitted once (idempotent, like prompts).
 - U3 A child moved with `/move` runs its tools (shell `pwd`) inside the new directory.
 - U4 `PATCH …/inbox/{id} {delivery:"steer"}` on a parked `queue` item of an **idle** session starts a turn.
 - U5 A `.md` command with `subagent: true` frontmatter behaves like F4/F5.
@@ -68,7 +69,11 @@ Refused for CTO conversation sessions (same error as K4). `Api.opencodeInboxSetD
 
 **N2 — background run input (B).** `opencode:run-command` input gains `background?: boolean`.
 `Api.opencodeRunCommand` input type gains the field. `background:true` is refused (clear error) for CTO
-conversation sessions and for names that are not an opencode command or skill.
+conversation sessions and for names that are not an opencode command or skill. For a command N3 marks
+`background: true`, the server **ignores** `background` and runs it normally on the parent — V2 makes the
+child itself (F4/F5); wrapping it again would create two children. The resolved composer `model` and
+`agent` in the input are the child's controls (§B-server 3), unless the command definition sets its own
+(V2 applies a command's own `agent`/`model` over them).
 
 **N3 — command list (B).** `OpencodeCommand` gains `background?: true` — set only when manta-server can
 prove the definition runs in the background (§B3); absent means "unknown / foreground".
@@ -78,34 +83,50 @@ prove the definition runs in the background (§B3); absent means "unknown / fore
 ```
 info:  { id, role: "assistant", sessionID, time:{created}, background: true }
 parts: [{ id: `${id}:bg`, type: "background-result",
-          childSessionId, state: "completed"|"failed"|"cancelled"|string,
+          childSessionId, jobId?: string /* metadata.manta.jobId when Manta posted it */,
+          state: "completed"|"failed"|"cancelled"|string,
           name?: string /* "/review HEAD~1" for command runs */, agent?: string,
           text /* inner text of the <subagent> envelope */ }]
 ```
 Other synthetic records stay dropped. The iOS client must keep decoding transcripts that contain this
-(it skips unknown part types — the implementer must confirm in `mobile/native` and add a decode test);
-iOS rendering of the card is a follow-up, not this spec.
+(the implementer must confirm in `mobile/native` that an unknown part type and the extra `info.background`
+field are skipped, and add a decode test); iOS rendering of the card is a follow-up, not this spec.
 
-**N5 — background-start marker (B).** A Manta-started background run is visible in the parent from the
-moment it starts, durably (survives reload, shows on every client). Mechanism, decided by U2:
-- if U2 holds: `POST /api/session/{parent}/synthetic` `{ text: "Started /<name> <args> in the background.",
-  metadata: { source: "manta-background-start", childID, command: { name, arguments } }, resume: false }`
-  and N4 also maps `source === "manta-background-start"` to a `background-result`-style part with
-  `state: "running"` (the renderer pairs start + result by `childSessionId` and shows ONE card that flips
-  from running to finished, as in the mockup);
-- if U2 does not hold: no marker message; the renderer derives the running chip from the job store
-  (`delegateList` for this parent, `origin: "command"`) and the result card from N4 only.
-The implementer reports which branch was taken.
+**N5 — running background work, shown from the job store (B).** There is NO start-marker message (a
+synthetic posted into a busy parent could be consumed by its running turn). A running background run is
+shown from the job store, which is durable and reaches every client: the renderer lists jobs with
+`parentSessionID === this session` whose `status` is `running`/`paused` (existing `delegateList` /
+job-ownership data) as **running cards** under the transcript — "Running in background: /review HEAD~1 ·
+Open session" — and replaces each with its N4 result card once one arrives, **paired by `jobId`** (falling
+back to `childSessionId` for opencode-owned children). A job that fails before its child ran turns its
+running card into a failure card with the error (never a card that spins forever).
 
-**N6 — job origins (B, C).** Job records gain origin values `"command"` (a background slash command —
-Manta-started or V2-native) alongside today's `"delegate"`, `"subagent"`, `"cto"` (whatever the existing
-names are — keep them; add only `"command"`), and a field `engine: "v2" | "legacy"` (C).
+**N6 — job record fields (B, C).** Keep today's `origin` values (`"delegate"`, `"subagent"`, …) and the
+`actor` field (`"cto"` marks CTO-dispatched jobs — `delegate.mjs` ~1121, `ctoWorkTools.mjs` ~2423). Add:
+- `origin: "command"` — a background slash command (Manta-wrapped or V2-native);
+- `engine: "v2" | "legacy"` — absent = legacy (C);
+- `completionOwner: "manta" | "opencode"` — who reports the result to the parent. `"opencode"` for
+  children V2 started and reports itself (background `task` subagents, V2-native background commands): Manta
+  NEVER posts a result for them (it only tracks the row). `"manta"` for children Manta started (wrapped
+  command runs, delegate jobs on V2): Manta posts exactly one N7 result. Exactly one result and one parent
+  reply per job is a tested invariant.
+- `attempt` (C): the resume counter; `childSessionID` may change across attempts, `jobId` never does.
 
-**N7 — job result delivery (C).** A finished `engine:"v2"` job is reported to its parent by
-`POST /api/session/{parent}/synthetic` `{ text: buildCompletionText(job), description: job.name,
-metadata: { source: "subagent", childID: job.childSessionID, agent: job.agent ?? null, state, manta: { jobId } },
-delivery: "queue", resume: true }` — so it renders through N4, never interrupts a running parent turn
-(today's defer-until-idle behaviour), and the agent replies when it is delivered (D-B1). Depends on U1.
+**N7 — job result delivery (B for wrapped command runs, C for delegate jobs).** A finished
+`completionOwner:"manta"` job is reported to its parent by
+`POST /api/session/{parent}/synthetic` `{ id: job.completionMessageId, text: buildCompletionText(job),
+description: job.name, metadata: { source: "subagent", childID: job.childSessionID, agent: job.agent ?? null,
+state, manta: { jobId: job.id } }, delivery: "queue", resume: true }`.
+- **One policy from B onward:** `delivery:"queue"` — never steers a running parent turn (today's
+  defer-until-idle behaviour); delivered when the parent's turn ends, or at once when the parent is idle
+  or stopped (U1); the agent then replies (D-B1).
+- **Retry-safe:** `completionMessageId` (`msg_…`, minted once) and `completionDelivery:
+  "pending"|"delivered"` are persisted **in the same write** that makes the job terminal. Delivery runs
+  after that write and is retried (boot reconcile + the existing sweeper tick) until `delivered`; the
+  explicit `id` makes a retry after an uncertain POST harmless (U2). A terminal transition never re-runs.
+- **CTO conversation parents:** if the parent is the CTO conversation session, the result does NOT go
+  through N7 — it keeps going through `promptDelivery` and its admission redirect (`promptDelivery.mjs`
+  ~290–310), unchanged. N7 is only for ordinary parent sessions.
 
 **N8 — client pin (D).** `package.json` pins `@opencode/client` to exactly `OPENCODE_V2_VERSION`
 (`scripts/opencode-v2/version.mjs`); a test fails when they differ.
@@ -153,7 +174,14 @@ delivery: "queue", resume: true }` — so it renders through N4, never interrupt
 - While running, the composer's send offers **Send now** (tap) and **Send after this turn** (long-press menu
   on the send button); both post immediately with `delivery` instead of holding the prompt in the local
   outbox until idle. The local outbox (`PendingPromptStore`) stays ONLY for sends that failed to reach the
-  box (tap-to-retry), unchanged.
+  box (tap-to-retry).
+- **A separate busy-send path**, not today's `deliver` (which resets the completion latch, mints a new
+  streaming tail and rolls `running` back on failure — wrong for a turn that is already running): it never
+  touches `running`, the tail or the completion state. Each prompt carries a client-minted `messageID`
+  (persisted with the outbox row, reused on retry — V2 treats it as idempotent) and its `delivery`, so a retry
+  after an uncertain failure can never enqueue twice. A definite refusal (4xx) marks the row failed with the
+  reason; an uncertain failure (timeout / network) marks it "may have been sent — tap to retry", and the
+  row disappears by itself if that id shows up in the `inbox` frame or the transcript.
 - The pending list renders from the `inbox` frame + `opencode:inbox` (K3 acceptance rule, epoch/rev) with
   the same rows and actions (Send now / Wait / ×) and the stopped footer. Swipe-to-cancel is fine in place
   of a visible ×.
@@ -191,28 +219,55 @@ delivery: "queue", resume: true }` — so it renders through N4, never interrupt
    `GET /api/agent`), `~/.config/opencode/commands/**/*.md` frontmatter, and the session-directory
    project's `.opencode/commands/**/*.md` + `opencode.json(c)` (read via the existing config helpers; no
    new writer). Unknown → absent. Unit-tested on fixtures.
-3. **Manta-started run (N2):** in `opencode.mjs` `runCommand`, `background:true` →
-   a. resolve the parent's current agent/model (`GET /api/session/{parent}`);
-   b. `POST /api/session` `{ parentID: parent, title: "/<name> <args>", agent?, model }` (F7, F8);
-   c. register the job (origin `"command"`, `engine:"v2"`, no worktree, cwd = parent's directory) through
-      the existing adoption path so the sidebar row + window exist before the run starts;
-   d. N5 start marker (per U2);
-   e. run the command **in the child** (existing `runCommand` on the child id — skills keep their prompt
-      branch);
-   f. completion: on the child's `session.execution.succeeded|failed|interrupted` (lifecycle adapter idle /
-      error), take the child's last assistant text and post the N7-shaped synthetic **with
-      `delivery` omitted (V2 default) and `resume:true`** — identical in shape to F5 so N4 renders both.
-      (Stage C later moves this onto the generic job-result path.)
-   Failures at any step are reported to the caller and leave no orphan job record (undo like `startJob`).
-4. **V2-native background commands (F4/F5):** adopt their child into the sidebar: while a command window
-   (cleanup spec §3) is open for parent P, a `session.created` with `data.parentID === P` that no `task`
-   tool part claims within the window is adopted (origin `"command"`, `engine:"v2"`, name = the command).
-   Background `task` subagents keep their existing adoption path (F11).
-5. **N4 mapping** in `mapTimeline` + the iOS decode check (§1 N4).
-6. **CTO refusals** for N2 in `rpc.mjs`.
-7. Smoke (mock model): Manta-started background run → child created, job registered, marker (or job-store
-   chip per U2), result synthetic, parent auto-reply, N4 part in the parent transcript; a native
-   `subagent:true` command (native `commands` key) → adopted row + N4 card; U5 checked with a `.md` command.
+3. **Manta-wrapped run (N2, command not marked background by N3).** A NEW launch entry point
+   `startCommandJob` in `delegate.mjs` — NOT `adoptSubagentJob`, which deliberately skips launch checks
+   because opencode already started the child. `startCommandJob` enforces, before creating anything:
+   - the box-wide `MAX_RUNNING_JOBS` cap and the no-nesting rule (no background run from inside a
+     background job's session), same refusals and messages as `startJob`;
+   - **permissions:** the child gets the parent session's own ruleset (`GET /api/session/{parent}` →
+     `permissions`), so a command run can do exactly what the user's conversation can — no wider (it is
+     the user's own command, in the same checkout, so no delegate-style preflight grant list and no
+     approval card);
+   - **controls:** the child's agent/model = the input's resolved composer `agent`/`model` (what the user
+     sees in the picker / plan toggle), else the parent session's current ones; passed **explicitly** to
+     the child create AND to the `runCommand` call on the child, so `syncSessionControls`' omitted-agent rule
+     can never flip it. The model is whatever the user already uses in this conversation, so no delegate
+     model-whitelist check;
+   then, in order, undoing everything already done on any failure (no orphan record, child or window):
+   a. `POST /api/session { parentID, title: "/<name> <args>", agent, model, permissions }` (F7, F8);
+   b. register the job (`origin:"command"`, `engine:"v2"`, `completionOwner:"manta"`, no worktree, cwd =
+      parent's directory, mint `completionMessageId`) and its window/sidebar row;
+   c. run the command **in the child** (`runCommand` on the child id; skills keep their prompt branch);
+   d. completion: from the child's raw `session.execution.succeeded|failed|interrupted` (§C1 step 6 —
+      the same detection C1 uses), take the child's last assistant text, mark terminal, deliver N7.
+4. **V2-native background commands (N3 says background, or V2 turns out to background it anyway).**
+   Run the command normally on the parent; adopt the child it creates:
+   - **Adopt immediately** on `session.created` with `data.parentID === P` while a command window for P is
+     open (`origin:"command"`, `completionOwner:"opencode"`, name = the command). If a `task` tool part later
+     claims that child (a background `task` started concurrently), relabel the record
+     (`origin:"subagent"`) — same row, no second record.
+   - **No lost lifecycle:** the pump keeps a short-lived (10 min, capped) map of child sessions' latest
+     raw execution outcome, fed for every `session.execution.*`. Adoption (here and in the existing
+     `task` path) reads it, so a child that finished before it was adopted is recorded as finished at once.
+   - **Reconnect:** `resyncAfterReconnect` reconciles every `running` job with `engine:"v2"` against
+     `GET /api/session/active` + the child's last execution record; a child no longer running gets its
+     terminal state (and, for `completionOwner:"manta"`, its N7 delivery).
+   - opencode posts the result itself (F5) — Manta posts nothing (N6).
+5. **Finished rows stay.** Today `finishJob` → `cleanupTerminalJob` kills the window even when there is no
+   worktree, so a finished background row would vanish and "Open session →" would have nothing to open.
+   For jobs **without a worktree** (`origin` `command` / `subagent`): keep the window and record after
+   finishing (row shows done) until the user closes the row or the existing 7-day / 50-record retention
+   sweep removes it. Worktree jobs keep today's behaviour. "Open session →" calls a new RPC
+   `delegate:open-session({ jobId })` → focuses the job's window, re-creating a chat window stamped with the
+   child session id if it was closed; it reports a visible error if the child session no longer exists.
+6. **N4 mapping** in `mapTimeline` + the iOS decode check (§1 N4).
+7. **CTO refusals** for N2 in `rpc.mjs`.
+8. Smoke (mock model): wrapped run → cap/nesting refusals, child created with the parent's permissions and
+   the composer's agent/model (a plan-agent parent stays plan), job registered, N7 result (busy parent:
+   waits for the turn; idle parent: immediate turn; U1), exactly ONE result + ONE parent reply, N4 part in
+   the parent transcript; a native `subagent:true` command (native `commands` key) → adopted row, no Manta
+   result, exactly one opencode result + one reply, row stays done; a child that finishes in < 1 s is still
+   recorded finished; U2 (same synthetic id twice → one record); U5 with a `.md` command.
 
 ### B-desktop
 - Highlight overlay in `InputArea.tsx`: the textarea stays the input (caret, IME, selection, undo, paste,
@@ -220,8 +275,9 @@ delivery: "queue", resume: true }` — so it renders through N4, never interrupt
   (same font/size/padding/wrapping — the Sidebar ghost-text overlay is the precedent; read its comments).
   Must not lag typing (memoised, no per-keystroke re-render of the transcript).
 - The box + helper text + Send label per B-behaviour; Enter sends with `background:true` when checked.
-- Transcript: render the N4 / N5 part as the mockup's card (running → finished, "Open session →" opens
-  the child's sidebar row/window). Background `task` subagent results get the same card.
+- Transcript: the N5 running cards (from the job store) and the N4 result cards, paired by `jobId`, look
+  like the mockup (running → finished / failed). "Open session →" calls `delegate:open-session` and reports
+  both outcomes. Background `task` subagent results get the same card.
 - Tests: validity matrix (known / unknown / skill / Manta built-in / slash mid-text / leading space /
   arguments), box show/hide/reset, locked state, send payload, card states.
 
@@ -229,31 +285,47 @@ delivery: "queue", resume: true }` — so it renders through N4, never interrupt
 
 ## Stage C — Background jobs on the V2 engine
 
-### C1 — `delegate` (and B's command runs) on V2
-`startJob` for every origin except the CTO's (kept `engine:"legacy"` until C2):
+### C1 — `delegate` on V2 (not CTO-dispatched jobs)
+Applies to `startJob` / `resumeJob` for every job **except** those with `actor:"cto"` (they stay
+`engine:"legacy"` until C2). The gate is the `actor` field, never `origin` (CTO jobs are
+`origin:"delegate", actor:"cto"`).
 1. worktree + branch exactly as today;
 2. `POST /api/session { parentID: parentSessionID, title: job.name, agent, model, permissions: <today's
-   preflight ruleset> }` (F8) — replaces the session that `newWindow` chat-mode creation makes today;
-3. `POST /api/session/{child}/move { directory: worktree }` (F7) — verify U3 in the smoke (shell `pwd`);
-4. `newWindow` with `existingSessionId: child` (the adoption path already supports stamping an existing
-   session) so the sidebar row/window behave as today;
-5. opening prompt via `sendPrompt` on the child, as today;
-6. completion from the child's lifecycle events (unchanged detection), then **N7** instead of
-   `promptDelivery.deliver` — `promptDelivery` keeps serving schedules / webhooks / peers / capabilities;
-7. pause / resume / stop / timeout / sweep / reconcile-on-boot work unchanged on `engine:"v2"` records
-   (resume creates a fresh child the same way: create → move → stamp);
-8. B's Manta-started command runs switch from their own completion (B-server 3f) to N7 — one path.
+   preflight ruleset> }` (F8) — replaces the session that `newWindow` chat-mode creation makes today; the
+   model still goes through today's whitelist resolution first;
+3. `POST /api/session/{child}/move { directory: worktree }` (F7) — verify U3 in the smoke (shell `pwd`).
+   If the move fails, undo (delete the child session, remove the worktree) and report;
+4. `newWindow` with `existingSessionId: child` so the sidebar row/window behave as today;
+5. opening prompt via `sendPrompt` on the child, as today; record `engine:"v2"`,
+   `completionOwner:"manta"`, `attempt`, `completionMessageId`;
+6. **completion from raw V2 execution outcomes** for `engine:"v2"` children, not the lifecycle adapter
+   (which turns an interrupt into an ignored abort followed by an idle that reads as success —
+   `opencodeV2.mjs` ~500–518): `succeeded` → completed; `failed` → failed with the error; `interrupted` →
+   `paused` if `pauseRequested`, `stopped` if a stop was requested, else `failed: "interrupted"`. The pump
+   (`index.mjs`) feeds raw `session.execution.*` to the delegate engine for this (and for B's wrapped runs
+   and the §B-server 4 lifecycle map). Pause / stop / timeout / result races are resolved by the job
+   store's existing lock: the first terminal transition wins, later ones are no-ops;
+7. then **N7** instead of `promptDelivery.deliver` — except when the parent is the CTO conversation session
+   (N7 says why); `promptDelivery` keeps serving schedules / webhooks / peers / capabilities;
+8. pause / resume / stop / timeout / sweep / reconcile-on-boot keep their behaviour on `engine:"v2"`
+   records. Resume creates a fresh child the same way (create → move → stamp), bumps `attempt`, keeps
+   `jobId` — cards pair by `jobId` (N5), so a resumed job's running card still turns into its result;
+9. B's wrapped command runs keep their own launch (`startCommandJob`) but share steps 6–7.
 Records created before C1 have no `engine` field = legacy, and finish on the legacy path.
 
-### C2 — the CTO on V2, then delete legacy
-Flip the CTO origin to `engine:"v2"` after C1 has been on `main` and the CTO work tests + one live CTO
-dispatch on the dev box (orchestrator-run) pass. Then delete the legacy job-completion delivery path and
-`engine:"legacy"` handling once no running legacy record can exist (boot reconcile marks any left over
-`failed: "interrupted by upgrade"`, the same way it handles a dead job today).
+### C2 — CTO-dispatched jobs on V2, then delete legacy
+Flip `actor:"cto"` jobs to `engine:"v2"` after C1 has been on `main` and the CTO work tests + one live CTO
+dispatch on the dev box (orchestrator-run) pass. Their completions keep going through `promptDelivery` +
+the admission redirect whenever the parent is the CTO conversation (N7) — only the child-session engine
+changes; dedupe, ordering and turn authorization stay the admission engine's. Then delete the legacy
+completion path and `engine:"legacy"` handling once no running legacy record can exist (boot reconcile
+marks any left over `failed: "interrupted by upgrade"`, the same way it handles a dead job today).
 
 ### C-tests
 Unit tests per step with injected I/O (create/move/stamp undo on each failure point; N7 payload; CTO
-origin stays legacy in C1). Smoke (mock model): a delegate job whose child runs `pwd` and writes a file —
+actor stays legacy in C1; interrupted → paused/stopped/failed mapping; first-terminal-wins races between
+pause, stop, timeout and completion; N7 retry after a failed POST and after a boot mid-delivery, with
+exactly one parent record). Smoke (mock model): a delegate job whose child runs `pwd` and writes a file —
 the file lands in the worktree, not the parent checkout (U3); the parent gets the N7 result, rendered via
 N4, and replies after its own turn ends (U1); pause → resume → completion; 30-min timeout path with a
 shortened timeout injected.
@@ -289,11 +361,11 @@ shortened timeout injected.
 | A | A1 server | `opencode.mjs`, `streamInterp.mjs`, `rpc.mjs` (N1), `src/shared/{api.ts,types.ts}` (N1), c1-smoke | renderer, mobile |
 | A | A2 desktop | `src/renderer/**`, `AGENTS.md` (queued-message section) | server, shared, mobile |
 | A | A3 iOS | `mobile/native/**` | everything else |
-| B | B1 server | `opencode.mjs`, `rpc.mjs`, `delegate.mjs` (adoption + origin), `src/shared/opencodeV2.mjs` (N4), `src/shared/{api.ts,types.ts}` (N2–N5), N3 reader (new module), smoke | renderer, mobile (except the N4 decode test, which B1 adds under `mobile/native/**Tests**` only) |
+| B | B1 server | `opencode.mjs`, `rpc.mjs`, `delegate.mjs` (`startCommandJob`, adoption, no-worktree retention, `delegate:open-session`), `commandOrigins.mjs` (window hooks for adoption), `index.mjs` (pump: raw `session.created` / `session.execution.*` feed, lifecycle map, reconnect reconcile), `src/shared/opencodeV2.mjs` (N4), `src/shared/{api.ts,types.ts}` (N2–N6 + `delegate:open-session`), N3 reader (new module), smoke | renderer; mobile except the N4 decode test under the iOS test target |
 | B | B2 desktop | `src/renderer/**`, `AGENTS.md` | server, shared |
-| C | C1 | `delegate.mjs`, `opencode.mjs` (create/move helpers), `promptDelivery.mjs` (only to stop routing job completions), smoke | renderer, mobile, CTO modules |
+| C | C1 | `delegate.mjs`, `opencode.mjs` (create/move/delete-session helpers), `index.mjs` (pump wiring only if B1's feed needs extending), `promptDelivery.mjs` (only to stop routing ordinary-parent job completions), smoke | renderer, mobile, `cto*.mjs` |
 | C | C2 | `delegate.mjs`, `cto*.mjs` job dispatch call sites | renderer, mobile |
-| D | D1 | `package.json`/lockfile, `opencode.mjs`, `upgradeV2.mjs` (opencode calls), `tsconfig.server.json`, `package.json` typecheck script, tests | everything else |
+| D | D1 | `package.json` + lockfile (dependency + `typecheck` script), new `tsconfig.server.json` (and `tsconfig.node.json` only if a reference is needed), `opencode.mjs`, `upgradeV2.mjs` (opencode calls), `scripts/release/pack.mjs` only if the tarball misses the dependency, tests | everything else |
 
 Within a stage, slices run in parallel in separate worktrees on the attached volume
 (`/mnt/HC_Volume_105783934/dev-cache/wt/…`), coding against §1; the orchestrator merges server → desktop
