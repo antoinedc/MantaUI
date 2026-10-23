@@ -33,12 +33,28 @@ it; if not, keep edits to those functions minimal and additive so either order m
 
 ## 1. Pinned contracts (code against these, not against each other's code)
 
-**K1 — prompt delivery.** `opencode:prompt` and `opencode:run-command` inputs gain an
-optional `delivery?: "steer" | "queue"`. For ordinary sessions the server passes it
-straight to V2 (`POST /api/session/{id}/prompt` / `.../command` body `delivery`). For CTO
-conversation sessions (the `ctoConversation.isConversationSession` branch in `rpc.mjs`)
-the field is **dropped** before `admitDirect` / `admitCommand` — admission owns ordering
-there. `src/shared/api.ts` input types gain the field.
+**K1 — prompt delivery.** The RPC inputs of `opencode:prompt` and `opencode:run-command`
+gain an optional `delivery?: "steer" | "queue"`. Client signatures (`src/shared/api.ts`):
+- `opencodePrompt(sessionId, text, model?, attachments?, mentions?, agent?, opts?: { delivery?: "steer" | "queue" })`
+  — a new 7th positional param; every existing caller is untouched. `httpApi.ts` packs it
+  as `{ ..., delivery: opts?.delivery }`.
+- `opencodeRunCommand(input)` — `input` gains `delivery?: "steer" | "queue"`.
+
+Server: for ordinary sessions `delivery` goes straight to V2 (`POST /api/session/{id}/prompt`
+/ `.../command` body field `delivery`). **When `delivery` is set, `sendPrompt` /
+`runCommand` skip `syncSessionControls` entirely** — a steered message never switches the
+session's model or agent mid-turn (today's omitted-agent rule would otherwise flip a plan
+turn back to build). The composer's model/agent choice applies from the next idle send.
+For CTO conversation sessions (the `ctoConversation.isConversationSession` branch in
+`rpc.mjs`) `delivery` is **dropped** before `admitDirect` / `admitCommand` — admission owns
+ordering there.
+
+`sendPrompt` must always post a message `id`: the caller's `messageID` when given, else a
+freshly minted one (V2 requires `^msg_`; reuse whatever generator the composer's
+optimistic messageID / the admission path already uses — `ctoAdmission.mjs` mints
+`msg_${randomUUID()}`). It records every id it posted in a short-lived per-session set
+("our prompt ids", TTL 60 s) used by §3. The smoke (§8) must confirm transcript order is
+unchanged with minted ids.
 
 **K2 — inbox item shape** (shared type `OpencodeInboxItem` in `src/shared/types.ts`):
 ```ts
@@ -54,31 +70,56 @@ Only `type: "user"` inbox entries are surfaced. Synthetic / compaction / move en
 never shown to clients.
 
 **K3 — `inbox` stream frame.** New sub `"inbox"` added to the stream sub union in
-`src/shared/types.ts`: `{ sub: "inbox", sessionId, payload: { items: OpencodeInboxItem[] } }`
-— always the FULL current list of pending user items for that session, oldest first (an
-empty list means "nothing pending"). The interpreter keeps a per-session snapshot and
-re-emits it on every `session.inbox.enqueued` / `.delivered` / `.cancelled` /
-`.delivery.changed` for that session, and on reconnect resync (re-read via
-`GET /api/session/{id}/inbox`). It is additive: iOS ignores unknown subs (the implementer
-must confirm every Swift `switch` over frame subs has a `default:`).
+`src/shared/types.ts`:
+`{ sub: "inbox", sessionId, payload: { rev: number, items: OpencodeInboxItem[] } }` —
+always the FULL current list of pending user items for that session, oldest first (empty
+list = nothing pending). `rev` is a per-session counter that increases on every change; a
+client keeps the payload with the highest `rev` it has seen for the session and ignores
+older ones (that is the stale-response rule for the RPC below too).
+
+The **interpreter is the single source of truth**; clients never build the list from raw
+events. Server algorithm (pure, unit-tested in isolation):
+- A session's snapshot is either `unknown` or `known`. It becomes `known` only by
+  **hydration**: `GET /api/session/{id}/inbox`. Hydration is triggered by the first inbox
+  event for an unknown session, by `opencode:inbox` for an unknown session, and for every
+  known session on reconnect resync (`resyncAfterReconnect`), which resets them to
+  `unknown` first. One hydration in flight per session (shared promise).
+- While a hydration is in flight, inbox events for that session are recorded in a window
+  log. When the GET returns: start from its items, remove every id seen `delivered` or
+  `cancelled` in the window, add every `enqueued` item from the window not already present
+  (and not removed), apply `delivery.changed`. Set operations, so order inside the window
+  doesn't matter. Then `rev++` and emit.
+- Once `known`: `enqueued` (user items, from `data.item`) adds, `delivered` / `cancelled`
+  (by `data.inboxID`) remove, `delivery.changed` updates — each `rev++` + emit.
+- A failed hydration leaves the session `unknown`, emits nothing, and is retried on the
+  next trigger.
+It is additive for iOS: the implementer must confirm every Swift `switch` over frame subs
+falls through to a `default:` that ignores unknown subs (`MantaEventStore.swift`,
+`ChatSessionStore.swift`).
 
 **K4 — inbox RPCs** (new channels in `rpc.mjs`, methods on `Api` + `httpApi.ts`):
-- `opencode:inbox` `(sessionId)` → `{ items: OpencodeInboxItem[] }`
-- `opencode:inbox-cancel` `({ sessionId, id })` → `{ cancelled: boolean, item?: OpencodeInboxItem }`
-  `cancelled:false` when the item was already delivered or gone (V2's DELETE is a 204
-  no-op in that case, so the server decides by reading the inbox BEFORE the DELETE: the
-  item must be present, and must be absent afterwards). `item` is the pre-cancel copy so
-  the client can restore its text.
+- `opencode:inbox` `(sessionId)` → `{ rev: number, items: OpencodeInboxItem[] }` — the
+  interpreter snapshot (hydrating first if `unknown`), never a raw pass-through.
+- `opencode:inbox-cancel` `({ sessionId, id })` →
+  `{ outcome: "cancelled" | "delivered" | "unknown", item?: OpencodeInboxItem }`.
+  V2's DELETE is a 204 no-op for an item that is no longer pending, so "absent afterwards"
+  proves nothing. The outcome is decided from **authoritative evidence only**:
+  `cancelled` iff the interpreter observes `session.inbox.cancelled` for that id (wait up
+  to 3 s after the DELETE returns); `delivered` iff it observes `session.inbox.delivered`
+  for that id, or `GET /api/session/{id}/message/{id}` finds the message; otherwise
+  `unknown`. `item` (the pre-cancel copy from the snapshot) is returned only with
+  `cancelled`. Only `cancelled` lets a client restore text.
 Both are refused for CTO conversation sessions with a clear error (`"not available for the
 CTO conversation"`), never a silent empty result.
 
 **K5 — user interrupt resumes steered input.** `opencode:abort` (the user's Esc / stop
-button) calls `POST /api/session/{id}/interrupt?resume=true`. V2 then runs pending
-*steering* input as a fresh turn and keeps queued items parked — matching today's
-behaviour, where Esc ends the turn and the queued message goes out next. Every
-**internal** caller of `abortSession` (seat retry watch, delegate pause, admission, usage
-stop, CTO) keeps `resume=false`: add `interruptSession(sessionId, { resume, signal })` and
-leave `abortSession` as the `resume:false` wrapper.
+button) calls `POST /api/session/{id}/interrupt?resume=true`. Per the V2 API description,
+V2 then runs pending *steering* input and keeps *queued* prompts parked — matching today,
+where Stop ends the turn and the queued message goes out next. Every **internal** caller of
+`abortSession` (seat retry watch, delegate pause, admission, usage stop, CTO) keeps
+`resume=false`: add `interruptSession(sessionId, { resume, signal })` and keep
+`abortSession` as the `resume:false` wrapper. The desktop's existing "Aborted" notice on a
+user Stop is unchanged (it is shown today and stays shown).
 
 **K6 — command origin on the message model.** User messages produced by a slash command
 carry `info.command?: { name: string; arguments: string }` in the `{info, parts}` shape
@@ -87,8 +128,13 @@ returned by `opencode:messages` / `opencode:message`. The live `commandExecuted`
 
 **K7 — reclaim API** (served next to `/api/upgrade` in `upgradeV2.mjs`, auth required):
 - `GET /api/upgrade/reclaim` →
-  `{ available: boolean, reason: string | null, mode: "copy" | "in-place" | null, bytes: number | null }`
-- `POST /api/upgrade/reclaim` → `{ ok: true, freedBytes: number } | { ok: false, error: string }`
+  `ReclaimStatus = { available: boolean, reason: string | null, mode: "copy" | "in-place" | null, bytes: number | null, state: "none" | "running" | "failed" | "done" }`
+- `POST /api/upgrade/reclaim` → `ReclaimResult = { ok: true, freedBytes: number } | { ok: false, error: string }`
+- Client (`src/shared/api.ts` + `httpApi.ts`, next to the existing `upgradeStatus` /
+  `upgradeAction`): `upgradeReclaimStatus(): Promise<ReclaimStatus | null>` (`null` when
+  the box answers 404 — it predates the route) and `upgradeReclaim(): Promise<ReclaimResult>`
+  (never rejects on a refusal or network error, same rule as `upgradeAction`; a 401 throws
+  `AuthRequiredError` like the rest).
 
 ---
 
@@ -102,30 +148,50 @@ returned by `opencode:messages` / `opencode:message`. The live `commandExecuted`
 - Pending messages are listed in the existing "⏳ queued" ambient card, now sourced from
   the `inbox` frame (so they survive a reload and appear on a second desktop). Each row has
   an **×** that cancels it (K4). The existing "pop the last queued message back into the
-  composer" gesture becomes: cancel the newest pending item; on `cancelled:true` put its
-  text back in the composer; on `cancelled:false` say "Already sent to the agent" (never a
-  silent no-op). If the item had attachments, the composer shows "Attachments weren't
-  restored — re-attach them".
-- Esc / stop while messages are pending: K5 — the turn stops, the pending steered message
-  runs next.
+  composer" gesture becomes: cancel the newest pending item; on `outcome:"cancelled"` put
+  its text back in the composer; on `"delivered"` say "Already sent to the agent"; on
+  `"unknown"` say "Couldn't confirm it was cancelled — it may still be sent" and restore
+  nothing (restoring could make the user send it twice). If a cancelled item had
+  attachments, the composer also shows "Attachments weren't restored — re-attach them".
+- Esc / stop while messages are pending: K5 — the turn stops ("Aborted" notice as today),
+  the pending steered message runs next.
 - A pending **question** card when the user sends from the composer: today the drain
-  rejects pending questions before resending. Keep that: reject the session's pending
-  questions (existing `rejectAllPendingQuestions` path), then send with `steer`. A pending
-  **permission** is left alone; the message stays pending until the permission is answered.
-- Slash commands typed while running go through `opencode:run-command` with
-  `delivery:"steer"`; attachments and @-mentions go through as today.
+  rejects pending questions before resending. Keep that, but awaited: a new
+  `rejectPendingQuestions(): Promise<{ ok: boolean; error?: string }>` rejects the CURRENT
+  session's pending questions only (same filter as today's helper), awaits every request,
+  and removes a card only once its rejection succeeded. On any failure the message is NOT
+  sent, the composer keeps its text and attachments, and the error is shown. A question
+  that arrives after the rejection pass is left for the user. A pending **permission** is
+  left alone; the message stays pending until the permission is answered.
+- **Busy send is its own path**, not today's idle `submit()` (which optimistically sets
+  running, clears the composer and sets running false on failure):
+  - text / attachments / @-mentions → `opencodePrompt(..., { delivery: "steer" })`;
+    `/name args` for an opencode command → `opencodeRunCommand({ ..., delivery: "steer" })`.
+  - **Local** slash commands (`/clear`, `/fork`, `/compact` and every other command the
+    composer handles itself) are refused while running with a visible message ("Stop the
+    agent or wait for it to finish before /clear") — never run mid-turn, never dropped
+    silently.
+  - It never changes `running`. The composer clears only after the RPC resolves; on
+    failure the text and attachments stay and the error is shown.
+  - No optimistic transcript row: the pending card shows the message until delivery.
+  - Model / agent pickers are not applied to a steered message (K1); they apply from the
+    next idle send.
 
 ### Server (S1)
-1. `sendPrompt` / `runCommand`: forward `delivery` (already plumbed in `sendPrompt`; add to
-   `runCommand`). Thread it through `rpc.mjs` per K1.
+1. `sendPrompt` / `runCommand`: forward `delivery`, skip `syncSessionControls` when it is
+   set, always post an id + record "our prompt ids" (K1). Thread `delivery` through
+   `rpc.mjs` per K1.
 2. `interruptSession` + `abortSession` wrapper per K5; `opencode:abort` uses `resume:true`.
 3. `listInbox(sessionId)` and `cancelInboxItem(sessionId, id)` in `opencode.mjs` (V2
    `GET /api/session/{id}/inbox`, `DELETE /api/session/{id}/inbox/{inboxID}`); RPCs per K4.
-4. `streamInterp.mjs`: per-session inbox snapshot + `inbox` frame per K3. The
-   `session.inbox.enqueued` event carries the item (`data.item`); delivered / cancelled
-   carry `inboxID`. Existing `messageChanged` emission on `delivered` stays. Resync
-   (`resyncAfterReconnect` in `index.mjs`) re-reads the inbox for known sessions and emits
-   the frame.
+4. `streamInterp.mjs`: the K3 snapshot state machine (hydration via an injected
+   `listInbox`, window log, `rev`) + `inbox` frame + the K4 cancel-outcome wait. Event
+   fields: `session.inbox.enqueued` → `data.inboxID`, `data.item`; `.delivered` /
+   `.cancelled` → `data.inboxID`; `.delivery.changed` → `data.inboxID`, `data.delivery`
+   (from `docs/opencode-v2/spikes/round1-b.md` B1/B2 — confirm against the recorded corpus
+   in `src/server/fixtures/opencodeV2Events/` and the smoke; correct the spec if V2 differs).
+   Existing `messageChanged` emission on `delivered` stays. `resyncAfterReconnect` resets
+   known sessions' inbox to `unknown` and hydrates them.
 5. `src/server/push.mjs`: the `MessageAbortedError` early-return stays (the lifecycle
    adapter still emits it for interrupts); only fix comments that cite the deleted renderer
    drain.
@@ -137,13 +203,14 @@ Delete, with their tests: `messageQueue` / `setMessageQueue` / `messageQueueRef`
 call site (`chatUtils.ts`, `useSseBus.ts`, `ChatPanel.tsx`). Replace with:
 - `inboxItems` state per session, set from the `inbox` frame, seeded by `opencode:inbox`
   on open and on `resync`.
-- `submit()` while `running`: send immediately with `delivery:"steer"` (prompt or command
-  path), no optimistic transcript row (the pending card shows it until it is delivered).
-  Idle submit is unchanged.
-- The ambient card + pop-last + × per §2 behaviour. Both branches of every action are
+- `inboxItems` keeps the highest-`rev` payload per session (K3); a response or frame for a
+  session that is no longer the panel's session is dropped.
+- The busy-send path per §2 behaviour; idle submit is unchanged.
+- `rejectPendingQuestions` (awaited) replaces the fire-and-forget drain call.
+- The ambient card + pop-last + × per §2 behaviour. Every branch of every action is
   reported (AGENTS.md "never stub a control").
-- The user's own Esc must still not show the "aborted" notice (existing behaviour — keep
-  whatever mechanism handles it today; only the drain-specific suppression goes).
+- The "Aborted" notice on a user Stop stays exactly as today; only the drain-generated
+  abort suppression (`isDrainAbortError`) goes, because nothing issues that abort any more.
 `src/server/delegate.mjs` keeps its own `isToolStepBoundary` (delegate pause uses it via the
 lifecycle adapter) — update its "mirrors the renderer" comment only. That file is S1's.
 
@@ -160,17 +227,30 @@ stores a plain user message whose `text` is the expanded template, with no metad
    durable map `messageID → { name, arguments, sessionId, at }` in
    `statePath("command-origins.json")`, atomic writes, capped at 5,000 entries and 90 days
    (oldest evicted first).
-2. `runCommand` (the single chokepoint; the CTO `admitCommand` path also ends there):
-   before the POST, register a **pending** entry `{sessionId, name, arguments, at}` in a
-   per-session FIFO; drop it if the POST fails; pending entries expire after 15 s.
-3. The event pump (`index.mjs`, raw V2 events, before the interpreter) on
-   `session.inbox.enqueued` with `item.type === "user"`: if that session has a pending
-   command entry, bind it to `inboxID` (= the future message id), persist, and have the
-   interpreter emit `commandExecuted {messageID, name, arguments}` for the session.
-4. Message mapper (`listMessages` / `getMessage` → `{info, parts}`): stamp `info.command`
+2. **Correlation rule — tag only when unambiguous, otherwise leave untagged** (an untagged
+   command message just shows its full text, i.e. today's behaviour; a wrongly tagged
+   message is worse). `runCommand` (the single chokepoint; the CTO `admitCommand` path also
+   ends there) opens a **command window** for the session when its POST starts and closes
+   it 3 s after the POST returns. Every manta prompt carries an id that is in "our prompt
+   ids" (K1). The pump (`index.mjs`, raw V2 events, before the interpreter) collects every
+   `session.inbox.enqueued` user item for that session during the window whose id is NOT
+   one of our prompt ids. At window close: exactly one such id → record it; zero or more
+   than one → record nothing and log one line. Additionally record nothing if:
+   - two command windows overlap on the same session (both stay untagged);
+   - the event stream disconnected at any point during the window;
+   - the POST failed.
+   On a successful tag, the interpreter emits `commandExecuted {messageID, name, arguments}`.
+   The smoke must confirm the command's user message actually passes through
+   `session.inbox.enqueued` (if V2 writes it some other way, stop and report — do not
+   invent a different correlation).
+3. Message mapper (`listMessages` / `getMessage` → `{info, parts}`): stamp `info.command`
    (K6) on user messages whose id is in the record.
-5. Skills dispatched as prompts (PR #1607) already show `/skill args` as their text — they
+4. Skills dispatched as prompts (PR #1607) already show `/skill args` as their text — they
    are NOT recorded.
+5. Tests: concurrent prompt + command on one session (tag only the command), a foreign
+   enqueue in the window (untagged), overlapping commands (untagged), failed POST, event
+   arriving after the POST returns but inside the 3 s, event arriving after the window
+   (untagged), disconnect during the window (untagged).
 
 ### Desktop renderer (S2)
 `userCommandInfo` in `ChatPanel.tsx`: prefer `info.command`, then the live
@@ -210,22 +290,48 @@ After a copy-mode migration the untouched V1 history (tens of GB on real boxes) 
 kept V1 binary exist only for rollback. Deleting them is a one-way, user-initiated choice.
 
 ### Server
-1. `GET /api/upgrade/reclaim` (K7): `available` is true only when the migration state
-   (`~/.manta/v2-migration.json`) is `completed`, `mode === "copy"`, `reclaimedAt` is
-   unset, and `v1Db` exists. `bytes` = size of `v1Db` + its `-wal` / `-shm` + the kept
-   `~/.opencode/bin/opencode-v1` if present. `reason` is a plain sentence when not
-   available ("Nothing to reclaim", "Only available after the upgrade finishes", "This box
-   migrated in place; reclaiming space isn't supported yet", "Already reclaimed").
-2. `POST /api/upgrade/reclaim`: re-check availability; refuse if `v1Db` resolves to the
-   same path as the live V2 DB (`targetDb` / `$OPENCODE_DB`) — a hard guard with its own
-   test; delete the V1 DB files and the V1 binary; record `reclaimedAt` + `reclaimedBytes`
-   in the state file; return `freedBytes`. Never stops opencode. Partial failure → `ok:false`
-   with what was and wasn't deleted.
-3. Rollback after a reclaim: `POST /api/upgrade/rollback` answers
+The state file supplies the deletion targets, so it is NOT trusted to also prove they are
+safe to delete. Safety comes from independent checks, and every uncertainty fails closed.
+
+1. **Live DB identity, determined independently of the state file.** The live V2 DB is
+   `$OPENCODE_DB` as configured in the installed opencode **service definition** (systemd
+   unit / launchd plist / nohup fallback env — read via the helpers `upgradeV2Service.mjs`
+   already uses to write it), else opencode's default path. It must exist. If it can't be
+   determined or doesn't exist → not available ("Couldn't confirm which database is in
+   use").
+2. **Allowed targets — a closed list, nothing else is ever deleted:** `V`, `V-wal`, `V-shm`
+   where `V = realpath(state.v1Db)`, and `realpath(~/.opencode/bin/opencode-v1)`. Each target
+   must: have basename exactly `opencode.db` / `opencode.db-wal` / `opencode.db-shm` /
+   `opencode-v1`; for the DB files, live in the same directory as the live DB (after
+   realpath); be a regular file (`lstat` of the unresolved path is not a symlink, and the resolved path
+   is a regular file); and differ from
+   the live DB and its `-wal` / `-shm` both by realpath AND by `(dev, ino)`. Any check
+   failing → not available, nothing deleted.
+3. **Availability** (`GET`): migration `state === "completed"`, `mode === "copy"`, no
+   upgrade/retry/rollback in progress, `reclaim.state` not `done`, at least one allowed
+   target present. `bytes` = sum of present targets. `reason` is a plain sentence when not
+   available ("Only available after the upgrade finishes", "This box migrated in place;
+   reclaiming space isn't supported yet", "Already reclaimed", "Nothing to reclaim",
+   "Couldn't confirm which database is in use"). `state` mirrors `reclaim.state` (`none`
+   when absent).
+4. **Durable, resumable reclaim** (`POST`): serialized with the upgrade engine's own lock
+   (no reclaim while retry/rollback runs, and vice versa). Re-run the checks, then write
+   `reclaim: { state: "running", startedAt, targets: [...] }` to the state file BEFORE the
+   first deletion. Delete targets one by one, recording each as removed. All removed →
+   `state: "done"`, `doneAt`, `freedBytes`. Any error → `state: "failed"` with the remaining
+   targets; `GET` stays `available` for the remaining ones so the user can retry. A
+   manta-server restart mid-reclaim leaves `running` → treated as `failed` on load. A
+   target already missing counts as removed. Never stops opencode.
+5. **Rollback is refused from the first destructive step**: once `reclaim` exists in any
+   state, `POST /api/upgrade/rollback` answers
    `{ok:false, error:"Rollback is no longer possible: the old history was deleted to free space."}`
    without touching anything.
-4. Deps (fs, paths) injected like the rest of `upgradeV2.mjs`; tests cover every
-   availability reason, the same-path guard, partial failure, and rollback-after-reclaim.
+6. Deps (fs incl. realpath/stat/unlink, service-env reader, paths) injected like the rest
+   of `upgradeV2.mjs`. Tests: every availability reason; state file pointing `v1Db` at the
+   live DB (by same path, by a symlinked parent, by a hard link / same inode); a target
+   with a wrong basename or outside the DB dir; a symlink target; live DB undeterminable;
+   partial failure then retry; restart while `running`; rollback refused in each reclaim
+   state; reclaim refused while a rollback runs.
 
 ### Desktop (Settings)
 A "Old conversation history (from before the OpenCode 2 upgrade)" row in Settings →
@@ -244,13 +350,15 @@ pattern).
 
 | Slice | Owns | Must not touch |
 |---|---|---|
-| **S1 server** | `src/server/opencode.mjs`, `streamInterp.mjs`, `rpc.mjs` (opencode channels), `index.mjs` (pump + resync only), `peers.mjs`, `push.mjs` (comments), `delegate.mjs` (comment), new `commandOrigins.mjs`, `src/shared/streamInterpretation.mjs` (+`.d.mts`), `src/shared/types.ts` (K2/K3/K6 types), `src/shared/api.ts` (K1/K4 signatures), `scripts/opencode-v2/c1-smoke.mjs`, their tests/fixtures | `src/renderer/**`, `mobile/**`, `upgradeV2*.mjs`, `AGENTS.md` |
-| **S2 desktop** | `src/renderer/**` except Settings' reclaim row, `AGENTS.md` | `src/server/**`, `src/shared/**`, `mobile/**` |
-| **S3 reclaim** | `src/server/upgradeV2.mjs` (+ test), the Settings reclaim row (+ any `httpApi.ts` / `api.ts` methods it needs — coordinate: S1 also edits `api.ts`, so S3 appends its methods in a separate block) | everything else |
+| **S1 server** | `src/server/opencode.mjs`, `streamInterp.mjs`, `rpc.mjs` (opencode channels), `index.mjs` (pump + resync only), `peers.mjs`, `push.mjs` (comments), `delegate.mjs` (comment), new `commandOrigins.mjs`, `src/shared/streamInterpretation.mjs` (+`.d.mts`), `src/shared/types.ts` (K2/K3/K6 types + IPC channel names), `src/shared/api.ts` (K1/K4 signatures), `scripts/opencode-v2/c1-smoke.mjs`, their tests/fixtures | `src/renderer/**`, `mobile/**`, `upgradeV2*.mjs`, `AGENTS.md` |
+| **S2 desktop** | `src/renderer/**` (incl. `httpApi.ts` for K1/K4) except the reclaim pieces below, `AGENTS.md` | `src/server/**`, `src/shared/**`, `mobile/**` |
+| **S3 reclaim** | `src/server/upgradeV2.mjs` (+ test), `upgradeV2Service.mjs` (read-only helper additions only), the K7 types + `Api` methods in `src/shared/api.ts` (one block next to `upgradeStatus`), the two K7 functions in `httpApi.ts` (one block next to `upgradeAction`), the Settings reclaim row | everything else |
 
-S2 codes against K1–K6 as written; until S1 lands, S2's tests use fakes of those shapes.
-S1 and S3 both append to `src/shared/api.ts`: each adds its methods as its own contiguous
-block to keep the merge trivial.
+Implementers run in parallel in separate worktrees off `feat/opencode-v2-cleanup`; the
+orchestrator merges S1 → S3 → S2. The shared files touched by two slices (`api.ts`,
+`httpApi.ts`) are edited in disjoint, pinned blocks only. S2 codes against K1–K6 as
+written; its tests use fakes of those shapes, and it may not edit `src/shared/**` — if a
+shape it needs is missing, it reports that instead of adding it.
 
 ## 8. Verification (each slice, before reporting done)
 
@@ -259,12 +367,18 @@ block to keep the merge trivial.
 - S1 live: extend `scripts/opencode-v2/c1-smoke.mjs` (pinned 2.0.30 sandbox, Haiku,
   `ANTHROPIC_API_KEY="$(cat <path from secret_provide>)"`, never the live :4096/:8787) with:
   (a) steer mid-turn → `inbox` frame with 1 item → delivered within the same execution →
-  `inbox` empty; (b) a `queue` item + cancel → `cancelled:true`, and cancel after delivery →
-  `cancelled:false`; (c) Esc with a pending steer item → `interrupt?resume=true` → the item
-  runs as the next turn; Esc with an empty inbox leaves the session idle; (d) a slash
-  command → `commandExecuted` frame and `info.command` on refetch; (e) a pending question +
-  composer send (reject then steer) → the turn continues and reads the message;
-  (f) `listActiveSessionIds` true mid-turn, false after.
+  `inbox` empty; (b) a `queue` item + cancel → `outcome:"cancelled"`, and cancel after
+  delivery → `outcome:"delivered"`; (c) Esc with a pending steer item →
+  `interrupt?resume=true` → the item runs as the next turn; Esc with an empty inbox leaves
+  the session idle; (d) a slash command → its user message passes through
+  `session.inbox.enqueued`, `commandExecuted` frame, `info.command` on refetch; a plain
+  prompt sent during the same window is NOT tagged; (e) a pending question + composer send
+  (reject then steer) → the turn continues and reads the message; (f)
+  `listActiveSessionIds` contains the session mid-turn and not after; (g) a steered send
+  after a plan-agent turn does not switch the agent; (h) transcript order with minted
+  prompt ids matches send order.
+  If any V2 behaviour the spec assumes turns out different, stop and report it rather than
+  working around it silently.
 - S2: vitest for the new inbox reducer / pop-last / cancel branches; the renderer harness
   (`tests/visual/`) still passes; `npm run build` succeeds.
 - S3: unit tests per §6; one manual run against a sandbox copy of a migration state file
