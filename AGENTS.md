@@ -1723,6 +1723,18 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
   touch / keydown on the scroller, plus a held-pointer flag. Landing within
   `FOLLOW_THRESHOLD_PX` of the bottom still re-attaches unconditionally.
 
+  **Generation seven: an upward gesture stops the follow at once, and "the
+  bottom" means the bottom.** While text streams, the follow writes
+  `scrollTop = scrollHeight` between a wheel event and the scroll it causes,
+  so the gesture's own scroll arrived back at the tail and read as "at the
+  bottom" — and the old 64px re-attach band meant a slow trackpad scroll's
+  first few-px step re-attached anyway. Together: scrolling up while text
+  streamed was impossible. Now a wheel-up / PageUp / ArrowUp / Home / upward
+  touch drag on a scrollable transcript calls `setFollowing(false)` from the
+  input event itself (`isUpwardScrollGesture`), and `FOLLOW_THRESHOLD_PX` is a
+  2px rounding allowance: the transcript auto-follows ONLY when it is all the
+  way down.
+
   **Pointer intent is "a button is held", NOT "the press landed on the
   scrollbar" — the geometric test is a no-op on the primary platform.** The
   obvious discriminator is `clientX > left + clientWidth` (the gutter the
