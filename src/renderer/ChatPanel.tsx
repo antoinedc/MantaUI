@@ -109,11 +109,11 @@ import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
-import { buildVoiceNoteMap, isReadOnlyJob } from "./chatUtils";
+import { buildVoiceNoteMap, concatUserMessageText, isReadOnlyJob } from "./chatUtils";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
-import { PendingMessagesCard } from "./PendingMessagesCard";
+import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { BackgroundRunCards } from "./BackgroundCards";
 import {
   backgroundApi,
@@ -198,6 +198,14 @@ type Props = {
   // composer (setInput); it does NOT submit. The user reviews + hits Enter.
   seedPrompt?: { text: string };
 };
+
+/** How long an idle send's transient inbox item may stay out of the pending card. */
+const IDLE_SEND_HIDE_MS = 5000;
+/** How long a message sent into a running turn keeps its own "sending" row after the box accepted it, if the box's list never shows it (delivered at once). */
+const SENT_ROW_LINGER_MS = 1500;
+/** After an idle send's request returns, how long new inbox items still count as that send's. */
+const IDLE_SEND_SETTLE_MS = 3000;
+const mintMessageId = () => `msg_${crypto.randomUUID().replaceAll("-", "")}`;
 
 export function ChatPanel({
   sessionId,
@@ -737,6 +745,65 @@ export function ChatPanel({
 
 
   // ===== Pending messages (V2 inbox) =====
+  // Two client-side adjustments to the box's list, both about messages THIS
+  // panel sent:
+  //   - a message sent into a running turn shows in the card AT ONCE, marked
+  //     "sending…", instead of after the round trip (which is long enough to
+  //     look like the send did nothing). It is replaced by the box's own row
+  //     (same id) when that arrives, or simply goes once the send settled;
+  //   - an IDLE send also passes through the box's inbox for a moment before it
+  //     starts its turn. It is already shown as the optimistic transcript row,
+  //     so the inbox items that appear around an idle send are not shown in the
+  //     card (no "pending" flash on an ordinary send).
+  const [localPending, setLocalPending] = useState<Array<PendingCardItem & { settledAt?: number }>>([]);
+  const [idleHiddenIds, setIdleHiddenIds] = useState<ReadonlySet<string>>(() => new Set());
+  const idleSendWindowRef = useRef<{ known: Set<string>; until: number } | null>(null);
+  const inboxItemsRef = useRef<OpencodeInboxItem[]>([]);
+  const localPendingRef = useRef(localPending);
+  localPendingRef.current = localPending;
+  inboxItemsRef.current = inboxItems;
+
+  // Reconcile both adjustments with every new inbox list.
+  useEffect(() => {
+    const win = idleSendWindowRef.current;
+    if (win && Date.now() <= win.until) {
+      const mine = new Set(localPendingRef.current.map((l) => l.id));
+      const fresh = inboxItems.filter((i) => !win.known.has(i.id) && !mine.has(i.id)).map((i) => i.id);
+      if (fresh.length > 0) {
+        for (const id of fresh) win.known.add(id);
+        setIdleHiddenIds((prev) => new Set([...prev, ...fresh]));
+        // Never hidden for long: an item still pending after this really is
+        // waiting, and the card should say so.
+        setTimeout(() => {
+          setIdleHiddenIds((prev) => {
+            const next = new Set(prev);
+            for (const id of fresh) next.delete(id);
+            return next;
+          });
+        }, IDLE_SEND_HIDE_MS);
+      }
+    }
+    // A sent row the box now lists itself (same id) has done its job; a sent
+    // slash-command row (whose message id the box mints) goes with the first
+    // list that follows its send.
+    setLocalPending((prev) => {
+      const ids = new Set(inboxItems.map((i) => i.id));
+      const next = prev.filter((l) => !(l.settledAt != null && (ids.has(l.id) || l.id.startsWith("local-"))));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [inboxItems]);
+
+  // The card's rows: the box's list (minus an idle send's transient items),
+  // then this panel's messages still on their way.
+  const cardItems = useMemo<PendingCardItem[]>(() => {
+    const real = idleHiddenIds.size > 0 ? inboxItems.filter((i) => !idleHiddenIds.has(i.id)) : inboxItems;
+    if (localPending.length === 0) return real;
+    const realIds = new Set(inboxItems.map((i) => i.id));
+    return [
+      ...real,
+      ...localPending.filter((l) => !realIds.has(l.id)).map(({ settledAt: _s, ...l }) => l),
+    ];
+  }, [inboxItems, idleHiddenIds, localPending]);
   // One action in flight per row: cancel (×, ↑ edit last) and the delivery
   // change (Send now / Wait) share the busy set, so a row's controls are all
   // disabled while any of them is awaiting the box.
@@ -1357,6 +1424,10 @@ export function ChatPanel({
   // after the box accepted it. One in flight per panel.
   const busyInFlightRef = useRef(false);
   const [busySending, setBusySending] = useState(false);
+  // Sends into a running turn run one after another (their order is the
+  // order the user sent them), but none waits for the previous one's round
+  // trip before showing: each appears in the pending card at once.
+  const busyChainRef = useRef<Promise<void>>(Promise.resolve());
   const sendWhileBusy = useCallback(async (args: {
     text: string;
     /** The composer text being submitted; null when the text came from an override (voice, /clear bridge), so there is no composer draft to clear. */
@@ -1365,7 +1436,6 @@ export function ChatPanel({
     /** "steer" = Now (Enter, the default); "queue" = After this turn (⌥Enter). */
     delivery?: "steer" | "queue";
   }) => {
-    if (busyInFlightRef.current) return; // a second Enter while one is in flight: no side effect
     const { text, draft, submitAttachments, delivery = "steer" } = args;
     const plan = planBusySend(text, MANTA_BUILTIN_NAMES, commandsRef.current);
     if (plan.kind === "refuse") {
@@ -1383,57 +1453,77 @@ export function ChatPanel({
       setSendError(unsupported);
       return;
     }
-    busyInFlightRef.current = true;
-    setBusySending(true);
-    try {
-      // A pending question blocks the turn: dismiss it first (awaited). On any
-      // failure NOTHING is sent and the composer keeps its text + attachments.
-      const dismissed = await rejectPendingQuestions();
-      if (!dismissed.ok) {
-        setSendError(dismissed.error ?? "Couldn't dismiss the pending question");
-        return;
-      }
-      setSendError(null);
-      appendPromptHistory(tmuxSession, windowIndex, text);
-      setHistoryEpoch((e) => e + 1);
-      if (plan.kind === "command") {
-        await window.api.opencodeRunCommand({
-          sessionId,
-          command: plan.name,
-          arguments: plan.args,
-          attachments: readyAttachments,
-          delivery,
-        });
-      } else {
-        const resolvedMentions = resolveAgentMentions(text, agentMentions);
-        await window.api.opencodePrompt(
-          sessionId,
-          text,
-          undefined,
-          readyAttachments,
-          resolvedMentions.length > 0 ? resolvedMentions : undefined,
-          undefined,
-          { delivery },
-        );
-      }
-      // Accepted. Clear only what was submitted: the chips always; the text
-      // only if the composer still holds exactly the submitted draft.
-      if (sentAttachments.length > 0) {
-        const ids = new Set(sentAttachments.map((a) => a.id));
-        setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
-      }
-      if (shouldClearDraft(draft, inputRef.current?.value ?? "")) {
-        setInput("");
-        setAgentMentions([]);
-      }
-      refreshInbox();
-    } catch (e) {
-      // Nothing cleared: the draft and its attachments stay for another try.
-      setSendError(String((e as Error)?.message ?? e));
-    } finally {
-      busyInFlightRef.current = false;
-      setBusySending(false);
+    const resolvedMentions = plan.kind === "command" ? [] : resolveAgentMentions(text, agentMentions);
+    const sentMentions = agentMentions;
+
+    // Show it NOW: a "sending…" row in the pending card, and the composer
+    // cleared (the submitted draft only — newer text the user typed stays).
+    // A slash command's message id is minted by the box, so its row carries a
+    // local id; a prompt carries the id it will have, so the box's own row
+    // replaces it exactly.
+    const rowId = plan.kind === "command" ? `local-${mintMessageId()}` : mintMessageId();
+    setLocalPending((prev) => [
+      ...prev,
+      { id: rowId, text, delivery, createdAt: Date.now(), attachmentCount: readyAttachments.length, sending: true },
+    ]);
+    if (sentAttachments.length > 0) {
+      const ids = new Set(sentAttachments.map((a) => a.id));
+      setAttachments((prev) => prev.filter((a) => !ids.has(a.id)));
     }
+    const clearedDraft = shouldClearDraft(draft, inputRef.current?.value ?? "");
+    if (clearedDraft) {
+      setInput("");
+      setAgentMentions([]);
+    }
+    setSendError(null);
+    appendPromptHistory(tmuxSession, windowIndex, text);
+    setHistoryEpoch((e) => e + 1);
+
+    const send = async () => {
+      try {
+        // A pending question blocks the turn: dismiss it first (awaited). On a
+        // failure nothing is sent.
+        const dismissed = await rejectPendingQuestions();
+        if (!dismissed.ok) throw new Error(dismissed.error ?? "Couldn't dismiss the pending question");
+        if (plan.kind === "command") {
+          await window.api.opencodeRunCommand({
+            sessionId,
+            command: plan.name,
+            arguments: plan.args,
+            attachments: readyAttachments,
+            delivery,
+          });
+        } else {
+          await window.api.opencodePrompt(
+            sessionId,
+            text,
+            undefined,
+            readyAttachments,
+            resolvedMentions.length > 0 ? resolvedMentions : undefined,
+            undefined,
+            { delivery, messageID: rowId },
+          );
+        }
+        // Accepted. The row stays (now settled) until the box's list shows the
+        // message, or briefly if it was delivered before ever being listed.
+        setLocalPending((prev) => prev.map((l) => (l.id === rowId ? { ...l, settledAt: Date.now() } : l)));
+        setTimeout(() => setLocalPending((prev) => prev.filter((l) => l.id !== rowId)), SENT_ROW_LINGER_MS);
+        refreshInbox();
+      } catch (e) {
+        // Not sent: the row goes, and the message comes back into the composer
+        // (if the user hasn't started a new one) with its attachments.
+        setLocalPending((prev) => prev.filter((l) => l.id !== rowId));
+        if (sentAttachments.length > 0) setAttachments((prev) => [...sentAttachments, ...prev]);
+        if (clearedDraft && draft !== null && (inputRef.current?.value ?? "") === "") {
+          setInput(draft);
+          setAgentMentions(sentMentions);
+        }
+        setSendError(`Couldn't send the message: ${String((e as Error)?.message ?? e)}`);
+      }
+    };
+    const run = busyChainRef.current.then(send);
+    busyChainRef.current = run;
+    await run;
   }, [sessionId, tmuxSession, windowIndex, agentMentions, unsupportedAttachmentsMessage, rejectPendingQuestions, refreshInbox, setAttachments, setInput, setAgentMentions, setSendError, inputRef]);
 
   // A background run (v2-next B-behaviour 3). Its own path, like sendWhileBusy:
@@ -1758,6 +1848,11 @@ export function ChatPanel({
       }
     }
 
+    // An idle send passes through the box's inbox for an instant before its
+    // turn starts; it is shown as the optimistic row above, so keep its
+    // transient inbox item out of the pending card (see cardItems).
+    const idleWindow = { known: new Set(inboxItemsRef.current.map((i) => i.id)), until: Number.POSITIVE_INFINITY };
+    idleSendWindowRef.current = idleWindow;
     try {
       if (knownCommand && slashMatch) {
         await window.api.opencodeRunCommand({
@@ -1793,6 +1888,7 @@ export function ChatPanel({
         prev ? prev.filter((m) => m.info.id !== optimisticUserId) : prev,
       );
     }
+    idleWindow.until = Date.now() + IDLE_SEND_SETTLE_MS;
     // tmuxSession/windowIndex key the per-window prompt-history list (line
     // 720) — if they moved to a different owning window, submit must use the
     // NEW window's history, so they're deps. activeTodos + the session ops
@@ -2583,17 +2679,24 @@ export function ChatPanel({
   // renders (a fresh `{name, arguments}` per render would defeat React.memo on
   // MessageRow).
   const userCommandInfo = useMemo<
-    Map<string, { name: string; arguments: string }>
+    Map<string, { name: string; arguments: string; inline?: true }>
   >(() => {
-    const out = new Map<string, { name: string; arguments: string }>();
+    const out = new Map<string, { name: string; arguments: string; inline?: true }>();
     if (!messages) return out;
     for (const m of messages) {
       if (m.info.role !== "user") continue;
       const origin = m.info.command ?? commandByMessageId.get(m.info.id);
-      if (origin) out.set(m.info.id, origin);
+      if (origin) {
+        out.set(m.info.id, origin);
+        continue;
+      }
+      // A slash command sent as its own text (a skill, or a message typed as
+      // `/name args`): the bubble keeps the composer's colour on `/name`.
+      const token = parseSlashToken(concatUserMessageText(m), commands, MANTA_BUILTIN_NAMES);
+      if (token) out.set(m.info.id, { name: token.name, arguments: "", inline: true });
     }
     return out;
-  }, [messages, commandByMessageId]);
+  }, [messages, commandByMessageId, commands]);
 
   // BET-837: user-message-id → voice-note map. Passed to MessageRow exactly
   // like userCommandInfo — an O(1) Map lookup in messages.map, never an object
@@ -3059,11 +3162,11 @@ export function ChatPanel({
           <X size={14} aria-hidden="true" />
         </button>
       </div>));
-    if (inboxItems.length > 0) list.push(amb("pending",
+    if (cardItems.length > 0) list.push(amb("pending",
       <MeasureColumn>
         <div className="shrink-0 pb-2">
           <PendingMessagesCard
-            items={inboxItems}
+            items={cardItems}
             running={running}
             busyIds={inboxBusyIds}
             onSendNow={sendInboxNow}
@@ -3133,7 +3236,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, inboxItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   if (error || transcriptLoadError) {

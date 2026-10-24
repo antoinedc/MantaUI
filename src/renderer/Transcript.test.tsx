@@ -349,6 +349,28 @@ describe("Transcript follow state", () => {
     h.unmount();
   });
 
+  it("REGRESSION: a wheel-up stops the follow AT ONCE, so a streamed delta can't undo it before its scroll lands", () => {
+    // While text streams, the follow writes scrollTop = scrollHeight between the
+    // wheel event and the scroll it causes; the gesture's scroll then arrives
+    // back at the tail. The wheel itself must stop the follow.
+    const { h, el, changes } = mountFollowing();
+    scrollTo(el, 1500);
+    fire(el, new WheelEvent("wheel", { deltaY: -4 }));
+    expect(changes.at(-1)).toBe(false);
+    // …and a slow scroll a few px up stays detached.
+    scrollTo(el, 1490);
+    expect(changes.at(-1)).toBe(false);
+    h.unmount();
+  });
+
+  it("a wheel-DOWN never stops the follow", () => {
+    const { h, el, changes } = mountFollowing();
+    scrollTo(el, 1500);
+    fire(el, new WheelEvent("wheel", { deltaY: 40 }));
+    expect(changes).not.toContain(false);
+    h.unmount();
+  });
+
   it("re-attaches when a scroll lands back at the bottom, gesture or not", () => {
     const { h, el, changes } = mountFollowing();
     scrollTo(el, 1500);

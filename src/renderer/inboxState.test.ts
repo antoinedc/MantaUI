@@ -184,8 +184,8 @@ describe("pending card helpers", () => {
     expect(inboxBadgeLabel({ delivery: "steer" })).toBe("Now");
     expect(inboxBadgeLabel({ delivery: "queue" })).toBe("After this turn");
   });
-  it("row note: only Now rows, 'at next step' while running, 'runs next' once stopped", () => {
-    expect(inboxRowNote({ delivery: "steer" }, true)).toBe("at next step");
+  it("row note: only Now rows, 'sent after this step' while running, 'runs next' once stopped", () => {
+    expect(inboxRowNote({ delivery: "steer" }, true)).toBe("sent after this step");
     expect(inboxRowNote({ delivery: "steer" }, false)).toBe("runs next");
     expect(inboxRowNote({ delivery: "queue" }, true)).toBeNull();
     expect(inboxRowNote({ delivery: "queue" }, false)).toBeNull();

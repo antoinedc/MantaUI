@@ -155,6 +155,7 @@ import {
   inboxReasonLabel,
   scrollElementToTail,
   classifyFollowOnScroll,
+  isUpwardScrollGesture,
   createUserScrollIntent,
   hasUserScrollIntent,
   releaseUserScrollIntent,
@@ -5292,6 +5293,32 @@ describe("classifyFollowOnScroll", () => {
     expect(
       classifyFollowOnScroll({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }, 300, true),
     ).toBe(true);
+  });
+});
+
+describe("follow: only when all the way down", () => {
+  it("REGRESSION: a small scroll-up near the bottom is NOT re-attached (a slow trackpad gesture)", () => {
+    // 20px above the bottom after a user gesture: was inside the old 64px band
+    // and re-attached, so the next streamed delta yanked the user back down.
+    expect(
+      classifyFollowOnScroll({ scrollTop: 880, scrollHeight: 1000, clientHeight: 100 }, 900, true),
+    ).toBe(false);
+  });
+
+  it("isUpwardScrollGesture: wheel up / PageUp / ArrowUp / Home / finger dragging down count; down gestures don't", () => {
+    const m = { scrollTop: 900, scrollHeight: 1000, clientHeight: 100 };
+    expect(isUpwardScrollGesture({ type: "wheel", deltaY: -3 }, m)).toBe(true);
+    expect(isUpwardScrollGesture({ type: "wheel", deltaY: 3 }, m)).toBe(false);
+    expect(isUpwardScrollGesture({ type: "keydown", key: "PageUp" }, m)).toBe(true);
+    expect(isUpwardScrollGesture({ type: "keydown", key: "ArrowUp" }, m)).toBe(true);
+    expect(isUpwardScrollGesture({ type: "keydown", key: "Home" }, m)).toBe(true);
+    expect(isUpwardScrollGesture({ type: "keydown", key: "PageDown" }, m)).toBe(false);
+    expect(isUpwardScrollGesture({ type: "touchmove" }, m, 12)).toBe(true);
+    expect(isUpwardScrollGesture({ type: "touchmove" }, m, -12)).toBe(false);
+  });
+
+  it("isUpwardScrollGesture: nothing counts when the transcript can't scroll", () => {
+    expect(isUpwardScrollGesture({ type: "wheel", deltaY: -100 }, { scrollTop: 0, scrollHeight: 300, clientHeight: 300 })).toBe(false);
   });
 });
 

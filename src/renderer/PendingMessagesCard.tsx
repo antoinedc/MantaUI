@@ -15,6 +15,9 @@
 import { memo } from "react";
 import { X } from "lucide-react";
 import type { OpencodeInboxItem } from "../shared/types";
+
+/** A row: the box's pending item, or a message this panel is still sending (`sending`). */
+export type PendingCardItem = OpencodeInboxItem & { sending?: boolean };
 import {
   STOPPED_FOOTER_TEXT,
   inboxBadgeLabel,
@@ -24,8 +27,10 @@ import {
 } from "./inboxState";
 
 const BADGE_BASE = "shrink-0 whitespace-nowrap rounded-full border px-2 text-micro tracking-normal font-semibold";
-const BADGE_NOW = "border-accent/40 bg-accent-bg text-accent-tx";
 const BADGE_AFTER = "border-border bg-fill text-text-faint";
+// Wait and × share one quiet bordered button style; Send now is the accented one.
+const ROW_BUTTON =
+  "shrink-0 inline-flex items-center justify-center rounded-sm border border-border bg-fill px-2 py-px text-text-muted hover:text-text hover:bg-fill-hover disabled:opacity-50";
 
 export const PendingMessagesCard = memo(function PendingMessagesCard({
   items,
@@ -36,7 +41,7 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
   onCancel,
   onEditLast,
 }: {
-  items: ReadonlyArray<OpencodeInboxItem>;
+  items: ReadonlyArray<PendingCardItem>;
   running: boolean;
   /** Rows with an action in flight (cancel or delivery change): all their controls are disabled. */
   busyIds: ReadonlySet<string>;
@@ -46,7 +51,7 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
   onEditLast: () => void;
 }) {
   const [lead, rest] = pendingHeaderText(items.length).split(" · ");
-  const canEditLast = items.some((i) => !busyIds.has(i.id));
+  const canEditLast = items.some((i) => !i.sending && !busyIds.has(i.id));
   return (
     <div
       className="rounded-lg border border-border bg-bg-soft overflow-hidden text-meta"
@@ -71,8 +76,9 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
       </div>
       <div>
         {items.map((item, idx) => {
-          const busy = busyIds.has(item.id);
-          const note = inboxRowNote(item, running);
+          const sending = item.sending === true;
+          const busy = sending || busyIds.has(item.id);
+          const note = sending ? "sending…" : inboxRowNote(item, running);
           const now = item.delivery === "steer";
           return (
             <div
@@ -80,10 +86,13 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
               className={`flex items-center gap-2 px-3 py-1${idx > 0 ? " border-t border-border-subtle" : ""}`}
               data-testid="inbox-row"
               data-delivery={item.delivery}
+              data-sending={sending ? "true" : undefined}
             >
-              <span className={`${BADGE_BASE} ${now ? BADGE_NOW : BADGE_AFTER}`} data-testid="inbox-badge">
-                {inboxBadgeLabel(item)}
-              </span>
+              {!now && (
+                <span className={`${BADGE_BASE} ${BADGE_AFTER}`} data-testid="inbox-badge">
+                  {inboxBadgeLabel(item)}
+                </span>
+              )}
               <span className="flex-1 min-w-0 truncate text-text" title={item.text} data-testid="inbox-text">
                 {item.text}
               </span>
@@ -93,7 +102,13 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
                 </span>
               )}
               {note && (
-                <span className="shrink-0 whitespace-nowrap text-text-faint" data-testid="inbox-note">
+                <span className="shrink-0 whitespace-nowrap text-text-faint inline-flex items-center gap-1" data-testid="inbox-note">
+                  {sending && (
+                    <span
+                      aria-hidden="true"
+                      className="w-2.5 h-2.5 rounded-full border-2 border-accent/35 border-t-accent-tx animate-spin motion-reduce:animate-none"
+                    />
+                  )}
                   {note}
                 </span>
               )}
@@ -102,7 +117,7 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
                   type="button"
                   onClick={() => onWait(item)}
                   disabled={busy}
-                  className="shrink-0 px-1 text-text-faint hover:text-text disabled:opacity-50"
+                  className={ROW_BUTTON}
                   title="Keep it for after this turn instead"
                   data-testid="inbox-wait"
                 >
@@ -124,7 +139,7 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
                 type="button"
                 onClick={() => onCancel(item)}
                 disabled={busy}
-                className="shrink-0 inline-flex items-center text-text-faint hover:text-text leading-none disabled:opacity-50"
+                className={`${ROW_BUTTON} self-stretch`}
                 title="Cancel this message"
                 aria-label="Cancel this message"
                 data-testid="inbox-cancel"

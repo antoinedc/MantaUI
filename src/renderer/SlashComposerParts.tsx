@@ -9,11 +9,11 @@
 //     undo, paste, autosize are all untouched); the overlay is aria-hidden,
 //     pointer-events:none, and carries the same font / size / line-height /
 //     wrapping, so the coloured token lands exactly on the glyphs it covers.
-//     Everything outside the token is transparent, and the token's own box is
-//     opaque (the composer's card colour under the accent tint) so the
-//     textarea's plain glyphs underneath are covered rather than doubled. The
-//     token never changes weight or gets horizontal padding — either would
-//     shift its width and break the character-for-character alignment.
+//     While it is shown the textarea's own glyphs are transparent (InputArea
+//     keeps only its caret and selection), so the overlay draws the WHOLE text:
+//     the token in the accent colour, the rest in the normal text colour — no
+//     background tint, and no doubled glyphs. The token never changes weight or
+//     gets padding — either would shift its width and break the alignment.
 //   - BackgroundRunBox: the "Run in background" checkbox that slides in under
 //     the input while the text is a valid opencode command / skill.
 
@@ -31,16 +31,9 @@ import {
 // The textarea's own metrics (InputArea): font-sans, text-prose, 1.5 line
 // height, pre-wrap with break-word wrapping.
 const OVERLAY_CLASS =
-  "absolute inset-0 overflow-hidden pointer-events-none whitespace-pre-wrap break-words font-sans text-prose text-transparent";
+  "absolute inset-0 overflow-hidden pointer-events-none whitespace-pre-wrap break-words font-sans text-prose text-text";
 
-const TOKEN_STYLE: React.CSSProperties = {
-  // Opaque card colour first, accent tint on top: covers the textarea glyphs
-  // beneath instead of drawing a second copy over them.
-  backgroundColor: "rgb(var(--card-rgb))",
-  backgroundImage: "linear-gradient(var(--accent-bg), var(--accent-bg))",
-  color: "var(--accent-tx)",
-  borderRadius: 4,
-};
+const TOKEN_STYLE: React.CSSProperties = { color: "var(--accent-tx)" };
 
 export const SlashHighlight = memo(
   forwardRef<HTMLDivElement, { text: string; token: SlashToken }>(function SlashHighlight(

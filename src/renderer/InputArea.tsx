@@ -588,7 +588,13 @@ export function InputArea({
           rows={1}
           spellCheck={false}
           className="block w-full resize-none bg-transparent text-text text-prose focus:outline-none placeholder:text-text-faint font-sans min-w-0"
-          style={{ maxHeight: "140px", lineHeight: "1.5" }}
+          style={{
+            maxHeight: "140px",
+            lineHeight: "1.5",
+            // The highlight overlay draws the text while a slash command is
+            // recognised; the textarea keeps only its caret + selection.
+            ...(slashToken ? { color: "transparent", caretColor: "rgb(var(--tx1-rgb))" } : {}),
+          }}
         />
         </div>
         {/* The desktop mic + attach buttons moved DOWN into the meta row

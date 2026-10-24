@@ -1104,7 +1104,9 @@ export interface Api {
     // K1: how the message joins a RUNNING turn. `steer` = into the turn at its
     // next step; `queue` = after the turn. Set → the box leaves the session's
     // model/agent alone. Omit for an ordinary idle send.
-    opts?: { delivery?: OpencodeDelivery },
+    // `messageID` (`msg_…`): the id the message will have, minted by the caller
+    // so it can recognise its own message in the pending list.
+    opts?: { delivery?: OpencodeDelivery; messageID?: string },
   ): Promise<void>;
   // The user's Stop: ends the turn; pending steered input then runs (K5).
   opencodeAbort(sessionId: string): Promise<void>;

@@ -54,6 +54,7 @@ import {
   formatTokens,
   scrollElementToTail,
   classifyFollowOnScroll,
+  isUpwardScrollGesture,
   createUserScrollIntent,
   hasUserScrollIntent,
   releaseUserScrollIntent,
@@ -476,7 +477,7 @@ export type TranscriptProps = {
     }
   >;
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
-  userCommandInfo: Map<string, { name: string; arguments: string }>;
+  userCommandInfo: Map<string, { name: string; arguments: string; inline?: true }>;
   voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
   // BET-1148: messageID → inline media entry (from the `media` bus events),
   // memoized at ChatPanel scope like the other per-message maps.
@@ -756,8 +757,17 @@ export function Transcript({
     if (!el) return;
     const intent = createUserScrollIntent();
     let prevScrollTop = el.scrollTop;
-    const mark = () => {
+    let touchY: number | null = null;
+    const mark = (ev?: Event) => {
       intent.lastInputAt = Date.now();
+      if (!ev) return;
+      let touchDeltaY: number | undefined;
+      if (ev.type === "touchstart" || ev.type === "touchmove") {
+        const y = (ev as TouchEvent).touches?.[0]?.clientY;
+        if (ev.type === "touchmove" && touchY != null && y != null) touchDeltaY = y - touchY;
+        touchY = y ?? null;
+      }
+      if (isUpwardScrollGesture(ev as WheelEvent & KeyboardEvent, el, touchDeltaY)) onFollowingChange(false);
     };
     // Every pointer-driven scroll (thumb drag, click-to-page in the track,
     // drag-select autoscroll) holds a button for the scrolls it causes; a

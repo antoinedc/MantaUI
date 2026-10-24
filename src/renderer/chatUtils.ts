@@ -4964,9 +4964,14 @@ export function scrollElementToTail(el: HTMLElement | null): void {
  * it can never reach this function, and only a real position change can turn
  * following off.
  *
- * - Landing within FOLLOW_THRESHOLD_PX of the bottom always means following,
- *   whatever caused it (the user scrolling back down, our own tail scroll, or
- *   the scroller clamping after the transcript shrank on /compact).
+ * - Landing AT the bottom (within FOLLOW_THRESHOLD_PX, a sub-line rounding
+ *   allowance) always means following, whatever caused it (the user scrolling
+ *   back down, our own tail scroll, or the scroller clamping after the
+ *   transcript shrank on /compact). It used to be 64px: a slow trackpad
+ *   scroll-up moves a few px per event, so the first event of every gesture
+ *   landed inside 64px, re-attached, and the next streamed delta yanked the
+ *   user back down — while text streamed, scrolling up was impossible. The
+ *   transcript follows ONLY when it is all the way down.
  * - Moving UP while away from the bottom stops it — but ONLY when the move
  *   came from the user (`userIntent`). A scroll event is not by itself
  *   evidence of intent: react-virtuoso writes to the scroller behind our back
@@ -4978,7 +4983,7 @@ export function scrollElementToTail(el: HTMLElement | null): void {
  *   stopped following with no user input at all. See the intent tracker in
  *   Transcript.tsx for what counts as a gesture.
  */
-export const FOLLOW_THRESHOLD_PX = 64;
+export const FOLLOW_THRESHOLD_PX = 2;
 
 export function classifyFollowOnScroll(
   m: { scrollTop: number; scrollHeight: number; clientHeight: number },
@@ -5027,6 +5032,29 @@ export function hasUserScrollIntent(intent: UserScrollIntent, now: number): bool
   // a held FLAG and not a geometric test of where the press landed.
   if (intent.pointerDown) return true;
   return now - intent.lastInputAt <= USER_SCROLL_INTENT_WINDOW_MS;
+}
+
+/**
+ * Does this input event ask to move the transcript UP? Such a gesture stops the
+ * follow AT ONCE, before its scroll lands. Waiting for the scroll event is too
+ * late while text streams: content growth makes the follow write `scrollTop =
+ * scrollHeight` between the wheel event and the scroll it causes, so the
+ * gesture's own scroll arrives already back at the tail and reads as "at the
+ * bottom" — the user's scroll-up is undone every time. Only a scroller that can
+ * actually scroll counts (a gesture on a transcript shorter than its viewport
+ * must not stop a follow that the next growth will need).
+ */
+export function isUpwardScrollGesture(
+  ev: { type: string; deltaY?: number; key?: string },
+  m: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  touchDeltaY?: number,
+): boolean {
+  if (m.scrollHeight - m.clientHeight <= FOLLOW_THRESHOLD_PX) return false;
+  if (ev.type === "wheel") return (ev.deltaY ?? 0) < 0;
+  if (ev.type === "keydown") return ev.key === "PageUp" || ev.key === "ArrowUp" || ev.key === "Home";
+  // A finger moving DOWN the screen scrolls the content up.
+  if (ev.type === "touchmove") return (touchDeltaY ?? 0) > 0;
+  return false;
 }
 
 /**
