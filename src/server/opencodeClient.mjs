@@ -66,6 +66,28 @@ export function plainError(label, f) {
 }
 
 /**
+ * The client accepts a 2xx only as `application/json` (or a bare 204); the code it replaces
+ * parsed any 2xx body as JSON whatever its header said, and treated an empty one as "nothing".
+ * Keep that: a 2xx that is not labelled JSON but IS JSON is relabelled, and an empty one becomes a
+ * 204. (A well-behaved opencode never hits this; a proxy or a thin test double can.)
+ * @param {Response} res
+ * @returns {Promise<Response>}
+ */
+async function asJsonResponse(res) {
+  if (NULL_BODY_STATUS.has(res.status) || /json/i.test(res.headers.get("content-type") ?? "")) return res;
+  const text = await res.text();
+  if (text === "") return new Response(null, { status: 204 });
+  try {
+    JSON.parse(text);
+  } catch {
+    return new Response(text, { status: res.status, headers: res.headers });
+  }
+  const headers = new Headers(res.headers);
+  headers.set("content-type", "application/json");
+  return new Response(text, { status: res.status, headers });
+}
+
+/**
  * @param {{ send: (url: string, init: RequestInit) => Promise<Response>, resolveUrl: (pathAndQuery: string) => string }} deps
  *   send       — the authenticated transport (resolves its own transport + auth per request)
  *   resolveUrl — the CURRENT base URL + `/api/...`, called for every request
@@ -98,8 +120,9 @@ export function createOcClient({ send, resolveUrl }) {
       throw e;
     }
     if (res.ok) {
-      if (ctx) ctx.ok = res;
-      return res;
+      const lenient = await asJsonResponse(res);
+      if (ctx) ctx.ok = lenient;
+      return lenient;
     }
     const text = await res.text();
     if (ctx) ctx.failure = { status: res.status, text, headers: res.headers };

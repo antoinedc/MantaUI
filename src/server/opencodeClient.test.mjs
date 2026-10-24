@@ -234,6 +234,19 @@ test("a void operation succeeds on ANY 2xx (the client alone would only take a 2
   }
 });
 
+test("a 2xx that is JSON but not labelled JSON still parses; an empty 2xx is nothing (as before the client)", async () => {
+  await withV2(
+    {
+      "GET /api/session/ses_a": () => new Response(JSON.stringify({ data: { id: "ses_a", location: { directory: "/d" } } }), { status: 200 }),
+      "DELETE /api/session/ses_b": () => new Response("", { status: 200 }),
+    },
+    async () => {
+      assert.equal((await oc.readSession("ses_a")).state, "found");
+      await oc.deleteSessionRaw("ses_b");
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // The wire: method, path, query and body of every migrated call
 // ---------------------------------------------------------------------------

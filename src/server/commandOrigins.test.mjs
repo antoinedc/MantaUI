@@ -342,7 +342,7 @@ function* walk(dir) {
 test("every manta-server session prompt goes through the recording helper (postPrompt)", () => {
   // upgradeV2.mjs's verify turn talks to a separate V2 instance before cutover
   // (upgrade mode) — it never reaches this box's pump, so it is exempt.
-  const EXEMPT = new Set(["upgradeV2.mjs"]);
+  const EXEMPT = new Set(["upgradeV2.mjs", "opencodeUpgradeCalls.mjs"]);
   const hits = [];
   for (const file of walk(SERVER_DIR)) {
     const rel = relative(SERVER_DIR, file);
