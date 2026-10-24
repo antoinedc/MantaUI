@@ -43,6 +43,13 @@ function runningJob(id, over = {}) {
     result: null,
     error: null,
     filesChanged: null,
+    engine: "v2",
+    completionOwner: "manta",
+    attempt: 1,
+    launchState: "running",
+    submittedAt: 1,
+    completionMessageId: `msg_${id}`,
+    completionDelivery: null,
     ...over,
   };
 }
@@ -115,16 +122,14 @@ test("concurrent delegate starts never exceed MAX_RUNNING_JOBS", async () => {
     load,
     save,
     publish() {},
-    deliver: async () => ({ delivered: true }),
     gitAddWorktree: async () => {
       throw new Error("not a git repository");
     },
     listProjects: async () => [{ tmuxSession: "proj", windows: [parentWin] }],
-    newWindow: async (input) => ({
-      sessionId: `child-${input.windowName}`,
-      windowIndex: 1,
-      projects: [{ tmuxSession: "proj", windows: [parentWin] }],
-    }),
+    createChildSession: async (i) => ({ id: i.id }),
+    moveSession: async () => {},
+    sendChildPrompt: async () => {},
+    newWindow: async () => ({ windowIndex: 1 }),
   };
 
   const N = del.MAX_RUNNING_JOBS + 3;
@@ -144,9 +149,9 @@ test("concurrent delegate starts never exceed MAX_RUNNING_JOBS", async () => {
 
 // ---------------------------------------------------------------------------
 // P2-1 (delegate): a completing job racing the timeout sweep is not flipped to
-// "timed out" and is not notified of a false timeout. finishJob holds the lock
-// through its delivery; the sweep queued behind it re-reads the now-done job
-// and must leave it terminal.
+// "timed out" and is not notified of a false timeout. The job's terminal write is
+// ONE write under the lock; a sweep that starts right after it (its result is
+// being posted) re-reads the now-done job and must leave it terminal.
 // ---------------------------------------------------------------------------
 test("a completing delegate job racing the timeout sweep is not flipped to timed out", async () => {
   const dir = await tmpDir();
@@ -158,41 +163,39 @@ test("a completing delegate job racing the timeout sweep is not flipped to timed
   await save([job]);
 
   const delivered = [];
-  let doneDeliveredResolve;
-  const doneDelivered = new Promise((r) => (doneDeliveredResolve = r));
-
-  const finishDeps = {
-    load,
-    save,
-    publish() {},
-    deliver: async (m) => {
-      delivered.push(m);
-      doneDeliveredResolve();
-      return { delivered: true };
-    },
-    listMessages: async () => [],
-    now: () => 100,
-  };
+  let sweeping = null;
   const sweepDeps = {
     load,
     save,
     publish() {},
-    deliver: async (m) => delivered.push(m),
+    postSynthetic: async (_sid, body) => delivered.push(body),
     now: () => 2_000_000, // far past RUNNING_TIMEOUT_MS for a startedAt=1 running job
     sessionExists: async () => true,
     killWindow: async () => {},
     gitRemoveWorktree: async () => ({ removed: true }),
+    abortSession: async () => {},
+  };
+  const finishDeps = {
+    load,
+    save,
+    publish() {},
+    // the terminal write has landed by the time the result is posted
+    postSynthetic: async (_sid, body) => {
+      delivered.push(body);
+      sweeping = del.sweepDelegateJobs(sweepDeps);
+    },
+    listMessages: async () => [],
+    now: () => 100,
   };
 
-  const pFinish = del.finishJob(job, "done", null, finishDeps, new Map());
-  await doneDelivered; // finishJob has persisted "done" and still holds the lock
-  const pSweep = del.sweepDelegateJobs(sweepDeps); // queued behind the lock
-  await Promise.all([pFinish, pSweep]);
+  await del.finishV2Job(job, "done", null, finishDeps);
+  await sweeping;
 
   const stored = (await load()).find((j) => j.id === "j1");
   assert.equal(stored.status, "done", "completed job is not flipped to 'timed out' by the racing sweep");
   const falseTimeouts = delivered.filter((m) => (m.text || "").includes("timed out"));
   assert.equal(falseTimeouts.length, 0, "no false timeout is notified for a completed job");
+  assert.equal(delivered.length, 1, "exactly one result");
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -263,14 +266,14 @@ test("a done job is not resurrected to running by a stale activity-poller write"
     load,
     save,
     publish() {},
-    deliver: async () => ({ delivered: true }),
+    postSynthetic: async () => {},
     listMessages: async () => [],
     now: () => 100,
   };
   const pollDeps = { load, save, publish() {}, listMessages: async () => [], now: () => Date.now() };
 
   await Promise.all([
-    del.finishJob(job, "done", null, finishDeps, new Map()),
+    del.finishV2Job(job, "done", null, finishDeps),
     del.tickActivity(pollDeps),
   ]);
 

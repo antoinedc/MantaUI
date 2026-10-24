@@ -1091,30 +1091,45 @@ and worktree all belong to it.
   message — the model must not report or guess the job's findings before
   then (this is the exact bug Claude Code had to fix). Do not soften it.
 - **Server-owned engine** (`src/server/delegate.mjs`, dependency-injected
-  pure logic + injected I/O, mirrors `capabilities.mjs`): startJob creates a
-  worktree → new chat-mode window (stamps `@manta-session-id`) → records the
-  job `running` → injects the opening prompt. Completion is detected from
-  the opencode event firehose via `observeEvent` (first idle AFTER a seen
-  busy, per-job `sawBusy` flag — stops a stray pre-prompt idle completing the
-  job instantly). `finishJob` assembles the result (last assistant text +
-  `filesChanged`) and delivers the completion to the parent session through
-  the shared prompt-delivery engine (`src/server/promptDelivery.mjs`), which
-  defers until the parent is idle so a notice never aborts the parent's turn.
-  **That is now the LEGACY path, used only by CTO-dispatched jobs
-  (`actor:"cto"`) and old records with no `engine` field.** Every other job
-  is `engine:"v2"` (opencode-v2-next spec, Stage C1): a real V2 child session
-  created under the parent with a client-minted id, moved into its worktree
-  (`POST /api/session/{id}/move`; the launch waits for the move's own short
-  execution to end, which must never read as the job finishing), given a
-  window, then sent its opening prompt. It completes from the child's RAW
-  execution outcome (`settleV2Job`, the same evaluator Stage B's background
-  command runs use — never the lifecycle adapter, which reads an interrupt as
-  success) and reports exactly ONE result to the parent as a V2 `synthetic`
-  (`delivery:"queue"`, persisted `completionMessageId`, retried until
-  delivered; the CTO conversation keeps promptDelivery + admission). A pause
-  interrupts at the next tool boundary and the `interrupted` outcome parks the
-  job; resume makes a fresh child (`attempt++`, same job id and result id).
-  An uncertain launch is never rolled back.
+  pure logic + injected I/O, mirrors `capabilities.mjs`). **Every job is
+  `engine:"v2"`** (opencode-v2-next, Stages C1–C2) — the CTO's own workers
+  (`actor:"cto"`) included; the old idle/busy-pairing completion path (`sawBusy`,
+  the legacy `finishJob`, legacy pause/resume/stop branches) is gone. `startJob`
+  creates a worktree (an `isolationRequired` failure refuses and never falls
+  back to the repository), registers the record FIRST with a client-minted child
+  session id and result id, then creates a real V2 child under the parent with
+  the preflight ruleset, moves it into its worktree when it was created
+  elsewhere (`POST /api/session/{id}/move`; the child's own reported directory
+  decides — the CTO conversation sits wherever the CTO does, not in the
+  repository; the launch waits for the move's own short execution to end, which
+  must never read as the job finishing), gives it a window (in `targetProject`
+  when the caller names one, since the CTO conversation owns no window), and
+  sends its opening prompt. It completes from the child's RAW execution outcome
+  (`settleV2Job`, the same evaluator Stage B's background command runs use —
+  never the lifecycle adapter, which reads an interrupt as success) and reports
+  exactly ONE result to the parent, whatever route it takes to a terminal state
+  (done / failed / stopped / timed out): a V2 `synthetic` (`delivery:"queue"`,
+  persisted `completionMessageId`, retried until delivered) for an ordinary
+  parent, or — when the parent is the CTO conversation — `promptDelivery` + the
+  CTO admission redirect with the same id as its dedupe key (`ctoKey`). **That
+  route is decided from facts, never guessed:** a tracked-work job
+  (`correlation.kind:"work"`) ALWAYS goes through admission, even if classifying
+  the parent fails open, and a classifier that cannot answer leaves the result
+  pending for the next retry instead of posting straight into the CTO
+  conversation. A pause interrupts at the next tool boundary and the
+  `interrupted` outcome parks the job (a pause, like a resume, emits nothing);
+  resume makes a fresh child (`attempt++`, same job id, result id and worktree).
+  An uncertain launch is never rolled back. `observeEvent` (the lifecycle
+  stream) only adopts background `task` subagents and finds a pausing job's tool
+  boundary. **Pre-C2 records** (no `engine`) can only be leftovers of an
+  upgrade and are settled once by `reconcileJobsOnBoot` (also run first by every
+  sweep, so the boot call and the sweeper's first tick can overlap): a `running`
+  one becomes `failed: "interrupted by upgrade"`, its child interrupted, and it
+  ends through the normal terminal transition — one result to its parent (through
+  admission for the CTO conversation), the work coordinator's `onJobTerminal`,
+  worktree cleanup; a `paused` one is upgraded in place to a V2 paused record
+  (minted result id, `executionDirectory`, `launch.model` from its recorded
+  model) and can be resumed on the V2 path; finished ones are inert history.
 - **Cap of five concurrent `running` jobs** box-wide (`MAX_RUNNING_JOBS`);
   a sixth is refused with a clear error (do not retry). No `queued` state —
   a job either starts immediately or is refused. Running jobs older than 30
@@ -1127,10 +1142,14 @@ and worktree all belong to it.
   answering a user's "what's running?" question, not for waiting (do NOT
   poll).
 - Jobs appear in the sidebar as ordinary sessions (their own window).
-- Tests: `src/server/delegate.test.mjs` (startJob undo-on-failure,
-  nesting/cap refusal, observeEvent completion ordering, finishJob result
-  assembly, buildJobPrompt/buildCompletionText, sweep retention, stop/delete
-  — pure/IO-injected logic only, no live HTTP/tmux).
+- Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
+  refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
+  sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the
+  launch, undo, raw-outcome completion, pause/resume, exactly-one-result for
+  ordinary AND CTO parents, boot reconcile of pre-C2 records),
+  `delegateV2.test.mjs` (wrapped command runs, adoption), and the live-binary
+  `scripts/opencode-v2/c1-smoke.mjs` — pure/IO-injected logic only, no live
+  HTTP/tmux outside the smoke's sandbox.
 
 ## App control — MantaUI-native AI tool (`src/server/appControl.mjs`)
 

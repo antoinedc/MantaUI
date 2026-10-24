@@ -1033,15 +1033,15 @@ const webhookEngine = createWebhookEngine({
   },
 });
 
-// Background-job engine (BET-378): durable jobs that run in their own
-// worktree + chat-mode window, detect completion from the opencode event
-// stream, and report their result back to the parent session (deferred until
-// the parent is idle via the shared prompt-delivery engine). See
-// src/server/delegate.mjs. Completion detection runs in the opencode pump
-// below (delegateEngine.observeEvent); the sweeper fails out stale running
-// jobs (30 min) and prunes terminal retention; the 10s activity poller
-// refreshes the `activity` summary for running jobs. The AI tool + UI are
-// Stage 3 — this server wiring is Stage 2 only.
+// Background-job engine (BET-378): durable jobs that run as a V2 child session
+// in their own worktree + chat-mode window — the CTO's workers included — and
+// report ONE result back to the parent session (a V2 synthetic, or through
+// promptDelivery + the CTO admission redirect when the parent is the CTO
+// conversation). See src/server/delegate.mjs. Completion is detected from the
+// child's raw execution outcome (delegateEngine.observeRaw in the opencode pump
+// below) and re-checked from opencode's own state on every sweep; the sweeper
+// fails out stale running jobs (30 min) and prunes terminal retention; the 10s
+// activity poller refreshes the `activity` summary for running jobs.
 //
 // §8.1 outcome routing (work family): a terminal job carrying correlation
 // `{kind:"work"}` is adopted into its work envelope by the CTO work control.
@@ -1125,11 +1125,11 @@ const delegateEngine = createDelegateEngine({
   readProgress: (sid) => readProgressRecord(sid),
   clearProgress: (sid) => clearProgress(sid),
 });
-// Restart reconciliation (spec §11.6-5): a job recorded `running` whose opencode
-// child session did not survive the box restart is parked as `paused` (its
-// worktree + branch persist, so it can be resumed). Best-effort, non-blocking;
-// a healthy box reconciles nothing. The CTO engine also calls this on its own
-// boot (C3).
+// Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
+// engine): a `running` one is failed "interrupted by upgrade" and reports its one
+// result; a `paused` one is upgraded in place so it can still be resumed. A healthy
+// box reconciles nothing. (V2 jobs are re-checked from opencode's own state by
+// reconcileV2 below.) Best-effort, non-blocking.
 delegateEngine.reconcileJobsOnBoot().catch((e) =>
   console.warn("[delegate] boot reconciliation failed:", e?.message ?? e),
 );

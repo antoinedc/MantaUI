@@ -1,9 +1,9 @@
 // delegate.mjs — background job engine for the MantaUI server (BET-378).
 //
 // The core of "background delegation": a durable record of jobs plus the
-// machinery to start one (worktree → session → window → prompt), detect when
-// it finishes, assemble its result, and hand that result back to the parent
-// session WITHOUT interrupting the user.
+// machinery to start one (worktree → V2 child session → window → prompt),
+// detect when it finishes, assemble its result, and hand that result back to
+// the parent session WITHOUT interrupting the user.
 //
 // Modelled on src/server/capabilities.mjs (dependency-injected pure-logic +
 // injected I/O, an in-flight-guarded sweeper/poller with timer.unref()), but a
@@ -12,18 +12,15 @@
 // background jobs complete from a different signal (the opencode event stream,
 // not an executor POST).
 //
-// Completion is detected from the opencode event firehose via observeEvent,
-// which the pump in src/server/index.mjs calls alongside the existing
-// observers (promptDelivery, webhookEngine). A job completes on the first
-// idle transition for its childSessionID that occurs AFTER at least one busy
-// has been observed (per-job in-memory sawBusy flag) — that ordering is what
-// stops a stray pre-prompt idle from completing the job instantly.
-//
-// The result is assembled in finishJob (final assistant text + filesChanged
-// count) and delivered to the parent session through the shared
-// prompt-delivery engine (src/server/promptDelivery.mjs), which defers it
-// until the parent is idle so a completion notice never aborts the parent's
-// in-flight turn.
+// EVERY job is `engine:"v2"` (opencode-v2-next, Stage C): a real V2 child
+// session, completing from the child's RAW execution outcome (observeRaw →
+// settleV2Job) and reporting exactly ONE result to its parent — as a V2
+// synthetic (N7) for an ordinary parent, or through promptDelivery + the CTO
+// admission redirect when the parent is the CTO conversation. observeEvent (the
+// lifecycle-adapted stream) is kept only to adopt background `task` subagents
+// and to find a pausing job's tool-step boundary. There is no other completion
+// path: a record with no `engine` can only be a leftover of a pre-C2 box and
+// reconcileJobsOnBoot settles it once, at boot.
 
 import { randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -55,7 +52,7 @@ const STORE_PATH = statePath("delegate-jobs.json");
 // Single-writer serialization for the jobs store (BET-770 P2-1/2-2/2-3). Every
 // read-modify-write mutation of the jobs array runs inside `jobsLock`, shared by
 // ALL writers: startJob (+ the MAX_RUNNING_JOBS check), adoptSubagentJob,
-// finishJob, stopJob, deleteJob, the activity poller, and the sweeper. Without
+// finishV2Job, stopJob, deleteJob, the activity poller, and the sweeper. Without
 // this, a stale activity-poller write could resurrect a terminal job to
 // `running`, a just-completed job could be flipped to "timed out", and two
 // near-simultaneous `delegate` POSTs could both pass the cap check. Each
@@ -391,19 +388,11 @@ export async function getJob(id, { load = loadJobs, readProgress = defaultReadPr
 }
 
 // ---------------------------------------------------------------------------
-// startJob — performs the steps in the exact order the spec dictates. If any
-// step throws, undo the steps already done, in reverse, and return
-// {ok:false, error} — never leave a half-created job.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// registerJob — the shared "window + record + publish" half of startJob
-// (formerly steps 6 and 7). Registers an existing-or-new opencode session into
-// a chat-mode tmux window and persists the record. `existingSessionId` adopts
-// an already-running session (the backgrounded-subagent path); undefined
-// creates a fresh one (the delegate path). The ONLY place that builds a job
-// record or calls newWindow. On a window-creation throw it undoes the worktree
-// (best-effort) and returns {ok:false, error}.
+// registerJob — the "window + record + publish" half of adopting a session
+// opencode already started (a background `task` subagent, a V2-native background
+// command). Registers the existing session into a chat-mode tmux window and
+// persists the record. The ONLY place that builds an ADOPTED job record. On a
+// window-creation throw it returns {ok:false, error}.
 // ---------------------------------------------------------------------------
 
 async function registerJob(
@@ -420,22 +409,7 @@ async function registerJob(
     baseSha,
     existingSessionId,
     origin,
-    permission,
-    link,
-    actor,
-    sweepAllowanceMs,
-    // §8.1 explicit-contract path (spec: "Accept a preallocated operation/job
-    // identity and persist its reservation before creating any worktree,
-    // window or opencode session"): the execution target is the CALLER-
-    // VALIDATED project reference, never re-derived from the parent's tmux
-    // window — a headless completion parent (the on-call CTO conversation)
-    // has no holder to resolve. `correlation` is the preallocated operation
-    // identity persisted on the record so a crash after creation can adopt
-    // the matching worker instead of creating another blindly.
-    targetTmuxSession,
-    correlation,
-    // V2 job fields (engine, completionOwner, launchState, …) merged onto the
-    // record. Absent for the legacy delegate path.
+    // V2 job fields (engine, completionOwner, launchState, …) merged onto the record.
     extra,
   },
   deps = {},
@@ -447,7 +421,6 @@ async function registerJob(
     newWindow,
     stampOwner,
     listProjects,
-    gitRemoveWorktree,
     oc,
     now = () => Date.now(),
   } = deps;
@@ -456,18 +429,11 @@ async function registerJob(
   let tmuxSession = null;
   let windowIndex = null;
   try {
-    if (targetTmuxSession) {
-      // §8.1: target workspace resolution uses the explicit project reference,
-      // not parent lookup. The caller already failed it closed against live
-      // tmux; newWindow below still fails loudly if the target vanished.
-      tmuxSession = targetTmuxSession;
-    } else {
-      const owner = resolveOwner(await listProjects(), parentSessionID);
-      if (!owner) {
-        throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
-      }
-      tmuxSession = owner.tmuxSession;
+    const owner = resolveOwner(await listProjects(), parentSessionID);
+    if (!owner) {
+      throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
     }
+    tmuxSession = owner.tmuxSession;
     const created = await newWindow({
       sessionName: tmuxSession,
       windowName: name,
@@ -476,7 +442,6 @@ async function registerJob(
       existingSessionId,
       worktreePath: worktree,
       oc,
-      permission,
     });
     childSessionID = created.sessionId ?? existingSessionId ?? null;
     windowIndex = created.windowIndex ?? null;
@@ -484,15 +449,6 @@ async function registerJob(
       throw new Error("could not read the new window's opencode session id");
     }
   } catch (e) {
-    // Undo the worktree in reverse (best-effort) — mirrors the old startJob
-    // rollback on a window-creation throw.
-    if (worktree && gitRemoveWorktree) {
-      try {
-        await gitRemoveWorktree({ path: worktree, force: false });
-      } catch {
-        /* best-effort cleanup; the start failure is the headline error */
-      }
-    }
     return { ok: false, error: String(e?.message ?? e) };
   }
 
@@ -531,29 +487,11 @@ async function registerJob(
     branch,
     baseSha,
     origin,
-    // Session-link primitive (§3.4⑥, BET-847/844): the at-most-one issue + one
-    // pull request this job's session is about. Stored on the job's own session
-    // record in the shared `{ issue?, pr? }` shape so the forge progress sink
-    // (and future notification/inbox readers) address the linked issue or PR —
-    // the triggering issue — with no per-feature plumbing. A forge-triggered
-    // delegate sets this at dispatch; a user delegate leaves it null.
-    link: link ?? null,
-    // Who started the job ("user" default; "cto" for the adaptive-CTO engine).
-    // Persisted so the CTO engine can reason about its own jobs across restarts.
-    actor: actor ?? "user",
-    // §8.1 operation-correlation identity ({kind:"work", workId, receiptId, op})
-    // persisted so a crashed dispatch can ADOPT the matching worker instead of
-    // creating another blindly ("never create another blindly"). Ordinary
-    // user/CTO jobs carry null.
-    correlation: correlation ?? null,
-    // Running-sweep allowance (ms) this job gets; absent ⇒ the 30-min default.
-    // The CTO engine passes overnightWindowRemainingMs for its overnight sweep.
-    // Persisted so a resumed or restarted job keeps the same allowance.
-    sweepAllowanceMs: sweepAllowanceMs ?? null,
-    // The permission ruleset the job's session was created with, persisted so a
-    // RESUME (a fresh session in the same worktree) is re-scoped and never
-    // silently falls back to an unscoped session that could prompt the user.
-    permission: permission ?? null,
+    link: null,
+    actor: "user",
+    correlation: null,
+    sweepAllowanceMs: null,
+    permission: null,
     status: "running",
     activity: null,
     createdAt: now(),
@@ -897,13 +835,14 @@ async function prepareWorktree({ input, name, parentDirectory }, deps) {
  *        `link` (BET-844) — the optional session link (at most one issue + one
  *        PR, `{issue?, pr?}` shape) a forge-triggered delegate carries so the
  *        progress sink addresses the linked issue/PR. Stored on the job record.
- * @param {object} deps injected I/O (load/save/publish/deliver/listProjects/
-  *        newWindow/gitAddWorktree/gitRun/oc listMessages/listModels/now;
-  *        routingServices/catalogIndex/providerHealthState/endpointSummary/pacing
-  *        for the router; chooseSubagentModel only as a test seam)
+ * @param {object} deps injected I/O (load/save/publish/listProjects/newWindow/
+  *        createChildSession/moveSession/sendChildPrompt/gitAddWorktree/gitRun/
+  *        listMessages/listModels/now; routingServices/catalogIndex/
+  *        providerHealthState/endpointSummary/pacing for the router;
+  *        chooseSubagentModel only as a test seam)
  */
 export async function startJob(input, deps = {}) {
-  const { deliver, listModels, configGet = async () => ({}), listSnapshots = () => [] } = deps;
+  const { listModels, configGet = async () => ({}), listSnapshots = () => [] } = deps;
   // listRoutableModels defaults its `models` argument to the REAL opencode.mjs
   // listModels whenever it is handed `undefined` — so passing an absent reader
   // through would hit a live box (or the wrong reader in a test). Guard it: an
@@ -1096,87 +1035,9 @@ export async function startJob(input, deps = {}) {
 
   const effectiveModel = input?.model ? deliverModel : routedModel;
 
-  // C1: every job except the CTO's runs on the V2 engine — a real child session
-  // moved into its worktree, completing from raw execution outcomes. The gate is
-  // the ACTOR (a CTO job is origin "delegate" too), and CTO jobs stay on the
-  // legacy path below, untouched, until C2.
-  if (input?.actor !== "cto") {
-    return startJobV2({ input, prompt, parentSessionID, parentDirectory, requestedModel, effectiveModel }, deps);
-  }
-
-  // The whole creation — nesting + cap checks, worktree, window, record append —
-  // runs inside the jobs-store lock so a concurrent `delegate` POST cannot pass
-  // the (read-then-act) MAX_RUNNING_JOBS check at the same moment as another
-  // and start >5 running jobs, and so the record append cannot interleave with
-  // another writer's read-modify-write. The prompt is delivered AFTER the lock
-  // releases.
-  const reg = await jobsLock.runExclusive(async () => {
-    const { load = loadJobs } = deps;
-
-    // 1 + 2. Refuse if nesting, or at cap. Checked here, inside the lock and
-    //    BEFORE any worktree/window is created, so a burst of concurrent POSTs
-    //    cannot exceed MAX_RUNNING_JOBS without leaking created worktrees.
-    const refused = launchRefusal(await load(), parentSessionID);
-    if (refused) return refused;
-
-    // 3. Derive the name.
-    const name = jobNameFor(input, prompt);
-
-    // 4 + 5. The worktree + baseSha.
-    const wt = await prepareWorktree({ input, name, parentDirectory }, deps);
-    if (wt.refusal) return wt.refusal;
-    const { worktree, branch, baseSha, cwd } = wt;
-
-    // 6+7. Register the window + record + publish.
-    return registerJob(
-      {
-        parentSessionID,
-        parentDirectory,
-        name,
-        prompt,
-        model: requestedModel,
-        requestedModel,
-        cwd,
-        worktree,
-        branch,
-        baseSha,
-        existingSessionId: undefined,
-        origin: "delegate",
-        permission: input?.permission,
-        link: input?.link,
-        actor: input?.actor,
-        sweepAllowanceMs: input?.sweepAllowanceMs,
-        // §8.1 explicit-contract path (absent on ordinary callers — their
-        // behavior is byte-identical): the execution target comes from the
-        // caller's validated project reference, and `correlation` is the
-        // preallocated operation identity persisted on the job record.
-        targetTmuxSession: input?.targetProject ?? null,
-        correlation: input?.correlation ?? null,
-      },
-      deps,
-    );
-  });
-
-  if (!reg.ok) return reg;
-
-  // 8. Send the opening prompt via the shared delivery module's deliver. The
-  //    effective model was decided above, before the lock: a caller-named
-  //    model is used VERBATIM (11b), and silence was routed with the same
-  //    never-break-a-spawn degradation contract (11a/11e, BET-1535).
-  try {
-    await deliver({
-      sessionId: reg.job.childSessionID,
-      text: buildJobPrompt({ prompt, worktree: reg.job.worktree, branch: reg.job.branch }),
-      ...(effectiveModel ? { model: effectiveModel } : {}),
-    });
-  } catch (e) {
-    // deliver never rejects in production, but guard anyway — the job is
-    // already persisted + running; a delivery failure surfaces as a normal
-    // completion (the child will idle immediately).
-    console.warn("[delegate] opening prompt delivery failed:", e?.message ?? e);
-  }
-
-  return { ok: true, job: reg.job };
+  // Every job — the CTO's workers included — is a real V2 child session moved
+  // into its worktree, completing from raw execution outcomes.
+  return startJobV2({ input, prompt, parentSessionID, parentDirectory, requestedModel, effectiveModel }, deps);
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,156 +1124,84 @@ export async function adoptSubagentJob(
 }
 
 // ---------------------------------------------------------------------------
-// Completion detection — observeEvent, called by the opencode pump.
+// observeEvent — the lifecycle-adapted opencode stream, called by the pump.
 //
-// A job completes on the first idle transition for its childSessionID that
-// occurs AFTER at least one busy has been observed for that session. Track a
-// per-job in-memory sawBusy flag (passed in so each engine instance owns its
-// own map).
+// It does NOT complete jobs (that is observeRaw → settleV2Job, from the raw
+// execution outcome, which tells an interrupt from success). It does two things:
+// adopt a background `task` subagent into the job store, and tell a pausing
+// job where its tool-step boundary is.
 // ---------------------------------------------------------------------------
 
 /**
  * @param {object} evt an opencode event
- * @param {object} deps { load, save, publish, deliver, listMessages, gitRun, now }
- * @param {Map<string,boolean>} sawBusy per-childSessionID busy flag (engine-owned)
+ * @param {object} deps { load, listProjects, newWindow, abortSession, … }
  */
-// The only event types observeEvent acts on. Everything else (notably the
-// per-token `message.part.delta` stream) is a no-op, so it must return BEFORE
-// loading the job store — that load is a synchronous read + parse of
-// delegate-jobs.json, and doing it per streamed token ran it ~40×/s.
-const OBSERVED_EVENT_TYPES = new Set([
-  "message.part.updated",
-  "session.error",
-  "session.idle",
-  "session.status",
-]);
-
-export async function observeEvent(evt, deps = {}, sawBusy = new Map()) {
+// Everything but a part update is a no-op, so it must return BEFORE loading the
+// job store — that load is a synchronous read + parse of delegate-jobs.json, and
+// doing it per streamed token ran it ~40×/s.
+export async function observeEvent(evt, deps = {}) {
   const sid = evt?.properties?.sessionID;
   if (typeof sid !== "string" || !sid) return;
-  if (!OBSERVED_EVENT_TYPES.has(evt?.type)) return;
+  if (evt?.type !== "message.part.updated") return;
   const { load = loadJobs } = deps;
-  const jobs = await load();
 
   // BET-721: passively adopt a background subagent into the job store so it
   // appears as a nested sidebar row. Detection is passive (events never carry
   // `background:true` unless the capability is on) and must never throw into
   // the pump.
-  if (evt.type === "message.part.updated") {
-    try {
-      const info = extractSubagentInfo(evt?.properties?.part);
-      // A `task` tool part naming a child CLAIMS it (provisional adoption of a
-      // command's child waits for exactly this): foreground → inline only,
-      // background → the adoption just below.
-      if (info?.childSessionId) deps.onSubagentClaim?.(info.childSessionId, info.background === true);
-      if (
-        info &&
-        info.background === true &&
-        (info.status === "running" || info.status === "pending")
-      ) {
-        const projects = deps.listProjects ? await deps.listProjects() : [];
-        const owner = resolveOwner(projects, evt?.properties?.sessionID);
-        if (!owner) {
-          const shape = (Array.isArray(projects) ? projects : []).map((p) => ({
-            tmuxSession: p?.tmuxSession,
-            windows: (p?.windows || []).map((w) => `${w?.index}:${w?.opencodeSessionId}`),
-          }));
-          console.warn(
-            "[delegate] could not resolve the owning window to adopt background subagent:",
-            evt?.properties?.sessionID,
-            "projects=", shape,
-          );
-          return;
-        }
-        await adoptSubagentJob(
-          {
-            parentSessionID: evt?.properties?.sessionID,
-            parentDirectory: owner.cwd,
-            childSessionID: info.childSessionId,
-            name: info.description || info.agent,
-            prompt: info.prompt,
-            model: info.model ? `${info.model.providerID}/${info.model.modelID}` : null,
-          },
-          deps,
+  try {
+    const info = extractSubagentInfo(evt?.properties?.part);
+    // A `task` tool part naming a child CLAIMS it (provisional adoption of a
+    // command's child waits for exactly this): foreground → inline only,
+    // background → the adoption just below.
+    if (info?.childSessionId) deps.onSubagentClaim?.(info.childSessionId, info.background === true);
+    if (
+      info &&
+      info.background === true &&
+      (info.status === "running" || info.status === "pending")
+    ) {
+      const projects = deps.listProjects ? await deps.listProjects() : [];
+      const owner = resolveOwner(projects, evt?.properties?.sessionID);
+      if (!owner) {
+        const shape = (Array.isArray(projects) ? projects : []).map((p) => ({
+          tmuxSession: p?.tmuxSession,
+          windows: (p?.windows || []).map((w) => `${w?.index}:${w?.opencodeSessionId}`),
+        }));
+        console.warn(
+          "[delegate] could not resolve the owning window to adopt background subagent:",
+          evt?.properties?.sessionID,
+          "projects=", shape,
         );
         return;
       }
-    } catch (e) {
-      console.warn("[delegate] background-subagent adoption failed:", e?.message ?? e);
-    }
-  }
-
-  // engine:"v2" jobs complete from the RAW execution outcomes (observeRaw), not
-  // from this adapted lifecycle — which reads an interrupt as success. The
-  // lifecycle still tells a pausing V2 job where its step boundary is.
-  const job = jobs.find((j) => j.childSessionID === sid && j.status === "running");
-  if (!job) {
-    // Not a tracked background job — but still keep the sawBusy flag honest so
-    // a job that starts later in this same session id isn't instantly
-    // completed by a stale idle. (Session ids are unique per opencode
-    // session, so this is defensive only.)
-    return;
-  }
-  if (job.engine === "v2") {
-    if (
-      job.pauseRequested &&
-      evt.type === "message.part.updated" &&
-      isToolStepBoundary(evt?.properties?.part)
-    ) {
-      await interruptForPause(job, deps);
-    }
-    return;
-  }
-
-  // Pause (spec §11.6-1): pauseJob set `pauseRequested`; the actual transition
-  // to `paused` happens HERE at the next completed-tool-part boundary — the
-  // current tool has finished, so drain-aborting the session loses no
-  // half-written tool work. The window + worktree + branch are KEPT so
-  // resumeJob can spin up a fresh session in the same worktree later.
-  if (job.pauseRequested) {
-    const boundary =
-      evt.type === "message.part.updated" && isToolStepBoundary(evt?.properties?.part);
-    if (boundary) {
-      await pauseAtBoundary(job, deps);
-      // After the drain-abort the aborting opencode session emits a
-      // MessageAbortedError (ignored) then an idle; by then this job is
-      // `paused`, so those events find no `running` job and are no-ops. Deliberately
-      // do NOT fall through to the completion handlers below.
+      await adoptSubagentJob(
+        {
+          parentSessionID: evt?.properties?.sessionID,
+          parentDirectory: owner.cwd,
+          childSessionID: info.childSessionId,
+          name: info.description || info.agent,
+          prompt: info.prompt,
+          model: info.model ? `${info.model.providerID}/${info.model.modelID}` : null,
+        },
+        deps,
+      );
       return;
     }
+  } catch (e) {
+    console.warn("[delegate] background-subagent adoption failed:", e?.message ?? e);
   }
 
-  if (evt.type === "session.error") {
-    const errName = evt?.properties?.error?.name;
-    if (errName === "MessageAbortedError") return; // intentional abort — ignore
-    await finishJob(job, "failed", String(evt?.properties?.error?.message ?? "error"), deps, sawBusy);
-    return;
-  }
-
-  if (evt.type === "session.idle") {
-    if (sawBusy.get(sid)) {
-      await finishJob(job, "done", null, deps, sawBusy);
-    }
-    return;
-  }
-
-  if (evt.type === "session.status") {
-    const t = evt?.properties?.status?.type;
-    if (t === "busy" || t === "retry") {
-      sawBusy.set(sid, true);
-    } else if (t === "idle") {
-      if (sawBusy.get(sid)) {
-        await finishJob(job, "done", null, deps, sawBusy);
-      }
-    }
+  // A pause was requested and this running job's child just finished a tool: its
+  // step boundary. Only the interrupt happens here — the child's raw
+  // `interrupted` outcome is what parks the job (finishV2Job).
+  const job = (await load()).find((j) => j.childSessionID === sid && j.status === "running");
+  if (job?.pauseRequested && isToolStepBoundary(evt?.properties?.part)) {
+    await interruptForPause(job, deps);
   }
 }
 
 // ---------------------------------------------------------------------------
-// finishJob — assemble the result, persist, and deliver the completion
-// message to the parent session through the shared delivery engine (which
-// defers until the parent is idle). If the parent session no longer exists,
-// deliver fails; swallow it, log, and still mark the job terminal.
+// Result helpers shared by every terminal transition (finishV2Job).
 // ---------------------------------------------------------------------------
 
 async function lastAssistantText(messages) {
@@ -1496,142 +1285,6 @@ export async function cleanupTerminalJob(job, deps = {}) {
     }
   }
   return { cleanedUp: true };
-}
-
-export async function finishJob(job, status, error, deps = {}, sawBusy) {
-  if (job?.engine === "v2") return finishV2Job(job, status, error, deps);
-  const {
-    load = loadJobs,
-    save = saveJobs,
-    publish,
-    deliver,
-    listMessages,
-    clearProgress = defaultClearProgress,
-    now = () => Date.now(),
-  } = deps;
-
-  return jobsLock.runExclusive(async () => {
-    // Re-read the job under the lock: the `job` passed in may be a stale
-    // snapshot (e.g. a sweeper candidate read before another writer completed,
-    // stopped or pruned it). If the live record is already terminal — or was
-    // pruned — do nothing. This is what stops a completing job being flipped
-    // to "timed out" (and a false timeout being notified) or a truly timed-out
-    // job being resurrected to "done" by a stale writer.
-    {
-      const jobs = await load();
-      const idx = jobs.findIndex((j) => j.id === job.id);
-      if (idx === -1) return { ok: true, alreadyTerminal: true };
-      job = jobs[idx];
-    }
-
-    // Idempotent: if the job is already terminal, do nothing.
-    if (job.status === "done" || job.status === "failed" || job.status === "stopped") {
-      return { ok: true, alreadyTerminal: true };
-    }
-
-    let result = "";
-    let filesChanged = null;
-    if (status === "done") {
-      try {
-        const messages = listMessages ? await listMessages(job.childSessionID) : [];
-        result = await lastAssistantText(messages);
-      } catch (e) {
-        console.warn("[delegate] listMessages failed:", e?.message ?? e);
-        result = "";
-      }
-      filesChanged = await countFilesChanged(job, deps);
-    }
-
-    const finishedAt = now();
-    const updated = {
-      ...job,
-      status,
-      error: status === "done" ? null : (error ?? null),
-      result: status === "done" ? result : null,
-      filesChanged,
-      finishedAt,
-    };
-
-    // Persist.
-    {
-      const jobs = await load();
-      const idx = jobs.findIndex((j) => j.id === job.id);
-      if (idx !== -1) {
-        jobs[idx] = updated;
-        await save(jobs);
-      }
-    }
-    publish?.({
-      kind: "delegate.updated",
-      payload: { id: updated.id, status: updated.status, activity: updated.activity },
-    });
-    if (sawBusy) sawBusy.delete(job.childSessionID);
-
-    // §8.1 outcome-routing seam: the engine composition may route a terminal
-    // job to the work coordinator (jobs carrying correlation.kind === "work").
-    // Best-effort — a routing failure must never break the job's own terminal
-    // transition or its completion delivery.
-    if (typeof deps.onJobTerminal === "function") {
-      try {
-        await deps.onJobTerminal(updated);
-      } catch (e) {
-        console.warn(`[delegate] onJobTerminal failed for ${updated.id}:`, e?.message ?? e);
-      }
-    }
-
-    // The child session is ending — clear its progress record (progress is
-    // "where are we right now"; a finished job leaves none). Reads the SAME
-    // progress.json store, no second record/event. Never fails the transition.
-    if (job.childSessionID) {
-      try {
-        await clearProgress(job.childSessionID);
-      } catch (e) {
-        console.warn(`[delegate] clearProgress failed for ${job.id}:`, e?.message ?? e);
-      }
-    }
-
-    // Deliver the completion message to the parent session (deferred until idle
-    // by the shared delivery engine). Swallow a failure — the job is terminal
-    // regardless.
-    //
-    // BET-721: skip the deliver for adopted subagents — opencode ALREADY injects
-    // the <task ...> result into the parent when the child finishes, so
-    // delivering ours too would report the same job twice. A missing `origin`
-    // (records written before this change) means `delegate` and still delivers.
-    if (deliver && job.parentSessionID && job.origin !== "subagent") {
-      try {
-        await deliver({
-          sessionId: job.parentSessionID,
-          text: buildCompletionText(updated),
-        });
-      } catch (e) {
-        console.warn(`[delegate] completion delivery failed for ${job.id}:`, e?.message ?? e);
-      }
-    }
-
-    // BET-418 §B: remove the tmux window + worktree now that the job is
-    // terminal. A dirty worktree keeps both (cleanupTerminalJob returns
-    // cleanedUp:false); persist that flag so the retention sweep does NOT prune
-    // the record (the window must stay recognisable as a job, not leak as an
-    // ordinary session). A clean cleanup sets cleanedUp:true so retention may
-    // prune the record normally once it ages out.
-    let cleanedUp = false;
-    try {
-      const res = await cleanupTerminalJob(updated, deps);
-      cleanedUp = !!res.cleanedUp;
-    } catch (e) {
-      console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
-    }
-    {
-      const jobs = await load();
-      const idx = jobs.findIndex((j) => j.id === job.id);
-      if (idx !== -1) {
-        jobs[idx] = { ...jobs[idx], cleanedUp };
-        await save(jobs);
-      }
-    }
-    return { ok: true };
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1728,8 +1381,6 @@ export async function sweepDelegateJobs(deps = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
-    publish,
-    deliver,
     now = () => Date.now(),
     sessionExists,
     abortSession,
@@ -1770,7 +1421,7 @@ export async function sweepDelegateJobs(deps = {}) {
       // A V2 child opencode owns (an adopted subagent, a native background
       // command) has no running timeout: opencode runs its lifecycle and
       // settleV2Job finishes it from the real outcome.
-      if (job.engine === "v2" && completionOwnerOf(job) === "opencode") continue;
+      if (completionOwnerOf(job) === "opencode") continue;
       if (job.status === "running" && job.startedAt != null && job.launchState !== "uncertain") {
         // Per-job running-sweep allowance: default 30 min, or the caller's
         // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
@@ -1801,22 +1452,21 @@ export async function sweepDelegateJobs(deps = {}) {
     // Orphaned jobs → stopped (parent gone). stopJob aborts + marks stopped +
     // runs the same terminal cleanup. Runs BEFORE the timeout pass so a job
     // that is both orphaned and timed-out is recorded as "stopped" (parent
-    // gone is the more precise reason); finishJob is idempotent on the
+    // gone is the more precise reason); finishV2Job is a no-op on the
     // already-terminal record.
     for (const job of orphaned) {
       await stopJob(job.id, deps);
     }
-    // Timed-out jobs → failed. Pass the FULL deps so finishJob's terminal
-    // cleanup (killWindow + gitRemoveWorktree) actually runs. The error
-    // reflects the job's own allowance, so the default path stays byte-for-byte
-    // the legacy "timed out after 30 minutes".
+    // Timed-out jobs → failed. Pass the FULL deps so the terminal cleanup
+    // (killWindow + gitRemoveWorktree) actually runs. The error reflects the
+    // job's own allowance, so the default path stays "timed out after 30 minutes".
     for (const { job, allowance } of transitioned) {
       const mins = Math.round(allowance / 60_000);
-      const res = await finishJob(job, "failed", `timed out after ${mins} minutes`, deps, new Map());
-      // A V2 child Manta started keeps running (and spending) after its result
-      // said "failed" unless it is interrupted. The record is already terminal
-      // here, so the interrupt's own outcome event finds nothing left to do.
-      if (job.engine === "v2" && !res?.alreadyTerminal && abortSession && job.childSessionID) {
+      const res = await finishV2Job(job, "failed", `timed out after ${mins} minutes`, deps);
+      // A child Manta started keeps running (and spending) after its result said
+      // "failed" unless it is interrupted. The record is already terminal here, so
+      // the interrupt's own outcome event finds nothing left to do.
+      if (!res?.alreadyTerminal && abortSession && job.childSessionID) {
         try {
           await abortSession(job.childSessionID);
         } catch (e) {
@@ -1824,63 +1474,15 @@ export async function sweepDelegateJobs(deps = {}) {
         }
       }
     }
-    // Paused-expired jobs → stopped.
+    // Paused-expired jobs → stopped. A job still owes its parent its one result,
+    // even a stopped one, so this goes through stopJob.
     for (const job of pausedExpired) {
-      // A V2 job still owes its parent the job's one result, even a stopped one.
-      if (job.engine === "v2") {
-        await stopJob(job.id, deps, { error: "paused for over 7 days, stopped" });
-        continue;
-      }
-      await stopExpiredPausedJob(job, {
-        load, save, publish, now,
-        killWindow: deps.killWindow,
-        gitRemoveWorktree: deps.gitRemoveWorktree,
-      });
+      await stopJob(job.id, deps, { error: "paused for over 7 days, stopped" });
     }
     await persistRetention({ load, save, deps }, nowMs);
   } catch (e) {
     console.warn("[delegate] sweep failed:", e?.message ?? e);
   }
-}
-
-/**
- * Terminal transition for a `paused` job that exceeded PAUSE_KEEP_MS: mark it
- * `stopped` and run the standard keep-on-dirty terminal cleanup (the dirty
- * worktree survives; the record is retained via the cleanedUp=false stamp).
- */
-async function stopExpiredPausedJob(job, deps = {}) {
-  const { load = loadJobs, save = saveJobs, publish, now = () => Date.now(), killWindow, gitRemoveWorktree } = deps;
-  return jobsLock.runExclusive(async () => {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === job.id);
-    if (idx === -1) return;
-    const live = jobs[idx];
-    if (live.status !== "paused") return; // a writer already resumed/stopped it
-    const stopped = {
-      ...live,
-      status: "stopped",
-      error: "paused for over 7 days, stopped",
-      finishedAt: now(),
-    };
-    jobs[idx] = stopped;
-    await save(jobs);
-    publish?.({ kind: "delegate.updated", payload: { id: stopped.id, status: "stopped" } });
-    let cleanedUp = false;
-    try {
-      const res = await cleanupTerminalJob(stopped, { killWindow, gitRemoveWorktree });
-      cleanedUp = !!res.cleanedUp;
-    } catch (e) {
-      console.warn(`[delegate] paused-expiry cleanup failed for ${job.id}:`, e?.message ?? e);
-    }
-    {
-      const jobs2 = await load();
-      const i2 = jobs2.findIndex((j) => j.id === job.id);
-      if (i2 !== -1) {
-        jobs2[i2] = { ...jobs2[i2], cleanedUp };
-        await save(jobs2);
-      }
-    }
-  });
 }
 
 // Retention prune under the jobs-store lock: re-read the store fresh so the
@@ -1896,7 +1498,7 @@ async function persistRetention({ load, save, deps }, nowMs) {
     // its record closes that window FIRST — a window left without a record
     // would reappear as an ordinary top-level session.
     for (const j of pruned) {
-      if (j.engine === "v2" && !j.worktree) await closeJobWindow(j, deps ?? {});
+      if (!j.worktree) await closeJobWindow(j, deps ?? {});
     }
     await save(retained);
   });
@@ -1963,119 +1565,59 @@ async function withRunningJob(id, deps, fn, { allowPaused = false } = {}) {
 }
 
 /**
- * stopJob aborts the child session with oc.abortSession, marks the job
- * `stopped`, and sends a completion message, then cleans up the window +
- * worktree (a dirty worktree keeps both; the branch always survives).
+ * stopJob interrupts the child session with oc.abortSession, marks the job
+ * `stopped` in ONE terminal write (result-delivery fields included), posts its
+ * one result to the parent, then cleans up the window + worktree (a dirty
+ * worktree keeps both; the branch always survives).
  *
  * A PAUSED job can be stopped too (2026-09-25: nine workers frozen by an old
  * dispatch bug could not be stopped by any tool, so their cancelled cards
  * could never be archived). A paused job has no turn in flight, so there is
- * nothing to abort and no completion notice is sent — the caller already
- * knows it is ending it.
+ * nothing to interrupt — but it still emits its `stopped` result: a job reports
+ * exactly one result, at its final terminal state.
  */
 export async function stopJob(id, deps = {}, { error: stopError } = {}) {
   const {
-    load = loadJobs,
     save = saveJobs,
     publish,
-    deliver,
     abortSession,
-    listMessages,
     now = () => Date.now(),
   } = deps;
-  // Under the jobs-store lock: the read-check-mutate + the cleanedUp stamp are
-  // atomic, so a stop cannot race another writer into a half-state.
+  // Under the jobs-store lock: the read-check-mutate is atomic, so a stop cannot
+  // race another writer into a half-state. The N7 / admission delivery happens
+  // after the lock is released.
   const stopped = await withRunningJob(id, deps, async (jobs, idx, job) => {
-    if (job.engine === "v2") {
-      // V2 job: one terminal write (result-delivery fields included); the N7
-      // result, when Manta owns it, is posted after the lock is released. A
-      // PAUSED job has no turn in flight, so there is nothing to interrupt — but
-      // it still emits its `stopped` result: a job reports exactly one result, at
-      // its final terminal state.
-      if (job.status === "running" && abortSession && job.childSessionID && job.launchState !== "creating") {
-        try {
-          await abortSession(job.childSessionID);
-        } catch (e) {
-          console.warn(`[delegate] abortSession failed for ${id}:`, e?.message ?? e);
-        }
-      }
-      const manta = completionOwnerOf(job) === "manta";
-      const updated = {
-        ...job,
-        status: "stopped",
-        error: stopError ?? "stopped by user",
-        stopRequested: true,
-        finishedAt: now(),
-        pauseRequested: false,
-        pausedAt: null,
-        completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : (job.completionMessageId ?? null),
-        completionDelivery: manta ? "pending" : null,
-      };
-      jobs[idx] = updated;
-      await save(jobs);
-      pauseInterrupts.delete(updated.id);
-      publish?.({
-        kind: "delegate.updated",
-        payload: { id: updated.id, status: updated.status, activity: updated.activity },
-      });
-      return { ok: true, deliverV2: manta, v2Stopped: updated };
-    }
-    const wasPaused = job.status === "paused";
-    if (!wasPaused && abortSession && job.childSessionID) {
+    if (job.status === "running" && abortSession && job.childSessionID && job.launchState !== "creating") {
       try {
         await abortSession(job.childSessionID);
       } catch (e) {
         console.warn(`[delegate] abortSession failed for ${id}:`, e?.message ?? e);
       }
     }
-    const finishedAt = now();
+    const manta = completionOwnerOf(job) === "manta";
     const updated = {
       ...job,
       status: "stopped",
-      error: "stopped by user",
-      finishedAt,
+      error: stopError ?? "stopped by user",
+      stopRequested: true,
+      finishedAt: now(),
+      pauseRequested: false,
+      pausedAt: null,
+      completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : (job.completionMessageId ?? null),
+      completionDelivery: manta ? "pending" : null,
     };
     jobs[idx] = updated;
     await save(jobs);
+    pauseInterrupts.delete(updated.id);
     publish?.({
       kind: "delegate.updated",
       payload: { id: updated.id, status: updated.status, activity: updated.activity },
     });
-    // opencode reports an adopted subagent's end to the parent itself.
-    if (!wasPaused && deliver && job.parentSessionID && job.origin !== "subagent") {
-      try {
-        await deliver({
-          sessionId: job.parentSessionID,
-          text: buildCompletionText(updated),
-        });
-      } catch (e) {
-        console.warn(`[delegate] stop completion delivery failed for ${id}:`, e?.message ?? e);
-      }
-    }
-    // BET-418 §B: a stopped job is terminal → remove the window + worktree (a
-    // dirty worktree keeps both). Persist cleanedUp so retention treats it
-    // correctly.
-    let cleanedUp = false;
-    try {
-      const res = await cleanupTerminalJob(updated, deps);
-      cleanedUp = !!res.cleanedUp;
-    } catch (e) {
-      console.warn(`[delegate] stop cleanup failed for ${id}:`, e?.message ?? e);
-    }
-    {
-      const jobs2 = await load();
-      const idx2 = jobs2.findIndex((j) => j.id === id);
-      if (idx2 !== -1) {
-        jobs2[idx2] = { ...jobs2[idx2], cleanedUp };
-        await save(jobs2);
-      }
-    }
-    void listMessages;
-    return { ok: true };
+    return { ok: true, deliver: manta, stopped: updated };
   }, { allowPaused: true });
-  if (stopped?.v2Stopped) {
-    if (stopped.deliverV2) await deliverJobResult(id, deps);
-    await finishV2Cleanup(stopped.v2Stopped, deps);
+  if (stopped?.stopped) {
+    if (stopped.deliver) await deliverJobResult(id, deps);
+    await finishV2Cleanup(stopped.stopped, deps);
     return { ok: true };
   }
   return stopped;
@@ -2113,7 +1655,6 @@ export async function deleteJob(id, deps = {}, opts = {}) {
     // ends, until retention prunes it. A finished, delivered row is closed for
     // good (window + record) as before.
     if (
-      job.engine === "v2" &&
       !job.worktree &&
       (!isTerminal(job) || job.launchState === "uncertain" || job.completionDelivery === "pending")
     ) {
@@ -2162,80 +1703,42 @@ export async function deleteJob(id, deps = {}, opts = {}) {
 // Pausing, resuming, reconciliation (spec §11.6)
 //
 // `paused` is a distinct, non-terminal state. A paused job keeps its window,
-// worktree and branch; only its opencode child session is aborted. Paused jobs
+// worktree and branch; only its V2 child session is interrupted. Paused jobs
 // do NOT count against the global running cap (MAX_RUNNING_JOBS counts only
 // `running`), so parking a job frees a slot while keeping its work intact.
 //
-// pause → at the next completed-tool-part boundary, the child session is
-//   drain-aborted (see observeEvent) and the job flips to `paused`.
-// resume → a FRESH opencode session is started in the SAME worktree/branch
-//   (never a new worktree), re-acquiring a cap slot like a fresh start, and
-//   seeded with the original prompt plus git log / git status / last progress.
+// pause → pauseJob flags the job; at its next completed-tool-part boundary
+//   (observeEvent → interruptForPause) the child is interrupted, and the
+//   child's raw `interrupted` outcome parks the job (finishV2Job).
+// resume → a FRESH V2 child is created in the SAME worktree/branch (never a new
+//   worktree), re-acquiring a cap slot like a fresh start, and seeded with the
+//   original prompt plus git log / git status / last progress.
 // ---------------------------------------------------------------------------
 
 /**
  * Request a pause. Only flags the job — the actual transition to `paused`
- * happens in observeEvent at the job's next completed-tool-part boundary, so
- * an in-flight tool is never interrupted mid-write. Idempotent for a running
- * job (re-sets the flag).
+ * happens when its child is interrupted at the job's next completed-tool-part
+ * boundary, so an in-flight tool is never interrupted mid-write. Idempotent for
+ * a running job (re-sets the flag).
  */
 export async function pauseJob(id, deps = {}) {
-  const { load = loadJobs, save = saveJobs, publish } = deps;
+  const { save = saveJobs, publish } = deps;
   return withRunningJob(id, deps, async (jobs, idx, job) => {
     // V2 owns a background command's / subagent's lifecycle: there is nothing
     // to park, so the control is refused rather than half-working.
-    if (job.engine === "v2" && (job.origin === "command" || completionOwnerOf(job) === "opencode")) {
+    if (job.origin === "command" || completionOwnerOf(job) === "opencode") {
       return { ok: false, error: "pause isn't available for this job" };
     }
     const updated = { ...job, pauseRequested: true };
     jobs[idx] = updated;
     await save(jobs);
-    // Status stays "running" until pauseAtBoundary flips it to `paused`; the
-    // flag is what observeEvent acts on.
+    // Status stays "running" until the child's interrupted outcome parks the job;
+    // the flag is what observeEvent acts on.
     publish?.({
       kind: "delegate.updated",
       payload: { id: updated.id, status: updated.status, pauseRequested: true },
     });
     return { ok: true, job: updated };
-  });
-}
-
-/**
- * The drain-abort + state flip that completes a pause request, run by
- * observeEvent at a completed-tool-part boundary. The window + worktree +
- * branch are deliberately KEPT (resumeJob reuses them).
- */
-async function pauseAtBoundary(job, deps = {}) {
-  const {
-    load = loadJobs,
-    save = saveJobs,
-    publish,
-    abortSession,
-    now = () => Date.now(),
-  } = deps;
-  if (abortSession && job.childSessionID) {
-    try {
-      await abortSession(job.childSessionID);
-    } catch (e) {
-      console.warn(`[delegate] pause abortSession failed for ${job.id}:`, e?.message ?? e);
-    }
-  }
-  // Under the jobs-store lock: re-read so a concurrent writer that already
-  // resumed/stopped this job is not clobbered.
-  return jobsLock.runExclusive(async () => {
-    const jobs = await load();
-    const idx = jobs.findIndex((j) => j.id === job.id);
-    if (idx === -1) return { ok: true };
-    const live = jobs[idx];
-    if (live.status !== "running" || !live.pauseRequested) return { ok: true };
-    const paused = { ...live, status: "paused", pauseRequested: false, pausedAt: now() };
-    jobs[idx] = paused;
-    await save(jobs);
-    publish?.({
-      kind: "delegate.updated",
-      payload: { id: paused.id, status: "paused" },
-    });
-    return { ok: true, job: paused };
   });
 }
 
@@ -2302,30 +1805,21 @@ async function buildResumePrompt(job, deps, childSessionID) {
 }
 
 /**
- * Resume a paused job: start a FRESH opencode session in the SAME worktree +
- * branch, re-acquiring a cap slot like a fresh start, and deliver the resume
- * context. If the cap is full the job stays `paused` and the call is retriable
- * ({ok:false, error:CAP_ERROR, retriable:true}).
+ * Resume a paused job: start a FRESH V2 child session in the SAME worktree +
+ * branch (attempt + 1, same job id and result id), re-acquiring a cap slot like
+ * a fresh start, and send it the resume context. If the cap is full the job
+ * stays `paused` and the call is retriable ({ok:false, error:CAP_ERROR,
+ * retriable:true}).
  */
 export async function resumeJob(id, deps = {}) {
-  const {
-    load = loadJobs,
-    save = saveJobs,
-    publish,
-    newWindow,
-    stampOwner,
-    killWindow,
-    listProjects,
-    deliver,
-    now = () => Date.now(),
-  } = deps;
+  const { load = loadJobs } = deps;
 
-  // A V2 job's resume prompt (git + progress reads) is built BEFORE the lock, from a
+  // The resume prompt (git + progress reads) is built BEFORE the lock, from a
   // peek at the record; the lock then checks it is still about the same attempt.
   let preparedResume = null;
   {
     const peek = (await load()).find((j) => j.id === id);
-    if (peek?.engine === "v2" && peek.status === "paused") {
+    if (peek?.status === "paused") {
       preparedResume = {
         childId: peek.childSessionID,
         text: buildJobPrompt({
@@ -2352,153 +1846,107 @@ export async function resumeJob(id, deps = {}) {
     if (running >= MAX_RUNNING_JOBS) {
       return { ok: false, error: CAP_ERROR, retriable: true };
     }
-    if (job.engine === "v2") return registerV2Resume(jobs, idx, job, preparedResume, deps);
-
-    const oldChildSessionID = job.childSessionID;
-    const oldWindow = { sessionName: job.tmuxSession, windowIndex: job.windowIndex };
-    let newChildSessionID = null;
-    let newWindowIndex = null;
-    let ownerSession = job.tmuxSession ?? null;
-    try {
-      // A tracked-work parent may be the windowless CTO conversation. Resume
-      // into the target workspace persisted on the job instead of requiring
-      // that parent to acquire a tmux holder after dispatch. The fallback is
-      // only for older persisted records that predate tmuxSession.
-      if (!ownerSession) {
-        const owner = resolveOwner(await listProjects(), job.parentSessionID);
-        if (!owner) throw new Error(`could not resolve the tmux session owning ${job.parentSessionID}`);
-        ownerSession = owner.tmuxSession;
-      }
-      const cwd = job.worktree || job.parentDirectory;
-      const created = await newWindow({
-        sessionName: ownerSession,
-        windowName: job.name,
-        cwd: cwd || null,
-        chatMode: true,
-        existingSessionId: undefined,
-        worktreePath: job.worktree,
-        oc: deps.oc,
-        permission: job.permission,
-      });
-      newChildSessionID = created.sessionId ?? null;
-      newWindowIndex = created.windowIndex ?? null;
-    } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) };
-    }
-    if (!newChildSessionID) {
-      return { ok: false, error: "could not create a session to resume into" };
-    }
-
-    // Advisory owner stamp on the fresh window (best-effort, mirrors
-    // registerJob's BET-1377 stamp).
-    if (stampOwner && newWindowIndex != null) {
-      try {
-        await stampOwner(ownerSession, newWindowIndex, "job");
-      } catch {
-        /* best-effort */
-      }
-    }
-    // Best-effort remove the OLD aborted window; the worktree is what persists.
-    if (killWindow && oldWindow.sessionName != null && oldWindow.windowIndex != null) {
-      try {
-        await killWindow(oldWindow);
-      } catch (e) {
-        console.warn(`[delegate] resume killWindow failed for ${id}:`, e?.message ?? e);
-      }
-    }
-
-    const updated = {
-      ...job,
-      status: "running",
-      childSessionID: newChildSessionID,
-      tmuxSession: ownerSession ?? job.tmuxSession,
-      windowIndex: newWindowIndex ?? job.windowIndex,
-      pauseRequested: false,
-      pausedAt: null,
-      // Reset the running-timeout clock: a resumed job re-acquires a cap slot
-      // AND a fresh allowance window "like a fresh start" — otherwise a job
-      // paused for days would trip the running-sweep on its first tick back.
-      startedAt: now(),
-    };
-    jobs[idx] = updated;
-    await save(jobs);
-    publish?.({
-      kind: "delegate.updated",
-      payload: { id: updated.id, status: "running" },
-    });
-    return { ok: true, job: updated, oldChildSessionID };
+    return registerV2Resume(jobs, idx, job, preparedResume, deps);
   });
 
   if (!reg.ok) return reg;
-  if (reg.v2) {
-    // Fresh child the same way a first launch makes one (create → move → window →
-    // prompt); the job id, result id and worktree are unchanged.
-    try {
-      return await launchDelegate(reg.job, deps);
-    } finally {
-      inLaunch.delete(reg.job.id);
-    }
+  // Fresh child the same way a first launch makes one (create → move → window →
+  // prompt); the job id, result id and worktree are unchanged.
+  try {
+    return await launchDelegate(reg.job, deps);
+  } finally {
+    inLaunch.delete(reg.job.id);
   }
-  // Build + deliver the resume prompt to the fresh session. The progress read
-  // targets the OLD (aborted) child session, captured before the record's
-  // childSessionID was overwritten.
-  const resumeText = buildJobPrompt({
-    prompt: await buildResumePrompt(reg.job, deps, reg.oldChildSessionID),
-    worktree: reg.job.worktree,
-    branch: reg.job.branch,
-  });
-  if (deliver) {
-    try {
-      await deliver({ sessionId: reg.job.childSessionID, text: resumeText });
-    } catch (e) {
-      console.warn(`[delegate] resume prompt delivery failed for ${id}:`, e?.message ?? e);
-    }
-  }
-  return { ok: true, job: reg.job };
 }
 
 // ---------------------------------------------------------------------------
-// Restart reconciliation (spec §11.6-5)
+// Boot reconciliation of pre-C2 records
 //
-// A job recorded `running` whose child session no longer exists (the box
-// restarted; opencode sessions are not durable across a reboot) is parked as
-// `paused` — its worktree + branch persist, so it can be resumed. This runs
-// once at delegate-engine boot. Exported for the CTO engine (C3) to call too.
+// Before Stage C2 a CTO-dispatched job was a legacy record (no `engine`) that
+// completed from the idle/busy event pairing — a path that no longer exists. A
+// box upgraded while one was unfinished leaves it in the store, once:
+//   • `running` → `failed: "interrupted by upgrade"`. Nothing can finish it any
+//     more, and its child may still be spending. It is made V2-shaped, its child
+//     interrupted, and it ends through the SAME terminal transition every job
+//     uses (finishV2Job) — so a Manta-owned job reports its one result to its
+//     parent exactly as before (through admission for the CTO conversation, N7
+//     otherwise), the CTO's work envelope hears its outcome (onJobTerminal), and
+//     the worktree is cleaned up like any finished job's.
+//   • `paused` → upgraded IN PLACE to a V2 paused record, so the user can still
+//     resume it (on the V2 path: a fresh child in the same worktree).
+//   • terminal records are inert history and are left to retention.
+// V2 jobs that were running when the box restarted are NOT handled here: their
+// state is read from opencode (reconcileV2Jobs), never guessed.
 // ---------------------------------------------------------------------------
 
+/** "providerID/modelID" → {providerID, modelID} (the model id may itself contain "/"). */
+function parseModelString(value) {
+  if (typeof value !== "string") return null;
+  const i = value.indexOf("/");
+  if (i <= 0 || i === value.length - 1) return null;
+  return { providerID: value.slice(0, i), modelID: value.slice(i + 1) };
+}
+
+// The V2 shape of a record that predates `engine` (everything finishV2Job /
+// resume / reconcile read), without changing what the record already says.
+function upgradeLegacyRecord(job) {
+  const manta = completionOwnerOf(job) === "manta";
+  return {
+    ...job,
+    engine: "v2",
+    completionOwner: completionOwnerOf(job),
+    attempt: 1,
+    launchState: "running",
+    submittedAt: job.startedAt ?? null,
+    // minted once per JOB; null for a child opencode reports itself
+    completionMessageId: manta ? (job.completionMessageId ?? mintMessageId()) : null,
+    completionDelivery: null,
+    agent: V2_JOB_AGENT,
+    executionDirectory: job.worktree ?? job.parentDirectory ?? null,
+    launch: {
+      text: buildJobPrompt({ prompt: job.prompt, worktree: job.worktree, branch: job.branch }),
+      model: parseModelString(job.model ?? job.requestedModel),
+      messageId: mintMessageId(),
+    },
+  };
+}
+
 /**
- * @returns {Promise<{ok:true, reconciled:number}>} count of jobs flipped
- * running → paused. Skips reconciliation when `sessionExists` is absent.
+ * @returns {Promise<{ok:true, reconciled:number}>} how many pre-C2 records were
+ * settled (running → failed, paused → upgraded). A healthy box reconciles none.
  */
 export async function reconcileJobsOnBoot(deps = {}) {
-  const { load = loadJobs, save = saveJobs, publish, sessionExists, now = () => Date.now() } = deps;
-  if (typeof sessionExists !== "function") return { ok: true, reconciled: 0 };
-  return jobsLock.runExclusive(async () => {
+  const { load = loadJobs, save = saveJobs, publish, abortSession } = deps;
+  const interrupted = [];
+  let reconciled = 0;
+  await jobsLock.runExclusive(async () => {
     const jobs = await load();
-    let reconciled = 0;
-    const next = [];
-    for (const job of jobs) {
-      // engine:"v2" jobs are reconciled by reconcileV2Jobs (authoritative
-      // reads, never a guessed state); parking one as paused would strand it.
-      if (job.status === "running" && job.childSessionID && job.engine !== "v2") {
-        let alive = true;
-        try {
-          alive = await sessionExists(job.childSessionID);
-        } catch {
-          alive = true; // transient blip → don't park a healthy job
-        }
-        if (!alive) {
-          next.push({ ...job, status: "paused", pauseRequested: false, pausedAt: now() });
-          publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "paused" } });
-          reconciled += 1;
-          continue;
-        }
-      }
-      next.push(job);
-    }
+    const next = jobs.map((job) => {
+      if (job.engine === "v2" || (job.status !== "running" && job.status !== "paused")) return job;
+      reconciled += 1;
+      const upgraded = upgradeLegacyRecord(job);
+      if (job.status === "running") interrupted.push(upgraded);
+      else publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "paused" } });
+      return upgraded;
+    });
     if (reconciled > 0) await save(next);
-    return { ok: true, reconciled };
   });
+  for (const job of interrupted) {
+    // its child may still be running under the new server, with nothing left to end it
+    if (abortSession && job.childSessionID) {
+      try {
+        await abortSession(job.childSessionID);
+      } catch (e) {
+        console.warn(`[delegate] interrupting the pre-upgrade child of ${job.id} failed:`, e?.message ?? e);
+      }
+    }
+    try {
+      await finishV2Job(job, "failed", "interrupted by upgrade", deps);
+    } catch (e) {
+      console.warn(`[delegate] settling the pre-upgrade job ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  return { ok: true, reconciled };
 }
 
 // ---------------------------------------------------------------------------
@@ -2759,7 +2207,7 @@ async function dropResumeRestore(job, deps = {}) {
  * result nor post it twice. The first terminal transition wins; later ones are
  * no-ops. The N7 post (if any) happens AFTER the write. A job without a
  * worktree keeps its window and record (the row shows done); a job WITH one is
- * cleaned up like a legacy job (worktree + window removed, a dirty one kept).
+ * cleaned up (worktree + window removed, a dirty one kept).
  *
  * `interrupted:true` says the child's raw outcome was an interruption. What that
  * means is decided against the LIVE record, under the lock: a pause that was
@@ -2859,9 +2307,9 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   return { ok: true };
 }
 
-// What a finished V2 job leaves behind: a worktree job is cleaned up exactly like a
-// legacy one (worktree + window removed, a dirty worktree keeps both and the record
-// says so, so retention never prunes it); an unfinished resume's old window goes.
+// What a finished V2 job leaves behind: a worktree job is cleaned up (worktree + window
+// removed; a dirty worktree keeps both and the record says so, so retention never
+// prunes it); an unfinished resume's old window goes.
 async function finishV2Cleanup(job, deps) {
   await dropResumeRestore(job, deps);
   if (!job.worktree) return;
@@ -2917,11 +2365,22 @@ export async function deliverJobResult(id, deps = {}) {
     const markIfPending = (completionDelivery) =>
       patchJob(id, { completionDelivery }, deps, { onlyIf: (j) => j.completionDelivery === "pending" });
 
-    let cto = false;
-    try {
-      cto = !!(await isCtoConversationSession?.(job.parentSessionID));
-    } catch {
-      cto = false;
+    // Which route is decided from facts, never guessed: the CTO's tracked-work
+    // workers (correlation.kind "work") are dispatched with the CTO conversation
+    // as their completion parent, so they ALWAYS go through admission — even when
+    // classifying the session fails open (the conversation store unreadable),
+    // which would otherwise post their result straight into the CTO conversation
+    // past its admission queue. Anything else asks the classifier, and a
+    // classifier that cannot answer leaves the result pending for the next retry
+    // rather than risking the wrong route.
+    let cto = job.correlation?.kind === "work";
+    if (!cto) {
+      try {
+        cto = !!(await isCtoConversationSession?.(job.parentSessionID));
+      } catch (e) {
+        console.warn(`[delegate] could not classify the parent of ${id} (will retry):`, e?.message ?? e);
+        return { ok: false, error: String(e?.message ?? e) };
+      }
     }
     if (cto) {
       // The CTO conversation keeps promptDelivery + its admission redirect. The
@@ -3263,14 +2722,17 @@ async function resumeUnsentLaunch(job, deps) {
 }
 
 /**
- * Re-check every unfinished `engine:"v2"` job (boot, reconnect, each sweep).
+ * Re-check every unfinished job (boot, reconnect, each sweep).
  * Sequential: a box with a handful of background rows must not fan out reads.
  */
 export async function reconcileV2Jobs(deps = {}) {
   const { load = loadJobs } = deps;
+  // A pre-C2 record is settled before anything reads the store as V2 (the boot call
+  // and the sweeper's first tick can overlap; whichever comes first does it, once).
+  await reconcileJobsOnBoot(deps);
   if (typeof deps.listActiveIds !== "function") return 0;
   // (a paused job has no run to re-check: it is parked until someone resumes it)
-  const targets = (await load()).filter((j) => j.engine === "v2" && j.status === "running" && j.childSessionID);
+  const targets = (await load()).filter((j) => j.status === "running" && j.childSessionID);
   for (let job of targets) {
     try {
       if (inLaunch.has(job.id) || resuming.has(job.id)) continue;
@@ -3557,7 +3019,7 @@ async function launchRegistered(job, { owner, parentSessionID, parentDirectory, 
 
 // ---- delegate jobs on V2 (Stage C1) ---------------------------------------
 //
-// Every job except the CTO's (`actor:"cto"`, still legacy until C2) is a real V2
+// Every job — the CTO's workers included — is a real V2
 // child session: created under the parent with a client-minted id, moved into the
 // job's worktree, given a window, and sent its opening prompt. It completes from the
 // child's raw execution outcome (settleV2Job — the same evaluator B's wrapped runs
@@ -3718,8 +3180,9 @@ async function launchDelegate(job, deps) {
   };
 
   // (b) the child session — created under the parent, which places it at the parent's location
+  let created = null;
   try {
-    await createChildSession({
+    created = await createChildSession({
       directory: job.parentDirectory,
       id: job.childSessionID,
       parentID: job.parentSessionID,
@@ -3740,7 +3203,12 @@ async function launchDelegate(job, deps) {
   // execution of its own (which "succeeds" ~half a second later), so the prompt is
   // held back until the move has landed and that execution is over: otherwise its
   // outcome would read as the job finishing.
-  if (job.executionDirectory && job.executionDirectory !== job.parentDirectory) {
+  // Where the child actually IS decides whether it needs moving: a parent that is
+  // not at the job's own directory (the CTO conversation, which sits wherever the
+  // CTO does, not in the repository a worker is dispatched into) puts it elsewhere.
+  const childDirectory = (typeof created?.directory === "string" && created.directory) || job.parentDirectory;
+  const trimSlash = (d) => (d.length > 1 ? d.replace(/\/+$/, "") : d);
+  if (job.executionDirectory && trimSlash(job.executionDirectory) !== trimSlash(childDirectory)) {
     if (!(await launchStillWanted(job, deps))) return dropHaltedLaunch(job, deps);
     try {
       await moveSession(job.childSessionID, job.executionDirectory);
@@ -3865,10 +3333,12 @@ async function awaitMoveApplied(job, deps) {
  */
 async function ensureMoved(job, deps) {
   const dir = job.executionDirectory;
-  if (!job.launch || !dir || dir === job.parentDirectory) return { ok: true };
+  if (!job.launch || !dir) return { ok: true };
   try {
     const rs = await deps.readSession(job.childSessionID);
     if (rs.state !== "found") return { ok: false };
+    // (the child's own directory is the authority: created under the parent, it sits
+    // at the PARENT's location, which is not always the job's directory)
     if (rs.session?.directory !== dir) {
       const inbox = (await deps.listInbox?.(job.childSessionID)) ?? [];
       if (!inbox.some((i) => i?.type === "move" && i?.payload?.location?.directory === dir)) {
@@ -4012,7 +3482,6 @@ export async function openJobSession(id, deps = {}) {
 // ---------------------------------------------------------------------------
 
 export function createDelegateEngine(baseDeps) {
-  const sawBusy = new Map();
   // Per-session promise chain. opencode emits several events per turn boundary
   // and the pump calls observeEvent without awaiting it, so two invocations can
   // be in flight at once. Every observeEvent branch is a read store -> decide
@@ -4100,7 +3569,7 @@ export function createDelegateEngine(baseDeps) {
     if (typeof childId !== "string" || typeof parentID !== "string") return;
     const jobs = await (deps.load ?? loadJobs)();
     // A descendant of a Manta-owned wrapped run: remember whose tree it is.
-    const root = jobs.find((j) => j.engine === "v2" && completionOwnerOf(j) === "manta" && !isTerminal(j) && j.childSessionID === parentID);
+    const root = jobs.find((j) => completionOwnerOf(j) === "manta" && !isTerminal(j) && j.childSessionID === parentID);
     const rootId = root?.id ?? treeIndex.get(parentID);
     if (rootId) {
       treeIndex.set(childId, rootId);
@@ -4122,7 +3591,7 @@ export function createDelegateEngine(baseDeps) {
     const outcome = rawOutcome(type);
     const jobs = await (deps.load ?? loadJobs)();
     for (const job of jobs) {
-      if (job.engine !== "v2" || job.status !== "running" || !job.childSessionID) continue;
+      if (job.status !== "running" || !job.childSessionID) continue;
       const own = job.childSessionID === sid;
       if (!own && treeIndex.get(sid) !== job.id) continue;
       // A start only matters as proof an uncertain launch was admitted.
@@ -4205,9 +3674,9 @@ export function createDelegateEngine(baseDeps) {
       const sid = evt?.properties?.sessionID;
       if (typeof sid !== "string" || !sid) {
         // Nothing to serialise on — call through unchanged.
-        return observeEvent(evt, deps, sawBusy);
+        return observeEvent(evt, deps);
       }
-      return serialize(sid, () => observeEvent(evt, deps, sawBusy));
+      return serialize(sid, () => observeEvent(evt, deps));
     },
     sweep: () => sweepDelegateJobs(deps),
     listJobs: (filter) => listJobs(filter, deps),

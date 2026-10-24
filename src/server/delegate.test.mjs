@@ -8,7 +8,6 @@ import {
   resolveForgeOwner,
   startJob as startJobEngine,
   observeEvent,
-  finishJob,
   listJobs,
   sweepDelegateJobs,
   deleteJob,
@@ -28,12 +27,15 @@ import {
   runningJobCount,
   reconcileJobsOnBoot,
   isToolStepBoundary,
+  finishV2Job,
 } from "./delegate.mjs";
 import { familyKey } from "../shared/modelGuide.mjs";
 
-// This file covers the LEGACY engine path — the one a CTO-dispatched job (actor
-// "cto") keeps until C2. Every other job runs on V2 (delegateV2Jobs.test.mjs), so
-// these inputs say who they are.
+// Every job — the CTO's workers included — runs on the V2 engine. This file covers
+// the engine's shared plumbing (model routing at spawn, the cap, retention, cleanup,
+// approvals, the activity poller …) through a harness whose V2 launch calls are
+// fakes; the launch itself, completion and the CTO's own jobs are in
+// delegateV2Jobs.test.mjs. These inputs say who they are.
 const startJob = (input, deps) => startJobEngine({ actor: "cto", ...input }, deps);
 
 // Shared routing-test fixtures (BET-1535 Block 3: one factory, no per-file
@@ -71,6 +73,8 @@ function jobStoreCore({ jobs, published, deliver, now }) {
 function harness(initialJobs = [], fixedNow = 1_700_000_000_000) {
   const jobs = initialJobs.map((j) => ({ ...j }));
   const published = [];
+  // Everything sent TO a session, in order: a job's opening prompt (sendChildPrompt)
+  // and a completion notice delivered through admission (deliver).
   const delivered = [];
   let nowMs = fixedNow;
   const deps = jobStoreCore({
@@ -83,6 +87,19 @@ function harness(initialJobs = [], fixedNow = 1_700_000_000_000) {
     now: () => nowMs,
   });
   deps.setNow = (n) => { nowMs = n; };
+  // The V2 launch, as fakes: a child is created at its parent's location (/repo) and
+  // a move changes where it is; nothing is ever running.
+  const where = new Map(jobs.filter((j) => j.childSessionID).map((j) => [j.childSessionID, j.worktree ?? "/repo"]));
+  deps.listProjects = async () => [];
+  deps.createChildSession = async (i) => { where.set(i.id, "/repo"); return { id: i.id }; };
+  deps.moveSession = async (sid, directory) => { where.set(sid, directory); };
+  deps.sendChildPrompt = async (args) => { delivered.push(args); };
+  // …and a finished job's one result posted to its parent (N7), recorded the same way
+  deps.postSynthetic = async (sessionId, body) => { delivered.push({ sessionId, text: body.text, synthetic: body }); };
+  deps.readSession = async (sid) => (where.has(sid) ? { state: "found", session: { id: sid, directory: where.get(sid) } } : { state: "missing" });
+  deps.listActiveIds = async () => [];
+  deps.newWindow = async (i) => ({ sessionId: i.existingSessionId, windowIndex: 1 });
+  deps.sleep = async () => {};
   return {
     deps,
     published,
@@ -297,6 +314,8 @@ function runningJob(i) {
     status: "running", activity: null,
     createdAt: 1, startedAt: 1, finishedAt: null,
     result: null, error: null, filesChanged: null,
+    engine: "v2", completionOwner: "manta", attempt: 1, launchState: "running", submittedAt: 1,
+    completionMessageId: "msg_fixture", completionDelivery: null,
   };
 }
 
@@ -314,7 +333,7 @@ test("startJob refuses a sixth concurrent job with the exact cap error", async (
 });
 
 // ----------------------------------------------------------------------------
-// cleanupTerminalJob + finishJob/stopJob terminal cleanup (BET-418 §B)
+// cleanupTerminalJob + finishV2Job/stopJob terminal cleanup (BET-418 §B)
 // ----------------------------------------------------------------------------
 
 function cleanupHarness() {
@@ -373,12 +392,12 @@ test("cleanupTerminalJob with no worktree just kills the window", async () => {
   assert.equal(c.killWindowCalls.length, 1);
 });
 
-test("finishJob runs terminal cleanup and stamps cleanedUp true on a clean worktree", async () => {
+test("finishV2Job runs terminal cleanup and stamps cleanedUp true on a clean worktree", async () => {
   const c = cleanupHarness();
   const job = { ...runningObserverJob(), id: "fin-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
   const h = harness([job], 1_700_000_000_000);
   const deps = { ...h.deps, ...c };
-  await finishJob(job, "done", null, deps, new Map());
+  await finishV2Job(job, "done", null, deps);
   const stored = h.jobs.find((j) => j.id === "fin-clean");
   assert.equal(stored.status, "done");
   assert.equal(stored.cleanedUp, true);
@@ -386,13 +405,13 @@ test("finishJob runs terminal cleanup and stamps cleanedUp true on a clean workt
   assert.equal(c.removeCalls.length, 1);
 });
 
-test("finishJob keeps the record (cleanedUp false) on a dirty worktree", async () => {
+test("finishV2Job keeps the record (cleanedUp false) on a dirty worktree", async () => {
   const c = cleanupHarness();
   c.gitRemoveWorktree = async () => ({ removed: false, reason: "dirty" });
   const job = { ...runningObserverJob(), id: "fin-dirty", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
   const h = harness([job], 1_700_000_000_000);
   const deps = { ...h.deps, ...c };
-  await finishJob(job, "done", null, deps, new Map());
+  await finishV2Job(job, "done", null, deps);
   const stored = h.jobs.find((j) => j.id === "fin-dirty");
   assert.equal(stored.cleanedUp, false);
   assert.equal(c.killWindowCalls.length, 0, "dirty worktree keeps the window");
@@ -512,7 +531,7 @@ test("startJob persists the session link on the job record (BET-844)", async () 
     h.deps,
   );
   assert.equal(res.ok, true);
-  const job = h.jobs.find((j) => j.childSessionID === "child_link");
+  const job = h.jobs[0];
   assert.ok(job, "job persisted");
   assert.deepEqual(job.link, { issue: { repoKey: "github.com/owner/repo", number: 42 } });
 });
@@ -524,7 +543,7 @@ test("startJob leaves the link null when none is provided", async () => {
     h.deps,
   );
   assert.equal(res.ok, true);
-  const job = h.jobs.find((j) => j.childSessionID === "child_nolink");
+  const job = h.jobs[0];
   assert.equal(job.link, null);
 });
 
@@ -554,7 +573,7 @@ test("startJob still succeeds when the owner stamp fails (best-effort)", async (
     h.deps,
   );
   assert.equal(res.ok, true);
-  assert.ok(h.jobs.some((j) => j.childSessionID === "child_owner_fail"), "job persisted");
+  assert.equal(h.jobs.length, 1, "job persisted");
 });
 
 // ----------------------------------------------------------------------------
@@ -654,7 +673,7 @@ function startHarness(childSessionId, windowIndex = 1) {
   h.deps.listProjects = async () => [
     { tmuxSession: "s", windows: [{ index: 1, opencodeSessionId: "parent", paneCurrentPath: "/repo" }] },
   ];
-  h.deps.newWindow = async () => ({ sessionId: childSessionId, windowIndex });
+  h.deps.newWindow = async (i) => ({ sessionId: i.existingSessionId, windowIndex });
   return h;
 }
 
@@ -662,7 +681,7 @@ test("startJob with a structured model passes it to deliver and records requeste
   const h = startHarness("child_struct");
   const opus = { providerID: "anthropic", modelID: "claude-opus-4-5" };
   const res = await startWithModel(h, opus);
-  const job = h.jobs.find((j) => j.childSessionID === "child_struct");
+  const job = h.jobs[0];
   assert.equal(job.requestedModel, "anthropic/claude-opus-4-5");
 });
 
@@ -673,7 +692,7 @@ test("startJob resolves free text matching a known model and passes it (BET-947)
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
   assert.deepEqual(h.delivered[0].model, { providerID: "anthropic", modelID: "claude-opus-4-5" });
-  const job = h.jobs.find((j) => j.childSessionID === "child_freetext");
+  const job = h.jobs[0];
   assert.equal(job.requestedModel, "anthropic/claude-opus-4-5");
 });
 
@@ -701,7 +720,7 @@ test("startJob with no model calls deliver without a model key (BET-947 regressi
   assert.equal(res.ok, true);
   assert.equal(h.delivered.length, 1);
   assert.equal("model" in h.delivered[0], false, "no model key on the default path");
-  const job = h.jobs.find((j) => j.childSessionID === "child_default");
+  const job = h.jobs[0];
   assert.equal(job.requestedModel, null);
 });
 
@@ -1386,7 +1405,7 @@ test("startJob allows nesting when the blocking job is terminal", async () => {
   const childWin = { index: 5, name: "nested-work", opencodeSessionId: "c2", paneCurrentPath: "/repo" };
   h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
   h.deps.newWindow = async (input) => ({
-    sessionId: "c2",
+    sessionId: input.existingSessionId,
     windowIndex: 5,
     projects: [{ tmuxSession: input.sessionName, windows: [parentWin, childWin] }],
   });
@@ -1432,17 +1451,9 @@ test("startJob rolls back the worktree when window creation throws", async () =>
 });
 
 // ----------------------------------------------------------------------------
-// 5. observeEvent: idle before any busy does NOT complete; busy then idle DOES
+// 5. observeEvent never completes a job — completion is the raw execution
+//    outcome (observeRaw → settleV2Job), tested in delegateV2*.test.mjs
 // ----------------------------------------------------------------------------
-
-// BET-1535 Block 3: one busy→error dispatch pair for the observeEvent tests.
-async function sendSessionError(deps, sawBusy, errorName, message) {
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, deps, sawBusy);
-  await observeEvent({
-    type: "session.error",
-    properties: { sessionID: "child", error: { name: errorName, message } },
-  }, deps, sawBusy);
-}
 
 function runningObserverJob() {
   return {
@@ -1453,70 +1464,28 @@ function runningObserverJob() {
     status: "running", activity: null,
     createdAt: 1, startedAt: 1, finishedAt: null,
     result: null, error: null, filesChanged: null,
+    engine: "v2", completionOwner: "manta", attempt: 1, launchState: "running", submittedAt: 1,
+    completionMessageId: "msg_fixture", completionDelivery: null,
   };
 }
 
-test("observeEvent: idle before any busy does NOT complete the job", async () => {
+test("observeEvent: the lifecycle adapter's busy → idle / error events no longer complete or fail a job", async () => {
   const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  // stray idle arrives before the opening prompt lands
-  await observeEvent({ type: "session.idle", properties: { sessionID: "child" } }, h.deps, sawBusy);
-  assert.equal(h.jobs[0].status, "running");
-  assert.equal(h.delivered.length, 0);
-});
-
-test("observeEvent: busy then idle DOES complete the job as done", async () => {
-  const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  h.deps.listMessages = async () => [
-    { info: { role: "assistant" }, parts: [{ type: "text", text: "all done" }] },
+  const events = [
+    { type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } },
+    { type: "session.status", properties: { sessionID: "child", status: { type: "idle" } } },
+    { type: "session.idle", properties: { sessionID: "child" } },
+    { type: "session.error", properties: { sessionID: "child", error: { name: "ProviderAuthError", message: "bad key" } } },
+    { type: "session.error", properties: { sessionID: "child", error: { name: "MessageAbortedError", message: "aborted" } } },
   ];
-  h.deps.gitRun = async () => ({ stdout: "" }); // no worktree → filesChanged null
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, h.deps, sawBusy);
-  assert.equal(h.jobs[0].status, "running");
-  await observeEvent({ type: "session.idle", properties: { sessionID: "child" } }, h.deps, sawBusy);
-  assert.equal(h.jobs[0].status, "done");
-  assert.equal(h.jobs[0].result, "all done");
-  assert.equal(h.delivered.length, 1);
-  assert.equal(h.delivered[0].sessionId, "parent");
-  assert.match(h.delivered[0].text, /\[background job "bg" done\]/);
-});
-
-test("observeEvent: session.status idle (not session.idle) also completes after busy", async () => {
-  const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } }, h.deps, sawBusy);
-  await observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "idle" } } }, h.deps, sawBusy);
-  assert.equal(h.jobs[0].status, "done");
-});
-
-// ----------------------------------------------------------------------------
-// 6. observeEvent: session.error fails the job, MessageAbortedError ignored
-// ----------------------------------------------------------------------------
-
-test("observeEvent: session.error fails the job", async () => {
-  const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  await sendSessionError(h.deps, sawBusy, "ProviderAuthError", "bad key");
-  assert.equal(h.jobs[0].status, "failed");
-  assert.equal(h.jobs[0].error, "bad key");
-  assert.equal(h.delivered.length, 1);
-  assert.match(h.delivered[0].text, /failed/);
-  assert.match(h.delivered[0].text, /Error: bad key/);
-});
-
-test("observeEvent: MessageAbortedError is ignored (intentional abort)", async () => {
-  const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  await sendSessionError(h.deps, sawBusy, "MessageAbortedError", "aborted");
+  for (const e of events) await observeEvent(e, h.deps);
   assert.equal(h.jobs[0].status, "running");
   assert.equal(h.delivered.length, 0);
 });
 
 test("observeEvent ignores events for untracked sessions", async () => {
   const h = harness([runningObserverJob()]);
-  const sawBusy = new Map();
-  await observeEvent({ type: "session.idle", properties: { sessionID: "other" } }, h.deps, sawBusy);
+  await observeEvent({ type: "session.idle", properties: { sessionID: "other" } }, h.deps);
   assert.equal(h.jobs[0].status, "running");
 });
 
@@ -1644,7 +1613,7 @@ test("observeEvent adopts a running background:true subagent from a message.part
     },
   });
   const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part } };
-  await observeEvent(evt, a.deps, new Map());
+  await observeEvent(evt, a.deps);
   assert.equal(a.jobs.length, 1);
   assert.equal(a.jobs[0].childSessionID, "ses_child");
   assert.equal(a.jobs[0].origin, "subagent");
@@ -1662,7 +1631,7 @@ test("observeEvent adopts nothing when background is absent from the part", asyn
   const part = backgroundPart();
   delete part.state.metadata.background;
   const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part } };
-  await observeEvent(evt, a.deps, new Map());
+  await observeEvent(evt, a.deps);
   assert.equal(a.jobs.length, 0);
   assert.equal(a.newWindowCalls.length, 0);
 });
@@ -1670,7 +1639,7 @@ test("observeEvent adopts nothing when background is absent from the part", asyn
 test("observeEvent adopts nothing for a completed background task", async () => {
   const a = adoptHarness();
   const evt = { type: "message.part.updated", properties: { sessionID: "ses_parent", part: backgroundPart({ state: { ...backgroundPart().state, status: "completed" } }) } };
-  await observeEvent(evt, a.deps, new Map());
+  await observeEvent(evt, a.deps);
   assert.equal(a.jobs.length, 0);
   assert.equal(a.newWindowCalls.length, 0);
 });
@@ -1757,25 +1726,6 @@ test("BET-773: two identical adoption events produce exactly one window + one re
   assert.equal(a.jobs[0].origin, "subagent");
 });
 
-test("BET-773: overlapping session.status{idle} and session.idle deliver the completion exactly once", async () => {
-  const h = harness([runningObserverJob()]);
-  h.deps.listMessages = async () => [
-    { info: { role: "assistant" }, parts: [{ type: "text", text: "all done" }] },
-  ];
-  h.deps.gitRun = async () => ({ stdout: "" });
-  const engine = createDelegateEngine(h.deps);
-  // Prime the engine's own sawBusy for the child session via a busy event.
-  await engine.observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "busy" } } });
-  // Both terminal triggers fire overlapping.
-  await Promise.all([
-    engine.observeEvent({ type: "session.status", properties: { sessionID: "child", status: { type: "idle" } } }),
-    engine.observeEvent({ type: "session.idle", properties: { sessionID: "child" } }),
-  ]);
-  assert.equal(h.delivered.length, 1, "deliver called exactly once");
-  const terminal = h.jobs.filter((j) => j.status === "done");
-  assert.equal(terminal.length, 1, "store holds exactly one terminal record");
-});
-
 test("BET-773: events for different sessions are not serialised behind each other", async () => {
   const h = harness();
   let releaseA;
@@ -1790,11 +1740,12 @@ test("BET-773: events for different sessions are not serialised behind each othe
     return [];
   };
   const engine = createDelegateEngine(h.deps);
-  const a = engine.observeEvent({ type: "session.idle", properties: { sessionID: "A" } });
+  const textPart = (sessionID) => ({ type: "message.part.updated", properties: { sessionID, part: { type: "text", text: "x" } } });
+  const a = engine.observeEvent(textPart("A"));
   // Give A time to enter its blocking load before B arrives.
   await new Promise((r) => setTimeout(r, 10));
   let bResolved = false;
-  const b = engine.observeEvent({ type: "session.idle", properties: { sessionID: "B" } }).then(() => {
+  const b = engine.observeEvent(textPart("B")).then(() => {
     bResolved = true;
   });
   // If B were queued behind A (a global chain), it could not resolve until A is
@@ -1806,19 +1757,15 @@ test("BET-773: events for different sessions are not serialised behind each othe
 });
 
 
-test("finishJob does not deliver for origin subagent, but still does for delegate and legacy", async () => {
-  const sub = harness([{ ...runningObserverJob(), id: "sub", worktree: null, origin: "subagent" }]);
-  await finishJob(sub.jobs[0], "done", null, sub.deps, new Map());
+test("finishV2Job does not report a job opencode owns (an adopted subagent), but does for one Manta started", async () => {
+  const sub = harness([{ ...runningObserverJob(), id: "sub", worktree: null, origin: "subagent", completionOwner: "opencode" }]);
+  await finishV2Job(sub.jobs[0], "done", null, sub.deps);
   assert.equal(sub.delivered.length, 0, "opencode already injects the <task> result for adopted subagents");
+  assert.equal(sub.jobs[0].status, "done");
 
-  for (const job of [
-    { ...runningObserverJob(), id: "del", worktree: null, origin: "delegate" },
-    { ...runningObserverJob(), id: "legacy", worktree: null }, // no origin field (pre-change record)
-  ]) {
-    const h = harness([job]);
-    await finishJob(h.jobs[0], "done", null, h.deps, new Map());
-    assert.equal(h.delivered.length, 1, `delivers for ${job.id}`);
-  }
+  const del = harness([{ ...runningObserverJob(), id: "del", worktree: null, origin: "delegate" }]);
+  await finishV2Job(del.jobs[0], "done", null, del.deps);
+  assert.equal(del.delivered.length, 1, "delivers for a delegate job");
 });
 
 // ----------------------------------------------------------------------------
@@ -1923,7 +1870,7 @@ test("startJob happy path (non-git cwd) persists a running job and delivers the 
   const childWin = { index: 2, name: "fix-the-login-bug", opencodeSessionId: "child-h", paneCurrentPath: "/repo" };
   h.deps.listProjects = async () => [{ tmuxSession: "proj", windows: [parentWin] }];
   h.deps.newWindow = async (input) => ({
-    sessionId: "child-h",
+    sessionId: input.existingSessionId,
     windowIndex: 2,
     projects: [{ tmuxSession: input.sessionName, windows: [parentWin, childWin] }],
   });
@@ -1936,26 +1883,25 @@ test("startJob happy path (non-git cwd) persists a running job and delivers the 
   assert.equal(res.job.worktree, null);
   assert.equal(res.job.branch, null);
   assert.equal(res.job.baseSha, null);
-  assert.equal(res.job.childSessionID, "child-h");
+  assert.match(res.job.childSessionID, /^ses_[0-9a-f]{32}$/, "a client-minted V2 child");
   assert.equal(res.job.status, "running");
   assert.equal(h.jobs.length, 1);
-  // opening prompt delivered to the child session
+  // opening prompt sent to the child session
   assert.equal(h.delivered.length, 1);
-  assert.equal(h.delivered[0].sessionId, "child-h");
+  assert.equal(h.delivered[0].sessionId, res.job.childSessionID);
   assert.match(h.delivered[0].text, /Fix the login bug please/);
   assert.doesNotMatch(h.delivered[0].text, /git worktree/);
 });
 
 // ----------------------------------------------------------------------------
-// finishJob filesChanged counts committed + uncommitted (with a worktree)
+// finishV2Job filesChanged counts committed + uncommitted (with a worktree)
 // ----------------------------------------------------------------------------
 
-test("finishJob counts committed + uncommitted files when a worktree exists", async () => {
+test("finishV2Job counts committed + uncommitted files when a worktree exists", async () => {
   const job = {
     ...runningObserverJob(), id: "fc", worktree: "/repo/wt", branch: "b", baseSha: "sha1",
   };
   const h = harness([job]);
-  const sawBusy = new Map();
   h.deps.listMessages = async () => [
     { info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] },
   ];
@@ -1964,16 +1910,16 @@ test("finishJob counts committed + uncommitted files when a worktree exists", as
     if (args.includes("status")) return { stdout: " M c.ts\n?? d.ts\n" }; // 2 uncommitted
     return { stdout: "" };
   };
-  await finishJob(job, "done", null, h.deps, sawBusy);
+  await finishV2Job(job, "done", null, h.deps);
   assert.equal(h.jobs[0].status, "done");
   assert.equal(h.jobs[0].result, "done");
   assert.equal(h.jobs[0].filesChanged, 4);
 });
 
-test("finishJob is idempotent for an already-terminal job", async () => {
+test("finishV2Job is idempotent for an already-terminal job", async () => {
   const job = { ...runningObserverJob(), id: "idem", status: "done", finishedAt: 9 };
   const h = harness([job]);
-  const res = await finishJob(job, "done", null, h.deps, new Map());
+  const res = await finishV2Job(job, "done", null, h.deps);
   assert.equal(res.ok, true);
   assert.equal(res.alreadyTerminal, true);
   assert.equal(h.delivered.length, 0);
@@ -2170,9 +2116,10 @@ function approvalEngineHarness(initialJobs = []) {
   let jobs = initialJobs.map((j) => ({ ...j }));
   const published = [];
   const newWindowCalls = [];
-  const createSessionCalls = [];
+  const createCalls = [];
   const parentWin = { index: 1, name: "parent", opencodeSessionId: "ses_p", paneCurrentPath: "/proj" };
-  const childWin = { index: 2, name: "run-the-tests", opencodeSessionId: "ses_child", paneCurrentPath: "/proj" };
+  // the child session as opencode would report it
+  const child = { outcome: null };
   const deps = {
     ...jobStoreCore({
       jobs,
@@ -2185,22 +2132,23 @@ function approvalEngineHarness(initialJobs = []) {
     listProjects: async () => [{ tmuxSession: "proj", windows: [parentWin] }],
     newWindow: async (input) => {
       newWindowCalls.push(input);
-      return {
-        sessionId: "ses_child",
-        windowIndex: 2,
-        projects: [{ tmuxSession: input.sessionName, windows: [parentWin, { ...childWin, name: input.windowName }] }],
-      };
+      return { sessionId: input.existingSessionId, windowIndex: 2 };
     },
-    oc: {
-      createSession: async (input) => {
-        createSessionCalls.push(input);
-        return { id: "ses_child", directory: input?.directory };
-      },
+    createChildSession: async (input) => {
+      createCalls.push(input);
+      return { id: input.id, directory: input.directory };
     },
+    moveSession: async () => {},
+    sendChildPrompt: async () => {},
+    readSession: async (sid) => ({ state: "found", session: { id: sid, directory: "/proj", outcome: child.outcome, time: { idle: 1_700_000_000_001 } } }),
+    listActiveIds: async () => [],
+    listRawTimeline: async () => [{ type: "user" }],
+    postSynthetic: async () => {},
+    sleep: async () => {},
     now: () => 1_700_000_000_000,
   };
   const engine = createDelegateEngine(deps);
-  return { engine, published, get jobs() { return jobs; }, newWindowCalls, createSessionCalls };
+  return { engine, published, get jobs() { return jobs; }, newWindowCalls, createCalls, child };
 }
 
 // BET-1535 Block 3: the shared startJobWithApproval input (over = per-test knobs).
@@ -2243,9 +2191,10 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
   assert.ok(h.engine.approve(req.payload.id, [{ permission: "bash", pattern: "pytest * -x" }]));
   const res = await p;
   assert.equal(res.ok, true);
-  // newWindow received the ruleset: catch-all deny FIRST, then the approved
-  // grant — the order that actually lets the grant take effect (last-match-wins).
-  const perm = h.newWindowCalls[0]?.permission;
+  // the child session was created with the ruleset: catch-all deny FIRST, then
+  // the approved grant — the order that actually lets the grant take effect
+  // (last-match-wins).
+  const perm = h.createCalls[0]?.permission;
   assert.ok(Array.isArray(perm));
   assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
   assert.deepEqual(perm.at(-1), { permission: "bash", pattern: "pytest * -x", action: "allow" }, "the EDITED grant is forwarded");
@@ -2255,10 +2204,10 @@ test("startJobWithApproval starts the job on approve and forwards the ruleset", 
 // §A4 deeper test — a job whose ruleset omits bash FAILS its first command,
 // not stalls. Simulates the deny→fail path through the mocked oc layer:
 //   1. start a job with tools that omit bash (ruleset has no bash-allow).
-//   2. assert the catch-all deny reached oc.createSession (opencode WILL deny
-//      an unmatched bash tool, never resolve it to `ask`).
-//   3. simulate the denial as opencode would surface it — a session.error
-//      event for the child session — and assert observeEvent completes the
+//   2. assert the catch-all deny reached the child's session creation (opencode
+//      WILL deny an unmatched bash tool, never resolve it to `ask`).
+//   3. simulate the denial as opencode would surface it — the child's execution
+//      FAILS (a raw `session.execution.failed`) — and assert the engine ends the
 //      job as `failed` immediately (no hang, no 30-min timeout).
 // This bridges the gap the reviewer flagged: it observes the OUTCOME (job
 // fails fast), not just the ruleset SHAPE.
@@ -2276,27 +2225,21 @@ test("§A4: a job omitting bash receives the catch-all deny at the session-creat
   });
   assert.equal(res.ok, true);
 
-  // 1. The ruleset reached the session-creation boundary (newWindow forwards
-  //    it to maybeCreateChatSession → oc.createSession in production). The
-  //    harness intercepts at newWindow, so assert there.
-  assert.equal(h.newWindowCalls.length, 1);
-  const perm = h.newWindowCalls[0].permission;
+  // 1. The ruleset reached the child's session creation.
+  assert.equal(h.createCalls.length, 1);
+  const perm = h.createCalls[0].permission;
   assert.ok(Array.isArray(perm), "the permission ruleset was forwarded to session creation");
   const bashAllow = perm.find((r) => r.permission === "bash" && r.action === "allow");
   assert.equal(bashAllow, undefined, "no bash-allow rule — bash hits the catch-all deny");
   assert.deepEqual(perm[0], { permission: "*", pattern: "**", action: "deny" });
 
-  // 2. Simulate opencode denying the job's first bash command. opencode
-  //    surfaces a tool denial as a session.error (the job's turn aborts); the
-  //    engine's observeEvent must transition the job to `failed` immediately.
-  const before = h.jobs[0].status;
-  assert.equal(before, "running");
-  await h.engine.observeEvent({
-    type: "session.error",
-    properties: {
-      sessionID: "ses_child",
-      error: { name: "PermissionDeniedError", message: "bash denied by ruleset" },
-    },
+  // 2. Simulate opencode denying the job's first bash command: the child's run
+  //    fails, which the pump hands over as a RAW execution outcome.
+  assert.equal(h.jobs[0].status, "running");
+  h.child.outcome = "failed";
+  await h.engine.observeRaw({
+    type: "session.execution.failed",
+    data: { sessionID: h.jobs[0].childSessionID, error: { message: "bash denied by ruleset" } },
   });
   const after = h.jobs[0];
   assert.equal(after.status, "failed", "job fails fast — does NOT stall for the 30-min timeout");
@@ -2340,7 +2283,7 @@ test("listJobs attaches the child's progress record to the job (BET-790)", async
   assert.equal(job1.progress, null);
 });
 
-test("finishJob clears the child's progress record (BET-790)", async () => {
+test("finishV2Job clears the child's progress record (BET-790)", async () => {
   const h = harness([
     {
       id: "job1",
@@ -2353,7 +2296,7 @@ test("finishJob clears the child's progress record (BET-790)", async () => {
   ]);
   const cleared = [];
   h.deps.clearProgress = async (sid) => { cleared.push(sid); return { ok: true, deleted: true }; };
-  await finishJob(h.jobs[0], "done", null, h.deps, new Map());
+  await finishV2Job(h.jobs[0], "done", null, h.deps);
   assert.deepEqual(cleared, ["child1"]);
 });
 
@@ -2395,13 +2338,15 @@ test("pauseJob then a completed-tool-part boundary aborts + pauses, worktree kep
   }]);
   const aborted = [];
   h.deps.abortSession = async (sid) => { aborted.push(sid); };
-  const sawBusy = new Map();
   await pauseJob("p1", h.deps);
   await observeEvent({
     type: "message.part.updated",
     properties: { sessionID: "child", part: { type: "tool", state: { status: "completed" } } },
-  }, h.deps, sawBusy);
-  assert.deepEqual(aborted, ["child"]);
+  }, h.deps);
+  assert.deepEqual(aborted, ["child"], "the child is interrupted at the tool boundary");
+  assert.equal(h.jobs[0].status, "running", "the interrupt itself parks nothing");
+  // the child's raw `interrupted` outcome is what parks the job
+  await finishV2Job(h.jobs[0], "failed", "interrupted", h.deps, { interrupted: true });
   assert.equal(h.jobs[0].status, "paused");
   assert.equal(h.jobs[0].pauseRequested, false);
   assert.equal(h.jobs[0].pausedAt, 1_700_000_000_000);
@@ -2413,11 +2358,10 @@ test("pauseJob then a completed-tool-part boundary aborts + pauses, worktree kep
 test("a non-boundary tool part does NOT pause a pauseRequested job", async () => {
   const h = harness([{ ...runningObserverJob(), id: "p2", pauseRequested: true }]);
   h.deps.abortSession = async () => {};
-  const sawBusy = new Map();
   await observeEvent({
     type: "message.part.updated",
     properties: { sessionID: "child", part: { type: "tool", state: { status: "running" } } },
-  }, h.deps, sawBusy);
+  }, h.deps);
   assert.equal(h.jobs[0].status, "running");
   assert.equal(h.jobs[0].pauseRequested, true);
 });
@@ -2460,12 +2404,13 @@ test("resumeJob starts a fresh session in the SAME worktree with resume context"
     worktree: "/repo/wt-r", branch: "fix-r", parentSessionID: "parent",
   };
   const h = harness([job]);
-  const parentWin = { index: 1, opencodeSessionId: "parent" };
-  h.deps.listProjects = async () => [{ tmuxSession: "s", windows: [parentWin] }];
+  const projects = [{ tmuxSession: "s", windows: [{ index: 0, opencodeSessionId: "parent" }, { index: 1, opencodeSessionId: "child" }] }];
+  h.deps.listProjects = async () => projects;
   const newWindows = [];
   h.deps.newWindow = async (input) => {
     newWindows.push(input);
-    return { sessionId: "child-resumed", windowIndex: 9 };
+    projects[0].windows.push({ index: 9, opencodeSessionId: input.existingSessionId });
+    return { sessionId: input.existingSessionId, windowIndex: 9 };
   };
   const killed = [];
   h.deps.killWindow = async (input) => { killed.push(input); };
@@ -2481,7 +2426,9 @@ test("resumeJob starts a fresh session in the SAME worktree with resume context"
   const res = await resumeJob("paused1", h.deps);
   assert.equal(res.ok, true);
   assert.equal(res.job.status, "running");
-  assert.equal(res.job.childSessionID, "child-resumed");
+  assert.match(res.job.childSessionID, /^ses_[0-9a-f]{32}$/, "a fresh child");
+  assert.notEqual(res.job.childSessionID, "child");
+  assert.equal(res.job.attempt, 2);
   assert.equal(res.job.windowIndex, 9);
   assert.equal(res.job.pauseRequested, false);
   assert.equal(res.job.pausedAt, null);
@@ -2491,13 +2438,13 @@ test("resumeJob starts a fresh session in the SAME worktree with resume context"
   // SAME worktree reused (no new gitAddWorktree), old window killed, owner stamped
   assert.equal(newWindows[0].cwd, "/repo/wt-r");
   assert.equal(newWindows[0].worktreePath, "/repo/wt-r");
-  assert.equal(newWindows[0].existingSessionId, undefined);
+  assert.equal(newWindows[0].existingSessionId, res.job.childSessionID);
   assert.deepEqual(killed, [{ sessionName: "s", windowIndex: 1 }]);
   assert.deepEqual(stamps, [{ s: "s", i: 9, o: "job" }]);
 
-  // delivered resume context: original prompt + git log + status + progress
+  // sent resume context: original prompt + git log + status + progress
   assert.equal(h.delivered.length, 1);
-  assert.equal(h.delivered[0].sessionId, "child-resumed");
+  assert.equal(h.delivered[0].sessionId, res.job.childSessionID);
   assert.match(h.delivered[0].text, /^p/); // original prompt leads
   assert.ok(h.delivered[0].text.includes("abc123 fix thing"));
   assert.ok(h.delivered[0].text.includes(" M src/x.js"));
@@ -2511,22 +2458,18 @@ test("resumeJob reuses the persisted target workspace when the parent CTO sessio
     worktree: "/repo/tracked-work", branch: "tracked-work",
   };
   const h = harness([job]);
-  let listedProjects = false;
-  h.deps.listProjects = async () => {
-    listedProjects = true;
-    return [];
-  };
+  // no window anywhere belongs to the CTO conversation
+  h.deps.listProjects = async () => [{ tmuxSession: "target-project", windows: [{ index: 1, opencodeSessionId: "child" }] }];
   const newWindows = [];
   h.deps.newWindow = async (input) => {
     newWindows.push(input);
-    return { sessionId: "resumed-child", windowIndex: 7 };
+    return { sessionId: input.existingSessionId, windowIndex: 7 };
   };
 
   const res = await resumeJob("paused-cto", h.deps);
 
-  assert.equal(res.ok, true);
-  assert.equal(listedProjects, false, "the windowless parent is not re-resolved through tmux");
-  assert.equal(newWindows[0].sessionName, "target-project");
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(newWindows[0].sessionName, "target-project", "the workspace the job was dispatched into, not a lookup of the CTO's own window");
   assert.equal(newWindows[0].cwd, "/repo/tracked-work");
   assert.equal(res.job.tmuxSession, "target-project");
   assert.equal(res.job.status, "running");
@@ -2578,29 +2521,16 @@ test("sweeper leaves a young paused job paused", async () => {
   assert.equal(h.jobs[0].status, "paused");
 });
 
-test("reconcileJobsOnBoot parks a running job whose session is gone as paused", async () => {
-  const h = harness([{ ...runningObserverJob(), id: "gone", childSessionID: "dead" }]);
+test("reconcileJobsOnBoot leaves V2 jobs alone, whatever their session looks like (reconcileV2Jobs reads opencode instead)", async () => {
+  const h = harness([
+    { ...runningObserverJob(), id: "gone", childSessionID: "dead" },
+    { ...runningObserverJob(), id: "parked", status: "paused", pausedAt: 5 },
+  ]);
   h.deps.sessionExists = async (sid) => sid !== "dead";
-  const res = await reconcileJobsOnBoot(h.deps);
-  assert.equal(res.reconciled, 1);
-  assert.equal(h.jobs[0].status, "paused");
-  assert.equal(h.jobs[0].pausedAt, 1_700_000_000_000);
-  assert.equal(h.jobs[0].worktree, null); // non-worktree job still parks
-});
-
-test("reconcileJobsOnBoot leaves a live running job untouched", async () => {
-  const h = harness([{ ...runningObserverJob(), id: "alive", childSessionID: "child" }]);
-  h.deps.sessionExists = async () => true;
+  const before = structuredClone(h.jobs);
   const res = await reconcileJobsOnBoot(h.deps);
   assert.equal(res.reconciled, 0);
-  assert.equal(h.jobs[0].status, "running");
-});
-
-test("reconcileJobsOnBoot is a no-op without a sessionExists dep", async () => {
-  const h = harness([{ ...runningObserverJob(), id: "x" }]);
-  const res = await reconcileJobsOnBoot(h.deps);
-  assert.equal(res.reconciled, 0);
-  assert.equal(h.jobs[0].status, "running");
+  assert.deepEqual(h.jobs, before);
 });
 
 test("startJob uses an explicit name (the work objective) instead of the prompt's first words", async () => {
@@ -2610,11 +2540,11 @@ test("startJob uses an explicit name (the work objective) instead of the prompt'
     h.deps,
   );
   assert.equal(res.ok, true);
-  const job = h.jobs.find((j) => j.childSessionID === "child_named");
+  const job = h.jobs[0];
   assert.match(job.name, /^restore-github-actions-ci/);
   const h2 = startHarness("child_unnamed");
   await startJob({ prompt: "You are the implementation worker", parentSessionID: "parent", parentDirectory: "/repo" }, h2.deps);
-  assert.match(h2.jobs.find((j) => j.childSessionID === "child_unnamed").name, /^you-are-the/);
+  assert.match(h2.jobs[0].name, /^you-are-the/);
 });
 
 test("observeEvent: token-stream events return before loading the job store", async () => {
@@ -2624,6 +2554,11 @@ test("observeEvent: token-stream events return before loading the job store", as
     await observeEvent({ type, properties: { sessionID: "ses_x" } }, { load });
   }
   assert.equal(loads, 0);
-  await observeEvent({ type: "session.idle", properties: { sessionID: "ses_x" } }, { load });
+  // the lifecycle adapter's idle / status / error events complete nothing any more
+  for (const type of ["session.idle", "session.status", "session.error"]) {
+    await observeEvent({ type, properties: { sessionID: "ses_x" } }, { load });
+  }
+  assert.equal(loads, 0);
+  await observeEvent({ type: "message.part.updated", properties: { sessionID: "ses_x", part: { type: "text", text: "x" } } }, { load });
   assert.equal(loads, 1);
 });

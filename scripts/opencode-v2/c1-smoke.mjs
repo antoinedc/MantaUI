@@ -85,6 +85,11 @@ const killed = [];
 let postedByManta = 0;
 const localMod = await import("../../src/server/local.mjs");
 let legacyDeliveries = 0;
+// Stage C2: sessions the engine must treat as the CTO conversation (their results go through an injected
+// admission stand-in, never an N7 post), what that stand-in was handed, and the terminal hook's calls.
+const ctoSessions = new Set();
+const ctoDeliveries = [];
+const terminalCalls = [];
 const engine = delegateMod.createDelegateEngine({
   load: loadJobsB,
   save: saveJobsB,
@@ -117,8 +122,15 @@ const engine = delegateMod.createDelegateEngine({
   gitRemoveWorktree: (i) => localMod.gitRemoveWorktree(i),
   gitRun: async (args) => ({ stdout: execFileSync("git", args, { encoding: "utf8" }) }),
   sessionExists: (sid) => oc.sessionExists(sid),
-  deliver: async () => {
+  deliver: async (a) => {
+    if (ctoSessions.has(a.sessionId)) {
+      ctoDeliveries.push(a); // the CTO conversation's admission queue (promptDelivery + redirect) accepted it
+      return { delivered: false, queued: true };
+    }
     legacyDeliveries += 1; // a V2 delegate job must NEVER take the legacy promptDelivery route
+  },
+  onJobTerminal: async (job) => {
+    terminalCalls.push({ id: job.id, status: job.status });
   },
   runCommandOnChild: (i) => oc.runCommand(i),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
@@ -126,7 +138,7 @@ const engine = delegateMod.createDelegateEngine({
     postedByManta += 1;
     return oc.postSynthetic(sid, body);
   },
-  isCtoConversationSession: async () => false,
+  isCtoConversationSession: async (sid) => ctoSessions.has(sid),
   openCommandWindows: (sid) => correlatorRef.current.openWindows(sid),
   oc,
 });
@@ -952,6 +964,97 @@ try {
     const cl = await jobById(job.id);
     check("(19) a CLEAN worktree is removed with its window (real git), like a legacy job", cl.cleanedUp === true && !existsSync(job.worktree) && killed.some((k) => k.windowIndex === cl.windowIndex), j({ cleanedUp: cl.cleanedUp, exists: existsSync(job.worktree), killed }));
     check("(19) exactly ONE result (state failed) — the child's late interrupted outcome added nothing", syn.length === 1 && syn[0].metadata.state === "failed" && postedByManta === 1 && (await jobById(job.id)).status === "failed" && legacyDeliveries === 0, j(syn.map((s) => s.metadata)));
+  }
+
+  // ================================================================ Stage C2 — the CTO's own jobs on V2
+  // What ctoWorkTools hands startJob for a tracked-work dispatch, minus the model (the mock answers).
+  const ctoJob = (parentId, command, extra = {}) =>
+    engine.startJobWithApproval({
+      prompt: `Run exactly this shell command and nothing else: ${command} . Then reply with the single word done.`,
+      name: "cto worker",
+      parentSessionID: parentId,
+      parentDirectory: sb.dirs.repo,
+      targetProject: "smoke",
+      isolationRequired: true,
+      correlation: { kind: "work", workId: "w-smoke", receiptId: `r-${Math.random().toString(36).slice(2, 8)}`, op: "work.dispatch" },
+      actor: "cto",
+      sweepAllowanceMs: 3_600_000,
+      model: MODEL,
+      tools: [{ permission: "bash", pattern: "**" }, { permission: "edit", pattern: "**" }],
+      trustMode: true,
+      ...extra,
+    });
+
+  // ---------------------------------------------------------------- 20. a CTO job under an ORDINARY session (a plan / overnight job)
+  console.log("\n[20] actor cto, parent = an ordinary session: a V2 child, ONE N7 result like any other job");
+  {
+    const p = await newParent();
+    postedByManta = 0;
+    legacyDeliveries = 0;
+    terminalCalls.length = 0;
+    const res = await ctoJob(p.id, "pwd > cto-cwd.txt", { correlation: undefined });
+    check("(20) a CTO-actor job is a running V2 job (no legacy path)", res.ok === true && res.job.engine === "v2" && res.job.actor === "cto" && res.job.completionOwner === "manta" && res.job.launchState === "running", j(res));
+    const job = res.job;
+    sessions.push(job.childSessionID);
+    await wait("(20) the job finished", async () => (await jobById(job.id))?.status === "done", 90_000);
+    const cwdFile = join(job.worktree, "cto-cwd.txt");
+    check("(20) the child ran in its worktree", existsSync(cwdFile) && readFileSync(cwdFile, "utf8").trim() === job.worktree);
+    await wait("(20) the result was posted", async () => (await jobById(job.id))?.completionDelivery === "delivered", 60_000);
+    await until("(20) parent settled", async () => !(await oc.listActiveSessionIds()).includes(p.id), 60_000);
+    await sleep(1200);
+    const tl = await rawTl(p.id);
+    const syn = resultsIn(tl, job.id);
+    check("(20) exactly ONE N7 result, under the persisted id, and ONE reply; promptDelivery never used", syn.length === 1 && syn[0].id === job.completionMessageId && repliesAfter(tl, syn[0].id).length === 1 && postedByManta === 1 && legacyDeliveries === 0 && ctoDeliveries.length === 0, j({ syn: syn.length, posted: postedByManta, legacy: legacyDeliveries }));
+    check("(20) the terminal hook ran once", terminalCalls.filter((t) => t.id === job.id).length === 1 && terminalCalls[0].status === "done", j(terminalCalls));
+  }
+
+  // ---------------------------------------------------------------- 21. a CTO job under the CTO CONVERSATION (headless: no window)
+  console.log("\n[21] actor cto, parent = the CTO conversation: through admission with the persisted ctoKey, NEVER a synthetic into it");
+  {
+    // the conversation: a real V2 session that owns no tmux window (the workspace comes from targetProject)
+    const cto = await newSession({ model: MODEL });
+    ctoSessions.add(cto.id);
+    postedByManta = 0;
+    legacyDeliveries = 0;
+    ctoDeliveries.length = 0;
+    terminalCalls.length = 0;
+
+    // done
+    const res = await ctoJob(cto.id, "pwd > cto-conv-cwd.txt");
+    check("(21) dispatched into the workspace named by targetProject, without a window for the parent", res.ok === true && res.job.engine === "v2" && res.job.tmuxSession === "smoke" && res.job.correlation?.kind === "work" && res.job.sweepAllowanceMs === 3_600_000, j(res));
+    const job = res.job;
+    sessions.push(job.childSessionID);
+    const child = (await oc.readSession(job.childSessionID)).session;
+    check("(21) its child hangs under the CTO conversation, in the worktree", child.parentID === cto.id && existsSync(job.worktree), j({ parentID: child.parentID, wt: job.worktree }));
+    await wait("(21) the job finished", async () => (await jobById(job.id))?.status === "done", 90_000);
+    await wait("(21) the result went to admission", async () => (await jobById(job.id))?.completionDelivery === "delivered", 60_000);
+    check("(21) the child ran in the worktree, not the checkout", existsSync(join(job.worktree, "cto-conv-cwd.txt")) && !existsSync(join(sb.dirs.repo, "cto-conv-cwd.txt")));
+    await engine.reconcileV2();
+    await engine.sweep();
+    await sleep(800);
+    const mine = ctoDeliveries.filter((d) => d.ctoKey === job.completionMessageId);
+    check("(21) exactly ONE admission delivery, keyed by the job's persisted result id, naming the CTO conversation", mine.length === 1 && ctoDeliveries.length === 1 && mine[0].sessionId === cto.id && /^\[background job "[^"]*" done\]/.test(mine[0].text), j(ctoDeliveries.map((d) => [d.sessionId, d.ctoKey])));
+    check("(21) nothing was posted into the CTO conversation behind admission's back, and no legacy notice", postedByManta === 0 && resultsIn(await rawTl(cto.id), job.id).length === 0 && legacyDeliveries === 0);
+    check("(21) the work coordinator's terminal hook ran once", terminalCalls.filter((t) => t.id === job.id).length === 1, j(terminalCalls));
+
+    // stopped (the cancel path)
+    ctoDeliveries.length = 0;
+    const res2 = await ctoJob(cto.id, "for i in $(seq 1 60); do echo s$i; sleep 1; done");
+    check("(21) a second worker started", res2.ok === true, j(res2));
+    const job2 = res2.job;
+    sessions.push(job2.childSessionID);
+    await until("(21) its child is running", async () => (await oc.listActiveSessionIds()).includes(job2.childSessionID), 30_000);
+    const st = await engine.stopJob(job2.id);
+    check("(21) stop is accepted", st.ok === true, j(st));
+    await until("(21) the stopped child is no longer active", async () => !(await oc.listActiveSessionIds()).includes(job2.childSessionID), 30_000);
+    await sleep(1000);
+    await engine.reconcileV2();
+    await engine.sweep();
+    const stopped = await jobById(job2.id);
+    const mine2 = ctoDeliveries.filter((d) => d.ctoKey === job2.completionMessageId);
+    check("(21) stopped → exactly ONE admission delivery (state stopped), the child's late interrupted outcome added nothing", stopped.status === "stopped" && stopped.completionDelivery === "delivered" && mine2.length === 1 && ctoDeliveries.length === 1 && /stopped\]/.test(mine2[0].text), j({ status: stopped.status, deliveries: ctoDeliveries.length }));
+    check("(21) …and still nothing posted into the CTO conversation", postedByManta === 0 && legacyDeliveries === 0);
+    ctoSessions.delete(cto.id);
   }
 
   // ---------------------------------------------------------------- 15. N4 over the real timeline (if the mapper has landed)
