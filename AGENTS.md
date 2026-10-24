@@ -1572,14 +1572,26 @@ Backup at `~/.tmux.conf.pre-MantaUI` on the remote if it was ever modified.
 
   **The card's shape (approved mockup, no reordering — D-A2).** Header
   `Pending · N message(s)` + **↑ edit last**; one row per item, oldest first:
-  a badge — **Now** (accent, `delivery: "steer"`) or **After this turn**
-  (neutral, `"queue"`) — the text on one line with an ellipsis, then per kind:
-  a Now row shows a quiet `at next step` (`runs next` once the agent is not
-  running) and a **Wait** link; an After row shows a primary **Send now**
-  button; every row has **×**. When the agent is NOT running and at least one
-  After item remains, a footer reads "Agent stopped — these are waiting. Send
-  now, or ×." (`showStoppedFooter`). The text/label rules are pure helpers in
-  `inboxState.ts`.
+  the text on one line with an ellipsis, then per kind: a Now (`steer`) row has
+  NO badge, a quiet `sent after this step` (`runs next` once the agent is not
+  running) and a bordered **Wait** button; an After this turn (`queue`) row has
+  the neutral **After this turn** badge and a primary **Send now** button;
+  every row has a bordered **×** (same style as Wait). When the agent is NOT
+  running and at least one After item remains, a footer reads "Agent stopped —
+  these are waiting. Send now, or ×." (`showStoppedFooter`). The text/label
+  rules are pure helpers in `inboxState.ts`.
+
+  **A send into a running turn shows at once.** The busy send adds a local
+  "sending…" row (spinner, controls disabled) and clears the composer before
+  the request goes out; a prompt carries a client-minted `msg_` id
+  (`opencodePrompt(..., { delivery, messageID })`), so the box's own row
+  replaces it exactly; a failed send removes the row, puts the draft and its
+  attachments back (if the composer is still empty) and shows the error.
+  Busy sends are chained, not refused: a second Enter goes out after the first.
+  **An idle send never flashes the card**: V2 lists it in the inbox for an
+  instant, but it is already the optimistic transcript row, so inbox items that
+  appear during an idle send (and 3 s after) are hidden for up to 5 s
+  (`cardItems` in ChatPanel).
 
   **Send now / Wait are N1** (`opencode:inbox-set-delivery`,
   `window.api.opencodeInboxSetDelivery({ sessionId, id, delivery })`): Send now
