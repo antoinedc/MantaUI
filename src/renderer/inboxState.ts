@@ -168,7 +168,7 @@ export function inboxBadgeLabel(item: Pick<OpencodeInboxItem, "delivery">): "Now
 /** The quiet note on a Now row; After rows carry none (their action is Send now). */
 export function inboxRowNote(item: Pick<OpencodeInboxItem, "delivery">, running: boolean): string | null {
   if (item.delivery !== "steer") return null;
-  return running ? "at next step" : "runs next";
+  return running ? "sent after this step" : "runs next";
 }
 
 /** The stopped footer: the agent is not running and at least one After item is still parked. */

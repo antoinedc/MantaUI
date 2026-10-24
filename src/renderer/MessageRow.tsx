@@ -224,7 +224,7 @@ const UserCommandBar = memo(function UserCommandBar({
         <span className="text-text-quiet shrink-0 w-3 inline-flex items-center">
           {expanded ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
         </span>
-        <span className="font-mono text-text shrink-0">/{name}</span>
+        <span className="font-mono text-accent-tx shrink-0" data-testid="user-slash-token">/{name}</span>
         {trimmedArgs && (
           <span className="font-mono text-text-muted truncate">{trimmedArgs}</span>
         )}
@@ -284,7 +284,9 @@ export const MessageRow = memo(function MessageRow({
   // Slash-command provenance from commandByMessageId. When set on a user
   // message, the row shows a collapsed `/name args` pill with an expand
   // chevron instead of the full expanded template body.
-  commandInfo: { name: string; arguments: string } | null;
+  // `inline`: the message's own text starts with `/name` (a skill, or a typed
+  // slash message) — rendered as an ordinary bubble with `/name` coloured.
+  commandInfo: { name: string; arguments: string; inline?: true } | null;
   // BET-837: the voice note claimed by this user message (via
   // buildVoiceNoteMap). When set, the row renders a VoicePlayer below the
   // text — the transcript stays fully visible (text-first); the player is
@@ -445,7 +447,12 @@ export const MessageRow = memo(function MessageRow({
           </div>
         )}
         {text && (
-          commandInfo ? (
+          commandInfo?.inline && text.startsWith(`/${commandInfo.name}`) ? (
+            <MessageBubble entering={entering}>
+              <span className="text-accent-tx" data-testid="user-slash-token">/{commandInfo.name}</span>
+              {text.slice(commandInfo.name.length + 1)}
+            </MessageBubble>
+          ) : commandInfo && !commandInfo.inline ? (
             <UserCommandBar
               name={commandInfo.name}
               args={commandInfo.arguments}

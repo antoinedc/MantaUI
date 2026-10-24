@@ -102,10 +102,13 @@ describe("ChatPanel busy send + inbox", () => {
       expect([sid, text, model, agent]).toEqual([SID, "also check the tests", undefined, undefined]);
       expect(atts).toEqual([]);
       expect(mentions).toBeUndefined();
-      expect(opts).toEqual({ delivery: "steer" });
+      expect(opts).toEqual({ delivery: "steer", messageID: expect.stringMatching(/^msg_/) });
       expect(textarea().value).toBe("");
-      // no optimistic transcript row, and the turn is still running (Stop visible)
-      expect(h!.text()).not.toContain("also check the tests");
+      // no optimistic transcript row (it shows in the pending card instead),
+      // and the turn is still running (Stop visible)
+      const card = h!.container.querySelector('[data-testid="inbox-card"]');
+      expect(card?.textContent).toContain("also check the tests");
+      expect(h!.text().split("also check the tests")).toHaveLength(2);
       expect(h!.container.querySelector('button[aria-label="Stop the running turn"]')).not.toBeNull();
     });
 
@@ -141,18 +144,50 @@ describe("ChatPanel busy send + inbox", () => {
       expect(h!.container.querySelector('button[aria-label="Stop the running turn"]')).not.toBeNull();
     });
 
-    it("one in flight per panel: a second Enter is ignored and the button is disabled", async () => {
+    it("shows at once: a 'sending…' row in the pending card and a cleared composer, BEFORE the box answers", async () => {
       let release!: () => void;
       await open({ opencodePrompt: () => new Promise<void>((res) => (release = res)) });
       await type("one");
       await key("Enter");
-      await key("Enter");
-      expect(api.calls.opencodePrompt).toHaveLength(1);
-      const send = h!.container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
-      expect(send.disabled).toBe(true);
+      expect(textarea().value).toBe("");
+      const row = h!.container.querySelector('[data-testid="inbox-row"]')!;
+      expect(row.getAttribute("data-sending")).toBe("true");
+      expect(row.querySelector('[data-testid="inbox-text"]')?.textContent).toBe("one");
+      expect(row.querySelector('[data-testid="inbox-note"]')?.textContent).toBe("sending…");
       await act(async () => release());
       await h!.flush();
-      expect(textarea().value).toBe("");
+    });
+
+    it("the box's own row (same message id) replaces the sending row — never two", async () => {
+      await open();
+      await type("one");
+      await key("Enter");
+      const opts = (api.calls.opencodePrompt[0] as unknown[])[6] as { messageID: string };
+      await pushInbox([item(opts.messageID, "one")]);
+      const rows = [...h!.container.querySelectorAll('[data-testid="inbox-row"]')];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].getAttribute("data-sending")).toBeNull();
+    });
+
+    it("a second send while the first is in flight is sent after it, in order — not dropped", async () => {
+      let release!: () => void;
+      const texts: string[] = [];
+      let n = 0;
+      await open({
+        opencodePrompt: (_sid: string, text: string) => {
+          texts.push(text);
+          return n++ === 0 ? new Promise<void>((res) => (release = res)) : Promise.resolve();
+        },
+      });
+      await type("one");
+      await key("Enter");
+      await type("two");
+      await key("Enter");
+      expect(texts).toEqual(["one"]);
+      expect(h!.container.querySelectorAll('[data-testid="inbox-row"][data-sending="true"]')).toHaveLength(2);
+      await act(async () => release());
+      await h!.flush();
+      expect(texts).toEqual(["one", "two"]);
     });
 
     it("newer text typed while the send is in flight is NOT cleared", async () => {
@@ -226,7 +261,7 @@ describe("ChatPanel busy send + inbox", () => {
       expect([sid, text, model, agent]).toEqual([SID, "then update the CHANGELOG", undefined, undefined]);
       expect(atts).toEqual([]);
       expect(mentions).toBeUndefined();
-      expect(opts).toEqual({ delivery: "queue" });
+      expect(opts).toEqual({ delivery: "queue", messageID: expect.stringMatching(/^msg_/) });
       expect(textarea().value).toBe("");
       expect(h!.container.querySelector('button[aria-label="Stop the running turn"]')).not.toBeNull();
     });
@@ -354,6 +389,31 @@ describe("ChatPanel busy send + inbox", () => {
   });
 
   describe("pending card", () => {
+    it("REGRESSION: an ordinary (idle) send's brief pass through the inbox does not flash the card", async () => {
+      await open();
+      await setRunning(false);
+      await type("hello there");
+      await key("Enter");
+      // V2 lists the idle send for an instant before its turn starts.
+      await pushInbox([item("msg_idle", "hello there")]);
+      expect(h!.container.querySelector('[data-testid="inbox-card"]')).toBeNull();
+      // An item that was already pending before the send is still shown.
+      await pushInbox([item("msg_idle", "hello there")]);
+      expect(h!.container.querySelector('[data-testid="inbox-card"]')).toBeNull();
+    });
+
+    it("items already pending before an idle send stay visible", async () => {
+      await open();
+      await pushInbox([item("m_old", "queued earlier", 0, "queue")]);
+      await setRunning(false);
+      await type("hello there");
+      await key("Enter");
+      await pushInbox([item("m_old", "queued earlier", 0, "queue"), item("msg_idle", "hello there")]);
+      const rows = [...h!.container.querySelectorAll('[data-testid="inbox-row"]')].map((r) => r.textContent);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toContain("queued earlier");
+    });
+
     it("lists the inbox items (from the frame) and drops them when the list empties", async () => {
       await open();
       await pushInbox([item("m1", "first"), item("m2", "second")]);
@@ -425,8 +485,8 @@ describe("ChatPanel busy send + inbox", () => {
       await pushInbox([item("m1", "use staging", 0, "steer"), item("m2", "update CHANGELOG", 0, "queue")]);
       const [now, after] = rowEls();
       expect(now.querySelector('[data-testid="inbox-text"]')?.textContent).toBe("use staging");
-      expect(now.querySelector('[data-testid="inbox-badge"]')?.textContent).toBe("Now");
-      expect(now.querySelector('[data-testid="inbox-note"]')?.textContent).toBe("at next step");
+      expect(now.querySelector('[data-testid="inbox-badge"]')).toBeNull();
+      expect(now.querySelector('[data-testid="inbox-note"]')?.textContent).toBe("sent after this step");
       expect(now.querySelector('[data-testid="inbox-wait"]')?.textContent).toBe("Wait");
       expect(now.querySelector('[data-testid="inbox-send-now"]')).toBeNull();
       expect(after.querySelector('[data-testid="inbox-badge"]')?.textContent).toBe("After this turn");
@@ -466,7 +526,8 @@ describe("ChatPanel busy send + inbox", () => {
       expect(useStore.getState().systemNotice).toBeNull();
       // the next inbox frame is what flips the badge
       await pushInbox([item("m1", "later", 0, "steer")]);
-      expect(rowEls()[0].querySelector('[data-testid="inbox-badge"]')?.textContent).toBe("Now");
+      expect(rowEls()[0].querySelector('[data-testid="inbox-badge"]')).toBeNull();
+      expect(rowEls()[0].querySelector('[data-testid="inbox-wait"]')).not.toBeNull();
     });
 
     it("Wait → N1 queue", async () => {

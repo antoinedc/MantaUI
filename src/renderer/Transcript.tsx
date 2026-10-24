@@ -477,7 +477,7 @@ export type TranscriptProps = {
     }
   >;
   finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
-  userCommandInfo: Map<string, { name: string; arguments: string }>;
+  userCommandInfo: Map<string, { name: string; arguments: string; inline?: true }>;
   voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
   // BET-1148: messageID → inline media entry (from the `media` bus events),
   // memoized at ChatPanel scope like the other per-message maps.

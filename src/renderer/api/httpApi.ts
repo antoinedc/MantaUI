@@ -1161,7 +1161,10 @@ export const httpApi: Api = {
    * We mirror that packing exactly.
    */
   opencodePrompt: (sessionId, text, model, attachments, mentions, agent, opts) =>
-    rpc(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions, agent, delivery: opts?.delivery }),
+    rpc(IPC.opencodePrompt, {
+      sessionId, text, model, attachments, mentions, agent, delivery: opts?.delivery,
+      ...(opts?.messageID ? { messageID: opts.messageID } : {}),
+    }),
 
   opencodeAbort: (sessionId) => rpc(IPC.opencodeAbort, sessionId),
   opencodeInbox: (sessionId) => rpc(IPC.opencodeInbox, sessionId),

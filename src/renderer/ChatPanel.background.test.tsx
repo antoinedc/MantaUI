@@ -183,6 +183,22 @@ describe("ChatPanel background slash commands (Stage B)", () => {
       expect(token()?.textContent).toBe("/fork");
     });
 
+    it("a SENT slash message keeps the colour on /name in its bubble; plain text doesn't", async () => {
+      await open({
+        opencodeMessages: () =>
+          Promise.resolve([
+            { info: { id: "msg_u1", sessionID: SID, role: "user", time: { created: 1 } }, parts: [{ id: "p1", messageID: "msg_u1", type: "text", text: "/impeccable polish the card" }] },
+            { info: { id: "msg_u2", sessionID: SID, role: "user", time: { created: 2 } }, parts: [{ id: "p2", messageID: "msg_u2", type: "text", text: "/usr/local is a path" }] },
+          ]),
+      });
+      await type("/");
+      await h!.flush();
+      const tokens = [...h!.container.querySelectorAll('[data-testid="user-slash-token"]')];
+      expect(tokens.map((t) => t.textContent)).toEqual(["/impeccable"]);
+      expect(tokens[0].className).toContain("text-accent-tx");
+      expect(h!.text()).toContain("/impeccable polish the card");
+    });
+
     it("unknown, partial, leading-space and mid-text slashes are not highlighted", async () => {
       await open();
       for (const text of ["/revie", "/nope x", " /review", "please run /review", "hello"]) {
