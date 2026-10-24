@@ -161,6 +161,20 @@ describe("ChatPanel background slash commands (Stage B)", () => {
       expect(q('[data-testid="slash-highlight"]')?.getAttribute("aria-hidden")).toBe("true");
     });
 
+    it("the token is coloured text only (no background); the overlay draws the text and the textarea keeps only its caret", async () => {
+      await open();
+      await type("/review HEAD~1");
+      const t = token() as HTMLElement;
+      expect(t.style.color).toBe("var(--accent-tx)");
+      expect(t.style.backgroundColor).toBe("");
+      expect(t.style.backgroundImage).toBe("");
+      expect(textarea().style.color).toBe("transparent");
+      expect(textarea().style.caretColor).not.toBe("");
+      await type("plain text");
+      expect(token()).toBeNull();
+      expect(textarea().style.color).toBe("");
+    });
+
     it("a skill and a Manta built-in are highlighted too", async () => {
       await open();
       await type("/impeccable polish");
@@ -376,6 +390,35 @@ describe("ChatPanel background slash commands (Stage B)", () => {
       expect(card.textContent).toContain("done");
       expect(card.textContent).toContain("RESULT_MARK: backoff has no upper bound");
       expect(card.querySelector('[data-testid="background-open-session"]')?.textContent).toBe("Open session →");
+    });
+
+    it("a long result is clamped to a few lines with Show more / Show less", async () => {
+      const sh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+      const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+      Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return this.getAttribute?.("data-testid") === "background-result-text" ? 400 : 0; } });
+      Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get() { return this.getAttribute?.("data-testid") === "background-result-text" && this.style.maxHeight ? 60 : this.getAttribute?.("data-testid") === "background-result-text" ? 400 : 0; } });
+      try {
+        await open({ opencodeMessages: () => Promise.resolve([resultMessage()]) });
+        const body = q<HTMLElement>('[data-testid="background-result-text"]')!;
+        expect(body.style.maxHeight).not.toBe("");
+        const toggle = q<HTMLButtonElement>('[data-testid="background-result-toggle"]')!;
+        expect(toggle.textContent).toBe("Show more");
+        await act(async () => { toggle.click(); });
+        await h!.flush();
+        expect(q<HTMLElement>('[data-testid="background-result-text"]')!.style.maxHeight).toBe("");
+        expect(q('[data-testid="background-result-toggle"]')!.textContent).toBe("Show less");
+        await act(async () => { q<HTMLButtonElement>('[data-testid="background-result-toggle"]')!.click(); });
+        await h!.flush();
+        expect(q<HTMLElement>('[data-testid="background-result-text"]')!.style.maxHeight).not.toBe("");
+      } finally {
+        if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh); else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+        if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch); else delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+      }
+    });
+
+    it("a short result has no Show more toggle", async () => {
+      await open({ opencodeMessages: () => Promise.resolve([resultMessage()]) });
+      expect(q('[data-testid="background-result-toggle"]')).toBeNull();
     });
 
     it("a failed result is tinted as a failure; a task subagent (no jobId, no name) is still a card", async () => {

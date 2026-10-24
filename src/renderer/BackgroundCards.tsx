@@ -15,7 +15,7 @@
 // the window is selected on success, and a refusal / failure leaves a visible
 // error under the card (AGENTS.md: never stub a control).
 
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "./store";
 import { renderMarkdown } from "./MarkdownBody";
 import {
@@ -199,8 +199,64 @@ export const BackgroundResultCard = memo(function BackgroundResultCard({
         <span className="shrink-0">· {resultStateLabel(part.state)}</span>
         {jobId && <OpenSessionButton onOpen={() => void open()} busy={busy} arrow className="ml-auto" />}
       </div>
-      {text && <div className="mt-1 break-words text-text">{renderMarkdown(text)}</div>}
+      {text && <ClampedResultText text={text} />}
       {error && <ErrorLine message={error} />}
+    </div>
+  );
+});
+
+// A result can be a whole report: the card shows its first couple of lines and
+// a Show more / Show less toggle — offered only when the text actually overflows.
+const CLAMP_HEIGHT = "4.5em"; // ~3 lines of meta-size text
+
+const ClampedResultText = memo(function ClampedResultText({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, expanded]);
+  const clamped = !expanded;
+  return (
+    <div className="mt-1">
+      <div
+        ref={bodyRef}
+        className="break-words text-text overflow-hidden"
+        style={
+          clamped
+            ? {
+                maxHeight: CLAMP_HEIGHT,
+                ...(overflows
+                  ? {
+                      maskImage: "linear-gradient(to bottom, black 55%, transparent)",
+                      WebkitMaskImage: "linear-gradient(to bottom, black 55%, transparent)",
+                    }
+                  : {}),
+              }
+            : undefined
+        }
+        data-testid="background-result-text"
+      >
+        {renderMarkdown(text)}
+      </div>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-meta text-accent-tx hover:underline"
+          aria-expanded={expanded}
+          data-testid="background-result-toggle"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
     </div>
   );
 });
