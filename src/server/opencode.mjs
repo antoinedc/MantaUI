@@ -1,3 +1,4 @@
+// @ts-check
 // opencode HTTP client — server-side (OpenCode V2).
 //
 // OpenCode V2 runs on the SAME machine as this Node server, listening at
@@ -18,17 +19,11 @@ import http from "node:http";
 import { expandTilde, patchPath } from "../shared/paths.mjs";
 import { readOpencodePassword } from "./upgradeV2Service.mjs";
 import { isPlanAgent } from "../shared/planMode.mjs";
-import {
-  mapTimeline,
-  sessionFromV2,
-  permissionFromV2,
-  permissionKeyToV2,
-  isQuestionForm,
-  questionFromForm,
-  formAnswerFromAnswers,
-} from "../shared/opencodeV2.mjs";
+// @ts-ignore  src/shared/opencodeV2.d.mts declares only toolTitle, so these exports read as missing
+import { mapTimeline, sessionFromV2, permissionFromV2, permissionKeyToV2, isQuestionForm, questionFromForm, formAnswerFromAnswers } from "../shared/opencodeV2.mjs";
 import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
+import { createOcClient, statusError, plainError } from "./opencodeClient.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
 import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs";
 import { endpointKey } from "../shared/endpointKey.mjs";
@@ -168,6 +163,7 @@ async function ocFetch(url, init) {
 function pooledOcRequest(url, init) {
   return new Promise((resolve, reject) => {
     const method = (init?.method ?? "GET").toString();
+    /** @type {Record<string, string>} */
     const headers = {};
     if (init?.headers) {
       for (const [k, v] of Object.entries(init.headers)) headers[k] = String(v);
@@ -266,36 +262,22 @@ export function _resetSessionDirectoryCache() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * One V2 call: JSON in, JSON out, `data` unwrapped. A non-2xx throws
- * `opencode <label> <status>: <body>` with `err.status` set so callers can tell
- * a definitive refusal (4xx) from an unknown outcome (network / 5xx).
- */
-async function ocJson(label, method, path, body, { signal } = {}) {
-  const res = await ocFetch(apiUrl(path), {
-    method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    ...(signal ? { signal } : {}),
-  });
-  if (!res.ok) {
-    const err = new Error(`opencode ${label} ${res.status}: ${await res.text()}`);
-    err.status = res.status;
-    err.retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
-    throw err;
-  }
-  const text = await res.text();
-  if (!text) return undefined;
-  const parsed = JSON.parse(text);
-  return parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
-}
+// The typed V2 client (opencodeClient.mjs): every request/response call below is
+// one of its operations, run through `ocCall` over THIS file's transport (pooling,
+// per-request auth, per-request base URL). A non-2xx throws
+// `opencode <label> <status>: <body>` with `err.status` set so callers can tell a
+// definitive refusal (4xx) from an unknown outcome (network / 5xx); a call that
+// handles a refusal itself passes `onHttpError`. The SSE pump (`subscribeEvents`)
+// is NOT a client call — the client has no replay or reconnect.
+const { call: ocCall } = createOcClient({ send: (url, init) => ocFetch(url, init), resolveUrl: (pathAndQuery) => apiUrl(pathAndQuery) });
 
 // ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
 
 /** Create a new session in the given directory with an optional title.
- *  @param {{ directory: string, title?: string }} opts
+ *  `permission` is a Manta-spelled ruleset, `permissions` an already-V2 one (it wins); `model` is `{providerID, modelID, variant?}`.
+ *  @param {{ directory: string, title?: string, permission?: Array<{ permission: string, pattern: string, action: "allow"|"deny"|"ask" }>, metadata?: object, signal?: AbortSignal, id?: string, parentID?: string, agent?: string, model?: { providerID: string, modelID: string, variant?: string }, permissions?: Array<{ action: string, resource: string, effect: "allow"|"deny"|"ask" }> }} opts
  *  @returns {Promise<{ id: string, title: string, directory: string, projectID: string }>}
  */
 // opencode requires an ABSOLUTE directory: given `~/projects/x` it resolves
@@ -306,6 +288,7 @@ async function ocJson(label, method, path, body, { signal } = {}) {
 // opencode sees the path.
 export async function createSession({ directory, title = "", permission, metadata, signal, id, parentID, agent, model, permissions }) {
   const absDir = expandTilde(directory);
+  /** @type {{ -readonly [K in keyof import("@opencode/client").SessionCreateInput]: import("@opencode/client").SessionCreateInput[K] }} */
   const body = { location: { directory: absDir } };
   // A caller-minted id makes a create reconcilable after a lost response; a
   // parentID links the new session as a child (V2 places it at the parent's
@@ -343,11 +326,11 @@ export async function createSession({ directory, title = "", permission, metadat
     }
     body.metadata = metadata;
   }
-  // The numeric `err.status` (set by ocJson) lets callers distinguish a
+  // The numeric `err.status` (set by ocCall) lets callers distinguish a
   // DEFINITIVE rejection (4xx — nothing was created) from an unknown outcome
   // (network error, timeout, 5xx — the create may still have landed). The
   // binding service clears a reservation only on the former (P3a1 review blocker 1).
-  const sess = sessionFromV2(await ocJson("createSession", "POST", "/api/session", body, { signal }));
+  const sess = sessionFromV2(await ocCall("createSession", (c, o) => c.session.create(body, o), { signal }));
   // Fall back to the EXPANDED dir, never the raw tilde (the bug we fixed).
   rememberSessionDirectory(sess.id, sess.directory || absDir);
   return sess;
@@ -363,10 +346,11 @@ export async function createSession({ directory, title = "", permission, metadat
  * from an unknown outcome.
  * @param {string} sessionId
  * @param {string} directory
+ * @param {{ signal?: AbortSignal }} [opts]
  */
 export async function moveSession(sessionId, directory, { signal } = {}) {
   const absDir = expandTilde(directory);
-  await ocJson("moveSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/move`, { directory: absDir }, { signal });
+  await ocCall("moveSession", (c, o) => c.session.move({ sessionID: sessionId, directory: absDir }, o), { signal, ignoreBody: true });
   rememberSessionDirectory(sessionId, absDir);
 }
 
@@ -451,17 +435,19 @@ const isConversation = (m) => m?.type === "user" || m?.type === "assistant" || (
  * number of CONVERSATION records wanted (the tail): the timeline also holds
  * idle / agent-switch records that are not messages, so pages are read until
  * enough conversation records have been seen.
+ * @param {string} sessionId
+ * @param {{ limit?: number|null }} [opts]
  */
 async function readTimeline(sessionId, { limit } = {}) {
-  const base = `/api/session/${encodeURIComponent(sessionId)}/message`;
   const desc = [];
   let convo = 0;
   let cursor = null;
   for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
-    const qs = cursor ? `cursor=${encodeURIComponent(cursor)}&limit=${TIMELINE_PAGE}` : `order=desc&limit=${TIMELINE_PAGE}`;
-    const res = await ocFetch(apiUrl(`${base}?${qs}`));
-    if (!res.ok) throw new Error(`opencode listMessages ${res.status}: ${await res.text()}`);
-    const body = await res.json();
+    const body = await ocCall(
+      "listMessages",
+      (c, o) => c.message.list(cursor ? { sessionID: sessionId, cursor, limit: TIMELINE_PAGE } : { sessionID: sessionId, order: "desc", limit: TIMELINE_PAGE }, o),
+      { onHttpError: (f) => { throw plainError("listMessages", f); } },
+    );
     const rows = Array.isArray(body?.data) ? body.data : [];
     for (const m of rows) {
       desc.push(m);
@@ -531,13 +517,8 @@ export async function listMessages(sessionId, opts = {}) {
  */
 export async function getMessage(sessionId, messageId) {
   try {
-    const url = `/api/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`;
-    const res = await ocFetch(apiUrl(url));
-    if (!res.ok) {
-      await discardBody(res);
-      return null;
-    }
-    const record = (await res.json())?.data;
+    const record = await ocCall("getMessage", (c, o) => c.session.message.get({ sessionID: sessionId, messageID: messageId }, o), { onHttpError: () => null });
+    if (record === null) return null;
     const [mapped] = stampCommandOrigins(await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId), commandCorrelator.originOf);
     return mapped ? stripDuplicateToolOutput(mapped) : null;
   } catch {
@@ -590,22 +571,28 @@ export function getCommandCorrelator() {
  * "our prompt ids" BEFORE the request, which is what lets the command
  * correlator tell a command's user message from ours. A definitive 4xx drops
  * the id again (it never reached the inbox). commandOrigins.test.mjs fails if a
- * `/prompt` POST appears anywhere else in src/server.
- * @returns {Promise<Response>}
+ * session-prompt call appears anywhere else in src/server.
+ * @param {string} sessionId
+ * @param {{ text: string, id?: string, files?: any[], agents?: any[], skills?: any[], delivery?: "steer"|"queue" }} body
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<import("./opencodeClient.mjs").HttpFailure|null>} null once accepted; the refusal (a non-2xx) otherwise
  */
 async function postPrompt(sessionId, body, { signal } = {}) {
   const id = typeof body.id === "string" && body.id ? body.id : mintPromptId();
   commandCorrelator.registerPromptId(sessionId, id);
-  const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/prompt`), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...body, id }),
-    ...(signal ? { signal } : {}),
-  });
   // (A transport failure / abort throws past here with the id still registered:
   // the server may have accepted it after all.)
-  if (!res.ok && res.status >= 400 && res.status < 500) commandCorrelator.unregisterPromptId(sessionId, id);
-  return res;
+  /** @type {import("./opencodeClient.mjs").HttpFailure|null} */
+  let refused = null;
+  await ocCall("postPrompt", (c, o) => c.session.prompt({ ...body, sessionID: sessionId, id }, o), {
+    signal,
+    ignoreBody: true,
+    onHttpError: (f) => {
+      refused = f;
+    },
+  });
+  if (refused && refused.status >= 400 && refused.status < 500) commandCorrelator.unregisterPromptId(sessionId, id);
+  return refused;
 }
 
 const DEFAULT_AGENT = "build";
@@ -617,29 +604,32 @@ const normVariant = (v) => (typeof v === "string" && v && v !== "default" ? v : 
  * a model/agent first reads the session and only switches what differs.
  * An omitted agent after a plan-mode turn means "back to build" — V1's
  * per-prompt agent was never sticky, V2's is.
+ * @param {string} sessionId
+ * @param {{ model?: { providerID: string, modelID: string, variant?: string }, agent?: string, signal?: AbortSignal }} controls
  */
 async function syncSessionControls(sessionId, { model, agent, signal }) {
   let info;
   try {
-    info = sessionFromV2(await ocJson("getSession", "GET", `/api/session/${encodeURIComponent(sessionId)}`, undefined, { signal }));
+    info = sessionFromV2(await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), { signal }));
   } catch (e) {
     if (e?.status === 404) throw e;
     info = null; // can't read it — set what was asked and let the prompt decide
   }
-  const base = `/api/session/${encodeURIComponent(sessionId)}`;
   const wantAgent = agent ?? (isPlanAgent(info?.agent) ? DEFAULT_AGENT : null);
   if (wantAgent && (info?.agent ?? DEFAULT_AGENT) !== wantAgent) {
-    await ocJson("setAgent", "POST", `${base}/agent`, { agent: wantAgent }, { signal });
+    await ocCall("setAgent", (c, o) => c.session.switchAgent({ sessionID: sessionId, agent: wantAgent }, o), { signal, ignoreBody: true });
   }
   if (model?.providerID && model?.modelID) {
     const cur = info?.model;
     if (!cur || cur.providerID !== model.providerID || cur.id !== model.modelID || normVariant(cur.variant) !== normVariant(model.variant)) {
-      await ocJson(
+      await ocCall(
         "setModel",
-        "POST",
-        `${base}/model`,
-        { model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } },
-        { signal },
+        (c, o) =>
+          c.session.switchModel(
+            { sessionID: sessionId, model: { providerID: model.providerID, id: model.modelID, ...(model.variant ? { variant: model.variant } : {}) } },
+            o,
+          ),
+        { signal, ignoreBody: true },
       );
     }
   }
@@ -687,25 +677,24 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
   if (messageID) body.id = messageID;
   if (delivery) body.delivery = delivery;
 
-  const res = await postPrompt(sessionId, body, { signal });
-  if (!res.ok) {
-    const err = new Error(`opencode sendPrompt ${res.status}: ${await res.text()}`);
+  const refused = await postPrompt(sessionId, body, { signal });
+  if (refused) {
+    const err = /** @type {Error & { status?: number, retryAfterMs?: number }} */ (new Error(`opencode sendPrompt ${refused.status}: ${refused.text}`));
     // Mirror the usage-meter HTTP error shape (usageAdapters/httpError.mjs):
     // carry the real status + Retry-After so the provider-refusal path can
     // tell 402 (out of credit) from 429 (rate limited) from 5xx (broken)
     // without string-matching the body (BET-1230).
-    err.status = res.status;
-    const retryAfterMs = parseRetryAfterMs(res.headers?.get?.("retry-after"));
+    err.status = refused.status;
+    const retryAfterMs = parseRetryAfterMs(refused.headers?.get?.("retry-after"));
     if (retryAfterMs !== undefined) err.retryAfterMs = retryAfterMs;
     // BET-1270 6c: stash the transport Retry-After for the session so the pump
     // can attach it to the matching session.error (see getAndClearSessionRefusal).
     _transportRefusalBySession.set(sessionId, {
-      httpStatus: res.status,
+      httpStatus: refused.status,
       ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
     });
     throw err;
   }
-  await discardBody(res);
 }
 
 /**
@@ -720,7 +709,7 @@ export async function sendPrompt({ sessionId, text, model, agent, attachments, m
  * @param {{ signal?: AbortSignal }} [opts]
  */
 export async function abortSession(sessionId, { signal } = {}) {
-  await ocJson("abortSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=false`, undefined, { signal });
+  await ocCall("abortSession", (c, o) => c.session.interrupt({ sessionID: sessionId, resume: false }, o), { signal, ignoreBody: true });
 }
 
 /**
@@ -732,35 +721,42 @@ export async function abortSession(sessionId, { signal } = {}) {
  * @param {{ resume?: boolean, signal?: AbortSignal }} [opts]
  */
 export async function interruptSession(sessionId, { resume = false, signal } = {}) {
-  await ocJson("interruptSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt?resume=${resume ? "true" : "false"}`, undefined, { signal });
+  await ocCall("interruptSession", (c, o) => c.session.interrupt({ sessionID: sessionId, resume: !!resume }, o), { signal, ignoreBody: true });
 }
 
 /**
  * The session's raw V2 inbox (`GET /api/session/{id}/inbox`): durable enqueued
  * work not yet delivered, oldest first — user, synthetic, compaction and move
  * items. The stream interpreter maps and filters it; nothing else reads it.
+ * @param {string} sessionId
+ * @param {{ signal?: AbortSignal }} [opts]
  * @returns {Promise<any[]>}
  */
 export async function listInbox(sessionId, { signal } = {}) {
-  const data = await ocJson("listInbox", "GET", `/api/session/${encodeURIComponent(sessionId)}/inbox`, undefined, { signal });
+  const data = await ocCall("listInbox", (c, o) => c.session.inbox.list({ sessionID: sessionId }, o), { signal });
   return Array.isArray(data) ? data : [];
 }
 
-/** `DELETE /api/session/{id}/inbox/{inboxID}` — a 204 whether or not the item was still pending (the interpreter decides the outcome from events). */
+/** `DELETE /api/session/{id}/inbox/{inboxID}` — a 204 whether or not the item was still pending (the interpreter decides the outcome from events).
+ *  @param {string} sessionId @param {string} inboxId @param {{ signal?: AbortSignal }} [opts] */
 export async function cancelInboxItem(sessionId, inboxId, { signal } = {}) {
-  await ocJson("cancelInboxItem", "DELETE", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`, undefined, { signal });
+  await ocCall("cancelInboxItem", (c, o) => c.session.inbox.cancel({ sessionID: sessionId, inboxID: inboxId }, o), { signal, ignoreBody: true });
 }
 
-/** `PATCH /api/session/{id}/inbox/{inboxID} {delivery}` — switch a pending item between steer and queue (N1). The interpreter decides the outcome from events. */
+/** `PATCH /api/session/{id}/inbox/{inboxID} {delivery}` — switch a pending item between steer and queue (N1). The interpreter decides the outcome from events.
+ *  @param {string} sessionId @param {string} inboxId @param {"steer"|"queue"} delivery @param {{ signal?: AbortSignal }} [opts] */
 export async function setInboxDelivery(sessionId, inboxId, delivery, { signal } = {}) {
-  await ocJson("setInboxDelivery", "PATCH", `/api/session/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(inboxId)}`, { delivery }, { signal });
+  await ocCall("setInboxDelivery", (c, o) => c.session.inbox.update({ sessionID: sessionId, inboxID: inboxId, delivery }, o), { signal, ignoreBody: true });
 }
 
 /** The set of sessions with a turn in flight: GET /api/session/active → `{[sessionId]: {type:"running"}}`. */
 async function readActive() {
-  const res = await ocFetch(apiUrl("/api/session/active"), { signal: AbortSignal.timeout(8000) });
-  if (!res.ok) throw new Error(`opencode session/active ${res.status}: ${await res.text()}`);
-  const data = (await res.json())?.data;
+  const data = await ocCall("session/active", (c, o) => c.session.active(o), {
+    signal: AbortSignal.timeout(8000),
+    onHttpError: (f) => {
+      throw plainError("session/active", f);
+    },
+  });
   return data && typeof data === "object" && !Array.isArray(data) ? data : {};
 }
 
@@ -778,16 +774,19 @@ export async function listActiveSessionIds() {
  * @returns {Promise<{ output: string, cursor: number, truncated: boolean }|null>} null once the shell is gone
  */
 export async function readShellOutput({ shellID, cursor = 0, directory }) {
-  const loc = directory ? `&location%5Bdirectory%5D=${encodeURIComponent(directory)}` : "";
-  const res = await ocFetch(apiUrl(`/api/shell/${encodeURIComponent(shellID)}/output?cursor=${Math.max(0, cursor | 0)}${loc}`), {
-    signal: AbortSignal.timeout(8000),
-  });
-  if (res.status === 404) {
-    await discardBody(res);
-    return null;
-  }
-  if (!res.ok) throw new Error(`opencode readShellOutput ${res.status}: ${await res.text()}`);
-  const data = (await res.json())?.data;
+  const body = await ocCall(
+    "readShellOutput",
+    (c, o) => c.shell.output({ id: shellID, cursor: Math.max(0, cursor | 0), ...(directory ? { location: { directory } } : {}) }, o),
+    {
+      signal: AbortSignal.timeout(8000),
+      onHttpError: (f) => {
+        if (f.status === 404) return null;
+        throw plainError("readShellOutput", f);
+      },
+    },
+  );
+  if (body === null) return null;
+  const data = body?.data;
   return data && typeof data.output === "string"
     ? { output: data.output, cursor: Number.isFinite(data.cursor) ? data.cursor : cursor, truncated: data.truncated === true }
     : null;
@@ -839,17 +838,17 @@ export function cachedSessionDirectory(sessionId) {
 /** List sessions, newest first, optionally scoped to a project directory.
  *  Pages are followed up to 500 sessions (V1 capped at 100).
  *  @param {string} [directory]
+ *  @param {{ signal?: AbortSignal }} [opts]
  */
 export async function listSessions(directory, { signal } = {}) {
   const out = [];
   let cursor = null;
   for (let page = 0; page < 5; page++) {
-    const q = [`limit=100`];
-    if (directory) q.push(`directory=${encodeURIComponent(directory)}`);
-    if (cursor) q.push(`cursor=${encodeURIComponent(cursor)}`);
-    const res = await ocFetch(apiUrl(`/api/session?${q.join("&")}`), { signal });
-    if (!res.ok) throw new Error(`opencode listSessions ${res.status}: ${await res.text()}`);
-    const body = await res.json();
+    const body = await ocCall(
+      "listSessions",
+      (c, o) => c.session.list({ limit: 100, ...(directory ? { directory } : {}), ...(cursor ? { cursor } : {}) }, o),
+      { signal, onHttpError: (f) => { throw plainError("listSessions", f); } },
+    );
     for (const s of Array.isArray(body?.data) ? body.data : []) {
       const mapped = sessionFromV2(s);
       rememberSessionDirectory(mapped.id, mapped.directory);
@@ -864,12 +863,9 @@ export async function listSessions(directory, { signal } = {}) {
 /** One session record, mapped; null on miss/error. */
 async function getSessionInfo(sessionId) {
   try {
-    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`));
-    if (!res.ok) {
-      await discardBody(res);
-      return null;
-    }
-    const s = sessionFromV2((await res.json())?.data);
+    const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), { onHttpError: () => null });
+    if (record === null) return null;
+    const s = sessionFromV2(record);
     if (s?.id) rememberSessionDirectory(s.id, s.directory);
     return s;
   } catch {
@@ -917,9 +913,13 @@ export async function getSessionDirectory(sessionId) {
 export async function sessionExists(sessionId) {
   if (!sessionId) return false;
   try {
-    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`));
-    await discardBody(res);
-    return res.status !== 404;
+    let exists = true;
+    await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), {
+      onHttpError: (f) => {
+        exists = f.status !== 404;
+      },
+    });
+    return exists;
   } catch {
     return true; // transient failure — never treat as "gone"
   }
@@ -933,21 +933,21 @@ export async function sessionExists(sessionId) {
  * callers can verify an identity marker stamped at create.
  *
  * @param {string} sessionId
+ * @param {{ signal?: AbortSignal }} [opts]
  * @returns {Promise<{ state: "found", session: object } | { state: "missing" } | { state: "unknown" }>}
  */
 export async function readSession(sessionId, { signal } = {}) {
   if (!sessionId) return { state: "missing" };
   try {
-    const res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}`), { signal });
-    if (res.status === 404) {
-      await discardBody(res);
-      return { state: "missing" };
-    }
-    if (!res.ok) {
-      await discardBody(res);
-      return { state: "unknown" };
-    }
-    return { state: "found", session: sessionFromV2((await res.json())?.data) };
+    /** @type {{ state: "missing" } | { state: "unknown" } | undefined} */
+    let refused;
+    const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), {
+      signal,
+      onHttpError: (f) => {
+        refused = f.status === 404 ? { state: "missing" } : { state: "unknown" };
+      },
+    });
+    return refused ?? { state: "found", session: sessionFromV2(record) };
   } catch {
     return { state: "unknown" };
   }
@@ -958,17 +958,18 @@ export async function readSession(sessionId, { signal } = {}) {
  * Throws on a non-2xx / network error: "no children" and "couldn't ask" must
  * never be confused by a caller deciding whether work is finished.
  * @param {string} parentId
+ * @param {{ signal?: AbortSignal }} [opts]
  * @returns {Promise<any[]>}
  */
 export async function listChildSessions(parentId, { signal } = {}) {
   const out = [];
   let cursor = null;
   for (let page = 0; page < 5; page++) {
-    const q = [`parentID=${encodeURIComponent(parentId)}`, "limit=100"];
-    if (cursor) q.push(`cursor=${encodeURIComponent(cursor)}`);
-    const res = await ocFetch(apiUrl(`/api/session?${q.join("&")}`), { signal });
-    if (!res.ok) throw new Error(`opencode listChildSessions ${res.status}: ${await res.text()}`);
-    const body = await res.json();
+    const body = await ocCall(
+      "listChildSessions",
+      (c, o) => c.session.list({ parentID: parentId, limit: 100, ...(cursor ? { cursor } : {}) }, o),
+      { signal, onHttpError: (f) => { throw plainError("listChildSessions", f); } },
+    );
     const rows = Array.isArray(body?.data) ? body.data : [];
     for (const s of rows) {
       const mapped = sessionFromV2(s);
@@ -991,15 +992,18 @@ export async function listChildSessions(parentId, { signal } = {}) {
  * @returns {Promise<any[]>}
  */
 export async function listRawTimeline(sessionId, { type, signal } = {}) {
-  const base = `/api/session/${encodeURIComponent(sessionId)}/message`;
   const desc = [];
   let cursor = null;
   for (let page = 0; page < TIMELINE_MAX_PAGES; page++) {
-    const typeQs = type ? `&type=${encodeURIComponent(type)}` : "";
-    const qs = cursor ? `cursor=${encodeURIComponent(cursor)}&limit=${TIMELINE_PAGE}${typeQs}` : `order=desc&limit=${TIMELINE_PAGE}${typeQs}`;
-    const res = await ocFetch(apiUrl(`${base}?${qs}`), { signal });
-    if (!res.ok) throw new Error(`opencode listRawTimeline ${res.status}: ${await res.text()}`);
-    const body = await res.json();
+    const body = await ocCall(
+      "listRawTimeline",
+      (c, o) =>
+        c.message.list(
+          { sessionID: sessionId, limit: TIMELINE_PAGE, ...(cursor ? { cursor } : { order: "desc" }), ...(type ? { type: /** @type {any} */ (type) } : {}) },
+          o,
+        ),
+      { signal, onHttpError: (f) => { throw plainError("listRawTimeline", f); } },
+    );
     const rows = Array.isArray(body?.data) ? body.data : [];
     desc.push(...rows);
     cursor = body?.cursor?.next ?? null;
@@ -1014,10 +1018,11 @@ export async function listRawTimeline(sessionId, { type, signal } = {}) {
  * uncertain response admit once. `err.status` carries a refusal (404 = the
  * parent session is gone).
  * @param {string} sessionId
- * @param {{ id: string, text: string, description?: string, metadata?: object, delivery?: "steer"|"queue", resume?: boolean }} body
+ * @param {{ id: string, text: string, description?: string, metadata?: any, delivery?: "steer"|"queue", resume?: boolean }} body
+ * @param {{ signal?: AbortSignal }} [opts]
  */
 export async function postSynthetic(sessionId, body, { signal } = {}) {
-  await ocJson("postSynthetic", "POST", `/api/session/${encodeURIComponent(sessionId)}/synthetic`, body, { signal });
+  await ocCall("postSynthetic", (c, o) => c.session.synthetic({ ...body, sessionID: sessionId }, o), { signal, ignoreBody: true });
 }
 
 /**
@@ -1025,12 +1030,7 @@ export async function postSynthetic(sessionId, body, { signal } = {}) {
  * @param {{ sessionId: string, messageID?: string }} opts
  */
 export async function forkSession({ sessionId, messageID }) {
-  const data = await ocJson(
-    "forkSession",
-    "POST",
-    `/api/session/${encodeURIComponent(sessionId)}/fork`,
-    messageID ? { before: messageID } : {},
-  );
+  const data = await ocCall("forkSession", (c, o) => c.session.fork({ sessionID: sessionId, ...(messageID ? { before: messageID } : {}) }, o));
   // `data` is the NEW session's record (`fork.sessionID` names the parent).
   const sess = sessionFromV2(data);
   rememberSessionDirectory(sess.id, sess.directory || cachedSessionDirectory(sessionId));
@@ -1041,7 +1041,7 @@ export async function forkSession({ sessionId, messageID }) {
  *  @param {string} sessionId
  */
 export async function compactSession(sessionId) {
-  await ocJson("compactSession", "POST", `/api/session/${encodeURIComponent(sessionId)}/compact`, {});
+  await ocCall("compactSession", (c, o) => c.session.compact({ sessionID: sessionId }, o), { ignoreBody: true });
 }
 
 // BET-1356: the background-compaction one-liner's "before → after" figure.
@@ -1120,7 +1120,7 @@ export async function measureSessionContextTokens(sessionId) {
  */
 export async function deleteSessionRaw(sessionId) {
   sessionDirectoryCache.delete(sessionId);
-  await ocJson("deleteSession", "DELETE", `/api/session/${encodeURIComponent(sessionId)}`);
+  await ocCall("deleteSession", (c, o) => c.session.remove({ sessionID: sessionId }, o), { ignoreBody: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1138,7 @@ const CHEAP_MODEL_RE = /haiku|mini|flash|nano|lite|small/i;
 
 /** The cheapest usable connected model for a one-shot text call, or null. */
 export async function pickCheapModel(listFn = listModels) {
+  /** @type {any[]} */
   let models = [];
   try {
     models = await listFn();
@@ -1158,14 +1159,17 @@ export async function pickCheapModel(listFn = listModels) {
  * Generate text from a prompt with no session. Returns the RAW text; "" on any
  * failure/timeout so a caller can skip rather than error.
  *
- * @param {{ instruction: string, model?: { providerID: string, id?: string, modelID?: string }|null, signal?: AbortSignal }} a
+ * @param {{ instruction?: string, model?: { providerID: string, id?: string, modelID?: string }|null, signal?: AbortSignal }} [a]
  */
 export async function generateText({ instruction, model, signal } = {}) {
   try {
+    /** @type {any} */
     const m = model ?? (await pickCheapModel());
-    const body = { prompt: instruction };
-    if (m?.providerID && (m.id || m.modelID)) body.model = { providerID: m.providerID, id: m.id ?? m.modelID };
-    const data = await ocJson("generate", "POST", "/api/experimental/generate", body, { signal: signal ?? AbortSignal.timeout(30_000) });
+    const data = await ocCall(
+      "generate",
+      (c, o) => c.generate.text({ prompt: /** @type {string} */ (instruction), ...(m?.providerID && (m.id || m.modelID) ? { model: { providerID: m.providerID, id: m.id ?? m.modelID } } : {}) }, o),
+      { signal: signal ?? AbortSignal.timeout(30_000) },
+    );
     return typeof data?.text === "string" ? data.text : "";
   } catch {
     return "";
@@ -1208,21 +1212,24 @@ export async function runThrowawayAgent({ instruction }) {
  * CTO's `activeEphemeral` set, BET-1378) can record it before the model
  * starts, and clean it up in its own finally around this call.
  *
- * @param {object} a
- * @param {string} a.directory  absolute session directory
- * @param {string} a.instruction  the prompt text
- * @param {string} [a.agent]  agent to run on (default: the session's own)
- * @param {object} [a.model]  structured { providerID, modelID, variant? } to pin (null/absent → box default)
- * @param {string} [a.title]  creation title tag for the hidden session
- * @param {number} [a.pollIntervalMs]  ms between message-list polls (default 1000)
- * @param {number} [a.maxAttempts]  max polls before giving up (default 30)
- * @param {Function} [a.onCreated]  async (sid) => {} — called after create, before prompt
- * @param {string} [a.operation]  operation label for the §4.1 record (default: the title tag)
- * @param {boolean} [a.probe]  W8 (BET-1536): mark the operation record AND its
- *   provider attempt as probe evidence — recorded separately, never production
- *   evidence (excluded from register statistics; no operation_outcome row).
- * @param {object} [a.attempts]  §4 recorder injection (default: the real endpoint-attempts store)
- * @returns {Promise<{text: string, sid: string|null}>}
+ * Parameters (one options object):
+ *   directory       absolute session directory
+ *   instruction     the prompt text
+ *   agent           agent to run on (default: the "title" agent)
+ *   model           structured { providerID, modelID, variant? } to pin (null/absent → box default)
+ *   title           creation title tag for the hidden session
+ *   pollIntervalMs  ms between message-list polls (default 1000)
+ *   maxAttempts     max polls before giving up (default 30)
+ *   onCreated       async (sid) => {} — called after create, before prompt
+ *   trackCreation   internal-session provenance recorder (default: beginInternalSession)
+ *   operation       operation label for the §4.1 record (default: the title tag)
+ *   probe           W8 (BET-1536): mark the operation record AND its provider attempt as
+ *                   probe evidence — recorded separately, never production evidence
+ *                   (excluded from register statistics; no operation_outcome row)
+ *   attempts        §4 recorder injection (default: the real endpoint-attempts store)
+ *
+ * @param {{ directory: string, instruction: string, agent?: string, model?: any, title?: string, pollIntervalMs?: number, maxAttempts?: number, onCreated?: (sid: string) => any, trackCreation?: () => any, operation?: string, probe?: boolean, attempts?: any }} a
+ * @returns {Promise<any>} `{ text, sid, ok, code, … }` — the result the caller reads
  */
 export async function runSynchronousSession({
   directory,
@@ -1289,24 +1296,23 @@ export async function runSynchronousSession({
   }).catch(() => {});
 
   let sid = null;
+  /** @type {any} */
   let result;
-  const finish = (out) => { result = out; return out; };
+  const finish = (/** @type {any} */ out) => { result = out; return out; };
   let finishCreation = null;
   try {
     // §4.3 fix: trackCreation() runs INSIDE the try — a synchronous throw here
     // previously escaped the function with no finish(), no cleanup and no record.
     finishCreation = trackCreation();
-    const createRes = await ocFetch(apiUrl("/api/session"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ location: { directory: absDir }, title }),
+    let createRefused = false;
+    const created = await ocCall("createSession", (c, o) => c.session.create({ location: { directory: absDir }, title }, o), {
       signal: AbortSignal.timeout(10_000),
+      onHttpError: () => {
+        createRefused = true;
+      },
     });
-    if (!createRes.ok) {
-      await discardBody(createRes);
-      return finish({ text: "", sid: null, ok: false, code: "create-http" });
-    }
-    sid = (await createRes.json())?.data?.id;
+    if (createRefused) return finish({ text: "", sid: null, ok: false, code: "create-http" });
+    sid = created?.id;
     try { await finishCreation(sid); } catch {
       return finish({ text: "", sid, ok: false, code: "provenance-error" });
     }
@@ -1328,12 +1334,11 @@ export async function runSynchronousSession({
     } catch {
       return finish({ text: "", sid, ok: false, code: "prompt-http" });
     }
-    const promptRes = await postPrompt(sid, { text: instruction });
-    if (!promptRes.ok) {
+    const promptRefused = await postPrompt(sid, { text: instruction });
+    if (promptRefused) {
       // §4.1a: preserve the refusal's status and Retry-After, mirroring sendPrompt.
-      const status = promptRes.status;
-      const retryAfterMs = parseRetryAfterMs(promptRes.headers?.get?.("retry-after"));
-      await discardBody(promptRes);
+      const status = promptRefused.status;
+      const retryAfterMs = parseRetryAfterMs(promptRefused.headers?.get?.("retry-after"));
       promptRefusal = { httpStatus: status, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) };
       return finish({ text: "", sid, ok: false, code: "prompt-http",
         httpStatus: status, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) });
@@ -1453,23 +1458,21 @@ function extractAssistantText(msgs) {
 // into the parent's panel (BET-418 §A): a job is created with a pre-flight
 // permission ruleset so it never asks anything once running.
 
-/** Fetch a pending-items listing (`{data:[…]}`) and soften a non-OK response.
+/** Read a pending-items listing and soften a non-OK response.
  *  The live stream is the primary source; these listings are reconciliation
  *  only, so a failing listing means "no pending items I can see" (warn once,
  *  return []) rather than blanking the card the user is waiting on.
- *  @param {string} endpoint  API path.
+ *  @param {(c: import("@opencode/client").OpenCodeClient, o: { headers: Record<string, string> }) => Promise<any>} read  the client listing
  *  @param {string} label     caller name, for the warning.
- *  @returns {Promise<Array<unknown>>}
+ *  @returns {Promise<any[]>}
  */
-async function fetchPendingList(endpoint, label) {
-  const res = await ocFetch(apiUrl(endpoint));
-  if (!res.ok) {
-    console.warn(
-      `opencode ${label}: non-OK ${res.status} (${await res.text()}); treating as no pending items`,
-    );
-    return [];
-  }
-  const body = await res.json();
+async function fetchPendingList(read, label) {
+  const body = await ocCall(label, read, {
+    onHttpError: (f) => {
+      console.warn(`opencode ${label}: non-OK ${f.status} (${f.text}); treating as no pending items`);
+      return [];
+    },
+  });
   const all = body && typeof body === "object" && !Array.isArray(body) ? body.data : body;
   return Array.isArray(all) ? all : [];
 }
@@ -1478,8 +1481,10 @@ async function fetchPendingList(endpoint, label) {
  *  @param {string} [sessionId]
  */
 export async function listPermissions(sessionId) {
-  const path = sessionId ? `/api/session/${encodeURIComponent(sessionId)}/permission` : "/api/permission/request";
-  const list = await fetchPendingList(path, "listPermissions");
+  const list = await fetchPendingList(
+    sessionId ? (c, o) => c.permission.list({ sessionID: sessionId }, o) : (c, o) => c.permission.request.list(undefined, o),
+    "listPermissions",
+  );
   return list.map(permissionFromV2).filter((p) => !sessionId || p.sessionID === sessionId);
 }
 
@@ -1491,12 +1496,7 @@ export async function replyPermission({ requestId, reply, sessionId }) {
   let sid = sessionId;
   if (!sid) sid = (await listPermissions()).find((p) => p.id === requestId)?.sessionID;
   if (!sid) throw new Error(`opencode replyPermission: no pending permission ${requestId}`);
-  await ocJson(
-    "replyPermission",
-    "POST",
-    `/api/session/${encodeURIComponent(sid)}/permission/${encodeURIComponent(requestId)}/reply`,
-    { decision: reply },
-  );
+  await ocCall("replyPermission", (c, o) => c.permission.reply({ sessionID: sid, requestID: requestId, decision: reply }, o), { ignoreBody: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,17 +1508,18 @@ export async function replyPermission({ requestId, reply, sessionId }) {
  *  @param {string} [sessionId]
  */
 export async function listQuestions(sessionId) {
-  const path = sessionId ? `/api/session/${encodeURIComponent(sessionId)}/form` : "/api/form";
-  const forms = (await fetchPendingList(path, "listQuestions")).filter(isQuestionForm);
+  const forms = (
+    await fetchPendingList(sessionId ? (c, o) => c.session.form.list({ sessionID: sessionId }, o) : (c, o) => c.form.list(undefined, o), "listQuestions")
+  ).filter(isQuestionForm);
   return forms.map(questionFromForm).filter((q) => !sessionId || q.sessionID === sessionId);
 }
 
 async function findForm(requestId, sessionId) {
   if (sessionId) {
-    const f = await ocJson("getForm", "GET", `/api/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(requestId)}`);
+    const f = await ocCall("getForm", (c, o) => c.session.form.get({ sessionID: sessionId, formID: requestId }, o));
     if (f) return { form: f, sessionId };
   }
-  const f = (await fetchPendingList("/api/form", "findForm")).find((x) => x?.id === requestId);
+  const f = (await fetchPendingList((c, o) => c.form.list(undefined, o), "findForm")).find((x) => x?.id === requestId);
   if (!f) throw new Error(`opencode: no pending question ${requestId}`);
   return { form: f, sessionId: f.sessionID };
 }
@@ -1530,12 +1531,7 @@ async function findForm(requestId, sessionId) {
  */
 export async function replyQuestion({ requestId, answers, sessionId }) {
   const { form, sessionId: sid } = await findForm(requestId, sessionId);
-  await ocJson(
-    "replyQuestion",
-    "POST",
-    `/api/session/${encodeURIComponent(sid)}/form/${encodeURIComponent(requestId)}/reply`,
-    { answer: formAnswerFromAnswers(form, answers) },
-  );
+  await ocCall("replyQuestion", (c, o) => c.session.form.reply({ sessionID: sid, formID: requestId, answer: formAnswerFromAnswers(form, answers) }, o), { ignoreBody: true });
 }
 
 /** Reject (dismiss) a question without answering.
@@ -1543,7 +1539,7 @@ export async function replyQuestion({ requestId, answers, sessionId }) {
  */
 export async function rejectQuestion({ requestId, sessionId }) {
   const sid = sessionId ?? (await findForm(requestId)).sessionId;
-  await ocJson("rejectQuestion", "DELETE", `/api/session/${encodeURIComponent(sid)}/form/${encodeURIComponent(requestId)}`);
+  await ocCall("rejectQuestion", (c, o) => c.session.form.cancel({ sessionID: sid, formID: requestId }, o), { ignoreBody: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,14 +1579,10 @@ export function _modelFromV2(m) {
   };
 }
 
-async function getJsonSoft(path) {
+/** One client read that never throws: a non-2xx or a transport failure is `null`. */
+async function readSoft(read) {
   try {
-    const res = await ocFetch(apiUrl(path));
-    if (!res.ok) {
-      await discardBody(res);
-      return null;
-    }
-    return await res.json();
+    return (await ocCall("readSoft", read, { onHttpError: () => null })) ?? null;
   } catch {
     return null;
   }
@@ -1628,10 +1620,10 @@ let providersInFlight = null;
 async function fetchProviders() {
   try {
     const [prov, integ, models, def] = await Promise.all([
-      getJsonSoft("/api/provider"),
-      getJsonSoft("/api/integration"),
-      getJsonSoft("/api/model"),
-      getJsonSoft("/api/model/default"),
+      readSoft((c, o) => c.provider.list(undefined, o)),
+      readSoft((c, o) => c.integration.list(undefined, o)),
+      readSoft((c, o) => c.model.list(undefined, o)),
+      readSoft((c, o) => c.model.default(undefined, o)),
     ]);
     if (!prov || !Array.isArray(prov.data)) return { connected: [] };
     const hasConnection = new Map();
@@ -1678,7 +1670,7 @@ export async function getDefaultModel() {
  * Strips raw API keys by reconstructing the model shape (normalizeProviderModel).
  * Routes through `getProviders()` so the live `/provider` fetch lives in
  * exactly one place (BET-342 — sibling of BET-320 for `getDefaultModel`).
- * @returns {Promise<Array<{ id: string, providerID: string, name: string, ... }>>}
+ * @returns {Promise<Array<{ id: string, providerID: string, name: string, [key: string]: any }>>}
  */
 export async function listModels(overrides = {}) {
   const out = [];
@@ -1725,7 +1717,7 @@ export async function listModels(overrides = {}) {
  * @param {object} cfg  AppConfig (deactivatedMainModels, deactivatedSubagents, optInModels)
  * @param {Function} [models]  model-source to list from; defaults to `listModels`
  *        (the real one). Injectable so tests can pass a fake catalogue.
- * @returns {Promise<Array<{id: string, providerID: string, ...}>>}
+ * @returns {Promise<Array<{ id: string, providerID: string, [key: string]: any }>>}
  */
 export async function listRoutableModels(surface, cfg, models = listModels) {
   const deactivated = new Set(
@@ -1873,18 +1865,16 @@ const AUTH_METHOD_TYPE = { key: "api" };
 const toAuthMethod = (m) => ({ ...m, type: AUTH_METHOD_TYPE[m?.type] ?? m?.type, label: m?.label ?? (m?.type === "key" ? "API key" : String(m?.type ?? "")) });
 
 async function integrationMethods(providerID) {
-  const data = await ocJson("integration", "GET", `/api/integration/${encodeURIComponent(providerID)}`);
-  return Array.isArray(data?.methods) ? data.methods : [];
+  const body = await ocCall("integration", (c, o) => c.integration.get({ integrationID: providerID }, o));
+  return Array.isArray(body?.data?.methods) ? body.data.methods : [];
 }
 
-const failFrom = async (res) => {
-  const detail = await res.text().catch(() => "");
-  return {
-    ok: false,
-    error: res.status === 401 || res.status === 403 ? "unauthorized" : "bad_response",
-    detail: detail.slice(0, 200),
-  };
-};
+/** The structured failure a provider-auth call reports for a non-2xx (`ocCall`'s `onHttpError`). */
+const failFrom = (f) => ({
+  ok: false,
+  error: f.status === 401 || f.status === 403 ? "unauthorized" : "bad_response",
+  detail: f.text.slice(0, 200),
+});
 
 /**
  * The auth methods of every provider (GET /api/integration), keyed by provider id.
@@ -1892,13 +1882,16 @@ const failFrom = async (res) => {
  */
 export async function listProviderAuthMethods() {
   try {
-    const res = await ocFetch(apiUrl("/api/integration"));
-    if (!res.ok) {
-      const out = await failFrom(res);
-      return { ...out, error: "bad_response" };
-    }
+    let refused;
+    const body = await ocCall("listProviderAuthMethods", (c, o) => c.integration.list(undefined, o), {
+      onHttpError: (f) => {
+        refused = { ...failFrom(f), error: "bad_response" };
+      },
+    });
+    if (refused) return refused;
+    /** @type {Record<string, any[]>} */
     const methods = {};
-    for (const i of (await res.json())?.data ?? []) {
+    for (const i of body?.data ?? []) {
       methods[i.id] = (Array.isArray(i.methods) ? i.methods : []).map(toAuthMethod);
     }
     return { ok: true, methods };
@@ -1920,13 +1913,14 @@ export async function startProviderOauth(providerID, methodIndex) {
   try {
     const m = (await integrationMethods(providerID))[methodIndex];
     if (m?.type !== "oauth") return { ok: false, error: "bad_response", detail: "no such oauth method" };
-    const res = await ocFetch(apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/oauth`), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ methodID: m.id }),
+    let refused;
+    const res = await ocCall("startProviderOauth", (c, o) => c.integration.oauth.connect({ integrationID: providerID, methodID: m.id }, o), {
+      onHttpError: (f) => {
+        refused = failFrom(f);
+      },
     });
-    if (!res.ok) return failFrom(res);
-    const data = (await res.json())?.data;
+    if (refused) return refused;
+    const data = res?.data;
     if (data?.attemptID) oauthAttempts.set(`${providerID}:${methodIndex}`, data.attemptID);
     return {
       ok: true,
@@ -1951,16 +1945,18 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
   try {
     const attemptID = oauthAttempts.get(`${providerID}:${methodIndex}`);
     if (!attemptID) return { ok: false, error: "bad_response", detail: "no oauth attempt in progress" };
-    const res = await ocFetch(
-      apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/oauth/${encodeURIComponent(attemptID)}/complete`),
+    let refused;
+    await ocCall(
+      "completeProviderOauth",
+      (c, o) => c.integration.oauth.complete({ integrationID: providerID, attemptID, ...(typeof code === "string" && code !== "" ? { code } : {}) }, o),
       {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(typeof code === "string" && code !== "" ? { code } : {}),
+        ignoreBody: true,
+        onHttpError: (f) => {
+          refused = failFrom(f);
+        },
       },
     );
-    if (!res.ok) return failFrom(res);
-    await discardBody(res);
+    if (refused) return refused;
     oauthAttempts.delete(`${providerID}:${methodIndex}`);
     return { ok: true };
   } catch (e) {
@@ -1979,13 +1975,14 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
  */
 export async function setProviderApiKey(providerID, key) {
   try {
-    const res = await ocFetch(apiUrl(`/api/integration/${encodeURIComponent(providerID)}/connect/key`), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ key }),
+    let refused;
+    await ocCall("setProviderApiKey", (c, o) => c.integration.connect.key({ integrationID: providerID, key }, o), {
+      ignoreBody: true,
+      onHttpError: (f) => {
+        refused = failFrom(f);
+      },
     });
-    if (!res.ok) return failFrom(res);
-    await discardBody(res);
+    if (refused) return refused;
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -2016,27 +2013,37 @@ export async function setProviderAuthEntry(providerID, entry) {
   try {
     if (entry?.type === "api" || entry?.type === "key") return setProviderApiKey(providerID, entry.key);
     const oauth = (await integrationMethods(providerID)).find((m) => m?.type === "oauth");
+    /** @type {Record<string, string>} */
     const metadata = {};
     if (typeof entry?.accountId === "string" && entry.accountId) metadata.accountID = entry.accountId;
     if (typeof entry?.enterpriseUrl === "string" && entry.enterpriseUrl) metadata.enterpriseUrl = entry.enterpriseUrl;
-    const res = await ocFetch(apiUrl("/api/credential"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        integrationID: providerID,
-        activate: true,
-        value: {
-          type: "oauth",
-          methodID: oauth?.id ?? "oauth",
-          refresh: entry?.refresh,
-          access: entry?.access,
-          expires: entry?.expires,
-          ...(Object.keys(metadata).length ? { metadata } : {}),
+    let refused;
+    await ocCall(
+      "setProviderAuthEntry",
+      (c, o) =>
+        c.credential.create(
+          {
+            integrationID: providerID,
+            activate: true,
+            // The refresh/access/expires of a partial entry are sent as given (opencode is the validator).
+            value: {
+              type: "oauth",
+              methodID: oauth?.id ?? "oauth",
+              refresh: /** @type {string} */ (entry?.refresh),
+              access: /** @type {string} */ (entry?.access),
+              expires: /** @type {number} */ (entry?.expires),
+              ...(Object.keys(metadata).length ? { metadata } : {}),
+            },
+          },
+          o,
+        ),
+      {
+        onHttpError: (f) => {
+          refused = failFrom(f);
         },
-      }),
-    });
-    if (!res.ok) return failFrom(res);
-    await discardBody(res);
+      },
+    );
+    if (refused) return refused;
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -2051,10 +2058,15 @@ export async function setProviderAuthEntry(providerID, entry) {
 export async function removeProviderAuth(providerID) {
   try {
     const creds = await listCredentials();
-    for (const c of creds.filter((x) => x?.integrationID === providerID)) {
-      const res = await ocFetch(apiUrl(`/api/credential/${encodeURIComponent(c.id)}`), { method: "DELETE" });
-      if (!res.ok && res.status !== 404) return failFrom(res);
-      await discardBody(res);
+    for (const cred of creds.filter((x) => x?.integrationID === providerID)) {
+      let refused;
+      await ocCall("removeProviderAuth", (c, o) => c.credential.remove({ credentialID: cred.id }, o), {
+        ignoreBody: true,
+        onHttpError: (f) => {
+          if (f.status !== 404) refused = failFrom(f);
+        },
+      });
+      if (refused) return refused;
     }
     return { ok: true };
   } catch (e) {
@@ -2064,7 +2076,7 @@ export async function removeProviderAuth(providerID) {
 
 /** Every stored credential: `[{id, integrationID, label, active, value:{type:"key"|"oauth"|…, …}}]`. */
 async function listCredentials() {
-  const data = await ocJson("credentials", "GET", "/api/credential");
+  const data = await ocCall("credentials", (c, o) => c.credential.list(o));
   return Array.isArray(data) ? data : [];
 }
 
@@ -2129,6 +2141,7 @@ export async function readProviderOAuthToken(providerId, { listCredentials: list
 export function codexEntryFromCredential(credential) {
   const v = credential?.value;
   if (v?.type !== "oauth" || typeof v.access !== "string" || !v.access) return null;
+  /** @type {any} */
   const entry = { type: "oauth", access: v.access };
   if (typeof v.refresh === "string") entry.refresh = v.refresh;
   if (typeof v.expires === "number") entry.expires = v.expires;
@@ -2362,7 +2375,7 @@ export async function refreshClaudeCredentials() {
  * (the function logs its own outcome line and the caller doesn't await the
  * result anyway).
  *
- * @param {unknown} evt  opencode event from `subscribeEvents`
+ * @param {any} evt  opencode event from `subscribeEvents`
  */
 export async function maybeRecoverCredentials(evt) {
   try {
@@ -2471,7 +2484,7 @@ const _seatRefreshInFlight = new Map();
 
 /**
  * @param {{ seatId: string, dir: string }} target
- * @param {{ spawn?: Function, now?: () => number, resolveBin?: () => string }} [deps]
+ * @param {{ spawn?: any, now?: () => number, resolveBin?: () => string }} [deps]
  * @returns {Promise<{ ok: boolean, reason?: string, expiresAt?: number }>}
  */
 export function refreshClaudeSeatCredentials({ seatId, dir }, deps = {}) {
@@ -2657,7 +2670,7 @@ export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_M
     listCodexTargets: seats ? () => seats.codexRefreshTargets() : undefined,
     refreshCodex: seats ? (target) => refreshCodexSeatAndNote(seats, target) : undefined,
   });
-  return startPoller(sweep, { intervalMs, label: "opencode-credentials" });
+  return startPoller(sweep, /** @type {any} */ ({ intervalMs, label: "opencode-credentials" }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2669,11 +2682,11 @@ export function startCredentialRefreshPoller({ intervalMs = CREDENTIAL_REFRESH_M
  *  reported as "no skills" — commands must keep working without them. */
 // Commands, skills and agents are LOCATION-scoped: a project's own
 // `.opencode/commands` only show up when the request names its directory.
-const locationQs = (directory) => (typeof directory === "string" && directory ? `?location%5Bdirectory%5D=${encodeURIComponent(directory)}` : "");
+const locationOf = (directory) => (typeof directory === "string" && directory ? { location: { directory } } : {});
 
 async function listSkills(directory) {
   try {
-    const raw = (await ocJson("listSkills", "GET", `/api/skill${locationQs(directory)}`)) ?? [];
+    const raw = (await ocCall("listSkills", (c, o) => c.skill.list(locationOf(directory), o)))?.data ?? [];
     return raw
       .filter((s) => typeof s?.id === "string" && s.id)
       .map((s) => ({ id: s.id, description: typeof s.description === "string" ? s.description : undefined }));
@@ -2715,7 +2728,7 @@ export async function listCommands({ directory, backgroundNames } = {}) {
 }
 
 async function listRawCommands(directory) {
-  const raw = (await ocJson("listCommands", "GET", `/api/command${locationQs(directory)}`)) ?? [];
+  const raw = (await ocCall("listCommands", (c, o) => c.command.list(locationOf(directory), o)))?.data ?? [];
   return raw.map((c) => ({
     name: String(c.name ?? ""),
     description: typeof c.description === "string" ? c.description : undefined,
@@ -2728,10 +2741,10 @@ async function listRawCommands(directory) {
 }
 
 /** List primary and sub-agents.
- *  @returns {Promise<Array<{ name: string, description?: string, mode?: string, ... }>>}
+ *  @returns {Promise<Array<{ name: string, description?: string, mode?: string, [key: string]: any }>>}
  */
 export async function listAgents() {
-  const raw = (await ocJson("listAgents", "GET", "/api/agent")) ?? [];
+  const raw = (await ocCall("listAgents", (c, o) => c.agent.list(undefined, o)))?.data ?? [];
   return raw.map((a) => ({
     name: String(a.id ?? a.name ?? ""),
     description: typeof a.description === "string" ? a.description : undefined,
@@ -2750,8 +2763,7 @@ export async function listAgents() {
  *  @returns {Promise<string[]>}
  */
 export async function findFiles({ query, directory }) {
-  const qs = `location%5Bdirectory%5D=${encodeURIComponent(directory)}&query=${encodeURIComponent(query)}&limit=50`;
-  const rows = (await ocJson("findFiles", "GET", `/api/fs/find?${qs}`)) ?? [];
+  const rows = (await ocCall("findFiles", (c, o) => c.file.find({ location: { directory }, query, limit: 50 }, o)))?.data ?? [];
   return rows.map((r) => (typeof r === "string" ? r : r?.path)).filter((p) => typeof p === "string");
 }
 
@@ -2765,17 +2777,17 @@ export async function findFiles({ query, directory }) {
  *     source: { type: "local", path, ... } | { type: "git", repository, branch?, ... } }
  *
  * We project each entry down to the flat shape the renderer needs for
- * @-mention autocomplete and the Settings list: alias (name) plus either a
+ * `@`-mention autocomplete and the Settings list: alias (name) plus either a
  * local path or a git repository+branch, and an optional description.
  * Hidden references are kept — Manta's typeahead only renders non-hidden ones
  * (see useTypeahead), mirroring opencode's own autocomplete semantics.
  */
 export async function listReferences() {
-  const res = await ocFetch(apiUrl(`/api/reference`));
-  if (!res.ok) {
-    throw new Error(`opencode reference ${res.status}: ${await res.text()}`);
-  }
-  const body = await res.json();
+  const body = await ocCall("reference", (c, o) => c.reference.list(undefined, o), {
+    onHttpError: (f) => {
+      throw plainError("reference", f);
+    },
+  });
   const data = Array.isArray(body?.data) ? body.data : [];
   return data.map((r) => {
     const out = { name: r.name };
@@ -2804,7 +2816,7 @@ export async function listReferences() {
  * runs in the background makes its own child session, and the parent's
  * agent/model must stay exactly as they are, even mid-turn.
  *
- * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, noSync?: boolean, signal?: AbortSignal }} opts
+ * @param {{ sessionId: string, command: string, arguments: string, attachments?: Array<{ remotePath: string, mime: string, filename?: string }>, model?: { providerID: string, modelID: string, variant?: string }, agent?: string, delivery?: "steer"|"queue", noSync?: boolean, signal?: AbortSignal }} opts
  */
 export async function runCommand({ sessionId, command, arguments: argumentsStr, attachments, model, agent, delivery, noSync, signal }) {
   // A skill isn't a V2 command (the command route 404s it, or runs a same-named
@@ -2835,32 +2847,33 @@ export async function runCommand({ sessionId, command, arguments: argumentsStr, 
   // The command's user message is created by V2 itself, so it carries an id
   // manta-server did not choose: open a correlation window for it (§3).
   const win = commandCorrelator.openWindow(sessionId, { name: command, arguments: argumentsStr ?? "" });
-  let res;
+  /** @type {import("./opencodeClient.mjs").HttpFailure|null} */
+  let refused = null;
   try {
-    res = await ocFetch(apiUrl(`/api/session/${encodeURIComponent(sessionId)}/command`), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+    await ocCall("runCommand", (c, o) => c.session.command({ ...body, sessionID: sessionId }, o), {
       // Propagate the caller's bounded deadline signal to the actual POST (the
       // admission engine bounds every oc call; without this a hung command POST
       // would never surface as the "unknown" uncertainty it is).
-      ...(signal ? { signal } : {}),
+      signal,
+      ignoreBody: true,
+      onHttpError: (f) => {
+        refused = f;
+      },
     });
   } catch (e) {
     win.finish({ ok: false });
     throw e;
   }
-  if (!res.ok) {
-    win.finish({ ok: false, status: res.status });
-    const err = new Error(`opencode runCommand ${res.status}: ${await res.text()}`);
+  if (refused) {
+    win.finish({ ok: false, status: refused.status });
+    const err = /** @type {Error & { status?: number }} */ (new Error(`opencode runCommand ${refused.status}: ${refused.text}`));
     // Carry the real HTTP status so admission can tell a DEFINITIVE 4xx
     // refusal (→ failed, proven not accepted) from anything else (→ unknown,
     // never resent).
-    err.status = res.status;
+    err.status = refused.status;
     throw err;
   }
   win.finish({ ok: true });
-  await discardBody(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -3075,13 +3088,15 @@ import { restartOpencode as restartOpencodeImpl } from "./opencodeAdmin.mjs";
  * still see `connected: true` on a slower retry.
  *
  * @param {{
- *   startedAt: number,
+ *   startedAt?: number,
  *   restartOpencode?: typeof restartOpencodeImpl,
  *   getProviders?: typeof getProviders,
  *   now?: number,
  *   backupPath?: string | null,
  *   validator?: (rawFileText: string) => boolean,
- * }} args
+ *   credentialsPath?: string,
+ *   isolated?: boolean,
+ * }} [args]
  * @returns {Promise<
  *   | { state: "no-file" }
  *   | { state: "pre-existing" }
