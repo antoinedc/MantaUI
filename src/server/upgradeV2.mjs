@@ -39,6 +39,7 @@ import {
   V2_PLUGIN_IDS,
 } from "./upgradeV2Prepare.mjs";
 import { respondSafe500 } from "./safeApiError.mjs";
+import { createUpgradeV2Calls } from "./opencodeUpgradeCalls.mjs";
 import {
   createOpencodeService,
   opencodeBinPath,
@@ -1082,20 +1083,6 @@ export function createDefaultDeps({
   });
   const configDir = opencodeConfigDir(home);
   const password = () => readOpencodePassword({ env });
-  const v2Fetch = async (path, init = {}) => {
-    const res = await fetchImpl(`${opencodeUrl}${path}`, {
-      ...init,
-      headers: {
-        authorization: `Basic ${Buffer.from(`opencode:${await password()}`).toString("base64")}`,
-        "content-type": "application/json",
-        ...(init.headers ?? {}),
-      },
-      signal: AbortSignal.timeout(init.timeoutMs ?? 10_000),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`${init.method ?? "GET"} ${path} → ${res.status} ${text.slice(0, 200)}`);
-    return text ? JSON.parse(text) : undefined;
-  };
 
   return {
     loadState: async () => readJsonSync(statePathFile, null),
@@ -1184,47 +1171,7 @@ export function createDefaultDeps({
     },
     hasClaudeLogin: async () => existsSync(join(home, ".claude", ".credentials.json")),
 
-    v2: {
-      // 30 min: V2's lazy v1 migration runs inside this request, so on a huge DB each poll must
-      // hold until it completes instead of aborting at the 10 s default.
-      // Capped at 60 s, not a long hold: V2's lazy v1 migration runs inside this request on huge
-      // DBs, so a hold can span the whole migration. Aborting at the cap turns each hold into the
-      // loop's "alive and busy" delayed failure and lets elapsed/count progress publish between
-      // holds; a dead opencode is noticed within a minute. The migration itself is boot-triggered
-      // server-side and unaffected by the abort.
-      migrationStatus: () => v2Fetch("/api/experimental/migration/v1", { timeoutMs: 60_000 }),
-      // Only ACTIVE plugins count: a plugin that failed to load still appears in the list.
-      pluginIds: async () => {
-        const r = await v2Fetch(`/api/plugin?location[directory]=${encodeURIComponent(home)}`);
-        return (r?.data ?? [])
-          .filter((p) => typeof p === "string" || !p?.state?.status || p.state.status === "active")
-          .map((p) => (typeof p === "string" ? p : p?.id))
-          .filter(Boolean);
-      },
-      // One tiny real turn through the Claude login proves auth + plugins + model routing end to end.
-      tinyTurn: async () => {
-        let id = null;
-        try {
-          const created = await v2Fetch("/api/session", {
-            method: "POST",
-            body: JSON.stringify({ location: { directory: home }, model: { providerID: "anthropic", id: "claude-haiku-4-5" } }),
-          });
-          id = created.data.id;
-          await v2Fetch(`/api/session/${id}/prompt`, { method: "POST", body: JSON.stringify({ text: "Reply with the single word: ok" }) });
-          await v2Fetch(`/api/experimental/session/${id}/wait`, { method: "POST", timeoutMs: 90_000 });
-          const msgs = await v2Fetch(`/api/session/${id}/message?limit=20`);
-          const list = msgs?.data ?? msgs ?? [];
-          const reply = list.some(
-            (m) => m?.type === "assistant" && Array.isArray(m.content) && m.content.some((c) => c?.type === "text" && c.text),
-          );
-          return reply ? { ok: true } : { ok: false, error: "the model returned no text" };
-        } catch (e) {
-          return { ok: false, error: String(e?.message ?? e) };
-        } finally {
-          if (id) await v2Fetch(`/api/session/${id}`, { method: "DELETE" }).catch(() => {});
-        }
-      },
-    },
+    v2: createUpgradeV2Calls({ fetchImpl, opencodeUrl, password, home }),
 
     // Reclaim disk space (K7). The live DB identity comes from the RUNNING opencode process.
     reclaim: {

@@ -339,10 +339,10 @@ function* walk(dir) {
   }
 }
 
-test("every manta-server `/prompt` POST goes through the recording helper (postPrompt)", () => {
+test("every manta-server session prompt goes through the recording helper (postPrompt)", () => {
   // upgradeV2.mjs's verify turn talks to a separate V2 instance before cutover
   // (upgrade mode) — it never reaches this box's pump, so it is exempt.
-  const EXEMPT = new Set(["upgradeV2.mjs"]);
+  const EXEMPT = new Set(["upgradeV2.mjs", "opencodeUpgradeCalls.mjs"]);
   const hits = [];
   for (const file of walk(SERVER_DIR)) {
     const rel = relative(SERVER_DIR, file);
@@ -350,16 +350,19 @@ test("every manta-server `/prompt` POST goes through the recording helper (postP
     readFileSync(file, "utf8").split("\n").forEach((line, i) => {
       const code = line.trim();
       if (code.startsWith("//") || code.startsWith("*") || code.startsWith("/*")) return;
-      if (/\/prompt(?![A-Za-z./_-])/.test(code) && /session|apiUrl|v2Fetch|fetch/.test(code)) hits.push(`${rel}:${i + 1}: ${code}`);
+      // The typed client's operation, or a hand-written `/prompt` request.
+      const raw = /\/prompt(?![A-Za-z./_-])/.test(code) && /session|apiUrl|v2Fetch|fetch/.test(code);
+      if (raw || /\.session\.prompt\(/.test(code)) hits.push(`${rel}:${i + 1}: ${code}`);
     });
   }
-  assert.equal(hits.length, 1, `unexpected /prompt call sites:\n${hits.join("\n")}`);
+  assert.equal(hits.length, 1, `unexpected session-prompt call sites:\n${hits.join("\n")}`);
   assert.match(hits[0], /^opencode\.mjs:\d+:/);
+  assert.match(hits[0], /\.session\.prompt\(/, "the one prompt call is a typed client call, not a raw request");
   const src = readFileSync(join(SERVER_DIR, "opencode.mjs"), "utf8");
   const helperStart = src.indexOf("async function postPrompt(");
   const helperEnd = src.indexOf("\n}\n", helperStart);
   const at = src.indexOf(hits[0].split(": ")[1]);
-  assert.ok(helperStart > 0 && at > helperStart && at < helperEnd, "the one /prompt POST lives inside postPrompt");
+  assert.ok(helperStart > 0 && at > helperStart && at < helperEnd, "the one session prompt lives inside postPrompt");
   assert.match(src.slice(helperStart, helperEnd), /registerPromptId\(/);
 });
 
