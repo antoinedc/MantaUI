@@ -12,6 +12,7 @@
 // unmodified. Nothing installs it yet (Phase 4).
 
 import { Plugin } from "@opencode/plugin";
+import { createHandoffNote } from "./lib/handoff-note.ts";
 import { createPolicyClient, renderConstraintBlock } from "./lib/policy.ts";
 import { createPricesClient } from "./lib/prices.ts";
 import { serverBase } from "./lib/server.ts";
@@ -51,6 +52,7 @@ export default Plugin.define({
     const server = createPolicyClient({ fetch: (...args) => fetch(...args), base, directory });
     const prices = createPricesClient({ fetch: (...args) => fetch(...args), base });
     const trims = createTrimStore();
+    const handoffNote = createHandoffNote({ policies: server });
     prices.refreshIfDue(); // warm the price map before the first request
 
     await ctx.session.hook("context", (event: any) => {
@@ -67,6 +69,9 @@ export default Plugin.define({
       } catch {
         /* fail open — a trimming bug must degrade to "we did not trim", never a broken turn */
       }
+      // AFTER the trim: the boundary the planner records is of the untouched input,
+      // so the appended note must not exist yet. createHandoffNote never throws.
+      handoffNote(event);
     });
 
     // GUARDRAIL (BET-1346): constraint injection ships behind

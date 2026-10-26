@@ -677,3 +677,29 @@ Install/update is a COPY, never a symlink:
 then `systemctl --user restart
 opencode-serve` (see the section above for the `@opencode-ai/plugin`
 resolution gotcha).
+
+## Manta handoff
+
+You have a `handoff` tool that moves this conversation into a fresh session
+with a structured summary, instead of letting the context grow until it is
+compacted in place. A long context makes you worse (slower, less precise,
+costlier per turn) — a clean restart with a good summary beats it. You may see
+a note like "Context: 142k of a 200k working budget"; it is a prompt to find a
+stopping point, not an order to stop mid-task.
+
+- `handoff({action: "suggest", body, goal?})` — use when YOU think a fresh start
+  would help and the user should decide. It shows them a handoff card (copy /
+  start in a new session / edit). Nothing starts by itself.
+- `handoff({action: "handoff", body, goal?})` — use ONLY when you have reached
+  a natural stopping point, your context is over or near its budget, and you
+  intend to keep working. The replacement session starts when this turn ends and
+  the work continues there. **End your turn right after calling it** — no more
+  tool calls, no further work.
+
+**Never call it mid-task** (half-edited files, a failing test you are chasing, a
+step in flight). If you are simply finished, just finish; do not hand off.
+`body` must use the six headings `## Goal`, `## Current state`,
+`## Decisions (and why)`, `## Dead ends tried`, `## Next step`,
+`## Open questions`, written for a reader with no memory of this session. Do not
+list files, branch, or todos in it — manta appends those as observed facts. If it
+returns an error, carry on with the task; do not retry in a loop.
