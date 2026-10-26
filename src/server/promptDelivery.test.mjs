@@ -596,3 +596,59 @@ test("26. F3: session.deleted clears busy, queue, awaiting-start and its timer",
     assert.equal(calls.length, 1, "queued item was dropped with the session");
   }
 });
+
+// ---- auto-handoff admission resolver (spec §6.1) --------------------------------
+
+test("27. resolveTarget: a delivery to a replaced session is keyed by, sent to and reported against the live session", async () => {
+  const links = { old: "new" };
+  const { engine, calls } = makeEngine({ resolveTarget: (sid) => ({ target: links[sid] ?? sid }) });
+  const res = await engine.deliver({ sessionId: "old", text: "hello" });
+  assert.deepEqual(calls.map((c) => c.sessionId), ["new"]);
+  assert.deepEqual(res, { delivered: true, queued: false, deliveredTo: "new" });
+  assert.equal(engine.isBusy("new"), true, "busy tracking follows the resolved id");
+  assert.equal(engine.isBusy("old"), false);
+  // an unredirected delivery keeps the historical result shape (no deliveredTo)
+  assert.deepEqual(await engine.deliver({ sessionId: "other", text: "x" }), { delivered: true, queued: false });
+});
+
+test("28. resolveTarget runs before the cto redirect", async () => {
+  const seen = [];
+  const { engine } = makeEngine({
+    resolveTarget: () => ({ target: "live" }),
+    redirect: async (a) => {
+      seen.push(a.sessionId);
+      return null;
+    },
+  });
+  await engine.deliver({ sessionId: "dead", text: "x" });
+  assert.deepEqual(seen, ["live"]);
+});
+
+test("29. an item queued under a session that is replaced while it waits is re-keyed to the live session at drain time", async () => {
+  const links = {};
+  const { engine, calls } = makeEngine({ resolveTarget: (sid) => ({ target: links[sid] ?? sid }) });
+  engine.observeEvent(status("s1", "busy"));
+  const res = await engine.deliver({ sessionId: "s1", text: "waiting" });
+  assert.equal(res.queued, true);
+  links.s1 = "s2"; // a handoff commits while the item waits
+  boundary(engine, "s1");
+  await tick();
+  assert.deepEqual(calls.map((c) => c.sessionId), ["s2"]);
+  assert.equal(engine.isBusy("s2"), true);
+});
+
+test("30. a send answered {held:true} (parked behind a transition fence) is not 'busy': no turn starts, the next item parks too, and the caller learns it was held", async () => {
+  const calls = [];
+  const engine = createPromptDelivery({
+    sendPrompt: async (args) => {
+      calls.push(args.text);
+      return { held: true };
+    },
+  });
+  const a = await engine.deliver({ sessionId: "s1", text: "one" });
+  const b = await engine.deliver({ sessionId: "s1", text: "two" });
+  assert.deepEqual(a, { delivered: false, queued: true, held: true });
+  assert.deepEqual(b, { delivered: false, queued: true, held: true });
+  assert.deepEqual(calls, ["one", "two"], "not stuck behind a turn that never starts");
+  assert.equal(engine.isBusy("s1"), false);
+});

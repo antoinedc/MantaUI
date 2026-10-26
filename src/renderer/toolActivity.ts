@@ -10,6 +10,7 @@
 
 import type { OpencodeMessage, OpencodePart } from "../shared/types";
 import { isRenderableMessage, visibleAssistantParts } from "./chatUtils";
+import { isHandoffToolPart } from "./handoff";
 
 // ===== Wording =====
 
@@ -339,8 +340,11 @@ export type TranscriptLayout = {
   trailing: ToolGroup | null;
 };
 
+// A `handoff` tool call is not one of a run's machine actions: it renders as the
+// handoff card (§3), so it must stand on its own in the transcript — folded into
+// a collapsed "N tool calls" group the card would be invisible.
 function isToolPart(p: OpencodePart): boolean {
-  return p.type === "tool";
+  return p.type === "tool" && !isHandoffToolPart(p);
 }
 
 /**

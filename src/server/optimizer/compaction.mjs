@@ -155,6 +155,11 @@ export function createCompactionScheduler({
   save,
   enabled = () => true,
   onCompacted = null,
+  // Auto-handoff §6.2: the shared per-session operation registry. `acquire`
+  // returns false when another maintenance operation (a handoff's generation or
+  // start) owns the session — it is then skipped, cooldown untouched.
+  acquire = null,
+  release = null,
 } = {}) {
   const inflight = new Set();
   let state = null;
@@ -217,6 +222,7 @@ export function createCompactionScheduler({
       });
 
       if (!decision.compact) continue;
+      if (typeof acquire === "function" && !acquire(c.sessionID)) continue;
 
       const pct = contextLimitForPct(c.contextTokens, c.contextLimit);
       // Guard 2 (persisted cooldown): stamp the attempt BEFORE the call so a
@@ -273,6 +279,7 @@ export function createCompactionScheduler({
         );
       } finally {
         inflight.delete(c.sessionID);
+        if (typeof release === "function") release(c.sessionID);
         await persist();
       }
     }

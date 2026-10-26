@@ -1176,6 +1176,22 @@ export async function generateText({ instruction, model, signal } = {}) {
   }
 }
 
+/**
+ * The session-scoped one-shot behind `/btw` (`POST /api/session/{id}/generate`):
+ * answers `prompt` with the session's FULL history in context and adds nothing to
+ * it (verified live). Used by auto-handoff to write the handoff text. Unlike
+ * generateText this THROWS (with `err.status` on a refusal) — the caller must
+ * tell "the model returned nothing" from "couldn't ask".
+ * @param {string} sessionId
+ * @param {string} prompt
+ * @param {{ signal?: AbortSignal }} [opts]
+ * @returns {Promise<string>}
+ */
+export async function generateInSession(sessionId, prompt, { signal } = {}) {
+  const data = await ocCall("sessionGenerate", (c, o) => c.session.generate({ sessionID: sessionId, prompt }, o), { signal });
+  return typeof data?.text === "string" ? data.text : "";
+}
+
 // Auto-rename: generate a 1-2 word title. Returns the RAW model reply; the
 // renderer sanitizes it. "" on failure so the caller skips the rename.
 export function generateSessionTitle({ instruction }) {

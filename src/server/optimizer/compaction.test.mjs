@@ -85,7 +85,7 @@ test("shouldCompact: all true → compact with reason 'compact'", () => {
 
 // ---- createCompactionScheduler ----
 
-function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabled = () => true, initial = {} } = {}) {
+function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabled = () => true, initial = {}, acquire, release } = {}) {
   let state = initial;
   const compactCalls = [];
   const saves = [];
@@ -100,6 +100,8 @@ function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabl
       saves.push(state);
     },
     enabled,
+    ...(acquire ? { acquire } : {}),
+    ...(release ? { release } : {}),
   });
   return { scheduler, compactCalls, saves, getState: () => state };
 }
@@ -256,4 +258,40 @@ test("scheduler: non-finite/zero compact return is coerced to null", async () =>
   });
   await scheduler.tick();
   assert.equal(notified.afterTokens, null);
+});
+
+// ---- auto-handoff: the shared per-session operation registry (spec §6.2) ----
+
+test("scheduler: a session another maintenance operation owns is skipped (cooldown untouched); acquire/release bracket every compaction", async () => {
+  const held = new Set(["s1"]);
+  const acquired = [];
+  const released = [];
+  const { scheduler, compactCalls, getState } = makeScheduler({
+    listCandidates: async () => [candidate("s1"), candidate("s2")],
+    acquire: (sid) => {
+      if (held.has(sid)) return false;
+      acquired.push(sid);
+      return true;
+    },
+    release: (sid) => released.push(sid),
+  });
+  await scheduler.tick();
+  assert.deepEqual(compactCalls, ["s2"], "s1 belongs to a handoff");
+  assert.deepEqual(acquired, ["s2"]);
+  assert.deepEqual(released, ["s2"]);
+  assert.equal(getState().sessions.s1, undefined, "a skipped session gets no cooldown stamp");
+});
+
+test("scheduler: the operation is released even when the compaction throws or the busy re-check aborts it", async () => {
+  const released = [];
+  const { scheduler } = makeScheduler({
+    listCandidates: async () => [candidate("s1")],
+    compact: async () => {
+      throw new Error("boom");
+    },
+    acquire: () => true,
+    release: (sid) => released.push(sid),
+  });
+  await scheduler.tick();
+  assert.deepEqual(released, ["s1"]);
 });

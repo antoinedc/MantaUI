@@ -846,6 +846,102 @@ export type ModelCostArgs = {
   cost: { input: number; output: number; cache_read?: number; cache_write?: number };
 };
 
+// ===== Auto-handoff (docs/superpowers/specs/2026-10-26-auto-handoff.md) =====
+// The wire shapes of the `handoff:*` rpc channels (§11 + §15 addendum). Kept in
+// this file (the renderer's contract with the box) rather than types.ts.
+
+/** Config `handoffMode`: auto-start on budget · only offer a card · never automatic. */
+export type HandoffMode = "auto" | "suggest" | "off";
+
+export type HandoffState =
+  | "requested"
+  | "generating"
+  | "ready"
+  | "starting"
+  | "committed"
+  | "failed"
+  | "cancelled";
+
+/** `clear` = replacement (the successor takes over the window); `new-session` = branch. */
+export type HandoffHow = "clear" | "new-session";
+/** `send` = first turn · `armed` = preamble delivered with the next message · `draft` = placed in the composer. */
+export type HandoffDisposition = "send" | "armed" | "draft";
+
+export interface HandoffRecord {
+  id: string;
+  fromSessionId: string;
+  successorId?: string;
+  messageId?: string;
+  kind: "suggest" | "auto";
+  /** "agent" records have a `handoff` tool part in the transcript; every other trigger is server-path (pinned card). */
+  trigger: "user" | "button" | "agent" | (string & {});
+  state: HandoffState;
+  step?: string;
+  how?: HandoffHow;
+  disposition?: HandoffDisposition;
+  /** Canonical handoff markdown — every card renders this. */
+  text: string;
+  reason?: string;
+  createdAt: number;
+  updatedAt: number;
+  // Optional conveniences a box MAY include; the continuation notice falls back
+  // to reading the predecessor's transcript when they are absent.
+  fromTitle?: string;
+  contextTokens?: number;
+}
+
+export interface HandoffLinks {
+  /** Set on a predecessor that was replaced (clear). */
+  replacedBy?: string;
+  /** Set on a replacement successor: the session it took over from. */
+  replaces?: string;
+  /** Set on a branch: the session it was branched from. */
+  branchedFrom?: string;
+  branches?: string[];
+}
+
+export interface HandoffContinuation {
+  /** Armed handoff held until the successor's first admitted message; cleared once delivered. */
+  preamble?: string;
+  claim?: { messageId?: string } | null;
+  /** "Edit first" text placed in the successor's composer. */
+  draft?: string;
+  draftRevision?: number;
+  /** A box MAY report that the draft was already loaded by some client. */
+  draftConsumed?: boolean;
+  send?: unknown;
+}
+
+export interface HandoffSessionInfo {
+  records: HandoffRecord[];
+  links: HandoffLinks | null;
+  continuation?: HandoffContinuation | null;
+}
+
+/** `handoff` bus payload — published on every record change; carries no text. */
+export interface HandoffEventPayload {
+  id: string;
+  fromSessionId: string;
+  successorId?: string;
+  state: HandoffState;
+  how?: HandoffHow;
+  disposition?: HandoffDisposition;
+}
+
+export interface HandoffCreateInput {
+  sessionId: string;
+  trigger: "user" | "button";
+  action: "suggest";
+  goal?: string;
+}
+
+export interface HandoffStartInput {
+  id: string;
+  how: HandoffHow;
+  disposition: "send" | "draft";
+  text?: string;
+}
+
 export interface Api {
   configGet(): Promise<AppConfig>;
   configUpdate(patch: Partial<AppConfig>): Promise<AppConfig>;
@@ -1366,6 +1462,20 @@ export interface Api {
   // `action`. No-op on the preload bridge and on demoApi (Proxy fallback
   // returns a no-op unsubscribe).
   onAppControl(cb: (payload: AppControlPayload) => void): () => void;
+
+  // Auto-handoff (spec §15). All six are `/rpc` channels, implemented once on
+  // the box next to the REST routes. rpc errors reject with the box's error
+  // code as the message (`busy`, `not_ready`, `already_started`, `expired`, …).
+  handoffCreate(input: HandoffCreateInput): Promise<{ handoff: HandoffRecord }>;
+  handoffList(input: { sessionId: string }): Promise<HandoffSessionInfo>;
+  handoffGet(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
+  handoffStart(input: HandoffStartInput): Promise<{ handoff: HandoffRecord }>;
+  handoffRetry(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
+  handoffDraftConsumed(input: { id: string; draftRevision: number }): Promise<void>;
+  // The box publishes `{kind:"handoff", payload}` on every record change. No-op
+  // on the preload bridge and on demoApi (Proxy fallback returns a no-op
+  // unsubscribe).
+  onHandoff(cb: (payload: HandoffEventPayload) => void): () => void;
 
   // Inline media (BET-1148). The box publishes ONE `media` bus kind with an
   // `action` discriminator (begin / show / fail); the desktop subscribes once

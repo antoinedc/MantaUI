@@ -56,6 +56,7 @@ import type {
   UpgradeStatus,
   ReclaimResult,
   ReclaimStatus,
+  HandoffEventPayload,
 } from "../../shared/api.js";
 // BET-559: httpApi used to pull these claim helpers through the (now-retired)
 // mobile shell's pairingLogic re-export. The shared, process-boundary-safe
@@ -424,6 +425,7 @@ type Kind =
   | "model-prefs.updated"
   | "progress.updated"
   | "appControl"
+  | "handoff"
   | "media"
   | "widget"
   | "stream"
@@ -453,6 +455,7 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   "model-prefs.updated": new Set(),
   "progress.updated": new Set(),
   appControl: new Set(),
+  handoff: new Set(),
   media: new Set(),
   widget: new Set(),
   stream: new Set(),
@@ -1350,6 +1353,20 @@ export const httpApi: Api = {
   // effect (switch-model, rename-session, ...). The payload IS the full event
   // — the renderer switches on `action` directly, no refetch.
   onAppControl: (cb) => on<AppControlPayload>("appControl", cb),
+
+  // Auto-handoff (spec §15): six `/rpc` channels with the same payloads as the
+  // REST routes, plus the single `handoff` bus kind published on every record
+  // change. Channel names are literal here — the IPC table in shared/types.ts is
+  // the desktop-main vestige and the box owns these.
+  handoffCreate: (input) => rpc("handoff:create", input),
+  // Fired on every chat-panel mount, so a box that predates the feature (unknown
+  // channel) reads as "no handoffs" instead of a red 500 per panel.
+  handoffList: (input) => rpcOptional("handoff:list", { records: [], links: null, continuation: null }, input),
+  handoffGet: (input) => rpc("handoff:get", input),
+  handoffStart: (input) => rpc("handoff:start", input),
+  handoffRetry: (input) => rpc("handoff:retry", input),
+  handoffDraftConsumed: (input) => rpc("handoff:draft-consumed", input),
+  onHandoff: (cb) => on<HandoffEventPayload>("handoff", cb),
 
   // BET-1148: the box publishes ONE `media` bus kind with an `action`
   // discriminator (begin / show / fail) whenever the media tools land a

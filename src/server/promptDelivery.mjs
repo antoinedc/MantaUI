@@ -65,6 +65,11 @@ function sameModel(a, b) {
  *        The underlying opencode prompt injector (oc.sendPrompt).
  * @param {((args:object)=>Promise<{result:object}|null>)|null} [deps.redirect]
  *        CTO admission redirect; runs first in deliver().
+ * @param {((sessionId:string)=>{target:string, fenced?:boolean})|null} [deps.resolveTarget]
+ *        Auto-handoff admission resolver (§6.1): follows replacement links to the
+ *        live session. SYNCHRONOUS; queues, busy tracking and receipts are keyed
+ *        by the id it returns. The injected `sendPrompt` owns holding a message
+ *        while a transition fence is up and answers `{held:true}` for it.
  * @param {((sessionId:string)=>Promise<"busy"|"retry"|"idle">)|null} [deps.getSessionStatus]
  *        Asks opencode for a session's real status (stale-busy re-check).
  * @param {() => number} [deps.now] Injectable clock (ms).
@@ -78,6 +83,7 @@ function sameModel(a, b) {
 export function createPromptDelivery({
   sendPrompt,
   redirect = null,
+  resolveTarget = null,
   getSessionStatus = null,
   now = Date.now,
   timers = {
@@ -135,6 +141,15 @@ export function createPromptDelivery({
         pending.delete(sessionId);
         return;
       }
+      // A handoff replaced this session while the item waited: it belongs to the
+      // live end of the chain now, and is keyed (busy, receipts) by that id.
+      const live = resolveTarget ? resolveTarget(sessionId).target : sessionId;
+      if (live !== sessionId) {
+        pending.delete(sessionId);
+        pending.set(live, [...queue, ...(pending.get(live) ?? [])]);
+        void drain(live);
+        return;
+      }
       const item = queue.shift();
       const { text, model } = item;
       if (queue.length === 0) pending.delete(sessionId);
@@ -142,8 +157,9 @@ export function createPromptDelivery({
       lastEventAt.set(sessionId, now());
       const mark = { timer: null, text, model };
       awaitingStart.set(sessionId, mark);
+      let sent;
       try {
-        await sendPrompt(withModel(sessionId, text, model));
+        sent = await sendPrompt(withModel(sessionId, text, model));
       } catch (e) {
         // Warn and move on: one wedged delivery must not strand the rest of
         // the queued prompts behind it.
@@ -160,6 +176,14 @@ export function createPromptDelivery({
         return; // a busy event arrived meanwhile: the session is really running
       }
       item.sent = true;
+      if (sent && typeof sent === "object" && sent.held === true) {
+        // Parked behind a transition fence: no turn starts on this id, so this
+        // is not "busy" — release the session and let the next item park too.
+        item.held = true;
+        clearAwaiting(sessionId);
+        busy.delete(sessionId);
+        continue;
+      }
       // Sent. If the turn has not been seen to start yet, give it a bounded
       // time to do so, then treat the send as finished and release the next.
       if (awaitingStart.get(sessionId) === mark) {
@@ -287,7 +311,11 @@ export function createPromptDelivery({
     return busy.size > 0;
   }
 
-  async function deliver({ sessionId, text, model, ctoKey, coalesceKey }) {
+  async function deliver({ sessionId: requestedId, text, model, ctoKey, coalesceKey }) {
+    // Auto-handoff §6.1: the resolver runs FIRST (before the redirect and the
+    // busy check), so everything below is keyed by the live session id.
+    const sessionId = resolveTarget ? resolveTarget(requestedId).target : requestedId;
+    const redirected = sessionId !== requestedId ? { deliveredTo: sessionId } : {};
     // P3a3 (spec §8.3): every writer to the CTO role session goes through the
     // durable admission queue — including this engine's background senders.
     // The redirect runs FIRST so a conversation-targeted delivery never
@@ -323,7 +351,7 @@ export function createPromptDelivery({
       same.text = text;
       same.model = model;
       void drain(sessionId);
-      return { delivered: false, queued: true, coalesced: true };
+      return { delivered: false, queued: true, coalesced: true, ...redirected };
     }
     // Also identical to the item drain just sent whose turn has not been seen
     // to start yet (the send is in flight): the same prompt twice in that
@@ -334,7 +362,7 @@ export function createPromptDelivery({
       (inflight && inflight.text === text && sameModel(inflight.model, model))
     ) {
       void drain(sessionId);
-      return { delivered: false, queued: true, coalesced: true };
+      return { delivered: false, queued: true, coalesced: true, ...redirected };
     }
     if (q.length >= MAX_PENDING_PER_SESSION) {
       // Queue is at the cap (BET-772). Reject + surface rather than grow
@@ -344,7 +372,7 @@ export function createPromptDelivery({
       console.warn(
         `[promptDelivery] deferred delivery queue for ${sessionId} is full (${MAX_PENDING_PER_SESSION}); rejecting`,
       );
-      return { delivered: false, queued: false, rejected: true };
+      return { delivered: false, queued: false, rejected: true, ...redirected };
     }
     const item = { text, model, ...(coalesceKey ? { coalesceKey } : {}) };
     q.push(item);
@@ -353,9 +381,10 @@ export function createPromptDelivery({
     await drain(sessionId);
     // Report what happened to THIS call's item. drain marks an item it sent
     // (or failed to send); otherwise the item is still waiting.
-    if (item.sent) return { delivered: true, queued: false };
-    if (item.failed) return { delivered: false, queued: false };
-    return { delivered: false, queued: true };
+    if (item.held) return { delivered: false, queued: true, held: true, ...redirected };
+    if (item.sent) return { delivered: true, queued: false, ...redirected };
+    if (item.failed) return { delivered: false, queued: false, ...redirected };
+    return { delivered: false, queued: true, ...redirected };
   }
 
   return { deliver, observeEvent, isBusy, anyBusy, startStaleSweep, sweepStale };
