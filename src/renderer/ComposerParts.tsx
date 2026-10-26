@@ -718,12 +718,16 @@ export function TrustRow({
   chatAutoAllow,
   setChatAutoAllow,
   trailing,
+  status,
 }: {
   planOn: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   /** Another ambient control for the same line (the handoff mode), after the trust state. */
   trailing?: React.ReactNode;
+  /** Transient key-hint text (busy send / voice), right-aligned. Lives here, not in
+   *  the controls row above, so it appearing mid-turn never re-wraps those controls. */
+  status?: React.ReactNode;
 }) {
   return (
     <div className="pb-3 flex items-center gap-4">
@@ -758,6 +762,7 @@ export function TrustRow({
         </button>
       )}
       {trailing}
+      {status && <span className="ml-auto min-w-0 truncate">{status}</span>}
     </div>
   );
 }

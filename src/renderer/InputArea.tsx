@@ -752,6 +752,21 @@ export function InputArea({
             onSecrets={onSecrets}
             onWebhooks={onWebhooks}
           />
+        </span>
+      </div>
+      {/* Trust toggle — labelled control with a Shield icon (BET-415).
+          Shared TrustRow (also used by the new-session composer). In plan
+          mode nothing is bypassed — the edit tools are gone — so the row
+          reports "Plan mode — edits blocked" instead and the bypass state is
+          not shown. Two contradictory permission claims stacked together is
+          how users stop believing either. */}
+      <TrustRow
+        planOn={plan.on}
+        chatAutoAllow={chatAutoAllow}
+        setChatAutoAllow={setChatAutoAllow}
+        trailing={showHandoffMode ? <HandoffModeToggle /> : undefined}
+        status={
+          <>
           {running && onSubmitAfterTurn && !voiceActive && (
             <span className="text-meta text-text-faint whitespace-nowrap" data-testid="busy-send-hint">
               {bgActive ? "⏎ run in background" : busySendHint(IS_MAC)}
@@ -786,19 +801,8 @@ export function InputArea({
               ) : null}
             </span>
           )}
-        </span>
-      </div>
-      {/* Trust toggle — labelled control with a Shield icon (BET-415).
-          Shared TrustRow (also used by the new-session composer). In plan
-          mode nothing is bypassed — the edit tools are gone — so the row
-          reports "Plan mode — edits blocked" instead and the bypass state is
-          not shown. Two contradictory permission claims stacked together is
-          how users stop believing either. */}
-      <TrustRow
-        planOn={plan.on}
-        chatAutoAllow={chatAutoAllow}
-        setChatAutoAllow={setChatAutoAllow}
-        trailing={showHandoffMode ? <HandoffModeToggle /> : undefined}
+          </>
+        }
       />
       </MeasureColumn>
     </div>
