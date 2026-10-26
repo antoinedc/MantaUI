@@ -157,13 +157,13 @@ test("a user / button / agent ready card never blocks auto and is left alone", a
   }
 });
 
-test("in suggest mode a newer automatic card supersedes the older unanswered one; a failed automatic attempt is not retried every turn", async () => {
+test("in suggest mode an unanswered automatic card is not regenerated every turn; a failed automatic attempt is not retried every turn", async () => {
   const w = standardWorld({ mode: "suggest" });
   await turn(w.engine, "ses_p");
   await turn(w.engine, "ses_p");
   const cards = records(w);
-  assert.equal(cards.length, 2);
-  assert.deepEqual(cards.map((r) => r.state).sort(), ["cancelled", "ready"]);
+  assert.equal(cards.length, 1, "one card, not a fresh generation per turn");
+  assert.equal(cards[0].state, "ready");
   const f = standardWorld();
   f.failures.generate.push({}, {});
   await turn(f.engine, "ses_p");

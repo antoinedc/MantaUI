@@ -629,6 +629,10 @@ export function createHandoffEngine(deps = {}) {
     const mode = normalizeMode(await getMode());
     if (mode === "off") return;
     if (recordsFor(sid).some((r) => IN_FLIGHT_STATES.includes(r.state))) return;
+    // Suggest mode: an unanswered automatic card already says "hand off" — don't
+    // pay a full-history generation every turn to say it again. (Auto mode does
+    // not wait on it: it supersedes the card and hands off.)
+    if (mode === "suggest" && recordsFor(sid).some((r) => r.trigger === "auto" && r.state === "ready")) return;
     // A failed automatic attempt costs a full-history generation: don't loop on it.
     if (recordsFor(sid).some((r) => r.trigger === "auto" && r.state === "failed" && now() - r.updatedAt < cooldownMs)) return;
     if (ops.has(sid)) return; // another maintenance operation owns the session (§6.2)
