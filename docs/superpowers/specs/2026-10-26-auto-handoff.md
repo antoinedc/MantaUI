@@ -438,3 +438,45 @@ status line + marker.
   delegate job finishing after a replacement lands in the successor; a message
   sent during a start is delivered to the successor; restart mid-start
   recovers; Previous sessions read-only.
+
+## 15. Implementation addendum (pinned 2026-10-26, before parallel work)
+
+**Client transport.** Desktop (`src/renderer/api/httpApi.ts` `rpc()`) and iOS
+(`MantaAPIClient.call`) use `/rpc` channels, not REST. The server exposes the
+§11 routes BOTH as REST (for the agent tool) and as rpc channels with the same
+payloads/results, implemented once:
+
+| rpc channel | REST equivalent | args (single object) |
+|---|---|---|
+| `handoff:create` | `POST /api/handoff` | `{sessionId, trigger, action, goal?, body?}` |
+| `handoff:list` | `GET /api/handoff?sessionId=` | `{sessionId}` |
+| `handoff:get` | `GET /api/handoff/:id` | `{id}` |
+| `handoff:start` | `POST /api/handoff/:id/start` | `{id, how, disposition, text?}` |
+| `handoff:retry` | `POST /api/handoff/:id/retry` | `{id}` |
+| `handoff:draft-consumed` | `POST /api/handoff/:id/draft-consumed` | `{id, draftRevision}` |
+
+rpc errors surface the same `{error, message}` codes (thrown with `code`).
+
+**Bus.** Server publishes `{kind: "handoff", payload}` on the existing bus
+(`/events`); desktop subscribes with `on("handoff", …)` in httpApi (new
+`onHandoff` on the `Api` type); iOS matches `frame.kind == "handoff"`.
+
+**Config.** `handoffMode` readable/writable through the existing `config:get` /
+`config:update` channels; server default `"auto"`.
+
+**Generate marker.** Every server `generate` prompt starts with the line
+`<!-- manta-handoff-generate -->`. The optimizer plugin skips its budget note
+for any request whose last user content contains that marker (belt-and-braces
+for §4.4's generate exclusion).
+
+**Tool marker.** Tool output ends with the line `<!-- manta-handoff:<id> -->`
+(regex `<!-- manta-handoff:([A-Za-z0-9_-]+) -->`). Record ids: `hof_` + 20
+base36 chars.
+
+**Plugin policy fields.** The existing per-session policy response gains
+`handoff: {contextTokens, budget, measuredAt, mode} | null` (null when unknown —
+plugin injects nothing).
+
+**Card placement.** Agent-path card renders inline as the `handoff` tool part;
+server-path cards (records with no tool part, i.e. `trigger !== "agent"`) and
+`failed`/`ready` server records render pinned above the composer.
