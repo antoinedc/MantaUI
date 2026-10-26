@@ -480,3 +480,13 @@ plugin injects nothing).
 **Card placement.** Agent-path card renders inline as the `handoff` tool part;
 server-path cards (records with no tool part, i.e. `trigger !== "agent"`) and
 `failed`/`ready` server records render pinned above the composer.
+
+**Seam pins (added after iOS landed):**
+- `handoff:list` / `GET /api/handoff?sessionId=` returns `links` as the object
+  for the REQUESTED session only: `{replacedBy?, replaces?, branchedFrom?,
+  branches: []}` — not a map keyed by session id — plus `chain: {predecessors:
+  [{id, title?, deleted?}]}` (newest first) for Previous sessions.
+- Record gains `contextTokens?: number` (context size of the predecessor when
+  the handoff was created) — used by the continuation notice.
+- rpc/REST error codes are exactly: `already_started`, `busy`, `not_ready`,
+  `expired`, `not_found`, `generation_failed`, `invalid`.
