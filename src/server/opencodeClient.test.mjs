@@ -405,6 +405,12 @@ const WIRE = [
     () => oc.generateText({ instruction: "name it", model: { providerID: "p", modelID: "m" } }),
     [["POST", "/api/experimental/generate", {}, { prompt: "name it", model: { providerID: "p", id: "m" } }]],
   ],
+  [
+    "generateInSession (auto-handoff)",
+    { "POST /api/session/ses_a/generate": { data: { text: "## Goal" } } },
+    () => oc.generateInSession("ses_a", "<!-- manta-handoff-generate -->\nwrite it"),
+    [["POST", "/api/session/ses_a/generate", {}, { prompt: "<!-- manta-handoff-generate -->\nwrite it" }]],
+  ],
   ["listPermissions (all)", { "GET /api/permission/request": { data: [] } }, () => oc.listPermissions(), [["GET", "/api/permission/request"]]],
   ["listPermissions (one session)", { "GET /api/session/ses_a/permission": { data: [] } }, () => oc.listPermissions("ses_a"), [["GET", "/api/session/ses_a/permission"]]],
   [

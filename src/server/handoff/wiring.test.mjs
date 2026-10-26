@@ -1,0 +1,143 @@
+// The production assembly (wiring.mjs) over fake clients, plus a source scan of
+// index.mjs (which boots the server on import, so it cannot be imported — same
+// approach as errorBodyContract.test.mjs).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createProductionHandoff } from "./wiring.mjs";
+import { FULL_BODY, settle } from "./testWorld.mjs";
+
+const SERVER = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+function fakes(over = {}) {
+  const calls = [];
+  const sessions = new Map([["ses_p", { id: "ses_p", title: "Fix auth", directory: "/proj", agent: "build", model: { providerID: "anthropic", id: "claude-opus-4-8" } }]]);
+  const oc = {
+    readSession: async (sid) => (sessions.has(sid) ? { state: "found", session: sessions.get(sid) } : { state: "missing" }),
+    createSession: async (i) => (calls.push(["createSession", i]), sessions.set(i.id, { id: i.id, directory: i.directory })),
+    deleteSessionRaw: async (sid) => void calls.push(["delete", sid]),
+    generateInSession: async (sid, prompt) => (calls.push(["generate", sid, prompt]), FULL_BODY),
+    sendPrompt: async (a) => void calls.push(["sendPrompt", a]),
+    postSynthetic: async (sid, b) => void calls.push(["postSynthetic", sid, b]),
+    listInbox: async () => [],
+    getMessage: async () => null,
+    listActiveSessionIds: async () => [],
+    listMessages: async () => [
+      { info: { role: "user", time: { created: 100 } }, parts: [] },
+      { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", tokens: { input: 10, cache: { read: 200, write: 30 } } }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { filePath: "/proj/a.ts" } } }] },
+    ],
+    getVcsBranch: async () => "feat/x",
+  };
+  const tmux = {
+    findWindowBySessionId: async (sid) => (sid === "ses_p" ? { sessionName: "proj", windowIndex: 3, name: "work", cwd: "/proj" } : null),
+    findWindowByName: async () => null,
+    restampSessionId: async (...a) => void calls.push(["restamp", ...a]),
+    createStampedChatWindow: async () => 9,
+    renameWindow: async () => {},
+    run: async (cmd, args) => (calls.push(["run", cmd, args]), { stdout: " M src/a.ts\n?? new.txt\n" }),
+  };
+  const disk = { json: null };
+  const published = [];
+  const delegate = {
+    repointSessions: async (a) => void calls.push(["repoint", a]),
+    reconcileV2: async () => void calls.push(["reconcileV2"]),
+    isRunningJobSession: async (sid) => sid === "ses_job",
+  };
+  const p = {
+    oc,
+    tmux,
+    configGet: async () => ({ handoffMode: "suggest" }),
+    publish: (e) => published.push(e),
+    delegate: () => delegate,
+    isCtoConversationSession: async (sid) => sid === "ses_cto",
+    contextLimitFor: () => 1_000_000,
+    constraints: { snapshot: async () => ({ sessions: { ses_p: { constraints: ["no emojis"], at: 5 } } }) },
+    extractConstraints: async (sid) => void calls.push(["extract", sid]),
+    loadState: () => (disk.json ? JSON.parse(disk.json) : null),
+    saveState: async (s) => void (disk.json = JSON.stringify(s)),
+    ...over,
+  };
+  return { p, calls, published, disk, sessions };
+}
+
+test("the production engine builds a ready card from the box's real-shaped reads: facts are observed/inferred, constraints re-extracted when stale", async () => {
+  const f = fakes();
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "user", goal: "auth" });
+  await settle(10);
+  const done = engine.get(rec.id);
+  assert.equal(done.state, "ready");
+  assert.ok(done.text.startsWith(FULL_BODY));
+  assert.match(done.text, /previous session: ses_p — “Fix auth”/);
+  assert.match(done.text, /- \(observed\) branch: feat\/x/);
+  assert.match(done.text, /  - M src\/a\.ts/);
+  assert.match(done.text, /files this session edited: 1/);
+  assert.match(done.text, /- \(inferred\) standing instructions/);
+  assert.ok(f.calls.some((c) => c[0] === "extract" && c[1] === "ses_p"), "the constraints (at=5) predate the last user message (100): re-extracted first");
+  assert.ok(f.calls.find((c) => c[0] === "generate")[2].startsWith("<!-- manta-handoff-generate -->"));
+  assert.ok(f.published.some((e) => e.kind === "handoff"));
+  assert.ok(JSON.parse(f.disk.json).records[rec.id], "persisted");
+});
+
+test("start through the production adapters: restamps the window, re-points jobs, copies settings, posts to the successor", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "auto" }) });
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  const out = await engine.start(rec.id, { how: "clear", disposition: "send" });
+  assert.equal(out.state, "committed");
+  const kinds = f.calls.map((c) => c[0]);
+  assert.ok(kinds.indexOf("createSession") < kinds.indexOf("sendPrompt") && kinds.indexOf("sendPrompt") < kinds.indexOf("restamp") && kinds.indexOf("restamp") < kinds.indexOf("repoint"), "create → send → attach → re-point");
+  const create = f.calls.find((c) => c[0] === "createSession")[1];
+  assert.deepEqual(create.model, { providerID: "anthropic", modelID: "claude-opus-4-8" });
+  assert.deepEqual(f.calls.find((c) => c[0] === "restamp").slice(1), ["proj", 3, out.successorId]);
+  assert.deepEqual(f.calls.find((c) => c[0] === "repoint")[1], { fromSessionId: "ses_p", toSessionId: out.successorId });
+});
+
+test("a failed send handoff tells the delegate engine to re-settle; held-message failures reach the bus", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "auto" }) });
+  f.p.oc = { ...f.p.oc, createSession: async () => { throw Object.assign(new Error("no"), { status: 400 }); } };
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "agent", action: "handoff", body: FULL_BODY });
+  await engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(engine.get(rec.id).state, "failed");
+  await settle();
+  assert.ok(f.calls.some((c) => c[0] === "reconcileV2"));
+});
+
+test("the mode comes from config handoffMode (default auto, garbage → auto); CTO conversations and running job sessions are recognised", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "nonsense" }) });
+  const engine = createProductionHandoff(f.p);
+  engine.observeEvent({ type: "session.next.step.ended", properties: { sessionID: "ses_p", tokens: { input: 1000, cache: { read: 0, write: 0 } }, providerID: "anthropic", modelID: "claude-opus-4-8" } });
+  assert.equal((await engine.policyFor("ses_p")).mode, "auto");
+});
+
+test("index.mjs: the engine is wired into every seam the spec names", () => {
+  const index = readFileSync(join(SERVER, "index.mjs"), "utf8");
+  // REST routes behind the same gate as every /api route
+  assert.match(index, /if \(await handoffHandler\(req, res, url\)\) return;/);
+  // rpc channels
+  assert.match(index, /delegate: delegateEngine,\s*handoff: handoffEngine,/);
+  // triggers: the lifecycle tap
+  assert.match(index, /handoffEngine\.observeEvent\(evt\)/);
+  // §4.5: idle compaction stands aside unless the mode is off, and shares the operation registry (§6.2)
+  assert.match(index, /normalizeHandoffMode\(cfg\?\.handoffMode\) === "off"/);
+  assert.match(index, /acquire: \(sid\) => handoffEngine\.acquireOperation\(sid, "compaction"\)/);
+  assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
+  // §6.3 ownership
+  assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
+  assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
+  // §15 policy block, per session
+  assert.match(index, /handoff: sessionID \? await handoffEngine\.policyFor\(sessionID\) : null/);
+  // §5.5 boot recovery runs after the delegate engine exists
+  assert.ok(index.indexOf("handoffEngine\n  .recover()") > index.indexOf("delegateEngine.reconcileV2().catch"));
+});
+
+test("the handoff state lives under the sandboxed state home, never a literal $HOME path", () => {
+  const index = readFileSync(join(SERVER, "index.mjs"), "utf8");
+  assert.match(index, /statePath\("handoffs\.json"\)/);
+  for (const f of ["handoff/engine.mjs", "handoff/state.mjs", "handoff/wiring.mjs", "handoffRoute.mjs"]) {
+    assert.ok(!/homedir\(\)|process\.env\.HOME|\.manta\//.test(readFileSync(join(SERVER, f), "utf8").replace(/\/\/.*$/gm, "")), `${f} must not resolve state paths itself`);
+  }
+});

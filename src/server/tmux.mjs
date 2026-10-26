@@ -654,6 +654,47 @@ export async function renameSession({ oldName, newName }) {
   await addOwnedSession(newName, { path });
   return listProjects();
 }
+/**
+ * Create a chat-mode holder window already carrying its `@manta-session-id`, in
+ * ONE tmux invocation (a `;` command chain): there is no moment at which the
+ * window exists without the stamp, so a crash between "created" and "stamped"
+ * cannot leave an unclaimed window. The temporary `tempName` is how a recovery
+ * finds the window if the process dies before the caller renames it. Returns
+ * the new window's index.
+ *
+ * @param {{ sessionName: string, tempName: string, cwd: string, sessionId: string }} a
+ */
+export async function createStampedChatWindow({ sessionName, tempName, cwd, sessionId }) {
+  const dir = resolveCwdOrThrow(cwd);
+  const { stdout } = await run("tmux", [
+    "new-window", "-t", sessionName, "-n", tempName, "-P", "-F", "#{window_index}", "-c", dir,
+    "sh", "-c", CHAT_HOLDER_CMD,
+    ";",
+    "set-window-option", "-t", `${sessionName}:=${tempName}`, "@manta-session-id", sessionId,
+  ]);
+  const idx = Number(stdout.trim().split("\n")[0]);
+  if (!Number.isFinite(idx)) throw new Error(`tmux new-window returned unexpected index: ${JSON.stringify(stdout.trim())}`);
+  return idx;
+}
+
+/** The window (any project) whose name is exactly `name`, or null. Used to recover a half-made branch window. */
+export async function findWindowByName(name, listFn = listProjects) {
+  for (const p of await listFn()) {
+    const w = (p.windows ?? []).find((x) => x.name === name);
+    if (w) return { sessionName: p.tmuxSession, windowIndex: w.index };
+  }
+  return null;
+}
+
+/** The window stamped with an opencode session id, or null: `{sessionName, windowIndex, name, cwd}`. */
+export async function findWindowBySessionId(sessionId, listFn = listProjects) {
+  for (const p of await listFn()) {
+    const w = (p.windows ?? []).find((x) => x.opencodeSessionId === sessionId);
+    if (w) return { sessionName: p.tmuxSession, windowIndex: w.index, name: w.name, cwd: w.paneCurrentPath ?? p.defaultCwd };
+  }
+  return null;
+}
+
 export async function renameWindow({ sessionName, windowIndex, newName }) {
   await run("tmux", ["rename-window", "-t", `${sessionName}:${windowIndex}`, newName]);
   return listProjects();

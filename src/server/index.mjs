@@ -210,6 +210,9 @@ import {
 import { setSecret, deleteSecret, listSecrets, provideSecret } from "./secrets.mjs";
 import { resourceSnapshot } from "./resourceSnapshot.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
+import { createProductionHandoff } from "./handoff/wiring.mjs";
+import { createHandoffHandler } from "./handoffRoute.mjs";
+import { normalizeMode as normalizeHandoffMode } from "./handoff/policy.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
@@ -487,8 +490,30 @@ const { stop: stopUploadCleanupPoller } = startUploadCleanupPoller({
 // P3a3 (spec §8.3): deliveries aimed at the CTO role session are redirected
 // into the durable admission queue via `redirect` (the closure resolves the
 // composed conversation service at call time; nothing below runs at boot).
+// Auto-handoff (docs/superpowers/specs/2026-10-26-auto-handoff.md): the engine
+// that replaces a long conversation with a fresh one carrying a handoff prompt.
+// It is also the ONE admission resolver (§6.1): every sender below sends through
+// it, so a message for a replaced conversation lands in its successor and one
+// that arrives mid-transition is held, never lost or reordered. Its collaborators
+// that are built later in the boot (delegate engine, CTO conversation, the
+// constraint store) are reached lazily.
+const handoffEngine = createProductionHandoff({
+  oc,
+  tmux,
+  configGet: () => local.configGet(),
+  publish: (evt) => bus.publish(evt),
+  delegate: () => delegateEngine,
+  isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
+  contextLimitFor,
+  constraints: { snapshot: () => optimizerConstraints.snapshot() },
+  extractConstraints: (sid) => extractAndStoreConstraints(sid),
+  loadState: () => readJsonSync(statePath("handoffs.json"), null),
+  saveState: (snapshot) => writeJsonAtomic(statePath("handoffs.json"), JSON.stringify(snapshot, null, 2)),
+});
 const promptDelivery = createPromptDelivery({
-  sendPrompt: (args) => oc.sendPrompt(args),
+  // The admission seam: resolves to the live session, parks behind a fence.
+  sendPrompt: (args) => handoffEngine.admitPrompt(args),
+  resolveTarget: (sid) => handoffEngine.resolveAdmissionTarget(sid),
   redirect: (args) => ctoConversation.redirectDelivery(args),
   getSessionStatus: (sid) => oc.getSessionStatus(sid),
 });
@@ -1014,7 +1039,7 @@ const { stop: stopCapSweeper } = startCapSweeper({
 let forgeRulesEngine = null;
 
 const webhookEngine = createWebhookEngine({
-  sendPrompt: (args) => oc.sendPrompt(args),
+  sendPrompt: (args) => handoffEngine.admitPrompt(args),
   delivery: promptDelivery,
   publish: (evt) => bus.publish(evt),
   // Forge hooks route to the forge ingest path instead of waking a session.
@@ -1107,7 +1132,13 @@ const delegateEngine = createDelegateEngine({
   sendChildPrompt: (input) => oc.sendPrompt(input),
   runCommandOnChild: (input) => oc.runCommand(input),
   deleteSession: (sid) => oc.deleteSessionRaw(sid),
-  postSynthetic: (sid, body) => oc.postSynthetic(sid, body),
+  // N7 result to the parent: an admission like any other (§6.1) — a replaced
+  // parent's result lands in its successor, a fenced one is held.
+  postSynthetic: (sid, body) => handoffEngine.admitSynthetic(sid, body),
+  // §6.3: a job whose own session has a pending `send` handoff does not settle
+  // yet; a parent's job list spans its whole replacement chain.
+  deferSettlement: (sid) => handoffEngine.hasPendingSend(sid),
+  replacementChain: (sid) => handoffEngine.chainOf(sid),
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   openCommandWindows: (sid) => commandCorrelator.openWindows(sid),
@@ -1140,6 +1171,13 @@ onCommandWindowClosed = (w) => delegateEngine.windowClosed(w);
 delegateEngine.reconcileV2().catch((e) =>
   console.warn("[delegate] boot V2 reconciliation failed:", e?.message ?? e),
 );
+// Auto-handoff boot recovery (§5.5): finish or roll back every start a restart
+// interrupted, drain anything held, and prune dead history/links. Fences and held
+// admissions were already in force from the engine's synchronous load.
+handoffEngine
+  .recover()
+  .then(() => handoffEngine.sweep((sid) => oc.sessionExists(sid)))
+  .catch((e) => console.warn("[handoff] boot recovery failed:", e?.message ?? e));
 
 // §7 `work` control-tool family (record + dispatch half): composed from the
 // live tmux reader and the bound delegate engine, and injected into the CTO
@@ -1839,7 +1877,15 @@ const compactionScheduler = createCompactionScheduler({
       console.warn("[optimizer] compaction notice publish failed:", e?.message ?? e);
     }
   },
-  enabled: async () => (await local.configGet())?.optimizerEnabled === true,
+  // §4.5: with auto-handoff on (auto or suggest) idle compaction stands aside —
+  // the handoff covers the same sessions. Only `off` leaves the scheduler as it was.
+  enabled: async () => {
+    const cfg = await local.configGet();
+    return cfg?.optimizerEnabled === true && normalizeHandoffMode(cfg?.handoffMode) === "off";
+  },
+  // §6.2: one maintenance operation per session.
+  acquire: (sid) => handoffEngine.acquireOperation(sid, "compaction"),
+  release: (sid) => handoffEngine.releaseOperation(sid, "compaction"),
 });
 
 const stopCompactionScheduler = startPoller(() => compactionScheduler.tick(), {
@@ -1940,6 +1986,7 @@ rpcHandlers = buildHandlers({
   serverVersion: SERVER_VERSION,
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
+  handoff: handoffEngine,
   // BET-1252: routing-services readers shared with delegate (the routing:choose
   // channel). Same degradation contract:
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
@@ -3288,6 +3335,12 @@ function observeLifecycleEvent(evt, raw) {
   } catch (e) {
     console.warn("[webhook] observeEvent failed:", e?.message ?? e);
   }
+  // Auto-handoff triggers (§4.2): a turn that ended successfully over its budget.
+  try {
+    handoffEngine.observeEvent(evt);
+  } catch (e) {
+    console.warn("[handoff] observeEvent failed:", e?.message ?? e);
+  }
   try {
     delegateEngine.observeEvent(evt);
   } catch (e) {
@@ -3595,6 +3648,7 @@ const UPLOAD_ROOT = uploadRoot();
 // (extracted BET-1460 on the projectsRoute.mjs pattern; tested in uploadRoute.test.mjs).
 // Injected with the box's upload root (~/.manta-uploads).
 const uploadHandler = createUploadHandler({ uploadRoot: UPLOAD_ROOT });
+const handoffHandler = createHandoffHandler({ engine: handoffEngine, readJson: (req) => readJsonBody(req) });
 
 // Agent → device download: stream a file back to the device as a browser
 // download. Path-traversal guarded with the SAME home-scoped rule /api/peek
@@ -4044,6 +4098,9 @@ const handleRequest = async (req, res) => {
   if (req.method === "POST" && path === "/api/upload") {
     return uploadHandler(req, res, url);
   }
+
+  // Auto-handoff REST routes (§11); the rpc channels twin them (rpc.mjs).
+  if (await handoffHandler(req, res, url)) return;
 
   if (req.method === "GET" && path === "/api/download") {
     return handleDownload(req, res, url);
@@ -4892,7 +4949,8 @@ const handleRequest = async (req, res) => {
         const repoTable = validateRepoTable(readJsonSync(statePath("optimizer-policy.json"), {}));
         const config = await local.configGet();
         const policy = resolvePolicy({ config, repoTable, directory, cacheTtlMs });
-        respondJson(res, 200, { ...policy, sessionID });
+        // §15: the handoff budget block — authoritative for THIS session only (null when unmeasured).
+        respondJson(res, 200, { ...policy, sessionID, handoff: sessionID ? await handoffEngine.policyFor(sessionID) : null });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });
