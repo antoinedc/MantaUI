@@ -686,9 +686,10 @@ export function InputArea({
           />
         )}
       </div>
-      {/* Meta footer — model ▸ effort split on the left, resource toolbar +
-          transient status on the right. Branch + context pill moved to the
-          SessionHeader; the footer now owns only composing controls. */}
+      {/* Meta footer — model ▸ effort split on the left, resource toolbar on
+          the right. Branch + context pill moved to the SessionHeader; the footer
+          now owns only composing controls. Transient key hints (busy send, voice)
+          live on the TrustRow below so they never re-wrap this row. */}
       <div className="py-1 flex items-center justify-between gap-3 flex-wrap">
         <span className="flex items-center gap-3 min-w-0 flex-wrap">
           <ModelPicker
