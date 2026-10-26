@@ -1,6 +1,6 @@
 # Auto-handoff — design
 
-Status: draft v6 (Astra review round 4 addressed) · Branch: `feat/auto-handoff`
+Status: approved for implementation (Astra review: no blockers, round 5) · Branch: `feat/auto-handoff`
 Target runtime: opencode **V2** (box verified on 2.0.30; main already on V2).
 
 Decisions taken with the user (2026-10-26):
@@ -220,9 +220,19 @@ attempt in step 3 onwards the start only ever **recovers forward**.
    confirmed acceptance (uncertain → reconcile as above).
 
 **Rollback** (only steps 1–3, and in step 3 only before any `send` POST was
-attempted or after a definitive refusal): delete the successor session, remove
-the fence, release held messages to the predecessor, record `failed` with
-**Retry**.
+attempted or after a definitive refusal of the **first** POST): delete the
+successor session, remove the fence, release held messages to the predecessor,
+record `failed` with **Retry**. A refusal of a *re-post* after an uncertain
+first POST does not prove the original was rejected — keep reconciling and
+recover forward.
+
+**Release failures:** a held admission definitively refused at release is
+reported durably to its sender through the normal failure path, removed from
+the journal, and the queue advances (no permanent retry).
+
+**Ordering during commit and release:** from step 4 until the held queue is
+empty, any new admission resolving to the successor joins the end of the held
+queue instead of posting directly, so nothing overtakes a held message.
 
 ### 5.4 Armed preamble
 
