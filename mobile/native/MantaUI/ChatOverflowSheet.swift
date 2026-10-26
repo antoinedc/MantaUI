@@ -59,6 +59,11 @@ struct ChatOverflowSheet: View {
     /// Live count for the scheduled-tasks row (§8: "with live count").
     var scheduleCount: Int = 0
 
+    /// Background jobs this session has started: `total` is every job on record
+    /// (the row is hidden at 0 — a session that never had one has nothing to
+    /// show), `running` the live ones, shown as the row's count.
+    var backgroundJobs: (total: Int, running: Int) = (total: 0, running: 0)
+
     /// Auto-handoff (spec §9): the three-way mode control under "Trust mode" and
     /// the "Previous sessions" list. nil hides both — a control with nothing to
     /// drive is not drawn (the capture scene has no chat to hand off).
@@ -66,11 +71,6 @@ struct ChatOverflowSheet: View {
     /// Open a previous session read-only. Required for the list to be shown: a
     /// row that could not open anything must not exist.
     var onOpenPrevious: ((HandoffPreviousEntry) -> Void)? = nil
-
-    /// Background jobs this session has started: `total` is every job on record
-    /// (the row is hidden at 0 — a session that never had one has nothing to
-    /// show), `running` the live ones, shown as the row's count.
-    var backgroundJobs: (total: Int, running: Int) = (total: 0, running: 0)
 
     /// Clear/Delete/Compact confirmations. Presented as a compact native
     /// bottom sheet (`ConfirmActionSheet`) from within this sheet, so it layers
