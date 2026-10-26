@@ -1179,16 +1179,6 @@ main() {
     sync_opencode_guidance "$OPENCODE_TOOLS_SRC/AGENTS.md" "$OPENCODE_AGENTS"
   fi
 
-  # --- C2. opencode tool-output pruning on by default (once). ---------------
-  # `compaction.prune: true` defaults OFF in opencode. The script sets it only when
-  # absent (comments kept) and records a marker in ~/.manta/config.json so it never
-  # overrides a user. Runs here — after upgradeV2Prepare wrote the config, before
-  # opencode is first started in step D. Never fatal.
-  if [ -f "$MANTA_HOME/scripts/migrate-opencode-prune.mjs" ]; then
-    "$NODE" "$MANTA_HOME/scripts/migrate-opencode-prune.mjs" \
-      || warn "opencode prune default migration failed — continuing"
-  fi
-
   # install_launchd_agent <label> <template-src> <dest-plist> — render the
   # @@…@@ placeholders and (re)load the LaunchAgent idempotently. macOS only.
   # Mirrors the systemd `daemon-reload + enable --now` shape:

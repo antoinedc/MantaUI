@@ -439,6 +439,18 @@ async function cli(argv) {
   if (cmd === "prepare") {
     const mantaHome = flags.home || join(dirname(fileURLToPath(import.meta.url)), "..", "..");
     const r = await prepareOpencodeV2({ mantaHome, log: (m) => process.stderr.write(`${m}\n`) });
+    // Turn on opencode tool-output pruning once (scripts/migrate-opencode-prune.mjs).
+    // It lives HERE, not in self-update.sh: the updater that performs an update is the
+    // OLD script on disk, but it runs this command from the NEW payload, so the first
+    // update after this ships already applies it. Never fatal; stderr only (stdout is
+    // eval'd by the caller).
+    try {
+      const { migratePrune } = await import("../../scripts/migrate-opencode-prune.mjs");
+      const m = await migratePrune();
+      process.stderr.write(m.warning ? `[prepare] prune default: ${m.warning}\n` : `[prepare] prune default: ${m.outcome}\n`);
+    } catch (e) {
+      process.stderr.write(`[prepare] prune default skipped: ${e?.message ?? e}\n`);
+    }
     process.stdout.write(
       [
         `MIGRATION_NEEDED=${r.migrationNeeded ? 1 : 0}`,

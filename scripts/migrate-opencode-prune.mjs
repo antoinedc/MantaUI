@@ -6,8 +6,8 @@
 // context, the cheapest way to keep a long session lean, so Manta wants it ON
 // by default — without ever overriding a user who chose a value.
 //
-// Called by scripts/self-update.sh (before it restarts opencode) and
-// scripts/install.sh (before opencode first starts). Idempotent and NEVER fatal:
+// Called from `upgradeV2Prepare.mjs prepare` (run by both self-update.sh, from the NEW
+// payload and before any opencode restart, and install.sh). Idempotent and NEVER fatal:
 // every failure is a one-line warning and exit 0, so an update/install carries on.
 //
 // Rules:
