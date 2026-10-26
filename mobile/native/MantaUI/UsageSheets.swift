@@ -69,6 +69,10 @@ struct ContextSheet: View {
     let tokens: Tokens
     let onCompact: () -> Void
     let onClear: () -> Void
+    /// "Hand off" (auto-handoff §10.8): ask for a handoff prompt for this chat.
+    /// nil hides the row, so a surface that cannot hand off never shows a
+    /// button that does nothing.
+    var onHandOff: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
 
@@ -89,6 +93,11 @@ struct ContextSheet: View {
                 Section {
                     actionRow("Compact session", systemImage: "arrow.triangle.2.circlepath", onTap: { confirmingCompact = true })
                     actionRow("Clear session", systemImage: "plus.circle", onTap: { confirmingClear = true })
+                    if let onHandOff {
+                        // Not destructive: it only produces a handoff card, so it
+                        // needs no confirm sheet.
+                        actionRow("Hand off", systemImage: "arrow.right.circle", onTap: { dismiss(); onHandOff() })
+                    }
                 }
             }
             .listStyle(.insetGrouped)

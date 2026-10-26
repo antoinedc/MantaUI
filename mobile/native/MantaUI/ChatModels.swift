@@ -350,7 +350,9 @@ enum ChatTranscriptMapper {
         // must not appear live only to vanish when the canonical turn lands.
         var live: [OpencodePart] = tools.compactMap { tool in
             let name = tool.name?.lowercased()
-            if name == "task" || name == "todowrite" || name == "todo_write" { return nil }
+            // A `handoff` call is a card, never a run line: the canonical turn
+            // brings the card (the layout stands it apart from the run).
+            if name == "task" || name == "todowrite" || name == "todo_write" || name == "handoff" { return nil }
             return TaskStatusResolver.applying(context, to: livePart(from: tool))
         }
         live += subagents.compactMap { payload in
@@ -422,6 +424,12 @@ enum ChatTranscriptMapper {
     /// BET-1029, so do not fold `file` into a catch-all).
     private static func process(_ part: OpencodePart, at: Date?, into blocks: inout [TranscriptBlock]) {
         if part.ignored == true || part.synthetic == true { return }
+        // A `handoff` tool call draws its card from the record the tool's marker
+        // names. The row id is the PART id: deterministic across a refetch.
+        if let handoff = HandoffToolRef.from(part: part) {
+            blocks.append(.handoff(handoff))
+            return
+        }
         // A blank/whitespace-only text part is paragraph noise — opencode
         // routinely emits a newline-only text part after a tool run. Rendering
         // it as a prose block would stack another `--sp-3` (+ line box) and

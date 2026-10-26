@@ -834,12 +834,16 @@ enum TranscriptBlock: Equatable, Sendable {
     /// The todo checklist card — always the LAST row of the transcript, id
     /// `"todos"`, present at most once (spec §6).
     case todos(TodoCardContent)
+    /// An agent-authored handoff: the `handoff` tool part, drawn as the handoff
+    /// card from the record its marker names. Keyed by the PART id, so it is
+    /// stable across a refetch.
+    case handoff(HandoffToolRef)
 
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos: return nil
+        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos, .handoff: return nil
         }
     }
 }

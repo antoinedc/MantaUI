@@ -681,6 +681,13 @@ extension ToolActivity {
             let id = msg.info.id
             blocksByMessage[id] = blocksByMessage[id] ?? []
             for part in visibleAssistantParts(msg) {
+                // A `handoff` call is a card of its own, not a line inside a run:
+                // it ends the open run and draws as a standalone part.
+                if HandoffToolRef.isHandoffTool(part) {
+                    closeRun()
+                    blocksByMessage[id, default: []].append(.part(part))
+                    continue
+                }
                 if part.type == "tool" || part.type == "patch" {
                     if run != nil {
                         run?.value.parts.append(part)

@@ -88,6 +88,11 @@ struct ComposerView: View {
     /// Performs a `/fork` (BET-749 slash palette). Optional: the chat screen
     /// owns forking + navigation; the composer just triggers it.
     var onSlashFork: (() -> Void)? = nil
+    /// Performs `/handoff [goal]` (auto-handoff §10.6) with the goal typed after
+    /// the command, if any. Optional: when nil the palette does not list
+    /// `/handoff` and a typed `/handoff` is an ordinary message — a command that
+    /// could not act is never offered.
+    var onSlashHandoff: ((String?) -> Void)? = nil
     /// Prompt-history identity (BET-1305): the tmux session + window index the
     /// persisted history is keyed by (NOT the opencode sessionId — /clear
     /// swaps the sessionId while the window survives). Both may be nil until
@@ -109,7 +114,11 @@ struct ComposerView: View {
     /// inside this view (keyboard `@`/`/`, voice, caret insert, history,
     /// submit, file select, slash) writes through the binding unchanged.
     @Binding var text: String
-    @State private var attachments: [ComposerAttachment] = []
+    /// The attachment chips, owned by ChatScreen like `text`: a handoff that
+    /// replaces this chat moves the unsent text AND the uploaded attachments to
+    /// the successor's composer (auto-handoff §8), which only works if the
+    /// screen — not this view — holds them.
+    @Binding var attachments: [ComposerAttachment]
     @State private var showPhotoPicker = false
     @State private var showDocPicker = false
     @State private var photoItems: [PhotosPickerItem] = []
@@ -1369,6 +1378,14 @@ struct ComposerView: View {
     /// this turn". When idle the message is an ordinary send.
     private func submit(delivery: InboxDelivery = .steer) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A typed `/handoff [goal]` runs the handoff instead of posting it as a
+        // message — the palette closes after the first word, so Send is the only
+        // way a goal ever reaches it.
+        if let onSlashHandoff, ComposerTypeahead.isHandoffCommand(trimmed) {
+            onSlashHandoff(ComposerTypeahead.goalAfterCommand(in: trimmed))
+            text = ""
+            return
+        }
         // Never send while an attachment is still uploading (the button is
         // disabled too; this guards the non-button paths like voice submit).
         guard (!trimmed.isEmpty || !attachments.isEmpty),
@@ -1425,7 +1442,8 @@ struct ComposerView: View {
     private var slashPalette: [ComposerTypeahead.SlashCommand]? {
         guard let anchor = ComposerTypeahead.detectSlash(in: text, caret: composerCaret) else { return nil }
         let filtered = ComposerTypeahead.filterSlashCommands(
-            ComposerTypeahead.slashCommands(running: store.running),
+            ComposerTypeahead.slashCommands(running: store.running)
+                .filter { $0.kind != .handoff || onSlashHandoff != nil },
             query: anchor.query
         )
         return filtered.isEmpty ? nil : filtered
@@ -1560,6 +1578,9 @@ struct ComposerView: View {
             onSlashClear?()
         case .fork:
             onSlashFork?()
+        case .handoff:
+            // The goal is read BEFORE the draft is cleared below.
+            onSlashHandoff?(ComposerTypeahead.goalAfterCommand(in: text))
         case .abort:
             store.abort()
         }
