@@ -93,12 +93,12 @@ final class ComposerTypeaheadTests: XCTestCase {
 
     func testSlashCommandsBaseSet() {
         let commands = ComposerTypeahead.slashCommands(running: false)
-        XCTAssertEqual(commands.map(\.id), ["submit", "compact", "clear", "fork"])
+        XCTAssertEqual(commands.map(\.id), ["submit", "compact", "clear", "fork", "handoff"])
     }
 
     func testSlashCommandsAddsAbortOnlyWhileRunning() {
-        XCTAssertEqual(ComposerTypeahead.slashCommands(running: true).map(\.id), ["submit", "compact", "clear", "fork", "abort"])
-        XCTAssertEqual(ComposerTypeahead.slashCommands(running: false).map(\.id), ["submit", "compact", "clear", "fork"])
+        XCTAssertEqual(ComposerTypeahead.slashCommands(running: true).map(\.id), ["submit", "compact", "clear", "fork", "handoff", "abort"])
+        XCTAssertEqual(ComposerTypeahead.slashCommands(running: false).map(\.id), ["submit", "compact", "clear", "fork", "handoff"])
     }
 
     func testFilterSlashCommandsByTokenAndTitle() {
@@ -107,6 +107,31 @@ final class ComposerTypeaheadTests: XCTestCase {
         XCTAssertEqual(ComposerTypeahead.filterSlashCommands(all, query: "CLEAR").map(\.id), ["clear"])
         XCTAssertEqual(ComposerTypeahead.filterSlashCommands(all, query: "fork").map(\.id), ["fork"])
         XCTAssertEqual(ComposerTypeahead.filterSlashCommands(all, query: "sub").map(\.id), ["submit"])
+    }
+
+    func testFilterSlashCommandsFindsHandoff() {
+        let all = ComposerTypeahead.slashCommands(running: false)
+        XCTAssertEqual(ComposerTypeahead.filterSlashCommands(all, query: "hand").map(\.id), ["handoff"])
+        XCTAssertEqual(ComposerTypeahead.slashCommands(running: false).first { $0.id == "handoff" }?.kind, .handoff)
+    }
+
+    func testGoalAfterCommand() {
+        XCTAssertEqual(ComposerTypeahead.goalAfterCommand(in: "/handoff fix the flaky test"), "fix the flaky test")
+        XCTAssertEqual(ComposerTypeahead.goalAfterCommand(in: "/handoff   spaced  out \n"), "spaced  out")
+        XCTAssertNil(ComposerTypeahead.goalAfterCommand(in: "/handoff"))
+        XCTAssertNil(ComposerTypeahead.goalAfterCommand(in: "/handoff   "))
+        XCTAssertNil(ComposerTypeahead.goalAfterCommand(in: "not a command goal"))
+    }
+
+    func testIsHandoffCommand() {
+        XCTAssertTrue(ComposerTypeahead.isHandoffCommand("/handoff"))
+        XCTAssertTrue(ComposerTypeahead.isHandoffCommand("  /handoff the goal  "))
+        XCTAssertTrue(ComposerTypeahead.isHandoffCommand("/HANDOFF"))
+        // A different command, a longer token, or prose that merely mentions it is a normal message.
+        XCTAssertFalse(ComposerTypeahead.isHandoffCommand("/handoffs"))
+        XCTAssertFalse(ComposerTypeahead.isHandoffCommand("/fork"))
+        XCTAssertFalse(ComposerTypeahead.isHandoffCommand("please /handoff"))
+        XCTAssertFalse(ComposerTypeahead.isHandoffCommand(""))
     }
 
     func testFilterSlashCommandsEmptyQueryReturnsAll() {

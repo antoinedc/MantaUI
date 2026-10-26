@@ -102,11 +102,13 @@ private enum OverflowDestination: String, Identifiable {
 private enum PendingPush {
     case subagent(SubagentSession)
     case session(SessionOpenTarget)
+    case previous(PreviousSessionRoute)
 
     func perform(on path: Binding<NavigationPath>) {
         switch self {
         case .subagent(let agent): path.wrappedValue.append(agent)
         case .session(let target): path.wrappedValue.append(target)
+        case .previous(let route): path.wrappedValue.append(route)
         }
     }
 }
@@ -127,6 +129,10 @@ struct ChatScreen: View {
     @ObservedObject var eventStore: MantaEventStore
     @Binding var path: NavigationPath
     @State private var currentSessionId: String?
+    /// What a handoff replacement moves from the predecessor's composer onto the
+    /// successor's (auto-handoff §8). Read once by the content screen it is
+    /// handed to; nil for every other way the id changes.
+    @State private var carryOver: HandoffCarryOver?
     /// "Quote in new session" composer seed, forwarded to the content screen
     /// (BET-1353). Empty for every normal open.
     let seed: String?
@@ -139,8 +145,16 @@ struct ChatScreen: View {
             projectName: projectName,
             eventStore: eventStore,
             path: $path,
-            onCleared: { newId in currentSessionId = newId },
-            seed: seed ?? ""
+            onCleared: { newId in
+                carryOver = nil
+                currentSessionId = newId
+            },
+            onHandedOff: { newId, carry in
+                carryOver = carry
+                currentSessionId = newId
+            },
+            seed: seed ?? "",
+            carryOver: carryOver
         )
         .id(sid)
     }
@@ -175,6 +189,8 @@ private struct ChatScreenContent: View {
     /// jobs" entry + sheet, and the task rows' status (a job record that says
     /// running keeps its task row running — spec §5).
     @StateObject private var jobsStore: BackgroundJobsStore
+    /// This chat's handoff records, cards, mode and reconciliation (auto-handoff).
+    @StateObject private var handoffStore: HandoffStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -247,6 +263,19 @@ private struct ChatScreenContent: View {
     /// screen opens a "quote in new session" fork.
     @State private var composerText = ""
 
+    /// The composer's attachment chips, owned HERE for the same reason as
+    /// `composerText`: a handoff replacement moves them to the successor
+    /// (auto-handoff §8).
+    @State private var composerAttachments: [ComposerAttachment] = []
+
+    /// Uploads that were still running when a handoff carried the composer over;
+    /// they are bound to the old composer and cannot follow, so the new screen
+    /// says so once instead of dropping them silently.
+    private let skippedUploads: Int
+    /// The skipped-uploads hint is shown once, not on every re-appear (returning
+    /// from a pushed screen re-runs `onAppear`).
+    @State private var carryHintShown = false
+
     /// Focus for the composer field. Lifter to this level (from ComposerView's
     /// internal `@FocusState`) so a quote action can focus the composer after
     /// prepending (BET-1353).
@@ -258,19 +287,26 @@ private struct ChatScreenContent: View {
 
     /// Called with the NEW session id after a clear, so the wrapper can swap it.
     let onCleared: (String) -> Void
+    /// Called with the successor's id and the composer carry-over when a handoff
+    /// REPLACES this chat, so the wrapper can swap the id (auto-handoff §6.4).
+    let onHandedOff: (String, HandoffCarryOver) -> Void
     /// The box client bound to this session's paired server. Shared by the two
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, seed: String = "") {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
         self._path = path
         self.onCleared = onCleared
+        self.onHandedOff = onHandedOff
         // Seed the composer draft for a "quote in new session" fork (BET-1353);
-        // empty for every normal open, which leaves the draft empty.
-        _composerText = State(initialValue: seed)
+        // empty for every normal open, which leaves the draft empty. A handoff
+        // replacement appends the predecessor's unsent text below it (§8).
+        _composerText = State(initialValue: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""))
+        _composerAttachments = State(initialValue: carryOver?.attachments ?? [])
+        self.skippedUploads = carryOver?.skippedUploads ?? 0
         let api = MantaAPIClient.live()
         self.api = api
         _store = StateObject(wrappedValue: ChatSessionStore(
@@ -285,6 +321,7 @@ private struct ChatScreenContent: View {
         _accountsStore = StateObject(wrappedValue: AccountsStore(api: api, sessionId: sessionId, eventStore: eventStore))
         _voicePlayer = StateObject(wrappedValue: VoicePlaybackEngine(api: api))
         _jobsStore = StateObject(wrappedValue: BackgroundJobsStore(api: api, sessionId: sessionId, eventStore: eventStore))
+        _handoffStore = StateObject(wrappedValue: HandoffStore(sessionId: sessionId, api: api, eventStore: eventStore))
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -319,6 +356,9 @@ private struct ChatScreenContent: View {
                 // picker was opened, so the first open always stalled) and the
                 // window/branch lookup.
                 store.start()
+                wireHandoff()
+                handoffStore.start()
+                restoreHandoffDraft()
                 modelStore.load()
                 modelStore.loadAgentsIfNeeded()
                 seedPlanModeFromBox()
@@ -404,6 +444,20 @@ private struct ChatScreenContent: View {
                 ) {
                     SessionHaptics.fire(.success, enabled: true)
                 }
+            }
+            // The armed preamble is cleared box-side when the first message is
+            // accepted, and no frame announces that: re-read when a turn starts
+            // or settles while one is showing.
+            .onChange(of: store.running) { _, _ in
+                if handoffStore.armedPreamble != nil { handoffStore.refresh() }
+            }
+            .onChange(of: store.turnCompletionCount) { _, _ in
+                if handoffStore.armedPreamble != nil { handoffStore.refresh() }
+            }
+            // The local copy of a loaded handoff draft has done its job once the
+            // composer is empty again (sent, or cleared by the user).
+            .onChange(of: composerText) { _, text in
+                if text.isEmpty { handoffStore.clearLocalDraft() }
             }
             .onChange(of: scenePhase) { _, phase in
                 // Mirror foreground state to the box so it suppresses redundant
@@ -514,9 +568,11 @@ private struct ChatScreenContent: View {
                         sessionDirectory: sessionWindow?.cwd,
                         onSlashClear: { Task { await clearSession() } },
                         onSlashFork: { Task { await forkSession() } },
+                        onSlashHandoff: { goal in handoffStore.create(trigger: "user", goal: goal) },
                         historyTmuxSession: sessionWindow?.name,
                         historyWindowIndex: sessionWindow?.index,
                         text: $composerText,
+                        attachments: $composerAttachments,
                         inputFocused: $composerFocused
                     )
                 }
@@ -529,6 +585,16 @@ private struct ChatScreenContent: View {
                     bottomBarHeight = height
                 }
             }
+        }
+        .navigationDestination(for: PreviousSessionRoute.self) { route in
+            PreviousSessionScreen(
+                route: route,
+                eventStore: eventStore,
+                api: MantaAPIClient.live(),
+                tokens: tokens,
+                path: $path
+            )
+            .id(route.sessionId)
         }
         .navigationDestination(for: SubagentSession.self) { agent in
             ChatSubagentScreen(
@@ -562,7 +628,7 @@ private struct ChatScreenContent: View {
                     .accessibilityIdentifier("connection-banner")
             }
         }
-        .sheet(isPresented: $showOverflow) { overflowSheet }
+        .sheet(isPresented: $showOverflow, onDismiss: flushPendingPush) { overflowSheet }
         .sheet(item: $overflowDestination, onDismiss: flushPendingPush) { destination in
             destinationCard(destination)
         }
@@ -604,12 +670,76 @@ private struct ChatScreenContent: View {
             settingsStore: settingsStore,
             onToggleTrust: { _ in flipTrustMode() },
             scheduleCount: scheduleCount,
-            backgroundJobs: (total: jobsStore.jobs.count, running: jobsStore.runningCount)
+            backgroundJobs: (total: jobsStore.jobs.count, running: jobsStore.runningCount),
+            handoff: handoffStore,
+            onOpenPrevious: { entry in
+                pendingPush = .previous(PreviousSessionRoute(
+                    sessionId: entry.sessionId,
+                    title: handoffStore.title(for: entry.sessionId)
+                ))
+            }
         )
         .task {
             await refreshScheduleCount()
             await jobsStore.refresh()
         }
+    }
+
+    // MARK: - Auto-handoff
+
+    /// Connect the handoff store to this screen: where its hints surface, and
+    /// what a committed replacement / branch / loaded draft does here.
+    private func wireHandoff() {
+        handoffStore.onHint = { store.actionHint = $0 }
+        handoffStore.onSwitchToSuccessor = { handedOff(to: $0) }
+        handoffStore.onOpenBranch = { openHandoffBranch($0) }
+        handoffStore.onDraft = { loadHandoffDraft($0) }
+        if skippedUploads > 0, !carryHintShown {
+            carryHintShown = true
+            store.actionHint = skippedUploads == 1
+                ? "1 attachment was still uploading and wasn't carried over — add it again"
+                : "\(skippedUploads) attachments were still uploading and weren't carried over — add them again"
+        }
+    }
+
+    /// A handoff REPLACED this chat (§6.4, §8): carry the model choice and the
+    /// composer (unsent text + uploaded attachments) over, then show the
+    /// successor — the same swap a clear does, plus the carry-over.
+    private func handedOff(to successorId: String) {
+        let carry = HandoffCarryOver(
+            text: composerText,
+            attachments: composerAttachments.filter { !$0.isUploading },
+            skippedUploads: composerAttachments.filter { $0.isUploading }.count
+        )
+        modelStore.rebind(to: successorId)
+        onHandedOff(successorId, carry)
+    }
+
+    /// A branch this device started: copy the model choice, then open it. (Only
+    /// the initiating device gets here — the store gates on that.)
+    private func openHandoffBranch(_ branchId: String) {
+        modelStore.rebind(to: branchId)
+        path.append(SessionOpenTarget(
+            project: projectName,
+            windowIndex: sessionWindow?.index ?? 0,
+            name: "\(title) handoff",
+            sessionId: branchId
+        ))
+    }
+
+    /// A draft from "Edit first": already persisted locally by the store. An
+    /// existing composer text is appended BELOW it, never overwritten (§8).
+    private func loadHandoffDraft(_ draft: String) {
+        composerText = HandoffComposerCarry.appendBelow(draft, composerText)
+        composerFocused = true
+        store.actionHint = "Handoff draft loaded — edit it, then send"
+    }
+
+    /// A draft that was loaded but never sent (the app was killed, or the chat
+    /// was left): put it back, below anything already typed.
+    private func restoreHandoffDraft() {
+        guard let local = handoffStore.restoreLocalDraft(), !composerText.contains(local) else { return }
+        composerText = HandoffComposerCarry.appendBelow(local, composerText)
     }
 
     // MARK: - Trust mode (BET-748 gap #14)
@@ -927,6 +1057,9 @@ private struct ChatScreenContent: View {
         // Deliver the box-wide widget live store to widget cards so liveness
         // can ride on the store rather than the cell (BET-1326).
         .environment(\.widgetLiveStore, WidgetLiveStore.shared)
+        // Delivers the handoff store to `handoff` tool-part cards (same route as
+        // the widget store); read-only surfaces leave it unset.
+        .environment(\.handoffStore, handoffStore)
     }
     /// How far above the bottom the user must scroll for the down-arrow to
     /// appear. Same magnitude MessagingUI uses internally for its own "near
@@ -998,6 +1131,15 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var sessionHeaderBlock: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            // "Continued from … · View previous" at the top of a successor.
+            if let notice = handoffStore.notice {
+                HandoffNoticeRow(notice: notice, tokens: tokens) {
+                    path.append(PreviousSessionRoute(
+                        sessionId: notice.previousSessionId,
+                        title: handoffStore.title(for: notice.previousSessionId)
+                    ))
+                }
+            }
             subtitleChip
             contextStrip
         }
@@ -1107,7 +1249,8 @@ private struct ChatScreenContent: View {
                 bandColor: contextBandColor,
                 tokens: tokens,
                 onCompact: { store.compact() },
-                onClear: { Task { await clearSession() } }
+                onClear: { Task { await clearSession() } },
+                onHandOff: { handoffStore.create(trigger: "button") }
             )
         } else {
             Color.clear
@@ -1215,6 +1358,12 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            // Handoff cards for this chat (preparing / ready / starting / failed)
+            // and the armed successor's carried-over context. Only drawn when
+            // there is something to show, so an empty stack adds no spacing.
+            if !handoffStore.pinned.isEmpty || handoffStore.armedPreamble != nil {
+                HandoffPinnedCards(store: handoffStore, tokens: tokens)
+            }
             // Weekly-limit banner (BET-824): one pinned dismissible card, once
             // per session, when the weekly window is at/over 90%. The dot
             // tracks the 5-hour window, so it can read green while the weekly

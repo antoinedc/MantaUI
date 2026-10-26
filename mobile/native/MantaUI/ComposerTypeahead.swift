@@ -102,6 +102,7 @@ enum ComposerTypeahead {
         case compact
         case clear
         case fork
+        case handoff
         case abort
     }
 
@@ -144,11 +145,32 @@ enum ComposerTypeahead {
             SlashCommand(id: "compact", title: "Compact", subtitle: "Summarise the conversation to free context", kind: .compact),
             SlashCommand(id: "clear", title: "Clear", subtitle: "Start a fresh session in this window", kind: .clear),
             SlashCommand(id: "fork", title: "Fork", subtitle: "Fork this session into a new window", kind: .fork),
+            SlashCommand(id: "handoff", title: "Handoff", subtitle: "Write a handoff prompt for a fresh session", kind: .handoff),
         ]
         if running {
             commands.append(SlashCommand(id: "abort", title: "Abort", subtitle: "Stop the running turn", kind: .abort))
         }
         return commands
+    }
+
+    /// The optional goal typed after a leading slash command: `/handoff fix the
+    /// flaky test` → "fix the flaky test". nil when nothing follows the first
+    /// word. The palette closes once the caret leaves that first word, so this
+    /// is what lets a goal reach `handoff:create` at all.
+    static func goalAfterCommand(in text: String) -> String? {
+        guard text.hasPrefix("/") else { return nil }
+        guard let space = text.firstIndex(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) else { return nil }
+        let rest = text[text.index(after: space)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? nil : rest
+    }
+
+    /// True when `text` is the typed `/handoff` command (alone or followed by a
+    /// goal), so a Send of it runs the handoff instead of posting it as a prompt.
+    static func isHandoffCommand(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return false }
+        let first = trimmed.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).first ?? ""
+        return first.lowercased() == "/handoff"
     }
 
     /// Keep only commands whose token/title match what was typed after `/`. A

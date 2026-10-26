@@ -74,6 +74,8 @@ extension TranscriptBlock {
         // ONE todo row per transcript, so its id is a constant — which also keeps
         // it stable while the list inside changes.
         case .todos: return TranscriptBlock.todosRowID
+        // The tool part's id — unique per call and reproduced by every refetch.
+        case .handoff(let ref): return "hof-" + ref.partId
         }
     }
 
@@ -385,6 +387,10 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         .padding(.bottom, Metrics.spacing.sp1)
     case .todos(let content):
         TodoCardView(content: content, tokens: tokens, onToggle: actions.onToggleTodos)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+    case .handoff(let ref):
+        HandoffToolCardView(ref: ref, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
     case .notice(let text, let kind):

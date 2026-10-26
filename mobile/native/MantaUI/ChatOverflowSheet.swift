@@ -64,6 +64,14 @@ struct ChatOverflowSheet: View {
     /// show), `running` the live ones, shown as the row's count.
     var backgroundJobs: (total: Int, running: Int) = (total: 0, running: 0)
 
+    /// Auto-handoff (spec §9): the three-way mode control under "Trust mode" and
+    /// the "Previous sessions" list. nil hides both — a control with nothing to
+    /// drive is not drawn (the capture scene has no chat to hand off).
+    var handoff: HandoffStore? = nil
+    /// Open a previous session read-only. Required for the list to be shown: a
+    /// row that could not open anything must not exist.
+    var onOpenPrevious: ((HandoffPreviousEntry) -> Void)? = nil
+
     /// Clear/Delete/Compact confirmations. Presented as a compact native
     /// bottom sheet (`ConfirmActionSheet`) from within this sheet, so it layers
     /// over the overflow sheet (sheet-on-sheet). No system primitive renders a
@@ -119,6 +127,16 @@ struct ChatOverflowSheet: View {
                             }
                         }
                         .accessibilityIdentifier("trust-mode-toggle")
+                    }
+                    // Handoff mode — auto / suggest / off, directly under Trust mode.
+                    if let handoff {
+                        HandoffModeRow(store: handoff)
+                    }
+                }
+                if let handoff, let onOpenPrevious {
+                    HandoffPreviousSection(store: handoff) { entry in
+                        dismiss()
+                        onOpenPrevious(entry)
                     }
                 }
                 Section {

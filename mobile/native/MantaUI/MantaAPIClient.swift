@@ -800,6 +800,51 @@ final class MantaAPIClient: Sendable {
         _ = try await callVoid("model-prefs:seed", args: [payload])
     }
 
+    // MARK: - Auto-handoff (spec 2026-10-26-auto-handoff §15)
+
+    // Every handoff channel takes ONE object (`args: [dict]`), the shape pinned
+    // by MantaActionRPCWireTests. A refusal arrives as the rpc `error` string
+    // and surfaces as `MantaError.server`.
+
+    /// `handoff:create` — make a handoff record for a session. `action` is
+    /// `suggest` (a card) or `handoff`; `trigger` says who asked.
+    func handoffCreate(sessionId: String, trigger: String, action: String, goal: String? = nil) async throws -> HandoffRecord {
+        var dict: [String: Any] = ["sessionId": sessionId, "trigger": trigger, "action": action]
+        if let goal, !goal.isEmpty { dict["goal"] = goal }
+        return try await callRequired("handoff:create", args: [dict], as: HandoffEnvelope.self).handoff
+    }
+
+    /// `handoff:list` — the records where the session is `from` or `to`, its
+    /// links, and the continuation it carries (armed preamble / draft).
+    func handoffList(sessionId: String) async throws -> HandoffListResult {
+        try await callRequired("handoff:list", args: [["sessionId": sessionId]], as: HandoffListResult.self)
+    }
+
+    /// `handoff:get` — one record; an expired one is refused with an `expired` error.
+    func handoffGet(id: String) async throws -> HandoffRecord {
+        try await callRequired("handoff:get", args: [["id": id]], as: HandoffEnvelope.self).handoff
+    }
+
+    /// `handoff:start` — begin a ready handoff: `how` = replacement (`clear`) or
+    /// branch (`new-session`); `disposition` = `send` or `draft`.
+    func handoffStart(id: String, how: HandoffHow, disposition: HandoffDisposition, text: String? = nil) async throws -> HandoffRecord {
+        var dict: [String: Any] = ["id": id, "how": how.rawValue, "disposition": disposition.rawValue]
+        if let text { dict["text"] = text }
+        return try await callRequired("handoff:start", args: [dict], as: HandoffEnvelope.self).handoff
+    }
+
+    /// `handoff:retry` — regenerate a failed handoff and return it to `ready`.
+    func handoffRetry(id: String) async throws -> HandoffRecord {
+        try await callRequired("handoff:retry", args: [["id": id]], as: HandoffEnvelope.self).handoff
+    }
+
+    /// `handoff:draft-consumed` — tell the box this client has the draft (call
+    /// only after persisting it locally). The revision is echoed as sent.
+    func handoffDraftConsumed(id: String, draftRevision: JSONValue) async throws {
+        let revision = MantaSettingsLogic.anyValue(draftRevision)
+        _ = try await callVoid("handoff:draft-consumed", args: [["id": id, "draftRevision": revision]])
+    }
+
     /// `POST /push/register-apns` — hand the APNs device token to the box
     /// (server mirror of the /rpc/push:register-apns channel; both call
     /// push.addApnsToken, see src/server/index.mjs). Fire-and-forget from the

@@ -454,6 +454,12 @@ final class MantaEventStore: ObservableObject {
     /// reaches the raw handlers too.
     let accountsUpdates = PassthroughSubject<AccountsBusEvent, Never>()
 
+    /// Fires once for every `handoff` frame — a handoff record changed state
+    /// (auto-handoff §11). A `Subject` for the same reason as `delegateUpdates`:
+    /// its observers are per-chat stores that come and go, and the handler list
+    /// cannot unsubscribe. The frame still reaches the raw handlers too.
+    let handoffUpdates = PassthroughSubject<HandoffBusEvent, Never>()
+
     /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
     func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
         rawFrameHandlers.append(handler)
@@ -566,6 +572,7 @@ final class MantaEventStore: ObservableObject {
         } else {
             if frame.kind == "delegate.updated" { delegateUpdates.send() }
             if let accountsEvent = AccountsBusEvent.from(frame) { accountsUpdates.send(accountsEvent) }
+            if let handoffEvent = HandoffBusEvent.from(frame: frame) { handoffUpdates.send(handoffEvent) }
             for handler in rawFrameHandlers { handler(frame) }
         }
     }
