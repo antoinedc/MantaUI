@@ -465,6 +465,21 @@ PLUGINS_CHANGED="$OPENCODE_PLUGINS_CHANGED"
 # (opencode_restart_plan → "server"): the service is pinned to V1 and manta-server's boot hook
 # (upgradeV2) restarts it itself, in order, once the disk preflight has passed.
 
+# --- Turn on opencode tool-output pruning, once ----------------------------------
+# `compaction.prune: true` is opencode's cheapest context saver and defaults OFF.
+# scripts/migrate-opencode-prune.mjs sets it surgically (comments kept) ONLY when the
+# key is absent, and records `migrations.pruneDefault` in ~/.manta/config.json so it
+# never runs twice or overrides a user's choice. It must land BEFORE the restart
+# block below so it takes effect on this same update. Runs on every invocation that
+# reaches this point (idempotent), including CLI-only updates that restart opencode.
+# Never fatal: a missing node/script, a missing or unparseable config just warns.
+if [ -x "$NODE_CMD" ] && [ -f "$MANTA_HOME/scripts/migrate-opencode-prune.mjs" ]; then
+  "$NODE_CMD" "$MANTA_HOME/scripts/migrate-opencode-prune.mjs" \
+    || warn "self-update: opencode prune default migration failed — continuing"
+else
+  warn "self-update: node or migrate-opencode-prune.mjs unavailable — skipping prune default"
+fi
+
 # --- Sync opencode agent guidance (BET-640) -----------------------------------
 # Appends any top-level `## ` guidance section that is missing from the user's
 # AGENTS.md (replaces install.sh's old all-or-nothing marker check). Same lib
