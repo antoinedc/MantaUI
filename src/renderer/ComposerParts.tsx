@@ -717,13 +717,16 @@ export function TrustRow({
   planOn,
   chatAutoAllow,
   setChatAutoAllow,
+  trailing,
 }: {
   planOn: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  /** Another ambient control for the same line (the handoff mode), after the trust state. */
+  trailing?: React.ReactNode;
 }) {
   return (
-    <div className="pb-3 flex items-center">
+    <div className="pb-3 flex items-center gap-4">
       {planOn ? (
         <span className="inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
           <Shield size={14} aria-hidden="true" />
@@ -754,6 +757,7 @@ export function TrustRow({
             : "Permissions on — click to bypass"}
         </button>
       )}
+      {trailing}
     </div>
   );
 }

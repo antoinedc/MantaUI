@@ -28,6 +28,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { VirtuosoMockContext } from "react-virtuoso";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
+import { resetHandoffStore } from "./handoffStore";
 import { SessionHeader } from "./SessionHeader";
 // The REAL box-side interpreter. The renderer reads only interpreted frames
 // (OpenCode V2 slice A2), so a test that wants to say "this V1 opencode event
@@ -161,6 +162,9 @@ function defaultApiImpl(): Record<string, unknown> {
     // the shared modelPrefs module. Empty by default unless a test overrides it.
     modelPrefsGet: () => Promise.resolve({ sessions: {}, recents: [] }),
     onModelPrefsUpdated: () => () => {},
+    // Auto-handoff: an idle box (no records, no links) and a bus nobody writes to.
+    handoffList: () => Promise.resolve({ records: [], links: null, continuation: null }),
+    onHandoff: () => () => {},
     // Voice / files — component may probe these on mount.
     getPathForFile: () => "",
     clipboardReadImage: () => Promise.resolve(null),
@@ -261,9 +265,11 @@ export function installMockApi(
 export function resetStore(
   partial: Partial<ReturnType<typeof useStore.getState>> = {},
 ): void {
+  resetHandoffStore();
   act(() => {
     useStore.setState({
       chatAutoAllow: false,
+      handoffMode: "auto",
       autoRenameSessions: false,
       defaultModel: null,
       cacheTtl: "1h",

@@ -630,6 +630,7 @@ export const MANTA_BUILTIN_COMMANDS: BuiltinCommand[] = [
   { name: "clear", description: "Start a fresh chat in this window" },
   { name: "fork", description: "Copy this session's history into a new window" },
   { name: "compact", description: "Summarize to free context" },
+  { name: "handoff", description: "Write a handoff prompt for a fresh session [goal]" },
   { name: "help", description: "Show available commands" },
 ];
 export const MANTA_BUILTIN_NAMES = new Set(MANTA_BUILTIN_COMMANDS.map((c) => c.name));
