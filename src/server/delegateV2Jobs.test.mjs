@@ -663,13 +663,14 @@ test("C1 N7: a dirty worktree is kept (with its window and record), exactly like
   assert.equal(w.calls.kill.length, 0, "the window stays with the dirty worktree");
 });
 
-test("C1 N7: a repo-less job keeps its window and record (the row shows done), and the text has no branch lines", async () => {
+test("C1 N7: a repo-less job closes its window but keeps its record, and the text has no branch lines", async () => {
   const w = world({ git: false });
   const id = await start(w);
   w.say(w.job(id).childSessionID, "ok");
   w.finish(w.job(id).childSessionID, "succeeded", T0 + 1);
   await createDelegateEngine(w.deps).observeRaw(raw("session.execution.succeeded", w.job(id).childSessionID));
-  assert.equal(w.calls.kill.length, 0);
+  assert.equal(w.calls.kill.length, 1, "the finished job's window is closed");
+  assert.equal(w.job(id).status, "done", "the record stays");
   assert.doesNotMatch(w.calls.synth[0].body.text, /Branch:/);
 });
 
