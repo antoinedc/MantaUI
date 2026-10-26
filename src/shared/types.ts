@@ -95,6 +95,9 @@ export type AppConfig = {
   // so tool calls run without prompting. Closest analog to Claude Code's
   // --dangerously-skip-permissions. Off by default.
   chatAutoAllow?: boolean;
+  // Auto-handoff mode (docs/superpowers/specs/2026-10-26-auto-handoff.md);
+  // the box defaults it to "auto".
+  handoffMode?: "auto" | "suggest" | "off";
   // BET-246: when true, every new chat session (window) auto-creates a
   // sibling git worktree next to the project's repo root, named after the
   // session. The window's `cwd` is set to the new worktree so the AI

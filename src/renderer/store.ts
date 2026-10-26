@@ -1138,9 +1138,8 @@ export const useStore = create<State>((set, get) => ({
       boxToken: c.boxToken ?? "",
       onboardingSkipped: c.onboardingSkipped ?? false,
       chatAutoAllow: c.chatAutoAllow ?? false,
-      // `handoffMode` is a box config key AppConfig (shared/types.ts) does not
-      // declare yet; the box defaults it to "auto" and so do we.
-      handoffMode: normalizeHandoffMode((c as { handoffMode?: unknown }).handoffMode),
+      // The box defaults `handoffMode` to "auto" and so do we.
+      handoffMode: normalizeHandoffMode(c.handoffMode),
       autoRenameSessions: c.autoRenameSessions ?? false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
       optimizerEnabled: c.optimizerEnabled === true,
@@ -1212,10 +1211,7 @@ export const useStore = create<State>((set, get) => ({
     const prev = get().handoffMode;
     set({ handoffMode: v });
     try {
-      // See applyConfig: the key is the box's, not (yet) part of AppConfig.
-      const next = (await window.api.configUpdate({ handoffMode: v } as unknown as Partial<AppConfig>)) as {
-        handoffMode?: unknown;
-      };
+      const next = await window.api.configUpdate({ handoffMode: v });
       // Reconcile with what the box actually saved.
       set({ handoffMode: normalizeHandoffMode(next?.handoffMode ?? v) });
     } catch (e) {
