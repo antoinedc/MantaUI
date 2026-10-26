@@ -19,7 +19,7 @@ function engineStub(over = {}) {
   return {
     calls,
     create: async (i) => (calls.push(["create", i]), rec),
-    list: (i) => (calls.push(["list", i]), { records: [rec], links: {} }),
+    list: async (i) => (calls.push(["list", i]), { records: [rec], links: { branches: [] }, chain: { predecessors: [] } }),
     get: (id) => (calls.push(["get", id]), id === ID ? rec : null),
     start: async (id, i) => (calls.push(["start", id, i]), rec),
     retry: async (id) => (calls.push(["retry", id]), rec),
@@ -77,7 +77,7 @@ test("HandoffError codes map to their statuses with {error, message} and the rec
     ["busy", 409, true],
     ["not_ready", 422, true],
     ["no_window", 422, false],
-    ["invalid_input", 400, false],
+    ["invalid", 400, false],
     ["expired", 404, false],
   ];
   for (const [code, status, withRecord] of cases) {
@@ -107,7 +107,7 @@ test("an unreadable JSON body is a 400, not a 500", async () => {
   const h = createHandoffHandler({ engine: engineStub(), readJson: async () => { throw new Error("bad json"); } });
   const { rs } = await call(h, "POST", "/api/handoff");
   assert.equal(rs.status, 400);
-  assert.equal(rs.body.error, "invalid_input");
+  assert.equal(rs.body.error, "invalid");
 });
 
 test("wrong methods are 405", async () => {

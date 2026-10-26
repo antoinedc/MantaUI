@@ -29,7 +29,7 @@ async function boot({ withHeld }) {
   return { w, e1, r };
 }
 
-function assertFinished(w, e2, r, { how, disposition, withHeld }) {
+async function assertFinished(w, e2, r, { how, disposition, withHeld }) {
   const rec = e2.get(r.id);
   assert.equal(rec.state, "committed", `record committed (was ${rec.state})`);
   const succ = rec.successorId;
@@ -49,7 +49,7 @@ function assertFinished(w, e2, r, { how, disposition, withHeld }) {
     assert.equal(w.windows.length, 2);
     assert.equal(w.windows.find((x) => x.sid === succ).name, "work ↪");
     assert.equal(e2.resolveAdmissionTarget("ses_p").target, "ses_p");
-    assert.deepEqual(e2.list({ sessionId: succ }).links[succ].branchedFrom, "ses_p");
+    assert.equal((await e2.list({ sessionId: succ })).links.branchedFrom, "ses_p");
   }
   const ids = w.acceptedIds(succ);
   if (disposition === "send") {
@@ -63,7 +63,7 @@ function assertFinished(w, e2, r, { how, disposition, withHeld }) {
     assert.equal(w.acceptedIds("ses_p").length, 0);
   }
   if (disposition === "armed") assert.ok(e2._state.continuations[succ].preamble, "the preamble is waiting for the first admission");
-  if (disposition === "draft") assert.ok(e2.list({ sessionId: succ }).continuation.draft);
+  if (disposition === "draft") assert.ok((await e2.list({ sessionId: succ })).continuation.draft);
 }
 
 const SCENARIOS = [
@@ -85,7 +85,7 @@ for (const sc of SCENARIOS) {
       const e2 = w.build();
       await e2.recover();
       await settle();
-      assertFinished(w, e2, r, sc);
+      await assertFinished(w, e2, r, sc);
       // recovery is idempotent
       const snapshot = w.disk.json;
       await e2.recover();

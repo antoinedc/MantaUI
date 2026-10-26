@@ -108,7 +108,7 @@ export function publicRecord(r) {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
-  for (const k of ["successorId", "messageId", "step", "how", "disposition", "reason"]) if (r[k] !== undefined) out[k] = r[k];
+  for (const k of ["successorId", "messageId", "step", "how", "disposition", "reason", "contextTokens"]) if (r[k] !== undefined) out[k] = r[k];
   return out;
 }
 

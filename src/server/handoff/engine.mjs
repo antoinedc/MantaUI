@@ -32,12 +32,13 @@ export class HandoffError extends Error {
 }
 /** HTTP status for a HandoffError code (the REST route and the rpc layer share it). */
 export const ERROR_STATUS = Object.freeze({
-  invalid_input: 400,
+  invalid: 400,
   expired: 404,
   already_started: 409,
   busy: 409,
   not_ready: 422,
   no_window: 422,
+  generation_failed: 502,
   unavailable: 503,
 });
 
@@ -48,6 +49,7 @@ const PREAMBLE_SEP = "\n\n---\n\n";
 const OP_GENERATE = "handoff-generate";
 const OP_START = "handoff-start";
 const MAX_POST_ATTEMPTS = 4;
+const MAX_CHAIN = 50;
 const isDefinite = (e) => typeof e?.status === "number" && e.status >= 400 && e.status < 500;
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -100,6 +102,7 @@ export function createHandoffEngine(deps = {}) {
     quietRetries = 3,
     quietDelayMs = 500,
     cooldownMs = COOLDOWN_MS,
+    lookupTimeoutMs = 2000,
   } = deps;
 
   const mintSessionId = deps.mintSessionId ?? (() => `ses_${randomUUID().replaceAll("-", "")}`);
@@ -414,7 +417,7 @@ export function createHandoffEngine(deps = {}) {
   const recordsFor = (sid) => Object.values(state.records).filter((r) => r.fromSessionId === sid);
   const ACTIVE_STATES = ["requested", "generating", "ready", "starting"];
 
-  function newRecord({ fromSessionId, kind, trigger, plan, body, goal }) {
+  function newRecord({ fromSessionId, kind, trigger, plan, body, goal, contextTokens }) {
     const t = now();
     const rec = {
       id: mintId(),
@@ -423,6 +426,7 @@ export function createHandoffEngine(deps = {}) {
       trigger,
       state: "requested",
       text: typeof body === "string" ? body : "",
+      ...(typeof contextTokens === "number" && Number.isFinite(contextTokens) && contextTokens > 0 ? { contextTokens } : {}),
       createdAt: t,
       updatedAt: t,
       internal: {
@@ -471,6 +475,17 @@ export function createHandoffEngine(deps = {}) {
     return false;
   }
 
+  /** The session's context size right now: the last observed step, else one transcript measurement; undefined when unknown. */
+  async function measuredTokens(sessionId) {
+    const seen = stepCtx.get(sessionId)?.tokens;
+    if (typeof seen === "number") return seen;
+    try {
+      return (await gather.measureContext?.(sessionId))?.tokens ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Server-generated text via POST /session/{id}/generate: 120 s timeout, one retry (§2). */
   async function generateText(sessionId, goal) {
     const prompt = buildGeneratePrompt({ goal });
@@ -505,19 +520,19 @@ export function createHandoffEngine(deps = {}) {
     };
     let body = j.body && missingHeadings(j.body).length === 0 ? j.body : null;
     if (!body) {
-      if (!acquireOperation(sid, OP_GENERATE)) return fail("another operation is running on this conversation");
+      if (!acquireOperation(sid, OP_GENERATE)) return fail("Another operation is running on this conversation. Try again in a moment.");
       try {
         rec.state = "generating";
         rec.reason = undefined;
         j.baselineRevision ??= userRev.get(followReplacement(sid)) ?? 0;
         touch(rec);
         await persist();
-        if (!(await sessionQuiet(sid))) return fail("the conversation is not idle");
+        if (!(await sessionQuiet(sid))) return fail("The conversation wasn't idle, so the handoff prompt couldn't be written. Try again when it is.");
         try {
           body = await generateText(sid, j.goal);
         } catch (e) {
           warn("[handoff] generation failed:", e?.message ?? e);
-          return fail("couldn't write the handoff prompt");
+          return fail("The model couldn't write the handoff prompt. Try again.");
         }
       } finally {
         releaseOperation(sid, OP_GENERATE);
@@ -539,13 +554,14 @@ export function createHandoffEngine(deps = {}) {
    */
   async function create(input = {}) {
     const { sessionId, trigger, action, goal, body } = input;
-    if (typeof sessionId !== "string" || !sessionId) throw new HandoffError("invalid_input", "sessionId is required");
-    if (!["user", "button", "agent"].includes(trigger)) throw new HandoffError("invalid_input", "trigger must be user, button or agent");
-    if (trigger === "agent" && !["suggest", "handoff"].includes(action)) throw new HandoffError("invalid_input", "action must be suggest or handoff");
-    if (body !== undefined && typeof body !== "string") throw new HandoffError("invalid_input", "body must be a string");
+    if (typeof sessionId !== "string" || !sessionId) throw new HandoffError("invalid", "sessionId is required");
+    if (!["user", "button", "agent"].includes(trigger)) throw new HandoffError("invalid", "trigger must be user, button or agent");
+    if (trigger === "agent" && !["suggest", "handoff"].includes(action)) throw new HandoffError("invalid", "action must be suggest or handoff");
+    if (body !== undefined && typeof body !== "string") throw new HandoffError("invalid", "body must be a string");
     const sid = followReplacement(sessionId);
     const plan = entryPlan({ mode: await getMode(), trigger, action });
     const rec = newRecord({
+      contextTokens: await measuredTokens(sid),
       fromSessionId: sid,
       kind: plan.kind,
       trigger,
@@ -642,6 +658,7 @@ export function createHandoffEngine(deps = {}) {
     if (mode === "auto" && !(await tmux.findWindow?.(sid))) return; // nothing to take over
     const plan = entryPlan({ mode, trigger: "auto" });
     const rec = newRecord({
+      contextTokens: ctx?.tokens,
       fromSessionId: sid,
       kind: plan.kind,
       trigger: "auto",
@@ -722,10 +739,10 @@ export function createHandoffEngine(deps = {}) {
     const rec = state.records[id];
     if (!rec) throw new HandoffError("expired", "This handoff has expired.");
     const { how, disposition, text, origin = "user" } = req;
-    if (!["clear", "new-session"].includes(how)) throw new HandoffError("invalid_input", "how must be clear or new-session");
+    if (!["clear", "new-session"].includes(how)) throw new HandoffError("invalid", "how must be clear or new-session");
     const allowed = origin === "auto" ? ["send", "draft", "armed"] : ["send", "draft"];
-    if (!allowed.includes(disposition)) throw new HandoffError("invalid_input", "disposition must be send or draft");
-    if (text !== undefined && typeof text !== "string") throw new HandoffError("invalid_input", "text must be a string");
+    if (!allowed.includes(disposition)) throw new HandoffError("invalid", "disposition must be send or draft");
+    if (text !== undefined && typeof text !== "string") throw new HandoffError("invalid", "text must be a string");
     if (rec.state === "starting" || rec.state === "committed") {
       throw new HandoffError("already_started", "This handoff was already started.", { handoff: publicRecord(rec) });
     }
@@ -1122,16 +1139,52 @@ export function createHandoffEngine(deps = {}) {
 
   const publicLink = (l) => ({ ...(l.replacedBy ? { replacedBy: l.replacedBy } : {}), ...(l.replaces ? { replaces: l.replaces } : {}), ...(l.branchedFrom ? { branchedFrom: l.branchedFrom } : {}), branches: [...(l.branches ?? [])] });
 
-  function list({ sessionId } = {}) {
-    if (typeof sessionId !== "string" || !sessionId) throw new HandoffError("invalid_input", "sessionId is required");
+  /** Predecessors of a session, nearest first, then (last) the session its chain was branched from. Ids only. */
+  function predecessorIds(sessionId) {
+    const ids = [];
+    const seen = new Set([sessionId]);
+    let t = sessionId;
+    while (state.links[t]?.replaces && !seen.has(state.links[t].replaces) && ids.length < MAX_CHAIN) {
+      t = state.links[t].replaces;
+      seen.add(t);
+      ids.push({ id: t });
+    }
+    const origin = state.links[t]?.branchedFrom; // the oldest session of the chain is the one a branch hangs off
+    if (origin && !seen.has(origin)) ids.push({ id: origin, branchedFrom: true });
+    return ids;
+  }
+
+  /** One session's title / deletion, bounded: a 404 is `deleted`; any other failure or a timeout says nothing. */
+  async function lookupSession(id) {
+    let timer;
+    try {
+      const rs = await Promise.race([
+        oc.readSession(id),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ state: "unknown" }), lookupTimeoutMs); // cleared below, so it never outlives the call
+        }),
+      ]);
+      if (rs?.state === "missing") return { deleted: true };
+      if (rs?.state === "found" && typeof rs.session?.title === "string" && rs.session.title) return { title: rs.session.title };
+      return {};
+    } catch {
+      return {};
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function list({ sessionId } = {}) {
+    if (typeof sessionId !== "string" || !sessionId) throw new HandoffError("invalid", "sessionId is required");
     const records = Object.values(state.records)
       .filter((r) => r.fromSessionId === sessionId || r.successorId === sessionId)
       .sort((a, b) => b.createdAt - a.createdAt)
       .map(publicRecord);
-    const links = {};
-    for (const sid of chainOf(sessionId)) if (state.links[sid]) links[sid] = publicLink(state.links[sid]);
+    const preds = predecessorIds(sessionId);
+    const looked = await Promise.all(preds.map((p) => lookupSession(p.id)));
+    const predecessors = preds.map((p, i) => ({ ...p, ...looked[i] }));
     const c = state.continuations[sessionId];
-    const out = { records, links };
+    const out = { records, links: publicLink(state.links[sessionId] ?? {}), chain: { predecessors } };
     if (c && (c.preamble || c.draft !== undefined || c.send)) {
       out.continuation = {
         recordId: c.recordId,

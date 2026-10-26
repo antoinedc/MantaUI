@@ -57,7 +57,8 @@ test("replacement + send: the successor is created with the predecessor's settin
   assert.deepEqual(w.repointed, [["ses_p", succ]]);
   assert.deepEqual(engine.resolveAdmissionTarget("ses_p"), { target: succ, fenced: false });
   assert.equal(engine._state.fences.ses_p, undefined, "the fence became the permanent link");
-  assert.deepEqual(engine.list({ sessionId: succ }).links.ses_p, { replacedBy: succ, branches: [] });
+  assert.deepEqual((await engine.list({ sessionId: "ses_p" })).links, { replacedBy: succ, branches: [] });
+  assert.deepEqual((await engine.list({ sessionId: succ })).links, { replaces: "ses_p", branches: [] });
   assert.ok(w.published.some((e) => e.kind === "handoff" && e.payload.state === "committed" && e.payload.successorId === succ));
 });
 
@@ -73,9 +74,9 @@ test("branch + draft: a new window next to the original, ancestry link, no redir
   assert.equal(w.windows[0].sid, "ses_p");
   assert.deepEqual(w.repointed, [], "a branch re-points nothing");
   assert.deepEqual(w.engine.resolveAdmissionTarget("ses_p"), { target: "ses_p", fenced: false }, "ancestry never redirects");
-  const l = w.engine.list({ sessionId: "ses_p" }).links;
-  assert.deepEqual(l.ses_p.branches, [succ]);
-  const cont = w.engine.list({ sessionId: succ }).continuation;
+  const l = (await w.engine.list({ sessionId: "ses_p" })).links;
+  assert.deepEqual(l.branches, [succ]);
+  const cont = (await w.engine.list({ sessionId: succ })).continuation;
   assert.equal(cont.draft, "edited by the user");
   assert.equal(cont.draftRevision, 1);
   assert.equal(cont.draftConsumed, false);
@@ -87,10 +88,10 @@ test("draft-consumed is idempotent and only honours the current revision", async
   const r = await readyRecord(w);
   const out = await w.engine.start(r.id, { how: "clear", disposition: "draft" });
   await w.engine.draftConsumed(r.id, 99);
-  assert.equal(w.engine.list({ sessionId: out.successorId }).continuation.draftConsumed, false);
+  assert.equal((await w.engine.list({ sessionId: out.successorId })).continuation.draftConsumed, false);
   await w.engine.draftConsumed(r.id, 1);
   await w.engine.draftConsumed(r.id, 1);
-  assert.equal(w.engine.list({ sessionId: out.successorId }).continuation.draftConsumed, true);
+  assert.equal((await w.engine.list({ sessionId: out.successorId })).continuation.draftConsumed, true);
   await assert.rejects(w.engine.draftConsumed("hof_nope", 1), (e) => e.code === "expired");
 });
 
@@ -122,15 +123,15 @@ test("concurrent starts: exactly one proceeds, the other gets already_started wi
   await assert.rejects(w.engine.start(r.id, START_SEND), (e) => e.code === "already_started");
 });
 
-test("start validation: not ready → not_ready, unknown id → expired, bad enums → invalid_input, armed is internal only", async () => {
+test("start validation: not ready → not_ready, unknown id → expired, bad enums → invalid, armed is internal only", async () => {
   const w = standardWorld();
   const pending = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: "no headings" });
   assert.equal(pending.state, "requested");
   await assert.rejects(w.engine.start(pending.id, START_SEND), (e) => e.code === "not_ready");
   await assert.rejects(w.engine.start("hof_missing", START_SEND), (e) => e.code === "expired");
   const r = await readyRecord(w);
-  await assert.rejects(w.engine.start(r.id, { how: "sideways", disposition: "send" }), (e) => e.code === "invalid_input");
-  await assert.rejects(w.engine.start(r.id, { how: "clear", disposition: "armed" }), (e) => e.code === "invalid_input", "a user cannot ask for armed");
+  await assert.rejects(w.engine.start(r.id, { how: "sideways", disposition: "send" }), (e) => e.code === "invalid");
+  await assert.rejects(w.engine.start(r.id, { how: "clear", disposition: "armed" }), (e) => e.code === "invalid", "a user cannot ask for armed");
   assert.equal(w.engine.get(r.id).state, "ready");
 });
 
@@ -560,10 +561,10 @@ test("generation failure: one retry, then the record fails with a reason and can
 
 test("create validates its input", async () => {
   const w = standardWorld();
-  await assert.rejects(w.engine.create({}), (e) => e.code === "invalid_input");
-  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "auto" }), (e) => e.code === "invalid_input", "auto is server-internal");
-  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "agent", action: "x" }), (e) => e.code === "invalid_input");
-  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "agent", action: "suggest", body: 7 }), (e) => e.code === "invalid_input");
+  await assert.rejects(w.engine.create({}), (e) => e.code === "invalid");
+  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "auto" }), (e) => e.code === "invalid", "auto is server-internal");
+  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "agent", action: "x" }), (e) => e.code === "invalid");
+  await assert.rejects(w.engine.create({ sessionId: "s", trigger: "agent", action: "suggest", body: 7 }), (e) => e.code === "invalid");
 });
 
 // ---- §6.2 one maintenance operation per session ------------------------------------------------
@@ -582,18 +583,19 @@ test("operation registry: a compaction (or another handoff phase) blocks generat
 
 // ---- misc --------------------------------------------------------------------------------------
 
-test("list: records where the session is from OR to, links for the whole chain, continuation for the successor", async () => {
+test("list: records where the session is from OR to, the requested session's own links, continuation for the successor", async () => {
   const w = standardWorld();
   const r = await readyRecord(w);
   const out = await w.engine.start(r.id, { how: "clear", disposition: "armed", origin: "auto" });
-  const forPred = w.engine.list({ sessionId: "ses_p" });
-  const forSucc = w.engine.list({ sessionId: out.successorId });
+  const forPred = await w.engine.list({ sessionId: "ses_p" });
+  const forSucc = await w.engine.list({ sessionId: out.successorId });
   assert.equal(forPred.records.length, 1);
   assert.equal(forSucc.records[0].id, r.id);
-  assert.deepEqual(Object.keys(forSucc.links).sort(), ["ses_p", out.successorId].sort());
+  assert.deepEqual(forSucc.links, { replaces: "ses_p", branches: [] });
+  assert.deepEqual(forPred.links, { replacedBy: out.successorId, branches: [] });
   assert.ok(forSucc.continuation.preamble);
   assert.equal(forPred.continuation, undefined);
-  assert.throws(() => w.engine.list({}), (e) => e.code === "invalid_input");
+  await assert.rejects(w.engine.list({}), (e) => e.code === "invalid");
 });
 
 test("a deleted session cancels its unfinished records", async () => {
@@ -632,4 +634,121 @@ test("a start that cannot persist its first step gives the record and the sessio
   assert.equal(flaky._runtime.ops.has("ses_p"), false, "the operation was released");
   const out = await flaky.start(card.id, START_SEND);
   assert.equal(out.state, "committed");
+});
+
+// ---- list(): links for the requested session + chain.predecessors ---------------------
+
+async function chainOfThree(w) {
+  // ses_p → A → B (B is live), each replaced by a send handoff
+  const r1 = await readyRecord(w);
+  const o1 = await w.engine.start(r1.id, START_SEND);
+  w.addSession(o1.successorId, { title: "second" });
+  const r2 = await readyRecord(w, { sessionId: o1.successorId });
+  const o2 = await w.engine.start(r2.id, START_SEND);
+  w.addSession(o2.successorId, { title: "third" });
+  return [o1.successorId, o2.successorId];
+}
+
+test("list: links are the requested session's own object — {branches: []} when it has none", async () => {
+  const w = standardWorld();
+  assert.deepEqual((await w.engine.list({ sessionId: "ses_nothing" })).links, { branches: [] });
+  assert.deepEqual((await w.engine.list({ sessionId: "ses_nothing" })).chain, { predecessors: [] });
+});
+
+test("list: chain.predecessors are nearest first, with titles from the session record", async () => {
+  const w = standardWorld();
+  const [a, b] = await chainOfThree(w);
+  const { chain, links } = await w.engine.list({ sessionId: b });
+  assert.deepEqual(links, { replaces: a, branches: [] });
+  assert.deepEqual(chain.predecessors, [
+    { id: a, title: "second" },
+    { id: "ses_p", title: "title ses_p" },
+  ]);
+  assert.deepEqual((await w.engine.list({ sessionId: a })).chain.predecessors, [{ id: "ses_p", title: "title ses_p" }]);
+  assert.deepEqual((await w.engine.list({ sessionId: "ses_p" })).chain.predecessors, [], "the oldest has none");
+});
+
+test("list: a predecessor opencode no longer has is deleted:true; a non-404 failure or a timeout only omits the title", async () => {
+  const w = standardWorld();
+  const [a, b] = await chainOfThree(w);
+  w.sessions.delete("ses_p");
+  const gone = (await w.engine.list({ sessionId: b })).chain.predecessors;
+  assert.deepEqual(gone, [{ id: a, title: "second" }, { id: "ses_p", deleted: true }]);
+  const e = w.build({
+    lookupTimeoutMs: 20,
+    oc: {
+      readSession: async (id) => {
+        if (id === a) throw new Error("boom");
+        return new Promise(() => {}); // never answers
+      },
+    },
+  });
+  const slow = (await e.list({ sessionId: b })).chain.predecessors;
+  assert.deepEqual(slow, [{ id: a }, { id: "ses_p" }], "no title, and NOT marked deleted");
+});
+
+test("list: the session a chain was branched from is the last entry, marked branchedFrom", async () => {
+  const w = standardWorld();
+  const r = await readyRecord(w);
+  const br = await w.engine.start(r.id, { how: "new-session", disposition: "draft" });
+  w.addSession(br.successorId, { title: "branch" });
+  assert.deepEqual((await w.engine.list({ sessionId: br.successorId })).links, { branchedFrom: "ses_p", branches: [] });
+  assert.deepEqual((await w.engine.list({ sessionId: br.successorId })).chain.predecessors, [{ id: "ses_p", title: "title ses_p", branchedFrom: true }]);
+  // a replacement of the branch: its predecessor first, then where the chain was branched from
+  const r2 = await readyRecord(w, { sessionId: br.successorId });
+  w.addWindow("proj", 11, "n", br.successorId);
+  const o2 = await w.engine.start(r2.id, START_SEND);
+  const preds = (await w.engine.list({ sessionId: o2.successorId })).chain.predecessors;
+  assert.deepEqual(preds.map((p) => p.id), [br.successorId, "ses_p"]);
+  assert.equal(preds[0].branchedFrom, undefined);
+  assert.equal(preds[1].branchedFrom, true);
+});
+
+// ---- contextTokens ------------------------------------------------------------------------
+
+test("a record carries the predecessor's measured context size from creation (last step, else the transcript); omitted when unknown", async () => {
+  const w = standardWorld();
+  w.engine.observeEvent({ type: "session.next.step.ended", properties: { sessionID: "ses_p", tokens: { input: 90_000, cache: { read: 60_000, write: 1000 } }, providerID: "anthropic", modelID: "claude-opus-4-8" } });
+  const seen = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.equal(seen.contextTokens, 151_000);
+  assert.equal(w.engine.get(seen.id).contextTokens, 151_000);
+  const viaTranscript = standardWorld();
+  const e = viaTranscript.build({ gather: { facts: async () => null, measureContext: async () => ({ tokens: 42_000 }) } });
+  assert.equal((await e.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY })).contextTokens, 42_000);
+  const unknown = await standardWorld().engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.equal("contextTokens" in unknown, false);
+  const failing = standardWorld();
+  const f = failing.build({ gather: { facts: async () => null, measureContext: async () => { throw new Error("x"); } } });
+  assert.equal("contextTokens" in (await f.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY })), false);
+});
+
+test("an automatic record carries the context size that tripped the budget", async () => {
+  const w = standardWorld();
+  const ev = (type, properties) => w.engine.observeEvent({ type, properties: { sessionID: "ses_p", ...properties } });
+  ev("session.status", { status: { type: "busy" } });
+  ev("session.next.step.ended", { tokens: { input: 250_000, cache: { read: 0, write: 0 } }, providerID: "anthropic", modelID: "claude-opus-4-8" });
+  ev("session.idle", {});
+  await settle(10);
+  const rec = Object.values(w.engine._state.records)[0];
+  assert.equal(rec.contextTokens, 250_000);
+  assert.equal(w.published.at(-1).payload.contextTokens, undefined, "bus payload stays the pinned shape");
+});
+
+// ---- error codes ------------------------------------------------------------------------------
+
+test("error codes are exactly the pinned set (+ no_window, unavailable, generation_failed)", async () => {
+  const { ERROR_STATUS } = await import("./engine.mjs");
+  assert.deepEqual(ERROR_STATUS, { invalid: 400, expired: 404, already_started: 409, busy: 409, not_ready: 422, no_window: 422, generation_failed: 502, unavailable: 503 });
+  const w = standardWorld();
+  await assert.rejects(w.engine.create({}), (e) => e.code === "invalid");
+});
+
+test("a failed generation leaves a human sentence as the reason", async () => {
+  const w = standardWorld();
+  w.failures.generate.push({}, {});
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "user" });
+  await settle();
+  const r = w.engine.get(rec.id);
+  assert.equal(r.state, "failed");
+  assert.match(r.reason, /^The model couldn't write the handoff prompt\. Try again\.$/);
 });

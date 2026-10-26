@@ -31,7 +31,7 @@ function send(res, status, body) {
 export function createHandoffHandler({ engine, readJson: rawReadJson }) {
   const readJson = (req) =>
     rawReadJson(req).catch(() => {
-      throw new HandoffError("invalid_input", "The request body isn't valid JSON.");
+      throw new HandoffError("invalid", "The request body isn't valid JSON.");
     });
   return async function handleHandoff(req, res, url) {
     const path = url.pathname;
@@ -51,7 +51,7 @@ export function createHandoffHandler({ engine, readJson: rawReadJson }) {
           return true;
         }
         if (req.method === "GET") {
-          send(res, 200, engine.list({ sessionId: url.searchParams.get("sessionId") ?? "" }));
+          send(res, 200, await engine.list({ sessionId: url.searchParams.get("sessionId") ?? "" }));
           return true;
         }
         send(res, 405, { error: "method_not_allowed", message: "Method not allowed." });
