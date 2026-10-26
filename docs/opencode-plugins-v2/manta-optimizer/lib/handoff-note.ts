@@ -92,7 +92,7 @@ export function createHandoffNote(deps: HandoffNoteDeps) {
         return false;
       }
 
-      messages.push({ role: "user", content: [{ type: "text", text: renderHandoffNote(used, budget) }] });
+      messages.push({ role: "user", content: [{ type: "text", text: renderHandoffNote(used, budget) }], metadata: {} });
       state.delete(key); // re-insert so the oldest-first eviction below is LRU
       state.set(key, next);
       while (state.size > MAX_TRACKED) {
