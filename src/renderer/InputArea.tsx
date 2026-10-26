@@ -54,6 +54,7 @@ import { backgroundBoxVisible, backgroundRequested, type SlashToken } from "./ba
 import { BackgroundRunBox, SlashHighlight } from "./SlashComposerParts";
 import { IS_MAC } from "./platform";
 import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
+import { HandoffModeToggle } from "./HandoffParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
 // sites (Composer) keep working after the leaf component moved to ./ComposerParts.
 export { TypeaheadPopup } from "./ComposerParts";
@@ -152,6 +153,7 @@ export function InputArea({
   modelLabel,
   chatAutoAllow,
   setChatAutoAllow,
+  showHandoffMode = false,
   voice,
   models,
   modelOverride,
@@ -228,6 +230,10 @@ export function InputArea({
   modelLabel: string | null;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
+  // Auto-handoff: show the "Handoff: auto|suggest|off" control beside the trust
+  // toggle. Chat sessions only — the CTO conversation shares this composer and
+  // has nothing to hand off.
+  showHandoffMode?: boolean;
   // The whole voice hook result (BET-836): the recording session state
   // (phase/elapsedMs/nearLimit/liveWindowRef), the actions (start/pause/
   // resume/send/discard), the discard-arm state, and the a11y announcements.
@@ -788,7 +794,12 @@ export function InputArea({
           reports "Plan mode — edits blocked" instead and the bypass state is
           not shown. Two contradictory permission claims stacked together is
           how users stop believing either. */}
-      <TrustRow planOn={plan.on} chatAutoAllow={chatAutoAllow} setChatAutoAllow={setChatAutoAllow} />
+      <TrustRow
+        planOn={plan.on}
+        chatAutoAllow={chatAutoAllow}
+        setChatAutoAllow={setChatAutoAllow}
+        trailing={showHandoffMode ? <HandoffModeToggle /> : undefined}
+      />
       </MeasureColumn>
     </div>
   );

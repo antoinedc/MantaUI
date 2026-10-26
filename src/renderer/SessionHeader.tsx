@@ -17,7 +17,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2 } from "lucide-react";
+import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2, History, ArrowRightLeft } from "lucide-react";
 import {
   ctxStageColor,
   cssVar,
@@ -54,6 +54,17 @@ import { Popover } from "./Popover";
 import { useStore } from "./store";
 import { MarqueeLabel } from "./MarqueeLabel";
 import { ConfirmModal } from "./ConfirmModal";
+import { previousEntryLabel, type PreviousSessionEntry } from "./handoff";
+
+// Auto-handoff wiring for the header (spec §9): the "Hand off" button in the
+// context popover and the "Previous sessions" group in the ⋯ menu. Optional so
+// callers that have no handoff (tests, the CTO surface) render byte-identically.
+export interface SessionHeaderHandoff {
+  previous: PreviousSessionEntry[];
+  onOpenPrevious: (id: string) => void;
+  /** Resolves when the box answered; the caller reports a failure itself. */
+  onHandOff: () => Promise<void>;
+}
 
 // Cache-segment colors for the header pill. Consumed from the semantic tokens
 // (BET-408 / BET-1337 D2) so the header bar and the OptimizerCard share one
@@ -86,6 +97,7 @@ export function SessionHeader({
   modelName,
   hasSession,
   readOnly,
+  handoff,
   onFork,
   onCompact,
   onClear,
@@ -137,6 +149,7 @@ export function SessionHeader({
   // the Fork/Compact/Clear/Delete menu is hidden (Stop, in ReadOnlyJobBar, is
   // the only live action). Branch + context pill still render as info.
   readOnly?: boolean;
+  handoff?: SessionHeaderHandoff;
   onFork: () => void;
   onCompact: () => void;
   onClear: () => void;
@@ -344,6 +357,7 @@ export function SessionHeader({
           modelName={modelName}
           staleCache={staleCache}
           onRequestClear={() => setConfirm("clear")}
+          onHandOff={readOnly || !handoff ? undefined : handoff.onHandOff}
         />
       ),
     });
@@ -379,6 +393,8 @@ export function SessionHeader({
           onCompact={onCompact}
           onRequestClear={() => setConfirm("clear")}
           onRequestDelete={() => setConfirm("delete")}
+          previous={handoff?.previous}
+          onOpenPrevious={handoff?.onOpenPrevious}
         />
       ),
     });
@@ -601,6 +617,7 @@ function ContextPill({
   modelName,
   staleCache,
   onRequestClear,
+  onHandOff,
 }: {
   sessionId: string | null;
   pct: number | null;
@@ -616,8 +633,10 @@ function ContextPill({
   modelName: string | null;
   staleCache: StaleCacheResult;
   onRequestClear: () => void;
+  onHandOff?: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [handingOff, setHandingOff] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const sessionSeat = useStore((s) => (sessionId ? s.sessionSeats[sessionId] ?? null : null));
   const accounts = useStore((s) => s.accounts);
@@ -780,6 +799,29 @@ function ContextPill({
             </div>
           )}
 
+          {/* Hand off (auto-handoff §9): ask the box for a handoff prompt. The card
+              it produces appears above the composer, so the popover closes. */}
+          {onHandOff && (
+            <div className="mt-4 pt-3 border-t border-border-subtle">
+              <Button
+                tone="default"
+                block
+                loading={handingOff}
+                title="Write a handoff prompt for a fresh session"
+                onClick={() => {
+                  setHandingOff(true);
+                  void onHandOff().finally(() => {
+                    setHandingOff(false);
+                    setOpen(false);
+                  });
+                }}
+              >
+                <ArrowRightLeft size={14} aria-hidden="true" />
+                {handingOff ? "Preparing handoff…" : "Hand off"}
+              </Button>
+            </div>
+          )}
+
           {/* Stale-cache warning — only when actually stale. The amber tint on
               the pill is the peripheral cue; this is the detail plus the one
               action that resolves it. */}
@@ -872,6 +914,8 @@ function SessionMenu({
   onCompact,
   onRequestClear,
   onRequestDelete,
+  previous,
+  onOpenPrevious,
 }: {
   mode?: SessionMode;
   onModeChange?: (m: SessionMode) => void;
@@ -880,6 +924,8 @@ function SessionMenu({
   onCompact: () => void;
   onRequestClear: () => void;
   onRequestDelete: () => void;
+  previous?: PreviousSessionEntry[];
+  onOpenPrevious?: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -1072,6 +1118,19 @@ function SessionMenu({
           <Eraser size={14} aria-hidden="true" />,
           "Clear session",
           onRequestClear,
+        )}
+        {previous && previous.length > 0 && onOpenPrevious && (
+          <>
+            <div className="my-1 border-t border-border-subtle" role="separator" />
+            <div className={`${GROUP_LABEL} pt-1`} role="presentation">
+              Previous sessions
+            </div>
+            {previous.map((p) => (
+              <Fragment key={p.id}>
+                {item(<History size={14} aria-hidden="true" />, previousEntryLabel(p), () => onOpenPrevious(p.id))}
+              </Fragment>
+            ))}
+          </>
         )}
         <div className="my-1 border-t border-border-subtle" role="separator" />
         {item(

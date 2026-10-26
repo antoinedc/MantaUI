@@ -115,6 +115,14 @@ import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { BackgroundRunCards } from "./BackgroundCards";
+import { useHandoffPanel } from "./hooks/useHandoffPanel";
+import {
+  CarriedContextBlock,
+  ContinuationNotice,
+  DeletedSessionNotice,
+  PinnedHandoffCard,
+  PreviousSessionBar,
+} from "./HandoffParts";
 import {
   backgroundApi,
   backgroundRequested,
@@ -197,6 +205,11 @@ type Props = {
   // autoSubmit, delivered to the RIGHT session's panel, but it only fills the
   // composer (setInput); it does NOT submit. The user reviews + hits Enter.
   seedPrompt?: { text: string };
+  // Auto-handoff "Previous sessions" (spec §9): this panel is the READ-ONLY view
+  // of an older session shown inside the current pane. The composer is replaced
+  // by the "Back to current" bar; no card, menu or send exists. Set only by the
+  // parent panel's own previous-session view.
+  readOnlyView?: { label: string; onBack: () => void };
 };
 
 /** How long an idle send's transient inbox item may stay out of the pending card. */
@@ -224,6 +237,7 @@ export function ChatPanel({
   registerModelControl,
   unregisterModelControl,
   seedPrompt,
+  readOnlyView,
 }: Props) {
   // chatAutoAllow / setChatAutoAllow / optInModels / optInModel are subscribed
   // INSIDE useComposerController now (they feed the composer's trust toggle +
@@ -742,6 +756,30 @@ export function ChatPanel({
     setVerdictReset(null);
     setSendError(`Health reset — ${results.join(" · ")}. Try sending again, or pick a model.`);
   }, [verdictReset, verdictResetBusy, setSendError]);
+
+  // ===== Auto-handoff (spec 2026-10-26-auto-handoff.md) =====
+  // Pinned cards, the successor chrome, Previous sessions, the §6.4 pane switch
+  // and the §7/§8 draft + composer carry-over all live in the hook; the composer
+  // is handed over through a ref so the listeners never re-subscribe per keystroke.
+  const composerRef = useRef<{ text: string; attachments: Attachment[] }>({ text: "", attachments: [] });
+  composerRef.current = { text: input, attachments };
+  const handoff = useHandoffPanel({
+    sessionId,
+    cwd,
+    enabled: !readOnlyView,
+    interactive: !jobOwnership,
+    running,
+    composerRef,
+    sessionChoice,
+    setInput,
+    setAttachments,
+    setSendError,
+  });
+  const handoffRef = useRef(handoff);
+  handoffRef.current = handoff;
+  // The nested read-only view of a previous session (and a background job's
+  // session) shows history only: no cards, no composer, no session menu.
+  const viewOnly = !!jobOwnership || !!readOnlyView;
 
 
   // ===== Pending messages (V2 inbox) =====
@@ -1690,6 +1728,10 @@ export function ChatPanel({
           await compactSessionRef.current();
         } else if (cmdName === "help") {
           setSystemNotice(buildHelpText());
+        } else if (cmdName === "handoff") {
+          // Always lands a ready card, whatever the mode (spec §4.1); the hook
+          // reports a failure through the send-error card.
+          await handoffRef.current.create("user", slashMatch?.[2]);
         }
       } catch (e) {
         setSendError(String((e as Error)?.message ?? e));
@@ -2844,6 +2886,7 @@ export function ChatPanel({
   // tier (fixed priority, at most two expanded, the rest rolled up).
   const AMBIENT_CARD: Record<string, { order: number; label: string }> = {
     retry: { order: 7, label: "↻ retry" },
+    handoff: { order: 8, label: "⇄ handoff" },
     compaction: { order: 6, label: "↧ compaction" },
     "send-error": { order: 5, label: "⚠ error" },
     pending: { order: 4, label: "⏳ pending" },
@@ -3065,8 +3108,10 @@ export function ChatPanel({
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "blocking", order, render });
-    const amb = (id: string, render: React.ReactNode): PinnedCardRender =>
-      ({ id, tier: "ambient", order: AMBIENT_CARD[id].order, label: AMBIENT_CARD[id].label, render });
+    const amb = (id: string, render: React.ReactNode): PinnedCardRender => {
+      const meta = AMBIENT_CARD[id.startsWith("handoff-") ? "handoff" : id];
+      return { id, tier: "ambient", order: meta.order, label: meta.label, render };
+    };
     const mng = (id: string, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "management", order: AMBIENT_CARD[id].order, render });
     const blockOrder = (id: string): number => {
@@ -3079,7 +3124,7 @@ export function ChatPanel({
       return order;
     };
     // Blocking tier — permission requests + delegate-approval, newest first.
-    if (!jobOwnership) {
+    if (!viewOnly) {
       permissions.forEach((p) => list.push(block(
         `permission-${p.id}`, blockOrder(`permission-${p.id}`),
         <PermissionCard
@@ -3176,7 +3221,12 @@ export function ChatPanel({
           />
         </div>
       </MeasureColumn>));
-    if (!jobOwnership) {
+    // Handoff cards (server path): ahead of every other ambient card — a ready
+    // handoff is the one thing here the user is expected to act on.
+    for (const rec of handoff.pinned) {
+      list.push(amb(`handoff-${rec.id}`, <PinnedHandoffCard record={rec} />));
+    }
+    if (!viewOnly) {
       if (openPanel === "schedules") list.push(mng("schedules",
         <div className="shrink-0 px-4 pt-2 pb-2">
           <ScheduledTasksCard
@@ -3236,8 +3286,36 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [jobOwnership, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [viewOnly, handoff.pinned, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
+
+  // Previous sessions (spec §9): the chosen older session shown read-only in THIS
+  // pane. A deleted one keeps its id in the links, so say it is gone instead of
+  // failing to load. Everything below is the live session, left mounted.
+  if (handoff.previousView) {
+    const pv = handoff.previousView;
+    return (
+      <div className="h-full w-full flex flex-col bg-bg font-sans text-prose relative">
+        {pv.deleted ? (
+          <>
+            <DeletedSessionNotice />
+            <PreviousSessionBar label={pv.label} deleted onBack={handoff.closePrevious} />
+          </>
+        ) : (
+          <ChatPanel
+            sessionId={pv.id}
+            tmuxSession={null}
+            windowIndex={null}
+            cwd={cwd}
+            isActive={isActive}
+            projectName={projectName}
+            winName={pv.label}
+            readOnlyView={{ label: pv.label, onBack: handoff.closePrevious }}
+          />
+        )}
+      </div>
+    );
+  }
 
   if (error || transcriptLoadError) {
     return (
@@ -3314,7 +3392,12 @@ export function ChatPanel({
             : null
         }
         hasSession={!!tmuxSession && windowIndex != null}
-        readOnly={!!jobOwnership}
+        readOnly={viewOnly}
+        handoff={{
+          previous: handoff.previous,
+          onOpenPrevious: handoff.openPrevious,
+          onHandOff: () => handoff.create("button"),
+        }}
         onFork={() => void forkSession()}
         onCompact={() => void compactSession()}
         onClear={() => void clearSession()}
@@ -3354,6 +3437,14 @@ export function ChatPanel({
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
 
+      {/* Auto-handoff: "Continued from …" at the top of a successor. */}
+      {handoff.notice && (
+        <ContinuationNotice
+          notice={handoff.notice}
+          onViewPrevious={() => handoff.openPrevious(handoff.notice!.predecessorId)}
+        />
+      )}
+
       {/* The transcript region owns its own positioning context so the
           jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above
           the card stack and the composer, both of which change height. */}
@@ -3382,7 +3473,7 @@ export function ChatPanel({
             // BET-418 §D: a job session is read-only — never show its (anyway
             // impossible) question cards. Defensive: a job's pre-flight ruleset
             // means it never generates asks.
-            questions={jobOwnership ? [] : questions.filter((q) => !isPlanExitQuestion(q, messages))}
+            questions={viewOnly ? [] : questions.filter((q) => !isPlanExitQuestion(q, messages))}
             turnInfo={turnInfo}
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}
@@ -3422,9 +3513,12 @@ export function ChatPanel({
           internal scroll so the transcript stays the flexible child of the
           panel. Read-only job sessions (jobOwnership) never mount these — the
           ReadOnlyJobBar below replaces the composer instead. */}
+      {handoff.preamble && <CarriedContextBlock preamble={handoff.preamble} />}
       <CardStack cards={cards} sessionId={sessionId} />
 
-      {jobOwnership ? (
+      {readOnlyView ? (
+        <PreviousSessionBar label={readOnlyView.label} deleted={false} onBack={readOnlyView.onBack} />
+      ) : jobOwnership ? (
         <ReadOnlyJobBar
           job={jobOwnership}
           modelName={
@@ -3470,6 +3564,7 @@ export function ChatPanel({
       ) : (
       <Composer
         {...composer.composerProps}
+        showHandoffMode
         // The send transport is ChatPanel's own — its `submit` is entangled with
         // routing / optimistic transcript / compaction and is NOT composer state,
         // so it is spread on top of the controller's ready-to-render bundle. The

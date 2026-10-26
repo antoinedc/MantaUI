@@ -36,6 +36,8 @@ import { TaskCard } from "./TaskCard";
 import { BackgroundResultCard } from "./BackgroundCards";
 import { isBackgroundResultPart } from "./backgroundRun";
 import { CardMount } from "./components/CardMount";
+import { HandoffToolCard } from "./HandoffParts";
+import { isHandoffToolPart } from "./handoff";
 
 // Terse `+38 −4` summary of an Edit/Write/MultiEdit diff, matching the spec's
 // right-hand meta (`.tool-h .r`). `+N` in ok, `−N` in danger, each omitted
@@ -134,6 +136,8 @@ function renderAssistantPart(
   }
 
   if (part.type === "tool") {
+    // Auto-handoff (§3): the agent's `handoff` tool call IS the handoff card.
+    if (isHandoffToolPart(part)) return <HandoffToolCard part={part} />;
     return <ToolCall part={part} verbose={showThinking} defaultExpanded={defaultExpanded} />;
   }
 
