@@ -415,7 +415,8 @@ export function createHandoffEngine(deps = {}) {
 
   // ---- records -------------------------------------------------------------------
   const recordsFor = (sid) => Object.values(state.records).filter((r) => r.fromSessionId === sid);
-  const ACTIVE_STATES = ["requested", "generating", "ready", "starting"];
+  // Only these block a new automatic attempt: a `ready` card has no dismiss action, so it must never wedge auto mode.
+  const IN_FLIGHT_STATES = ["requested", "generating", "starting"];
 
   function newRecord({ fromSessionId, kind, trigger, plan, body, goal, contextTokens }) {
     const t = now();
@@ -627,7 +628,7 @@ export function createHandoffEngine(deps = {}) {
   async function maybeAuto(sid, success) {
     const mode = normalizeMode(await getMode());
     if (mode === "off") return;
-    if (recordsFor(sid).some((r) => ACTIVE_STATES.includes(r.state))) return;
+    if (recordsFor(sid).some((r) => IN_FLIGHT_STATES.includes(r.state))) return;
     // A failed automatic attempt costs a full-history generation: don't loop on it.
     if (recordsFor(sid).some((r) => r.trigger === "auto" && r.state === "failed" && now() - r.updatedAt < cooldownMs)) return;
     if (ops.has(sid)) return; // another maintenance operation owns the session (§6.2)
@@ -664,6 +665,15 @@ export function createHandoffEngine(deps = {}) {
       trigger: "auto",
       plan: plan.produce === "start" ? { how: plan.how, disposition: plan.disposition } : null,
     });
+    // The new automatic record supersedes this session's older automatic ready
+    // cards (clients drop a cancelled card). Cards from the user or the agent are
+    // their suggestions and stay.
+    for (const old of recordsFor(sid)) {
+      if (old !== rec && old.trigger === "auto" && old.state === "ready") {
+        old.state = "cancelled";
+        touch(old);
+      }
+    }
     touch(rec);
     await persist();
     detach("auto handoff", () => processRequested(rec, true));

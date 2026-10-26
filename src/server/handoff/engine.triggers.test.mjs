@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { COOLDOWN_MS } from "./policy.mjs";
-import { createWorld, settle, standardWorld } from "./testWorld.mjs";
+import { FULL_BODY, createWorld, settle, standardWorld } from "./testWorld.mjs";
 
 const OPUS = { providerID: "anthropic", modelID: "claude-opus-4-8" };
 
@@ -102,11 +102,68 @@ test("cooldown: a session created by a handoff is not handed off again for 30 mi
   assert.equal(records(w, succ).length, 1, "after it");
 });
 
-test("no second record while one is in flight or waiting as a card; a failed automatic attempt is not retried every turn", async () => {
+test("only in-flight records (requested / generating / starting) block a new automatic attempt", async () => {
+  for (const state of ["requested", "generating", "starting"]) {
+    const w = standardWorld();
+    const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "handoff", body: "## Goal\nthin" });
+    w.engine._state.records[rec.id].state = state;
+    await turn(w.engine, "ses_p");
+    assert.equal(records(w).length, 1, `${state} blocks a second automatic record`);
+    assert.ok(records(w).every((r) => r.trigger === "agent"));
+  }
+});
+
+test("an auto-degraded ready card does not wedge auto mode: the next qualifying turn hands off and the old card is cancelled", async () => {
+  const w = standardWorld();
+  let release;
+  const parked = new Promise((r) => (release = r));
+  const body = w.generateText;
+  w.generateText = async () => {
+    await parked;
+    return body;
+  };
+  await turn(w.engine, "ses_p");
+  await w.engine.admitPrompt({ sessionId: "ses_p", text: "one more thing" });
+  release();
+  await settle(10);
+  const [old] = records(w);
+  assert.equal(old.state, "ready");
+  assert.equal(old.reason, "you kept working");
+  w.generateText = body;
+  w.clock += 1; // (no successor yet, so no cooldown applies)
+  await turn(w.engine, "ses_p");
+  const after = records(w);
+  assert.equal(after.length, 2);
+  assert.equal(w.engine.get(old.id).state, "cancelled");
+  const fresh = after.find((r) => r.id !== old.id);
+  assert.equal(fresh.state, "committed");
+  assert.ok(w.published.some((e) => e.payload.id === old.id && e.payload.state === "cancelled"), "the bus told clients to drop the card");
+  assert.equal(JSON.parse(w.disk.json).records[old.id].state, "cancelled", "persisted");
+});
+
+test("a user / button / agent ready card never blocks auto and is left alone", async () => {
+  for (const trigger of ["user", "agent"]) {
+    const w = standardWorld();
+    const card = trigger === "agent"
+      ? await w.engine.create({ sessionId: "ses_p", trigger, action: "suggest", body: FULL_BODY })
+      : await w.engine.create({ sessionId: "ses_p", trigger });
+    await settle();
+    assert.equal(w.engine.get(card.id).state, "ready");
+    w.generateCalls.length = 0;
+    await turn(w.engine, "ses_p");
+    assert.equal(w.engine.get(card.id).state, "ready", `${trigger} card stays`);
+    const auto = records(w).find((r) => r.trigger === "auto");
+    assert.equal(auto.state, "committed");
+  }
+});
+
+test("in suggest mode a newer automatic card supersedes the older unanswered one; a failed automatic attempt is not retried every turn", async () => {
   const w = standardWorld({ mode: "suggest" });
   await turn(w.engine, "ses_p");
   await turn(w.engine, "ses_p");
-  assert.equal(records(w).length, 1, "the unanswered card is enough");
+  const cards = records(w);
+  assert.equal(cards.length, 2);
+  assert.deepEqual(cards.map((r) => r.state).sort(), ["cancelled", "ready"]);
   const f = standardWorld();
   f.failures.generate.push({}, {});
   await turn(f.engine, "ses_p");
