@@ -1,6 +1,6 @@
 # Auto-handoff — design
 
-Status: draft v5 (Astra review round 3 addressed) · Branch: `feat/auto-handoff`
+Status: draft v6 (Astra review round 4 addressed) · Branch: `feat/auto-handoff`
 Target runtime: opencode **V2** (box verified on 2.0.30; main already on V2).
 
 Decisions taken with the user (2026-10-26):
@@ -167,9 +167,9 @@ synchronous (no `await` between check and set).
 
 Before any side effect the record persists: `successorId` (caller-minted
 `ses_…`, V2 create accepts `id`), `messageId` for a `send` (`msg_…`, required
-prefix), and the window marker (successor id; windows are found by their
-`@manta-session-id` stamp). Recovery reconciles against these, so no step can
-create a duplicate.
+prefix), and the branch window's temporary name `handoff-<recordId>` (windows
+are found by that name or by their `@manta-session-id` stamp). Recovery
+reconciles against these, so no step can create a duplicate.
 
 ### 5.2 Admission reservations
 
@@ -181,42 +181,48 @@ reconciled). Each accepted user admission also bumps an in-memory
 
 ### 5.3 Steps
 
-Nothing about the successor is visible to any client or any admission until
-step 5. All steps before it are reversible.
+The successor's id is known only to the server until commit, and no window
+points at it until commit, so nothing can reach it early (the topology snapshot
+never shows it). Steps 1–3 are reversible; from the first delivery POST
+attempt in step 3 onwards the start only ever **recovers forward**.
 
 1. **Fence (replacement only).** Synchronously, under the mutex: require
    `reservations[pred] == 0`, `userRevision[pred]` unchanged since generation
    began, and no other session operation (§6.2). Pass → install
    `fence = {successorId}`: from now on every admission to the predecessor is
-   **held** in manta (persisted, not posted). Fail → abort auto-start, record →
-   `ready` (`reason: "you kept working"`).
+   **held** in manta (persisted with its stable message id, not posted). Fail →
+   abort auto-start, record → `ready` (`reason: "you kept working"`).
    Then the asynchronous checks: predecessor not active in V2 and its V2 inbox
    empty. Fail → remove fence, release held messages to the predecessor, abort
    as above.
 2. **Create** the successor (skipped if `successorId` exists): same directory;
    model, variant, agent and **permissions** copied from the predecessor's V2
    session; `parentID` copied (a child conversation stays a child).
-3. **Attach.** Replacement: restamp the window to `successorId`. Branch: create
-   the window and stamp it **in one tmux command chain** (`new-window … \;
-   set-option -w @manta-session-id <successorId>`), so a window never exists
-   unstamped; skipped if a window with that stamp exists.
-4. **Prepare delivery** (persisted on the successor's continuation, §7, before
+3. **Prepare delivery** (persisted on the successor's continuation, §7, before
    any effect):
-   - `send`: persist `{messageId, payload}`, post it, and wait for confirmed
-     acceptance (uncertain → reconcile by id in inbox + history; absent from
-     both → re-post same id). Definitive refusal → roll back (below).
+   - `send`: persist `{messageId, payload}`, set `sendAttempted`, then post.
+     Confirmed acceptance → continue. **Definitive refusal** → rollback
+     (below). **Uncertain** → reconcile by id (inbox + history); absent from
+     both → re-post the same id (idempotent) — never roll back.
    - `armed`: persist `{preamble}`.
    - `draft`: persist `{draft, draftRevision}`.
-5. **Commit.** Write the link (replacement or ancestry), re-point ownership
-   (§6.3), record `committed`, publish the bus event. Replacement: the fence
-   becomes the permanent replacement link.
-6. **Release** held admissions in order to the successor (through §5.4 if
-   armed; behind the accepted `send` turn otherwise).
+4. **Commit** (each sub-step idempotent, journaled; recovery re-runs it):
+   a. attach — replacement: restamp the window to `successorId`; branch: create
+      a window named `handoff-<recordId>`, stamp it, then rename it
+      (recovery finds it by stamp OR by that temporary name and finishes the
+      remaining sub-steps);
+   b. write the link (replacement or ancestry) and re-point ownership (§6.3);
+   c. record `committed`; publish the bus event. Replacement: the fence becomes
+      the permanent replacement link.
+5. **Release** held admissions in order to the successor (through §5.4 if
+   armed; behind the accepted `send` turn otherwise). Each held admission is
+   posted with its stable message id and removed from the journal only after
+   confirmed acceptance (uncertain → reconcile as above).
 
-**Rollback** (failure in steps 1–4): restamp the window back to the predecessor
-(replacement) or kill the created window (branch), delete the successor
-session, remove the fence, release held messages to the predecessor, record
-`failed` with **Retry**. After step 5 there is nothing left to fail.
+**Rollback** (only steps 1–3, and in step 3 only before any `send` POST was
+attempted or after a definitive refusal): delete the successor session, remove
+the fence, release held messages to the predecessor, record `failed` with
+**Retry**.
 
 ### 5.4 Armed preamble
 
@@ -234,12 +240,16 @@ UI copy: "Carried-over context — sent with the next message."
 
 ### 5.5 Recovery on boot
 
-Reservations are in-memory and start at zero (nothing is in flight after a
-restart). `generating` → `failed` (Retry). `starting` → resume from the first
-step whose effect is not observed (successor exists? window stamped?
-continuation persisted? send accepted? link written?), or roll back if the
-failing step is ≤ 4 and cannot complete. Held admissions persist and are
-released by whichever outcome wins. An armed claim present → reconcile as §5.4.
+Reservations are in-memory and start at zero. Then, for every record:
+- `generating` → `failed` (Retry).
+- `starting`, no `send` POST attempted → resume from the first step whose
+  effect is not observed (fence? successor exists? continuation persisted?), or
+  roll back if that step cannot complete.
+- `starting`, `send` POST attempted → reconcile the send (§5.3 step 3) and
+  recover forward through commit.
+- commit journaled but incomplete → finish the remaining commit sub-steps.
+- `committed` with held admissions still journaled → drain them (step 5).
+- armed claim present → reconcile as §5.4.
 
 ### 5.6 Idempotency
 
@@ -274,8 +284,8 @@ except by a fence.
   successor at commit. A job that settles before commit delivers its completion
   to the predecessor, where the fence holds it and releases it to the
   successor — no ordering issue.
-- A **running background-job session** (the job's own session): its turn end
-  IS the job's completion signal, so:
+- A **running background-job session** (the job's own session) is in scope
+  like any chat, but its turn end IS the job's terminal completion signal, so:
   - server-initiated (armed) handoff never applies to it — the job settles
     normally;
   - an agent `action: handoff` inside a job registers the record synchronously
@@ -305,8 +315,10 @@ switches to the successor; on a **branch**, only the initiating client switches.
 - **continuation** per successor — `{preamble?, claim?, draft?,
   draftRevision?, send?}`; never pruned while unconsumed. A draft is consumed
   when a client loads it into the composer and calls
-  `POST /api/handoff/:id/draft-consumed {draftRevision}` (idempotent); clients
-  only load a draft whose revision is not yet consumed.
+  `POST /api/handoff/:id/draft-consumed {draftRevision}` (idempotent) — only
+  after the client has persisted the draft in its own local composer storage, so
+  a client crash cannot lose the only copy. Clients only load a draft whose
+  revision is not yet consumed.
 - **fences** and **held admissions** — persisted so recovery can release them.
 
 ## 8. Settings carried to the successor
