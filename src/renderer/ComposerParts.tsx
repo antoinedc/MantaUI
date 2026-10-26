@@ -718,17 +718,21 @@ export function TrustRow({
   chatAutoAllow,
   setChatAutoAllow,
   trailing,
+  status,
 }: {
   planOn: boolean;
   chatAutoAllow: boolean;
   setChatAutoAllow: (v: boolean) => Promise<void>;
   /** Another ambient control for the same line (the handoff mode), after the trust state. */
   trailing?: React.ReactNode;
+  /** Transient key-hint text (busy send / voice), right-aligned. Lives here, not in
+   *  the controls row above, so it appearing mid-turn never re-wraps those controls. */
+  status?: React.ReactNode;
 }) {
   return (
-    <div className="pb-3 flex items-center gap-4">
+    <div className="pb-3 flex items-center gap-4 min-w-0">
       {planOn ? (
-        <span className="inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
+        <span className="shrink-0 whitespace-nowrap inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 text-text-muted">
           <Shield size={14} aria-hidden="true" />
           Plan mode — edits blocked
         </span>
@@ -740,7 +744,7 @@ export function TrustRow({
             // state line under the composer, not a call to action. The danger
             // colour is what makes the bypassing state read — the type does
             // not need to carry it too.
-            "inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
+            "shrink-0 whitespace-nowrap inline-flex items-center gap-2 text-[11px] leading-none font-normal py-[6px] px-0 " +
             (chatAutoAllow
               ? "text-danger hover:text-danger"
               : "text-text-muted hover:text-text-muted")
@@ -757,7 +761,8 @@ export function TrustRow({
             : "Permissions on — click to bypass"}
         </button>
       )}
-      {trailing}
+      {trailing && <span className="shrink-0">{trailing}</span>}
+      {status && <span className="ml-auto min-w-0 truncate">{status}</span>}
     </div>
   );
 }
