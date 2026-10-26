@@ -336,12 +336,20 @@ test("startJob refuses a sixth concurrent job with the exact cap error", async (
 // cleanupTerminalJob + finishV2Job/stopJob terminal cleanup (BET-418 §B)
 // ----------------------------------------------------------------------------
 
-function cleanupHarness() {
+// `owned`: jobs whose window tmux still shows stamped with their child session —
+// the window close only targets a window that still belongs to the job.
+function cleanupHarness(owned) {
   const killWindowCalls = [];
   const removeCalls = [];
   return {
     killWindowCalls,
     removeCalls,
+    ...(owned
+      ? {
+          listProjects: async () =>
+            owned.map((j) => ({ tmuxSession: j.tmuxSession, windows: [{ index: j.windowIndex, opencodeSessionId: j.childSessionID }] })),
+        }
+      : {}),
     killWindow: async (input) => { killWindowCalls.push(input); },
     gitRemoveWorktree: async (input) => { removeCalls.push(input); return { removed: true }; },
   };
@@ -393,8 +401,8 @@ test("cleanupTerminalJob with no worktree just kills the window", async () => {
 });
 
 test("finishV2Job runs terminal cleanup and stamps cleanedUp true on a clean worktree", async () => {
-  const c = cleanupHarness();
   const job = { ...runningObserverJob(), id: "fin-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const c = cleanupHarness([job]);
   const h = harness([job], 1_700_000_000_000);
   const deps = { ...h.deps, ...c };
   await finishV2Job(job, "done", null, deps);
@@ -418,8 +426,8 @@ test("finishV2Job keeps the record (cleanedUp false) on a dirty worktree", async
 });
 
 test("stopJob runs terminal cleanup and stamps cleanedUp", async () => {
-  const c = cleanupHarness();
   const job = { ...runningObserverJob(), id: "stop-clean", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2 };
+  const c = cleanupHarness([job]);
   const h = harness([job], 1_700_000_000_000);
   const deps = { ...h.deps, ...c };
   const res = await stopJob("stop-clean", deps);
@@ -474,8 +482,8 @@ test("sweep does not prune a terminal dirty-kept job (cleanedUp false)", async (
 // ----------------------------------------------------------------------------
 
 test("sweep stops a running job whose parent session is gone", async () => {
-  const c = cleanupHarness();
   const job = { ...runningObserverJob(), id: "orphan", parentSessionID: "ses_gone", worktree: "/tmp/wt", branch: "fix", baseSha: "abc", tmuxSession: "proj", windowIndex: 2, startedAt: 1_700_000_000_000 };
+  const c = cleanupHarness([job]);
   const h = harness([job], 1_700_000_000_000);
   const deps = {
     ...h.deps,

@@ -990,7 +990,7 @@ test("no lost lifecycle: the existing task-subagent adoption reads the map too",
   assert.equal(j.completionOwner, "opencode");
 });
 
-test("an adopted native-command row completes from the raw outcome (still no Manta result) and the row stays", async () => {
+test("an adopted native-command row completes from the raw outcome (still no Manta result), its window closes, the record stays", async () => {
   const w = world();
   w.state.openWindows = [{ name: "bg", arguments: "" }];
   const { engine, fire } = engineWithTimers(w);
@@ -1005,12 +1005,12 @@ test("an adopted native-command row completes from the raw outcome (still no Man
   const j = w.jobs.find((x) => x.childSessionID === "ses_nat");
   assert.equal(j.status, "done");
   assert.equal(w.calls.synth.length + w.calls.deliver.length, 0);
-  assert.equal(w.calls.kill.length, 0, "the window stays after finishing");
-  assert.ok(j.windowIndex != null);
+  assert.equal(w.calls.kill.length, 1, "the window closes once the job finishes");
+  assert.equal(j.cleanedUp, true);
 });
 
 // ---------------------------------------------------------------------------
-// Finished rows stay; retention; closing; pause
+// Finished rows: window closed, record kept; retention; closing; pause
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60_000;
@@ -1023,6 +1023,9 @@ function finishedRow(i, over = {}) {
     status: "done",
     finishedAt: T0 + i,
     completionDelivery: "delivered",
+    // Finished rows close their window on finish; a window still open here is
+    // one the user reopened afterwards.
+    cleanedUp: true,
     ...over,
   });
 }
@@ -1073,6 +1076,27 @@ test("retention: never prunes a record whose result is still pending, by age or 
   assert.ok(w2.jobs.some((j) => j.id === "f0000001"), "pending survives");
   assert.equal(w2.jobs.filter((j) => j.status === "done").length, 50);
   assert.equal(w2.jobs.filter((j) => j.id !== "f0000001").length, 49, "the oldest deliverable rows went");
+});
+
+test("sweep closes the still-open window of a row finished before windows closed on finish, once", async () => {
+  const w = world({ jobs: [finishedRow(1, { cleanedUp: undefined })] });
+  w.windows.push({ index: 11, opencodeSessionId: "ses_f1" });
+  w.setNow(T0 + 1000);
+  await sweepDelegateJobs(w.deps);
+  assert.deepEqual(w.calls.kill.map((k) => k.windowIndex), [11]);
+  assert.equal(w.jobs[0].cleanedUp, true);
+  assert.equal(w.jobs.length, 1, "the record stays");
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.calls.kill.length, 1, "not closed again");
+});
+
+test("sweep never closes a window whose index now belongs to another session", async () => {
+  const w = world({ jobs: [finishedRow(1, { cleanedUp: undefined })] });
+  w.windows.push({ index: 11, opencodeSessionId: "ses_someone_else" });
+  w.setNow(T0 + 1000);
+  await sweepDelegateJobs(w.deps);
+  assert.equal(w.calls.kill.length, 0);
+  assert.equal(w.jobs[0].cleanedUp, true);
 });
 
 test("retention (count): beyond 50 finished rows the oldest are pruned with their windows closed", async () => {

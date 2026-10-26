@@ -1261,7 +1261,7 @@ async function countFilesChanged(job, deps) {
 // Pure-ish: all I/O is injected; exported for unit tests.
 // ---------------------------------------------------------------------------
 export async function cleanupTerminalJob(job, deps = {}) {
-  const { killWindow, gitRemoveWorktree } = deps;
+  const { gitRemoveWorktree } = deps;
   if (job?.worktree && gitRemoveWorktree) {
     try {
       const res = await gitRemoveWorktree({ path: job.worktree, force: false });
@@ -1277,13 +1277,7 @@ export async function cleanupTerminalJob(job, deps = {}) {
       return { cleanedUp: false, reason: "remove-failed" };
     }
   }
-  if (killWindow && job?.tmuxSession != null && job?.windowIndex != null) {
-    try {
-      await killWindow({ sessionName: job.tmuxSession, windowIndex: job.windowIndex });
-    } catch (e) {
-      console.warn(`[delegate] cleanup killWindow failed for ${job?.id}:`, e?.message ?? e);
-    }
-  }
+  await closeJobWindow(job, deps);
   return { cleanedUp: true };
 }
 
@@ -1396,6 +1390,14 @@ export async function sweepDelegateJobs(deps = {}) {
     if (jobs.length === 0) return;
     const nowMs = now();
 
+    // Jobs that finished before worktree-less windows were closed on finish still
+    // have their window open: close it once (cleanedUp marks it done).
+    for (const job of jobs) {
+      if (!isTerminal(job) || job.worktree || job.cleanedUp != null || job.completionDelivery === "pending") continue;
+      await closeJobWindow(job, deps);
+      await patchJob(job.id, { cleanedUp: true }, deps);
+    }
+
     // BET-418 §B: parent session gone → stop the job immediately (there is
     // nobody left to report to), then the same terminal cleanup runs inside
     // stopJob. Best-effort: a sessionExists failure degrades to "assume
@@ -1494,8 +1496,8 @@ async function persistRetention({ load, save, deps }, nowMs) {
     if (jobs.length === 0) return;
     const { retained, pruned } = applyRetention(jobs, nowMs);
     if (pruned.length === 0) return;
-    // A V2 row with no worktree keeps its window after it finishes, so pruning
-    // its record closes that window FIRST — a window left without a record
+    // A worktree-less row's window may still be open (the user reopened the
+    // session after it finished), so pruning its record closes that window FIRST — a window left without a record
     // would reappear as an ordinary top-level session.
     for (const j of pruned) {
       if (!j.worktree) await closeJobWindow(j, deps ?? {});
@@ -2205,9 +2207,9 @@ async function dropResumeRestore(job, deps = {}) {
  * whose result Manta posts — the minted `completionMessageId` with
  * `completionDelivery:"pending"`, so a crash right after can never lose the
  * result nor post it twice. The first terminal transition wins; later ones are
- * no-ops. The N7 post (if any) happens AFTER the write. A job without a
- * worktree keeps its window and record (the row shows done); a job WITH one is
- * cleaned up (worktree + window removed, a dirty one kept).
+ * no-ops. The N7 post (if any) happens AFTER the write. Then the job is cleaned
+ * up: its window is closed, and a worktree (if any) is removed — a dirty worktree
+ * keeps both.
  *
  * `interrupted:true` says the child's raw outcome was an interruption. What that
  * means is decided against the LIVE record, under the lock: a pause that was
@@ -2307,12 +2309,18 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   return { ok: true };
 }
 
-// What a finished V2 job leaves behind: a worktree job is cleaned up (worktree + window
-// removed; a dirty worktree keeps both and the record says so, so retention never
-// prunes it); an unfinished resume's old window goes.
+// What a finished V2 job leaves behind: nothing in the sidebar. Its window is
+// closed (only if it still belongs to the job — tmux reuses indexes) and a worktree
+// is removed; a dirty worktree keeps both and the record says so, so retention never
+// prunes it. An unfinished resume's old window goes too. The record stays, so the
+// session can still be reopened from the job.
 async function finishV2Cleanup(job, deps) {
   await dropResumeRestore(job, deps);
-  if (!job.worktree) return;
+  if (!job.worktree) {
+    await closeJobWindow(job, deps);
+    await patchJob(job.id, { cleanedUp: true }, deps);
+    return;
+  }
   let cleanedUp = false;
   try {
     cleanedUp = !!(await cleanupTerminalJob(job, deps)).cleanedUp;
