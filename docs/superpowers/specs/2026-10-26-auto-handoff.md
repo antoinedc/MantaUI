@@ -1,152 +1,272 @@
 # Auto-handoff — design
 
-Status: draft · Branch: `feat/auto-handoff`
+Status: draft v2 (open questions resolved) · Branch: `feat/auto-handoff`
+Target runtime: opencode **V2** (box verified on 2.0.30, main already on V2).
 
 ## Problem
 
 When a chat session gets long, the user manually asks "give me a handoff prompt
-to keep going in a fresh session", clears, and pastes it. Today the only
-automatic mechanisms are opencode's own auto-compaction (fires mid-task on
-overflow — the worst moment) and the optimizer's idle background compaction.
-Both summarise in place, which is lossy and stacks summary on summary.
+to keep going in a fresh session", clears, and pastes it. The only automatic
+mechanisms today are opencode's own auto-compaction (fires mid-task on overflow
+— the worst moment) and the optimizer's idle background compaction. Both
+summarise in place: lossy, and they stack summary on summary.
 
 ## Evidence this design rests on
 
 - **Context rot** (Chroma, 18 models): quality degrades with input length well
-  before the window is full, on every model. → trigger on an absolute budget,
-  not "nearly full".
+  before the window is full, on every model → trigger on an absolute budget.
 - **Handoff beats compaction** (Amp removed compaction for handoff, Oct 2025):
-  goal-directed extraction into a fresh thread instead of a summary of
-  everything.
-- **Structured > free-form summaries** (Factory, 36k messages): fixed sections
-  (intent / files / decisions / next steps) outscore Anthropic and OpenAI
-  compression. Artifact recall (which files changed) is the weakest dimension
-  for every method → the system records it, not the model.
+  goal-directed extraction into a fresh thread, shown as an editable draft.
+- **Structured > free-form** (Factory, 36k messages): fixed sections beat
+  Anthropic/OpenAI compression; file-artifact recall is the weakest dimension
+  for every method → the system records artifacts, not the model.
 - **Durable state > summary** (Anthropic long-running harness): progress files,
-  git, todos are what make a fresh context productive.
+  git and todos are what make a fresh context productive.
 - **Tool-output clearing** is the cheapest lever (Anthropic context editing,
   opencode `compaction.prune`).
 
-## Scope
+## Part A — enable tool-output pruning on every box (ships first, independent)
 
-### Part A — enable tool-output pruning for every box (ships first, independent)
-
-- opencode's `compaction.prune` defaults to off. Set it on.
-- **Rollout:** a one-time migration run by the box updater, BEFORE it restarts
-  opencode (so it takes effect on that same update) and on fresh install.
-  - Edits the opencode config file surgically (comment-preserving jsonc edit,
-    same library the server already uses for removals). Never a hand-rolled
-    read/merge/write.
-  - Writes `compaction.prune: true` **only if the key is absent**. An explicit
+- opencode's `compaction.prune` defaults to off; V2 still honours it (verified in
+  the 2.0.30 config schema). Set it on.
+- **Rollout:** one-time migration run by the box updater BEFORE it restarts
+  opencode (so it applies on that same update), and by the installer.
+  - Surgical, comment-preserving edit of the opencode config file (same jsonc
+    library the server already uses). Never a hand-rolled read/merge/write.
+  - Writes `compaction.prune: true` **only if the key is absent**; an explicit
     user value (true or false) is left alone.
-  - Records a marker (`migrations.pruneDefault` in the box's state config) so it
-    runs once. A user who later turns pruning off is never re-overridden.
-  - Never fatal: a missing/unparseable config logs a warning and the update
-    continues (same rule as the other updater steps).
-- The dev box has already been set by hand (2026-10-26); the migration must see
-  the key present and only record the marker.
+  - Records marker `migrations.pruneDefault` in the box state config so it runs
+    once; a user who later turns pruning off is never re-overridden.
+  - Never fatal: missing/unparseable config → warn, update continues.
+- Dev box set by hand 2026-10-26 (takes effect at opencode's next restart); the
+  migration must see the key present and only record the marker.
 
-### Part B — the handoff action
+## Part B — the handoff engine
 
-Three entry points, one engine:
-1. `/handoff [goal]` typed in the composer.
-2. A "Hand off" button in the context pill popover.
-3. A `handoff` tool the agent can call itself (global opencode tool, same thin
-   registrar pattern as the other Manta tools).
+One server-owned engine, five entry points:
 
-Engine steps (server-owned):
-1. **Generate the handoff in the current session, right after a turn ends**,
-   on the current model — cache is warm, so re-reading history is cheap, and
-   the model holds the intent. Generated from a fixed template:
-   `Goal · Current state · Decisions (and why) · Dead ends tried · Next step ·
-   Open questions`. The optional user goal steers it.
-   - The generation turn must NOT appear as a visible turn in the old
-     session's transcript (or must be clearly labelled as the handoff).
-2. **Append system-recorded facts** (not model-written): files edited in the
-   session (from tool parts), branch + uncommitted-change summary, the todo
-   list, the last test/build command and its result, the stored standing
-   instructions (reuse the optimizer's constraint extraction store).
-3. **Create the fresh session in the same window** via the existing clear path
-   (inherits cwd, carries the model override forward).
-4. **Link** the new session to the old one: the prompt names the previous
-   session id and tells the agent it can look things up there on demand
-   (existing transcript read tooling) rather than carrying it.
-5. Mode-dependent finish (Part D): send the prompt, or leave it as an editable
-   draft in the composer.
+| Entry point | Who | Default outcome |
+|---|---|---|
+| `/handoff [goal]` in the composer | user | per mode (D) |
+| "Hand off" in the context pill popover (desktop) / context meter sheet (iOS) | user | per mode |
+| `handoff` tool, `action: "suggest"` | agent | always a suggestion card |
+| `handoff` tool, `action: "handoff"` | agent | per mode |
+| automatic trigger (Part C) | server | per mode |
 
-### Part C — when it fires automatically
+### B1. Producing the handoff text
+
+Two producers, same template and same appended facts:
+
+1. **Agent-authored (tool path).** The agent passes the handoff body as the
+   tool's argument (it holds the full context and the cache is warm — no extra
+   model call). Optional `goal` argument.
+2. **Server-generated (button, `/handoff`, automatic).** Uses opencode V2's
+   session-scoped one-shot generation — `POST /api/session/{id}/generate
+   {prompt}` → `{data:{text}}`, the same call behind V2's built-in `/btw` side
+   question. **Verified live on the box:** it answers from the session's full
+   history (recalled a codeword from an earlier turn) and adds **no** message to
+   the session (message count unchanged). It runs on the session's own model and
+   prefix, so the prompt cache stays warm. Run it only when the session is idle
+   (shared busy gate).
+
+Template (both producers), markdown:
+`## Goal · ## Current state · ## Decisions (and why) · ## Dead ends tried ·
+## Next step · ## Open questions`. A user `goal` steers it ("hand off to:
+<goal>").
+
+### B2. System-recorded facts (appended by the server, never model-written)
+
+`## Context from the previous session`:
+- previous session id + title, and a line telling the agent it may read that
+  transcript on demand rather than assume;
+- files edited in the session (from the session's tool parts);
+- branch + uncommitted-change summary of the session directory;
+- the todo list as of now;
+- the last test/build command run and its pass/fail;
+- the stored standing instructions (reuse the optimizer's constraint store; run
+  extraction first if none stored).
+
+Assembly is a pure function (session data in → markdown out), unit-tested.
+
+### B3. The suggestion card (dedicated block)
+
+Whenever a handoff is a *suggestion* rather than an automatic switch, the
+transcript shows a **dedicated handoff block**, distinct from normal assistant
+text:
+- Header: "Handoff prompt" + why it was produced (agent / you / context budget
+  at N tokens).
+- Body: the full prompt rendered as markdown (collapsed after ~12 lines with
+  "Show all").
+- Three buttons:
+  1. **Copy** — copies the raw **markdown** source (not rendered text).
+  2. **Clear & start** — replaces this session in the same window with a fresh
+     one, sends the prompt; the old session is hidden (Part E).
+  3. **Start in new session** — creates **another** chat session in the same
+     project (new window, same directory), with the **same model settings** as
+     the current session (provider + model, reasoning effort / variant, fast
+     toggle, agent), sends the prompt and switches to it. The current session
+     stays where it is, visible and untouched.
+- The user can edit the prompt before starting (an "Edit" affordance that
+  drops it into the target composer instead of sending). Not a separate button
+  row item on mobile — long-press / secondary action.
+- After either start button succeeds, the card shows "Started in <session>"
+  with a link, and its start buttons disable (idempotent: one start per card).
+
+**Carrier (so the card survives reloads and renders on every client):**
+- Agent path: the `handoff` tool part itself. Clients render tool parts named
+  `handoff` with this block. The tool output is the final markdown (agent body +
+  B2 facts), so the card is fully reconstructable from the transcript.
+- Server-generated path in suggest mode: the server stores the handoff record
+  (B5) and publishes a bus event; clients render the card pinned above the
+  composer (same place as other session cards), fetched from the record on
+  load. It is **not** injected into the session's model context.
+
+### B4. Executing a start
+
+`Clear & start` and auto mode reuse the existing clear path (fresh session in
+the same window, cwd + model override carried). `Start in new session` reuses
+the existing new-window path (chat-mode window in the same tmux session /
+project). In both: send the prompt as the new session's first turn with the
+model settings supplied by the caller. Model settings are client-side state
+today (per-session on desktop and iOS), so **the caller passes them in the
+request**, and the bus event carries them so every client persists them for the
+new session id.
+
+### B5. Persistence
+
+Server store (`~/.manta/handoffs.json`, atomic writes, via `statePath`):
+handoff records `{id, fromSessionId, toSessionId?, kind: suggest|auto,
+trigger, text, createdAt, startedAt?, startedHow?}` and session linkage
+`{sessionId → predecessorId, hidden}`. Bounded retention (e.g. 200 records /
+30 days); linkage for live sessions is never pruned.
+
+## Part C — when it fires automatically
 
 Fire when **all** hold:
-- **At a natural boundary:** a turn has just completed (session idle), AND one
-  of: every todo is terminal, a commit landed during the last turn, or (agent
-  tool path) the agent judged the task finished.
-- **Over budget:** context tokens > the session's working budget.
-- Not already handed off within a cooldown; session not busy (shared busy gate).
+- **Natural boundary:** a turn has just completed (session idle) AND one of:
+  every todo is terminal; a commit landed in the last turn; or the agent called
+  the tool (`action: "handoff"`).
+- **Over budget:** context tokens > working budget.
+- Not handed off within a cooldown (30 min); no handoff already in flight;
+  session not busy; mode ≠ off.
+- If the user has typed into the composer (unsent draft), do not auto-switch —
+  degrade to a suggestion card.
 
 **Working budget** = min(family ceiling, 60% of the model's context window).
-- Family ceilings live in ONE table with defaults: frontier models (Opus,
-  Sonnet, GPT-6 class) ≈ 200k; smaller/cheaper models ≈ 100k. Unknown → 60% of
-  window. No user setting.
-- Rationale: quality tracks absolute tokens, not % full; cost per turn grows
-  with context too.
+One table, defaults: frontier (Opus, Sonnet, GPT-6 class) ≈ 200k; smaller /
+cheaper ≈ 100k; unknown model → 60% of window. No user setting.
 
-**Agent awareness:** when context crosses ~70% of the budget, the agent gets a
-one-line note of its usage and the instruction to call `handoff` at its next
-natural stopping point. **Open question:** confirm the existing Manta opencode
-plugin can inject this under opencode v2 (hook surface changed in v2).
+**Agent awareness (resolved):** the existing Manta optimizer plugin already runs
+on opencode V2's per-request `context` hook and already fetches a per-session
+policy from manta-server. Extend that policy with `{contextTokens, budget}`;
+when usage crosses 70% of the budget the plugin appends a short note **at the
+tail of the request** (not the system prompt — a system edit would invalidate
+the prompt cache every turn): "Context: 148k of a 200k working budget. At your
+next natural stopping point, call `handoff`." Fail-open like the rest of the
+plugin. Also instruct the `handoff` tool description to prefer `suggest` when
+unsure whether the user wants to continue here.
 
 **Backstop:** opencode auto-compaction stays on as the overflow safety net. When
-handoff mode ≠ off, the optimizer's idle background compaction hands off
-instead of compacting (one owner per session — never both).
+mode ≠ off, the optimizer's idle background compaction hands off instead of
+compacting (one owner per session — never both).
 
-### Part D — mode control and old sessions
+## Part D — mode control
 
-- **Mode:** `auto` (default) · `suggest` · `off`, per box config.
-  - `auto`: new session is created and the prompt is sent.
-  - `suggest`: new session is created with the prompt as an editable draft.
-  - `off`: no automatic trigger; manual `/handoff` and the button still work
-    (as suggest).
-- **Control:** sits next to the "Bypassing permissions" toggle, click cycles
-  auto → suggest → off, label states the current mode. Must work on the native
-  iOS client too or be absent there (no dead control).
-- **Old sessions are hidden** from the sidebar after a handoff. They are
-  reachable from the session "…" menu (top right) as "Previous sessions" —
-  newest first, opens read-only in the same pane.
-- Every automatic handoff is visible: a one-line notice at the top of the new
-  session ("Continued from <title> — handed off at 182k tokens") and an entry on
-  the optimizer activity log.
+- Box config `handoffMode`: `auto` (default) · `suggest` · `off`.
+  - `auto`: fresh session in the same window, prompt sent, old session hidden.
+    A one-line notice tops the new session ("Continued from <title> — handed off
+    at 182k tokens · View previous") and an entry goes on the optimizer activity
+    log.
+  - `suggest`: a suggestion card (B3) appears; nothing switches until the user
+    presses a button.
+  - `off`: no automatic trigger; manual `/handoff`, the button, and the agent's
+    `suggest` still produce cards.
+  - The agent's `action: "suggest"` always yields a card, in every mode.
+- **Desktop:** control next to "Bypassing permissions" in the composer; click
+  cycles auto → suggest → off; label shows the mode ("Handoff: auto").
+- **iOS:** in the chat overflow sheet, directly under the existing "Trust mode"
+  toggle, as a three-way segmented control. Same config key over `config:update`.
+
+## Part E — old sessions
+
+- After `Clear & start` or an auto handoff, the old session is **hidden** from
+  the sidebar (desktop) and session list (iOS). Not deleted.
+- Reachable from the session "…" menu (desktop: top right; iOS: chat overflow
+  sheet) as **Previous sessions** — the predecessor chain, newest first. Opening
+  one shows it read-only in the same pane with a "Back to current" bar.
+- `Start in new session` hides nothing.
+
+## Part F — iOS scope (in this feature, not a follow-up)
+
+Every user-visible piece ships on iOS or is absent there (no dead controls):
+1. Render the handoff block (B3) for `handoff` tool parts and pinned suggestion
+   cards, with Copy (markdown to `UIPasteboard`), Clear & start, Start in new
+   session.
+2. Mode control in the overflow sheet (Part D).
+3. "Previous sessions" in the overflow sheet, read-only predecessor view.
+4. Auto-handoff notice at the top of the continued session.
+5. Honour the `handoff` bus event: switch the open chat to the new session id,
+   carry model prefs, drop the old session from the list.
+6. `/handoff` typed in the composer works (it is just a command to the server).
+7. "Hand off" action in the context meter's detail sheet (if the meter has no
+   sheet today, put it in the overflow sheet instead).
+
+iOS changes are verified per `mobile/native/AGENTS.md` (no Swift toolchain on
+the Linux box — build via the Mac worker / CI).
 
 ## Contracts to pin before parallel implementation
 
-- Server endpoint for the handoff action (request: session id, optional goal,
-  trigger source `user|button|agent|auto`; response: new session id, mode
-  applied). Error codes: `busy`, `already_handing_off`, `generation_failed`.
-- Bus event for the renderer: `handoff` with `{fromSessionId, toSessionId,
-  mode, trigger}` so the pane swaps and the sidebar hides the old session.
-- Session linkage persisted server-side (old → new, new → old) so the "…" menu
-  can list predecessors after restarts.
-- Config keys: `handoffMode`, migration marker `migrations.pruneDefault`.
+- `POST /api/handoff` `{sessionId, action: "suggest"|"start", how?:
+  "clear"|"new-session", goal?, text?, cardId?, model?: {providerID, modelID,
+  variant?, fast?, agent?}, trigger: "user"|"button"|"agent"|"auto"}` →
+  `{handoffId, text, toSessionId?, window?}`. Errors (400-class, readable):
+  `busy`, `already_in_flight`, `already_started`, `generation_failed`,
+  `not_found`.
+- `GET /api/handoff?sessionId=` → pending suggestion cards + predecessor chain.
+- `POST /api/handoff/:id/start` `{how, model}` (card buttons) — idempotent on
+  `already_started`.
+- Bus event `handoff` `{handoffId, fromSessionId, toSessionId?, kind, trigger,
+  how?, model?}`.
+- Agent tool `handoff` `{action: "suggest"|"handoff", goal?, body}` — global
+  opencode tool, thin registrar to the endpoint, returns the final markdown.
+- Config keys: `handoffMode`, `migrations.pruneDefault`.
+- Rendering rule: a tool part named `handoff` renders as the handoff block on
+  desktop and iOS.
 
-## Dependencies / risks
+## Resolved questions (2026-10-26)
 
-- **opencode v2 on the dev box (2.0.30):** `PATCH /global/config` now returns
-  405 (config moved to an authenticated endpoint). Manta's config writer is
-  broken there; Part A deliberately does not depend on it. Session create /
-  prompt / message-read used by Part B must be re-verified against v2.
-- Hidden generation turn: if opencode can't run a turn without persisting it,
-  fall back to a throwaway forked session for generation (warm-cache benefit
-  partially kept — fork shares the prefix).
-- Quality regression risk in `auto` mode → gated by the eval below.
+1. **Can the agent be told its usage on V2?** Yes — V2 plugins get a
+   per-request `context` hook (the optimizer plugin already uses it; built-in
+   plugins use it to edit tools/system). Note goes at the request tail.
+2. **Hidden generation?** Yes — `POST /api/session/{id}/generate`, verified live
+   (uses session history, adds no message). No fork/throwaway needed.
+3. **V2 session API compatibility?** Verified live: create, prompt, active,
+   message list, delete all 200/204; main already targets V2 for every path this
+   feature uses. (The earlier "config writer 405" note applied only to a stale
+   pre-V2 branch.)
+
+## Remaining risks
+
+- **Token accounting of `generate`:** unverified whether its usage lands in the
+  ledger the optimizer/usage dial reads. Measure during implementation; if not,
+  record it explicitly so plan-usage numbers stay honest.
+- **Tool-path content quality:** the agent writes the body itself; the template
+  is enforced by the tool description + a server check that all six headings
+  exist (missing → server regenerates via `generate`).
+- **Auto mode switching under the user:** mitigated by boundary-only firing,
+  the unsent-draft rule, the visible notice, and Previous sessions.
 
 ## Verification
 
-- Unit (pure): trigger decision (boundary × budget × cooldown × busy × mode),
-  budget table, migration idempotency (absent → set; present true/false →
-  untouched; marker → skip), system-facts assembly.
-- **Quality eval before `auto` ships as default:** probe-based (Factory method)
-  over ≥30 past sessions from this box: generate a handoff and, separately, an
-  opencode compaction at the same point; ask recall / files-changed /
-  next-step / decision probes; judge-score both. Handoff must match or beat
-  compaction.
-- Live: one real session driven over budget hands off in auto, suggest and off
-  modes; old session hidden and reachable from "…".
+- Unit (pure): trigger decision (boundary × budget × cooldown × busy × mode ×
+  draft), budget table, migration idempotency (absent → set; true/false →
+  untouched; marker → skip), facts assembly, template check, card start
+  idempotency.
+- **Quality gate before `auto` ships as default:** probe-based eval (Factory
+  method) over ≥30 past sessions from this box: at the same cut point produce a
+  handoff and an opencode compaction; ask recall / files-changed / next-step /
+  decision probes; judge-score. Handoff must match or beat compaction.
+- Live (desktop + iOS): a session driven over budget hands off in auto, shows a
+  card in suggest, does nothing automatic in off; agent `suggest` card with all
+  three buttons; Start in new session keeps model settings; old session hidden
+  and reachable via Previous sessions.
