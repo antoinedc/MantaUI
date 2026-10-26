@@ -45,6 +45,11 @@ const CONFIG_PATH = statePath("config.json");
 const DEFAULT_CONFIG = {
   projects: [],
   chatAutoAllow: false,
+  // Auto-handoff (spec 2026-10-26): "auto" replaces a conversation that outgrew
+  // its context budget with a fresh one carrying a handoff prompt; "suggest"
+  // only offers the prompt as a card; "off" never acts on its own (manual and
+  // agent entries still work). Default auto — the user's decision.
+  handoffMode: "auto",
   // BET-246: per-session worktree defaults (settings-only — read via the
   // generic configGet/configUpdate channel like every other AppConfig field).
   worktreePerSession: false,

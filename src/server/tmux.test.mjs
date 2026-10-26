@@ -25,6 +25,9 @@ import {
   stampOwner,
   resolveOwner,
   findWindowForCwd,
+  createStampedChatWindow,
+  findWindowByName,
+  findWindowBySessionId,
   killSession,
   renameSession,
   _resetOwnedSessionsCache,
@@ -1158,4 +1161,52 @@ test("newSession without forgeIssueRef stamps only @manta-session-id", async () 
   assert.equal(stamps.length, 1, "only the session-id stamp is issued");
   assert.ok(stamps[0].args.includes("@manta-session-id"));
   assert.ok(!stamps.some((c) => c.args.includes("@manta-forge-issue")), "no forge-issue stamp");
+});
+
+// ---- auto-handoff window helpers (spec §5.3 step 4a) ---------------------------
+
+test("createStampedChatWindow creates and stamps in ONE tmux invocation (a `;` chain), under the temporary name", async () => {
+  const cmds = [];
+  _setRun(async (cmd, args) => {
+    cmds.push({ cmd, args });
+    return { stdout: "7\n", stderr: "" };
+  });
+  try {
+    const dir = await mkdtemp(join(tmpdir(), "tmux-stamp-"));
+    const idx = await createStampedChatWindow({ sessionName: "proj", tempName: "handoff-hof_x", cwd: dir, sessionId: "ses_new" });
+    assert.equal(idx, 7);
+    assert.equal(cmds.length, 1, "one command — there is no moment the window exists unstamped");
+    const a = cmds[0].args;
+    assert.equal(cmds[0].cmd, "tmux");
+    assert.deepEqual(a.slice(0, 2), ["new-window", "-t"]);
+    assert.ok(a.includes("handoff-hof_x") && a.includes("-P") && a.includes("sleep infinity"));
+    const sep = a.indexOf(";");
+    assert.ok(sep > 0, "chained with a separate `;` argument");
+    assert.deepEqual(a.slice(sep + 1), ["set-window-option", "-t", "proj:=handoff-hof_x", "@manta-session-id", "ses_new"]);
+    await rm(dir, { recursive: true, force: true });
+  } finally {
+    _setRun(null);
+  }
+});
+
+test("createStampedChatWindow refuses a missing directory before touching tmux", async () => {
+  let ran = 0;
+  _setRun(async () => void ran++);
+  try {
+    await assert.rejects(createStampedChatWindow({ sessionName: "p", tempName: "t", cwd: "/no/such/dir/xyz", sessionId: "s" }), /does not exist/);
+    assert.equal(ran, 0);
+  } finally {
+    _setRun(null);
+  }
+});
+
+test("findWindowBySessionId / findWindowByName locate a window across projects", async () => {
+  const projects = async () => [
+    { tmuxSession: "a", defaultCwd: "/a", windows: [{ index: 0, name: "one", paneCurrentPath: "/a/x", opencodeSessionId: "ses_1" }] },
+    { tmuxSession: "b", defaultCwd: "/b", windows: [{ index: 4, name: "handoff-hof_9", paneCurrentPath: "/b", opencodeSessionId: "ses_2" }] },
+  ];
+  assert.deepEqual(await findWindowBySessionId("ses_1", projects), { sessionName: "a", windowIndex: 0, name: "one", cwd: "/a/x" });
+  assert.equal(await findWindowBySessionId("ses_zzz", projects), null);
+  assert.deepEqual(await findWindowByName("handoff-hof_9", projects), { sessionName: "b", windowIndex: 4 });
+  assert.equal(await findWindowByName("nope", projects), null);
 });

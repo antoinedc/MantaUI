@@ -58,6 +58,7 @@ import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
 import { searchMessages } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
 import { getDb } from "./opencodeDb.mjs";
+import { ERROR_STATUS as HANDOFF_ERROR_STATUS } from "./handoff/engine.mjs";
 import { loadTopology, planRestore, executeRestore, describeRestore } from "./topology.mjs";
 import { createOptimizerSummary } from "./optimizer/summary.mjs";
 import { createOptimizerSeries } from "./optimizer/series.mjs";
@@ -609,6 +610,10 @@ export function buildHandlers({
   // whose definitions provably run in the background (commandBackground.mjs).
   // Injectable for tests; the default reads the real definitions.
   backgroundCommandNames = defaultBackgroundCommandNames,
+  // Auto-handoff (src/server/handoff/): the engine facade. Null when not wired
+  // (tests) → admissions take the raw route and the handoff:* channels answer
+  // an actionable error.
+  handoff = null,
 }) {
   // The cto:conversation-* channels require the composed runtime. Answer with
   // an actionable message rather than an opaque crash when it isn't wired.
@@ -619,6 +624,13 @@ export function buildHandlers({
     return ctoConversation;
   }
 
+  function requireHandoff() {
+    if (!handoff) throw Object.assign(new Error("auto-handoff isn't available on this box"), { code: "unavailable", name: "HandoffError" });
+    return handoff;
+  }
+  function handoffExpired() {
+    return Object.assign(new Error("This handoff has expired."), { code: "expired", name: "HandoffError" });
+  }
   // K1: `delivery` is "steer" | "queue" or absent; anything else is refused
   // here rather than forwarded for V2 to reject with an opaque 400.
   function checkDelivery(input) {
@@ -834,6 +846,9 @@ export function buildHandlers({
     // the mirror claiming something the box does not do. Both directions are a
     // config-file edit + live reload (V2): nothing restarts, no turn ends.
     "config:update": async (patch) => {
+      if (patch?.handoffMode !== undefined && !["auto", "suggest", "off"].includes(patch.handoffMode)) {
+        throw new Error('handoffMode must be "auto", "suggest" or "off"');
+      }
       if (Array.isArray(patch?.skillRegistryUrls)) {
         const applied = await providers.setSkillRegistryUrls(patch.skillRegistryUrls);
         if (!applied.ok) throw new Error(applied.error);
@@ -1331,6 +1346,10 @@ export function buildHandlers({
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(withoutDelivery(input));
       }
+      // Auto-handoff §6.1: the admission resolver runs before anything else — a
+      // replaced conversation's message goes to its successor, a fenced one is
+      // held. The result carries `deliveredTo`.
+      if (handoff && input) return handoff.admitPrompt(input);
       return oc.sendPrompt(input);
     },
 
@@ -2039,12 +2058,31 @@ export function buildHandlers({
         if (input.background === true) throw new Error("Background runs aren't available for the CTO conversation");
         return ctoConversation.admitCommand(withoutBackground(withoutDelivery(input)));
       }
+      // Auto-handoff §6.1: a command is never held — refused while a handoff owns
+      // the session, otherwise sent to the live end of the replacement chain.
+      if (handoff && input) input = { ...input, sessionId: handoff.guardCommand(input.sessionId).target };
       // N2: resolves { jobId } (a Manta-wrapped run) or void (always-background).
       if (input?.background === true) return runBackgroundCommand(input);
       if (input && (await isAlwaysBackground(input.sessionId, String(input.command ?? "").trim()))) {
         return oc.runCommand({ ...withoutBackground(input), noSync: true });
       }
       return oc.runCommand(input && "background" in input ? withoutBackground(input) : input);
+    },
+
+    // ---- auto-handoff (spec §11 / §15): the REST routes' twins, one implementation ----
+    // Errors are HandoffError (code + safe message); the transport shows `message`.
+    "handoff:create": async (input) => ({ handoff: await requireHandoff().create(input ?? {}) }),
+    "handoff:list": (input) => requireHandoff().list(input ?? {}),
+    "handoff:get": (input) => {
+      const h = requireHandoff().get(input?.id);
+      if (!h) throw handoffExpired();
+      return { handoff: h };
+    },
+    "handoff:start": async (input) => ({ handoff: await requireHandoff().start(input?.id, input ?? {}) }),
+    "handoff:retry": async (input) => ({ handoff: await requireHandoff().retry(input?.id) }),
+    "handoff:draft-consumed": async (input) => {
+      await requireHandoff().draftConsumed(input?.id, input?.draftRevision);
+      return undefined;
     },
 
     // ---- cto: the conversation channels (P3a3, spec §8.3) ----
@@ -2662,6 +2700,12 @@ export async function handleRpcRequest(handlers, channel, req, res) {
       const result = await dispatch(handlers, channel, args);
       sendJson(200, { result: result ?? null });
     } catch (e) {
+      // Auto-handoff errors carry a stable code (§15: "the same {error, message} codes").
+      const status = typeof e?.code === "string" ? HANDOFF_ERROR_STATUS[e.code] : undefined;
+      if (e?.name === "HandoffError" && status) {
+        sendJson(status, { error: e.code, message: e.message, ...(e.handoff ? { handoff: e.handoff } : {}) });
+        return;
+      }
       sendJson(500, { error: String(e?.message ?? e) });
     }
   });

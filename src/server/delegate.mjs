@@ -362,9 +362,15 @@ export function resolveForgeOwner(projects, parentDirectory) {
 // List / get
 // ---------------------------------------------------------------------------
 
-export async function listJobs({ sessionID } = {}, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
+export async function listJobs({ sessionID, sessionIDs } = {}, { load = loadJobs, readProgress = defaultReadProgress } = {}) {
   const jobs = await load();
-  const scoped = sessionID === undefined ? jobs : jobs.filter((j) => j.parentSessionID === sessionID);
+  // `sessionIDs` (auto-handoff §6.3): the whole replacement chain of the asked-for session.
+  const wanted = Array.isArray(sessionIDs) ? new Set(sessionIDs) : null;
+  const scoped = wanted
+    ? jobs.filter((j) => wanted.has(j.parentSessionID))
+    : sessionID === undefined
+      ? jobs
+      : jobs.filter((j) => j.parentSessionID === sessionID);
   // Expose the child's live progress record on the job (BET-790 §5) so the
   // renderer's job card can show a live label instead of "Ruminating…" for
   // thirty minutes. Reads the SAME progress.json store — no second record or
@@ -2125,6 +2131,33 @@ async function patchJob(id, patch, deps = {}, { onlyIf } = {}) {
   });
 }
 
+/**
+ * Auto-handoff commit (§6.3): move every job that belonged to `fromSessionId` onto
+ * `toSessionId`. `parent` re-points jobs the session STARTED; `child` re-points a
+ * running job whose OWN session was the one replaced. Idempotent — a recovery
+ * re-runs it. Returns how many records changed.
+ * @param {{ fromSessionId: string, toSessionId: string, parent?: boolean, child?: boolean }} a
+ */
+export async function repointJobSessions({ fromSessionId, toSessionId, parent = true, child = true }, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  return jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    let changed = 0;
+    const next = jobs.map((j) => {
+      let u = j;
+      if (parent && j.parentSessionID === fromSessionId) u = { ...u, parentSessionID: toSessionId };
+      if (child && j.childSessionID === fromSessionId) u = { ...u, childSessionID: toSessionId };
+      if (u !== j) changed++;
+      return u;
+    });
+    if (changed > 0) {
+      await save(next);
+      for (const j of next) if (j.parentSessionID === toSessionId || j.childSessionID === toSessionId) publish?.({ kind: "delegate.updated", payload: { id: j.id, status: j.status, launchState: j.launchState, activity: j.activity } });
+    }
+    return changed;
+  });
+}
+
 async function removeJobRecord(id, deps = {}) {
   const { load = loadJobs, save = saveJobs, publish } = deps;
   await jobsLock.runExclusive(async () => {
@@ -2566,6 +2599,10 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   const { listActiveIds, readSession } = deps;
   if (typeof listActiveIds !== "function" || typeof readSession !== "function") return { settled: false, reason: "no-readers" };
   if (isTerminal(job)) return { settled: false, reason: "terminal" };
+  // Auto-handoff (§6.3): the job's turn end is its completion signal, but a `send`
+  // handoff registered on its own session means the work continues in a successor.
+  // Defer; the handoff commit re-points the job, a failure re-runs this settlement.
+  if (deps.deferSettlement?.(job.childSessionID)) return { settled: false, reason: "handoff-pending" };
   // A paused job's last child ended `interrupted` — that is WHY it is paused. Only a
   // running job has a run to settle.
   if (job.status !== "running") return { settled: false, reason: "not-running" };
@@ -3687,7 +3724,14 @@ export function createDelegateEngine(baseDeps) {
       return serialize(sid, () => observeEvent(evt, deps));
     },
     sweep: () => sweepDelegateJobs(deps),
-    listJobs: (filter) => listJobs(filter, deps),
+    // §6.3: a parent's list includes the jobs of its whole replacement chain.
+    listJobs: (filter) => {
+      const chain = filter?.sessionID !== undefined ? deps.replacementChain?.(filter.sessionID) : null;
+      return listJobs(Array.isArray(chain) && chain.length > 1 ? { sessionIDs: chain } : filter, deps);
+    },
+    repointSessions: (a) => repointJobSessions(a, deps),
+    /** Is `sessionId` the own session of a job that is still running? */
+    isRunningJobSession: async (sessionId) => ((await (deps.load ?? loadJobs)()).some((j) => j.childSessionID === sessionId && j.status === "running")),
     getJob: (id) => getJob(id, deps),
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
