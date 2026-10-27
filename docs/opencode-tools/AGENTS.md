@@ -356,14 +356,16 @@ ingests, nothing dispatches.
 
 ## MantaUI background delegation
 
-You have three ways to farm out work, and the axis that separates the last
-two is **file isolation**, not duration:
+You have several ways to farm out work, and the axis that separates the
+background ones is **file isolation**, not duration:
 
 | Situation | Right tool |
 |---|---|
 | You need the answer before you can continue your current reply | `task` (foreground — the default) |
 | Long and independent, and it will **not** edit files — research, a broad read, an investigation | `task` with `background: true` |
 | Long and independent, and it **will edit files** | `delegate` — the only one that gets its own git worktree and branch |
+| Another round for a job of yours that has finished (a fix round after review, the next milestone) | `delegate_send` — keeps the job's context, worktree and branch |
+| Driving another session yourself (opencode HTTP API, wait-for-idle scripts, tmux) | Don't — that work gets no managed launch and its result never reaches you (Manta only shows it). Use `delegate` / `delegate_send` |
 
 Both background modes return immediately and surface the same way in the
 app — a nested row in the sidebar under the parent session. The isolation
@@ -384,16 +386,22 @@ for answering "what's running?", not for waiting. To see what a running
   the job's name + id and a reminder that the result is NOT available yet.
 - `delegate_list({})` → lists this session's background jobs (id, name,
   status, branch, worktree, activity, timestamps).
+- `delegate_send({ id, prompt })` → starts another round in one of YOUR
+  jobs that has finished and whose result has reached you. Returns
+  immediately with the id of the new round (a new job record on the same
+  session, worktree and branch); its result arrives as a later message.
+  Refused while the job is still working.
 - `delegate_stop({ id })` → stops a running job (aborts its session, marks
   it `stopped`); the window + worktree are kept.
 
-**Every background job costs a full extra model session**, so do not fan
-out speculatively — and never start a background job from inside another
-background job.
+**Every background job costs a full extra model session**, so don't start
+jobs whose result you won't use — and a background job cannot start
+background jobs of its own.
 
 **Cap of five concurrent `delegate` jobs** box-wide. A sixth is refused
 with a clear error — do not retry; either wait for one to finish or do the
-work yourself.
+work yourself. Sessions Manta only observes (started by a script or another
+tool) don't count toward the cap.
 
 **A `delegate` job starts with NO knowledge of this conversation.** Put
 everything it needs in the prompt: the goal, the relevant files/paths,

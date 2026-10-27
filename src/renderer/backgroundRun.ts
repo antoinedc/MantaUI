@@ -40,6 +40,8 @@ export type BackgroundJob = {
   error: string | null;
   createdAt: number;
   origin?: string;
+  attempt?: number;
+  supersededBy?: string | null;
   completionOwner?: "manta" | "opencode";
   launchState?: "creating" | "submitting" | "running" | "uncertain";
   completionDelivery?: "pending" | "delivered" | "abandoned" | null;
@@ -128,8 +130,8 @@ export function splitSlashText(text: string): { name: string; args: string } | n
 // ===== Cards from the job store (N5) =====
 
 export type BackgroundCard =
-  | { kind: "running"; key: string; jobId: string; name: string; paused: boolean }
-  | { kind: "uncertain"; key: string; jobId: string; name: string }
+  | { kind: "running"; key: string; jobId: string; name: string; paused: boolean; observed?: true }
+  | { kind: "uncertain"; key: string; jobId: string; name: string; observed?: true }
   | { kind: "failed"; key: string; jobId: string; name: string; error: string }
   | { kind: "settling"; key: string; jobId: string; name: string };
 
@@ -162,9 +164,25 @@ export function collectFinishedKeys(messages: ReadonlyArray<OpencodeMessage> | n
 
 const LIVE = new Set(["running", "paused"]);
 
+// A session Manta only watches (started by a script or another tool): shown,
+// never reported to a chat. Both surfaces that show one carry this label.
+export const OBSERVED_JOB_LABEL = "started outside Manta";
+export const OBSERVED_JOB_TITLE =
+  "Picked up automatically — this session was started by a script or another tool. Manta shows it but doesn't report its result to a chat.";
+
+export function isObservedJob(job: { origin?: string } | null | undefined): boolean {
+  return job?.origin === "observed";
+}
+
+/** One run = one record: an older run of a continued job is never shown. */
+export function isSupersededJob(job: { supersededBy?: string | null } | null | undefined): boolean {
+  return !!job?.supersededBy;
+}
+
 /** Could this job still need a card? Lets the caller skip scanning the transcript when nothing qualifies. */
 export function isCardCandidate(job: BackgroundJob, sessionId: string): boolean {
   if (job.parentSessionID !== sessionId) return false;
+  if (job.supersededBy) return false;
   if (LIVE.has(job.status)) return true;
   if (job.completionOwner === "manta" && job.completionDelivery === "pending") return true;
   return failedBeforeStart(job);
@@ -194,17 +212,18 @@ export function deriveBackgroundCards(
 ): BackgroundCard[] {
   const cards: BackgroundCard[] = [];
   const mine = jobs
-    .filter((j) => j.parentSessionID === sessionId)
+    .filter((j) => j.parentSessionID === sessionId && !j.supersededBy)
     .sort((a, b) => a.createdAt - b.createdAt);
   for (const job of mine) {
     if (finished.jobIds.has(job.id)) continue;
     if (job.childSessionID && finished.childIds.has(job.childSessionID)) continue;
     const base = { key: job.id, jobId: job.id, name: job.name };
     if (LIVE.has(job.status)) {
+      const observed = job.origin === "observed" ? ({ observed: true } as const) : {};
       cards.push(
         job.launchState === "uncertain"
-          ? { kind: "uncertain", ...base }
-          : { kind: "running", ...base, paused: job.status === "paused" },
+          ? { kind: "uncertain", ...base, ...observed }
+          : { kind: "running", ...base, paused: job.status === "paused", ...observed },
       );
     } else if (failedBeforeStart(job)) {
       cards.push({ kind: "failed", ...base, error: job.error || "It failed before it started" });

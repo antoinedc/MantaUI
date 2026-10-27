@@ -519,3 +519,70 @@ describe("Sidebar — only the active draft is highlighted (BET-1088)", () => {
     expect(headerName).toBeTruthy();
   });
 });
+
+describe("Sidebar — nested background job rows (observed label, superseded)", () => {
+  let h: Harness | null = null;
+  const job = (over: Record<string, unknown> = {}) => ({
+    id: "j1",
+    name: "job",
+    parentSessionID: "ses_parent",
+    childSessionID: "ses_child",
+    status: "running",
+    activity: null,
+    ...over,
+  });
+
+  function mountWith(jobs: unknown[]): Harness {
+    installMockApi();
+    resetStore({
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [
+            { index: 0, name: "parent", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_parent" },
+            { index: 1, name: "child", active: false, paneCurrentPath: "/x", opencodeSessionId: "ses_child" },
+          ],
+        }),
+      ],
+    });
+    useStore.getState().setJobs(jobs as never);
+    h = mount(
+      <Sidebar
+        onOpenSettings={() => {}}
+        onNewProject={() => {}}
+        onNewSessionInProject={() => {}}
+        onOpenResumeModal={() => {}}
+        onOpenCto={() => {}}
+        ctoState={null}
+      />,
+    );
+    return h;
+  }
+
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("an observed job's nested row says it was started outside Manta", () => {
+    mountWith([job({ origin: "observed", completionOwner: "opencode" })]);
+    const label = h!.container.querySelector('[data-testid="job-observed-label"]');
+    expect(label?.textContent).toBe("started outside Manta");
+    expect(label?.getAttribute("title")).toContain("started by a script or another tool");
+  });
+
+  it("an ordinary job's nested row has no such label", () => {
+    mountWith([job({ origin: "delegate" })]);
+    expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
+    expect(h!.container.querySelectorAll('[role="treeitem"]').length).toBeGreaterThan(1);
+  });
+
+  it("a superseded record is not rendered as a nested job; its successor is", () => {
+    mountWith([
+      job({ id: "old", origin: "observed", status: "done", supersededBy: "new" }),
+      job({ id: "new", attempt: 2, origin: "delegate" }),
+    ]);
+    expect(useStore.getState().jobs["ses_child"]?.id).toBe("new");
+    expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
+  });
+});

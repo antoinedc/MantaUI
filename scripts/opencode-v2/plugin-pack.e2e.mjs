@@ -236,12 +236,12 @@ try {
   // ---- registration: plugin loaded, all tools present in every location
   console.log("\n[registration]");
   const expected = [...(await parseV1Inventory()).map((i) => i.name), "todo_write"].sort();
-  check("expected tool set is 44 V1 + todo_write = 45", expected.length === 45);
+  check("expected tool set is 45 V1 + todo_write = 46", expected.length === 46);
   const probes = readFileSync(probeFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
   for (const dir of [dirA, dirB, sub]) {
     const p = probes.find((x) => x.directory === dir);
     const missing = p ? expected.filter((n) => !p.tools.includes(n)) : expected;
-    check(`all 45 manta tools registered in location ${dir.replace(sb.root, "…")}`, p && missing.length === 0, `missing: ${j(missing)}`);
+    check(`all 46 manta tools registered in location ${dir.replace(sb.root, "…")}`, p && missing.length === 0, `missing: ${j(missing)}`);
   }
   const pluginList = await api("GET", `/api/plugin?location[directory]=${encodeURIComponent(dirA)}`);
   const mantaPlugin = (pluginList.data ?? []).find((x) => x.id === "manta");

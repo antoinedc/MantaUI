@@ -1294,7 +1294,7 @@ export const useStore = create<State>((set, get) => ({
     set(() => {
       const next: Record<string, DelegateJob> = {};
       for (const j of jobs) {
-        if (!j.childSessionID) continue;
+        if (!j.childSessionID || j.supersededBy) continue;
         next[j.childSessionID] = j;
       }
       return { jobs: next };
