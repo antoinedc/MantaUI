@@ -85,7 +85,7 @@ test("shouldCompact: all true → compact with reason 'compact'", () => {
 
 // ---- createCompactionScheduler ----
 
-function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabled = () => true, initial = {}, acquire, release } = {}) {
+function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabled = () => true, initial = {}, acquire, release, eligible } = {}) {
   let state = initial;
   const compactCalls = [];
   const saves = [];
@@ -102,6 +102,7 @@ function makeScheduler({ listCandidates, compact, isBusy, now = () => NOW, enabl
     enabled,
     ...(acquire ? { acquire } : {}),
     ...(release ? { release } : {}),
+    ...(eligible ? { eligible } : {}),
   });
   return { scheduler, compactCalls, saves, getState: () => state };
 }
@@ -294,4 +295,38 @@ test("scheduler: the operation is released even when the compaction throws or th
   });
   await scheduler.tick();
   assert.deepEqual(released, ["s1"]);
+});
+
+// ---- auto-handoff: per-session eligibility (per-session handoff mode) ----
+
+test("scheduler: eligible() is consulted per candidate — an ineligible session is skipped with no cooldown stamp, no acquire, and does not use up the tick's quota", async () => {
+  const asked = [];
+  const acquired = [];
+  const { scheduler, compactCalls, getState } = makeScheduler({
+    listCandidates: async () => [candidate("s1"), candidate("s2"), candidate("s3"), candidate("s4")],
+    eligible: async (sid) => {
+      asked.push(sid);
+      return sid !== "s1" && sid !== "s2";
+    },
+    acquire: (sid) => (acquired.push(sid), true),
+  });
+  await scheduler.tick();
+  assert.deepEqual(compactCalls, ["s3", "s4"], "the two ineligible sessions did not consume COMPACT_MAX_PER_TICK");
+  assert.deepEqual(acquired, ["s3", "s4"]);
+  assert.equal(getState().sessions.s1, undefined);
+  assert.deepEqual(asked, ["s1", "s2", "s3", "s4"]);
+});
+
+test("scheduler: an eligible() that throws leaves the session alone; without the hook every session is eligible", async () => {
+  const { scheduler, compactCalls } = makeScheduler({
+    listCandidates: async () => [candidate("s1")],
+    eligible: async () => {
+      throw new Error("config unreadable");
+    },
+  });
+  await scheduler.tick();
+  assert.deepEqual(compactCalls, []);
+  const plain = makeScheduler({ listCandidates: async () => [candidate("s1")] });
+  await plain.scheduler.tick();
+  assert.deepEqual(plain.compactCalls, ["s1"]);
 });

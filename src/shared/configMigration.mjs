@@ -1,8 +1,9 @@
 // configMigration.mjs — pure, electron-free config migrations, unit-testable
 // with vitest and reusable from any context (desktop main, box server).
-// Holds two unrelated one-time migrations:
+// Holds three unrelated one-time migrations:
 //   1. migrateLegacyCapConfig  — v1 capability-executor → v2 plugins
 //   2. migrateCacheTtlDefault  — the wrong "1h" prompt-cache default → "5m"
+//   3. migrateHandoffModeDefault — the box handoff-mode default "auto" → "suggest"
 //
 // Extracted from src/main/config.ts (BET-190) so the migration is its own
 // source of truth and the runtime config reader stays a thin file-loader.
@@ -94,5 +95,32 @@ export function migrateCacheTtlDefault(raw) {
   // Only the stale default is rewritten. An absent key already resolves to
   // the new "5m" default, and an explicit "5m" is already correct.
   if (out.cacheTtl === "1h") out.cacheTtl = "5m";
+  return out;
+}
+
+// ===== handoffMode: the default moved from "auto" to "suggest" =====
+//
+// Auto-handoff shipped with a box default of "auto" (2026-10-26) and a day
+// later became "suggest": replacing a conversation on its own is too much to
+// do to a session nobody opted in. Like cacheTtl above, a persisted "auto" is
+// indistinguishable from a deliberate pick, but the feature is one day old, so
+// any stored value is treated as the old default and rewritten ONCE.
+// `handoffModeDefaultMigrated` marks it done: a later deliberate "auto" (or
+// "off") sticks. A fresh config carries the marker from the start (see
+// DEFAULT_CONFIG in src/server/local.mjs), so only configs written before this
+// change are ever rewritten.
+//
+// Does NOT mutate the input; returns a NEW object for the caller to persist.
+
+/**
+ * @param {Record<string, any>|null|undefined} raw
+ * @returns {Record<string, any>}
+ */
+export function migrateHandoffModeDefault(raw) {
+  if (raw == null || typeof raw !== "object") return {};
+  const out = { ...raw };
+  if (out.handoffModeDefaultMigrated === true) return out;
+  out.handoffModeDefaultMigrated = true;
+  out.handoffMode = "suggest";
   return out;
 }

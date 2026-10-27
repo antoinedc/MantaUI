@@ -209,13 +209,18 @@ test("context measurement falls back to the transcript when no step was seen (e.
   assert.equal(records(w).length, 1);
 });
 
-test("small models get the smaller budget: 120k of context is over for haiku, under for opus", async () => {
+test("with a known window the budget is 60% of it for every family; with an unknown window small models get the smaller ceiling", async () => {
+  const known = standardWorld(); // window 400k → 240k
+  await turn(known.engine, "ses_p", { ctx: 120_000, model: { providerID: "anthropic", modelID: "claude-haiku-4-5" } });
+  assert.equal(records(known).length, 0, "no family ceiling when the window is known");
   const small = standardWorld();
+  small.engine = small.build({ contextLimitFor: () => null });
   await turn(small.engine, "ses_p", { ctx: 120_000, model: { providerID: "anthropic", modelID: "claude-haiku-4-5" } });
-  assert.equal(records(small).length, 1);
+  assert.equal(records(small).length, 1, "unknown window: haiku ceiling 100k");
   const big = standardWorld();
+  big.engine = big.build({ contextLimitFor: () => null });
   await turn(big.engine, "ses_p", { ctx: 120_000 });
-  assert.equal(records(big).length, 0);
+  assert.equal(records(big).length, 0, "unknown window: opus ceiling 200k");
 });
 
 test("the armed preamble carries the labelled facts; the card text never goes into model context via the tool path", async () => {
@@ -234,7 +239,7 @@ test("policyFor: authoritative per session — measurement, budget, time and mod
   await turn(w.engine, "ses_p", { ctx: 120_000 });
   const p = await w.engine.policyFor("ses_p");
   assert.equal(p.contextTokens, 120_000);
-  assert.equal(p.budget, 200_000);
+  assert.equal(p.budget, 240_000, "60% of the 400k window");
   assert.equal(p.mode, "auto");
   assert.equal(typeof p.measuredAt, "number");
   assert.equal(await w.engine.policyFor("ses_other"), null, "never another session's numbers");

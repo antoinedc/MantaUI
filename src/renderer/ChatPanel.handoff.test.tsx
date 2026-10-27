@@ -119,8 +119,8 @@ describe("ChatPanel — auto-handoff", () => {
     await h!.flush();
   }
 
-  describe("pinned card", () => {
-    it("pins a ready server-path record above the composer, and its actions call the box", async () => {
+  describe("handoff card (server path)", () => {
+    it("shows a ready server-path record above the composer, and its actions call the box", async () => {
       lists[SID] = { records: [rec()], links: null, continuation: null };
       await open({
         handoffStart: () => Promise.resolve({ handoff: rec({ state: "committed", how: "clear", successorId: "ses_new", updatedAt: 11 }) }),
@@ -134,7 +134,55 @@ describe("ChatPanel — auto-handoff", () => {
       expect(api.calls.handoffStart).toEqual([[{ id: "hof_a", how: "clear", disposition: "send" }]]);
     });
 
-    it("does not pin agent-path records (they are the tool part) or started ones", async () => {
+    it("sits in the transcript tail right after the todo checklist — not in the pinned card stack", async () => {
+      lists[SID] = { records: [rec()], links: null, continuation: null };
+      const todoMsg = {
+        info: { id: "m_todo", sessionID: SID, role: "assistant", time: { created: 1, completed: 2 } },
+        parts: [
+          {
+            id: "p_todo",
+            messageID: "m_todo",
+            type: "tool",
+            tool: "todowrite",
+            state: { status: "completed", input: { todos: [{ content: "TODO_ITEM_X", status: "pending", priority: "high" }] }, output: "" },
+          },
+        ],
+      };
+      await open({ opencodeMessages: () => Promise.resolve([assistantMsg("m1", 5000), todoMsg]) });
+      const card = h!.container.querySelector('[data-testid="handoff-card"]')!;
+      const todo = [...h!.container.querySelectorAll("span")].find((d) => d.textContent === "Todo")!;
+      expect(card).not.toBeNull();
+      expect(h!.text()).toContain("TODO_ITEM_X");
+      // todo checklist → handoff card → composer, in document order
+      expect(todo.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(card.compareDocumentPosition(textarea()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // the tail is the transcript's: the card shares its container with the todo checklist
+      const todoCard = todo.closest(".rounded-sm")!;
+      expect(card.parentElement!.parentElement).toBe(todoCard.parentElement);
+    });
+
+    it("dismissing hides the card, calls the box, and a refusal keeps it with the error", async () => {
+      lists[SID] = { records: [rec()], links: null, continuation: null };
+      await open({
+        handoffDismiss: () => {
+          lists[SID] = { records: [rec({ state: "dismissed", updatedAt: 11 })], links: null, continuation: null, dismissed: true };
+          return Promise.resolve({ handoff: rec({ state: "dismissed", updatedAt: 11 }) });
+        },
+      });
+      await click(h!.container.querySelector('button[aria-label="Dismiss handoff"]'));
+      expect(api.calls.handoffDismiss).toEqual([[{ id: "hof_a" }]]);
+      expect(h!.container.querySelector('[data-testid="handoff-card"]')).toBeNull();
+    });
+
+    it("a dismiss the box refuses leaves the card and says why", async () => {
+      lists[SID] = { records: [rec()], links: null, continuation: null };
+      await open({ handoffDismiss: () => Promise.reject(new Error("offline")) });
+      await click(h!.container.querySelector('button[aria-label="Dismiss handoff"]'));
+      expect(h!.container.querySelector('[data-testid="handoff-card"]')).not.toBeNull();
+      expect(h!.container.querySelector('[data-testid="handoff-notice"]')?.textContent).toBe("offline");
+    });
+
+    it("does not show agent-path records here (they are the tool part)", async () => {
       lists[SID] = { records: [rec({ trigger: "agent" })], links: null, continuation: null };
       await open();
       expect(h!.container.querySelector('[data-testid="handoff-card"]')).toBeNull();
@@ -231,18 +279,28 @@ describe("ChatPanel — auto-handoff", () => {
   });
 
   describe("mode control", () => {
-    it("sits beside the trust toggle and cycles + persists", async () => {
-      await open();
+    it("sits beside the trust toggle and cycles + persists for THIS session only", async () => {
+      lists[SID] = { ...EMPTY, mode: "auto", modeIsDefault: true };
+      await open({ handoffSetMode: ({ mode }: { mode: string }) => Promise.resolve({ mode }) });
       const btn = () => h!.container.querySelector('[data-testid="handoff-mode"]') as HTMLButtonElement;
       expect(btn()).not.toBeNull();
       expect(btn().textContent).toContain("Handoff: auto");
       await click(btn());
       expect(btn().textContent).toContain("Handoff: suggest");
-      expect(api.calls.configUpdate).toEqual([[{ handoffMode: "suggest" }]]);
+      expect(api.calls.handoffSetMode).toEqual([[{ sessionId: SID, mode: "suggest" }]]);
+      expect(api.calls.configUpdate).toBeUndefined();
+    });
+
+    it("another session's panel keeps its own mode", async () => {
+      lists[SID] = { ...EMPTY, mode: "auto" };
+      lists.ses_other = { ...EMPTY, mode: "off" };
+      await open({}, { sessionId: "ses_other" });
+      expect(h!.container.querySelector('[data-testid="handoff-mode"]')!.textContent).toContain("Handoff: off");
     });
 
     it("reports a save that fails", async () => {
-      await open({ configUpdate: () => Promise.reject(new Error("nope")) });
+      lists[SID] = { ...EMPTY, mode: "auto" };
+      await open({ handoffSetMode: () => Promise.reject(new Error("nope")) });
       await click(h!.container.querySelector('[data-testid="handoff-mode"]') as HTMLElement);
       expect(h!.container.querySelector('[data-testid="handoff-mode"]')!.textContent).toContain("Handoff: auto");
       expect(h!.text()).toContain("Couldn't save handoff mode: nope");

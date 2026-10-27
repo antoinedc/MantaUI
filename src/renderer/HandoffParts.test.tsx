@@ -82,23 +82,58 @@ describe("HandoffCardView", () => {
     expect(h!.container.querySelector('[data-testid="handoff-body"]')?.textContent).toContain("ship it");
   });
 
-  it("collapses a long body after 12 lines and shows all on request", async () => {
-    const text = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n\n");
-    open(rec({ text }));
-    await h!.flush();
-    const collapsed = h!.container.querySelector('[data-testid="handoff-body"]')!.textContent!;
-    expect(collapsed).toContain("line 0");
-    expect(collapsed).not.toContain("line 29");
-    await press(h!, buttons(h!).find((b) => /Show all/.test(b.textContent ?? "")));
-    expect(h!.container.querySelector('[data-testid="handoff-body"]')!.textContent).toContain("line 29");
-    expect(buttons(h!).some((b) => /Show less/.test(b.textContent ?? ""))).toBe(true);
+  it("clamps a long body to a few lines with Show more / Show less, and never scrolls", async () => {
+    const sh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const isBody = (el: HTMLElement) => el.getAttribute?.("data-testid") === "handoff-body";
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return isBody(this) ? 400 : 0; } });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get() { return isBody(this) ? (this.style.maxHeight ? 90 : 400) : 0; } });
+    try {
+      open(rec({ text: Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n\n") }));
+      await h!.flush();
+      const body = () => h!.container.querySelector('[data-testid="handoff-body"]') as HTMLElement;
+      expect(body().style.maxHeight).toBe("9em");
+      expect(h!.container.querySelector('[class*="overflow-y"]')).toBeNull();
+      const toggle = () => h!.container.querySelector('[data-testid="handoff-body-toggle"]') as HTMLButtonElement;
+      expect(toggle().textContent).toBe("Show more");
+      await press(h!, toggle());
+      expect(body().style.maxHeight).toBe("");
+      expect(toggle().textContent).toBe("Show less");
+      await press(h!, toggle());
+      expect(body().style.maxHeight).toBe("9em");
+    } finally {
+      if (sh) Object.defineProperty(HTMLElement.prototype, "scrollHeight", sh); else delete (HTMLElement.prototype as { scrollHeight?: number }).scrollHeight;
+      if (ch) Object.defineProperty(HTMLElement.prototype, "clientHeight", ch); else delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    }
   });
 
-  it("Copy writes the RAW markdown and says so", async () => {
-    open(rec({ text: "## Goal\n**bold** `x`" }));
-    await press(h!, byText(h!, "Copy"));
-    expect(clip.writeText).toHaveBeenCalledWith("## Goal\n**bold** `x`");
-    expect(noticeText(h!)).toBe("Copied to the clipboard");
+  it("a short body has no Show more toggle, and the actions stay visible", async () => {
+    open(rec());
+    await h!.flush();
+    expect(h!.container.querySelector('[data-testid="handoff-body-toggle"]')).toBeNull();
+    expect(byText(h!, "Clear & start")).toBeTruthy();
+  });
+
+  it("Copy writes the RAW markdown, swaps the label for a check (same width, no notice line), then reverts", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      open(rec({ text: "## Goal\n**bold** `x`" }));
+      const copyBtn = () => buttons(h!).find((b) => b.getAttribute("aria-label") === "Copied" || (b.textContent ?? "").trim() === "Copy")!;
+      await press(h!, byText(h!, "Copy"));
+      expect(clip.writeText).toHaveBeenCalledWith("## Goal\n**bold** `x`");
+      expect(copyBtn().getAttribute("aria-label")).toBe("Copied");
+      expect(h!.container.querySelector('[data-testid="handoff-copied"] svg')).not.toBeNull();
+      // the label is still in flow (hidden), so the button keeps its width
+      expect(copyBtn().querySelector(".invisible")?.textContent).toBe("Copy");
+      expect(noticeText(h!)).toBe("");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1600);
+      });
+      expect(h!.container.querySelector('[data-testid="handoff-copied"]')).toBeNull();
+      expect(byText(h!, "Copy")!.getAttribute("aria-label")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Copy that the clipboard refuses reports the failure", async () => {
@@ -107,6 +142,7 @@ describe("HandoffCardView", () => {
     await press(h!, byText(h!, "Copy"));
     expect(noticeText(h!)).toBe("denied");
     expect(h!.container.querySelector('[data-testid="handoff-notice"]')?.getAttribute("role")).toBe("alert");
+    expect(h!.container.querySelector('[data-testid="handoff-copied"]')).toBeNull();
   });
 
   it("Clear & start → handoff:start {how: clear, disposition: send}", async () => {
@@ -204,6 +240,47 @@ describe("HandoffCardView", () => {
     expect(noticeText(h!)).toMatch(/busy/);
   });
 
+  describe("dismiss", () => {
+    const dismissBtn = () => h!.container.querySelector('button[aria-label="Dismiss handoff"]') as HTMLButtonElement | null;
+
+    it("a ready card has an × that calls handoff:dismiss and hides the card", async () => {
+      resetHandoffStore();
+      open(rec(), { handoffDismiss: () => Promise.resolve({ handoff: rec({ state: "dismissed", updatedAt: 2 }) }) });
+      expect(dismissBtn()!.title).toContain("don't suggest a handoff again in this session");
+      await press(h!, dismissBtn());
+      expect(api.calls.handoffDismiss).toEqual([[{ id: "hof_a" }]]);
+      // the session is refetched so its `dismissed` flag follows
+      expect(api.calls.handoffList).toEqual([[{ sessionId: "ses_old" }]]);
+    });
+
+    it("a failed card can be dismissed too", async () => {
+      open(rec({ state: "failed", reason: "x" }));
+      expect(dismissBtn()).not.toBeNull();
+    });
+
+    it("a refusal keeps the card and says why", async () => {
+      open(rec(), { handoffDismiss: () => Promise.reject(new Error("This handoff can no longer be dismissed.")) });
+      await press(h!, dismissBtn());
+      expect(h!.container.querySelector('[data-testid="handoff-card"]')).not.toBeNull();
+      expect(noticeText(h!)).toBe("This handoff can no longer be dismissed.");
+      expect(dismissBtn()!.disabled).toBe(false);
+    });
+
+    it.each(["generating", "starting", "committed", "cancelled"] as const)("no × while %s", async (state) => {
+      open(rec({ state, successorId: "ses_new" }));
+      await h!.flush();
+      expect(dismissBtn()).toBeNull();
+    });
+
+    it("a dismissed record collapses to a single faint line with no actions", async () => {
+      open(rec({ state: "dismissed" }));
+      await h!.flush();
+      expect(h!.container.querySelector('[data-testid="handoff-card"]')).toBeNull();
+      expect(h!.container.querySelector('[data-testid="handoff-dismissed"]')?.textContent).toBe("Handoff dismissed");
+      expect(h!.container.querySelectorAll("button")).toHaveLength(0);
+    });
+  });
+
   it("preparing shows no actions", async () => {
     open(rec({ state: "generating", text: "" }));
     await h!.flush();
@@ -236,6 +313,14 @@ describe("HandoffToolCard (inline, agent path)", () => {
     // the marker and the model-facing status line are not shown
     expect(h.text()).not.toContain("manta-handoff");
     expect(h.text()).not.toContain("ready below");
+  });
+
+  it("an agent-path card whose record was dismissed shows 'Handoff dismissed'", async () => {
+    installMockApi({ handoffGet: () => Promise.resolve({ handoff: rec({ id: "hof_d", trigger: "agent", state: "dismissed" }) }) });
+    h = mount(<HandoffToolCard part={part("<!-- manta-handoff:hof_d -->")} />);
+    await h.flush();
+    expect(h.container.querySelector('[data-testid="handoff-dismissed"]')?.textContent).toBe("Handoff dismissed");
+    expect(h.container.querySelectorAll("button")).toHaveLength(0);
   });
 
   it("an expired record says so and offers no actions", async () => {
@@ -284,34 +369,80 @@ describe("HandoffToolCard (inline, agent path)", () => {
   });
 });
 
-describe("HandoffModeToggle", () => {
+describe("HandoffModeToggle (per session)", () => {
   let h: Harness | null = null;
+  beforeEach(() => resetHandoffStore());
   afterEach(() => {
     h?.unmount();
     h = null;
   });
+  const btn = () => h!.container.querySelector('[data-testid="handoff-mode"]') as HTMLButtonElement;
 
-  it("cycles auto → suggest → off → auto, persisting each step through config:update", async () => {
-    const { api } = installMockApi({ configUpdate: (patch: Record<string, unknown>) => Promise.resolve({ ...patch }) });
-    resetStore({ handoffMode: "auto" } as never);
-    h = mount(<HandoffModeToggle />);
-    const btn = () => h!.container.querySelector('[data-testid="handoff-mode"]') as HTMLButtonElement;
+  it("shows the session's effective mode and cycles via handoff:set-mode for THIS session only", async () => {
+    const { api } = installMockApi({
+      handoffList: () => Promise.resolve({ records: [], links: null, continuation: null, mode: "auto", modeIsDefault: false }),
+      handoffSetMode: ({ mode }: { mode: string }) => Promise.resolve({ mode }),
+    });
+    h = mount(<HandoffModeToggle sessionId="ses_a" />);
+    await h.flush();
     expect(btn().textContent).toContain("Handoff: auto");
+    expect(btn().title).toContain("this conversation only");
     await press(h, btn());
     expect(btn().textContent).toContain("Handoff: suggest");
     await press(h, btn());
     expect(btn().textContent).toContain("Handoff: off");
     await press(h, btn());
     expect(btn().textContent).toContain("Handoff: auto");
-    expect(api.calls.configUpdate).toEqual([[{ handoffMode: "suggest" }], [{ handoffMode: "off" }], [{ handoffMode: "auto" }]]);
+    expect(api.calls.handoffSetMode).toEqual([
+      [{ sessionId: "ses_a", mode: "suggest" }],
+      [{ sessionId: "ses_a", mode: "off" }],
+      [{ sessionId: "ses_a", mode: "auto" }],
+    ]);
+    // never the box default
+    expect(api.calls.configUpdate).toBeUndefined();
   });
 
-  it("a failed save restores the label and says so", async () => {
-    installMockApi({ configUpdate: () => Promise.reject(new Error("box unreachable")) });
-    resetStore({ handoffMode: "auto" } as never);
-    h = mount(<HandoffModeToggle />);
-    await press(h, h.container.querySelector('[data-testid="handoff-mode"]') as HTMLElement);
-    expect(h.container.querySelector('[data-testid="handoff-mode"]')!.textContent).toContain("Handoff: auto");
+  it("two sessions are independent", async () => {
+    installMockApi({
+      handoffList: ({ sessionId }: { sessionId: string }) =>
+        Promise.resolve({ records: [], links: null, continuation: null, mode: sessionId === "ses_a" ? "off" : "auto", modeIsDefault: true }),
+      handoffSetMode: ({ mode }: { mode: string }) => Promise.resolve({ mode }),
+    });
+    h = mount(
+      <>
+        <div id="a"><HandoffModeToggle sessionId="ses_a" /></div>
+        <div id="b"><HandoffModeToggle sessionId="ses_b" /></div>
+      </>,
+    );
+    await h.flush();
+    const a = () => h!.container.querySelector("#a [data-testid=handoff-mode]") as HTMLButtonElement;
+    const b = () => h!.container.querySelector("#b [data-testid=handoff-mode]") as HTMLButtonElement;
+    expect(a().textContent).toContain("Handoff: off");
+    expect(b().textContent).toContain("Handoff: auto");
+    await press(h, a());
+    expect(a().textContent).toContain("Handoff: auto");
+    expect(b().textContent).toContain("Handoff: auto");
+    await press(h, b());
+    expect(a().textContent).toContain("Handoff: auto");
+    expect(b().textContent).toContain("Handoff: suggest");
+  });
+
+  it("falls back to suggest when the box reports no mode (older box)", async () => {
+    installMockApi();
+    h = mount(<HandoffModeToggle sessionId="ses_a" />);
+    await h.flush();
+    expect(btn().textContent).toContain("Handoff: suggest");
+  });
+
+  it("a failed save restores the old mode and says so", async () => {
+    installMockApi({
+      handoffList: () => Promise.resolve({ records: [], links: null, continuation: null, mode: "auto", modeIsDefault: true }),
+      handoffSetMode: () => Promise.reject(new Error("box unreachable")),
+    });
+    h = mount(<HandoffModeToggle sessionId="ses_a" />);
+    await h.flush();
+    await press(h, btn());
+    expect(btn().textContent).toContain("Handoff: auto");
     expect(h.container.querySelector('[role="alert"]')?.textContent).toContain("Couldn't save handoff mode: box unreachable");
   });
 });

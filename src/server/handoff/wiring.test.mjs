@@ -106,11 +106,11 @@ test("a failed send handoff tells the delegate engine to re-settle; held-message
   assert.ok(f.calls.some((c) => c[0] === "reconcileV2"));
 });
 
-test("the mode comes from config handoffMode (default auto, garbage → auto); CTO conversations and running job sessions are recognised", async () => {
+test("the mode comes from config handoffMode (garbage → the suggest default); CTO conversations and running job sessions are recognised", async () => {
   const f = fakes({ configGet: async () => ({ handoffMode: "nonsense" }) });
   const engine = createProductionHandoff(f.p);
   engine.observeEvent({ type: "session.next.step.ended", properties: { sessionID: "ses_p", tokens: { input: 1000, cache: { read: 0, write: 0 } }, providerID: "anthropic", modelID: "claude-opus-4-8" } });
-  assert.equal((await engine.policyFor("ses_p")).mode, "auto");
+  assert.equal((await engine.policyFor("ses_p")).mode, "suggest");
 });
 
 test("index.mjs: the engine is wired into every seam the spec names", () => {
@@ -121,8 +121,8 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /delegate: delegateEngine,\s*handoff: handoffEngine,/);
   // triggers: the lifecycle tap
   assert.match(index, /handoffEngine\.observeEvent\(evt\)/);
-  // §4.5: idle compaction stands aside unless the mode is off, and shares the operation registry (§6.2)
-  assert.match(index, /normalizeHandoffMode\(cfg\?\.handoffMode\) === "off"/);
+  // §4.5: idle compaction stands aside per session unless that session's mode is off, and shares the operation registry (§6.2)
+  assert.match(index, /eligible: async \(sid\) => \(await handoffEngine\.modeFor\(sid\)\) === "off"/);
   assert.match(index, /acquire: \(sid\) => handoffEngine\.acquireOperation\(sid, "compaction"\)/);
   assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
   // §6.3 ownership

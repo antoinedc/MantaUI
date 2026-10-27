@@ -78,12 +78,19 @@ export function handoffBadge(state: HandoffState): HandoffBadge {
       return { label: "failed", tone: "danger" };
     case "cancelled":
       return { label: "cancelled", tone: "neutral" };
+    case "dismissed":
+      return { label: "dismissed", tone: "neutral" };
   }
 }
 
 /** Card actions are live only while the record is `ready` (§3); after a start they are off on every client. */
 export function handoffActionsEnabled(record: Pick<HandoffRecord, "state">): boolean {
   return record.state === "ready";
+}
+
+/** Only a card the user can still act on can be dismissed (the box refuses any other state). */
+export function handoffCanDismiss(record: Pick<HandoffRecord, "state">): boolean {
+  return record.state === "ready" || record.state === "failed";
 }
 
 /** "agent" · "automatic" · "/handoff" · "button" — the card's source label. */
@@ -100,17 +107,11 @@ export function describeHandoffSource(record: Pick<HandoffRecord, "trigger" | "k
   }
 }
 
-/** Collapse markdown after `maxLines` lines. `hidden` is how many lines the collapse hides. */
-export function collapseHandoffText(text: string, maxLines = 12): { shown: string; hidden: number } {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return { shown: text, hidden: 0 };
-  return { shown: lines.slice(0, maxLines).join("\n"), hidden: lines.length - maxLines };
-}
-
 // ---------------------------------------------------------------------------
 // Pinned records (§15 "Card placement")
 // ---------------------------------------------------------------------------
 
+// A `dismissed` record is terminal and is never pinned.
 const PINNED_STATES: ReadonlySet<HandoffState> = new Set([
   "requested",
   "generating",
@@ -226,8 +227,9 @@ export function draftRecordFor(records: readonly HandoffRecord[], sessionId: str
 
 export const HANDOFF_MODES: readonly HandoffMode[] = ["auto", "suggest", "off"];
 
+/** The box default is "suggest": anything unparseable or absent (an older box) means that. */
 export function normalizeHandoffMode(v: unknown): HandoffMode {
-  return v === "suggest" || v === "off" || v === "auto" ? v : "auto";
+  return v === "suggest" || v === "off" || v === "auto" ? v : "suggest";
 }
 
 /** Click cycles auto → suggest → off → auto. */
@@ -238,11 +240,11 @@ export function nextHandoffMode(mode: HandoffMode): HandoffMode {
 export function describeHandoffMode(mode: HandoffMode): string {
   switch (mode) {
     case "auto":
-      return "Handoff: auto — long chats hand off to a fresh session on their own. Click to switch to suggest.";
+      return "Handoff: auto — this conversation hands off to a fresh session on its own when it gets long. Applies to this conversation only. Click to switch to suggest.";
     case "suggest":
-      return "Handoff: suggest — long chats show a handoff card for you to start. Click to switch to off.";
+      return "Handoff: suggest — when this conversation gets long it shows a handoff card for you to start. Applies to this conversation only. Click to switch to off.";
     case "off":
-      return "Handoff: off — nothing is automatic; /handoff still works. Click to switch to auto.";
+      return "Handoff: off — nothing is automatic in this conversation; /handoff still works. Applies to this conversation only. Click to switch to auto.";
   }
 }
 
@@ -257,6 +259,7 @@ export function describeHandoffError(e: unknown): string {
   if (/\bbusy\b/i.test(raw)) return "The session is busy — wait for it to finish, then try again.";
   if (/not_ready/i.test(raw)) return "This handoff isn't ready yet.";
   if (/expired|not.?found|\b404\b/i.test(raw)) return "This handoff has expired.";
+  if (raw.trim() === "dismissed") return "Handoff suggestions were dismissed in this conversation.";
   return raw || "Something went wrong.";
 }
 

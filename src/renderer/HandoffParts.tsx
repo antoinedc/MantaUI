@@ -1,8 +1,8 @@
 // ===== Auto-handoff — UI pieces (spec 2026-10-26-auto-handoff.md §3, §9) =====
 //
-//   - HandoffCardView / HandoffToolCard / PinnedHandoffCard: the handoff card —
-//     inline as the `handoff` tool part, pinned above the composer for
-//     server-path records.
+//   - HandoffCardView / HandoffToolCard / HandoffTailCards: the handoff card —
+//     inline as the `handoff` tool part, in the transcript tail (after the todo
+//     checklist) for server-path records.
 //   - CarriedContextBlock: "Carried-over context — sent with the next message."
 //   - ContinuationNotice: "Continued from … · View previous".
 //   - PreviousSessionBar: replaces the composer while a previous session is open.
@@ -13,49 +13,63 @@
 // failure — in the card (AGENTS.md "never stub a control").
 
 import { memo, useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowRightLeft, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowRightLeft, Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import type { OpencodePart } from "../shared/types";
 import type { HandoffHow, HandoffMode, HandoffRecord } from "../shared/api";
 import { Button } from "./Button";
 import { Card } from "./Card";
 import { Pill } from "./Pill";
 import { renderMarkdown } from "./MarkdownBody";
-import { useStore } from "./store";
-import { useHandoffRecord } from "./handoffStore";
-import { copyHandoffText, openSessionWindow, retryHandoff, startHandoff } from "./handoffActions";
+import { ClampedMarkdown } from "./ClampedMarkdown";
+import { normalizeHandoffMode } from "./handoff";
+import { useHandoffRecord, useHandoffSession } from "./handoffStore";
 import {
-  collapseHandoffText,
+  copyHandoffText,
+  dismissHandoff,
+  openSessionWindow,
+  retryHandoff,
+  setSessionHandoffMode,
+  startHandoff,
+} from "./handoffActions";
+import {
   describeContinuationNotice,
   describeHandoffError,
   describeHandoffMode,
   describeHandoffSource,
   handoffActionsEnabled,
   handoffBadge,
+  handoffCanDismiss,
   handoffIdOfPart,
   nextHandoffMode,
   type ContinuationNotice as ContinuationNoticeData,
 } from "./handoff";
 
 type Notice = { tone: "ok" | "error"; text: string };
-type Busy = "copy" | "clear" | "new-session" | "edit-clear" | "edit-new-session" | "retry" | "open" | null;
+type Busy = "copy" | "dismiss" | "clear" | "new-session" | "edit-clear" | "edit-new-session" | "retry" | "open" | null;
 
 const NOTICE_CLS = { ok: "text-ok", error: "text-danger" } as const;
+
+const COPIED_MS = 1500;
+/** The card body shows this many lines before "Show more". */
+const BODY_LINES = 6;
 
 // ---------------------------------------------------------------------------
 // The card
 // ---------------------------------------------------------------------------
 
 export const HandoffCardView = memo(function HandoffCardView({ record }: { record: HandoffRecord }) {
-  const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(copiedTimer.current), []);
 
   const badge = handoffBadge(record.state);
   const ready = handoffActionsEnabled(record);
   const failed = record.state === "failed";
   const started = record.state === "committed";
-  const { shown, hidden } = collapseHandoffText(record.text);
+  const dismissable = handoffCanDismiss(record);
 
   // Run one press: await it, then say what happened. `okText` is the success line
   // (omitted when the card itself changing state is the confirmation).
@@ -77,9 +91,25 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
     void run(key, () => startHandoff(record, how, disposition));
   };
 
+  const copy = () =>
+    run("copy", async () => {
+      await copyHandoffText(record.text);
+      clearTimeout(copiedTimer.current);
+      setCopied(true);
+      copiedTimer.current = setTimeout(() => setCopied(false), COPIED_MS);
+    });
+
   const anyBusy = busy !== null;
   const off = !ready || anyBusy;
   const offTitle = ready ? undefined : "Available once the handoff is ready";
+
+  if (record.state === "dismissed") {
+    return (
+      <div className="text-meta text-text-faint px-1 py-1" data-testid="handoff-dismissed">
+        Handoff dismissed
+      </div>
+    );
+  }
 
   return (
     <div className="text-meta" data-testid="handoff-card" data-state={record.state}>
@@ -101,6 +131,19 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
             <Pill tone={badge.tone === "danger" ? "warn" : badge.tone}>
               <span data-testid="handoff-badge">{badge.label}</span>
             </Pill>
+            {dismissable && (
+              <button
+                type="button"
+                aria-label="Dismiss handoff"
+                title="Dismiss — don't suggest a handoff again in this session"
+                disabled={anyBusy}
+                onClick={() => void run("dismiss", () => dismissHandoff(record.id))}
+                data-testid="handoff-dismiss"
+                className="shrink-0 -mr-1 inline-flex items-center justify-center w-[30px] h-[30px] rounded-md text-text-faint hover:text-text hover:bg-fill-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            )}
           </>
         }
         actions={
@@ -116,9 +159,20 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
                     tone="ghost"
                     disabled={!ready || anyBusy}
                     title={offTitle}
-                    onClick={() => void run("copy", () => copyHandoffText(record.text), "Copied to the clipboard")}
+                    ariaLabel={copied && busy !== "copy" ? "Copied" : undefined}
+                    onClick={() => void copy()}
                   >
-                    {busy === "copy" ? "Copying…" : "Copy"}
+                    {/* The label stays in flow (hidden) while the check shows, so the button keeps its width. */}
+                    <span className="relative inline-flex items-center justify-center">
+                      <span className={copied && busy !== "copy" ? "invisible" : undefined}>
+                        {busy === "copy" ? "Copying…" : "Copy"}
+                      </span>
+                      {copied && busy !== "copy" && (
+                        <span className="absolute inset-0 inline-flex items-center justify-center manta-check-in" data-testid="handoff-copied">
+                          <Check size={14} aria-hidden="true" />
+                        </span>
+                      )}
+                    </span>
                   </Button>
                   <Button
                     tone="primary"
@@ -166,19 +220,14 @@ export const HandoffCardView = memo(function HandoffCardView({ record }: { recor
       >
         <>
           {record.text ? (
-            <div className="text-text-muted break-words" data-testid="handoff-body">
-              {renderMarkdown(expanded ? record.text : shown)}
-              {hidden > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setExpanded((v) => !v)}
-                  className="mt-1 inline-flex items-center gap-1 text-text-faint hover:text-text"
-                >
-                  {expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
-                  {expanded ? "Show less" : `Show all (${hidden} more lines)`}
-                </button>
-              )}
-            </div>
+            <ClampedMarkdown
+              text={record.text}
+              lines={BODY_LINES}
+              className=""
+              bodyClassName="text-text-muted"
+              bodyTestId="handoff-body"
+              toggleTestId="handoff-body-toggle"
+            />
           ) : (
             <div className="text-text-faint">
               {record.state === "requested" || record.state === "generating" ? "Writing the handoff…" : "No text."}
@@ -259,11 +308,13 @@ export const HandoffToolCard = memo(function HandoffToolCard({ part }: { part: O
   return <HandoffCardById id={id} />;
 });
 
-/** The server path: a record pinned above the composer. */
-export const PinnedHandoffCard = memo(function PinnedHandoffCard({ record }: { record: HandoffRecord }) {
+/** The server path: the session's handoff cards, rendered in the transcript tail (after the todo checklist). */
+export const HandoffTailCards = memo(function HandoffTailCards({ records }: { records: HandoffRecord[] }) {
   return (
-    <div className="shrink-0 px-4 pt-2 pb-2">
-      <HandoffCardView record={record} />
+    <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
+      {records.map((r) => (
+        <HandoffCardView key={r.id} record={r} />
+      ))}
     </div>
   );
 });
@@ -357,12 +408,13 @@ export function DeletedSessionNotice({ children }: { children?: ReactNode }) {
 // ---------------------------------------------------------------------------
 
 /**
- * "Handoff: auto|suggest|off" beside the trust toggle. Click cycles and saves to
- * the box config; a save that fails restores the old value and says so here.
+ * "Handoff: auto|suggest|off" beside the trust toggle — THIS session's mode. Click
+ * cycles and saves it for this session only; a save that fails restores the old
+ * value and says so here. A session with no mode of its own shows the box default.
  */
-export function HandoffModeToggle() {
-  const mode = useStore((s) => s.handoffMode);
-  const setHandoffMode = useStore((s) => s.setHandoffMode);
+export function HandoffModeToggle({ sessionId }: { sessionId: string }) {
+  const info = useHandoffSession(sessionId)?.info;
+  const mode: HandoffMode = normalizeHandoffMode(info?.mode);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -375,7 +427,7 @@ export function HandoffModeToggle() {
     clearTimeout(timer.current);
     const next: HandoffMode = nextHandoffMode(mode);
     try {
-      await setHandoffMode(next);
+      await setSessionHandoffMode(sessionId, next);
     } catch (e) {
       setError(`Couldn't save handoff mode: ${String((e as Error)?.message ?? e)}`);
       timer.current = setTimeout(() => setError(null), 6000);

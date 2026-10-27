@@ -14,8 +14,7 @@ import type {
   UpdateTarget,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
-import type { HandoffMode, SyncPayload } from "../shared/api.js";
-import { normalizeHandoffMode } from "./handoff";
+import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry, type WidgetEntry } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
@@ -344,10 +343,6 @@ type State = {
   // computed and then discarded — the user saw a blank form and no cause.
   pairLinkError: string | null;
   chatAutoAllow: boolean;
-  // Auto-handoff mode (config `handoffMode`, server default "auto"): auto starts
-  // a fresh session on its own past the context budget, suggest only offers a
-  // card, off is manual-only. Read from configGet; written by setHandoffMode.
-  handoffMode: HandoffMode;
   // Auto-rename chat-mode windows from the conversation (opt-in). See
   // AppConfig.autoRenameSessions.
   autoRenameSessions: boolean;
@@ -800,7 +795,6 @@ type State = {
   // Optimistic set + config write. REJECTS (after restoring the previous value)
   // when the write fails, so the composer control can say so instead of looking
   // like it saved.
-  setHandoffMode: (v: HandoffMode) => Promise<void>;
   setAutoRenameSessions: (v: boolean) => Promise<void>;
   // BET-414: toggle a window's pin. Optimistic set + configUpdate + reconcile.
   // The id is `<tmuxSession>/<windowIndex>` (see windowPinId in chatUtils.ts).
@@ -850,7 +844,6 @@ export const useStore = create<State>((set, get) => ({
   pendingPairLink: null,
   pairLinkError: null,
   chatAutoAllow: false,
-  handoffMode: "auto",
   autoRenameSessions: false,
   alwaysShowUsage: false,
   optimizerEnabled: false,
@@ -1138,8 +1131,6 @@ export const useStore = create<State>((set, get) => ({
       boxToken: c.boxToken ?? "",
       onboardingSkipped: c.onboardingSkipped ?? false,
       chatAutoAllow: c.chatAutoAllow ?? false,
-      // The box defaults `handoffMode` to "auto" and so do we.
-      handoffMode: normalizeHandoffMode(c.handoffMode),
       autoRenameSessions: c.autoRenameSessions ?? false,
       alwaysShowUsage: c.alwaysShowUsage ?? false,
       optimizerEnabled: c.optimizerEnabled === true,
@@ -1205,19 +1196,6 @@ export const useStore = create<State>((set, get) => ({
     const next = await window.api.configUpdate({ chatAutoAllow: v });
     // Reconcile with what main actually saved (handles error/reject paths).
     set({ chatAutoAllow: next.chatAutoAllow ?? false });
-  },
-
-  setHandoffMode: async (v) => {
-    const prev = get().handoffMode;
-    set({ handoffMode: v });
-    try {
-      const next = await window.api.configUpdate({ handoffMode: v });
-      // Reconcile with what the box actually saved.
-      set({ handoffMode: normalizeHandoffMode(next?.handoffMode ?? v) });
-    } catch (e) {
-      set({ handoffMode: prev });
-      throw e;
-    }
   },
 
   setAutoRenameSessions: async (v) => {

@@ -17,7 +17,7 @@
 //     `tmux` objects, so the whole protocol is unit-testable with a fake world.
 
 import { randomUUID } from "node:crypto";
-import { COOLDOWN_MS, decideAutoTrigger, entryPlan, handoffBudget, normalizeMode } from "./policy.mjs";
+import { COOLDOWN_MS, DEFAULT_HANDOFF_MODE, HANDOFF_MODES, decideAutoTrigger, entryPlan, handoffBudget, normalizeMode } from "./policy.mjs";
 import { buildGeneratePrompt, composeHandoffText, factLines, missingHeadings } from "./text.mjs";
 import { continuationUnconsumed, emptyState, mintRecordId, normalizeState, pruneLinks, pruneRecords, publicEvent, publicRecord } from "./state.mjs";
 
@@ -36,6 +36,7 @@ export const ERROR_STATUS = Object.freeze({
   expired: 404,
   already_started: 409,
   busy: 409,
+  dismissed: 409,
   not_ready: 422,
   no_window: 422,
   generation_failed: 502,
@@ -82,7 +83,7 @@ export function createHandoffEngine(deps = {}) {
     load = () => emptyState(),
     save = async () => {},
     now = Date.now,
-    getMode = () => "auto",
+    getMode = () => DEFAULT_HANDOFF_MODE,
     publish = () => {},
     warn = (...a) => console.warn(...a),
     oc = {},
@@ -415,6 +416,12 @@ export function createHandoffEngine(deps = {}) {
 
   // ---- records -------------------------------------------------------------------
   const recordsFor = (sid) => Object.values(state.records).filter((r) => r.fromSessionId === sid);
+  const isDismissed = (sid) => typeof state.dismissedSessions[sid] === "number";
+  const hasOwnMode = (sid) => HANDOFF_MODES.includes(state.sessionModes[sid]);
+  /** A session's own mode, else the box default (`getMode`). */
+  async function modeFor(sid) {
+    return hasOwnMode(sid) ? state.sessionModes[sid] : normalizeMode(await getMode());
+  }
   // Only these block a new automatic attempt: a `ready` card has no dismiss action, so it must never wedge auto mode.
   const IN_FLIGHT_STATES = ["requested", "generating", "starting"];
 
@@ -560,7 +567,10 @@ export function createHandoffEngine(deps = {}) {
     if (trigger === "agent" && !["suggest", "handoff"].includes(action)) throw new HandoffError("invalid", "action must be suggest or handoff");
     if (body !== undefined && typeof body !== "string") throw new HandoffError("invalid", "body must be a string");
     const sid = followReplacement(sessionId);
-    const plan = entryPlan({ mode: await getMode(), trigger, action });
+    if (trigger === "agent" && isDismissed(sid)) {
+      throw new HandoffError("dismissed", "The user dismissed handoff suggestions in this conversation. Do not suggest a handoff again unless the user asks.");
+    }
+    const plan = entryPlan({ mode: await modeFor(sid), trigger, action });
     const rec = newRecord({
       contextTokens: await measuredTokens(sid),
       fromSessionId: sid,
@@ -626,7 +636,8 @@ export function createHandoffEngine(deps = {}) {
   }
 
   async function maybeAuto(sid, success) {
-    const mode = normalizeMode(await getMode());
+    if (isDismissed(sid)) return;
+    const mode = await modeFor(sid);
     if (mode === "off") return;
     if (recordsFor(sid).some((r) => IN_FLIGHT_STATES.includes(r.state))) return;
     // Suggest mode: an unanswered automatic card already says "hand off" — don't
@@ -700,6 +711,8 @@ export function createHandoffEngine(deps = {}) {
     if (type === "session.deleted") {
       stepCtx.delete(sid);
       turns.delete(sid);
+      delete state.dismissedSessions[sid];
+      delete state.sessionModes[sid];
       for (const r of recordsFor(sid)) {
         if (["requested", "generating", "ready"].includes(r.state)) {
           r.state = "cancelled";
@@ -1060,6 +1073,18 @@ export function createHandoffEngine(deps = {}) {
     }
     const c = j.commit;
     rec.step = "commit";
+    if (!c.modeInherited) {
+      // The successor keeps the predecessor's effective mode, stored explicitly (a later change to the box default doesn't move it).
+      if (!hasOwnMode(succ)) {
+        try {
+          state.sessionModes[succ] = await modeFor(pred);
+        } catch (e) {
+          warn("[handoff] the successor couldn't inherit the handoff mode:", e?.message ?? e);
+        }
+      }
+      c.modeInherited = true;
+      await persist();
+    }
     if (!c.attached) {
       await attachWindow(rec);
       await hook("attach");
@@ -1122,6 +1147,28 @@ export function createHandoffEngine(deps = {}) {
       detach("retry generate", () => produceText(rec));
     }
     return publicRecord(rec);
+  }
+
+  /** Hide a `ready`/`failed` card and stop proposing handoffs in its session (explicit /handoff and the button still work). */
+  async function dismiss(id) {
+    const rec = state.records[id];
+    if (!rec) throw new HandoffError("expired", "This handoff has expired.");
+    if (rec.state !== "ready" && rec.state !== "failed") {
+      throw new HandoffError("not_ready", "This handoff can no longer be dismissed.", { handoff: publicRecord(rec) });
+    }
+    rec.state = "dismissed";
+    state.dismissedSessions[rec.fromSessionId] = now();
+    touch(rec);
+    await persist();
+    return publicRecord(rec);
+  }
+
+  async function setMode(sessionId, mode) {
+    if (typeof sessionId !== "string" || !sessionId) throw new HandoffError("invalid", "sessionId is required");
+    if (!HANDOFF_MODES.includes(mode)) throw new HandoffError("invalid", 'mode must be "auto", "suggest" or "off"');
+    state.sessionModes[sessionId] = mode;
+    await persist();
+    return mode;
   }
 
   async function draftConsumed(id, draftRevision) {
@@ -1198,7 +1245,14 @@ export function createHandoffEngine(deps = {}) {
     const looked = await Promise.all(preds.map((p) => lookupSession(p.id)));
     const predecessors = preds.map((p, i) => ({ ...p, ...looked[i] }));
     const c = state.continuations[sessionId];
-    const out = { records, links: publicLink(state.links[sessionId] ?? {}), chain: { predecessors } };
+    const out = {
+      records,
+      links: publicLink(state.links[sessionId] ?? {}),
+      chain: { predecessors },
+      dismissed: isDismissed(sessionId),
+      mode: await modeFor(sessionId),
+      modeIsDefault: !hasOwnMode(sessionId),
+    };
     if (c && (c.preamble || c.draft !== undefined || c.send)) {
       out.continuation = {
         recordId: c.recordId,
@@ -1220,7 +1274,7 @@ export function createHandoffEngine(deps = {}) {
     if (!ctx) return null;
     const budget = handoffBudget({ providerID: ctx.providerID, modelID: ctx.modelID, contextLimit: contextLimitFor(ctx.providerID, ctx.modelID) });
     if (budget === null) return null;
-    return { contextTokens: ctx.tokens, budget, measuredAt: ctx.at, mode: normalizeMode(await getMode()) };
+    return { contextTokens: ctx.tokens, budget, measuredAt: ctx.at, mode: isDismissed(sessionId) ? "off" : await modeFor(sessionId) };
   }
 
   // ---- boot recovery (§5.5) ---------------------------------------------------------------------
@@ -1272,6 +1326,9 @@ export function createHandoffEngine(deps = {}) {
     create,
     start: startRecord,
     retry,
+    dismiss,
+    setMode,
+    modeFor,
     draftConsumed,
     list,
     get,

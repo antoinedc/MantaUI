@@ -23,6 +23,8 @@ function engineStub(over = {}) {
     get: (id) => (calls.push(["get", id]), id === ID ? rec : null),
     start: async (id, i) => (calls.push(["start", id, i]), rec),
     retry: async (id) => (calls.push(["retry", id]), rec),
+    dismiss: async (id) => (calls.push(["dismiss", id]), { ...rec, state: "dismissed" }),
+    setMode: async (sid, mode) => (calls.push(["setMode", sid, mode]), mode),
     draftConsumed: async (id, rev) => void calls.push(["draftConsumed", id, rev]),
     ...over,
   };
@@ -71,11 +73,27 @@ test("POST start / retry / draft-consumed", async () => {
   assert.deepEqual(e.calls.at(-1), ["draftConsumed", ID, 3]);
 });
 
+test("POST dismiss → 200 {handoff}; POST /api/handoff/mode → 200 {mode} (GET is a 405, a bad mode a 400)", async () => {
+  const e = engineStub();
+  const d = await call(mk(e), "POST", `/api/handoff/${ID}/dismiss`);
+  assert.equal(d.rs.status, 200);
+  assert.deepEqual(d.rs.body, { handoff: { id: ID, state: "dismissed" } });
+  assert.deepEqual(e.calls.at(-1), ["dismiss", ID]);
+  const m = await call(mk(e, { sessionId: "ses_a", mode: "off", extra: 1 }), "POST", "/api/handoff/mode");
+  assert.equal(m.rs.status, 200);
+  assert.deepEqual(m.rs.body, { mode: "off" });
+  assert.deepEqual(e.calls.at(-1), ["setMode", "ses_a", "off"]);
+  assert.equal((await call(mk(e), "GET", "/api/handoff/mode")).rs.status, 405);
+  const bad = engineStub({ setMode: async () => { throw new HandoffError("invalid", "mode must be auto, suggest or off"); } });
+  assert.equal((await call(mk(bad, { sessionId: "s", mode: "x" }), "POST", "/api/handoff/mode")).rs.status, 400);
+});
+
 test("HandoffError codes map to their statuses with {error, message} and the record on 409", async () => {
   const cases = [
     ["already_started", 409, true],
     ["busy", 409, true],
     ["not_ready", 422, true],
+    ["dismissed", 409, false],
     ["no_window", 422, false],
     ["invalid", 400, false],
     ["expired", 404, false],

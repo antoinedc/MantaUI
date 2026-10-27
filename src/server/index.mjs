@@ -212,7 +212,6 @@ import { resourceSnapshot } from "./resourceSnapshot.mjs";
 import { createPromptDelivery } from "./promptDelivery.mjs";
 import { createProductionHandoff } from "./handoff/wiring.mjs";
 import { createHandoffHandler } from "./handoffRoute.mjs";
-import { normalizeMode as normalizeHandoffMode } from "./handoff/policy.mjs";
 import { createCtoBinding } from "./ctoBinding.mjs";
 import { createCtoAdmission } from "./ctoAdmission.mjs";
 import { createCtoConversationService, authorizeCtoProjectMutation } from "./ctoConversation.mjs";
@@ -1877,12 +1876,10 @@ const compactionScheduler = createCompactionScheduler({
       console.warn("[optimizer] compaction notice publish failed:", e?.message ?? e);
     }
   },
-  // §4.5: with auto-handoff on (auto or suggest) idle compaction stands aside —
-  // the handoff covers the same sessions. Only `off` leaves the scheduler as it was.
-  enabled: async () => {
-    const cfg = await local.configGet();
-    return cfg?.optimizerEnabled === true && normalizeHandoffMode(cfg?.handoffMode) === "off";
-  },
+  enabled: async () => (await local.configGet())?.optimizerEnabled === true,
+  // §4.5: a session whose handoff mode is on (auto or suggest) is skipped —
+  // the handoff covers it. The mode is per session; only `off` leaves it to compaction.
+  eligible: async (sid) => (await handoffEngine.modeFor(sid)) === "off",
   // §6.2: one maintenance operation per session.
   acquire: (sid) => handoffEngine.acquireOperation(sid, "compaction"),
   release: (sid) => handoffEngine.releaseOperation(sid, "compaction"),

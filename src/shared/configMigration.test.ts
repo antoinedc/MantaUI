@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { migrateCacheTtlDefault, migrateLegacyCapConfig } from "./configMigration.mjs";
+import { migrateCacheTtlDefault, migrateHandoffModeDefault, migrateLegacyCapConfig } from "./configMigration.mjs";
 
 describe("migrateLegacyCapConfig", () => {
   it("empty input → {}", () => {
@@ -120,6 +120,38 @@ describe("migrateCacheTtlDefault", () => {
     const input = { cacheTtl: "1h" };
     const snapshot = JSON.stringify(input);
     migrateCacheTtlDefault(input);
+    expect(JSON.stringify(input)).toBe(snapshot);
+  });
+});
+
+describe("migrateHandoffModeDefault", () => {
+  it("rewrites an unmarked stored auto to suggest and marks it", () => {
+    const r = migrateHandoffModeDefault({ handoffMode: "auto" });
+    expect(r.handoffMode).toBe("suggest");
+    expect(r.handoffModeDefaultMigrated).toBe(true);
+  });
+
+  it("sets suggest + marker when the key is absent or another value was stored", () => {
+    expect(migrateHandoffModeDefault({}).handoffMode).toBe("suggest");
+    expect(migrateHandoffModeDefault({ handoffMode: "off" }).handoffMode).toBe("suggest");
+  });
+
+  it("is one-time — a marked config is untouched, so a later deliberate auto sticks", () => {
+    const marked = { handoffMode: "auto", handoffModeDefaultMigrated: true };
+    expect(migrateHandoffModeDefault(marked)).toEqual(marked);
+  });
+
+  it("is idempotent", () => {
+    const once = migrateHandoffModeDefault({ handoffMode: "auto" });
+    expect(migrateHandoffModeDefault(once)).toEqual(once);
+  });
+
+  it("null/non-object input → {}, other fields preserved, input not mutated", () => {
+    expect(migrateHandoffModeDefault(null)).toEqual({});
+    expect(migrateHandoffModeDefault("nope" as never)).toEqual({});
+    const input = { handoffMode: "auto", groqApiKey: "k" };
+    const snapshot = JSON.stringify(input);
+    expect(migrateHandoffModeDefault(input).groqApiKey).toBe("k");
     expect(JSON.stringify(input)).toBe(snapshot);
   });
 });

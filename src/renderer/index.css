@@ -352,6 +352,13 @@ html, body, #root {
   .manta-palette-panel-out { animation: none; }
 }
 
+/* Handoff card: the copy confirmation check pops in over the Copy label. */
+.manta-check-in { animation: manta-check-in var(--motion-fast) var(--ease-out); }
+@keyframes manta-check-in { from { opacity: 0; transform: scale(0.5); } }
+@media (prefers-reduced-motion: reduce) {
+  .manta-check-in { animation: none; }
+}
+
 /* D2 — menus/popovers enter with a 120ms rise; exit stays instant (snappy close). */
 .manta-menu-in {
   animation: manta-menu-in var(--motion-fast) var(--ease-out);

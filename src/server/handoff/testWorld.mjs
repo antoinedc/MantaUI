@@ -140,7 +140,7 @@ export function createWorld({ mode = "auto" } = {}) {
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
       gather: { facts: async () => null, measureContext: async () => null },
-      contextLimitFor: () => 1_000_000,
+      contextLimitFor: () => 400_000, // budget = 60% = 240k; the over-budget fixtures use 250k+
       hooks: { step: async (name) => { if (w.crashAt === name) throw new Crash(name); } },
       timers: { setTimeout: (fn) => { w.timers.push(fn); return { unref() {} }; } },
       sleep: async () => {},

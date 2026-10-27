@@ -850,7 +850,7 @@ export type ModelCostArgs = {
 // The wire shapes of the `handoff:*` rpc channels (§11 + §15 addendum). Kept in
 // this file (the renderer's contract with the box) rather than types.ts.
 
-/** Config `handoffMode`: auto-start on budget · only offer a card · never automatic. */
+/** Per-session handoff mode (box default: config `handoffMode`): auto-start on budget · only offer a card · never automatic. */
 export type HandoffMode = "auto" | "suggest" | "off";
 
 export type HandoffState =
@@ -860,7 +860,8 @@ export type HandoffState =
   | "starting"
   | "committed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "dismissed";
 
 /** `clear` = replacement (the successor takes over the window); `new-session` = branch. */
 export type HandoffHow = "clear" | "new-session";
@@ -916,6 +917,12 @@ export interface HandoffSessionInfo {
   records: HandoffRecord[];
   links: HandoffLinks | null;
   continuation?: HandoffContinuation | null;
+  /** The user dismissed handoff suggestions in this session. Absent on an older box. */
+  dismissed?: boolean;
+  /** Effective handoff mode of this session. Absent on an older box (callers fall back to "suggest"). */
+  mode?: HandoffMode;
+  /** True when `mode` is the box default rather than this session's own value. */
+  modeIsDefault?: boolean;
 }
 
 /** `handoff` bus payload — published on every record change; carries no text. */
@@ -1463,7 +1470,7 @@ export interface Api {
   // returns a no-op unsubscribe).
   onAppControl(cb: (payload: AppControlPayload) => void): () => void;
 
-  // Auto-handoff (spec §15). All six are `/rpc` channels, implemented once on
+  // Auto-handoff (spec §15). All eight are `/rpc` channels, implemented once on
   // the box next to the REST routes. rpc errors reject with the box's error
   // code as the message (`busy`, `not_ready`, `already_started`, `expired`, …).
   handoffCreate(input: HandoffCreateInput): Promise<{ handoff: HandoffRecord }>;
@@ -1472,6 +1479,10 @@ export interface Api {
   handoffStart(input: HandoffStartInput): Promise<{ handoff: HandoffRecord }>;
   handoffRetry(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
   handoffDraftConsumed(input: { id: string; draftRevision: number }): Promise<void>;
+  /** Dismiss a ready/failed card and stop unasked handoff proposals in its session. */
+  handoffDismiss(input: { id: string }): Promise<{ handoff: HandoffRecord }>;
+  /** Set one session's handoff mode (never the box default). */
+  handoffSetMode(input: { sessionId: string; mode: HandoffMode }): Promise<{ mode: HandoffMode }>;
   // The box publishes `{kind:"handoff", payload}` on every record change. No-op
   // on the preload bridge and on demoApi (Proxy fallback returns a no-op
   // unsubscribe).

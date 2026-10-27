@@ -6,7 +6,6 @@ import {
   appendBelow,
   buildPreviousEntries,
   carriableAttachments,
-  collapseHandoffText,
   contextTokensOfMessages,
   creatingRecord,
   describeContinuationNotice,
@@ -17,6 +16,7 @@ import {
   formatHandoffTokens,
   handoffActionsEnabled,
   handoffBadge,
+  handoffCanDismiss,
   handoffIdOfPart,
   isEmptyCarry,
   isHandoffToolPart,
@@ -96,12 +96,13 @@ describe("state → badge / actions", () => {
     expect(describeHandoffSource(rec({ trigger: "button" }))).toBe("Hand off button");
     expect(describeHandoffSource(rec({ trigger: "auto", kind: "auto" }))).toBe("automatic");
   });
-  it("collapses after 12 lines and reports what it hid", () => {
-    const text = Array.from({ length: 20 }, (_, i) => `l${i}`).join("\n");
-    const { shown, hidden } = collapseHandoffText(text);
-    expect(shown.split("\n")).toHaveLength(12);
-    expect(hidden).toBe(8);
-    expect(collapseHandoffText("a\nb")).toEqual({ shown: "a\nb", hidden: 0 });
+  it("badges a dismissed record and offers dismiss only for ready/failed", () => {
+    expect(handoffBadge("dismissed")).toEqual({ label: "dismissed", tone: "neutral" });
+    expect(handoffCanDismiss({ state: "ready" })).toBe(true);
+    expect(handoffCanDismiss({ state: "failed" })).toBe(true);
+    for (const state of ["requested", "generating", "starting", "committed", "cancelled", "dismissed"] as const) {
+      expect(handoffCanDismiss({ state }), state).toBe(false);
+    }
   });
 });
 
@@ -117,6 +118,7 @@ describe("selectPinnedHandoffs", () => {
   it("does not pin started/cancelled ones or another session's", () => {
     expect(selectPinnedHandoffs([rec({ state: "committed" })], "ses_old")).toEqual([]);
     expect(selectPinnedHandoffs([rec({ state: "cancelled" })], "ses_old")).toEqual([]);
+    expect(selectPinnedHandoffs([rec({ state: "dismissed" })], "ses_old")).toEqual([]);
     expect(selectPinnedHandoffs([rec()], "ses_other")).toEqual([]);
     // a record where this session is the SUCCESSOR is not this session's card
     expect(selectPinnedHandoffs([rec({ fromSessionId: "ses_x", successorId: "ses_old" })], "ses_old")).toEqual([]);
@@ -206,9 +208,10 @@ describe("mode", () => {
     expect(nextHandoffMode("suggest")).toBe("off");
     expect(nextHandoffMode("off")).toBe("auto");
   });
-  it("defaults anything unknown to auto", () => {
-    expect(normalizeHandoffMode(undefined)).toBe("auto");
-    expect(normalizeHandoffMode("nope")).toBe("auto");
+  it("defaults anything unknown (or absent, on an older box) to suggest", () => {
+    expect(normalizeHandoffMode(undefined)).toBe("suggest");
+    expect(normalizeHandoffMode("nope")).toBe("suggest");
+    expect(normalizeHandoffMode("auto")).toBe("auto");
     expect(normalizeHandoffMode("off")).toBe("off");
     expect(normalizeHandoffMode("suggest")).toBe("suggest");
   });
@@ -220,6 +223,8 @@ describe("describeHandoffError", () => {
     expect(describeHandoffError(new Error("busy"))).toMatch(/busy/);
     expect(describeHandoffError(new Error("not_ready"))).toMatch(/isn't ready/);
     expect(describeHandoffError(new Error("HTTP 404"))).toMatch(/expired/);
+    expect(describeHandoffError(new Error("dismissed"))).toMatch(/dismissed/);
+    expect(describeHandoffError(new Error("This handoff can no longer be dismissed."))).toBe("This handoff can no longer be dismissed.");
     expect(describeHandoffError(new Error("boom"))).toBe("boom");
     expect(describeHandoffError(undefined)).toBe("Something went wrong.");
   });

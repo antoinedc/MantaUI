@@ -96,6 +96,10 @@ export type TranscriptContext = {
   // by ChatPanel from the job store. Rendered first in the tail, right under
   // the last message, so they read as transcript entries.
   backgroundCards?: React.ReactNode;
+  // The server-path handoff cards (ready / failed / preparing), rendered in the
+  // tail right after the todo checklist. Built by ChatPanel over the session's
+  // pinned handoff records.
+  handoffCards?: React.ReactNode;
   // BET-837: the pending voice-note row (upload/transcribe in flight) renders
   // here — after the message list, before the working indicator. When it
   // resolves into a real note it lands as a VoicePlayer on its message row.
@@ -414,6 +418,11 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
       {context.activeTodos && context.activeTodos.length > 0 && (
         <ActiveTodos todos={context.activeTodos} onDismiss={context.onDismissTodos} />
       )}
+      {context.handoffCards && (
+        <ErrorBoundary>
+          {context.handoffCards}
+        </ErrorBoundary>
+      )}
       {context.questions.length > 0 && (
         <div className="flex flex-col" style={{ gap: "var(--block-gap)" }}>
           {context.questions.map((q) => (
@@ -493,6 +502,8 @@ export type TranscriptProps = {
   planCard?: React.ReactNode;
   // Background-run cards, mounted first in the tail (see TranscriptContext.backgroundCards).
   backgroundCards?: React.ReactNode;
+  // Handoff cards, mounted in the tail after the todo checklist (see TranscriptContext.handoffCards).
+  handoffCards?: React.ReactNode;
   // The Virtuoso scroll container, published upward so ChatPanel's
   // scrollToTail can address the real bottom (Footer included).
   scrollerElRef: React.MutableRefObject<HTMLElement | null>;
@@ -539,6 +550,7 @@ export function Transcript({
   onRejectQuestion,
   planCard,
   backgroundCards,
+  handoffCards,
   scrollerElRef,
   followingRef,
   onFollowingChange,
@@ -702,6 +714,7 @@ export function Transcript({
     onRejectQuestion,
     planCard,
     backgroundCards,
+    handoffCards,
     pendingVoiceNote,
     onRetryVoiceNote,
   };
@@ -860,6 +873,7 @@ export function Transcript({
                 {/* A background run can be the very first thing a session does;
                     its card must not wait for a first message to exist. */}
                 {backgroundCards && <ErrorBoundary>{backgroundCards}</ErrorBoundary>}
+                {handoffCards && <ErrorBoundary>{handoffCards}</ErrorBoundary>}
               </div>
             </div>
           </motion.div>

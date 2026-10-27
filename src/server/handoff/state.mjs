@@ -6,15 +6,18 @@
 //   continuations per successor: {recordId, preamble?, claim?, draft?, draftRevision?, draftConsumed?, send?}
 //   fences        pred session -> {successorId, recordId}
 //   held          target session -> [{id, kind, args, at}] admissions parked by a fence / claim / release
+//   dismissedSessions  session -> when the user dismissed its handoff suggestions
+//   sessionModes       session -> its own handoff mode (absent = the box default)
 
 import { randomBytes } from "node:crypto";
+import { HANDOFF_MODES } from "./policy.mjs";
 
 export const RECORD_RETENTION_MS = 30 * 24 * 3600_000;
 export const RECORD_RETENTION_MAX = 500;
-export const TERMINAL_STATES = Object.freeze(["committed", "failed", "cancelled"]);
+export const TERMINAL_STATES = Object.freeze(["committed", "failed", "cancelled", "dismissed"]);
 
 export function emptyState() {
-  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {} };
+  return { version: 1, records: {}, links: {}, continuations: {}, fences: {}, held: {}, dismissedSessions: {}, sessionModes: {} };
 }
 
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
@@ -26,6 +29,12 @@ export function normalizeState(raw) {
   for (const k of ["records", "links", "continuations", "fences"]) if (isObj(raw[k])) s[k] = raw[k];
   if (isObj(raw.held)) {
     for (const [k, v] of Object.entries(raw.held)) if (Array.isArray(v) && v.length > 0) s.held[k] = v;
+  }
+  if (isObj(raw.dismissedSessions)) {
+    for (const [k, v] of Object.entries(raw.dismissedSessions)) if (typeof v === "number" && Number.isFinite(v)) s.dismissedSessions[k] = v;
+  }
+  if (isObj(raw.sessionModes)) {
+    for (const [k, v] of Object.entries(raw.sessionModes)) if (HANDOFF_MODES.includes(v)) s.sessionModes[k] = v;
   }
   return s;
 }
