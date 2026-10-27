@@ -57,7 +57,16 @@ export function createHandoffHandler({ engine, readJson: rawReadJson }) {
         send(res, 405, { error: "method_not_allowed", message: "Method not allowed." });
         return true;
       }
-      const m = path.match(/^\/api\/handoff\/([^/]+)(?:\/(start|retry|draft-consumed))?$/);
+      if (path === "/api/handoff/mode") {
+        if (req.method !== "POST") {
+          send(res, 405, { error: "method_not_allowed", message: "Method not allowed." });
+          return true;
+        }
+        const body = await readJson(req);
+        send(res, 200, { mode: await engine.setMode(body?.sessionId, body?.mode) });
+        return true;
+      }
+      const m = path.match(/^\/api\/handoff\/([^/]+)(?:\/(start|retry|dismiss|draft-consumed))?$/);
       if (!m || !ID_RE.test(m[1])) {
         send(res, 404, { error: "expired", message: "This handoff has expired." });
         return true;
@@ -75,6 +84,8 @@ export function createHandoffHandler({ engine, readJson: rawReadJson }) {
           send(res, 200, { handoff: await engine.start(id, { how: body?.how, disposition: body?.disposition, text: body?.text }) });
         } else if (action === "retry") {
           send(res, 200, { handoff: await engine.retry(id) });
+        } else if (action === "dismiss") {
+          send(res, 200, { handoff: await engine.dismiss(id) });
         } else {
           await engine.draftConsumed(id, body?.draftRevision);
           send(res, 204);

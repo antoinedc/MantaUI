@@ -6,8 +6,8 @@
 // function here either resolves with its effect done or REJECTS with wording the
 // card shows — nothing swallows an error (AGENTS.md "never stub a control").
 
-import type { HandoffHow, HandoffRecord } from "../shared/api";
-import { announceRecord, applyRecord, useHandoffStore } from "./handoffStore";
+import type { HandoffHow, HandoffMode, HandoffRecord } from "../shared/api";
+import { announceRecord, applyRecord, loadSession, patchSessionInfo, useHandoffStore } from "./handoffStore";
 import { describeHandoffError } from "./handoff";
 import { getMantaPreload } from "./preloadAccess";
 import { resolveSessionOwner, useStore } from "./store";
@@ -112,6 +112,40 @@ export async function retryHandoff(id: string): Promise<void> {
     applyRecord(res.handoff);
   } catch (e) {
     throw new Error(describeHandoffError(e));
+  }
+}
+
+/**
+ * Dismiss a ready/failed card: the box hides it and stops proposing handoffs in
+ * that session. The card goes away from the record we get back; the session is
+ * refetched so its `dismissed` flag follows.
+ */
+export async function dismissHandoff(id: string): Promise<void> {
+  let dismissed: HandoffRecord;
+  try {
+    const res = await window.api.handoffDismiss({ id });
+    if (!res?.handoff) throw new Error("The box didn't return the handoff.");
+    dismissed = res.handoff;
+  } catch (e) {
+    throw new Error(describeHandoffError(e));
+  }
+  applyRecord(dismissed);
+  await loadSession(dismissed.fromSessionId);
+}
+
+/**
+ * Set one session's handoff mode (never the box default). Optimistic: the
+ * toggle shows `mode` at once and is rolled back if the box refuses.
+ */
+export async function setSessionHandoffMode(sessionId: string, mode: HandoffMode): Promise<void> {
+  const prev = useHandoffStore.getState().sessions[sessionId]?.info;
+  patchSessionInfo(sessionId, { mode, modeIsDefault: false });
+  try {
+    const res = await window.api.handoffSetMode({ sessionId, mode });
+    patchSessionInfo(sessionId, { mode: res?.mode ?? mode, modeIsDefault: false });
+  } catch (e) {
+    patchSessionInfo(sessionId, { mode: prev?.mode, modeIsDefault: prev?.modeIsDefault });
+    throw e;
   }
 }
 

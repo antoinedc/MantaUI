@@ -29,30 +29,34 @@ for (const [trigger, action, mode, want] of TABLE) {
   });
 }
 
-test("entryPlan rejects unknown triggers/actions and treats a garbage mode as the default (auto)", () => {
+test("entryPlan rejects unknown triggers/actions and treats a garbage mode as the box default (suggest)", () => {
   assert.throws(() => entryPlan({ mode: "auto", trigger: "cron" }), /unknown trigger/);
   assert.throws(() => entryPlan({ mode: "auto", trigger: "agent", action: "nuke" }), /unknown action/);
-  assert.equal(normalizeMode("yes"), "auto");
-  assert.equal(normalizeMode(undefined), "auto");
+  assert.equal(normalizeMode("yes"), "suggest");
+  assert.equal(normalizeMode(undefined), "suggest");
   assert.equal(normalizeMode("off"), "off");
-  assert.equal(entryPlan({ mode: "bogus", trigger: "auto" }).disposition, "armed");
+  assert.equal(entryPlan({ mode: "bogus", trigger: "auto" }).produce, "card");
 });
 
 // ---- §4.3 budget -----------------------------------------------------------------
 
-test("budget: min(family ceiling, 60% of the window)", () => {
-  assert.equal(handoffBudget({ modelID: "claude-opus-4-8", contextLimit: 1_000_000 }), 200_000);
-  assert.equal(handoffBudget({ modelID: "claude-sonnet-5-5", contextLimit: 200_000 }), 120_000, "60% of a 200k window beats the 200k ceiling");
-  assert.equal(handoffBudget({ modelID: "gpt-6-sol", contextLimit: 400_000 }), 200_000);
-  assert.equal(handoffBudget({ modelID: "claude-haiku-4-5", contextLimit: 200_000 }), 100_000, "smaller/cheaper ≈ 100k");
-  assert.equal(handoffBudget({ modelID: "gpt-5-mini", contextLimit: 400_000 }), 100_000, "a small marker wins over a frontier family word");
+test("budget: a known window is 60% of it, with no family ceiling", () => {
+  assert.equal(handoffBudget({ modelID: "claude-opus-4-8", contextLimit: 1_000_000 }), 600_000, "a 1M frontier window triggers at 600k, not 200k");
+  assert.equal(handoffBudget({ modelID: "claude-sonnet-5-5", contextLimit: 200_000 }), 120_000);
+  assert.equal(handoffBudget({ modelID: "gpt-6-sol", contextLimit: 400_000 }), 240_000);
+  assert.equal(handoffBudget({ modelID: "claude-haiku-4-5", contextLimit: 200_000 }), 120_000, "small models get no ceiling either when the window is known");
+  assert.equal(handoffBudget({ modelID: "gpt-5-mini", contextLimit: 400_000 }), 240_000);
   assert.equal(handoffBudget({ modelID: "some-new-model", contextLimit: 128_000 }), 76_800, "unknown family → 60% of the window");
+  assert.equal(handoffBudget({ contextLimit: 1_000_001 }), 600_000, "floor of 60%");
 });
 
 test("budget: an unknown window uses the family ceiling; neither → null", () => {
   assert.equal(handoffBudget({ modelID: "claude-opus-4-8" }), 200_000);
   assert.equal(handoffBudget({ modelID: "claude-opus-4-8", contextLimit: 0 }), 200_000);
+  assert.equal(handoffBudget({ modelID: "claude-haiku-4-5" }), 100_000);
+  assert.equal(handoffBudget({ modelID: "gpt-5-mini", contextLimit: null }), 100_000, "a small marker wins over a frontier family word");
   assert.equal(handoffBudget({ modelID: "mystery" }), null);
+  assert.equal(handoffBudget({ modelID: "mystery", contextLimit: null }), null);
   assert.equal(handoffBudget({}), null);
   assert.equal(modelClass("x", ""), "unknown");
 });

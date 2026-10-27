@@ -765,16 +765,16 @@ export function InputArea({
         planOn={plan.on}
         chatAutoAllow={chatAutoAllow}
         setChatAutoAllow={setChatAutoAllow}
-        trailing={showHandoffMode ? <HandoffModeToggle /> : undefined}
+        trailing={showHandoffMode && activeSessionId ? <HandoffModeToggle sessionId={activeSessionId} /> : undefined}
         status={
           <>
           {running && onSubmitAfterTurn && !voiceActive && (
-            <span className="text-meta text-text-faint whitespace-nowrap" data-testid="busy-send-hint">
+            <span className="text-text-faint truncate" data-testid="busy-send-hint">
               {bgActive ? "⏎ run in background" : busySendHint(IS_MAC)}
             </span>
           )}
           {voiceActive && (
-            <span className="text-meta text-text-faint">
+            <span className="text-text-faint truncate">
               {voiceProcessing ? (
                 "transcribing… · esc cancels"
               ) : voicePhase === "paused" ? (

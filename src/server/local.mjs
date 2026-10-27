@@ -19,7 +19,7 @@ import { slugifyProjectName, uniqueSessionName } from "../shared/projectName.mjs
 import { detectForge, repoKey } from "../shared/forge.mjs";
 import { runLoginShell } from "./launchers.mjs";
 import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
-import { migrateCacheTtlDefault } from "../shared/configMigration.mjs";
+import { migrateCacheTtlDefault, migrateHandoffModeDefault } from "../shared/configMigration.mjs";
 
 // ============================================================
 // Config persistence (real implementation — renderer depends on it)
@@ -48,8 +48,12 @@ const DEFAULT_CONFIG = {
   // Auto-handoff (spec 2026-10-26): "auto" replaces a conversation that outgrew
   // its context budget with a fresh one carrying a handoff prompt; "suggest"
   // only offers the prompt as a card; "off" never acts on its own (manual and
-  // agent entries still work). Default auto — the user's decision.
-  handoffMode: "auto",
+  // agent entries still work). This is the BOX default; each session may carry
+  // its own mode (handoff engine state). Default suggest since 2026-10-27; the
+  // marker makes a fresh config count as already migrated, so a deliberate
+  // choice is never reset by migrateHandoffModeDefault.
+  handoffMode: "suggest",
+  handoffModeDefaultMigrated: true,
   // BET-246: per-session worktree defaults (settings-only — read via the
   // generic configGet/configUpdate channel like every other AppConfig field).
   worktreePerSession: false,
@@ -141,7 +145,17 @@ async function getConfig() {
     // measurably requests 5m). Pure logic + rationale live in
     // shared/configMigration.mjs; it is idempotent and self-marking, so it is
     // safe to run on every load and a later deliberate "1h" pick sticks.
-    _config = { ...DEFAULT_CONFIG, ...migrateCacheTtlDefault(parsed) };
+    const migrated = migrateHandoffModeDefault(migrateCacheTtlDefault(parsed));
+    _config = { ...DEFAULT_CONFIG, ...migrated };
+    // One-time handoff default switch (auto → suggest): write the marker and the
+    // value together, so the migration can never run twice and undo a later pick.
+    if (parsed.handoffModeDefaultMigrated !== true) {
+      try {
+        await writeJsonAtomic(CONFIG_PATH, JSON.stringify(migrated, null, 2));
+      } catch (e) {
+        console.warn("[config] couldn't persist the handoff mode migration:", e?.message ?? e);
+      }
+    }
   } else {
     _config = { ...DEFAULT_CONFIG };
   }

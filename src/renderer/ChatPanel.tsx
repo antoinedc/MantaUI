@@ -120,7 +120,7 @@ import {
   CarriedContextBlock,
   ContinuationNotice,
   DeletedSessionNotice,
-  PinnedHandoffCard,
+  HandoffTailCards,
   PreviousSessionBar,
 } from "./HandoffParts";
 import {
@@ -2886,7 +2886,6 @@ export function ChatPanel({
   // tier (fixed priority, at most two expanded, the rest rolled up).
   const AMBIENT_CARD: Record<string, { order: number; label: string }> = {
     retry: { order: 7, label: "↻ retry" },
-    handoff: { order: 8, label: "⇄ handoff" },
     compaction: { order: 6, label: "↧ compaction" },
     "send-error": { order: 5, label: "⚠ error" },
     pending: { order: 4, label: "⏳ pending" },
@@ -3104,12 +3103,19 @@ export function ChatPanel({
     [backgroundCards],
   );
 
+  // Server-path handoff cards live in the transcript tail (after the todos), not
+  // the pinned stack; memoized on the records so streaming never re-renders them.
+  const handoffCardsNode = useMemo(
+    () => (handoff.pinned.length > 0 ? <HandoffTailCards records={handoff.pinned} /> : undefined),
+    [handoff.pinned],
+  );
+
   const cards = useMemo<PinnedCardRender[]>(() => {
     const list: PinnedCardRender[] = [];
     const block = (id: string, order: number, render: React.ReactNode): PinnedCardRender =>
       ({ id, tier: "blocking", order, render });
     const amb = (id: string, render: React.ReactNode): PinnedCardRender => {
-      const meta = AMBIENT_CARD[id.startsWith("handoff-") ? "handoff" : id];
+      const meta = AMBIENT_CARD[id];
       return { id, tier: "ambient", order: meta.order, label: meta.label, render };
     };
     const mng = (id: string, render: React.ReactNode): PinnedCardRender =>
@@ -3221,11 +3227,6 @@ export function ChatPanel({
           />
         </div>
       </MeasureColumn>));
-    // Handoff cards (server path): ahead of every other ambient card — a ready
-    // handoff is the one thing here the user is expected to act on.
-    for (const rec of handoff.pinned) {
-      list.push(amb(`handoff-${rec.id}`, <PinnedHandoffCard record={rec} />));
-    }
     if (!viewOnly) {
       if (openPanel === "schedules") list.push(mng("schedules",
         <div className="shrink-0 px-4 pt-2 pb-2">
@@ -3286,7 +3287,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [viewOnly, handoff.pinned, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [viewOnly, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   // Previous sessions (spec §9): the chosen older session shown read-only in THIS
@@ -3486,6 +3487,7 @@ export function ChatPanel({
             onRejectQuestion={rejectQuestion}
             planCard={planCard}
             backgroundCards={backgroundCardsNode}
+            handoffCards={handoffCardsNode}
             scrollerElRef={scrollerElRef}
             followingRef={followingRef}
             onFollowingChange={setFollowing}

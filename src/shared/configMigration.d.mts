@@ -12,3 +12,9 @@ export function migrateLegacyCapConfig(
 export function migrateCacheTtlDefault(
   raw: Record<string, unknown> | null | undefined,
 ): Record<string, unknown>;
+
+// One-time switch of the box handoff-mode default "auto" → "suggest", marked by
+// `handoffModeDefaultMigrated` so a deliberate re-pick sticks.
+export function migrateHandoffModeDefault(
+  raw: Record<string, unknown> | null | undefined,
+): Record<string, unknown>;

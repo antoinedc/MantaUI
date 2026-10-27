@@ -154,6 +154,15 @@ native iOS client is NOT changed here (it keeps working; see §6).
   default if it already does — leave any Settings control alone; check first).
 - Title text says it applies to this conversation only.
 
+## 5b. Budget — 60% of the model's real window
+
+`handoffBudget` (`policy.mjs`) today is `min(family ceiling, 60% of window)`,
+so a 1M-window Opus triggers at 200k (20%). New rule: when the box knows the
+model's context window (`contextLimitFor`, from the box's model list), the
+budget is `floor(window × 0.6)` — no ceiling. The family ceilings
+(200k frontier / 100k small) apply ONLY when the window is unknown; neither →
+null (no automatic trigger), as before. Update `policy.test.mjs` accordingly.
+
 ## 6. Out of scope / compatibility
 - iOS (`mobile/native`) is unchanged. It still reads/writes the config key, so
   on iOS the toggle changes the box default (affecting sessions that have no own

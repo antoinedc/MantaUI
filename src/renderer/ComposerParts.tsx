@@ -762,7 +762,14 @@ export function TrustRow({
         </button>
       )}
       {trailing && <span className="shrink-0">{trailing}</span>}
-      {status && <span className="ml-auto min-w-0 truncate">{status}</span>}
+      {/* Same type metrics + vertical box as the trust/handoff controls
+          (11px, leading-none, 6px padding, flex-centred) so the hint sits on
+          their line instead of a taller 12px/1.4 line box. */}
+      {status && (
+        <span className="ml-auto min-w-0 inline-flex items-center overflow-hidden whitespace-nowrap text-[11px] leading-none py-[6px]">
+          {status}
+        </span>
+      )}
     </div>
   );
 }

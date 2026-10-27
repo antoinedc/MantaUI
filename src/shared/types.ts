@@ -96,7 +96,8 @@ export type AppConfig = {
   // --dangerously-skip-permissions. Off by default.
   chatAutoAllow?: boolean;
   // Auto-handoff mode (docs/superpowers/specs/2026-10-26-auto-handoff.md);
-  // the box defaults it to "auto".
+  // the BOX DEFAULT for sessions with no mode of their own (the box defaults it
+  // to "suggest"); each session's own mode is set via `handoffSetMode`.
   handoffMode?: "auto" | "suggest" | "off";
   // BET-246: when true, every new chat session (window) auto-creates a
   // sibling git worktree next to the project's repo root, named after the

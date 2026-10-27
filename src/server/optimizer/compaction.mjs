@@ -160,6 +160,9 @@ export function createCompactionScheduler({
   // start) owns the session — it is then skipped, cooldown untouched.
   acquire = null,
   release = null,
+  // Auto-handoff §5: per-candidate gate. Returns false when the session's own
+  // handoff mode means a handoff covers it (a throw counts as "not eligible").
+  eligible = null,
 } = {}) {
   const inflight = new Set();
   let state = null;
@@ -222,6 +225,15 @@ export function createCompactionScheduler({
       });
 
       if (!decision.compact) continue;
+      if (typeof eligible === "function") {
+        let ok = false;
+        try {
+          ok = !!(await eligible(c.sessionID));
+        } catch (e) {
+          console.warn("[optimizer] compaction eligibility check failed:", e?.message ?? e);
+        }
+        if (!ok) continue;
+      }
       if (typeof acquire === "function" && !acquire(c.sessionID)) continue;
 
       const pct = contextLimitForPct(c.contextTokens, c.contextLimit);

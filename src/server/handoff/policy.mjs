@@ -4,9 +4,9 @@
 // No I/O, no clock: every fact arrives as an argument.
 
 export const HANDOFF_MODES = Object.freeze(["auto", "suggest", "off"]);
-export const DEFAULT_HANDOFF_MODE = "auto";
+export const DEFAULT_HANDOFF_MODE = "suggest";
 
-/** Anything unreadable falls back to the default ("auto" — the user's decision, 2026-10-26). */
+/** Anything unreadable falls back to the box default ("suggest"; it was "auto" until 2026-10-27). */
 export function normalizeMode(value) {
   return HANDOFF_MODES.includes(value) ? value : DEFAULT_HANDOFF_MODE;
 }
@@ -66,8 +66,9 @@ export function modelClass(providerID, modelID) {
 }
 
 /**
- * PURE. min(family ceiling, 60% of the window). Unknown family → 60% of the
- * window; unknown window → the family ceiling; neither → null (no budget, so
+ * PURE. A known window → 60% of it, whatever the model family (no ceiling: a
+ * 1M-window model triggers at 600k). Only an unknown window falls back to the
+ * family ceiling (frontier 200k / small 100k); neither → null (no budget, so
  * no automatic trigger).
  * @param {{ providerID?: string|null, modelID?: string|null, contextLimit?: number|null }} a
  * @returns {number|null}
@@ -75,10 +76,8 @@ export function modelClass(providerID, modelID) {
 export function handoffBudget({ providerID, modelID, contextLimit } = {}) {
   const win = typeof contextLimit === "number" && Number.isFinite(contextLimit) && contextLimit > 0 ? contextLimit : null;
   const cls = modelClass(providerID, modelID);
-  const ceiling = cls === "frontier" ? FRONTIER_CEILING_TOKENS : cls === "small" ? SMALL_CEILING_TOKENS : null;
-  const frac = win === null ? null : Math.floor(win * WINDOW_FRACTION);
-  if (ceiling !== null && frac !== null) return Math.min(ceiling, frac);
-  return ceiling ?? frac;
+  if (win !== null) return Math.floor(win * WINDOW_FRACTION);
+  return cls === "frontier" ? FRONTIER_CEILING_TOKENS : cls === "small" ? SMALL_CEILING_TOKENS : null;
 }
 
 // ---- §4.2 automatic trigger --------------------------------------------------

@@ -126,6 +126,9 @@ export function loadSession(sessionId: string): Promise<HandoffSessionInfo | nul
         records: Array.isArray(res?.records) ? res.records : [],
         links: res?.links ?? null,
         continuation: res?.continuation ?? null,
+        ...(typeof res?.dismissed === "boolean" ? { dismissed: res.dismissed } : {}),
+        ...(res?.mode ? { mode: res.mode } : {}),
+        ...(typeof res?.modeIsDefault === "boolean" ? { modeIsDefault: res.modeIsDefault } : {}),
       };
       for (const r of info.records) applyRecord(r);
       useHandoffStore.setState((s) => ({ sessions: { ...s.sessions, [sessionId]: { status: "ready", info } } }));
@@ -145,6 +148,15 @@ export function loadSession(sessionId: string): Promise<HandoffSessionInfo | nul
   })();
   inflightSessions.set(sessionId, run);
   return run;
+}
+
+/** Overlay fields onto a session's cached info (an optimistic edit, or a write the box just confirmed). */
+export function patchSessionInfo(sessionId: string, patch: Partial<HandoffSessionInfo>): void {
+  useHandoffStore.setState((s) => {
+    const cur = s.sessions[sessionId];
+    const info: HandoffSessionInfo = { records: [], links: null, continuation: null, ...cur?.info, ...patch };
+    return { sessions: { ...s.sessions, [sessionId]: { status: "ready", info } } };
+  });
 }
 
 /** Refetch everything this client already holds that the event could have changed. */

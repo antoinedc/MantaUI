@@ -1354,7 +1354,7 @@ export const httpApi: Api = {
   // — the renderer switches on `action` directly, no refetch.
   onAppControl: (cb) => on<AppControlPayload>("appControl", cb),
 
-  // Auto-handoff (spec §15): six `/rpc` channels with the same payloads as the
+  // Auto-handoff (spec §15): eight `/rpc` channels with the same payloads as the
   // REST routes, plus the single `handoff` bus kind published on every record
   // change. Channel names are literal here — the IPC table in shared/types.ts is
   // the desktop-main vestige and the box owns these.
@@ -1366,6 +1366,8 @@ export const httpApi: Api = {
   handoffStart: (input) => rpc("handoff:start", input),
   handoffRetry: (input) => rpc("handoff:retry", input),
   handoffDraftConsumed: (input) => rpc("handoff:draft-consumed", input),
+  handoffDismiss: (input) => rpc("handoff:dismiss", input),
+  handoffSetMode: (input) => rpc("handoff:set-mode", input),
   onHandoff: (cb) => on<HandoffEventPayload>("handoff", cb),
 
   // BET-1148: the box publishes ONE `media` bus kind with an `action`

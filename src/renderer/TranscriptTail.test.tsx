@@ -42,4 +42,26 @@ describe("TranscriptTail", () => {
       expect(root.style.paddingTop).toBe("var(--block-gap)");
     }
   });
+
+  it("renders the handoff cards right after the todo checklist and before the plan card", () => {
+    h = mount(
+      <TranscriptTail
+        context={ctx({
+          activeTodos: [{ content: "do it", status: "pending" }],
+          handoffCards: <div data-testid="hc" />,
+          planCard: <div data-testid="pc" />,
+        })}
+      />,
+    );
+    const todo = [...h.container.querySelectorAll("span")].find((e) => e.textContent === "Todo")!;
+    const hc = h.container.querySelector('[data-testid="hc"]')!;
+    const pc = h.container.querySelector('[data-testid="pc"]')!;
+    expect(todo.compareDocumentPosition(hc) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(hc.compareDocumentPosition(pc) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("takes the todo checklist's place when there are no todos", () => {
+    h = mount(<TranscriptTail context={ctx({ handoffCards: <div data-testid="hc" /> })} />);
+    expect(h.container.querySelector('[data-testid="hc"]')).not.toBeNull();
+  });
 });

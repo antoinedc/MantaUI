@@ -269,7 +269,6 @@ export function resetStore(
   act(() => {
     useStore.setState({
       chatAutoAllow: false,
-      handoffMode: "auto",
       autoRenameSessions: false,
       defaultModel: null,
       cacheTtl: "1h",

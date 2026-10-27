@@ -24,6 +24,8 @@ function rig(handoffOver = {}) {
     get: (id) => (id === "hof_1" ? { id } : null),
     start: async (id, i) => (log.push(["start", id, i]), { id, state: "committed" }),
     retry: async (id) => ({ id, state: "ready" }),
+    dismiss: async (id) => (log.push(["dismiss", id]), { id, state: "dismissed" }),
+    setMode: async (sid, mode) => (log.push(["setMode", sid, mode]), mode),
     draftConsumed: async (id, rev) => void log.push(["draftConsumed", id, rev]),
     admitPrompt: async (i) => (log.push(["admit", i]), { deliveredTo: "ses_live" }),
     guardCommand: (sid) => ({ target: sid === "ses_old" ? "ses_live" : sid }),
@@ -42,6 +44,15 @@ test("the handoff:* channels are the REST routes' twins: same payloads, {handoff
   assert.deepEqual(await dispatch(handlers, "handoff:retry", [{ id: "hof_1" }]), { handoff: { id: "hof_1", state: "ready" } });
   assert.equal(await dispatch(handlers, "handoff:draft-consumed", [{ id: "hof_1", draftRevision: 2 }]), undefined);
   assert.deepEqual(log.at(-1), ["draftConsumed", "hof_1", 2]);
+});
+
+test("handoff:dismiss and handoff:set-mode answer {handoff} / {mode}", async () => {
+  const { handlers, log } = rig();
+  assert.deepEqual(await dispatch(handlers, "handoff:dismiss", [{ id: "hof_1" }]), { handoff: { id: "hof_1", state: "dismissed" } });
+  assert.deepEqual(await dispatch(handlers, "handoff:set-mode", [{ sessionId: "ses_a", mode: "off" }]), { mode: "off" });
+  assert.deepEqual(log, [["dismiss", "hof_1"], ["setMode", "ses_a", "off"]]);
+  const refuse = rig({ dismiss: async () => { throw new HandoffError("not_ready", "This handoff can no longer be dismissed."); } });
+  await assert.rejects(dispatch(refuse.handlers, "handoff:dismiss", [{ id: "hof_1" }]), (e) => e.code === "not_ready");
 });
 
 test("handoff:get of a missing record throws the expired code", async () => {
