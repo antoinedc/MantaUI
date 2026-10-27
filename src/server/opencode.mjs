@@ -25,6 +25,7 @@ import { readModalities, isDeprecated } from "../shared/modelGuide.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { createOcClient, statusError, plainError } from "./opencodeClient.mjs";
 import { beginInternalSession } from "./internalSessions.mjs";
+import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { assistantCompletion, classifyModelErrorCode } from "./ctoRunOutcome.mjs";
 import { endpointKey } from "../shared/endpointKey.mjs";
 import { createCommandCorrelator, createOriginStore, mintPromptId, stampCommandOrigins } from "./commandOrigins.mjs";
@@ -1323,7 +1324,7 @@ export async function runSynchronousSession({
     // previously escaped the function with no finish(), no cleanup and no record.
     finishCreation = trackCreation();
     let createRefused = false;
-    const created = await ocCall("createSession", (c, o) => c.session.create({ location: { directory: absDir }, title }, o), {
+    const created = await ocCall("createSession", (c, o) => c.session.create({ location: { directory: absDir }, title, metadata: withInternalMarker() }, o), {
       signal: AbortSignal.timeout(10_000),
       onHttpError: () => {
         createRefused = true;

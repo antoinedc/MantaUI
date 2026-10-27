@@ -1018,6 +1018,8 @@ test("production composition: real opencode.mjs createSession sends the metadata
     assert.equal(post.body.title, ROLE_SESSION_TITLE);
     assert.equal(post.body.metadata.role, CONVERSATION_ROLE);
     assert.equal(post.body.metadata.bindingOperation, result.binding.currentOperation);
+    // the identity marker survives, and the session is marked Manta-internal (never adopted as a background job)
+    assert.equal(post.body.metadata.manta?.internal, true);
     assert.equal(post.body.location.directory, controlDir);
 
     const found = await ocModule.readSession(result.binding.currentSessionId);

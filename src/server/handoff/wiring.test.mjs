@@ -130,8 +130,14 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
   // §15 policy block, per session
   assert.match(index, /handoff: sessionID \? await handoffEngine\.policyFor\(sessionID\) : null/);
-  // §5.5 boot recovery runs after the delegate engine exists
-  assert.ok(index.indexOf("handoffEngine\n  .recover()") > index.indexOf("delegateEngine.reconcileV2().catch"));
+  // §5.5 boot recovery runs after the delegate engine exists, and is the FIRST step of the explicit boot chain:
+  // handoff recovery → V2 job reconciliation → the first active-session reconciliation → its poller.
+  const engineAt = index.indexOf("const delegateEngine = createDelegateEngine(");
+  const recover = index.indexOf("await handoffEngine.recover()");
+  const v2 = index.indexOf("await delegateEngine.reconcileV2()");
+  const active = index.indexOf("await delegateEngine.reconcileActiveSessions()");
+  const poller = index.indexOf("delegateEngine.startActiveSessionReconciler()");
+  assert.ok(engineAt > -1 && recover > engineAt && v2 > recover && active > v2 && poller > active, "boot recovery order");
 });
 
 test("the handoff state lives under the sandboxed state home, never a literal $HOME path", () => {

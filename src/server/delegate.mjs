@@ -21,8 +21,17 @@
 // and to find a pausing job's tool-step boundary. There is no other completion
 // path: a record with no `engine` can only be a leftover of a pre-C2 box and
 // reconcileJobsOnBoot settles it once, at boot.
+//
+// ONE RUN = ONE RECORD. A record is never brought back from a terminal state: another
+// round of a session (`continueJob` for the caller's own finished job, adoptExistingSession
+// for one opencode or a script drives) is a NEW record linked to the old one (`continues` /
+// `supersededBy`) and sharing its session, window and worktree. Those shared resources are
+// guarded by the per-session `sessionResources` lock (OUTER; the jobs-store lock is INNER).
+// Sessions Manta merely observes (origin "observed", found by the active-session
+// reconciler) are track-only: they never count toward the cap and never get a result posted.
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
@@ -42,6 +51,7 @@ import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
 import { chooseModel, describeDecision } from "../shared/modelRouter.mjs";
 import { listRoutableModels } from "./opencode.mjs";
 import { buildRoutingServices } from "./routingServices.mjs";
+import { isMarkedInternal } from "./internalSessionMarker.mjs";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrors capabilities.mjs exactly — reuse, do not diverge)
@@ -59,6 +69,30 @@ const STORE_PATH = statePath("delegate-jobs.json");
 // mutation re-reads the store inside the lock, so a writer that lost a race
 // observes the winner's state instead of overwriting it.
 const jobsLock = createMutex();
+
+// Per-session resource lock. A continued session is shared by several records
+// (one per run), so every window / worktree side effect for a session — closing
+// the window, removing the worktree, creating a successor run — runs under
+// `sessionResources(childSessionID)`. Lock order: sessionResources OUTER,
+// jobsLock INNER, never the reverse. NOT re-entrant: only the outermost entry
+// points take it, and the functions they call are the "…Locked" variants.
+function createKeyedMutex() {
+  const tails = new Map();
+  return {
+    runExclusive(key, fn) {
+      if (!key) return Promise.resolve().then(fn);
+      const run = (tails.get(key) ?? Promise.resolve()).then(() => fn());
+      const tail = run.then(() => {}, () => {});
+      tails.set(key, tail);
+      tail.then(() => {
+        if (tails.get(key) === tail) tails.delete(key);
+      });
+      return run;
+    },
+  };
+}
+const sessionResources = createKeyedMutex();
+const withSessionResources = (childSessionID, fn) => sessionResources.runExclusive(childSessionID, fn);
 
 // Max concurrently `running` jobs, counted box-wide. There is no `queued`
 // state — a job either starts immediately or is refused by the cap.
@@ -82,6 +116,8 @@ const MAX_TERMINAL_JOBS = 50;
 const ACTIVITY_INTERVAL_MS = 10_000;
 // Sweeper cadence (matches capabilities.mjs SWEEP_INTERVAL_MS).
 const SWEEP_INTERVAL_MS = 60_000;
+// Active-session reconciler cadence (adopts busy sessions nothing tracks).
+const ACTIVE_RECONCILE_INTERVAL_MS = 15_000;
 // BET-418 §A: a `delegate` call requesting approval blocks this long for the
 // user's decision before being treated as declined.
 const APPROVAL_TIMEOUT_MS = 2 * 60_000;
@@ -394,128 +430,279 @@ export async function getJob(id, { load = loadJobs, readProgress = defaultReadPr
 }
 
 // ---------------------------------------------------------------------------
-// registerJob — the "window + record + publish" half of adopting a session
-// opencode already started (a background `task` subagent, a V2-native background
-// command). Registers the existing session into a chat-mode tmux window and
-// persists the record. The ONLY place that builds an ADOPTED job record. On a
-// window-creation throw it returns {ok:false, error}.
+// Owner resolution + adoptExistingSession — turning a session opencode (or a
+// script) is already running into a sidebar row.
+//
+// resolveSessionOwner answers "which workspace hosts the row, and which row does
+// it nest under" for a session that may have NO window of its own.
+// adoptExistingSession is the ONE place an adopted record is built: the
+// reconciler, the background-`task` event path and command candidates all land
+// here. One run = one record: a session that already has a terminal record gets
+// a NEW record linked to it (`continues` / `supersededBy`), never a revived one.
 // ---------------------------------------------------------------------------
 
-async function registerJob(
-  {
-    parentSessionID,
-    parentDirectory,
-    name,
-    prompt,
-    model,
-    requestedModel,
-    cwd,
-    worktree,
-    branch,
-    baseSha,
-    existingSessionId,
-    origin,
-    // V2 job fields (engine, completionOwner, launchState, …) merged onto the record.
-    extra,
-  },
-  deps = {},
-) {
-  const {
-    load = loadJobs,
-    save = saveJobs,
-    publish,
-    newWindow,
-    stampOwner,
-    listProjects,
-    oc,
-    now = () => Date.now(),
-  } = deps;
+const MAX_ANCESTOR_DEPTH = 8;
 
-  let childSessionID = null;
-  let tmuxSession = null;
-  let windowIndex = null;
+// Log a condition once per key per process (a repeating event / tick must not repeat the warning).
+const warnedOnce = new Set();
+function warnOnce(key, ...args) {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  while (warnedOnce.size > 500) warnedOnce.delete(warnedOnce.values().next().value);
+  console.warn(...args);
+}
+
+const trimSlashes = (p) => (typeof p === "string" && p.length > 1 ? p.replace(/\/+$/, "") : p);
+
+async function pathExistsVia(deps, p) {
+  if (typeof p !== "string" || !p) return false;
   try {
-    const owner = resolveOwner(await listProjects(), parentSessionID);
-    if (!owner) {
-      throw new Error(`could not resolve the tmux session owning ${parentSessionID}`);
-    }
-    tmuxSession = owner.tmuxSession;
-    const created = await newWindow({
-      sessionName: tmuxSession,
-      windowName: name,
-      cwd,
-      chatMode: true,
-      existingSessionId,
-      worktreePath: worktree,
-      oc,
-    });
-    childSessionID = created.sessionId ?? existingSessionId ?? null;
-    windowIndex = created.windowIndex ?? null;
-    if (!childSessionID) {
-      throw new Error("could not read the new window's opencode session id");
-    }
-  } catch (e) {
-    return { ok: false, error: String(e?.message ?? e) };
+    return !!(await (deps.pathExists ?? existsSync)(p));
+  } catch {
+    return false;
   }
+}
 
-  // BET-1377: stamp the window's owner as "job" now that it exists, so the
-  // CTO digest (and any other consumer of listProjects) can tell a delegate
-  // job's window apart from a user's window. Mirror of the @manta-session-id
-  // stamp — a separate option (@manta-owner) so the two never collide. This
-  // is advisory metadata: a stamp failure must not fail the job start (absent
-  // option ⇒ "user"), so it is best-effort and never rolled back.
-  if (stampOwner) {
-    try {
-      await stampOwner(tmuxSession, windowIndex, "job");
-    } catch {
-      /* best-effort; the window already exists and the job record below is
-         the source of truth for the job's own lifecycle */
+function findStampedWindow(projects, childSessionID) {
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const win = (p.windows || []).find((w) => w.opencodeSessionId === childSessionID);
+    if (win) return { tmuxSession: p.tmuxSession, windowIndex: win.index };
+  }
+  return null;
+}
+
+// The tmux project that owns a directory: an exact match on a project's cwd or a window's
+// path wins; otherwise the most specific project path that contains the directory; last, a
+// window inside it (the same direction resolveForgeOwner matches). "/" never owns anything.
+function ownerByDirectory(projects, directory) {
+  const dir = trimSlashes(directory);
+  if (typeof dir !== "string" || !dir.startsWith("/")) return null;
+  let best = null;
+  for (const p of Array.isArray(projects) ? projects : []) {
+    const paths = [p.defaultCwd, ...(p.windows || []).map((w) => w?.paneCurrentPath)].map(trimSlashes);
+    for (const pp of paths) {
+      if (typeof pp !== "string" || !pp.startsWith("/") || pp === "/") continue;
+      let score = 0;
+      if (pp === dir) score = 1_000_000 + pp.length;
+      else if (dir.startsWith(pp + "/")) score = pp.length;
+      else if (pp.startsWith(dir + "/")) score = 1;
+      if (score > 0 && (!best || score > best.score)) best = { score, tmuxSession: p.tmuxSession };
     }
   }
+  return best ? { tmuxSession: best.tmuxSession } : null;
+}
 
-  // Persist the record with status "running", startedAt = now.
-  const id = genId();
-  const job = {
-    id,
-    name,
-    prompt,
-    model: model ?? null,
-    // What was ASKED for (canonical "providerID/modelID" string or null).
-    // Never overwritten — distinct from `job.model`, which tickActivity stamps
-    // with the model OBSERVED in the child's own transcript (BET-947).
-    requestedModel: requestedModel ?? null,
-    parentSessionID,
-    parentDirectory,
-    childSessionID,
-    tmuxSession,
-    windowIndex,
-    worktree,
-    branch,
-    baseSha,
-    origin,
-    link: null,
-    actor: "user",
-    correlation: null,
-    sweepAllowanceMs: null,
-    permission: null,
-    status: "running",
-    activity: null,
-    createdAt: now(),
-    startedAt: now(),
-    finishedAt: null,
-    result: null,
-    error: null,
-    filesChanged: null,
-    ...(extra ?? {}),
-  };
-  {
-    const jobs = await load();
-    jobs.push(job);
-    await save(jobs);
+/**
+ * Which workspace (tmux session) should host the row of `sid`, and which window does it
+ * nest under?
+ *   1. walk `parentID` upward (max depth 8, cycle-safe): the first ancestor stamped on a
+ *      window → that window's workspace, nested under that ancestor (`includeSelf` also
+ *      accepts `sid` itself);
+ *   2. else the tmux project that owns the session's directory (nested under nothing);
+ *   3. else none.
+ * Any unreadable read on the way → `unknown`: the caller skips this round without warning.
+ *
+ * @returns {Promise<{status:"ok", owner:{tmuxSession:string}, displayParentID:string|null, cwd:string|null, sessionParentID:string|null, directory:string|null}|{status:"none"}|{status:"unknown"}>}
+ */
+export async function resolveSessionOwner(sid, deps = {}, { includeSelf = false, session = null } = {}) {
+  const { readSession, listProjects } = deps;
+  if (!sid || typeof listProjects !== "function") return { status: "unknown" };
+  let projects;
+  try {
+    projects = await listProjects();
+  } catch {
+    return { status: "unknown" };
   }
-  publish?.({ kind: "delegate.updated", payload: { id, status: "running" } });
+  if (!Array.isArray(projects)) projects = [];
+  const windowed = (id) => (id ? resolveOwner(projects, id) : null);
+  if (includeSelf) {
+    const own = windowed(sid);
+    if (own) {
+      return { status: "ok", owner: { tmuxSession: own.tmuxSession }, displayParentID: sid, cwd: own.cwd ?? null, sessionParentID: null, directory: null };
+    }
+  }
+  if (typeof readSession !== "function") return { status: "unknown" };
 
-  return { ok: true, job };
+  let cur = sid;
+  const seen = new Set([sid]);
+  let sessionParentID = null;
+  let directory = null;
+  for (let depth = 0; depth <= MAX_ANCESTOR_DEPTH; depth++) {
+    let rs;
+    if (session && cur === sid) {
+      rs = { state: "found", session };
+    } else {
+      try {
+        rs = await readSession(cur);
+      } catch {
+        rs = { state: "unknown" };
+      }
+    }
+    if (rs?.state === "unknown" || !rs) return { status: "unknown" };
+    if (rs.state === "missing") {
+      if (cur === sid) return { status: "unknown" };
+      break; // an ancestor that no longer exists ends the walk
+    }
+    const s = rs.session ?? {};
+    if (cur === sid) {
+      directory = typeof s.directory === "string" && s.directory ? s.directory : null;
+      sessionParentID = typeof s.parentID === "string" && s.parentID ? s.parentID : null;
+    }
+    const parent = typeof s.parentID === "string" && s.parentID ? s.parentID : null;
+    if (!parent || seen.has(parent)) break;
+    seen.add(parent);
+    const own = windowed(parent);
+    if (own) {
+      return { status: "ok", owner: { tmuxSession: own.tmuxSession }, displayParentID: parent, cwd: own.cwd ?? null, sessionParentID, directory };
+    }
+    cur = parent;
+  }
+  const byDir = ownerByDirectory(projects, directory);
+  if (byDir) return { status: "ok", owner: byDir, displayParentID: sessionParentID, cwd: directory, sessionParentID, directory };
+  return { status: "none" };
+}
+
+/** The newest record for a session: the one nothing supersedes (highest attempt as the tie-break). */
+export function newestRecordFor(jobs, childSessionID) {
+  const all = (Array.isArray(jobs) ? jobs : []).filter((j) => j?.childSessionID === childSessionID);
+  const live = all.filter((j) => !j.supersededBy);
+  const pool = live.length > 0 ? live : all;
+  return pool.reduce((best, j) => (!best || (j.attempt ?? 1) > (best.attempt ?? 1) || ((j.attempt ?? 1) === (best.attempt ?? 1) && (j.createdAt ?? 0) >= (best.createdAt ?? 0)) ? j : best), null);
+}
+
+/**
+ * Adopt a session that already exists into the job store + a window.
+ *
+ * Under `sessionResources(childSessionID)` then `jobsLock`: a session with a non-terminal
+ * record is already adopted. Otherwise a NEW record is appended — linked to the session's
+ * newest terminal record, which this helper finds ITSELF (`continues` / `supersededBy`, the
+ * worktree transferred when it still exists on disk) — and a window stamped with the
+ * session is reused or created. opencode (or a script) owns the run and reports its own
+ * result: `completionOwner:"opencode"`, so Manta never posts one.
+ *
+ * @param {{ childSessionID:string, owner:{tmuxSession:string}, displayParentID?:string|null, sessionParentID?:string|null,
+ *           cwd?:string, parentDirectory?:string, name:string, prompt?:string, model?:string|null, origin:string, runStartedAt?:number }} input
+ * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string}>}
+ */
+export async function adoptExistingSession(input, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish, newWindow, stampOwner, listProjects, oc, now = () => Date.now() } = deps;
+  const { childSessionID, owner, displayParentID = null, sessionParentID = null, name, prompt = "", model = null, origin, runStartedAt } = input ?? {};
+  if (!childSessionID || !owner?.tmuxSession) return { ok: false, error: "childSessionID and an owning workspace are required" };
+
+  return withSessionResources(childSessionID, () =>
+    jobsLock.runExclusive(async () => {
+      const jobs = await load();
+      const records = jobs.filter((j) => j.childSessionID === childSessionID);
+      // Idempotent — the detecting event / tick fires repeatedly.
+      if (records.some((j) => !isTerminal(j))) return { ok: true, alreadyAdopted: true };
+      const prev = newestRecordFor(records, childSessionID);
+      // A late / replayed signal about a run that has already ended is not a new run.
+      if (prev && runStartedAt != null && prev.finishedAt != null && runStartedAt < prev.finishedAt) {
+        return { ok: true, alreadyAdopted: true, stale: true };
+      }
+
+      // Ownership transfer: the worktree travels with the session while it still exists.
+      let worktree = null;
+      let branch = null;
+      let baseSha = null;
+      if (prev?.worktree && (await pathExistsVia(deps, prev.worktree))) {
+        worktree = prev.worktree;
+        branch = prev.branch ?? null;
+        baseSha = prev.baseSha ?? null;
+      }
+
+      // The window opens at the session's own directory; a finished delegate job's directory
+      // (its removed worktree) may be gone, in which case it falls back to where the job began.
+      let cwd = input.cwd || input.parentDirectory;
+      if (cwd && !(await pathExistsVia(deps, cwd))) {
+        for (const alt of [worktree, prev?.parentDirectory, input.parentDirectory]) {
+          if (alt && alt !== cwd && (await pathExistsVia(deps, alt))) {
+            cwd = alt;
+            break;
+          }
+        }
+      }
+
+      let tmuxSession = owner.tmuxSession;
+      let windowIndex = null;
+      try {
+        const projects = typeof listProjects === "function" ? await listProjects() : [];
+        const stamped = findStampedWindow(projects, childSessionID); // by stamp, never by a recorded index
+        if (stamped) {
+          tmuxSession = stamped.tmuxSession;
+          windowIndex = stamped.windowIndex;
+        } else {
+          const created = await newWindow({
+            sessionName: tmuxSession,
+            windowName: windowNameFor(name),
+            cwd,
+            chatMode: true,
+            existingSessionId: childSessionID,
+            worktreePath: worktree,
+            oc,
+          });
+          windowIndex = created.windowIndex ?? null;
+          if (!(created.sessionId ?? childSessionID)) throw new Error("could not read the new window's opencode session id");
+        }
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+      // Advisory metadata (@manta-owner): a stamp failure must not fail the adoption.
+      if (stampOwner && windowIndex != null) {
+        try {
+          await stampOwner(tmuxSession, windowIndex, "job");
+        } catch {
+          /* best-effort */
+        }
+      }
+
+      const t = now();
+      const job = {
+        id: genId(),
+        name,
+        prompt,
+        model: model ?? null,
+        requestedModel: null,
+        parentSessionID: displayParentID ?? null,
+        parentDirectory: input.parentDirectory ?? cwd ?? null,
+        childSessionID,
+        tmuxSession,
+        windowIndex,
+        worktree,
+        branch,
+        baseSha,
+        origin,
+        link: null,
+        actor: "user",
+        correlation: null,
+        sweepAllowanceMs: null,
+        permission: null,
+        status: "running",
+        activity: null,
+        createdAt: t,
+        startedAt: t,
+        finishedAt: null,
+        result: null,
+        error: null,
+        filesChanged: null,
+        engine: "v2",
+        completionOwner: "opencode",
+        attempt: prev ? (prev.attempt ?? 1) + 1 : 1,
+        continues: prev?.id ?? null,
+        sessionParentID: sessionParentID ?? null,
+        runStartedAt: runStartedAt ?? t,
+        launchState: "running",
+        submittedAt: null,
+        completionMessageId: null,
+        completionDelivery: null,
+      };
+      const next = prev ? jobs.map((j) => (j.id === prev.id ? { ...j, supersededBy: job.id } : j)) : jobs;
+      await save([...next, job]);
+      if (prev) publish?.({ kind: "delegate.updated", payload: { id: prev.id, status: prev.status } });
+      publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running" } });
+      return { ok: true, job };
+    }),
+  );
 }
 
 /**
@@ -760,11 +947,13 @@ export function chooseSubagentModel({
 
 // The two refusals every launch checks before it creates anything: nesting (no
 // background job from inside a background job's session) and the box-wide cap.
+// A session Manta merely observes (origin "observed") neither counts toward the cap nor
+// makes its session a "background job" for nesting purposes.
 function launchRefusal(jobs, parentSessionID) {
-  if (jobs.find((j) => j.childSessionID === parentSessionID && j.status === "running")) {
+  if (jobs.find((j) => j.childSessionID === parentSessionID && countsTowardCap(j))) {
     return { ok: false, error: "a background job cannot start another background job" };
   }
-  if (jobs.filter((j) => j.status === "running").length >= MAX_RUNNING_JOBS) {
+  if (jobs.filter(countsTowardCap).length >= MAX_RUNNING_JOBS) {
     return { ok: false, error: CAP_ERROR };
   }
   return null;
@@ -1047,84 +1236,83 @@ export async function startJob(input, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// adoptSubagentJob — promote an opencode background subagent into a delegate
-// job record (BET-721). opencode has ALREADY started the child session (the
-// parent's `task` tool ran with background:true), so this entry point adopts
-// that session into the store + a window rather than creating anything. The
-// detecting event fires repeatedly as the tool part updates, so adoption must
-// be idempotent.
+// adoptSubagentJob — promote an opencode background subagent (or a native
+// background command) into a job row (BET-721). opencode has ALREADY started the
+// child session, so this entry point resolves where its row belongs and adopts the
+// session (adoptExistingSession) rather than creating anything. The detecting event
+// fires repeatedly as the tool part updates, so adoption is idempotent.
 // ---------------------------------------------------------------------------
 
 /**
- * @param {{parentSessionID:string, parentDirectory:string, childSessionID:string,
- *          name:string, prompt:string, model?:object}} input
- * @param {object} deps injected I/O (load/save/publish/newWindow/listProjects)
- * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string}>}
+ * @param {{parentSessionID:string, parentDirectory?:string, childSessionID:string,
+ *          name:string, prompt:string, model?:string|null, origin?:string, runStartedAt?:number}} input
+ * @param {object} deps injected I/O (load/save/publish/newWindow/listProjects/readSession …)
+ * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string, none?:true, unknown?:true}>}
  */
 export async function adoptSubagentJob(
-  { parentSessionID, parentDirectory, childSessionID, name, prompt, model, origin = "subagent" },
+  { parentSessionID, parentDirectory, childSessionID, name, prompt, model, origin = "subagent", runStartedAt },
   deps = {},
 ) {
-  const { load = loadJobs } = deps;
+  const { load = loadJobs, now = () => Date.now() } = deps;
 
-  if (!parentSessionID || !parentDirectory || !childSessionID) {
-    return { ok: false, error: "parentSessionID, parentDirectory and childSessionID are required" };
+  if (!parentSessionID || !childSessionID) {
+    return { ok: false, error: "parentSessionID and childSessionID are required" };
   }
 
-  // Under the jobs-store lock: the idempotency read + the record append happen
-  // as one atomic unit, so a repeated adoption event cannot interleave with
-  // another writer.
-  const adopted = await jobsLock.runExclusive(async () => {
-    // Idempotent — the detecting event fires repeatedly as the tool part updates.
-    {
-      const jobs = await load();
-      const exists = jobs.find((j) => j.childSessionID === childSessionID);
-      if (exists) {
-        return { ok: true, alreadyAdopted: true };
-      }
+  // The detecting event repeats: don't resolve an owner for a child that already has a live row.
+  {
+    const jobs = await load();
+    if (jobs.some((j) => j.childSessionID === childSessionID && !isTerminal(j))) return { ok: true, alreadyAdopted: true };
+  }
+
+  // The parent may have no window of its own (a session driven through the API): the row
+  // nests under its nearest windowed ancestor, else lands in the workspace owning its directory.
+  const res = await resolveSessionOwner(parentSessionID, deps, { includeSelf: true });
+  if (res.status === "unknown") return { ok: false, unknown: true, error: "could not read the owning session — will retry" };
+  if (res.status === "none") return { ok: false, none: true, error: `could not resolve the tmux session owning ${parentSessionID}` };
+
+  // The child's window opens at the child's own directory (it inherits the parent's, unless it was moved).
+  let cwd = res.cwd ?? parentDirectory ?? null;
+  if (typeof deps.readSession === "function") {
+    try {
+      const rs = await deps.readSession(childSessionID);
+      if (rs?.state === "found" && typeof rs.session?.directory === "string" && rs.session.directory) cwd = rs.session.directory;
+    } catch {
+      /* the owner's directory stands */
     }
+  }
 
-    // We deliberately do NOT enforce MAX_RUNNING_JOBS and do NOT enforce the
-    // no-nesting rule: opencode has already started this subagent, so refusing
-    // to record it would only make it invisible — the exact bug this fixes.
-    // We also do NOT create a worktree (the session is adopted, not created)
-    // and do NOT call deliver() — opencode already sent the child its prompt.
-    return registerJob(
-      {
-        parentSessionID,
-        parentDirectory,
-        name,
-        prompt,
-        model,
-        requestedModel: null,
-        cwd: parentDirectory,
-        worktree: null,
-        branch: null,
-        baseSha: null,
-        existingSessionId: childSessionID,
-        origin,
-        // opencode started this child and reports its result to the parent
-        // itself: Manta only tracks the row and never posts a result for it.
-        extra: {
-          engine: "v2",
-          completionOwner: "opencode",
-          attempt: 1,
-          launchState: "running",
-          submittedAt: null,
-          completionMessageId: null,
-          completionDelivery: null,
-        },
-      },
-      deps,
-    );
-  });
+  // We deliberately do NOT enforce MAX_RUNNING_JOBS and do NOT enforce the no-nesting rule:
+  // opencode has already started this session, so refusing to record it would only make it
+  // invisible. No worktree is created and no prompt is sent — the session is adopted.
+  const adopted = await adoptExistingSession(
+    {
+      childSessionID,
+      owner: res.owner,
+      // (a parent with no window of its own still names the row's parent: it renders top-level)
+      displayParentID: res.displayParentID ?? parentSessionID,
+      sessionParentID: parentSessionID,
+      cwd: cwd ?? undefined,
+      parentDirectory: parentDirectory ?? res.cwd ?? undefined,
+      name,
+      prompt,
+      model: model ?? null,
+      origin,
+      runStartedAt: runStartedAt ?? now(),
+    },
+    deps,
+  );
 
-  // No lost lifecycle: a child that finished before it was adopted is recorded
-  // as finished at once, from the raw outcome the pump remembered for it.
-  if (adopted.ok && adopted.job && typeof deps.lifecycleGet === "function") {
-    const seen = deps.lifecycleGet(childSessionID);
-    const t = seen ? outcomeToTerminal(seen.outcome, { error: seen.error }) : null;
-    if (t) await finishV2Job(adopted.job, t.status, t.error, deps);
+  // No lost lifecycle: a child that finished before it was adopted settles at once, from
+  // authoritative reads (current activity + an outcome that belongs to THIS run — a resumed
+  // session's previous outcome can no longer finish its new record).
+  if (adopted.ok && adopted.job) {
+    const seen = typeof deps.lifecycleGet === "function" ? deps.lifecycleGet(childSessionID) : null;
+    try {
+      await settleV2Job(adopted.job, deps, { hint: seen ? { outcome: seen.outcome, error: seen.error, at: seen.at } : undefined });
+    } catch (e) {
+      console.warn(`[delegate] settling the adopted session ${childSessionID} failed:`, e?.message ?? e);
+    }
   }
   return adopted;
 }
@@ -1166,31 +1354,26 @@ export async function observeEvent(evt, deps = {}) {
       info.background === true &&
       (info.status === "running" || info.status === "pending")
     ) {
-      const projects = deps.listProjects ? await deps.listProjects() : [];
-      const owner = resolveOwner(projects, evt?.properties?.sessionID);
-      if (!owner) {
-        const shape = (Array.isArray(projects) ? projects : []).map((p) => ({
-          tmuxSession: p?.tmuxSession,
-          windows: (p?.windows || []).map((w) => `${w?.index}:${w?.opencodeSessionId}`),
-        }));
-        console.warn(
-          "[delegate] could not resolve the owning window to adopt background subagent:",
-          evt?.properties?.sessionID,
-          "projects=", shape,
-        );
-        return;
-      }
-      await adoptSubagentJob(
+      const startedAt = Number(evt?.properties?.part?.state?.time?.start);
+      const res = await adoptSubagentJob(
         {
           parentSessionID: evt?.properties?.sessionID,
-          parentDirectory: owner.cwd,
           childSessionID: info.childSessionId,
           name: info.description || info.agent,
           prompt: info.prompt,
           model: info.model ? `${info.model.providerID}/${info.model.modelID}` : null,
+          ...(Number.isFinite(startedAt) && startedAt > 0 ? { runStartedAt: startedAt } : {}),
         },
         deps,
       );
+      if (res?.none) {
+        warnOnce(
+          `no-owner:${info.childSessionId}`,
+          "[delegate] could not resolve the owning workspace to adopt background subagent:",
+          info.childSessionId,
+          "parent=", evt?.properties?.sessionID,
+        );
+      }
       return;
     }
   } catch (e) {
@@ -1267,6 +1450,17 @@ async function countFilesChanged(job, deps) {
 // Pure-ish: all I/O is injected; exported for unit tests.
 // ---------------------------------------------------------------------------
 export async function cleanupTerminalJob(job, deps = {}) {
+  // A continued session's window and worktree belong to its NEWEST run: under the session's
+  // resource lock the LIVE record decides, and a superseded one touches nothing.
+  return withSessionResources(job?.childSessionID, async () => {
+    const live = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === job?.id);
+    if (live?.supersededBy) return { cleanedUp: true, superseded: true };
+    return cleanupTerminalJobLocked(job, deps);
+  });
+}
+
+// The body of cleanupTerminalJob; the caller holds sessionResources(job.childSessionID).
+async function cleanupTerminalJobLocked(job, deps = {}) {
   const { gitRemoveWorktree } = deps;
   if (job?.worktree && gitRemoveWorktree) {
     try {
@@ -1283,7 +1477,7 @@ export async function cleanupTerminalJob(job, deps = {}) {
       return { cleanedUp: false, reason: "remove-failed" };
     }
   }
-  await closeJobWindow(job, deps);
+  await closeJobWindowLocked(job, deps);
   return { cleanedUp: true };
 }
 
@@ -1400,8 +1594,12 @@ export async function sweepDelegateJobs(deps = {}) {
     // have their window open: close it once (cleanedUp marks it done).
     for (const job of jobs) {
       if (!isTerminal(job) || job.worktree || job.cleanedUp != null || job.completionDelivery === "pending") continue;
-      await closeJobWindow(job, deps);
-      await patchJob(job.id, { cleanedUp: true }, deps);
+      await withSessionResources(job.childSessionID, async () => {
+        // The window of a superseded run belongs to its successor: re-read the LIVE record.
+        const live = ((await load()) ?? []).find((j) => j.id === job.id) ?? job;
+        if (!live.supersededBy) await closeJobWindowLocked(live, deps);
+        await patchJob(job.id, { cleanedUp: true }, deps);
+      });
     }
 
     // BET-418 §B: parent session gone → stop the job immediately (there is
@@ -1412,6 +1610,8 @@ export async function sweepDelegateJobs(deps = {}) {
     if (sessionExists) {
       for (const job of jobs) {
         if (job.status !== "running" || !job.parentSessionID) continue;
+        // A session opencode (or a script) runs has no reporting parent for Manta to wait on.
+        if (completionOwnerOf(job) === "opencode") continue;
         try {
           const alive = await sessionExists(job.parentSessionID);
           if (!alive) orphaned.push(job);
@@ -1493,21 +1693,29 @@ export async function sweepDelegateJobs(deps = {}) {
   }
 }
 
-// Retention prune under the jobs-store lock: re-read the store fresh so the
-// prune cannot clobber a write a concurrent writer persisted while this sweep
-// was inspecting a stale snapshot.
+// Retention prune: re-read the store fresh so the prune cannot clobber a write a concurrent
+// writer persisted while this sweep was inspecting a stale snapshot.
+//
+// A worktree-less row's window may still be open (the user reopened the session after it
+// finished), so pruning its record closes that window FIRST — a window left without a record
+// would reappear as an ordinary top-level session. That close takes the session's resource
+// lock (OUTER), so it runs before the store lock (INNER), and never for a superseded run
+// (its window belongs to the successor).
 async function persistRetention({ load, save, deps }, nowMs) {
+  const peek = (await load()) ?? [];
+  if (peek.length === 0) return;
+  for (const j of applyRetention(peek, nowMs).pruned) {
+    if (j.worktree) continue;
+    await withSessionResources(j.childSessionID, async () => {
+      const live = ((await load()) ?? []).find((x) => x.id === j.id) ?? j;
+      if (!live.supersededBy) await closeJobWindowLocked(live, deps ?? {});
+    });
+  }
   await jobsLock.runExclusive(async () => {
     const jobs = await load();
     if (jobs.length === 0) return;
     const { retained, pruned } = applyRetention(jobs, nowMs);
     if (pruned.length === 0) return;
-    // A worktree-less row's window may still be open (the user reopened the
-    // session after it finished), so pruning its record closes that window FIRST — a window left without a record
-    // would reappear as an ordinary top-level session.
-    for (const j of pruned) {
-      if (!j.worktree) await closeJobWindow(j, deps ?? {});
-    }
     await save(retained);
   });
 }
@@ -1520,7 +1728,8 @@ function applyRetention(jobs, nowMs) {
   // an ordinary top-level session). cleanedUp===false is set only by the new
   // cleanup path; undefined (old records) prunes as before. A record whose
   // result has not been posted to its parent yet is never pruned either.
-  const keeps = (j) => j.cleanedUp === false || j.completionDelivery === "pending";
+  // A superseded record's resources belong to its successor: `cleanedUp:false` never keeps it.
+  const keeps = (j) => (j.cleanedUp === false && !j.supersededBy) || j.completionDelivery === "pending";
   const isTerm = (j) => j.status === "done" || j.status === "failed" || j.status === "stopped";
   const pruned = new Set();
   for (const j of jobs) {
@@ -1643,6 +1852,20 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
  * evidence first).
  */
 export async function deleteJob(id, deps = {}, opts = {}) {
+  const { load = loadJobs } = deps;
+  // The window / worktree part runs under the session's resource lock (OUTER) and then the
+  // store lock (INNER). A resume swaps a record's child, so the lock taken from a peek is
+  // re-checked against the live record and the attempt retried when it moved.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const peek = (await load()).find((j) => j.id === id);
+    if (!peek) return { ok: false, error: "not found" };
+    const outcome = await withSessionResources(peek.childSessionID, () => deleteJobLocked(id, peek.childSessionID, deps, opts));
+    if (!outcome.moved) return outcome;
+  }
+  return { ok: false, error: "the job changed while it was being deleted — try again" };
+}
+
+async function deleteJobLocked(id, lockedChild, deps, opts) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -1651,11 +1874,19 @@ export async function deleteJob(id, deps = {}, opts = {}) {
     gitRemoveWorktree,
   } = deps;
   // Under the jobs-store lock: the load → remove-record save is atomic.
-  const result = await jobsLock.runExclusive(async () => {
+  return jobsLock.runExclusive(async () => {
     const jobs = await load();
     const idx = jobs.findIndex((j) => j.id === id);
     if (idx === -1) return { ok: false, error: "not found" };
     const job = jobs[idx];
+    if (job.childSessionID !== lockedChild) return { moved: true };
+
+    // A superseded run's window and worktree belong to its successor: only the record goes.
+    if (job.supersededBy) {
+      await save(jobs.filter((j) => j.id !== id));
+      publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
+      return { ok: true };
+    }
 
     // V2 rows with no worktree (background commands / subagents): closing the
     // row of work that is still running, unresolved, or holds an unposted result
@@ -1666,7 +1897,7 @@ export async function deleteJob(id, deps = {}, opts = {}) {
       !job.worktree &&
       (!isTerminal(job) || job.launchState === "uncertain" || job.completionDelivery === "pending")
     ) {
-      await closeJobWindow(job, deps);
+      await closeJobWindowLocked(job, deps);
       jobs[idx] = { ...job, windowIndex: null };
       await save(jobs);
       publish?.({ kind: "delegate.updated", payload: { id, status: job.status, launchState: job.launchState } });
@@ -1704,7 +1935,6 @@ export async function deleteJob(id, deps = {}, opts = {}) {
     publish?.({ kind: "delegate.updated", payload: { id, status: "deleted" } });
     return { ok: true };
   });
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1758,7 +1988,7 @@ export async function pauseJob(id, deps = {}) {
 export async function runningJobCount(deps = {}) {
   const { load = loadJobs } = deps;
   const jobs = await load();
-  return jobs.filter((j) => j.status === "running").length;
+  return jobs.filter(countsTowardCap).length;
 }
 
 /**
@@ -1850,7 +2080,7 @@ export async function resumeJob(id, deps = {}) {
     // Re-acquire a cap slot like a fresh start; `paused` is not counted by the
     // cap, but the resumed job needs a free slot to run. Cap full → stay
     // paused and let the caller retry.
-    const running = jobs.filter((j) => j.status === "running").length;
+    const running = jobs.filter(countsTowardCap).length;
     if (running >= MAX_RUNNING_JOBS) {
       return { ok: false, error: CAP_ERROR, retriable: true };
     }
@@ -2059,6 +2289,11 @@ const TREE_INDEX_MAX = 2000;
 
 const isTerminal = (j) => j?.status === "done" || j?.status === "failed" || j?.status === "stopped";
 
+/** The ONE accounting predicate: does this record use one of the box-wide job slots? A session Manta merely observes never does. */
+export function countsTowardCap(job) {
+  return job?.status === "running" && job?.origin !== "observed";
+}
+
 /** Who reports this job's result to its parent. Records from before the field existed: adopted subagents were always opencode's. */
 export function completionOwnerOf(job) {
   return job?.completionOwner ?? (job?.origin === "subagent" ? "opencode" : "manta");
@@ -2172,8 +2407,11 @@ async function removeJobRecord(id, deps = {}) {
  * Close a job's tmux window, only if the window at its recorded index is STILL
  * the one stamped with this job's child session: indexes get reused, and a
  * stale one must never close somebody else's window. Best-effort; never throws.
+ *
+ * The caller holds `sessionResources(job.childSessionID)`; `closeJobWindow` below is the
+ * variant for a caller that does not.
  */
-async function closeJobWindow(job, deps = {}) {
+async function closeJobWindowLocked(job, deps = {}) {
   const { killWindow, listProjects } = deps;
   if (!killWindow || job?.tmuxSession == null || job?.windowIndex == null) return false;
   try {
@@ -2192,6 +2430,9 @@ async function closeJobWindow(job, deps = {}) {
     return false;
   }
 }
+
+/** closeJobWindowLocked for a caller that holds no session lock (a launch undoing the window it just made). */
+const closeJobWindow = (job, deps = {}) => withSessionResources(job?.childSessionID, () => closeJobWindowLocked(job, deps));
 
 // ---- pause + resume bookkeeping -------------------------------------------
 
@@ -2222,14 +2463,20 @@ async function interruptForPause(job, deps = {}) {
  * A resumed attempt keeps the paused attempt's window until the new one is known to
  * be running (so a refused launch can put the job back as it was). Once it is, the
  * old window goes — stamp-checked, so a reused index never closes somebody else's.
+ *
+ * It acts on the restore's OWN child, which for a resume differs from the record's current
+ * one: that session's lock is taken here unless the caller already holds it (`heldSession`).
  */
-async function dropResumeRestore(job, deps = {}) {
+async function dropResumeRestore(job, deps = {}, { heldSession = null } = {}) {
   const restore = job?.launch?.restore;
   if (!restore) return;
-  await closeJobWindow(
-    { id: job.id, tmuxSession: restore.tmuxSession, windowIndex: restore.windowIndex, childSessionID: restore.childSessionID },
-    deps,
-  );
+  const closeOld = () =>
+    closeJobWindowLocked(
+      { id: job.id, tmuxSession: restore.tmuxSession, windowIndex: restore.windowIndex, childSessionID: restore.childSessionID },
+      deps,
+    );
+  if (restore.childSessionID && restore.childSessionID !== heldSession) await withSessionResources(restore.childSessionID, closeOld);
+  else await closeOld();
   await patchJob(job.id, (live) => ({ launch: { ...live.launch, restore: undefined } }), deps);
 }
 
@@ -2251,8 +2498,12 @@ async function dropResumeRestore(job, deps = {}) {
  * "interrupted"`. Only a job that is still `running` can be finished at all: a
  * stale snapshot (a timeout sweep that read the store before a pause landed)
  * must neither time out a paused job nor resurrect one.
+ *
+ * `resourcesHeld:true` says the caller already holds `sessionResources(job.childSessionID)`
+ * (a launch / recovery that finishes its own record): the cleanup then runs its lock-held
+ * variant instead of waiting on a lock it would never get.
  */
-export async function finishV2Job(job, status, error, deps = {}, { interrupted = false } = {}) {
+export async function finishV2Job(job, status, error, deps = {}, { interrupted = false, resourcesHeld = false } = {}) {
   const {
     load = loadJobs,
     save = saveJobs,
@@ -2338,7 +2589,7 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
   }
   pauseInterrupts.delete(updated.id);
   if (updated.completionDelivery === "pending") await deliverJobResult(updated.id, deps);
-  await finishV2Cleanup(updated, deps);
+  await finishV2Cleanup(updated, deps, { held: resourcesHeld });
   return { ok: true };
 }
 
@@ -2347,16 +2598,34 @@ export async function finishV2Job(job, status, error, deps = {}, { interrupted =
 // is removed; a dirty worktree keeps both and the record says so, so retention never
 // prunes it. An unfinished resume's old window goes too. The record stays, so the
 // session can still be reopened from the job.
-async function finishV2Cleanup(job, deps) {
-  await dropResumeRestore(job, deps);
+async function finishV2Cleanup(job, deps, { held = false } = {}) {
+  if (held) return finishV2CleanupLocked(job, deps);
+  return withSessionResources(job.childSessionID, () => finishV2CleanupLocked(job, deps));
+}
+
+// The caller holds sessionResources(job.childSessionID). The LIVE record decides: a run that a
+// successor superseded does nothing to the window / worktree the successor now owns.
+async function finishV2CleanupLocked(job, deps) {
+  const { load = loadJobs } = deps;
+  const live = ((await load()) ?? []).find((j) => j.id === job.id);
+  if (live?.supersededBy) return;
+  await dropResumeRestore(job, deps, { heldSession: job.childSessionID });
+  // A session Manta only observes never loses a worktree (a script may prompt it again): its
+  // window closes, and a worktree it inherited and still holds keeps the record from pruning.
+  if (job.origin === "observed") {
+    await closeJobWindowLocked(job, deps);
+    const holds = !!job.worktree && (await pathExistsVia(deps, job.worktree));
+    await patchJob(job.id, holds ? { cleanedUp: false, cleanupReason: "kept" } : { cleanedUp: true }, deps);
+    return;
+  }
   if (!job.worktree) {
-    await closeJobWindow(job, deps);
+    await closeJobWindowLocked(job, deps);
     await patchJob(job.id, { cleanedUp: true }, deps);
     return;
   }
   let cleanedUp = false;
   try {
-    cleanedUp = !!(await cleanupTerminalJob(job, deps)).cleanedUp;
+    cleanedUp = !!(await cleanupTerminalJobLocked(job, deps)).cleanedUp;
   } catch (e) {
     console.warn(`[delegate] cleanup failed for ${job.id}:`, e?.message ?? e);
   }
@@ -2496,15 +2765,24 @@ export async function retryPendingDeliveries(deps = {}) {
 
 // ---- completion: authoritative reads --------------------------------------
 
+// Is the user input of THIS launch known to opencode? A continued session already holds many user
+// messages, so for a continuation only the record / inbox item carrying the launch's own message id counts.
 async function hasAdmissionEvidence(job, deps) {
   const child = job.childSessionID;
-  const tries = [
-    // (a pending `move` item is Manta's own doing — a delegate child is moved into its
-    // worktree before the prompt — and proves nothing about the prompt)
-    async () => ((await deps.listInbox?.(child)) ?? []).filter((i) => i?.type !== "move").length > 0,
-    async () => ((await deps.listRawTimeline?.(child, { type: "user" })) ?? []).length > 0,
-    async () => ((await deps.listChildSessions?.(child)) ?? []).length > 0,
-  ];
+  const mine = job.launch?.continuation ? job.launch.messageId : null;
+  if (job.launch?.continuation && !mine) return false;
+  const tries = mine
+    ? [
+        async () => ((await deps.listInbox?.(child)) ?? []).some((i) => i?.id === mine),
+        async () => ((await deps.listRawTimeline?.(child, { type: "user" })) ?? []).some((r) => r?.id === mine),
+      ]
+    : [
+        // (a pending `move` item is Manta's own doing — a delegate child is moved into its
+        // worktree before the prompt — and proves nothing about the prompt)
+        async () => ((await deps.listInbox?.(child)) ?? []).filter((i) => i?.type !== "move").length > 0,
+        async () => ((await deps.listRawTimeline?.(child, { type: "user" })) ?? []).length > 0,
+        async () => ((await deps.listChildSessions?.(child)) ?? []).length > 0,
+      ];
   for (const t of tries) {
     try {
       if (await t()) return true;
@@ -2637,11 +2915,19 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   const session = rs.session ?? {};
   const outcome = session.outcome ?? hint?.outcome ?? null;
   const idleAt = session.time?.idle ?? hint?.at ?? null;
-  const fresh = job.submittedAt == null || (idleAt != null && idleAt >= job.submittedAt);
+  // Which run does this outcome belong to? A Manta job: one at/after its submission. A session
+  // opencode runs: one at/after the moment THIS run was first seen — a resumed session's
+  // previous outcome must not finish its new record.
+  const fresh =
+    !manta && job.runStartedAt != null
+      ? idleAt != null && idleAt >= job.runStartedAt
+      : job.submittedAt == null || (idleAt != null && idleAt >= job.submittedAt);
 
   if (job.launchState === "uncertain") {
-    const evidence =
-      active.has(job.childSessionID) || (outcome && fresh) || (await hasAdmissionEvidence(job, deps));
+    // A continuation's session is busy / has outcomes of its own: only the launch's own message id proves it was admitted.
+    const evidence = job.launch?.continuation
+      ? await hasAdmissionEvidence(job, deps)
+      : active.has(job.childSessionID) || (outcome && fresh) || (await hasAdmissionEvidence(job, deps));
     if (!evidence) return { settled: false, reason: "uncertain" };
     job = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) })) ?? job;
     await dropResumeRestore(job, deps);
@@ -2673,7 +2959,8 @@ export async function settleV2Job(job, deps = {}, { hint } = {}) {
   if (job.launch && typeof deps.listRawTimeline === "function") {
     let sawInput = false;
     try {
-      sawInput = ((await deps.listRawTimeline(job.childSessionID, { type: "user" })) ?? []).length > 0;
+      const users = (await deps.listRawTimeline(job.childSessionID, { type: "user" })) ?? [];
+      sawInput = job.launch.continuation ? users.some((r) => r?.id === job.launch.messageId) : users.length > 0;
     } catch {
       sawInput = false;
     }
@@ -2786,6 +3073,12 @@ export async function reconcileV2Jobs(deps = {}) {
       if (job.launchState === "creating" || job.launchState === "submitting") {
         job = (await patchJob(job.id, { launchState: "uncertain" }, deps, { onlyIf: (j) => !isTerminal(j) && (j.launchState === "creating" || j.launchState === "submitting") })) ?? job;
       }
+      // A continuation shares its session with earlier runs: it is recovered by its own
+      // routine (never resumeUnsentLaunch, whose move step and abandon path delete the session).
+      if (job.launch?.continuation && job.launchState !== "running") {
+        await recoverContinuation(job, deps);
+        continue;
+      }
       if (completionOwnerOf(job) === "manta" && job.submittedAt == null && (job.launchState === "creating" || job.launchState === "uncertain")) {
         const rs = await deps.readSession(job.childSessionID);
         if (rs.state === "found") await resumeUnsentLaunch(job, deps);
@@ -2814,6 +3107,8 @@ export function commandDisplayName(command, args) {
 
 // Undo a launch proven not admitted: the child, its window and the record.
 async function rollbackLaunch(job, deps) {
+  // (a continuation's session is shared with earlier runs: it has its own, session-preserving undo)
+  if (job.launch?.continuation) return rollbackContinuation(job, deps);
   if (job.launch) return rollbackDelegateLaunch(job, deps);
   if (deps.deleteSession && job.childSessionID) {
     try {
@@ -2833,8 +3128,9 @@ async function rollbackLaunch(job, deps) {
  * admitted, so the record, child and window stay, marked `uncertain`, and the
  * sweeper keeps reconciling them.
  */
-async function submitCommand(job, deps, { reconciled = false } = {}) {
+async function submitCommand(job, deps, { reconciled = false, undo = {} } = {}) {
   const delegate = !!job.launch;
+  const continuation = !!job.launch?.continuation;
   const run = job.commandRun ?? {};
   try {
     if (delegate) {
@@ -2864,7 +3160,13 @@ async function submitCommand(job, deps, { reconciled = false } = {}) {
       // started it) was reported to its caller as started: it must not vanish, so
       // it ends `failed` with its one result — unless it is a resume, which simply
       // goes back to being paused.
-      if (reconciled && delegate && !job.launch.restore) {
+      if (continuation) {
+        // The caller holds the session's resource lock either way. A RECONCILED refusal was
+        // reported as sent: it ends `failed` with its one result. A live one is simply undone.
+        // Nothing here ever deletes the session — it is shared with earlier runs.
+        if (reconciled) await finishV2Job(job, "failed", `could not send: ${String(e?.message ?? e)}`, deps, { resourcesHeld: true });
+        else await rollbackContinuation(job, deps, undo);
+      } else if (reconciled && delegate && !job.launch.restore) {
         await finishV2Job(job, "failed", `could not start: ${String(e?.message ?? e)}`, deps);
       } else {
         await rollbackLaunch(job, deps);
@@ -2877,6 +3179,331 @@ async function submitCommand(job, deps, { reconciled = false } = {}) {
   const running = (await patchJob(job.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) && j.launchState !== "running" })) ?? job;
   if (delegate) await dropResumeRestore(running, deps);
   return { ok: true, job: running };
+}
+
+// ---- delegate_send: another round of one of YOUR finished jobs --------------
+//
+// One run = one record. A new round of a finished job is a NEW record sharing the old one's
+// session (`continues` / `supersededBy`), so a late settle, delivery or cleanup of the old
+// record can only ever touch the old record. The worktree travels to the successor; the
+// session is never deleted. Everything from the record write through its window step (and any
+// undo) runs inside `sessionResources(childSessionID)`.
+
+// A `git worktree add` for a worktree a finished run's cleanup removed (its branch survives).
+async function restoreWorktree(job, deps) {
+  const dir = job.parentDirectory;
+  if (!dir || !job.branch || !job.worktree || typeof deps.gitRun !== "function") return { ok: false };
+  try {
+    try {
+      await deps.gitRun(["-C", dir, "worktree", "prune"]);
+    } catch {
+      /* best-effort: a stale registration would make the add refuse */
+    }
+    await deps.gitRun(["-C", dir, "worktree", "add", job.worktree, job.branch]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
+// Undo a continuation that was refused before anything ran: the new record goes, the old one is
+// its own again, and only what THIS attempt made (a window, a re-added worktree) is taken back.
+// The session itself is shared with earlier runs and is NEVER deleted. The caller holds the
+// session's resource lock.
+async function rollbackContinuation(job, deps, { createdWindow = null, worktreeRestored = false } = {}) {
+  const { load = loadJobs, save = saveJobs, publish } = deps;
+  if (createdWindow) {
+    await closeJobWindowLocked(
+      { id: job.id, tmuxSession: createdWindow.tmuxSession, windowIndex: createdWindow.windowIndex, childSessionID: job.childSessionID },
+      deps,
+    );
+  }
+  if (worktreeRestored && job.worktree && deps.gitRemoveWorktree) {
+    try {
+      await deps.gitRemoveWorktree({ path: job.worktree, force: false });
+    } catch (e) {
+      console.warn(`[delegate] removing the re-added worktree of ${job.id} failed:`, e?.message ?? e);
+    }
+  }
+  await jobsLock.runExclusive(async () => {
+    const jobs = await load();
+    const next = jobs
+      .filter((j) => j.id !== job.id)
+      .map((j) => {
+        if (j.id !== job.continues || j.supersededBy !== job.id) return j;
+        const { supersededBy: _drop, ...rest } = j;
+        return rest;
+      });
+    await save(next);
+    publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "deleted" } });
+    if (job.continues) publish?.({ kind: "delegate.updated", payload: { id: job.continues } });
+  });
+}
+
+// The window for a continuation: the one already stamped with the session, else a new one in the
+// job's own workspace (the caller's, when that workspace is gone). Returns where it is and whether
+// THIS call made it.
+async function ensureContinuationWindow(job, sessionDirectory, deps) {
+  const { listProjects, newWindow, stampOwner } = deps;
+  const projects = (await listProjects()) ?? [];
+  const stamped = findStampedWindow(projects, job.childSessionID);
+  let target = stamped?.tmuxSession ?? null;
+  let windowIndex = stamped?.windowIndex ?? null;
+  let created = false;
+  if (!stamped) {
+    target = projects.some((p) => p.tmuxSession === job.tmuxSession) ? job.tmuxSession : (resolveOwner(projects, job.parentSessionID)?.tmuxSession ?? null);
+    if (!target) throw new Error("could not find a workspace to open the job in");
+    const made = await newWindow({
+      sessionName: target,
+      windowName: windowNameFor(job.name),
+      cwd: job.worktree || sessionDirectory,
+      chatMode: true,
+      existingSessionId: job.childSessionID,
+      ...(job.worktree ? { worktreePath: job.worktree } : {}),
+      oc: deps.oc,
+    });
+    windowIndex = made.windowIndex ?? null;
+    created = true;
+  }
+  if (stampOwner && windowIndex != null) {
+    try {
+      await stampOwner(target, windowIndex, "job");
+    } catch {
+      /* advisory */
+    }
+  }
+  return { tmuxSession: target, windowIndex, created };
+}
+
+// Everything `delegate_send` checks against the store, in the order the spec fixes (first failure wins).
+function continueRefusal(jobs, id, { prompt, sessionID }, deps) {
+  const job = jobs.find((j) => j.id === id);
+  if (!job) return { ok: false, status: 404, error: "that background job no longer exists" };
+  if (typeof prompt !== "string" || !prompt.trim()) return { ok: false, status: 400, error: "prompt is required" };
+  const chain = typeof deps.replacementChain === "function" ? deps.replacementChain(job.parentSessionID) : null;
+  const mine = typeof sessionID === "string" && !!sessionID && (sessionID === job.parentSessionID || (Array.isArray(chain) && chain.includes(sessionID)));
+  if (!mine) return { ok: false, status: 403, error: "that job belongs to another session" };
+  if (job.correlation) return { ok: false, status: 403, error: "that job is managed by the CTO" };
+  if (job.supersededBy && jobs.some((j) => j.id === job.supersededBy)) {
+    const newest = newestRecordFor(jobs, job.childSessionID);
+    const eligible = newest && newest.origin !== "observed" && completionOwnerOf(newest) === "manta";
+    return {
+      ok: false,
+      status: 409,
+      error: eligible ? `that job has a newer run — use ${newest.id}` : "that job's session was continued outside delegate — start a new job instead",
+    };
+  }
+  if (job.origin === "observed" || completionOwnerOf(job) !== "manta") {
+    return { ok: false, status: 409, error: "only jobs started with delegate can be continued — start a new job instead" };
+  }
+  if (job.status === "running") return { ok: false, status: 409, error: "that job is still working — its result will arrive on its own" };
+  if (job.status === "paused") return { ok: false, status: 409, error: "that job is paused — resume it first" };
+  if (job.completionDelivery === "pending") return { ok: false, status: 409, error: "its result is still being delivered — try again shortly" };
+  return { ok: true, job };
+}
+
+/**
+ * Start another round of one of the caller's finished jobs: a NEW record on the same session
+ * (see the section header), the follow-up sent with a persisted message id.
+ *
+ * @param {string} id the finished job's id
+ * @param {{ prompt: string, sessionID: string }} input `sessionID` is the caller's own session
+ * @returns {Promise<{ok:true, job:object, uncertain?:true}|{ok:false, status:number, error:string}>}
+ */
+export async function continueJob(id, input, deps = {}) {
+  const { load = loadJobs, save = saveJobs, publish, now = () => Date.now() } = deps;
+  const args = { prompt: input?.prompt, sessionID: input?.sessionID };
+  const peeked = continueRefusal((await load()) ?? [], id, args, deps);
+  if (!peeked.ok) return peeked;
+  const child = peeked.job.childSessionID;
+  if (!child) return { ok: false, status: 409, error: "that job has no session to continue" };
+  const followUp = String(args.prompt).trim();
+
+  return withSessionResources(child, async () => {
+    // Who else is driving the session, and does it still exist? (async reads, so outside the store lock)
+    let active;
+    try {
+      active = await deps.listActiveIds();
+    } catch {
+      return { ok: false, status: 500, error: "couldn't check whether the job's session is busy — try again" };
+    }
+    if (active.includes(child)) return { ok: false, status: 409, error: "that job's session is busy" };
+    let rs;
+    try {
+      rs = await deps.readSession(child);
+    } catch {
+      rs = { state: "unknown" };
+    }
+    if (rs.state === "missing") return { ok: false, status: 409, error: "that job has no session to continue" };
+    if (rs.state !== "found") return { ok: false, status: 500, error: "couldn't read the job's session — try again" };
+    const sessionDirectory = rs.session?.directory || peeked.job.parentDirectory;
+
+    // The record write: re-check everything against the LIVE store, then append the successor.
+    const reg = await jobsLock.runExclusive(async () => {
+      const jobs = (await load()) ?? [];
+      const recheck = continueRefusal(jobs, id, args, deps);
+      if (!recheck.ok) return recheck;
+      if (jobs.filter(countsTowardCap).length >= MAX_RUNNING_JOBS) return { ok: false, status: 409, error: CAP_ERROR };
+      const old = recheck.job;
+      const t = now();
+      const { supersededBy: _s, cleanupReason: _c, ...inherited } = old;
+      const job = {
+        ...inherited,
+        id: genId(),
+        attempt: (old.attempt ?? 1) + 1,
+        continues: old.id,
+        prompt: followUp,
+        status: "running",
+        createdAt: t,
+        startedAt: t,
+        finishedAt: null,
+        result: null,
+        error: null,
+        filesChanged: null,
+        activity: null,
+        completionOwner: "manta",
+        completionMessageId: null,
+        completionDelivery: null,
+        pauseRequested: false,
+        stopRequested: false,
+        pausedAt: null,
+        cleanedUp: null,
+        launchState: "creating",
+        submittedAt: null,
+        windowIndex: null,
+        launch: { text: followUp, messageId: mintMessageId(), model: null, continuation: true },
+      };
+      inLaunch.add(job.id); // from the moment it exists: a sweep must never read it as cut off
+      try {
+        await save([...jobs.map((j) => (j.id === old.id ? { ...j, supersededBy: job.id } : j)), job]);
+      } catch (e) {
+        inLaunch.delete(job.id);
+        throw e;
+      }
+      publish?.({ kind: "delegate.updated", payload: { id: old.id, status: old.status } });
+      publish?.({ kind: "delegate.updated", payload: { id: job.id, status: "running", launchState: "creating" } });
+      return { ok: true, job };
+    });
+    if (!reg.ok) return reg;
+
+    const job = reg.job;
+    const undo = { createdWindow: null, worktreeRestored: false };
+    try {
+      // 1. the worktree a finished run's cleanup removed
+      if (job.worktree && !(await pathExistsVia(deps, job.worktree))) {
+        const restored = await restoreWorktree(job, deps);
+        if (!restored.ok) {
+          await rollbackContinuation(job, deps, undo);
+          return { ok: false, status: 409, error: `that job's branch ${job.branch} no longer exists` };
+        }
+        undo.worktreeRestored = true;
+      }
+      // 2. its window
+      let placed;
+      try {
+        placed = await ensureContinuationWindow(job, sessionDirectory, deps);
+      } catch (e) {
+        await rollbackContinuation(job, deps, undo);
+        return { ok: false, status: 500, error: `couldn't send to the job: ${String(e?.message ?? e)}` };
+      }
+      if (placed.created) undo.createdWindow = { tmuxSession: placed.tmuxSession, windowIndex: placed.windowIndex };
+      // 3. claim, then send (the one place a definite refusal is told to the caller)
+      const claimed = await patchJob(
+        job.id,
+        () => ({ tmuxSession: placed.tmuxSession, windowIndex: placed.windowIndex, launchState: "submitting", submittedAt: now() }),
+        deps,
+        { onlyIf: (j) => j.status === "running" && j.submittedAt == null },
+      );
+      // Ended meanwhile (stopped / timed out): that record carries the terminal state and its one result.
+      if (!claimed) return { ok: false, status: 409, error: "that job was stopped before the new round started" };
+      const sent = await submitCommand(claimed, deps, { undo });
+      if (!sent.ok) return { ok: false, status: 500, error: `couldn't send to the job: ${sent.error}` };
+      return { ok: true, job: sent.job, ...(sent.uncertain ? { uncertain: true } : {}) };
+    } finally {
+      inLaunch.delete(job.id);
+    }
+  });
+}
+
+// Finish (or end) a continuation a restart / lost response left unresolved. Idempotent; every
+// step is continuation-safe — a definite refusal is the RECONCILED one (the caller was already
+// told "sent", so the record ends `failed` with its one result) and nothing deletes the session.
+async function recoverContinuation(job, deps) {
+  if (resuming.has(job.id)) return;
+  resuming.add(job.id);
+  try {
+    await withSessionResources(job.childSessionID, async () => {
+      const { load = loadJobs } = deps;
+      const live = ((await load()) ?? []).find((j) => j.id === job.id);
+      if (!live || live.status !== "running" || !live.launch?.continuation || live.launchState === "running") return;
+      const held = { resourcesHeld: true };
+
+      // (a) the session
+      let rs;
+      try {
+        rs = await deps.readSession(live.childSessionID);
+      } catch {
+        rs = { state: "unknown" };
+      }
+      if (rs.state === "missing") {
+        await finishV2Job(live, "failed", "the session no longer exists", deps, held);
+        return;
+      }
+      if (rs.state !== "found") return;
+
+      // (b) the worktree
+      if (live.worktree && !(await pathExistsVia(deps, live.worktree))) {
+        const restored = await restoreWorktree(live, deps);
+        if (!restored.ok) {
+          await finishV2Job(live, "failed", `its branch ${live.branch} no longer exists`, deps, held);
+          return;
+        }
+      }
+
+      // (c) the window — found by the session's stamp; the recorded index proves nothing
+      let current = live;
+      try {
+        const placed = await ensureContinuationWindow(live, rs.session?.directory || live.parentDirectory, deps);
+        if (placed.tmuxSession !== live.tmuxSession || placed.windowIndex !== live.windowIndex) {
+          current = (await patchJob(live.id, { tmuxSession: placed.tmuxSession, windowIndex: placed.windowIndex }, deps)) ?? live;
+        }
+      } catch (e) {
+        console.warn(`[delegate] recovering the window of ${live.id} failed:`, e?.message ?? e);
+        return;
+      }
+
+      // (d) the send
+      if (current.submittedAt == null) {
+        // never sent
+        const claimed = await patchJob(
+          current.id,
+          () => ({ launchState: "submitting", submittedAt: (deps.now ?? Date.now)() }),
+          deps,
+          { onlyIf: (j) => j.status === "running" && j.submittedAt == null },
+        );
+        if (claimed) await submitCommand(claimed, deps, { reconciled: true });
+        return;
+      }
+      // sent, outcome unknown: is the launch's own message known to opencode?
+      if (await hasAdmissionEvidence(current, deps)) {
+        await patchJob(current.id, { launchState: "running" }, deps, { onlyIf: (j) => !isTerminal(j) });
+        return;
+      }
+      let active;
+      try {
+        active = await deps.listActiveIds();
+      } catch {
+        return;
+      }
+      if (active.includes(current.childSessionID)) return; // someone is driving it: look again next tick
+      // not there and nothing running: send it again — SAME message id, which opencode admits once
+      await submitCommand(current, deps, { reconciled: true });
+    });
+  } catch (e) {
+    console.warn(`[delegate] recovering the continuation ${job.id} failed:`, e?.message ?? e);
+  } finally {
+    resuming.delete(job.id);
+  }
 }
 
 /**
@@ -2905,10 +3532,10 @@ export async function startCommandJob(input, deps = {}) {
   const args = String(input?.arguments ?? "");
 
   const refusal = (jobs) => {
-    if (jobs.find((j) => j.childSessionID === parentSessionID && j.status === "running")) {
+    if (jobs.find((j) => j.childSessionID === parentSessionID && countsTowardCap(j))) {
       return { ok: false, error: "a background job cannot start another background job" };
     }
-    if (jobs.filter((j) => j.status === "running").length >= MAX_RUNNING_JOBS) return { ok: false, error: CAP_ERROR };
+    if (jobs.filter(countsTowardCap).length >= MAX_RUNNING_JOBS) return { ok: false, error: CAP_ERROR };
     return null;
   };
   // Cheap early refusal (re-checked atomically below, before anything is created).
@@ -3468,10 +4095,23 @@ async function registerV2Resume(jobs, idx, job, prepared, deps) {
  * @returns {Promise<{ok:true, tmuxSession:string, windowIndex:number}|{ok:false, error:string}>}
  */
 export async function openJobSession(id, deps = {}) {
+  const { load = loadJobs } = deps;
+  const peek = (await load()).find((j) => j.id === id);
+  if (!peek) return { ok: false, error: "that background job no longer exists" };
+  if (!peek.childSessionID) return { ok: false, error: "this background job has no session yet" };
+  // Window creation is a session resource: it must not interleave with a cleanup or a successor's setup.
+  return withSessionResources(peek.childSessionID, () => openJobSessionLocked(id, peek.childSessionID, deps));
+}
+
+async function openJobSessionLocked(id, lockedChild, deps) {
   const { load = loadJobs, listProjects, newWindow, stampOwner, readSession } = deps;
-  const job = (await load()).find((j) => j.id === id);
-  if (!job) return { ok: false, error: "that background job no longer exists" };
-  if (!job.childSessionID) return { ok: false, error: "this background job has no session yet" };
+  const all = (await load()) ?? [];
+  const found = all.find((j) => j.id === id);
+  if (!found) return { ok: false, error: "that background job no longer exists" };
+  if (found.childSessionID !== lockedChild) return { ok: false, error: "the job changed while it was being opened — try again" };
+  // A superseded run shares the session with its successor: the window it opens belongs to the successor.
+  const job = found.supersededBy ? (newestRecordFor(all, lockedChild) ?? found) : found;
+  id = job.id;
 
   let rs;
   try {
@@ -3518,6 +4158,191 @@ export async function openJobSession(id, deps = {}) {
   } catch (e) {
     return { ok: false, error: `Couldn't open the session: ${String(e?.message ?? e)}` };
   }
+}
+
+// ---------------------------------------------------------------------------
+// The active-session reconciler
+//
+// A session that is busy but has no job row is invisible: a script drove it through opencode's
+// HTTP API, a finished job was prompted again, a background `task` ran under a parent that has no
+// window, or work started while this server was restarting. Each tick lists the sessions with a
+// turn in flight and adopts the ones nothing tracks (origin "observed" — track-only: no result is
+// ever posted for them, they never count toward the cap).
+//
+// What it deliberately leaves alone: a session that already has a live row, one a launch in this
+// process is making, anything inside a live job's tree, Manta's own helper sessions, an inline
+// (foreground) `task` child, a user's own window, and a session whose handoff is pending. A session
+// must be seen busy on consecutive ticks before it is adopted, so seconds-long helpers never appear.
+// ---------------------------------------------------------------------------
+
+const RECONCILE_TICKS = 2;
+// A child whose parent's `task` block can't be found yet is held a tick longer: the block is what
+// tells an inline child (never a row) from a background one.
+const RECONCILE_TICKS_NO_BLOCK = 3;
+
+const modelStringOf = (m) => (m?.providerID && (m.id ?? m.modelID) ? `${m.providerID}/${m.id ?? m.modelID}` : null);
+
+/**
+ * @param {object} deps readSession, listActiveIds, listProjects, listRawTimeline, load, now, plus
+ *   the optional predicates isInternalSession / isCtoConversationSession / deferSettlement, and
+ *   everything adoptExistingSession needs.
+ * @returns {{ reconcile: () => Promise<{adopted:number}|{skipped:string}>, seenCount: () => number }}
+ */
+export function createActiveSessionReconciler(deps = {}) {
+  const { now = () => Date.now() } = deps;
+  const seen = new Map(); // sid -> { ticks, since }: consecutive ticks seen busy + the first one
+
+  // Is `session` somewhere below a job that is still live? → "inside" | "outside" | "unknown"
+  async function insideLiveJobTree(session, jobs) {
+    const live = new Set(jobs.filter((j) => !isTerminal(j) && j.childSessionID).map((j) => j.childSessionID));
+    if (live.size === 0) return "outside";
+    const visited = new Set([session.id]);
+    let parent = typeof session.parentID === "string" ? session.parentID : null;
+    for (let depth = 0; parent && depth < MAX_ANCESTOR_DEPTH; depth++) {
+      if (live.has(parent)) return "inside";
+      if (visited.has(parent)) return "outside";
+      visited.add(parent);
+      let rs;
+      try {
+        rs = await deps.readSession(parent);
+      } catch {
+        return "unknown";
+      }
+      if (rs?.state === "unknown" || !rs) return "unknown";
+      if (rs.state === "missing") return "outside";
+      parent = typeof rs.session?.parentID === "string" ? rs.session.parentID : null;
+    }
+    return "outside";
+  }
+
+  async function consider(sid, { jobs, projects, windowed }) {
+    const records = jobs.filter((j) => j.childSessionID === sid);
+    // a. a live row (running / paused) already represents it; b. a launch in this process is making it
+    if (records.some((j) => !isTerminal(j) || inLaunch.has(j.id) || resuming.has(j.id))) return skip(sid);
+    if (deps.deferSettlement?.(sid)) return skip(sid);
+    // a window with no record is the user's own window
+    if (records.length === 0 && windowed.has(sid)) return skip(sid);
+
+    let rs;
+    try {
+      rs = await deps.readSession(sid);
+    } catch {
+      rs = { state: "unknown" };
+    }
+    if (rs?.state !== "found") return false; // unreadable: look again next tick, no warning
+    const session = { ...(rs.session ?? {}), id: sid };
+
+    // c. below a live job: that row already represents the work
+    const tree = await insideLiveJobTree(session, jobs);
+    if (tree === "unknown") return false;
+    if (tree === "inside") return skip(sid);
+
+    // d. Manta's own helper sessions
+    if (isMarkedInternal(session)) return skip(sid);
+    try {
+      if ((await deps.isInternalSession?.(sid)) || (await deps.isCtoConversationSession?.(sid))) return skip(sid);
+    } catch {
+      return false; // a provenance store that can't answer fails closed
+    }
+
+    // e. an inline `task` child is part of its parent's turn, never a row
+    let required = RECONCILE_TICKS;
+    if (session.parentID) {
+      let timeline;
+      try {
+        timeline = (await deps.listRawTimeline(session.parentID, { type: "assistant" })) ?? [];
+      } catch {
+        return false;
+      }
+      const block = toolBlockFor(timeline, sid);
+      if (block) {
+        const background = block.state?.input?.background === true || block.state?.metadata?.background === true;
+        if (!background) return skip(sid);
+      } else {
+        required = RECONCILE_TICKS_NO_BLOCK;
+      }
+    }
+
+    // f. seen busy on consecutive ticks
+    const entry = seen.get(sid) ?? { ticks: 0, since: now() };
+    entry.ticks += 1;
+    seen.set(sid, entry);
+    if (entry.ticks < required) return false;
+
+    // g. adopt
+    const prev = newestRecordFor(records, sid);
+    const ownWindow = resolveOwner(projects, sid);
+    const res = await resolveSessionOwner(sid, deps, { session });
+    if (res.status === "unknown") return false;
+    const owner = res.status === "ok" ? res.owner : ownWindow ? { tmuxSession: ownWindow.tmuxSession } : null;
+    if (!owner) {
+      warnOnce(`no-owner:${sid}`, "[delegate] could not find a workspace for the busy session", sid, "— not tracked");
+      return false;
+    }
+    const title = typeof session.title === "string" ? session.title.trim() : "";
+    const out = await adoptExistingSession(
+      {
+        childSessionID: sid,
+        owner,
+        displayParentID: res.status === "ok" ? res.displayParentID : (prev?.parentSessionID ?? null),
+        sessionParentID: session.parentID ?? null,
+        cwd: session.directory || undefined,
+        parentDirectory: session.directory || undefined,
+        name: title.slice(0, 80) || "Background session",
+        prompt: "",
+        model: modelStringOf(session.model),
+        origin: "observed",
+        runStartedAt: entry.since,
+      },
+      deps,
+    );
+    seen.delete(sid);
+    if (!out.ok) {
+      warnOnce(`adopt:${sid}`, `[delegate] adopting the busy session ${sid} failed:`, out.error);
+      return false;
+    }
+    return !!out.job;
+  }
+
+  function skip(sid) {
+    seen.delete(sid);
+    return false;
+  }
+
+  async function reconcile() {
+    if (typeof deps.listActiveIds !== "function" || typeof deps.readSession !== "function" || typeof deps.listProjects !== "function") {
+      return { skipped: "no-readers" };
+    }
+    let active;
+    try {
+      active = await deps.listActiveIds();
+    } catch {
+      return { skipped: "unknown" };
+    }
+    if (!Array.isArray(active)) return { skipped: "unknown" };
+    const activeSet = new Set(active);
+    for (const sid of [...seen.keys()]) if (!activeSet.has(sid)) seen.delete(sid);
+    let projects;
+    try {
+      projects = (await deps.listProjects()) ?? [];
+    } catch {
+      return { skipped: "unknown" };
+    }
+    const jobs = (await (deps.load ?? loadJobs)()) ?? [];
+    const windowed = new Set();
+    for (const p of Array.isArray(projects) ? projects : []) for (const w of p.windows || []) if (w?.opencodeSessionId) windowed.add(w.opencodeSessionId);
+    let adopted = 0;
+    for (const sid of active) {
+      try {
+        if (await consider(sid, { jobs, projects, windowed })) adopted += 1;
+      } catch (e) {
+        console.warn(`[delegate] reconciling the busy session ${sid} failed:`, e?.message ?? e);
+      }
+    }
+    return { adopted };
+  }
+
+  return { reconcile, seenCount: () => seen.size };
 }
 
 // ---------------------------------------------------------------------------
@@ -3576,21 +4401,20 @@ export function createDelegateEngine(baseDeps) {
     }
   }
   const deps = { ...baseDeps, lifecycleGet: (sid) => lifecycle.get(sid), onSubagentClaim: noteClaim };
+  const activeReconciler = createActiveSessionReconciler(deps);
 
   async function adoptCandidate(childId) {
     const c = candidates.get(childId);
     if (!c) return;
     candidates.delete(childId);
     if (claims.has(childId)) return;
-    const owner = resolveOwner(await deps.listProjects(), c.parentID);
-    if (!owner) {
-      console.warn("[delegate] could not resolve the owning window to adopt a background command:", c.parentID);
-      return;
-    }
-    await adoptSubagentJob(
-      { parentSessionID: c.parentID, parentDirectory: owner.cwd, childSessionID: childId, name: c.name, prompt: c.name, model: null, origin: "command" },
+    // The parent may have no window of its own: the row nests under its nearest windowed ancestor
+    // (or lands in the workspace owning its directory) instead of being dropped.
+    const res = await adoptSubagentJob(
+      { parentSessionID: c.parentID, childSessionID: childId, name: c.name, prompt: c.name, model: null, origin: "command", runStartedAt: c.since },
       deps,
     );
+    if (res?.none) warnOnce(`no-owner:${childId}`, "[delegate] could not resolve the owning workspace to adopt a background command:", c.parentID);
   }
 
   // The last open command window of a session closed: its unclaimed candidates
@@ -3626,7 +4450,7 @@ export function createDelegateEngine(baseDeps) {
     const open = deps.openCommandWindows?.(parentID) ?? [];
     if (open.length === 0) return;
     const name = open.length === 1 ? commandDisplayName(open[0].name, open[0].arguments) : "Background command";
-    candidates.set(childId, { parentID, name, timer: null });
+    candidates.set(childId, { parentID, name, timer: null, since: nowFn() });
     boundMap(candidates, 200);
   }
 
@@ -3700,6 +4524,8 @@ export function createDelegateEngine(baseDeps) {
     startJobWithApproval,
     startCommandJob: (input) => startCommandJob(input, deps),
     openSession: (id) => openJobSession(id, deps),
+    /** `delegate_send`: another round of one of the caller's finished jobs (a NEW record on the same session). */
+    continueJob: (id, input) => continueJob(id, input, deps),
     stopJob: (id) => stopJob(id, deps),
     deleteJob: (id, opts) => deleteJob(id, deps, opts),
     pauseJob: (id) => pauseJob(id, deps),
@@ -3712,6 +4538,11 @@ export function createDelegateEngine(baseDeps) {
       await reconcileV2Jobs(deps);
       await retryPendingDeliveries(deps);
     },
+    // Adopt every busy session nothing tracks (see createActiveSessionReconciler). Boot runs it once
+    // after reconcileV2, then starts the poller.
+    reconcileActiveSessions: () => activeReconciler.reconcile(),
+    startActiveSessionReconciler: ({ intervalMs = ACTIVE_RECONCILE_INTERVAL_MS } = {}) =>
+      startPoller(() => activeReconciler.reconcile(), { intervalMs, label: "delegate-reconcile", immediate: false }),
     observeRaw,
     windowClosed,
     lifecycle,

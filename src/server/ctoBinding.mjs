@@ -61,6 +61,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { stateHome, statePath } from "../shared/paths.mjs";
 import { writeJsonAtomic } from "./jsonStore.mjs";
 import { bindingStore, patchStore } from "./ctoStores.mjs";
+import { withInternalMarker } from "./internalSessionMarker.mjs";
 
 // Role provenance vocabulary (spec §3.1). The durable CEO conversation is
 // `cto_conversation`; the CTO's own ephemeral inference sessions stay
@@ -682,7 +683,7 @@ export function createCtoBinding({
     let session;
     try {
       session = await withDeadline(
-        (signal) => oc.createSession({ directory: op.directory, title: ROLE_SESSION_TITLE, metadata: markerFor(op), signal }),
+        (signal) => oc.createSession({ directory: op.directory, title: ROLE_SESSION_TITLE, metadata: withInternalMarker(markerFor(op)), signal }),
         requestDeadlineMs,
         "createSession",
       );

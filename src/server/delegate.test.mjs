@@ -1516,6 +1516,8 @@ function adoptHarness(initialJobs = []) {
       projects: [],
     };
   };
+  // An adopted session exists in opencode (adoption settles it against what opencode says).
+  h.deps.readSession = async (sid) => ({ state: "found", session: { id: sid, directory: "/repo", time: {} } });
   h.deps.gitAddWorktree = async () => {
     gitAddWorktree += 1;
     throw new Error("adoptSubagentJob must never create a worktree");
