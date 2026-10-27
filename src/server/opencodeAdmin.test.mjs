@@ -14,7 +14,7 @@ import {
   reloadOpencodeConfig,
   listOpencodeModels,
 } from "./opencodeAdmin.mjs";
-import { _setApiBase } from "./opencode.mjs";
+import { _setApiBase, _setOcTransport, getProviders } from "./opencode.mjs";
 import { statePath } from "../shared/paths.mjs";
 
 // A fake detached child that exits with `code` once the caller has attached
@@ -31,7 +31,43 @@ function exitingChild(code) {
   };
 }
 
+// The provider catalogue is cached on the box; the admin actions below must mark it
+// stale. Observable effect: after priming it, the next getProviders() re-reads opencode
+// (a second /api/provider) only when an action invalidated it.
+async function primedCatalogue() {
+  let reads = 0;
+  const ok = (body) => Response.json(body);
+  _setOcTransport(async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/api/provider") { reads += 1; return ok({ data: [{ id: "p", name: "P", activation: "enabled" }] }); }
+    if (path === "/api/integration" || path === "/api/model") return ok({ data: [] });
+    return ok({ data: null });
+  });
+  await getProviders();
+  return { reads: () => reads, refetched: async () => { await getProviders(); return reads > 1; } };
+}
+
+// `failing` must leave the primed catalogue cached; `succeeding` must invalidate it.
+async function assertInvalidatesOnSuccessOnly(failing, succeeding) {
+  let cat = await primedCatalogue();
+  await failing();
+  assert.equal(await cat.refetched(), false, "a failed action leaves the cache alone");
+  _setOcTransport(null);
+  cat = await primedCatalogue();
+  await succeeding();
+  assert.equal(await cat.refetched(), true);
+}
+
 describe("restartOpencode", () => {
+  afterEach(() => _setOcTransport(null));
+
+  it("invalidates the cached provider catalogue on success only", async () => {
+    await assertInvalidatesOnSuccessOnly(
+      () => restartOpencode(async () => { throw new Error("nope"); }),
+      () => restartOpencode(async () => ({ stdout: "", stderr: "" })),
+    );
+  });
+
   it("invokes systemctl --user restart opencode-serve with a fixed argv (no shell string)", async () => {
     const calls = [];
     const exec = async (cmd, args) => { calls.push({ cmd, args }); return { stdout: "", stderr: "" }; };
@@ -308,6 +344,14 @@ const basic = (pw) => `Basic ${Buffer.from(`opencode:${pw}`).toString("base64")}
 
 describe("reloadOpencodeConfig", () => {
   useSandboxedOpencode();
+  afterEach(() => _setOcTransport(null));
+
+  it("invalidates the cached provider catalogue after a successful reload, not after a refused one", async () => {
+    await assertInvalidatesOnSuccessOnly(
+      () => reloadOpencodeConfig({ fetchFn: async () => new Response("bad", { status: 500 }) }),
+      () => reloadOpencodeConfig({ fetchFn: async () => new Response(null, { status: 204 }) }),
+    );
+  });
 
   it("POSTs /api/location/reload with Basic auth and treats 204 as reloaded", async () => {
     const seen = [];

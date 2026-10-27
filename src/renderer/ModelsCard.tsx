@@ -275,6 +275,7 @@ export function ModelsCard() {
           // typed for setting, not clearing).
           useStore.setState({ defaultModel: null });
         }
+        refreshModelCatalog();
       });
       setBusy(null);
     },
@@ -301,6 +302,7 @@ export function ModelsCard() {
         // Sub toggles write opencode.jsonc agent blocks — a restart is
         // required for opencode to re-read them. Raise the panel banner.
         useStore.getState().setOpencodeRestartNeeded(true);
+        refreshModelCatalog();
       });
       setBusy(null);
     },
@@ -325,6 +327,7 @@ export function ModelsCard() {
         });
         setOptIn(new Set(resolvedList));
         useStore.getState().setOpencodeRestartNeeded(true);
+        refreshModelCatalog();
       });
       setBusy(null);
     },

@@ -67,7 +67,7 @@ import {
   readPlanSaved,
   writePlanSaved,
 } from "../chatShared";
-import { resolvePlanToggle, type PlanToggleState } from "../chatUtils";
+import { resolvePlanToggle, shouldClearMissingModel, type PlanToggleState } from "../chatUtils";
 import { isPlanAgent } from "../../shared/planMode.mjs";
 import { useAgentCatalog } from "../agentCatalog";
 import { useComposerAttachments } from "./useComposerAttachments";
@@ -434,11 +434,10 @@ export function useComposerController(config: ComposerControllerConfig): Compose
 
   // If the saved model references one that isn't in the current list, clear it
   // (BET-1281) — otherwise the server rejects the prompt with a not-found error.
+  // Never on an empty list: that is an unreadable catalog, not a removed model.
   useEffect(() => {
     if (!models) return;
-    const sel = sessionBoxSelection(sessionId);
-    if (!sel) return;
-    if (models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID)) return;
+    if (!shouldClearMissingModel(models, sessionBoxSelection(sessionId))) return;
     setSessionChoice(sessionId, { kind: "server-default" });
     setModelOverride(null);
   }, [models, sessionId, sessionChoice]);

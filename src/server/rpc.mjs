@@ -1443,7 +1443,8 @@ export function buildHandlers({
     // model picker — sees the same overridden name / description / context.
     "opencode:models": async () => {
       const cfg = await local.configGet();
-      return oc.listModels(cfg.modelOverrides ?? {});
+      // strict: an unreadable catalogue rejects, so the renderer keeps its last list instead of adopting [].
+      return oc.listModels(cfg.modelOverrides ?? {}, { strict: true });
     },
 
     // BET-1244: the read-only, side-effect-free routing decision — the generic

@@ -47,6 +47,7 @@ import { SettingsRow } from "./SettingsRow";
 import { MantaLoader } from "./MantaLoader";
 import { useCachedResource } from "./useCachedResource";
 import { useRoutingCatalog, type RoutingCatalog } from "./routingCatalog";
+import { refreshModelCatalog } from "./modelCatalog";
 import { useStore } from "./store";
 
 // ===== Pure row logic (unit-tested) =====
@@ -708,6 +709,7 @@ export function AccountsCard() {
         const res = await window.api.opencodeProviderAuth({ action: "disconnect", id });
         if (res.action !== "disconnect") throw new Error("Unexpected response from the box.");
         if (!res.ok) throw new Error(res.error ?? "Disconnect failed.");
+        refreshModelCatalog();
         void refresh();
       });
       setBusy(null);
@@ -718,6 +720,7 @@ export function AccountsCard() {
 
   const onConnectChange = useCallback(() => {
     setConnectingId(null);
+    refreshModelCatalog();
     void refresh();
   }, [refresh]);
 
@@ -735,6 +738,7 @@ export function AccountsCard() {
     (id: string, message: string) => {
       setConnectingId(null);
       setSeatNotice((n) => ({ ...n, [id]: { message, n: (n[id]?.n ?? 0) + 1 } }));
+      refreshModelCatalog();
       void refresh();
     },
     [refresh],
@@ -797,6 +801,7 @@ export function AccountsCard() {
         });
         if (!res.ok) throw new Error(res.error ?? "Save failed");
         useStore.getState().setOpencodeRestartNeeded(true);
+        refreshModelCatalog();
         void refresh();
       });
       setBusy(null);
@@ -883,6 +888,7 @@ export function AccountsCard() {
           const { [ep.id]: _drop, ...rest } = er;
           return rest;
         });
+        refreshModelCatalog();
         void refresh();
       });
       setBusy(null);

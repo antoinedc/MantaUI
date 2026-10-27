@@ -25,10 +25,11 @@ type Snapshot = {
   defaultModel: ServerDefaultModel;
 };
 
-// How long a cached catalog is served without a background refresh. Short
-// enough that a Settings change lands on the next session switch; long enough
-// that flipping between sessions doesn't hammer the box.
-const STALE_MS = 10_000;
+// How long a cached catalog is served without a background refresh. The list
+// rarely changes and the box caches it too; Settings calls
+// `refreshModelCatalog()` after every change that can alter it, so this is only
+// the backstop for changes made elsewhere.
+const STALE_MS = 5 * 60_000;
 
 let cache: Snapshot = { models: null, defaultModel: null };
 let fetchedAt = 0;
