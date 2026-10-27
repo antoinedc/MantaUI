@@ -135,6 +135,8 @@ let ocTransport = null; // lazily set to pooledOcRequest after it's defined
  *  restore the default pooled transport. */
 export function _setOcTransport(fn) {
   ocTransport = fn;
+  // A different transport is a different opencode: never serve the previous one's catalogue.
+  _resetProvidersCacheForTests();
 }
 
 /** Test-only: exercise the real pooled transport directly (bypasses any
@@ -1610,30 +1612,93 @@ async function readSoft(read) {
  *   all       — every provider with its models: `{id, name, models:{[modelID]: raw model}}`
  *   default   — `{[providerID]: modelID}` for the default model's provider
  * Single source of truth for callers that need the authoritative `connected[]`
- * list. Never throws — a transport failure or non-2xx yields `{ connected: [] }`.
+ * list. Never throws.
  *
- * @returns {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string> }>}
+ * CACHED: the catalogue rarely changes, and opencode's reads fail briefly during a config
+ * reload or restart. A good snapshot is served for `PROVIDERS_CACHE_TTL_MS` without contacting
+ * opencode, and `invalidateProvidersCache()` marks it stale on the events that really change it.
+ * A refresh only counts when `/api/provider`, `/api/model` and `/api/integration` all answered
+ * (`/api/model/default` failing alone keeps the previous default); a failed refresh serves the
+ * last good snapshot and leaves it stale so the next call retries. `unavailable: true` (with
+ * `connected: []`) appears only when nothing good was ever read.
+ *
+ * @returns {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string>, unavailable?: true }>}
  */
 export function getProviders() {
+  if (providersSnapshot && providersSnapshot.gen === providersGen && providersNow() - providersSnapshot.at < PROVIDERS_CACHE_TTL_MS) {
+    return Promise.resolve(providersSnapshot.value);
+  }
   // Single-flight: concurrent callers share ONE in-flight read. The catalogue behind it (every
   // provider's models) is large and opencode answers these one at a time, so N parallel callers
   // used to queue for N × the build time. Opening Settings → Models fires ~6 of them at once
   // (models list, config:get's cache-TTL reconcile, the identify card, the app-wide catalog),
   // pushing config:get past the renderer's 15 s fail-fast timeout — the "model list times out"
   // bug. Concurrent callers share the request already in flight (which may have started slightly
-  // before them); any call after it settles starts a new request — nothing is cached. Callers
-  // share the returned object and must treat it as read-only.
-  if (providersInFlight) return providersInFlight;
-  providersInFlight = fetchProviders().finally(() => {
-    providersInFlight = null;
-  });
-  return providersInFlight;
+  // before them) unless an invalidation landed since it started — that read may predate the
+  // change. Callers share the returned object and must treat it as read-only.
+  if (providersInFlight && providersInFlight.gen === providersGen) return providersInFlight.promise;
+  const gen = providersGen;
+  const entry = {
+    gen,
+    promise: refreshProviders(gen).finally(() => {
+      if (providersInFlight === entry) providersInFlight = null;
+    }),
+  };
+  providersInFlight = entry;
+  return entry.promise;
 }
 
-/** @type {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string> }>|null} */
-let providersInFlight = null;
+/** How long a good catalogue snapshot is served without re-reading opencode. */
+export const PROVIDERS_CACHE_TTL_MS = 10 * 60_000;
 
-async function fetchProviders() {
+/** @typedef {{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string>, unavailable?: true }} ProvidersResult */
+
+/** @type {{ gen: number, promise: Promise<ProvidersResult> }|null} */
+let providersInFlight = null;
+/** The last SUCCESSFUL read; `gen` is the invalidation generation it was read under. @type {{ value: ProvidersResult, at: number, gen: number }|null} */
+let providersSnapshot = null;
+let providersGen = 0;
+let providersNow = () => Date.now();
+
+/**
+ * Mark the cached catalogue stale WITHOUT discarding it: the next `getProviders()` re-reads
+ * opencode, but if that read fails the previous good snapshot is still served. Call after
+ * anything that changes the catalogue — a config reload/restart, a credential change, an
+ * opencode restart.
+ */
+export function invalidateProvidersCache() {
+  providersGen += 1;
+}
+
+/** Test-only: drop the snapshot and any in-flight read; optionally inject the clock. */
+/** @param {{ now?: () => number }} [opts] */
+export function _resetProvidersCacheForTests({ now } = {}) {
+  providersSnapshot = null;
+  providersInFlight = null;
+  providersGen += 1;
+  providersNow = now ?? (() => Date.now());
+}
+
+/** @param {number} gen @returns {Promise<ProvidersResult>} */
+async function refreshProviders(gen) {
+  const previous = providersSnapshot?.value;
+  const fresh = await fetchProviders(previous);
+  if (fresh) {
+    // A read that began before a newer one's invalidation must not clobber the newer snapshot.
+    if (!providersSnapshot || gen >= providersSnapshot.gen) providersSnapshot = { value: fresh, at: providersNow(), gen };
+    return fresh;
+  }
+  if (previous) {
+    console.warn("[providers] refresh failed, serving last-good snapshot");
+    return previous;
+  }
+  return { connected: [], unavailable: /** @type {const} */ (true) };
+}
+
+/** One full read, or `null` when any of provider/model/integration did not answer with data.
+ *  @param {ProvidersResult} [previous]
+ *  @returns {Promise<ProvidersResult|null>} */
+async function fetchProviders(previous) {
   try {
     const [prov, integ, models, def] = await Promise.all([
       readSoft((c, o) => c.provider.list(undefined, o)),
@@ -1641,13 +1706,13 @@ async function fetchProviders() {
       readSoft((c, o) => c.model.list(undefined, o)),
       readSoft((c, o) => c.model.default(undefined, o)),
     ]);
-    if (!prov || !Array.isArray(prov.data)) return { connected: [] };
+    if (!Array.isArray(prov?.data) || !Array.isArray(integ?.data) || !Array.isArray(models?.data)) return null;
     const hasConnection = new Map();
-    for (const i of Array.isArray(integ?.data) ? integ.data : []) {
+    for (const i of integ.data) {
       hasConnection.set(i.id, Array.isArray(i.connections) && i.connections.length > 0);
     }
     const modelsByProvider = new Map();
-    for (const m of Array.isArray(models?.data) ? models.data : []) {
+    for (const m of models.data) {
       const bucket = modelsByProvider.get(m.providerID) ?? {};
       bucket[m.modelID ?? m.id] = _modelFromV2(m);
       modelsByProvider.set(m.providerID, bucket);
@@ -1659,10 +1724,12 @@ async function fetchProviders() {
       all.push({ id: p.id, name: p.name, models: modelsByProvider.get(p.id) ?? {} });
     }
     const d = def?.data;
-    const defaults = d?.providerID && (d.modelID ?? d.id) ? { [d.providerID]: d.modelID ?? d.id } : undefined;
+    let defaults = d?.providerID && (d.modelID ?? d.id) ? { [d.providerID]: d.modelID ?? d.id } : undefined;
+    // The default read failing (null) is not a failed refresh: keep the one we already had.
+    if (!def && previous?.default) defaults = previous.default;
     return { connected, all, ...(defaults ? { default: defaults } : {}) };
   } catch {
-    return { connected: [] };
+    return null;
   }
 }
 
@@ -1686,12 +1753,19 @@ export async function getDefaultModel() {
  * Strips raw API keys by reconstructing the model shape (normalizeProviderModel).
  * Routes through `getProviders()` so the live `/provider` fetch lives in
  * exactly one place (BET-342 — sibling of BET-320 for `getDefaultModel`).
+ * Resolves `[]` when the catalogue is unavailable, unless `strict` — then it
+ * rejects, so a caller that must tell "no models" from "couldn't read them"
+ * (the `opencode:models` RPC) can keep its own last list.
+ * @param {Record<string, any>} [overrides]
+ * @param {{ strict?: boolean }} [opts]
  * @returns {Promise<Array<{ id: string, providerID: string, name: string, [key: string]: any }>>}
  */
-export async function listModels(overrides = {}) {
+export async function listModels(overrides = {}, { strict = false } = {}) {
   const out = [];
+  const providers = await getProviders();
+  if (strict && providers.unavailable) throw new Error("model list unavailable");
   try {
-    const { connected: connectedIds, all } = await getProviders();
+    const { connected: connectedIds, all } = providers;
     if (!Array.isArray(all)) return out;
     const connected = new Set(connectedIds);
     for (const p of all) {
@@ -1974,6 +2048,7 @@ export async function completeProviderOauth(providerID, methodIndex, code) {
     );
     if (refused) return refused;
     oauthAttempts.delete(`${providerID}:${methodIndex}`);
+    invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -1999,6 +2074,7 @@ export async function setProviderApiKey(providerID, key) {
       },
     });
     if (refused) return refused;
+    invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -2060,6 +2136,7 @@ export async function setProviderAuthEntry(providerID, entry) {
       },
     );
     if (refused) return refused;
+    invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
@@ -2074,6 +2151,7 @@ export async function setProviderAuthEntry(providerID, entry) {
 export async function removeProviderAuth(providerID) {
   try {
     const creds = await listCredentials();
+    let removed = false;
     for (const cred of creds.filter((x) => x?.integrationID === providerID)) {
       let refused;
       await ocCall("removeProviderAuth", (c, o) => c.credential.remove({ credentialID: cred.id }, o), {
@@ -2082,8 +2160,13 @@ export async function removeProviderAuth(providerID) {
           if (f.status !== 404) refused = failFrom(f);
         },
       });
-      if (refused) return refused;
+      if (refused) {
+        if (removed) invalidateProvidersCache();
+        return refused;
+      }
+      removed = true;
     }
+    invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };

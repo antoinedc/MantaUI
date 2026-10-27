@@ -5274,3 +5274,14 @@ export function providersFromExcludedKeys(excluded: string[] | undefined | null)
   }
   return out;
 }
+
+/** Whether a session's saved model should be cleared because the catalog
+ *  lacks it. An EMPTY catalog never clears: it means the list couldn't be read
+ *  (or nothing is connected), not that the user's model was removed. */
+export function shouldClearMissingModel(
+  models: ReadonlyArray<{ providerID: string; id: string }> | null | undefined,
+  sel: { providerID: string; modelID: string } | null | undefined,
+): boolean {
+  if (!models || models.length === 0 || !sel) return false;
+  return !models.some((m) => m.providerID === sel.providerID && m.id === sel.modelID);
+}

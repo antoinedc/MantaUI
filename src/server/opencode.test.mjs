@@ -59,6 +59,9 @@ import {
   _pooledOcRequest,
   discardBody,
   getProviders,
+  invalidateProvidersCache,
+  _resetProvidersCacheForTests,
+  PROVIDERS_CACHE_TTL_MS,
   getDefaultModel,
   generateSessionTitle,
   generateText,
@@ -1082,16 +1085,125 @@ test("getProviders: connected = credential/env-backed or always-enabled; all car
   });
 });
 
-test("getProviders returns {connected:[]} on a non-2xx response and on a transport throw", async () => {
+// The catalogue is cached with a TTL + last-good fallback (see getProviders). `clock` is the
+// injected `now`; `fail` flips the routes between a healthy opencode and a failing one.
+function cacheHarness(extra = {}) {
+  const clock = { t: 1_000_000 };
+  const state = { failing: null };
+  const healthy = PROVIDER_ROUTES();
+  const routes = {};
+  for (const key of Object.keys(healthy)) {
+    routes[key] = () => (state.failing === key || state.failing === "all" ? new Response("x", { status: 500 }) : healthy[key]);
+  }
+  return { clock, state, routes: { ...routes, ...extra } };
+}
+const warnSilently = (fn) => {
+  const orig = console.warn;
+  const warnings = [];
+  console.warn = (...a) => warnings.push(a.join(" "));
+  return fn(warnings).finally(() => { console.warn = orig; });
+};
+
+test("getProviders cold failure: {connected:[], unavailable:true}, never throws; listModels → [], strict listModels rejects", async () => {
   await withV2({ "GET /api/provider": () => new Response("x", { status: 500 }), "GET /api/integration": { data: [] }, "GET /api/model": { data: [] }, "GET /api/model/default": () => new Response("x", { status: 404 }) }, async () => {
-    assert.deepEqual(await getProviders(), { connected: [] });
+    assert.deepEqual(await getProviders(), { connected: [], unavailable: true });
+    assert.deepEqual(await listModels(), []);
+    await assert.rejects(listModels({}, { strict: true }), /model list unavailable/);
   });
   _setOcTransport(async () => { throw new Error("down"); });
-  assert.deepEqual(await getProviders(), { connected: [] });
+  assert.deepEqual(await getProviders(), { connected: [], unavailable: true });
   _setOcTransport(null);
 });
 
-test("getProviders coalesces concurrent callers into ONE read of the catalogue, and refetches afterwards", async () => {
+test("getProviders cache: within the TTL no request is made; past it opencode is read again", async () => {
+  const h = cacheHarness();
+  await withV2(h.routes, async (calls) => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const first = await getProviders();
+    assert.deepEqual(first.connected, ["anthropic", "fake"]);
+    h.clock.t += PROVIDERS_CACHE_TTL_MS - 1;
+    assert.equal(await getProviders(), first, "served from the snapshot");
+    assert.equal(only(calls, "GET", "/api/provider").length, 1);
+    h.clock.t += 2;
+    await getProviders();
+    assert.equal(only(calls, "GET", "/api/provider").length, 2, "expired → one more read");
+  });
+});
+
+test("getProviders: a failed refresh serves the last-good snapshot, warns once, and does NOT reset the TTL", async () => {
+  const h = cacheHarness();
+  await warnSilently((warnings) => withV2(h.routes, async (calls) => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    h.clock.t += PROVIDERS_CACHE_TTL_MS + 1;
+    h.state.failing = "all";
+    assert.equal(await getProviders(), good, "last-good served");
+    assert.equal(warnings.filter((w) => w.includes("[providers] refresh failed, serving last-good snapshot")).length, 1);
+    // Still stale: the very next call retries rather than trusting the failure for another TTL.
+    await getProviders();
+    assert.equal(only(calls, "GET", "/api/provider").length, 3);
+    h.state.failing = null;
+    const recovered = await getProviders();
+    assert.notEqual(recovered, good);
+    assert.equal(await getProviders(), recovered, "a good refresh is cached again");
+    assert.equal(only(calls, "GET", "/api/provider").length, 4);
+  }));
+});
+
+test("getProviders: a partial failure (/api/model or /api/integration 500) counts as a failure, not an empty catalogue", async () => {
+  for (const key of ["GET /api/model", "GET /api/integration", "GET /api/provider"]) {
+    const h = cacheHarness();
+    await warnSilently(() => withV2(h.routes, async () => {
+      _resetProvidersCacheForTests({ now: () => h.clock.t });
+      const good = await getProviders();
+      h.clock.t += PROVIDERS_CACHE_TTL_MS + 1;
+      h.state.failing = key;
+      const got = await getProviders();
+      assert.equal(got, good, `${key} failing keeps the last-good catalogue`);
+      assert.equal((await listModels({}, { strict: true })).length, 2);
+    }));
+  }
+  // Cold + partial failure → unavailable, not a provider list with empty model maps.
+  const h = cacheHarness();
+  h.state.failing = "GET /api/model";
+  await withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    assert.equal((await getProviders()).unavailable, true);
+  });
+});
+
+test("getProviders: /api/model/default failing alone is not a failure and keeps the previous default", async () => {
+  const h = cacheHarness();
+  await withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    assert.deepEqual((await getProviders()).default, { anthropic: "claude-haiku-4-5" });
+    invalidateProvidersCache();
+    h.state.failing = "GET /api/model/default";
+    const next = await getProviders();
+    assert.equal(next.unavailable, undefined);
+    assert.deepEqual(next.connected, ["anthropic", "fake"]);
+    assert.deepEqual(next.default, { anthropic: "claude-haiku-4-5" });
+  });
+});
+
+test("invalidateProvidersCache: next call re-reads, but a failed re-read still falls back to the last-good snapshot", async () => {
+  const h = cacheHarness();
+  await warnSilently(() => withV2(h.routes, async (calls) => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    invalidateProvidersCache();
+    h.state.failing = "all";
+    assert.equal(await getProviders(), good, "the reload window: failure falls back, never []");
+    assert.equal(only(calls, "GET", "/api/provider").length, 2);
+    h.state.failing = null;
+    const fresh = await getProviders();
+    assert.notEqual(fresh, good);
+    assert.equal(await getProviders(), fresh);
+    assert.equal(only(calls, "GET", "/api/provider").length, 3);
+  }));
+});
+
+test("getProviders single-flight: concurrent callers share ONE read; an invalidation mid-read starts a new one", async () => {
   // Settings → Models fires ~6 of these at once; opencode answers them serially, which used to
   // queue past the renderer's 15 s timeout.
   let release;
@@ -1103,11 +1215,23 @@ test("getProviders coalesces concurrent callers into ONE read of the catalogue, 
     const results = await Promise.all(pending);
     assert.equal(only(calls, "GET", "/api/provider").length, 1, "six concurrent callers share one read");
     for (const r of results) assert.deepEqual(r.connected, ["anthropic", "fake"]);
-    // Nothing is cached past completion: the next call reads opencode again.
-    await getProviders();
-    assert.equal(only(calls, "GET", "/api/provider").length, 2);
   });
-  assert.equal(only(calls, "GET", "/api/model").length, 2);
+  assert.equal(only(calls, "GET", "/api/model").length, 1);
+
+  // A read that began before an invalidation may predate the change: don't share it, and don't trust its result.
+  let release2;
+  const gate2 = new Promise((r) => { release2 = r; });
+  let n = 0;
+  await withV2(PROVIDER_ROUTES({ "GET /api/provider": async () => { n += 1; if (n === 1) await gate2; return PROVIDER_ROUTES()["GET /api/provider"]; } }), async (calls) => {
+    const before = getProviders();
+    invalidateProvidersCache();
+    const after = getProviders();
+    release2();
+    await Promise.all([before, after]);
+    assert.equal(only(calls, "GET", "/api/provider").length, 2);
+    await getProviders();
+    assert.equal(only(calls, "GET", "/api/provider").length, 2, "the post-invalidation read is cached");
+  });
 });
 
 test("getDefaultModel: the default of the first connected provider that has one; null otherwise (never re-throws)", async () => {

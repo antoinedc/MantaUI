@@ -3456,6 +3456,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     streamInterp.inboxDisconnected();
   },
   onConnect: ({ reconnect }) => {
+    // opencode may have restarted outside Manta: its provider catalogue is no longer trustworthy.
+    if (reconnect) oc.invalidateProvidersCache();
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
     // Events may have been missed while disconnected (or before the first
     // connect): re-check every unfinished V2 job from authoritative reads.

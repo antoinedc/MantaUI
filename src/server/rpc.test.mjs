@@ -104,6 +104,19 @@ function makeDeps(projects, liveProjects = []) {
   };
 }
 
+test("opencode:models asks listModels in strict mode, so an unreadable catalogue rejects instead of resolving []", async () => {
+  const { deps } = makeDeps([]);
+  const seen = [];
+  deps.oc.listModels = async (overrides, opts) => {
+    seen.push(opts);
+    if (opts?.strict) throw new Error("model list unavailable");
+    return [];
+  };
+  const handlers = buildHandlers(deps);
+  await assert.rejects(handlers["opencode:models"](), /model list unavailable/);
+  assert.deepEqual(seen, [{ strict: true }]);
+});
+
 test("tmux:new-window resolves empty cwd from project defaultCwd", async () => {
   const { deps, calls } = makeDeps([{ tmuxSession: "better-ui", defaultCwd: "/home/dev/projects/better-ui" }]);
   const handlers = buildHandlers(deps);

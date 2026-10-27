@@ -22,7 +22,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { statePath } from "../shared/paths.mjs";
-import { apiUrl, opencodeAuthHeader } from "./opencode.mjs";
+import { apiUrl, invalidateProvidersCache, opencodeAuthHeader } from "./opencode.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -85,7 +85,10 @@ export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000
     console.warn("[opencodeAdmin] config reload: opencode unreachable:", msg);
     return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
   }
-  if (res.ok) return { ok: true, reloaded: true };
+  if (res.ok) {
+    invalidateProvidersCache();
+    return { ok: true, reloaded: true };
+  }
   let detail = "";
   try {
     detail = await res.text();
@@ -110,6 +113,7 @@ export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000
 export async function restartOpencode(exec = execFileAsync) {
   try {
     await exec("systemctl", ["--user", "restart", "opencode-serve"]);
+    invalidateProvidersCache();
     return { ok: true };
   } catch (e) {
     console.warn("[opencodeAdmin] restart failed:", e);

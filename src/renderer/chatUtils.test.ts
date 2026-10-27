@@ -20,6 +20,7 @@ import {
   filterCommands,
   dedupeAgainstBuiltins,
   formatModelContextSize,
+  shouldClearMissingModel,
   findSessionTitle,
   formatHiddenTodosSummary,
   summarizeTodoProgress,
@@ -496,6 +497,24 @@ describe("ctxStageColor", () => {
   it("returns danger from 90% and above", () => {
     expect(ctxStageColor(90)).toBe(cssVar("--danger"));
     expect(ctxStageColor(100)).toBe(cssVar("--danger"));
+  });
+});
+
+// ===== shouldClearMissingModel =====
+describe("shouldClearMissingModel", () => {
+  const sel = { providerID: "anthropic", modelID: "claude-opus-5-5" };
+  it("never clears on an empty or missing catalog", () => {
+    expect(shouldClearMissingModel([], sel)).toBe(false);
+    expect(shouldClearMissingModel(null, sel)).toBe(false);
+    expect(shouldClearMissingModel(undefined, sel)).toBe(false);
+  });
+  it("clears when a non-empty catalog lacks the saved model", () => {
+    expect(shouldClearMissingModel([{ providerID: "anthropic", id: "claude-haiku-4-5" }], sel)).toBe(true);
+    expect(shouldClearMissingModel([{ providerID: "openai", id: "claude-opus-5-5" }], sel)).toBe(true);
+  });
+  it("keeps a saved model the catalog contains, and does nothing without a saved model", () => {
+    expect(shouldClearMissingModel([{ providerID: "anthropic", id: "claude-opus-5-5" }], sel)).toBe(false);
+    expect(shouldClearMissingModel([{ providerID: "anthropic", id: "x" }], null)).toBe(false);
   });
 });
 
