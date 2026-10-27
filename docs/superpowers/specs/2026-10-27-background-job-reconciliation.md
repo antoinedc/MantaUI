@@ -1,7 +1,7 @@
 # Background-job reconciliation, `delegate_send`, and delegate tool copy
 
 Box server + opencode tool registrars + a small renderer change. Native iOS is
-not changed. Revision 3 (after two reviews): no takeover, no follow-up queuing, and
+not changed. Revision 4 (after three reviews): no takeover, no follow-up queuing, and
 every new run is a NEW job record so runs can never interfere with each other.
 
 ## 0. Problem (measured 2026-10-27)
@@ -44,7 +44,15 @@ Consequences that must hold everywhere:
   never the reverse. Inside the critical section each cleanup re-reads the LIVE
   record and does nothing to the window/worktree when it has `supersededBy`
   (the window is stamped with the shared child id, so the stamp check alone
-  cannot tell runs apart). Test: pause an old record's cleanup right before its
+  cannot tell runs apart). The mutex is NOT re-entrant: only the outermost
+  entry points take it (`finishV2Cleanup`, the sweep's close-once loop,
+  `deleteJob`, `openJobSession`, successor creation, `recoverContinuation`);
+  the functions they call (`cleanupTerminalJob`, `closeJobWindow`,
+  `dropResumeRestore`) get "lock already held" internal variants and are never
+  called unlocked from elsewhere. `dropResumeRestore` acts on the restore's
+  OWN child id, which for a resume differs from the record's current child: it
+  takes `sessionResources(restore.childSessionID)` only when that id differs
+  from the one already held. Test: pause an old record's cleanup right before its
   removal, create a successor, release — the successor's window/worktree survive.
 - **Resource ownership transfers.** A successor inherits `worktree`, `branch`,
   `baseSha` from its predecessor when the predecessor had a worktree that still
@@ -52,8 +60,11 @@ Consequences that must hold everywhere:
   Superseded records are hidden from lists and pruned by normal retention
   (their resources belong to the successor), never kept alive by a worktree.
 - **Observed records never remove a worktree** (a script may prompt the session
-  again): their cleanup closes the window only and records `cleanedUp:false`,
-  `cleanupReason:"kept"`, so retention keeps the record while it holds one.
+  again): their cleanup closes the window only. If the record holds a worktree
+  (inherited, still on disk) it records `cleanedUp:false`,
+  `cleanupReason:"kept"`, so retention keeps it while it holds one; otherwise
+  `cleanedUp:true`. `applyRetention` must NOT protect a superseded record
+  because of `cleanedUp:false` — its resources belong to the successor.
 - Every lookup by `childSessionID` must not pick a superseded record when a newer
   one exists. Implementer audits all `childSessionID ===` finds in
   `delegate.mjs` / `index.mjs` and lists them in the report.
@@ -247,14 +258,28 @@ Inherited: `name`, `model`, `requestedModel`, `parentSessionID` (the caller),
 continued session already has many). For records with `launch.continuation`:
 - `hasAdmissionEvidence` and the `settleV2Job` "sawInput" check look ONLY for
   a user timeline record / inbox item whose id is `launch.messageId`.
-- `reconcileV2Jobs`: a continuation still `creating` (restart before the send)
-  goes through `resumeUnsentLaunch` (window if missing, then the claim that
-  writes `submittedAt` + `launchState:"submitting"`, then the send). One that
-  is `uncertain` with no evidence for its `messageId` and whose child is not
-  active is re-sent with the SAME `messageId` (opencode admits a message id
-  once — the same guarantee `submitCommand` already relies on), then re-checked.
-- Tests: restart before the send; lost send response (resend with the same id
-  admits once); an old idle/outcome before `submittedAt` never settles.
+- `reconcileV2Jobs` routes EVERY record with `launch.continuation` that is not
+  yet `launchState:"running"` to a dedicated, idempotent
+  `recoverContinuation(job)` — never `resumeUnsentLaunch` (whose move step and
+  `abandonLaunch` are not continuation-safe). Under `sessionResources`:
+  (a) child `readSession` missing → `finishV2Job(failed, "the session no longer
+  exists")`; unknown → leave for the next tick;
+  (b) restore the worktree if the record has one and it is missing (same rule
+  as step 1 below; failure → `finishV2Job(failed, "its branch <b> no longer
+  exists")`);
+  (c) window: find by session stamp (ignore the recorded index if no window
+  carries the stamp); else create one (step 2 rule); patch
+  `tmuxSession/windowIndex`;
+  (d) `creating` (never sent) → the claim + `submitCommand` of step 3;
+  `uncertain` → evidence for `launch.messageId` present → `running`; absent and
+  child not active → re-send via `submitCommand` with the SAME `messageId`
+  (opencode admits a message id once — the guarantee `submitCommand` already
+  relies on); absent and child active → leave for the next tick.
+  Every failure here is continuation-safe: a definite refusal is the RECONCILED
+  refusal of step 3; nothing deletes the session.
+- Tests: restart before worktree restore, before window creation, before the
+  send; lost send response (resend with the same id admits once); an old
+  idle/outcome before `submittedAt` never settles.
 
 Then, outside `jobsLock` but still inside `sessionResources`:
 1. Re-add the worktree if it is missing (see 409 above).
