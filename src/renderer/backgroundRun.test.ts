@@ -8,6 +8,9 @@ import {
   deriveBackgroundCards,
   isBackgroundResultMessage,
   isCardCandidate,
+  isObservedJob,
+  isSupersededJob,
+  OBSERVED_JOB_LABEL,
   openJobSession,
   overlaySegments,
   parseSlashToken,
@@ -174,6 +177,36 @@ describe("deriveBackgroundCards (N5)", () => {
       none,
     );
     expect(cards.map((c) => c.jobId)).toEqual(["a", "b"]);
+  });
+});
+
+describe("observed + superseded jobs", () => {
+  it("an observed job's card carries the observed flag; an ordinary one does not", () => {
+    expect(deriveBackgroundCards([job({ origin: "observed", completionOwner: "opencode" })], "ses_p", none)[0]).toMatchObject({
+      kind: "running",
+      observed: true,
+    });
+    expect("observed" in deriveBackgroundCards([job()], "ses_p", none)[0]).toBe(false);
+    expect(
+      deriveBackgroundCards([job({ origin: "observed", launchState: "uncertain" })], "ses_p", none)[0],
+    ).toMatchObject({ kind: "uncertain", observed: true });
+  });
+
+  it("a superseded record gets no card and is not a candidate", () => {
+    const old = job({ supersededBy: "next", status: "running" });
+    expect(deriveBackgroundCards([old], "ses_p", none)).toEqual([]);
+    expect(isCardCandidate(old, "ses_p")).toBe(false);
+    const cards = deriveBackgroundCards([old, job({ id: "next", attempt: 2 })], "ses_p", none);
+    expect(cards.map((c) => c.jobId)).toEqual(["next"]);
+  });
+
+  it("predicates", () => {
+    expect(isObservedJob({ origin: "observed" })).toBe(true);
+    expect(isObservedJob({ origin: "delegate" })).toBe(false);
+    expect(isObservedJob(undefined)).toBe(false);
+    expect(isSupersededJob({ supersededBy: "x" })).toBe(true);
+    expect(isSupersededJob({ supersededBy: null })).toBe(false);
+    expect(OBSERVED_JOB_LABEL).toBe("started outside Manta");
   });
 });
 

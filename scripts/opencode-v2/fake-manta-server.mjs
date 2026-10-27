@@ -55,9 +55,18 @@ export function cannedResponse(req) {
     return json({
       jobs: [
         { id: "abc12345", name: "bg-job", status: "running", branch: "delegate/x", worktree: "/w" },
-        { id: "def67890", name: "other", status: "done" },
+        { id: "def67890", name: "other", status: "done", attempt: 2 },
+        { id: "old00000", name: "superseded", status: "done", supersededBy: "def67890" },
       ],
     });
+  {
+    const m = /^\/api\/delegate\/([^/]+)\/send$/.exec(p);
+    if (method === "POST" && m) {
+      return decodeURIComponent(m[1]) === "busy0000"
+        ? json({ error: "that job is still working — its result will arrive on its own" }, 409)
+        : json({ ok: true, job: { id: "new12345", name: "bg-job", attempt: 2 } });
+    }
+  }
   {
     const m = /^\/api\/delegate\/([^/]+)\/stop$/.exec(p);
     if (method === "POST" && m) {

@@ -1,5 +1,5 @@
 // V2 twin of docs/opencode-tools/delegate.ts → delegate / delegate_list /
-// delegate_stop. manta-server owns the background job engine
+// delegate_send / delegate_stop. manta-server owns the background job engine
 // (src/server/delegate.mjs). The "you do NOT have the result yet" return string
 // is load-bearing — do not soften it.
 
@@ -11,24 +11,28 @@ export const tools: ToolDef[] = [
   {
     name: "delegate",
     description: [
-      "Start a long-running task as a BACKGROUND job in its own opencode session and",
-      "git worktree, so the main conversation is NOT blocked. Use this when the work",
-      "is long-running, independent, and you do NOT need its answer to continue your",
-      "current reply — research, a broad refactor, an investigation, or a test-suite",
-      "run-and-fix. The built-in `task` tool is the right choice when you need the",
-      "answer before you can carry on (its foreground default) or for long independent",
-      "work that will not edit files (`background: true`); use this `delegate` tool for",
-      "work that WILL edit files — it is the only one that gets its own git worktree and",
-      "branch. Every background job costs a full extra model session;",
-      "do not fan out speculatively. The job starts with NO knowledge of this",
-      "conversation — put everything it needs in the prompt. It works in its own git",
-      "worktree and commits to its own branch; it never pushes, merges, or touches",
-      "this checkout. This tool returns IMMEDIATELY and you do NOT have its result",
-      "yet — completion arrives on its own as a separate later message; do not",
-      "report or guess the job's findings before then, and do not poll. To see what a",
-      "running job is doing, use `peers_inspect`, not a list call in a loop. At most",
-      "five background jobs may run at once. Do not start a background job from inside",
-      "another background job.",
+      "Run a piece of work in the background — in its own session, git worktree and",
+      "branch — and get its result back automatically as a later message. This is",
+      "THE way to hand work to another agent on this box: the user sees every job as",
+      "a row in the sidebar and can open or stop it. Use it whenever the work",
+      "doesn't block what you do next and it edits files: implementing a feature or",
+      "fix, a refactor, a test-suite run-and-fix, an investigation that must not",
+      "touch your checkout. Split independent pieces into parallel jobs (up to five",
+      "at once); each one is a full model session, so don't start jobs whose result",
+      "you won't use. Prefer it over driving opencode sessions yourself (scripts",
+      "calling opencode's HTTP API, wait-for-idle scripts, sleep/poll loops, tmux):",
+      "that work has no managed launch (no worktree, no permission scoping) and its",
+      "result is never delivered to you — Manta can only show it. Use the built-in",
+      "`task` tool instead when you need the",
+      "answer before you can continue (foreground), or for read-only research",
+      "(`background: true`). The job starts with NO knowledge of this conversation:",
+      "put the goal, paths, constraints and what \"done\" looks like in the prompt.",
+      "When a job of yours has finished and you want another round from the same",
+      "worker (a fix round after review, the next milestone), use `delegate_send`",
+      "with its id — it keeps the job's context, worktree and branch. This call",
+      "returns IMMEDIATELY and you do NOT have the result yet — it arrives on its",
+      "own; do not report or guess it before then, and do not poll. A background job",
+      "cannot start background jobs of its own.",
     ].join(" "),
     input: input(
       {
@@ -121,15 +125,53 @@ export const tools: ToolDef[] = [
         "GET",
         `/api/delegate?sessionID=${encodeURIComponent(context.sessionID ?? "")}`,
       );
-      const jobs = Array.isArray(res?.jobs) ? res.jobs : [];
+      const jobs = (Array.isArray(res?.jobs) ? res.jobs : []).filter((j: any) => !j?.supersededBy);
       if (jobs.length === 0) return "No background jobs for this session.";
       const lines = jobs.map((j: any) => {
         const parts = [`${j?.id ?? ""}`, `"${j?.name ?? ""}"`, j?.status ?? "?"];
         if (j?.branch) parts.push(`branch=${j.branch}`);
         if (j?.worktree) parts.push(`worktree`);
+        if (Number(j?.attempt) > 1) parts.push(`round ${j.attempt}`);
         return parts.join(" ");
       });
       return `Background jobs (${jobs.length}):\n` + lines.join("\n");
+    },
+  },
+  {
+    name: "delegate_send",
+    description: [
+      "Start another round of work in one of YOUR background jobs that has finished —",
+      "a fix round after a review, the next milestone, a follow-up question. The job",
+      "keeps its session, context, worktree and branch, so this is cheaper and",
+      "better than starting a new job for the same work. Only works once the job's",
+      "previous result has reached you (while it is still working, wait for that",
+      "result). The new round's result comes back to you automatically as a later",
+      "message — do not poll. Returns immediately; you do NOT have the result yet.",
+    ].join(" "),
+    input: input({
+      id: str("The id of the finished background job to continue, from `delegate_list`."),
+      prompt: str(
+        "What the job should do in this round. The job keeps its earlier context, " +
+          "but state the new task, paths and constraints explicitly.",
+      ),
+    }),
+    async execute(args, context) {
+      let res: any;
+      try {
+        res = await call("POST", `/api/delegate/${encodeURIComponent(args.id)}/send`, {
+          prompt: args.prompt,
+          sessionID: context.sessionID,
+        });
+      } catch (e: any) {
+        return `Could not send to background job "${args.id}": ${e?.message ?? e}.`;
+      }
+      const name = res?.job?.name ?? args.id;
+      const id = res?.job?.id ?? "";
+      return (
+        `Sent another round to background job "${name}" (id ${id}). You do NOT have its\n` +
+        "result yet — it will arrive as a separate message when this round finishes. Do\n" +
+        "not report or guess it before then."
+      );
     },
   },
   {

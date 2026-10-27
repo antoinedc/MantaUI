@@ -28,6 +28,7 @@ import {
   describeSessionClose,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
+import { OBSERVED_JOB_LABEL, OBSERVED_JOB_TITLE, isObservedJob } from "./backgroundRun";
 import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
 import { dotTone, badgeLabel } from "./ctoView";
@@ -640,6 +641,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (isJobRow(jobs, w.opencodeSessionId)) {
       const job = w.opencodeSessionId ? jobs[w.opencodeSessionId] : undefined;
       if (job?.activity) parts.push(job.activity);
+      if (isObservedJob(job)) parts.push(OBSERVED_JOB_TITLE);
     }
     return parts.join(" · ");
   };
@@ -895,6 +897,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           commitRename={commitRename}
                           cancelRename={() => setRenameTarget(null)}
                           title={rowTitle(w)}
+                          observed={isObservedJob(w.opencodeSessionId ? jobs[w.opencodeSessionId] : undefined)}
                         />
                         {kids.map((childIdx, i) => {
                           const childWin = p.windows.find((x) => x.index === childIdx);
@@ -918,6 +921,9 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                                 })
                               }
                               title={rowTitle(childWin)}
+                              observed={isObservedJob(
+                                childWin.opencodeSessionId ? jobs[childWin.opencodeSessionId] : undefined,
+                              )}
                             />
                           );
                         })}
@@ -1248,6 +1254,7 @@ function WindowRow({
   commitRename,
   cancelRename,
   title,
+  observed = false,
 }: {
   project: Project;
   window: TmuxWindow;
@@ -1272,6 +1279,8 @@ function WindowRow({
   commitRename: () => void;
   cancelRename: () => void;
   title: string;
+  /** An observed job whose parent has no window renders top-level, so the label lives here too. */
+  observed?: boolean;
 }) {
   const isRenaming =
     renameTarget?.kind === "window" &&
@@ -1312,7 +1321,20 @@ function WindowRow({
           marquee={!isRenaming}
           age={age.text}
           ageStale={age.stale}
-          trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
+          trailing={
+            <>
+              {observed ? (
+                <span
+                  className="shrink-0 text-micro text-text-quiet"
+                  title={OBSERVED_JOB_TITLE}
+                  data-testid="job-observed-label"
+                >
+                  {OBSERVED_JOB_LABEL}
+                </span>
+              ) : null}
+              <PinSlot pinned={pinned} onToggle={onTogglePin} />
+            </>
+          }
           title={title}
           tabIndex={focused ? 0 : -1}
           ariaSelected={isActive}
@@ -1336,6 +1358,7 @@ function JobChildRow({
   onActivate,
   onClose,
   title,
+  observed,
 }: {
   window: TmuxWindow;
   isActive: boolean;
@@ -1345,6 +1368,7 @@ function JobChildRow({
   onActivate: () => void;
   onClose: () => void;
   title: string;
+  observed: boolean;
 }) {
   const dot = dotFor(status);
   const age = useAge(status);
@@ -1362,6 +1386,17 @@ function JobChildRow({
           age={age.text}
           ageStale={age.stale}
           title={title}
+          trailing={
+            observed ? (
+              <span
+                className="shrink-0 text-micro text-text-quiet"
+                title={OBSERVED_JOB_TITLE}
+                data-testid="job-observed-label"
+              >
+                {OBSERVED_JOB_LABEL}
+              </span>
+            ) : undefined
+          }
           ariaLevel={2}
           tabIndex={focused ? 0 : -1}
           ariaSelected={isActive}

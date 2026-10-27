@@ -1067,16 +1067,36 @@ and worktree all belong to it.
 - **Global opencode tool**, `docs/opencode-tools/delegate.ts`, **COPIED** (not
   symlinked — same `@opencode-ai/plugin` gotcha) to
   `~/.config/opencode/tools/delegate.ts`, **plus the shared `manta-auth.ts` module
-  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Three exports → `delegate`,
-  `delegate_list`, `delegate_stop`. Guidance appended to
+  it imports** (`→ ~/.config/opencode/tools/manta-auth.ts`). Four exports → `delegate`,
+  `delegate_list`, `delegate_send`, `delegate_stop` (the V2 plugin twin,
+  `docs/opencode-plugins-v2/manta/tools/delegate.ts`, carries the same four and
+  is the installed one; keep the two in sync). Guidance appended to
   `~/.config/opencode/AGENTS.md` from `docs/opencode-tools/AGENTS.md`
   (## MantaUI background delegation). **Install/update =
   `systemctl --user restart opencode-serve`.**
 - **Thin registrar** — `fetch`es manta-server (no SSH hop). `delegate` POSTs
   `/api/delegate {prompt, model?, sessionID, directory}` → `{ok, id, job}`;
   `delegate_list` GETs `/api/delegate?sessionID=`; `delegate_stop` POSTs
-  `/api/delegate/:id/stop`. `execute` returns promptly; the engine owns the
-  lifecycle.
+  `/api/delegate/:id/stop`; `delegate_send` POSTs
+  `/api/delegate/:id/send {prompt, sessionID}` and returns the server's error
+  text (not a throw) on a refusal. `execute` returns promptly; the engine owns
+  the lifecycle.
+- **One run = one record; `delegate_send` starts another round.** A record is
+  never brought back from a terminal state. `delegate_send` (only for the
+  caller's own finished, Manta-owned job) appends a NEW record on the same
+  child session, worktree and branch (`attempt` + 1, `continues` → the old id)
+  and marks the old one `supersededBy`; superseded records are hidden from
+  `delegate_list`, the background cards and the sidebar, so a late settle of an
+  old run can never touch the new one. Per-session resource lock guards every
+  window/worktree side effect for a session.
+- **Active-session reconciler + observed records.** A 15s reconciler
+  (`reconcileActiveSessions`) adopts any busy opencode session that has no row
+  (started by a script via opencode's HTTP API, a `task` whose parent has no
+  window, or a finished job prompted again) as an `origin:"observed"` record —
+  labelled "started outside Manta" in the UI. Observed records are track-only:
+  `completionOwner:"opencode"` (Manta posts no result), never count toward the
+  five-job cap, no timeout, no Pause. Manta-internal sessions (title /
+  compaction / CTO helpers) are excluded via `metadata.manta.internal`.
 - **Three-way mode selection is the model's choice.** `delegate`'s
   description steers it: use the built-in `task` tool in the foreground when
   you need the answer before you can continue, or with `background: true`

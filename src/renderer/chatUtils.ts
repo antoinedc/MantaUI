@@ -2087,6 +2087,7 @@ export function computeJobNesting(
       status: string;
       parentSessionID: string | null;
       childSessionID: string | null;
+      supersededBy?: string | null;
     }
   >,
 ): JobNestingResult {
@@ -2100,7 +2101,7 @@ export function computeJobNesting(
   }
 
   for (const job of Object.values(jobs)) {
-    if (!job.childSessionID) continue;
+    if (!job.childSessionID || job.supersededBy) continue;
     const childWin = byOpencodeId.get(job.childSessionID);
     if (!childWin) continue; // job's window isn't in this project
     const parentWin = job.parentSessionID
@@ -2136,13 +2137,13 @@ export function sessionsWithActiveWork(
   parents: Record<string, string>,
   jobs: Record<
     string,
-    { status: string; parentSessionID: string | null; childSessionID: string | null }
+    { status: string; parentSessionID: string | null; childSessionID: string | null; supersededBy?: string | null }
   >,
 ): Set<string> {
   const links = new Map<string, string>(Object.entries(parents));
   const seeds: string[] = [...running];
   for (const job of Object.values(jobs)) {
-    if (job.status !== "running") continue;
+    if (job.status !== "running" || job.supersededBy) continue;
     if (job.childSessionID) {
       seeds.push(job.childSessionID);
       if (job.parentSessionID && !links.has(job.childSessionID)) {
@@ -2194,7 +2195,7 @@ export function sessionsWithActiveWork(
 // Pure so it can be tested without a tree, a socket, or a live job.
 export function shouldResyncWindowsForJobs(
   projects: Project[],
-  jobs: Record<string, { status: string; childSessionID: string | null }>,
+  jobs: Record<string, { status: string; childSessionID: string | null; supersededBy?: string | null }>,
 ): boolean {
   const known = new Set<string>();
   for (const p of projects) {
@@ -2203,7 +2204,7 @@ export function shouldResyncWindowsForJobs(
     }
   }
   for (const job of Object.values(jobs)) {
-    if (!job.childSessionID) continue;
+    if (!job.childSessionID || job.supersededBy) continue;
     const present = known.has(job.childSessionID);
     if (job.status === "running" && !present) return true;
     if (job.status !== "running" && present) return true;

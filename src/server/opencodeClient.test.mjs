@@ -563,7 +563,7 @@ const WIRE = [
       assert.equal(r.ok, true);
     },
     [
-      ["POST", "/api/session", {}, { location: { directory: "/work" }, title: "manta-throwaway" }],
+      ["POST", "/api/session", {}, { location: { directory: "/work" }, title: "manta-throwaway", metadata: { manta: { internal: true } } }],
       ["GET", "/api/session/ses_t"],
       ["POST", "/api/session/ses_t/agent", {}, { agent: "title" }],
       ["POST", "/api/session/ses_t/prompt", {}, { text: "x" }], // + the minted id, checked separately
@@ -628,7 +628,7 @@ test("upgrade calls: wire shape, own base URL + per-request password, and the `<
     [
       ["GET", "/api/experimental/migration/v1", {}, undefined],
       ["GET", "/api/plugin", { "location[directory]": "/home/u" }, undefined],
-      ["POST", "/api/session", {}, { location: { directory: "/home/u" }, model: { providerID: "anthropic", id: "claude-haiku-4-5" } }],
+      ["POST", "/api/session", {}, { location: { directory: "/home/u" }, model: { providerID: "anthropic", id: "claude-haiku-4-5" }, metadata: { manta: { internal: true } } }],
       ["POST", "/api/session/ses_u/prompt", {}, { text: "Reply with the single word: ok" }],
       ["POST", "/api/experimental/session/ses_u/wait", {}, undefined],
       ["GET", "/api/session/ses_u/message", { limit: "20" }, undefined],

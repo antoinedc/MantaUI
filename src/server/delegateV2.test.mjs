@@ -963,6 +963,7 @@ test("no lost lifecycle: a child that finished BEFORE it was adopted is recorded
   const w = world();
   w.state.openWindows = [{ name: "quick", arguments: "" }];
   const { engine, fire } = engineWithTimers(w);
+  w.sessions.set("ses_fast", { id: "ses_fast", parentID: PARENT, directory: "/repo", time: {} });
   await engine.observeRaw(created("ses_fast"));
   // it finishes in well under a second — before any adoption
   await engine.observeRaw(rawExec("session.execution.succeeded", "ses_fast"));
@@ -980,6 +981,7 @@ test("no lost lifecycle: a child that finished BEFORE it was adopted is recorded
 
 test("no lost lifecycle: the existing task-subagent adoption reads the map too", async () => {
   const w = world();
+  w.sessions.set("ses_sub", { id: "ses_sub", parentID: PARENT, directory: "/repo", time: {} });
   const lifecycleGet = (sid) => (sid === "ses_sub" ? { outcome: "failed", error: "oops", at: T0 } : null);
   const res = await adoptSubagentJob({ parentSessionID: PARENT, parentDirectory: "/repo", childSessionID: "ses_sub", name: "explore", prompt: "p" }, { ...w.deps, lifecycleGet });
   assert.equal(res.ok, true);
@@ -996,9 +998,9 @@ test("an adopted native-command row completes from the raw outcome (still no Man
   const { engine, fire } = engineWithTimers(w);
   await engine.observeRaw(created("ses_nat"));
   w.state.openWindows = [];
+  w.sessions.set("ses_nat", { id: "ses_nat", parentID: PARENT, time: {} });
   engine.windowClosed({ sessionId: PARENT });
   await fire();
-  w.sessions.set("ses_nat", { id: "ses_nat", parentID: PARENT, time: {} });
   w.say("ses_nat", "native done");
   w.finish("ses_nat", "succeeded", T0 + 9);
   await engine.observeRaw(rawExec("session.execution.succeeded", "ses_nat"));

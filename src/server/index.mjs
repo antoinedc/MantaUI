@@ -7,7 +7,8 @@
 // one less auth surface.
 
 import { createServer } from "node:http";
-import { resolvePipelineSession } from "./internalSessions.mjs";
+import { resolvePipelineSession, isInternalSession } from "./internalSessions.mjs";
+import { withInternalMarker } from "./internalSessionMarker.mjs";
 import { resolvePlanParent } from "./ctoAct.mjs";
 import { readSegmentEvidence } from "./ctoSegmentEvidence.mjs";
 import { execFile } from "node:child_process";
@@ -140,7 +141,7 @@ import {
   startCapSweeper,
 } from "./capabilities.mjs";
 import { notifyCapSession } from "./capNotifier.mjs";
-import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob } from "./delegate.mjs";
+import { createDelegateEngine, buildPermissionRuleset as delegateBuildPermissionRuleset, resolveForgeOwner, resolveOwner, loadJobs as loadDelegateJobs, pauseJob as delegatePauseJob, newestRecordFor as newestDelegateRecordFor } from "./delegate.mjs";
 import {
   reportProgress,
   readProgressRecord,
@@ -1137,9 +1138,12 @@ const delegateEngine = createDelegateEngine({
   // §6.3: a job whose own session has a pending `send` handoff does not settle
   // yet; a parent's job list spans its whole replacement chain.
   deferSettlement: (sid) => handoffEngine.hasPendingSend(sid),
+  isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
+  // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.
+  isInternalSession: (sid) => isInternalSession(sid),
   openCommandWindows: (sid) => commandCorrelator.openWindows(sid),
   // BET-418 §B: detect a running job whose parent opencode session is gone so
   // the sweeper can stop + clean it up (nobody left to report to).
@@ -1164,19 +1168,40 @@ delegateEngine.reconcileJobsOnBoot().catch((e) =>
   console.warn("[delegate] boot reconciliation failed:", e?.message ?? e),
 );
 onCommandWindowClosed = (w) => delegateEngine.windowClosed(w);
-// V2 jobs: re-check every unfinished one from authoritative reads and retry any
-// result not yet posted to its parent. opencode may not be up yet at boot — the
-// sweeper repeats this every minute and the stream's (re)connect triggers it too.
-delegateEngine.reconcileV2().catch((e) =>
-  console.warn("[delegate] boot V2 reconciliation failed:", e?.message ?? e),
-);
-// Auto-handoff boot recovery (§5.5): finish or roll back every start a restart
-// interrupted, drain anything held, and prune dead history/links. Fences and held
-// admissions were already in force from the engine's synchronous load.
-handoffEngine
-  .recover()
-  .then(() => handoffEngine.sweep((sid) => oc.sessionExists(sid)))
-  .catch((e) => console.warn("[handoff] boot recovery failed:", e?.message ?? e));
+// Boot recovery, in order — each step's failure is logged and the chain goes on:
+//   1. auto-handoff (§5.5): finish or roll back every start a restart interrupted, drain
+//      anything held, prune dead history/links (fences and held admissions were already in
+//      force from the engine's synchronous load);
+//   2. V2 jobs: re-check every unfinished one from authoritative reads and retry any result
+//      not yet posted to its parent (opencode may not be up yet at boot — the sweeper repeats
+//      this every minute and the stream's (re)connect triggers it too);
+//   3. the active-session reconciler adopts every busy session nothing tracks (work that
+//      started while this server was down), then its poller starts — never before recovery is done.
+// Assigned once the chain reaches the last step; the upgrade pause/resume at the bottom reads it.
+let stopDelegateReconciler = null;
+(async () => {
+  try {
+    await handoffEngine.recover();
+    await handoffEngine.sweep((sid) => oc.sessionExists(sid));
+  } catch (e) {
+    console.warn("[handoff] boot recovery failed:", e?.message ?? e);
+  }
+  try {
+    await delegateEngine.reconcileV2();
+  } catch (e) {
+    console.warn("[delegate] boot V2 reconciliation failed:", e?.message ?? e);
+  }
+  try {
+    await delegateEngine.reconcileActiveSessions();
+  } catch (e) {
+    console.warn("[delegate] boot active-session reconciliation failed:", e?.message ?? e);
+  }
+  try {
+    stopDelegateReconciler = delegateEngine.startActiveSessionReconciler().stop;
+  } catch (e) {
+    console.warn("[delegate] starting the active-session reconciler failed:", e?.message ?? e);
+  }
+})();
 
 // §7 `work` control-tool family (record + dispatch half): composed from the
 // live tmux reader and the bound delegate engine, and injected into the CTO
@@ -1430,7 +1455,8 @@ function forgeContextForRepoKey(repoKey) {
 async function resolveForgeSinkTarget(childSessionID) {
   try {
     const { jobs } = await delegateEngine.listJobs();
-    const job = jobs?.find((j) => j.childSessionID === childSessionID);
+    // (the newest run of the session: a continued job's older records share its child)
+    const job = newestDelegateRecordFor(jobs, childSessionID);
     const link = readSessionLink(job ?? null);
     const ref = link?.pr ?? link?.issue;
     if (!ref) return null;
@@ -2618,7 +2644,7 @@ const adaptiveCto = ctoEngine.createCtoEngine({
   executor: {
     runnerDeps: {
       createSession: async ({ directory, title, permission, signal } = {}) => {
-        const sess = await oc.createSession({ directory, title, permission, signal });
+        const sess = await oc.createSession({ directory, title, permission, signal, metadata: withInternalMarker() });
         return { ok: true, id: sess?.id };
       },
       sendPrompt: async (args) => {
@@ -4349,6 +4375,10 @@ const handleRequest = async (req, res) => {
   //                               → 200 {ok, job} (400 refused: cap/nesting/bad input; 202 pending approval)
   // GET    /api/delegate?sessionID= → {jobs:[...]} (jobs for that parent session)
   // POST   /api/delegate/:id/stop  → 200 {ok} (409 not running / 404 not found)
+  // POST   /api/delegate/:id/send  body {prompt, sessionID} → 200 {ok, job: <the NEW record>}
+  //                               (404 gone / 400 no prompt / 403 not yours or CTO-managed /
+  //                                409 not continuable now / 500 couldn't send — {error} is the
+  //                                text for the model)
   // DELETE /api/delegate/:id       → 200 {ok} (409 dirty worktree → {error:"dirty"})
   // GET    /api/delegate/approvals?sessionID= → pending pre-flight approvals (BET-418 §A)
   // POST   /api/delegate/approve/:id  body {tools?} → 200 {ok} (approve + start the job)
@@ -4363,9 +4393,9 @@ const handleRequest = async (req, res) => {
     path === "/api/delegate/approvals" ||
     /^\/api\/delegate\/approve\/([0-9a-f]{8})$/.test(path) ||
     /^\/api\/delegate\/decline\/([0-9a-f]{8})$/.test(path) ||
-    /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/.test(path)
+    /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send))?$/.test(path)
   ) {
-    const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop))?$/;
+    const detailRe = /^\/api\/delegate\/([0-9a-f]{8})(?:\/(stop|send))?$/;
     const detailMatch = path.match(detailRe);
     const approveMatch = path.match(/^\/api\/delegate\/approve\/([0-9a-f]{8})$/);
     const declineMatch = path.match(/^\/api\/delegate\/decline\/([0-9a-f]{8})$/);
@@ -4401,6 +4431,22 @@ const handleRequest = async (req, res) => {
       }
       if (detailMatch) {
         const [, id, action] = detailMatch;
+        if (action === "send") {
+          // Another round for one of the caller's finished jobs: a NEW record on the same
+          // session. Every refusal is a 4xx whose `error` is the text the AI tool relays.
+          if (req.method !== "POST") {
+            respondJson(res, 405, { error: "method not allowed" });
+            return;
+          }
+          const body = await readJsonBody(req);
+          const result = await delegateEngine.continueJob(id, { prompt: body?.prompt, sessionID: body?.sessionID });
+          if (!result.ok) {
+            respondJson(res, result.status ?? 500, { error: result.error });
+            return;
+          }
+          respondJson(res, 200, { ok: true, job: result.job });
+          return;
+        }
         if (action === "stop") {
           if (req.method !== "POST") {
             respondJson(res, 405, { error: "method not allowed" });
@@ -6204,7 +6250,7 @@ const handleRequest = async (req, res) => {
 // Durable, resumable state machine (src/server/upgradeV2.mjs). While it runs the box is in UPGRADE
 // MODE (see the gate right after the auth gate in handleRequest). Pausing background work = stopping
 // the three pollers that start turns / jobs on their own; resuming re-creates them.
-const upgradePausable = { schedule: stopSchedulePoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller };
+const upgradePausable = { schedule: stopSchedulePoller, sweeper: stopDelegateSweeper, activity: stopDelegateActivityPoller, reconciler: () => stopDelegateReconciler?.() };
 const upgradeV2 = createUpgradeV2(
   createUpgradeDeps({
     mantaHome: PROJECT_ROOT,
@@ -6228,6 +6274,8 @@ const upgradeV2 = createUpgradeV2(
         ).stop;
         upgradePausable.sweeper = delegateEngine.startSweeper().stop;
         upgradePausable.activity = delegateEngine.startActivityPoller().stop;
+        stopDelegateReconciler = delegateEngine.startActiveSessionReconciler().stop;
+        upgradePausable.reconciler = () => stopDelegateReconciler?.();
       },
     },
   }),

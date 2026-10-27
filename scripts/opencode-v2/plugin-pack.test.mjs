@@ -64,10 +64,10 @@ after(async () => {
 });
 
 describe("tool inventory", () => {
-  test("V1 inventory is the 44 tools the spec names", async () => {
+  test("V1 inventory is the 45 tools the spec names", async () => {
     const inv = await parseV1Inventory();
-    assert.equal(inv.length, 44);
-    assert.equal(new Set(inv.map((i) => i.name)).size, 44, "V1 names are unique");
+    assert.equal(inv.length, 45);
+    assert.equal(new Set(inv.map((i) => i.name)).size, 45, "V1 names are unique");
   });
 
   test("V1 name derivation: <file>_<export> unless the export is already the full name", () => {
@@ -93,7 +93,7 @@ describe("tool inventory", () => {
       ["handoff", "todo_write"],
       "V2 adds exactly todo_write and handoff",
     );
-    assert.equal(v2.allTools.length, 46);
+    assert.equal(v2.allTools.length, 47);
     assert.ok(!v2Names.has("todowrite"), "todowrite is reserved by V2");
   });
 
@@ -217,6 +217,8 @@ const SCENARIOS = [
   ["delegate", { prompt: "decline-me" }],
   ["delegate_list", {}],
   ["delegate_list", {}, only("GET /api/delegate", { status: 200, body: { jobs: [] } })],
+  ["delegate_send", { id: "abc12345", prompt: "fix the review findings" }],
+  ["delegate_send", { id: "busy0000", prompt: "again" }],
   ["delegate_stop", { id: "abc12345" }],
   ["delegate_stop", { id: "boom0000" }],
   ["peers_list", {}],
@@ -327,7 +329,7 @@ describe("behavioural parity (V1 vs V2 against the same fake manta-server)", () 
 // ---------------------------------------------------------------------------
 
 describe("plugin entry", () => {
-  test("setup registers all 46 tools once, wrapping results as { content }", async () => {
+  test("setup registers all 47 tools once, wrapping results as { content }", async () => {
     const mod = await import(v2.indexUrl);
     const def = mod.default;
     assert.equal(def.id, "manta");
@@ -344,8 +346,8 @@ describe("plugin entry", () => {
     };
     await def.setup(pluginCtx);
     assert.equal(transformCalls, 1);
-    assert.equal(added.length, 46);
-    assert.equal(new Set(added.map((t) => t.name)).size, 46);
+    assert.equal(added.length, 47);
+    assert.equal(new Set(added.map((t) => t.name)).size, 47);
 
     const calls = installFakeFetch();
     const sched = added.find((t) => t.name === "schedule_list");

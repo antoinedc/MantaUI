@@ -457,6 +457,13 @@ export function createHandoffEngine(deps = {}) {
     );
   }
 
+  /** True while `sessionId` is a handoff's minted successor that isn't committed and released yet — busy, but not a run to adopt. */
+  function isSuccessor(sessionId) {
+    if (!sessionId) return false;
+    if (releasing.has(sessionId)) return true;
+    return Object.values(state.records).some((r) => r.successorId === sessionId && r.state === "starting");
+  }
+
   async function gatherFactLines(sessionId) {
     try {
       const raw = await gather.facts?.(sessionId);
@@ -1334,6 +1341,7 @@ export function createHandoffEngine(deps = {}) {
     get,
     // ownership / listings
     hasPendingSend,
+    isSuccessor,
     chainOf,
     policyFor,
     // lifecycle

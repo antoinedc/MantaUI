@@ -6,6 +6,7 @@
 // under tsconfig.server.json (upgradeV2.mjs itself is not type-checked).
 
 import { createOcClient } from "./opencodeClient.mjs";
+import { withInternalMarker } from "./internalSessionMarker.mjs";
 
 /** @typedef {import("@opencode/client").OpenCodeClient} OpenCodeClient */
 
@@ -69,7 +70,7 @@ export function createUpgradeV2Calls({ fetchImpl, opencodeUrl, password, home })
       let id = null;
       try {
         const created = await v2Call("POST", "/api/session", (c, o) =>
-          c.session.create({ location: { directory: home }, model: { providerID: "anthropic", id: "claude-haiku-4-5" } }, o),
+          c.session.create({ location: { directory: home }, model: { providerID: "anthropic", id: "claude-haiku-4-5" }, metadata: withInternalMarker() }, o),
         );
         const sessionID = created.id;
         id = sessionID;

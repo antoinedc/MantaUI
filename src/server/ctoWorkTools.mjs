@@ -94,7 +94,7 @@ import {
   LIST_DEFAULT_LIMIT,
 } from "./ctoWork.mjs";
 import { workStore, mantaControlStore } from "./ctoStores.mjs";
-import { MAX_RUNNING_JOBS, CAP_ERROR, loadJobs } from "./delegate.mjs";
+import { MAX_RUNNING_JOBS, CAP_ERROR, loadJobs, countsTowardCap } from "./delegate.mjs";
 import { resolveCwdOrThrow } from "./tmux.mjs";
 import { readConversationSessionId } from "./ctoBinding.mjs";
 import { rollupChecks } from "../shared/forge.mjs";
@@ -1908,7 +1908,7 @@ export function createCtoWorkControl({
 
   async function workCapacity() {
     const jobs = await readJobsOrThrow("capacity");
-    const running = jobs.filter((j) => j?.status === "running").length;
+    const running = jobs.filter(countsTowardCap).length;
     const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
     const byState = {};
     for (const env of works) byState[env.state] = (byState[env.state] ?? 0) + 1;
@@ -2529,7 +2529,7 @@ export function createCtoWorkControl({
   async function assertSchedulingOrPark(workId, env) {
     if (env.schedulingClass === "interactive") return; // CEO work never yields
     const jobs = await readJobsOrThrow(`scheduling work "${workId}"`);
-    const availableSlots = Math.max(0, MAX_RUNNING_JOBS - jobs.filter((j) => j?.status === "running").length);
+    const availableSlots = Math.max(0, MAX_RUNNING_JOBS - jobs.filter(countsTowardCap).length);
     const { works } = await work.listWorks({ limit: LIST_MAX_LIMIT });
     const competitors = works.filter(
       (w) =>

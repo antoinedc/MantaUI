@@ -29,6 +29,7 @@
 
 import { rollupChecks, unsupportedByForge, repoKey as forgeRepoKey, repoKeyParts } from "../../shared/forge.mjs";
 import { run } from "../tmux.mjs";
+import { withInternalMarker } from "../internalSessionMarker.mjs";
 import { createSession as ocCreateSession, sendPrompt as ocSendPrompt, listMessages as ocListMessages, deleteSessionRaw as ocDeleteSessionRaw } from "../opencode.mjs";
 import { buildPrDescriptionPrompt, parsePrDescription, extractTranscriptText, extractCompletedAssistantText } from "./shipDescription.mjs";
 import { gitRemoteOrigin as localGitRemoteOrigin, detectForgeCli as localDetectForgeCli, gitPush as localGitPush, configGet as localConfigGet } from "../local.mjs";
@@ -1030,7 +1031,7 @@ async function tryGeneratePrDescription(cwd, ctx, { base, files, deps }) {
 
   let sid = null;
   try {
-    const created = await createSession({ directory: cwd, title: PR_DESC_SESSION_TITLE });
+    const created = await createSession({ directory: cwd, title: PR_DESC_SESSION_TITLE, metadata: withInternalMarker() });
     sid = created?.id;
     if (!sid) return null;
     await sendPrompt({ sessionId: sid, text: prompt, model: { providerID: model.providerID, modelID: model.modelID } });

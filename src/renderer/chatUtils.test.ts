@@ -2514,6 +2514,31 @@ describe("fuzzySessionScore", () => {
   });
 });
 
+describe("superseded jobs are invisible to the sidebar inputs", () => {
+  const projects = [
+    mkProject("p", [
+      { index: 1, name: "parent", opencodeSessionId: "parent" },
+      { index: 2, name: "job", opencodeSessionId: "child1" },
+    ]),
+  ];
+  const old = { status: "done", parentSessionID: "parent", childSessionID: "child1", supersededBy: "next" };
+  const live = { status: "running", parentSessionID: "parent", childSessionID: "child1" };
+
+  it("computeJobNesting ignores a superseded record but nests the live one", () => {
+    expect(computeJobNesting(projects[0], { old }).children.size).toBe(0);
+    expect(computeJobNesting(projects[0], { old, live }).children.get(1)).toEqual([2]);
+  });
+
+  it("sessionsWithActiveWork ignores a superseded running record", () => {
+    expect(sessionsWithActiveWork([], {}, { old: { ...old, status: "running" } }).size).toBe(0);
+    expect([...sessionsWithActiveWork([], {}, { live })].sort()).toEqual(["child1", "parent"]);
+  });
+
+  it("shouldResyncWindowsForJobs does not chase a superseded record's window", () => {
+    expect(shouldResyncWindowsForJobs(projects, { old })).toBe(false);
+  });
+});
+
 describe("shouldResyncWindowsForJobs", () => {
   // THE REGRESSION THIS LOCKS IN: a delegated job creates its tmux window on
   // the box, so the renderer's window tree — only re-listed at bootstrap and

@@ -2587,7 +2587,8 @@ export type DelegateJob = {
   // them); plain delegate jobs stay read-only.
   correlation?: { kind?: string; workId?: string } | null;
   // P4 — all optional, absent on records from before Stage B.
-  // "delegate" | "subagent" | "command" (a background slash command, wrapped or V2-native).
+  // "delegate" | "subagent" | "command" (a background slash command, wrapped or V2-native)
+  // | "observed" (a session Manta only watches — started by a script or another tool).
   origin?: string;
   // "cto" marks CTO-dispatched jobs.
   actor?: string;
@@ -2595,7 +2596,12 @@ export type DelegateJob = {
   engine?: "v2" | "legacy";
   completionOwner?: DelegateCompletionOwner;
   // Resume counter; `childSessionID` may change across attempts, the job id never does.
+  // Also the round number of a `delegate_send` continuation (a NEW record on the same session).
   attempt?: number;
+  // One run = one record: the id of the record this run continues, and — on the
+  // OLD record — the id of the newer run. A superseded record is never shown.
+  continues?: string | null;
+  supersededBy?: string | null;
   launchState?: DelegateLaunchState;
   // When the command was sent to the child (never rewritten for an attempt).
   submittedAt?: number | null;
