@@ -127,6 +127,7 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
   // §6.3 ownership
   assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
+  assert.match(index, /isHandoffSuccessor: \(sid\) => handoffEngine\.isSuccessor\(sid\)/);
   assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
   // §15 policy block, per session
   assert.match(index, /handoff: sessionID \? await handoffEngine\.policyFor\(sessionID\) : null/);

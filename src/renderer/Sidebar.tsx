@@ -897,6 +897,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
                           commitRename={commitRename}
                           cancelRename={() => setRenameTarget(null)}
                           title={rowTitle(w)}
+                          observed={isObservedJob(w.opencodeSessionId ? jobs[w.opencodeSessionId] : undefined)}
                         />
                         {kids.map((childIdx, i) => {
                           const childWin = p.windows.find((x) => x.index === childIdx);
@@ -1253,6 +1254,7 @@ function WindowRow({
   commitRename,
   cancelRename,
   title,
+  observed = false,
 }: {
   project: Project;
   window: TmuxWindow;
@@ -1277,6 +1279,8 @@ function WindowRow({
   commitRename: () => void;
   cancelRename: () => void;
   title: string;
+  /** An observed job whose parent has no window renders top-level, so the label lives here too. */
+  observed?: boolean;
 }) {
   const isRenaming =
     renameTarget?.kind === "window" &&
@@ -1317,7 +1321,20 @@ function WindowRow({
           marquee={!isRenaming}
           age={age.text}
           ageStale={age.stale}
-          trailing={<PinSlot pinned={pinned} onToggle={onTogglePin} />}
+          trailing={
+            <>
+              {observed ? (
+                <span
+                  className="shrink-0 text-micro text-text-quiet"
+                  title={OBSERVED_JOB_TITLE}
+                  data-testid="job-observed-label"
+                >
+                  {OBSERVED_JOB_LABEL}
+                </span>
+              ) : null}
+              <PinSlot pinned={pinned} onToggle={onTogglePin} />
+            </>
+          }
           title={title}
           tabIndex={focused ? 0 : -1}
           ariaSelected={isActive}

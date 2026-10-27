@@ -4220,8 +4220,10 @@ export function createActiveSessionReconciler(deps = {}) {
     // a. a live row (running / paused) already represents it; b. a launch in this process is making it
     if (records.some((j) => !isTerminal(j) || inLaunch.has(j.id) || resuming.has(j.id))) return skip(sid);
     if (deps.deferSettlement?.(sid)) return skip(sid);
-    // a window with no record is the user's own window
-    if (records.length === 0 && windowed.has(sid)) return skip(sid);
+    // a session that already has a window is visible: the user's own, or a finished job they reopened
+    if (windowed.has(sid)) return skip(sid);
+    // a handoff's successor is busy and windowless until the handoff commits
+    if (deps.isHandoffSuccessor?.(sid)) return skip(sid);
 
     let rs;
     try {

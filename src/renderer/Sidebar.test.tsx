@@ -532,19 +532,15 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     ...over,
   });
 
-  function mountWith(jobs: unknown[]): Harness {
+  function mountWith(
+    jobs: unknown[],
+    windows = [
+      { index: 0, name: "parent", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_parent" },
+      { index: 1, name: "child", active: false, paneCurrentPath: "/x", opencodeSessionId: "ses_child" },
+    ],
+  ): Harness {
     installMockApi();
-    resetStore({
-      projects: [
-        proj({
-          tmuxSession: "proj",
-          windows: [
-            { index: 0, name: "parent", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_parent" },
-            { index: 1, name: "child", active: false, paneCurrentPath: "/x", opencodeSessionId: "ses_child" },
-          ],
-        }),
-      ],
-    });
+    resetStore({ projects: [proj({ tmuxSession: "proj", windows })] });
     useStore.getState().setJobs(jobs as never);
     h = mount(
       <Sidebar
@@ -569,6 +565,16 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     const label = h!.container.querySelector('[data-testid="job-observed-label"]');
     expect(label?.textContent).toBe("started outside Manta");
     expect(label?.getAttribute("title")).toContain("started by a script or another tool");
+  });
+
+  it("an observed job whose parent has no window renders top-level and still carries the label", () => {
+    mountWith([job({ origin: "observed", completionOwner: "opencode" })], [
+      { index: 1, name: "child", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_child" },
+    ]);
+    const labels = h!.container.querySelectorAll('[data-testid="job-observed-label"]');
+    expect(labels.length).toBe(1);
+    expect(labels[0].textContent).toBe("started outside Manta");
+    expect(labels[0].closest('[role="treeitem"]')?.getAttribute("aria-level")).toBeNull();
   });
 
   it("an ordinary job's nested row has no such label", () => {

@@ -270,6 +270,22 @@ test("during commit and release, a new admission to the successor joins the END 
   assert.deepEqual(w.acceptedIds(out.successorId), [out.messageId, "msg_first", "msg_early"]);
 });
 
+test("isSuccessor: true for the minted successor while the start is in flight, false for everything else and once released", async () => {
+  const w = standardWorld();
+  const r = await readyRecord(w);
+  const p = pausedAt(w, "attach");
+  assert.equal(p.engine.isSuccessor("ses_p"), false);
+  assert.equal(p.engine.isSuccessor(undefined), false);
+  const start = p.engine.start(r.id, START_SEND);
+  await p.reached;
+  const succ = p.engine.get(r.id).successorId;
+  assert.equal(p.engine.isSuccessor(succ), true, "busy and windowless until the commit restamps a window");
+  assert.equal(p.engine.isSuccessor("ses_p"), false, "the predecessor is not the successor");
+  p.release();
+  await start;
+  assert.equal(p.engine.isSuccessor(succ), false, "committed and released");
+});
+
 test("a held message the successor definitively refuses at release is reported, removed, and the queue advances", async () => {
   const w = standardWorld();
   const r = await readyRecord(w);

@@ -394,9 +394,9 @@ for answering "what's running?", not for waiting. To see what a running
 - `delegate_stop({ id })` → stops a running job (aborts its session, marks
   it `stopped`); the window + worktree are kept.
 
-**Every background job costs a full extra model session**, so don't start
-jobs whose result you won't use — and a background job cannot start
-background jobs of its own.
+**Split independent pieces into parallel jobs (up to five at once); each one
+is a full model session, so don't start jobs whose result you won't use — and
+a background job cannot start background jobs of its own.**
 
 **Cap of five concurrent `delegate` jobs** box-wide. A sixth is refused
 with a clear error — do not retry; either wait for one to finish or do the

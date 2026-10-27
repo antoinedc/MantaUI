@@ -1051,21 +1051,35 @@ test("reconciler: unreadable reads skip the session without a warning; a failing
   void tick;
 });
 
-test("reconciler: a session whose job finished and is busy again becomes a NEW observed record superseding the old one, reusing the open window", async () => {
+test("reconciler: a windowed session is never adopted, even when its only records are terminal (a reopened finished job the user chats in)", async () => {
   const { w, tick } = recWorld({ jobs: [finishedJob({ childSessionID: "ses_again", windowIndex: 3, worktree: null, branch: null, cleanedUp: false, finishedAt: T0 + 5 })] });
   w.windows.push({ index: 3, opencodeSessionId: "ses_again", paneCurrentPath: REPO });
   busy(w, "ses_again", { parentID: PARENT });
   w.timelines.set(PARENT, []);
-  await tick(3);
-  assert.equal(w.jobs.length, 2);
-  const next = w.jobs.find((j) => j.id !== "aaaa1111");
-  assert.equal(next.origin, "observed");
-  assert.equal(next.attempt, 2);
-  assert.equal(next.continues, "aaaa1111");
-  assert.equal(next.windowIndex, 3);
-  assert.equal(w.calls.window.length, 0, "the window already open is reused");
-  assert.equal(w.job("aaaa1111").supersededBy, next.id);
-  assert.equal(w.job("aaaa1111").result, "all done", "the old record keeps its delivered result");
+  await tick(6);
+  assert.equal(w.jobs.length, 1, "no record written");
+  assert.equal(w.job("aaaa1111").supersededBy ?? null, null);
+  assert.equal(w.calls.window.length, 0);
+});
+
+test("reconciler: a session the handoff engine flags as an uncommitted successor is skipped", async () => {
+  const { w } = recWorld();
+  busy(w, "ses_succ", {});
+  let flagged = true;
+  w.deps.isHandoffSuccessor = (sid) => flagged && sid === "ses_succ";
+  const engine = createDelegateEngine(w.deps);
+  const tickOwn = async (n) => {
+    for (let i = 0; i < n; i++) {
+      w.state.now += 15_000;
+      await engine.reconcileActiveSessions();
+    }
+  };
+  await tickOwn(6);
+  assert.equal(w.jobs.length, 0);
+  assert.equal(w.calls.window.length, 0);
+  flagged = false;
+  await tickOwn(2);
+  assert.equal(w.jobs.length, 1, "adopted once the predicate no longer flags it");
 });
 
 test("reconciler: an observed record picked up here later settles on its own and posts nothing", async () => {

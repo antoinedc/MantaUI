@@ -174,10 +174,10 @@ Per tick:
       first-seen-busy time. If the session has a terminal record the helper
       links it (the "re-prompted finished job" case: a new observed run; the
       old record keeps its delivered result).
-   A session that already has a window and no record is a user window → skip
-   (step a does not apply; check `sid ∈ windowed && no records` → skip).
-   A session with a window AND only terminal records (dirty-worktree window
-   kept, or reopened) → proceed to c–g; `adoptExistingSession` reuses the window.
+   A session that already has a window is never adopted: it is already visible
+   (a reopened finished job the user is chatting in must not become an observed
+   run). Likewise a handoff's uncommitted successor (`isHandoffSuccessor`) is
+   skipped — it is busy and windowless until the handoff commits.
 
 ### 2.1 Manta-internal sessions
 Inventory every server-side session creator (`grep -rn "createSession(\|session.create\|session\.create" src/server`):

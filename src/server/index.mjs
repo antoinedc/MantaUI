@@ -1138,6 +1138,7 @@ const delegateEngine = createDelegateEngine({
   // §6.3: a job whose own session has a pending `send` handoff does not settle
   // yet; a parent's job list spans its whole replacement chain.
   deferSettlement: (sid) => handoffEngine.hasPendingSend(sid),
+  isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
