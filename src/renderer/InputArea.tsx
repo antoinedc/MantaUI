@@ -49,10 +49,9 @@ import {
 } from "./ComposerParts";
 import type { PendingScreenshot } from "./store";
 import { UsageDial } from "./UsageDial";
-import { BUSY_PLACEHOLDER, busySendHint } from "./inboxState";
+import { BUSY_PLACEHOLDER } from "./inboxState";
 import { backgroundBoxVisible, backgroundRequested, type SlashToken } from "./backgroundRun";
 import { BackgroundRunBox, SlashHighlight } from "./SlashComposerParts";
-import { IS_MAC } from "./platform";
 import { VOICE_MAX_DURATION_MS } from "../shared/waveform.mjs";
 import { HandoffModeToggle } from "./HandoffParts";
 // Re-exported so existing `import { TypeaheadPopup } from "./InputArea"` call
@@ -768,11 +767,6 @@ export function InputArea({
         trailing={showHandoffMode && activeSessionId ? <HandoffModeToggle sessionId={activeSessionId} /> : undefined}
         status={
           <>
-          {running && onSubmitAfterTurn && !voiceActive && (
-            <span className="text-text-faint truncate" data-testid="busy-send-hint">
-              {bgActive ? "⏎ run in background" : busySendHint(IS_MAC)}
-            </span>
-          )}
           {voiceActive && (
             <span className="text-text-faint truncate">
               {voiceProcessing ? (
