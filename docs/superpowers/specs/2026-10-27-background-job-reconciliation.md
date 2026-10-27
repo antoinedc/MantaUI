@@ -276,7 +276,14 @@ continued session already has many). For records with `launch.continuation`:
   (opencode admits a message id once — the guarantee `submitCommand` already
   relies on); absent and child active → leave for the next tick.
   Every failure here is continuation-safe: a definite refusal is the RECONCILED
-  refusal of step 3; nothing deletes the session.
+  refusal of step 3; nothing deletes the session. A persisted `submitting`
+  (restart after the claim, before/while sending) is first normalised to
+  `uncertain` by the existing `reconcileV2Jobs` step, keeping `submittedAt` and
+  `launch.messageId`, then dispatched here. `finishV2Job` takes an option
+  `{ resourcesHeld: true }` that makes it run the lock-held cleanup variant;
+  every call made while holding `sessionResources` (here, step 3, the
+  continuation rollback) passes it. Tests: restart right after the claim;
+  recovery failure → failed without deadlock.
 - Tests: restart before worktree restore, before window creation, before the
   send; lost send response (resend with the same id admits once); an old
   idle/outcome before `submittedAt` never settles.
