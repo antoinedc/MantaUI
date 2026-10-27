@@ -1,7 +1,7 @@
 # Background-job reconciliation, `delegate_send`, and delegate tool copy
 
 Box server + opencode tool registrars + a small renderer change. Native iOS is
-not changed. Revision 2 (after review): no takeover, no follow-up queuing, and
+not changed. Revision 3 (after two reviews): no takeover, no follow-up queuing, and
 every new run is a NEW job record so runs can never interfere with each other.
 
 ## 0. Problem (measured 2026-10-27)
@@ -33,14 +33,27 @@ that already has a terminal record gets a **new record** (new id) with:
 
 Consequences that must hold everywhere:
 - All writes are id-scoped already (`patchJob`, `finishV2Job` re-read by id
-  under the lock); a late settle / delivery / cleanup of the old record can only
-  touch the old record.
-- **Window/worktree side effects of a superseded record are suppressed**:
-  `closeJobWindow`, `cleanupTerminalJob`, `finishV2Cleanup`, the sweep's
-  "close once" loop, `deleteJob` (window + worktree part; it may still delete
-  the record) and `dropResumeRestore` do nothing to the window/worktree when the
-  record has `supersededBy` set. (The window is stamped with the shared child id,
-  so the existing stamp check cannot tell the runs apart.)
+  under the lock); a late settle / delivery of the old record can only touch
+  the old record.
+- **Per-session resource lock.** A keyed mutex `sessionResources(childSessionID)`
+  guards every window/worktree side effect for a session: `closeJobWindow`,
+  `cleanupTerminalJob`, `finishV2Cleanup`, the sweep's "close once" loop, the
+  window/worktree part of `deleteJob`, `dropResumeRestore`, AND successor
+  creation (§1.4 / §3, from the locked record write through its window step
+  and any rollback). Lock order: `sessionResources` OUTER, `jobsLock` INNER —
+  never the reverse. Inside the critical section each cleanup re-reads the LIVE
+  record and does nothing to the window/worktree when it has `supersededBy`
+  (the window is stamped with the shared child id, so the stamp check alone
+  cannot tell runs apart). Test: pause an old record's cleanup right before its
+  removal, create a successor, release — the successor's window/worktree survive.
+- **Resource ownership transfers.** A successor inherits `worktree`, `branch`,
+  `baseSha` from its predecessor when the predecessor had a worktree that still
+  exists on disk; from then on only the successor's cleanup may touch it.
+  Superseded records are hidden from lists and pruned by normal retention
+  (their resources belong to the successor), never kept alive by a worktree.
+- **Observed records never remove a worktree** (a script may prompt the session
+  again): their cleanup closes the window only and records `cleanedUp:false`,
+  `cleanupReason:"kept"`, so retention keeps the record while it holds one.
 - Every lookup by `childSessionID` must not pick a superseded record when a newer
   one exists. Implementer audits all `childSessionID ===` finds in
   `delegate.mjs` / `index.mjs` and lists them in the report.
@@ -73,22 +86,33 @@ reconciler (§2), the `task` event path (`observeEvent`) and command candidates
 
 ```
 input = { childSessionID, owner: {tmuxSession}, displayParentID, sessionParentID,
-          cwd, name, prompt, model, origin, supersedes? }
+          cwd, name, prompt, model, origin, runStartedAt }
 ```
-Under `jobsLock`: if any record for `childSessionID` is non-terminal → return
-`{ok:true, alreadyAdopted:true}`. If `supersedes` is given it must be the id of
-the newest terminal record for that session, still without `supersededBy`
-(else return alreadyAdopted). Then create the window (reuse a window already
-stamped with `childSessionID` if one exists — match by stamp, never by recorded
-index) in `owner.tmuxSession` with `cwd`, append the record, set
-`supersededBy` on the old one, publish `delegate.updated`. `registerJob` is
-refactored to accept an explicit `owner` and must not append outside the lock.
+Under `sessionResources(childSessionID)` then `jobsLock`: if any record for
+`childSessionID` is non-terminal → return `{ok:true, alreadyAdopted:true}`.
+The helper ITSELF finds the newest terminal record for the session (if any)
+and links it (`continues` / `supersededBy`, ownership transfer per §1.1) — for
+every caller, never a caller-supplied id. Then create the window (reuse a
+window already stamped with `childSessionID` if one exists — match by stamp,
+never by recorded index) in `owner.tmuxSession` with `cwd`, append the record,
+publish `delegate.updated`. `registerJob` is refactored to accept an explicit
+`owner` and must not append outside the lock.
 Record extra fields: `engine:"v2"`, `completionOwner:"opencode"`,
 `launchState:"running"`, `submittedAt:null`, `completionMessageId:null`,
-`completionDelivery:null`, `attempt`, `continues`, `sessionParentID`.
-`parentSessionID` = `displayParentID` (the window it nests under; may be a
-windowless id, in which case the row renders top-level). `adoptSubagentJob`
-keeps its lifecycle-replay behaviour after adopting.
+`completionDelivery:null`, `attempt`, `continues`, `sessionParentID`,
+`runStartedAt`. `parentSessionID` = `displayParentID` (the window it nests
+under; may be a windowless id, in which case the row renders top-level).
+
+**Run freshness for opencode-owned records.** `runStartedAt` is when THIS run
+began: for the `task` event path, the task part's `state.time.start` (fallback:
+now); for the reconciler, the first tick the session was seen busy. In
+`settleV2Job`, for a `completionOwner:"opencode"` record that has
+`runStartedAt`, `fresh` := `idleAt != null && idleAt >= runStartedAt` (instead
+of the `submittedAt == null` shortcut). The old unconditional lifecycle replay
+in `adoptSubagentJob` is REPLACED by one `settleV2Job(newRecord)` call right
+after adoption (authoritative: current activity + fresh outcome), so a resumed
+task's stale previous outcome can no longer finish its new record, while a
+child that finished just before adoption still settles.
 
 ### 1.5 Owner resolution for a session that has no window
 `resolveSessionOwner(sid, deps)`:
@@ -107,9 +131,11 @@ keeps its lifecycle-replay behaviour after adopting.
 
 `reconcileActiveSessions()` on the engine, run by
 `startActiveSessionReconciler` (15 s, in-flight guard, `timer.unref()`, the
-`startPoller` shape) and once at boot **after** `reconcileV2()` resolves. Also
-wire it to the existing auto-handoff deferral: skip any sid for which
-`deps.deferSettlement?.(sid)` is true.
+`startPoller` shape). Boot order in `index.mjs` becomes explicit and
+sequential: `handoffEngine.recover()` → `reconcileV2()` → first
+`reconcileActiveSessions()` → start the poller (each step's failure is logged
+and the chain continues). The poller must not run before boot recovery
+finished. Also skip any sid for which `deps.deferSettlement?.(sid)` is true.
 
 Per tick:
 1. `active = listActiveIds()`; failure → no-op tick. `projects = listProjects()`.
@@ -133,10 +159,10 @@ Per tick:
       (3 when e found no block) before adoption.
    g. Adopt via `adoptExistingSession` with owner from §1.5 (none → skip and
       warn once per sid per process), `origin:"observed"`, `name` =
-      session title or "Background session", `prompt:""`, and
-      `supersedes` = the newest terminal record for this sid if one exists
-      (this is the "re-prompted finished job" case: it becomes a new observed
-      run; its old record keeps its delivered result).
+      session title or "Background session", `prompt:""`, `runStartedAt` =
+      first-seen-busy time. If the session has a terminal record the helper
+      links it (the "re-prompted finished job" case: a new observed run; the
+      old record keeps its delivered result).
    A session that already has a window and no record is a user window → skip
    (step a does not apply; check `sid ∈ windowed && no records` → skip).
    A session with a window AND only terminal records (dirty-worktree window
@@ -147,8 +173,10 @@ Inventory every server-side session creator (`grep -rn "createSession(\|session.
 title generation, CTO conversation/role/ephemeral sessions (`ctoBinding.mjs`,
 `ctoAct.mjs`, `index.mjs` ~2621), optimizer/compaction/handoff helpers, etc.
 Every creator of a session that is NOT meant to be a user-visible window or a
-job must pass `metadata: { manta: { internal: true } }` (extend
-`createSession` to forward `metadata` if it does not). Exclusion predicate:
+job must add `manta: { internal: true }` to its metadata, MERGED into any
+metadata it already passes (e.g. the CTO binding's identity marker in
+`ctoBinding.mjs` must survive unchanged); extend `createSession` to forward
+`metadata` if it does not. Exclusion predicate:
 `session.metadata?.manta?.internal === true` OR `session.agent ∈ {title,
 compaction, summary}` OR the CTO binding owns it (expose a predicate if none
 exists). The 2-tick debounce additionally keeps seconds-long helpers out.
@@ -173,7 +201,14 @@ Checks, in order (first failure wins):
 - `403 {error:"that job belongs to another session"}` unless `sessionID` is
   `job.parentSessionID` or in `deps.replacementChain(job.parentSessionID)`.
 - `403 {error:"that job is managed by the CTO"}` when `job.correlation` is set.
-- `409 {error:"that job has a newer run — use <newId>"}` when `supersededBy`.
+- `409 {error:"that job has a newer run — use <newId>"}` when `supersededBy` and
+  the newest record is itself eligible; when the newest record for the session
+  is observed / opencode-owned: `409 {error:"that job's session was continued
+  outside delegate — start a new job instead"}`.
+- `409 {error:"only jobs started with delegate can be continued — start a new
+  job instead"}` when `origin === "observed"` or `completionOwnerOf(job) !==
+  "manta"` (adopted `task` children keep opencode's own result route to their
+  original parent; a second, Manta, route would duplicate it).
 - `409 {error:"that job is still working — its result will arrive on its own"}`
   when status `running`; `409 {error:"that job is paused — resume it first"}`
   when `paused`.
@@ -197,32 +232,53 @@ record (§1.1) copied from the old one EXCEPT these fields, which are set fresh:
 `result:null`, `error:null`, `filesChanged:null`, `activity:null`,
 `completionOwner:"manta"`, `completionMessageId:null`,
 `completionDelivery:null`, `pauseRequested:false`, `stopRequested:false`,
-`pausedAt:null`, `cleanedUp:null`, `launch:null`, `launchState:"submitting"`,
-`submittedAt: now`, `tmuxSession/windowIndex` (from the window step).
+`pausedAt:null`, `cleanedUp:null`, `launchState:"creating"`,
+`submittedAt:null`, `tmuxSession/windowIndex` (from the window step), and
+`launch: { text: <prompt>, messageId: mintMessageId(), model: null,
+continuation: true }` — the persisted admission identity.
 Inherited: `name`, `model`, `requestedModel`, `parentSessionID` (the caller),
 `parentDirectory`, `childSessionID`, `worktree`, `branch`, `baseSha`, `origin`,
-`permission`, `sweepAllowanceMs`, `actor`. Old record: `supersededBy`.
-Register the new id in `inLaunch` for the duration.
+`permission`, `sweepAllowanceMs`, `actor`, `agent`. Old record:
+`supersededBy`. The whole sequence below runs inside
+`sessionResources(childSessionID)` (§1.1) and registers the new id in
+`inLaunch` for the duration.
 
-Then, outside the lock:
+**Admission is tied to `launch.messageId`, never to "any user message"** (a
+continued session already has many). For records with `launch.continuation`:
+- `hasAdmissionEvidence` and the `settleV2Job` "sawInput" check look ONLY for
+  a user timeline record / inbox item whose id is `launch.messageId`.
+- `reconcileV2Jobs`: a continuation still `creating` (restart before the send)
+  goes through `resumeUnsentLaunch` (window if missing, then the claim that
+  writes `submittedAt` + `launchState:"submitting"`, then the send). One that
+  is `uncertain` with no evidence for its `messageId` and whose child is not
+  active is re-sent with the SAME `messageId` (opencode admits a message id
+  once — the same guarantee `submitCommand` already relies on), then re-checked.
+- Tests: restart before the send; lost send response (resend with the same id
+  admits once); an old idle/outcome before `submittedAt` never settles.
+
+Then, outside `jobsLock` but still inside `sessionResources`:
 1. Re-add the worktree if it is missing (see 409 above).
 2. Window: reuse a window stamped with the child id; else `newWindow` in
    `job.tmuxSession` if that tmux session exists, else `resolveOwner(caller)`;
    `cwd` = `job.worktree` if set, else the session's own `directory`.
    `stampOwner(..., "job")`.
-3. Submit the prompt the way `submitCommand` does for a delegate launch
-   (`sendChildPrompt`, same accepted / definite-refusal / unknown
-   classification): accepted → `launchState:"running"`; unknown →
-   `launchState:"uncertain"` (existing reconcile path decides); definite
-   refusal → roll back and return `500 {error:"couldn't send to the job:
-   <reason>"}`. The rollback is NEW code, NOT `rollbackDelegateLaunch` /
-   `abandonLaunch` (those delete the child session — the continued session must
-   never be deleted): delete the new record, clear the old record's
-   `supersededBy`, close the window only if step 2 created it, remove the
-   worktree only if step 1 re-added it. The same rollback applies to a failure
-   in steps 1–2 (with the matching 409/500). `submittedAt` is the value written
-   under the lock (before the send), so an idle that predates the send never
-   settles the new run.
+3. Claim (`patchJob` onlyIf running && `submittedAt == null`):
+   `submittedAt: now`, `launchState:"submitting"`. Then submit through
+   `submitCommand` (it sends `launch.text` with `launch.messageId`; same
+   accepted / definite-refusal / unknown classification): accepted →
+   `launchState:"running"`; unknown → `launchState:"uncertain"` (recovered as
+   above); definite refusal → roll back and return `500 {error:"couldn't send
+   to the job: <reason>"}`. `submitCommand` / `rollbackLaunch` must branch on
+   `launch.continuation` to the NEW continuation rollback — never
+   `rollbackDelegateLaunch` / `abandonLaunch`, which delete the child session
+   (the continued session must never be deleted). A LIVE refusal (the send
+   call itself) → continuation rollback + the 500. A RECONCILED refusal (the
+   caller was already told "sent") → `finishV2Job(newRecord, "failed", "could
+   not send: <reason>")`, which posts one failure result to the caller and runs
+   the normal cleanup; no session deletion. Continuation rollback: delete the new record, clear the old
+   record's `supersededBy`, close the window only if step 2 created it, remove
+   the worktree only if step 1 re-added it. The same rollback applies to a
+   failure in steps 1–2 (with the matching 409/500).
 4. Completion is the existing `settleV2Job`: `submittedAt` makes only an idle
    after this submission count (`fresh`), descendant evidence applies, and
    `finishV2Job` posts exactly ONE result (N7) to the caller.
@@ -246,8 +302,8 @@ the tool returns the server's error text (not a throw), so the model can act.
 > at once); each one is a full model session, so don't start jobs whose result
 > you won't use. Prefer it over driving opencode sessions yourself (scripts
 > calling opencode's HTTP API, wait-for-idle scripts, sleep/poll loops, tmux):
-> nothing tracks that work — the user can't control it and no result is
-> delivered to you. Use the built-in `task` tool instead when you need the
+> that work has no managed launch (no worktree, no permission scoping) and its
+> result is never delivered to you — Manta can only show it. Use the built-in `task` tool instead when you need the
 > answer before you can continue (foreground), or for read-only research
 > (`background: true`). The job starts with NO knowledge of this conversation:
 > put the goal, paths, constraints and what "done" looks like in the prompt.
@@ -281,10 +337,12 @@ omitted from the list).
 Same three-row table plus two rows: "Another round for a job of yours that has
 finished → `delegate_send`" and "Driving another session yourself (opencode
 HTTP API, wait-for-idle scripts, tmux) → don't; use `delegate` /
-`delegate_send` — that work is untracked and its result never reaches you."
+`delegate_send`."
 Add `delegate_send` to the tool bullets. Keep the "you do NOT have a result"
 paragraph and the cap paragraph (add: sessions Manta only observes don't count).
-Replace "do not fan out speculatively" with the §4 wording. Mirror in the repo
+Replace "do not fan out speculatively" with the §4 wording. The "driving
+another session yourself" row says that work gets no managed launch and its
+result never reaches you (Manta only shows it). Mirror in the repo
 `AGENTS.md` "Background delegation" section: tool list + one paragraph on the
 reconciler, observed records, and one-run-one-record.
 
