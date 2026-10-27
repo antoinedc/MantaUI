@@ -118,7 +118,6 @@ import { BackgroundRunCards } from "./BackgroundCards";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
 import {
   CarriedContextBlock,
-  ContinuationNotice,
   DeletedSessionNotice,
   HandoffTailCards,
   PreviousSessionBar,
@@ -3437,14 +3436,6 @@ export function ChatPanel({
         onCreatePr={() => void confirmShip()}
         onEnsureShipPreview={() => void ensureShipPreview()}
       />
-
-      {/* Auto-handoff: "Continued from …" at the top of a successor. */}
-      {handoff.notice && (
-        <ContinuationNotice
-          notice={handoff.notice}
-          onViewPrevious={() => handoff.openPrevious(handoff.notice!.predecessorId)}
-        />
-      )}
 
       {/* The transcript region owns its own positioning context so the
           jump-to-latest button floats at the BOTTOM OF THE TRANSCRIPT — above

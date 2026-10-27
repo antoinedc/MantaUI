@@ -1,19 +1,16 @@
 import { describe, it, expect } from "vitest";
 import type { HandoffRecord } from "../shared/api";
-import type { OpencodeMessage, OpencodePart } from "../shared/types";
+import type { OpencodePart } from "../shared/types";
 import type { Attachment } from "./chatShared";
 import {
   appendBelow,
   buildPreviousEntries,
   carriableAttachments,
-  contextTokensOfMessages,
   creatingRecord,
-  describeContinuationNotice,
   describeHandoffError,
   describeHandoffSource,
   draftRecordFor,
   eventOfRecord,
-  formatHandoffTokens,
   handoffActionsEnabled,
   handoffBadge,
   handoffCanDismiss,
@@ -230,30 +227,7 @@ describe("describeHandoffError", () => {
   });
 });
 
-describe("continuation notice + previous sessions", () => {
-  it("formats tokens and the notice", () => {
-    expect(formatHandoffTokens(182_340)).toBe("182k");
-    expect(formatHandoffTokens(900)).toBe("900");
-    expect(describeContinuationNotice({ predecessorId: "p", title: "Fix login", tokens: 182_000 })).toBe(
-      "Continued from “Fix login” — handed off at 182k tokens",
-    );
-    expect(describeContinuationNotice({ predecessorId: "p", title: null, tokens: null })).toBe(
-      "Continued from the previous session",
-    );
-  });
-  it("reads context size from the newest assistant message with tokens", () => {
-    const m = (role: string, tokens?: object) => ({ info: { id: role, role, tokens }, parts: [] }) as unknown as OpencodeMessage;
-    expect(
-      contextTokensOfMessages([
-        m("assistant", { input: 10, cache: { read: 5, write: 5 } }),
-        m("user"),
-        m("assistant", { input: 100, cache: { read: 50, write: 32 } }),
-        m("user"),
-      ]),
-    ).toBe(182);
-    expect(contextTokensOfMessages([m("user")])).toBeNull();
-    expect(contextTokensOfMessages([m("assistant", { input: 0 })])).toBeNull();
-  });
+describe("previous sessions", () => {
   it("lists previous sessions newest first, deduped, titled", () => {
     const entries = buildPreviousEntries(
       [

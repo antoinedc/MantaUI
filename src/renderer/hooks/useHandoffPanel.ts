@@ -39,7 +39,6 @@ import {
 import {
   buildPreviousEntries,
   carriableAttachments,
-  contextTokensOfMessages,
   creatingRecord,
   describeHandoffError,
   draftRecordFor,
@@ -47,7 +46,6 @@ import {
   selectPinnedHandoffs,
   shouldLoadDraft,
   shouldSwitchPane,
-  type ContinuationNotice,
   type PreviousSessionEntry,
 } from "../handoff";
 
@@ -62,8 +60,6 @@ export interface HandoffPanel {
   pinned: HandoffRecord[];
   /** The armed handoff waiting to ride the next message, or null. */
   preamble: string | null;
-  /** "Continued from …" data when this session replaced another, else null. */
-  notice: ContinuationNotice | null;
   /** Replacement predecessors + branch origin, newest first. */
   previous: PreviousSessionEntry[];
   /** The previous session being viewed read-only in this pane, or null. */
@@ -214,8 +210,6 @@ export function useHandoffPanel(args: {
   // handoff changes — not on every refetch that hands back an equal record.
   const creating = creatingRecord(records, sessionId);
   const createdAt = creating?.createdAt ?? 0;
-  const creatingTokens = creating?.contextTokens;
-  const creatingTitle = creating?.fromTitle;
   useEffect(() => {
     if (enabled && replaces) reconcileSessionPrefs(replaces, sessionId);
   }, [enabled, replaces, sessionId]);
@@ -257,36 +251,6 @@ export function useHandoffPanel(args: {
     return buildPreviousEntries(chain, t);
   }, [chain, titles, records]);
 
-  // The continuation notice: who it continued from, and how big that context was.
-  const [tokens, setTokens] = useState<number | null>(null);
-  useEffect(() => {
-    let alive = true;
-    setTokens(null);
-    if (!enabled || !replaces) return;
-    if (typeof creatingTokens === "number") {
-      setTokens(creatingTokens);
-      return;
-    }
-    window.api
-      .opencodeMessages(replaces, { limit: 30 })
-      .then((m) => {
-        if (alive) setTokens(contextTokensOfMessages(m ?? []));
-      })
-      .catch(() => {
-        /* predecessor gone — the notice just omits the size */
-      });
-    return () => {
-      alive = false;
-    };
-  }, [enabled, replaces, creatingTokens]);
-  const notice = useMemo<ContinuationNotice | null>(
-    () =>
-      enabled && replaces
-        ? { predecessorId: replaces, title: creatingTitle || titles[replaces]?.trim() || null, tokens }
-        : null,
-    [enabled, replaces, creatingTitle, titles, tokens],
-  );
-
   // ----- previous-session view (read-only, same pane) -----
   const [previousView, setPreviousView] = useState<PreviousView | null>(null);
   useEffect(() => setPreviousView(null), [sessionId]);
@@ -315,7 +279,7 @@ export function useHandoffPanel(args: {
     [sessionId],
   );
 
-  return { pinned, preamble, notice, previous, previousView, openPrevious, closePrevious, create };
+  return { pinned, preamble, previous, previousView, openPrevious, closePrevious, create };
 }
 
 /** Session titles for the "Continued from" notice and the Previous sessions list. */

@@ -4,7 +4,6 @@
 //     inline as the `handoff` tool part, in the transcript tail (after the todo
 //     checklist) for server-path records.
 //   - CarriedContextBlock: "Carried-over context — sent with the next message."
-//   - ContinuationNotice: "Continued from … · View previous".
 //   - PreviousSessionBar: replaces the composer while a previous session is open.
 //   - HandoffModeToggle: the "Handoff: auto|suggest|off" control by the trust row.
 //
@@ -32,7 +31,6 @@ import {
   startHandoff,
 } from "./handoffActions";
 import {
-  describeContinuationNotice,
   describeHandoffError,
   describeHandoffMode,
   describeHandoffSource,
@@ -41,7 +39,6 @@ import {
   handoffCanDismiss,
   handoffIdOfPart,
   nextHandoffMode,
-  type ContinuationNotice as ContinuationNoticeData,
 } from "./handoff";
 
 type Notice = { tone: "ok" | "error"; text: string };
@@ -342,28 +339,6 @@ export const CarriedContextBlock = memo(function CarriedContextBlock({ preamble 
           <div className="mt-2 text-text-muted break-words max-h-[40vh] overflow-y-auto">{renderMarkdown(preamble)}</div>
         )}
       </div>
-    </div>
-  );
-});
-
-/** "Continued from <title> — handed off at 182k tokens · View previous". */
-export const ContinuationNotice = memo(function ContinuationNotice({
-  notice,
-  onViewPrevious,
-}: {
-  notice: ContinuationNoticeData;
-  onViewPrevious: () => void;
-}) {
-  return (
-    <div
-      className="shrink-0 mx-auto w-full px-4 pt-2 text-meta text-text-faint"
-      style={{ maxWidth: "var(--measure)" }}
-      data-testid="handoff-continuation"
-    >
-      {describeContinuationNotice(notice)} ·{" "}
-      <button type="button" onClick={onViewPrevious} className="text-accent hover:underline">
-        View previous
-      </button>
     </div>
   );
 });

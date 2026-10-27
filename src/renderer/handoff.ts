@@ -14,7 +14,7 @@ import type {
   HandoffRecord,
   HandoffState,
 } from "../shared/api";
-import type { OpencodeMessage, OpencodePart } from "../shared/types";
+import type { OpencodePart } from "../shared/types";
 import type { Attachment } from "./chatShared";
 
 // ---------------------------------------------------------------------------
@@ -264,39 +264,8 @@ export function describeHandoffError(e: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Continuation notice + Previous sessions (§9)
+// Previous sessions (§9)
 // ---------------------------------------------------------------------------
-
-/** 182340 → "182k". */
-export function formatHandoffTokens(n: number): string {
-  if (n < 1000) return String(n);
-  return `${Math.round(n / 1000)}k`;
-}
-
-/** The predecessor's context size at handoff: the newest assistant message's total input. */
-export function contextTokensOfMessages(messages: readonly OpencodeMessage[]): number | null {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const info = messages[i].info;
-    if (info.role !== "assistant" || !info.tokens) continue;
-    const t = info.tokens;
-    const total = (t.input ?? 0) + (t.cache?.read ?? 0) + (t.cache?.write ?? 0);
-    if (total > 0) return total;
-  }
-  return null;
-}
-
-export interface ContinuationNotice {
-  predecessorId: string;
-  title: string | null;
-  tokens: number | null;
-}
-
-/** "Continued from <title> — handed off at 182k tokens · View previous". */
-export function describeContinuationNotice(n: ContinuationNotice): string {
-  const from = n.title ? `“${n.title}”` : "the previous session";
-  const at = n.tokens != null ? ` — handed off at ${formatHandoffTokens(n.tokens)} tokens` : "";
-  return `Continued from ${from}${at}`;
-}
 
 export interface PreviousSessionEntry {
   id: string;

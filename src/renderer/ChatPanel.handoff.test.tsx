@@ -386,17 +386,6 @@ describe("ChatPanel — auto-handoff", () => {
       expect(h!.container.querySelector('[data-testid="handoff-carried"]')).toBeNull();
     });
 
-    it("shows 'Continued from <title> — handed off at 182k tokens · View previous'", async () => {
-      lists[SID] = { records: [creating], links: { replaces: "ses_prev" }, continuation: null };
-      await open({
-        opencodeMessages: sessions,
-        opencodeListSessions: () => Promise.resolve([{ id: "ses_prev", title: "Fix login" }]),
-      });
-      const n = h!.container.querySelector('[data-testid="handoff-continuation"]');
-      expect(n?.textContent).toContain("Continued from “Fix login” — handed off at 182k tokens");
-      expect(n?.textContent).toContain("View previous");
-    });
-
     it("lists Previous sessions in the menu; opening one is read-only with a Back to current bar", async () => {
       lists[SID] = { records: [creating], links: { replaces: "ses_prev" }, continuation: null };
       await open({
@@ -420,7 +409,9 @@ describe("ChatPanel — auto-handoff", () => {
         opencodeMessages: (id: string) => (id === SID ? Promise.resolve([]) : Promise.reject(new Error("404"))),
         opencodeListSessions: () => Promise.resolve([]),
       });
-      await click(h!.container.querySelector('[data-testid="handoff-continuation"] button'));
+      expect(h!.container.querySelector('[data-testid="handoff-continuation"]')).toBeNull(); // no pinned "Continued from" header
+      await click(h!.container.querySelector('button[aria-label="Session actions"]'));
+      await click(byText("Untitled session"));
       expect(h!.container.querySelector('[data-testid="handoff-deleted"]')?.textContent).toBe("This session was deleted.");
       expect(h!.container.querySelector('[data-testid="handoff-previous-bar"]')?.textContent).toContain("This session was deleted.");
       await click(byText("Back to current", h!.container));
