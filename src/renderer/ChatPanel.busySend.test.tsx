@@ -11,8 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { ChatPanel } from "./ChatPanel";
 import { useStore } from "./store";
-import { BUSY_PLACEHOLDER, STOPPED_FOOTER_TEXT, busySendHint, resetRetiredInboxEpochs } from "./inboxState";
-import { IS_MAC } from "./platform";
+import { BUSY_PLACEHOLDER, STOPPED_FOOTER_TEXT, resetRetiredInboxEpochs } from "./inboxState";
 import {
   installMockApi,
   resetStore,
@@ -364,12 +363,10 @@ describe("ChatPanel busy send + inbox", () => {
   describe("composer copy: hint, Send label, placeholder", () => {
     const hint = () => h!.container.querySelector('[data-testid="busy-send-hint"]');
 
-    it("running: the two-key hint, a Send button (not Queue) and the neutral placeholder", async () => {
+    it("running: no key-hint label, a Send button (not Queue) and the neutral placeholder", async () => {
       await open();
       await type("x");
-      expect(hint()?.textContent).toBe(busySendHint(IS_MAC));
-      expect(hint()?.textContent).toContain("send now");
-      expect(hint()?.textContent).toContain("after this turn");
+      expect(hint()).toBeNull();
       expect(textarea().placeholder).toBe(BUSY_PLACEHOLDER);
       expect(textarea().placeholder).toBe("Message the agent…");
       const send = h!.container.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;

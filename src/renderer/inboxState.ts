@@ -147,11 +147,6 @@ export function shouldClearDraft(submittedDraft: string | null, currentText: str
 
 // ===== Pending card =====
 
-/** The composer's hint row while the agent runs (session surface only). */
-export function busySendHint(isMac: boolean): string {
-  return isMac ? "⏎ send now · ⌥⏎ after this turn" : "⏎ send now · Alt+⏎ after this turn";
-}
-
 /** The composer placeholder while the agent runs (session surface; the CTO passes its own). */
 export const BUSY_PLACEHOLDER = "Message the agent…";
 

@@ -3,7 +3,6 @@ import {
   ATTACHMENTS_NOT_RESTORED,
   SET_DELIVERY_UNCONFIRMED,
   acceptInbox,
-  busySendHint,
   describeInboxSetDelivery,
   inboxBadgeLabel,
   inboxRowNote,
@@ -198,10 +197,6 @@ describe("pending card helpers", () => {
     expect(showStoppedFooter([after], true)).toBe(false);
     expect(showStoppedFooter([now], false)).toBe(false);
     expect(showStoppedFooter([], false)).toBe(false);
-  });
-  it("busySendHint: ⌥ on mac, Alt+ elsewhere", () => {
-    expect(busySendHint(true)).toBe("⏎ send now · ⌥⏎ after this turn");
-    expect(busySendHint(false)).toBe("⏎ send now · Alt+⏎ after this turn");
   });
 });
 
