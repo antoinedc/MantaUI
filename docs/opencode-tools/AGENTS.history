@@ -1,0 +1,55 @@
+## Manta handoff	02a8a6f4f19146f6956a646f180c2cce77498f312620686fbe8b55e5078bddc9
+## MantaUI app control	05b41873dff37588f1da66fa027c152b90ff381cc706560c6b4a18e2b1a2489c
+## MantaUI app control	ba4558af85d336d4e35250fa07325a0747fb8136cb11f1dda44660ab47654a26
+## MantaUI background delegation	1de2051691d4574ebc0a508b9f83642a04861e980e80f774860691f7ed2878cb
+## MantaUI background delegation	29345ad43d7e7119786c046dd9f2ec7acde792cb37886055bc5119374441c9f4
+## MantaUI background delegation	59ef45335140afc8c03371b21b22c406b794dc9cf6175aae207b5d97407dd882
+## MantaUI background delegation	70539f99969a283230068c091181bed3ad3d55f8908b80dcf3ab2d875fd1e366
+## MantaUI background delegation	744800bff7080cfdfd8d5c3e8084b4dd233b38a019e94381e7492126a587d350
+## MantaUI background delegation	7d9d2ec56b649a8dccc36784ed3c7673787ee2b35eff686b1bf9a5e179c26842
+## MantaUI forge rules	2df58d4dfcc3b1296e89fe8249779802bd92f6421e740baf1147e27fcdd3f39b
+## MantaUI iOS build	87b229055225a97c3905051ee2844fe09813022d76d69dd64ceafb666a223485
+## MantaUI inline widgets	83c08add72dfd1183e8e96b7bbe9b2c99fd48fd3e4ec78e79655106dd8331ed2
+## MantaUI inline widgets	f0f228eeea282bd2480d6a85159e78ef3188c5b410acda20be375c8fe4f56769
+## MantaUI inline widgets — sizing is a hard constraint	452f9d809db4fd06eb20a6096aba7ad54ca84d223500e8ff855a19dc060a1934
+## MantaUI inline widgets — sizing is a hard constraint	935297de36832761daf8bcbe94356cadeab9afc35d1e02943c426026ffeac53b
+## MantaUI plugins	38b6e06982f1220c68f202041a6511e08cf17c03484161d37fd6bd2ff919ef7d
+## MantaUI plugins	a904dac037d068c475f560c8cd0da328b4747d9f1ae9f13445cd417a325beaee
+## Shared auth module — `manta-auth.ts`	9bbcc48e468608605a6ec6bf299380d42aecc3fe6d8732cdf20a35f404b9ab92
+## bui inbound webhooks	ae2dbd5c21d36744fffa7705ff84c6644ad0759641a8ca52062c4c9ca5c13640
+## bui inbound webhooks	c600fd651ab66bf9942e9e76c4a4ab8467a464a6eae125d45d385245514f6be5
+## bui notifications	d7b9361606484bbb3921be0c31f2ce4478dc152b0beb2f8371f7d37f88792b0c
+## bui peer-session awareness	074a0310e763349d76d138e4fc0e02e9f74b63a6b7f29b681ee5edaba8ee982a
+## bui peer-session awareness	84499c83b141a68b5fb59c9c02c8c07a2218d538b2eacc84b87ba9258882f62c
+## bui peer-session awareness	970d43b5aa118ba047b854eb4ea2e2013b632e1e04bc8e1617ce7d0870a4514b
+## bui scheduled tasks	593c6997113713559005365d0f81a2411c298e3ec9184d2bf20a1d2a357f10a1
+## bui secrets	523e1d74515a48d8f35ebb7f0ef5ad4de528c77693c5fe3024be2a2c8ec2583b
+## bui serve page	0a4ac0a9c2e48c3a6c4d63710c99765275ece3f7616a2ab6089aa75d268e64af
+## bui serve page	67040e2c5884aa0d72486dc0ee72e3d8cf124ae43f6d669b6b037742bbb51634
+## bui subagent models	7184385d221009230f2f329acc3d3d923f41140529d09d88272274d778450a96
+## manta cto_fact — Adaptive CTO blackboard (BET-1390)	6c84e4b9ce83dde3954a97cde6d6aae54df9ee5e86cc46813f7bc7c88aceb35e
+## manta inbound webhooks	d6a3e2f84e164a3335d297a14cd7f70a8a134d4870151db31da7c96217881f25
+## manta inline media	4f060b05028b2b2dcb7a740b46aa48979ed396a72377c8f3e58e0800f3f5c693
+## manta inline media	6f93ac62025903c88a143c9f132a248858bdcbd1511bb1b42aa1d1def4a97763
+## manta notifications	6efb8999bcbb50f3c446a090e4c517488724de8955094c12462329147ea47078
+## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)	08070da0642a0e3e3b72e3f316e09c0ae4922d2c8f55baf075ca57a988145520
+## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)	365603583d177d28056390032171f199cb7dde91155e948d83a08b7fcaf3e83c
+## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)	787b0f321148d4746314ef9a9374a944f151740fbcff9deeb43d6e889bdb4da9
+## manta on-call CTO inbound — `send_to_cto` + watchers (BET-1165)	e15e03472cb17dd752abb167fa22a5d666fdbace8e09d8882d145850f8166dc5
+## manta on-call CTO reads	0f542fa369aeab72ccd04eee85c276bdb378c28f304122fc1bace5279f97b98d
+## manta on-call CTO reads	34b736142bde8fcb70bf8fb4625baa29b55dae27b41d79766c89129d55ee690b
+## manta on-call CTO reads	37a232b10a6b67028b117fbc4be4ca90b8b3785719ebedc32741eeb76c9b1a6b
+## manta on-call CTO reads	dfa4c2be4e58c81a48a50d92bccd56c5a84e8e55fba0ae6548a8eece4303faaf
+## manta peer-session awareness	a94ad55145e366d6ea2b7b1bd0f9ec9382816bc14eeeeb4fbc512078afa01b36
+## manta progress	7713e74d240e9be40f831bff2754a25bdc711dba8288a439ec9a566770e183a8
+## manta resource snapshot	8847eba880b725c714b4eca602c781565339babf451322a4582c18df4ed28c4c
+## manta scheduled tasks	ca95bc5138f91b25ceea198f9183528de8976f4ee77ff9d9855927a122867feb
+## manta secrets	7331ce90fc9b09920ee17e79fb3babc757523549dee76f84fedb18055db3714d
+## manta send-file	3bcd3bd4e97ae39386c5eabcdcc90d26523f258ce404323ae357259ebbba8eec
+## manta send-file	4fd8555feaa9737c9a88ea385f25e95886309090dd586f0b06b0860c6a31b526
+## manta send-file	f91a8afa996b6e8ea959f44cf7c481f2d69806aa9e8c54af47c08f791e018619
+## manta serve page	5d300ee2b286f2e598603c7fcbd8785b81225e25a69f250e610a3752a52747b9
+## manta serve page	81713211b6295d9dbc1cbeeae9ee8a72e49ec6b2794da3a238dd13ebf32a5afc
+## manta serve page	fd468eec46a9ee3d033d1bd1bf6f09cc72da25f24816817f6793d972c7084950
+## manta subagent models	817c055b60f53cb0ddb585d3449485455a95840010f560e8b7b8fe11080024e0
+## manta todo hygiene	6148997aad0e4ea3ddb4721508b75df133c1cd84a773d401c89dbe1873f1c6e9

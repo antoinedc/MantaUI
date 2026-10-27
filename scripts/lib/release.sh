@@ -164,64 +164,352 @@ replace_release_payload() {
 
 # sync_opencode_guidance <src-agents-md> <dest-agents-md>
 #
-# Bring a box's ~/.config/opencode/AGENTS.md in sync with the tool guidance
-# that ships with this release. We append each top-level `## ` section from
-# the source to the destination ONLY if a line exactly matching that heading is
-# not already present in the destination. Existing sections are left
-# byte-for-byte alone — the user may have edited them, and this must NEVER
-# rewrite their file. This replaces install.sh's old all-or-nothing marker
-# check (which, once ANY manta section existed, never appended a later
-# section — exactly how the delegation tool guidance never reached boxes
-# installed before delegation shipped).
+# Bring a box's ~/.config/opencode/AGENTS.md in sync with the tool guidance that
+# ships with this release. Every top-level `## ` section of <src> is compared
+# with <dest>:
 #
-# Writes via a temp file + atomic `mv`, the same idiom install.sh already used.
-# Non-fatal throughout: a missing source just logs a warning and returns.
+#   * missing                          -> appended
+#   * present and identical            -> nothing
+#   * present, differs, and the box copy is a version Manta itself shipped
+#     (manifest of what this sync last wrote, or docs/opencode-tools/
+#     AGENTS.history = every version ever committed) -> REPLACED in place
+#   * present, differs, not a known Manta version (the user edited it)
+#                                      -> left alone, with a warning
+#   * absent under its current heading but present under an OLD heading listed
+#     in docs/opencode-tools/AGENTS.aliases (a rename) -> the pristine old copy
+#     is replaced/removed so no stale duplicate is left behind
+#
+# Sections Manta never shipped, and the text before the first `## `, are never
+# touched. Spec: docs/superpowers/specs/2026-10-27-guidance-section-refresh.md.
+# The parser contract (section split, fences, canonical hash) is shared with
+# scripts/release/guidance-history.mjs — keep the two in lockstep.
+#
+# Whole-file writes go through a temp file in the destination directory + `mv`;
+# the guidance is committed first, then the manifest. Non-fatal throughout
+# (always returns 0, warns on failure): this runs inside callers that use
+# `set -euo pipefail`, so every step is checked explicitly.
 sync_opencode_guidance() {
-  local src="$1" dest="$2"
+  local src="$1" dest="$2" work rc=0
   if [ ! -f "$src" ]; then
     warn "sync_opencode_guidance: source not found: $src"
     return 0
   fi
-  local tmp changed=0 section heading line
-  tmp="$(mktemp "${TMPDIR:-/tmp}/manta-agents.XXXXXX")"
-  [ -f "$dest" ] && cat "$dest" > "$tmp"
-  section=""
-  heading=""
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      '##'*)
-        if [ -n "$section" ]; then
-          if ! grep -qFx -- "$heading" "$dest" 2>/dev/null; then
-            [ -s "$tmp" ] && printf '\n' >> "$tmp"
-            printf '%s' "$section" >> "$tmp"
-            changed=1
+  if ! work="$(mktemp -d "${TMPDIR:-/tmp}/manta-guidance.XXXXXX" 2>/dev/null)"; then
+    warn "sync_opencode_guidance: cannot create a scratch directory; guidance left unchanged"
+    return 0
+  fi
+  _guidance_sync_run "$src" "$dest" "$work" || rc=$?
+  rm -rf "$work"
+  if [ "$rc" -ne 0 ]; then
+    warn "sync_opencode_guidance: could not update $dest; left unchanged"
+  fi
+  return 0
+}
+
+# _guidance_split <file> <out-prefix>
+# Parse <file> per the shared contract. Writes each section's canonical bytes to
+# "<out-prefix>.<n>.body" and prints one "n<TAB>start<TAB>end<TAB>heading" line
+# per section (1-based file lines; end includes trailing blank lines).
+_guidance_split() {
+  awk -v outp="$2" '
+    function fence_run(l,   i, j, c) {
+      F_CHAR = ""; F_LEN = 0; F_REST = ""
+      i = 1
+      while (substr(l, i, 1) == " ") i++
+      if (i - 1 > 3) return 0
+      c = substr(l, i, 1)
+      if (c != "`" && c != "~") return 0
+      j = i
+      while (substr(l, j, 1) == c) j++
+      if (j - i < 3) return 0
+      F_CHAR = c; F_LEN = j - i; F_REST = substr(l, j)
+      return 1
+    }
+    function flush(endl,   k, last, f) {
+      if (n == 0) return
+      last = cnt
+      while (last > 0 && body[last] ~ /^[ \t]*$/) last--
+      f = outp "." n ".body"
+      for (k = 1; k <= last; k++) print body[k] > f
+      close(f)
+      printf "%d\t%d\t%d\t%s\n", n, startl, endl, head
+    }
+    BEGIN { n = 0; cnt = 0; infence = 0 }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      isstart = 0
+      if (infence) {
+        if (fence_run(line) && F_CHAR == fch && F_LEN >= flen && F_REST ~ /^[ \t]*$/) infence = 0
+      } else if (substr(line, 1, 3) == "## ") {
+        isstart = 1
+      } else if (fence_run(line)) {
+        infence = 1; fch = F_CHAR; flen = F_LEN
+      }
+      if (isstart) {
+        flush(NR - 1)
+        n++; startl = NR; cnt = 0
+        head = line; sub(/[ \t\r]+$/, "", head)
+      }
+      if (n > 0) body[++cnt] = line
+    }
+    END { flush(NR) }
+  ' "$1"
+}
+
+# _guidance_hash_index <idx> <out-prefix> <out-file>
+# Append the sha256 of each section's canonical body as a 5th column.
+_guidance_hash_index() {
+  local n s e h hash
+  : > "$3" || return 1
+  while IFS=$'\t' read -r n s e h; do
+    [ -n "$n" ] || continue
+    hash="$(_sha256_of "$2.$n.body")" || return 1
+    [ -n "$hash" ] || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$s" "$e" "$h" "$hash" >> "$3" || return 1
+  done < "$1"
+}
+
+# _guidance_find <hashed-idx> <heading> — print the index lines with that heading.
+_guidance_find() {
+  GS_H="$2" awk -F'\t' '$4 == ENVIRON["GS_H"]' "$1"
+}
+
+# _guidance_known <heading> <hash> <file>... — 0 when a "<heading>\t<hash>" line
+# is present verbatim in any of the files.
+_guidance_known() {
+  local line f
+  line="$1"$'\t'"$2"
+  shift 2
+  for f in "$@"; do
+    if grep -Fxq -- "$line" "$f" 2>/dev/null; then return 0; fi
+  done
+  return 1
+}
+
+# _guidance_apply <dest-or-/dev/null> <sorted-plan> <append-file-or-empty> <nofinal 0|1>
+# Rewrite <dest> to stdout. Plan lines: start<TAB>end<TAB>R|D<TAB>file<TAB>blank.
+# R replaces the line span with <file>'s lines (+ one blank line when blank=1),
+# D deletes it. Every other line is copied byte for byte.
+_guidance_apply() {
+  GS_NOFINAL="$4" awk -v plan="$2" -v appendf="$3" '
+    function emit(s) {
+      if (started) printf "\n"
+      printf "%s", s
+      started = 1
+      lastline = s
+    }
+    BEGIN {
+      np = 0; cur = 1; started = 0; lastorig = 0; lastline = ""
+      while ((getline pl < plan) > 0) {
+        np++
+        split(pl, a, "\t")
+        ps[np] = a[1] + 0; pe[np] = a[2] + 0; pa[np] = a[3]; pf[np] = a[4]; pb[np] = a[5]
+      }
+      close(plan)
+    }
+    {
+      lastorig = 0
+      if (cur <= np && NR >= ps[cur] && NR <= pe[cur]) {
+        if (NR == ps[cur] && pa[cur] == "R") {
+          while ((getline fl < pf[cur]) > 0) emit(fl)
+          close(pf[cur])
+          if (pb[cur] == "1") emit("")
+        }
+        if (NR == pe[cur]) cur++
+        next
+      }
+      emit($0)
+      lastorig = 1
+    }
+    END {
+      if (appendf != "") {
+        if (started && lastline !~ /^[ \t\r]*$/) emit("")
+        while ((getline fl < appendf) > 0) emit(fl)
+        close(appendf)
+        lastorig = 0
+      }
+      if (started && !(ENVIRON["GS_NOFINAL"] == "1" && lastorig)) printf "\n"
+    }
+  ' "$1"
+}
+
+_guidance_sync_run() { # $1=src $2=dest $3=scratch dir
+  local src="$1" dest="$2" work="$3"
+  local tab=$'\t' srcdir state manifest hist aliases
+  srcdir="$(dirname "$src")"
+  hist="$srcdir/AGENTS.history"
+  aliases="$srcdir/AGENTS.aliases"
+  case "${MANTA_STATE_HOME-}" in
+    *[![:space:]]*) state="$MANTA_STATE_HOME" ;;
+    *) state="$HOME" ;;
+  esac
+  manifest="$state/.manta/opencode-guidance.manifest"
+
+  # Lookup tables (CR stripped so a CRLF checkout of the data files still works).
+  if [ -f "$hist" ]; then tr -d '\r' < "$hist" > "$work/history" || return 1; else : > "$work/history"; fi
+  if [ -f "$aliases" ]; then tr -d '\r' < "$aliases" > "$work/aliases" || return 1; else : > "$work/aliases"; fi
+  if [ -f "$manifest" ]; then tr -d '\r' < "$manifest" > "$work/manifest.old" || return 1; else : > "$work/manifest.old"; fi
+
+  _guidance_split "$src" "$work/src" > "$work/src.idx" || return 1
+  _guidance_hash_index "$work/src.idx" "$work/src" "$work/src.hidx" || return 1
+  local destsrc="/dev/null" nofinal=0
+  if [ -f "$dest" ]; then
+    destsrc="$dest"
+    if [ -s "$dest" ] && [ -n "$(tail -c 1 "$dest")" ]; then nofinal=1; fi
+  fi
+  _guidance_split "$destsrc" "$work/dest" > "$work/dest.idx" || return 1
+  _guidance_hash_index "$work/dest.idx" "$work/dest" "$work/dest.hidx" || return 1
+  local dtotal
+  dtotal="$(grep -c '' "$work/dest.hidx" 2>/dev/null || true)"
+  dtotal="${dtotal:-0}"
+
+  # Shipped duplicates are ambiguous: skip those headings entirely.
+  awk -F'\t' '{ c[$4]++ } END { for (h in c) if (c[h] > 1) print h }' "$work/src.hidx" > "$work/src.dups" || return 1
+  local dup
+  while IFS= read -r dup; do
+    [ -n "$dup" ] || continue
+    warn "opencode guidance: the shipped AGENTS.md repeats the heading \"$dup\"; skipping it"
+  done < "$work/src.dups"
+
+  : > "$work/plan.raw"; : > "$work/append"; : > "$work/rec"; : > "$work/claimed"
+  local n_app=0 n_ref=0 n_del=0
+  local sn ss se H hB m cnt dn ds de dh dhash flag
+  local preds A pm pcnt pn ps_ pe_ ph phash pris edited ambig first
+  while IFS=$'\t' read -r sn ss se H hB; do
+    [ -n "$sn" ] || continue
+    case "$H" in *"$tab"*) continue ;; esac
+    if grep -Fxq -- "$H" "$work/src.dups" 2>/dev/null; then continue; fi
+
+    m="$(_guidance_find "$work/dest.hidx" "$H")" || return 1
+    cnt=0
+    if [ -n "$m" ]; then cnt=1; case "$m" in *$'\n'*) cnt=2 ;; esac; fi
+    if [ "$cnt" -gt 1 ]; then
+      warn "opencode guidance: \"$H\" appears more than once in $dest; left unchanged"
+      continue
+    fi
+
+    # Predecessors: every alias OLD -> H whose heading exists in dest.
+    : > "$work/pris"; edited=""; ambig=""
+    preds="$(GS_H="$H" awk -F'\t' '$2 == ENVIRON["GS_H"] && $1 != "" { print $1 }' "$work/aliases")" || return 1
+    while IFS= read -r A; do
+      [ -n "$A" ] || continue
+      [ "$A" != "$H" ] || continue
+      if [ -n "$(_guidance_find "$work/src.hidx" "$A")" ]; then continue; fi
+      pm="$(_guidance_find "$work/dest.hidx" "$A")" || return 1
+      [ -n "$pm" ] || continue
+      pcnt=1; case "$pm" in *$'\n'*) pcnt=2 ;; esac
+      if [ "$pcnt" -gt 1 ]; then ambig="$ambig \"$A\""; continue; fi
+      IFS=$'\t' read -r pn ps_ pe_ ph phash <<< "$pm"
+      if grep -Fxq -- "$pn" "$work/claimed" 2>/dev/null; then continue; fi
+      if _guidance_known "$A" "$phash" "$work/manifest.old" "$work/history"; then
+        printf '%s\t%s\t%s\t%s\n' "$ps_" "$pe_" "$pn" "$A" >> "$work/pris" || return 1
+      else
+        edited="$edited \"$A\""
+      fi
+    done <<< "$preds"
+    [ -s "$work/pris" ] && LC_ALL=C sort -n -t "$tab" -k1,1 "$work/pris" > "$work/pris.sorted" && mv "$work/pris.sorted" "$work/pris" || true
+
+    if [ "$cnt" -eq 1 ]; then
+      IFS=$'\t' read -r dn ds de dh dhash <<< "$m"
+      if [ "$dhash" = "$hB" ]; then
+        printf '%s\t%s\n' "$H" "$hB" >> "$work/rec" || return 1
+      elif _guidance_known "$H" "$dhash" "$work/manifest.old" "$work/history"; then
+        flag=0; [ "$dn" -lt "$dtotal" ] && flag=1
+        printf '%s\t%s\tR\t%s\t%s\n' "$ds" "$de" "$work/src.$sn.body" "$flag" >> "$work/plan.raw" || return 1
+        printf '%s\n' "$dn" >> "$work/claimed" || return 1
+        printf '%s\t%s\n' "$H" "$hB" >> "$work/rec" || return 1
+        n_ref=$((n_ref + 1))
+      else
+        warn "opencode guidance: you edited \"$H\" in $dest; not updated (delete that section to get the shipped version)"
+      fi
+      # Rule 4: the current heading is present, so pristine predecessors are stale duplicates.
+      while IFS=$'\t' read -r ps_ pe_ pn A; do
+        [ -n "$pn" ] || continue
+        printf '%s\t%s\tD\t-\t0\n' "$ps_" "$pe_" >> "$work/plan.raw" || return 1
+        printf '%s\n' "$pn" >> "$work/claimed" || return 1
+        n_del=$((n_del + 1))
+      done < "$work/pris"
+      [ -z "$edited$ambig" ] || warn "opencode guidance: old section(s)$edited$ambig left in place (edited or ambiguous) next to \"$H\""
+    else
+      if [ ! -s "$work/pris" ] && [ -z "$edited$ambig" ]; then
+        if [ -s "$work/append" ]; then printf '\n' >> "$work/append" || return 1; fi
+        cat "$work/src.$sn.body" >> "$work/append" || return 1
+        printf '%s\t%s\n' "$H" "$hB" >> "$work/rec" || return 1
+        n_app=$((n_app + 1))
+      elif [ -n "$edited$ambig" ]; then
+        warn "opencode guidance: \"$H\" not applied: old section(s)$edited$ambig were edited or are ambiguous; left unchanged"
+      else
+        first=1
+        while IFS=$'\t' read -r ps_ pe_ pn A; do
+          [ -n "$pn" ] || continue
+          if [ "$first" = "1" ]; then
+            first=0
+            flag=0; [ "$pn" -lt "$dtotal" ] && flag=1
+            printf '%s\t%s\tR\t%s\t%s\n' "$ps_" "$pe_" "$work/src.$sn.body" "$flag" >> "$work/plan.raw" || return 1
+            n_ref=$((n_ref + 1))
+          else
+            printf '%s\t%s\tD\t-\t0\n' "$ps_" "$pe_" >> "$work/plan.raw" || return 1
+            n_del=$((n_del + 1))
           fi
-        fi
-        heading="$line"
-        section="${line}
-"
-        ;;
-      *)
-        section="${section}${line}
-"
-        ;;
-    esac
-  done < "$src"
-  if [ -n "$section" ]; then
-    if ! grep -qFx -- "$heading" "$dest" 2>/dev/null; then
-      [ -s "$tmp" ] && printf '\n' >> "$tmp"
-      printf '%s' "$section" >> "$tmp"
-      changed=1
+          printf '%s\n' "$pn" >> "$work/claimed" || return 1
+        done < "$work/pris"
+        printf '%s\t%s\n' "$H" "$hB" >> "$work/rec" || return 1
+      fi
+    fi
+  done < "$work/src.hidx"
+
+  local committed=0 gdir stage appendarg=""
+  if [ -s "$work/plan.raw" ] || [ -s "$work/append" ]; then
+    LC_ALL=C sort -n -t "$tab" -k1,1 "$work/plan.raw" > "$work/plan" || return 1
+    [ -s "$work/append" ] && appendarg="$work/append"
+    gdir="$(dirname "$dest")"
+    mkdir -p "$gdir" || return 1
+    stage="$(mktemp "$gdir/.AGENTS.md.XXXXXX")" || return 1
+    if [ -f "$dest" ]; then
+      cp -p "$dest" "$stage" || { rm -f "$stage"; return 1; }
+    else
+      chmod 644 "$stage" || { rm -f "$stage"; return 1; }
+    fi
+    _guidance_apply "$destsrc" "$work/plan" "$appendarg" "$nofinal" > "$stage" || { rm -f "$stage"; return 1; }
+    mv "$stage" "$dest" || { rm -f "$stage"; return 1; }
+    committed=1
+  fi
+
+  # Manifest: one line per heading, the version this sync last wrote/confirmed.
+  GS_RECF="$work/rec" awk -F'\t' '
+    BEGIN { while ((getline l < ENVIRON["GS_RECF"]) > 0) { split(l, a, "\t"); drop[a[1]] = 1 } }
+    !($1 in drop)
+  ' "$work/manifest.old" > "$work/manifest.new" || return 0
+  cat "$work/rec" >> "$work/manifest.new" || return 0
+  LC_ALL=C sort -u "$work/manifest.new" > "$work/manifest.sorted" || return 0
+  local mchanged=0
+  if [ -f "$manifest" ]; then
+    cmp -s "$work/manifest.sorted" "$manifest" || mchanged=1
+  elif [ -s "$work/manifest.sorted" ]; then
+    mchanged=1
+  fi
+  if [ "$mchanged" = "1" ]; then
+    local mdir mstage
+    mdir="$(dirname "$manifest")"
+    if mkdir -p "$mdir" \
+       && mstage="$(mktemp "$mdir/.opencode-guidance.manifest.XXXXXX")" \
+       && cat "$work/manifest.sorted" > "$mstage" \
+       && chmod 644 "$mstage" \
+       && mv "$mstage" "$manifest"; then
+      :
+    else
+      [ -z "${mstage:-}" ] || rm -f "$mstage"
+      warn "opencode guidance: could not record $manifest; the next update will re-evaluate the sections"
     fi
   fi
-  if [ "$changed" = "1" ]; then
-    mkdir -p "$(dirname "$dest")"
-    mv "$tmp" "$dest"
-    ok "opencode AGENTS.md updated with new guidance sections."
+
+  if [ "$committed" = "1" ]; then
+    ok "opencode AGENTS.md updated ($n_app added, $n_ref refreshed, $n_del stale removed)."
   else
-    rm -f "$tmp"
     ok "opencode AGENTS.md already current."
   fi
+  return 0
 }
 
 # write_previous_release <file> <git_sha> <version>
