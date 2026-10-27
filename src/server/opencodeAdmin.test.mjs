@@ -47,17 +47,25 @@ async function primedCatalogue() {
   return { reads: () => reads, refetched: async () => { await getProviders(); return reads > 1; } };
 }
 
+// `failing` must leave the primed catalogue cached; `succeeding` must invalidate it.
+async function assertInvalidatesOnSuccessOnly(failing, succeeding) {
+  let cat = await primedCatalogue();
+  await failing();
+  assert.equal(await cat.refetched(), false, "a failed action leaves the cache alone");
+  _setOcTransport(null);
+  cat = await primedCatalogue();
+  await succeeding();
+  assert.equal(await cat.refetched(), true);
+}
+
 describe("restartOpencode", () => {
   afterEach(() => _setOcTransport(null));
 
   it("invalidates the cached provider catalogue on success only", async () => {
-    let cat = await primedCatalogue();
-    await restartOpencode(async () => { throw new Error("nope"); });
-    assert.equal(await cat.refetched(), false, "a failed restart leaves the cache alone");
-    _setOcTransport(null);
-    cat = await primedCatalogue();
-    await restartOpencode(async () => ({ stdout: "", stderr: "" }));
-    assert.equal(await cat.refetched(), true);
+    await assertInvalidatesOnSuccessOnly(
+      () => restartOpencode(async () => { throw new Error("nope"); }),
+      () => restartOpencode(async () => ({ stdout: "", stderr: "" })),
+    );
   });
 
   it("invokes systemctl --user restart opencode-serve with a fixed argv (no shell string)", async () => {
@@ -339,13 +347,10 @@ describe("reloadOpencodeConfig", () => {
   afterEach(() => _setOcTransport(null));
 
   it("invalidates the cached provider catalogue after a successful reload, not after a refused one", async () => {
-    let cat = await primedCatalogue();
-    await reloadOpencodeConfig({ fetchFn: async () => new Response("bad", { status: 500 }) });
-    assert.equal(await cat.refetched(), false);
-    _setOcTransport(null);
-    cat = await primedCatalogue();
-    await reloadOpencodeConfig({ fetchFn: async () => new Response(null, { status: 204 }) });
-    assert.equal(await cat.refetched(), true);
+    await assertInvalidatesOnSuccessOnly(
+      () => reloadOpencodeConfig({ fetchFn: async () => new Response("bad", { status: 500 }) }),
+      () => reloadOpencodeConfig({ fetchFn: async () => new Response(null, { status: 204 }) }),
+    );
   });
 
   it("POSTs /api/location/reload with Basic auth and treats 204 as reloaded", async () => {
