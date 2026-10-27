@@ -2923,6 +2923,18 @@ deploy is the tag push. If someone reports "issue X is done but not live", the
 fix is almost always "it was merged but no release tag was pushed" — check the
 live URL / TestFlight against `main`, then push the right tag.
 
+**UPGRADES ARE ALWAYS AUTOMATIC — an existing user never runs a manual step.**
+Everything a release changes on a box (server code, the opencode binary, the
+manta opencode plugins/tools, the guidance in `~/.config/opencode/AGENTS.md`,
+service definitions, config migrations) must land through the update itself —
+`scripts/self-update.sh` and/or manta-server's first start after the upgrade.
+"Copy file X to ~/.config/…", "re-run Y", "restart Z by hand" are NOT
+acceptable deploy notes for users; if a change needs one, the change is not
+finished — add the step to the update path (idempotent, non-fatal where
+possible, preserving user edits) and test it. Deploy notes may only list the
+maintainer's release action (the tag push). A change that only works on a
+fresh install is a bug: existing boxes must converge to the same state.
+
 ### The six release targets (each its own tag prefix)
 
 | Tag prefix | Target | Runner | What fires | Config |
