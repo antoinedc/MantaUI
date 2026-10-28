@@ -802,10 +802,10 @@ enum TranscriptBlock: Equatable, Sendable {
     case user(String, at: Date?)
     case prose(String, at: Date?)
     case steps(StepGroupContent)
-    /// A file/attachment reference (e.g. a voice note) rendered inline next to
-    /// the message it belongs to. GENERAL on purpose — image and generic-file
-    /// rendering will reuse this case; only the voice-note flavour is rendered
-    /// today (BET-1029).
+    /// A file/attachment reference rendered inline next to the message it belongs
+    /// to: a voice note (BET-1029), a widget, the files attached to a user
+    /// message, or an image/video the agent showed. GENERAL on purpose — every
+    /// flavour reuses this case and its identity rules.
     case file(TranscriptAttachment)
     /// A terminal system notice (session error / truncation) at the end of the
     /// turn it belongs to.
@@ -838,20 +838,48 @@ enum TranscriptBlock: Equatable, Sendable {
     /// card from the record its marker names. Keyed by the PART id, so it is
     /// stable across a refetch.
     case handoff(HandoffToolRef)
+    /// A user turn that was produced by a `/command` or skill: drawn as one
+    /// collapsed `› /name args` band instead of the expanded template. Keyed by
+    /// the user message id.
+    case command(TranscriptCommandTurn)
+    /// A reasoning part, drawn only while "Show reasoning & full output" is on.
+    /// Keyed by the PART id.
+    case reasoning(TranscriptReasoning)
+    /// The footer under a finished turn ("Pondered for 1m44s · 12.4k tokens"),
+    /// and/or a truncation warning. Keyed by the message id it follows.
+    case turnFooter(TranscriptTurnFooter)
 
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
         case .user(_, let at), .prose(_, let at): return at
-        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos, .handoff: return nil
+        case .command(let turn): return turn.at
+        case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos, .handoff,
+             .reasoning, .turnFooter: return nil
         }
     }
 }
 
-/// A file/attachment reference carried by a `.file` transcript block. Only the
-/// `.voiceNote` and `.widget` flavours render today; image and generic-file
-/// rendering are deliberately not implemented yet (BET-1029) — a file part
-/// that is not one of those renders nothing, exactly as it did before.
+/// A `/command` user turn: the command's name and arguments for the collapsed
+/// band, and the full expanded prompt the sheet shows.
+struct TranscriptCommandTurn: Equatable, Sendable {
+    let messageID: String
+    let name: String
+    let arguments: String
+    let expandedText: String
+    let at: Date?
+}
+
+/// The files attached to ONE user message, drawn as a row of chips above the
+/// prompt. Identified by the message id.
+struct TranscriptUserFiles: Equatable, Sendable {
+    let messageID: String
+    let refs: [TranscriptFileRef]
+}
+
+/// A file/attachment reference carried by a `.file` transcript block: a voice
+/// note, a widget, the files attached to a user message, or an image/video the
+/// agent showed with `media_show`.
 struct TranscriptAttachment: Equatable, Sendable {
     enum Kinds: Equatable, Sendable {
         case voiceNote(VoiceNote)
@@ -861,6 +889,12 @@ struct TranscriptAttachment: Equatable, Sendable {
         /// would fork the row-identity logic). Its `WidgetRef.id` is the
         /// deterministic row identity.
         case widget(WidgetRef)
+        /// The files attached to a user message. Row id `ufiles:<messageID>`.
+        case userFiles(TranscriptUserFiles)
+        /// An image or video the agent displayed (`media_begin` / `media_show`).
+        /// Row id is the media identity — the same for the pending placeholder,
+        /// the ready card and its canonical twin, so the row updates in place.
+        case media(TranscriptMediaEntry)
     }
     let kind: Kinds
 }

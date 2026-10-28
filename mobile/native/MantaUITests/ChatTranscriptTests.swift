@@ -612,9 +612,10 @@ final class ChatTranscriptTests: XCTestCase {
             ]),
         ]
         let blocks = ChatTranscriptMapper.blocks(from: msgs)
-        XCTAssertEqual(blocks.count, 3)
-        guard case .activity(let a) = blocks[0], case .user = blocks[1], case .activity(let b) = blocks[2] else {
-            return XCTFail("expected [.activity, .user, .activity], got \(blocks)")
+        XCTAssertEqual(blocks.count, 4, "the second run's turn (after the user message) ends with its footer")
+        guard case .activity(let a) = blocks[0], case .user = blocks[1], case .activity(let b) = blocks[2],
+              case .turnFooter = blocks[3] else {
+            return XCTFail("expected [.activity, .user, .activity, .turnFooter], got \(blocks)")
         }
         XCTAssertNotEqual(a.id, b.id)
     }

@@ -141,6 +141,31 @@ struct LiveActivityMerge: Equatable {
     var trailing: ToolRun?
 }
 
+/// Everything the mapper needs besides the canonical messages. Every field
+/// defaults to "nothing", so a caller that has none of it gets the
+/// canonical-only result and the live-only features simply wait for the
+/// transcript to settle.
+struct TranscriptMapOptions: Equatable, Sendable {
+    /// Draw reasoning parts (the "Show reasoning & full output" switch).
+    var showReasoning: Bool = false
+    /// The session is running a turn: no footer on the transcript's last message.
+    var running: Bool = false
+    /// user message id → the `/command` that produced it (live `commandExecuted`
+    /// frames). A durable `info.command` wins over these.
+    var liveCommands: [String: OpencodeCommandOrigin] = [:]
+    /// The latest live truncation warning, used only for a message the transcript
+    /// itself has no finish record for.
+    var liveTruncation: TranscriptLiveTruncation? = nil
+    /// This session's live media entries (session-wide, never keyed by message).
+    var liveMedia: [TranscriptMediaEntry] = []
+
+    /// The options every legacy overload forwards: the persisted reasoning switch
+    /// and nothing live.
+    static var current: TranscriptMapOptions {
+        TranscriptMapOptions(showReasoning: TranscriptDisplayOptions.showDetails)
+    }
+}
+
 /// Maps the canonical transcript (and the live stream state) onto the block
 /// types.
 ///
@@ -178,6 +203,25 @@ enum ChatTranscriptMapper {
     /// desktop. A run belongs to the message it STARTS in; the assistant
     /// messages it absorbs draw no block of their own.
     static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote], widgets: [WidgetRef]) -> [TranscriptBlock] {
+        blocks(from: messages, voiceNotes: voiceNotes, widgets: widgets, options: .current)
+    }
+
+    /// The full mapper. `options` carries everything that is not in the
+    /// canonical transcript itself: the reasoning switch, the running gate, and
+    /// the live-only data (media placeholders, `/command` frames, the latest
+    /// truncation warning). Every default is empty, so a caller that passes none
+    /// of them gets the canonical-only result.
+    ///
+    /// Block order for one turn: user files, the `.user` / `.command` band, its
+    /// voice note, its widgets, then for each settled assistant message its
+    /// owned media, its layout blocks (runs, prose, reasoning, handoff), its
+    /// widgets and its footer.
+    static func blocks(
+        from messages: [OpencodeMessage],
+        voiceNotes: [VoiceNote],
+        widgets: [WidgetRef],
+        options: TranscriptMapOptions
+    ) -> [TranscriptBlock] {
         let voiceMap = buildVoiceNoteMap(messages: messages, notes: voiceNotes)
         let widgetMap = buildWidgetMap(widgets)
         // An assistant message still streaming (time.completed == nil) is
@@ -189,18 +233,57 @@ enum ChatTranscriptMapper {
         let settled = messages.filter {
             $0.info.role.rawValue != "assistant" || $0.info.time?.completed != nil
         }
-        let layout = ToolActivity.layout(messages: settled, running: false, showThinking: false)
+        let layout = ToolActivity.layout(messages: settled, running: false, showThinking: options.showReasoning)
+
+        // The turn footer is decided over EVERY message (a turn is not finished
+        // while its last step is still in flight).
+        let turns = TranscriptTurns.info(messages, running: options.running)
+
+        // Media: canonical (session-wide) plus live-only entries, grouped under
+        // the settled assistant message that owns them. Entries whose owner is
+        // not settled belong to `liveMediaTail`.
+        let canonicalMedia = TranscriptMediaParse.canonicalEntries(messages)
+        let liveMedia = TranscriptMediaReconcile.liveOnly(live: options.liveMedia, canonical: canonicalMedia)
+        let owners = mediaOwnerIDs(of: messages)
+        var mediaByOwner: [String: [TranscriptMediaEntry]] = [:]
+        for entry in canonicalMedia + liveMedia where owners.contains(entry.ownerMessageID) {
+            mediaByOwner[entry.ownerMessageID, default: []].append(entry)
+        }
+
         var blocks: [TranscriptBlock] = []
+        // The prose of the turn in progress, for the reply menu. A user message
+        // or a background result starts a new turn.
+        var turnProse: [String] = []
 
         for msg in settled {
             switch msg.info.role.rawValue {
             case "user":
+                turnProse = []
                 let text = textParts(of: msg)
+                // Files attached to the prompt draw above it — even when the
+                // message is ONLY an attachment.
+                let refs = TranscriptFileParse.refs(of: msg)
+                if !refs.isEmpty {
+                    let files = TranscriptUserFiles(messageID: msg.info.id, refs: refs)
+                    blocks.append(.file(TranscriptAttachment(kind: .userFiles(files))))
+                }
                 if !text.isEmpty {
                     // A prompt is timestamped when it was WRITTEN; a reply when
                     // it finished. Both are what the reader means by "when did
                     // this happen".
-                    blocks.append(.user(text, at: ChatClock.date(epochMs: msg.info.time?.created)))
+                    let at = ChatClock.date(epochMs: msg.info.time?.created)
+                    let origin = TranscriptCommandOrigin.resolve(durable: msg.info.command, live: options.liveCommands[msg.info.id])
+                    if let origin, !origin.name.isEmpty {
+                        blocks.append(.command(TranscriptCommandTurn(
+                            messageID: msg.info.id,
+                            name: origin.name,
+                            arguments: origin.arguments ?? "",
+                            expandedText: text,
+                            at: at
+                        )))
+                    } else {
+                        blocks.append(.user(text, at: at))
+                    }
                     // The voice-note player renders directly under the user band
                     // that dictated it, claimed by transcript-text match.
                     if let note = voiceMap[msg.info.id] {
@@ -209,7 +292,13 @@ enum ChatTranscriptMapper {
                     appendWidgets(widgetMap[msg.info.id], into: &blocks)
                 }
             case "assistant":
+                if TranscriptTurns.isBackgroundResult(msg) { turnProse = [] }
                 let at = ChatClock.date(epochMs: msg.info.time?.completed)
+                // Media this message owns draws first, then its own blocks.
+                for entry in mediaByOwner[msg.info.id] ?? [] {
+                    blocks.append(.file(TranscriptAttachment(kind: .media(entry))))
+                }
+                let blocksStart = blocks.count
                 for block in layout.blocksByMessage[msg.info.id] ?? [] {
                     switch block {
                     case .tools(let run):
@@ -218,14 +307,100 @@ enum ChatTranscriptMapper {
                         process(part, at: at, into: &blocks)
                     }
                 }
+                for case .prose(let text, _) in blocks[blocksStart...] {
+                    turnProse.append(text)
+                }
                 // A turn's widgets follow its tools/prose: the model rendered
                 // them as part of that assistant message.
                 appendWidgets(widgetMap[msg.info.id], into: &blocks)
+                appendFooter(
+                    for: msg,
+                    turns: turns,
+                    turnProse: turnProse,
+                    options: options,
+                    into: &blocks
+                )
             default:
                 break
             }
         }
         return blocks
+    }
+
+    /// The turn footer: duration · tokens for a finished turn, and/or a
+    /// truncation warning. The truncation is the TRANSCRIPT's own record when it
+    /// has one (survives a reload), else the latest live warning for this message.
+    private static func appendFooter(
+        for msg: OpencodeMessage,
+        turns: [String: TranscriptTurnInfo],
+        turnProse: [String],
+        options: TranscriptMapOptions,
+        into blocks: inout [TranscriptBlock]
+    ) {
+        let live = options.liveTruncation?.messageID == msg.info.id ? options.liveTruncation?.kind : nil
+        let effective = TranscriptTruncation.kind(of: msg) ?? live
+        let info = turns[msg.info.id]
+        guard TranscriptFooterRule.shouldEmit(finishedTurn: info != nil, effectiveTruncation: effective) else { return }
+        blocks.append(.turnFooter(TranscriptTurnFooter(
+            messageID: msg.info.id,
+            summary: info.flatMap { TranscriptTurns.summary($0) },
+            truncation: effective,
+            isTurnEnd: info != nil,
+            turnText: info != nil ? turnProse.joined(separator: "\n\n") : ""
+        )))
+    }
+
+    /// The ids of the messages whose media the MAPPER draws: settled assistant
+    /// messages. `liveMediaTail` draws the rest, so the two never overlap.
+    private static func mediaOwnerIDs(of messages: [OpencodeMessage]) -> Set<String> {
+        Set(messages.compactMap { msg in
+            msg.info.role.rawValue == "assistant" && msg.info.time?.completed != nil ? msg.info.id : nil
+        })
+    }
+
+    /// Media that belongs at the live tail instead of under a settled message:
+    /// (a) an entry whose owner is in `messages` but not settled, and (b) — only
+    /// when `isLiveWindow` — a live-only entry of the CURRENT turn whose owner is
+    /// absent from `messages` (the running step, which the transcript does not
+    /// carry until it settles). An entry of an earlier turn whose owner is outside
+    /// the window renders nowhere.
+    ///
+    /// Pass the SAME `messages` array as the `blocks(from:…options:)` call: the
+    /// mapper emits settled owners and this emits the others, so an owner can
+    /// never appear in both segments.
+    static func liveMediaTail(
+        messages: [OpencodeMessage],
+        live: [TranscriptMediaEntry],
+        isLiveWindow: Bool
+    ) -> [TranscriptBlock] {
+        let canonical = TranscriptMediaParse.canonicalEntries(messages)
+        let liveOnly = TranscriptMediaReconcile.liveOnly(live: live, canonical: canonical)
+        let drawnByMapper = mediaOwnerIDs(of: messages)
+        let present = Set(messages.map(\.info.id))
+        var tail: [TranscriptMediaEntry] = []
+        for entry in canonical + liveOnly {
+            let owner = entry.ownerMessageID
+            if drawnByMapper.contains(owner) { continue }
+            if present.contains(owner) {
+                tail.append(entry)
+            } else if isLiveWindow && entry.inCurrentTurn {
+                tail.append(entry)
+            }
+        }
+        return tail
+            .sorted { ($0.seq, $0.id) < ($1.seq, $1.id) }
+            .map { .file(TranscriptAttachment(kind: .media($0))) }
+    }
+
+    /// The message ids whose footer carries a truncation warning — the warnings
+    /// actually on screen. WS02's tail notice is skipped only for these, so a
+    /// warning is never both duplicated and never lost.
+    static func footerTruncationMessageIDs(_ blocks: [TranscriptBlock]) -> Set<String> {
+        var ids = Set<String>()
+        for case .turnFooter(let footer) in blocks where footer.truncation != nil {
+            ids.insert(footer.messageID)
+        }
+        return ids
     }
 
     /// messageId → widgets claimed onto that message. A widget whose message is
@@ -416,12 +591,11 @@ enum ChatTranscriptMapper {
         return LiveActivityMerge(blocks: result, trailing: nil)
     }
 
-    /// A non-blank text part becomes prose. Everything else draws nothing here:
-    /// tool/patch parts are claimed by the layout as runs, reasoning is not
-    /// shown on iOS, and a file part that is not a voice note renders nothing
-    /// (voice notes attach at the USER-message level — `buildVoiceNoteMap` — and
-    /// image / generic-file rendering is deliberately not implemented yet,
-    /// BET-1029, so do not fold `file` into a catch-all).
+    /// A non-blank text part becomes prose, and a non-blank reasoning part becomes a
+    /// reasoning row (the layout only hands reasoning over while the "show
+    /// reasoning" switch is on). Everything else draws nothing here: tool/patch
+    /// parts are claimed by the layout as runs, and file parts are drawn at the
+    /// message level (user files, media), never as a catch-all.
     private static func process(_ part: OpencodePart, at: Date?, into blocks: inout [TranscriptBlock]) {
         if part.ignored == true || part.synthetic == true { return }
         // A `handoff` tool call draws its card from the record the tool's marker
@@ -437,6 +611,12 @@ enum ChatTranscriptMapper {
         // `textParts(of:)`.
         if part.type == "text", let t = part.text, !isBlank(t) {
             blocks.append(.prose(t, at: at))
+            return
+        }
+        if part.type == "reasoning", let t = part.text, !isBlank(t) {
+            // Leading and trailing newlines are trimmed (desktop parity). The row
+            // id is the PART id: deterministic across a refetch.
+            blocks.append(.reasoning(TranscriptReasoning(id: part.id, text: t.trimmingCharacters(in: .newlines))))
         }
     }
 
@@ -561,6 +741,12 @@ enum ChatQuestionAnswers {
 enum ToolOutputPreview {
     static let maxLines = 12
     static let maxCharacters = 2_000
+    /// The "show full output" view is bounded too: canonical `state.output` has no
+    /// box-side cap (the 20,000-character cap is only on live streamed chunks), so
+    /// even verbose shows the LAST 2,000 lines, hard-capped to the last 100,000
+    /// characters. Copy always gets the full text.
+    static let verboseMaxLines = 2_000
+    static let verboseMaxCharacters = 100_000
 
     /// Keep the LAST `maxLines` lines (output is a tail — the newest lines are
     /// the interesting ones), then hard-cap the result to the last
@@ -585,6 +771,27 @@ enum ToolOutputPreview {
         }
         // One prefix, whichever bound bit — so the reader can see it is a tail.
         return trimmed ? "… \n" + result : result
+    }
+
+    /// The bounded FULL view: the last `verboseMaxLines` lines, hard-capped to the
+    /// last `verboseMaxCharacters` characters, with the same "… \n" prefix when
+    /// trimmed. `trimmed` is true whenever either bound bit.
+    static func verboseTail(_ output: String) -> (text: String, trimmed: Bool) {
+        if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (output, false)
+        }
+        var result = output
+        var trimmed = false
+        let lines = output.components(separatedBy: "\n")
+        if lines.count > verboseMaxLines {
+            result = lines.suffix(verboseMaxLines).joined(separator: "\n")
+            trimmed = true
+        }
+        if result.count > verboseMaxCharacters {
+            result = String(result.suffix(verboseMaxCharacters))
+            trimmed = true
+        }
+        return (trimmed ? "… \n" + result : result, trimmed)
     }
 }
 

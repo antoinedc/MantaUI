@@ -76,6 +76,14 @@ extension TranscriptBlock {
         case .todos: return TranscriptBlock.todosRowID
         // The tool part's id — unique per call and reproduced by every refetch.
         case .handoff(let ref): return "hof-" + ref.partId
+        // The user MESSAGE id: one `/command` band per user message, reproduced
+        // by every refetch.
+        case .command(let turn): return "cmd-" + turn.messageID
+        // The reasoning PART id (`<msg>:reasoning:<n>`), reproduced by every refetch.
+        case .reasoning(let reasoning): return "r" + reasoning.id
+        // The id of the assistant message the footer follows — a message has at
+        // most one footer.
+        case .turnFooter(let footer): return "tf-" + footer.messageID
         }
     }
 
@@ -93,6 +101,13 @@ private func attachmentIdentity(_ attachment: TranscriptAttachment) -> String {
     // row identity (never an index, never a render-time UUID). A refetch of the
     // same window re-derives the same id, so TiledView updates the row in place.
     case .widget(let ref): return "widget:\(ref.id)"
+    // The message the files are attached to — one chip row per user message.
+    case .userFiles(let files): return "ufiles:\(files.messageID)"
+    // The media identity: `media:h:<handle>`, or `media:s:<messageID>:<path>`.
+    // The same string for the pending placeholder, the ready card and its
+    // canonical twin, so a refetch updates the row in place instead of adding
+    // a duplicate.
+    case .media(let entry): return entry.id
     }
 }
 
@@ -159,8 +174,10 @@ final class TranscriptCardActions {
     let onBuildHere: (QuestionRequest, String) -> Void
     let onKeepPlanning: (QuestionRequest, String) -> Void
     let onOpenPage: () -> Void
-    /// Invoked from the system text-selection edit menu with the user's SELECTED text, not a whole block (BET-1364).
-    let onQuote: (String, QuoteDestination) -> Void
+    /// Quote text into this session's composer, or into a forked session. nil on
+    /// a surface that cannot quote (the read-only subagent drill-in): the quote
+    /// controls are then not offered at all (see `TranscriptQuoteCapability`).
+    let onQuote: ((String, QuoteDestination) -> Void)?
     /// Open the Activity sheet for a run (by run id). nil → the run rows draw as
     /// plain, inert lines: a control that cannot act is not rendered as one.
     let onOpenActivity: ((String) -> Void)?
@@ -178,7 +195,7 @@ final class TranscriptCardActions {
         onBuildHere: @escaping (QuestionRequest, String) -> Void,
         onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
         onOpenPage: @escaping () -> Void,
-        onQuote: @escaping (String, QuoteDestination) -> Void,
+        onQuote: ((String, QuoteDestination) -> Void)? = nil,
         onOpenActivity: ((String) -> Void)? = nil,
         onToggleTodos: (() -> Void)? = nil
     ) {
@@ -218,7 +235,7 @@ extension TranscriptCardActions {
             onBuildHere: { _, _ in },
             onKeepPlanning: { _, _ in },
             onOpenPage: {},
-            onQuote: { _, _ in },
+            onQuote: nil,
             onOpenActivity: onOpenActivity,
             onToggleTodos: onToggleTodos
         )
@@ -237,6 +254,17 @@ extension EnvironmentValues {
     var transcriptCardActions: TranscriptCardActions? {
         get { self[TranscriptCardActionsKey.self] }
         set { self[TranscriptCardActionsKey.self] = newValue }
+    }
+}
+
+/// Whether a surface can quote. `cards != nil` does NOT mean it can: the
+/// subagent drill-in injects a (read-only) action set whose `onQuote` is nil.
+/// Both quote surfaces — the reply menu and the select-text sheet's edit menu —
+/// gate on this.
+@MainActor
+enum TranscriptQuoteCapability {
+    static func canQuote(_ cards: TranscriptCardActions?) -> Bool {
+        cards?.onQuote != nil
     }
 }
 
@@ -364,9 +392,8 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         MantaProse(text: text, tokens: tokens)
     case .file(let attachment):
         // The voice-note player sits directly under the user band it belongs
-        // to: 12px horizontal, 14px below. Image and generic-file rendering are
-        // deliberately not implemented yet — the `.file` case only renders the
-        // voice-note flavour (see `attachmentView`).
+        // to: 12px horizontal, 14px below. User-attached files, agent media and
+        // widgets draw through the same case (see `attachmentView`).
         attachmentView(attachment, tokens: tokens)
     case .steps(let content):
         // Machinery is inset to the same margin as prose. Only the USER
@@ -393,6 +420,16 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         HandoffToolCardView(ref: ref, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
+    case .command(let turn):
+        TranscriptCommandRow(turn: turn, tokens: tokens)
+            .padding(.bottom, Metrics.spacing.sp4)
+    case .reasoning(let reasoning):
+        TranscriptReasoningView(reasoning: reasoning, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+    case .turnFooter(let footer):
+        TranscriptTurnFooterView(footer: footer, tokens: tokens, onQuote: actions.onQuote)
+            .padding(.horizontal, Metrics.spacing.sp3)
     case .notice(let text, let kind):
         SystemNoticeView(text: text, kind: kind, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
@@ -479,13 +516,12 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
     }
 }
 
-/// Render a `.file` attachment block. ONLY the voice-note and widget flavours
-/// render — an image or generic-file part is deliberately NOT implemented yet
-/// (BET-1029); it would return nothing here, exactly as it did before this
-/// case existed. The widget store comes through the SwiftUI environment (a
-/// `@MainActor` reference type, like `transcriptCardActions`), so a read-only
-/// surface (subagent drill-in, capture fixture) leaves it unset and a widget
-/// renders its inert placeholder with no live wiring.
+/// Render a `.file` attachment block: a voice note, a widget, the files attached
+/// to a user message, or an image/video the agent showed. The widget store comes
+/// through the SwiftUI environment (a `@MainActor` reference type, like
+/// `transcriptCardActions`), so a read-only surface (subagent drill-in, capture
+/// fixture) leaves it unset and a widget renders its inert placeholder with no
+/// live wiring.
 @ViewBuilder
 private func attachmentView(_ attachment: TranscriptAttachment, tokens: Tokens) -> some View {
     switch attachment.kind {
@@ -495,6 +531,14 @@ private func attachmentView(_ attachment: TranscriptAttachment, tokens: Tokens) 
             .padding(.bottom, Metrics.spacing.sp4)
     case .widget(let ref):
         WidgetCardView(ref: ref, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp3)
+    case .userFiles(let files):
+        TranscriptUserFilesRow(files: files, tokens: tokens)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp1)
+    case .media(let entry):
+        TranscriptMediaCardView(entry: entry, tokens: tokens)
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
     }

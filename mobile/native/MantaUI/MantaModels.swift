@@ -70,6 +70,27 @@ struct OpencodeTime: Codable, Equatable, Sendable {
     var completed: Double?
 }
 
+/// An assistant message's token usage (`opencode:messages` `info.tokens`).
+struct OpencodeTokenUsage: Codable, Equatable, Sendable {
+    var input: Double?
+    var output: Double?
+    var reasoning: Double?
+    var cache: Cache?
+
+    struct Cache: Codable, Equatable, Sendable {
+        var read: Double?
+        var write: Double?
+    }
+}
+
+/// The durable record of a `/command` that produced a user message
+/// (`info.command`, stamped by the box's `commandOrigins`). `arguments` is
+/// optional because the record may lack it.
+struct OpencodeCommandOrigin: Codable, Equatable, Sendable {
+    var name: String
+    var arguments: String?
+}
+
 struct OpencodeMessageInfo: Codable, Equatable, Sendable {
     var id: String
     var sessionID: String
@@ -77,6 +98,45 @@ struct OpencodeMessageInfo: Codable, Equatable, Sendable {
     var time: OpencodeTime?
     var modelID: String?
     var providerID: String?
+    var tokens: OpencodeTokenUsage?
+    var finish: String?
+    var command: OpencodeCommandOrigin?
+
+    enum CodingKeys: String, CodingKey {
+        case id, sessionID, role, time, modelID, providerID, tokens, finish, command
+    }
+}
+
+// The decoding lives in an EXTENSION so the memberwise initializer that tests and
+// fixtures use stays available. The three newer keys decode with `try?`: a
+// malformed value is nil and never fails the message (which would fail the whole
+// transcript). The older keys decode exactly as before.
+extension OpencodeMessageInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        sessionID = try container.decode(String.self, forKey: .sessionID)
+        role = try container.decode(OpencodeRole.self, forKey: .role)
+        time = try container.decodeIfPresent(OpencodeTime.self, forKey: .time)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        providerID = try container.decodeIfPresent(String.self, forKey: .providerID)
+        tokens = try? container.decodeIfPresent(OpencodeTokenUsage.self, forKey: .tokens)
+        finish = try? container.decodeIfPresent(String.self, forKey: .finish)
+        command = try? container.decodeIfPresent(OpencodeCommandOrigin.self, forKey: .command)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(role, forKey: .role)
+        try container.encodeIfPresent(time, forKey: .time)
+        try container.encodeIfPresent(modelID, forKey: .modelID)
+        try container.encodeIfPresent(providerID, forKey: .providerID)
+        try container.encodeIfPresent(tokens, forKey: .tokens)
+        try container.encodeIfPresent(finish, forKey: .finish)
+        try container.encodeIfPresent(command, forKey: .command)
+    }
 }
 
 struct OpencodePart: Codable, Equatable, Sendable {
