@@ -18,6 +18,12 @@ struct MantaAppRoot: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var flow: MantaOnboardingFlow
+    /// C2: the app-wide router. Injected below on the root `Group`, so every
+    /// screen — and every sheet or cover presented from one — can reach it.
+    @StateObject private var navigator = MantaNavigator()
+    /// M-10-1: the phone's own theme override (device-local; System follows the
+    /// phone). Written by Settings → Appearance.
+    @AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue
     @State private var paired: Bool
     /// A pairing payload that arrived while already paired — pending the
     /// "Switch box?" confirmation (BET-702).
@@ -125,6 +131,18 @@ struct MantaAppRoot: View {
                 UpgradeScreen(model: model, tokens: tokens)
                     .transition(.opacity)
             }
+        }
+        .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
+        .environmentObject(navigator)
+        // M-10-2: "Remove server" finished on this phone (its credentials are
+        // gone). Tear down the box's stream and state and return to onboarding —
+        // never leave the old box's sessions on screen.
+        .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
+            store.stop()
+            sessionStore.resetForBoxChange()
+            flow.isSwitching = false
+            flow.backToEntry()
+            paired = false
         }
         // S8 (BET-600): a pairing link — either the manta:// custom scheme or
         // the associated-domain universal link (https://app.mantaui.com/m/…)—

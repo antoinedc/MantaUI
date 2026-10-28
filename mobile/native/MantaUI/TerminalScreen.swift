@@ -22,19 +22,46 @@ struct TerminalScreen: View {
     let sessionName: String
     let windowIndex: Int
     let defaultCwd: String
+    /// `.terminal` = a plain shell; `.cli` = an installed AI CLI in the window's
+    /// folder (spec 04 §2).
+    let mode: SessionMode
+    /// The window's opencode session id. nil for an adopted (non-chat) window,
+    /// which has no mode menu — there is no chat to go back to.
+    let sessionID: String?
 
     @ObservedObject var sessionStore: SessionListStore
     @StateObject private var terminal = TerminalSessionState()
+    @EnvironmentObject private var navigator: MantaNavigator
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
-    init(window: MantaWindow, project: MantaProject, sessionStore: SessionListStore) {
+    init(window: MantaWindow, project: MantaProject, sessionStore: SessionListStore,
+         mode: SessionMode = .terminal, sessionID: String? = nil) {
         self.windowName = window.name
         self.projectName = project.tmuxSession
         self.sessionName = project.tmuxSession
         self.windowIndex = window.index
         self.defaultCwd = window.paneCurrentPath
+        self.mode = mode
+        self.sessionID = sessionID
         self._sessionStore = ObservedObject(wrappedValue: sessionStore)
+    }
+
+    /// The launcher to start: the CLI's id plus the user's saved flags laid over
+    /// the schema defaults (`ExtensionsLaunchers.resolve`). Nil for a shell.
+    private var launcher: SessionPtyLauncher? {
+        guard case .cli(let id) = mode else { return nil }
+        let schema = sessionStore.launchers.first(where: { $0.id == id })?.flags ?? []
+        return SessionPtyLauncher(id: id, flags: ExtensionsLaunchers.resolve(schema: schema, saved: sessionStore.launcherFlags[id]))
+    }
+
+    /// The header's second line: the CLI's name (when it is one) and the live
+    /// geometry.
+    private var subtitle: String {
+        let geometry = terminal.geometryText.isEmpty ? "—" : terminal.geometryText
+        guard case .cli(let id) = mode else { return geometry }
+        let label = sessionStore.launchers.first(where: { $0.id == id })?.label ?? id
+        return "\(label) · \(geometry)"
     }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
@@ -57,7 +84,9 @@ struct TerminalScreen: View {
                 windowName: windowName,
                 projectName: projectName,
                 defaultCwd: defaultCwd,
-                danger: UIColor(tokens.danger)
+                danger: UIColor(tokens.danger),
+                mode: mode,
+                launcher: launcher
             )
         }
         .background(Color.black.ignoresSafeArea())
@@ -94,16 +123,51 @@ struct TerminalScreen: View {
                     .foregroundColor(tokens.tx1)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(terminal.geometryText.isEmpty ? "—" : terminal.geometryText)
+                Text(subtitle)
                     .font(.manta(size: Metrics.type.xs, weight: .medium, design: .monospaced))
                     .foregroundColor(tokens.tx4)
             }
 
             Spacer(minLength: 0)
 
-            // Trailing slot keeps the header symmetric with the chat screen.
-            Color.clear
+            // Trailing slot: the mode menu (back to Chat, or another AI CLI) and
+            // the quick switcher — only for a window that has a chat session; an
+            // adopted window has nothing to switch to.
+            if let sessionID {
+                SessionModeMenu(
+                    current: mode,
+                    launchers: sessionStore.launchers,
+                    catalog: sessionStore.launcherCatalog,
+                    onSelect: { next in
+                        guard next != mode else { return }
+                        navigator.switchMode(
+                            windowKey: SessionRouteLogic.windowKey(project: projectName, windowIndex: windowIndex),
+                            sessionID: sessionID,
+                            to: next
+                        )
+                    },
+                    onRetry: { Task { await sessionStore.refreshLaunchers() } }
+                )
+                .font(.system(size: Metrics.type.body, weight: .semibold))
+                .foregroundColor(tokens.tx1)
                 .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                .background(.ultraThinMaterial, in: Circle())
+
+                Button {
+                    navigator.presentSwitcher()
+                } label: {
+                    Image(systemName: "rectangle.stack")
+                        .font(.system(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.tx1)
+                        .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Switch session")
+            } else {
+                Color.clear
+                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+            }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)

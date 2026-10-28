@@ -10,6 +10,11 @@ import SwiftUI
 
 struct FolderPickerView: View {
     let initialPath: String
+    /// The header title ("Choose folder" by default).
+    let title: String
+    /// Offer "one session per worktree" when the chosen folder has several.
+    /// Off when the choice is only a location (a scratch root).
+    let allowsFanOut: Bool
     let onSelect: (String) -> Void
     let onFanOut: (String, [MantaWorktree]) -> Void
     let onCancel: () -> Void
@@ -30,10 +35,13 @@ struct FolderPickerView: View {
         var id: String { full }
     }
 
-    init(initialPath: String, onSelect: @escaping (String) -> Void,
+    init(initialPath: String, title: String = "Choose folder", allowsFanOut: Bool = true,
+         onSelect: @escaping (String) -> Void,
          onFanOut: @escaping (String, [MantaWorktree]) -> Void,
          onCancel: @escaping () -> Void) {
         self.initialPath = initialPath
+        self.title = title
+        self.allowsFanOut = allowsFanOut
         self.onSelect = onSelect
         self.onFanOut = onFanOut
         self.onCancel = onCancel
@@ -51,7 +59,7 @@ struct FolderPickerView: View {
         .background(tokens.canvas.ignoresSafeArea())
         .overlay(alignment: .bottom) { fanOutSheet }
         .task(id: path) {
-            await listDirectory(parent(of: path))
+            await listDirectory(current(of: path))
         }
     }
 
@@ -63,7 +71,7 @@ struct FolderPickerView: View {
                     .foregroundColor(tokens.tx2)
             }
             .accessibilityLabel("Close")
-            Text("Choose folder")
+            Text(title)
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
             Spacer()
@@ -95,7 +103,7 @@ struct FolderPickerView: View {
 
             HStack(spacing: 2) {
                 Button {
-                    path = FolderPath.parentPath(path)
+                    path = parent(of: path)
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.system(size: Metrics.type.twoXS, weight: .regular))
@@ -132,7 +140,7 @@ struct FolderPickerView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 Button {
-                    path = FolderPath.parentPath(path)
+                    path = parent(of: path)
                 } label: {
                     rowContent(name: "..", monospaced: true, color: tokens.tx2, icon: "arrow.up")
                 }
@@ -209,20 +217,33 @@ struct FolderPickerView: View {
         FolderPath.parentPath(p.hasSuffix("/") ? String(p.dropLast()) : p)
     }
 
+    /// The folder whose sub-folders are listed: the path itself, without a
+    /// trailing slash (`/` and `~` stay as they are).
+    private func current(of p: String) -> String {
+        let trimmed = p.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "~" }
+        if trimmed.count > 1 && trimmed.hasSuffix("/") { return String(trimmed.dropLast()) }
+        return trimmed
+    }
+
+    /// `fs:list-dirs` answers `{dir, entries:[{name, path, hidden}]}` (B1: this
+    /// used to be decoded as `[String]`, which never succeeded, so every folder
+    /// read "Couldn't list folder"). Dot-folders are filtered out, as on desktop,
+    /// and each row's absolute `path` is what is browsed into / selected.
     private func listDirectory(_ dir: String) async {
         loading = true
         error = nil
-        defer { loading = false }
+        // A superseded (cancelled) listing must not clear the spinner of the one
+        // that replaced it.
+        defer { if !Task.isCancelled { loading = false } }
         do {
-            let matches = try await api.listDirs(dir)
-            let filtered = matches.filter { $0.hasPrefix(dir) }
-            rows = filtered.map { full in
-                let name = full.split(separator: "/").filter { !$0.isEmpty }.last.map(String.init) ?? full
-                return FolderRow(name: name, full: full)
-            }
+            let listing = try await api.fsListDirectory(dir)
+            guard !Task.isCancelled else { return }
+            rows = listing.visibleEntries.map { FolderRow(name: $0.name, full: $0.path) }
             worktreeCounts = [:]
         } catch {
-            self.error = "Couldn't list folder"
+            guard !Task.isCancelled else { return }
+            self.error = SessionActionError.message("list this folder", error: error)
             rows = []
         }
     }
@@ -234,10 +255,16 @@ struct FolderPickerView: View {
     }
 
     private func selectCurrent() {
-        let chosen = path.hasSuffix("/") ? String(path.dropLast()) : path
+        let chosen = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+        guard allowsFanOut else {
+            onSelect(chosen)
+            return
+        }
         Task {
-            if WorktreeInfoLogic.hasFanOut((try? await api.listWorktrees(chosen)) ?? nil) {
-                let wts = (try? await api.listWorktrees(chosen)) ?? []
+            // A failed probe is "just this folder" — the picker never blocks a
+            // choice on an optional hint.
+            let wts = (try? await api.listWorktrees(chosen)) ?? []
+            if WorktreeInfoLogic.hasFanOut(wts) {
                 fanOut = (chosen, wts)
             } else {
                 onSelect(chosen)

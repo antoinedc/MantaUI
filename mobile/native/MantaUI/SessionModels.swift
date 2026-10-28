@@ -318,22 +318,38 @@ struct NewWindowInput: Sendable {
 ///
 /// The box answers `{sessionId, windowIndex, projects}` (since 2026-08-06); a
 /// box that predates that answers with a bare `Project[]`. ONE type absorbs
-/// both so the two call sites stay a single code path and neither has to know
-/// which box it is talking to. Only `projects` is consumed — the caller finds
-/// the created window by name — so the other two fields are deliberately
-/// dropped rather than plumbed through to nothing.
+/// both so the call sites stay a single code path and neither has to know
+/// which box it is talking to.
+///
+/// `sessionId` / `windowIndex` identify the window the box JUST created. They
+/// are nil for the legacy bare-array reply, and a caller then falls back to
+/// finding the window by name — which mixes up same-named windows, so a caller
+/// that has the index must use it first (bug B2).
 struct TmuxCreateResult: Decodable, Equatable, Sendable {
     let projects: [MantaProject]
+    let sessionId: String?
+    let windowIndex: Int?
 
-    private enum CodingKeys: String, CodingKey { case projects }
+    private enum CodingKeys: String, CodingKey { case projects, sessionId, windowIndex }
+
+    init(projects: [MantaProject], sessionId: String? = nil, windowIndex: Int? = nil) {
+        self.projects = projects
+        self.sessionId = sessionId
+        self.windowIndex = windowIndex
+    }
 
     init(from decoder: Decoder) throws {
         if let list = try? [MantaProject](from: decoder) {
             projects = list
+            sessionId = nil
+            windowIndex = nil
             return
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         projects = try container.decode([MantaProject].self, forKey: .projects)
+        let sid = (try? container.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil
+        sessionId = (sid?.isEmpty == false) ? sid : nil
+        windowIndex = (try? container.decodeIfPresent(Int.self, forKey: .windowIndex)) ?? nil
     }
 }
 
@@ -365,6 +381,27 @@ struct SessionRowStatus: Equatable, Sendable {
     var lastActivity: Date? = nil
     /// A tmux window with no opencode session — i.e. a terminal window.
     var isTerminal: Bool = false
+    /// How many of this session's subagents are working right now (spec 04 §9).
+    /// Already stale-guarded by `SessionSubagentCount` — zero whenever the
+    /// parent turn is not running.
+    var runningSubagents: Int = 0
+    /// The box's durable record says a provider usage limit stopped this
+    /// conversation (spec 04 §9).
+    var halted: Bool = false
+}
+
+/// How many subagents a row reports (spec 04 §9). Counts the live subagent
+/// records the interpreted stream publishes under the PARENT session.
+enum SessionSubagentCount {
+    /// `running` and `pending` records count; `completed`, `error` and an
+    /// unknown status do not. A record can stay `running` forever if its finish
+    /// frame was missed across a reconnect, so the count is ZERO whenever the
+    /// parent turn is not running: foreground subagents block the parent's turn,
+    /// and background ones are counted by the job list.
+    static func running(_ subagents: [StreamSubagentPayload], parentRunning: Bool) -> Int {
+        guard parentRunning else { return 0 }
+        return subagents.filter { $0.status == "running" || $0.status == "pending" }.count
+    }
 }
 
 /// Per-window live status for a TERMINAL window, as reported by the box's
@@ -388,9 +425,17 @@ enum SessionRowSubtitle {
     /// only the idle tail is new (BET-897): a terminal row says "terminal",
     /// otherwise the idle line is the model label alone; recency lives in the
     /// age chip (BET-1084).
+    ///
+    /// Spec 04 §9 slots two lines into that table: `N subagent(s)` sits right
+    /// under background jobs and replaces everything else a running row would
+    /// say (mobile's deliberate divergence from the desktop tooltip), and
+    /// `stopped by a provider limit` sits between `needs you` and the idle tail.
     static func text(for s: SessionRowStatus) -> String? {
         if s.backgroundJobs > 0 {
             return "\(s.backgroundJobs) background job" + (s.backgroundJobs == 1 ? "" : "s")
+        }
+        if s.runningSubagents > 0 {
+            return "\(s.runningSubagents) subagent" + (s.runningSubagents == 1 ? "" : "s")
         }
         if s.running {
             if let label = s.progressLabel, !label.isEmpty {
@@ -403,6 +448,9 @@ enum SessionRowSubtitle {
         }
         if s.attention {
             return "needs you"
+        }
+        if s.halted {
+            return "stopped by a provider limit"
         }
         if s.isTerminal { return "terminal" }
         // Recency lives in the trailing age chip (BET-1084); the subtitle is model-only.
@@ -474,11 +522,15 @@ enum SessionRowAge {
 enum SessionDotState: Sendable {
     case running
     case needsYou
+    /// A provider usage limit stopped the conversation (spec 04 §9). Only when
+    /// nothing outranks it: a pending question or a live turn wins.
+    case halted
     case idle
 
     static func forRow(_ s: SessionRowStatus) -> SessionDotState {
         if s.attention { return .needsYou }
         if s.running { return .running }
+        if s.halted { return .halted }
         return .idle
     }
 }
