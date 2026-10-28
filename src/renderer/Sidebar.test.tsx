@@ -560,10 +560,12 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     h = null;
   });
 
-  it("an observed job's nested row says it was started outside Manta", () => {
+  it("an observed job's nested row carries the small observed mark", () => {
     mountWith([job({ origin: "observed", completionOwner: "opencode" })]);
     const label = h!.container.querySelector('[data-testid="job-observed-label"]');
-    expect(label?.textContent).toBe("started outside Manta");
+    expect(label?.textContent).toBe("");
+    expect(label?.querySelector("svg")).not.toBeNull();
+    expect(label?.getAttribute("aria-label")).toBe("started outside Manta");
     expect(label?.getAttribute("title")).toContain("started by a script or another tool");
   });
 
@@ -573,7 +575,7 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     ]);
     const labels = h!.container.querySelectorAll('[data-testid="job-observed-label"]');
     expect(labels.length).toBe(1);
-    expect(labels[0].textContent).toBe("started outside Manta");
+    expect(labels[0].getAttribute("aria-label")).toBe("started outside Manta");
     expect(labels[0].closest('[role="treeitem"]')?.getAttribute("aria-level")).toBeNull();
   });
 
