@@ -188,6 +188,8 @@ struct TranscriptMediaEntry: Equatable, Sendable {
   var size: Int64?               // bytes, when known
   var beganAt: Date?
   var handle: String?
+  var turn: Int = 0              // live only: the session turn number (TranscriptMediaSessionState.currentTurn) at FIRST sight; never rewritten. Canonical entries: 0.
+  var inCurrentTurn: Bool = false // set ONLY by TranscriptMediaSessionState.vended(); canonical entries: false
 }
 
 struct TranscriptMediaFrame: Codable, Equatable, Sendable {   // the `media` payload
@@ -201,12 +203,23 @@ enum TranscriptMediaIdentity {
   static func id(handle: String?, showMessageID: String, path: String) -> String
 }
 
-/// Session-wide live reducer state: entries keyed by id, plus a seq counter.
+/// Session-wide live reducer state: entries keyed by id, a seq counter, and the
+/// session's TURN counter (round 4: current-turn eligibility, see "Live tail").
 struct TranscriptMediaSessionState: Equatable, Sendable {
   var byID: [String: TranscriptMediaEntry] = [:]
   var nextSeq = 0
+  var currentTurn = 0            // 0 = no turn observed yet
+  var turnOpen = false           // true between a turn's start and the session going idle
+  static let maxEntries = 100
+  /// Running observation from the event store. `running == true` while !turnOpen → currentTurn += 1, turnOpen = true.
+  /// `running == false` → turnOpen = false. Anything else → no change. Idempotent for repeated equal values.
+  mutating func observeRunning(_ running: Bool)
+  /// Media frame. If !turnOpen, first opens a turn exactly as observeRunning(true) would (a frame can arrive
+  /// before the running edge). A NEW id is stamped `turn = currentTurn`, `seq = nextSeq`. Then evicts to maxEntries
+  /// (oldest seq first, only among entries with turn < currentTurn; current-turn entries are never evicted).
   mutating func apply(_ frame: TranscriptMediaFrame, now: Date)
-  var ordered: [TranscriptMediaEntry] { get }   // sorted by seq
+  /// Entries in (seq, id) order with `inCurrentTurn = (turn == currentTurn)`. This is what the store vends.
+  func vended() -> [TranscriptMediaEntry]
 }
 
 enum TranscriptMediaParse {
@@ -289,11 +302,18 @@ which is not in the package.
   3. A begin that was never shown stays `pending` only while it is in the live
      store. Canonically it is dropped (the desktop shows nothing after reload
      either). A live `fail` keeps the `failed` state.
-- **Live merge.** `TranscriptMediaReconcile.liveOnly` keeps only live entries
-  whose id the canonical list lacks. Placement:
-  - If the entry's `ownerMessageID` is a settled, loaded message, it renders
-    there through the mapper (`options.liveMedia`).
-  - Otherwise it renders in the live tail (`liveMediaTail`).
+- **Live merge and retirement (round 4).** `TranscriptMediaReconcile.liveOnly`
+  keeps only live entries whose **id** the canonical list lacks. That is the
+  only retirement rule:
+  - A live entry is retired, meaning it is not rendered, exactly when a
+    canonical entry with the **same media identity** replaces it.
+  - Owner presence, owner settlement, a post-turn refetch or the session going
+    idle never retire or delete anything.
+  - A pending entry or a live failure that has no canonical twin therefore
+    keeps rendering.
+  - The store's only deletion is the `maxEntries` eviction. It touches only
+    entries of earlier turns.
+  - The full placement table is under **Live tail** below.
 - **Ordering** inside one owner message: by `seq`. Canonical entries get `seq`
   from their part order (begin part first, else show part), live entries from
   first-sight order. Ties are broken by `id` (string compare), so equal or nil
@@ -328,10 +348,33 @@ which is not in the package.
 @MainActor final class TranscriptMediaStore: ObservableObject {
   static let shared = TranscriptMediaStore()
   @Published private(set) var sessions: [String: TranscriptMediaSessionState] = [:]
-  func bind(eventStore: MantaEventStore)        // idempotent; addRawFrameHandler, kind == "media" only
-  func entries(for sessionID: String) -> [TranscriptMediaEntry]
+  /// Idempotent. Registers (1) addRawFrameHandler → handleFrame for kind == "media", and
+  /// (2) a sink on eventStore.$sessionStates → observeRunning for every session whose `running` is non-nil.
+  func bind(eventStore: MantaEventStore)
+  func handleFrame(_ frame: MantaStreamFrame)                       // decodes TranscriptMediaFrame, routes by frame sessionID
+  func observeRunning(sessionID: String, running: Bool)            // also the unit-test seam
+  func entries(for sessionID: String) -> [TranscriptMediaEntry]    // = sessions[sessionID]?.vended() ?? []
 }
 ```
+
+- **Where the turn signal comes from (round 4, finding 1).**
+  `MantaEventStore.sessionStates` is `@Published`
+  (`MantaEventStore.swift:399`). Each `MantaSessionStreamState.running` is set
+  `true` by the `running` sub and set `false` by `turnComplete`/idle and by the
+  running-set replay (`MantaEventStore.swift:184-200`, `applyRunningSet`).
+  - That covers every kind of turn: user prompts, queued drains, background
+    results and scheduled prompts. Every turn flips `running`, whatever started
+    it.
+  - The sink calls `observeRunning(sessionID:running:)` only when a session's
+    value differs from the last value the store saw. That avoids churn on every
+    frame.
+  - No new server field and no WS02 input is needed. `MantaEventStore` is used
+    read-only, so no other workstream's file is edited.
+- Because `currentTurn` and `turnOpen` live inside
+  `TranscriptMediaSessionState`, a turn change publishes `$sessions`. WS02's
+  existing M-01-3 subscription,
+  `$sessions.map { $0[sessionId] }.removeDuplicates()`, therefore remaps
+  without any change to that mount.
 
 - The store is in memory only, like the desktop. Canonical parts carry the media
   after a reload.
@@ -425,19 +468,34 @@ which is not in the package.
   It returns `.file(.media)` blocks, in `(seq, id)` order, for entries
   (canonical ∪ live-only) whose owner is one of these:
   - (a) a message in `messages` that is NOT settled;
-  - (b) only when `isLiveWindow`, a message ABSENT from `messages` whose live
-    entry was recorded during the CURRENT turn (`TranscriptMediaEntry.turnStartedAt`
-    ≥ the session's current-turn start, i.e. created after the last user message
-    the store has seen). This is the normal case for the running step, because the
-    transcript is not refetched mid-turn.
-  - **Retirement (round 3, finding 2):** `TranscriptMediaStore` drops a session's
-    live-only entries for an owner as soon as a canonical snapshot contains that
-    owner message (absorbed), and drops all live entries for a session when a turn
-    settles and the post-turn refetch lands. So an old settled owner outside the
-    30-message window can never resurrect at the tail. Tests: (i) settled media
-    owner older than the loaded window + new turn → not in the tail; (ii) focus
-    suffix whose last id equals the full list's last id → only current-turn
-    entries in the tail.
+  - (b) only when `isLiveWindow`, a message ABSENT from `messages`, and only for
+    a live-only entry with `inCurrentTurn == true`. This is the normal case for
+    the running step, because the transcript is not refetched mid-turn.
+- **Live tail: placement table (round 4).** This applies to a live-only entry,
+  meaning one with no canonical twin. "Settled" means a completed message in the
+  presented list.
+
+  | Owner in presented list | Entry's turn | Rendered where |
+  |---|---|---|
+  | present, settled | any | under the owner (mapper), whatever the state: pending, ready or failed |
+  | present, not settled | any (necessarily current) | live tail |
+  | absent | current (`inCurrentTurn`) | live tail (needs `isLiveWindow`) |
+  | absent | earlier turn | **nowhere**: its turn is over and its owner is outside the loaded window, so it cannot resurrect at an unrelated tail |
+
+  - **Pending retention.** A begin in A, then a snapshot that contains a
+    settled A but no show yet: the live pending entry stays and renders under
+    A. `canonicalEntries` drops the unshown begin, so `liveOnly` keeps the live
+    one.
+  - **Failure retention.** A `fail`, then the post-turn refetch: the failed
+    entry renders under its owner (row 1) for the rest of the app run. Old
+    failures never enter a later turn's tail (row 4).
+  - **Ready.** A ready live entry is replaced in place by its canonical twin
+    (same id, same row) once the refetch carries the `media_show` part.
+- **Historical focus (round 3, finding 2).** `isLiveWindow` stays as pinned.
+  Because WS02's focus slice is a suffix that ends at the latest message, the
+  expression is true for it too. Showing **current-turn** media at the end of
+  that suffix is correct, because that is where the current turn is. The
+  earlier-turn rule (row 4) is what stops the resurrection, not `isLiveWindow`.
 - **One message list, disjoint segments (round 2, finding 1).** The mapper
   emits only entries whose owner is a SETTLED message of the list it was given.
   `liveMediaTail` emits only cases (a) and (b). So **as long as both calls
@@ -557,7 +615,35 @@ which is not in the package.
   exactly one `media:h:` row each time, under A, with no `#dup` suffix.
 - `liveMediaTail` excludes owners that are settled.
 - `liveMediaTail` with an owner absent from `messages`: emitted when
-  `isLiveWindow`, omitted when not.
+  `isLiveWindow` and `inCurrentTurn`; omitted otherwise.
+- **Round-4 path tests, through the real reducer.** Each builds entries with
+  `TranscriptMediaSessionState.apply` / `observeRunning` / `vended()`, never with
+  a hand-made entry, then runs `blocks(…options:)` + `liveMediaTail`:
+  1. **Pending kept.** Turn opens, begin(A); the snapshot contains A settled and
+     no show → one pending row under A, none in the tail.
+  2. **Failure kept.** begin(A), then fail, then `observeRunning(false)`, then a
+     snapshot with A settled → one failed row under A.
+  3. **Ready retired by identity.** begin(A), show(B); the snapshot contains the
+     canonical `media_show` for the same handle → exactly one row, the
+     canonical one, same id, and the live entry is not rendered.
+  4. **Old owner beyond the window.** Turn 1: show(X); X settled and then
+     absent from a later window. Turn 2 opens via `observeRunning(true)` →
+     X's entry is not in the tail and not rendered anywhere.
+  5. **Old failure kept out of a new tail.** Turn 1 fails a begin in A; turn 2
+     opens; A is absent → not in turn 2's tail.
+  6. **Focused suffix.** A suffix whose last id equals the full list's last id,
+     plus an earlier-turn entry with an absent owner → tail contains only
+     current-turn entries.
+  7. **A frame before the running edge.** `apply(begin)` with no running
+     observed, then `observeRunning(true)` → the entry is still `inCurrentTurn`,
+     because there is no double increment.
+  8. **Eviction.** 101 entries, where the oldest belongs to an earlier turn →
+     that one is evicted. When all 101 are in the current turn → none is
+     evicted.
+- **Store wiring (Mac).** A real `MantaEventStore` fed a `running` frame
+  (`running: true`), then a `media` raw frame, then `turnComplete{running:false}`,
+  then a `running` frame → `TranscriptMediaStore.entries(for:)` shows the media
+  entry with `inCurrentTurn` true, then false after the second turn opens.
 - **Disjointness:** for one entry list and one message array, the ids from
   `blocks(…options:)` media and from `liveMediaTail` never intersect. The test
   covers a settled owner, an unsettled owner, an absent owner, and both values
@@ -1048,7 +1134,9 @@ combinations) tests are pure, so they run on Linux in
 - [ ] Every finished turn ends with "<Verb> for <duration> · <N> tokens", with the
       same verb the desktop shows for that turn.
 - [ ] A reply cut off by the output limit shows "⚠ truncated (output limit)";
-      tapping it explains what to do. It is still there after reopening the chat.
+      tapping it explains what to do. It is still there after reopening the chat
+      **when canonical finish metadata is available** (the message carries a
+      `step-finish` part, which the box emits only when the message has usage).
 - [ ] No footer appears under a turn that is still running.
 
 ---
@@ -1734,4 +1822,40 @@ mention WS01:**
   M-01-1's provider symbols: `truncationByMessageID` is replaced by the existing
   `truncation` plus `TranscriptLiveTruncation.from` (finding 1 redesign), and
   M-01-2's signature gains `isLiveWindow:`.
+
+## Review responses (round4)
+
+**`reviews/round4/01-transcript.md`** (it also covers round-3 finding 2):
+
+1. **BLOCKING: current-turn state was undeclared and unpopulated.** Replaced
+   the undeclared `turnStartedAt` predicate with a fully wired turn counter.
+   - Declared fields: `TranscriptMediaEntry.turn` and `.inCurrentTurn`;
+     `TranscriptMediaSessionState.currentTurn` and `.turnOpen`.
+   - Declared methods: `observeRunning(_:)` and `vended()`.
+   - Data source: `TranscriptMediaStore.bind` subscribes to the existing
+     `@Published MantaEventStore.sessionStates` (`MantaEventStore.swift:399`)
+     and turns every `running` edge into `observeRunning`. That covers every
+     kind of turn. A media frame arriving before the running edge opens the
+     turn itself.
+   - Tests now go through the real reducer and the store (path tests 1–8, plus
+     store wiring).
+   - **No mount or signature change.** The turn counter sits inside the
+     already-subscribed `$sessions` (M-01-3) and is vended by the
+     already-pinned `entries(for:)` (M-01-1, M-01-2), so the canonical ledger
+     and WS02's receiving table stay identical.
+2. **BLOCKING: retirement treated owner presence as absorption.** Removed the
+   owner-presence and post-turn-refetch deletion.
+   - Retirement is now only identity replacement, through `liveOnly` (same id
+     as a canonical entry).
+   - Pending and failed entries have an explicit placement table: under a
+     settled owner, in the tail while their owner is unsettled, in the tail
+     when the owner is absent and the entry is from the current turn, and
+     nowhere when the owner is absent and the entry is from an earlier turn.
+   - Storage is bounded by evicting only earlier-turn entries.
+   - Tests cover all four cases the review lists: begin(A) with no show is
+     retained; a failure survives the post-turn refetch; a ready entry is
+     retired by its canonical twin; and an old failure stays out of a new
+     tail.
+3. **NIT: F4 acceptance.** The persistence checkbox is now qualified: "when
+   canonical finish metadata is available".
 
