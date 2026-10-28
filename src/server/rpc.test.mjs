@@ -1128,7 +1128,8 @@ test("forge:ship returns the forge result unchanged and performs no config write
   const handlers = buildHandlers(deps);
   const cwd = mkdtempSync(join(tmpdir(), "bet870-noforge-"));
   const res = await handlers["forge:ship"]({ cwd });
-  assert.deepEqual(res, { ok: false, error: "no_forge" });
+  // The box adds a plain-language `message` beside the raw error (WS05 G4).
+  assert.deepEqual(res, { ok: false, error: "no_forge", message: "This folder isn't linked to a GitHub repository." });
   assert.equal(calls.projectMetaUpsert.length, 0);
 });
 
