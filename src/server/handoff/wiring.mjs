@@ -4,7 +4,7 @@
 // the boot, e.g. the delegate engine), so nothing here runs at import time.
 
 import { createHandoffEngine } from "./engine.mjs";
-import { extractEditedFiles, extractTestRun, extractTodos, lastUserMessageAt } from "./text.mjs";
+import { extractEditedFiles, extractLastReply, extractTestRun, extractTodos, lastUserMessageAt } from "./text.mjs";
 import { normalizeMode } from "./policy.mjs";
 import { selectLatestTokenUsage } from "../../shared/streamInterpretation.mjs";
 import { parseGitStatus } from "../peers.mjs";
@@ -81,6 +81,7 @@ export function createProductionHandoff(p) {
           editedFiles: extractEditedFiles(messages),
           todos: extractTodos(messages),
           testRun: extractTestRun(messages),
+          lastReply: extractLastReply(messages),
           git: null,
           constraints: null,
         };

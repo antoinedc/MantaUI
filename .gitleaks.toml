@@ -96,4 +96,10 @@ paths = [
 regexTarget = "match"
 regexes = [
   '''\$\(cat ~/\.manta/opencode-password\)''',
+  # A `key` field holding a "provider/model" id (`key: "anthropic/opus"`) trips
+  # generic-api-key in model-table tests (feat/ios-desktop-parity, 69067c71;
+  # TS + Swift). The full-history scan reaches every fetched branch, so this
+  # blocked every PR. Exact shape only: a quoted lowercase provider/model id.
+  # Audited 2026-10-28.
+  '''(?i)key"?\s*:\s*\\?"(anthropic|openai|google)/[a-z][a-z0-9.\-]{0,40}\\?"''',
 ]

@@ -26,7 +26,7 @@ function fakes(over = {}) {
     listActiveSessionIds: async () => [],
     listMessages: async () => [
       { info: { role: "user", time: { created: 100 } }, parts: [] },
-      { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", tokens: { input: 10, cache: { read: 200, write: 30 } } }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { filePath: "/proj/a.ts" } } }] },
+      { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", tokens: { input: 10, cache: { read: 200, write: 30 } } }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { filePath: "/proj/a.ts" } } }, { type: "text", text: "Patched. Should I also run the migration?" }] },
     ],
     getVcsBranch: async () => "feat/x",
   };
@@ -74,6 +74,8 @@ test("the production engine builds a ready card from the box's real-shaped reads
   assert.match(done.text, /- \(observed\) branch: feat\/x/);
   assert.match(done.text, /  - M src\/a\.ts/);
   assert.match(done.text, /files this session edited: 1/);
+  assert.match(done.text, /ask it again as your first action/);
+  assert.match(done.text, /  > Patched\. Should I also run the migration\?/);
   assert.match(done.text, /- \(inferred\) standing instructions/);
   assert.ok(f.calls.some((c) => c[0] === "extract" && c[1] === "ses_p"), "the constraints (at=5) predate the last user message (100): re-extracted first");
   assert.ok(f.calls.find((c) => c[0] === "generate")[2].startsWith("<!-- manta-handoff-generate -->"));

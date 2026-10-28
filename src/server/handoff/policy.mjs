@@ -21,8 +21,11 @@ export const ACTIONS = Object.freeze(["suggest", "handoff"]);
  *   produce "none"  — nothing happens (automatic trigger, mode off)
  *   produce "card"  — a `ready` card the user acts on
  *   produce "start" — the server starts the handoff itself at the right moment:
- *                     replacement, with `disposition` "armed" (automatic, turn
- *                     end) or "send" (the agent asked for it, after its turn)
+ *                     a replacement with `disposition` "send", so the work
+ *                     continues in the new session without the user having to
+ *                     type anything (automatic turn end, or the agent asked).
+ *                     "armed" (hold the handoff until the next message) is no
+ *                     longer planned; the engine still honours old armed records.
  * `kind` is the record kind: "auto" when the server starts it, else "suggest".
  *
  * @param {{ mode: string, trigger: string, action?: string }} a
@@ -34,7 +37,7 @@ export function entryPlan({ mode, trigger, action } = {}) {
   if (trigger === "auto") {
     if (m === "off") return { produce: "none", kind: "suggest" };
     if (m === "suggest") return { produce: "card", kind: "suggest" };
-    return { produce: "start", kind: "auto", how: "clear", disposition: "armed" };
+    return { produce: "start", kind: "auto", how: "clear", disposition: "send" };
   }
   if (trigger === "agent") {
     if (!ACTIONS.includes(action)) throw new Error(`unknown action "${String(action)}"`);

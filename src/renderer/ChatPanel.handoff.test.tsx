@@ -403,6 +403,19 @@ describe("ChatPanel — auto-handoff", () => {
       expect(h!.container.querySelector("textarea")).not.toBeNull();
     });
 
+    it("names previous sessions from the box's chain lookup when the directory listing misses them", async () => {
+      lists[SID] = {
+        records: [creating],
+        links: { replaces: "ses_prev" },
+        continuation: null,
+        chain: { predecessors: [{ id: "ses_prev", title: "Fix login" }] },
+      };
+      await open({ opencodeMessages: sessions, opencodeListSessions: () => Promise.resolve([]) });
+      await click(h!.container.querySelector('button[aria-label="Session actions"]'));
+      expect(document.body.textContent).toContain("Fix login");
+      expect(document.body.textContent).not.toContain("Untitled session");
+    });
+
     it("opening a deleted previous session says it was deleted", async () => {
       lists[SID] = { records: [creating], links: { replaces: "ses_prev" }, continuation: null };
       await open({

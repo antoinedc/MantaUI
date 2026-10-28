@@ -53,7 +53,6 @@ import {
   type EntryMotionState,
   type StaleCacheResult,
   type PendingScrollWin,
-  isApprovalCoveredByAlways,
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
@@ -93,6 +92,13 @@ import { MantaLoader } from "./MantaLoader";
 import { MeasureColumn } from "./MeasureColumn";
 import { BlockedProgressCard, CompactionCard, PermissionCard, PlanCard, RetryCard } from "./Cards";
 import { Button } from "./Button";
+import {
+  copyTools,
+  nextPendingApproval,
+  settleApprovalDecision,
+  type ApprovalDecisionKind,
+  type ApprovalDecisionState,
+} from "./delegateApprovalFeedback";
 import { DelegateApprovalCard, ReadOnlyJobBar, ScheduledTasksCard, SecretsCard, WebhooksCard } from "./PanelCards";
 import { CardStack, type PinnedCardRender } from "./components/CardStack";
 import { useSessionResources } from "./hooks/useSessionResources";
@@ -150,7 +156,8 @@ function buildHelpText(): string {
     "  shift+⏎         newline",
     "  esc             interrupt while running",
     "  ctrl+o          toggle reasoning / verbose tool output",
-    "  @               file or agent mention typeahead",
+    "  @               file / reference mention typeahead",
+    "  @@              agent mention typeahead",
     "  drag-drop       attach files",
   ];
   return lines.join("\n");
@@ -322,8 +329,15 @@ export function ChatPanel({
   const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
   // The box refused the edited rules (or couldn't be reached): shown on the approval card.
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  // Cleared when a DIFFERENT approval shows; a refused approval comes back with
+  // the same id and keeps the message the box gave for it.
   const approvalErrorId = pendingApproval?.id ?? null;
-  useEffect(() => setApprovalError(null), [approvalErrorId]);
+  const lastApprovalIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (approvalErrorId === null) return;
+    if (approvalErrorId !== lastApprovalIdRef.current) setApprovalError(null);
+    lastApprovalIdRef.current = approvalErrorId;
+  }, [approvalErrorId]);
   const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
 
   // BET-794/867: forge ship + merge for this session. The server resolves cwd →
@@ -968,36 +982,74 @@ export function ChatPanel({
   // Stable identity so it doesn't defeat ActiveTodos' React.memo.
   const dismissTodos = useCallback(() => setTodosDismissed(true), [setTodosDismissed]);
 
-  // BET-418 §A5: ref mirror of permissions so the approval poll can read the
-  // latest always[] grants without taking permissions as a dep (which would
-  // reset the poll timer on every permission change).
-  const permissionsRef = useRef(permissions);
+  // Background-job approval decisions. `approvalDecisionsRef` holds ONLY
+  // in-flight decisions and unconfirmed-failure retry snapshots (deleted on a
+  // confirmed outcome). `approvalEpochRef` is bumped on every press and every
+  // completion so a poll issued before either discards its (stale) result;
+  // `approvalGenRef` is bumped on every setup/cleanup of the poll effect
+  // (session, activity, trust mode, unmount) so a late completion never
+  // restores a card into a panel that has since gone away.
+  const approvalDecisionsRef = useRef<Map<string, ApprovalDecisionState>>(new Map());
+  const approvalEpochRef = useRef(0);
+  const approvalGenRef = useRef(0);
   useEffect(() => {
-    permissionsRef.current = permissions;
-  }, [permissions]);
-  useEffect(() => {
+    approvalGenRef.current++;
     setPendingApproval(null);
-    if (chatAutoAllowApproval) return; // trust mode → server never requests approval
-    if (!isActive) return; // hidden panel — stop polling; refire once on reactivation
+    if (chatAutoAllowApproval) return () => { approvalGenRef.current++; }; // trust mode → server never requests approval
+    if (!isActive) return () => { approvalGenRef.current++; }; // hidden panel — stop polling; refire once on reactivation
     let cancelled = false;
     const poll = async () => {
+      const epoch = approvalEpochRef.current;
       try {
-        const list = await window.api.delegatePendingApprovals(sessionId);
-        if (cancelled || list.length === 0) return;
-        const approval = list[0];
-        // BET-418 §A5: if the parent's existing always[] grants cover every
-        // requested tool, auto-approve without rendering the card.
-        if (isApprovalCoveredByAlways(approval, permissionsRef.current)) {
-          void window.api.delegateApprove(approval.id, approval.tools).catch(() => { /* best-effort */ });
-          return;
+        const polled = await window.api.delegatePendingApprovals(sessionId);
+        if (cancelled || epoch !== approvalEpochRef.current || !Array.isArray(polled)) return;
+        const decisions = approvalDecisionsRef.current;
+        // The box no longer lists a retryable approval → nothing left to retry.
+        for (const [id, d] of decisions) {
+          if (d.state === "retry" && !polled.some((a) => a.id === id)) decisions.delete(id);
         }
-        setPendingApproval(approval);
-      } catch { /* non-fatal */ }
+        setPendingApproval((current) => nextPendingApproval({ current, polled, decisions }));
+      } catch { /* non-fatal: the next tick retries */ }
     };
     void poll();
     const t = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(t); };
+    return () => { cancelled = true; clearInterval(t); approvalGenRef.current++; };
   }, [sessionId, chatAutoAllowApproval, isActive]);
+
+  // One press on the approval card: hide it, run the decision, report the
+  // outcome. Synchronous in-flight guard (a second press / the poll cannot act
+  // on the same approval), snapshot of the submitted rules, restore on an
+  // unconfirmed failure only into the still-live panel.
+  const decideApproval = useCallback((kind: ApprovalDecisionKind, approval: DelegateApproval, tools: DelegateApprovalTool[]) => {
+    const decisions = approvalDecisionsRef.current;
+    if (decisions.get(approval.id)?.state === "inflight") return;
+    const snapshot = copyTools(tools);
+    const gen = approvalGenRef.current;
+    decisions.set(approval.id, { state: "inflight" });
+    approvalEpochRef.current++;
+    setApprovalError(null);
+    setPendingApproval(null);
+    // The box's message when it refuses the submitted rules (`{ok:false, error}`):
+    // the approval is still pending there, so the card comes back carrying it.
+    let refusal: string | null = null;
+    void settleApprovalDecision(kind, async () => {
+      if (kind === "decline") return window.api.delegateDecline(approval.id);
+      const reply = await window.api.delegateApprove(approval.id, snapshot);
+      if (reply && reply.ok === false && reply.error) refusal = reply.error;
+      return reply;
+    }).then((outcome) => {
+      approvalEpochRef.current++;
+      if (outcome !== "unconfirmed" && outcome !== "refused") {
+        decisions.delete(approval.id);
+        return;
+      }
+      decisions.set(approval.id, { state: "retry", tools: snapshot });
+      if (gen !== approvalGenRef.current) return;
+      if (outcome === "refused") setApprovalError(refusal);
+      else if (kind === "approve") setApprovalError("Couldn't reach your box — try again");
+      setPendingApproval((cur) => cur ?? { ...approval, tools: copyTools(snapshot) });
+    });
+  }, []);
 
 
   // ===== ChatPanel-own state (not extracted to hooks) =====
@@ -3175,24 +3227,8 @@ export function ChatPanel({
         <DelegateApprovalCard
           approval={pendingApproval}
           error={approvalError}
-          onApprove={(tools: DelegateApprovalTool[]) => {
-            const id = pendingApproval.id;
-            setApprovalError(null);
-            // Keep the card until the box answers: a refusal of the rules (ok:false
-            // WITH an error) leaves the approval pending and says why.
-            window.api.delegateApprove(id, tools).then((r) => {
-              if (r && r.ok === false && r.error) {
-                setApprovalError(r.error);
-                return;
-              }
-              setPendingApproval(null);
-            }).catch(() => setApprovalError("Couldn't reach your box — try again"));
-          }}
-          onDecline={() => {
-            const id = pendingApproval.id;
-            setPendingApproval(null);
-            void window.api.delegateDecline(id).catch(() => { /* best-effort */ });
-          }}
+          onApprove={(tools: DelegateApprovalTool[]) => decideApproval("approve", pendingApproval, tools)}
+          onDecline={() => decideApproval("decline", pendingApproval, pendingApproval.tools)}
           />,
         ));
       // BET-791 [C9]: a model reporting it has STOPPED and needs a human
@@ -3241,7 +3277,7 @@ export function ChatPanel({
           </button>
         )}
         {authReconnect && (
-          <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Reconnect ${authReconnect}`}>
+          <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Open Accounts to reconnect ${authReconnect}`}>
             Reconnect
           </button>
         )}
@@ -3325,7 +3361,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [viewOnly, permissions, pendingApproval, approvalError, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, inboxActionsEnabled, inboxGateNote, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [viewOnly, permissions, pendingApproval, approvalError, decideApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, inboxActionsEnabled, inboxGateNote, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   // Previous sessions (spec §9): the chosen older session shown read-only in THIS

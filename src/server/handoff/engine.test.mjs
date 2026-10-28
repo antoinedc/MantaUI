@@ -386,6 +386,18 @@ test("armed: the first admission claims the preamble exactly once; later concurr
   assert.deepEqual(w.engine._state.held, {});
 });
 
+test("armed: consuming the preamble publishes a handoff event so clients drop the carried-over block", async () => {
+  const w = standardWorld();
+  const r = await readyRecord(w);
+  const out = await w.engine.start(r.id, { how: "clear", disposition: "armed", origin: "auto" });
+  const before = w.published.length;
+  await w.engine.admitPrompt({ sessionId: out.successorId, text: "go", messageID: "msg_go" });
+  await settle();
+  assert.equal(w.engine._state.continuations[out.successorId].preamble, undefined);
+  const after = w.published.slice(before).filter((e) => e.kind === "handoff" && e.payload.successorId === out.successorId);
+  assert.ok(after.length >= 1, "an event names the successor once its preamble is sent");
+});
+
 test("armed claim: a definitive refusal fails that admission to its sender, drops the claim, and the next held admission becomes the claimer", async () => {
   const w = standardWorld();
   const r = await readyRecord(w);

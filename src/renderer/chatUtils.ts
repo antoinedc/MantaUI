@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, DelegateApprovalTool, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -513,6 +513,49 @@ export function filterCommands<T extends TypeaheadCommandRow>(
   if (!query) return commands;
   const q = query.toLowerCase();
   return commands.filter((c) => c.name.toLowerCase().includes(q));
+}
+
+/** What the composer's typeahead popup should open for, before UI state is added. */
+export type TypeaheadTrigger = {
+  mode: "file" | "agent" | "command";
+  query: string;
+  anchorStart: number;
+  anchorEnd: number;
+};
+
+/**
+ * Decide which typeahead (if any) the text/caret should open.
+ *
+ *   /<word>   at byte 0, caret inside that first word  → command (query = the
+ *             whole first word, not just the text before the caret)
+ *   @<token>  token starts at BOF or after whitespace   → file / reference
+ *   @@<token> same position                             → agent mention
+ *
+ * The decision keys off the token's LEADING characters (the run of
+ * non-whitespace ending at the caret), not the last `@` before the caret — in
+ * `@@x` the last `@` follows another `@`, which used to make the agent popup
+ * unreachable. A further `@` inside the query (`@foo@bar`, `@@@`) or a token
+ * that does not start with `@` (`a@b`) opens nothing. The anchor slice runs to
+ * the end of the token so selecting replaces the whole word.
+ */
+export function detectTypeaheadTrigger(text: string, caretPos: number): TypeaheadTrigger | null {
+  const caret = Math.max(0, Math.min(caretPos, text.length));
+  if (text.startsWith("/")) {
+    const m = /^\/([\w-]*)/.exec(text);
+    if (m && caret <= m[0].length) {
+      return { mode: "command", query: m[1], anchorStart: 0, anchorEnd: m[0].length };
+    }
+  }
+  let start = caret;
+  while (start > 0 && !/\s/.test(text[start - 1])) start--;
+  const typed = text.slice(start, caret);
+  if (!typed.startsWith("@")) return null;
+  const agent = typed.startsWith("@@");
+  const query = typed.slice(agent ? 2 : 1);
+  if (query.includes("@")) return null;
+  let end = caret;
+  while (end < text.length && !/\s/.test(text[end])) end++;
+  return { mode: agent ? "agent" : "file", query, anchorStart: start, anchorEnd: end };
 }
 
 /**
@@ -1625,6 +1668,21 @@ export function terminalShortcut(
 // box (src/shared/streamInterpretation.mjs, run in streamInterp.mjs) — the
 // `sessionError` frame carries `display` and the renderer only shows it.
 
+/**
+ * The seat-provider id (Settings → Accounts seat panel) for an auth-banner
+ * provider id. Kimi (API key) has no seat panel → undefined.
+ */
+export function authProviderSeatId(providerID: string | null | undefined): SeatProviderId | undefined {
+  if (providerID === "anthropic") return "claude";
+  if (providerID === "openai") return "codex";
+  return undefined;
+}
+
+/** A banner provider that signs in with an API key and has no seat panel (Kimi). */
+export function isKeyOnlyAuthProvider(providerID: string | null | undefined): boolean {
+  return providerID === "kimi-for-coding";
+}
+
 // ===== Background delegation job rows (BET-381) =====
 //
 // Pure helpers for the sidebar / mobile session list second line and the jobs
@@ -1969,49 +2027,6 @@ export function shouldResyncWindowsForJobs(
     if (job.status !== "running" && present) return true;
   }
   return false;
-}
-
-// BET-418 §A5: conservative glob-cover check. An `always` pattern covers a
-// requested pattern when they are equal, or the always pattern is a prefix-
-// star superset (ends with `*` and the requested stem starts with the always
-// prefix). Intentionally conservative — when in doubt, return false so the
-// card is shown rather than silently auto-approving.
-export function globCovers(always: string, pattern: string): boolean {
-  if (always === pattern) return true;
-  if (always === "*") return true;
-  if (always.endsWith("*")) {
-    const prefix = always.slice(0, -1);
-    const reqStem = pattern.endsWith("*") ? pattern.slice(0, -1) : pattern;
-    if (reqStem.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-// BET-418 §A5: check whether the parent session's existing `always[]` grants
-// (from pending/retained PermissionRequest records) already cover every tool
-// the delegate approval requests. When fully covered, the renderer auto-
-// approves via delegateApprove without rendering the card. Returns false when
-// any tool lacks a covering always grant — the card is shown in that case.
-export function isApprovalCoveredByAlways(
-  approval: { tools: DelegateApprovalTool[] },
-  permissions: PermissionRequest[],
-): boolean {
-  if (approval.tools.length === 0) return false;
-  const alwaysByPerm = new Map<string, Set<string>>();
-  for (const p of permissions) {
-    if (!p.always || p.always.length === 0) continue;
-    const set = alwaysByPerm.get(p.permission) ?? new Set<string>();
-    for (const a of p.always) set.add(a);
-    alwaysByPerm.set(p.permission, set);
-  }
-  return approval.tools.every((tool) => {
-    const set = alwaysByPerm.get(tool.permission);
-    if (!set) return false;
-    for (const always of set) {
-      if (globCovers(always, tool.pattern)) return true;
-    }
-    return false;
-  });
 }
 
 // Compact model display name for the composer model pill (BET-460). The
@@ -3430,6 +3445,29 @@ export function accountsErrorMessage(code: AccountsError | string | undefined): 
     default:
       return "That didn't work. Try again.";
   }
+}
+
+/**
+ * What a seat that is the box's own login can be told: the server refuses to
+ * re-sign it (`live-seat`), so say what actually works instead of a button.
+ * `command` is shown as code by the caller (no backticks in the copy).
+ */
+export function liveSeatNoteParts(
+  provider: SeatProviderId,
+): { before: string; command: string | null; after: string } {
+  return provider === "claude"
+    ? {
+        before: "This is the login this box itself uses (the Claude CLI owns it). To sign in again, run ",
+        command: "claude auth login",
+        after: " on the box and sign in with the same account.",
+      }
+    : { before: "This is the login this box itself uses; it can't be re-signed from here yet.", command: null, after: "" };
+}
+
+/** The same note as one plain string (for places that render text only). */
+export function liveSeatNoteText(provider: SeatProviderId): string {
+  const n = liveSeatNoteParts(provider);
+  return `${n.before}${n.command ?? ""}${n.after}`;
 }
 
 /** A seat that cannot serve requests says why, in two words; a healthy one

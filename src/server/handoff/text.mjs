@@ -65,6 +65,7 @@ const line = (label, s) => `- (${label}) ${s}`;
  *   todos?: Array<{content?: string, status?: string}>,
  *   constraints?: { items: string[], at?: number|null }|null,
  *   testRun?: { command: string, exit: number }|null,
+ *   lastReply?: string|null,
  * }} f
  * @returns {string[]} the lines, most important first (the cap drops from the end)
  */
@@ -72,6 +73,12 @@ export function factLines(f = {}) {
   const out = [];
   const pred = f.predecessor ?? {};
   if (pred.id) out.push(line(OBS, `previous session: ${pred.id}${pred.title ? ` — “${pred.title}”` : ""} (read its transcript on demand if you need detail)`));
+  if (typeof f.lastReply === "string" && f.lastReply.trim()) {
+    // Kept near the top so the size cap drops it last: a question the user has not
+    // answered yet must survive the handoff, or the new session runs past it.
+    out.push(line(OBS, "the previous session's last reply to the user, which the user has not answered yet. If it asks the user something, ask it again as your first action and wait for the answer before doing anything else:"));
+    for (const l of f.lastReply.trim().split("\n")) out.push(`  > ${l}`);
+  }
   if (f.git) {
     if (f.git.branch) out.push(line(OBS, `branch: ${f.git.branch}`));
     const ch = Array.isArray(f.git.changes) ? f.git.changes : [];
@@ -193,6 +200,26 @@ export function extractTestRun(messages) {
     found = { command: cmd.length > 200 ? `${cmd.slice(0, 200)}…` : cmd, exit };
   }
   return found;
+}
+
+export const LAST_REPLY_MAX_CHARS = 1500;
+
+/**
+ * PURE. The text of the newest assistant message when nothing from the user came
+ * after it (the user has not answered it), else null. Long replies keep their
+ * END — that is where a question to the user sits.
+ */
+export function extractLastReply(messages, maxChars = LAST_REPLY_MAX_CHARS) {
+  const list = Array.isArray(messages) ? messages : [];
+  const last = list[list.length - 1];
+  if (last?.info?.role !== "assistant") return null;
+  const text = (last.parts ?? [])
+    .filter((p) => p?.type === "text" && typeof p.text === "string" && !p.synthetic && !p.ignored)
+    .map((p) => p.text)
+    .join("\n\n")
+    .trim();
+  if (!text) return null;
+  return text.length > maxChars ? `…${text.slice(text.length - maxChars).trimStart()}` : text;
 }
 
 /** PURE. Epoch ms of the newest user message (0 when none) — constraint freshness. */

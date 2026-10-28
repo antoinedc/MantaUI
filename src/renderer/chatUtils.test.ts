@@ -18,6 +18,7 @@ import {
   ctxStageColor,
   cssVar,
   filterCommands,
+  detectTypeaheadTrigger,
   dedupeAgainstBuiltins,
   formatModelContextSize,
   shouldClearMissingModel,
@@ -41,6 +42,7 @@ import {
   trimOutputEdges,
   reconcileOptimisticUser,
   shouldForceReconnect,
+  authProviderSeatId,
   shouldReconnectOnAppStateChange,
   runWithConcurrency,
   chooseUpdateSkewVariant,
@@ -72,8 +74,6 @@ import {
   computeJobNesting,
   sessionsWithActiveWork,
   shouldResyncWindowsForJobs,
-  globCovers,
-  isApprovalCoveredByAlways,
   shortModelName,
   isFastModelId,
   baseModelId,
@@ -2183,7 +2183,7 @@ describe("isRenderableMessage", () => {
 
 // ===== BET-414 sidebar helpers =====
 
-import type { Project, PermissionRequest } from "../shared/types";
+import type { Project } from "../shared/types";
 
 function mkProject(
   tmuxSession: string,
@@ -2547,135 +2547,6 @@ describe("computeJobNesting", () => {
     const res = computeJobNesting(project, jobs);
     expect(res.hidden.size).toBe(0);
     expect(res.children.size).toBe(0);
-  });
-});
-
-// ===== globCovers / isApprovalCoveredByAlways (BET-418 §A5) =====
-
-describe("globCovers", () => {
-  it("covers equal patterns", () => {
-    expect(globCovers("alembic upgrade head", "alembic upgrade head")).toBe(true);
-    expect(globCovers("pytest *", "pytest *")).toBe(true);
-  });
-
-  it("covers when always is a bare star (matches everything)", () => {
-    expect(globCovers("*", "anything")).toBe(true);
-    expect(globCovers("*", "pytest tests/")).toBe(true);
-  });
-
-  it("covers when always ends with star and pattern starts with the prefix", () => {
-    expect(globCovers("alembic upgrade *", "alembic upgrade head")).toBe(true);
-    expect(globCovers("pytest *", "pytest tests/")).toBe(true);
-    expect(globCovers("git *", "git commit -m")).toBe(true);
-  });
-
-  it("covers a narrower glob (pattern also ends with star, longer prefix)", () => {
-    expect(globCovers("alembic upgrade *", "alembic upgrade head *")).toBe(true);
-    expect(globCovers("git *", "git push *")).toBe(true);
-  });
-
-  it("does not cover when prefix differs", () => {
-    expect(globCovers("alembic upgrade *", "pytest tests/")).toBe(false);
-    expect(globCovers("git *", "hg commit")).toBe(false);
-  });
-
-  it("does not cover when always has no star and patterns differ", () => {
-    expect(globCovers("alembic upgrade head", "alembic upgrade downgrade")).toBe(false);
-  });
-
-  it("is conservative with complex globs (does not parse ** patterns)", () => {
-    expect(globCovers("**/*.ts", "src/foo.ts")).toBe(false);
-    expect(globCovers("**/*.ts", "**/*.ts")).toBe(true);
-  });
-});
-
-describe("isApprovalCoveredByAlways", () => {
-  const mkPerm = (
-    permission: string,
-    always: string[],
-  ): PermissionRequest => ({
-    id: `id-${permission}`,
-    sessionID: "ses",
-    permission,
-    always,
-  });
-
-  it("returns false when approval has no tools", () => {
-    expect(isApprovalCoveredByAlways({ tools: [] }, [mkPerm("bash", ["*"])])).toBe(false);
-  });
-
-  it("returns false when there are no permissions", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
-    expect(isApprovalCoveredByAlways(approval, [])).toBe(false);
-  });
-
-  it("returns false when no permission matches the tool category", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
-    const perms = [mkPerm("write", ["/tmp/*"])];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
-  });
-
-  it("returns true when a single tool is covered by a matching always grant", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "alembic upgrade head" }] };
-    const perms = [mkPerm("bash", ["alembic upgrade *"])];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
-  });
-
-  it("returns true when always is a bare star for the matching category", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "anything" }] };
-    const perms = [mkPerm("bash", ["*"])];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
-  });
-
-  it("returns true when all tools are covered (multi-tool)", () => {
-    const approval = {
-      tools: [
-        { permission: "bash", pattern: "pytest tests/" },
-        { permission: "write", pattern: "/tmp/out.txt" },
-      ],
-    };
-    const perms = [
-      mkPerm("bash", ["pytest *"]),
-      mkPerm("write", ["/tmp/*"]),
-    ];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
-  });
-
-  it("returns false when one of multiple tools is not covered", () => {
-    const approval = {
-      tools: [
-        { permission: "bash", pattern: "pytest tests/" },
-        { permission: "write", pattern: "/etc/passwd" },
-      ],
-    };
-    const perms = [
-      mkPerm("bash", ["pytest *"]),
-      mkPerm("write", ["/tmp/*"]),
-    ];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
-  });
-
-  it("aggregates always[] across multiple PermissionRequests of the same category", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "git push" }] };
-    const perms = [
-      mkPerm("bash", ["pytest *"]),
-      mkPerm("bash", ["git *"]),
-    ];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(true);
-  });
-
-  it("ignores PermissionRequests with empty always[]", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
-    const perms = [mkPerm("bash", [])];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
-  });
-
-  it("ignores PermissionRequests with undefined always", () => {
-    const approval = { tools: [{ permission: "bash", pattern: "pytest *" }] };
-    const perms: PermissionRequest[] = [
-      { id: "p1", sessionID: "ses", permission: "bash" },
-    ];
-    expect(isApprovalCoveredByAlways(approval, perms)).toBe(false);
   });
 });
 
@@ -5298,3 +5169,75 @@ describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
   });
 });
 
+// ===== detectTypeaheadTrigger =====
+
+describe("detectTypeaheadTrigger", () => {
+  const t = (text: string, caret: number) => detectTypeaheadTrigger(text, caret);
+
+  it("opens the agent typeahead on @@ and @@partial", () => {
+    expect(t("@@", 2)).toEqual({ mode: "agent", query: "", anchorStart: 0, anchorEnd: 2 });
+    expect(t("@@bu", 4)).toEqual({ mode: "agent", query: "bu", anchorStart: 0, anchorEnd: 4 });
+    expect(t("hi @@bu", 7)).toEqual({ mode: "agent", query: "bu", anchorStart: 3, anchorEnd: 7 });
+    expect(t("hi\n@@x", 6)).toMatchObject({ mode: "agent", query: "x", anchorStart: 3 });
+  });
+
+  it("extends the anchor to the end of the token when the caret is mid-token", () => {
+    expect(t("@@build ok", 4)).toEqual({ mode: "agent", query: "bu", anchorStart: 0, anchorEnd: 7 });
+  });
+
+  it("keeps single-@ file typeahead", () => {
+    expect(t("@", 1)).toEqual({ mode: "file", query: "", anchorStart: 0, anchorEnd: 1 });
+    expect(t("@src/fo", 7)).toMatchObject({ mode: "file", query: "src/fo" });
+    expect(t("see @a", 6)).toMatchObject({ mode: "file", query: "a", anchorStart: 4 });
+  });
+
+  it("opens nothing for email-like or malformed tokens", () => {
+    for (const [text, caret] of [
+      ["a@b", 3],
+      ["foo@", 4],
+      ["x@@y", 4],
+      ["@foo@bar", 8],
+      ["@@foo@bar", 9],
+      ["@@@", 3],
+      ["@a b", 4],
+      ["", 0],
+    ] as const) {
+      expect(t(text, caret), `${JSON.stringify(text)}@${caret}`).toBeNull();
+    }
+  });
+
+  it("treats a caret between the two @ as file mode", () => {
+    expect(t("@@x", 1)).toMatchObject({ mode: "file", query: "" });
+  });
+
+  describe("slash commands (semantics preserved)", () => {
+    it("uses the whole first token as the query, wherever the caret sits in it", () => {
+      expect(t("/review rest", 3)).toEqual({ mode: "command", query: "review", anchorStart: 0, anchorEnd: 7 });
+      expect(t("/review rest", 0)).toMatchObject({ mode: "command", query: "review" });
+    });
+
+    it("stops the command token at punctuation", () => {
+      expect(t("/review.foo", 7)).toEqual({ mode: "command", query: "review", anchorStart: 0, anchorEnd: 7 });
+    });
+
+    it("does not trigger on a leading-space slash or past the first word", () => {
+      expect(t(" /rev", 5)).toBeNull();
+      expect(t("/rev x", 6)).toBeNull();
+      expect(t("/@@x", 4)).toBeNull();
+    });
+
+    it("falls through to file mentions once the caret leaves the command token", () => {
+      expect(t("/rev @file", 10)).toEqual({ mode: "file", query: "file", anchorStart: 5, anchorEnd: 10 });
+    });
+  });
+});
+
+describe("authProviderSeatId", () => {
+  it("maps the seat-bearing providers", () => {
+    expect(authProviderSeatId("anthropic")).toBe("claude");
+    expect(authProviderSeatId("openai")).toBe("codex");
+  });
+  it("has no seat panel for Kimi or anything else", () => {
+    for (const v of ["kimi-for-coding", "", "foo", null, undefined]) expect(authProviderSeatId(v)).toBeUndefined();
+  });
+});

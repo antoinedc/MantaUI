@@ -942,6 +942,15 @@ export interface HandoffSessionInfo {
   mode?: HandoffMode;
   /** True when `mode` is the box default rather than this session's own value. */
   modeIsDefault?: boolean;
+  /** The replacement chain behind this session (+ branch origin), with titles the box looked up. Absent on an older box. */
+  chain?: { predecessors: HandoffChainEntry[] };
+}
+
+export interface HandoffChainEntry {
+  id: string;
+  title?: string;
+  deleted?: boolean;
+  branchedFrom?: boolean;
 }
 
 /** `handoff` bus payload — published on every record change; carries no text. */

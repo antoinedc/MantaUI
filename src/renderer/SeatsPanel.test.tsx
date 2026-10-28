@@ -7,7 +7,7 @@ import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
 import { act } from "react";
 import { installCanvasStub, mount, installMockApi, resetStore, buttonByText, type Harness } from "./testHarness";
 import { useStore } from "./store";
-import { clearAccountsFocus } from "./accountsData";
+import { clearAccountsFocus, openAccountsSettings } from "./accountsData";
 import { NOW, oneSeatView, threeSeatView } from "./seatFixtures";
 import type { ProviderView } from "../shared/types";
 
@@ -452,5 +452,40 @@ describe("AddSeatFlow wait limit and failure reasons", () => {
       h!.rerender?.(<AddSeatFlow provider="claude" accountId="a1" onDone={(m) => onDone(m)} onCancel={() => {}} />);
     });
     expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("pending provider focus (set before mount) expands that provider's panel once, then is consumed", async () => {
+    openAccountsSettings("claude");
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    installMockApi({ accountsList: () => Promise.resolve({ providers: [oneSeatView()] }) });
+    resetStore({ accounts: [oneSeatView()], appToasts: [] } as never);
+    h = mount(<SeatsPanel view={oneSeatView()} />);
+    await h.flush();
+    expect(h.container.querySelector("button[aria-expanded]")!.getAttribute("aria-expanded")).toBe("true");
+    h.unmount();
+    h = mount(<SeatsPanel view={oneSeatView()} />);
+    await h.flush();
+    expect(h.container.querySelector("button[aria-expanded]")!.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("manta-open-settings with a provider while already mounted expands only the matching panel", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    const codex = { ...oneSeatView(), provider: "codex" as const };
+    installMockApi({ accountsList: () => Promise.resolve({ providers: [oneSeatView(), codex] }) });
+    resetStore({ accounts: [oneSeatView(), codex], appToasts: [] } as never);
+    h = mount(
+      <>
+        <SeatsPanel view={oneSeatView()} />
+        <SeatsPanel view={codex} />
+      </>,
+    );
+    await h.flush();
+    await act(async () => {
+      openAccountsSettings("codex");
+    });
+    await h.flush();
+    const [claudeToggle, codexToggle] = Array.from(h.container.querySelectorAll("button[aria-expanded]"));
+    expect(claudeToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(codexToggle.getAttribute("aria-expanded")).toBe("true");
   });
 });
