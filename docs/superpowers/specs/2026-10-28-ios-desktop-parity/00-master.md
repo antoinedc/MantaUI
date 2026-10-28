@@ -179,6 +179,76 @@ Server-file conflicts: only one workstream per wave may edit `rpc.mjs` /
 `index.mjs`; if two in the same wave need it, the second serialises behind the
 first within the wave.
 
+## Consolidation decisions (binding; override any workstream spec that disagrees)
+
+D1. **Ownership amendments.** `MantaModels.swift`, `MantaUIApp.swift` → WS01.
+`InboxModels.swift`, `PendingMessagesCard.swift`, `HandoffStore.swift` → WS02.
+`TerminalScreen.swift`, `TerminalWebView.swift`, `TerminalModels.swift` → WS04
+(additive edits only). `ChatModelStore.swift` → WS09. `mobile/native/Package.swift`
+and `project.yml` → WS07 (wave B); any other workstream needing a package or
+project change lists it as a mount request. Navigator injection happens in
+`MantaAppRoot.swift` (not `RootView`, which is the capture-harness fixture).
+WS07 mounts its agent-file notice in `MantaAppRoot.swift` in wave B.
+
+D2. **`NewSessionDraft` is defined once, in `MantaNavigation.swift`** (wave-0
+scaffold, owned by WS04 afterwards):
+
+```swift
+struct NewSessionDraftAttachment: Hashable, Sendable { var remotePath: String; var displayName: String; var mime: String? }
+struct NewSessionDraft: Hashable, Sendable {
+  var cwd: String?                 // absolute box path; nil = user picks
+  var text: String                 // composer seed — placed in the new chat's composer, NEVER auto-sent
+  var attachments: [NewSessionDraftAttachment]
+  var worktreeBranch: String?      // non-nil = create flow pre-ticks "new worktree" with this branch name
+  var linkedIssueURL: String?      // informational; shown in the create sheet header (WS05 inbox)
+}
+// on MantaNavigator:
+func startNewSession(_ draft: NewSessionDraft)   // presents WS04's create sheet prefilled
+```
+
+WS03's `ComposerTextController.newSessionDraft(cwd:)` produces this type; WS03
+must not declare a second `NewSessionDraft`. The create sheet always needs one
+user confirmation (Create) — no silent session creation.
+
+D3. **`ComposerTextController` adoption in `ChatScreen.swift`** is done by WS03
+in wave A as a minimal, additive edit (WS02 does not run in wave A). WS02 builds
+on it in wave B.
+
+D4. **Quote format**: keep the behaviour iOS already ships (WS03 F6 default);
+C3's `.quote` wording follows WS03's spec.
+
+D5. **GitHub device sign-in** is built ONCE by WS04 in wave A as a reusable view
+(`GitHubDeviceSignIn` in `CloneFromGitHub*`), to the contract written in WS05 §4.
+WS05 reuses it.
+
+D6. **"Send failures to the agent"** appends (C3 `.append`), never replaces.
+
+D7. Accepted server changes (and only these): WS08 S1 (`ptyWs.mjs` refuses
+hidden sign-in launchers); WS09 `models:unidentified` channel in
+`src/server/modelsUnidentified.mjs` with a desktop-parity node test; WS10
+`current` flag on `GET /auth/devices`. Wave A: WS08 (`ptyWs.mjs`) and WS10
+(`devices.mjs`, `auth.mjs`, `index.mjs`). Wave B: WS09 (`rpc.mjs`).
+
+D8. Accepted deferrals: "Reset health" (Auto routing never runs from iOS);
+auto-save files, downloads folder, opencode port; revoking the shared desktop
+pairing from the phone; model tier tag/description; matched-text highlight after
+a search jump; the gateway code→box lookup (manual pairing becomes one "Server
+address" field + code).
+
+D9. Defaults accepted from specs: search session-list entry sends `maxPrimary: 3`;
+"show reasoning & full output" is an app-wide persisted toggle, off by default;
+secrets default scope = shared (desktop parity); agent-file notice always shown;
+custom-endpoint save does not restart opencode, API-key / device-code connect
+keeps desktop's restart-and-poll; "Edit last" queued message asks before
+replacing a non-empty draft; "Go to parent" uses `MantaNavigator.open(.session)`;
+background job from the inbox asks "Run under which session?".
+
+D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
+job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
+fixed by the workstream that touches the matching iOS feature ONLY if the fix is
+in a shared/pure module both clients use; desktop-renderer-only fixes are out of
+scope and reported at the end.
+
 ## Definition of done (whole effort)
 
 - Every gap in the table above is either built per its spec or explicitly
