@@ -236,9 +236,27 @@ describe("SecretsCard (chat popover)", () => {
     typeInto(search, "aws");
     expect(h.text()).not.toContain("GITHUB_PAT");
     h.rerender(<SecretsCard {...props} prefillKey="GITHUB_PAT" />);
-    expect(search.value).toBe("");
+    expect(h.container.querySelector('input[aria-label="Search secrets"]')).toBeNull(); // add form replaced the search row
     const row = Array.from(h.container.querySelectorAll("div.group")).find((d) => d.textContent?.includes("GITHUB_PAT"));
     expect((row as HTMLElement).style.boxShadow).toContain("inset");
+  });
+
+  it("search sits next to '+ Add secret'; opening the add form clears it; no search when there are no secrets", () => {
+    mountCard();
+    expect(h!.text()).not.toContain("Agents use these via secret_provide");
+    const add = buttonIn(h!.container, "+ Add secret")!;
+    const search = h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement;
+    expect(add.parentElement!.contains(search)).toBe(true);
+    typeInto(search, "aws");
+    click(add);
+    expect(h!.container.querySelector('input[aria-label="Search secrets"]')).toBeNull();
+    expect(h!.text()).toContain("GITHUB_PAT");
+    click(buttonIn(h!.container, "Cancel"));
+    expect((h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement).value).toBe("");
+    h!.unmount();
+    h = null;
+    mountCard({ secrets: [] });
+    expect(h!.container.querySelector('input[aria-label="Search secrets"]')).toBeNull();
   });
 
   it("the row being edited stays visible when the search stops matching it", () => {
