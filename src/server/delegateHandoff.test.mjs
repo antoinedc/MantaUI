@@ -70,5 +70,10 @@ test("the engine's listJobs expands a session to its replacement chain", async (
   assert.deepEqual((await engine.listJobs({ sessionID: "z" })).map((j) => j.id), ["j3"]);
   assert.equal(await engine.isRunningJobSession("ses_child"), true);
   assert.equal(await engine.isRunningJobSession("ses_none"), false);
+  // The read-only-job guard's cheap read: the raw records, with no progress reads at all.
+  let progressReads = 0;
+  const lean = createDelegateEngine({ load: s.load, save: s.save, readProgress: async () => (progressReads++, null) });
+  assert.deepEqual((await lean.loadRecords()).map((j) => j.id), ["j1", "j2", "j3"]);
+  assert.equal(progressReads, 0);
   assert.equal(await engine.repointSessions({ fromSessionId: "a", toSessionId: "a2" }), 1);
 });

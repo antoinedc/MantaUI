@@ -217,8 +217,17 @@ struct ChatCardApprovalCard: View {
     let onApprove: ([ChatCardApprovalTool]) -> Void
     let onDecline: () -> Void
 
+    /// One editable rule with a stable identity, so removing a middle row does not
+    /// hand its text field (focus, in-progress edit) to the row below it.
+    private struct RuleRow: Identifiable {
+        let id = UUID()
+        var tool: ChatCardApprovalTool
+    }
+
     @State private var editing = false
-    @State private var tools: [ChatCardApprovalTool]
+    @State private var rows: [RuleRow]
+
+    private var tools: [ChatCardApprovalTool] { rows.map(\.tool) }
 
     init(approval: ChatCardApproval, busy: Bool, error: String?, tokens: Tokens,
          onApprove: @escaping ([ChatCardApprovalTool]) -> Void, onDecline: @escaping () -> Void) {
@@ -228,7 +237,7 @@ struct ChatCardApprovalCard: View {
         self.tokens = tokens
         self.onApprove = onApprove
         self.onDecline = onDecline
-        _tools = State(initialValue: approval.tools)
+        _rows = State(initialValue: approval.tools.map { RuleRow(tool: $0) })
     }
 
     var body: some View {
@@ -273,11 +282,11 @@ struct ChatCardApprovalCard: View {
                     .font(.manta(size: Metrics.type.xs))
                     .foregroundColor(tokens.tx4)
             }
-            ForEach(Array(tools.enumerated()), id: \.offset) { index, tool in
+            ForEach(rows) { row in
                 if editing {
-                    ruleEditor(index: index)
+                    ruleEditor(id: row.id)
                 } else {
-                    Text("\(tool.permission): \(tool.pattern)")
+                    Text(ChatCardApprovalLogic.ruleLabel(row.tool))
                         .font(.manta(size: Metrics.type.xs, design: .monospaced))
                         .foregroundColor(tokens.tx2)
                         .padding(.horizontal, Metrics.spacing.sp2)
@@ -286,7 +295,7 @@ struct ChatCardApprovalCard: View {
                 }
             }
             if editing {
-                Button { tools.append(ChatCardApprovalTool(permission: "bash", pattern: "")) } label: {
+                Button { rows.append(RuleRow(tool: ChatCardApprovalTool(permission: "bash", pattern: ""))) } label: {
                     Label("Add rule", systemImage: "plus")
                         .font(.manta(size: Metrics.type.xs, weight: .semibold))
                         .foregroundColor(tokens.accentTx)
@@ -352,20 +361,20 @@ struct ChatCardApprovalCard: View {
         .chatCardSurface(tokens, identifier: "approval-card")
         // A different approval starts with its own rules and a closed editor.
         .onChange(of: approval.id) { _, _ in
-            tools = approval.tools
+            rows = approval.tools.map { RuleRow(tool: $0) }
             editing = false
         }
     }
 
-    private func ruleEditor(index: Int) -> some View {
+    private func ruleEditor(id: UUID) -> some View {
         HStack(spacing: Metrics.spacing.sp2) {
-            TextField("permission", text: binding(index, \.permission))
+            TextField("permission", text: binding(id, \.permission))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            TextField("pattern", text: binding(index, \.pattern))
+            TextField("pattern", text: binding(id, \.pattern))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            Button { tools.remove(at: index) } label: {
+            Button { rows.removeAll { $0.id == id } } label: {
                 Image(systemName: "trash")
                     .font(.system(size: Metrics.type.xs))
                     .foregroundColor(tokens.danger)
@@ -382,10 +391,12 @@ struct ChatCardApprovalCard: View {
         .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
     }
 
-    private func binding(_ index: Int, _ keyPath: WritableKeyPath<ChatCardApprovalTool, String>) -> Binding<String> {
+    private func binding(_ id: UUID, _ keyPath: WritableKeyPath<ChatCardApprovalTool, String>) -> Binding<String> {
         Binding(
-            get: { tools.indices.contains(index) ? tools[index][keyPath: keyPath] : "" },
-            set: { if tools.indices.contains(index) { tools[index][keyPath: keyPath] = $0 } }
+            get: { rows.first { $0.id == id }?.tool[keyPath: keyPath] ?? "" },
+            set: { value in
+                if let index = rows.firstIndex(where: { $0.id == id }) { rows[index].tool[keyPath: keyPath] = value }
+            }
         )
     }
 }

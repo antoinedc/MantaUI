@@ -111,6 +111,13 @@ enum ChatCardApprovalLogic {
         return nil
     }
 
+    /// One rule as the card shows it. A deny rule reads "deny · …" so the user can
+    /// see what they are approving.
+    static func ruleLabel(_ tool: ChatCardApprovalTool) -> String {
+        let base = "\(tool.permission): \(tool.pattern)"
+        return tool.action == "deny" ? "deny · \(base)" : base
+    }
+
     /// The confirmation after a decision the box accepted (`ok: true`), or the
     /// "already decided elsewhere" line for `ok: false`.
     static func outcomeHint(ok: Bool, approved: Bool) -> String {
@@ -209,6 +216,27 @@ enum ChatCardMutationGate {
         case .readOnlyJob: return .refuse(readOnlyJobMessage)
         case .resolving: return action == .send ? .hold : .refuse(checkingMessage)
         }
+    }
+}
+
+extension ChatCardMutationGate {
+    /// The composer takes input in every state but a read-only job: while the session
+    /// is still being checked typing stays possible (the send is held instead).
+    static func composerAcceptsInput(_ policy: ChatCardMutationPolicy) -> Bool {
+        policy != .readOnlyJob
+    }
+}
+
+// MARK: - Pending-message actions gate
+
+enum ChatCardInboxGate {
+    static let updateBoxNote = "Update your box to use this"
+
+    /// Whether the pending card's actions (×, Send now, Wait, Edit last) are enabled,
+    /// and the line that explains why not. `available` is `chat-cards-1`: nil = not
+    /// known yet (disabled, no note), false = an older box (disabled + the note).
+    static func resolve(available: Bool?, canMutate: Bool) -> (actionsEnabled: Bool, gateNote: String?) {
+        (available == true && canMutate, available == false ? updateBoxNote : nil)
     }
 }
 

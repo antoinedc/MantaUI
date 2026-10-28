@@ -34,12 +34,22 @@ extension MantaAPIClient {
     /// `ok:false` with an `error` = the box refused the rules; the approval stays
     /// pending.
     func delegateApprove(id: String, tools: [ChatCardApprovalTool]) async throws -> ChatCardApproveResult {
-        let payload: [[String: String]] = tools.map { ["permission": $0.permission, "pattern": $0.pattern] }
         return try await callRequired(
             "delegate:approve",
-            args: [["id": id, "tools": payload]],
+            args: [["id": id, "tools": Self.approvalToolsPayload(tools)]],
             as: ChatCardApproveResult.self
         )
+    }
+
+    /// The wire form of the edited access list. `action` MUST ride along: the box reads
+    /// a rule with no `action:"deny"` as an allow, so dropping it would turn a deny
+    /// rule into an allow the moment a job is approved from the phone.
+    static func approvalToolsPayload(_ tools: [ChatCardApprovalTool]) -> [[String: Any]] {
+        tools.map { tool in
+            var rule: [String: Any] = ["permission": tool.permission, "pattern": tool.pattern]
+            if let action = tool.action { rule["action"] = action }
+            return rule
+        }
     }
 
     /// `delegate:decline` — `ok:false` only means it is no longer pending.

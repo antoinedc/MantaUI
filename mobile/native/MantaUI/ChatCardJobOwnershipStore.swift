@@ -38,11 +38,24 @@ final class ChatCardJobOwnershipStore: ObservableObject {
     private let sessionId: String
     private let api: any ChatCardJobAPI
     private let capabilities: ChatCardCapabilities
+    private var capabilityWatch: AnyCancellable?
 
     init(sessionId: String, api: any ChatCardJobAPI, capabilities: ChatCardCapabilities) {
         self.sessionId = sessionId
         self.api = api
         self.capabilities = capabilities
+        // Belt and braces: when the capability list lands while this session is still
+        // unconfirmed, ask again at once rather than waiting for the 30 s tick.
+        capabilityWatch = capabilities.$ids
+            .dropFirst()
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.policy == .resolving else { return }
+                    await self.resolve()
+                }
+            }
     }
 
     /// Whether the 30 s re-resolve should be running: while still resolving, or

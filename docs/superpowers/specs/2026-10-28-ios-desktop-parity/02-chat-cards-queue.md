@@ -417,9 +417,16 @@ non-blank — client gating, KEEP-CLIENT per audit C6; the box re-checks),
   (throws on refusal). Freshness via `eventStore.delegateUpdates`.
 - **NEW refusal (C10):** the box itself refuses `opencode:prompt`,
   `opencode:inbox-cancel`, `opencode:inbox-set-delivery`,
-  `opencode:compact-session`, `opencode:run-command` aimed at a read-only job
-  session: HTTP 409 `{error:"This is a background job — it can't take messages", code:"read_only_job"}`.
-  The client policy below remains the UX; the box is the authority.
+  `opencode:compact-session`, `opencode:run-command`, **and (code-review
+  decision) the job's own asks and turn: `opencode:permission-reply`,
+  `opencode:question-reply`, `opencode:question-reject`, `opencode:abort`**
+  aimed at a read-only job session:
+  HTTP 409 `{error:"This is a background job — it can't take messages", code:"read_only_job"}`.
+  Deliberately NOT guarded (follow-ups, listed in the `delegateView.mjs` header):
+  `opencode:clear-session` / `delete-session` / `delete-session-raw`, the
+  `handoff:*` channels, and prompts the box injects itself (schedule, webhooks,
+  `peers_message`). The client policy below remains the UX; the box is the
+  authority.
 
 ### Ownership states (resolves review #8)
 `enum ChatCardMutationPolicy: Equatable, Sendable { case resolving, allowed, readOnlyJob }`
@@ -443,7 +450,9 @@ non-blank — client gating, KEEP-CLIENT per audit C6; the box re-checks),
     `.waiting` (exactly as when a turn runs) and do not deliver;
     `drainPendingPromptIfIdle` also requires `.allowed`. Other mutations are
     refused with hint "One moment — checking this session". Blocking cards
-    render inert (`transcriptCardActions` nil). The composer stays usable, so
+    keep their live actions, so a tap on Allow / Deny / Submit reports that
+    hint instead of doing nothing (never a dead button); only a `.readOnlyJob`
+    session gets the inert read-only actions. The composer stays usable, so
     the degraded-mode promise (typing while the box is unreachable) holds.
   - `.allowed`: today's behaviour; held `.waiting` prompts drain.
   - `.readOnlyJob`: the composer is replaced by the bar; any held `.waiting`
@@ -859,8 +868,9 @@ capability id, **`chat-cards-1`**, covers all of SF-1…SF-5.
 - NEW `src/shared/formatTokens.mjs` (+ `.d.mts`, test `src/shared/formatTokens.test.ts`;
   master D26 — the ONE token formatter, created by WS02 in wave B, consumed by
   WS09 and WS11): `formatTokenCount(n) -> string` (compact, no unit: `<1000` →
-  whole number, `<100k` → one decimal with `.0` dropped + "k", else rounded
-  "k") and `formatTokens(n) -> string` (`n < 1000 ? "<n> tokens" : "<formatTokenCount(n)> tokens"`,
+  whole number, `<100k` → one decimal with `.0` dropped + "k", `<1M` → rounded
+  "k", else one decimal + "M" with `.0` dropped — byte-identical to the deleted
+  `SessionHeader.formatTokensCompact`, which also formatted millions) and `formatTokens(n) -> string` (`n < 1000 ? "<n> tokens" : "<formatTokenCount(n)> tokens"`,
   byte-identical to today's `chatUtils.ts:219`).
 - `streamInterpretation.mjs`: `compactionFirstLine(text) -> string|null` (first
   non-blank line, trimmed); imports `formatTokenCount` from `./formatTokens.mjs`;
@@ -901,7 +911,7 @@ capability id, **`chat-cards-1`**, covers all of SF-1…SF-5.
 ```js
 export class ReadOnlyJobError extends Error { code = "read_only_job"; rpcStatus = 409 }
 export const READ_ONLY_JOB_MESSAGE = "This is a background job — it can't take messages";
-export function createDelegateView({ listJobs, listProjects, listModels, now = Date.now }) → {
+export function createDelegateView({ loadJobs, listProjects, listModels, now = Date.now }) → {
   jobForSession(sessionId) → Promise<{readOnly:false} | {readOnly:true, job: DelegateJobView}>,
   assertWritable(sessionId) → Promise<void>,        // throws ReadOnlyJobError
   decorateList(jobs) → jobs.map(j => ({...j, statusLabel, summary})),
@@ -938,11 +948,17 @@ isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName)
   - `await delegateView.assertWritable(<sessionId>)` first in
     `opencode:prompt` (`input.sessionId`), `opencode:inbox-cancel`,
     `opencode:inbox-set-delivery` (`input.sessionId`), `opencode:compact-session`
-    (arg), `opencode:run-command` (`input.sessionId`).
+    (arg), `opencode:run-command` (`input.sessionId`), `opencode:permission-reply`,
+    `opencode:question-reply`, `opencode:question-reject` (`input.sessionId`) and
+    `opencode:abort` (arg).
   - `handleRpcRequest` catch: `if (typeof e?.rpcStatus === "number") { sendJson(e.rpcStatus, {error: e.message, code: e.code}); return; }`
     — the body's `error` is the human sentence, so an old desktop shows it as-is
     (audit §4).
-- `index.mjs` (mount M-02-srv-10): `const delegateView = createDelegateView({ listJobs: (f) => delegateEngine.listJobs(f ?? {}), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() })`
+- `index.mjs` (mount M-02-srv-10): `const delegateView = createDelegateView({ loadJobs: () => delegateEngine.loadRecords(), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() })`
+  (`loadRecords` is the engine's raw record read — no per-job `progress.json`
+  reads, because `assertWritable` runs on every guarded request in every
+  session; `delegateView,` goes AFTER `handoff: handoffEngine,` in the
+  `buildHandlers` call so `handoff/wiring.test.mjs` stays green)
   and pass `delegateView` into `buildHandlers`.
 - Node tests `src/server/delegateView.test.mjs`: work vs delegate vs subagent
   record; superseded record ignored; headline with/without a catalog hit;
@@ -956,9 +972,11 @@ isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName)
   `handoff`, `ctoConversation`, `delegateView` over an in-memory job list —
   no live box, sandboxed state per `scripts/testSandbox.mjs`):
   - `delegate:job-for-session` round trip.
-  - **Table-driven over all five guarded channels** (`opencode:prompt`,
+  - **Table-driven over all nine guarded channels** (`opencode:prompt`,
     `opencode:inbox-cancel`, `opencode:inbox-set-delivery`,
-    `opencode:compact-session`, `opencode:run-command`), each through
+    `opencode:compact-session`, `opencode:run-command`,
+    `opencode:permission-reply`, `opencode:question-reply`,
+    `opencode:question-reject`, `opencode:abort`), each through
     `handleRpcRequest` with a fake request/response: for a read-only job
     session → HTTP 409, body exactly
     `{error:"This is a background job — it can't take messages", code:"read_only_job"}`,
@@ -966,7 +984,7 @@ isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName)
     `streamInterp.cancelInbox`, `streamInterp.setInboxDelivery`,
     `oc.compactSession`, the command runner, `handoff.admitPrompt`,
     `ctoConversation.admitDirect`).
-  - The same five for an ordinary session and for a `correlation.kind:"work"`
+  - The same nine for an ordinary session and for a `correlation.kind:"work"`
     job session → the existing route is reached (downstream fake called once,
     200).
   - `opencode:compact-session` (today a synchronous arrow, `rpc.mjs:1968`)
@@ -1236,7 +1254,7 @@ IDs match the master's canonical mount ledger (`00-master.md`).
 | M-02-1 | `TranscriptRow.swift` (WS01) | Integration agent B (WS01 does not run in B) | `EnvironmentValues.transcriptHighlightedRowID: String?` (WS02, `ChatCardMessageFocus.swift`) | In `TranscriptCellReveal` add `@Environment(\.transcriptHighlightedRowID) private var highlightedRowID`; on `cellContent` add `.background(item.id == highlightedRowID ? tokens.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: Metrics.radius.md))` and `.animation(.easeOut, value: highlightedRowID)`. Nothing else. | WS02 commit containing `ChatCardMessageFocus.swift` |
 | M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 (wave B) | — (plain parameter) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete, the Trust-mode toggle, Rename (M-04-1) and the Mode rows (M-04-2). ChatScreen passes `isReadOnlyJob: store.isBackgroundJobReadOnly`. The default keeps either landing order compiling. | none |
 | M-02-3 | `mobile/native/Package.swift` | Integration agent B | `ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift` (WS02) | Append the two files to the `MantaUI` target `sources` and the test file to `MantaUITests` `sources`, then run `./verify.sh`. Do NOT add `MantaAPIClient+ChatCards.swift`, `ChatCardViews.swift`, `ChatCardApprovalStore.swift`, `ChatCardJobOwnershipStore.swift`, `ChatCardMessageFocus.swift`, `ChatCardsStoreTests.swift`. | WS02 commit |
-| M-02-4 | `SessionModels.swift` (WS04) | Integration agent B (WS04 not in B) | `delegate:list` row fields `statusLabel`, `summary` (SF-4, S16) | `DelegateJob` gains `var statusLabel: String? = nil`, `var summary: String? = nil` (CodingKeys + lenient decode in the existing `init(from:)`); **delete** `BackgroundJobFormat.statusLabel(_:)` (the box owns it). `timing`, `sorted`, `failureReason` stay (clock/sort/transport — KEEP-CLIENT). | WS02 commit (SF-4 server) |
+| M-02-4 | `SessionModels.swift` (WS04) | Integration agent B (WS04 not in B) | `delegate:list` row fields `statusLabel`, `summary` (SF-4, S16) | `DelegateJob` gains `var statusLabel: String? = nil`, `var summary: String? = nil` (CodingKeys + lenient decode in the existing `init(from:)`); **delete** `BackgroundJobFormat.statusLabel(_:)` (the box owns it) **and its uses in `MantaUITests/SessionActivityOrderTests.swift` (~:362–364)**. `timing`, `sorted`, `failureReason` stay (clock/sort/transport — KEEP-CLIENT). | WS02 commit (SF-4 server) |
 | M-02-5 | `BackgroundJobsSheet.swift` (WS02 from wave B, master D28) | WS02 (wave B, own file) | `DelegateJob.statusLabel: String?`, `.summary: String?` (pinned; added to WS04's `SessionModels.swift` by IB via M-02-4) | In `detailLine(_:)` (~:376) use `job.statusLabel ?? job.status` instead of `BackgroundJobFormat.statusLabel(job)`; for a terminal job append `job.summary` when non-nil. Old box: the raw `status` word (data, no rule). | M-02-4 |
 | M-02-srv-1 | `src/server/rpc.mjs` (`"server:version"`, :2584) | Integration agent B (1st in wave-B server order) | `BOX_CAPABILITIES` (`boxCapabilities.mjs`) | `({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion, capabilities: [...BOX_CAPABILITIES] })` + import. | WS02 commit |
 | M-02-srv-2 | `src/server/streamInterp.mjs` (`session.retry.scheduled`, :771–782) | Integration agent B | `describeRetry` (`streamInterpretation.mjs`) | Emit `{attempt, message, ...(next), ...describeRetry({attempt, message, action: null})}`. | WS02 commit |
@@ -1244,10 +1262,10 @@ IDs match the master's canonical mount ledger (`00-master.md`).
 | M-02-srv-4 | `src/server/index.mjs` (`optimizer.compacted` publish, :1925–1937) | Integration agent B | `describeBackgroundCompaction` | Add `text: describeBackgroundCompaction({ beforeTokens: before ?? null, afterTokens: after ?? null, away })` to the payload + import. | WS02 commit |
 | M-02-srv-5 | `src/server/streamInterp.mjs` (`session.execution.failed`, :742–760) | Integration agent B | `describeSessionError` | Add `display: describeSessionError({ name: err?.name ?? null, message: human, rawMessage: message }, st.model?.providerID ?? null)` to the `sessionError` payload + import. | WS02 commit |
 | M-02-srv-6 | `src/server/rpc.mjs` (`buildHandlers` deps + delegate channels, :2434–2480) | Integration agent B | `createDelegateView` instance `delegateView` | Destructure `delegateView` from deps; `"delegate:list"` → `delegateView ? delegateView.decorateList(list) : list` (array case only); NEW `"delegate:job-for-session"`; `"delegate:approve"` → `validateApprovalTools` check first (SF-4). | M-02-srv-10 |
-| M-02-srv-7 | `src/server/rpc.mjs` (`opencode:prompt` :1344, `opencode:inbox-cancel` :1388, `opencode:inbox-set-delivery` :1402, `opencode:compact-session` :1968, `opencode:run-command` :2055) | Integration agent B | `delegateView.assertWritable` | First statement of each handler: `await delegateView?.assertWritable(<sessionId>)` (`input?.sessionId`, or the arg for compact). `opencode:compact-session` becomes `async (sessionId) => { await delegateView?.assertWritable(sessionId); return oc.compactSession(sessionId); }`. The CTO/handoff branches stay after the guard, unchanged. | M-02-srv-6 |
+| M-02-srv-7 | `src/server/rpc.mjs` (`opencode:prompt` :1344, `opencode:inbox-cancel` :1388, `opencode:inbox-set-delivery` :1402, `opencode:compact-session` :1968, `opencode:run-command` :2055, + `opencode:abort` :1373, `opencode:permission-reply`, `opencode:question-reply`, `opencode:question-reject`) | Integration agent B | `delegateView.assertWritable` | First statement of each handler: `await delegateView?.assertWritable(<sessionId>)` (`input?.sessionId`, or the arg for compact). `opencode:compact-session` becomes `async (sessionId) => { await delegateView?.assertWritable(sessionId); return oc.compactSession(sessionId); }`. The CTO/handoff branches stay after the guard, unchanged. | M-02-srv-6 |
 | M-02-srv-8 | `src/server/rpc.mjs` (`handleRpcRequest` catch, :2705) | Integration agent B | `ReadOnlyJobError.rpcStatus/code` | Before the HandoffError branch: `if (typeof e?.rpcStatus === "number") { sendJson(e.rpcStatus, { error: String(e.message), code: e.code }); return; }`. | M-02-srv-7 |
 | M-02-srv-9 | `src/server/rpc.mjs` (inbox handlers :1388–1419) | Integration agent B | `describeInboxCancel`, `describeInboxSetDelivery` (`inboxCopy.mjs`) | Wrap results: `{...r, ...describeInboxCancel(r, { restore: input?.restore === true })}` / `{...r, ...describeInboxSetDelivery(r)}`. | WS02 commit |
-| M-02-srv-10 | `src/server/index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | Integration agent B | `createDelegateView` | `const delegateView = createDelegateView({ listJobs: (f) => delegateEngine.listJobs(f ?? {}), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() });` and pass `delegateView` into `buildHandlers({...})`. | WS02 commit |
+| M-02-srv-10 | `src/server/index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | Integration agent B | `createDelegateView` | `const delegateView = createDelegateView({ loadJobs: () => delegateEngine.loadRecords(), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() });` and pass `delegateView,` into `buildHandlers({...})` AFTER `handoff: handoffEngine,` (`handoff/wiring.test.mjs` pins `delegate: delegateEngine,\s*handoff: handoffEngine,`). Needs `delegate.mjs`'s new `loadRecords` (in the WS02 commit). | WS02 commit |
 
 Server-mount order inside integration agent B: M-02-srv-1 → 10 → 6 → 7 → 8 → 9
 → 2 → 3 → 5 → 4, then `npm run test:server` (includes WS02's
@@ -1399,7 +1417,7 @@ Q3 (Edit last over a draft) by D9.
 | C2 compaction copy | `compaction` `ended` + `firstLine` (box accumulates text, M-02-srv-3); `optimizer.compacted` + `text` (M-02-srv-4); one shared `formatTokenCount` (desktop `formatTokens` built on it). iOS `ChatCardTokens`/`ChatCardCompactionNotice.text` deleted; desktop `formatCompactionSaving` deleted. |
 | C5 send-error | `describeSessionError`/`authErrorAdvice`/`AUTH_PROVIDER_LABELS` moved from `chatUtils.ts` to the shared module, run in streamInterp against the box's own model record (`sessionError.display`, M-02-srv-5). iOS `ChatCardSendError` + `sessionErrorProviderID` deleted; desktop `useSseBus` reads `display`. |
 | C9 job view | NEW `src/server/delegateView.mjs` + `delegate:job-for-session` (M-02-srv-6/10). iOS `ChatCardJobLogic` and raw `ChatCardJob` decoding deleted, bar renders the view; desktop `isReadOnlyJob`/`parseModelRef`/`formatJobSummary` deleted, `ReadOnlyJobBar` takes the view. The `.resolving` machine stays client (audit). Deviation from the audit's sketch: the parent is returned as `{sessionId, name, project, windowIndex}` instead of a `windowKey`, because the key format is a client navigation concern (`MantaNavigator.windowKey` is static client code). |
-| C10 refusal | `assertWritable` on prompt / inbox-cancel / inbox-set-delivery / compact / run-command, 409 `{error: <sentence>, code:"read_only_job"}` via a generic `rpcStatus` branch in `handleRpcRequest` (M-02-srv-7/8). Client gate kept as UX. |
+| C10 refusal | `assertWritable` on prompt / inbox-cancel / inbox-set-delivery / compact / run-command (+ permission-reply / question-reply / question-reject / abort, code-review decision), 409 `{error: <sentence>, code:"read_only_job"}` via a generic `rpcStatus` branch in `handleRpcRequest` (M-02-srv-7/8). Client gate kept as UX. |
 | C11 inbox copy | NEW `src/server/inboxCopy.mjs`; results gain `notice`/`error`/`restoreText`, cancel takes `restore` (M-02-srv-9). iOS `InboxActionReport.cancel/setDelivery` deleted; desktop `describeInboxCancel/describeInboxSetDelivery` deleted. |
 | S16 list labels | `delegate:list` rows + `statusLabel`, `summary`; iOS `BackgroundJobFormat.statusLabel` deleted via M-02-4/5 (integration B). |
 | Wire compat | Additive only; capability `chat-cards-1` (`boxCapabilities.mjs`, `server:version`, `/api/version`); per-feature old-box behaviour stated in F1/F2/F4/F6/F8 and SF-0 — hidden/disabled with "Update your box to use this", never a fallback copy of the moved logic. |

@@ -370,13 +370,17 @@ export function ChatPanel({
   // has no bar to show: the session simply opens as an ordinary one.
   const jobsCapability = useBoxCapability("chat-cards-1");
   const [jobView, setJobView] = useState<DelegateJobView | null>(null);
+  // Overlapping refreshes can land out of order: only the newest request may write.
+  const jobViewSeq = useRef(0);
   const refreshJobView = useCallback(async () => {
+    const seq = ++jobViewSeq.current;
     if (jobsCapability !== true) {
       setJobView(null);
       return;
     }
     try {
       const r = await window.api.delegateJobForSession(sessionId);
+      if (seq !== jobViewSeq.current) return;
       setJobView(r.readOnly ? r.job : null);
     } catch {
       /* keep the last answer: a hiccup must not flip a known job writable */

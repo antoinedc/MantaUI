@@ -1,5 +1,5 @@
 // WS02 server-first (SF-4 / SF-5) at the RPC seam: the read-only job refusal on the
-// five guarded channels, delegate:job-for-session, decorated delegate:list, the
+// nine guarded channels, delegate:job-for-session, decorated delegate:list, the
 // approve rule check, and inbox outcome decoration. Dependency-injected — no live box.
 // Green once the M-02-srv-6…10 mounts are applied to rpc.mjs.
 import { test } from "node:test";
@@ -41,6 +41,10 @@ function rig({ cancelResult = { outcome: "cancelled" } } = {}) {
     getMessage: async () => null,
     listModels: async () => [],
     getSessionDirectory: async () => undefined,
+    replyPermission: async (i) => log.push(["replyPermission", i]),
+    replyQuestion: async (i) => log.push(["replyQuestion", i]),
+    rejectQuestion: async (i) => log.push(["rejectQuestion", i]),
+    interruptSession: async (sid, o) => log.push(["interruptSession", sid, o]),
   };
   const streamInterp = {
     getInbox: async () => ({ epoch: "e", rev: 1, items: [] }),
@@ -54,7 +58,7 @@ function rig({ cancelResult = { outcome: "cancelled" } } = {}) {
     admitCommand: async (i) => log.push(["admitCommand", i]),
   };
   const delegateView = createDelegateView({
-    listJobs: async () => jobs,
+    loadJobs: async () => jobs,
     listProjects: async () => [],
     listModels: async () => [],
   });
@@ -98,6 +102,12 @@ const GUARDED = [
   ["opencode:inbox-set-delivery", (sid) => [{ sessionId: sid, id: "m1", delivery: "steer" }], ["setInboxDelivery"]],
   ["opencode:compact-session", (sid) => [sid], ["compactSession"]],
   ["opencode:run-command", (sid) => [{ sessionId: sid, command: "review", arguments: "" }], ["runCommand"]],
+  // Orchestrator decision (review F4): the job's own asks and its turn are the box's to
+  // refuse too, so a client that skips the read-only bar cannot answer or interrupt them.
+  ["opencode:permission-reply", (sid) => [{ requestId: "p1", reply: "once", sessionId: sid }], ["replyPermission"]],
+  ["opencode:question-reply", (sid) => [{ requestId: "q1", answers: [["a"]], sessionId: sid }], ["replyQuestion"]],
+  ["opencode:question-reject", (sid) => [{ requestId: "q1", sessionId: sid }], ["rejectQuestion"]],
+  ["opencode:abort", (sid) => [sid], ["interruptSession"]],
 ];
 
 for (const [channel, argsFor, downstream] of GUARDED) {

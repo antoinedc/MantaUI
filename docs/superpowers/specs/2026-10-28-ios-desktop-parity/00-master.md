@@ -438,7 +438,8 @@ D25. **One capability module, one id list, one client accessor per client.**
 
 D26. **One token formatter.** `src/shared/formatTokens.mjs` (+ `.d.mts`, test),
 created by WS02 in wave B, exports `formatTokenCount(n)` (compact, no unit) and
-`formatTokens(n)` ("N tokens", byte-identical to today's `chatUtils.ts:219`).
+`formatTokens(n)` ("N tokens", byte-identical to today's `chatUtils.ts:219`). `formatTokenCount` also renders millions ("1.2M"), byte-identical to the deleted
+`SessionHeader.formatTokensCompact`; `formatTokens` keeps its old output.
 `streamInterpretation.mjs`, WS09's box views, WS11's `resentText` and every
 renderer caller import it; `chatUtils.ts` re-exports `formatTokens`; the
 private copies (`chatUtils.formatTokensCompact`, `SessionHeader.tsx`'s
@@ -574,7 +575,7 @@ Exact text of each row lives in the owning spec's mount table.
 | 1 | M-02-srv-1 | `rpc.mjs` `"server:version"` (:2584) | add `capabilities: [...BOX_CAPABILITIES]` + import | 02 |
 | 2 | M-02-srv-10 | `index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | build `delegateView`, pass into `buildHandlers` | 02 |
 | 3 | M-02-srv-6 | `rpc.mjs` delegate channels (:2434–2480) | NEW `delegate:job-for-session`; decorate `delegate:list`; `delegate:approve` rule check | 02 |
-| 4 | M-02-srv-7 | `rpc.mjs` `opencode:prompt` / `inbox-cancel` / `inbox-set-delivery` / `compact-session` / `run-command` | `await delegateView?.assertWritable(…)` first | 02 |
+| 4 | M-02-srv-7 | `rpc.mjs` `opencode:prompt` / `inbox-cancel` / `inbox-set-delivery` / `compact-session` / `run-command` / `abort` / `permission-reply` / `question-reply` / `question-reject` | `await delegateView?.assertWritable(…)` first | 02 |
 | 5 | M-02-srv-8 | `rpc.mjs` `handleRpcRequest` catch (:2705) | generic `rpcStatus` branch | 02 |
 | 6 | M-02-srv-9 | `rpc.mjs` inbox handlers (:1388–1419) | wrap with `describeInboxCancel` / `describeInboxSetDelivery` | 02 |
 | 7 | M-02-srv-2 | `streamInterp.mjs` `session.retry.scheduled` (:771) | `retry` + `headline/caption/body` | 02 |

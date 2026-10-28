@@ -5,8 +5,12 @@
 //   - jobForSession(sessionId): is this session a read-only background job, and
 //     if so the bar's headline / status line / parent line / stoppability;
 //   - assertWritable(sessionId): the authority behind the read-only bar — a
-//     prompt, inbox change, compaction or command aimed at a job session is
-//     refused with HTTP 409 (ReadOnlyJobError.rpcStatus, read by handleRpcRequest);
+//     prompt, inbox change, compaction, command, permission / question reply or
+//     reject, or abort aimed at a job session is refused with HTTP 409
+//     (ReadOnlyJobError.rpcStatus, read by handleRpcRequest). The guard is NOT
+//     complete on purpose: clear / delete-session, the handoff channels and
+//     prompts the box injects itself (schedule, webhooks, peers_message) are
+//     deliberately unguarded — they are follow-ups, not part of this contract;
 //   - decorateList(jobs): `statusLabel` + `summary` on every delegate:list row;
 //   - validateApprovalTools(tools): the rule check behind delegate:approve.
 //
@@ -110,10 +114,12 @@ function findParentWindow(projects, parentSessionID) {
 }
 
 /**
- * @param {{ listJobs: (filter?: object) => Promise<any>, listProjects: () => Promise<any[]>,
+ * `loadJobs` is the RAW record list (no per-job progress reads): assertWritable
+ * runs on every guarded request in every session, so it must stay one cheap read.
+ * @param {{ loadJobs: () => Promise<any[]>, listProjects: () => Promise<any[]>,
  *           listModels: () => Promise<any[]>, now?: () => number }} deps
  */
-export function createDelegateView({ listJobs, listProjects, listModels, now = Date.now }) {
+export function createDelegateView({ loadJobs, listProjects, listModels, now = Date.now }) {
   let modelsCache = null; // { at, models }
 
   async function modelNameFor(ref) {
@@ -132,8 +138,8 @@ export function createDelegateView({ listJobs, listProjects, listModels, now = D
   }
 
   async function readJobs() {
-    const r = await listJobs({});
-    return Array.isArray(r) ? r : Array.isArray(r?.jobs) ? r.jobs : [];
+    const r = await loadJobs();
+    return Array.isArray(r) ? r : [];
   }
 
   async function jobFor(sessionId) {

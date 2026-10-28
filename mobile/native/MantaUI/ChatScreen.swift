@@ -1262,7 +1262,7 @@ private struct ChatScreenContent: View {
         )
         // Deliver the blocking-card actions to the transcript cells via the
         // SwiftUI environment (BET-1214). The subagent drill-in keeps `nil`.
-        .environment(\.transcriptCardActions, store.mutationPolicy == .allowed ? cardActions : readOnlyCardActions)
+        .environment(\.transcriptCardActions, store.mutationPolicy == .readOnlyJob ? readOnlyCardActions : cardActions)
         // The jumped-to message's highlight (WS02 F10, drawn by the cell: M-02-1).
         .environment(\.transcriptHighlightedRowID, store.focusedRowID)
         // Deliver the box-wide widget live store to widget cards so liveness
@@ -1648,6 +1648,7 @@ private struct ChatScreenContent: View {
             // not in the transcript, so they stay in view and actionable however
             // far the conversation is scrolled.
             if !store.inboxItems.isEmpty, !store.isBackgroundJobReadOnly {
+                let gate = ChatCardInboxGate.resolve(available: store.chatCardsAvailable, canMutate: store.canMutate)
                 PendingMessagesCard(
                     items: store.inboxItems,
                     running: store.running,
@@ -1657,8 +1658,8 @@ private struct ChatScreenContent: View {
                     onWait: { store.setInboxDelivery(id: $0, to: .queue) },
                     onCancel: { store.cancelInboxItem(id: $0) },
                     onEditLast: { editLastPendingMessage() },
-                    actionsEnabled: store.chatCardsAvailable == true && store.canMutate,
-                    gateNote: store.chatCardsAvailable == false ? ChatCardCapabilities.updateBoxNote : nil
+                    actionsEnabled: gate.actionsEnabled,
+                    gateNote: gate.gateNote
                 )
             }
             // Only things that BLOCK the turn and need a tap stay here (plus the
@@ -1704,8 +1705,10 @@ private struct ChatScreenContent: View {
         }
     }
 
-    /// The blocking cards are inert while the session is read-only or still being
-    /// checked: opening a run's detail sheet and expanding the checklist only READ.
+    /// A background job's session has no live blocking cards: opening a run's detail
+    /// sheet and expanding the checklist only READ. While the session is merely still
+    /// being checked (`.resolving`) the live actions stay wired — the store's gate
+    /// answers a tap with "One moment — checking this session" instead of a dead button.
     private var readOnlyCardActions: TranscriptCardActions {
         TranscriptCardActions.readOnly(
             onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
@@ -1726,9 +1729,9 @@ private struct ChatScreenContent: View {
         jobOwnership.onPolicy = { policy in
             // The policy lands in the store and the composer in ONE main-actor step.
             store.applyMutationPolicy(policy)
-            composer.acceptsInput = !store.isBackgroundJobReadOnly
+            composer.acceptsInput = store.composerAcceptsInput
         }
-        composer.acceptsInput = !store.isBackgroundJobReadOnly
+        composer.acceptsInput = store.composerAcceptsInput
         approvalStore.setPolling(approvalPollActive)
         Task { await refreshChatCards() }
     }

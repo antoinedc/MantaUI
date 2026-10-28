@@ -4834,6 +4834,8 @@ export function createDelegateEngine(baseDeps) {
     /** Is `sessionId` the own session of a job that is still running? */
     isRunningJobSession: async (sessionId) => ((await (deps.load ?? loadJobs)()).some((j) => j.childSessionID === sessionId && j.status === "running")),
     getJob: (id) => getJob(id, deps),
+    /** The raw job records (no progress reads) — the cheap read behind the read-only-job guard. */
+    loadRecords: async () => (await (deps.load ?? loadJobs)()) ?? [],
     startSweeper: (opts) => startSweeper(deps, opts),
     startActivityPoller: (opts) => startActivityPoller(deps, opts),
     approvals,

@@ -1,5 +1,5 @@
---- a/src/server/rpc.mjs	2026-10-28 11:20:42.995809476 +0000
-+++ b/src/server/rpc.mjs	2026-10-28 16:14:03.084752354 +0000
+--- a/src/server/rpc.mjs
++++ b/src/server/rpc.mjs
 @@ -1,6 +1,8 @@
  // Channel -> handler dispatch. Handlers are async (...args) => result.
  // Mirrors Electron ipcMain.handle semantics.
@@ -27,7 +27,15 @@
        checkDelivery(input);
        if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
          return ctoConversation.admitDirect(withoutDelivery(input));
-@@ -1388,12 +1394,15 @@
+@@ -1371,6 +1377,7 @@
+     // inbox is owned by the admission engine, and a resumed admitted turn would
+     // be exactly the stray-turn hazard described above.
+     "opencode:abort": async (sessionId) => {
++      await delegateView?.assertWritable(sessionId);
+       const cto = ctoConversation && (await ctoConversation.isConversationSession(sessionId));
+       return oc.interruptSession(sessionId, { resume: !cto });
+     },
+@@ -1388,12 +1395,15 @@
      "opencode:inbox-cancel": async (input) => {
        const sessionId = input?.sessionId;
        const id = input?.id;
@@ -44,7 +52,7 @@
      },
  
      // N1: switch one pending message between "steer" (Now) and "queue" (after
-@@ -1403,13 +1412,15 @@
+@@ -1403,13 +1413,15 @@
        const sessionId = input?.sessionId;
        const id = input?.id;
        const delivery = input?.delivery;
@@ -61,7 +69,39 @@
      },
  
      // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
-@@ -1965,7 +1976,10 @@
+@@ -1422,7 +1434,10 @@
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
+     // → args[0] = { requestId, reply, sessionId }; opencode.mjs replyPermission expects same shape
+-    "opencode:permission-reply": (input) => oc.replyPermission(input),
++    "opencode:permission-reply": async (input) => {
++      await delegateView?.assertWritable(input?.sessionId);
++      return oc.replyPermission(input);
++    },
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
+     // Background-job children no longer surface here (BET-418 §A) — see
+@@ -1431,11 +1446,17 @@
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
+     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }
+-    "opencode:question-reply": (input) => oc.replyQuestion(input),
++    "opencode:question-reply": async (input) => {
++      await delegateView?.assertWritable(input?.sessionId);
++      return oc.replyQuestion(input);
++    },
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId, sessionId })
+     // → opencode.mjs rejectQuestion expects { requestId, sessionId }
+-    "opencode:question-reject": (input) => oc.rejectQuestion(input),
++    "opencode:question-reject": async (input) => {
++      await delegateView?.assertWritable(input?.sessionId);
++      return oc.rejectQuestion(input);
++    },
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args.
+     // Model display overrides (Settings → Models → edit) are applied here so
+@@ -1965,7 +1986,10 @@
  
      // preload: ipcRenderer.invoke(IPC.opencodeCompactSession, sessionId)
      // → args[0] = sessionId (string)
@@ -73,7 +113,7 @@
  
      // preload: ipcRenderer.invoke(IPC.opencodeCommands)  → no args
      // P1: optional `{ directory }` — the session's directory, so the project's own
-@@ -2053,6 +2067,7 @@
+@@ -2053,6 +2077,7 @@
      // than a prompt), never bypassing the queue. Ordinary project sessions
      // take the byte-identical raw route.
      "opencode:run-command": async (input) => {
@@ -81,7 +121,7 @@
        checkDelivery(input);
        if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
          // N2: the CTO conversation never runs a command in the background.
-@@ -2431,8 +2446,19 @@
+@@ -2431,8 +2456,19 @@
      // card is raised. list/stop/delete route to the engine too. Stop/delete
      // publish delegate.updated so a future UI card refetches live.
      // preload: ipcRenderer.invoke(IPC.delegateList, sessionId) → args[0] = sessionId?
@@ -103,7 +143,7 @@
      // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
      "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
      // P6: where a job's chat window is (re-created, stamped with the child
-@@ -2472,10 +2498,11 @@
+@@ -2472,10 +2508,11 @@
      // is created. approve carries optional edited tools; decline cancels.
      "delegate:pending-approvals": (sessionId) =>
        delegate ? delegate.listPendingApprovals(sessionId || undefined) : [],
@@ -119,7 +159,7 @@
      "delegate:decline": (id) =>
        delegate ? { ok: delegate.decline(id) } : { ok: false },
  
-@@ -2581,7 +2608,7 @@
+@@ -2581,7 +2618,7 @@
      // so Settings → About renders it in the same trip — no new IPC channel.
      // The JSON-RPC envelope wraps the body as
      // { result: { version, minClient, opencodeVersion } }.
@@ -128,7 +168,7 @@
  
      // ---- plugins (BET-189 / BET-190) ----
      // Read the current plugin registry the Mac executor has published.
-@@ -2703,6 +2730,12 @@
+@@ -2703,6 +2740,12 @@
        const result = await dispatch(handlers, channel, args);
        sendJson(200, { result: result ?? null });
      } catch (e) {
@@ -141,8 +181,8 @@
        // Auto-handoff errors carry a stable code (§15: "the same {error, message} codes").
        const status = typeof e?.code === "string" ? HANDOFF_ERROR_STATUS[e.code] : undefined;
        if (e?.name === "HandoffError" && status) {
---- a/src/server/index.mjs	2026-10-28 12:27:10.859867000 +0000
-+++ b/src/server/index.mjs	2026-10-28 16:14:03.095752270 +0000
+--- a/src/server/index.mjs
++++ b/src/server/index.mjs
 @@ -97,7 +97,8 @@
  import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
  import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
@@ -153,20 +193,22 @@
  import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
  import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
  import { startUploadCleanupPoller } from "./uploads.mjs";
-@@ -1198,6 +1199,12 @@
+@@ -1198,6 +1199,14 @@
    readProgress: (sid) => readProgressRecord(sid),
    clearProgress: (sid) => clearProgress(sid),
  });
 +// WS02 (SF-4): the box's reading of background-job records for the chat screen.
 +const delegateView = createDelegateView({
-+  listJobs: (f) => delegateEngine.listJobs(f ?? {}),
++  // The RAW record list: assertWritable runs on every guarded request, so it must not
++  // pay the per-job progress reads that listJobs does.
++  loadJobs: () => delegateEngine.loadRecords(),
 +  listProjects: () => tmux.listProjects(),
 +  listModels: () => oc.listModels(),
 +});
  // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
  // engine): a `running` one is failed "interrupted by upgrade" and reports its one
  // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
-@@ -1935,6 +1942,8 @@
+@@ -1935,6 +1944,8 @@
            beforeTokens: before ?? null,
            afterTokens: after ?? null,
            away,
@@ -175,16 +217,16 @@
          },
        });
      } catch (e) {
-@@ -2048,6 +2057,7 @@
-   serverVersion: SERVER_VERSION,
+@@ -2049,6 +2060,7 @@
    opencodeVersion: OPENCODE_VERSION,
    delegate: delegateEngine,
-+  delegateView,
    handoff: handoffEngine,
++  delegateView,
    // BET-1252: routing-services readers shared with delegate (the routing:choose
    // channel). Same degradation contract:
---- a/src/server/streamInterp.mjs	2026-10-28 11:20:43.005809400 +0000
-+++ b/src/server/streamInterp.mjs	2026-10-28 16:14:03.097752255 +0000
+   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
+--- a/src/server/streamInterp.mjs
++++ b/src/server/streamInterp.mjs
 @@ -47,6 +47,9 @@
    applyPermissionEvent,
    extractSubagentInfo,

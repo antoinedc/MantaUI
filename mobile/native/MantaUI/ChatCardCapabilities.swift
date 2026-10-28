@@ -19,12 +19,15 @@ final class ChatCardCapabilities: ObservableObject {
     /// The capability behind retry / compaction / send-error copy, the job view
     /// and refusal, and the inbox outcome copy.
     static let chatCards = "chat-cards-1"
-    static let updateBoxNote = "Update your box to use this"
+    static let updateBoxNote = ChatCardInboxGate.updateBoxNote
 
     @Published private(set) var ids: Set<String>?
 
     private let load: @Sendable () async throws -> Set<String>
-    private var inFlight = false
+    /// The one load in progress. A caller that arrives while it runs WAITS for it (it
+    /// never returns early on a still-unknown list — that left the job-ownership
+    /// resolve reading "unknown" on every first chat open).
+    private var loadTask: Task<Void, Never>?
 
     init(api: MantaAPIClient) {
         load = { try await api.boxCapabilities() }
@@ -39,18 +42,26 @@ final class ChatCardCapabilities: ObservableObject {
         ids.map { $0.contains(id) }
     }
 
-    /// Ask the box. A failure keeps the last answer (a hiccup must not turn a
-    /// known capability back into "unknown").
+    /// Ask the box. Concurrent callers share one request and all return after it
+    /// settles. A failure keeps the last answer (a hiccup must not turn a known
+    /// capability back into "unknown").
     func refresh() async {
-        guard !inFlight else { return }
-        inFlight = true
-        defer { inFlight = false }
-        do {
-            let loaded = try await load()
-            if ids != loaded { ids = loaded }
-        } catch {
-            NSLog("[chat-cards] couldn't read the box capabilities: %@", String(describing: error))
+        if let running = loadTask {
+            await running.value
+            return
         }
+        let load = self.load
+        let task = Task { [weak self] in
+            do {
+                let loaded = try await load()
+                if self?.ids != loaded { self?.ids = loaded }
+            } catch {
+                NSLog("[chat-cards] couldn't read the box capabilities: %@", String(describing: error))
+            }
+            self?.loadTask = nil
+        }
+        loadTask = task
+        await task.value
     }
 
     /// Test seam.

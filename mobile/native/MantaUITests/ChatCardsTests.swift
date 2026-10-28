@@ -381,4 +381,41 @@ final class ChatCardsTests: XCTestCase {
         XCTAssertEqual(p.name, "review")
         XCTAssertEqual(p.arguments, "")
     }
+
+    // MARK: review round — approval rules, composer gate, pending-card gate
+
+    func testRuleLabelMarksADenyRule() {
+        XCTAssertEqual(ChatCardApprovalLogic.ruleLabel(ChatCardApprovalTool(permission: "bash", pattern: "npm *")), "bash: npm *")
+        XCTAssertEqual(ChatCardApprovalLogic.ruleLabel(ChatCardApprovalTool(permission: "bash", pattern: "rm *", action: "deny")),
+                       "deny · bash: rm *")
+    }
+
+    func testApprovalToolDecodesAndKeepsItsAction() throws {
+        let tool = try decode(ChatCardApprovalTool.self, #"{"permission":"bash","pattern":"rm *","action":"deny"}"#)
+        XCTAssertEqual(tool.action, "deny")
+        let plain = try decode(ChatCardApprovalTool.self, #"{"permission":"bash","pattern":"ls"}"#)
+        XCTAssertNil(plain.action)
+    }
+
+    // M-03-7: typing stays possible while the session is being checked.
+    func testComposerAcceptsInputInEveryStateButAReadOnlyJob() {
+        XCTAssertTrue(ChatCardMutationGate.composerAcceptsInput(.resolving))
+        XCTAssertTrue(ChatCardMutationGate.composerAcceptsInput(.allowed))
+        XCTAssertFalse(ChatCardMutationGate.composerAcceptsInput(.readOnlyJob))
+    }
+
+    // #21: unknown capability = disabled, no note; absent = disabled + the update note.
+    func testPendingCardGate() {
+        let unknown = ChatCardInboxGate.resolve(available: nil, canMutate: true)
+        XCTAssertFalse(unknown.actionsEnabled)
+        XCTAssertNil(unknown.gateNote)
+        let absent = ChatCardInboxGate.resolve(available: false, canMutate: true)
+        XCTAssertFalse(absent.actionsEnabled)
+        XCTAssertEqual(absent.gateNote, "Update your box to use this")
+        let present = ChatCardInboxGate.resolve(available: true, canMutate: true)
+        XCTAssertTrue(present.actionsEnabled)
+        XCTAssertNil(present.gateNote)
+        XCTAssertFalse(ChatCardInboxGate.resolve(available: true, canMutate: false).actionsEnabled,
+                       "a resolving session or a job never acts on the queue")
+    }
 }

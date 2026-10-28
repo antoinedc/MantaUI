@@ -319,6 +319,82 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
         XCTAssertEqual(hints.last, "Couldn't stop the job: already finished")
     }
 
+    // Review finding 2: the first chat open started the capability load (store.start)
+    // and the job lookup (wireChatCards) together; the lookup read "unknown" and parked
+    // the session in "can't confirm" for up to 30 s.
+    func testAResolveThatArrivesDuringTheCapabilityLoadWaitsForIt() async {
+        let gate = LoadGate()
+        let capabilities = ChatCardCapabilities(load: {
+            await gate.wait()
+            return [ChatCardCapabilities.chatCards]
+        })
+        let api = FakeJobAPI()
+        let store = ChatCardJobOwnershipStore(sessionId: "ses", api: api, capabilities: capabilities)
+
+        let load = Task { await capabilities.refresh() }
+        await gate.waitUntilStarted()
+        let resolving = Task { await store.resolve() }
+        await Task.yield()
+        await gate.open()
+        await load.value
+        await resolving.value
+
+        XCTAssertEqual(store.policy, .allowed)
+        XCTAssertNil(store.lastFailure)
+        XCTAssertEqual(api.lookups, 1)
+        let loads = await gate.started
+        XCTAssertEqual(loads, 1, "both callers shared one capability request")
+    }
+
+    func testFirstOpenDeliversAHeldSendOnceTheSharedLoadLands() async {
+        let gate = LoadGate()
+        let capabilities = ChatCardCapabilities(load: {
+            await gate.wait()
+            return [ChatCardCapabilities.chatCards]
+        })
+        PendingPromptStore.save([])
+        defer { PendingPromptStore.save([]) }
+        let stream = ChatCardsTestStream()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ChatCardsRPCStub.self]
+        ChatCardsRPCStub.reset()
+        let client = MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil },
+                                    session: URLSession(configuration: config))
+        let chat = ChatSessionStore(sessionId: "ses", eventStore: eventStore, api: client,
+                                    mutationPolicy: .resolving, chatCardCapabilities: capabilities)
+        let ownership = ChatCardJobOwnershipStore(sessionId: "ses", api: FakeJobAPI(), capabilities: capabilities)
+        ownership.onPolicy = { chat.applyMutationPolicy($0) }
+
+        await chat.send(text: "hello", attachments: [], model: nil)
+        XCTAssertEqual(chat.pendingPrompts.map(\.state), [.waiting])
+
+        chat.start()                               // enqueues the capability load
+        await gate.waitUntilStarted()
+        let resolving = Task { await ownership.resolve() }   // the screen's job lookup, concurrently
+        await Task.yield()
+        await gate.open()
+        await resolving.value
+
+        XCTAssertEqual(ownership.policy, .allowed)
+        XCTAssertNil(ownership.lastFailure)
+        for _ in 0..<100 where chat.pendingPrompts.first?.state == .waiting { try? await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertNotEqual(chat.pendingPrompts.first?.state, .waiting, "the held message was delivered")
+    }
+
+    func testTheCapabilityListLandingLaterReResolvesAStuckSession() async {
+        let capabilities = ChatCardCapabilities(load: { throw MantaError.transport("offline") })
+        let api = FakeJobAPI()
+        let store = ChatCardJobOwnershipStore(sessionId: "ses", api: api, capabilities: capabilities)
+        await store.resolve()
+        XCTAssertEqual(store.policy, .resolving)
+        XCTAssertNotNil(store.lastFailure)
+        capabilities.apply([ChatCardCapabilities.chatCards])
+        for _ in 0..<100 where store.policy == .resolving { try? await Task.sleep(nanoseconds: 20_000_000) }
+        XCTAssertEqual(store.policy, .allowed, "no 30 s wait: the list landing asks again at once")
+        XCTAssertNil(store.lastFailure)
+    }
+
     func testNeedsPollingWhileResolvingOrWhileARunningJobShows() async {
         let api = FakeJobAPI()
         let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
@@ -458,6 +534,233 @@ final class ChatCardsChatStoreTests: XCTestCase {
     }
 }
 
+// MARK: - Chat store: end-to-end (stub box)
+
+@MainActor
+final class ChatCardsStubBoxTests: XCTestCase {
+
+    override func setUp() async throws {
+        try await super.setUp()
+        ChatCardsRPCStub.reset()
+        PendingPromptStore.save([])
+    }
+
+    override func tearDown() async throws {
+        ChatCardsRPCStub.reset()
+        PendingPromptStore.save([])
+        TranscriptDisplayOptions.setShowDetails(false)
+        try await super.tearDown()
+    }
+
+    private struct Harness {
+        let store: ChatSessionStore
+        let stream: ChatCardsTestStream
+    }
+
+    private func makeHarness(policy: ChatCardMutationPolicy = .allowed) -> Harness {
+        let stream = ChatCardsTestStream()
+        let eventStore = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ChatCardsRPCStub.self]
+        let api = MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil },
+                                 session: URLSession(configuration: config))
+        let store = ChatSessionStore(sessionId: "ses", eventStore: eventStore, api: api, mutationPolicy: policy)
+        store.chatCardCapabilities.apply([ChatCardCapabilities.chatCards])
+        return Harness(store: store, stream: stream)
+    }
+
+    private func waitUntil(_ condition: @escaping @MainActor () -> Bool, timeout: TimeInterval = 5.0) async {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    private func truncationFrame(kind: String, label: String, messageID: String) -> String {
+        #"{"kind":"stream","sub":"truncation","sessionId":"ses","payload":{"kind":"\#(kind)","label":"\#(label)","messageID":"\#(messageID)"}}"#
+    }
+
+    private func footer(for id: String, in blocks: [TranscriptBlock]) -> TranscriptTurnFooter? {
+        for case .turnFooter(let f) in blocks where f.messageID == id { return f }
+        return nil
+    }
+
+    private func warnNotices(in blocks: [TranscriptBlock]) -> [String] {
+        blocks.compactMap { block in
+            if case .notice(let text, let kind) = block, kind == .warn { return text }
+            return nil
+        }
+    }
+
+    // MARK: #16 — live truncation, mapper + store
+
+    func testALiveTruncationOnASettledMessageShowsTheFooterBadgeAndDropsTheNotice() async {
+        ChatCardsRPCStub.messages = [
+            ChatCardsRPCStub.user("m1", "go"),
+            ChatCardsRPCStub.assistant("m2", "done", completed: true),
+        ]
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 2 }
+        h.stream.inject(truncationFrame(kind: "output-cap", label: "Response truncated (output cap)", messageID: "m2"))
+        await waitUntil { self.footer(for: "m2", in: h.store.blocks)?.truncation != nil }
+        XCTAssertEqual(footer(for: "m2", in: h.store.blocks)?.truncation, .outputCap, "the footer shows the live truncation")
+        XCTAssertEqual(warnNotices(in: h.store.blocks), [], "…so the tail notice is gone")
+    }
+
+    func testAnUnknownTruncationKindKeepsTheNoticeAndShowsNoBadge() async {
+        ChatCardsRPCStub.messages = [
+            ChatCardsRPCStub.user("m1", "go"),
+            ChatCardsRPCStub.assistant("m2", "done", completed: true),
+        ]
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 2 }
+        h.stream.inject(truncationFrame(kind: "mystery", label: "Odd one", messageID: "m2"))
+        await waitUntil { self.warnNotices(in: h.store.blocks) == ["Odd one"] }
+        XCTAssertEqual(warnNotices(in: h.store.blocks), ["Odd one"], "no footer shows it, so the notice stays")
+        XCTAssertNil(footer(for: "m2", in: h.store.blocks)?.truncation)
+    }
+
+    func testATruncationOnAMessageStillIncompleteInTheSnapshotKeepsTheNotice() async {
+        ChatCardsRPCStub.messages = [
+            ChatCardsRPCStub.user("m1", "go"),
+            ChatCardsRPCStub.assistant("m2", "partial", completed: false),
+        ]
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 2 }
+        h.stream.inject(truncationFrame(kind: "output-cap", label: "Cut off", messageID: "m2"))
+        await waitUntil { self.warnNotices(in: h.store.blocks) == ["Cut off"] }
+        XCTAssertEqual(warnNotices(in: h.store.blocks), ["Cut off"])
+        XCTAssertNil(footer(for: "m2", in: h.store.blocks), "an unsettled message draws no footer")
+    }
+
+    // MARK: #18 — the composer follows the policy (M-03-7)
+
+    func testTheComposerAcceptsInputWhileResolvingNotForAJobAndAgainAfter() {
+        let h = makeHarness(policy: .resolving)
+        let composer = ComposerTextController()
+        composer.acceptsInput = h.store.composerAcceptsInput
+        XCTAssertTrue(composer.acceptsInput, "typing stays possible while the session is being checked")
+        XCTAssertTrue(composer.insert(text: "draft", mode: .append))
+        XCTAssertTrue(composer.attach(remotePath: "/home/dev/a.txt", displayName: "a.txt", mime: nil))
+
+        h.store.applyMutationPolicy(.readOnlyJob)
+        composer.acceptsInput = h.store.composerAcceptsInput
+        XCTAssertFalse(composer.acceptsInput)
+        XCTAssertFalse(composer.insert(text: "x", mode: .append))
+        XCTAssertFalse(composer.attach(remotePath: "/home/dev/b.txt", displayName: "b.txt", mime: nil))
+
+        h.store.applyMutationPolicy(.allowed)
+        composer.acceptsInput = h.store.composerAcceptsInput
+        XCTAssertTrue(composer.acceptsInput, "an ordinary session again")
+        XCTAssertTrue(composer.insert(text: "y", mode: .append))
+    }
+
+    // MARK: #19 — Load earlier while a message is focused
+
+    private func fillHistory(_ count: Int) {
+        ChatCardsRPCStub.messages = (0..<count).map { ChatCardsRPCStub.user(String(format: "m%03d", $0), "message \($0)") }
+    }
+
+    private func focus(_ h: Harness, _ id: String) async {
+        h.store.focus(messageID: id)
+        await waitUntil { if case .presented = h.store.focusPhase { return true } else { return false } }
+    }
+
+    func testLoadEarlierWhileFocusedRevealsTheHiddenMessagesWithoutRefetchingOrWidening() async {
+        fillHistory(60)                          // the window holds the last 30: m030…m059
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 30 }
+        await focus(h, "m042")                   // index 12 in the window
+        XCTAssertEqual(h.store.messages.count, 30)
+        XCTAssertEqual(h.store.rows.count, 18, "the slice starts at the target (30 − 12)")
+        let fetches = h.store.transcriptFetchCount
+        let calls = ChatCardsRPCStub.messageCalls.count
+
+        h.store.loadEarlier()
+
+        XCTAssertEqual(h.store.rows.count, 30, "the 12 hidden rows are revealed")
+        XCTAssertEqual(h.store.messages.count, 30, "the loaded window is unchanged")
+        XCTAssertEqual(h.store.focusPhase, .none)
+        XCTAssertEqual(h.store.transcriptFetchCount, fetches, "no refetch")
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.count, calls)
+    }
+
+    func testLoadEarlierAtTheFirstFetchedMessageAlsoWidensTheWindow() async {
+        fillHistory(120)                         // window m090…m119, history continues above
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 30 }
+        await focus(h, "m090")                   // index 0: nothing local to reveal
+        XCTAssertTrue(h.store.hasEarlier)
+
+        h.store.loadEarlier()
+
+        await waitUntil { h.store.messages.count == 80 }
+        XCTAssertEqual(h.store.messages.count, 80, "30 + the 50-message step")
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.last?.limit, 80)
+    }
+
+    func testAJumpToAMessageBeyond500ReportsHowFarBack() async {
+        fillHistory(700)
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 30 }
+        h.store.focus(messageID: "m000")
+        await waitUntil(timeout: 15) { h.store.actionHint == ChatCardFocusMachine.tooFarBackMessage }
+        XCTAssertEqual(h.store.actionHint, "That message is too far back to open here — it's more than 500 messages ago")
+        XCTAssertEqual(h.store.focusPhase, .none)
+    }
+
+    // MARK: #20 — slim follows "show reasoning & full output" (M-01-7)
+
+    func testTheFetchIsSlimWhileDetailsAreOffAndFullWhenTheyAreOn() async {
+        TranscriptDisplayOptions.setShowDetails(false)
+        fillHistory(5)
+        let h = makeHarness()
+        h.store.start()
+        await waitUntil { h.store.messages.count == 5 }
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.last?.slim, true)
+        try? await Task.sleep(nanoseconds: 300_000_000)   // let the open's own fetches settle
+
+        let before = ChatCardsRPCStub.messageCalls.count
+        TranscriptDisplayOptions.setShowDetails(true)
+        await waitUntil { ChatCardsRPCStub.messageCalls.count > before }
+        try? await Task.sleep(nanoseconds: 300_000_000)   // any second, unwanted refetch would land by now
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.count, before + 1, "flipping the switch refetches once")
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.last?.slim, false)
+
+        TranscriptDisplayOptions.setShowDetails(false)
+        await waitUntil { ChatCardsRPCStub.messageCalls.count > before + 1 }
+        XCTAssertEqual(ChatCardsRPCStub.messageCalls.last?.slim, true)
+    }
+
+    // MARK: Review finding 7 — a push/pop must not leave a notice latched
+
+    func testLeavingTheScreenEndsTheCompactionHoldSoItCannotStayPinned() async {
+        let h = makeHarness()
+        h.store.start()
+        func frame(_ payload: String) -> String {
+            #"{"kind":"stream","sub":"compaction","sessionId":"ses","payload":\#(payload)}"#
+        }
+        h.stream.inject(frame(#"{"phase":"started","text":""}"#))
+        await waitUntil { h.store.compaction != nil }
+        h.stream.inject(frame(#"{"phase":"ended","firstLine":"Summary"}"#))
+        await waitUntil { h.store.compaction?.phase == .done }
+        XCTAssertEqual(h.store.compaction?.phase, .done, "fixture: the done card is in its 3 s hold")
+
+        h.store.stop()      // a subagent push: the hold timer is cancelled
+        XCTAssertNil(h.store.compaction, "leaving the screen ends the hold")
+        h.store.start()     // the pop
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertNil(h.store.compaction, "the expired card is not revived")
+    }
+}
+
 /// A stream control that never connects but can inject frames.
 @MainActor
 private final class ChatCardsTestStream: MantaEventStreamControl {
@@ -483,4 +786,90 @@ private final class ChatCardsFailingProtocol: URLProtocol {
         client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
     }
     override func stopLoading() {}
+}
+
+/// Holds a loader open until the test releases it; counts how many loads began.
+private actor LoadGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var started = 0
+
+    func wait() async {
+        started += 1
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
+
+    func waitUntilStarted() async {
+        while started == 0 { try? await Task.sleep(nanoseconds: 10_000_000) }
+    }
+}
+
+/// A box that answers `opencode:messages` from a list (honouring `limit` / `slim`) and
+/// `null` to every other channel; records each messages request.
+private final class ChatCardsRPCStub: URLProtocol {
+    nonisolated(unsafe) static var messages: [String] = []
+    nonisolated(unsafe) static var messageCalls: [(limit: Int?, slim: Bool)] = []
+
+    static func reset() {
+        messages = []
+        messageCalls = []
+    }
+
+    static func user(_ id: String, _ text: String) -> String {
+        #"{"info":{"id":"\#(id)","sessionID":"ses","role":"user","time":{"created":1}},"parts":[{"type":"text","id":"p-\#(id)","messageID":"\#(id)","text":"\#(text)"}]}"#
+    }
+
+    static func assistant(_ id: String, _ text: String, completed: Bool) -> String {
+        let time = completed ? #"{"created":1,"completed":2}"# : #"{"created":1}"#
+        return #"{"info":{"id":"\#(id)","sessionID":"ses","role":"assistant","time":\#(time)},"parts":[{"type":"text","id":"p-\#(id)","messageID":"\#(id)","text":"\#(text)"}]}"#
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let channel = request.url?.lastPathComponent ?? ""
+        var body = #"{"result":null}"#
+        if channel == "opencode:prompt" { body = #"{"result":{}}"# }
+        if channel == "opencode:messages" {
+            let args = Self.bodyJSON(of: request).flatMap { $0["args"] as? [Any] } ?? []
+            let opts = args.count > 1 ? args[1] as? [String: Any] : nil
+            let limit = opts?["limit"] as? Int
+            let slim = opts?["slim"] as? Bool ?? false
+            Self.messageCalls.append((limit, slim))
+            let all = Self.messages
+            let page = limit.map { Array(all.suffix($0)) } ?? all
+            body = #"{"result":[\#(page.joined(separator: ","))]}"#
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    private static func bodyJSON(of request: URLRequest) -> [String: Any]? {
+        var data = request.httpBody
+        if data == nil, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var collected = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read <= 0 { break }
+                collected.append(buffer, count: read)
+            }
+            data = collected
+        }
+        return data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    }
 }

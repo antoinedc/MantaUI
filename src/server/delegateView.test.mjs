@@ -46,7 +46,7 @@ const models = [{ providerID: "anthropic", id: "claude-sonnet-5-5", name: "Claud
 function view(jobs, over = {}) {
   const calls = { models: 0, jobs: 0 };
   const v = createDelegateView({
-    listJobs: async () => {
+    loadJobs: async () => {
       calls.jobs++;
       return jobs;
     },
@@ -206,15 +206,6 @@ test("jobForSession: terminal views carry the status line and an 'unknown' label
   assert.equal((await empty.v.jobForSession("ses_child")).job.statusLabel, "unknown");
 });
 
-test("jobForSession accepts the {jobs: []} list shape", async () => {
-  const v = createDelegateView({
-    listJobs: async () => ({ jobs: [job()] }),
-    listProjects: async () => projects,
-    listModels: async () => models,
-  });
-  assert.equal((await v.jobForSession("ses_child")).readOnly, true);
-});
-
 test("models are fetched once within the memo window and again after it", async () => {
   let t = 1_000;
   const { v, calls } = view([job()], { now: () => t });
@@ -250,6 +241,18 @@ test("assertWritable lets a work job, an ordinary session and a missing id throu
 test("assertWritable still refuses a TERMINAL job session", async () => {
   const { v } = view([job({ status: "done" })]);
   await assert.rejects(() => v.assertWritable("ses_child"), ReadOnlyJobError);
+});
+
+test("assertWritable is one raw record read — no models, projects or per-job progress work", async () => {
+  const projectsCalls = { n: 0 };
+  const { v, calls } = view([job(), job({ id: "j2", childSessionID: "ses_other" })], {
+    listProjects: async () => (projectsCalls.n++, projects),
+  });
+  await assert.rejects(() => v.assertWritable("ses_child"), ReadOnlyJobError);
+  await v.assertWritable("ses_ordinary");
+  assert.equal(calls.jobs, 2, "one loadJobs per call");
+  assert.equal(calls.models, 0);
+  assert.equal(projectsCalls.n, 0);
 });
 
 // ---- decorateList ---------------------------------------------------------

@@ -101,6 +101,27 @@ describe("ChatPanel — read-only background job (the box decides)", () => {
     expect(h!.container.querySelector('[data-testid="read-only-job-bar"]')).toBeNull();
     expect(h!.container.querySelector("textarea")).not.toBeNull();
   });
+
+  it("an older answer that lands after a newer one never overwrites it", async () => {
+    let fire: (() => void) | null = null;
+    const pending: Array<(v: unknown) => void> = [];
+    await open({
+      onDelegateUpdated: (cb: () => void) => {
+        fire = cb;
+        return () => {};
+      },
+      delegateJobForSession: () => new Promise((resolve) => pending.push(resolve)),
+    });
+    expect(pending.length).toBe(1);
+    await act(async () => fire!());
+    await h!.flush();
+    expect(pending.length).toBe(2);
+    await act(async () => pending[1]({ readOnly: false }));
+    await act(async () => pending[0]({ readOnly: true, job: view() }));
+    await h!.flush();
+    expect(h!.container.querySelector('[data-testid="read-only-job-bar"]')).toBeNull();
+    expect(h!.container.querySelector("textarea")).not.toBeNull();
+  });
 });
 
 describe("ChatPanel — background-job approval refusal", () => {

@@ -285,6 +285,8 @@ final class ChatSessionStore: ObservableObject {
 
     /// A background job's session is read-only; the bar replaces the composer.
     var isBackgroundJobReadOnly: Bool { mutationPolicy == .readOnlyJob }
+    /// What the composer's `acceptsInput` follows (true while resolving, false only for a job).
+    var composerAcceptsInput: Bool { ChatCardMutationGate.composerAcceptsInput(mutationPolicy) }
     /// Whether a user action may change this conversation right now.
     var canMutate: Bool { !isReadOnly && mutationPolicy == .allowed }
 
@@ -577,6 +579,11 @@ final class ChatSessionStore: ObservableObject {
         noticeExpiry?.cancel()
         compactionExpiry = nil
         noticeExpiry = nil
+        // A cancelled timer must not leave its key "scheduled": the latch would then
+        // never start another one after a push/pop, and the line would stay pinned.
+        // Leaving the screen ends the hold.
+        if let key = compactionLatch?.scheduled { expireCompaction(key) }
+        if let key = noticeLatch?.scheduled { expireNotice(key) }
         highlightClear?.cancel()
         highlightClear = nil
         // A jump in progress does not outlive the screen.
