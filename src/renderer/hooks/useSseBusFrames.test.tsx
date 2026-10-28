@@ -38,7 +38,6 @@ type Stubs = {
 
 let bus!: SseBus;
 let stubs!: Stubs;
-let providerID: string | null = "anthropic";
 
 function Probe() {
   bus = useSseBus({
@@ -57,7 +56,6 @@ function Probe() {
     isActiveRef: { current: true },
     refetchOwedWhileInactive: { current: false },
     applyStreamFlush: stubs.applyStreamFlush as never,
-    providerID,
     setPlanOn: stubs.setPlanOn as never,
   });
   return null;
@@ -88,7 +86,6 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
 
   beforeEach(() => {
     resetRetiredInboxEpochs();
-    providerID = "anthropic";
     stubs = {
       setMessages: vi.fn(),
       setRefreshing: vi.fn(),
@@ -227,30 +224,45 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
   });
 
   describe("sessionError", () => {
-    it("typed message + stops the turn", async () => {
+    it("shows the box's display text + stops the turn", async () => {
       await mountProbe();
       await emit(frame("running", { running: true }));
-      await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big" }));
-      expect(bus.sendError).toBe("Context full — try /compact: too big");
+      await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big", display: { text: "BOX: context full — too big", reconnect: null } }));
+      expect(bus.sendError).toBe("BOX: context full — too big");
       expect(bus.running).toBe(false);
       expect(bus.authReconnect).toBeNull();
     });
 
-    it("a credential failure on the active provider becomes the reconnect banner", async () => {
+    it("a credential failure: the box's text and reconnect label become the banner", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x" }));
-      expect(bus.sendError).toBe("Claude needs to be reconnected.");
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x", display: { text: "BOX: Claude needs a new sign-in.", reconnect: { providerID: "anthropic", label: "Claude", accountsId: "claude" } } }));
+      expect(bus.sendError).toBe("BOX: Claude needs a new sign-in.");
       expect(bus.authReconnect).toBe("Claude");
     });
 
-    it("keeps classifying against the raw provider message (rawMessage)", async () => {
+    it("an older box (no display) shows the raw message and no reconnect — never a client-side reclassification", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "ApiError", message: "Your session is no longer valid", rawMessage: 'Unauthorized: {"error":{"type":"authentication_error","message":"Your session is no longer valid"}}' }));
-      expect(bus.authReconnect).toBe("Claude");
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "raw provider words" }));
+      expect(bus.sendError).toBe("raw provider words");
+      expect(bus.authReconnect).toBeNull();
     });
 
     describe("Reconnect (opens Settings → Accounts)", () => {
-      const authErr = () => frame("sessionError", { name: "ProviderAuthError", message: "x" });
+      // The box classifies the failure and sends the reconnect target in `display`.
+      const AUTH_PROVIDERS = {
+        anthropic: { label: "Claude", accountsId: "claude" },
+        openai: { label: "Codex", accountsId: "codex" },
+        "kimi-for-coding": { label: "Kimi", accountsId: "kimi" },
+      } as const;
+      const authErr = (prov: keyof typeof AUTH_PROVIDERS = "anthropic") =>
+        frame("sessionError", {
+          name: "ProviderAuthError",
+          message: "x",
+          display: {
+            text: `${AUTH_PROVIDERS[prov].label} needs to be reconnected.`,
+            reconnect: { providerID: prov, ...AUTH_PROVIDERS[prov] },
+          },
+        });
       const opened = () => {
         const seen: CustomEvent[] = [];
         const fn = (e: Event) => seen.push(e as CustomEvent);
@@ -263,12 +275,11 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
         ["anthropic", "Claude", "claude"],
         ["openai", "Codex", "codex"],
         ["kimi-for-coding", "Kimi", undefined],
-      ])("%s → Accounts focused on %s, and the banner stays", async (prov, label, seatId) => {
-        providerID = prov;
+      ] as const)("%s → Accounts focused on %s, and the banner stays", async (prov, label, seatId) => {
         const o = opened();
         try {
           await mountProbe();
-          await emit(authErr());
+          await emit(authErr(prov));
           await press();
           expect(o.seen).toHaveLength(1);
           expect(o.seen[0].detail).toEqual({ section: "accounts", provider: seatId });
@@ -309,11 +320,8 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
           expect(bus.authReconnect).toBeNull();
           await emit(authErr());
           expect(bus.authReconnect).toBe("Claude");
-          // Same hook instance (no remount): switch the active provider, force one
-          // re-render so the hook's provider ref updates, then a second classified error.
-          providerID = "openai";
-          await emit(frame("running", { running: true }));
-          await emit(authErr());
+          // Same hook instance: a classified error for another provider replaces the target.
+          await emit(authErr("openai"));
           expect(bus.authReconnect).toBe("Codex");
           await press();
           expect(o.seen.at(-1)!.detail).toEqual({ section: "accounts", provider: "codex" });
@@ -344,7 +352,7 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
 
     it("an aborted frame after a sign-in error replaces it and drops the Reconnect", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x" }));
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x", display: { text: "Claude needs to be reconnected.", reconnect: { providerID: "anthropic", label: "Claude", accountsId: "claude" } } }));
       expect(bus.authReconnect).toBe("Claude");
       await emit(frame("aborted", {}));
       expect(bus.sendError).toBe("Aborted");

@@ -15,7 +15,7 @@ import {
   mountSessionHeader,
   type Harness,
 } from "./testHarness";
-import type { ForgeCheckRun, PullRequest } from "../shared/types";
+import type { ForgeCheckRun, ForgePullRequestView, PullRequest } from "../shared/types";
 
 const PR: PullRequest = {
   number: 412,
@@ -34,20 +34,35 @@ const PR: PullRequest = {
   unresolvedThreads: 0,
 };
 
-// Fixture: 2 failed + 1 running + 7 passed = ten checks. All have a log URL
-// except p7 (the "no url" case).
+// Fixture: 2 failed + 1 running + 7 passed = ten checks, ALREADY in the box's
+// order (failed → running → passed) and carrying the box's `tone`. All have a
+// log URL except p7 (the "no url" case).
 const CHECKS: ForgeCheckRun[] = [
-  { name: "f1", conclusion: "failure", url: "https://logs/f1" },
-  { name: "f2", conclusion: "cancelled", url: "https://logs/f2" },
-  { name: "r1", status: "in_progress", url: "https://logs/r1" },
-  { name: "p1", conclusion: "success", url: "https://logs/p1" },
-  { name: "p2", conclusion: "success", url: "https://logs/p2" },
-  { name: "p3", conclusion: "success", url: "https://logs/p3" },
-  { name: "p4", conclusion: "success", url: "https://logs/p4" },
-  { name: "p5", conclusion: "success", url: "https://logs/p5" },
-  { name: "p6", conclusion: "success", url: "https://logs/p6" },
-  { name: "p7", conclusion: "success" },
+  { name: "f1", conclusion: "failure", url: "https://logs/f1", tone: "error" },
+  { name: "f2", conclusion: "cancelled", url: "https://logs/f2", tone: "error" },
+  { name: "r1", status: "in_progress", url: "https://logs/r1", tone: "running" },
+  { name: "p1", conclusion: "success", url: "https://logs/p1", tone: "ok" },
+  { name: "p2", conclusion: "success", url: "https://logs/p2", tone: "ok" },
+  { name: "p3", conclusion: "success", url: "https://logs/p3", tone: "ok" },
+  { name: "p4", conclusion: "success", url: "https://logs/p4", tone: "ok" },
+  { name: "p5", conclusion: "success", url: "https://logs/p5", tone: "ok" },
+  { name: "p6", conclusion: "success", url: "https://logs/p6", tone: "ok" },
+  { name: "p7", conclusion: "success", tone: "ok" },
 ];
+
+// The box's view: the chip, the "send failures" text and the log URL are its.
+const VIEW: ForgePullRequestView = {
+  panel: "pr",
+  chipLabel: "feat/forge-seam · #412",
+  ship: { state: "has-pr", copy: null },
+  merge: { can: false, reason: "checks failing", mergeable: { text: "mergeable", tone: "ok" } },
+  checks: {
+    counts: { passed: 7, failed: 2, running: 1 },
+    chip: { glyph: "✗", label: "✗ 2 failed", tone: "danger" },
+    failuresPrompt: "FIXTURE PROMPT: f1, f2",
+    logsUrl: "https://logs/f1",
+  },
+};
 
 const bodyText = () => document.body.textContent ?? "";
 const popover = () =>
@@ -73,7 +88,7 @@ function mountWithChecks({
   return mountSessionHeader({
     pr: PR,
     checks: CHECKS,
-    checksRollup: "red",
+    view: VIEW,
     forgeConnected: true,
     forgeKind,
     onOpenExternal,
@@ -202,6 +217,8 @@ describe("SessionHeader checks popover (BET-926)", () => {
     expect(sendBtn).toBeTruthy();
     act(() => sendBtn!.click());
     expect(onFillComposer).toHaveBeenCalledTimes(1);
+    // The text is the box's, not rebuilt here.
+    expect(onFillComposer).toHaveBeenCalledWith("FIXTURE PROMPT: f1, f2");
     // The footer's own Open-logs button opens the first failing check's log.
     const openLogs = [...(popover()?.querySelectorAll("button") ?? [])].find(
       (b) => b.textContent?.includes("Open logs"),
@@ -209,5 +226,30 @@ describe("SessionHeader checks popover (BET-926)", () => {
     expect(openLogs).toBeTruthy();
     act(() => openLogs!.click());
     expect(onOpenExternal).toHaveBeenCalledWith("https://logs/f1");
+  });
+
+  it("the chip label is the box's; no view → no chip at all", async () => {
+    h = mountWithChecks();
+    await h.flush();
+    expect(h.container.querySelector("button.manta-checks-chip")?.textContent).toContain("✗ 2 failed");
+    h.unmount();
+    h = mountSessionHeader({ pr: PR, checks: CHECKS, view: null, forgeConnected: true, forgeKind: "github" });
+    await h.flush();
+    expect(h.container.querySelector("button.manta-checks-chip")).toBeNull();
+  });
+
+  it("with nothing failed there is no Send failures action", async () => {
+    h = mountSessionHeader({
+      pr: PR,
+      checks: CHECKS.filter((c) => c.tone === "ok"),
+      view: { ...VIEW, checks: { ...VIEW.checks, failuresPrompt: null, logsUrl: null, chip: { glyph: "✓", label: "✓ 7", tone: "ok" } } },
+      forgeConnected: true,
+      forgeKind: "github",
+      onFillComposer: vi.fn(),
+    });
+    openChecksChip(h);
+    await h.flush();
+    expect(bodyText()).not.toContain("Send failures to the agent");
+    expect(bodyText()).not.toContain("Open logs");
   });
 });

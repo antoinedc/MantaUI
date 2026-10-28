@@ -54,7 +54,9 @@ final class ChatInboxStoreTests: XCTestCase {
             tokenProvider: { nil },
             session: URLSession(configuration: config)
         )
-        let store = ChatSessionStore(sessionId: sessionId, eventStore: eventStore, api: api, isReadOnly: readOnly)
+        let store = ChatSessionStore(sessionId: sessionId, eventStore: eventStore, api: api, isReadOnly: readOnly, mutationPolicy: readOnly ? .resolving : .allowed)
+        // A current box: it advertises the chat-cards capability.
+        store.chatCardCapabilities.apply([ChatCardCapabilities.chatCards])
         return Harness(store: store, stream: stream, eventStore: eventStore)
     }
 
@@ -406,25 +408,77 @@ final class ChatInboxStoreTests: XCTestCase {
     }
 
     func testSetDeliveryDeliveredAndUnknownAreReported() async {
-        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"delivered"}"#) : .result("null") }
+        // The BOX words the outcome; the app shows its sentence verbatim.
+        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"delivered","notice":"BOX: already sent","error":null}"#) : .result("null") }
         let h = makeHarness()
         h.store.setInboxDelivery(id: "m", to: .steer)
         await waitUntil { h.store.actionHint != nil }
-        XCTAssertEqual(h.store.actionHint, "Already sent to the agent")
+        XCTAssertEqual(h.store.actionHint, "BOX: already sent")
 
-        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"unknown"}"#) : .result("null") }
+        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"unknown","notice":null,"error":"BOX: couldn't confirm"}"#) : .result("null") }
         h.store.actionHint = nil
         h.store.setInboxDelivery(id: "m", to: .queue)
         await waitUntil { h.store.actionHint != nil }
-        XCTAssertEqual(h.store.actionHint, "Couldn't confirm the change — check the pending list")
+        XCTAssertEqual(h.store.actionHint, "BOX: couldn't confirm")
     }
 
-    func testSetDeliveryUnrecognisedOutcomeIsReportedNotSwallowed() async {
-        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"teleported"}"#) : .result("null") }
+    func testSetDeliveryUnrecognisedOutcomeShowsTheBoxsError() async {
+        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-set-delivery" ? .result(#"{"outcome":"teleported","error":"BOX: couldn't confirm"}"#) : .result("null") }
         let h = makeHarness()
         h.store.setInboxDelivery(id: "m", to: .steer)
         await waitUntil { h.store.actionHint != nil }
-        XCTAssertEqual(h.store.actionHint, "Couldn't confirm the change — check the pending list")
+        XCTAssertEqual(h.store.actionHint, "BOX: couldn't confirm")
+    }
+
+    /// An older box (no `chat-cards-1`) can answer `unknown` with no sentence at all, which
+    /// would be lost silently — so every inbox action is gated and sends NO request.
+    func testInboxActionsAreGatedOnTheCapabilityAndSendNothing() async {
+        let h = makeHarness()
+        h.store.chatCardCapabilities.apply([])   // an older box: answered, lists nothing
+        h.store.setInboxDelivery(id: "m", to: .steer)
+        h.store.cancelInboxItem(id: "m")
+        let edited = await h.store.editLastInboxItem()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(edited)
+        XCTAssertTrue(InboxRPCStub.calls.filter { $0.channel.hasPrefix("opencode:inbox-") }.isEmpty)
+    }
+
+    func testEditLastCancelsTheNewestPendingItemWithRestoreAndReturnsTheBoxsText() async {
+        InboxRPCStub.handler = { channel, _ in
+            channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"cancelled","notice":null,"error":null,"restoreText":"second text"}"#) : .result("null")
+        }
+        let h = makeHarness()
+        h.stream.inject(inboxFrame(1, items: [("m1", "steer"), ("m2", "queue")]))
+        await waitUntil { h.store.inboxItems.count == 2 }
+        let restored = await h.store.editLastInboxItem()
+        XCTAssertEqual(restored, "second text")
+        let call = InboxRPCStub.calls.first { $0.channel == "opencode:inbox-cancel" }?.arg
+        XCTAssertEqual(call?["id"] as? String, "m2", "the newest pending message")
+        XCTAssertEqual(call?["restore"] as? Bool, true)
+    }
+
+    func testEditLastReportsTheBoxsNoticeWhenAttachmentsAreLost() async {
+        InboxRPCStub.handler = { channel, _ in
+            channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"cancelled","notice":"BOX: re-attach them","error":null,"restoreText":"t"}"#) : .result("null")
+        }
+        let h = makeHarness()
+        h.stream.inject(inboxFrame(1, items: [("m1", "steer")]))
+        await waitUntil { h.store.inboxItems.count == 1 }
+        let restored = await h.store.editLastInboxItem()
+        XCTAssertEqual(restored, "t")
+        XCTAssertEqual(h.store.actionHint, "BOX: re-attach them")
+    }
+
+    func testEditLastNeverRestoresWhenTheCancelWasNotConfirmed() async {
+        InboxRPCStub.handler = { channel, _ in
+            channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"unknown","notice":null,"error":"BOX: may still be sent","restoreText":null}"#) : .result("null")
+        }
+        let h = makeHarness()
+        h.stream.inject(inboxFrame(1, items: [("m1", "steer")]))
+        await waitUntil { h.store.inboxItems.count == 1 }
+        let restored = await h.store.editLastInboxItem()
+        XCTAssertNil(restored)
+        XCTAssertEqual(h.store.actionHint, "BOX: may still be sent")
     }
 
     func testSetDeliveryTransportFailureIsReported() async {
@@ -445,16 +499,16 @@ final class ChatInboxStoreTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertNil(h.store.actionHint, "a cancelled message needs no words — the row leaves")
 
-        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"delivered"}"#) : .result("null") }
+        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"delivered","notice":"BOX: already sent"}"#) : .result("null") }
         h.store.cancelInboxItem(id: "m")
         await waitUntil { h.store.actionHint != nil }
-        XCTAssertEqual(h.store.actionHint, "Already sent to the agent")
+        XCTAssertEqual(h.store.actionHint, "BOX: already sent")
 
-        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"unknown"}"#) : .result("null") }
+        InboxRPCStub.handler = { channel, _ in channel == "opencode:inbox-cancel" ? .result(#"{"outcome":"unknown","error":"BOX: may still be sent"}"#) : .result("null") }
         h.store.actionHint = nil
         h.store.cancelInboxItem(id: "m")
         await waitUntil { h.store.actionHint != nil }
-        XCTAssertEqual(h.store.actionHint, "Couldn't confirm it was cancelled — it may still be sent")
+        XCTAssertEqual(h.store.actionHint, "BOX: may still be sent")
 
         InboxRPCStub.handler = { _, _ in .rpcError("not available for the CTO conversation") }
         h.store.actionHint = nil

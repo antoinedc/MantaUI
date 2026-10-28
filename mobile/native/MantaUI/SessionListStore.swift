@@ -21,14 +21,23 @@ import SwiftUI
 // `SessionModels.swift`; this store is the I/O + state wiring around them.
 // ===========================================================================
 
-/// The rename/fork RPC seam for the session-list surface, so the store's
-/// "refresh only after a successful mutation" orchestration is unit-testable
-/// without a live box. The live adapter wraps `MantaAPIClient`'s existing RPCs
-/// unchanged (no semantics change — only the swallowing call sites move here).
+/// The mutation/read seam for the session-list surface, so the store's
+/// orchestration ("refresh only after a successful mutation", the close queue,
+/// the launcher catalog) is unit-testable without a live box. The live adapter
+/// wraps `MantaAPIClient`'s RPCs unchanged.
 @MainActor
 protocol SessionListMutationAPI {
     func renameWindow(session: String, index: Int, newName: String) async throws
     func forkSession(sessionId: String, sessionName: String, windowName: String) async throws
+    func renameProject(oldName: String, newName: String) async throws
+    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws
+    func killWindow(session: String, index: Int) async throws
+    func killProject(_ name: String) async throws
+    func deleteProjectMeta(_ name: String) async throws
+    func removeWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval
+    func configGet() async throws -> [String: JSONValue]?
+    func launchersList() async throws -> [AvailableLauncher]
+    func usageStoppedList() async throws -> SessionStoppedList
 }
 
 @MainActor
@@ -41,6 +50,42 @@ struct ServerSessionListMutations: SessionListMutationAPI {
 
     func forkSession(sessionId: String, sessionName: String, windowName: String) async throws {
         _ = try await api.forkSession(sessionId: sessionId, sessionName: sessionName, windowName: windowName)
+    }
+
+    func renameProject(oldName: String, newName: String) async throws {
+        try await api.tmuxRenameSession(oldName: oldName, newName: newName)
+    }
+
+    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
+        try await api.deleteSession(sessionId: sessionId, sessionName: sessionName, windowIndex: windowIndex)
+    }
+
+    func killWindow(session: String, index: Int) async throws {
+        try await api.killWindow(KillWindowInput(sessionName: session, windowIndex: index))
+    }
+
+    func killProject(_ name: String) async throws {
+        try await api.tmuxKillSession(name)
+    }
+
+    func deleteProjectMeta(_ name: String) async throws {
+        try await api.projectMetaDelete(name)
+    }
+
+    func removeWorktree(path: String, force: Bool) async throws -> SessionWorktreeRemoval {
+        try await api.gitRemoveWorktree(path: path, force: force)
+    }
+
+    func configGet() async throws -> [String: JSONValue]? {
+        try await api.configGet()
+    }
+
+    func launchersList() async throws -> [AvailableLauncher] {
+        try await api.launchersList()
+    }
+
+    func usageStoppedList() async throws -> SessionStoppedList {
+        try await api.usageStoppedList()
     }
 }
 
@@ -91,6 +136,30 @@ final class SessionListStore: ObservableObject {
     /// through it.
     @Published private(set) var liveActivity: [String: Date] = [:]
 
+    // MARK: WS04 state (spec 04): launchers, stopped conversations, recents,
+    // the close queue. All device/box decoration — none of it may blank the list.
+
+    /// Which AI CLIs are installed on the box, and how sure we are (spec §2).
+    @Published private(set) var launcherCatalog: SessionLauncherCatalog = .loading
+    /// The last good `launchers:list` (kept across a failed refresh).
+    @Published private(set) var launchers: [AvailableLauncher] = []
+    /// `config.launcherFlags`: the user's saved flags per launcher.
+    @Published private(set) var launcherFlags: [String: [String: Bool]] = [:]
+    /// The box's durable list of conversations a provider limit stopped (D16 —
+    /// the ONLY stopped-state source on iOS; WS09 reads it).
+    @Published private(set) var stoppedRecords: [SessionStoppedRecord] = []
+    /// Epoch milliseconds, exactly as the box sent it (compare with `stoppedAt`).
+    @Published private(set) var stoppedLastLooked: Double?
+    @Published private(set) var stoppedConversations: Set<String> = []
+    /// Window keys (`"<project>#<index>"`), most recently opened first. Device-local.
+    @Published private(set) var recents: [String]
+    /// Dirty-worktree decisions waiting for the user, in the order they arose.
+    @Published private(set) var worktreePrompts: [SessionWorktreePrompt] = []
+    /// Real outcomes of closes, consumed by the view (haptic + toast).
+    @Published private(set) var closeFeedback: [SessionCloseFeedback] = []
+    /// How many times a refresh was asked for (an observation point for tests).
+    private(set) var refreshRequestCount = 0
+
     private let api: MantaAPIClient
     private let mutations: SessionListMutationAPI
     private let eventStore: MantaEventStore
@@ -126,20 +195,34 @@ final class SessionListStore: ObservableObject {
     /// only; one source per window type, no merging.
     private(set) var terminalStatus: [String: WindowPollStatus] = [:]
     private var cancellables: Set<AnyCancellable> = []
+    private let defaults: UserDefaults
+    private static let recentsKey = "sessionRecents"
+    /// Closes run through ONE worker, in the order they were asked for.
+    private var closeQueue: [SessionCloseRequest] = []
+    private var closeWorker: Task<Void, Never>?
+    /// Bumped by `resetForBoxChange`. A worker (or refresh) started before the
+    /// reset sees a stale generation and neither publishes into the new box's
+    /// state nor clears the handle of the worker that replaced it.
+    private var closeGeneration = 0
+    private var boxGeneration = 0
+    private var launcherTask: Task<Void, Never>?
     /// A job-list refetch (driven by `delegate.updated`) in flight, and one
     /// asked for meanwhile — coalesced the same way `refresh()` is.
     private var jobsRefreshing = false
     private var jobsRefreshQueued = false
 
-    init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil) {
+    init(api: MantaAPIClient = MantaAPIClient.live(), eventStore: MantaEventStore, mutations: SessionListMutationAPI? = nil, defaults: UserDefaults = .standard) {
         self.api = api
         self.mutations = mutations ?? ServerSessionListMutations(api: api)
         self.eventStore = eventStore
+        self.defaults = defaults
+        self.recents = defaults.stringArray(forKey: Self.recentsKey) ?? []
         self.loadConfig()
         self.eventStore.addRawFrameHandler { [weak self] frame in
             self?.trackProgress(frame: frame)
             self?.trackStatus(frame: frame)
             self?.trackDelegate(frame: frame)
+            self?.trackStopped(frame: frame)
         }
         // A turn completing is the moment the age chip becomes eligible
         // (`!running`), and it is precisely when the cached `lastActivity` is
@@ -193,6 +276,7 @@ final class SessionListStore: ObservableObject {
     /// caller marks a re-run and the loop fires once more when the in-flight
     /// fetch lands, so a refresh request can never be silently lost.
     func refresh() async {
+        refreshRequestCount += 1
         if loading {
             refreshQueued = true
             return
@@ -222,11 +306,18 @@ final class SessionListStore: ObservableObject {
             // and no count shows — never a blank list. On success adopt it; on
             // failure keep whatever we had (stale jobs still resolve to real
             // windows) and just re-derive nesting against the new projects.
+            // More decoration, same rule: a failure keeps what we had. The stopped
+            // list is cheap, so it runs alongside the job list. Launcher discovery
+            // is NOT here — it spawns a login shell per CLI (seconds), so it runs
+            // once after launch / box change, on foreground and on demand.
+            async let stopped: Void = refreshStopped()
             if let jobs = try? await api.delegateList() {
                 applyJobs(jobs)
             } else {
                 recomputeNesting()
             }
+            await stopped
+            if launcherCatalog == .loading { Task { await refreshLaunchers() } }
         } catch {
             // Keep whatever was already on screen — a failed fetch must never
             // blank a list we successfully loaded before.
@@ -382,6 +473,7 @@ final class SessionListStore: ObservableObject {
         let isTerminal = window.opencodeSessionId == nil
         let stream = eventStore.sessionStates[sid]
         var running = stream?.running == true
+        var subagents = SessionSubagentCount.running(stream?.subagents ?? [], parentRunning: running)
         let attention = !(stream?.questions?.questions.isEmpty ?? true)
             || !(stream?.permissions?.permissions.isEmpty ?? true)
         if isTerminal,
@@ -394,15 +486,18 @@ final class SessionListStore: ObservableObject {
             // fallback to the stream. Chat windows are untouched (the branch is
             // terminal-only; one source per window type, no merging).
             running = polled.running
+            subagents = polled.subagents
         }
         return SessionRowStatus(
-            running: running,
+            running: running || subagents > 0,
             attention: attention,
             backgroundJobs: backgroundJobsBySession[sid] ?? 0,
             modelLabel: sessionMeta[sid]?.modelLabel,
             progressLabel: progressBySession[sid],
             lastActivity: sessionMeta[sid]?.lastActivity,
-            isTerminal: isTerminal
+            isTerminal: isTerminal,
+            runningSubagents: subagents,
+            halted: !sid.isEmpty && stoppedConversations.contains(sid)
         )
     }
 
@@ -577,15 +672,21 @@ final class SessionListStore: ObservableObject {
         cancelPendingDelete(id)
     }
 
-    /// Fire the RPC for anything still pending whose window has expired.
-    /// Called by the undo toast's `.task(id:)` when it times out. Returns
-    /// whether anything was committed (so the caller can gate a confirm haptic).
+    /// Hand everything still pending whose undo window has expired to the close
+    /// queue. Called by the undo toast's `.task(id:)` when it times out. Returns
+    /// whether anything was enqueued. It does NOT mean anything was closed: the
+    /// queue reports real outcomes through `closeFeedback`.
     @discardableResult
     func commitExpiredDeletes(now: Date = Date()) -> Bool {
-        let expired = pendingDeletes.values.filter { $0.expired(now: now) }.map(\.pinID)
-        var committed = false
-        for id in expired where commitPendingDelete(id) { committed = true }
-        return committed
+        // Oldest first, so the queue (and any worktree prompts) follow the order
+        // the user deleted in rather than the dictionary's.
+        let expired = pendingDeletes.values
+            .filter { $0.expired(now: now) }
+            .sorted { ($0.startedAt, $0.pinID) < ($1.startedAt, $1.pinID) }
+            .map(\.pinID)
+        var enqueued = false
+        for id in expired where commitPendingDelete(id) { enqueued = true }
+        return enqueued
     }
 
     private func cancelPendingDelete(_ id: String) {
@@ -597,37 +698,172 @@ final class SessionListStore: ObservableObject {
         guard let pending = pendingDeletes.removeValue(forKey: id) else { return false }
         switch pending.target {
         case .window(let session, let index):
-            let chatID = chatSessionID(session: session, index: index)
-            Task {
-                do {
-                    if let chatID {
-                        try await api.deleteSession(sessionId: chatID, sessionName: session, windowIndex: index)
-                    } else {
-                        try await api.killWindow(KillWindowInput(sessionName: session, windowIndex: index))
-                    }
-                    await refresh()
-                } catch {
-                    // Server rejected the delete — refresh so the row's real
-                    // state is shown rather than a phantom removal.
-                    await refresh()
-                }
-            }
+            enqueueClose(project: session, index: index)
         }
         return true
     }
 
+    // MARK: - Close queue (spec 04 §8)
+
+    /// Ask for a session to be closed. Requests run ONE at a time, in order, so
+    /// two quick deletes can never race each other's worktree decisions.
+    func enqueueClose(project: String, index: Int, decision: SessionCloseChoice = .none) {
+        let request = SessionCloseRequest(project: project, index: index, decision: decision)
+        // The same window can't be closed twice over.
+        if closeQueue.contains(where: { $0.key == request.key && $0.decision == request.decision }) { return }
+        closeQueue.append(request)
+        guard closeWorker == nil else { return }
+        let generation = closeGeneration
+        closeWorker = Task { [weak self] in
+            await self?.drainCloseQueue(generation: generation)
+        }
+    }
+
+    /// Completes once the queue has run dry (for tests and for callers that
+    /// must act after the close).
+    func waitForCloseQueue() async {
+        await closeWorker?.value
+    }
+
+    private func drainCloseQueue(generation: Int) async {
+        while generation == closeGeneration, !closeQueue.isEmpty {
+            let request = closeQueue.removeFirst()
+            await processClose(request, generation: generation)
+        }
+        // Only the CURRENT worker may clear the handle: a stale one finishing
+        // after a box reset must not wipe the new worker's, or the next enqueue
+        // would start a second concurrent worker.
+        if generation == closeGeneration { closeWorker = nil }
+    }
+
+    private func processClose(_ request: SessionCloseRequest, generation: Int) async {
+        let window = projects.first(where: { $0.tmuxSession == request.project })?
+            .windows.first(where: { $0.index == request.index })
+        let cleanOnClose = await readCleanOnClose()
+        guard generation == closeGeneration else { return }
+        var removal: SessionWorktreeRemoval?
+        var removalError: String?
+        var step = SessionCloseDecision.next(
+            cleanOnClose: cleanOnClose, worktreePath: window?.worktreePath, removal: nil, decision: request.decision
+        )
+        // Bounded: each pass either removes (once) or ends in ask/kill.
+        for _ in 0..<3 {
+            switch step {
+            case .removeWorktree(let force):
+                guard let path = window?.worktreePath else { step = .kill(.plain); continue }
+                do {
+                    removal = try await mutations.removeWorktree(path: path, force: force)
+                } catch {
+                    removal = .otherFailure
+                    removalError = SessionActionError.message("remove the worktree", error: error)
+                }
+                guard generation == closeGeneration else { return }
+                step = SessionCloseDecision.next(
+                    cleanOnClose: cleanOnClose, worktreePath: window?.worktreePath, removal: removal, decision: request.decision
+                )
+            case .ask:
+                // Nothing is deleted. The row stays; the user decides.
+                let prompt = SessionWorktreePrompt(
+                    key: request.key, project: request.project, index: request.index,
+                    windowName: window?.name ?? "session", worktreePath: window?.worktreePath ?? ""
+                )
+                worktreePrompts = SessionWorktreePromptQueue.append(prompt, to: worktreePrompts)
+                return
+            case .kill(let outcome):
+                await kill(window: window, request: request, outcome: outcome, removalError: removalError, generation: generation)
+                return
+            }
+        }
+    }
+
+    private func kill(window: MantaWindow?, request: SessionCloseRequest, outcome: SessionCloseOutcome,
+                      removalError: String?, generation: Int) async {
+        do {
+            if let sid = window?.opencodeSessionId, !sid.isEmpty {
+                try await mutations.deleteSession(sessionId: sid, sessionName: request.project, windowIndex: request.index)
+            } else {
+                try await mutations.killWindow(session: request.project, index: request.index)
+            }
+        } catch {
+            guard generation == closeGeneration else { return }
+            // The row's real state is shown instead of a phantom removal.
+            publishFeedback(.failed(SessionActionError.message("delete", error: error)))
+            await refresh()
+            return
+        }
+        // The close belonged to a box we have since left: say nothing about it.
+        guard generation == closeGeneration else { return }
+        switch outcome {
+        case .plain:
+            publishFeedback(.closed)
+        case .keptWorktree(let path):
+            publishFeedback(.closedWithNotice(SessionCloseCopy.kept([path]) ?? "Kept worktree at \(path)"))
+        case .removalFailed(let path):
+            publishFeedback(.closedWithNotice(removalError ?? "Couldn't remove the worktree at \(path)."))
+        }
+        await refresh()
+    }
+
+    private func publishFeedback(_ kind: SessionCloseFeedbackKind) {
+        closeFeedback.append(SessionCloseFeedback(kind: kind))
+    }
+
+    func consumeFeedback(id: UUID) {
+        closeFeedback.removeAll { $0.id == id }
+    }
+
+    /// The user's answer to the prompt for `key`. Cancel does nothing at all.
+    func resolveWorktreePrompt(key: String, decision: SessionWorktreeAnswer) {
+        guard let prompt = worktreePrompts.first(where: { $0.key == key }) else { return }
+        worktreePrompts = SessionWorktreePromptQueue.resolve(key: key, in: worktreePrompts)
+        switch decision {
+        case .cancel: return
+        case .keep: enqueueClose(project: prompt.project, index: prompt.index, decision: .keep)
+        case .remove: enqueueClose(project: prompt.project, index: prompt.index, decision: .remove)
+        }
+    }
+
+    /// `worktreeCleanOnClose`, read from the box AT THE MOMENT it matters — a
+    /// cached copy would act on a setting the user has since changed. A failed
+    /// read is "off": nothing is removed when we can't confirm the setting.
+    func readCleanOnClose() async -> Bool {
+        guard let config = try? await mutations.configGet() else { return false }
+        if case .bool(let on)? = config["worktreeCleanOnClose"] { return on }
+        return false
+    }
+
+    /// `worktreePerSession`, read fresh when the create sheet opens. Off on failure.
+    func readWorktreePerSession() async -> Bool {
+        guard let config = try? await mutations.configGet() else { return false }
+        if case .bool(let on)? = config["worktreePerSession"] { return on }
+        return false
+    }
+
     // MARK: - Rename / Fork (transient-feedback mutations)
 
-    /// Rename a window. Refreshes only after a successful RPC; on a rejected
-    /// rename the in-memory list is left untouched (the pre-failure snapshot —
-    /// there is no optimistic rename to revert) and a transient message is
-    /// published for the view to surface.
-    func renameSession(project: String, index: Int, newName: String) async {
+    /// Rename a window. Refreshes only after a successful RPC and returns nil;
+    /// on a rejected rename the in-memory list is left untouched (there is no
+    /// optimistic rename to revert) and the message is RETURNED for the caller
+    /// to show — the rename sheet keeps itself open with it.
+    func renameSession(project: String, index: Int, newName: String) async -> String? {
         do {
             try await mutations.renameWindow(session: project, index: index, newName: newName)
             await refresh()
+            return nil
         } catch {
-            actionMessage = "Couldn't rename — check the connection"
+            return SessionActionError.message("rename", error: error)
+        }
+    }
+
+    /// Rename a whole project (a tmux session). Same contract as `renameSession`.
+    /// Pins are not migrated — the desktop doesn't either.
+    func renameProject(oldName: String, newName: String) async -> String? {
+        do {
+            try await mutations.renameProject(oldName: oldName, newName: newName)
+            await refresh()
+            return nil
+        } catch {
+            return SessionActionError.message("rename", error: error)
         }
     }
 
@@ -643,13 +879,157 @@ final class SessionListStore: ObservableObject {
         }
     }
 
-    /// The opencode session id for a window, if any (for chat deletes).
-    private func chatSessionID(session: String, index: Int) -> String? {
-        projects
-            .first(where: { $0.tmuxSession == session })?
-            .windows
-            .first(where: { $0.index == index })?
-            .opencodeSessionId
+    /// The window for a project/index pair.
+    func window(project: String, index: Int) -> MantaWindow? {
+        projects.first(where: { $0.tmuxSession == project })?.windows.first(where: { $0.index == index })
+    }
+
+    /// The window (and its project) a chat session lives in.
+    func window(forSessionID sessionID: String) -> (project: String, window: MantaWindow)? {
+        guard !sessionID.isEmpty else { return nil }
+        for project in projects {
+            if let window = project.windows.first(where: { $0.opencodeSessionId == sessionID }) {
+                return (project.tmuxSession, window)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Close a whole project (spec 04 §7)
+
+    /// Closes every window of a project the way the desktop does: remove each
+    /// worktree safely when the box setting asks for it (dirty ones are KEPT and
+    /// reported, other failures are reported and never abort), kill the tmux
+    /// session, forget the project's stored settings, refresh.
+    func closeProject(_ name: String) async -> SessionCloseReport {
+        var report = SessionCloseReport()
+        let windows = projects.first(where: { $0.tmuxSession == name })?.windows ?? []
+        if await readCleanOnClose() {
+            for window in windows {
+                guard let path = window.worktreePath, !path.isEmpty else { continue }
+                do {
+                    let removal = try await mutations.removeWorktree(path: path, force: false)
+                    if removal.isDirty {
+                        report.keptWorktrees.append(path)
+                    } else if !removal.removed {
+                        report.errors.append("Couldn't remove the worktree at \(path).")
+                    }
+                } catch {
+                    report.errors.append(SessionActionError.message("remove the worktree at \(path)", error: error))
+                }
+            }
+        }
+        do {
+            try await mutations.killProject(name)
+            report.killed = true
+        } catch {
+            report.errors.append(SessionActionError.message("close the project", error: error))
+            await refresh()
+            return report
+        }
+        do {
+            try await mutations.deleteProjectMeta(name)
+        } catch {
+            report.errors.append(SessionActionError.message("clear the project's saved settings", error: error))
+        }
+        await refresh()
+        return report
+    }
+
+    /// The counts the project-close confirm shows, from the COMPLETE project
+    /// (hidden background-job windows are killed too, so they are counted).
+    func closeCounts(for name: String, cleanOnClose: Bool) -> SessionCloseCounts.Counts? {
+        guard let project = projects.first(where: { $0.tmuxSession == name }) else { return nil }
+        return SessionCloseCounts.project(project, isRunning: { rowStatus(for: $0).running }, cleanOnClose: cleanOnClose)
+    }
+
+    // MARK: - Recents + switcher (spec 04 §10)
+
+    /// Remember that a session was opened (row tap, push link, navigator, create).
+    func noteOpened(project: String, index: Int) {
+        let next = SessionRecents.push(SessionRouteLogic.windowKey(project: project, windowIndex: index), into: recents)
+        guard next != recents else { return }
+        recents = next
+        defaults.set(next, forKey: Self.recentsKey)
+    }
+
+    /// Every visible session, in list order — what the switcher searches.
+    /// Background-job windows are excluded.
+    var switcherCandidates: [SessionSwitcherCandidate] {
+        visibleProjects.flatMap { project in
+            visibleWindows(in: project).map { window in
+                SessionSwitcherCandidate(
+                    key: SessionRouteLogic.windowKey(project: project.tmuxSession, windowIndex: window.index),
+                    project: project.tmuxSession, windowIndex: window.index, name: window.name
+                )
+            }
+        }
+    }
+
+    // MARK: - Launchers (spec 04 §2)
+
+    /// Refresh which AI CLIs are installed and the user's saved launch flags.
+    /// Decoration: a failure keeps the last good list and never touches the
+    /// session list. Callers coalesce onto one in-flight refresh, and nothing is
+    /// published unless it changed (the list re-renders on every publish).
+    func refreshLaunchers() async {
+        if let running = launcherTask {
+            await running.value
+            return
+        }
+        let task = Task { await self.performLauncherRefresh() }
+        launcherTask = task
+        await task.value
+    }
+
+    private func performLauncherRefresh() async {
+        let generation = boxGeneration
+        defer { if generation == boxGeneration { launcherTask = nil } }
+        let catalog: SessionLauncherCatalog
+        var list: [AvailableLauncher]?
+        do {
+            let fetched = try await mutations.launchersList()
+            list = fetched
+            catalog = .loaded(ids: fetched.map(\.id))
+        } catch {
+            catalog = .failed(
+                message: SessionActionError.message("check the installed AI CLIs", error: error),
+                lastGood: launcherCatalog.authoritativeIDs
+            )
+        }
+        // The saved flags are read from the box at the same moment, so a CLI
+        // launches with what the user last chose (never a copy from app start).
+        let config = try? await mutations.configGet()
+        guard generation == boxGeneration else { return }
+        if let list, list != launchers { launchers = list }
+        if catalog != launcherCatalog { launcherCatalog = catalog }
+        if let config {
+            let flags = ExtensionsLaunchers.savedFlags(from: config)
+            if flags != launcherFlags { launcherFlags = flags }
+        }
+    }
+
+    // MARK: - Stopped conversations (spec 04 §9, D16)
+
+    var unarmedStoppedCount: Int { stoppedRecords.filter { $0.armed != true }.count }
+
+    func isStopped(sessionID: String) -> Bool { stoppedConversations.contains(sessionID) }
+
+    /// Refetch `usage-stopped:list`. A box that predates the channel, or a
+    /// failure, keeps the previous set and shows rows normally.
+    func refreshStopped() async {
+        guard let list = try? await mutations.usageStoppedList() else { return }
+        stoppedRecords = list.records
+        stoppedLastLooked = list.lastLooked
+        stoppedConversations = Set(list.records.map(\.conversation))
+    }
+
+    /// A `usage-stopped.updated` frame: refetch the list. Returns the refetch
+    /// task (nil for any other frame) so a caller can await it.
+    @discardableResult
+    func trackStopped(frame: MantaStreamFrame) -> Task<Void, Never>? {
+        guard frame.kind == "usage-stopped.updated" else { return nil }
+        return Task { await refreshStopped() }
     }
 
     // MARK: - Create (§7 creation)
@@ -672,6 +1052,7 @@ final class SessionListStore: ObservableObject {
             } else {
                 cacheTtlMs = SessionCacheTtl.ms(for: nil)
             }
+            launcherFlags = ExtensionsLaunchers.savedFlags(from: config)
         }
     }
 
@@ -706,5 +1087,22 @@ final class SessionListStore: ObservableObject {
         previouslyRunning = []
         liveActivity = [:]
         terminalStatus = [:]
+        // WS04 box state. Device-local recents and saved modes are kept — they
+        // are the user's habits on this phone, not facts about a box.
+        launcherCatalog = .loading
+        launchers = []
+        launcherFlags = [:]
+        stoppedRecords = []
+        stoppedLastLooked = nil
+        stoppedConversations = []
+        closeGeneration += 1
+        boxGeneration += 1
+        closeQueue = []
+        closeWorker?.cancel()
+        closeWorker = nil
+        launcherTask?.cancel()
+        launcherTask = nil
+        worktreePrompts = []
+        closeFeedback = []
     }
 }

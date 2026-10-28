@@ -258,3 +258,42 @@ type SubagentPart = {
 };
 
 type SubagentMessage = { parts?: SubagentPart[] };
+
+// ===== Chat cards (WS02 server-first) =====
+
+export function describeRetry(input: {
+  attempt?: number;
+  message?: string;
+  action?: { title?: string; message?: string } | null;
+}): { headline: string; caption: string | null; body: string | null };
+
+export function compactionFirstLine(text: string | null | undefined): string | null;
+
+export function describeBackgroundCompaction(input: {
+  beforeTokens: number | null;
+  afterTokens: number | null;
+  away: boolean;
+}): string;
+
+export const AUTH_PROVIDER_LABELS: Record<string, string>;
+
+export function isAuthErrorName(
+  errorName: string | null | undefined,
+  message: string | null | undefined,
+): boolean;
+
+export function authErrorAdvice(
+  errorName: string | null | undefined,
+  message: string | null | undefined,
+  providerID: string | null | undefined,
+): { providerID: string; label: string } | null;
+
+export type SessionErrorDisplay = {
+  text: string;
+  reconnect: { providerID: string; label: string; accountsId: string } | null;
+};
+
+export function describeSessionError(
+  p: { name: string | null | undefined; message: string; rawMessage?: string },
+  providerID: string | null | undefined,
+): SessionErrorDisplay;

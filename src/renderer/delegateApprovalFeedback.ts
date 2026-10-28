@@ -17,7 +17,10 @@ export type ApprovalDecisionKind = "approve" | "decline";
  *  approval (reason unknown). `unconfirmed` — the call rejected (network, auth,
  *  HTTP, timeout) or the reply was malformed: the box may or may not have
  *  applied it. */
-export type ApprovalDecisionOutcome = "done" | "unavailable" | "unconfirmed";
+export type ApprovalDecisionOutcome = "done" | "unavailable" | "unconfirmed" | "refused";
+// `refused` — the box rejected the submitted rules (`{ok:false, error}`, e.g. an
+// empty/blank rule) and STILL holds the approval pending: the caller shows the
+// box's message on the card and lets the user fix and retry. No toast.
 
 export const APPROVAL_FEEDBACK_COPY = {
   declineUnavailable:
@@ -30,10 +33,11 @@ export const APPROVAL_FEEDBACK_COPY = {
     "Couldn’t confirm that the background job was started. Check background jobs before trying again.",
 } as const;
 
-export function classifyApprovalReply(reply: unknown): "done" | "unavailable" | "unconfirmed" {
-  const ok = (reply as { ok?: unknown } | null | undefined)?.ok;
+export function classifyApprovalReply(reply: unknown): ApprovalDecisionOutcome {
+  const r = reply as { ok?: unknown; error?: unknown } | null | undefined;
+  const ok = r?.ok;
   if (ok === true) return "done";
-  if (ok === false) return "unavailable";
+  if (ok === false) return typeof r?.error === "string" && r.error ? "refused" : "unavailable";
   return "unconfirmed";
 }
 
@@ -53,7 +57,7 @@ export async function settleApprovalDecision(
   } catch {
     outcome = "unconfirmed";
   }
-  if (outcome === "done") return outcome;
+  if (outcome === "done" || outcome === "refused") return outcome;
   const { pushAppToast } = useStore.getState();
   if (outcome === "unavailable") {
     if (kind === "decline") pushAppToast({ message: APPROVAL_FEEDBACK_COPY.declineUnavailable });

@@ -227,7 +227,155 @@ final class UpgradeModelsTests: XCTestCase {
         XCTAssertEqual(m.kind, .failed)
         XCTAssertEqual(m.message, "Not enough free disk space")
         XCTAssertEqual(m.disk, "needs 31 GB free, has 3 GB")
-        XCTAssertEqual(m.hint, "Open Manta on your computer to retry or roll back.")
+        // The phone can act on a failure now (WS10 F19): there is no "go to your
+        // computer" hint any more.
+        XCTAssertNil(m.hint)
+    }
+
+    // MARK: - Failed-state actions (WS10 F19)
+
+    private func failedModel(step: String, retryable: Bool = true, steps: [UpgradeStep]? = nil) throws -> UpgradeScreenModel {
+        let failure = UpgradeFailure(step: step, message: "It broke", retryable: retryable)
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, steps: steps ?? [UpgradeStep(id: step, status: .failed)], error: failure))
+        return try XCTUnwrap(UpgradeScreenModel.make(g))
+    }
+
+    func testRetryLabelAndRollbackPerFailedStep() throws {
+        // Preflight / verify are fixed in place: "Check again", and no rollback.
+        for step in ["preflight", "verify"] {
+            let m = try failedModel(step: step)
+            XCTAssertEqual(m.retryLabel, "Check again", step)
+            XCTAssertFalse(m.canRollback, step)
+            XCTAssertEqual(m.retryOkText, "Checking again…", step)
+        }
+        // Everything else: "Retry", and rolling back is offered.
+        for step in ["stop", "copy", "migrate", "cutover"] {
+            let m = try failedModel(step: step)
+            XCTAssertEqual(m.retryLabel, "Retry", step)
+            XCTAssertTrue(m.canRollback, step)
+            XCTAssertEqual(m.retryOkText, "Retry requested", step)
+        }
+    }
+
+    func testAnUnretryableFailureDisablesRetryWithTheReason() throws {
+        let m = try failedModel(step: "migrate", retryable: false)
+        XCTAssertFalse(m.canRetry)
+        XCTAssertEqual(m.retryDisabledReason, "This failure can't be retried — roll back instead.")
+        XCTAssertTrue(m.canRollback)
+        let ok = try failedModel(step: "migrate")
+        XCTAssertTrue(ok.canRetry)
+        XCTAssertNil(ok.retryDisabledReason)
+    }
+
+    func testNothingChangedOnlyForPreflight() throws {
+        XCTAssertTrue(try failedModel(step: "preflight").nothingChanged)
+        for step in ["stop", "copy", "migrate", "verify", "cutover"] {
+            XCTAssertFalse(try failedModel(step: step).nothingChanged, step)
+        }
+    }
+
+    func testFailedStepFallsBackToTheCurrentStepThenPreflight() throws {
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, steps: [UpgradeStep(id: "copy", status: .failed)]))
+        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).failedStep, "copy")
+        var none = UpgradeGateState()
+        none.apply(status: status(.failed))
+        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(none)).failedStep, "preflight")
+    }
+
+    func testOutcomesResetWhenTheBoxMovesToAnotherState() throws {
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, error: UpgradeFailure(step: "copy", message: "m")))
+        g.actionStarted(.retry)
+        XCTAssertEqual(g.retry, .pending)
+        g.actionFinished(.retry, result: UpgradeActionResult(ok: true))
+        XCTAssertEqual(g.retry, .ok)
+        // The same state again (a poll) keeps the outcome…
+        g.apply(status: status(.failed, error: UpgradeFailure(step: "copy", message: "m")))
+        XCTAssertEqual(g.retry, .ok)
+        // …but failed → running (the retry took) clears it.
+        g.apply(status: status(.running))
+        XCTAssertEqual(g.retry, .idle)
+        XCTAssertEqual(g.rollback, .idle)
+    }
+
+    func testActionResultsBecomeOutcomes() {
+        var g = UpgradeGateState()
+        g.actionFinished(.rollback, result: UpgradeActionResult(ok: false, error: "no previous version"))
+        XCTAssertEqual(g.rollback, .error("no previous version"))
+        g.actionFinished(.rollback, result: UpgradeActionResult(ok: false))
+        XCTAssertEqual(g.rollback, .error("The box refused the request."))
+        g.actionFinished(.retry, result: UpgradeActionResult(ok: false, error: ""))
+        XCTAssertEqual(g.retry, .error("The box refused the request."))
+    }
+
+    func testOutcomeLines() {
+        XCTAssertEqual(UpgradeActionOutcome.ok.line(okText: "Retry requested"), "Retry requested")
+        XCTAssertEqual(UpgradeActionOutcome.error("nope").line(okText: "x"), "nope")
+        XCTAssertNil(UpgradeActionOutcome.idle.line(okText: "x"))
+        XCTAssertNil(UpgradeActionOutcome.pending.line(okText: "x"))
+        XCTAssertTrue(UpgradeActionOutcome.pending.isPending)
+        XCTAssertTrue(UpgradeActionOutcome.error("e").isError)
+    }
+
+    func testTheModelCarriesTheOutcomes() throws {
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, error: UpgradeFailure(step: "copy", message: "m")))
+        g.actionStarted(.rollback)
+        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
+        XCTAssertEqual(m.rollback, .pending)
+        XCTAssertEqual(m.retry, .idle)
+    }
+
+    // MARK: - Copy details (describeGateDetails)
+
+    func testDetailsForARunningUpgrade() throws {
+        let steps = [
+            UpgradeStep(id: "preflight", status: .done),
+            UpgradeStep(id: "copy", status: .running,
+                        progress: UpgradeProgress(label: "1 GB of 4 GB", numerator: 25, denominator: 100)),
+            UpgradeStep(id: "migrate", status: .pending),
+        ]
+        var g = UpgradeGateState()
+        g.apply(status: status(.running, steps: steps))
+        XCTAssertEqual(
+            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
+            """
+            Manta box upgrade — running
+            preflight: done
+            copy: running (25/100) — 1 GB of 4 GB
+            migrate: pending
+            """)
+    }
+
+    func testDetailsForAFailureIncludeTheErrorAndTheDiskNumbers() throws {
+        let failure = UpgradeFailure(step: "preflight", message: "Not enough free disk space",
+                                     needBytes: 31 * GiB, haveBytes: 3 * GiB)
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, steps: [UpgradeStep(id: "preflight", status: .failed, error: "no space")], error: failure))
+        XCTAssertEqual(
+            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
+            """
+            Manta box upgrade — failed
+            preflight: failed — no space
+            error (preflight): Not enough free disk space
+            disk: needs 31 GB free, has 3 GB
+            """)
+    }
+
+    func testDetailsForARolledBackBox() throws {
+        var g = UpgradeGateState()
+        g.apply(status: status(.rolledBack, steps: [UpgradeStep(id: "stop", status: .done)]))
+        XCTAssertEqual(
+            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
+            "Manta box upgrade — rolled back\nstop: done")
+    }
+
+    func testTheWaitingStateHasNoDetails() throws {
+        var g = UpgradeGateState()
+        g.markUpgradeMode()
+        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).details, "")
     }
 
     func testFailedFallsBackToTheFailedStepsOwnError() throws {

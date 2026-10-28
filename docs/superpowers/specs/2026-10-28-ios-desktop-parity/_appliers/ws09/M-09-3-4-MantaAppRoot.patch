@@ -1,0 +1,57 @@
+--- a/mobile/native/MantaUI/MantaAppRoot.swift	2026-10-28 16:51:02.665818905 +0000
++++ b/mobile/native/MantaUI/MantaAppRoot.swift	2026-10-28 16:51:02.718818499 +0000
+@@ -21,6 +21,8 @@
+     /// C2: the app-wide router. Injected below on the root `Group`, so every
+     /// screen — and every sheet or cover presented from one — can reach it.
+     @StateObject private var navigator = MantaNavigator()
++    /// M-09-3: WS09's app-wide usage alerts + resume-after-limit presentation.
++    @ObservedObject private var usageAlerts = UsageAlertsStore.shared
+     /// M-10-1: the phone's own theme override (device-local; System follows the
+     /// phone). Written by Settings → Appearance.
+     @AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue
+@@ -132,6 +134,17 @@
+                     .transition(.opacity)
+             }
+         }
++        // M-09-3: the usage banner (90 % / limit) and the resume-after-limit sheet,
++        // only over the paired destination.
++        .overlay(alignment: .top) {
++            if paired, scene == nil { UsageAlertBanner(store: usageAlerts) }
++        }
++        .sheet(isPresented: Binding(
++            get: { paired && scene == nil && usageAlerts.resumeSheetPresented },
++            set: { usageAlerts.resumeSheetPresented = $0 }
++        )) {
++            UsageResumeSheet(sessions: sessionStore, usage: usageAlerts)
++        }
+         .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
+         .environmentObject(navigator)
+         // M-10-2: "Remove server" finished on this phone (its credentials are
+@@ -140,6 +153,8 @@
+         .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
+             store.stop()
+             sessionStore.resetForBoxChange()
++            UsageAlertsStore.shared.resetForBoxChange()
++            ChatModelCatalog.shared.resetForBoxChange()
+             navigator.reset()
+             flow.isSwitching = false
+             flow.backToEntry()
+@@ -210,6 +225,8 @@
+             if flow.isSwitching {
+                 store.stop()
+                 sessionStore.resetForBoxChange()
++                UsageAlertsStore.shared.resetForBoxChange()
++                ChatModelCatalog.shared.resetForBoxChange()
+                 navigator.reset()
+             }
+             paired = true
+@@ -230,6 +247,9 @@
+     private func startModelPrefs() {
+         ChatModelPrefs.shared.subscribe(to: store)
+         ChatModelPrefs.shared.startIfNeeded()
++        // M-09-3: WS09's alerts + catalogue bus subscriptions (idempotent; this
++        // runs on every paired launch and after a re-pair).
++        UsageAlertsStore.shared.bind(eventStore: store)
+         ChatModelPrefs.migrateIfNeeded()
+     }
+ 

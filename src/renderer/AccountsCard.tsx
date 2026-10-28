@@ -30,7 +30,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import type { DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
-import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
+import { autoEligibility, describeMissing } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { formatEndpointStateLine, isKeyOnlyAuthProvider, selectProviderView } from "./chatUtils";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
@@ -164,26 +164,10 @@ export function usagePace(w: UsageWindow, nowMs: number): string | null {
   return null;
 }
 
-// The machine-key → phrase map lives HERE, in the renderer, once. autoEligibility
-// deliberately carries no user-facing copy; the router and this UI share the
-// same MISSING keys by construction.
-const MISSING_PHRASE: Record<string, string> = {
-  [MISSING.IDENTITY]: "which model",
-  [MISSING.PRICE]: "what it costs",
-  [MISSING.CACHING]: "whether it caches",
-  [MISSING.QUALITY]: "how it compares",
-};
-
-/** Join missing-eligibility keys into "which model, what it costs, and …". */
-export function describeMissing(missing: readonly string[]): string | null {
-  const phrases = missing.filter((k) => k in MISSING_PHRASE).map((k) => MISSING_PHRASE[k]);
-  if (phrases.length === 0) return null;
-  if (phrases.length === 1) return phrases[0];
-  const head = phrases.slice(0, -1);
-  // Oxford comma style: "which model, and whether it caches" (2+) and
-  // "which model, what it costs, whether it caches, and how it compares" (4).
-  return `${head.join(", ")}, and ${phrases[phrases.length - 1]}`;
-}
+// The machine-key → phrase map (and `describeMissing`) now live in the shared
+// autoEligibility module, so the box's "models we couldn't identify" help
+// lines and this card say the same thing. Re-exported for existing importers.
+export { describeMissing };
 
 /** The row's help line: "Supported · subscription · Max 20x" or the custom form. */
 export function helpText(r: AccountRowModel): string {

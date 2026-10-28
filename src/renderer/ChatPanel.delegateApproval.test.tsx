@@ -197,6 +197,15 @@ describe("ChatPanel background-job approval card", () => {
     { kind: "approve", btn: "Start job", method: "delegateApprove", unavailable: COPY.approveUnavailable, unconfirmed: COPY.approveUnconfirmed, unavailableTone: "error" },
   ] as const;
 
+  it("approve refused with {ok:false, error} → the card comes back with the box's message, no toast", async () => {
+    decideImpl.delegateApprove = () => Promise.resolve({ ok: false, error: "Every rule needs a pattern" });
+    await open();
+    await click(button("Start job"));
+    expect(toasts()).toEqual([]);
+    expect(cardShown()).toBe(true);
+    expect(h!.container.querySelector('[data-testid="delegate-approval-error"]')?.textContent).toBe("Every rule needs a pattern");
+  });
+
   describe.each(KINDS)("$kind", ({ btn, method, unavailable, unconfirmed, unavailableTone }) => {
     it("rejection → 'couldn’t confirm' error toast and the card is back", async () => {
       decideImpl[method] = () => Promise.reject(new Error("net"));

@@ -73,6 +73,12 @@ struct ContextSheet: View {
     /// nil hides the row, so a surface that cannot hand off never shows a
     /// button that does nothing.
     var onHandOff: (() -> Void)? = nil
+    /// "Seat  Work · Seat 2" — the account this conversation runs on. nil hides the
+    /// row (no seat). Built by `ChatCardSeatLine.value(_:)`.
+    var seat: String? = nil
+    /// false hides Compact / Clear / Hand off: a read-only background job takes no
+    /// actions.
+    var allowsActions = true
 
     @Environment(\.dismiss) private var dismiss
 
@@ -89,14 +95,22 @@ struct ContextSheet: View {
                 Section(footer: staleLine) {
                     header
                     segmentedMeter
+                    if let seat {
+                        LabeledContent("Seat", value: seat)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .accessibilityIdentifier("ctx-seat-line")
+                    }
                 }
-                Section {
-                    actionRow("Compact session", systemImage: "arrow.triangle.2.circlepath", onTap: { confirmingCompact = true })
-                    actionRow("Clear session", systemImage: "plus.circle", onTap: { confirmingClear = true })
-                    if let onHandOff {
-                        // Not destructive: it only produces a handoff card, so it
-                        // needs no confirm sheet.
-                        actionRow("Hand off", systemImage: "arrow.right.circle", onTap: { dismiss(); onHandOff() })
+                if allowsActions {
+                    Section {
+                        actionRow("Compact session", systemImage: "arrow.triangle.2.circlepath", onTap: { confirmingCompact = true })
+                        actionRow("Clear session", systemImage: "plus.circle", onTap: { confirmingClear = true })
+                        if let onHandOff {
+                            // Not destructive: it only produces a handoff card, so it
+                            // needs no confirm sheet.
+                            actionRow("Hand off", systemImage: "arrow.right.circle", onTap: { dismiss(); onHandOff() })
+                        }
                     }
                 }
             }
@@ -510,8 +524,9 @@ private struct UsageWindowRow: View {
     var inactive = false
 
     var body: some View {
-        let band = UsageMeters.band(window.pct)
-        let tint = inactive ? tokens.tx4 : MeterRing.tint(band, tokens)
+        // The box's own tone for the window (WS09, M-09-9): no tone = neutral.
+        let band = UsageMeters.band(window)
+        let tint = inactive ? tokens.tx4 : (band.map { MeterRing.tint($0, tokens) } ?? tokens.tx4)
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
             HStack(spacing: Metrics.spacing.sp1) {
                 MeterRing(pct: window.pct, color: tint, diameter: 11, lineWidth: 2.5, track: tokens.borderSubtle)

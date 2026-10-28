@@ -21,31 +21,21 @@
 import { useEffect, useState } from "react";
 import { Card } from "./Card";
 import type { LedgerSummary } from "../shared/types";
+import { UPDATE_YOUR_BOX } from "./modelsPicker";
 
 const money = (n: number) => `$${n.toFixed(2)}`;
-const wholePct = (f: number) => `${Math.round(f * 100)}%`;
 
-// Order + colour of the cache-split bar segments, and the legend that mirrors
-// them above the bar. `cls` is the only visual the contract grants the segment.
-const SEGMENTS = [
-  { key: "cacheRead", label: "cache read", cls: "bg-danger" },
-  { key: "cacheWrite", label: "cache write", cls: "bg-warn" },
-  { key: "output", label: "output", cls: "bg-accent" },
-  { key: "input", label: "fresh input", cls: "bg-fill-active" },
-] as const;
+// Colour of each cache-split segment. The box decides the order, labels, whole
+// percentages and the in-bar threshold (`view.segments`); only the colour is
+// presentation.
+const SEGMENT_CLASS = {
+  cacheRead: "bg-danger",
+  cacheWrite: "bg-warn",
+  output: "bg-accent",
+  input: "bg-fill-active",
+} as const;
 
 type LedgerData = LedgerSummary | { supported: false };
-
-function Numeric({
-  children,
-  fallback = "—",
-}: {
-  children: number | null | undefined;
-  fallback?: string;
-}) {
-  if (children == null) return <span>{fallback}</span>;
-  return <span>{children}</span>;
-}
 
 export function ModelLedgerCard() {
   // loading=true until the first resolution below; data is null until then.
@@ -74,9 +64,7 @@ export function ModelLedgerCard() {
     };
   }, []);
 
-  const header = (
-    <span className="text-micro uppercase text-text-faint">Where your spend goes</span>
-  );
+  const header = <span className="text-micro uppercase text-text-faint">Where your spend goes</span>;
 
   if (state.loading) {
     return (
@@ -94,16 +82,20 @@ export function ModelLedgerCard() {
   if (!data || !data.supported) {
     return (
       <Card header={header}>
-        <div className="text-meta text-text-faint">
-          Spend history needs a newer box runtime.
-        </div>
+        <div className="text-meta text-text-faint">Spend history needs a newer box runtime.</div>
       </Card>
     );
   }
 
-  const d = data as LedgerSummary;
-  const share = d.cacheShare;
-  const cacheSharePct = share.cacheRead + share.cacheWrite;
+  // `supported:true` without a `view` = a box older than the ledger view (D24 wire compat).
+  const view = (data as LedgerSummary).view;
+  if (!view) {
+    return (
+      <Card header={header}>
+        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
+      </Card>
+    );
+  }
 
   const numCell = "font-mono tabular-nums text-right";
 
@@ -112,34 +104,26 @@ export function ModelLedgerCard() {
       {/* Block 1 — the cache split. */}
       <div>
         <div className="flex gap-4 flex-wrap text-meta text-text-faint">
-          {SEGMENTS.map((s) => (
-            <span key={s.key} className="inline-flex items-center gap-2">
-              <span className={`h-[9px] w-[9px] rounded-xs ${s.cls}`} aria-hidden="true" />
+          {view.segments.map((s) => (
+            <span key={s.kind} className="inline-flex items-center gap-2">
+              <span className={`h-[9px] w-[9px] rounded-xs ${SEGMENT_CLASS[s.kind]}`} aria-hidden="true" />
               {s.label}
-              <span className="font-mono tabular-nums">{wholePct(share[s.key])}</span>
+              <span className="font-mono tabular-nums">{s.pct}%</span>
             </span>
           ))}
         </div>
         <div className="mt-2 flex h-6 rounded-md overflow-hidden">
-          {SEGMENTS.map((s) => {
-            const pct = Math.round(share[s.key] * 100);
-            return (
-              <div
-                key={s.key}
-                className={`${s.cls} flex items-center justify-center overflow-hidden`}
-                style={{ width: `${pct}%` }}
-              >
-                {pct >= 4 && (
-                  <span className="text-on-accent font-mono text-meta">{pct}%</span>
-                )}
-              </div>
-            );
-          })}
+          {view.segments.map((s) => (
+            <div
+              key={s.kind}
+              className={`${SEGMENT_CLASS[s.kind]} flex items-center justify-center overflow-hidden`}
+              style={{ width: `${s.pct}%` }}
+            >
+              {s.inline && <span className="text-on-accent font-mono text-meta">{s.pct}%</span>}
+            </div>
+          ))}
         </div>
-        <div className="mt-1 text-meta text-text-faint">
-          Cache is {wholePct(cacheSharePct)} of your bill — carrying the conversation,
-          not generating answers.
-        </div>
+        <div className="mt-1 text-meta text-text-faint">{view.caption}</div>
       </div>
 
       {/* Block 2 — by model. */}
@@ -155,24 +139,19 @@ export function ModelLedgerCard() {
             </tr>
           </thead>
           <tbody>
-            {d.byModel.slice(0, 6).map((m, i) => (
-              <tr
-                key={m.key}
-                className={i === d.byModel.slice(0, 6).length - 1 ? "" : "border-b border-border-subtle"}
-              >
+            {view.topModels.map((m, i) => (
+              <tr key={m.key} className={i === view.topModels.length - 1 ? "" : "border-b border-border-subtle"}>
                 <td className="text-label text-text py-2 pr-3">{m.key}</td>
                 <td className={`py-2 px-3 ${numCell}`}>{m.turns.toLocaleString()}</td>
                 <td className={`py-2 px-3 ${numCell}`}>{money(m.costPerTurn)}</td>
-                <td className={`py-2 px-3 ${numCell}`}>
-                  <Numeric>{m.tokensPerSec}</Numeric>
-                </td>
+                <td className={`py-2 px-3 ${numCell}`}>{m.tokensPerSec ?? "—"}</td>
                 <td className={`py-2 pl-3 ${numCell}`}>{money(m.cost)}</td>
               </tr>
             ))}
-            {d.byModel.length === 0 && (
+            {view.topModels.length === 0 && (
               <tr>
                 <td colSpan={5} className="py-2 text-meta text-text-faint">
-                  No model spend recorded.
+                  {view.emptyModels}
                 </td>
               </tr>
             )}
@@ -192,14 +171,11 @@ export function ModelLedgerCard() {
             </tr>
           </thead>
           <tbody>
-            {d.byAgent.map((a, i) => (
-              <tr
-                key={a.agent ?? "main"}
-                className={i === d.byAgent.length - 1 ? "" : "border-b border-border-subtle"}
-              >
+            {view.agents.map((a, i) => (
+              <tr key={a.label} className={i === view.agents.length - 1 ? "" : "border-b border-border-subtle"}>
                 <td className="py-2 pr-3">
                   <span className="inline-flex items-center gap-2">
-                    <span className="text-label text-text">{a.agent ?? "main"}</span>
+                    <span className="text-label text-text">{a.label}</span>
                     {a.isChild && (
                       <span className="font-mono text-meta rounded-full border border-border bg-raised px-3 py-1 text-text-muted">
                         subagent
@@ -212,10 +188,10 @@ export function ModelLedgerCard() {
                 <td className={`py-2 pl-3 ${numCell}`}>{money(a.cost)}</td>
               </tr>
             ))}
-            {d.byAgent.length === 0 && (
+            {view.agents.length === 0 && (
               <tr>
                 <td colSpan={4} className="py-2 text-meta text-text-faint">
-                  No agent spend recorded.
+                  {view.emptyAgents}
                 </td>
               </tr>
             )}

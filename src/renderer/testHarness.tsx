@@ -29,6 +29,7 @@ import { VirtuosoMockContext } from "react-virtuoso";
 import type { OpencodeEvent, StreamEnvelope } from "../shared/types";
 import { useStore } from "./store";
 import { resetHandoffStore } from "./handoffStore";
+import { resetBoxCapabilities } from "./hooks/useBoxCapabilities";
 import { SessionHeader } from "./SessionHeader";
 // The REAL box-side interpreter. The renderer reads only interpreted frames
 // (OpenCode V2 slice A2), so a test that wants to say "this V1 opencode event
@@ -158,6 +159,10 @@ function defaultApiImpl(): Record<string, unknown> {
     webhookList: () => Promise.resolve([]),
     webhookDelete: () => Promise.resolve(),
     progressGet: () => Promise.resolve(null),
+    // A current box: it advertises the server-first capabilities (WS02) and no session is a background job.
+    getServerVersion: () =>
+      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"] }),
+    delegateJobForSession: () => Promise.resolve({ readOnly: false }),
     // Per-session model prefs (BET-1281): ChatPanel reads the box mirror through
     // the shared modelPrefs module. Empty by default unless a test overrides it.
     modelPrefsGet: () => Promise.resolve({ sessions: {}, recents: [] }),
@@ -195,6 +200,8 @@ export function installMockApi(
 ): { api: MockApi; bus: MockEventBus } {
   busListeners = new Set<EventListener>();
   streamListeners = new Set<StreamListener>();
+  // A fresh mock is a fresh box: forget the capabilities the last one advertised.
+  resetBoxCapabilities();
   const calls: Record<string, unknown[][]> = {};
 
   const deliverStream = (ev: StreamEnvelope) => {

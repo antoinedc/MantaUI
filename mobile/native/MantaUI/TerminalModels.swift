@@ -156,10 +156,11 @@ enum StickyModifierState: Equatable, Sendable {
 /// (`TerminalSocket`), so the webview never opens one; this is purely the URL
 /// shape. PURE.
 enum TerminalURLBuilder {
-    /// `https://host/...` → `wss://host/pty?session=<k>&cols=<c>&rows=<r>[&cwd=<p>]`.
+    /// `https://host/...` → `wss://host/pty?session=<k>&cols=<c>&rows=<r>[&cwd=<p>][&launcher=<json>]`.
     /// The token travels as a header (set separately by the socket), never in
-    /// the URL.
-    static func ptyURL(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String? = nil) -> URL? {
+    /// the URL. `launcher` (`{"flags":{…},"id":"…"}`) starts that AI CLI instead
+    /// of a plain shell; the box falls back to a shell for an unknown id.
+    static func ptyURL(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String? = nil, launcher: SessionPtyLauncher? = nil) -> URL? {
         var scheme = "wss"
         if let s = serverURL.scheme?.lowercased(), s == "http" { scheme = "ws" }
         guard var comps = URLComponents(url: serverURL, resolvingAgainstBaseURL: false) else {
@@ -174,6 +175,9 @@ enum TerminalURLBuilder {
         ]
         if let cwd, !cwd.isEmpty {
             items.append(URLQueryItem(name: "cwd", value: cwd))
+        }
+        if let launcher {
+            items.append(URLQueryItem(name: "launcher", value: launcher.queryJSON))
         }
         comps.queryItems = items
         return comps.url

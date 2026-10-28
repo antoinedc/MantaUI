@@ -804,15 +804,6 @@ function CtoConversation(props: {
     new Map(),
   );
 
-  const providerID = useMemo(() => {
-    if (!messages) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.info.role === "assistant" && m.info.providerID) return m.info.providerID;
-    }
-    return null;
-  }, [messages]);
-
 
   const bus = useSseBus({
     sessionId,
@@ -843,7 +834,6 @@ function CtoConversation(props: {
     isActiveRef: ts.isActiveRef,
     refetchOwedWhileInactive: ts.refetchOwedWhileInactive,
     applyStreamFlush: ts.applyStreamFlush,
-    providerID,
     setPlanOn: () => {
       /* plan mode is not a CTO surface */
     },

@@ -120,6 +120,59 @@ final class TerminalModelsTests: XCTestCase {
         XCTAssertEqual(url?.scheme, "ws")
     }
 
+    // MARK: - AI-CLI launcher (WS04 §2)
+
+    private func query(_ url: URL?) -> [String: String] {
+        let items = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems } ?? []
+        return Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+    }
+
+    func testPtyURLCarriesLauncherJSON() {
+        let server = URL(string: "https://box.example.com")!
+        let launcher = SessionPtyLauncher(id: "claude", flags: ["skipPermissions": true])
+        let url = TerminalURLBuilder.ptyURL(serverURL: server, sessionKey: "p:1:tui:claude", cols: 80, rows: 24, cwd: "/work", launcher: launcher)
+        let dict = query(url)
+        XCTAssertEqual(dict["launcher"], "{\"flags\":{\"skipPermissions\":true},\"id\":\"claude\"}")
+        XCTAssertEqual(dict["cwd"], "/work")
+        XCTAssertEqual(dict["session"], "p:1:tui:claude")
+    }
+
+    func testPtyURLOmitsLauncherWhenNil() {
+        let server = URL(string: "https://box.example.com")!
+        let url = TerminalURLBuilder.ptyURL(serverURL: server, sessionKey: "p:1", cols: 80, rows: 24)
+        XCTAssertNil(query(url)["launcher"])
+    }
+
+    func testSocketRequestCarriesLauncherAndBearer() {
+        let server = URL(string: "https://box.example.com")!
+        let launcher = SessionPtyLauncher(id: "claude", flags: [:])
+        let request = TerminalSocket.makeRequest(
+            serverURL: server, sessionKey: "p:1:tui:claude", cols: 80, rows: 24,
+            cwd: "/work", launcher: launcher, token: "t"
+        )
+        XCTAssertNotNil(request)
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"), "Bearer t")
+        XCTAssertTrue(request?.url?.absoluteString.contains("launcher=") == true)
+        // The token never rides in the URL.
+        XCTAssertNil(query(request?.url)["token"])
+        XCTAssertFalse(request?.url?.absoluteString.contains("Bearer") == true)
+        XCTAssertEqual(query(request?.url)["launcher"], launcher.queryJSON)
+    }
+
+    func testSocketRequestWithoutTokenHasNoHeader() {
+        let server = URL(string: "https://box.example.com")!
+        let request = TerminalSocket.makeRequest(
+            serverURL: server, sessionKey: "p:1", cols: 80, rows: 24, cwd: nil, launcher: nil, token: nil
+        )
+        XCTAssertNotNil(request)
+        XCTAssertNil(request?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(query(request?.url)["launcher"])
+        let empty = TerminalSocket.makeRequest(
+            serverURL: server, sessionKey: "p:1", cols: 80, rows: 24, cwd: nil, launcher: nil, token: ""
+        )
+        XCTAssertNil(empty?.value(forHTTPHeaderField: "Authorization"))
+    }
+
     func testDataFrameEnvelope() {
         let data = TerminalFrame.data("hi")
         let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

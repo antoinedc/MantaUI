@@ -323,13 +323,6 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(groups[0].models.map(\.id), ["gpt-5.6"])
     }
 
-    func testCatalogueRowDisabledUntilOptedIn() {
-        let deprecated = model("anthropic", "opus", status: "deprecated")
-        XCTAssertTrue(ChatModel.isCatalogueRowDisabled(deprecated, optIn: []))
-        XCTAssertFalse(ChatModel.isCatalogueRowDisabled(deprecated, optIn: ["anthropic/opus"]))
-        XCTAssertFalse(ChatModel.isCatalogueRowDisabled(model("anthropic", "haiku"), optIn: []))
-    }
-
     // MARK: - ChatVoice.mime
 
     func testMimeFromFilenameExtension() {

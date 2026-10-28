@@ -457,14 +457,16 @@ final class ChatModelStoreKeyTests: XCTestCase {
     private let otherSid = "test-session-2"
     private var api = MantaAPIClient(serverURL: URL(string: "https://example.com")!)
     private var prefs: ChatModelPrefs!
+    private var catalog: ChatModelCatalog!
 
     override func setUp() {
         super.setUp()
         prefs = ChatModelPrefs(api: MantaAPIClient(serverURL: URL(string: "https://example.com")!))
+        catalog = ChatModelCatalog(api: api)
     }
 
     private func store(_ id: String) -> ChatModelStore {
-        ChatModelStore(sessionId: id, api: api, catalog: ChatModelCatalog(api: api), prefs: prefs)
+        ChatModelStore(sessionId: id, api: api, catalog: catalog, prefs: prefs)
     }
 
     private func model(_ m: String) -> OpencodeModelID {
@@ -548,6 +550,8 @@ final class ChatModelStoreKeyTests: XCTestCase {
     // MARK: - Recents recorded through the box cache
 
     func testApplyRecordsSelectionAndRecentsToCache() {
+        // The box's picker decides what may be applied (D24).
+        catalog.setPickerForTesting(ModelsPickerWire(selectable: ["anthropic/sonnet"]))
         let s = store(sid)
         let choice = ModelChoice(providerID: "anthropic", modelID: "sonnet", variant: "high", fast: false)
         s.apply(choice)

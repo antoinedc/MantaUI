@@ -3,7 +3,7 @@
 // hooks/useSseBusFrames.test.tsx; this file pins the pieces that carry logic.
 
 import { describe, expect, it } from "vitest";
-import { createSidebarFrameHandler, describeSessionError, stepTokensFromFrame } from "./chatUtils";
+import { createSidebarFrameHandler, stepTokensFromFrame } from "./chatUtils";
 import type { StreamEnvelope } from "../shared/types";
 
 describe("stepTokensFromFrame", () => {
@@ -23,37 +23,6 @@ describe("stepTokensFromFrame", () => {
   it("returns null for an all-zero frame — a step.ended with no usage must not blank the context pill", () => {
     expect(stepTokensFromFrame({ tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } } })).toBeNull();
     expect(stepTokensFromFrame({})).toBeNull();
-  });
-});
-
-describe("describeSessionError", () => {
-  it("auth failures on a subscription provider become the single reconnect nudge", () => {
-    const d = describeSessionError({ name: "ProviderAuthError", message: "x" }, "anthropic");
-    expect(d.message).toMatch(/needs to be reconnected\.$/);
-    expect(d.auth?.providerID).toBe("anthropic");
-  });
-
-  it("classifies against the RAW provider message when the box humanized it (BET-1131)", () => {
-    // Humanized: "Your session is no longer valid" matches none of the auth keywords;
-    // the original body names `authentication_error`.
-    const humanized = "Your session is no longer valid";
-    const raw = `Unauthorized: {"error":{"type":"authentication_error","message":"${humanized}"}}`;
-    expect(describeSessionError({ name: "ApiError", message: humanized }, "anthropic").auth).toBeNull();
-    expect(describeSessionError({ name: "ApiError", message: humanized, rawMessage: raw }, "anthropic").auth).not.toBeNull();
-  });
-
-  it("no provider → no auth banner, falls through to the typed message", () => {
-    const d = describeSessionError({ name: "ApiError", message: "invalid api key" }, null);
-    expect(d.auth).toBeNull();
-    expect(d.message).toBe("API error: invalid api key");
-  });
-
-  it("typed prefixes", () => {
-    expect(describeSessionError({ name: "ContextOverflowError", message: "too big" }, "x").message).toBe("Context full — try /compact: too big");
-    expect(describeSessionError({ name: "MessageOutputLengthError", message: "ignored" }, "x").message).toBe("Response truncated (hit output limit)");
-    expect(describeSessionError({ name: "StructuredOutputError", message: "bad" }, "x").message).toBe("Structured output failed: bad");
-    expect(describeSessionError({ name: "Whatever", message: "plain" }, "x").message).toBe("plain");
-    expect(describeSessionError({ name: null, message: "plain" }, "x").message).toBe("plain");
   });
 });
 

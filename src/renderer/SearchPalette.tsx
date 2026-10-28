@@ -1,13 +1,13 @@
 // SearchPalette.tsx — ⌘F conversation search on the shared PaletteShell.
 //
-// Data flow (BET-698): the palette is a DUMB RENDERER of a single server-side
-// query. On query change (120ms debounced) it sends ONE
-// `window.api.opencodeSearchMessages({ query, sessionIds })` — the server
-// searches opencode's own SQLite over ALL of the chat windows' full history —
-// and renders whatever comes back. The old client-side "download N transcripts
-// over HTTP and scan them" fan-out (which capped at 5 sessions/keystroke) is
-// gone, and the active conversation is searched by the same call (fixing the
-// old tail-only gap). The renderer holds no search logic.
+// Data flow (BET-698, server-first D23/D24): the palette is a DUMB RENDERER of
+// a single server-side query. On query change (120ms debounced) it sends ONE
+// `window.api.opencodeSearchMessages({ query, scope:"all", primarySessionId })`
+// — the BOX resolves which conversations are in scope, searches opencode's own
+// SQLite over their full history, groups the hits and labels each group — and
+// this file renders whatever comes back. It builds no scope, groups nothing and
+// composes no titles; a failed search (`degraded`, or a transport error) is
+// shown as a failure, never as "no matches".
 //
 // Jump semantics:
 //   - same session → dispatch the existing `manta-scroll-to-message`
@@ -18,8 +18,8 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
-import { flatSessions, resolveSessionOwner } from "./store";
-import type { Project, TranscriptHit } from "../shared/types";
+import { resolveSessionOwner } from "./store";
+import type { Project, TranscriptHit, TranscriptHitGroup } from "../shared/types";
 import {
   formatAge,
   type PendingScrollWin,
@@ -28,29 +28,38 @@ import {
 const MIN_QUERY_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 120;
 
-type Section = {
-  sessionId: string;
-  hits: TranscriptHit[];
-};
-
 type FlatRow = { sessionId: string; hit: TranscriptHit };
 
-// Group a flat, server-ordered hit list by sessionId in first-appearance order
-// (the server already returns primary-first, then sessions in sidebar order,
-// so the group order follows). The group whose id equals the active session is
-// the "This conversation" section; the rest render under "other conversations".
-function groupHits(hits: TranscriptHit[]): Section[] {
-  const sections: Section[] = [];
-  const seen = new Set<string>();
-  for (const h of hits) {
-    if (seen.has(h.sessionId)) continue;
-    seen.add(h.sessionId);
-    sections.push({
-      sessionId: h.sessionId,
-      hits: hits.filter((x) => x.sessionId === h.sessionId),
-    });
-  }
-  return sections;
+export type SearchKind =
+  | "idle"
+  | "loading"
+  | "results"
+  | "empty"
+  | "unsupported"
+  | "boxTooOld"
+  | "failed";
+
+export type SearchReplyView = {
+  kind: SearchKind;
+  groups: TranscriptHitGroup[];
+  truncated: boolean;
+};
+
+// The box's reply → what to render. A box that predates the grouped reply never
+// sends `groups` (an empty answer still carries `[]`), which is the "box too
+// old" signal — there is deliberately no fallback to the old client-side scope.
+export function classifySearchReply(res: {
+  supported: boolean;
+  groups?: TranscriptHitGroup[];
+  truncated?: boolean;
+  degraded?: boolean;
+}): SearchReplyView {
+  const truncated = res.truncated === true;
+  if (!res.supported) return { kind: "unsupported", groups: [], truncated };
+  if (res.groups === undefined) return { kind: "boxTooOld", groups: [], truncated };
+  if (res.degraded) return { kind: "failed", groups: [], truncated };
+  if (res.groups.length === 0) return { kind: "empty", groups: [], truncated };
+  return { kind: "results", groups: res.groups, truncated };
 }
 
 export function SearchPalette({
@@ -66,69 +75,53 @@ export function SearchPalette({
 }) {
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
+  const [jumpNotice, setJumpNotice] = useState<string | null>(null);
 
   const q = query.trim();
   const active = q.length >= MIN_QUERY_CHARS;
 
-  // Search scope: the active session first, then every OTHER chat-mode window
-  // with an opencodeSessionId, in sidebar order, de-duplicated. No cap.
-  const sessionIds = useMemo(() => {
-    const seen = new Set<string>([sessionId]);
-    const ids = [sessionId];
-    for (const f of flatSessions(projects)) {
-      const sid = f.window.opencodeSessionId;
-      if (sid && !seen.has(sid)) {
-        seen.add(sid);
-        ids.push(sid);
-      }
-    }
-    return ids;
-  }, [projects, sessionId]);
-
-  // workspace › session label lookup per sessionId (for section headers).
-  const ownerBySession = useMemo(() => {
-    const m = new Map<string, { tmuxSession: string; name: string }>();
-    for (const f of flatSessions(projects)) {
-      const sid = f.window.opencodeSessionId;
-      if (sid) m.set(sid, { tmuxSession: f.project.tmuxSession, name: f.window.name });
-    }
-    return m;
-  }, [projects]);
-
-  const [groups, setGroups] = useState<Section[]>([]);
+  // null = nothing answered yet for the current query text.
+  const [reply, setReply] = useState<SearchReplyView | null>(null);
   const [loading, setLoading] = useState(false);
-  const [supported, setSupported] = useState(true);
   const seqRef = useRef(0);
 
   useEffect(() => {
     const seq = ++seqRef.current;
     if (!active) {
-      setGroups([]);
+      setReply(null);
       setLoading(false);
       return;
     }
     setLoading(true);
     const timer = window.setTimeout(async () => {
       try {
-        const res = await window.api.opencodeSearchMessages({ query: q, sessionIds });
+        const res = await window.api.opencodeSearchMessages({
+          query: q,
+          scope: "all",
+          primarySessionId: sessionId,
+        });
         if (seqRef.current !== seq) return; // stale — a newer query superseded us
-        setSupported(res.supported);
-        setGroups(res.supported ? groupHits(res.hits) : []);
+        setReply(classifySearchReply(res));
       } catch {
-        // A transport failure surfaces as no results rather than a new error UI.
         if (seqRef.current !== seq) return;
-        setGroups([]);
+        setReply({ kind: "failed", groups: [], truncated: false });
       } finally {
         if (seqRef.current === seq) setLoading(false);
       }
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [active, q, sessionIds]);
+  }, [active, q, sessionId]);
 
-  // Flat row list = keyboard-navigation order across all groups as rendered.
+  const groups = reply?.groups ?? [];
+  const currentGroup = groups.find((g) => g.isCurrent);
+  const otherGroups = groups.filter((g) => !g.isCurrent);
+
+  // Flat row list = keyboard-navigation order across all groups as rendered
+  // (the current conversation first, then the rest in the box's order).
   const flatRows = useMemo<FlatRow[]>(() => {
     const rows: FlatRow[] = [];
-    for (const g of groups) for (const hit of g.hits) rows.push({ sessionId: g.sessionId, hit });
+    const ordered = groups.filter((g) => g.isCurrent).concat(groups.filter((g) => !g.isCurrent));
+    for (const g of ordered) for (const hit of g.hits) rows.push({ sessionId: g.sessionId, hit });
     return rows;
   }, [groups]);
 
@@ -136,7 +129,9 @@ export function SearchPalette({
     if (sel >= flatRows.length) setSel(0);
   }, [flatRows.length, sel]);
 
-  const jump = (row: FlatRow) => {
+  // Returns false when the conversation has no window any more, so the shell
+  // keeps the palette open and the notice below can be read.
+  const jump = (row: FlatRow): void | false => {
     if (row.sessionId === sessionId) {
       window.dispatchEvent(
         new CustomEvent("manta-scroll-to-message", {
@@ -146,7 +141,10 @@ export function SearchPalette({
       return;
     }
     const owner = resolveSessionOwner(projects, row.sessionId);
-    if (!owner) return;
+    if (!owner) {
+      setJumpNotice("That conversation is no longer open.");
+      return false;
+    }
     (window as PendingScrollWin).__mantaPendingMessageScroll = {
       sessionId: row.sessionId,
       messageId: row.hit.messageId,
@@ -155,8 +153,6 @@ export function SearchPalette({
     onJumpToWindow(owner.tmuxSession, owner.windowIndex);
   };
 
-  const currentGroup = groups.find((g) => g.sessionId === sessionId);
-  const otherGroups = groups.filter((g) => g.sessionId !== sessionId);
   const total = flatRows.length;
   const convCount = groups.length;
 
@@ -168,44 +164,55 @@ export function SearchPalette({
       setQuery={(v) => {
         setQuery(v);
         setSel(0);
+        setJumpNotice(null);
       }}
       itemCount={flatRows.length}
       sel={sel}
       setSel={setSel}
       onPick={(i) => {
         const row = flatRows[i];
-        if (row) jump(row);
+        return row ? jump(row) : false;
       }}
       onClose={onClose}
       footerExtra={
-        total > 0
+        reply?.kind === "results" && total > 0
           ? `${total} result${total === 1 ? "" : "s"} · ${convCount} conversation${convCount === 1 ? "" : "s"}`
           : undefined
       }
     >
       {(pick) => {
+        const notice = jumpNotice ? (
+          <div key="jump-notice" role="status" className="px-3 py-2 text-label text-warn">
+            {jumpNotice}
+          </div>
+        ) : null;
+        const message = (text: string) => (
+          <>
+            {notice}
+            <div className="px-3 py-3 text-label text-text-faint">{text}</div>
+          </>
+        );
         if (!active) {
-          return (
-            <div className="px-3 py-3 text-label text-text-faint">
-              Search this conversation — and all others. Type at least 2
-              characters.
-            </div>
+          return message(
+            "Search this conversation — and all others. Type at least 2 characters.",
           );
         }
-        if (!supported) {
-          return (
-            <div className="px-3 py-3 text-label text-text-faint">
-              Search needs a newer server runtime — update the server.
-            </div>
-          );
+        if (!loading && reply?.kind === "unsupported") {
+          return message("Search needs a newer server runtime — update the server.");
+        }
+        if (!loading && reply?.kind === "boxTooOld") {
+          return message("Search needs a newer box — update your box to use this.");
+        }
+        if (!loading && reply?.kind === "failed") {
+          return message("Couldn't search — edit the query to try again.");
         }
         const nodes: ReactNode[] = [];
         let idx = 0;
-        if (currentGroup && currentGroup.hits.length > 0) {
+        if (currentGroup) {
           nodes.push(
             <SectionHeader
               key="cur-head"
-              session="This conversation"
+              title="This conversation"
               count={`${currentGroup.hits.length} match${currentGroup.hits.length === 1 ? "" : "es"}`}
             />,
           );
@@ -222,7 +229,8 @@ export function SearchPalette({
             );
           }
         }
-        if (otherGroups.length > 0 || loading) {
+        const searching = loading || reply === null;
+        if (otherGroups.length > 0 || searching) {
           nodes.push(
             <div
               key="other-div"
@@ -235,12 +243,10 @@ export function SearchPalette({
           );
         }
         for (const g of otherGroups) {
-          const owner = ownerBySession.get(g.sessionId);
           nodes.push(
             <SectionHeader
               key={`head-${g.sessionId}`}
-              workspace={owner?.tmuxSession}
-              session={owner?.name ?? g.sessionId}
+              title={g.label}
               count={String(g.hits.length)}
             />,
           );
@@ -257,48 +263,47 @@ export function SearchPalette({
             );
           }
         }
-        if (loading) {
+        if (searching) {
           nodes.push(
             <div key="other-loading" className="px-3 py-2 text-meta text-text-faint">
               Searching other conversations…
             </div>,
           );
         }
-        if (nodes.length === 0) {
+        // "No matches" even when the budget ran out (truncated) — the note
+        // below says how far the search got.
+        if (reply?.kind === "empty" && !searching) {
           nodes.push(
             <div key="none" className="px-3 py-3 text-label text-text-faint">
               No matches for “{q}”
             </div>,
           );
         }
-        return <>{nodes}</>;
+        if (reply?.truncated) {
+          nodes.push(
+            <div key="truncated" className="px-3 py-2 text-meta text-text-faint">
+              Showing the newest matches — this history is very large.
+            </div>,
+          );
+        }
+        return (
+          <>
+            {notice}
+            {nodes}
+          </>
+        );
       }}
     </PaletteShell>
   );
 }
 
-// "This conversation" / "workspace › session" section header with a
-// right-aligned count — the breadcrumb pattern from the approved mockup.
-function SectionHeader({
-  workspace,
-  session,
-  count,
-}: {
-  workspace?: string;
-  session: string;
-  count: string;
-}) {
+// Section header with a right-aligned count — the breadcrumb pattern from the
+// approved mockup. `title` is the box's label verbatim (or the fixed "This
+// conversation"); nothing is composed here.
+function SectionHeader({ title, count }: { title: string; count: string }) {
   return (
     <div className="flex items-center gap-2 px-3 pt-3 pb-1 text-meta text-text-faint">
-      <span className="flex items-center gap-2 min-w-0 truncate">
-        {workspace != null && (
-          <>
-            <span>{workspace}</span>
-            <span aria-hidden="true">›</span>
-          </>
-        )}
-        <span className="font-medium text-text-muted truncate">{session}</span>
-      </span>
+      <span className="font-medium text-text-muted min-w-0 truncate">{title}</span>
       <span className="ml-auto font-mono shrink-0">{count}</span>
     </div>
   );

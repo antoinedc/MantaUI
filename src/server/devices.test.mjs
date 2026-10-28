@@ -361,7 +361,52 @@ test("listDevices returns per-device metadata only — no tokens", () => {
     assert.equal(typeof d.last_seen, "number");
     assert.equal(typeof d.created_at, "number");
     assert.equal(typeof d.primary, "boolean");
+    assert.equal(typeof d.current, "boolean");
   }
+});
+
+test("listDevices flags `current` only for the caller's own live token", () => {
+  const { eng } = makeEngine();
+  const a = doClaim(eng, { device_id: "phone-1", name: "A phone" });
+  const b = doClaim(eng, { device_id: "tablet-1", name: "Tablet" });
+
+  // The caller's token → exactly its own row is current.
+  const asA = eng.listDevices({ currentToken: a.box_token });
+  assert.deepEqual(
+    asA.filter((d) => d.current).map((d) => d.device_id),
+    [a.device_id],
+  );
+  const asB = eng.listDevices({ currentToken: b.box_token });
+  assert.deepEqual(
+    asB.filter((d) => d.current).map((d) => d.device_id),
+    [b.device_id],
+  );
+
+  // The shared primary token flags the primary row (the desktop's pairing).
+  const asPrimary = eng.listDevices({ currentToken: PRIMARY_TOKEN });
+  const currentRows = asPrimary.filter((d) => d.current);
+  assert.equal(currentRows.length, 1);
+  assert.equal(currentRows[0].primary, true);
+
+  // Absent, empty, malformed or unknown tokens flag nothing.
+  for (const args of [undefined, {}, { currentToken: null }, { currentToken: "" }, { currentToken: "nope" }, { currentToken: "a".repeat(32) }]) {
+    const list = eng.listDevices(args);
+    assert.equal(list.some((d) => d.current), false, `no current row for ${JSON.stringify(args)}`);
+  }
+
+  // No row ever carries a token.
+  for (const d of asA) assert.equal("token" in d, false);
+});
+
+test("listDevices never flags a revoked device's token as current", async () => {
+  const { eng } = makeEngine();
+  const a = doClaim(eng, { device_id: "phone-1", name: "A phone" });
+  const b = doClaim(eng, { device_id: "tablet-1", name: "Tablet" });
+  const r = await eng.revoke({ token: b.box_token, device_id: "phone-1" });
+  assert.equal(r.ok, true);
+  const list = eng.listDevices({ currentToken: a.box_token });
+  assert.equal(list.some((d) => d.device_id === "phone-1"), false);
+  assert.equal(list.some((d) => d.current), false);
 });
 
 test("per-device revoke kills ONLY that device; other devices + primary still pass", async () => {

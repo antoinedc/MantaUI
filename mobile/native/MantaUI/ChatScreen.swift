@@ -90,8 +90,24 @@ private enum OverflowDestination: String, Identifiable {
     case secrets
     case artifacts
     case backgroundJobs
+    case webhooks
 
     var id: String { rawValue }
+}
+
+/// The provider the Reconnect button on a send-error line opens in Accounts. The
+/// id is the one `AccountsScreen(focusProvider:)` accepts (`claude`, `codex`, `kimi`).
+private struct ChatCardReconnectTarget: Identifiable {
+    let provider: String
+    var id: String { provider }
+}
+
+/// A rename in progress (the overflow sheet's Rename row → `SessionRenameSheet`).
+private struct ChatRenameTarget: Identifiable {
+    let project: String
+    let index: Int
+    let initialName: String
+    var id: Int { index }
 }
 
 /// A navigation push waiting for the sheet that triggered it to finish
@@ -136,6 +152,10 @@ struct ChatScreen: View {
     /// "Quote in new session" composer seed, forwarded to the content screen
     /// (BET-1353). Empty for every normal open.
     let seed: String?
+    /// A "start a new session with this" draft (the create flow): seeds the
+    /// composer ONCE, when the screen first opens. A clear or handoff swap (which
+    /// rebuilds the content below) never re-applies it.
+    var draft: NewSessionDraft? = nil
 
     var body: some View {
         let sid = currentSessionId ?? sessionId
@@ -154,7 +174,8 @@ struct ChatScreen: View {
                 currentSessionId = newId
             },
             seed: seed ?? "",
-            carryOver: carryOver
+            carryOver: carryOver,
+            draft: currentSessionId == nil ? draft : nil
         )
         .id(sid)
     }
@@ -191,11 +212,28 @@ private struct ChatScreenContent: View {
     @StateObject private var jobsStore: BackgroundJobsStore
     /// This chat's handoff records, cards, mode and reconciliation (auto-handoff).
     @StateObject private var handoffStore: HandoffStore
+    /// The background-job approval card (WS02 F5).
+    @StateObject private var approvalStore: ChatCardApprovalStore
+    /// Is this session a read-only background job? The BOX decides (WS02 F6).
+    @StateObject private var jobOwnership: ChatCardJobOwnershipStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var sessionStore: SessionListStore
+    @EnvironmentObject private var navigator: MantaNavigator
     @State private var showOverflow = false
+    /// Conversation search (WS06 M-06-1).
+    @State private var showSearch = false
+    /// A message the Artifacts card asked to jump to, opened once its sheet is gone
+    /// (WS07 M-07-1 → the C2 `.message` route → F10).
+    @State private var pendingArtifactJump: String?
+    /// The Reconnect button of a pinned send-error line.
+    @State private var reconnectTarget: ChatCardReconnectTarget?
+    /// "Replace your draft with the pending message?" (Edit last over a non-empty draft).
+    @State private var confirmingEditLast = false
+    @State private var renameTarget: ChatRenameTarget?
+    /// A rename waiting for the overflow sheet to finish dismissing.
+    @State private var pendingRename: ChatRenameTarget?
     /// Context sheet — opened by tapping the context strip.
     @State private var showContextSheet = false
     /// Usage sheet — opened by tapping the composer's usage dot, or the weekly
@@ -257,16 +295,13 @@ private struct ChatScreenContent: View {
     /// above the glass box and must stay undimmed).
     @State private var composerGlassHeight: CGFloat = 0
 
-    /// The composer draft, owned HERE so quote actions (which live on the
-    /// transcript, outside ComposerView) can prepend to it, and passed down to
-    /// ComposerView as a binding (BET-1353). Seeded from `seed` when this
-    /// screen opens a "quote in new session" fork.
-    @State private var composerText = ""
-
-    /// The composer's attachment chips, owned HERE for the same reason as
-    /// `composerText`: a handoff replacement moves them to the successor
-    /// (auto-handoff §8).
-    @State private var composerAttachments: [ComposerAttachment] = []
+    /// The composer draft + attachment chips, owned HERE so features outside
+    /// ComposerView (quote, handoff, a new-session draft, …) can put things into
+    /// it through one API (C3), and passed down to ComposerView as bindings
+    /// (BET-1353). Seeded from `seed` ("quote in new session" fork), the handoff
+    /// carry-over and the new-session `draft`; a handoff replacement moves the
+    /// text and chips to the successor (auto-handoff §8).
+    @StateObject private var composer: ComposerTextController
 
     /// Uploads that were still running when a handoff carried the composer over;
     /// they are bound to the old composer and cannot follow, so the new screen
@@ -294,7 +329,7 @@ private struct ChatScreenContent: View {
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
@@ -304,16 +339,34 @@ private struct ChatScreenContent: View {
         // Seed the composer draft for a "quote in new session" fork (BET-1353);
         // empty for every normal open, which leaves the draft empty. A handoff
         // replacement appends the predecessor's unsent text below it (§8).
-        _composerText = State(initialValue: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""))
-        _composerAttachments = State(initialValue: carryOver?.attachments ?? [])
+        // The StateObject autoclosure runs once per screen identity, so a
+        // re-render of this struct never re-seeds the draft.
+        _composer = StateObject(wrappedValue: ComposerTextController(
+            text: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""),
+            attachments: carryOver?.attachments ?? [],
+            draft: draft
+        ))
         self.skippedUploads = carryOver?.skippedUploads ?? 0
         let api = MantaAPIClient.live()
         self.api = api
+        // One capability reader shared by the chat store and the job check.
+        let capabilities = ChatCardCapabilities(api: api)
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
             api: api,
-            widgetLiveStore: WidgetLiveStore.shared
+            widgetLiveStore: WidgetLiveStore.shared,
+            chatCardCapabilities: capabilities
+        ))
+        _approvalStore = StateObject(wrappedValue: ChatCardApprovalStore(
+            sessionId: sessionId,
+            api: api,
+            requests: eventStore.delegateApprovalRequests.eraseToAnyPublisher()
+        ))
+        _jobOwnership = StateObject(wrappedValue: ChatCardJobOwnershipStore(
+            sessionId: sessionId,
+            api: api,
+            capabilities: capabilities
         ))
         _modelStore = StateObject(wrappedValue: ChatModelStore(sessionId: sessionId, api: api))
         _settingsStore = StateObject(wrappedValue: MantaSettingsStore())
@@ -339,10 +392,31 @@ private struct ChatScreenContent: View {
         // refuse to restart.
         content
             .environmentObject(voicePlayer)
-            .navigationTitle(title)
+            // The composer's insertion API (C3) for everything this screen
+            // presents (sheets inherit the environment).
+            .environment(\.composerController, composer)
+            // The live window name (a rename shows at once), else the title the
+            // screen was opened with (WS04 M-04-3).
+            .navigationTitle(sessionStore.window(forSessionID: store.sessionId)?.window.name ?? title)
             .navigationBarTitleDisplayMode(.inline)
             .mantaNavigationBarBackground(tokens)
             .toolbar {
+                // Quick session switcher (WS04 M-04-6).
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { navigator.presentSwitcher() } label: {
+                        Image(systemName: "rectangle.stack")
+                    }
+                    .accessibilityLabel("Switch session")
+                }
+                // Conversation search (WS06 M-06-1) — not on a read-only job's screen.
+                if !store.isBackgroundJobReadOnly {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { showSearch = true } label: {
+                            Image(systemName: "magnifyingglass")
+                        }
+                        .accessibilityLabel("Search conversations")
+                    }
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Button { showOverflow = true } label: {
                         Image(systemName: "ellipsis")
@@ -368,9 +442,57 @@ private struct ChatScreenContent: View {
                 jobsStore.startAutoRefresh()
                 Task { await jobsStore.refresh() }
                 MantaPushRouter.shared.visibleSessionID = store.sessionId
+                UsageAlertsStore.shared.activeSessionId = store.sessionId
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
                 Task { await resolveWindowAndBranch() }
+                wireChatCards()
+                consumeMessageRoute()
+                // A new-session draft whose attachments couldn't all be carried
+                // over says so once (the notice is consumed).
+                if let notice = composer.consumeSeedNotice() { store.actionHint = notice }
+            }
+            // Any successful insert/attach into the composer focuses it.
+            .onChange(of: composer.focusRequest) { _, _ in
+                composerFocused = true
+            }
+            // The composer takes no input while the session is a read-only job; while
+            // it is still being checked typing stays possible (sends are held).
+            .onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }
+            .onChange(of: store.isBackgroundJobReadOnly) { _, readOnly in
+                composer.acceptsInput = !readOnly
+                if readOnly { composerGlassHeight = 0 }
+            }
+            // A background job awaiting the user's go-ahead (pushed), a job whose
+            // state changed, a reconnect, or coming back to the foreground: ask again.
+            .onReceive(eventStore.delegateUpdates) { _ in
+                Task { await jobOwnership.resolve() }
+            }
+            .onChange(of: eventStore.connectionState) { _, state in
+                if state == .connected { Task { await refreshChatCards() } }
+            }
+            // Pending approvals are polled every 3 s while a turn runs and the chat is
+            // in front (the pushed frame covers the common case).
+            .onChange(of: approvalPollActive) { _, active in
+                approvalStore.setPolling(active)
+            }
+            // A turn started, the job check is still unresolved, or the bar shows a
+            // running job: re-resolve every 30 s so a missed `delegate.updated` heals.
+            .task(id: jobOwnership.needsPolling) {
+                guard jobOwnership.needsPolling else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    await jobOwnership.resolve()
+                }
+            }
+            // C2: a `.message` route aimed at this chat (search / artifacts jump).
+            .onChange(of: navigator.pending) { _, _ in
+                consumeMessageRoute()
+            }
+            // F10: the transcript must NOT follow the tail while a message is focused.
+            .onChange(of: store.focusPhase) { _, phase in
+                handleFocusPhase(phase)
             }
             .onDisappear {
                 store.stop()
@@ -378,6 +500,8 @@ private struct ChatScreenContent: View {
                 accountsStore.stop()
                 jobsStore.stopAutoRefresh()
                 MantaPushRouter.shared.visibleSessionID = nil
+                if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }
+                approvalStore.stop()
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
             }
             // BET-977: the box mirrors opencode's LOCAL plan_enter/plan_exit via
@@ -424,7 +548,8 @@ private struct ChatScreenContent: View {
             // transition, never per rebuild; re-arm when the card leaves.
             .onChange(of: isBlockingCardPresent) { _, nowPresent in
                 let decision = ChatSessionStore.shouldScrollForCardArrival(nowPresent, wasPresent: wasBlockingCardPresent)
-                if decision.scroll {
+                // A focused message stays where it is: no jump to the bottom (F10).
+                if decision.scroll, ChatCardFocusPolicy.allowsBottomJump(phase: store.focusPhase) {
                     scrollPosition.scrollTo(edge: .bottom, animated: true)
                 }
                 wasBlockingCardPresent = decision.present
@@ -456,7 +581,7 @@ private struct ChatScreenContent: View {
             }
             // The local copy of a loaded handoff draft has done its job once the
             // composer is empty again (sent, or cleared by the user).
-            .onChange(of: composerText) { _, text in
+            .onChange(of: composer.text) { _, text in
                 if text.isEmpty { handoffStore.clearLocalDraft() }
             }
             .onChange(of: scenePhase) { _, phase in
@@ -468,10 +593,13 @@ private struct ChatScreenContent: View {
                 // not visible.
                 switch phase {
                 case .active:
+                    Task { await refreshChatCards() }
                     MantaPushRouter.shared.visibleSessionID = store.sessionId
+                    UsageAlertsStore.shared.activeSessionId = store.sessionId
                     Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                     clearDeliveredNotifications(for: store.sessionId)
                 case .background, .inactive:
+                    if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }
                     Task { try? await MantaAPIClient.live().reportFocus(sessionId: nil, visible: false) }
                 default:
                     break
@@ -550,6 +678,11 @@ private struct ChatScreenContent: View {
             GlassEffectContainer(spacing: 0) {
                 VStack(spacing: 0) {
                     bottomCards
+                    if store.isBackgroundJobReadOnly {
+                        // A background job takes no messages: the bar (the box's own
+                        // wording) replaces the composer.
+                        readOnlyJobBar
+                    } else {
                     ComposerView(
                         sessionId: store.sessionId,
                         projectName: projectName,
@@ -561,6 +694,8 @@ private struct ChatScreenContent: View {
                         onShowUsage: { showUsageSheet = true },
                         showScrollToBottom: showScrollToBottom,
                         onScrollToBottom: {
+                            // Leaving a jump: back to the newest messages first.
+                            store.clearFocus()
                             scrollPosition.scrollTo(edge: .bottom, animated: true)
                             showScrollToBottom = false
                         },
@@ -571,10 +706,11 @@ private struct ChatScreenContent: View {
                         onSlashHandoff: { goal in handoffStore.create(trigger: "user", goal: goal) },
                         historyTmuxSession: sessionWindow?.name,
                         historyWindowIndex: sessionWindow?.index,
-                        text: $composerText,
-                        attachments: $composerAttachments,
+                        text: $composer.text,
+                        attachments: $composer.attachments,
                         inputFocused: $composerFocused
                     )
+                    }
                 }
                 // Feeds the transcript's bottom content inset its height. Safe
                 // to measure here: it is an overlay, so nothing it reports
@@ -650,6 +786,34 @@ private struct ChatScreenContent: View {
         .sheet(isPresented: $showUsageSheet) {
             usageSheet
         }
+        // Reconnect on a pinned send-error line: Accounts, with that provider first.
+        .sheet(item: $reconnectTarget) { target in
+            NavigationStack {
+                AccountsScreen(store: accountsStore, focusProvider: target.provider, ownsLifecycle: false)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { reconnectTarget = nil }
+                        }
+                    }
+            }
+        }
+        .confirmActionSheet(
+            isPresented: $confirmingEditLast,
+            title: "Replace your draft with the pending message?",
+            message: "Your current draft is replaced by the message you sent.",
+            destructiveTitle: "Replace draft",
+            destructiveAction: { Task { await performEditLast() } }
+        )
+        // Conversation search (WS06 M-06-1).
+        .sheet(isPresented: $showSearch) {
+            SearchScreen(primarySessionId: store.sessionId)
+        }
+        // Rename this session (WS04 M-04-4).
+        .sheet(item: $renameTarget) { target in
+            SessionRenameSheet(title: "Rename session", initialName: target.initialName) { newName in
+                await sessionStore.renameSession(project: target.project, index: target.index, newName: newName)
+            }
+        }
     }
 
     // MARK: - Overflow sheet (§8)
@@ -677,7 +841,24 @@ private struct ChatScreenContent: View {
                     sessionId: entry.sessionId,
                     title: handoffStore.title(for: entry.sessionId)
                 ))
-            }
+            },
+            // A background job's own session is read-only: Compact / Clear / Fork /
+            // Delete / Trust / Rename / Mode are hidden (WS02 M-02-2).
+            isReadOnlyJob: store.isBackgroundJobReadOnly,
+            onRename: { beginRename() },
+            mode: sessionWindow == nil ? nil : SessionModeStore.read(sessionID: store.sessionId),
+            launchers: sessionStore.launchers,
+            launcherCatalog: sessionStore.launcherCatalog,
+            onSelectMode: { newMode in
+                guard newMode != .chat, let window = sessionWindow else { return }
+                navigator.switchMode(
+                    windowKey: MantaNavigator.windowKey(project: projectName, windowIndex: window.index),
+                    sessionID: store.sessionId,
+                    to: newMode
+                )
+            },
+            onRetryLaunchers: { Task { await sessionStore.refreshLaunchers() } },
+            onWebhooks: { overflowDestination = .webhooks }
         )
         .task {
             await refreshScheduleCount()
@@ -707,9 +888,9 @@ private struct ChatScreenContent: View {
     /// successor — the same swap a clear does, plus the carry-over.
     private func handedOff(to successorId: String) {
         let carry = HandoffCarryOver(
-            text: composerText,
-            attachments: composerAttachments.filter { !$0.isUploading },
-            skippedUploads: composerAttachments.filter { $0.isUploading }.count
+            text: composer.text,
+            attachments: composer.attachments.filter { !$0.isUploading },
+            skippedUploads: composer.attachments.filter { $0.isUploading }.count
         )
         modelStore.rebind(to: successorId)
         onHandedOff(successorId, carry)
@@ -730,7 +911,7 @@ private struct ChatScreenContent: View {
     /// A draft from "Edit first": already persisted locally by the store. An
     /// existing composer text is appended BELOW it, never overwritten (§8).
     private func loadHandoffDraft(_ draft: String) {
-        composerText = HandoffComposerCarry.appendBelow(draft, composerText)
+        composer.text = HandoffComposerCarry.appendBelow(draft, composer.text)
         composerFocused = true
         store.actionHint = "Handoff draft loaded — edit it, then send"
     }
@@ -738,8 +919,8 @@ private struct ChatScreenContent: View {
     /// A draft that was loaded but never sent (the app was killed, or the chat
     /// was left): put it back, below anything already typed.
     private func restoreHandoffDraft() {
-        guard let local = handoffStore.restoreLocalDraft(), !composerText.contains(local) else { return }
-        composerText = HandoffComposerCarry.appendBelow(local, composerText)
+        guard let local = handoffStore.restoreLocalDraft(), !composer.text.contains(local) else { return }
+        composer.text = HandoffComposerCarry.appendBelow(local, composer.text)
     }
 
     // MARK: - Trust mode (BET-748 gap #14)
@@ -780,6 +961,19 @@ private struct ChatScreenContent: View {
             )
         case .artifacts:
             ArtifactsCard(
+                sessionId: store.sessionId,
+                onClose: { overflowDestination = nil },
+                projectName: projectName,
+                cwd: sessionWindow?.cwd,
+                composer: composer,
+                // The jump runs once the sheet is gone (`flushPendingPush`).
+                onJumpToMessage: { messageID in
+                    pendingArtifactJump = messageID
+                    overflowDestination = nil
+                }
+            )
+        case .webhooks:
+            WebhooksCard(
                 sessionId: store.sessionId,
                 onClose: { overflowDestination = nil }
             )
@@ -823,6 +1017,16 @@ private struct ChatScreenContent: View {
     /// Run the push a just-dismissed sheet asked for. A sheet closed any other
     /// way (swipe, Done) leaves nothing pending, so this is a no-op then.
     private func flushPendingPush() {
+        // A jump the Artifacts card asked for: through the C2 route, which this
+        // screen itself consumes (F10).
+        if let messageID = pendingArtifactJump {
+            pendingArtifactJump = nil
+            navigator.open(.message(sessionID: store.sessionId, messageID: messageID))
+        }
+        if let rename = pendingRename {
+            pendingRename = nil
+            renameTarget = rename
+        }
         guard let push = pendingPush else { return }
         pendingPush = nil
         push.perform(on: $path)
@@ -909,31 +1113,6 @@ private struct ChatScreenContent: View {
         return (cwd as NSString).lastPathComponent
     }
 
-    /// The branch + relative path shown in the navigation bar's subtitle chip,
-    /// or nil when there is no branch (non-git cwd, detached HEAD, unreachable
-    /// box) — in which case the chip renders nothing at all.
-    private var branchCapsuleInfo: (name: String, path: String?)? {
-        guard let branch, !branch.isEmpty else { return nil }
-        return (branch, branchRelPath)
-    }
-
-    /// The system navigation bar's subtitle chip (BET-821): the branch name and
-    /// relative working-directory path once a branch is known. Renders NOTHING
-    /// when there is no branch (non-git cwd, detached HEAD, unreachable box) so
-    /// the inline title stands alone rather than showing a dead glyph.
-    @ViewBuilder
-    private var subtitleChip: some View {
-        if let info = branchCapsuleInfo {
-            let path = info.path.flatMap { $0.isEmpty ? nil : $0 }
-            Label(path.map { "\(info.name) · \($0)" } ?? info.name,
-                  systemImage: "arrow.triangle.branch")
-                .labelStyle(.titleAndIcon)
-                .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(tokens.tx4)
-                .lineLimit(1)
-        }
-    }
-
     /// Clear = a fresh opencode session in the SAME window. Stay on the screen
     /// and re-point it at the new id; the transcript comes back empty because
     /// the session really is new.
@@ -997,14 +1176,20 @@ private struct ChatScreenContent: View {
     /// composer and opens it. Both run through `QuoteText.buildQuoteBlock`, so
     /// whatever lands in the composer is exactly the sent form.
     private func quote(_ selection: String, into destination: QuoteDestination) async {
-        guard let block = QuoteText.buildQuoteBlock(selection) else { return }
         switch destination {
         case .thisSession:
+            // The controller turns the raw selection into the blockquote itself
+            // (never pass an already-built block) and focuses the composer.
             await MainActor.run {
-                composerText = block + composerText
-                composerFocused = true
+                if !composer.insert(text: selection, mode: .quote) {
+                    store.actionHint = composer.acceptsInput ? "Nothing to quote" : "This chat is read-only"
+                }
             }
         case .newSession:
+            guard let block = QuoteText.buildQuoteBlock(selection) else {
+                await MainActor.run { store.actionHint = "Nothing to quote" }
+                return
+            }
             await forkSession(seed: block)
         }
     }
@@ -1053,7 +1238,9 @@ private struct ChatScreenContent: View {
         )
         // Deliver the blocking-card actions to the transcript cells via the
         // SwiftUI environment (BET-1214). The subagent drill-in keeps `nil`.
-        .environment(\.transcriptCardActions, cardActions)
+        .environment(\.transcriptCardActions, store.mutationPolicy == .readOnlyJob ? readOnlyCardActions : cardActions)
+        // The jumped-to message's highlight (WS02 F10, drawn by the cell: M-02-1).
+        .environment(\.transcriptHighlightedRowID, store.focusedRowID)
         // Deliver the box-wide widget live store to widget cards so liveness
         // can ride on the store rather than the cell (BET-1326).
         .environment(\.widgetLiveStore, WidgetLiveStore.shared)
@@ -1127,7 +1314,7 @@ private struct ChatScreenContent: View {
     /// full-width context row. Its own background is fully opaque `tokens.canvas`
     /// so the bar's default material is not visible — that removes the seam
     /// between the solid nav bar and the block. The branch row drops out
-    /// entirely when there is no branch (`subtitleChip` renders nothing then).
+    /// entirely when there is no branch (`GitSessionHeaderRow` renders nothing then).
     @ViewBuilder
     private var sessionHeaderBlock: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
@@ -1140,7 +1327,18 @@ private struct ChatScreenContent: View {
                     ))
                 }
             }
-            subtitleChip
+            // The branch chip, the checks chip and the "Connect GitHub" offer (WS05
+            // M-05-1). Plain label when GitHub isn't in play; nothing without a branch.
+            GitSessionHeaderRow(
+                branch: branch,
+                relPath: branchRelPath,
+                cwd: sessionWindow?.cwd,
+                sessionId: store.sessionId,
+                shipModel: modelStore.override,
+                readOnly: store.isBackgroundJobReadOnly,
+                tokens: tokens,
+                composer: composer
+            )
             contextStrip
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -1250,7 +1448,9 @@ private struct ChatScreenContent: View {
                 tokens: tokens,
                 onCompact: { store.compact() },
                 onClear: { Task { await clearSession() } },
-                onHandOff: { handoffStore.create(trigger: "button") }
+                onHandOff: { handoffStore.create(trigger: "button") },
+                seat: ChatCardSeatLine.value(accountsStore.conversationSeat),
+                allowsActions: !store.isBackgroundJobReadOnly
             )
         } else {
             Color.clear
@@ -1358,30 +1558,84 @@ private struct ChatScreenContent: View {
     @ViewBuilder
     private var bottomCards: some View {
         VStack(spacing: Metrics.spacing.sp3) {
+            // "Showing an earlier message · Jump to latest" / "Finding message…" (F10).
+            if store.focusPhase != .none, !isFocusFailed {
+                ChatCardFocusChip(phase: store.focusPhase, tokens: tokens, onJumpToLatest: { jumpToLatest() })
+            }
+            // A background job waiting for the user's go-ahead (F5) — first, because
+            // the model is blocked on it. Never on a read-only job's screen.
+            if !store.isBackgroundJobReadOnly, let approval = approvalStore.pending {
+                ChatCardApprovalCard(
+                    approval: approval,
+                    busy: approvalStore.busy,
+                    error: approvalStore.error,
+                    tokens: tokens,
+                    onApprove: { tools in Task { await approvalStore.approve(tools: tools) } },
+                    onDecline: { Task { await approvalStore.decline() } }
+                )
+            }
+            // The model stopped and needs a human decision (F3).
+            if let blocked = store.blockedProgress {
+                ChatCardBlocked(progress: blocked, tokens: tokens)
+            }
+            // The box could not say whether this is a background job: sends wait (F6).
+            if store.mutationPolicy == .resolving, jobOwnership.lastFailure != nil {
+                ChatCardResolvingLine(
+                    retrying: jobOwnership.resolveInFlight,
+                    tokens: tokens,
+                    onRetry: { Task { await jobOwnership.resolve() } }
+                )
+            }
             // Handoff cards for this chat (preparing / ready / starting / failed)
             // and the armed successor's carried-over context. Only drawn when
             // there is something to show, so an empty stack adds no spacing.
             if !handoffStore.pinned.isEmpty || handoffStore.armedPreamble != nil {
                 HandoffPinnedCards(store: handoffStore, tokens: tokens)
             }
-            // Weekly-limit banner (BET-824): one pinned dismissible card, once
-            // per session, when the weekly window is at/over 90%. The dot
-            // tracks the 5-hour window, so it can read green while the weekly
-            // is nearly spent — this banner is the only thing between a green
-            // dot and a multi-day lockout the user did not see coming.
-            if weeklyBannerVisible {
-                weeklyBanner
+            if !store.isBackgroundJobReadOnly {
+                // Weekly-limit banner (BET-824): one pinned dismissible card, once
+                // per session, when the weekly window is at/over 90%. The dot
+                // tracks the 5-hour window, so it can read green while the weekly
+                // is nearly spent — this banner is the only thing between a green
+                // dot and a multi-day lockout the user did not see coming.
+                if weeklyBannerVisible {
+                    weeklyBanner
+                }
+                // Multi-account (spec §5.3): this conversation moved to another
+                // seat — one slim dismissible line; hides itself after 5 minutes.
+                if let notice = accountsStore.moveNotice {
+                    seatMoveBanner(notice)
+                }
+                // A credential failure: ONE actionable line, pinned (the transcript
+                // does not repeat it). Reconnect opens Accounts on that provider.
+                if let error = store.sessionError, let reconnect = error.display?.reconnect {
+                    ChatCardSendErrorLine(
+                        text: error.shownText,
+                        tokens: tokens,
+                        onReconnect: {
+                            reconnectTarget = ChatCardReconnectTarget(provider: reconnect.accountsId)
+                            store.dismissSessionError()
+                        },
+                        onDismiss: { store.dismissSessionError() }
+                    )
+                }
             }
-            // Multi-account (spec §5.3): this conversation moved to another
-            // seat — one slim dismissible line; hides itself after 5 minutes.
-            if let notice = accountsStore.moveNotice {
-                seatMoveBanner(notice)
+            // The provider is being retried (rate limit, overload).
+            if let retry = store.retry {
+                ChatCardRetry(retry: retry, tokens: tokens)
+            }
+            if let compaction = store.compaction {
+                ChatCardCompaction(state: compaction, tokens: tokens)
+            }
+            if let notice = store.compactionNotice {
+                ChatCardCompactionNoticeView(notice: notice, tokens: tokens)
             }
             // Messages sent during a turn that the box is still holding: "Now"
             // (read at the agent's next step) and "After this turn". Pinned here,
             // not in the transcript, so they stay in view and actionable however
             // far the conversation is scrolled.
-            if !store.inboxItems.isEmpty {
+            if !store.inboxItems.isEmpty, !store.isBackgroundJobReadOnly {
+                let gate = ChatCardInboxGate.resolve(available: store.chatCardsAvailable, canMutate: store.canMutate)
                 PendingMessagesCard(
                     items: store.inboxItems,
                     running: store.running,
@@ -1389,7 +1643,10 @@ private struct ChatScreenContent: View {
                     tokens: tokens,
                     onSendNow: { store.setInboxDelivery(id: $0, to: .steer) },
                     onWait: { store.setInboxDelivery(id: $0, to: .queue) },
-                    onCancel: { store.cancelInboxItem(id: $0) }
+                    onCancel: { store.cancelInboxItem(id: $0) },
+                    onEditLast: { editLastPendingMessage() },
+                    actionsEnabled: gate.actionsEnabled,
+                    gateNote: gate.gateNote
                 )
             }
             // Only things that BLOCK the turn and need a tap stay here (plus the
@@ -1403,6 +1660,143 @@ private struct ChatScreenContent: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.top, Metrics.spacing.sp2)
+    }
+
+    // MARK: - Chat cards (WS02)
+
+    private var isFocusFailed: Bool {
+        if case .failed = store.focusPhase { return true }
+        return false
+    }
+
+    /// The bar that replaces the composer for a background job's session.
+    @ViewBuilder
+    private var readOnlyJobBar: some View {
+        if let job = jobOwnership.job {
+            ChatCardReadOnlyJobBar(
+                job: job,
+                stopping: jobOwnership.stopping,
+                tokens: tokens,
+                onGoToParent: {
+                    // The box returns the parent's project + window index; the key
+                    // format is a client navigation concern (WS04).
+                    if let parent = job.parent {
+                        navigator.open(.session(windowKey: MantaNavigator.windowKey(
+                            project: parent.project, windowIndex: parent.windowIndex)))
+                    }
+                },
+                onStop: { Task { await jobOwnership.stop() } }
+            )
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp2)
+        }
+    }
+
+    /// A background job's session has no live blocking cards: opening a run's detail
+    /// sheet and expanding the checklist only READ. While the session is merely still
+    /// being checked (`.resolving`) the live actions stay wired — the store's gate
+    /// answers a tap with "One moment — checking this session" instead of a dead button.
+    private var readOnlyCardActions: TranscriptCardActions {
+        TranscriptCardActions.readOnly(
+            onOpenActivity: { activityTarget = ActivityTarget(runID: $0) },
+            onToggleTodos: { store.toggleTodos() }
+        )
+    }
+
+    /// Whether the approval poll should run: a turn is running, the chat is in
+    /// front, and the session is an ordinary one.
+    private var approvalPollActive: Bool {
+        store.running && store.canMutate && scenePhase == .active
+    }
+
+    /// Hook the chat-card stores into this screen.
+    private func wireChatCards() {
+        approvalStore.onHint = { store.actionHint = $0 }
+        jobOwnership.onHint = { store.actionHint = $0 }
+        jobOwnership.onPolicy = { policy in
+            // The policy lands in the store and the composer in ONE main-actor step.
+            store.applyMutationPolicy(policy)
+            composer.acceptsInput = store.composerAcceptsInput
+        }
+        composer.acceptsInput = store.composerAcceptsInput
+        approvalStore.setPolling(approvalPollActive)
+        Task { await refreshChatCards() }
+    }
+
+    /// Re-ask the box what this session is and what is waiting on the user.
+    private func refreshChatCards() async {
+        await jobOwnership.resolve()
+        await approvalStore.refresh()
+    }
+
+    /// Edit last (F8): cancel the newest pending message and put its text back in
+    /// the composer. A non-empty draft is never overwritten without asking.
+    private func editLastPendingMessage() {
+        if composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Task { await performEditLast() }
+        } else {
+            confirmingEditLast = true
+        }
+    }
+
+    private func performEditLast() async {
+        guard let restored = await store.editLastInboxItem() else { return }
+        if !composer.insert(text: restored, mode: .replace) {
+            // C3: a rejected insert is never ignored.
+            UIPasteboard.general.string = restored
+            store.actionHint = "Removed from the queue — it couldn't go back in the composer, so it's on your clipboard"
+        }
+    }
+
+    // MARK: - Jump to a message (F10)
+
+    /// Consume a `.message` route aimed at THIS chat: focus the message. Other
+    /// sessions' routes are left for their own screens.
+    private func consumeMessageRoute() {
+        guard case .message(let sessionID, let messageID)? = navigator.pending,
+              sessionID == store.sessionId else { return }
+        navigator.pending = nil
+        store.focus(messageID: messageID)
+    }
+
+    /// While a message is focused the transcript must not chase the tail; on
+    /// presenting, the slice starts at the target, so the top edge IS the target.
+    private func handleFocusPhase(_ phase: ChatCardFocusPhase) {
+        switch phase {
+        case .locating:
+            scrollPosition.autoScrollsToBottomOnAppend = false
+            scrollPosition.scrollsToBottomOnReplace = false
+        case .presented:
+            scrollPosition.autoScrollsToBottomOnAppend = false
+            scrollPosition.scrollsToBottomOnReplace = false
+            // Next run loop: the slice has to be in the list before it can scroll.
+            Task {
+                await Task.yield()
+                scrollPosition.scrollTo(edge: .top, animated: true)
+            }
+        case .none, .failed:
+            scrollPosition.autoScrollsToBottomOnAppend = true
+            scrollPosition.scrollsToBottomOnReplace = true
+        }
+    }
+
+    /// "Jump to latest" on the focus chip.
+    private func jumpToLatest() {
+        store.clearFocus()
+        scrollPosition.autoScrollsToBottomOnAppend = true
+        scrollPosition.scrollsToBottomOnReplace = true
+        scrollPosition.scrollTo(edge: .bottom, animated: true)
+    }
+
+    /// Open the rename sheet for this session's window. The overflow sheet is still
+    /// dismissing when this runs, so the sheet is presented from its `onDismiss`.
+    private func beginRename() {
+        guard let location = sessionStore.window(forSessionID: store.sessionId) else {
+            store.actionHint = "Can't rename — session's window not found."
+            return
+        }
+        pendingRename = ChatRenameTarget(project: location.project, index: location.window.index, initialName: location.window.name)
+        showOverflow = false
     }
 
     /// The callbacks + context the blocking cards need now that they render in

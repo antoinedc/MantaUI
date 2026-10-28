@@ -198,13 +198,26 @@ enum InboxCancelOutcome: Equatable, Sendable {
 
 /// `opencode:inbox-cancel` reply. An unrecognised outcome decodes as `.unknown`
 /// (the honest "couldn't confirm"), never throws.
+///
+/// Server-first (WS02): the box words the outcome and decides what may go back
+/// into the composer. `notice` is a neutral line, `error` a failure to show, and
+/// `restoreText` the text of a cancelled message — present only when the request
+/// asked to restore and the cancel was confirmed. An older box sends none of the
+/// three; the chat then gates every inbox action instead of guessing.
 struct InboxCancelResult: Equatable, Sendable, Decodable {
     var outcome: InboxCancelOutcome
     var item: InboxItem?
+    var notice: String?
+    var error: String?
+    var restoreText: String?
 
-    init(outcome: InboxCancelOutcome, item: InboxItem? = nil) {
+    init(outcome: InboxCancelOutcome, item: InboxItem? = nil,
+         notice: String? = nil, error: String? = nil, restoreText: String? = nil) {
         self.outcome = outcome
         self.item = item
+        self.notice = notice
+        self.error = error
+        self.restoreText = restoreText
     }
 
     init(from decoder: Decoder) throws {
@@ -216,6 +229,14 @@ struct InboxCancelResult: Equatable, Sendable, Decodable {
         default: outcome = .unknown
         }
         item = InboxItem.parse(object["item"])
+        notice = Self.line(object["notice"])
+        error = Self.line(object["error"])
+        restoreText = ChatJSON.string(object["restoreText"])
+    }
+
+    private static func line(_ value: JSONValue?) -> String? {
+        guard let s = ChatJSON.string(value), !s.isEmpty else { return nil }
+        return s
     }
 }
 
@@ -228,9 +249,14 @@ enum InboxSetDeliveryOutcome: Equatable, Sendable {
 /// `opencode:inbox-set-delivery` reply. Unrecognised outcome → `.unknown`.
 struct InboxSetDeliveryResult: Equatable, Sendable, Decodable {
     var outcome: InboxSetDeliveryOutcome
+    /// The box's sentences (see `InboxCancelResult`); absent on an older box.
+    var notice: String?
+    var error: String?
 
-    init(outcome: InboxSetDeliveryOutcome) {
+    init(outcome: InboxSetDeliveryOutcome, notice: String? = nil, error: String? = nil) {
         self.outcome = outcome
+        self.notice = notice
+        self.error = error
     }
 
     init(from decoder: Decoder) throws {
@@ -240,33 +266,16 @@ struct InboxSetDeliveryResult: Equatable, Sendable, Decodable {
         case "delivered": outcome = .delivered
         default: outcome = .unknown
         }
+        let object = ChatJSON.object(value) ?? [:]
+        if let s = ChatJSON.string(object["notice"]), !s.isEmpty { notice = s }
+        if let s = ChatJSON.string(object["error"]), !s.isEmpty { error = s }
     }
 }
 
-/// What the user is told after an inbox action. `nil` = nothing to say (the
-/// next `inbox` frame is the confirmation). Every other outcome is a visible
-/// message — never a silent no-op.
+/// What the user is told when an inbox action produced NO verdict at all (the
+/// request itself failed). Every outcome the box did decide arrives worded in the
+/// result (`notice` / `error`) — there is no outcome → sentence rule here.
 enum InboxActionReport {
-    static let alreadySent = "Already sent to the agent"
-
-    /// × on a row. A cancelled message needs no words: the row leaves.
-    static func cancel(_ result: InboxCancelResult) -> String? {
-        switch result.outcome {
-        case .cancelled: return nil
-        case .delivered: return alreadySent
-        case .unknown: return "Couldn't confirm it was cancelled — it may still be sent"
-        }
-    }
-
-    /// Send now / Wait. `changed` is confirmed by the next frame.
-    static func setDelivery(_ result: InboxSetDeliveryResult) -> String? {
-        switch result.outcome {
-        case .changed: return nil
-        case .delivered: return alreadySent
-        case .unknown: return "Couldn't confirm the change — check the pending list"
-        }
-    }
-
     /// The request itself failed (no verdict from the box at all).
     static let cancelFailed = "Couldn't cancel — check the connection"
     static let setDeliveryFailed = "Couldn't change it — check the connection"

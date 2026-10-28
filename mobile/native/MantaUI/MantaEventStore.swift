@@ -83,6 +83,23 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// so the Plan chip turns itself off the moment the model exits planning.
     var planOn: Bool?
     var subagents: [StreamSubagentPayload] = []
+    // --- WS02 chat cards. All of it lives for the app's lifetime, so nothing here
+    // is "cleared by a timer": transient cards are hidden by a latch in the chat
+    // store, keyed by the generation / sequence numbers below.
+    /// The provider retry in progress (`retry` frame; a null frame clears it).
+    var retry: StreamRetryPayload?
+    /// Bumped on every compaction `started`.
+    var compactionGeneration = 0
+    var compaction: ChatCardCompactionState?
+    /// Bumped on every `transcriptStale` (the transcript changed wholesale).
+    var transcriptStaleSeq = 0
+    /// The box's "Compacted while you were away" line, and its sequence number.
+    var compactionNotice: ChatCardCompactionNotice?
+    var compactionNoticeSeq = 0
+    /// Bumped on every `sessionError` frame: two identical errors are two events.
+    var sessionErrorSeq = 0
+    /// user message id → the `/command` that produced it (newest 200).
+    var commands = ChatCardBoundedLog<StreamCommandExecutedPayload>(limit: 200)
     /// This TURN's live tools keyed by their stable tool part id (`idx`, which
     /// is the opencode part id), and the order they started in. A `toolEnded`
     /// keeps both the record (so the outcome can be reflected) and its place in
@@ -187,6 +204,7 @@ enum MantaStreamRouter {
                 s.runningSince = resolveRunningSince(running: p.running, since: p.since, current: s.runningSince)
                 // A new turn clears any stale error surfaced by the previous one.
                 if p.running { s.sessionError = nil }
+                if ChatCardStreamRules.clearsRetry(sub: sub, running: p.running, complete: nil) { s.retry = nil }
             }
         case "turnComplete":
             if let p = try? frame.decodedPayload(StreamTurnCompletePayload.self) {
@@ -200,6 +218,7 @@ enum MantaStreamRouter {
                 // never stopped.
                 s.running = p.running
                 s.runningSince = resolveRunningSince(running: p.running, since: p.since, current: s.runningSince)
+                if ChatCardStreamRules.clearsRetry(sub: sub, running: nil, complete: p.complete) { s.retry = nil }
             }
             // A finished turn has no running tools; the canonical refetch now
             // owns them as step rows, so drop the live map to bound memory
@@ -239,7 +258,31 @@ enum MantaStreamRouter {
         case "truncation":
             s.truncation = try? frame.decodedPayload(StreamTruncationPayload.self)
         case "sessionError":
-            s.sessionError = try? frame.decodedPayload(StreamSessionErrorPayload.self)
+            if let p = try? frame.decodedPayload(StreamSessionErrorPayload.self) {
+                s.sessionError = p
+                s.sessionErrorSeq += 1
+            }
+        case "retry":
+            // A `null` payload (the box clearing the card) fails to decode → nil.
+            s.retry = try? frame.decodedPayload(StreamRetryPayload.self)
+        case "compaction":
+            if let p = try? frame.decodedPayload(StreamCompactionPayload.self) {
+                if p.phase == "started" { s.compactionGeneration += 1 }
+                s.compaction = ChatCardCompactionReducer.apply(p, to: s.compaction, generation: s.compactionGeneration)
+            }
+        case "transcriptStale":
+            s.compaction = nil
+            s.transcriptStaleSeq += 1
+        case "optimizer.compacted":
+            // An older box sends no `text`: nothing to show, nothing published.
+            if let text = (try? frame.decodedPayload(StreamOptimizerCompactedPayload.self))?.text, !text.isEmpty {
+                s.compactionNotice = ChatCardCompactionNotice(text: text)
+                s.compactionNoticeSeq += 1
+            }
+        case "commandExecuted":
+            if let p = try? frame.decodedPayload(StreamCommandExecutedPayload.self), !p.messageID.isEmpty {
+                s.commands.set(p.messageID, p)
+            }
         case "context":
             s.context = try? frame.decodedPayload(StreamContextPayload.self)
         case "cache":
@@ -313,6 +356,9 @@ enum MantaStreamRouter {
             let entry = bySession[sid]
             s.running = entry != nil
             s.runningSince = resolveRunningSetSince(entry, current: s.runningSince)
+            // The box does not replay `retry`: a session that is no longer
+            // running has no retry in progress.
+            if entry == nil { s.retry = nil }
             // An authoritative replay starts here (BET-1348): the box's connect
             // snapshot only emits a `questions` / `permissions` frame for
             // sessions whose list is NON-empty, so a card answered while the
@@ -460,6 +506,17 @@ final class MantaEventStore: ObservableObject {
     /// cannot unsubscribe. The frame still reaches the raw handlers too.
     let handoffUpdates = PassthroughSubject<HandoffBusEvent, Never>()
 
+    /// Fires for every `progress.updated` frame, with the session id: the model's
+    /// own progress report changed (the "Blocked — needs a decision" card reads
+    /// it). A `Subject` for the same reason as `delegateUpdates`.
+    let progressUpdates = PassthroughSubject<String, Never>()
+
+    /// Fires for every `delegate.approval.requested` frame: a background job is
+    /// waiting for the user's go-ahead. The payload is not session-enveloped, so
+    /// the observing chat filters on `parentSessionID`. The 3-second poll in the
+    /// approval store is the safety net for a missed frame.
+    let delegateApprovalRequests = PassthroughSubject<ChatCardApproval, Never>()
+
     /// Register a raw (non-`stream`, non-`runningSet`) frame observer.
     func addRawFrameHandler(_ handler: @escaping (MantaStreamFrame) -> Void) {
         rawFrameHandlers.append(handler)
@@ -571,6 +628,14 @@ final class MantaEventStore: ObservableObject {
             routeStream(frame)
         } else {
             if frame.kind == "delegate.updated" { delegateUpdates.send() }
+            if frame.kind == "progress.updated",
+               let sid = ChatJSON.string(ChatJSON.object(frame.payload)?["sessionID"]), !sid.isEmpty {
+                progressUpdates.send(sid)
+            }
+            if frame.kind == "delegate.approval.requested",
+               let approval = try? frame.decodedPayload(ChatCardApproval.self) {
+                delegateApprovalRequests.send(approval)
+            }
             if let accountsEvent = AccountsBusEvent.from(frame) { accountsUpdates.send(accountsEvent) }
             if let handoffEvent = HandoffBusEvent.from(frame: frame) { handoffUpdates.send(handoffEvent) }
             for handler in rawFrameHandlers { handler(frame) }

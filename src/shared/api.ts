@@ -1,10 +1,26 @@
+import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
   AgentFileReady,
+  ModelsTableResult,
+  ModelsWriteReply,
+  ModelsPickerResult,
+  UnidentifiedList,
+  ModelsDeclareInput,
+  ModelsDeclareReply,
+  ModelsSetPriceInput,
+  ModelsSetPriceReply,
+  UsageResumeView,
+  UsageResumeApplyInput,
+  UsageResumeApplyReply,
+  UsageAlertsList,
+  UsageAlertFrame,
+  UsageRemindReply,
   AppConfig,
   AuthClaimInput,
   AuthPairResult,
   DelegateJob,
   DelegateApproval,
+  DelegateJobForSession,
   DelegateApprovalTool,
   DesktopNotifyPayload,
   OpencodeAgent,
@@ -101,6 +117,7 @@ import type {
   SubagentInput,
   PluginRegistryRow,
   TranscriptHit,
+  TranscriptHitGroup,
   LedgerSummary,
   OptimizerSummary,
   OptimizerRange,
@@ -837,6 +854,8 @@ export type OptimizerPricesResult = {
   fetchedAt: number;
   models: Record<string, OptimizerPriceRecord>;
   unpriced: string[];
+  // WS09 SF-M13: `unpriced` grouped by provider by the box; absent on an older box.
+  unpricedByProvider?: { providerID: string; models: string[] }[];
 };
 
 // Sticky-trims spec §6 C6: body of `opencode:set-model-cost`, $ per million.
@@ -1227,7 +1246,7 @@ export interface Api {
   opencodeInbox(sessionId: string): Promise<OpencodeInboxSnapshot>;
   // K4: cancel one pending message. Only `outcome: "cancelled"` proves it will
   // not be sent; `item` (the pre-cancel copy) comes back only with it.
-  opencodeInboxCancel(input: { sessionId: string; id: string }): Promise<OpencodeInboxCancelResult>;
+  opencodeInboxCancel(input: { sessionId: string; id: string; restore?: boolean }): Promise<OpencodeInboxCancelResult>;
   // N1: switch one pending message between steer ("Now") and queue ("After this
   // turn"). Only `changed` proves the switch; `delivered` = already sent.
   opencodeInboxSetDelivery(input: { sessionId: string; id: string; delivery: OpencodeDelivery }): Promise<OpencodeInboxSetDeliveryResult>;
@@ -1433,6 +1452,30 @@ export interface Api {
   usageStoppedArm(conversation: string): Promise<void>;
   usageStoppedDisarm(conversation: string): Promise<void>;
   usageStoppedStampLastLooked(): Promise<void>;
+  // WS09: box-computed resume screen view + apply (arm/disarm in one call).
+  usageStoppedView(): Promise<UsageResumeView>;
+  usageStoppedApply(input: UsageResumeApplyInput): Promise<UsageResumeApplyReply>;
+  // WS09: box-computed 90% / limit alerts (snapshot + `usage.alert` frames).
+  usageAlerts(): Promise<UsageAlertsList>;
+  usageRemindAtReset(input: { key: string; sessionID: string }): Promise<UsageRemindReply>;
+  onUsageAlert(cb: (payload: UsageAlertFrame) => void): () => void;
+  // WS09: box-owned models table / picker / writes (replaces the client-side
+  // config read-modify-write). `models.updated` is a hint frame — refetch.
+  modelsTable(): Promise<ModelsTableResult>;
+  modelsPicker(): Promise<ModelsPickerResult>;
+  modelsSetDefault(input: { key: string | null }): Promise<ModelsWriteReply>;
+  modelsSetMain(input: { key: string; on: boolean }): Promise<ModelsWriteReply>;
+  modelsSetSub(input: { key: string; on: boolean }): Promise<ModelsWriteReply>;
+  modelsRetrySubSync(): Promise<ModelsWriteReply>;
+  modelsOptIn(input: { keys: string[] }): Promise<ModelsWriteReply>;
+  modelsSetOverride(input: {
+    key: string;
+    fields: { name?: string; description?: string; context?: string };
+  }): Promise<ModelsWriteReply>;
+  modelsUnidentified(): Promise<UnidentifiedList>;
+  modelsDeclare(input: ModelsDeclareInput): Promise<ModelsDeclareReply>;
+  modelsSetPrice(input: ModelsSetPriceInput): Promise<ModelsSetPriceReply>;
+  onModelsUpdated(cb: (payload: Record<string, never>) => void): () => void;
 
   // Session progress (manta-server owned, BET-790). Reads the durable
   // "where are we right now" record for a session, written by the AI's
@@ -1537,6 +1580,7 @@ export interface Api {
   // workspace). Read-only; entries carry an `expiresAt` TTL and are only
   // removed by the box's expiry sweep, never by a download.
   outboxList(sessionId?: string): Promise<OutboxFile[]>;
+  artifactsList(opts: { sessionId: string }): Promise<ArtifactsListResult>;
 
   // Background delegation jobs (manta-server owned). list returns the full
   // job records (filtered by parent session when sessionId is passed; all
@@ -1559,7 +1603,10 @@ export interface Api {
   // the viewed parent session and shows ONE approval card before the job is
   // created. approve carries optional edited tools; decline cancels.
   delegatePendingApprovals(sessionId?: string): Promise<DelegateApproval[]>;
-  delegateApprove(id: string, tools?: DelegateApprovalTool[]): Promise<{ ok: boolean }>;
+  // `error` (with ok:false) = the box refused the rules; the approval stays pending.
+  delegateApprove(id: string, tools?: DelegateApprovalTool[]): Promise<{ ok: boolean; error?: string }>;
+  // WS02: is this session a read-only background job, and the bar's copy (the box decides).
+  delegateJobForSession(sessionId: string): Promise<DelegateJobForSession>;
   delegateDecline(id: string): Promise<{ ok: boolean }>;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
@@ -1627,15 +1674,28 @@ export interface Api {
     upsert?: OpencodeReferenceUpsert[];
     remove?: string[];
   }): Promise<{ ok: boolean; error?: string }>;
-  // BET-698: server-side conversation search. `sessionIds` is the search scope
-  // in priority order (sessionIds[0] = the active conversation). Hit caps stay
-  // server-side defaults. `supported:false` = the box can't search (needs the
-  // Node 24 runtime / opencode.db). `truncated:true` = the search hit its time
-  // budget on a very large history and covers only the newest matches.
+  // BET-698: server-side conversation search. `scope:"all"` makes the box
+  // enumerate every chat window itself (`primarySessionId` = the active
+  // conversation, searched first); it returns the hits grouped + labelled
+  // (`groups`, always present on a current box — its absence means an older
+  // box). `sessionIds` is the legacy explicit scope, kept for older desktops
+  // and the CTO engine; no renderer sends it. `supported:false` = the box can't
+  // search (needs the Node 24 runtime / opencode.db). `degraded:true` = the
+  // search itself failed (show a failure, not "no matches"). `truncated:true` =
+  // the search hit its time budget on a very large history and covers only the
+  // newest matches.
   opencodeSearchMessages(input: {
     query: string;
-    sessionIds: string[];
-  }): Promise<{ supported: boolean; hits: TranscriptHit[]; truncated?: boolean }>;
+    scope?: "all";
+    primarySessionId?: string;
+    sessionIds?: string[];
+  }): Promise<{
+    supported: boolean;
+    hits: TranscriptHit[];
+    groups?: TranscriptHitGroup[];
+    truncated?: boolean;
+    degraded?: boolean;
+  }>;
   // BET-1219: read-only spend/latency ledger over opencode's store.
   // `sinceMs` filters assistant rows to time_created >= sinceMs (default 0 =
   // all). Measurement only — no routing. `supported:false` = the box can't
@@ -1729,7 +1789,7 @@ export interface Api {
   // version the box's release ships (the same string as `/api/version`'s
   // `opencode.version`). Rendered alongside the desktop + server versions in
   // this single round-trip — no new IPC channel.
-  getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string }>;
+  getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's

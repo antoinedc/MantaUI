@@ -122,12 +122,16 @@ final class MantaTransportTests: XCTestCase {
         XCTAssertEqual(result.extra["name"], .string("/review HEAD~1"))
 
         let blocks = ChatTranscriptMapper.blocks(from: messages)
-        XCTAssertEqual(blocks.count, 3, "user + two prose blocks; the result message draws nothing")
+        XCTAssertEqual(blocks.count, 5, "user + two prose blocks, each followed by its turn footer; the result message draws nothing")
         guard case .user(let first, _) = blocks[0],
               case .prose(let second, _) = blocks[1],
-              case .prose(let third, _) = blocks[2] else {
+              case .turnFooter(let firstFooter) = blocks[2],
+              case .prose(let third, _) = blocks[3],
+              case .turnFooter(let secondFooter) = blocks[4] else {
             return XCTFail("unexpected blocks: \(blocks)")
         }
+        XCTAssertEqual(firstFooter.messageID, "msg_2", "the background result starts a new turn, so the first turn's footer stays on msg_2")
+        XCTAssertEqual(secondFooter.messageID, "msg_4")
         XCTAssertEqual(first, "run it in the background")
         XCTAssertEqual(second, "started")
         XCTAssertEqual(third, "the review passed")

@@ -16,7 +16,7 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, type Harness } from "./testHarness";
-import { UnifiedDiff } from "./ToolBodies";
+import { UnifiedDiff, diffLineNumbers } from "./ToolBodies";
 
 const DIFF = [
   "--- a/file.ts",
@@ -74,5 +74,52 @@ describe("UnifiedDiff", () => {
     expect(rows()).toHaveLength(3);
     expect(h.text()).not.toContain("@@");
     expect(h.text()).not.toContain("a/file.ts");
+  });
+});
+
+// WS05: line numbers come from the same parser the box uses (`parsePatch`).
+describe("diffLineNumbers", () => {
+  const TWO_HUNKS = [
+    "--- a/f.ts",
+    "+++ b/f.ts",
+    "@@ -1,2 +1,2 @@",
+    " keep",
+    "-old1",
+    "+new1",
+    "@@ -20,3 +30,4 @@",
+    " ctx",
+    "-gone",
+    "+added",
+    "+++ heading",
+    " tail",
+  ].join("\n");
+
+  it("numbers removals by old line and additions / context by new line across hunks", () => {
+    const nums = diffLineNumbers(TWO_HUNKS);
+    // [---, +++, @@, keep, -old1, +new1, @@, ctx, -gone, +added, +++ heading, tail]
+    expect(nums).toEqual([null, null, null, 1, 2, 2, null, 30, 21, 31, 32, 33]);
+  });
+
+  it("renders the added `+++ heading` line as content with the right number", () => {
+    const hh = mount(<UnifiedDiff text={TWO_HUNKS} />);
+    const text = hh.text();
+    expect(text).toContain("++ heading");
+    const rows = Array.from((hh.container.firstElementChild!.firstElementChild as HTMLElement).children) as HTMLElement[];
+    const heading = rows.find((r) => r.textContent?.includes("++ heading"))!;
+    expect(heading.textContent).toContain("32");
+    expect(heading.className).toContain("bg-[var(--diff-add)]");
+    hh.unmount();
+  });
+
+  it("numbers bare hunks that have no file headers", () => {
+    expect(diffLineNumbers("@@ -5,2 +5,2 @@\n a\n-b\n+c")).toEqual([null, 5, 6, 6]);
+  });
+
+  it("returns no numbers (and never throws) for text the parser rejects or with no hunks", () => {
+    expect(diffLineNumbers("@@ -1,2 +1,3 @@\n only\n+x")).toEqual([null, null, null]);
+    expect(diffLineNumbers("just some --- text\nwith no hunks")).toEqual([null, null]);
+    const orphan = mount(<UnifiedDiff text={"--- a\n+++ b\n+orphan line"} />);
+    expect(orphan.text()).toContain("orphan line");
+    orphan.unmount();
   });
 });

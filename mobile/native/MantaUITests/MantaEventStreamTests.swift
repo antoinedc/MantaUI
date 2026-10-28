@@ -1271,7 +1271,7 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
         fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
 
         StubTranscriptURLProtocol.result = transcriptResult(messageID: "msg_2", text: "the answer")
-        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI(), mutationPolicy: .allowed)
 
         await store.refetch()
 
@@ -1291,7 +1291,7 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
         fake.inject(#"{"kind":"stream","sub":"flush","sessionId":"ses_1","payload":{"messageID":"msg_9","partID":"part_1","field":"text","text":"still writing"}}"#)
 
         StubTranscriptURLProtocol.result = transcriptResult(messageID: "msg_2", text: "an older turn")
-        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI(), mutationPolicy: .allowed)
 
         await store.refetch()
 
@@ -1315,7 +1315,7 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
         fake.inject(#"{"kind":"stream","sub":"turnComplete","sessionId":"ses_1","payload":{"complete":true,"running":false}}"#)
 
         StubTranscriptURLProtocol.result = "not json at all"
-        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI())
+        let store = ChatSessionStore(sessionId: "ses_1", eventStore: eventStore, api: makeAPI(), mutationPolicy: .allowed)
 
         await store.refetch()
 

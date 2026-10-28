@@ -10,11 +10,13 @@
 // (bytes via /api/peek, non-destructive); jump scrolls the transcript to the
 // owning message via the `manta-scroll-to-message` window event.
 //
-// Data: the transcript is lifted into the store by ChatPanel (setChatMessages)
-// so this panel can derive artifacts without a second opencodeMessages fetch;
-// served pages come from servePageList on open + a 30s poll while open.
+// Data: the list comes from the box (`artifacts:list`, src/server/artifacts.mjs —
+// the ONE implementation of artifact derivation). It is fetched on open, every
+// 30s while open, and 400ms after the lifted transcript's last message changes
+// (ChatPanel lifts it into the store via setChatMessages) so a new attachment
+// shows up without waiting for the poll. The panel renders what the box sends.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { MOTION_BASE, MOTION_EASE } from "./chatMotion";
 import {
@@ -25,31 +27,36 @@ import {
   Download,
   ExternalLink,
   FileText,
-  Focus,
   Link2,
   Paperclip,
   Search,
 } from "lucide-react";
-import type { OutboxFile, ServedPageMeta } from "../shared/types";
+import type {
+  ArtifactCounts,
+  ArtifactExpiry,
+  ArtifactsListResult,
+} from "../shared/artifactsTypes";
 import { useStore } from "./store";
 import {
-  countByKind,
-  deriveArtifacts,
   groupByDay,
-  pageState,
   type Artifact,
   type ArtifactKind,
   type ArtifactOrigin,
   type PlanStatus,
 } from "./artifacts";
-import { decodeDataUri, expiryLabel, formatBytes, resolvePreviewType } from "./chatUtils";
+import {
+  decodeDataUri,
+  expiryLabel,
+  formatBytes,
+  isUnknownChannelError,
+  resolvePreviewType,
+} from "./chatUtils";
 import { saveToDownloads } from "./downloadFeedback";
 import { IconButton } from "./IconButton";
 import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
 import { getMantaPreload } from "./preloadAccess";
-import { planPageUrl } from "../shared/planMode.mjs";
 
 // Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
 // box filesystem path: a self-contained image part carries a `data:` URI (its
@@ -148,6 +155,7 @@ const MIN_WIDTH = 280;
 const MAX_WIDTH = 520;
 const DEFAULT_WIDTH = 340;
 const POLL_MS = 30_000;
+const TRANSCRIPT_REFETCH_MS = 400;
 
 // BET-792: the artifacts panel hosts the review pane as a MODE — a two-value
 // segmented switch (`Artifacts | Review`) above the kind tabs. Review is not
@@ -200,7 +208,7 @@ function emptyBig(kind: ArtifactKind): string {
   return "No files yet";
 }
 
-function emptySub(kind: ArtifactKind, counts: { link: number; image: number; file: number; plan: number }): string {
+function emptySub(kind: ArtifactKind, counts: ArtifactCounts): string {
   if (kind === "link") return `${counts.image} images, ${counts.file} files, ${counts.plan} plans`;
   if (kind === "image") return `${counts.link} links, ${counts.file} files, ${counts.plan} plans`;
   if (kind === "plan") return `${counts.link} links, ${counts.image} images, ${counts.file} files`;
@@ -271,13 +279,41 @@ function RowActions({
 
 // ===== Tab 1 — Links =======================================================
 
-function ExpiryPill({ state, label }: { state: "live" | "soon" | "expired"; label: string }) {
+// The box's own failure sentence already says what went wrong; any other message
+// (a network error, an HTTP status) gets a lead-in.
+const BOX_READ_FAILED = "Couldn't read this conversation's artifacts";
+function loadErrorText(message: string): string {
+  return message === BOX_READ_FAILED ? message : `Couldn't load artifacts. ${message}`;
+}
+
+// A muted footnote under the list when the box left something out.
+function degradedFootnote(degraded: readonly string[]): string | null {
+  const parts: string[] = [];
+  if (degraded.includes("public-address")) {
+    parts.push("Published pages are hidden — this box has no public address.");
+  }
+  if (degraded.some((d) => d !== "public-address")) {
+    parts.push("Some items couldn't be loaded.");
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+// The box computed `expiry.state` (live / soon / expired / never); only the
+// relative label ("5h") is formatted here, against the device clock.
+function expiryText(expiry: ArtifactExpiry, now: number): string {
+  if (expiry.state === "never") return "no expiry";
+  if (expiry.state === "expired") return "expired";
+  return expiryLabel(expiry.expiresAt, now) || "expired";
+}
+
+function ExpiryPill({ expiry, now }: { expiry: ArtifactExpiry; now: number }) {
   const cls =
-    state === "live"
+    expiry.state === "live" || expiry.state === "never"
       ? "bg-ok-bg text-ok"
-      : state === "soon"
+      : expiry.state === "soon"
         ? "bg-warn-bg text-warn"
         : "bg-danger-bg text-danger";
+  const label = expiryText(expiry, now);
   return (
     <span
       className={`ml-1 inline-flex shrink-0 items-center gap-1 rounded-full px-[6px] py-[2px] text-micro font-semibold align-middle ${cls}`}
@@ -298,9 +334,8 @@ function LinkCard({
   onOpen: (el: HTMLElement) => void;
   onJump: () => void;
 }) {
-  const state = artifact.expiresAt != null ? pageState(artifact.expiresAt, now) : null;
-  const expired = state === "expired";
-  const isHosted = artifact.isHosted ?? false;
+  const expired = artifact.expiry?.state === "expired";
+  const isHosted = artifact.isHosted;
   const hasContext = artifact.context != null;
 
   return (
@@ -332,18 +367,7 @@ function LinkCard({
             {/* Expiry chip — present on every hosted page (serve_page), incl. a
                 no-expiry one, so it is never hidden by a long title; the label
                 truncates above. External/pasted links never get a chip. */}
-            {isHosted && (
-              <ExpiryPill
-                state={state ?? "live"}
-                label={
-                  state === "expired"
-                    ? "expired"
-                    : artifact.expiresAt != null
-                      ? expiryLabel(artifact.expiresAt, now)
-                      : "no expiry"
-                }
-              />
-            )}
+            {isHosted && artifact.expiry && <ExpiryPill expiry={artifact.expiry} now={now} />}
           </div>
           <div className="mt-1 truncate font-mono text-micro text-text-quiet">
             {artifact.kind === "link" ? artifact.href.replace(/^https?:\/\//, "") : artifact.href}
@@ -439,10 +463,9 @@ function FileRow({
   onJump: () => void;
 }) {
   const size = artifact.size;
-  // Outbox files carry a TTL and are swept (not deleted) on download, so they
-  // render a live/soon/expired pill just like hosted pages.
-  const expiry =
-    artifact.expiresAt != null ? pageState(artifact.expiresAt, now) : null;
+  // Outbox files carry a TTL and are swept (not deleted) on download, so the
+  // box sends them an expiry just like hosted pages.
+  const expiry = artifact.expiry;
   return (
     <div className="group flex items-center gap-[9px] rounded-sm px-2 py-[7px] hover:bg-fill-hover">
       <button
@@ -459,12 +482,7 @@ function FileRow({
             files show their TTL next to the name, never wrapped. */}
         <div className="flex min-w-0 items-center gap-1">
           <span className="min-w-0 flex-1 truncate font-mono text-meta text-text">{artifact.label}</span>
-          {expiry && artifact.expiresAt != null && (
-            <ExpiryPill
-              state={expiry}
-              label={expiry === "expired" ? "expired" : expiryLabel(artifact.expiresAt, now)}
-            />
-          )}
+          {expiry && <ExpiryPill expiry={expiry} now={now} />}
         </div>
         <div className="mt-px flex items-center gap-[5px] text-micro text-text-quiet">
           <DirectionGlyph origin={artifact.origin} />
@@ -508,27 +526,23 @@ function PlanStatusPill({ status }: { status: PlanStatus }) {
 }
 
 // A plan is BOTH a file and a link, so it is not filed under either — it gets
-// its own row with its own actions: Open page · Open file · Delegate (focus
-// the job building it). `onOpenPage` publishes-then-opens the plan's companion
-// page (always available — the server publishes on demand). `onDelegate` is
-// null when the linked job is unavailable — that affordance is then omitted
-// rather than rendered as a dead control.
+// its own row with its own actions: Open published page · Open plan file
+// (preview; hidden when the box doesn't know the session folder). The box sends
+// the status, step count, page URL and file availability in `artifact.plan`.
+// "Open implementing session" has no plan→job link to act on, so it is not
+// rendered rather than shown dead.
 function PlanRow({
   artifact,
-  onOpen,
   onOpenPage,
-  onDelegate,
+  onOpenFile,
 }: {
   artifact: Artifact;
-  onOpen: (el: HTMLElement) => void;
-  onOpenPage: (() => void) | null;
-  onDelegate: (() => void) | null;
+  onOpenPage: () => void;
+  onOpenFile: ((el: HTMLElement) => void) | null;
 }) {
   const rowRef = useRef<HTMLDivElement | null>(null);
-  const steps = artifact.planStepCount ?? null;
-  const openFile = () => {
-    if (rowRef.current) onOpen(rowRef.current);
-  };
+  const plan = artifact.plan;
+  const steps = plan?.steps ?? 0;
   return (
     <div
       ref={rowRef}
@@ -536,47 +550,41 @@ function PlanRow({
     >
       <button
         type="button"
-        onClick={openFile}
+        onClick={onOpenPage}
         className="grid h-[30px] w-[30px] flex-none place-items-center rounded-sm border border-border-subtle bg-inset"
-        aria-label="Open plan file"
+        aria-label="Open published page"
       >
         <ClipboardList className="h-3.5 w-3.5 text-accent" style={{ strokeWidth: 1.7 }} />
       </button>
-      <button type="button" onClick={openFile} className="min-w-0 flex-1 text-left">
+      <button type="button" onClick={onOpenPage} className="min-w-0 flex-1 text-left">
         {/* Title + status pill on ONE line: the label truncates; the pill is a
             shrink-0 sibling so status never wraps below the name. */}
         <div className="flex min-w-0 items-center gap-1">
           <span className="min-w-0 flex-1 truncate font-mono text-meta text-text">{artifact.label}</span>
-          <PlanStatusPill status={artifact.planStatus ?? "draft"} />
+          <PlanStatusPill status={plan?.status ?? "draft"} />
         </div>
         <div className="mt-px flex items-center gap-[5px] text-micro text-text-quiet">
           <DirectionGlyph origin={artifact.origin} />
           <span>
-            {steps != null && steps > 0 ? `${steps} ${steps === 1 ? "step" : "steps"}` : "plan"}
+            {steps > 0 ? `${steps} ${steps === 1 ? "step" : "steps"}` : "plan"}
           </span>
         </div>
       </button>
       <div className="flex flex-none gap-px opacity-0 transition-opacity group-hover:opacity-100">
-        {onOpenPage && (
-          <ActionButton
-            icon={<ExternalLink className="h-3.5 w-3.5" />}
-            label="Open published page"
-            title="Open published page"
-            onClick={onOpenPage}
-          />
-        )}
         <ActionButton
-          icon={<FileText className="h-3.5 w-3.5" />}
-          label="Open plan file"
-          title="Open plan file"
-          onClick={openFile}
+          icon={<ExternalLink className="h-3.5 w-3.5" />}
+          label="Open published page"
+          title="Open published page"
+          onClick={onOpenPage}
         />
-        {onDelegate && (
+        {onOpenFile && (
           <ActionButton
-            icon={<Focus className="h-3.5 w-3.5" />}
-            label="Open implementing session"
-            title="Open the job building this plan"
-            onClick={onDelegate}
+            icon={<FileText className="h-3.5 w-3.5" />}
+            label="Open plan file"
+            title="Open plan file"
+            onClick={() => {
+              if (rowRef.current) onOpenFile(rowRef.current);
+            }}
           />
         )}
       </div>
@@ -593,11 +601,21 @@ export function ArtifactsPanel({
   cwd: string | null;
   open: boolean;
 }) {
-  // The transcript lifted by ChatPanel (reuse — never a second fetch).
-  const messages = useStore((s) => (sessionId ? s.chatMessages[sessionId] ?? [] : []));
+  // The transcript lifted by ChatPanel. The panel never derives from it — it
+  // only watches its tail (last message id + part count) to know when the box's
+  // list may have changed.
+  const transcriptSig = useStore((s) => {
+    const msgs = sessionId ? s.chatMessages[sessionId] : undefined;
+    const last = msgs && msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    return last ? `${last.info.id}:${last.parts.length}` : "";
+  });
 
-  const [pages, setPages] = useState<ServedPageMeta[]>([]);
-  const [outbox, setOutbox] = useState<OutboxFile[]>([]);
+  // `artifacts:list` result for the current session. `unsupported` = the box is
+  // older than this panel ("Update your box to use this"); `error` = the last
+  // fetch failed (shown as a banner with Retry; a previous result stays visible).
+  const [result, setResult] = useState<ArtifactsListResult | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
   const [width, setWidth] = useState(loadWidth);
   const widthRef = useRef(width);
   widthRef.current = width;
@@ -631,33 +649,60 @@ export function ArtifactsPanel({
   const previewSourceRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  // Page registry + outbox mailbox: fetch both on open + 30s poll while open
-  // only. Timer cleared on close and on session change (mirrors
-  // useSessionResources).
+  // Fetch the box's artifact list on open + every 30s while open, and 400ms
+  // after the transcript tail changes. Latest-request-wins per session: a slow
+  // response for a previous session (or an older request) is dropped.
+  const requestSeq = useRef(0);
+  const transcriptSigRef = useRef(transcriptSig);
+  transcriptSigRef.current = transcriptSig;
+  const sigAtFetchRef = useRef<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!sessionId) return;
+    const seq = ++requestSeq.current;
+    sigAtFetchRef.current = transcriptSigRef.current;
+    try {
+      const next = await window.api.artifactsList({ sessionId });
+      if (seq !== requestSeq.current) return;
+      setResult(next);
+      setLoadError(null);
+      setUnsupported(false);
+    } catch (e) {
+      if (seq !== requestSeq.current) return;
+      const message = e instanceof Error ? e.message : String(e);
+      if (isUnknownChannelError(message)) {
+        setUnsupported(true);
+        setLoadError(null);
+      } else {
+        setLoadError(message || "Couldn't load artifacts.");
+      }
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     if (!open || !sessionId) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const list = await window.api.servePageList();
-        if (!cancelled) setPages(list ?? []);
-      } catch {
-        /* best-effort page refresh */
-      }
-      try {
-        const entries = await window.api.outboxList(sessionId ?? "");
-        if (!cancelled) setOutbox(entries ?? []);
-      } catch {
-        /* best-effort outbox refresh */
-      }
-    };
     void refresh();
     const poll = setInterval(() => void refresh(), POLL_MS);
     return () => {
-      cancelled = true;
       clearInterval(poll);
+      requestSeq.current++;
     };
-  }, [open, sessionId]);
+  }, [open, sessionId, refresh]);
+
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    if (transcriptSig === sigAtFetchRef.current) return;
+    const t = setTimeout(() => void refresh(), TRANSCRIPT_REFETCH_MS);
+    return () => clearTimeout(t);
+  }, [open, sessionId, transcriptSig, refresh]);
+
+  // A different session starts from a clean slate (its own list, no stale error).
+  useEffect(() => {
+    setResult(null);
+    setLoadError(null);
+    setUnsupported(false);
+    sigAtFetchRef.current = null;
+  }, [sessionId]);
 
   // Reset the tab to the always-Links default + dismiss search on session
   // change so the panel follows the active chat pane cleanly. Also close any
@@ -679,12 +724,16 @@ export function ArtifactsPanel({
     return () => window.removeEventListener("manta-open-review", handler);
   }, []);
 
-  const now = useMemo(() => Date.now(), []);
-  const artifacts = useMemo(
-    () => deriveArtifacts(messages, pages, sessionId ?? "", outbox, cwd),
-    [messages, pages, outbox, sessionId, cwd],
+  const hasResult = !!result && result.sessionId === sessionId;
+  const now = useMemo(() => Date.now(), [result]);
+  const artifacts = useMemo<Artifact[]>(
+    () => (result && result.sessionId === sessionId ? result.items : []),
+    [result, sessionId],
   );
-  const counts = useMemo(() => countByKind(artifacts), [artifacts]);
+  const counts = useMemo<ArtifactCounts>(
+    () => (result && result.sessionId === sessionId ? result.counts : { link: 0, image: 0, file: 0, plan: 0 }),
+    [result, sessionId],
+  );
   const tabArtifacts = useMemo(
     () => artifacts.filter((a) => a.kind === tab),
     [artifacts, tab],
@@ -705,9 +754,10 @@ export function ArtifactsPanel({
   }, [tabArtifacts, query]);
   const groups = useMemo(() => groupByDay(filtered, now), [filtered, now]);
 
-  // Tab badge counts. Unfiltered → the real per-kind totals. Searching → the
-  // live match count for links and files, and a flat 0 for images (the image
-  // tab is excluded from search, so its badge reads 0 while a query is active).
+  // Tab badge counts. Unfiltered → the box's per-kind totals. Searching → the
+  // live match count for links, files and plans, and a flat 0 for images (the
+  // image tab is excluded from search, so its badge reads 0 while a query is
+  // active). Search is a per-keystroke client filter over the box's list.
   const displayCounts = useMemo(() => {
     if (!query) return counts;
     const q = query.toLowerCase();
@@ -732,24 +782,28 @@ export function ArtifactsPanel({
     previewSourceRef.current = null;
   };
 
-  // Open a plan's companion page. The single-HTML flow publishes it at
-  // plan_render time under the DETERMINISTIC subdomain
-  // (`<base>/pages/plan-<shortSessionId>`), so we open the artifact's `pageUrl`
-  // when present, else the deterministic URL — never publish-on-demand.
+  // Open a plan's companion page. The box resolved the URL (its published page,
+  // or the deterministic one under its own public address); when it could not,
+  // say so right here instead of doing nothing.
   const openPlanPage = (a: Artifact) => {
-    if (!sessionId) return;
     setPlanError(null);
-    const url = a.pageUrl || planPageUrl(sessionId, serverBase());
-    if (url) {
-      void window.api.openExternal(url).catch((e: unknown) => {
-        setPlanError(String((e as Error)?.message ?? e));
-      });
+    const url = a.plan?.pageUrl;
+    if (!url) {
+      setPlanError(
+        a.plan?.pageUrlReason === "other-session"
+          ? "Couldn't open the plan page. Another conversation's page uses this address."
+          : "Couldn't open the plan page.",
+      );
+      return;
     }
+    void window.api.openExternal(url).catch((e: unknown) => {
+      setPlanError(String((e as Error)?.message ?? e));
+    });
   };
 
   // Row-body "open". Previewables (image/PDF/text) open the BET-661 overlay;
   // links open externally (no in-app web renderer); everything else downloads.
-  // A plan's row "open" publishes then opens its companion page (BET-974).
+  // A plan's row "open" opens its companion page.
   const openRow = (a: Artifact, el: HTMLElement) => {
     if (a.kind === "link") {
       void window.api.openExternal(a.href);
@@ -759,6 +813,13 @@ export function ArtifactsPanel({
       openPlanPage(a);
       return;
     }
+    const pi = previewable.findIndex((p) => p.id === a.id);
+    if (pi >= 0) openPreview(pi, el);
+    else void downloadArtifact(a);
+  };
+
+  // "Open plan file": the markdown preview overlay (bytes via /api/peek).
+  const openPlanFile = (a: Artifact, el: HTMLElement) => {
     const pi = previewable.findIndex((p) => p.id === a.id);
     if (pi >= 0) openPreview(pi, el);
     else void downloadArtifact(a);
@@ -959,9 +1020,30 @@ export function ArtifactsPanel({
               </button>
             </div>
           )}
-          {groups.length === 0 ? (
+          {unsupported ? (
+            <div className="manta-artifacts-unsupported px-4 py-8 text-center">
+              <div className="text-label text-text-muted">Update your box to use this.</div>
+              <div className="mt-1 text-micro text-text-faint">Artifacts need a newer box version.</div>
+            </div>
+          ) : (
+          <>
+          {loadError && (
+            <div className="manta-artifacts-load-error shrink-0 mx-3 mt-2 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
+              <span className="min-w-0 flex-1">{loadErrorText(loadError)}</span>
+              <button
+                type="button"
+                onClick={() => void refresh()}
+                className="text-danger underline px-1 inline-flex items-center"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {groups.length === 0 && !hasResult && loadError ? null : groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
-              {query ? (
+              {!(result && result.sessionId === sessionId) && !loadError ? (
+                <div className="manta-artifacts-loading text-label text-text-faint">Loading artifacts…</div>
+              ) : query ? (
                 <div className="text-label text-text-muted">No matches for “{query}”</div>
               ) : (
                 <>
@@ -994,11 +1076,9 @@ export function ArtifactsPanel({
                       <PlanRow
                         key={a.id}
                         artifact={a}
-                        onOpen={(el) => openRow(a, el)}
                         onOpenPage={() => openPlanPage(a)}
-                        // No plan→job linkage today — the affordance is omitted
-                        // rather than rendered dead (per the spec).
-                        onDelegate={null}
+                        // Hidden when the box doesn't know the session folder.
+                        onOpenFile={a.plan?.fileAvailable ? (el) => openPlanFile(a, el) : null}
                       />
                     ))}
                   </div>
@@ -1024,6 +1104,13 @@ export function ArtifactsPanel({
                 )}
               </div>
             ))
+          )}
+          {result && result.sessionId === sessionId && degradedFootnote(result.degraded) && (
+            <div className="manta-artifacts-degraded px-4 pb-3 pt-1 text-micro text-text-faint">
+              {degradedFootnote(result.degraded)}
+            </div>
+          )}
+          </>
           )}
         </div>
         )}

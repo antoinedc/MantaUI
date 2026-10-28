@@ -31,6 +31,9 @@ final class TerminalSocket {
     let serverURL: URL
     let sessionKey: String
     private let cwd: String?
+    /// The AI CLI to launch instead of a shell. Kept for the socket's whole life
+    /// and sent on EVERY connect, so a reconnect relaunches the same CLI.
+    private let launcher: SessionPtyLauncher?
     private let token: String?
     private let urlSession: URLSession
 
@@ -52,6 +55,7 @@ final class TerminalSocket {
          sessionKey: String,
          token: String?,
          cwd: String? = nil,
+         launcher: SessionPtyLauncher? = nil,
          cols: Int = 80,
          rows: Int = 24,
          urlSession: URLSession = .shared,
@@ -61,6 +65,7 @@ final class TerminalSocket {
         self.sessionKey = sessionKey
         self.token = token
         self.cwd = cwd
+        self.launcher = launcher
         self.cols = clamp(cols, lo: 20, hi: 500)
         self.rows = clamp(rows, lo: 5, hi: 200)
         self.urlSession = urlSession
@@ -119,14 +124,29 @@ final class TerminalSocket {
 
     // MARK: - Internals
 
-    private func open() {
-        guard let url = TerminalURLBuilder.ptyURL(serverURL: serverURL, sessionKey: sessionKey, cols: cols, rows: rows, cwd: cwd) else {
-            fail("could not build pty URL")
-            return
-        }
+    /// The upgrade request for one connection. The single place the `/pty` URL is
+    /// built — the first connect and every reconnect both come through here, so
+    /// the launcher is never dropped. The bearer stays in a header, never in the
+    /// URL.
+    nonisolated static func makeRequest(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String?,
+                            launcher: SessionPtyLauncher?, token: String?) -> URLRequest? {
+        guard let url = TerminalURLBuilder.ptyURL(
+            serverURL: serverURL, sessionKey: sessionKey, cols: cols, rows: rows, cwd: cwd, launcher: launcher
+        ) else { return nil }
         var request = URLRequest(url: url)
         if let token, !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    private func open() {
+        guard let request = Self.makeRequest(
+            serverURL: serverURL, sessionKey: sessionKey, cols: cols, rows: rows,
+            cwd: cwd, launcher: launcher, token: token
+        ) else {
+            fail("could not build pty URL")
+            return
         }
         state = .connecting
         onState(.connecting)

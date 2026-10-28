@@ -58,8 +58,35 @@ final class AccountsStore: ObservableObject {
 
     let sessionId: String?
 
-    private let api: MantaAPIClient
+    /// The client the screen's flows (sign-in, connect) call through, so they
+    /// talk to the same box this store reads.
+    let api: MantaAPIClient
     private let eventStore: MantaEventStore?
+
+    /// Output and exit of the ptys the box spawned for a Claude sign-in or CLI
+    /// install (`kind:"pty"` bus frames, published to every `/events`
+    /// subscriber). A sign-in controller subscribes BEFORE it spawns and filters
+    /// on its own `sessionKey`.
+    ///
+    /// The raw-frame handler list has no unsubscribe, and every opened chat makes
+    /// an `AccountsStore`, so the handler is installed on FIRST USE (a sign-in
+    /// subscribing before it spawns), never for a store that only reads seats.
+    var ptyEvents: PassthroughSubject<PtyEvent, Never> {
+        if !ptyHandlerInstalled, let eventStore {
+            ptyHandlerInstalled = true
+            eventStore.addRawFrameHandler { [weak self] frame in
+                guard let event = PtyEvent.from(frame) else { return }
+                self?.ptyEventSubject.send(event)
+            }
+        }
+        return ptyEventSubject
+    }
+    private let ptyEventSubject = PassthroughSubject<PtyEvent, Never>()
+    private var ptyHandlerInstalled = false
+
+    /// False when the store was built without an event stream: the Claude
+    /// sign-in cannot show its link then, and says so instead of spinning.
+    var hasEventStream: Bool { eventStore != nil }
     private let pollInterval: TimeInterval
     private var pollTask: Task<Void, Never>?
     private var subscriptions = Set<AnyCancellable>()
@@ -171,6 +198,25 @@ final class AccountsStore: ObservableObject {
             await fetchOnce()
         } while refreshQueued
         refreshing = false
+    }
+
+    /// Read the list with a call of its OWN, started now: not coalesced into
+    /// `refresh()` (which returns early while a fetch is in flight and swallows
+    /// errors). Used where a decision must not rest on stale or never-loaded
+    /// data — whether Connect opens "Add account", and showing a just-added seat
+    /// before its sheet closes. On success the list is applied and returned; on
+    /// failure it THROWS and the store's data is untouched.
+    func freshProviders() async throws -> [AccountsProvider] {
+        let list = try await api.accountsList()
+        if list != providers { providers = list }
+        lastFetch = Date()
+        phase = .loaded
+        refreshError = nil
+        // A coalesced fetch already in flight may carry an older reading; queue
+        // one more so it cannot be the last word.
+        if refreshing { refreshQueued = true }
+        refreshMoveNotice()
+        return list
     }
 
     private func fetchOnce() async {
@@ -336,6 +382,12 @@ final class AccountsStore: ObservableObject {
     }
 
     // MARK: - Feedback
+
+    /// Say what a flow outside the store (a sign-in sheet, the connect flow, an
+    /// endpoint write) came to, in the screen's one banner.
+    func announce(_ text: String, isError: Bool = false) {
+        report(text, isError: isError)
+    }
 
     private func report(_ text: String, isError: Bool) {
         feedbackSeq += 1

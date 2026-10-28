@@ -34,7 +34,6 @@ import {
   selectUsageSnapshot,
   usageDialState,
   usageStale,
-  usageTone,
   type UsageDialTone,
 } from "./chatUtils";
 import { useStore } from "./store";
@@ -79,7 +78,11 @@ export function providerLabel(provider: string): string {
 // two different colours for the same number. (An earlier spec kept the ring
 // off --ok below 70 so it read as "pay attention only"; that produced a grey
 // ring above a green bar.)
-function toneRingColor(tone: UsageDialTone): string {
+// The tone itself is the BOX's (`window.tone`, WS09 SF-M18). A window with no
+// tone (an older box) renders in the neutral track colour — no colour is
+// invented here.
+function toneRingColor(tone: UsageDialTone | null | undefined): string {
+  if (tone == null) return cssVar("--border-strong") || cssVar("--tx4");
   if (tone === "over" || tone === "danger") return cssVar("--danger");
   if (tone === "warn") return cssVar("--warn");
   return cssVar("--ok");
@@ -401,6 +404,9 @@ function UsagePopoverBody({
           <UsageWindowRow key={w.kind} usageWindow={w} nowMs={nowMs} />
         ))}
       </div>
+      {snapshot.windows.some((w) => w.tone == null) && (
+        <div className="mt-2 w-0 min-w-full break-words text-meta text-text-faint">Update your box to see usage colours.</div>
+      )}
 
       {snapshot.extras && snapshot.extras.length > 0 && (
         <div className="mt-3 pt-3 border-t border-border-subtle flex flex-col gap-1">
@@ -598,7 +604,7 @@ export function SeatMiniBars({ seat, nowMs: _nowMs }: { seat: SeatView; nowMs: n
             <span className="flex-1 h-[3px] rounded-xs bg-fill-active overflow-hidden">
               <span
                 className="block h-full"
-                style={{ width: `${pct}%`, backgroundColor: toneRingColor(usageTone(pct)) }}
+                style={{ width: `${pct}%`, backgroundColor: toneRingColor(awaiting ? "under" : w.tone) }}
               />
             </span>
             <span className="w-7 text-right font-mono text-label tabular-nums text-text-muted">
@@ -624,7 +630,7 @@ export function UsageWindowRow({ usageWindow: w, nowMs }: { usageWindow: UsageWi
   // greyed with no figure and no fill, so it can't be mistaken for real usage.
   const inactive = w.active === false;
   const pctClamped = awaitingReset || inactive ? 0 : Math.max(0, Math.min(100, w.pct));
-  const fill = toneRingColor(usageTone(pctClamped));
+  const fill = toneRingColor(awaitingReset || inactive ? "under" : w.tone);
   const value = inactive
     ? "not active"
     : awaitingReset

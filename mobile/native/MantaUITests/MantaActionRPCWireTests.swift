@@ -137,6 +137,29 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertNotNil(payload?["chatMode"])
     }
 
+    // MARK: - background-job approval keeps each rule's action (WS02 review)
+
+    /// The box reads a rule with no `action:"deny"` as an ALLOW, so an edited list that
+    /// dropped `action` would turn a deny rule into an allow on approval from the phone.
+    func testDelegateApproveSendsEachRulesAction() async throws {
+        CapturingURLProtocol.result = #"{"result": {"ok": true}}"#
+        let client = makeClient()
+        _ = try await client.delegateApprove(id: "a1", tools: [
+            ChatCardApprovalTool(permission: "bash", pattern: "rm *", action: "deny"),
+            ChatCardApprovalTool(permission: "bash", pattern: "ls"),
+        ])
+        assertSingleWrapped()
+        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/delegate:approve")
+        let payload = CapturingURLProtocol.lastPayload()
+        XCTAssertEqual(payload?["id"] as? String, "a1")
+        let tools = payload?["tools"] as? [[String: Any]]
+        XCTAssertEqual(tools?.count, 2)
+        XCTAssertEqual(tools?[0]["permission"] as? String, "bash")
+        XCTAssertEqual(tools?[0]["pattern"] as? String, "rm *")
+        XCTAssertEqual(tools?[0]["action"] as? String, "deny")
+        XCTAssertNil(tools?[1]["action"], "a rule without an action stays without one")
+    }
+
     // MARK: - transcript window (mobile session-load perf)
 
     /// `opencode:messages` is dispatched as `fn(sessionId, opts)`, so the

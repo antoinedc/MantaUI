@@ -96,23 +96,25 @@ enum MantaSettingsLogic {
         }
     }
 
-    /// `entry.id -> default` for every entry in a section (config-driven AND
-    /// device-local). Used by per-section reset.
+    /// `entry.id -> default` for every VALUE entry in a section (config-driven
+    /// AND device-local). Used by per-section reset. `custom` entries are
+    /// screens/cards that hold no value, so there is nothing to reset — writing
+    /// their `.null` default would plant a junk key in UserDefaults.
     static func sectionResetValues(_ sectionID: String) -> [String: SettingValue] {
         var out: [String: SettingValue] = [:]
-        for entry in SettingsSchema.entries(in: sectionID) {
+        for entry in SettingsSchema.entries(in: sectionID) where entry.control != .custom {
             out[entry.id] = defaultValue(of: entry)
         }
         return out
     }
 
-    /// `entry.id -> default` for the whole schema. Drives reset-all (both
-    /// config-driven and device-local); mirror of the shared
+    /// `entry.id -> default` for every value entry in the schema. Drives
+    /// reset-all (both config-driven and device-local); mirror of the shared
     /// `resetAllPayload` but keyed by entry id so the surface can undo
-    /// device-local settings too.
+    /// device-local settings too. Skips `custom` entries (see above).
     static func resetAllValues() -> [String: SettingValue] {
         var out: [String: SettingValue] = [:]
-        for entry in SettingsSchema.entries {
+        for entry in SettingsSchema.entries where entry.control != .custom {
             out[entry.id] = defaultValue(of: entry)
         }
         return out

@@ -371,11 +371,15 @@ struct BackgroundJobsSheet: View {
         return name.isEmpty ? "Background job" : name
     }
 
-    /// "running · ⎇ feat/x · 4m" — status, branch when present, then timing.
+    /// "running · ⎇ feat/x · 4m" — the box's status word, branch when present, then
+    /// timing; a finished job adds the box's summary ("2 files changed"). Both
+    /// words are the box's (`delegate:list` `statusLabel` / `summary`); an older
+    /// box sends neither, so the raw status shows as it is.
     private func detailLine(_ job: DelegateJob) -> String {
-        var parts = [BackgroundJobFormat.statusLabel(job)]
+        var parts = [job.statusLabel ?? job.status]
         if let branch = job.branch, !branch.isEmpty { parts.append("⎇ \(branch)") }
         if let timing = BackgroundJobFormat.timing(job, now: now) { parts.append(timing) }
+        if !job.isActive, let summary = job.summary, !summary.isEmpty { parts.append(summary) }
         return parts.joined(separator: " · ")
     }
 

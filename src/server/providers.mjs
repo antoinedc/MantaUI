@@ -758,27 +758,45 @@ function isCostRate(v) {
  * file/reload hooks are injectable (`deps`) for unit tests.
  */
 export async function setModelCost(input, deps = {}) {
+  const res = await setModelCostDetailed(input, deps);
+  return res.ok ? { ok: true } : { ok: false, error: res.error ?? "opencode config update failed" };
+}
+
+/**
+ * `setModelCost` with the writer's full outcome: `{ ok, changed, reloaded,
+ * error? }`. `ok:false, changed:true` means the price is on disk but opencode
+ * refused the live reload — a caller must not say "nothing was changed" then.
+ * Validation failures are `{ ok:false, changed:false, error }`.
+ */
+export async function setModelCostDetailed(input, deps = {}) {
   const { providerID, modelID, cost } = input ?? {};
   for (const [label, id] of [["providerID", providerID], ["modelID", modelID]]) {
     if (typeof id !== "string" || !COST_ID_RE.test(id) || COST_ID_FORBIDDEN.has(id)) {
-      return { ok: false, error: `invalid ${label}` };
+      return { ok: false, changed: false, reloaded: false, error: `invalid ${label}` };
     }
   }
   if (cost === null || typeof cost !== "object" || Array.isArray(cost)) {
-    return { ok: false, error: "cost must be an object" };
+    return { ok: false, changed: false, reloaded: false, error: "cost must be an object" };
   }
   const out = {};
   for (const k of ["input", "output"]) {
-    if (!isCostRate(cost[k])) return { ok: false, error: `cost.${k} is required (a number ≥ 0, $/Mtok)` };
+    if (!isCostRate(cost[k])) return { ok: false, changed: false, reloaded: false, error: `cost.${k} is required (a number ≥ 0, $/Mtok)` };
     out[k] = cost[k];
   }
   for (const k of ["cache_read", "cache_write"]) {
     if (cost[k] === undefined || cost[k] === null) continue;
-    if (!isCostRate(cost[k])) return { ok: false, error: `cost.${k} must be a number ≥ 0 ($/Mtok)` };
+    if (!isCostRate(cost[k])) return { ok: false, changed: false, reloaded: false, error: `cost.${k} must be a number ≥ 0 ($/Mtok)` };
     out[k] = cost[k];
   }
   const res = await editConfig([{ path: ["provider", providerID, "models", modelID, "cost"], value: out }], deps);
-  return res.ok ? { ok: true } : { ok: false, error: res.error ?? "opencode config update failed" };
+  return res.ok
+    ? { ok: true, changed: res.changed === true, reloaded: res.reloaded === true }
+    : {
+        ok: false,
+        changed: res.changed === true,
+        reloaded: false,
+        error: res.error ?? "opencode config update failed",
+      };
 }
 
 /**
@@ -800,7 +818,22 @@ export async function setModelCost(input, deps = {}) {
  * as getSubagents/getProviderEndpoints. On a write failure, degrades to the
  * pre-sync existingAgents list (logged) so the card still renders something.
  */
-export async function syncSubagents(
+export async function syncSubagents(input, readConfig = readRemoteConfig, applySubagents = setSubagents) {
+  return (await syncSubagentsDetailed(input, readConfig, applySubagents)).agents;
+}
+
+/**
+ * The single reconcile implementation: `syncSubagents` is its `.agents`
+ * projection. Beyond the SubagentDef[] it reports what actually happened so a
+ * caller can tell a failed write from a successful no-op:
+ *   read:   "ok" | "failed"                      (config readable?)
+ *   write:  "noop" | "ok" | "failed"             (noop = nothing to change)
+ *   reload: "ok" | "failed" | "n/a"              (n/a for noop / failed writes)
+ * The write status comes from `applySubagents`' result: `{ok:true}` → ok/ok;
+ * `{ok:false, changed:true}` → written, live reload refused; any other
+ * `{ok:false}` → not written.
+ */
+export async function syncSubagentsDetailed(
   { models = [], deactivated = [], optIn = [] } = {},
   readConfig = readRemoteConfig,
   applySubagents = setSubagents,
@@ -810,17 +843,32 @@ export async function syncSubagents(
     cfg = await readConfig();
   } catch (e) {
     console.warn("[providers] could not read config for subagent sync:", e);
-    return [];
+    return {
+      agents: [],
+      read: "failed",
+      write: "noop",
+      reload: "n/a",
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
   const existingAgents = readAgentBlocks(cfg);
   const reservedNames = Object.keys(getAgentMap(cfg));
   const { upsert, remove } = reconcileSubagents({ models, existingAgents, deactivated, optIn, reservedNames });
-  if (upsert.length === 0 && remove.length === 0) return existingAgents;
+  if (upsert.length === 0 && remove.length === 0) {
+    return { agents: existingAgents, read: "ok", write: "noop", reload: "n/a" };
+  }
 
   const result = await applySubagents({ upsert, remove });
   if (!result.ok) {
     console.warn("[providers] subagent sync write failed:", result.error);
-    return existingAgents;
+    const written = result.changed === true;
+    return {
+      agents: existingAgents,
+      read: "ok",
+      write: written ? "ok" : "failed",
+      reload: written ? "failed" : "n/a",
+      error: result.error,
+    };
   }
 
   // Project the applied diff directly rather than re-reading the file —
@@ -828,7 +876,7 @@ export async function syncSubagents(
   const byName = new Map(existingAgents.map((a) => [a.name, a]));
   for (const name of remove) byName.delete(name);
   for (const a of upsert) byName.set(a.name, a);
-  return [...byName.values()];
+  return { agents: [...byName.values()], read: "ok", write: "ok", reload: "ok" };
 }
 
 // ---------------------------------------------------------------------------

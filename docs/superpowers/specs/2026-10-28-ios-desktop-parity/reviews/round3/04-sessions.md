@@ -1,0 +1,12 @@
+No findings. All six round-2 findings are resolved:
+
+1. **Round-2 #1 resolved — duplicate draft text.** The create target now carries `seed: nil` plus `draft`, consumed through WS03's single `ChatScreen(draft:)` path. Clear/handoff does not reapply it. Evidence: `04-sessions.md:430,1203-1232`; `03-composer.md:556-578`. The exactly-once text/attachment test is specified.
+2. **Round-2 #2 resolved — obsolete receiving mounts.** WS02 and WS07 now match M-04-1 through M-04-6, including launcher catalog/retry arguments and optional/defaulted overflow inputs. M-04-7 is explicitly superseded in both the master and WS02. Evidence: `00-master.md:395-402`; `02-chat-cards-queue.md:903-916`; `07-artifacts-cards.md:959-961`; `04-sessions.md:1352-1359`.
+3. **Round-2 #3 resolved — probe/member naming.** WS05's inbox calls `forgeProbe() -> ForgeProbeResult`; shared device members use `forgeDevice*`, with WS05 presenting the canonical sign-in view. No alias or competing provider is required. Evidence: `04-sessions.md:1322-1339`; `05-git-pr-review.md:51,845,1048-1052`; master Shared member registry.
+4. **Round-2 #4 resolved — theme mount.** WS04's M-10-1 receipt uses `SettingsAppearance.preference(for: themePref).colorScheme` and names both provider files. Settings navigation is identified as WS04's own work, not the package-manifest mount. Evidence: `04-sessions.md:1365,1375-1377`; `00-master.md:424`.
+5. **Round-2 #5 resolved — stopped timestamp representation.** Both provider and consumer use `Double?` epoch milliseconds for lastLooked and `Double` epoch milliseconds for stoppedAt, with conversion confined to presentation. Evidence: `04-sessions.md:997,1393-1400`; `09-models-usage.md:972-978,1007`; `src/server/stoppedStore.mjs:274-290`.
+6. **Round-2 #6 resolved — launcher ownership and stale socket question.** WS10 now provides `launchersList`, `AvailableLauncher` and `ExtensionsLaunchers.resolve`; WS04 consumes them. D20 grants socket ownership and §18 acknowledges it. Evidence: `10-settings-box.md:479-505,1020`; `04-sessions.md:1402-1407,1429`; `00-master.md:340-355`.
+
+Rechecked the revised draft transport, sign-in cancellation/generation/wake-channel contract, read-only mode-row guard, outgoing mounts, incoming integration receipts and shared client-member inventory against the canonical master ledger/registry and the corresponding consumer specs. No new blocking or nonblocking findings identified. This is spec approval, not an implementation/build verification.
+
+VERDICT: APPROVE

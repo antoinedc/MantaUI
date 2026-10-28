@@ -1,0 +1,152 @@
+diff --git a/src/server/rpc.mjs b/src/server/rpc.mjs
+index df8ec27..996fdf6 100644
+--- a/src/server/rpc.mjs
++++ b/src/server/rpc.mjs
+@@ -17,7 +17,7 @@ import {
+   selectLatestTokenUsage,
+ } from "../shared/streamInterpretation.mjs";
+ import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
+-import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots } from "./usage.mjs";
++import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
+ import {
+   listStopped as usageStoppedList,
+   armStopped as usageStoppedArm,
+@@ -68,7 +68,13 @@ import { createOptimizerSeries } from "./optimizer/series.mjs";
+ import { createOptimizerPrices, PRICES_PATH } from "./optimizer/prices.mjs";
+ import { readJsonSync } from "./jsonStore.mjs";
+ import { shipCtxEvent } from "./optimizer/telemetry.mjs";
+-import { allModels as catalogAllModels } from "./modelCatalog.mjs";
++import { allModels as catalogAllModels, lookupModel as catalogLookupModel, matchModel as catalogMatchModel } from "./modelCatalog.mjs";
++import { createModelsTable } from "./modelsTable.mjs";
++import { createModelsUnidentified } from "./modelsUnidentified.mjs";
++import { withLedgerView } from "./ledgerView.mjs";
++import { withSummaryView, withSeriesView } from "./optimizer/view.mjs";
++import { createModelsPricing, withUnpricedGroups } from "./modelsPricing.mjs";
++import { createUsageResumeView } from "./usageResumeView.mjs";
+ import { MIN_CLIENT } from "./version.mjs";
+ import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
+ import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
+@@ -591,6 +597,11 @@ export function buildHandlers({
+   // tests never PATCH a live opencode (the default is the real PATCH /global/config
+   // writer in providers.mjs).
+   setModelCost = providers.setModelCost,
++  // WS09 (models:* / usage:alerts): the outcome-aware writers and the running
++  // alert engine are injectable so tests never touch a live opencode.jsonc.
++  setModelCostDetailed = providers.setModelCostDetailed,
++  syncSubagentsDetailed = providers.syncSubagentsDetailed,
++  getUsageAlerts = getUsageAlertsImpl,
+   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
+   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
+   // Null when not wired (older boxes / tests that don't exercise it) → the
+@@ -788,6 +799,47 @@ export function buildHandlers({
+     baseUrl: () => publicBaseUrl(),
+   });
+ 
++  // ---- WS09: models / spend / usage views computed on the box (09-models-usage.md) ----
++  const publish = (evt) => bus.publish(evt);
++  // Same post-write step as the "config:update" handler: push the saved config
++  // into syncState so every client's config mirror (desktop store.defaultModel
++  // etc. via the `sync` frame) updates — not only the Models table.
++  const configUpdateSynced = async (patch) => {
++    const next = await local.configUpdate(patch);
++    syncState.applyConfig(next);
++    return next;
++  };
++  const modelsTable = createModelsTable({
++    listModels: (overrides) => oc.listModels(overrides, { strict: true }),
++    configGet: () => local.configGet(),
++    configUpdate: configUpdateSynced,
++    syncSubagentsDetailed: (input) => syncSubagentsDetailed(input),
++    getModelPrefs: () => modelPrefsGetStore(),
++    publish,
++  });
++  const modelsUnidentified = createModelsUnidentified({
++    listModels: (overrides) => oc.listModels(overrides, { strict: true }),
++    configGet: () => local.configGet(),
++    configUpdate: configUpdateSynced,
++    catalog: { lookupModel: catalogLookupModel, matchModel: catalogMatchModel, allModels: catalogAllModels },
++    publish,
++  });
++  const modelsPricing = createModelsPricing({
++    setModelCostDetailed: (input) => setModelCostDetailed(input),
++    invalidatePrices: () => optimizerPricesApi.invalidate(),
++    getPrices: () => optimizerPricesApi.get(),
++  });
++  const usageResumeView = createUsageResumeView({
++    listStopped: () => usageStoppedList(),
++    listSnapshots: () => usageListSnapshots(),
++    configGet: () => local.configGet(),
++    listProjects: () => tmux.listProjects(),
++    listMessages: (sid, opts) => oc.listMessages(sid, opts),
++    arm: ({ conversation }) => usageStoppedArm({ conversation }, { publish }),
++    disarm: ({ conversation }) => usageStoppedDisarm({ conversation }, { publish }),
++    now: Date.now,
++  });
++
+   return {
+     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
+ 
+@@ -2044,20 +2096,20 @@ export function buildHandlers({
+     // time_created >= sinceMs (default 0 = all). Measurement only: no
+     // routing, no behaviour change. Degrades to { supported:false } on a
+     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
+-    "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
++    "ledger:summary": async (opts) => withLedgerView(await ledgerSummary(opts ?? {})),
+ 
+     // BET-1333: the Optimizer's memoized read model over the ledger
+     // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
+     // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
+     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
+-    "optimizer:summary": () => optimizerSummaryFn(),
++    "optimizer:summary": async () => withSummaryView(await optimizerSummaryFn(), await local.configGet()),
+ 
+     // BET-1369: the windowed consumption read (optimizer/series.mjs). One
+     // argument: the OPTIONAL range ("24h" | "7d" | "30d"; unknown → 24h). The
+     // window is per-call and does NOT touch the optimizer:summary memo.
+     // Memoized per range behind a 60s TTL. Degrades to { supported:false } on
+     // a box without the Node 24 runtime / opencode.db.
+-    "optimizer:series": (opts) => optimizerSeriesFn(opts?.range),
++    "optimizer:series": async (opts) => withSeriesView(await optimizerSeriesFn(opts?.range), opts?.range),
+ 
+     // Sticky-trims C1: per-model list prices the optimizer's trim gate uses,
+     // resolved config → price cache → unpriced (optimizer/prices.mjs). No
+@@ -2065,7 +2117,7 @@ export function buildHandlers({
+     // cacheWrite, cacheWrite1h?, tiers?, source} }, unpriced: string[] } —
+     // `unpriced` lists the CONNECTED models that resolve to no usable price
+     // (the Settings providers card's "No prices" notice). Memoized ~60s.
+-    "optimizer:prices": () => optimizerPricesApi.get(),
++    "optimizer:prices": async () => withUnpricedGroups(await optimizerPricesApi.get()),
+ 
+     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
+     // → args[0] = that object; opencode.mjs runCommand expects same shape
+@@ -2429,6 +2481,30 @@ export function buildHandlers({
+     "usage-stopped:mark-ran": (conversation) =>
+       usageStoppedMarkRan({ conversation }, { publish: (evt) => bus.publish(evt) }),
+ 
++    // ---- WS09: box-computed views (09-models-usage.md "Server-first") ----
++    // The resume screen's view + apply (SF-M14/M15). Row markers / the
++    // sidebar capsule keep reading usage-stopped:list (master D29).
++    "usage-stopped:view": () => usageResumeView.view(),
++    "usage-stopped:apply": (i) => usageResumeView.apply(i ?? {}),
++    // Usage alerts (SF-M16/M17): the active set + the reminder. In-app only.
++    "usage:alerts": () => getUsageAlerts()?.list() ?? { supported: true, bootId: null, revision: 0, alerts: [] },
++    "usage:remind-at-reset": async (i) =>
++      (await getUsageAlerts()?.remind(i ?? {}, { createJob: (input) => scheduleCreateJob(input, { publish }) })) ??
++      { ok: false, code: "no-reset", message: "This window has no reset time." },
++    // Models table / picker / writes (SF-M1/M2) and the identify + price flows
++    // (SF-M9–M11, M13). Every write publishes `models.updated`.
++    "models:table": () => modelsTable.table(),
++    "models:picker": () => modelsTable.picker(),
++    "models:set-default": (i) => modelsTable.setDefault(i ?? {}),
++    "models:set-main": (i) => modelsTable.setMain(i ?? {}),
++    "models:set-sub": (i) => modelsTable.setSub(i ?? {}),
++    "models:retry-sub-sync": () => modelsTable.retrySubSync(),
++    "models:opt-in": (i) => modelsTable.optIn(i ?? {}),
++    "models:set-override": (i) => modelsTable.setOverride(i ?? {}),
++    "models:unidentified": () => modelsUnidentified.list(),
++    "models:declare": (i) => modelsUnidentified.declare(i ?? {}),
++    "models:set-price": (i) => modelsPricing.setPrice(i ?? {}),
++
+     // ---- per-session model prefs (manta-server owned; BET-1279) ----
+     // Durable box-side record of per-conversation model selection (provider+
+     // model, variant, fast flavour) + the recent-choices list, so the same

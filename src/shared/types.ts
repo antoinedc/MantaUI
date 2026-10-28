@@ -611,6 +611,33 @@ export type ForgeCheckRun = {
   status?: string;
   conclusion?: string;
   url?: string;
+  // The box's classification (WS05 S.1): ok | running | error. Absent from an
+  // older box (capability `forge-pr-view-1`).
+  tone?: "ok" | "running" | "error";
+};
+
+// The box's render-ready view of a PR read (WS05 S.1, capability
+// `forge-pr-view-1`): which panel the branch chip opens, the ship gate with its
+// copy, the merge gate with its reason, and the checks chip / prompt / log URL.
+// Clients render it; none re-derives any of it.
+export type ForgePullRequestView = {
+  panel: "none" | "no-pr" | "pr";
+  chipLabel: string | null;
+  ship: {
+    state: "has-pr" | "detached" | "unknown" | "on-base" | "no-commits" | "ready";
+    copy: string | null;
+  };
+  merge: null | {
+    can: boolean;
+    reason: string | null;
+    mergeable: { text: string; tone: "ok" | "muted" | "danger" };
+  };
+  checks: {
+    counts: { passed: number; failed: number; running: number };
+    chip: null | { glyph: string; label: string; tone: "ok" | "warn" | "danger" };
+    failuresPrompt: string | null;
+    logsUrl: string | null;
+  };
 };
 
 // forge:status result — presence + identity ONLY, never a token. `connected`
@@ -665,6 +692,8 @@ export type ForgePullRequestResult = {
   branch: string | null;
   base: string | null;
   aheadCount: number | null;
+  // WS05: the box's view. Absent from a box without `forge-pr-view-1`.
+  view?: ForgePullRequestView;
 };
 
 // A normalised forge review thread (the review pane's "incoming thread").
@@ -681,6 +710,34 @@ export type ForgeThread = {
   startLine?: number | null;
   resolved: boolean;
   comments: { author: string; body: string; createdAt: string | null }[];
+  // WS05 S.2: where the box put this thread (`forge:diff` only).
+  placement?: ForgePlacement;
+};
+
+// Where the box placed a thread / draft comment: under row `row` of file `file`
+// (indices into `ForgeDiffResult.files`), at the top of a file, or unplaced.
+export type ForgePlacement =
+  | { at: "row"; file: number; row: number }
+  | { at: "file"; file: number }
+  | { at: "unplaced" };
+
+// One row of the box's structured review diff (WS05 S.2).
+export type ForgeDiffRow = {
+  kind: "hunk" | "added" | "removed" | "context";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+  // The anchor a comment on this row carries; null for hunk headers.
+  anchor: { path: string; line: number; side: "new" | "old" | "both" } | null;
+};
+
+export type ForgeDiffFile = {
+  path: string;
+  added: number;
+  removed: number;
+  rowCount: number;
+  truncated: boolean;
+  rows: ForgeDiffRow[];
 };
 
 // The target of a forge read/write. Either the session's `cwd` (resolved
@@ -704,12 +761,20 @@ export type ForgeDiffResult = {
   headSha: string;
   stale?: boolean;
   error: "no_forge" | "not_connected" | "no_pr" | null;
+  // WS05 S.2 (capability `forge-diff-view-1`): the box's parsed diff, with every
+  // thread (in `threads[].placement`) and draft comment placed. `files` absent =
+  // an older box. `parseFailed`: the fetch worked but the diff text could not be
+  // read (`error` stays null). `message`: plain-word sentence beside `error`.
+  files?: ForgeDiffFile[];
+  draft?: ForgePlacedDraft | null;
+  parseFailed?: boolean;
+  message?: string | null;
 };
 
 // ----- Work inbox (BET-795) -----
 
 // Why an item is in the inbox. This is the value the row's secondary column
-// largely spells out (the label mapping lives in chatUtils.inboxReasonLabel),
+// largely spells out (the box sends the row label: `forge-inbox-view-1`),
 // and it is what the row ultimately displays.
 export type InboxReason = "assigned" | "review requested" | "checks failing";
 
@@ -733,6 +798,15 @@ export type ForgeInboxItem = {
   // single INBOX_SEED_PROMPT constant so the renderer never constructs its own
   // "Complete {{url}}" copy (one default, not two).
   seed: string;
+  // WS05 S.1 row fields (capability `forge-inbox-view-1`). Absent from an older box.
+  label?: string;
+  identifier?: string;
+  secondary?: string;
+  repoName?: string;
+  tone?: "danger" | "warn" | "muted";
+  branchName?: string;
+  // The checkout of `repoKey` on the box, joined box-side; null when none.
+  localPath?: string | null;
 };
 
 // forge:inbox result. `items` are sorted by updatedAt desc. `error` is
@@ -758,7 +832,7 @@ export type ForgeShipInput = {
 
 export type ForgeShipResult =
   | { ok: true; pr: PullRequest; url: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; message?: string };
 
 // forge:ship-preview — the facts the confirm card needs BEFORE anything is
 // pushed: the head branch, the base branch (PR target), a best-effort count
@@ -780,7 +854,7 @@ export type ForgeShipPreviewInput = {
 
 export type ForgeShipPreviewResult =
   | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; message?: string };
 // forge:merge input — ALWAYS passes the head SHA the user approved so the API
 // cannot merge a commit that landed after the reviewed diff (issue §4).
 export type ForgeMergeInput = {
@@ -801,7 +875,7 @@ export type ForgeMergeFailureKind =
 
 export type ForgeMergeResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; error: string; kind: ForgeMergeFailureKind | null };
+  | { ok: false; error: string; kind: ForgeMergeFailureKind | null; message?: string };
 
 // ----- Forge draft review (BET-793) -----
 
@@ -838,10 +912,15 @@ export type ForgeDraft = {
   updatedAt: number;
 };
 
+// A draft comment as `forge:diff` returns it, with the box's placement.
+export type ForgePlacedDraftComment = ForgeDraftComment & { placement?: ForgePlacement };
+export type ForgePlacedDraft = Omit<ForgeDraft, "comments"> & { comments: ForgePlacedDraftComment[] };
+
 // forge:draft-get result — the current draft for a session's PR (null when none).
 export type ForgeDraftGetResult = {
   draft: ForgeDraft | null;
   error: "no_forge" | "not_connected" | "no_pr" | null;
+  message?: string | null;
 };
 
 // forge:draft-comment input — `op` selects add / edit / delete of one comment
@@ -864,8 +943,8 @@ export type ForgeDraftCommentInput = {
 } & ForgeRefTarget;
 
 export type ForgeDraftCommentResult =
-  | { ok: true; draft: ForgeDraft }
-  | { ok: false; error: string };
+  | { ok: true; draft: ForgeDraft | null; message?: null }
+  | { ok: false; error: string; message?: string };
 
 // forge:draft-submit input + result. Submitting flushes the WHOLE draft as one
 // review; the draft is cleared only on success. A failed submit returns a typed
@@ -876,8 +955,8 @@ export type ForgeDraftSubmitInput = {
 } & ForgeRefTarget;
 
 export type ForgeDraftSubmitResult =
-  | { ok: true }
-  | { ok: false; error: string; kind?: string | null };
+  | { ok: true; message?: null }
+  | { ok: false; error: string; kind?: string | null; message?: string };
 
 // forge:thread-reply input + result. A reply targets ONE existing incoming
 // thread and posts immediately — it is never buffered in the draft, which
@@ -888,8 +967,8 @@ export type ForgeThreadReplyInput = {
 } & ForgeRefTarget;
 
 export type ForgeThreadReplyResult =
-  | { ok: true }
-  | { ok: false; error: string };
+  | { ok: true; message?: null }
+  | { ok: false; error: string; message?: string };
 
 
 // ----- IPC inputs -----
@@ -1682,6 +1761,22 @@ export const IPC = {
   usageStoppedArm: "usage-stopped:arm", // (conversation) → void
   usageStoppedDisarm: "usage-stopped:disarm", // (conversation) → void
   usageStoppedStampLastLooked: "usage-stopped:stamp-last-looked", // () → void
+  // WS09 box views (09-models-usage.md "Server-first")
+  usageStoppedView: "usage-stopped:view", // () → UsageResumeView
+  usageStoppedApply: "usage-stopped:apply", // ({selected, dryRun?}) → UsageResumeApplyReply
+  usageAlerts: "usage:alerts", // () → UsageAlertsList
+  usageRemindAtReset: "usage:remind-at-reset", // ({key, sessionID}) → UsageRemindReply
+  modelsTable: "models:table", // () → ModelsTableResult
+  modelsPicker: "models:picker", // () → ModelsPickerResult
+  modelsSetDefault: "models:set-default", // ({key|null}) → ModelsWriteReply
+  modelsSetMain: "models:set-main", // ({key,on}) → ModelsWriteReply
+  modelsSetSub: "models:set-sub", // ({key,on}) → ModelsWriteReply
+  modelsRetrySubSync: "models:retry-sub-sync", // () → ModelsWriteReply
+  modelsOptIn: "models:opt-in", // ({keys}) → ModelsWriteReply
+  modelsSetOverride: "models:set-override", // ({key,fields}) → ModelsWriteReply
+  modelsUnidentified: "models:unidentified", // () → UnidentifiedList
+  modelsDeclare: "models:declare", // ({key,catalogId}|{key,form}) → ModelsDeclareReply
+  modelsSetPrice: "models:set-price", // ({providerID,modelID,draft}) → ModelsSetPriceReply
 
   // ---- per-session model prefs (manta-server owned; BET-1279) ----
   // Durable box-side record of per-conversation model selection (provider+
@@ -1741,6 +1836,7 @@ export const IPC = {
   // own. Mirrors src/shared/types.ts OutboxFile / src/server/outbox.mjs
   // listOutbox rows.
   outboxList: "outbox:list", // () → OutboxFile[]
+  artifactsList: "artifacts:list", // ({sessionId}) → ArtifactsListResult
 
   // ---- background delegation jobs (manta-server owned) ----
   // Background jobs are started by the AI's global `delegate` opencode tool
@@ -1759,7 +1855,8 @@ export const IPC = {
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
-  delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean }
+  delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean, error?: string } — error = the box refused the rules (the approval stays pending)
+  delegateJobForSession: "delegate:job-for-session", // ({ sessionId }) → DelegateJobForSession — is this session a read-only background job, and the bar's copy
   delegateDecline: "delegate:decline", // (id) → { ok: boolean }
 
   // ---- APNs native-push registration (BET-181) ----
@@ -1808,7 +1905,7 @@ export const IPC = {
   // detection; gating / banner / force-update logic lands in a later phase.
   // BET-428 added `opencodeVersion` (the pinned OpenCode version the release
   // ships) so Settings → About can render it without a new IPC channel.
-  getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string }
+  getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string, capabilities?: string[] }
 
   // ---- server self-update apply (BET-225 stage 3) ----
   // Trigger the server's `scripts/self-update.sh` (git fetch + reset --hard
@@ -1944,6 +2041,19 @@ export type TranscriptHit = {
   timeCreated: number | null;
 };
 
+// WS06 (server-first): the box groups and labels the hits of
+// `opencode:search-messages` (`groups`). `label` is the only title policy —
+// "<workspace> › <name>", or the session id when either is unknown; clients
+// show it verbatim.
+export type TranscriptHitGroup = {
+  sessionId: string;
+  isCurrent: boolean;
+  workspace: string | null;
+  name: string | null;
+  label: string;
+  hits: TranscriptHit[];
+};
+
 // BET-1219: read-only spend/latency ledger over opencode's store
 // (`ledger:summary` RPC). Crosses the wire, so it lives in shared/types.
 // The four cacheShare fractions sum to ~1 (±0.001): each is that bucket's
@@ -1966,6 +2076,8 @@ export type LedgerSummary = {
   }[];
   byAgent: { agent: string | null; isChild: boolean; turns: number; cost: number; costPerTurn: number }[];
   byProject: { directory: string; turns: number; cost: number }[];
+  // WS09 SF-M6: box-computed render model; absent on an older box.
+  view?: LedgerView;
 };
 
 // BET-1333: the Manta Optimizer's P1.1 read model (`optimizer:summary` RPC).
@@ -2060,6 +2172,8 @@ export type OptimizerSummary = {
     role: string;
     price: string;
   }[];
+  // WS09 SF-M7: box-computed render model; absent on an older box.
+  view?: OptimizerSummaryView;
 };
 
 // BET-1369: the window selector on the optimizer card. The window is PER-CALL:
@@ -2121,6 +2235,8 @@ export type OptimizerSeries = {
     pricedShare: number;
     basis: "measured" | "partial" | "unpriced";
   };
+  // WS09 SF-M7: box-computed render model; absent on an older box.
+  view?: OptimizerSeriesView;
 };
 
 // Sticky-trims C1 (`optimizer:prices` RPC; the same body minus `unpriced` is
@@ -2296,6 +2412,9 @@ export type UsageWindow = {
   // alert from a stale window; the dial carries the last reading forward and
   // labels it "resetting…" rather than blanking.
   stale?: boolean;
+  // WS09 SF-M18: box-computed colour band for `pct` (<70 under · 70–89 warn ·
+  // 90–99 danger · ≥100 over). Absent on an older box → neutral rings.
+  tone?: "under" | "warn" | "danger" | "over";
 };
 export type UsageSnapshot = {
   provider: string; // adapter id: "claude" | "codex" | "kimi"
@@ -2614,7 +2733,28 @@ export type DelegateJob = {
   displayParentID?: string | null;
   // The agent the job's session runs (shown in its result).
   agent?: string | null;
+  // The box's reading of the record (delegate:list decoration, WS02): the status
+  // word ("unknown" when empty) and the terminal summary line ("<branch> · N files changed").
+  statusLabel?: string;
+  summary?: string;
 };
+
+// delegate:job-for-session — the box decides whether a session is a read-only
+// background job (a CTO work worker is not) and writes the bar's copy.
+export type DelegateJobView = {
+  id: string;
+  status: string;
+  statusLabel: string;
+  /** "Read-only — this is a background job running <model>." */
+  headline: string;
+  /** Running → the live activity; terminal → "<branch> · N files changed" (+ the reason). */
+  statusLine: string;
+  /** "It reports to <window>." / "It reports to a session that's closed." */
+  parentLine: string;
+  stoppable: boolean;
+  parent: { sessionId: string; name: string; project: string; windowIndex: number } | null;
+};
+export type DelegateJobForSession = { readOnly: false } | { readOnly: true; job: DelegateJobView };
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF
 // and the model declared `tools` (BET-418 §A). The renderer shows ONE card
@@ -2918,6 +3058,11 @@ export type StreamSessionErrorPayload = {
   message: string;
   /** The original provider message, present only when `message` was humanized (unwrapped) from it. */
   rawMessage?: string;
+  /** The box's sentence for the banner + the reconnect target when it is a credential failure (absent on an older box). */
+  display?: {
+    text: string;
+    reconnect: { providerID: string; label: string; accountsId: string } | null;
+  };
 };
 
 // ── Slice A frames (OpenCode V2 migration, phase 1) ──
@@ -2934,6 +3079,10 @@ export type StreamRetryPayload = {
   message: string;
   next?: number;
   action?: { title: string; message: string; label: string; link?: string };
+  /** The box's copy for the retry card (absent on an older box). */
+  headline?: string;
+  caption?: string | null;
+  body?: string | null;
 } | null;
 
 /** `stepEnded`: session.next.step.ended. `tokens` is all zeros when the event carried no usage. */
@@ -2958,6 +3107,8 @@ export type StreamCompactionPayload = {
   phase: "started" | "delta" | "ended";
   text?: string;
   reason?: string;
+  /** On `ended`: the first non-blank line of what the compaction streamed (written by the box). */
+  firstLine?: string | null;
 };
 
 /** `transcriptStale`: session.compacted — refetch the transcript. */
@@ -2988,10 +3139,26 @@ export type OpencodeInboxSnapshot = { epoch: string; rev: number; items: Opencod
 export type OpencodeInboxCancelResult = {
   outcome: "cancelled" | "delivered" | "unknown";
   item?: OpencodeInboxItem;
+  /** The box's sentences (absent on an older box): a neutral notice, an error to show, and the text that may go back into the composer. */
+  notice?: string | null;
+  error?: string | null;
+  restoreText?: string | null;
 };
 
 /** N1 — the result of `opencode:inbox-set-delivery`. `changed` only when the box observed V2 confirm the requested delivery; `delivered` when the item had already been sent. */
-export type OpencodeInboxSetDeliveryResult = { outcome: "changed" | "delivered" | "unknown" };
+export type OpencodeInboxSetDeliveryResult = {
+  outcome: "changed" | "delivered" | "unknown";
+  notice?: string | null;
+  error?: string | null;
+};
+
+/** `optimizer.compacted`: a background compaction of the open conversation. `text` is the box's full line, shown verbatim (absent on an older box). */
+export type StreamOptimizerCompactedPayload = {
+  beforeTokens: number | null;
+  afterTokens: number | null;
+  away: boolean;
+  text?: string;
+};
 
 /** `inbox`: the interpreter's full pending-user-message list for a session (K3). */
 export type StreamInboxPayload = OpencodeInboxSnapshot;
@@ -3440,3 +3607,231 @@ export type OpencodeProviderAuthResult =
   | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string }
   | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string }
   | { action: "oauth-cancel"; ok: boolean };
+
+// ===== WS09 box views (iOS↔desktop parity, 09-models-usage.md "Server-first") =====
+// The wire shapes of the `models:*`, `usage-stopped:view/apply`, `usage:alerts`
+// and `usage:remind-at-reset` channels and the additive `view` / `tone` /
+// `unpricedByProvider` fields. The box (src/server/modelsTable.mjs & friends)
+// owns every rule; clients render these verbatim.
+
+export type ModelsTableRow = {
+  key: string; // "providerID/modelID"
+  providerID: string;
+  modelID: string;
+  name: string;
+  contextLabel: string | null; // "200k" / "1M"
+  tier: "fast" | "balanced" | "deep" | null;
+  description: string | null;
+  searchText: string; // lower-case; client search = substring
+  deprecated: boolean;
+  deprecatedLocked: boolean;
+  isMain: boolean;
+  isSub: boolean;
+  isDefault: boolean;
+  canMakeDefault: boolean;
+  defaultHint: string | null;
+  editable: { name: string; description: string; context: number | null };
+};
+export type ModelsTableResult = {
+  supported: true;
+  defaultKey: string | null;
+  defaultLine: { name: string; providerID: string } | null;
+  rows: ModelsTableRow[];
+};
+export type ModelsSubOutcome = "applied" | "not-applied" | "saved-not-live";
+export type ModelsWriteOk = {
+  ok: true;
+  table: ModelsTableResult;
+  message: string;
+  outcome?: ModelsSubOutcome;
+  retry?: boolean;
+  ignored?: string[];
+};
+export type ModelsWriteErr = { ok: false; field?: string; code: string; message: string };
+export type ModelsWriteReply = ModelsWriteOk | ModelsWriteErr;
+
+export type ModelsPickerResult = {
+  supported: true;
+  groups: { provider: string; keys: string[] }[];
+  locked: string[];
+  selectable: string[];
+  delegateGroups: { provider: string; keys: string[] }[];
+  recents: { providerID: string; modelID: string; variant?: string; fast?: boolean; key: string }[];
+};
+
+export type UnidentifiedRow = {
+  key: string;
+  label: string;
+  providerID: string;
+  modelID: string;
+  state: "exact" | "ambiguous" | "none";
+  confidence?: "certain" | "probable";
+  evidence?: string;
+  catalogId: string | null;
+  match?: { id: string; name: string; tier?: "fast" | "balanced" | "deep"; context?: number; description?: string };
+  candidates: { id: string; name: string }[];
+  missing: ("identity" | "price" | "caching" | "quality")[];
+  help: string;
+  actions: ("confirm" | "change" | "pick" | "identify")[];
+  chips?: boolean;
+};
+export type UnidentifiedList = {
+  supported: boolean;
+  intro: string;
+  footer: string;
+  unavailableText?: string;
+  rows: UnidentifiedRow[];
+};
+export type ModelsDeclareForm = {
+  catalogId: string;
+  price: "free" | "custom" | null;
+  costIn: string;
+  costOut: string;
+  caching: "none" | "custom";
+  reads: boolean;
+  writes: boolean;
+};
+export type ModelsDeclareInput =
+  | { key: string; catalogId: string }
+  | { key: string; form: ModelsDeclareForm };
+export type ModelsDeclareReply =
+  | {
+      ok: true;
+      outcome: "resolved" | "still-needs" | "catalogue-unavailable";
+      row: UnidentifiedRow | null;
+      list: UnidentifiedList;
+      message: string;
+    }
+  | { ok: false; field?: string; code?: string; message: string };
+
+export type ModelsSetPriceInput = {
+  providerID: string;
+  modelID: string;
+  draft: { input: string; output: string; cacheRead: string; cacheWrite: string };
+};
+export type ModelsSetPriceReply =
+  | {
+      ok: true;
+      message: string;
+      warning?: string;
+      unpricedByProvider: { providerID: string; models: string[] }[];
+    }
+  | { ok: false; field?: string; message: string };
+
+export type LedgerView = {
+  segments: { kind: "cacheRead" | "cacheWrite" | "output" | "input"; label: string; pct: number; inline: boolean }[];
+  caption: string;
+  topModels: { key: string; turns: number; costPerTurn: number; tokensPerSec: number | null; cost: number }[];
+  agents: { label: string; isChild: boolean; turns: number; costPerTurn: number; cost: number }[];
+  emptyModels: string;
+  emptyAgents: string;
+};
+
+export type OptimizerStatView = {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
+  tone: "neutral" | "ok" | "warn";
+};
+export type OptimizerSummaryView = {
+  switch: { on: boolean; label: string; body: string };
+  subrows: { id: string; name: string; text: string; chip: string }[];
+  windowsCaption: string;
+  windows: {
+    key: string;
+    title: string;
+    resetsAt: number | null;
+    pct: number;
+    pctLabel: string;
+    band: "ok" | "warn" | "danger";
+    forecastPct: number | null;
+    forecastWarn: boolean;
+    forecastLabel: string;
+    pressure: { text: string; tone: "neutral" | "ok" | "warn" };
+  }[];
+  metered: { name: string; role: string; price: string }[];
+  meteredCaption: string;
+  activity: { id: string; ts: number; headline: string; detail: string; rolledBack: boolean }[];
+  activityCaption: string;
+  activityEmpty: string;
+  stats: OptimizerStatView[];
+};
+export type OptimizerSeriesView = {
+  heading: string;
+  trimming: { name: string; text: string; chip: string } | null;
+  hasCounterfactual: boolean;
+  noActivity: boolean;
+  emptyText: string;
+  legend: { sent: string; raw: string; noCounterfactual: string | null };
+  savingLabel: { text: string; tone: "ok" | "warn" } | null;
+  potentialLine: string | null;
+  rawValues: number[];
+  stats: OptimizerStatView[];
+};
+
+export type UsageResumeRowView = {
+  conversation: string;
+  name: string;
+  armed: boolean;
+  isNew: boolean;
+  snippet: string | null;
+  provider: string | null;
+  model: string | null;
+  window: { label: string; resetsAt: number | null };
+  cost: { warm: boolean; reReadTokens: number; label: string };
+};
+export type UsageResumeView = {
+  supported: true;
+  title: string;
+  header: string;
+  hasArmed: boolean;
+  unarmedCount: number;
+  totalCount: number;
+  emptyText: string;
+  groups: { workspace: string; rows: UsageResumeRowView[] }[];
+  coldNote: { one: string; many: string };
+};
+export type UsageResumeApplyInput = { selected: string[]; dryRun?: boolean };
+export type UsageResumeApplyReply = {
+  ok: boolean;
+  canApply: boolean;
+  title: string;
+  arm: string[];
+  disarm: string[];
+  applied?: { armed: string[]; disarmed: string[] };
+  failed?: { conversation: string; name: string; message: string }[];
+  message?: string;
+};
+
+export type UsageAlert = {
+  id: string;
+  key: string;
+  level: "warn" | "limit";
+  provider: string;
+  windowKind: string;
+  windowLabel: string;
+  pct: number;
+  resetsAt: number | null;
+  text: string;
+  raisedAt: number;
+  expiresAt: number | null;
+  sticky: boolean;
+  canRemind: boolean;
+  canKeepGoing: boolean;
+};
+export type UsageAlertsList = {
+  supported: true;
+  bootId: string | null;
+  revision: number;
+  alerts: UsageAlert[];
+};
+export type UsageAlertFrame = {
+  bootId: string;
+  revision: number;
+  alert?: UsageAlert;
+  retired?: string[];
+};
+export type UsageRemindReply =
+  | { ok: true; job?: unknown; fireAt: number }
+  | { ok: false; code: string; message: string };

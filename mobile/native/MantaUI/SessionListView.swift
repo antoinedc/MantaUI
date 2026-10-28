@@ -23,6 +23,7 @@ struct SessionListView: View {
     @ObservedObject var store: SessionListStore
     @EnvironmentObject private var eventStore: MantaEventStore
     @EnvironmentObject private var pushRouter: MantaPushRouter
+    @EnvironmentObject private var navigator: MantaNavigator
     @Environment(\.colorScheme) private var colorScheme
 
     @State private var searchText = ""
@@ -42,12 +43,24 @@ struct SessionListView: View {
     // screen), and a typed path would silently swallow the second.
     @State private var path = NavigationPath()
 
-    @State private var renameProject = ""
-    @State private var renameValue = ""
     @State private var confirmDeleteProject = ""
 
     @State private var deleteRunningText = ""
+    /// "Its worktree at <path> will be removed." — only when the box setting asks
+    /// for worktrees to be removed on close (read fresh when the confirm opens).
+    @State private var deleteWorktreeNote: String?
     @State private var showSettings = false
+    /// A Settings section to land on (C2 `.settings(section:)`).
+    @State private var settingsSection: String?
+    /// The project close the user is being asked to confirm.
+    @State private var closeProjectPrompt: CloseProjectPrompt?
+    /// A session opened in a saved AI-CLI mode whose installation can't be
+    /// confirmed yet; settled when the catalog turns authoritative.
+    @State private var waitingMode: (sessionID: String, launcherID: String)?
+    /// The session a `.message` route last put on screen, so a repeat doesn't
+    /// rebuild the stack under the chat.
+    @State private var routedSessionID: String?
+    @State private var handledInitialRoute = false
     /// The row that carries the `fill` background while its session is OPEN.
     /// Cleared the moment you come back to the list: a highlight there reads as
     /// "you are here", and you are not — you are on the list. (It used to track
@@ -106,12 +119,30 @@ struct SessionListView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                        settingsSection = nil
                         showSettings = true
                     } label: {
                         Image(systemName: "gearshape")
                             .foregroundColor(tokens.tx2)
                     }
                     .accessibilityLabel("Settings")
+                }
+                if store.unarmedStoppedCount > 0 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        UsageStoppedCapsule(count: store.unarmedStoppedCount) {
+                            UsageAlertsStore.shared.presentResume()
+                        }
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                        sheetRoute = .inbox
+                    } label: {
+                        Image(systemName: "tray")
+                            .foregroundColor(tokens.tx2)
+                    }
+                    .accessibilityLabel("Inbox")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     orderMenu
@@ -132,16 +163,7 @@ struct SessionListView: View {
             .safeAreaInset(edge: .top) { filterRow }
             .overlay(alignment: .top) { errorBanner }
             .navigationDestination(for: SessionOpenTarget.self) { target in
-                if let sessionId = target.sessionId, !sessionId.isEmpty {
-                    ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path, seed: target.seed ?? "")
-                } else if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
-                          let window = project.windows.first(where: { $0.index == target.windowIndex }) {
-                    // S6 (BET-598): a non-chat window opens the native
-                    // terminal (xterm.js in a WKWebView + the key-row chrome).
-                    TerminalScreen(window: window, project: project, sessionStore: store)
-                } else {
-                    SessionScreenPlaceholder(name: target.name)
-                }
+                destination(for: target)
             }
             // The sheet hangs off the stack's CONTENT, not off the stack
             // itself. A single view can only run one presentation, and the
@@ -154,9 +176,40 @@ struct SessionListView: View {
         }
         .overlay(alignment: .bottom) { undoToast }
         .overlay(alignment: .bottom) { feedbackToast }
-        .fullScreenCover(isPresented: $showSettings) {
-            SettingsScreen(eventStore: eventStore)
+        .fullScreenCover(isPresented: $showSettings, onDismiss: { settingsSection = nil }) {
+            SettingsScreen(eventStore: eventStore, initialSection: settingsSection)
         }
+        // Hosted on background nodes (like `confirmActionSheet`) so they can
+        // present while a chat or terminal is pushed on the stack.
+        .background(
+            Color.clear.sheet(isPresented: $navigator.switcherPresented) {
+                SessionSwitcherSheet(sessionStore: store) { candidate in
+                    navigator.open(.session(windowKey: candidate.key))
+                }
+            }
+        )
+        .background(
+            Color.clear.sheet(item: Binding(
+                get: { store.worktreePrompts.first },
+                set: { _ in }
+            )) { prompt in
+                SessionWorktreePromptSheet(prompt: prompt) { answer in
+                    store.resolveWorktreePrompt(key: prompt.key, decision: answer)
+                }
+            }
+        )
+        .confirmActionSheet(
+            isPresented: Binding(
+                get: { closeProjectPrompt != nil },
+                set: { if !$0 { closeProjectPrompt = nil } }
+            ),
+            title: closeProjectPrompt?.confirm.title ?? "",
+            message: closeProjectPrompt?.confirm.body,
+            destructiveTitle: closeProjectPrompt?.confirm.destructiveTitle ?? "Close project",
+            destructiveAction: {
+                if let prompt = closeProjectPrompt { closeProject(prompt.name) }
+            }
+        )
         // The age chip advances on its own, like the desktop rail's 10s tick
         // (src/renderer/clock.ts, AGE_TICK_MS). Ungated: an idle list is exactly
         // the list whose ages must keep moving. — BET-1084.
@@ -169,6 +222,7 @@ struct SessionListView: View {
             guard count == 0 else { return }
             // Back on the list means nothing is open, so nothing is highlighted.
             openRow = nil
+            routedSessionID = nil
             // …and it is the one moment the list is on screen again after an
             // unknown amount of time inside a session, during which windows may
             // have been created, renamed or killed. Nothing else fetches on this
@@ -182,8 +236,31 @@ struct SessionListView: View {
         // it into the same openTarget the list rows use. onChange covers a
         // warm launch (view already mounted), onAppear the cold-start case
         // (the tap routed before the list appeared).
-        .onAppear { consumePushLink() }
+        .onAppear {
+            consumePushLink()
+            // A route/draft requested before this view existed (a cold start). Once
+            // only: `onAppear` runs again on every return from a session, and a
+            // `.message` route still pending for its chat must not re-push it.
+            guard !handledInitialRoute else { return }
+            handledInitialRoute = true
+            handleRoute(navigator.pending)
+            handleDraft(navigator.pendingDraft)
+        }
         .onChange(of: pushRouter.pendingSessionID) { _ in consumePushLink() }
+        // C2: anything in the app can ask for a session, Settings or a new
+        // session; this is the one place that owns the stack and so acts on it.
+        .onChange(of: navigator.pending) { _, route in handleRoute(route) }
+        .onChange(of: navigator.pendingDraft) { _, draft in handleDraft(draft) }
+        // A saved AI-CLI mode waiting on the installed list resolves here.
+        .onChange(of: store.launcherCatalog) { _, _ in settleWaitingMode() }
+        // Real close outcomes drive the haptic and the toast — never "an RPC was
+        // sent".
+        .onChange(of: store.closeFeedback) { _, items in
+            for item in items {
+                handleCloseFeedback(item)
+                store.consumeFeedback(id: item.id)
+            }
+        }
         // Surface a mutation failure (rename/fork) the store published. Cleared
         // once consumed so the same message can't re-toast on a later change.
         .onChange(of: store.actionMessage) { _, message in
@@ -196,30 +273,248 @@ struct SessionListView: View {
     @ViewBuilder
     private func sheetContent(_ route: SheetRoute) -> some View {
         switch route {
-        case .create(let project):
+        case .create(let project, let draft, let startNew):
             SessionCreateSheet(
-                projects: store.projects,
+                store: store,
                 initialProject: project,
+                draft: draft,
+                startWithNewProject: startNew,
                 onClose: { sheetRoute = nil },
-                onCreated: { project, index, fresh in
+                onCreated: { created in
                     // Adopt the post-create list BEFORE resolving the window,
                     // otherwise the lookup runs against the pre-create snapshot
                     // and the new session opens as an unnamed, session-id-less
                     // placeholder.
-                    store.applyProjects(fresh)
-                    let window = store.projects.first(where: { $0.tmuxSession == project })?
-                        .windows.first(where: { $0.index == index })
-                    let name = window?.name ?? "session"
+                    store.applyProjects(created.projects)
+                    let window = store.window(project: created.project, index: created.windowIndex)
                     sheetRoute = nil
-                    path.append(SessionOpenTarget(project: project, windowIndex: index, name: name, sessionId: window?.opencodeSessionId))
+                    push(created.openTarget(windowName: window?.name ?? "session"))
                 }
             )
-        case .rename(let window, let project):
-            renameSheet(target: window, targetProject: project)
-                .presentationDetents([.height(320)])
+        case .renameSession(let project, let index, let name):
+            SessionRenameSheet(title: "Rename session", initialName: name) { newName in
+                await store.renameSession(project: project, index: index, newName: newName)
+            }
+            .presentationDetents([.medium])
+        case .renameProject(let name):
+            SessionRenameSheet(title: "Rename project", initialName: name) { newName in
+                await store.renameProject(oldName: name, newName: newName)
+            }
+            .presentationDetents([.medium])
         case .confirmDelete(let window):
             confirmDeleteSheet(target: window)
                 .presentationDetents([.height(320)])
+        case .conversationSearch(let seed):
+            // M-06-2: search every conversation's messages, seeded with the
+            // session-list capsule's text (no conversation is favoured).
+            SearchScreen(primarySessionId: nil, seed: seed)
+        case .inbox:
+            // WS05 M-05-2: the work inbox. Start-a-session closes it and hands a
+            // draft to the create sheet through the navigator.
+            InboxWorkScreen(onClose: { sheetRoute = nil })
+                .presentationDetents([.large])
+        case .review(let sessionID):
+            // WS05 M-05-3: the C2 `.review` route — the session's pull request.
+            NavigationStack {
+                ReviewScreen.forSession(sessionID)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { sheetRoute = nil }
+                        }
+                    }
+            }
+        }
+    }
+
+    // MARK: - Destinations (§2 mode-aware)
+
+    @ViewBuilder
+    private func destination(for target: SessionOpenTarget) -> some View {
+        if let sessionId = target.sessionId, !sessionId.isEmpty {
+            let saved = target.mode ?? SessionModeStore.read(sessionID: sessionId)
+            switch SessionModeResolution.resolve(saved: saved, catalog: store.launcherCatalog) {
+            case .ready(.chat):
+                ChatScreen(sessionId: sessionId, title: target.name, projectName: target.project, eventStore: eventStore, path: $path, seed: target.seed ?? "", draft: target.draft)
+            case .ready(let mode):
+                terminalDestination(for: target, mode: mode, sessionID: sessionId)
+            case .waiting(let launcherID):
+                SessionModePendingView(launcherID: launcherID, name: target.name, sessionStore: store) {
+                    // A one-off choice: the saved mode is left alone, so the CLI
+                    // is back the next time the box confirms it.
+                    var next = NavigationPath()
+                    next.append(SessionOpenTarget(
+                        project: target.project, windowIndex: target.windowIndex,
+                        name: target.name, sessionId: sessionId, mode: .chat
+                    ))
+                    path = next
+                }
+            }
+        } else {
+            terminalDestination(for: target, mode: .terminal, sessionID: nil)
+        }
+    }
+
+    @ViewBuilder
+    private func terminalDestination(for target: SessionOpenTarget, mode: SessionMode, sessionID: String?) -> some View {
+        if let project = store.projects.first(where: { $0.tmuxSession == target.project }),
+           let window = project.windows.first(where: { $0.index == target.windowIndex }) {
+            // S6 (BET-598): a non-chat window opens the native terminal
+            // (xterm.js in a WKWebView + the key-row chrome).
+            TerminalScreen(window: window, project: project, sessionStore: store, mode: mode, sessionID: sessionID)
+        } else {
+            SessionScreenPlaceholder(name: target.name)
+        }
+    }
+
+    /// Push a session. Records it as recently opened, and — for a saved AI-CLI
+    /// mode — notes when the catalog can't confirm the CLI yet (the pending view
+    /// waits) or has just told us it is gone (opened in chat, said so).
+    private func push(_ target: SessionOpenTarget) {
+        var target = target
+        if !target.project.isEmpty { store.noteOpened(project: target.project, index: target.windowIndex) }
+        if let sid = target.sessionId, !sid.isEmpty {
+            // Resolve the saved mode INTO the value (mode is identity), so a row
+            // tap and a route to the same session in the same mode are equal.
+            let saved = target.mode ?? SessionModeStore.read(sessionID: sid)
+            target.mode = saved
+            noteResolution(sessionID: sid, saved: saved)
+        } else {
+            routedSessionID = nil
+        }
+        path.append(target)
+    }
+
+    /// Records what is on top of the stack (for `.message`) and handles a saved
+    /// AI-CLI mode the catalog can't confirm yet, or has just told us is gone.
+    private func noteResolution(sessionID sid: String, saved: SessionMode) {
+        routedSessionID = nil
+        switch SessionModeResolution.resolve(saved: saved, catalog: store.launcherCatalog) {
+        case .waiting(let id):
+            waitingMode = (sid, id)
+        case .ready(.chat):
+            routedSessionID = sid
+            if case .cli(let id) = saved { showFeedback("\(id) isn't installed on your server — opened in chat") }
+        case .ready:
+            break
+        }
+    }
+
+    private func settleWaitingMode() {
+        guard let waiting = waitingMode else { return }
+        guard store.launcherCatalog.authoritativeIDs != nil else { return }
+        waitingMode = nil
+        if case .ready(.chat) = SessionModeResolution.resolve(saved: .cli(launcherID: waiting.launcherID), catalog: store.launcherCatalog) {
+            showFeedback("\(waiting.launcherID) isn't installed on your server — opened in chat")
+        }
+    }
+
+    // MARK: - C2 routes + drafts (§11, §12)
+
+    private func handleRoute(_ route: MantaRoute?) {
+        guard let route else { return }
+        switch route {
+        case .session(let key):
+            navigator.pending = nil
+            Task { await openSessionRoute(windowKey: key) }
+        case .message(let sessionID, _):
+            // Put the chat on screen and LEAVE the route pending: the chat screen
+            // consumes it (scroll + highlight) and clears it.
+            openMessageRoute(sessionID: sessionID)
+        case .settings(let section):
+            navigator.pending = nil
+            Task { await presentSettings(section: section) }
+        case .review(let sessionID):
+            // WS05 M-05-3: the review screen (a sheet over whatever is up).
+            navigator.pending = nil
+            Task { await presentReview(sessionID: sessionID) }
+        }
+    }
+
+    private func openSessionRoute(windowKey: String) async {
+        sheetRoute = nil
+        showSettings = false
+        var target = SessionRouteLogic.window(forKey: windowKey, in: store.projects)
+        if target == nil {
+            await store.refresh()
+            target = SessionRouteLogic.window(forKey: windowKey, in: store.projects)
+        }
+        guard let target else {
+            showFeedback("That session is no longer open")
+            return
+        }
+        // The saved mode goes INTO the target: a mode switch then produces a value
+        // different from the one on screen (a real replace), where a plain route
+        // to a session already open in the same mode stays equal.
+        let opened = SessionOpenTarget.opened(
+            project: target.project, windowIndex: target.windowIndex, name: target.name, sessionId: target.sessionId
+        )
+        var next = NavigationPath()
+        openRow = SessionRowEntry.id(project: target.project, windowIndex: target.windowIndex)
+        if !target.project.isEmpty { store.noteOpened(project: target.project, index: target.windowIndex) }
+        if let sid = target.sessionId, !sid.isEmpty, let mode = opened.mode {
+            noteResolution(sessionID: sid, saved: mode)
+        } else {
+            routedSessionID = nil
+        }
+        next.append(opened)
+        path = next
+    }
+
+    private func openMessageRoute(sessionID: String) {
+        sheetRoute = nil
+        showSettings = false
+        guard routedSessionID != sessionID || path.isEmpty else { return }
+        routedSessionID = sessionID
+        var next = NavigationPath()
+        if let found = SessionRouteLogic.window(forSessionID: sessionID, in: store.projects) {
+            if !found.project.isEmpty { store.noteOpened(project: found.project, index: found.windowIndex) }
+            next.append(SessionOpenTarget(project: found.project, windowIndex: found.windowIndex, name: found.name, sessionId: sessionID, mode: .chat))
+        } else {
+            next.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionID, mode: .chat))
+        }
+        path = next
+    }
+
+    /// UIKit refuses a new presentation while another is still dismissing, so
+    /// anything presented over a sheet that was up waits for it to finish.
+    private func dismissPresentations() async {
+        let hadSheet = sheetRoute != nil || showSettings || navigator.switcherPresented
+        sheetRoute = nil
+        showSettings = false
+        navigator.switcherPresented = false
+        if hadSheet { try? await Task.sleep(nanoseconds: 350_000_000) }
+    }
+
+    private func presentReview(sessionID: String) async {
+        await dismissPresentations()
+        sheetRoute = .review(sessionID: sessionID)
+    }
+
+    private func presentSettings(section: String?) async {
+        await dismissPresentations()
+        settingsSection = section
+        showSettings = true
+    }
+
+    private func handleDraft(_ draft: NewSessionDraft?) {
+        guard let draft else { return }
+        navigator.pendingDraft = nil
+        Task {
+            await dismissPresentations()
+            sheetRoute = .create(project: nil, draft: draft, startNew: false)
+        }
+    }
+
+    private func handleCloseFeedback(_ item: SessionCloseFeedback) {
+        switch item.kind {
+        case .closed:
+            SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
+        case .closedWithNotice(let text):
+            SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
+            showFeedback(text)
+        case .failed(let text):
+            SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
+            showFeedback(text)
         }
     }
 
@@ -234,9 +529,9 @@ struct SessionListView: View {
         // still fine).
         if let project = store.projects.first(where: { $0.windows.contains { $0.opencodeSessionId == sessionId } }),
            let window = project.windows.first(where: { $0.opencodeSessionId == sessionId }) {
-            path.append(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId))
+            push(SessionOpenTarget(project: project.tmuxSession, windowIndex: window.index, name: window.name, sessionId: sessionId))
         } else {
-            path.append(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
+            push(SessionOpenTarget(project: "", windowIndex: 0, name: "session", sessionId: sessionId))
         }
     }
 
@@ -293,6 +588,7 @@ struct SessionListView: View {
                     groupHeader(project)
                 }
             }
+            messageSearchSection
         }
         .listStyle(.plain)
         .listSectionSpacing(Metrics.spacing.sp6)
@@ -322,6 +618,7 @@ struct SessionListView: View {
                         )
                 }
             }
+            messageSearchSection
         }
         .listStyle(.plain)
         .listSectionSpacing(Metrics.spacing.sp6)
@@ -422,6 +719,7 @@ struct SessionListView: View {
                 chip("\(running) running", fg: tokens.accentTx, bg: tokens.accentSoft)
             }
             chip("\(visibleCount)", fg: tokens.tx4, bg: tokens.fill)
+            projectMenu(project)
         }
         .padding(.top, Metrics.type.listGroupAbove)
         .padding(.bottom, Metrics.type.listGroupBelow)
@@ -443,6 +741,66 @@ struct SessionListView: View {
             .background(bg, in: Capsule())
     }
 
+    /// The project header's actions (spec 04 §1/§7). Grouped ordering only — the
+    /// flat ordering has no headers.
+    private func projectMenu(_ project: MantaProject) -> some View {
+        Menu {
+            Button {
+                sheetRoute = .create(project: project.tmuxSession, draft: nil, startNew: false)
+            } label: {
+                Label("New session here", systemImage: "plus")
+            }
+            Button {
+                sheetRoute = .renameProject(name: project.tmuxSession)
+            } label: {
+                Label("Rename project…", systemImage: "pencil")
+            }
+            Divider()
+            Button(role: .destructive) {
+                beginCloseProject(project.tmuxSession)
+            } label: {
+                Label("Close project…", systemImage: "xmark.circle")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: Metrics.type.small, weight: .medium))
+                .foregroundColor(tokens.tx3)
+                .frame(minWidth: 28, minHeight: 28)
+                .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Project actions")
+    }
+
+    /// Counts come from the COMPLETE project: hidden background-job windows are
+    /// killed (and their worktrees removed) too, so they are counted. The box
+    /// setting is read fresh — a failed read counts as off.
+    private func beginCloseProject(_ name: String) {
+        Task {
+            let clean = await store.readCleanOnClose()
+            guard let counts = store.closeCounts(for: name, cleanOnClose: clean) else {
+                showFeedback("Couldn't close — that project is no longer on your server")
+                return
+            }
+            closeProjectPrompt = CloseProjectPrompt(
+                name: name,
+                confirm: SessionCloseCopy.project(
+                    name: name, sessionCount: counts.sessionCount,
+                    runningCount: counts.runningCount, worktreeCount: counts.worktreeCount
+                )
+            )
+        }
+    }
+
+    private func closeProject(_ name: String) {
+        Task {
+            let report = await store.closeProject(name)
+            if report.killed { SessionHaptics.fire(.success, enabled: store.hapticsEnabled) }
+            else { SessionHaptics.fire(.warning, enabled: store.hapticsEnabled) }
+            let lines = [SessionCloseCopy.kept(report.keptWorktrees), report.errors.first].compactMap { $0 }
+            if !lines.isEmpty { showFeedback(lines.joined(separator: "\n")) }
+        }
+    }
+
     @ViewBuilder
     private func row(projectName: String, entry: SessionRowEntry, showsProject: Bool) -> some View {
         let window = entry.window
@@ -452,7 +810,7 @@ struct SessionListView: View {
         let caption = showsProject ? titleCased(projectName) : nil
         Button {
             openRow = SessionRowEntry.id(project: projectName, windowIndex: window.index)
-            path.append(SessionOpenTarget(project: projectName, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
+            push(SessionOpenTarget(project: projectName, windowIndex: window.index, name: window.name, sessionId: window.opencodeSessionId))
         } label: {
             SessionRowContent(
                 window: window,
@@ -468,9 +826,7 @@ struct SessionListView: View {
         .contextMenu {
             let id = SessionPinID.window(projectName, index: window.index)
             Button("Rename") {
-                renameProject = projectName
-                renameValue = window.name
-                sheetRoute = .rename(window: window, project: projectName)
+                sheetRoute = .renameSession(project: projectName, index: window.index, name: window.name)
             }
             Button(store.isPinned(session: projectName, index: window.index) ? "Unpin" : "Pin") {
                 store.togglePin(session: projectName, index: window.index)
@@ -523,8 +879,18 @@ struct SessionListView: View {
             let durationText = runningDuration(of: window)
             deleteRunningText = durationText
             confirmDeleteProject = projectName
+            deleteWorktreeNote = nil
             sheetRoute = .confirmDelete(window: window)
             SessionHaptics.fire(.warning, enabled: store.hapticsEnabled)
+            // Read fresh when the confirm opens: a cached setting could promise a
+            // removal the box no longer does (or hide one it will do).
+            if let path = window.worktreePath, !path.isEmpty {
+                Task {
+                    if await store.readCleanOnClose() {
+                        deleteWorktreeNote = SessionCloseCopy.worktreeRemovalSentence(path: path)
+                    }
+                }
+            }
         } else {
             store.beginIdleDelete(session: projectName, index: window.index)
         }
@@ -545,7 +911,7 @@ struct SessionListView: View {
             Text("Delete this session?")
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx1)
-            Text("This will stop a turn that's been running \(deleteRunningText).")
+            Text("This will stop a turn that's been running \(deleteRunningText)." + (deleteWorktreeNote.map { " \($0)" } ?? ""))
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx2)
                 .multilineTextAlignment(.center)
@@ -553,15 +919,9 @@ struct SessionListView: View {
                 let index = target.index
                 let project = confirmDeleteProject
                 sheetRoute = nil
-                Task {
-                    if let sid = target.opencodeSessionId {
-                        try? await MantaAPIClient.live().deleteSession(sessionId: sid, sessionName: project, windowIndex: index)
-                    } else {
-                        try? await MantaAPIClient.live().killWindow(KillWindowInput(sessionName: project, windowIndex: index))
-                    }
-                    await store.refresh()
-                    SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
-                }
+                // Through the close queue: one close at a time, a dirty worktree
+                // asks, and the haptic/toast follow the real outcome.
+                store.enqueueClose(project: project, index: index)
             } label: {
                 Text("Delete Session")
                     .font(.manta(size: Metrics.type.small, weight: .semibold))
@@ -616,9 +976,9 @@ struct SessionListView: View {
                 // so `.task(id:)` restarts the countdown instead of the toast
                 // vanishing early (and no store-side timer double-times it).
                 try? await Task.sleep(nanoseconds: UInt64(PendingDelete.undoWindow * 1_000_000_000))
-                if store.commitExpiredDeletes() {
-                    SessionHaptics.fire(.success, enabled: store.hapticsEnabled)
-                }
+                // Enqueues the close. The success haptic is NOT fired here: it
+                // follows the real outcome through `store.closeFeedback`.
+                store.commitExpiredDeletes()
             }
         }
     }
@@ -725,39 +1085,7 @@ struct SessionListView: View {
     }
 
     private func presentCreateMenu() {
-        sheetRoute = .create(project: store.projects.first?.tmuxSession)
-    }
-
-    // MARK: - Rename (§7.2 context menu)
-
-    private func renameSheet(target: MantaWindow, targetProject: String) -> some View {
-        VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-            Text("Rename session")
-                .font(.manta(size: Metrics.type.body, weight: .semibold))
-                .foregroundColor(tokens.tx1)
-            TextField("Name", text: $renameValue)
-                .font(.manta(size: Metrics.type.body))
-                .foregroundColor(tokens.tx1)
-                .padding(.horizontal, Metrics.spacing.sp3)
-                .padding(.vertical, Metrics.spacing.sp2)
-                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-                .autocorrectionDisabled()
-            HStack {
-                Spacer()
-                Button("Cancel") { sheetRoute = nil }
-                    .foregroundColor(tokens.tx2)
-                Button("Save") {
-                    let value = renameValue.trimmingCharacters(in: .whitespaces)
-                    if !value.isEmpty {
-                        Task { await store.renameSession(project: targetProject, index: target.index, newName: value) }
-                    }
-                    sheetRoute = nil
-                }
-                .fontWeight(.semibold)
-                .foregroundColor(tokens.accentTx)
-            }
-        }
-        .padding(Metrics.spacing.sp4)
+        sheetRoute = .create(project: store.projects.first?.tmuxSession, draft: nil, startNew: false)
     }
 
     // MARK: - Fork
@@ -775,10 +1103,18 @@ struct SessionListView: View {
             Text("No sessions yet")
                 .font(.manta(size: Metrics.type.body, weight: .semibold))
                 .foregroundColor(tokens.tx3)
-            Text("Tap + to create one.")
+            Text("Pick repositories on your server, clone one from GitHub, or start from scratch.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
+                .multilineTextAlignment(.center)
+            Button("Get started") {
+                sheetRoute = .create(project: nil, draft: nil, startNew: true)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.top, Metrics.spacing.sp1)
+            .accessibilityIdentifier("sessions-get-started")
         }
+        .padding(.horizontal, Metrics.spacing.sp4)
         .accessibilityIdentifier("sessions-empty")
     }
 
@@ -823,8 +1159,45 @@ struct SessionListView: View {
             Text("Nothing named “\(searchText)”.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
+            if SearchCopy.isActive(searchText) {
+                messageSearchButton
+                    .padding(.top, Metrics.spacing.sp2)
+            }
         }
         .accessibilityIdentifier("sessions-no-match")
+    }
+
+    // MARK: - Message search entry (M-06-2)
+
+    /// Opens conversation search seeded with the capsule's text. The capsule
+    /// filters session NAMES; this reaches into what was said.
+    private var messageSearchButton: some View {
+        Button {
+            sheetRoute = .conversationSearch(seed: SearchCopy.normalized(searchText))
+        } label: {
+            Label("Search messages for “\(SearchCopy.normalized(searchText))”",
+                  systemImage: "text.magnifyingglass")
+                .font(.manta(size: Metrics.type.small, weight: .medium))
+                .foregroundColor(tokens.accentTx)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("sessions-search-messages")
+    }
+
+    /// The list's final row when the capsule holds a real query.
+    @ViewBuilder
+    private var messageSearchSection: some View {
+        if SearchCopy.isActive(searchText) {
+            Section {
+                messageSearchButton
+                    .padding(.vertical, Metrics.spacing.sp2)
+                    .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
+                                              bottom: 0, trailing: Metrics.spacing.sp3))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(tokens.canvas)
+            }
+        }
     }
 
     @ViewBuilder
@@ -963,6 +1336,7 @@ private struct SessionRowContent: View {
         switch SessionDotState.forRow(status) {
         case .running: return tokens.tx3
         case .needsYou: return tokens.warn
+        case .halted: return tokens.warn
         case .idle: return tokens.tx4
         }
     }
@@ -979,7 +1353,10 @@ private struct SessionStatusDot: View {
 
     var body: some View {
         Circle()
-            .fill(color)
+            .fill(state == .halted ? Color.clear : color)
+            // A hollow ring: stopped by a provider limit, waiting on a clock
+            // rather than on you.
+            .overlay { if state == .halted { Circle().strokeBorder(color, lineWidth: 1.5) } }
             .frame(width: Metrics.spacing.sp2, height: Metrics.spacing.sp2)
             .overlay {
                 if state == .running && !reduceMotion {
@@ -998,6 +1375,7 @@ private struct SessionStatusDot: View {
         switch state {
         case .running: return tokens.accent
         case .needsYou: return tokens.warn
+        case .halted: return tokens.warn
         case .idle: return tokens.tx4
         }
     }
@@ -1027,17 +1405,32 @@ enum SessionHaptics {
 /// Every sheet this screen can present, so exactly one `.sheet` modifier is
 /// attached to the view.
 private enum SheetRoute: Identifiable {
-    case create(project: String?)
-    case rename(window: MantaWindow, project: String)
+    case create(project: String?, draft: NewSessionDraft?, startNew: Bool)
+    case renameSession(project: String, index: Int, name: String)
+    case renameProject(name: String)
     case confirmDelete(window: MantaWindow)
+    case conversationSearch(seed: String)
+    case inbox
+    case review(sessionID: String)
 
     var id: String {
         switch self {
-        case .create(let project): return "create:\(project ?? "")"
-        case .rename(let window, let project): return "rename:\(project):\(window.index)"
+        case .create(let project, let draft, let startNew):
+            return "create:\(project ?? ""):\(draft.map { String($0.hashValue) } ?? ""):\(startNew)"
+        case .renameSession(let project, let index, _): return "rename:\(project):\(index)"
+        case .renameProject(let name): return "rename-project:\(name)"
         case .confirmDelete(let window): return "delete:\(window.index)"
+        case .conversationSearch(let seed): return "search:\(seed)"
+        case .inbox: return "inbox"
+        case .review(let sessionID): return "review:\(sessionID)"
         }
     }
+}
+
+/// The project close awaiting confirmation (spec 04 §7).
+private struct CloseProjectPrompt: Equatable {
+    let name: String
+    let confirm: SessionCloseConfirm
 }
 
 /// A route value, so its identity must be stable and derived from what it
@@ -1057,15 +1450,24 @@ struct SessionOpenTarget: Hashable {
     /// destination regardless of seed (a seed only ever travels with a fresh
     /// fork, which already has its own sessionId).
     var seed: String? = nil
+    /// The mode to open the session in (spec 04 §2). nil = the device's saved
+    /// mode for the session. Unlike `seed`, mode IS part of identity: the same
+    /// session in a different mode is a different destination.
+    var mode: SessionMode? = nil
+    /// The "start a new session with this" draft that seeds the composer ONCE
+    /// (D2). Not identity, like `seed`.
+    var draft: NewSessionDraft? = nil
 
     static func == (lhs: SessionOpenTarget, rhs: SessionOpenTarget) -> Bool {
-        lhs.project == rhs.project && lhs.windowIndex == rhs.windowIndex && lhs.sessionId == rhs.sessionId
+        lhs.project == rhs.project && lhs.windowIndex == rhs.windowIndex
+            && lhs.sessionId == rhs.sessionId && lhs.mode == rhs.mode
     }
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(project)
         hasher.combine(windowIndex)
         hasher.combine(sessionId)
+        hasher.combine(mode)
     }
 }
 

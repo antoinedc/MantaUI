@@ -10,8 +10,11 @@ import Foundation
 // It deliberately imports nothing else so it compiles in the Linux SwiftPM
 // package (`Package.swift`) and is unit-tested by `UpgradeModelsTests`.
 //
-// The iPhone shows this READ-ONLY. Retry and Roll back are desktop actions —
-// there is no button here and no API call that mutates anything.
+// The iPhone shows the status and — on a failure — can act on it (WS10 F19):
+// Retry / Check again, Roll back (behind a confirm) and Copy details, with the
+// desktop's labels and outcome lines. The decisions for those (which label, what
+// is disabled, what the details text says) are pure and live here; the calls
+// themselves go through `BoxRESTClient.upgradeAction`.
 //
 // Mirrors src/renderer/upgradeGateLogic.ts (the desktop's pure half). Keep the two
 // in step: same tolerance, same wording for the shared facts.
@@ -195,21 +198,88 @@ struct UpgradeGateState: Equatable, Sendable {
     /// A data call was refused `503 {upgrade:true}`; cleared by any answer that
     /// says the box is not (or no longer) upgrading.
     var upgradeModeSeen = false
+    /// What happened the last time the user pressed Retry / Roll back. A press's
+    /// outcome describes the state it was pressed in; once the box moves on
+    /// (failed → running after a retry) it is stale and is cleared.
+    var retry: UpgradeActionOutcome = .idle
+    var rollback: UpgradeActionOutcome = .idle
 
     /// A frame/read result. `nil` = the box has no upgrade API (404) — an old
     /// box is never "upgrading".
     mutating func apply(status next: UpgradeStatus?) {
+        let stateChanged = status?.state != next?.state
         status = next
         if next == nil || next?.state == .idle || next?.state == .completed {
             upgradeModeSeen = false
+        }
+        if stateChanged {
+            retry = .idle
+            rollback = .idle
         }
     }
 
     mutating func markUpgradeMode() { upgradeModeSeen = true }
 
+    mutating func actionStarted(_ action: UpgradeAction) {
+        switch action {
+        case .retry: retry = .pending
+        case .rollback: rollback = .pending
+        }
+    }
+
+    mutating func actionFinished(_ action: UpgradeAction, result: UpgradeActionResult) {
+        let outcome: UpgradeActionOutcome = result.ok
+            ? .ok
+            : .error((result.error?.isEmpty == false ? result.error : nil) ?? "The box refused the request.")
+        switch action {
+        case .retry: retry = outcome
+        case .rollback: rollback = outcome
+        }
+    }
+
     /// Whether the box is believed to be mid-upgrade — what keeps the 1 s poll
     /// alive while the stream is down (a restart is expected during an upgrade).
     var isActive: Bool { UpgradeScreenModel.make(self) != nil }
+}
+
+// MARK: - Retry / Roll back
+
+enum UpgradeAction: String, Equatable, Sendable {
+    case retry, rollback
+}
+
+/// The answer of `POST /api/upgrade/{retry|rollback}`: `{ok: true}` or
+/// `{ok: false, error}`.
+struct UpgradeActionResult: Equatable, Sendable {
+    var ok: Bool
+    var error: String?
+
+    init(ok: Bool, error: String? = nil) {
+        self.ok = ok
+        self.error = error
+    }
+}
+
+enum UpgradeActionOutcome: Equatable, Sendable {
+    case idle, pending, ok
+    case error(String)
+
+    /// The line shown under the buttons: `okText` after a success, the message
+    /// after a failure, nothing otherwise.
+    func line(okText: String) -> String? {
+        switch self {
+        case .ok: return okText
+        case .error(let message): return message
+        case .idle, .pending: return nil
+        }
+    }
+
+    var isPending: Bool { self == .pending }
+
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
+    }
 }
 
 // MARK: - What to show (pure)
@@ -229,8 +299,30 @@ struct UpgradeScreenModel: Equatable, Sendable {
     var currentFraction: Double?
     /// "needs 31 GB free, has 3 GB" on a disk failure.
     var disk: String?
-    /// The failure the device cannot act on, so says where to act.
+    /// Reserved for a state the phone cannot act on. Always nil now that a failed
+    /// upgrade is actionable from here.
     var hint: String?
+
+    // The failed state's actions (nil / defaults elsewhere).
+    /// The step the failure happened in ("preflight" when the box did not say).
+    var failedStep: String? = nil
+    /// "Check again" for preflight / verify (a retry just re-checks), else "Retry".
+    var retryLabel: String = "Retry"
+    /// false → Retry is rendered disabled with `retryDisabledReason`.
+    var canRetry: Bool = false
+    var retryDisabledReason: String? = nil
+    /// Preflight and verify failures are fixed in place; rolling back is wrong.
+    var canRollback: Bool = false
+    /// A preflight failure stops before anything is touched.
+    var nothingChanged: Bool = false
+    var retry: UpgradeActionOutcome = .idle
+    var rollback: UpgradeActionOutcome = .idle
+    /// Plain-text snapshot for "Copy details" (running, failed, rolled back).
+    var details: String = ""
+
+    /// The success line under the Retry button, matching the label.
+    var retryOkText: String { retryLabel == "Retry" ? "Retry requested" : "Checking again…" }
+    static let rollbackOkText = "Roll-back requested"
 
     /// nil when the app should open normally (idle, completed, an old box).
     static func make(_ s: UpgradeGateState) -> UpgradeScreenModel? {
@@ -248,22 +340,40 @@ struct UpgradeScreenModel: Equatable, Sendable {
                     currentStep: current,
                     currentFraction: UpgradePresentation.fraction(current),
                     disk: nil,
-                    hint: nil
+                    hint: nil,
+                    details: UpgradePresentation.details(heading: "running", steps: status.steps, failure: nil)
                 )
             case .failed:
+                let message = status.error?.message
+                    ?? status.steps.first(where: { $0.status == .failed })?.error
+                    ?? "The upgrade failed."
+                let current = UpgradePresentation.currentStep(status)
+                let disk = UpgradePresentation.diskText(status.error)
+                let failedStep = status.error?.step ?? current?.id ?? "preflight"
+                let fixedInPlace = UpgradePresentation.fixedInPlaceSteps.contains(failedStep)
+                let retryable = status.error?.retryable != false
                 return UpgradeScreenModel(
                     kind: .failed,
                     title: "The upgrade couldn't finish",
-                    message: status.error?.message
-                        ?? status.steps.first(where: { $0.status == .failed })?.error
-                        ?? "The upgrade failed.",
+                    message: message,
                     steps: status.steps,
                     overall: status.overall,
                     eta: nil,
-                    currentStep: UpgradePresentation.currentStep(status),
+                    currentStep: current,
                     currentFraction: nil,
-                    disk: UpgradePresentation.diskText(status.error),
-                    hint: "Open Manta on your computer to retry or roll back."
+                    disk: disk,
+                    hint: nil,
+                    failedStep: failedStep,
+                    retryLabel: fixedInPlace ? "Check again" : "Retry",
+                    canRetry: retryable,
+                    retryDisabledReason: retryable ? nil : "This failure can't be retried — roll back instead.",
+                    canRollback: !fixedInPlace,
+                    nothingChanged: failedStep == "preflight",
+                    retry: s.retry,
+                    rollback: s.rollback,
+                    details: UpgradePresentation.details(
+                        heading: "failed", steps: status.steps,
+                        failure: (step: failedStep, message: message, disk: disk))
                 )
             case .rolledBack:
                 return UpgradeScreenModel(
@@ -276,7 +386,8 @@ struct UpgradeScreenModel: Equatable, Sendable {
                     currentStep: nil,
                     currentFraction: nil,
                     disk: nil,
-                    hint: nil
+                    hint: nil,
+                    details: UpgradePresentation.details(heading: "rolled back", steps: status.steps, failure: nil)
                 )
             case .idle, .completed:
                 break
@@ -302,6 +413,39 @@ struct UpgradeScreenModel: Equatable, Sendable {
 }
 
 enum UpgradePresentation {
+    /// Failures fixed in place: a preflight stop touched nothing, and a verify
+    /// failure (e.g. a Claude login) has a specific fix — so "Check again", and no
+    /// rollback offered.
+    static let fixedInPlaceSteps: Set<String> = ["preflight", "verify"]
+
+    /// Plain-text snapshot for "Copy details" — the one thing a stuck user can
+    /// hand to whoever is helping. Port of `describeGateDetails`
+    /// (upgradeGateLogic.ts): a heading, one line per step (status, measured
+    /// progress, caption, error), then the failure and the disk numbers.
+    static func details(heading: String, steps: [UpgradeStep],
+                        failure: (step: String, message: String, disk: String?)?) -> String {
+        var lines = ["Manta box upgrade — \(heading)"]
+        for step in steps {
+            var line = "\(step.id): \(step.status.rawValue)"
+            if let p = step.progress {
+                if let n = p.numerator, let d = p.denominator { line += " (\(number(n))/\(number(d)))" }
+                if let label = p.label { line += " — \(label)" }
+            }
+            if let error = step.error { line += " — \(error)" }
+            lines.append(line)
+        }
+        if let failure {
+            lines.append("error (\(failure.step)): \(failure.message)")
+            if let disk = failure.disk { lines.append("disk: \(disk)") }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// A number the way `String(n)` prints it in JavaScript: 25 not 25.0.
+    private static func number(_ n: Double) -> String {
+        n == n.rounded() && abs(n) < 1e15 ? String(Int(n)) : String(n)
+    }
+
     /// The running step, else the failed one.
     static func currentStep(_ status: UpgradeStatus) -> UpgradeStep? {
         status.steps.first(where: { $0.status == .running })

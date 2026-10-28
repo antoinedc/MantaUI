@@ -1,0 +1,101 @@
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
+@@ -1944,6 +1944,19 @@
+   timeCreated: number | null;
+ };
+ 
++// WS06 (server-first): the box groups and labels the hits of
++// `opencode:search-messages` (`groups`). `label` is the only title policy —
++// "<workspace> › <name>", or the session id when either is unknown; clients
++// show it verbatim.
++export type TranscriptHitGroup = {
++  sessionId: string;
++  isCurrent: boolean;
++  workspace: string | null;
++  name: string | null;
++  label: string;
++  hits: TranscriptHit[];
++};
++
+ // BET-1219: read-only spend/latency ledger over opencode's store
+ // (`ledger:summary` RPC). Crosses the wire, so it lives in shared/types.
+ // The four cacheShare fractions sum to ~1 (±0.001): each is that bucket's
+--- a/src/shared/api.ts
++++ b/src/shared/api.ts
+@@ -101,6 +101,7 @@
+   SubagentInput,
+   PluginRegistryRow,
+   TranscriptHit,
++  TranscriptHitGroup,
+   LedgerSummary,
+   OptimizerSummary,
+   OptimizerRange,
+@@ -1618,15 +1619,28 @@
+     upsert?: OpencodeReferenceUpsert[];
+     remove?: string[];
+   }): Promise<{ ok: boolean; error?: string }>;
+-  // BET-698: server-side conversation search. `sessionIds` is the search scope
+-  // in priority order (sessionIds[0] = the active conversation). Hit caps stay
+-  // server-side defaults. `supported:false` = the box can't search (needs the
+-  // Node 24 runtime / opencode.db). `truncated:true` = the search hit its time
+-  // budget on a very large history and covers only the newest matches.
++  // BET-698: server-side conversation search. `scope:"all"` makes the box
++  // enumerate every chat window itself (`primarySessionId` = the active
++  // conversation, searched first); it returns the hits grouped + labelled
++  // (`groups`, always present on a current box — its absence means an older
++  // box). `sessionIds` is the legacy explicit scope, kept for older desktops
++  // and the CTO engine; no renderer sends it. `supported:false` = the box can't
++  // search (needs the Node 24 runtime / opencode.db). `degraded:true` = the
++  // search itself failed (show a failure, not "no matches"). `truncated:true` =
++  // the search hit its time budget on a very large history and covers only the
++  // newest matches.
+   opencodeSearchMessages(input: {
+     query: string;
+-    sessionIds: string[];
+-  }): Promise<{ supported: boolean; hits: TranscriptHit[]; truncated?: boolean }>;
++    scope?: "all";
++    primarySessionId?: string;
++    sessionIds?: string[];
++  }): Promise<{
++    supported: boolean;
++    hits: TranscriptHit[];
++    groups?: TranscriptHitGroup[];
++    truncated?: boolean;
++    degraded?: boolean;
++  }>;
+   // BET-1219: read-only spend/latency ledger over opencode's store.
+   // `sinceMs` filters assistant rows to time_created >= sinceMs (default 0 =
+   // all). Measurement only — no routing. `supported:false` = the box can't
+--- a/src/server/rpc.mjs
++++ b/src/server/rpc.mjs
+@@ -55,7 +55,7 @@
+ import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
+ import { addApnsToken } from "./push.mjs";
+ import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
+-import { searchMessages } from "./messageSearch.mjs";
++import { searchMessages, projectsFromSyncState } from "./messageSearch.mjs";
+ import { ledgerSummary } from "./modelLedger.mjs";
+ import { getDb } from "./opencodeDb.mjs";
+ import { ERROR_STATUS as HANDOFF_ERROR_STATUS } from "./handoff/engine.mjs";
+@@ -2009,12 +2009,15 @@
+       return res;
+     },
+ 
+-    // BET-698: server-side conversation search over opencode's SQLite
+-    // (messageSearch.mjs). Args { query, sessionIds } — sessionIds[0] is the
+-    // active conversation. Degrades to { supported:false } on a box that
+-    // hasn't taken the Node 24 runtime yet.
+-    // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, sessionIds })
+-    "opencode:search-messages": (input) => searchMessages(input ?? {}),
++    // BET-698 / WS06: server-side conversation search over opencode's SQLite
++    // (messageSearch.mjs). Args { query, scope:"all", primarySessionId? } — the
++    // box resolves the windows itself from the same sync state tmux:list serves
++    // and returns grouped + labelled hits (legacy { query, sessionIds } still
++    // works). Degrades to { supported:false } on a box without the Node 24
++    // runtime; { degraded:true } when the search itself fails.
++    // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, scope, primarySessionId })
++    "opencode:search-messages": (input) =>
++      searchMessages(input ?? {}, { listProjects: projectsFromSyncState(syncState) }),
+ 
+     // BET-1219: read-only spend/latency ledger over opencode's SQLite
+     // (modelLedger.mjs). Args { sinceMs } — filters assistant rows to

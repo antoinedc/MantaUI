@@ -11,12 +11,18 @@ import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { act } from "react";
 import { mount, installMockApi, resetStore, type Harness } from "./testHarness";
 import { OptimizerCard } from "./OptimizerCard";
-import type { OptimizerSummary, OptimizerSeries, OptimizerRange } from "../shared/types";
+import type { OptimizerSummary, OptimizerSeries, OptimizerRange, OptimizerSummaryView, OptimizerSeriesView } from "../shared/types";
+// The card renders the BOX's `view` blocks. These fixtures run the box's own
+// view functions over the raw read models (exactly what `optimizer:summary` /
+// `optimizer:series` do on the wire), so every wording / band / tone assertion
+// below exercises the real producer + this renderer end to end. The rules are
+// pinned in src/server/optimizer/view.test.mjs.
+import { summaryView, seriesView } from "../server/optimizer/view.mjs";
 
 const CD = { cacheRead: 8000, cacheWrite: 1000, input: 1000, output: 500 };
 
 function summaryFixture(over: Partial<OptimizerSummary> = {}): OptimizerSummary {
-  return {
+  const raw: OptimizerSummary = {
     supported: true,
     windowDays: 30,
     totals: { turns: 100, cost: 12.34, input: 1000, output: 500, cacheRead: 8000, cacheWrite: 1000 },
@@ -46,12 +52,13 @@ function summaryFixture(over: Partial<OptimizerSummary> = {}): OptimizerSummary 
     metered: [],
     ...over,
   };
+  return { ...raw, view: summaryView(raw, { optimizerEnabled: false }) as OptimizerSummaryView };
 }
 
 // A 24h hourly series by default (two points, no counterfactual). `range` is
 // honoured so a "7d" click can produce a day-bucket series.
 function seriesFixture(over: Partial<OptimizerSeries> = {}): OptimizerSeries {
-  return {
+  const raw: OptimizerSeries = {
     supported: true,
     range: "24h",
     bucket: "hour",
@@ -66,6 +73,7 @@ function seriesFixture(over: Partial<OptimizerSeries> = {}): OptimizerSeries {
     saved: { usd: 0, potentialUsd: 0, basis: "measured", pricedShare: 1 },
     ...over,
   };
+  return { ...raw, view: seriesView(raw, { range: raw.range }) as OptimizerSeriesView };
 }
 
 // Install both reads with sane defaults; tests override specifics per-case.
@@ -405,9 +413,7 @@ describe("OptimizerCard — BET-1369 range selector + windowed stats", () => {
   });
 
   it("a window ahead of pace (signal present, deficit > 0) renders a warn chip", async () => {
-    const f = summaryFixture();
-    f.windows[0].tokensPerPct = 100;
-    f.windows[0].deficit = 23;
+    const f = summaryFixture({ windows: [{ ...summaryFixture().windows[0], tokensPerPct: 100, deficit: 23 }] });
     setApi({ optimizerSummary: () => Promise.resolve(f) });
     h = mount(<OptimizerCard />);
     await h.flush();

@@ -941,7 +941,7 @@ final class MantaAPIClient: Sendable {
         return try JSONDecoder().decode(type, from: resultData)
     }
 
-    private func call<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D? {
+    func call<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D? {
         let data = try await transport(channel: channel, args: args)
         return try Self.decode(data, as: type)
     }
@@ -951,14 +951,14 @@ final class MantaAPIClient: Sendable {
     /// caller that folds that into an empty collection cannot tell a box that
     /// answered "nothing" from one that did not answer at all — which is how a
     /// box full of sessions came up blank, and reported as a success.
-    private func callRequired<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D {
+    func callRequired<D: Decodable>(_ channel: String, args: [Any], as type: D.Type) async throws -> D {
         guard let value = try await call(channel, args: args, as: type) else {
             throw MantaError.transport("\(channel) returned no result")
         }
         return value
     }
 
-    private func callVoid(_ channel: String, args: [Any]) async throws -> VoidResult? {
+    func callVoid(_ channel: String, args: [Any]) async throws -> VoidResult? {
         let data = try await transport(channel: channel, args: args)
         return try Self.decode(data, as: VoidResult.self)
     }
@@ -966,7 +966,7 @@ final class MantaAPIClient: Sendable {
     /// Encode any `Encodable` to a JSON-compatible object or array (`Any`) for
     /// an RPC payload. Unlike `jsonObject`, this does not require a top-level
     /// dictionary, so arrays (e.g. `model-prefs:set` recents) encode too.
-    private func jsonAny(_ value: some Encodable) throws -> Any {
+    func jsonAny(_ value: some Encodable) throws -> Any {
         let data = try JSONEncoder().encode(value)
         return try JSONSerialization.jsonObject(with: data)
     }
@@ -974,7 +974,7 @@ final class MantaAPIClient: Sendable {
     /// Encode an `Encodable` payload (e.g. `SecretInput`) back into the
     /// `[String: Any]` JSON-object shape the RPC transport serialises. Nil
     /// optional properties are omitted, matching the box's `{...i}` merge.
-    private func jsonObject(_ value: some Encodable) throws -> [String: Any] {
+    func jsonObject(_ value: some Encodable) throws -> [String: Any] {
         guard let object = try jsonAny(value) as? [String: Any] else {
             throw MantaError.transport("payload is not a JSON object")
         }
@@ -999,7 +999,7 @@ final class MantaAPIClient: Sendable {
     }
 }
 
-private struct VoidResult: Decodable {}
+struct VoidResult: Decodable {}
 
 /// The `delegate:stop` reply: `{ok: true}`, or `{ok: false, error, status?}`.
 private struct DelegateStopResult: Decodable {

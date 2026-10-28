@@ -83,7 +83,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         XCTAssertTrue(store.running, "opening a mid-turn session must show its working indicator")
@@ -109,7 +109,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         XCTAssertEqual(store.questions.map(\.id), ["q1"], "a pending question must show on open")
@@ -125,7 +125,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -159,7 +159,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -194,7 +194,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         XCTAssertFalse(store.running)
@@ -226,7 +226,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
-            api: api
+            api: api, mutationPolicy: .allowed
         )
         await store.send(text: "hello", attachments: [], model: nil)
         XCTAssertFalse(store.running, "a failed send must stop the running state (no forever-spinner)")
@@ -256,7 +256,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         XCTAssertEqual(store.permissions.map(\.id), ["perm_1"],
@@ -281,7 +281,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         XCTAssertEqual(store.permissions.map(\.id), ["perm_1"])
@@ -314,7 +314,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -332,7 +332,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         store.start()
         store.start()
@@ -352,7 +352,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -377,7 +377,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
@@ -404,7 +404,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
@@ -441,7 +441,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.recordingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         stream.inject(#"{"kind":"stream","sub":"running","sessionId":"ses","payload":{"running":true}}"#)
@@ -466,7 +466,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -510,7 +510,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -545,7 +545,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -565,7 +565,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -588,7 +588,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -613,7 +613,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
 
@@ -654,7 +654,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses-todo",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         stream.inject(Self.allDoneTodos)
@@ -683,7 +683,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses-todo",
             eventStore: eventStore,
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         stream.inject(Self.moreTodos)
@@ -702,7 +702,7 @@ final class ChatStreamMergeTests: XCTestCase {
             ChatSessionStore(
                 sessionId: "ses-todo-expansion",
                 eventStore: eventStore,
-                api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+                api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
             )
         }
         let first = makeStore()
@@ -761,7 +761,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.failingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         store.compact()
@@ -775,7 +775,7 @@ final class ChatStreamMergeTests: XCTestCase {
         let store = ChatSessionStore(
             sessionId: "ses",
             eventStore: MantaEventStore(stream: TestStreamControl(), tokenProvider: { nil }, serverProvider: { nil }),
-            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession())
+            api: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil }, session: Self.succeedingSession()), mutationPolicy: .allowed
         )
         await Task.yield()
         store.compact()
@@ -995,7 +995,7 @@ final class TrailingCardsTests: XCTestCase {
 
     func testTrailingOrderIsNoticesThenPermissionThenPlanThenQuestionThenQueued() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: StreamSessionErrorPayload(name: nil, message: "boom"),
+            sessionErrorText: "boom",
             truncation: StreamTruncationPayload(kind: "", label: "trunc", messageID: nil),
             running: false,
             permission: cardPermission("p"),
@@ -1010,7 +1010,7 @@ final class TrailingCardsTests: XCTestCase {
 
     func testTruncationNoticeSuppressedWhileRunning() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: nil,
+            sessionErrorText: nil,
             truncation: StreamTruncationPayload(kind: "", label: "trunc", messageID: nil),
             running: true,
             permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [])
@@ -1020,14 +1020,14 @@ final class TrailingCardsTests: XCTestCase {
 
     func testOmittedCardsProduceNoBlocks() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: nil, truncation: nil, running: false,
+            sessionErrorText: nil, truncation: nil, running: false,
             permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [])
         XCTAssertEqual(blocks, [])
     }
 
     func testQueuedPromptsStayLastBehindEveryCard() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: nil, truncation: nil, running: false,
+            sessionErrorText: nil, truncation: nil, running: false,
             permission: cardPermission("p"), planExitQuestion: cardQuestion("pe"), question: cardQuestion("q"),
             pendingPrompts: [queued("a"), queued("b")])
         let kinds = blocks.map(kind)
@@ -1044,7 +1044,7 @@ final class TrailingCardsTests: XCTestCase {
 
     func testTodoCardIsTheVeryLastRowAfterQueuedPrompts() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: nil, truncation: nil, running: false,
+            sessionErrorText: nil, truncation: nil, running: false,
             permission: cardPermission("p"), planExitQuestion: nil, question: nil,
             pendingPrompts: [queued("a"), queued("b")],
             todos: todoContent())
@@ -1054,7 +1054,7 @@ final class TrailingCardsTests: XCTestCase {
 
     func testNoTodoContentProducesNoTodoRow() {
         let blocks = ChatSessionStore.trailingBlocks(
-            sessionError: nil, truncation: nil, running: false,
+            sessionErrorText: nil, truncation: nil, running: false,
             permission: nil, planExitQuestion: nil, question: nil, pendingPrompts: [queued("a")])
         XCTAssertFalse(blocks.map(kind).contains("todos"))
     }

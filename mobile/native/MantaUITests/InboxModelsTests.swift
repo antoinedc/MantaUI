@@ -140,17 +140,36 @@ final class InboxDecodingTests: XCTestCase {
         XCTAssertEqual(try decode(#"{"outcome":7}"#).outcome, .unknown)
     }
 
-    func testEveryNonSilentOutcomeHasAVisibleMessage() {
-        XCTAssertNil(InboxActionReport.cancel(InboxCancelResult(outcome: .cancelled)),
-                     "a cancelled message needs no words: the row leaves")
-        XCTAssertEqual(InboxActionReport.cancel(InboxCancelResult(outcome: .delivered)), "Already sent to the agent")
-        XCTAssertEqual(InboxActionReport.cancel(InboxCancelResult(outcome: .unknown)),
-                       "Couldn't confirm it was cancelled — it may still be sent")
-        XCTAssertNil(InboxActionReport.setDelivery(InboxSetDeliveryResult(outcome: .changed)),
-                     "`changed` is confirmed by the next inbox frame")
-        XCTAssertEqual(InboxActionReport.setDelivery(InboxSetDeliveryResult(outcome: .delivered)), "Already sent to the agent")
-        XCTAssertEqual(InboxActionReport.setDelivery(InboxSetDeliveryResult(outcome: .unknown)),
-                       "Couldn't confirm the change — check the pending list")
+    /// Server-first (WS02): the box words every outcome; the app only DECODES it.
+    func testResultsDecodeTheBoxsSentencesAndRestoreText() throws {
+        let cancel = try JSONDecoder().decode(InboxCancelResult.self, from: Data(
+            #"{"outcome":"cancelled","item":{"id":"m","text":"hello"},"notice":"N","error":null,"restoreText":"hello"}"#.utf8))
+        XCTAssertEqual(cancel.outcome, .cancelled)
+        XCTAssertEqual(cancel.notice, "N")
+        XCTAssertNil(cancel.error)
+        XCTAssertEqual(cancel.restoreText, "hello")
+
+        let unknown = try JSONDecoder().decode(InboxCancelResult.self, from: Data(
+            #"{"outcome":"unknown","notice":null,"error":"E","restoreText":null}"#.utf8))
+        XCTAssertEqual(unknown.error, "E")
+        XCTAssertNil(unknown.restoreText)
+
+        let delivery = try JSONDecoder().decode(InboxSetDeliveryResult.self, from: Data(
+            #"{"outcome":"delivered","notice":"Already sent","error":null}"#.utf8))
+        XCTAssertEqual(delivery.notice, "Already sent")
+        XCTAssertNil(delivery.error)
+    }
+
+    /// An older box sends none of the three fields: they decode as absent, never as an error.
+    func testResultsFromAnOlderBoxCarryNoSentences() throws {
+        let cancel = try JSONDecoder().decode(InboxCancelResult.self, from: Data(#"{"outcome":"delivered"}"#.utf8))
+        XCTAssertNil(cancel.notice); XCTAssertNil(cancel.error); XCTAssertNil(cancel.restoreText)
+        let delivery = try JSONDecoder().decode(InboxSetDeliveryResult.self, from: Data(#"{"outcome":"unknown"}"#.utf8))
+        XCTAssertNil(delivery.notice); XCTAssertNil(delivery.error)
+        XCTAssertEqual(delivery.outcome, .unknown)
+    }
+
+    func testTransportFailureWordsStayLocal() {
         XCTAssertFalse(InboxActionReport.cancelFailed.isEmpty)
         XCTAssertFalse(InboxActionReport.setDeliveryFailed.isEmpty)
     }

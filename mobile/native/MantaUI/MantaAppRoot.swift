@@ -18,6 +18,14 @@ struct MantaAppRoot: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var flow: MantaOnboardingFlow
+    /// C2: the app-wide router. Injected below on the root `Group`, so every
+    /// screen — and every sheet or cover presented from one — can reach it.
+    @StateObject private var navigator = MantaNavigator()
+    /// M-09-3: WS09's app-wide usage alerts + resume-after-limit presentation.
+    @ObservedObject private var usageAlerts = UsageAlertsStore.shared
+    /// M-10-1: the phone's own theme override (device-local; System follows the
+    /// phone). Written by Settings → Appearance.
+    @AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue
     @State private var paired: Bool
     /// A pairing payload that arrived while already paired — pending the
     /// "Switch box?" confirmation (BET-702).
@@ -99,6 +107,11 @@ struct MantaAppRoot: View {
                 // tap-open's chat to live data; S3 delivers the list, its
                 // actions, and creation.
                 SessionListView(store: sessionStore)
+                    // M-07-3: the agent-file notice ("AI sent you a file") over the
+                    // session list and any pushed chat; beneath the upgrade overlay.
+                    .overlay(alignment: .bottom) {
+                        if scene == nil { ArtifactAgentFileNotice() }
+                    }
                     .onAppear {
                         if !didFailStale {
                             didFailStale = true
@@ -126,6 +139,33 @@ struct MantaAppRoot: View {
                     .transition(.opacity)
             }
         }
+        // M-09-3: the usage banner (90 % / limit) and the resume-after-limit sheet,
+        // only over the paired destination.
+        .overlay(alignment: .top) {
+            if paired, scene == nil { UsageAlertBanner(store: usageAlerts) }
+        }
+        .sheet(isPresented: Binding(
+            get: { paired && scene == nil && usageAlerts.resumeSheetPresented },
+            set: { usageAlerts.resumeSheetPresented = $0 }
+        )) {
+            UsageResumeSheet(sessions: sessionStore, usage: usageAlerts)
+        }
+        .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
+        .environmentObject(navigator)
+        // M-10-2: "Remove server" finished on this phone (its credentials are
+        // gone). Tear down the box's stream and state and return to onboarding —
+        // never leave the old box's sessions on screen.
+        .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
+            store.stop()
+            sessionStore.resetForBoxChange()
+            UsageAlertsStore.shared.resetForBoxChange()
+            ChatModelCatalog.shared.resetForBoxChange()
+            TranscriptMediaStore.shared.resetForBoxChange()
+            navigator.reset()
+            flow.isSwitching = false
+            flow.backToEntry()
+            paired = false
+        }
         // S8 (BET-600): a pairing link — either the manta:// custom scheme or
         // the associated-domain universal link (https://app.mantaui.com/m/…)—
         // is parsed and fed into the S2 onboarding flow. Delivery happens via
@@ -144,6 +184,9 @@ struct MantaAppRoot: View {
             MantaPushService.applyRegistrationState()
             store.resume()
             Task { await sessionStore.refresh() }
+            // Which AI CLIs are installed (and the user's launch flags) can change
+            // while the app is away; not part of every list refresh (it is slow).
+            Task { await sessionStore.refreshLaunchers() }
             Task { await upgradeStore.refresh() }
         }
         .onOpenURL { url in
@@ -188,6 +231,10 @@ struct MantaAppRoot: View {
             if flow.isSwitching {
                 store.stop()
                 sessionStore.resetForBoxChange()
+                UsageAlertsStore.shared.resetForBoxChange()
+                ChatModelCatalog.shared.resetForBoxChange()
+                TranscriptMediaStore.shared.resetForBoxChange()
+                navigator.reset()
             }
             paired = true
             // Wire the box model-prefs mirror for the newly-paired box (also
@@ -207,6 +254,9 @@ struct MantaAppRoot: View {
     private func startModelPrefs() {
         ChatModelPrefs.shared.subscribe(to: store)
         ChatModelPrefs.shared.startIfNeeded()
+        // M-09-3: WS09's alerts + catalogue bus subscriptions (idempotent; this
+        // runs on every paired launch and after a re-pair).
+        UsageAlertsStore.shared.bind(eventStore: store)
         ChatModelPrefs.migrateIfNeeded()
     }
 

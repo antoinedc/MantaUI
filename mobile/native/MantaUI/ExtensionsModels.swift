@@ -1,0 +1,232 @@
+import Foundation
+
+// ===========================================================================
+// WS10 F8–F12 — pure helpers behind the Extensions screens (plugins list,
+// forge, skill registries, references, CLI launch options). Foundation-only
+// ([pkg], D19). Each is a port of a desktop rule so the two clients can never
+// disagree:
+//   ExtensionsFormat      Settings.tsx `formatTimeout` + the plugin row text
+//   ExtensionsForge       chatUtils.ts `forgeCredentialSecondary`
+//   ExtensionsRegistries  Settings.tsx onAddRegistry / onRemoveRegistry
+//   ExtensionsReferences  settingsSchema.ts `validateReferenceAlias` /
+//                         `classifyReferenceTarget` + the add payload
+//   ExtensionsLaunchers   chatShared.tsx `resolveLauncherFlags` +
+//                         settingsShared.ts `updateLauncherFlag` (D21: WS10 owns
+//                         launcher discovery; WS04 consumes `resolve`)
+// ===========================================================================
+
+enum ExtensionsFormat {
+
+    /// "5s" / "30m" — a plugin's timeout.
+    static func timeout(ms: Double) -> String {
+        if ms < 1000 { return "\(Int(ms))ms" }
+        if ms < 60_000 { return "\(Int((ms / 1000).rounded()))s" }
+        return "\(Int((ms / 60_000).rounded()))m"
+    }
+
+    /// "3 steps · 30s" (singular for one step; the timeout is omitted when the
+    /// plugin declares none).
+    static func stepsLine(stepCount: Int, timeoutMs: Double?) -> String {
+        let steps = "\(stepCount) step\(stepCount == 1 ? "" : "s")"
+        guard let timeoutMs else { return steps }
+        return "\(steps) · \(timeout(ms: timeoutMs))"
+    }
+
+    /// "Inputs: id=\"default\", other" — each input id, with its default when it
+    /// declares one (JSON-formatted like the desktop's `JSON.stringify`). Nil when
+    /// the plugin takes no inputs.
+    static func inputsLine(_ inputs: [PluginRegistryInput]) -> String? {
+        guard !inputs.isEmpty else { return nil }
+        let parts = inputs.map { input -> String in
+            guard let value = input.default else { return input.id }
+            return "\(input.id)=\(jsonText(value))"
+        }
+        return "Inputs: " + parts.joined(separator: ", ")
+    }
+
+    /// `JSON.stringify` for the handful of shapes a plugin default can be.
+    static func jsonText(_ value: JSONValue) -> String {
+        switch value {
+        case .string(let s):
+            guard let data = try? JSONEncoder().encode(s), let text = String(data: data, encoding: .utf8) else {
+                return "\"\(s)\""
+            }
+            return text
+        case .number(let n):
+            return n == n.rounded() && abs(n) < 1e15 ? String(Int(n)) : String(n)
+        case .bool(let b):
+            return b ? "true" : "false"
+        case .null:
+            return "null"
+        case .array(let items):
+            return "[" + items.map(jsonText).joined(separator: ",") + "]"
+        case .object(let object):
+            let body = object.keys.sorted().map { key -> String in
+                "\(jsonText(.string(key))):\(jsonText(object[key] ?? .null))"
+            }
+            return "{" + body.joined(separator: ",") + "}"
+        }
+    }
+
+    /// "5 rules" / "1 rule" — `ruleCount` absent counts as 0.
+    static func ruleCountText(_ count: Int?) -> String {
+        let n = count ?? 0
+        return "\(n) rule\(count == 1 ? "" : "s")"
+    }
+}
+
+enum ExtensionsForge {
+
+    /// The secondary line on the GitHub row: who is connected, where the
+    /// credential came from, and — when GitHub rejected it — what to do. Exact
+    /// port of `forgeCredentialSecondary` (the box wording "server" is kept).
+    static func secondary(login: String?, source: String?, valid: Bool?) -> String {
+        if valid == false {
+            switch source {
+            case "cli":
+                return "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect."
+            case "env":
+                return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect."
+            default:
+                return "GitHub rejected this sign-in. Disconnect, then connect again."
+            }
+        }
+        let origin: String
+        switch source {
+        case "cli": origin = "from the gh CLI on your server"
+        case "env": origin = "from the MANTA_GITHUB_TOKEN env var"
+        case "stored": origin = "signed in on this server"
+        default: origin = "connected"
+        }
+        if let login, !login.isEmpty { return "@\(login) · \(origin)" }
+        return origin
+    }
+}
+
+enum ExtensionsRegistries {
+
+    /// The list with `url` appended; nil when it is blank or already there (the
+    /// desktop ignores both silently — iOS tells the user why instead).
+    static func add(_ url: String, to list: [String]) -> [String]? {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !list.contains(trimmed) else { return nil }
+        return list + [trimmed]
+    }
+
+    static func remove(_ url: String, from list: [String]) -> [String] {
+        list.filter { $0 != url }
+    }
+}
+
+enum ExtensionsReferences {
+
+    enum Kind: Equatable, Sendable {
+        case path
+        case repository
+    }
+
+    static let aliasRequired = "Alias is required."
+    static let aliasInvalid = "Alias can't contain spaces, slashes, backticks, or commas."
+    static let targetRequired = "Enter a local path or a repository."
+
+    /// opencode forbids `/`, whitespace, backticks and commas in aliases (they
+    /// would break @-mention parsing). Returns a user-facing error, or nil.
+    static func validateAlias(_ alias: String) -> String? {
+        let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        if a.isEmpty { return aliasRequired }
+        let forbidden = CharacterSet(charactersIn: "/` ,").union(.whitespacesAndNewlines)
+        if a.unicodeScalars.contains(where: { forbidden.contains($0) }) { return aliasInvalid }
+        return nil
+    }
+
+    /// Classify the combined "path or repository" field. A value that clearly
+    /// looks like a local path (leading `/`, `./`, `../`, `~/`) is a path; git
+    /// URLs, scp-style and bare `owner/repo` are repositories; everything else
+    /// defaults to a path.
+    static func classifyTarget(_ target: String) -> Kind {
+        let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return .path }
+        if t.hasPrefix("/") || t.hasPrefix("./") || t.hasPrefix("../") || t.hasPrefix("~/") { return .path }
+        if t.contains("://") || t.hasPrefix("git@") || t.hasSuffix(".git")
+            || t.range(of: #"^[^/\s]+:[^\s]+$"#, options: .regularExpression) != nil {
+            return .repository
+        }
+        if t.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil {
+            return .repository
+        }
+        return .path
+    }
+
+    /// One `upsert` entry for `opencode:set-references`: `{alias, path|repository,
+    /// description?}` (description omitted when blank).
+    static func upsertPayload(alias: String, target: String, description: String) -> [String: String] {
+        let a = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        let t = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        let d = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        var out: [String: String] = ["alias": a]
+        out[classifyTarget(t) == .repository ? "repository" : "path"] = t
+        if !d.isEmpty { out["description"] = d }
+        return out
+    }
+
+    /// "@name → path" or "@name → repo (branch)" — plain fields so this stays
+    /// independent of WS03's `OpencodeReferenceInfo`.
+    static func displayTarget(name: String, path: String?, repository: String?, branch: String?) -> String {
+        let target: String
+        if let path {
+            target = path
+        } else if let repository {
+            target = branch.map { $0.isEmpty ? repository : "\(repository) (\($0))" } ?? repository
+        } else {
+            target = ""
+        }
+        return "@\(name) → \(target)"
+    }
+}
+
+enum ExtensionsLaunchers {
+
+    /// For every flag in `schema`, `saved[key] ?? flag.default`. Keys in `saved`
+    /// that the schema no longer has are dropped.
+    static func resolve(schema: [AvailableLauncherFlag], saved: [String: Bool]?) -> [String: Bool] {
+        var out: [String: Bool] = [:]
+        for flag in schema { out[flag.key] = saved?[flag.key] ?? flag.default }
+        return out
+    }
+
+    /// `prev` with the launcher's entry replaced by its FULL resolved map plus the
+    /// toggled key — so a write never leaves the box holding a partial map. An
+    /// unknown launcher id leaves `prev` unchanged.
+    static func update(launchers: [AvailableLauncher], launcherID: String, flagKey: String,
+                       checked: Bool, prev: [String: [String: Bool]]) -> [String: [String: Bool]] {
+        guard let launcher = launchers.first(where: { $0.id == launcherID }) else { return prev }
+        var next = prev
+        var map = resolve(schema: launcher.flags, saved: prev[launcherID])
+        map[flagKey] = checked
+        next[launcherID] = map
+        return next
+    }
+
+    /// Reads `config["launcherFlags"]` into the typed map: non-object launchers and
+    /// non-bool flags are skipped; a missing config is empty.
+    static func savedFlags(from config: [String: JSONValue]?) -> [String: [String: Bool]] {
+        guard case .object(let launchers)? = config?["launcherFlags"] else { return [:] }
+        var out: [String: [String: Bool]] = [:]
+        for (launcherID, value) in launchers {
+            guard case .object(let flags) = value else { continue }
+            var map: [String: Bool] = [:]
+            for (key, flag) in flags {
+                if case .bool(let b) = flag { map[key] = b }
+            }
+            out[launcherID] = map
+        }
+        return out
+    }
+
+    /// The map as the `Any` graph `configUpdate` serialises.
+    static func payload(_ flags: [String: [String: Bool]]) -> [String: Any] {
+        var out: [String: Any] = [:]
+        for (launcherID, map) in flags { out[launcherID] = map }
+        return out
+    }
+}

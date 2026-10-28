@@ -357,17 +357,23 @@ export async function moveSession(sessionId, directory, { signal } = {}) {
   rememberSessionDirectory(sessionId, absDir);
 }
 
-// Part types NO client renders. `slim` drops them from the wire.
+// Part types the native iOS client does not need. `slim` drops them from the wire.
 //
 // The desktop renderer DOES render `reasoning` (ctrl+O) and `patch`/`file`
-// parts, which is exactly why slim is OPT-IN and desktop never asks for it:
-// only the native iOS transcript mapper, which switches on `text` and `tool`
-// and falls through everything else, sets it. Measured on a real 63-message
-// session these are ~20% of the payload, decoded on-device and then dropped.
-const SLIM_DROP_PART_TYPES = new Set(["step-start", "step-finish", "reasoning", "snapshot"]);
+// parts, which is exactly why slim is OPT-IN and desktop never asks for it.
+// Measured on a real 63-message session these are ~20% of the payload, decoded
+// on-device and then dropped.
+//
+// `step-finish` is deliberately NOT here: it carries the provider's RAW finish
+// reason (`reason`), which is the only source of the context-wall / tool-cutoff
+// truncation kinds (`info.finish` is V2's normalised value), so the iOS turn
+// footer needs it to show a truncation warning after a reload. It is tiny.
+// `reasoning` stays dropped: iOS asks for an unslimmed transcript while its
+// "Show reasoning & full output" switch is on (see ChatSessionStore).
+const SLIM_DROP_PART_TYPES = new Set(["step-start", "reasoning", "snapshot"]);
 
 /**
- * Shrink a transcript for a client that renders only text + tool parts.
+ * Shrink a transcript for a client that renders text, tool and step-finish parts.
  *
  * Two reductions, both lossless for such a client:
  *

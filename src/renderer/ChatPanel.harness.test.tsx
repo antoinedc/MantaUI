@@ -115,21 +115,21 @@ describe("ChatPanel render harness", () => {
     expect(h.text().toLowerCase()).toMatch(/allow|permission|run command/);
   });
 
-  it("renders the background-compaction one-liner (BET-1347)", async () => {
+  it("renders the background-compaction one-liner exactly as the box wrote it (BET-1347)", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     expect(h.text()).not.toContain("Compacted");
     await emitStreamAndFlush(bus, h, {
       sub: "optimizer.compacted",
       sessionId: "ses_test",
-      payload: { beforeTokens: 128_000, afterTokens: 31_000, away: true },
+      // Distinctive text: the renderer shows the box's sentence, it does not rebuild it from the token counts.
+      payload: { beforeTokens: 128_000, afterTokens: 31_000, away: true, text: "BOX-LINE compacted · 1 → 2" },
     });
-    expect(h.text()).toContain("Compacted while you were away");
-    expect(h.text()).toContain("128k");
-    expect(h.text()).toContain("31k");
+    expect(h.text()).toContain("BOX-LINE compacted · 1 → 2");
+    expect(h.text()).not.toContain("128k");
   });
 
-  it("falls back to background wording (no after-token count / not away) (BET-1347)", async () => {
+  it("shows no compaction line when an older box sends no text (BET-1347)", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
     await emitStreamAndFlush(bus, h, {
@@ -137,7 +137,44 @@ describe("ChatPanel render harness", () => {
       sessionId: "ses_test",
       payload: { beforeTokens: 90_000, afterTokens: null, away: false },
     });
-    expect(h.text()).toContain("Compacted in the background");
+    expect(h.text()).not.toContain("Compacted");
+  });
+
+  it("the retry card renders the box's headline / caption / body verbatim", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, {
+      sub: "retry",
+      sessionId: "ses_test",
+      payload: { attempt: 2, message: "raw-message", next: 1, headline: "HL-x", caption: "CAP-y", body: "BODY-z" },
+    });
+    const text = h.text();
+    expect(text).toContain("HL-x");
+    expect(text).toContain("CAP-y");
+    expect(text).toContain("BODY-z");
+    expect(text).not.toContain("raw-message");
+  });
+
+  it("an older box's retry frame (no copy fields) shows 'Retrying…' and the raw message", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, {
+      sub: "retry",
+      sessionId: "ses_test",
+      payload: { attempt: 2, message: "overloaded", next: 1 },
+    });
+    expect(h.text()).toContain("Retrying…");
+    expect(h.text()).toContain("overloaded");
+  });
+
+  it("the compaction card shows the box's firstLine once the compaction ended", async () => {
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, { sub: "compaction", sessionId: "ses_test", payload: { phase: "started", text: "", reason: "context" } });
+    await emitStreamAndFlush(bus, h, { sub: "compaction", sessionId: "ses_test", payload: { phase: "delta", text: "streamed words" } });
+    await emitStreamAndFlush(bus, h, { sub: "compaction", sessionId: "ses_test", payload: { phase: "ended", firstLine: "FIRST-LINE-from-box" } });
+    expect(h.text()).toContain("Compacted");
+    expect(h.text()).toContain("FIRST-LINE-from-box");
   });
 
   it("ignores events for a different session id", async () => {

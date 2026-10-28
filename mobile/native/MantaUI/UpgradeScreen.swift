@@ -1,13 +1,15 @@
 import SwiftUI
+import UIKit
 
 // ===========================================================================
 // "Your box is upgrading" (OpenCode V2 cutover, slice C4).
 //
-// The iPhone's READ-ONLY view of the box's upgrade (contract K3): overall
-// progress, the steps with a status each, the current step's own bar and the
-// ETA, and — on a failure — what went wrong and the disk numbers. There are
-// deliberately NO buttons: Retry / Roll back live on the desktop, and a control
-// that cannot act from here would be a lie. The failed state says where to act.
+// The iPhone's view of the box's upgrade (contract K3): overall progress, the
+// steps with a status each, the current step's own bar and the ETA, and — on a
+// failure — what went wrong and the disk numbers, with the desktop's actions
+// (WS10 F19): Retry / Check again, Roll back (behind a confirm) and Copy
+// details. Running and rolled-back states offer Copy details only. Every action
+// reports its outcome under the buttons.
 //
 // It covers the whole app and is not dismissible: while a box migrates, every
 // data route answers 503, so there is nothing behind it to reach. It leaves by
@@ -18,6 +20,10 @@ import SwiftUI
 struct UpgradeScreen: View {
     let model: UpgradeScreenModel
     let tokens: Tokens
+
+    @EnvironmentObject private var upgradeStore: UpgradeStore
+    @State private var confirmRollback = false
+    @State private var copied = false
 
     var body: some View {
         ZStack {
@@ -41,6 +47,9 @@ struct UpgradeScreen: View {
                     if let overall = model.overall, model.kind == .running { overallBlock(overall) }
                     if !model.steps.isEmpty { stepsBlock }
 
+                    if model.kind == .failed { failureActions }
+                    if model.kind == .running || model.kind == .rolledBack { copyDetailsRow }
+
                     if let hint = model.hint {
                         Text(hint)
                             .font(.manta(size: Metrics.type.small))
@@ -54,6 +63,15 @@ struct UpgradeScreen: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("upgrade-screen")
+        .onChange(of: model.details) { _, _ in copied = false }
+        .confirmationDialog("Roll the box back?", isPresented: $confirmRollback, titleVisibility: .visible) {
+            Button("Roll back", role: .destructive) {
+                Task { await upgradeStore.rollback() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The box returns to the previous version with your original history, which the upgrade did not change. Conversations started since the upgrade will not appear in the previous version. You will then need to reinstall the previous desktop version.")
+        }
     }
 
     // MARK: - Pieces
@@ -91,8 +109,114 @@ struct UpgradeScreen: View {
                     .foregroundColor(tokens.danger)
                     .accessibilityIdentifier("upgrade-disk")
             }
+            if model.nothingChanged {
+                Text("Nothing was changed — your box is exactly as it was.")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx3)
+                    .accessibilityIdentifier("upgrade-nothing-changed")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Actions (WS10 F19)
+
+    private var busy: Bool { model.retry.isPending || model.rollback.isPending }
+
+    private var failureActions: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+            HStack(spacing: Metrics.spacing.sp3) {
+                Button {
+                    Task { await upgradeStore.retry() }
+                } label: {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        if model.retry.isPending { ProgressView().tint(tokens.onAccent) }
+                        Text(retryTitle)
+                    }
+                    .font(.manta(size: Metrics.type.body, weight: .semibold))
+                    .foregroundColor(tokens.onAccent)
+                    .padding(.horizontal, Metrics.spacing.sp5)
+                    .padding(.vertical, Metrics.spacing.sp3)
+                    .background(tokens.accentSolid, in: RoundedRectangle(cornerRadius: Metrics.radius.lg))
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.canRetry || busy)
+                .opacity(!model.canRetry || busy ? 0.4 : 1)
+                .accessibilityIdentifier("upgrade-retry")
+
+                if model.canRollback {
+                    Button {
+                        confirmRollback = true
+                    } label: {
+                        HStack(spacing: Metrics.spacing.sp2) {
+                            if model.rollback.isPending { ProgressView().tint(tokens.danger) }
+                            Text(model.rollback.isPending ? "Rolling back…" : "Roll back")
+                        }
+                        .font(.manta(size: Metrics.type.body, weight: .semibold))
+                        .foregroundColor(tokens.danger)
+                        .padding(.horizontal, Metrics.spacing.sp5)
+                        .padding(.vertical, Metrics.spacing.sp3)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Metrics.radius.lg)
+                                .stroke(tokens.danger.opacity(0.6), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+                    .opacity(busy ? 0.4 : 1)
+                    .accessibilityIdentifier("upgrade-rollback")
+                }
+            }
+
+            outcomeLine(model.retry, okText: model.retryOkText)
+            outcomeLine(model.rollback, okText: UpgradeScreenModel.rollbackOkText)
+
+            if !model.canRetry, let reason = model.retryDisabledReason {
+                Text(reason)
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx3)
+                    .accessibilityIdentifier("upgrade-retry-disabled-reason")
+            }
+
+            copyDetailsRow
+        }
+    }
+
+    private var retryTitle: String {
+        guard model.retry.isPending else { return model.retryLabel }
+        return model.retryLabel == "Retry" ? "Retrying…" : "Checking…"
+    }
+
+    @ViewBuilder
+    private func outcomeLine(_ outcome: UpgradeActionOutcome, okText: String) -> some View {
+        if let line = outcome.line(okText: okText) {
+            Text(line)
+                .font(.manta(size: Metrics.type.small))
+                .foregroundColor(outcome.isError ? tokens.danger : tokens.ok)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("upgrade-outcome")
+        }
+    }
+
+    private var copyDetailsRow: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            Button {
+                UIPasteboard.general.string = model.details
+                copied = true
+            } label: {
+                Text("Copy details")
+                    .font(.manta(size: Metrics.type.small, weight: .medium))
+                    .foregroundColor(tokens.accentTx)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("upgrade-copy-details")
+            if copied {
+                Text("Copied to the clipboard")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.ok)
+                    .accessibilityIdentifier("upgrade-copied")
+            }
+        }
     }
 
     private var stepsBlock: some View {

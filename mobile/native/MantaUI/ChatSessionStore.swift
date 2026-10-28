@@ -201,7 +201,21 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var context: StreamContextPayload?
     @Published private(set) var cache: StreamCachePayload?
     @Published private(set) var truncation: StreamTruncationPayload?
+    /// The turn failure to show, nil once the user dismissed THAT occurrence (see
+    /// `dismissSessionError`). The box's `display` carries the sentence and, for a
+    /// credential failure, the provider to reconnect.
     @Published private(set) var sessionError: StreamSessionErrorPayload?
+    /// The provider retry in progress (the retry card); the box's copy.
+    @Published private(set) var retry: StreamRetryPayload?
+    /// The compaction card, hidden for good 3 s after it finished (`ChatCardExpiryLatch`).
+    @Published private(set) var compaction: ChatCardCompactionState?
+    /// The box's "Compacted while you were away" line, visible for 10 s.
+    @Published private(set) var compactionNotice: ChatCardCompactionNotice?
+    /// The model's own progress report (the "Blocked — needs a decision" card).
+    @Published private(set) var progress: MantaProgress?
+    /// The `/command` origins of this session's user messages (`commandExecuted`
+    /// frames, newest 200). WS01's mapper takes them as live fallbacks.
+    @Published private(set) var commandByMessageID: [String: StreamCommandExecutedPayload] = [:]
     @Published private(set) var todos: StreamTodosPayload?
     @Published private(set) var questions: [QuestionRequest] = []
     @Published private(set) var permissions: [PermissionRequest] = []
@@ -245,6 +259,36 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var hasEarlier = false
     /// True while a `loadEarlier()` widening fetch is in flight.
     @Published private(set) var loadingEarlier = false
+
+    // MARK: - WS02 state
+
+    /// Who may change this conversation (`.resolving` until the box has said). Read
+    /// ONLY through `isBackgroundJobReadOnly` / `canMutate` / this value by other
+    /// features (composer, git header, overflow sheet).
+    @Published private(set) var mutationPolicy: ChatCardMutationPolicy
+    /// Jump-to-message state (C2 `.message`): the phase, and the row to highlight.
+    @Published private(set) var focusPhase: ChatCardFocusPhase = .none
+    @Published private(set) var focusedRowID: String?
+    /// The capability list the box last advertised (`chat-cards-1`).
+    let chatCardCapabilities: ChatCardCapabilities
+    /// Whether the box has the chat-cards capability: true / false (an older box) /
+    /// nil (not known yet). Republished here so views observe one object; the store's
+    /// own guards read `chatCardCapabilities` directly (synchronous).
+    @Published private(set) var chatCardsAvailable: Bool?
+    private var inboxActionsAvailable: Bool {
+        chatCardCapabilities.has(ChatCardCapabilities.chatCards) == true
+    }
+
+    /// The messages the transcript is mapped from: `messages`, or — while a message
+    /// is focused — the slice of it that starts at the target.
+    private(set) var presentedMessages: [OpencodeMessage] = []
+
+    /// A background job's session is read-only; the bar replaces the composer.
+    var isBackgroundJobReadOnly: Bool { mutationPolicy == .readOnlyJob }
+    /// What the composer's `acceptsInput` follows (true while resolving, false only for a job).
+    var composerAcceptsInput: Bool { ChatCardMutationGate.composerAcceptsInput(mutationPolicy) }
+    /// Whether a user action may change this conversation right now.
+    var canMutate: Bool { !isReadOnly && mutationPolicy == .allowed }
 
     /// How many of the most recent messages the first fetch asks for. A session
     /// open used to pull the ENTIRE history — hundreds of KB on a long session,
@@ -375,18 +419,45 @@ final class ChatSessionStore: ObservableObject {
     /// by the id in its output.
     private(set) var jobStatusByID: [String: String] = [:]
 
+    // WS02 private state
+    private var compactionLatch: ChatCardExpiryLatch?
+    private var noticeLatch: ChatCardExpiryLatch?
+    private var compactionExpiry: Task<Void, Never>?
+    private var noticeExpiry: Task<Void, Never>?
+    private var lastTranscriptStaleSeq: Int?
+    /// The `sessionErrorSeq` the user dismissed.
+    private var dismissedSessionErrorSeq: Int?
+    private var focusToken = 0
+    private var focusTargetID: String?
+    private var highlightClear: Task<Void, Never>?
+    /// Whether the fetched window is a view onto longer history (before the focus
+    /// slice is taken into account).
+    private var windowHasEarlier = false
+    private var focusSliceOffset = 0
+    private var highlightedToken: Int?
+
     init(
         sessionId: String,
         eventStore: MantaEventStore,
         api: MantaAPIClient,
         widgetLiveStore: WidgetLiveStore? = nil,
-        isReadOnly: Bool = false
+        isReadOnly: Bool = false,
+        mutationPolicy: ChatCardMutationPolicy = .resolving,
+        chatCardCapabilities: ChatCardCapabilities? = nil
     ) {
         self.sessionId = sessionId
         self.eventStore = eventStore
         self.api = api
         self.widgetLiveStore = widgetLiveStore
         self.isReadOnly = isReadOnly
+        self.mutationPolicy = mutationPolicy
+        self.chatCardCapabilities = chatCardCapabilities ?? ChatCardCapabilities(api: api)
+        self.chatCardCapabilities.$ids
+            .map { $0.map { $0.contains(ChatCardCapabilities.chatCards) } }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] available in self?.chatCardsAvailable = available }
+            .store(in: &cancellables)
 
         // Per-session subscription (BET-672): sink on THIS session's state
         // alone, filtered to distinct values. The whole-dictionary sink used to
@@ -449,6 +520,33 @@ final class ChatSessionStore: ObservableObject {
                 .sink { [weak self] _ in self?.refreshWidgets() }
                 .store(in: &cancellables)
         }
+
+        // WS01 M-01-3: live media changing for THIS session re-maps the transcript;
+        // so does flipping "show reasoning & full output" — which also REFETCHES,
+        // because the slim fetch drops reasoning parts (M-01-7 / D22).
+        TranscriptMediaStore.shared.$sessions
+            .map { $0[sessionId] }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.remap() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: TranscriptDisplayOptions.didChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.scheduleRefetch()
+                self?.remap()
+            }
+            .store(in: &cancellables)
+
+        // The model's progress report changed (the "Blocked" card). Read-only
+        // child stores never show it.
+        if !isReadOnly {
+            eventStore.progressUpdates
+                .filter { $0 == sessionId }
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.refreshProgress() }
+                .store(in: &cancellables)
+        }
     }
 
     // MARK: - Lifecycle
@@ -462,6 +560,8 @@ final class ChatSessionStore: ObservableObject {
             load()
             refreshContextFromTranscript()
             refreshInbox()
+            refreshProgress()
+            Task { await chatCardCapabilities.refresh() }
         }
         // Register as an observer so the event store knows a consumer is
         // attached (BET-672): a session it completes with NO observer has its
@@ -475,6 +575,19 @@ final class ChatSessionStore: ObservableObject {
         // subagent screen owns ITS OWN store (BET-1024), so nothing here
         // touches any child; this releases the parent's own resources only.
         eventStore.unregisterSession(sessionId)
+        compactionExpiry?.cancel()
+        noticeExpiry?.cancel()
+        compactionExpiry = nil
+        noticeExpiry = nil
+        // A cancelled timer must not leave its key "scheduled": the latch would then
+        // never start another one after a push/pop, and the line would stay pinned.
+        // Leaving the screen ends the hold.
+        if let key = compactionLatch?.scheduled { expireCompaction(key) }
+        if let key = noticeLatch?.scheduled { expireNotice(key) }
+        highlightClear?.cancel()
+        highlightClear = nil
+        // A jump in progress does not outlive the screen.
+        if focusPhase != .none { endFocus() }
     }
 
     func load() {
@@ -523,6 +636,12 @@ final class ChatSessionStore: ObservableObject {
     /// Widen the window by `earlierMessageStep` and re-render. No-op while a
     /// widening is already running or when the whole history is already shown.
     func loadEarlier() {
+        // While a message is focused the earlier messages are ALREADY loaded (the
+        // slice just hides them): reveal them, and only widen when there are none.
+        if case .presented = focusPhase {
+            loadEarlierWhileFocused()
+            return
+        }
         guard hasEarlier, !loadingEarlier else { return }
         loadingEarlier = true
         messageLimit += ChatSessionStore.earlierMessageStep
@@ -567,8 +686,12 @@ final class ChatSessionStore: ObservableObject {
         // arrived yet.
         context = s.context ?? transcriptContext
         if let c = s.cache { cache = c }
+        let truncationChanged = truncation != s.truncation
         truncation = s.truncation
-        sessionError = s.sessionError
+        // The failure shows until the user dismisses THAT occurrence: a later
+        // frame — even an identical payload — has a higher sequence number.
+        sessionError = s.sessionErrorSeq == dismissedSessionErrorSeq ? nil : s.sessionError
+        let commandsChanged = applyChatCards(from: s)
         todos = s.todos
         subagents = s.subagents
         liveChildIDs = Set(s.subagents.map(\.childSessionId))
@@ -633,6 +756,7 @@ final class ChatSessionStore: ObservableObject {
         // `running` and `questions` are NOT touched by this merge (handled
         // above), and neither is the tail MINT (handled below).
         let frameStartedRunning = carried.running && (s.running == true)
+        if frameStartedRunning { dismissedSessionErrorSeq = nil }
         let merged = ChatStreamMerge.applying(
             frameTurnComplete: carried.turnComplete ? s.turnComplete : nil,
             frameStartedRunning: frameStartedRunning,
@@ -689,6 +813,7 @@ final class ChatSessionStore: ObservableObject {
             if runningChanged && running { scheduleRefetch() }
             if completeChanged && turnComplete { scheduleRefetch() }
         }
+        let wentIdle = runningChanged && !running
 
         // --- once-per-turn completion signal (BET-752 task 5). A multi-message
         // turn emits a `turnComplete` frame per `message.updated`, so the raw
@@ -704,7 +829,14 @@ final class ChatSessionStore: ObservableObject {
             completionArmed = false
         }
 
-        rebuildBlocks()
+        // The mapper's live inputs (`/command` origins, the latest truncation
+        // warning, the running gate on the last turn's footer) changed: re-map the
+        // canonical messages, not just the tail (WS01 M-01-3).
+        if commandsChanged || truncationChanged || wentIdle {
+            remap()
+        } else {
+            rebuildBlocks()
+        }
     }
 
     private func handleConnection(_ state: MantaConnectionState) {
@@ -725,6 +857,8 @@ final class ChatSessionStore: ObservableObject {
             // server's word: invalidate those answers, then re-read (K3).
             inboxTracker.markResync()
             refreshInbox()
+            refreshProgress()
+            Task { await chatCardCapabilities.refresh() }
         }
     }
 
@@ -862,7 +996,15 @@ final class ChatSessionStore: ObservableObject {
             thisTurnChildren: Set(streamState?.turnSubagentIDs ?? []),
             to: resolved
         )
-        let liveTranscript = merge.blocks
+        // Live media (images the model showed) draws after the settled transcript
+        // and before the live prose tail (WS01 M-01-2). Same `presentedMessages` as
+        // the mapper call, so a media owner is never drawn twice.
+        let mediaTail = ChatTranscriptMapper.liveMediaTail(
+            messages: presentedMessages,
+            live: TranscriptMediaStore.shared.entries(for: sessionId),
+            isLiveWindow: presentedMessages.last?.info.id == messages.last?.info.id
+        )
+        let liveTranscript = merge.blocks + mediaTail
         // @Published fires on EVERY assignment, and this runs on every stream
         // frame: only publish a real change so the working line is not re-drawn
         // for nothing.
@@ -880,15 +1022,18 @@ final class ChatSessionStore: ObservableObject {
         // tail here too, in the agreed fixed order — notices first, then
         // permission, plan-exit, generic question, the queued prompts, and the
         // todo card last. See `trailingBlocks` for the pinned order.
+        // A reconnectable error is shown PINNED (one actionable copy), not here.
+        let errorText = sessionError.flatMap { $0.display?.reconnect == nil ? $0.shownText : nil }
         let trailing = Self.trailingBlocks(
-            sessionError: sessionError,
+            sessionErrorText: errorText,
             truncation: truncation,
             running: running,
             permission: newestPermission,
             planExitQuestion: newestPlanQuestion,
             question: newestQuestion,
             pendingPrompts: pendingPrompts,
-            todos: todoContent
+            todos: todoContent,
+            footerTruncationIDs: ChatTranscriptMapper.footerTruncationMessageIDs(liveTranscript)
         )
 
         let newRows: [TranscriptRow]
@@ -936,20 +1081,25 @@ final class ChatSessionStore: ObservableObject {
     /// `nonisolated`: pure (value-in, value-out, no main-actor state), so it is
     /// directly unit-testable from a nonisolated XCTest body.
     nonisolated static func trailingBlocks(
-        sessionError: StreamSessionErrorPayload?,
+        sessionErrorText: String?,
         truncation: StreamTruncationPayload?,
         running: Bool,
         permission: PermissionRequest?,
         planExitQuestion: QuestionRequest?,
         question: QuestionRequest?,
         pendingPrompts: [PendingPrompt],
-        todos: TodoCardContent? = nil
+        todos: TodoCardContent? = nil,
+        footerTruncationIDs: Set<String> = []
     ) -> [TranscriptBlock] {
         var trailing: [TranscriptBlock] = []
-        if let err = sessionError {
-            trailing.append(.notice(err.message, .error))
+        if let text = sessionErrorText {
+            trailing.append(.notice(text, .error))
         }
-        if let trunc = truncation, !running {
+        // The warning is dropped only when a rendered turn footer already shows it
+        // for that message (WS01 M-01-4): a truncation with no footer keeps its
+        // standalone notice, so a warning is never both duplicated and never lost.
+        if let trunc = truncation, !running,
+           !(trunc.messageID.map { footerTruncationIDs.contains($0) } ?? false) {
             trailing.append(.notice(trunc.label ?? "Response truncated", .warn))
         }
         if let permission {
@@ -1009,8 +1159,12 @@ final class ChatSessionStore: ObservableObject {
             var failed = false
             var messages: [OpencodeMessage] = []
             do {
+                // Slim while "show reasoning & full output" is off; a FULL fetch while
+                // it is on, because the slim one drops the reasoning parts
+                // (WS01 M-01-7 / D22).
+                let slim = TranscriptDisplayOptions.fetchSlim
                 messages = try await Self.withTimeout(seconds: 12) {
-                    try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: true)
+                    try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: slim)
                 }
             } catch {
                 failed = true
@@ -1020,10 +1174,14 @@ final class ChatSessionStore: ObservableObject {
             await MainActor.run {
                 if isFirstLoad { loadFailed = didFail }
                 refreshing = false
+                // A jump to a message that could not even be fetched.
+                if didFail, case .locating(_, let token) = focusPhase {
+                    failFocus(.fetchFailed(token: token), clear: false)
+                }
                 // A full page back means the window is a view onto more
                 // history. A short page means we are looking at all of it. A
                 // failed fetch says nothing either way — leave it alone.
-                if !didFail { hasEarlier = loaded.count >= limit }
+                if !didFail { windowHasEarlier = loaded.count >= limit; publishHasEarlier() }
                 if !didFail || isFirstLoad {
                     // BET-1125 — never let a racing EMPTY refetch clobber a
                     // just-hydrated transcript (the blank-chat-on-open bug). A
@@ -1050,6 +1208,11 @@ final class ChatSessionStore: ObservableObject {
                     // just-hydrated transcript to blank. Assign to the PROPERTY
                     // (self.messages), not the shadowed local.
                     self.messages = loaded
+                    // Re-locate the focused message BY ID on every fetch (F10): a
+                    // message appended since the lookup, or a turn-boundary
+                    // refetch, can never shift it.
+                    if !didFail { planFocus(limit: limit) }
+                    recomputePresented()
                     // A sent-while-running message whose id is now in the
                     // transcript was received after all: its "may have been
                     // sent" row has nothing left to say.
@@ -1061,7 +1224,8 @@ final class ChatSessionStore: ObservableObject {
                     transcriptChildIDs = TaskStatusResolver.childSessionIDs(in: loaded)
                     updateChildRunning(eventStore.sessionStates)
                     voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: loaded, notes: voiceNotes)
-                    transcript = ChatTranscriptMapper.blocks(from: loaded, voiceNotes: voiceNotes, widgets: widgets)
+                    transcript = ChatTranscriptMapper.blocks(
+                        from: presentedMessages, voiceNotes: voiceNotes, widgets: widgets, options: mapOptions())
                     // The transcript now carries these messages, so any live
                     // copy of them is a duplicate — retire it BEFORE rebuilding
                     // or the finished answer renders twice, once from each
@@ -1085,6 +1249,7 @@ final class ChatSessionStore: ObservableObject {
                         inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
                     }
                     rebuildBlocks()
+                    resolveFocusHighlight()
                 }
             }
         } while fetchPending
@@ -1108,7 +1273,8 @@ final class ChatSessionStore: ObservableObject {
     func refreshVoiceNotes() async {
         let notes = (try? await api.voiceNotes(sessionId: sessionId)) ?? []
         await MainActor.run {
-            let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: notes, widgets: widgets)
+            let remapped = ChatTranscriptMapper.blocks(
+                from: presentedMessages, voiceNotes: notes, widgets: widgets, options: mapOptions())
             voiceNotes = notes
             voiceNoteMap = ChatTranscriptMapper.buildVoiceNoteMap(messages: messages, notes: notes)
             // Defensive, mirrors BET-1125's fetch guard: never let a voice-notes
@@ -1134,7 +1300,8 @@ final class ChatSessionStore: ObservableObject {
         let sessionWidgets = widgetLiveStore?.widgets.values.filter { $0.sessionId == sessionId } ?? []
         guard sessionWidgets != widgets else { return }
         widgets = sessionWidgets
-        let remapped = ChatTranscriptMapper.blocks(from: messages, voiceNotes: voiceNotes, widgets: widgets)
+        let remapped = ChatTranscriptMapper.blocks(
+            from: presentedMessages, voiceNotes: voiceNotes, widgets: widgets, options: mapOptions())
         if !(remapped.isEmpty && !transcript.isEmpty) {
             transcript = remapped
         }
@@ -1144,6 +1311,7 @@ final class ChatSessionStore: ObservableObject {
     // MARK: - Answers (wire from the phone, S1a)
 
     func replyPermission(_ request: PermissionRequest, reply: PermissionReply) {
+        guard requireMutation() else { return }
         Task {
             try? await api.permissionReply(requestId: request.id, reply: reply, sessionId: sessionId)
             await refreshPermissions()
@@ -1151,6 +1319,7 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func replyQuestion(_ request: QuestionRequest, answers: [[String]]) {
+        guard requireMutation() else { return }
         // opencode's /question/{id}/reply|reject accept ONLY the `que_…`
         // requestId — NOT the stable card id (a tool callID). Sending the card
         // id makes the box return HTTP 400 and the question never clears, so
@@ -1180,6 +1349,7 @@ final class ChatSessionStore: ObservableObject {
     }
 
     func rejectQuestion(_ request: QuestionRequest) {
+        guard requireMutation() else { return }
         guard let requestId = request.requestId else {
             questions.removeAll { $0.id == request.id }
             return
@@ -1213,6 +1383,7 @@ final class ChatSessionStore: ObservableObject {
     /// which re-reads the build model), so `buildModel` is the session's build
     /// model.
     func buildHere(question: QuestionRequest, planText: String, buildModel: SendPromptInput.Model?) {
+        guard requireMutation() else { return }
         replyQuestion(question, answers: [["Yes"]])
         Task {
             await send(text: planText, attachments: [], model: buildModel, agent: nil)
@@ -1225,6 +1396,7 @@ final class ChatSessionStore: ObservableObject {
     /// plan (still in plan mode — no edits). Ported from `ChatPanel.tsx`
     /// `keepPlanning` (lines 2531-2548).
     func keepPlanning(question: QuestionRequest, feedback: String) {
+        guard requireMutation() else { return }
         replyQuestion(question, answers: [["No"]])
         let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -1245,6 +1417,15 @@ final class ChatSessionStore: ObservableObject {
     /// drain if a turn is running). Failure is surfaced by the pending row in
     /// the transcript with its own tap-to-retry — never retried automatically.
     func send(text: String, attachments: [SendPromptInput.Attachment], model: SendPromptInput.Model?, mentions: [SendPromptInput.Mention]? = nil, agent: String? = nil) async {
+        // A read-only job takes no messages; while the box has not said who owns
+        // this session the message is held (it goes out when the answer is
+        // "ordinary", and fails with the reason when it is a job).
+        if case .refuse(let reason) = gate(.send) {
+            actionHint = reason
+            return
+        }
+        // Sending leaves a jump to an older message: the new turn lands at the tail.
+        clearFocus()
         dismissFinishedTodos()
         let prompt = PendingPrompt(
             id: UUID().uuidString,
@@ -1265,6 +1446,10 @@ final class ChatSessionStore: ObservableObject {
         // for the callers that need the picker's model / agent applied — a
         // steered message never switches them.)
         if running { return }
+        if mutationPolicy != .allowed {
+            rebuildBlocks()   // the held row shows in the transcript tail
+            return
+        }
         await deliver(prompt)
     }
 
@@ -1281,6 +1466,17 @@ final class ChatSessionStore: ObservableObject {
         agent: String? = nil,
         delivery: InboxDelivery = .steer
     ) async {
+        switch gate(.send) {
+        case .refuse(let reason):
+            actionHint = reason
+            return
+        case .hold:
+            // Not yet known to be an ordinary session: hold it (never delivered).
+            await send(text: text, attachments: attachments, model: model, mentions: mentions, agent: agent)
+            return
+        case .run:
+            break
+        }
         if running {
             await sendWhileRunning(text: text, attachments: attachments, model: model,
                                    mentions: mentions, agent: agent, delivery: delivery)
@@ -1327,6 +1523,16 @@ final class ChatSessionStore: ObservableObject {
         agent: String? = nil,
         delivery: InboxDelivery
     ) async {
+        switch gate(.send) {
+        case .refuse(let reason):
+            actionHint = reason
+            return
+        case .hold:
+            await send(text: text, attachments: attachments, model: model, mentions: mentions, agent: agent)
+            return
+        case .run:
+            break
+        }
         dismissFinishedTodos()
         let prompt = PendingPrompt(
             id: UUID().uuidString,
@@ -1423,16 +1629,19 @@ final class ChatSessionStore: ObservableObject {
         rebuildBlocks()
     }
 
-    /// Send now (`steer`) / Wait (`queue`) on a pending message (N1). Every
-    /// outcome is reported: `changed` is confirmed by the next `inbox` frame; the
-    /// rest say what happened.
+    /// Send now (`steer`) / Wait (`queue`) on a pending message (N1). The box words
+    /// every outcome: `error` / `notice` show as the hint; a plain `changed` is
+    /// confirmed by the next `inbox` frame. An older box (no `chat-cards-1`) can
+    /// answer `unknown` with no sentence at all, so every inbox action is gated on
+    /// the capability instead of guessing — the card shows its controls disabled.
     func setInboxDelivery(id: String, to delivery: InboxDelivery) {
-        guard !isReadOnly, inboxBusyIDs.insert(id).inserted else { return }
+        guard !isReadOnly, requireMutation(), inboxActionsAvailable,
+              inboxBusyIDs.insert(id).inserted else { return }
         Task {
             defer { inboxBusyIDs.remove(id) }
             do {
                 let result = try await api.inboxSetDelivery(sessionId: sessionId, id: id, delivery: delivery)
-                if let message = InboxActionReport.setDelivery(result) {
+                if let message = result.error ?? result.notice {
                     actionHint = message
                     refreshInbox()
                 }
@@ -1442,20 +1651,43 @@ final class ChatSessionStore: ObservableObject {
         }
     }
 
-    /// × on a pending message (K4).
+    /// × on a pending message (K4). Same reporting and gating as `setInboxDelivery`.
     func cancelInboxItem(id: String) {
-        guard !isReadOnly, inboxBusyIDs.insert(id).inserted else { return }
+        guard !isReadOnly, requireMutation(), inboxActionsAvailable,
+              inboxBusyIDs.insert(id).inserted else { return }
         Task {
             defer { inboxBusyIDs.remove(id) }
             do {
                 let result = try await api.inboxCancel(sessionId: sessionId, id: id)
-                if let message = InboxActionReport.cancel(result) {
+                if let message = result.error ?? result.notice {
                     actionHint = message
                     refreshInbox()
                 }
             } catch {
                 actionHint = InboxActionReport.cancelFailed
             }
+        }
+    }
+
+    /// "Edit last": cancel the NEWEST pending message that has no action in flight
+    /// and give back its text — the box decides whether it may be restored (only a
+    /// confirmed cancel is). Returns nil when there is nothing to restore; every
+    /// refusal / failure has already been reported through `actionHint`.
+    func editLastInboxItem() async -> String? {
+        guard !isReadOnly, requireMutation(), inboxActionsAvailable,
+              let item = ChatCardEditLast.pick(items: inboxItems, busy: inboxBusyIDs),
+              inboxBusyIDs.insert(item.id).inserted else { return nil }
+        defer { inboxBusyIDs.remove(item.id) }
+        do {
+            let result = try await api.inboxCancelReported(sessionId: sessionId, id: item.id, restore: true)
+            if let message = result.error ?? result.notice {
+                actionHint = message
+                refreshInbox()
+            }
+            return result.restoreText
+        } catch {
+            actionHint = InboxActionReport.cancelFailed
+            return nil
         }
     }
 
@@ -1535,7 +1767,7 @@ final class ChatSessionStore: ObservableObject {
     /// pending prompt waits for the next idle. Strict FIFO over `.waiting`
     /// rows (a `.failed`/`.sending` row is never auto-delivered).
     private func drainPendingPromptIfIdle() {
-        guard !running else { return }
+        guard !running, canMutate else { return }
         guard let next = pendingPrompts.first(where: { $0.state == .waiting }) else { return }
         Task { @MainActor in await deliver(next) }
     }
@@ -1551,6 +1783,23 @@ final class ChatSessionStore: ObservableObject {
     func retry(promptID: String) {
         guard let index = pendingPrompts.firstIndex(where: { $0.id == promptID }),
               pendingPrompts[index].state == .failed || pendingPrompts[index].state == .uncertain else { return }
+        switch gate(.send) {
+        case .refuse(let reason):
+            actionHint = reason
+            return
+        case .hold:
+            // Back to waiting; it goes out once the session is known to be ordinary.
+            var held = pendingPrompts[index]
+            held.delivery = nil
+            held.failureReason = nil
+            held.state = .waiting
+            pendingPrompts[index] = held
+            persistPending()
+            rebuildBlocks()
+            return
+        case .run:
+            break
+        }
         if pendingPrompts[index].isBusySend, running {
             let busyRow = pendingPrompts[index]
             Task { @MainActor in await postWhileRunning(busyRow) }
@@ -1595,6 +1844,7 @@ final class ChatSessionStore: ObservableObject {
 
     /// Interrupt the running turn.
     func abort() {
+        guard requireMutation() else { return }
         Task {
             do { try await api.abort(sessionId: sessionId) }
             catch { await MainActor.run { actionHint = "Couldn't stop the turn — check the connection" } }
@@ -1614,6 +1864,7 @@ final class ChatSessionStore: ObservableObject {
     ///   conversation resumes);
     /// - failure surfaces "Compact failed — check the connection".
     func compact() {
+        guard requireMutation() else { return }
         Task {
             do {
                 try await api.compactSession(sessionId: sessionId)
@@ -1720,4 +1971,319 @@ final class ChatSessionStore: ObservableObject {
     /// live elapsed against its own 1s tick rather than stream-state changes
     /// (BET-630, D1).
     var runningStart: Date? { runningSince }
+}
+
+// MARK: - WS02: chat cards, mutation policy, jump to a message
+
+extension ChatSessionStore {
+
+    // MARK: Mapper inputs (WS01 M-01-1)
+
+    /// Everything the transcript mapper needs besides the messages: the reasoning
+    /// switch, the running gate, the live `/command` origins, the latest live
+    /// truncation warning and this session's live media.
+    fileprivate func mapOptions() -> TranscriptMapOptions {
+        TranscriptMapOptions(
+            showReasoning: TranscriptDisplayOptions.showDetails,
+            running: running,
+            liveCommands: commandByMessageID.mapValues {
+                TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments)
+            },
+            liveTruncation: truncation.flatMap {
+                TranscriptLiveTruncation.from(kind: $0.kind, messageID: $0.messageID)
+            },
+            liveMedia: TranscriptMediaStore.shared.entries(for: sessionId)
+        )
+    }
+
+    /// Re-map the canonical messages (the live inputs changed) under the same
+    /// no-blank-clobber guard the voice-note / widget refreshes use, then rebuild.
+    fileprivate func remap() {
+        let remapped = ChatTranscriptMapper.blocks(
+            from: presentedMessages, voiceNotes: voiceNotes, widgets: widgets, options: mapOptions())
+        if !(remapped.isEmpty && !transcript.isEmpty) {
+            transcript = remapped
+        }
+        rebuildBlocks()
+    }
+
+    // MARK: Stream-fed cards
+
+    /// Copy this session's chat-card state out of the event store. Returns whether
+    /// the `/command` origins changed (the transcript must then be re-mapped).
+    fileprivate func applyChatCards(from s: MantaSessionStreamState) -> Bool {
+        if retry != s.retry { retry = s.retry }
+
+        let commands = s.commands.values
+        let commandsChanged = commands != commandByMessageID
+        if commandsChanged { commandByMessageID = commands }
+
+        // --- compaction card: visible until its 3 s hold after "ended" is over,
+        // then hidden for good (the event store keeps the state for the app's
+        // lifetime, so a copy cleared by a timer would be resurrected by the next
+        // snapshot). The first snapshot seeds the latch, so opening a chat never
+        // shows a stale card; one still RUNNING at open is shown.
+        if compactionLatch == nil {
+            let seed = s.compaction?.phase == .running ? s.compactionGeneration - 1 : s.compactionGeneration
+            compactionLatch = ChatCardExpiryLatch(seed: seed)
+        }
+        if let card = s.compaction, var latch = compactionLatch {
+            let verdict = latch.observe(key: card.generation, expiring: card.phase == .done)
+            compactionLatch = latch
+            let shown: ChatCardCompactionState? = verdict.visible ? card : nil
+            if compaction != shown { compaction = shown }
+            if let key = verdict.schedule {
+                compactionExpiry?.cancel()
+                compactionExpiry = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self?.expireCompaction(key)
+                }
+            }
+        } else if compaction != nil {
+            compaction = nil
+        }
+
+        // --- "Compacted while you were away": 10 s, once per notice.
+        if noticeLatch == nil { noticeLatch = ChatCardExpiryLatch(seed: s.compactionNoticeSeq) }
+        if let notice = s.compactionNotice, var latch = noticeLatch {
+            let verdict = latch.observe(key: s.compactionNoticeSeq, expiring: true)
+            noticeLatch = latch
+            let shown: ChatCardCompactionNotice? = verdict.visible ? notice : nil
+            if compactionNotice != shown { compactionNotice = shown }
+            if let key = verdict.schedule {
+                noticeExpiry?.cancel()
+                noticeExpiry = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self?.expireNotice(key)
+                }
+            }
+        } else if compactionNotice != nil {
+            compactionNotice = nil
+        }
+
+        // --- the compaction rewrote the timeline: refetch ONCE per signal (the
+        // first snapshot only seeds the counter).
+        if let last = lastTranscriptStaleSeq, last != s.transcriptStaleSeq { scheduleRefetch() }
+        lastTranscriptStaleSeq = s.transcriptStaleSeq
+
+        return commandsChanged
+    }
+
+    fileprivate func expireCompaction(_ key: Int) {
+        compactionLatch?.expire(key)
+        if compaction?.generation == key { compaction = nil }
+    }
+
+    fileprivate func expireNotice(_ key: Int) {
+        noticeLatch?.expire(key)
+        compactionNotice = nil
+    }
+
+    /// × on the pinned send-error line: hides THIS occurrence only.
+    func dismissSessionError() {
+        dismissedSessionErrorSeq = eventStore.sessionStates[sessionId]?.sessionErrorSeq
+        sessionError = nil
+        rebuildBlocks()
+    }
+
+    // MARK: Progress ("Blocked — needs a decision")
+
+    /// The model's own progress report. Ambient: a failure keeps the last value.
+    func refreshProgress() {
+        guard !isReadOnly else { return }
+        Task {
+            do {
+                let latest = try await api.progressGet(sessionID: sessionId)
+                if progress != latest { progress = latest }
+            } catch {
+                NSLog("[chat-cards] couldn't read the progress report for %@: %@", sessionId, String(describing: error))
+            }
+        }
+    }
+
+    /// The progress report, only while it says the model is blocked.
+    var blockedProgress: MantaProgress? {
+        progress.flatMap { ChatCardProgressRule.isBlocked(state: $0.state) ? $0 : nil }
+    }
+
+    // MARK: Mutation policy
+
+    /// The ownership store pushes who may change this conversation. A read-only
+    /// (subagent) store never leaves `.resolving` — it is read-only through
+    /// `isReadOnly`.
+    func applyMutationPolicy(_ policy: ChatCardMutationPolicy) {
+        guard !isReadOnly, policy != mutationPolicy else { return }
+        mutationPolicy = policy
+        switch policy {
+        case .readOnlyJob:
+            // Held messages can never go anywhere now: fail them with the reason.
+            var changed = false
+            for index in pendingPrompts.indices where pendingPrompts[index].state == .waiting {
+                pendingPrompts[index].state = .failed
+                pendingPrompts[index].failureReason = ChatCardMutationGate.readOnlyJobMessage
+                changed = true
+            }
+            if changed { persistPending() }
+            rebuildBlocks()
+        case .allowed:
+            drainPendingPromptIfIdle()
+        case .resolving:
+            break
+        }
+    }
+
+    fileprivate func gate(_ action: ChatCardMutationAction) -> ChatCardGateDecision {
+        if isReadOnly { return .refuse("This is a read-only view") }
+        return ChatCardMutationGate.decide(policy: mutationPolicy, action: action)
+    }
+
+    /// Whether a user action that is not a send may run now; reports why not.
+    fileprivate func requireMutation() -> Bool {
+        switch gate(.mutate) {
+        case .run:
+            return true
+        case .hold:
+            return false
+        case .refuse(let reason):
+            actionHint = reason
+            return false
+        }
+    }
+
+    // MARK: Jump to a message (C2 `.message`, F10)
+
+    /// Open the transcript at `messageID`: a slice of the history that starts at
+    /// it. Latest call wins. The screen stops following the tail the moment this
+    /// returns (the phase is set synchronously), before any row changes.
+    func focus(messageID: String) {
+        focusToken += 1
+        highlightedToken = nil
+        focusedRowID = nil
+        highlightClear?.cancel()
+        focusTargetID = nil
+        focusPhase = ChatCardFocusMachine.reduce(focusPhase, event: .focus(id: messageID, token: focusToken))
+        scheduleRefetch()
+    }
+
+    /// Leave the jump: back to the newest messages (the normal window), refetched.
+    func clearFocus() {
+        guard focusPhase != .none else { return }
+        endFocus()
+        messageLimit = Self.initialMessageLimit
+        scheduleRefetch()
+    }
+
+    /// Drop the slice and the highlight without touching the loaded window.
+    fileprivate func endFocus() {
+        focusPhase = ChatCardFocusMachine.reduce(focusPhase, event: .clear)
+        focusTargetID = nil
+        focusedRowID = nil
+        highlightedToken = nil
+        highlightClear?.cancel()
+        highlightClear = nil
+        recomputePresented()
+        remap()
+    }
+
+    /// "Load earlier" while a message is focused: the messages above it are already
+    /// loaded and merely hidden — reveal them (a prepend, no jump), keep the window
+    /// as it is, and only widen it when there was nothing to reveal.
+    fileprivate func loadEarlierWhileFocused() {
+        let action = ChatCardFocusPolicy.loadEarlierAction(index: focusSliceOffset)
+        endFocus()
+        if action == .revealLocalThenWiden { loadEarlier() }
+    }
+
+    /// Re-locate the focused message by id in the freshly fetched window.
+    fileprivate func planFocus(limit: Int) {
+        let target: String
+        let token: Int
+        switch focusPhase {
+        case .locating(let id, let t), .presented(let id, let t):
+            target = id
+            token = t
+        case .none, .failed:
+            return
+        }
+        let plan = ChatCardFocusPlanner.next(
+            target: target,
+            messageIDs: messages.map(\.info.id),
+            limit: limit,
+            hasEarlier: windowHasEarlier,
+            cap: ChatCardFocusPlanner.defaultCap,
+            step: Self.earlierMessageStep
+        )
+        switch plan {
+        case .present:
+            focusTargetID = target
+            focusPhase = ChatCardFocusMachine.reduce(focusPhase, event: .presented(token: token))
+        case .widen(let newLimit):
+            messageLimit = newLimit
+            fetchPending = true
+        case .tooFarBack:
+            failFocus(.tooFarBack(token: token), clear: true)
+        case .notFound:
+            failFocus(.notFound(token: token), clear: false)
+        }
+    }
+
+    /// A jump that cannot be done: say why, and leave focus.
+    fileprivate func failFocus(_ event: ChatCardFocusEvent, clear: Bool) {
+        guard case .failed(let message) = ChatCardFocusMachine.reduce(focusPhase, event: event) else { return }
+        actionHint = message
+        if clear { clearFocus() } else { endFocus() }
+    }
+
+    /// `presentedMessages` = the slice that starts at the focused message, or all
+    /// of `messages`.
+    fileprivate func recomputePresented() {
+        if case .presented = focusPhase, let id = focusTargetID,
+           let index = messages.firstIndex(where: { $0.info.id == id }) {
+            presentedMessages = Array(messages[index...])
+            focusSliceOffset = index
+        } else {
+            presentedMessages = messages
+            focusSliceOffset = 0
+        }
+        publishHasEarlier()
+    }
+
+    /// "Load earlier" is offered when the window is a view onto longer history, or
+    /// while a slice hides loaded messages above the target.
+    fileprivate func publishHasEarlier() {
+        let value = windowHasEarlier || focusSliceOffset > 0
+        if hasEarlier != value { hasEarlier = value }
+    }
+
+    /// Highlight the target row once per jump — but only when the target itself
+    /// produces a row (an unfinished or empty message must not highlight whatever
+    /// happens to follow it).
+    fileprivate func resolveFocusHighlight() {
+        guard case .presented(let id, let token) = focusPhase, highlightedToken != token else { return }
+        highlightedToken = token
+        guard let target = messages.first(where: { $0.info.id == id }) else { return }
+        let ownBlocks = ChatTranscriptMapper.blocks(
+            from: [target], voiceNotes: voiceNotes, widgets: widgets, options: mapOptions())
+        let unfinished = target.info.role.rawValue == "assistant" && target.info.time?.completed == nil
+        switch ChatCardFocusHighlight.resolve(
+            targetBlockCount: ownBlocks.count,
+            targetIsUnfinishedAssistant: unfinished,
+            sliceRowIDs: rows.map(\.id)
+        ) {
+        case .row(let rowID):
+            focusedRowID = rowID
+            highlightClear?.cancel()
+            highlightClear = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard !Task.isCancelled else { return }
+                self?.focusedRowID = nil
+            }
+        case .unfinished:
+            actionHint = ChatCardFocusHighlight.unfinishedHint
+        case .nothingToShow:
+            actionHint = ChatCardFocusHighlight.nothingToShowHint
+        }
+    }
 }

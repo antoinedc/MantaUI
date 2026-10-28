@@ -178,7 +178,7 @@ test("U27 (contract-only): no DB at any resolved path degrades to supported:fals
     process.env.MANTA_OPENCODE_DB = "/nonexistent/cto-p0/opencode.db";
     _resetDbHandle();
     const res = await searchMessages({ query: "anything", sessionIds: ["s1"] });
-    assert.deepEqual(res, { supported: false, hits: [] });
+    assert.deepEqual(res, { supported: false, hits: [], groups: [] });
   } finally {
     if (prevDb === undefined) delete process.env.MANTA_OPENCODE_DB;
     else process.env.MANTA_OPENCODE_DB = prevDb;

@@ -91,8 +91,60 @@ describe("settingsForPlatform", () => {
 
   it("excludes mobile-only entries on desktop", () => {
     const desktop = settingsForPlatform(ALL, "desktop");
-    expect(desktop.some((e) => e.id === "serverUrlMobile")).toBe(false); // mobile
+    expect(desktop.some((e) => e.id === "themeMobile")).toBe(false); // mobile
     expect(desktop.some((e) => e.id === "chatAutoAllow")).toBe(false); // mobile
+  });
+
+  it("themeMobile / hapticsEnabled are phone-only; the worktree toggles are on both (WS10)", () => {
+    const desktop = settingsForPlatform(ALL, "desktop");
+    const mobile = settingsForPlatform(ALL, "mobile");
+    for (const id of ["themeMobile", "hapticsEnabled"]) {
+      expect(desktop.some((e) => e.id === id), `${id} on desktop`).toBe(false);
+      expect(mobile.some((e) => e.id === id), `${id} on mobile`).toBe(true);
+    }
+    for (const id of ["worktreePerSession", "worktreeCleanOnClose"]) {
+      expect(desktop.some((e) => e.id === id), `${id} on desktop`).toBe(true);
+      expect(mobile.some((e) => e.id === id), `${id} on mobile`).toBe(true);
+    }
+    // The dead "Server URL" field (nothing ever read it) is gone everywhere.
+    expect(ALL.some((e) => e.id === "serverUrlMobile")).toBe(false);
+  });
+
+  it("themeMobile is device-local so it never rewrites the shared box theme", () => {
+    const theme = ALL.find((e) => e.id === "themeMobile") as SettingEntry;
+    expect(theme.configKey).toBeNull();
+    expect(theme.default).toBe("system");
+    expect(theme.options?.map((o) => o.value)).toEqual(["system", "light", "dark"]);
+    const haptics = ALL.find((e) => e.id === "hapticsEnabled") as SettingEntry;
+    expect(haptics.configKey).toBe("hapticsEnabled");
+    expect(haptics.default).toBe(true);
+  });
+
+  it("every phone-only anchor is a null-config custom entry in a section the phone shows", () => {
+    const anchors = [
+      "updatesMobile",
+      "backupMobile",
+      "boxStatusMobile",
+      "addDeviceMobile",
+      "linkedDevicesMobile",
+      "restartOpencodeMobile",
+      "removeServerMobile",
+      "pluginsListMobile",
+      "forgeMobile",
+      "skillRegistriesMobile",
+      "referencesMobile",
+      "launcherFlagsMobile",
+    ];
+    for (const id of anchors) {
+      const e = ALL.find((x) => x.id === id);
+      expect(e, id).toBeDefined();
+      expect(e!.control).toBe("custom");
+      expect(e!.configKey).toBeNull();
+      expect(e!.platform).toBe("mobile");
+    }
+    const mobileSections = new Set(settingsForPlatform(ALL, "mobile").map((e) => e.section));
+    expect(mobileSections.has("general")).toBe(true);
+    expect(mobileSections.has("extensions")).toBe(true);
   });
 
   it("excludes cto entries from mobile (BET-1191 — iOS has no call surface)", () => {
@@ -183,8 +235,9 @@ describe("searchSettings", () => {
   });
 
   it("respects platform", () => {
-    const hits = searchSettings(ALL, "server url", "desktop");
-    expect(hits).toEqual([]); // serverUrlMobile is mobile-only
+    const hits = searchSettings(ALL, "linked devices", "desktop");
+    expect(hits).toEqual([]); // linkedDevicesMobile is mobile-only
+    expect(searchSettings(ALL, "linked devices", "mobile").some((e) => e.id === "linkedDevicesMobile")).toBe(true);
   });
 
   it("returns nothing for cto fields once the cto section is filtered out (BET-1191 flag off)", () => {
@@ -245,7 +298,7 @@ describe("resetAllPayload", () => {
   it("omits null-configKey entries", () => {
     const payload = resetAllPayload(ALL);
     expect(payload).not.toHaveProperty("pluginsEnabled");
-    expect(payload).not.toHaveProperty("serverUrlMobile");
+    expect(payload).not.toHaveProperty("themeMobile");
   });
 });
 

@@ -1,16 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { StoppedRecord, UsageSnapshot } from "../shared/types";
-import {
-  extractLastSnippet,
-  groupStoppedByWorkspace,
-  isNewStopped,
-  resetAtFor,
-  resumeCost,
-  resumeCosts,
-  selectionSummary,
-  shouldShowStoppedMarker,
-  unarmedStoppedCount,
-} from "./usageResume";
+import type { StoppedRecord } from "../shared/types";
+import { reconcileResumeSelection, shouldShowStoppedMarker, unarmedStoppedCount } from "./usageResume";
 
 const rec = (partial: Partial<StoppedRecord> = {}): StoppedRecord => ({
   workspace: "manta",
@@ -25,140 +15,34 @@ const rec = (partial: Partial<StoppedRecord> = {}): StoppedRecord => ({
   ...partial,
 });
 
-const snap = (partial: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
-  provider: "claude",
-  providerIDs: ["anthropic"],
-  windows: [{ kind: "weekly", label: "Weekly", pct: 100, resetsAt: 2000 }],
-  fetchedAt: 100,
-  ...partial,
-});
-
 describe("unarmedStoppedCount", () => {
-  it("counts only conversations not yet armed", () => {
-    expect(unarmedStoppedCount([rec(), rec({ conversation: "b", armed: true })])).toBe(1);
-    expect(unarmedStoppedCount([rec({ armed: true }), rec({ conversation: "b", armed: true })])).toBe(0);
+  it("counts only conversations still waiting on a decision", () => {
     expect(unarmedStoppedCount([])).toBe(0);
+    expect(unarmedStoppedCount([rec(), rec({ conversation: "b", armed: true }), rec({ conversation: "c" })])).toBe(2);
   });
 });
 
-describe("resetAtFor", () => {
-  it("finds the matching provider window reset", () => {
-    const s = snap();
-    expect(resetAtFor(rec(), [s])).toBe(2000);
-  });
-  it("returns undefined when the provider is not reporting", () => {
-    expect(resetAtFor(rec({ provider: "kimi" }), [snap()])).toBeUndefined();
-  });
-  it("returns undefined when the record named no window", () => {
-    expect(resetAtFor(rec({ window: null }), [snap()])).toBeUndefined();
-  });
-});
-
-describe("resumeCost — warm vs cold either side of the cache window", () => {
-  const ttlMs = 60 * 60_000; // 1h
-  // reset at now + 30m → inside the window → warm → 0
-  it("is zero when the reset falls inside the prompt-cache window", () => {
-    expect(resumeCost(rec(), 90_000, 0, ttlMs)).toBe(0);
-  });
-  it("is at most the cached tokens exactly at the window edge (inclusive)", () => {
-    // reset - now === ttlMs → inside the window → warm
-    expect(resumeCost(rec(), ttlMs, 0, ttlMs)).toBe(0);
-  });
-  it("charges the re-read tokens once the reset is past the cache window", () => {
-    expect(resumeCost(rec(), ttlMs + 1, 0, ttlMs)).toBe(50000);
-  });
-  it("treats an unknown reset as cold", () => {
-    expect(resumeCost(rec(), undefined, 0, ttlMs)).toBe(50000);
-  });
-  it("defaults to 0 when the record carries no cached-token count", () => {
-    expect(resumeCost(rec({ cachedTokens: undefined }), undefined, 0, ttlMs)).toBe(0);
-  });
-});
-
-describe("resumeCosts", () => {
-  it("maps conversation → cost", () => {
-    const costs = resumeCosts([rec(), rec({ conversation: "b", window: null })], [snap()], 0, 60 * 60_000);
-    expect(costs.get("ses_a")).toBe(0); // warm (reset inside window)
-    expect(costs.get("b")).toBe(50000); // cold (no window → re-read)
-  });
-});
-
-describe("selectionSummary", () => {
-  const records = [rec(), rec({ conversation: "b" }), rec({ conversation: "c" })];
-  const costs = new Map([["ses_a", 0], ["b", 100], ["c", 200]]);
-
-  it("counts selection and batch total", () => {
-    expect(selectionSummary(records, new Set(["ses_a", "c"]), costs)).toMatchObject({
-      totalCount: 3,
-      selectedCount: 2,
-      batchTotal: 200,
-      allSelected: false,
-    });
-  });
-  it("check/uncheck all — allSelected flips", () => {
-    expect(selectionSummary(records, new Set(records.map((r) => r.conversation)), costs).allSelected).toBe(true);
-    expect(selectionSummary(records, new Set(), costs)).toMatchObject({
-      selectedCount: 0,
-      batchTotal: 0,
-      allSelected: false,
-    });
-  });
-});
-
-describe("isNewStopped — badge boundary against last-looked", () => {
-  it("new when stopped after the last-looked stamp", () => {
-    expect(isNewStopped(rec({ stoppedAt: 5000 }), 4000)).toBe(true);
-  });
-  it("not new when stopped at or before the last-looked stamp", () => {
-    expect(isNewStopped(rec({ stoppedAt: 3000 }), 3000)).toBe(false);
-    expect(isNewStopped(rec({ stoppedAt: 2000 }), 3000)).toBe(false);
-  });
-  it("everything is new when there is no stamp (never looked)", () => {
-    expect(isNewStopped(rec({ stoppedAt: 1 }), null)).toBe(true);
-  });
-});
-
-describe("shouldShowStoppedMarker — precedence over a pending question/permission", () => {
-  it("shows the stopped marker when merely stopped", () => {
+describe("shouldShowStoppedMarker", () => {
+  it("a pending question or permission outranks the stopped marker", () => {
     expect(shouldShowStoppedMarker(true, false)).toBe(true);
-  });
-  it("a pending question/permission outranks the stopped marker", () => {
     expect(shouldShowStoppedMarker(true, true)).toBe(false);
-  });
-  it("no marker when not stopped", () => {
     expect(shouldShowStoppedMarker(false, false)).toBe(false);
   });
 });
 
-describe("extractLastSnippet", () => {
-  const msg = (role: "user" | "assistant", text: string) => ({
-    info: { id: `m_${role}`, sessionID: "ses_a", role },
-    parts: [{ type: "text", id: `p_${role}`, messageID: "x", text }],
-  });
-  it("returns the last assistant text, truncated", () => {
-    expect(extractLastSnippet([msg("user", "hi"), msg("assistant", "short")])).toBe("short");
-  });
-  it("skips trailing non-text assistant parts and truncates long text", () => {
-    const long = "a".repeat(120);
-    expect(extractLastSnippet([msg("assistant", long)])).toBe("a".repeat(90) + "…");
-  });
-  it("returns null when there is no assistant text", () => {
-    expect(extractLastSnippet([msg("user", "hi")])).toBeNull();
-    expect(extractLastSnippet(null)).toBeNull();
-    expect(extractLastSnippet([])).toBeNull();
-  });
-});
+describe("reconcileResumeSelection", () => {
+  const set = (...ids: string[]) => new Set(ids);
 
-describe("groupStoppedByWorkspace", () => {
-  it("groups by workspace with most-recently-stopped first, preserving workspace order", () => {
-    const records = [
-      rec({ conversation: "a", stoppedAt: 10 }),
-      rec({ conversation: "b", workspace: "ethernal", stoppedAt: 99 }),
-      rec({ conversation: "c", stoppedAt: 50 }),
-    ];
-    const groups = groupStoppedByWorkspace(records);
-    expect(groups.map((g) => g.workspace)).toEqual(["manta", "ethernal"]);
-    expect(groups[0].rows.map((r) => r.conversation)).toEqual(["c", "a"]);
-    expect(groups[1].rows.map((r) => r.conversation)).toEqual(["b"]);
+  it("pristine → the armed rows (the default selection on open)", () => {
+    expect([...reconcileResumeSelection({ selected: set("x"), pristine: true, viewIds: set("a", "b"), armedIds: set("a") })]).toEqual(["a"]);
+  });
+
+  it("after the user touched anything: vanished rows leave, the user's other choices stay, new rows are not auto-selected", () => {
+    const next = reconcileResumeSelection({ selected: set("a", "gone", "c"), pristine: false, viewIds: set("a", "c", "new"), armedIds: set("a", "new") });
+    expect([...next].sort()).toEqual(["a", "c"]);
+  });
+
+  it("an emptied selection stays empty (unchecking everything is a choice)", () => {
+    expect(reconcileResumeSelection({ selected: set(), pristine: false, viewIds: set("a"), armedIds: set("a") }).size).toBe(0);
   });
 });

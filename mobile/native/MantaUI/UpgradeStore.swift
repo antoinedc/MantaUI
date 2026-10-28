@@ -4,8 +4,8 @@ import Combine
 // ===========================================================================
 // Box upgrade store (OpenCode V2 cutover, slice C4 — contract K3).
 //
-// Owns what the device knows about the box's upgrade and nothing else. READ
-// ONLY: it never calls retry or rollback (those are desktop actions). Three
+// Owns what the device knows about the box's upgrade, plus the two actions a
+// failed upgrade offers (Retry / Check again and Roll back — WS10 F19). Three
 // producers feed `gate`, in one place so they cannot disagree:
 //
 //   - `{kind:"upgrade"}` frames on /events (the whole K3 object, every change)
@@ -24,6 +24,9 @@ import Combine
 @MainActor
 final class UpgradeStore: ObservableObject {
     typealias Fetcher = @Sendable () async throws -> UpgradeStatus?
+    /// Runs Retry / Roll back against the box. Never throws: a failure is the
+    /// `{ok: false, error}` it returns.
+    typealias ActionRunner = @Sendable (UpgradeAction) async -> UpgradeActionResult
 
     @Published private(set) var gate = UpgradeGateState()
 
@@ -31,6 +34,7 @@ final class UpgradeStore: ObservableObject {
     var screen: UpgradeScreenModel? { UpgradeScreenModel.make(gate) }
 
     private let fetch: Fetcher
+    private let act: ActionRunner
     private let pollInterval: Duration
     private var pollTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
@@ -41,10 +45,12 @@ final class UpgradeStore: ObservableObject {
 
     init(
         fetch: @escaping Fetcher = { try await MantaAPIClient.live().upgradeStatus() },
-        pollInterval: Duration = .seconds(1)
+        pollInterval: Duration = .seconds(1),
+        act: @escaping ActionRunner = { await BoxRESTClient.live().upgradeAction($0) }
     ) {
         self.fetch = fetch
         self.pollInterval = pollInterval
+        self.act = act
     }
 
     /// Attach to the app's event stream. Idempotent (the raw-frame handler list
@@ -77,6 +83,23 @@ final class UpgradeStore: ObservableObject {
 
     /// Foreground / pull: re-read now.
     func refresh() async {
+        await read()
+    }
+
+    // MARK: - Actions (failed state)
+
+    /// "Retry" / "Check again". Pending → the box's answer → re-read, so the
+    /// screen moves on the moment the box does. One action at a time.
+    func retry() async { await perform(.retry) }
+
+    /// "Roll back" (the screen confirms first).
+    func rollback() async { await perform(.rollback) }
+
+    private func perform(_ action: UpgradeAction) async {
+        guard !gate.retry.isPending, !gate.rollback.isPending else { return }
+        gate.actionStarted(action)
+        let result = await act(action)
+        gate.actionFinished(action, result: result)
         await read()
     }
 

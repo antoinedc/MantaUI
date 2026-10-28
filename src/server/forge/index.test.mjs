@@ -580,7 +580,7 @@ test("shipPullRequest: no forge → no_forge, never pushes", async () => {
     gitRemoteOrigin: async () => null,
     gitPush: async (i) => { pushed.push(i); },
   });
-  assert.deepEqual(r, { ok: false, error: "no_forge" });
+  assert.deepEqual(r, { ok: false, error: "no_forge", message: "This folder isn't linked to a GitHub repository." });
   assert.equal(pushed.length, 0);
 });
 
@@ -622,10 +622,20 @@ test("shipPullRequest: push failure surfaces a push-failed error, never creates"
   assert.ok(r.error.startsWith("push failed"));
 });
 
+// An adapter whose PR (head "abc123") is green and mergeable, so the box's own
+// merge gate lets the call through.
+function readyToMerge(overrides = {}) {
+  return {
+    getPullRequest: async () => ({ data: { ...OPEN_PR, headSha: "abc123", unresolvedThreads: 0, mergeable: true, ...overrides }, stale: false }),
+    getChecks: async () => ({ data: [{ name: "ci", status: "completed", conclusion: "success" }], stale: false }),
+  };
+}
+
 test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure", async () => {
   let mergeInput = null;
   const adapter = {
     kind: "github",
+    ...readyToMerge(),
     merge: async (_repo, _n, input) => { mergeInput = input; return { data: { merged: true }, stale: false }; },
   };
   const ok = await mergePullRequest("/repo", { number: 42, method: "merge", sha: "abc123" }, {
@@ -637,14 +647,16 @@ test("mergePullRequest passes the head SHA and surfaces a sha_mismatch failure",
 
   const failing = {
     kind: "github",
+    ...readyToMerge(),
     merge: async () => { const e = new Error("head sha no longer matches"); e.kind = "sha_mismatch"; throw e; },
   };
-  const r = await mergePullRequest("/repo", { number: 42, method: "merge", sha: "abc999" }, {
+  const r = await mergePullRequest("/repo", { number: 42, method: "merge", sha: "abc123" }, {
     ...SHIP_DEPS,
     getAdapter: () => failing,
   });
   assert.equal(r.ok, false);
   assert.equal(r.kind, "sha_mismatch");
+  assert.match(r.message, /head SHA moved/);
 });
 
 test("shipPreview returns head, base and a best-effort file count", async () => {
@@ -706,7 +718,7 @@ test("shipPreview refuses an unknown base without running any git", async () => 
     ...linkedShipDeps({ getDefaultBranch: async () => null }),
     run: async () => { runCalls += 1; return { stdout: "", stderr: "" }; },
   });
-  assert.deepEqual(r, { ok: false, error: "unknown_base" });
+  assert.deepEqual(r, { ok: false, error: "unknown_base", message: "Couldn't tell which branch to target." });
   assert.equal(runCalls, 0, "no git call happens when the base is unknown");
 });
 
@@ -716,7 +728,7 @@ test("shipPullRequest refuses an unknown base and never pushes", async () => {
     ...linkedShipDeps({ getDefaultBranch: async () => null }),
     gitPush: async (i) => { pushed.push(i); },
   });
-  assert.deepEqual(r, { ok: false, error: "unknown_base" });
+  assert.deepEqual(r, { ok: false, error: "unknown_base", message: "Couldn't tell which branch to target." });
   assert.equal(pushed.length, 0, "a PR that cannot exist must not leave a pushed branch behind");
 });
 
@@ -766,7 +778,7 @@ test("shipPreview: repo with no forge → no_forge", async () => {
     ...SHIP_DEPS,
     gitRemoteOrigin: async () => null,
   });
-  assert.deepEqual(r, { ok: false, error: "no_forge" });
+  assert.deepEqual(r, { ok: false, error: "no_forge", message: "This folder isn't linked to a GitHub repository." });
 });
 
 test("shipPreview with no linkedIssue dep leaves the body unchanged from today", async () => {
@@ -1646,4 +1658,261 @@ test("forgeCloneStart clones into an existing EMPTY destination (empty dir is fi
   );
   assert.equal(result.error, undefined);
   assert.equal(store.started.length, 1);
+});
+
+// ---- WS05 server-first: view, last-PR cache, merge gate, messages, placement ----
+
+import { createLastPrCache } from "./view.mjs";
+
+const prDeps = (adapter, extra = {}) => ({
+  gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+  currentBranch: async () => "feature/x",
+  getDefaultBranch: async () => "main",
+  run: async () => ({ stdout: "2\n", stderr: "" }),
+  resolveToken: async () => ({ token: "t", source: "cli" }),
+  getAdapter: () => adapter,
+  lastPr: createLastPrCache({ max: 8 }),
+  ...extra,
+});
+
+test("pullRequestForCwd: returns ordered, toned checks and the box's view", async () => {
+  const checks = [
+    { name: "lint", status: "completed", conclusion: "success" },
+    { name: "build", status: "completed", conclusion: "failure", url: "https://ci/b" },
+    { name: "test", status: "in_progress" },
+  ];
+  const r = await pullRequestForCwd("/repo", prDeps(fakeAdapter({ prs: [OPEN_PR], checks })));
+  assert.deepEqual(r.checks.map((c) => `${c.name}:${c.tone}`), ["build:error", "test:running", "lint:ok"]);
+  assert.equal(r.view.panel, "pr");
+  assert.equal(r.view.chipLabel, "feature/x · #42");
+  assert.equal(r.view.merge.can, false);
+  assert.equal(r.view.merge.reason, "checks failing");
+  assert.equal(r.view.checks.chip.label, "✗ 1 failed");
+  assert.equal(r.view.checks.logsUrl, "https://ci/b");
+});
+
+test("pullRequestForCwd: no PR → view.panel no-pr with the ship state; no forge → panel none", async () => {
+  const noPr = await pullRequestForCwd("/repo", prDeps(fakeAdapter({ prs: [] })));
+  assert.equal(noPr.view.panel, "no-pr");
+  assert.equal(noPr.view.ship.state, "ready");
+  assert.equal(noPr.view.merge, null);
+  const none = await pullRequestForCwd("/repo", prDeps(fakeAdapter(), { gitRemoteOrigin: async () => null }));
+  assert.equal(none.view.panel, "none");
+  assert.equal(none.error, "no_forge");
+});
+
+test("pullRequestForCwd: a rate-limited read serves the last PR flagged stale; a fresh no-PR read drops it", async () => {
+  const lastPr = createLastPrCache({ max: 8 });
+  const good = await pullRequestForCwd("/repo", prDeps(fakeAdapter({ prs: [OPEN_PR] }), { lastPr }));
+  assert.equal(good.pr.number, 42);
+  const limited = {
+    kind: "github",
+    listPullRequests: async () => { throw new ForgeRateLimitedError("u"); },
+  };
+  const served = await pullRequestForCwd("/repo", prDeps(limited, { lastPr }));
+  assert.equal(served.pr.number, 42);
+  assert.equal(served.stale, true);
+  assert.equal(served.view.panel, "pr");
+  // A fresh read with no PR on the branch forgets it.
+  await pullRequestForCwd("/repo", prDeps(fakeAdapter({ prs: [] }), { lastPr }));
+  const after = await pullRequestForCwd("/repo", prDeps(limited, { lastPr }));
+  assert.equal(after.pr, null);
+  assert.equal(after.stale, true);
+});
+
+test("pullRequestForCwd: a failing list read with nothing cached still throws", async () => {
+  const broken = { kind: "github", listPullRequests: async () => { throw new Error("boom"); } };
+  await assert.rejects(pullRequestForCwd("/repo", prDeps(broken)), /boom/);
+});
+
+test("mergePullRequest: a blocked gate and a moved head are refused WITHOUT calling merge", async () => {
+  let merged = 0;
+  const blocked = {
+    kind: "github",
+    ...readyToMerge({ unresolvedThreads: 2 }),
+    merge: async () => { merged++; return { data: {}, stale: false }; },
+  };
+  const r = await mergePullRequest("/repo", { number: 42, sha: "abc123" }, { ...SHIP_DEPS, getAdapter: () => blocked });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "blocked");
+  assert.equal(r.message, "Can't merge yet: 2 unresolved threads");
+  const moved = await mergePullRequest("/repo", { number: 42, sha: "OLD" }, { ...SHIP_DEPS, getAdapter: () => ({ kind: "github", ...readyToMerge(), merge: async () => { merged++; } }) });
+  assert.equal(moved.kind, "sha_mismatch");
+  assert.match(moved.message, /head SHA moved/);
+  assert.equal(merged, 0, "the adapter's merge is never reached");
+});
+
+test("mergePullRequest: a missing or empty sha fails closed and never calls merge", async () => {
+  let merged = 0;
+  const adapter = { kind: "github", ...readyToMerge(), merge: async () => { merged++; return { data: {}, stale: false }; } };
+  for (const input of [{ number: 42 }, { number: 42, sha: "" }, { number: 42, sha: undefined }]) {
+    const r = await mergePullRequest("/repo", input, { ...SHIP_DEPS, getAdapter: () => adapter });
+    assert.equal(r.ok, false, JSON.stringify(input));
+    assert.equal(r.kind, "sha_mismatch");
+    assert.equal(r.error, "missing sha");
+  }
+  // The box's own read has no head SHA either: nothing to compare, so nothing merges.
+  const noHead = { kind: "github", ...readyToMerge({ headSha: "" }), merge: async () => { merged++; } };
+  const r = await mergePullRequest("/repo", { number: 42, sha: "abc123" }, { ...SHIP_DEPS, getAdapter: () => noHead });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "sha_mismatch");
+  assert.equal(merged, 0, "the adapter's merge is never reached");
+});
+
+test("mergePullRequest: an unreadable PR fails closed; adapter failures carry a message", async () => {
+  let merged = 0;
+  const unreadable = { kind: "github", getPullRequest: async () => { throw new Error("down"); }, merge: async () => { merged++; } };
+  const r = await mergePullRequest("/repo", { number: 42, sha: "abc123" }, { ...SHIP_DEPS, getAdapter: () => unreadable });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "blocked");
+  assert.equal(merged, 0);
+  const perm = { kind: "github", ...readyToMerge(), merge: async () => { const e = new Error("no"); e.kind = "permission"; throw e; } };
+  const p = await mergePullRequest("/repo", { number: 42, sha: "abc123" }, { ...SHIP_DEPS, getAdapter: () => perm });
+  assert.equal(p.message, "No permission to merge this pull request.");
+});
+
+test("shipPullRequest: push / create failures carry plain-word messages", async () => {
+  const push = await shipPullRequest("/repo", { title: "t" }, { ...SHIP_DEPS, gitPush: async () => { throw new Error("denied"); } });
+  assert.equal(push.message, "Couldn't push the branch: denied");
+  const create = await shipPullRequest("/repo", { title: "t" }, {
+    ...SHIP_DEPS,
+    getAdapter: () => ({ kind: "github", createPullRequest: async () => { throw new Error("422"); } }),
+  });
+  assert.equal(create.message, "GitHub refused the pull request: 422");
+});
+
+const FILE_DIFF = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n";
+
+function diffDeps(adapter, kit) {
+  return {
+    gitRemoteOrigin: async () => "https://github.com/acme/widget.git",
+    currentBranch: async () => "feature/x",
+    resolveToken: async () => ({ token: "t", source: "cli" }),
+    getAdapter: () => adapter,
+    load: kit.load, save: kit.save, publish: kit.publish,
+  };
+}
+
+test("forgeDiffForCwd: returns structured files, placed threads and the reconciled draft", async () => {
+  const kit = draftKit();
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "mine" } }, kit);
+  const r = await forgeDiffForCwd("/repo", diffDeps(diffAdapter({
+    prs: [OPEN_PR],
+    diff: FILE_DIFF,
+    threads: [{ id: "t1", path: "a.ts", line: 1, side: "LEFT", resolved: false, comments: [] }],
+    headSha: "abc",
+  }), kit));
+  assert.equal(r.error, null);
+  assert.equal(r.parseFailed, false);
+  assert.equal(r.message, null);
+  assert.equal(r.files[0].path, "a.ts");
+  assert.deepEqual(r.files[0].rows.map((x) => x.kind), ["hunk", "context", "removed", "added"]);
+  assert.deepEqual(r.threads[0].placement, { at: "row", file: 0, row: 1 }, "LEFT on a context row lands on its old-line row");
+  assert.equal(r.draft.comments.length, 1);
+  assert.deepEqual(r.draft.comments[0].placement, { at: "row", file: 0, row: 3 });
+  assert.equal(r.diff, FILE_DIFF, "the raw diff stays for compatibility");
+});
+
+test("forgeDiffForCwd: a rate-limited read still returns the stored draft (unplaced)", async () => {
+  const kit = draftKit();
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "mine" } }, kit);
+  const limitedDiff = {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getDiff: async () => { throw new ForgeRateLimitedError("u"); },
+  };
+  const r = await forgeDiffForCwd("/repo", diffDeps(limitedDiff, kit));
+  assert.equal(r.error, null);
+  assert.equal(r.stale, true);
+  assert.deepEqual(r.files, []);
+  assert.equal(r.draft.comments.length, 1);
+  assert.deepEqual(r.draft.comments[0].placement, { at: "unplaced" });
+  // The PR LIST read is limited instead: the last PR seen on the branch finds the draft.
+  const lastPr = createLastPrCache({ max: 4 });
+  lastPr.set("/repo", "feature/x", { pr: OPEN_PR, checks: [], rollup: "none" });
+  const limitedList = { kind: "github", listPullRequests: async () => { throw new ForgeRateLimitedError("u"); } };
+  const viaCache = await forgeDiffForCwd("/repo", { ...diffDeps(limitedList, kit), lastPr });
+  assert.equal(viaCache.stale, true);
+  assert.equal(viaCache.draft?.comments.length, 1);
+  // Nothing cached: no number, so no draft — and the clients keep their snapshot.
+  const bare = await forgeDiffForCwd("/repo", { ...diffDeps(limitedList, kit), lastPr: createLastPrCache({ max: 4 }) });
+  assert.equal(bare.stale, true);
+  assert.equal(bare.draft, null);
+});
+
+test("forgeDiffForCwd: a draft anchored to an older head is returned stale", async () => {
+  const kit = draftKit({ headSha: "old" });
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "x" } }, kit);
+  const r = await forgeDiffForCwd("/repo", diffDeps(diffAdapter({ prs: [OPEN_PR], diff: FILE_DIFF, headSha: "newer" }), kit));
+  assert.equal(r.draft.stale, true);
+});
+
+test("forgeDiffForCwd: a successful fetch with unparseable text → parseFailed, nothing lost", async () => {
+  const kit = draftKit();
+  const warn = console.warn;
+  console.warn = () => {};
+  let r;
+  try {
+    r = await forgeDiffForCwd("/repo", diffDeps(diffAdapter({
+      prs: [OPEN_PR],
+      diff: "@@ -1,2 +1,3 @@\n first\n+new\n",
+      threads: [{ id: "t1", path: "a.ts", line: 1, side: "RIGHT", resolved: false, comments: [] }],
+      headSha: "abc",
+    }), kit));
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(r.error, null);
+  assert.equal(r.parseFailed, true);
+  assert.equal(r.message, "Couldn't read this diff.");
+  assert.deepEqual(r.files, []);
+  assert.deepEqual(r.threads[0].placement, { at: "unplaced" });
+});
+
+test("forgeDiffForCwd: errors carry a plain message and empty structured fields", async () => {
+  const kit = draftKit();
+  const r = await forgeDiffForCwd("/repo", diffDeps(diffAdapter({ prs: [] }), kit));
+  assert.equal(r.error, "no_pr");
+  assert.equal(r.message, "No pull request on this session's branch.");
+  assert.deepEqual(r.files, []);
+  assert.equal(r.draft, null);
+});
+
+test("draft / reply / submit failures carry plain-word messages; successes carry null", async () => {
+  const k = draftKit();
+  const empty = await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "" } }, k);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.message, "Write a comment first.");
+  const ok = await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 1, side: "new", body: "hi" } }, k);
+  assert.equal(ok.message, null);
+  const none = await draftSubmitForCwd("/repo", {}, draftKit());
+  assert.equal(none.message, "Add at least one line comment before submitting.");
+  const rk = replyKit();
+  const noReply = await replyThreadForCwd("/repo", { threadId: "t", body: "" }, rk.k);
+  assert.equal(noReply.message, "Write a reply first.");
+  const bad = draftKit({ adapter: submitAdapter(async () => { const e = new Error("x"); e.kind = "http_422"; throw e; }) });
+  await addComments(bad, [{ path: "a.ts", line: 1, side: "new", body: "c" }]);
+  const failed = await draftSubmitForCwd("/repo", {}, bad);
+  assert.match(failed.message, /^GitHub rejected the review/);
+  const get = await draftGetForCwd("/repo", { ...draftKit(), gitRemoteOrigin: async () => null });
+  assert.equal(get.message, "No linked forge repository.");
+});
+
+test("forgeInbox: every item carries its row fields and the box-joined localPath", async () => {
+  const adapter = {
+    searchIssues: async (query) => query === "assignee:@me"
+      ? { data: [{ kind: "issue", owner: "acme", repo: "widget", repoKey: "github.com/acme/widget", number: 1, title: "Fix it", url: "https://gh/1", state: "open", updatedAt: 5, headSha: "", reason: "assigned" }], stale: false }
+      : { data: [], stale: false },
+    getChecks: async () => ({ data: [], stale: false }),
+  };
+  const base = { resolveToken: async () => ({ token: "t", source: "cli" }), getAdapter: () => adapter };
+  const r = await forgeInbox({ ...base, probeRepos: async () => ({ repos: [{ repoKey: "github.com/acme/widget", path: "/home/dev/widget" }] }) });
+  assert.equal(r.items[0].label, "issue · assigned to you");
+  assert.equal(r.items[0].identifier, "#1");
+  assert.equal(r.items[0].branchName, "manta/issue-1-fix-it");
+  assert.equal(r.items[0].localPath, "/home/dev/widget");
+  const failing = await forgeInbox({ ...base, probeRepos: async () => { throw new Error("scan failed"); } });
+  assert.equal(failing.items[0].localPath, null, "a probe failure never fails the inbox");
+  const noProbe = await forgeInbox(base);
+  assert.equal(noProbe.items[0].localPath, null);
 });

@@ -356,4 +356,30 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertTrue(UsageMeters.shouldShowContext(pct: 0.4))
         XCTAssertTrue(UsageMeters.shouldShowContext(pct: 100))
     }
+
+    // MARK: - band(window) — the BOX's tone, never a client computation (WS09 SF-M18)
+
+    func testBandFromTheBoxsTone() {
+        func tone(_ t: String?, pct: Double = 50) -> UsageWindow {
+            UsageWindow(kind: "session", pct: pct, tone: t)
+        }
+        XCTAssertEqual(UsageMeters.band(tone("under")), .ok)
+        XCTAssertEqual(UsageMeters.band(tone("warn")), .warn)
+        XCTAssertEqual(UsageMeters.band(tone("danger")), .danger)
+        XCTAssertEqual(UsageMeters.band(tone("over")), .danger)
+    }
+
+    /// An older box sends no tone: the window has no band (callers tint it neutral)
+    /// even when its percentage would have banded red — the colour is the box's call.
+    func testWindowWithoutToneHasNoBand() {
+        XCTAssertNil(UsageMeters.band(UsageWindow(kind: "session", pct: 99)))
+        XCTAssertNil(UsageMeters.band(UsageWindow(kind: "session", pct: 99, tone: "unheard-of")))
+    }
+
+    func testToneDecodesWhenPresentAndIsNilWhenAbsent() throws {
+        let with = try JSONDecoder().decode(UsageWindow.self, from: Data(#"{"kind":"weekly","pct":91,"tone":"danger"}"#.utf8))
+        XCTAssertEqual(with.tone, "danger")
+        let without = try JSONDecoder().decode(UsageWindow.self, from: Data(#"{"kind":"weekly","pct":91}"#.utf8))
+        XCTAssertNil(without.tone)
+    }
 }

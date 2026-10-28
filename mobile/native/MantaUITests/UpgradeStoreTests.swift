@@ -36,6 +36,30 @@ private final class FakeBox: @unchecked Sendable {
     }
 }
 
+/// A scripted answer to Retry / Roll back. Same locking discipline as `FakeBox`.
+private final class FakeActions: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _result = UpgradeActionResult(ok: true)
+    private var _calls: [UpgradeAction] = []
+    private let delay: Duration
+
+    init(delay: Duration = .milliseconds(60)) { self.delay = delay }
+
+    var calls: [UpgradeAction] { lock.lock(); defer { lock.unlock() }; return _calls }
+    func answer(_ r: UpgradeActionResult) { lock.lock(); _result = r; lock.unlock() }
+    private func record(_ action: UpgradeAction) -> UpgradeActionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        _calls.append(action)
+        return _result
+    }
+    func run(_ action: UpgradeAction) async -> UpgradeActionResult {
+        let result = record(action)
+        try? await Task.sleep(for: delay)
+        return result
+    }
+}
+
 @MainActor
 final class UpgradeStoreTests: XCTestCase {
 
@@ -46,8 +70,14 @@ final class UpgradeStoreTests: XCTestCase {
         UpgradeStatus(state: .completed, steps: [], overall: 1)
     }
 
-    private func makeStore(_ box: FakeBox, poll: Duration = .milliseconds(10)) -> UpgradeStore {
-        UpgradeStore(fetch: { try await box.fetch() }, pollInterval: poll)
+    private func makeStore(_ box: FakeBox, poll: Duration = .milliseconds(10),
+                           actions: FakeActions = FakeActions()) -> UpgradeStore {
+        UpgradeStore(fetch: { try await box.fetch() }, pollInterval: poll, act: { await actions.run($0) })
+    }
+
+    private func failed(step: String = "copy") -> UpgradeStatus {
+        UpgradeStatus(state: .failed, steps: [UpgradeStep(id: step, status: .failed)], overall: 0.4,
+                      error: UpgradeFailure(step: step, message: "It broke"))
     }
 
     /// Spin until `condition` holds or two seconds pass.
@@ -166,5 +196,80 @@ final class UpgradeStoreTests: XCTestCase {
         box.answer(.success(running())) // changed while we were disconnected
         store.connectionChanged(connected: true)
         await eventually("the reconnect read surfaces the missed state") { store.screen?.kind == .running }
+    }
+
+    // MARK: - Retry / Roll back (WS10 F19)
+
+    func testRetryGoesPendingThenOkThenRereads() async {
+        let box = FakeBox()
+        box.answer(.success(failed()))
+        let actions = FakeActions()
+        let store = makeStore(box, actions: actions)
+        store.apply(failed())
+        let readsBefore = box.calls
+
+        let task = Task { await store.retry() }
+        await eventually("the press is pending while the call runs") { store.gate.retry == .pending }
+        XCTAssertEqual(store.screen?.retry, .pending)
+        await task.value
+
+        XCTAssertEqual(actions.calls, [.retry])
+        XCTAssertEqual(store.gate.retry, .ok)
+        XCTAssertGreaterThan(box.calls, readsBefore, "the screen re-reads so it moves on the moment the box does")
+    }
+
+    func testAnErrorResultSurfacesItsMessage() async {
+        let box = FakeBox()
+        box.answer(.success(failed()))
+        let actions = FakeActions()
+        actions.answer(UpgradeActionResult(ok: false, error: "HTTP 500"))
+        let store = makeStore(box, actions: actions)
+        store.apply(failed())
+        await store.retry()
+        XCTAssertEqual(store.gate.retry, .error("HTTP 500"))
+        XCTAssertEqual(store.screen?.retry.line(okText: "x"), "HTTP 500")
+    }
+
+    func testRollbackBehavesTheSame() async {
+        let box = FakeBox()
+        box.answer(.success(failed()))
+        let actions = FakeActions()
+        let store = makeStore(box, actions: actions)
+        store.apply(failed())
+
+        await store.rollback()
+        XCTAssertEqual(actions.calls, [.rollback])
+        XCTAssertEqual(store.gate.rollback, .ok)
+
+        actions.answer(UpgradeActionResult(ok: false, error: "The box refused the request."))
+        await store.rollback()
+        XCTAssertEqual(store.gate.rollback, .error("The box refused the request."))
+    }
+
+    func testOnlyOneActionAtATime() async {
+        let box = FakeBox()
+        box.answer(.success(failed()))
+        let actions = FakeActions(delay: .milliseconds(120))
+        let store = makeStore(box, actions: actions)
+        store.apply(failed())
+
+        let first = Task { await store.retry() }
+        await eventually("first press pending") { store.gate.retry == .pending }
+        await store.rollback()
+        XCTAssertEqual(actions.calls, [.retry], "a second action is refused while one is pending")
+        await first.value
+    }
+
+    func testTheOutcomeIsClearedWhenAFrameMovesFailedToRunning() async {
+        let box = FakeBox()
+        box.answer(.success(failed()))
+        let store = makeStore(box)
+        store.apply(failed())
+        await store.retry()
+        XCTAssertEqual(store.gate.retry, .ok)
+
+        store.apply(running())
+        XCTAssertEqual(store.gate.retry, .idle)
+        XCTAssertEqual(store.screen?.kind, .running)
     }
 }

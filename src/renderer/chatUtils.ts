@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -15,6 +15,7 @@ import { isBackgroundResultMessage } from "./backgroundRun";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
+import { formatTokens, formatTokenCount } from "../shared/formatTokens.mjs";
 // BET-1139: the deprecated-model predicate lives in the shared node-safe
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
@@ -216,98 +217,9 @@ export function moveMenuHighlight(
   return (index + dir + length) % length;
 }
 
-export function formatTokens(n: number): string {
-  if (n < 1000) return `${n} tokens`;
-  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k tokens`;
-  return `${Math.round(n / 1000)}k tokens`;
-}
-
-// Compact token figure for inline surfaces (the compaction saving pill / the
-// "128k → 31k" one-liner). Built on formatTokens — never a second formatter —
-// with the " tokens" suffix stripped.
-function formatTokensCompact(n: number): string {
-  return formatTokens(n).replace(/\s+tokens$/, "");
-}
-
-// ---- Optimizer P2.5 (BET-1347) pure formatters ------------------------------
-
-export type PressureTone = "neutral" | "ok" | "warn";
-
-/**
- * Describe a subscription window's pacing pressure for the pressure chip that
- * sits under its gauge. `hasSignal` is false when there is no pressure signal
- * yet (tokensPerPct is null or there are too few samples) — that renders the
- * documented NEUTRAL state, never a fabricated pace.
- *
- *   hasSignal=false        -> "no pressure signal yet"      (neutral)
- *   hasSignal, deficit<=0  -> "on pace"                     (ok)
- *   hasSignal, deficit>0   -> "+N pts ahead of pace"        (warn)
- */
-export function describePressure(deficit: number, hasSignal: boolean): { text: string; tone: PressureTone } {
-  if (!hasSignal) return { text: "no pressure signal yet", tone: "neutral" };
-  const pts = Math.round(deficit);
-  if (deficit > 0) return { text: `+${pts} pts ahead of pace`, tone: "warn" };
-  return { text: "on pace", tone: "ok" };
-}
-
-export type ActivityEntry = {
-  id?: string;
-  ts?: number;
-  kind: string;
-  subject?: string;
-  from?: string | number;
-  to?: string | number;
-  verdict: string;
-  evidence?: Record<string, string | number>;
-  revertedAt?: number;
-};
-
-const VERDICT_WORD: Record<string, string> = {
-  kept: "Kept",
-  "rolled-back": "Rolled back",
-  applied: "Applied",
-};
-
-// A compact evidence line: "62 turns · hit 74.1% · churn 0.4%" — joined from
-// the counts/measurements, never content.
-function evidenceLine(evidence?: Record<string, string | number>): string {
-  if (!evidence) return "";
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(evidence)) {
-    if (v === undefined || v === null || String(v) === "") continue;
-    const label = k.replace(/([A-Z])/g, " $1").replace(/^[a-z]/g, (c) => c.toUpperCase()).trim();
-    parts.push(`${label} ${v}`);
-  }
-  return parts.join(" · ");
-}
-
-/**
- * Describe one activity-log entry for the feed: a headline (the verdict with
- * the change it describes) and the evidence line. The prefix is derived from
- * `verdict` (so a rolled-back entry is visually distinct); `subject` is the
- * change itself.
- */
-export function describeActivityEntry(entry: ActivityEntry): { headline: string; detail: string } {
-  const word = VERDICT_WORD[entry.verdict] ?? entry.verdict ?? "Changed";
-  const subject = typeof entry.subject === "string" && entry.subject ? entry.subject : "optimizer change";
-  return {
-    headline: `${word} — ${subject}`,
-    detail: evidenceLine(entry.evidence),
-  };
-}
-
-/**
- * Format a compaction's before/after token sizes for the "⟳ Compacted ... ·
- * 128k → 31k" one-liner. Returns the arrowed savings when the compaction
- * actually shrank the context, or "0" when there was no reduction (before and
- * after equal or after > before) — never fabricates a saving.
- */
-export function formatCompactionSaving(before: number, after: number): string {
-  const isNum = (n: number): boolean => typeof n === "number" && Number.isFinite(n) && n > 0;
-  if (!isNum(before) || !isNum(after)) return "0";
-  if (after >= before) return "0";
-  return `${formatTokensCompact(before)} → ${formatTokensCompact(after)}`;
-}
+// One token formatter for the whole effort (master D26): the implementation lives
+// in src/shared/formatTokens.mjs; this re-export keeps every renderer import path.
+export { formatTokens };
 
 // Build an SVG path string for a CUMULATIVE series over `values` (oldest →
 // newest), for the Optimizer's "sent vs raw counterfactual" consumption chart
@@ -827,45 +739,6 @@ export function stepTokensFromFrame(p: {
   const write = t.cache?.write ?? 0;
   if (input + output + reasoning + read + write <= 0) return null;
   return { input, output, reasoning, cache: { read, write }, cost: p.cost ?? 0 };
-}
-
-/**
- * A `sessionError` frame -> the banner the panel shows.
- *
- * - `auth` is non-null when the failure is a credential problem on one of the
- *   subscription providers (`authErrorAdvice`); the banner is then the single
- *   reconnect nudge. It classifies against the RAW provider message
- *   (`rawMessage`, which the box adds only when humanizing changed the text),
- *   because its keyword match must not shift with the box's unwrapping (BET-1131).
- * - Otherwise `message` is the typed prefix + the humanized sentence. `message`
- *   on the frame is already humanized by the box.
- */
-export function describeSessionError(
-  p: { name: string | null; message: string; rawMessage?: string },
-  providerID: string | null | undefined,
-): { message: string; auth: { providerID: string; label: string } | null } {
-  const name = p.name ?? undefined;
-  const auth = authErrorAdvice(name, p.rawMessage ?? p.message, providerID);
-  if (auth) return { message: `${auth.label} needs to be reconnected.`, auth };
-  const human = p.message;
-  let message: string;
-  switch (name) {
-    case "ContextOverflowError":
-      message = `Context full — try /compact: ${human}`;
-      break;
-    case "MessageOutputLengthError":
-      message = "Response truncated (hit output limit)";
-      break;
-    case "StructuredOutputError":
-      message = `Structured output failed: ${human}`;
-      break;
-    case "ApiError":
-      message = `API error: ${human}`;
-      break;
-    default:
-      message = human;
-  }
-  return { message, auth: null };
 }
 
 /**
@@ -1791,38 +1664,9 @@ export function terminalShortcut(
   }
 }
 
-// ===== Auth-error banner (BET-316) =====
-//
-// Opencode emits `session.error` whenever a turn fails. The legacy path in
-// useSseBus falls through to `default:` and surfaces the raw error message
-// — fine for Claude, where the upstream message is already actionable, but
-// misleading for Codex and Kimi: their messages can land without context, and
-// for Claude specifically the message ends with "Run `claude` to refresh
-// them." regardless of which provider the user is on.
-//
-// The banner this helper feeds into fixes both. When the error is recognisably
-// a credential/auth failure on one of the three providers in the subscription
-// registry, the banner shows `<Label> needs to be reconnected.` with a single
-// [Reconnect] button that opens Settings → Accounts on the failing provider
-// (openAccountsSettings). Claude's own
-// server-side auto-refresh (`maybeRecoverCredentials`, the 10-min pre-expiry
-// poller) still runs in parallel — it is additive, not a replacement.
-//
-// Deliberately Claude-agnostic at the renderer level: only the active model's
-// providerID decides which label to render. We never reach into the message
-// text to "guess" the provider — a wrong attribution is worse than falling
-// through to the existing raw-message path, which still names the right CLI
-// for Claude specifically and surfaces opencode's own message for the others.
-
-// Human label per provider, for the banner text. Single source of truth at
-// the renderer layer; mirrors `SUBSCRIPTION_PROVIDERS` in
-// src/server/subscriptionProviders.mjs (server) and the demo fixture in
-// src/renderer/api/demoApi.ts. Three entries — the entire registry.
-export const AUTH_PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Claude",
-  openai: "Codex",
-  "kimi-for-coding": "Kimi",
-};
+// The auth-error banner copy (describeSessionError / authErrorAdvice) moved to the
+// box (src/shared/streamInterpretation.mjs, run in streamInterp.mjs) — the
+// `sessionError` frame carries `display` and the renderer only shows it.
 
 /**
  * The seat-provider id (Settings → Accounts seat panel) for an auth-banner
@@ -1836,79 +1680,7 @@ export function authProviderSeatId(providerID: string | null | undefined): SeatP
 
 /** A banner provider that signs in with an API key and has no seat panel (Kimi). */
 export function isKeyOnlyAuthProvider(providerID: string | null | undefined): boolean {
-  return typeof providerID === "string" && providerID in AUTH_PROVIDER_LABELS && authProviderSeatId(providerID) === undefined;
-}
-
-/**
- * Decide whether to surface a "needs to be reconnected" banner for a
- * `session.error` event. Returns the provider id + label when ALL of:
- *
- *   1. The error is recognisably a credential/auth failure. We accept
- *      `ProviderAuthError` (the legacy typed name opencode emitted pre-BET-280)
- *      AND `ApiError` whose message carries credential-shaped keywords
- *      (`credential`, `authentication`, `unauthorized`, `api[-_ ]?key`,
- *      `auth token`/`auth failed`, `token expired`, `key expired`). The
- *      `ApiError` keyword gate is tight enough that an unrelated API failure
- *      (rate limit, 5xx, network blip) does NOT match — those messages
- *      contain none of the auth tokens above.
- *   2. `providerID` (the session's active model's provider) is a known
- *      registry entry — `anthropic` / `openai` / `kimi-for-coding`. Any
- *      other value, or null/undefined, returns null. The active model is
- *      authoritative: the user just tried to run a turn with that provider,
- *      so any auth failure on this turn belongs to it.
- *   3. A label exists for that provider (always true given condition 2,
- *      but asserted here so the registry and the helper stay in sync).
- *
- * Returns null otherwise — the caller falls back to the existing raw-
- * message path. Non-string / nullish inputs are tolerated (defensive against
- * malformed upstream payloads) and treated as "no match".
- *
- * @param errorName  the typed error name from `properties.error.name`
- *                   (`"ProviderAuthError"`, `"ApiError"`, etc.) — pass
- *                   `undefined` when the event has no name field.
- * @param message    the raw message from `properties.error.data.message`
- *                   (or `error.name` as the ultimate fallback the caller
- *                   already resolved). Pass `undefined` when neither exists.
- * @param providerID the session's active model's `providerID`. The single
- *                   authoritative source for "which provider's banner do we
- *                   show". `null`/`undefined` → no banner.
- */
-export function authErrorAdvice(
-  errorName: string | null | undefined,
-  message: string | null | undefined,
-  providerID: string | null | undefined,
-): { providerID: string; label: string } | null {
-  if (!isAuthErrorName(errorName, message)) return null;
-  if (typeof providerID !== "string" || providerID.length === 0) return null;
-  const label = AUTH_PROVIDER_LABELS[providerID];
-  if (!label) return null;
-  return { providerID, label };
-}
-
-/**
- * Inner predicate for authErrorAdvice. Exposed for tests so the keyword
- * matching can be asserted independently from the provider-label lookup.
- * Not exported on the renderer's public API — chatUtils re-exports the
- * surface-level `authErrorAdvice` only.
- */
-function isAuthErrorName(
-  errorName: string | null | undefined,
-  message: string | null | undefined,
-): boolean {
-  const name = typeof errorName === "string" ? errorName : "";
-  if (name === "ProviderAuthError") return true;
-  // `ApiError` is broad (rate limit, 5xx, network blip all land here too);
-  // require credential-shaped keywords in the message so we only catch the
-  // auth sub-type. Provider-agnostic — Claude/Codex/Kimi all phrase auth
-  // failures with one of these tokens. Standalone "expired" is intentionally
-  // excluded (too broad: matches "rate limit window expired", "context
-  // expired", etc.) — the combined keywords above always co-occur with the
-  // expired-word in the real failure messages.
-  if (name !== "ApiError") return false;
-  const msg = typeof message === "string" ? message : "";
-  return /credential|authentication|unauthorized|api[-_ ]?key|auth(?:entication)?\s+(?:token|failed)|token\s+expired|key\s+expired/i.test(
-    msg,
-  );
+  return providerID === "kimi-for-coding";
 }
 
 // ===== Background delegation job rows (BET-381) =====
@@ -1916,57 +1688,18 @@ function isAuthErrorName(
 // Pure helpers for the sidebar / mobile session list second line and the jobs
 // management card. The renderer never computes the activity text itself — it
 // comes from the job record's `activity` field (server-computed on a 10s
-// poll, no model call). These helpers only decide WHETHER a window is a job
-// row and format a finished job's summary line.
+// poll, no model call). This helper only decides WHETHER a window is a job
+// row; the box writes every job sentence (delegate:list `statusLabel` / `summary`).
 
 // A window is a job row when the jobs map has an entry for its opencode
 // session id. False for ordinary chat/terminal windows and when the window
 // has no opencode session id (a claude-TUI window).
-// A background job's session is read-only (ReadOnlyJobBar replaces the
-// composer) — EXCEPT a CTO work worker (correlation.kind "work"), which opens
-// as an ordinary, writable session the user can steer.
-export function isReadOnlyJob(
-  job: { correlation?: { kind?: string } | null } | null | undefined,
-): boolean {
-  return !!job && job.correlation?.kind !== "work";
-}
-
 export function isJobRow(
   jobs: Record<string, { name: string; status: string; activity: string | null }>,
   opencodeSessionId: string | null | undefined,
 ): boolean {
   if (!opencodeSessionId) return false;
   return Object.prototype.hasOwnProperty.call(jobs, opencodeSessionId);
-}
-
-// Format a finished job's summary line from its branch + files-changed count.
-// Used by the jobs management card for terminal (done/failed/stopped) rows.
-// The no-worktree case (job ran in the parent cwd, worktree null) renders
-// without a branch. `filesChanged` null/undefined → "0 files".
-// A job record's `model` is the canonical "providerID/modelID" ref. This
-// splits it on the FIRST "/" only — model ids contain slashes, provider ids
-// do not. Returns null for absent/malformed input and for any non-string
-// (defends against a legacy object shape persisted on disk, so the job footer
-// renders plain rather than crashing).
-export function parseModelRef(
-  ref: string | null | undefined,
-): { providerID: string; modelID: string } | null {
-  if (typeof ref !== "string" || ref.length === 0) return null;
-  const idx = ref.indexOf("/");
-  if (idx < 1 || idx === ref.length - 1) return null;
-  return { providerID: ref.slice(0, idx), modelID: ref.slice(idx + 1) };
-}
-
-export function formatJobSummary(job: {
-  branch?: string | null;
-  filesChanged?: number | null;
-  worktree?: string | null;
-}): string {
-  const files =
-    job.filesChanged == null ? 0 : Math.max(0, Math.floor(job.filesChanged));
-  const filesLabel = `${files} file${files === 1 ? "" : "s"} changed`;
-  if (!job.worktree || !job.branch) return filesLabel;
-  return `${job.branch} · ${filesLabel}`;
 }
 
 // ===== Background-job completion turn suppression (BET-418 §C) =====
@@ -2362,25 +2095,6 @@ export function fastModelId(modelID: string): string {
   return isFastModelId(modelID) ? modelID : `${modelID}${FAST_SUFFIX}`;
 }
 
-/**
- * Drop `-fast` models from the grouped dropdown list, but ONLY where the base
- * twin survives in the same provider group — a `-fast` model whose base is
- * absent (or deactivated) has no toggle to reach it by, so hiding it would
- * make it unselectable. Groups left empty are dropped so the menu never
- * renders a provider heading with nothing under it.
- */
-export function hideFastSiblingGroups(
-  groups: Array<[string, OpencodeModel[]]>,
-): Array<[string, OpencodeModel[]]> {
-  const out: Array<[string, OpencodeModel[]]> = [];
-  for (const [providerID, models] of groups) {
-    const ids = new Set(models.map((m) => m.id));
-    const kept = models.filter((m) => !(isFastModelId(m.id) && ids.has(baseModelId(m.id))));
-    if (kept.length > 0) out.push([providerID, kept]);
-  }
-  return out;
-}
-
 // ===== deprecated-model predicate (BET-1139) =====
 //
 // `isDeprecated` (a model the provider still serves but flags as deprecated)
@@ -2392,104 +2106,6 @@ export function hideFastSiblingGroups(
 // re-compare the literal.
 export { isDeprecated };
 
-// ===== selectableModelGroups =====
-//
-// The model set a user may actually switch TO — the answer to "does
-// delegation respect the Main toggle?". Enabled, not deprecated, not
-// deactivated in Settings (`deactivatedMainModels`), grouped by provider,
-// sorted, then `hideFastSiblingGroups`. Shared by ModelPicker's dropdown and
-// the delegate model picker so both read one source of truth (the `enabled !==
-// false` filter lives here and nowhere else in the renderer).
-
-/**
- * The flat selectable model list (enabled, not deprecated, not deactivated).
- * `null` input → `null` (the loading signal callers rely on). The flat list,
- * not the grouped one, is what `resolveFastToggle` needs — it must still see a
- * `-fast` twin whose base is present, which `hideFastSiblingGroups` would fold
- * out of the groups.
- */
-export function selectableModelList(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-): OpencodeModel[] | null {
-  if (!models) return null;
-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
-  return models.filter(
-    (m) =>
-      m.enabled !== false &&
-      !isDeprecated(m) &&
-      !deactivatedMain.has(`${m.providerID}/${m.id}`),
-  );
-}
-
-/**
- * The grouped, sorted, fast-sibling-folded selectable list — the candidate
- * model set for dropdowns and pickers. `null` models → `null` (loading).
- */
-export function selectableModelGroups(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-): Array<[string, OpencodeModel[]]> | null {
-  const selectable = selectableModelList(models, deactivatedMainModels);
-  if (selectable === null) return null;
-  const map = new Map<string, OpencodeModel[]>();
-  for (const m of selectable) {
-    const arr = map.get(m.providerID) ?? [];
-    arr.push(m);
-    map.set(m.providerID, arr);
-  }
-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  return hideFastSiblingGroups(sorted);
-}
-
-export type MainPickerGroups = {
-  /** Groups for the main model menu — includes deprecated models so they stay
-   *  importable/visible, with the same enabled/deactivated/fast-folding gates
-   *  as `selectableModelGroups`. */
-  groups: Array<[string, OpencodeModel[]]> | null;
-  /** "providerID/modelID" keys of DEPRECATED models shown disabled (not yet
-   *  opted in). Deprecated-but-opted-in models are ordinary selectable rows. */
-  disabledKeys: string[];
-};
-
-/**
- * The main picker's candidate set (BET-1139). Unlike `selectableModelGroups`,
- * a deprecated model is KEPT in the list — the user must be able to see and
- * opt in to a model the provider is deprecating — but it is rendered disabled
- * unless its "providerID/modelID" is in `optInModels` (`disabledKeys`). A
- * deprecated model that HAS been opted in is fully selectable, same as a live
- * model. Non-deprecated models behave exactly as `selectableModelGroups`.
- * Used ONLY by the main composer picker; the delegate picker keeps filtering
- * deprecated models via `selectableModelGroups`. `null` models → `null`
- * groups (loading).
- */
-export function mainPickerGroups(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-  optInModels: string[] | undefined,
-): MainPickerGroups {
-  if (!models) return { groups: null, disabledKeys: [] };
-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
-  const optIn = new Set(optInModels ?? []);
-  const disabledKeys: string[] = [];
-  const kept = models.filter((m) => {
-    const key = `${m.providerID}/${m.id}`;
-    if (m.enabled === false) return false;
-    if (deactivatedMain.has(key)) return false;
-    if (isDeprecated(m) && !optIn.has(key)) {
-      disabledKeys.push(key);
-    }
-    return true;
-  });
-  const map = new Map<string, OpencodeModel[]>();
-  for (const m of kept) {
-    const arr = map.get(m.providerID) ?? [];
-    arr.push(m);
-    map.set(m.providerID, arr);
-  }
-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  return { groups: hideFastSiblingGroups(sorted), disabledKeys };
-}
 
 export type FastToggleState = {
   /** The toggle can be clicked (a counterpart exists that keeps the effort). */
@@ -2639,55 +2255,6 @@ export function isPlanExitQuestion(
     }
   }
   return false;
-}
-
-// ---- Plan-file discovery (tolerant of how the plan was authored) ----
-//
-// Plan paths live in different part shapes depending on how the plan was
-// authored. The classic announcing message mentions the path in PROSE (a text
-// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool —
-// which records the path in `state.input.filePath` (and sometimes
-// `planPath`/`path`) plus a `patch` part listing the file — so the path never
-// reaches a text part, and `plan_exit` sometimes doesn't echo it either.
-// Scanning only one surface (e.g. only the plan_exit input) misses plans
-// authored via the plan tool. So we scan text, authoring-tool input, and
-// patch-file lists for any `.opencode/plans/*.md` reference. Cheap by design:
-// we never read tool output or file content, only path fields and prose.
-
-const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
-
-// Tools that AUTHOR the plan file (or confirm it at plan_exit). A `read` tool
-// pointed at a plan path is a reference, not an authoring signal, and must not
-// resolve as the plan — the write/plan tool (or a prose mention) already does.
-const PLAN_AUTHORING_TOOLS = new Set([
-  "write", "edit", "multiEdit", "patch", "plan", "plan_exit",
-]);
-
-/** Every distinct `.opencode/plans/*.md` reference a single part carries. */
-export function planRefsFromPart(part: OpencodePart): string[] {
-  const out: string[] = [];
-  const candidates: string[] = [];
-  if (typeof part.text === "string") candidates.push(part.text);
-  const raw = part as Record<string, unknown>;
-  const isTool = raw.type === "tool";
-  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
-    const input =
-      (raw.state as { input?: Record<string, unknown> } | undefined)?.input ??
-      (raw.input as Record<string, unknown> | undefined);
-    if (input) {
-      for (const key of ["filePath", "path", "planPath"]) {
-        const v = input[key];
-        if (typeof v === "string") candidates.push(v);
-      }
-    }
-  }
-  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
-  for (const c of candidates) {
-    for (const m of c.matchAll(PLAN_REF_RE)) {
-      if (!out.includes(m[0])) out.push(m[0]);
-    }
-  }
-  return out;
 }
 
 /**
@@ -3374,7 +2941,9 @@ export type UsageDialTone = "under" | "warn" | "danger" | "over";
 export type UsageDialState = {
   visible: boolean;
   pct: number;
-  tone: UsageDialTone;
+  // The BOX's colour band for the primary window (`window.tone`, WS09 SF-M18);
+  // null on an older box → the dial renders the neutral track.
+  tone: UsageDialTone | null;
   // The reported window has passed its reset instant and the provider has not
   // published its replacement numbers yet.
   awaitingReset: boolean;
@@ -3383,13 +2952,6 @@ export type UsageDialState = {
   // window, but the number and colour shown are the primary window's.
   window: UsageWindow | null;
 };
-
-export function usageTone(pct: number): UsageDialTone {
-  if (pct >= 100) return "over";
-  if (pct >= 90) return "danger";
-  if (pct >= 70) return "warn";
-  return "under";
-}
 
 /**
  * Derive the composer dial's visibility/colour/headline window from a usage
@@ -3437,7 +2999,7 @@ export function usageDialState(
   return {
     visible: worstPct >= 70 || alwaysShow,
     pct: awaitingReset ? 0 : primary.pct,
-    tone: awaitingReset ? "under" : usageTone(primary.pct),
+    tone: awaitingReset ? "under" : (primary.tone ?? null),
     awaitingReset,
     window: primary,
   };
@@ -3816,7 +3378,7 @@ export function formatLastMove(
   const reason = move.reason ? ` · ${move.reason}` : "";
   const resent =
     move.crossOrg && typeof move.resentTokens === "number"
-      ? `history re-sent: ${formatTokensCompact(move.resentTokens)}`
+      ? `history re-sent: ${formatTokenCount(move.resentTokens)}`
       : null;
   return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
 }
@@ -4038,85 +3600,6 @@ export function selectStatusItems(
 // per-state descriptor, the PR-suffixed branch label, and the connect-offer
 // decision. All computed from props alone — no DOM, no channels, no network.
 
-/** One check's traffic-light state — THE single classifier. A check with no
- * conclusion yet (queued / in progress / pending) is "running". Everything that
- * finished on something other than success is "error".
- *
- * `countsForChecks`, `failuresToAgentPrompt` and the checks popover all read
- * this, so the three can never drift on what "failed" means (they were three
- * hand-written copies before). The return values are deliberately StatusDot's
- * tone names, so the popover row needs no mapping table. */
-export function checkTone(c: ForgeCheckRun): "ok" | "running" | "error" {
-  const done = c.conclusion;
-  if (!done || c.status === "queued" || c.status === "in_progress") return "running";
-  return done === "success" ? "ok" : "error";
-}
-
-/** Every check in display order: failed, then running, then passed. The popover
- * lists ALL of them — the dot carries the state and this order carries the
- * grouping, so there are no headings and no per-row status label. `sort` is
- * stable, so within a bucket the forge's own order survives. */
-export function orderChecks(checks: ForgeCheckRun[]): ForgeCheckRun[] {
-  const rank = { error: 0, running: 1, ok: 2 } as const;
-  return [...checks].sort((a, b) => rank[checkTone(a)] - rank[checkTone(b)]);
-}
-
-/** Count a check list into the three traffic-light buckets. A check with no
- * conclusion yet (still queued / in progress / pending) is "running". */
-export function countsForChecks(checks: ForgeCheckRun[]): {
-  passed: number;
-  failed: number;
-  running: number;
-} {
-  let passed = 0;
-  let failed = 0;
-  let running = 0;
-  for (const c of checks) {
-    const tone = checkTone(c);
-    if (tone === "running") running++;
-    else if (tone === "ok") passed++;
-    else failed++;
-  }
-  return { passed, failed, running };
-}
-
-export type ChecksChipTone = "ok" | "warn" | "danger";
-
-/** The checks chip's label + tone + registry priority for a given rollup.
- * `none` yields null — no chip at all. The caller additionally gates on "no
- * PR" and "forge not connected" before calling, so absence of a chip is the
- * "there is nothing to say" state (§4.3 [C2]). Priority is a function of
- * state (§4.3): red outranks the menu+artifacts pin (survives the narrow
- * layout), green/yellow sit low so they are the first thing to overflow. */
-export function checksChipDescriptor(
-  rollup: CheckRollup,
-  counts: { passed: number; failed: number; running: number },
-): { label: string; tone: ChecksChipTone; priority: number } | null {
-  switch (rollup) {
-    case "green":
-      return { label: `✓ ${counts.passed}`, tone: "ok", priority: 40 };
-    case "red":
-      return { label: `✗ ${counts.failed} failed`, tone: "danger", priority: 90 };
-    case "yellow":
-      return { label: `◐ ${counts.running} running`, tone: "warn", priority: 40 };
-    case "none":
-    default:
-      return null;
-  }
-}
-
-/** Branch chip label: plain `⎇ branch`, or `⎇ branch · #412` when a PR
- * rides the chip. Null when there is no branch (chip not rendered at all).
- * The `⎇` stands in for the GitBranch icon the chip actually renders — the
- * label is the string form for tests/titles. */
-export function branchChipLabel(
-  branch: string | null,
-  pr: { number: number } | null,
-): string | null {
-  if (!branch) return null;
-  return pr ? `⎇ ${branch} · #${pr.number}` : `⎇ ${branch}`;
-}
-
 /** Whether to surface the one-line "Connect GitHub" offer under the header
  * (§4.5 [S10]). Only when the forge is NOT connected AND the session origin
  * is a recognised forge AND the offer has not been permanently dismissed. */
@@ -4132,16 +3615,6 @@ export function shouldOfferForgeConnect({
   if (connected) return false;
   if (dismissed) return false;
   return forgeKind != null;
-}
-
-/** The "send failures to the agent" composer fill — names each failing check
- * (plus its log URL) so the agent can act without the user transcribing. This
- * FILLS the composer; it does not submit. */
-export function failuresToAgentPrompt(checks: ForgeCheckRun[]): string {
-  const failed = checks.filter((c) => checkTone(c) === "error");
-  if (failed.length === 0) return "";
-  const lines = failed.map((c) => `- ${c.name}${c.url ? ` (${c.url})` : ""}`);
-  return `Checks are failing on this pull request:\n${lines.join("\n")}\n\nPlease investigate and fix them.`;
 }
 
 // ===== Pinned card stack arbiter (BET-783) =====
@@ -4349,186 +3822,6 @@ export function forgeCredentialSecondary(status: {
     : status.source === "stored" ? "signed in on this server"
     : "connected";
   return status.login ? `@${status.login} · ${where}` : where;
-}
-
-// ===== Forge merge gate (BET-794) =====
-
-/**
- * Whether the merge affordance is enabled for a pull request, plus a
- * user-visible reason when it is not. Merge is enabled ONLY when ALL hold:
- * the checks rollup is `green`, there are no unresolved review threads, and
- * the forge reports `mergeable === true`. Every blocking combination yields a
- * distinct reason so the UI can explain "why can't I merge" instead of a bare
- * disabled button.
- *
- * `mergeable: null` means the forge is still computing mergeability — NOT
- * mergeable, reason "still computing" (the caller may retry).
- *
- * @param {{ rollup: CheckRollup, unresolvedThreads: number, mergeable: true | false | null }} input
- * @returns {{ can: boolean, reason: string | null }}
- */
-export function canMerge({
-  rollup,
-  unresolvedThreads,
-  mergeable,
-}: {
-  rollup: CheckRollup;
-  unresolvedThreads: number;
-  mergeable: true | false | null;
-}): { can: boolean; reason: string | null } {
-  if (mergeable === null) return { can: false, reason: "still computing" };
-  if (mergeable !== true) return { can: false, reason: "not mergeable" };
-  if (rollup !== "green") {
-    const reason = rollup === "yellow" ? "checks still running" : rollup === "red" ? "checks failing" : "no checks";
-    return { can: false, reason };
-  }
-  if (unresolvedThreads > 0) {
-    return { can: false, reason: `${unresolvedThreads} unresolved thread${unresolvedThreads === 1 ? "" : "s"}` };
-  }
-  return { can: true, reason: null };
-}
-
-/**
- * The user-facing message for a merge failure, keyed by its distinguished kind
- * (status code, not a generic error): `sha_mismatch` (409), `cannot_merge`
- * (405), `permission` (403). Each has a different next action, so each must be
- * surfaced distinctly rather than as a bare "Merge failed".
- */
-export function describeMergeFailure(kind: string | null | undefined): string {
-  switch (kind) {
-    case "sha_mismatch":
-      return "Merge failed — the head SHA moved. This PR changed after you reviewed it; re-review before merging.";
-    case "cannot_merge":
-      return "Cannot merge — the PR is blocked (branch protection, draft, or a conflict).";
-    case "permission":
-      return "No permission to merge this pull request.";
-    default:
-      return kind ? `Merge failed (${kind}).` : "Merge failed.";
-  }
-}
-
-/**
- * The single decision for how the session-header branch chip renders and
- * whether it opens a popover (the ONE git surface, BET-867). `"none"` means the
- * plain, non-interactive `Tag` — either there is no branch, or the forge is not
- * connected for this cwd (a scratch dir with no forge must stay byte-identical
- * to a non-forge session). `"no-pr"` opens the popover in its Draft PR / Create
- * PR state; `"pr"` opens it in the merge surface state.
- */
-export function branchPanelState({
-  pr,
-  forgeConnected,
-  branch,
-}: {
-  pr: PullRequest | null;
-  forgeConnected: boolean;
-  branch: string | null;
-}): "none" | "no-pr" | "pr" {
-  if (!branch || !forgeConnected) return "none";
-  return pr ? "pr" : "no-pr";
-}
-
-/**
- * The ship gate for the forge surface (BET-892): whether a "Create pull
- * request" action even makes sense for the current branch, evaluated in this
- * order — first match wins.
- *
- *  1. `has-pr`    — a PR is already open on this branch.
- *  2. `detached`  — no branch (detached HEAD / non-git cwd).
- *  3. `unknown`   — base branch unknown (cannot tell if on the default branch).
- *  4. `on-base`   — sitting on the repo default branch (no PR to open).
- *  5. `no-commits`— no commits ahead of origin/<base> (nothing to ship).
- *  6. `ready`     — ship away.
- *
- * One deliberate asymmetry — do not "fix" it:
- * - `base === null` → `"unknown"`. The base is a *safety* fact: without it we
- *   cannot tell whether the current branch is the default branch, and a PR
- *   from a branch onto itself cannot exist. No base means no PR action.
- * - `aheadCount === null` still falls through to `"ready"`. The commit count is
- *   an *optimisation*, not a safety fact. It is legitimately unknown whenever
- *   `origin/<base>` is not fetched locally (shallow clone, fresh worktree), and
- *   hiding the action there would break a normal case for no safety gain — an
- *   empty PR is refused by the forge with a clear message.
- */
-export type ShipState = "on-base" | "detached" | "unknown" | "no-commits" | "ready" | "has-pr";
-
-export function resolveShipState(input: {
-  branch: string | null;
-  base: string | null;
-  aheadCount: number | null;
-  hasPr: boolean;
-}): ShipState {
-  if (input.hasPr) return "has-pr";
-  if (!input.branch) return "detached";
-  if (!input.base) return "unknown";
-  if (input.branch === input.base) return "on-base";
-  if (input.aheadCount === 0) return "no-commits";
-  return "ready";
-}
-
-// ---- Forge review pane (BET-792) -------------------------------------------
-
-// The line anchor a comment may attach to, in the forge-neutral shape the spec
-// (§3.4③) normalises on: `path` names the FILE, `side` is "new" (added lines —
-// GitHub's RIGHT), "old" (removed lines — GitHub's LEFT) or "both" (unchanged
-// context lines, present in both versions — GitLab positions them with both
-// `new_line` and `old_line`, BET-856), and `line` is the corresponding line
-// number. `path` is load-bearing — a PR diff is a single merged stream of many
-// files, so an anchor that drops it misplaces a thread whenever two files share
-// a line number. The renderer maps these onto the rows UnifiedDiff draws, keyed
-// per-file.
-export type CommentableLine = { path: string; line: number; side: "new" | "old" | "both" };
-
-// Derive the set of commentable line anchors from a unified-diff text, walking
-// the `@@ -A,B +C,D @@` hunk headers so numbers are exact per hunk. Added lines
-// anchor on the NEW side (new line number); removed lines on the OLD side (old
-// line number); unchanged context lines on BOTH (present in both versions, so
-// GitLab positions them with both `new_line` and `old_line` — BET-856). The
-// active file path is tracked from the `+++ b/` marker (falling back to `--- a/`
-// when a file is deleted to `/dev/null`), so every anchor is keyed to its file.
-// File markers / hunk headers are not commentable. An empty diff yields `[]`.
-// This is the SINGLE anchor producer (BET-859): `UnifiedDiff` (ToolBodies.tsx)
-// consumes its output rather than re-deriving `(path, side, line)` inline, so
-// the line-classification rule can't diverge from a second implementation.
-export function commentableLines(diffText: string): CommentableLine[] {
-  const result: CommentableLine[] = [];
-  let oldLine = 0;
-  let newLine = 0;
-  let path = "";
-  let aPath = "";
-  for (const line of diffText.split("\n")) {
-    if (line.startsWith("--- ")) {
-      const m = /^--- a\/(.+)$/.exec(line);
-      if (m) aPath = m[1].trim();
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      const m = /^\+\+\+ b\/(.+)$/.exec(line);
-      if (m) path = m[1].trim();
-      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) {
-        oldLine = parseInt(m[1], 10);
-        newLine = parseInt(m[2], 10);
-      }
-      continue;
-    }
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      if (path) result.push({ path, line: newLine, side: "new" });
-      newLine++;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
-      if (path) result.push({ path, line: oldLine, side: "old" });
-      oldLine++;
-    } else if (line.startsWith(" ")) {
-      if (path) result.push({ path, line: newLine, side: "both" });
-      oldLine++;
-      newLine++;
-    }
-  }
-  return result;
 }
 
 // The plain text of a USER message — its non-synthetic text parts concatenated
@@ -4950,59 +4243,6 @@ export function dispatchWidget(payload: unknown, handlers: WidgetHandlers): void
     handlers.fail?.(p);
     return;
   }
-}
-
-// ---- Work inbox (BET-795) --------------------------------------------------
-
-// How urgent each inbox reason is — the merge tiebreak. A checks-failing PR is
-// the most urgent (bad dot), a requested review next (warn dot), a plain
-// assignment least (mute dot) — the dot-tone order of the mockup. Mirrors the
-// server's precedence so a renderer that ever receives a duplicated key settles
-// it the same way, independently of the box.
-const INBOX_REASON_PRIORITY: Record<InboxReason, number> = {
-  "checks failing": 3,
-  "review requested": 2,
-  assigned: 1,
-};
-
-/**
- * The human phrase for an inbox reason — what the row's secondary column shows,
- * with the mockup's copy verbatim ("checks red", "review requested",
- * "issue · assigned to you"). Pure + tested.
- */
-export function inboxReasonLabel(reason: InboxReason): string {
-  switch (reason) {
-    case "checks failing":
-      return "checks red";
-    case "review requested":
-      return "review requested";
-    case "assigned":
-      return "issue · assigned to you";
-  }
-}
-
-/**
- * Sort inbox rows by `updatedAt` descending (most recent first), AND dedupe by
- * `repoKey#number` with the more urgent reason winning when the same object
- * appears twice (a PR matching two inbox populations). The server already
- * merges + dedupes, but the renderer guarantees the invariant it renders by —
- * nothing displays a duplicated row or a stale lower-priority reason. Pure +
- * tested, including the dedupe-precedence case.
- */
-export function sortInbox(items: ForgeInboxItem[]): ForgeInboxItem[] {
-  const byKey = new Map<string, ForgeInboxItem>();
-  for (const item of items) {
-    const key = `${item.repoKey}#${item.number}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, item);
-      continue;
-    }
-    if (INBOX_REASON_PRIORITY[item.reason] > INBOX_REASON_PRIORITY[existing.reason]) {
-      byKey.set(key, item);
-    }
-  }
-  return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /**

@@ -477,6 +477,32 @@ enum ToolActivity {
         return ChatJSON.string(record(state["metadata"])["output"]) ?? ""
     }
 
+    /// What the Copy button puts on the clipboard for a call — the FULL text, never
+    /// the tailed preview: a patch copies its file list; a `task` (a session, not
+    /// a tool call) copies nothing; otherwise the diff, else the output. nil when
+    /// there is nothing to copy.
+    static func copyText(of part: OpencodePart) -> String? {
+        if part.type == "patch" {
+            let files = (ChatJSON.array(part.extra["files"]) ?? []).compactMap { ChatJSON.string($0) }
+            return files.isEmpty ? nil : files.joined(separator: "\n")
+        }
+        if describe(part).kind == .task { return nil }
+        let d = detail(of: part)
+        guard let text = d.diff ?? d.output, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// The output text a call row shows. Not verbose: the tailed preview. Verbose
+    /// ("Show reasoning & full output"): the last 2,000 lines, hard-capped to the
+    /// last 100,000 characters — canonical output has no box-side cap, so even the
+    /// full view is bounded. `trimmed` tells the row to add a "showing the last
+    /// 2,000 lines" note.
+    static func outputForDisplay(_ output: String, verbose: Bool) -> (text: String, trimmed: Bool) {
+        if verbose { return ToolOutputPreview.verboseTail(output) }
+        let tail = ToolOutputPreview.tail(output)
+        return (tail, tail != output)
+    }
+
     /// `key: value` lines for an input object, sorted by key so the text is
     /// deterministic, long values clipped to one line.
     private static func argumentLines(_ input: [String: JSONValue], skipping: Set<String>) -> String {
@@ -958,9 +984,20 @@ enum ActivityDisclosure {
     /// Whether a call row starts expanded. A run with exactly ONE call opens
     /// with that call expanded (desktop's `defaultExpanded`); a failed call
     /// always starts open so its error is visible. The user's own toggle wins.
-    static func expanded(callCount: Int, status: ActivityStatus, isTool: Bool, userToggled: Bool?) -> Bool {
+    ///
+    /// With "Show reasoning & full output" on (`verbose`), a completed `read`
+    /// call also starts open: the full content is the point of the switch.
+    static func expanded(
+        callCount: Int,
+        status: ActivityStatus,
+        isTool: Bool,
+        userToggled: Bool?,
+        kind: ActivityKind = .other,
+        verbose: Bool = false
+    ) -> Bool {
         if let userToggled { return userToggled }
         if status == .error { return true }
+        if verbose, kind == .read, status == .completed { return true }
         return callCount == 1 && isTool
     }
 }

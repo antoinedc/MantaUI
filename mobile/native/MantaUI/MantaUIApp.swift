@@ -37,6 +37,9 @@ struct MantaUIApp: App {
         // The box-wide widget live store consumes `kind: "widget"` frames off
         // the same /events stream (registered once, idempotently).
         WidgetLiveStore.shared.bind(eventStore: event)
+        // Likewise the live media store: `kind: "media"` frames plus every
+        // session's running edge (the turn counter), registered once.
+        TranscriptMediaStore.shared.bind(eventStore: event)
     }
 
     var body: some Scene {

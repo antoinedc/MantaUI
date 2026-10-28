@@ -134,6 +134,41 @@ test("attachPtyWs: parses session/cwd/cols/rows/launcher and forwards to pty.spa
   assert.deepEqual(spawn.launcher, { id: "claude" });
 });
 
+test("attachPtyWs: a hidden sign-in launcher is refused with 1008 + error frame, no spawn", async () => {
+  for (const id of ["claude-auth-login", "claude-cli-install"]) {
+    const ws = fakeWs();
+    const pty = makeFakePty();
+    const url = new URL(`ws://x/pty?session=abc&launcher=${encodeURIComponent(JSON.stringify({ id }))}`);
+
+    attachPtyWs(ws, url, { pty });
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(ws.closed?.code, 1008, `${id}: policy-violation close code`);
+    assert.equal(ws.closed?.reason, "launcher_not_allowed");
+    assert.equal(ws.sent.length, 1);
+    assert.equal(JSON.parse(ws.sent[0]).error, "launcher_not_allowed");
+    assert.equal(pty.calls.spawn.length, 0, `${id}: never spawned`);
+    assert.equal(pty.calls.kill.length, 0, `${id}: nothing to kill`);
+  }
+});
+
+test("attachPtyWs: visible launchers, unknown launcher ids and no launcher still spawn", async () => {
+  const cases = [
+    'ws://x/pty?session=a&launcher={"id":"claude"}',
+    'ws://x/pty?session=b&launcher={"id":"codex"}',
+    'ws://x/pty?session=c&launcher={"id":"not-a-launcher"}',
+    "ws://x/pty?session=d",
+  ];
+  for (const raw of cases) {
+    const ws = fakeWs();
+    const pty = makeFakePty();
+    attachPtyWs(ws, new URL(raw), { pty });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(pty.calls.spawn.length, 1, `${raw} spawns`);
+    assert.equal(ws.closed, null, `${raw} is not closed`);
+  }
+});
+
 test("attachPtyWs: a {type:'data'} WS message → pty.write with the same sessionKey", async () => {
   const ws = fakeWs();
   const pty = makeFakePty();

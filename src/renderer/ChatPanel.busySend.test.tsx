@@ -432,22 +432,22 @@ describe("ChatPanel busy send + inbox", () => {
     });
 
     it("× cancels that item; cancelled → no message, the frame removes the row", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m1", "first") }) });
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m1", "first"), notice: null, error: null, restoreText: null }) });
       await pushInbox([item("m1", "first")]);
       const x = h!.container.querySelector('[data-testid="inbox-cancel"]') as HTMLButtonElement;
       await act(async () => x.click());
       await h!.flush();
-      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m1" }]]);
+      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m1", restore: false }]]);
       expect(sendError()).toBe("");
       expect(textarea().value).toBe("");
     });
 
-    it("× on an item that was already delivered says so", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered" }) });
+    it("× on an item that was already delivered shows the box's notice verbatim", async () => {
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered", notice: "BOX: already sent", error: null, restoreText: null }) });
       await pushInbox([item("m1", "first")]);
       await act(async () => (h!.container.querySelector('[data-testid="inbox-cancel"]') as HTMLButtonElement).click());
       await h!.flush();
-      expect(useStore.getState().systemNotice).toBe("Already sent to the agent");
+      expect(useStore.getState().systemNotice).toBe("BOX: already sent");
     });
 
     it("× failing shows the error", async () => {
@@ -515,7 +515,7 @@ describe("ChatPanel busy send + inbox", () => {
     });
 
     it("Send now → N1 steer; changed needs nothing more (no banner, no toast)", async () => {
-      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "changed" }) });
+      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "changed", notice: null, error: null }) });
       await pushInbox([item("m1", "later", 0, "queue")]);
       await click(h!.container.querySelector('[data-testid="inbox-send-now"]'));
       expect(api.calls.opencodeInboxSetDelivery).toEqual([[{ sessionId: SID, id: "m1", delivery: "steer" }]]);
@@ -528,26 +528,26 @@ describe("ChatPanel busy send + inbox", () => {
     });
 
     it("Wait → N1 queue", async () => {
-      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "changed" }) });
+      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "changed", notice: null, error: null }) });
       await pushInbox([item("m1", "now", 0, "steer")]);
       await click(h!.container.querySelector('[data-testid="inbox-wait"]'));
       expect(api.calls.opencodeInboxSetDelivery).toEqual([[{ sessionId: SID, id: "m1", delivery: "queue" }]]);
       expect(sendError()).toBe("");
     });
 
-    it("delivered → the 'Already sent' toast", async () => {
-      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "delivered" }) });
+    it("delivered → the box's notice as a toast", async () => {
+      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "delivered", notice: "BOX: already sent", error: null }) });
       await pushInbox([item("m1", "later", 0, "queue")]);
       await click(h!.container.querySelector('[data-testid="inbox-send-now"]'));
-      expect(useStore.getState().systemNotice).toBe("Already sent to the agent");
+      expect(useStore.getState().systemNotice).toBe("BOX: already sent");
       expect(sendError()).toBe("");
     });
 
-    it("unknown → an error banner, never silent", async () => {
-      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "unknown" }) });
+    it("unknown → the box's error as a banner, never silent", async () => {
+      await open({ opencodeInboxSetDelivery: () => Promise.resolve({ outcome: "unknown", notice: null, error: "BOX: couldn't confirm" }) });
       await pushInbox([item("m1", "now", 0, "steer")]);
       await click(h!.container.querySelector('[data-testid="inbox-wait"]'));
-      expect(sendError()).toBe("Couldn't confirm the change — check the pending list");
+      expect(sendError()).toBe("BOX: couldn't confirm");
     });
 
     it("a thrown error → an error banner with the message", async () => {
@@ -573,51 +573,92 @@ describe("ChatPanel busy send + inbox", () => {
     });
 
     it("↑ edit last (header button) pops the newest and restores its text — same as the ↑ key", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m2", "second text") }) });
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m2", "second text"), notice: null, error: null, restoreText: "second text" }) });
       await pushInbox([item("m1", "first"), item("m2", "second text")]);
       await click(h!.container.querySelector('[data-testid="inbox-edit-last"]'));
-      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m2" }]]);
+      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m2", restore: true }]]);
       expect(textarea().value).toBe("second text");
     });
 
-    it("× still reports a delivered item exactly as before", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered" }) });
+    it("× reports a delivered item with the box's notice", async () => {
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered", notice: "BOX: already sent", error: null, restoreText: null }) });
       await pushInbox([item("m1", "later", 0, "queue")]);
       await click(h!.container.querySelector('[data-testid="inbox-cancel"]'));
-      expect(useStore.getState().systemNotice).toBe("Already sent to the agent");
+      expect(useStore.getState().systemNotice).toBe("BOX: already sent");
+    });
+  });
+
+  describe("capability gate (an older box can't word the outcomes)", () => {
+    const click = async (el: Element | null) => {
+      await act(async () => (el as HTMLElement).click());
+      await h!.flush();
+    };
+    const gateNote = () => h!.container.querySelector('[data-testid="inbox-gate-note"]');
+    const disabled = (id: string) => (h!.container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement).disabled;
+
+    it("box without chat-cards-1: every inbox control is disabled, the note shows, and no RPC is sent", async () => {
+      await open({ getServerVersion: () => Promise.resolve({ version: "1", minClient: "0", opencodeVersion: "1" }) });
+      await pushInbox([item("m1", "later", 0, "queue"), item("m2", "now", 0, "steer")]);
+      expect(disabled("inbox-cancel")).toBe(true);
+      expect(disabled("inbox-send-now")).toBe(true);
+      expect(disabled("inbox-wait")).toBe(true);
+      expect(disabled("inbox-edit-last")).toBe(true);
+      expect(gateNote()?.textContent).toBe("Update your box to use this");
+      await click(h!.container.querySelector('[data-testid="inbox-cancel"]'));
+      await key("ArrowUp");
+      expect(api.calls.opencodeInboxCancel ?? []).toEqual([]);
+      expect(api.calls.opencodeInboxSetDelivery ?? []).toEqual([]);
+    });
+
+    it("capability still unknown (the box can't be asked): disabled, but no 'update' note", async () => {
+      await open({ getServerVersion: () => Promise.reject(new Error("offline")) });
+      await pushInbox([item("m1", "later", 0, "queue")]);
+      expect(disabled("inbox-cancel")).toBe(true);
+      expect(disabled("inbox-edit-last")).toBe(true);
+      expect(gateNote()).toBeNull();
+      await key("ArrowUp");
+      expect(api.calls.opencodeInboxCancel ?? []).toEqual([]);
+    });
+
+    it("a current box leaves everything enabled", async () => {
+      await open();
+      await pushInbox([item("m1", "later", 0, "queue")]);
+      expect(disabled("inbox-cancel")).toBe(false);
+      expect(disabled("inbox-send-now")).toBe(false);
+      expect(gateNote()).toBeNull();
     });
   });
 
   describe("pop-last (↑ on an empty composer)", () => {
     it("cancels the NEWEST pending item and restores its text", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m2", "second text") }) });
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m2", "second text"), notice: null, error: null, restoreText: "second text" }) });
       await pushInbox([item("m1", "first"), item("m2", "second text")]);
       await key("ArrowUp");
-      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m2" }]]);
+      expect(api.calls.opencodeInboxCancel).toEqual([[{ sessionId: SID, id: "m2", restore: true }]]);
       expect(textarea().value).toBe("second text");
     });
 
-    it("cancelled with attachments: text restored + the attachments note", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m1", "see image", 2) }) });
+    it("cancelled with attachments: text restored + the box's attachments note", async () => {
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "cancelled", item: item("m1", "see image", 2), notice: "BOX: re-attach them", error: null, restoreText: "see image" }) });
       await pushInbox([item("m1", "see image", 2)]);
       await key("ArrowUp");
       expect(textarea().value).toBe("see image");
-      expect(useStore.getState().systemNotice).toBe("Attachments weren't restored — re-attach them");
+      expect(useStore.getState().systemNotice).toBe("BOX: re-attach them");
     });
 
-    it("delivered: 'Already sent to the agent', nothing restored", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered" }) });
+    it("delivered: the box's notice, nothing restored", async () => {
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "delivered", notice: "BOX: already sent", error: null, restoreText: null }) });
       await pushInbox([item("m1", "first")]);
       await key("ArrowUp");
-      expect(useStore.getState().systemNotice).toBe("Already sent to the agent");
+      expect(useStore.getState().systemNotice).toBe("BOX: already sent");
       expect(textarea().value).toBe("");
     });
 
-    it("unknown: warns it may still be sent, restores NOTHING (it could be sent twice)", async () => {
-      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "unknown" }) });
+    it("unknown: shows the box's warning, restores NOTHING (it could be sent twice)", async () => {
+      await open({ opencodeInboxCancel: () => Promise.resolve({ outcome: "unknown", notice: null, error: "BOX: may still be sent", restoreText: null }) });
       await pushInbox([item("m1", "first")]);
       await key("ArrowUp");
-      expect(sendError()).toBe("Couldn't confirm it was cancelled — it may still be sent");
+      expect(sendError()).toBe("BOX: may still be sent");
       expect(textarea().value).toBe("");
     });
 

@@ -60,12 +60,9 @@ import {
   isPollExpired,
   arrangeCards,
   terminalShortcut,
-  authErrorAdvice,
-  AUTH_PROVIDER_LABELS,
   terminalMountKey,
   registerMountedTerminal,
   isJobRow,
-  formatJobSummary,
   isBackgroundJobCompletionTurn,
   visibleAssistantParts,
   isRenderableMessage,
@@ -79,17 +76,12 @@ import {
   shouldResyncWindowsForJobs,
   shortModelName,
   isFastModelId,
-  parseModelRef,
   baseModelId,
   fastModelId,
-  hideFastSiblingGroups,
   resolveFastToggle,
   resolvePlanToggle,
-  selectableModelGroups,
   filterModelGroups,
   moveMenuHighlight,
-  isDeprecated,
-  mainPickerGroups,
   MAX_PREVIEW_BYTES,
   resolvePreviewType,
   isWithinPreviewSize,
@@ -109,9 +101,6 @@ import {
   decodeDataUri,
   fetchTranscriptWithRetry,
   selectUsageSnapshot,
-  describePressure,
-  describeActivityEntry,
-  formatCompactionSaving,
   formatRetryMinutes,
   formatAgeAt,
   formatEndpointStateLine,
@@ -126,21 +115,11 @@ import {
   usageStale,
   pruneVisitedSessions,
   selectStatusItems,
-  checksChipDescriptor,
-  countsForChecks,
-  checkTone,
-  orderChecks,
-  branchChipLabel,
   shouldOfferForgeConnect,
-  failuresToAgentPrompt,
   zeroStateMode,
   describeRepoRow,
   homeRelativePath,
   planHighlightRanges,
-  canMerge,
-  resolveShipState,
-  describeMergeFailure,
-  commentableLines,
   cloneErrorKind,
   repoListErrorMessage,
   forgeCredentialSecondary,
@@ -150,10 +129,7 @@ import {
   progressAttentionKind,
   concatUserMessageText,
   buildVoiceNoteMap,
-  branchPanelState,
   dispatchAppControl,
-  sortInbox,
-  inboxReasonLabel,
   scrollElementToTail,
   classifyFollowOnScroll,
   isUpwardScrollGesture,
@@ -166,12 +142,11 @@ import {
   describeProjectClose,
   isPlanExitQuestion,
   extractPlanData,
-  planRefsFromPart,
   resolveDelegateModel,
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest, UpdateTarget } from "../shared/types";
 
 
 
@@ -2024,138 +1999,6 @@ describe("terminalShortcut", () => {
     });
   });
 });
-// ===== authErrorAdvice (BET-316) =====
-//
-// Maps a `session.error` event to the reconnect-banner copy. The contract
-// is: non-null only when the error is recognisably a credential failure on
-// one of the three providers in the subscription registry. Anything else
-// (context overflow, network blip, generic 5xx) returns null and falls
-// through to the existing raw-message path — a wrong attribution is worse
-// than no attribution.
-//
-// Tested cases (one assertion per scenario in the issue):
-//   - Claude credential error  → anthropic + "Claude"
-//   - Codex auth failure       → openai + "Codex"
-//   - Kimi auth failure        → kimi-for-coding + "Kimi"
-//   - Unrelated errors         → null (at least two negative cases — the
-//                                 false-positive cases are the ones that
-//                                 matter for this helper)
-
-describe("authErrorAdvice", () => {
-  it("attributes a Claude credential error to anthropic with label 'Claude'", () => {
-    // The real upstream message — verified against the deployed opencode
-    // build (see BET-280 / claudeAuth.mjs comment). `ApiError` is the typed
-    // name opencode normalizes to today; `ProviderAuthError` was the legacy
-    // name pre-BET-280. Both paths must work.
-    expect(
-      authErrorAdvice(
-        "ApiError",
-        "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
-        "anthropic",
-      ),
-    ).toEqual({ providerID: "anthropic", label: "Claude" });
-    expect(
-      authErrorAdvice("ProviderAuthError", undefined, "anthropic"),
-    ).toEqual({ providerID: "anthropic", label: "Claude" });
-  });
-
-  it("attributes a Codex auth failure to openai with label 'Codex'", () => {
-    expect(
-      authErrorAdvice("ApiError", "Authentication failed: invalid token", "openai"),
-    ).toEqual({ providerID: "openai", label: "Codex" });
-    expect(
-      authErrorAdvice("ApiError", "Unauthorized: API key not valid", "openai"),
-    ).toEqual({ providerID: "openai", label: "Codex" });
-  });
-
-  it("attributes a Kimi auth failure to kimi-for-coding with label 'Kimi'", () => {
-    expect(
-      authErrorAdvice(
-        "ApiError",
-        "API key expired — please renew in the console",
-        "kimi-for-coding",
-      ),
-    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
-    expect(
-      authErrorAdvice("ApiError", "token expired", "kimi-for-coding"),
-    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
-  });
-
-  it("returns null for an unrelated context-overflow error", () => {
-    // ContextOverflowError / MessageOutputLengthError etc. are handled by
-    // the existing switch in useSseBus.ts; authErrorAdvice must not steal
-    // them. Both an explicit name + safe message and a default name +
-    // credential-shaped message that lacks a known provider are tested.
-    expect(
-      authErrorAdvice("ContextOverflowError", "context window exceeded", "anthropic"),
-    ).toBeNull();
-    // Same credentials-shaped message but for an unrelated provider — must
-    // NOT promote to a banner; the user is on something the registry does
-    // not own, so we cannot reliably attribute.
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", "some-other-provider"),
-    ).toBeNull();
-  });
-
-  it("returns null for an unrelated tool / network error", () => {
-    expect(
-      authErrorAdvice("ApiError", "rate limit exceeded", "anthropic"),
-    ).toBeNull();
-    expect(authErrorAdvice("ApiError", "internal server error", "openai")).toBeNull();
-    // Network-style errors carry no auth tokens and are not ApiError.
-    expect(authErrorAdvice(undefined, "Network request failed", "anthropic")).toBeNull();
-    expect(authErrorAdvice(undefined, "ECONNRESET", "anthropic")).toBeNull();
-  });
-
-  it("returns null when providerID is missing (no active model known)", () => {
-    // Without a providerID we cannot attribute with confidence — fall
-    // through to the raw-message path. Both null and undefined must be
-    // tolerated (defensive against malformed event payloads).
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", null),
-    ).toBeNull();
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", undefined),
-    ).toBeNull();
-    expect(authErrorAdvice("ApiError", "credentials expired", "")).toBeNull();
-  });
-
-  it("returns null for non-string / nullish inputs (defensive parsing)", () => {
-    // Defensive: a malformed event from upstream must not crash the UI.
-    // Cast through `unknown` so the type system allows the bad inputs.
-    expect(
-      authErrorAdvice(
-        null as unknown as string,
-        null as unknown as string,
-        null as unknown as string,
-      ),
-    ).toBeNull();
-    expect(
-      authErrorAdvice(
-        undefined as unknown as string,
-        "credentials expired",
-        "anthropic",
-      ),
-    ).toBeNull();
-  });
-
-  it("exposes a tight label registry (exactly the three providers)", () => {
-    // Guards against a silent drift between this renderer-side table and
-    // SUBSCRIPTION_PROVIDERS in src/server/subscriptionProviders.mjs. Both
-    // files must agree on the three providers (anthropic / openai /
-    // kimi-for-coding). Adding a fourth here is intentional and rare;
-    // adding an unknown key (a typo) is the regression this catches.
-    expect(Object.keys(AUTH_PROVIDER_LABELS).sort()).toEqual([
-      "anthropic",
-      "kimi-for-coding",
-      "openai",
-    ]);
-    expect(AUTH_PROVIDER_LABELS.anthropic).toBe("Claude");
-    expect(AUTH_PROVIDER_LABELS.openai).toBe("Codex");
-    expect(AUTH_PROVIDER_LABELS["kimi-for-coding"]).toBe("Kimi");
-  });
-});
-
 describe("isJobRow", () => {
   const jobs = {
     ses_a: { name: "fix-login", status: "running", activity: "editing auth.ts" },
@@ -2184,74 +2027,6 @@ describe("isJobRow", () => {
   });
 });
 
-describe("formatJobSummary", () => {
-  it("formats branch + files-changed count for a finished job with a worktree", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: 3, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 3 files changed");
-  });
-
-  it("uses the singular 'file' for a single changed file", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: 1, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 1 file changed");
-  });
-
-  it("omits the branch when there is no worktree (ran in the parent cwd)", () => {
-    expect(formatJobSummary({ branch: null, filesChanged: 5, worktree: null })).toBe(
-      "5 files changed",
-    );
-  });
-
-  it("omits the branch when worktree is set but branch is null", () => {
-    expect(formatJobSummary({ branch: null, filesChanged: 2, worktree: "/tmp/wt" })).toBe(
-      "2 files changed",
-    );
-  });
-
-  it("treats null filesChanged as 0", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 0 files changed");
-  });
-});
-
-// ===== parseModelRef (BET-801) =====
-
-describe("parseModelRef", () => {
-  it("splits a canonical providerID/modelID ref", () => {
-    expect(parseModelRef("anthropic/claude-sonnet-4-6")).toEqual({
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    });
-  });
-
-  it("splits on the FIRST slash only when the modelID contains a slash", () => {
-    expect(parseModelRef("openai/gpt-4o/mini")).toEqual({
-      providerID: "openai",
-      modelID: "gpt-4o/mini",
-    });
-  });
-
-  it("returns null for absent or empty refs", () => {
-    expect(parseModelRef(null)).toBeNull();
-    expect(parseModelRef(undefined)).toBeNull();
-    expect(parseModelRef("")).toBeNull();
-  });
-
-  it("returns null for a ref with no slash", () => {
-    expect(parseModelRef("anthropic")).toBeNull();
-  });
-
-  it("returns null when either side is empty", () => {
-    expect(parseModelRef("/claude")).toBeNull();
-    expect(parseModelRef("anthropic/")).toBeNull();
-  });
-
-  it("returns null for a non-string (the legacy object shape on disk)", () => {
-    expect(parseModelRef({ providerID: "anthropic", modelID: "claude" } as unknown as string)).toBeNull();
-  });
-});
 
 // ===== isBackgroundJobCompletionTurn (BET-418 §C) =====
 
@@ -2824,32 +2599,8 @@ describe("fast-mode model helpers", () => {
     expect(fastModelId("gpt-5.6-fast")).toBe("gpt-5.6-fast");
   });
 
-  it("hideFastSiblingGroups drops a -fast model when its base is present", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["openai", [M("openai", "gpt-5.6"), M("openai", "gpt-5.6-fast"), M("openai", "gpt-5.4-mini")]],
-    ];
-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual([
-      "gpt-5.6",
-      "gpt-5.4-mini",
-    ]);
-  });
 
-  it("hideFastSiblingGroups KEEPS an orphan -fast model (nothing else reaches it)", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["x", [M("x", "solo-fast")]],
-    ];
-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual(["solo-fast"]);
-  });
 
-  it("hideFastSiblingGroups drops a group left empty", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["a", [M("a", "m"), M("a", "m-fast")]],
-      ["b", [M("b", "only-fast"), M("b", "only")]],
-    ];
-    const out = hideFastSiblingGroups(groups);
-    expect(out.map(([p]) => p)).toEqual(["a", "b"]);
-    expect(out[1][1].map((m) => m.id)).toEqual(["only"]);
-  });
 
   it("resolveFastToggle: base model with a fast twin is available and off", () => {
     const models = [M("openai", "gpt-5.6", ["low", "high"]), M("openai", "gpt-5.6-fast", ["low", "high"])];
@@ -3011,125 +2762,6 @@ describe("resolvePlanToggle — agent preference", () => {
   });
 });
 
-// ===== selectableModelGroups =====
-
-describe("selectableModelGroups", () => {
-  const M = (
-    providerID: string,
-    id: string,
-    extra: Partial<OpencodeModel> = {},
-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
-
-  it("returns null for null input (the loading signal)", () => {
-    expect(selectableModelGroups(null, undefined)).toBeNull();
-  });
-
-  it("filters out disabled, deprecated and deactivated models", () => {
-    const models = [
-      M("a", "keep"),
-      M("a", "disabled", { enabled: false }),
-      M("a", "deprecated", { status: "deprecated" }),
-      M("a", "deactivated"),
-    ];
-    const out = selectableModelGroups(models, ["a/deactivated"]);
-    const ids = out![0][1].map((m) => m.id);
-    expect(ids).toEqual(["keep"]);
-  });
-
-  it("groups and sorts by providerID", () => {
-    const models = [
-      M("zetta", "z1"),
-      M("alpha", "a1"),
-      M("alpha", "a2"),
-      M("zetta", "z2"),
-    ];
-    const out = selectableModelGroups(models, undefined)!;
-    expect(out.map(([p]) => p)).toEqual(["alpha", "zetta"]);
-    expect(out[0][1].map((m) => m.id)).toEqual(["a1", "a2"]);
-    expect(out[1][1].map((m) => m.id)).toEqual(["z1", "z2"]);
-  });
-
-  it("folds fast siblings but keeps an orphan whose base is gone", () => {
-    const models = [
-      M("openai", "gpt-5.6"),
-      M("openai", "gpt-5.6-fast"),
-      M("x", "solo-fast"),
-    ];
-    const out = selectableModelGroups(models, undefined)!;
-    const openai = out.find(([p]) => p === "openai")![1].map((m) => m.id);
-    expect(openai).toEqual(["gpt-5.6"]);
-    // The orphan fast model (no base to fold into / reach it by) survives.
-    const x = out.find(([p]) => p === "x")![1].map((m) => m.id);
-    expect(x).toEqual(["solo-fast"]);
-  });
-
-  it("an empty selection yields an empty (not null) grouped list", () => {
-    const models = [M("a", "off", { enabled: false })];
-    expect(selectableModelGroups(models, undefined)).toEqual([]);
-  });
-});
-
-// ===== isDeprecated =====
-
-describe("isDeprecated", () => {
-  it("is true only for status === 'deprecated'", () => {
-    expect(isDeprecated({ status: "deprecated" })).toBe(true);
-    expect(isDeprecated({ status: "live" })).toBe(false);
-    expect(isDeprecated({})).toBe(false);
-  });
-
-  it("handles null / undefined / absent status", () => {
-    expect(isDeprecated(null)).toBe(false);
-    expect(isDeprecated(undefined)).toBe(false);
-    expect(isDeprecated({ status: undefined })).toBe(false);
-  });
-});
-
-// ===== mainPickerGroups (BET-1139) =====
-
-describe("mainPickerGroups", () => {
-  const M = (
-    providerID: string,
-    id: string,
-    extra: Partial<OpencodeModel> = {},
-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
-
-  it("returns null groups for null input, with empty disabledKeys", () => {
-    expect(mainPickerGroups(null, undefined, undefined)).toEqual({
-      groups: null,
-      disabledKeys: [],
-    });
-  });
-
-  it("keeps a deprecated model present but DISABLED until opted in", () => {
-    const models = [
-      M("a", "live"),
-      M("a", "old", { status: "deprecated" }),
-    ];
-    const out = mainPickerGroups(models, undefined, undefined);
-    const ids = out.groups![0][1].map((m) => m.id);
-    expect(ids).toEqual(["live", "old"]);
-    expect(out.disabledKeys).toEqual(["a/old"]);
-  });
-
-  it("makes a deprecated model selectable once opted in", () => {
-    const models = [M("a", "old", { status: "deprecated" })];
-    const out = mainPickerGroups(models, undefined, ["a/old"]);
-    expect(out.groups![0][1].map((m) => m.id)).toEqual(["old"]);
-    expect(out.disabledKeys).toEqual([]);
-  });
-
-  it("still applies the enabled + deactivated gates", () => {
-    const models = [
-      M("a", "disabled", { enabled: false }),
-      M("a", "deactivated", { status: "deprecated" }),
-      M("a", "dep-disabled", { status: "deprecated", enabled: false }),
-    ];
-    const out = mainPickerGroups(models, ["a/deactivated"], undefined);
-    expect(out.groups).toEqual([]);
-    expect(out.disabledKeys).toEqual([]);
-  });
-});
 
 // ===== Transcript entry motion =====
 //
@@ -3618,14 +3250,21 @@ describe("computeTurnInfo", () => {
 
 // ===== Subscription plan usage (BET-738) =====
 
+// The box stamps `tone` on every window it publishes (WS09 SF-M18,
+// src/server/usageWindowView.mjs); mirror that here so fixtures look like a
+// real snapshot. An explicit `tone` (or `tone: undefined`) on a window wins.
+const boxTone = (pct: number): "under" | "warn" | "danger" | "over" =>
+  pct >= 100 ? "over" : pct >= 90 ? "danger" : pct >= 70 ? "warn" : "under";
+
 function usageSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
-  return {
+  const snap: UsageSnapshot = {
     provider: "claude",
     providerIDs: ["anthropic"],
     windows: [{ kind: "session", label: "Session (5h)", pct: 42 }],
     fetchedAt: 1_000_000,
     ...overrides,
   };
+  return { ...snap, windows: snap.windows.map((w) => ({ tone: boxTone(w.pct), ...w })) };
 }
 
 describe("selectUsageSnapshot", () => {
@@ -3654,6 +3293,11 @@ describe("selectUsageSnapshot", () => {
 });
 
 describe("usageDialState", () => {
+  it("a window with no box tone (an older box) reports tone null — no colour is invented", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "5h", pct: 95, tone: undefined }] });
+    expect(usageDialState(snap, false).tone).toBeNull();
+  });
+
   it("an inactive window never drives visibility or the reported window", () => {
     const snap = usageSnapshot({
       windows: [
@@ -4318,138 +3962,7 @@ describe("planHighlightRanges", () => {
   });
 });
 
-// ===== checksChipDescriptor / branchChipLabel / shouldOfferForgeConnect (BET-789) =====
-
-describe("checkTone", () => {
-  const run = (over: Partial<{ status: string; conclusion: string }>) => ({
-    name: "c",
-    ...over,
-  });
-
-  it("no conclusion → running (still pending)", () => {
-    expect(checkTone(run({}))).toBe("running");
-  });
-
-  it("status queued → running", () => {
-    expect(checkTone(run({ status: "queued" }))).toBe("running");
-  });
-
-  it("status in_progress → running", () => {
-    expect(checkTone(run({ status: "in_progress" }))).toBe("running");
-  });
-
-  it("conclusion success → ok", () => {
-    expect(checkTone(run({ conclusion: "success" }))).toBe("ok");
-  });
-
-  it("conclusion failure / cancelled / timed_out → error", () => {
-    expect(checkTone(run({ conclusion: "failure" }))).toBe("error");
-    expect(checkTone(run({ conclusion: "cancelled" }))).toBe("error");
-    expect(checkTone(run({ conclusion: "timed_out" }))).toBe("error");
-  });
-});
-
-describe("orderChecks", () => {
-  it("mixed list comes back failed → running → passed", () => {
-    const checks = [
-      { name: "p1", conclusion: "success" },
-      { name: "f1", conclusion: "failure" },
-      { name: "r1", status: "in_progress" },
-      { name: "p2", conclusion: "success" },
-      { name: "f2", conclusion: "cancelled" },
-    ];
-    expect(orderChecks(checks).map((c) => c.name)).toEqual([
-      "f1",
-      "f2",
-      "r1",
-      "p1",
-      "p2",
-    ]);
-  });
-
-  it("two checks in the same bucket keep their input order (stable)", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "success" },
-    ];
-    expect(orderChecks(checks).map((c) => c.name)).toEqual(["a", "b"]);
-  });
-
-  it("empty list → empty, and does not mutate its input", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "failure" },
-    ];
-    const before = [...checks];
-    expect(orderChecks([])).toEqual([]);
-    expect(checks).toEqual(before);
-  });
-});
-
-describe("countsForChecks", () => {
-  it("buckets success / other-conclusion / pending into passed / failed / running", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "failure" },
-      { name: "c", conclusion: "timed_out" },
-      { name: "d" },
-      { name: "e", status: "in_progress" },
-      { name: "f", status: "queued" },
-    ];
-    expect(countsForChecks(checks)).toEqual({ passed: 1, failed: 2, running: 3 });
-  });
-
-  it("empty list → all zero", () => {
-    expect(countsForChecks([])).toEqual({ passed: 0, failed: 0, running: 0 });
-  });
-});
-
-describe("checksChipDescriptor", () => {
-  it("green → ✓ N, ok tone, priority 40 (first to overflow)", () => {
-    expect(checksChipDescriptor("green", { passed: 7, failed: 0, running: 0 })).toEqual({
-      label: "✓ 7",
-      tone: "ok",
-      priority: 40,
-    });
-  });
-
-  it("red → ✗ N failed, danger tone, priority 90 (survives the narrow layout)", () => {
-    expect(checksChipDescriptor("red", { passed: 0, failed: 2, running: 0 })).toEqual({
-      label: "✗ 2 failed",
-      tone: "danger",
-      priority: 90,
-    });
-  });
-
-  it("yellow → ◐ N running, warn tone, priority 40", () => {
-    expect(checksChipDescriptor("yellow", { passed: 0, failed: 0, running: 3 })).toEqual({
-      label: "◐ 3 running",
-      tone: "warn",
-      priority: 40,
-    });
-  });
-
-  it("none → null (no chip — nothing to say)", () => {
-    expect(checksChipDescriptor("none", { passed: 0, failed: 0, running: 0 })).toBeNull();
-  });
-});
-
-describe("branchChipLabel", () => {
-  it("branch only → ⎇ branch", () => {
-    expect(branchChipLabel("feat/forge-seam", null)).toBe("⎇ feat/forge-seam");
-  });
-
-  it("branch + pr → ⎇ branch · #412", () => {
-    expect(branchChipLabel("feat/forge-seam", { number: 412 })).toBe(
-      "⎇ feat/forge-seam · #412",
-    );
-  });
-
-  it("no branch → null (chip not rendered), whatever the PR state", () => {
-    expect(branchChipLabel(null, null)).toBeNull();
-    expect(branchChipLabel(null, { number: 412 })).toBeNull();
-  });
-});
+// ===== shouldOfferForgeConnect (BET-789) =====
 
 describe("shouldOfferForgeConnect", () => {
   const cases: [boolean, string | null, boolean, boolean][] = [
@@ -4468,252 +3981,6 @@ describe("shouldOfferForgeConnect", () => {
       expect(shouldOfferForgeConnect({ connected, forgeKind, dismissed })).toBe(expected);
     });
   }
-});
-
-describe("failuresToAgentPrompt", () => {
-  it("names failing checks with their log URLs", () => {
-    const prompt = failuresToAgentPrompt([
-      { name: "typecheck-test", conclusion: "failure", url: "https://x/logs/1" },
-      { name: "duplication-gate", conclusion: "failure" },
-      { name: "lint", conclusion: "success" },
-    ]);
-    expect(prompt).toContain("typecheck-test");
-    expect(prompt).toContain("https://x/logs/1");
-    expect(prompt).toContain("duplication-gate");
-    expect(prompt).not.toContain("lint");
-  });
-
-  it("no failing checks → empty body", () => {
-    expect(failuresToAgentPrompt([])).toBe("");
-  });
-});
-
-describe("resolveShipState", () => {
-  const base = { branch: "feat/x", base: "main", aheadCount: 3, hasPr: false };
-
-  it("has-pr wins even when branch === base", () => {
-    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 0, hasPr: true })).toBe(
-      "has-pr",
-    );
-  });
-
-  it("detached when no branch", () => {
-    expect(resolveShipState({ branch: null, base: "main", aheadCount: 3, hasPr: false })).toBe(
-      "detached",
-    );
-  });
-
-  it("on-base when the branch is the default branch", () => {
-    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 3, hasPr: false })).toBe(
-      "on-base",
-    );
-  });
-
-  it("no-commits when aheadCount is 0", () => {
-    expect(resolveShipState({ ...base, aheadCount: 0 })).toBe("no-commits");
-  });
-
-  it("ready by default", () => {
-    expect(resolveShipState(base)).toBe("ready");
-  });
-
-  it("aheadCount null (unknown) falls through to ready", () => {
-    // Pins the deliberate asymmetry (BET-915): the commit count is an
-    // optimisation, not a safety fact — leaving it unknown must NOT hide the
-    // action, unlike a null base.
-    expect(resolveShipState({ ...base, aheadCount: null })).toBe("ready");
-  });
-
-  it("base null → unknown", () => {
-    expect(resolveShipState({ branch: "main", base: null, aheadCount: 3, hasPr: false })).toBe(
-      "unknown",
-    );
-  });
-
-  it("has-pr wins over unknown", () => {
-    expect(resolveShipState({ branch: "x", base: null, aheadCount: 3, hasPr: true })).toBe("has-pr");
-  });
-
-  it("detached wins over unknown", () => {
-    expect(resolveShipState({ branch: null, base: null, aheadCount: 3, hasPr: false })).toBe(
-      "detached",
-    );
-  });
-});
-
-describe("canMerge", () => {
-  it("enables merge only when green + no threads + mergeable true", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: true,
-      reason: null,
-    });
-  });
-
-  it("blocks when mergeable is null (still computing)", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: null })).toEqual({
-      can: false,
-      reason: "still computing",
-    });
-  });
-
-  it("blocks when mergeable is false", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: false })).toEqual({
-      can: false,
-      reason: "not mergeable",
-    });
-  });
-
-  it("blocks on red checks with a failing reason", () => {
-    expect(canMerge({ rollup: "red", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "checks failing",
-    });
-  });
-
-  it("blocks on yellow checks as still running, never green-only", () => {
-    expect(canMerge({ rollup: "yellow", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "checks still running",
-    });
-  });
-
-  it("blocks when there are no checks at all", () => {
-    expect(canMerge({ rollup: "none", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "no checks",
-    });
-  });
-
-  it("blocks on unresolved review threads", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 1, mergeable: true })).toEqual({
-      can: false,
-      reason: "1 unresolved thread",
-    });
-    expect(canMerge({ rollup: "green", unresolvedThreads: 3, mergeable: true })).toEqual({
-      can: false,
-      reason: "3 unresolved threads",
-    });
-  });
-
-  it("blocks on EVERY blocking combination at once", () => {
-    expect(canMerge({ rollup: "red", unresolvedThreads: 2, mergeable: null })).toEqual({
-      can: false,
-      reason: "still computing",
-    });
-  });
-});
-
-describe("describeMergeFailure", () => {
-  it("surfaces the distinguished SHA-mismatch reason", () => {
-    expect(describeMergeFailure("sha_mismatch")).toMatch(/head SHA moved/i);
-  });
-  it("surfaces cannot-merge and permission distinctly", () => {
-    expect(describeMergeFailure("cannot_merge")).toMatch(/blocked/i);
-    expect(describeMergeFailure("permission")).toMatch(/No permission/i);
-  });
-  it("degrades gracefully for unknown / absent kinds", () => {
-    expect(describeMergeFailure("http_422")).toContain("http_422");
-    expect(describeMergeFailure(null)).toBe("Merge failed.");
-  });
-});
-
-describe("commentableLines", () => {
-  it("returns [] for an empty diff", () => {
-    expect(commentableLines("")).toEqual([]);
-    expect(commentableLines("\n\n")).toEqual([]);
-  });
-
-  it("anchors an added line on the new side", () => {
-    const diff = [
-      "--- a/file.ts",
-      "+++ b/file.ts",
-      "@@ -10,3 +10,3 @@",
-      "  a",
-      "- old",
-      "+ new",
-      "  c",
-    ].join("\n");
-    // a=10 (context→both), old=11 (removed), new=11 (added), c=12 (context→both)
-    expect(commentableLines(diff)).toEqual([
-      { path: "file.ts", line: 10, side: "both" },
-      { path: "file.ts", line: 11, side: "old" },
-      { path: "file.ts", line: 11, side: "new" },
-      { path: "file.ts", line: 12, side: "both" },
-    ]);
-  });
-
-  it("anchors a removed line on the old side and an unchanged context line on both sides", () => {
-    const diff = ["--- a/x.ts", "+++ b/x.ts", "@@ -5 +5 @@", "- gone", "  kept"].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "x.ts", line: 5, side: "old" },
-      { path: "x.ts", line: 5, side: "both" },
-    ]);
-  });
-
-  it("handles a file with multiple hunks, resetting line counters per hunk", () => {
-    const diff = [
-      "--- a/file.ts",
-      "+++ b/file.ts",
-      "@@ -1,2 +1,2 @@",
-      "  a",
-      "- b",
-      "+ c",
-      "@@ -20,1 +20,1 @@",
-      "  z",
-      "+ w",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      // first hunk: a=1 (context→both), b=2 (removed), c=2 (added)
-      { path: "file.ts", line: 1, side: "both" },
-      { path: "file.ts", line: 2, side: "old" },
-      { path: "file.ts", line: 2, side: "new" },
-      // second hunk: z=20 (context→both), w=21 (added)
-      { path: "file.ts", line: 20, side: "both" },
-      { path: "file.ts", line: 21, side: "new" },
-    ]);
-  });
-
-  it("keys anchors per-file so two files with the same line number do not collide", () => {
-    const diff = [
-      "--- a/a.ts",
-      "+++ b/a.ts",
-      "@@ -1,1 +1,1 @@",
-      "+ a1",
-      "--- a/b.ts",
-      "+++ b/b.ts",
-      "@@ -1,1 +1,1 @@",
-      "+ b1",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "a.ts", line: 1, side: "new" },
-      { path: "b.ts", line: 1, side: "new" },
-    ]);
-  });
-
-  it("uses the +++ b/ path, falling back to --- a/ for a file deleted to /dev/null", () => {
-    const diff = [
-      "--- a/old.ts",
-      "+++ /dev/null",
-      "@@ -1,1 +0,0 @@",
-      "- gone",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "old.ts", line: 1, side: "old" },
-    ]);
-  });
-
-  it("skips hunk headers and file markers / new-file boilerplate", () => {
-    const diff = [
-      "diff --git a/x b/x",
-      "new file mode 100644",
-      "index 0000000..e69de29",
-      "--- /dev/null",
-      "+++ b/x",
-      "@@ -0,0 +1 @@",
-      "+ hi",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([{ path: "x", line: 1, side: "new" }]);
-  });
 });
 
 
@@ -5034,42 +4301,6 @@ describe("forgeCredentialSecondary (BET-1059)", () => {
   });
 });
 
-describe("branchPanelState (BET-867)", () => {
-  const pr = {
-    number: 412,
-    title: "T",
-    body: "",
-    url: "",
-    state: "open" as const,
-    draft: false,
-    headRef: "h",
-    baseRef: "b",
-    headSha: "s",
-    author: "a",
-    reviewers: [],
-    mergeable: null,
-    mergeBlockedReason: null,
-    unresolvedThreads: 0,
-  };
-
-  it("no branch → none (plain non-interactive Tag)", () => {
-    expect(branchPanelState({ pr, forgeConnected: true, branch: null })).toBe("none");
-    expect(branchPanelState({ pr, forgeConnected: true, branch: "" })).toBe("none");
-  });
-
-  it("branch but forge not connected → none", () => {
-    expect(branchPanelState({ pr, forgeConnected: false, branch: "feat/x" })).toBe("none");
-  });
-
-  it("branch + connected + no PR → no-pr", () => {
-    expect(branchPanelState({ pr: null, forgeConnected: true, branch: "feat/x" })).toBe("no-pr");
-  });
-
-  it("branch + connected + PR → pr", () => {
-    expect(branchPanelState({ pr, forgeConnected: true, branch: "feat/x" })).toBe("pr");
-  });
-});
-
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {
     const switchModel = vi.fn();
@@ -5130,72 +4361,6 @@ describe("dispatchAppControl (BET-841)", () => {
     dispatchAppControl(undefined, { switchModel, renameSession });
     expect(switchModel).not.toHaveBeenCalled();
     expect(renameSession).not.toHaveBeenCalled();
-  });
-});
-
-// ---- Work inbox (BET-795) -------------------------------------------------
-
-const inboxItem = (over: Partial<ForgeInboxItem>): ForgeInboxItem => ({
-  kind: "issue",
-  repoKey: "github.com/acme/widget",
-  number: 1,
-  title: "thing",
-  url: "https://github.com/acme/widget/issues/1",
-  state: "open",
-  rollup: "none",
-  updatedAt: 0,
-  reason: "assigned",
-  seed: "Complete https://github.com/acme/widget/issues/1",
-  ...over,
-});
-
-describe("inboxReasonLabel", () => {
-  it("maps the three inbox reasons to their verbatim mockup copy", () => {
-    expect(inboxReasonLabel("assigned")).toBe("issue · assigned to you");
-    expect(inboxReasonLabel("review requested")).toBe("review requested");
-    expect(inboxReasonLabel("checks failing")).toBe("checks red");
-  });
-});
-
-describe("sortInbox", () => {
-  it("sorts by updatedAt descending", () => {
-    const rows = [
-      inboxItem({ number: 1, updatedAt: 100 }),
-      inboxItem({ number: 2, updatedAt: 900 }),
-      inboxItem({ number: 3, updatedAt: 500 }),
-    ];
-    expect(sortInbox(rows).map((r) => r.number)).toEqual([2, 3, 1]);
-  });
-
-  it("dedupes the same object at two keys to one row, more urgent reason wins (dedupe-precedence case)", () => {
-    const rows = [
-      inboxItem({
-        number: 9,
-        kind: "pr",
-        reason: "review requested",
-        updatedAt: 500,
-        rollup: "red",
-        url: "https://github.com/acme/widget/pull/9",
-      }),
-      inboxItem({
-        number: 9,
-        kind: "pr",
-        reason: "checks failing",
-        updatedAt: 500,
-        rollup: "red",
-        url: "https://github.com/acme/widget/pull/9",
-      }),
-    ];
-    const result = sortInbox(rows);
-    expect(result).toHaveLength(1);
-    expect(result[0].reason).toBe("checks failing");
-  });
-
-  it("does not mutate the caller's array", () => {
-    const rows = [inboxItem({ number: 2, updatedAt: 900 }), inboxItem({ number: 1, updatedAt: 100 })];
-    const before = [...rows];
-    sortInbox(rows);
-    expect(rows.map((r) => r.number)).toEqual(before.map((r) => r.number));
   });
 });
 
@@ -5539,44 +4704,6 @@ describe("extractPlanData", () => {
   });
 });
 
-describe("planRefsFromPart", () => {
-  const part = (over: Record<string, unknown>): OpencodePart =>
-    ({ type: "tool", id: "p", messageID: "m", ...over }) as OpencodePart;
-
-  it("collects .opencode/plans refs across text, tool input, and patch files", () => {
-    expect(planRefsFromPart(part({ type: "text", text: "Plan: .opencode/plans/a.md" }))).toEqual([
-      ".opencode/plans/a.md",
-    ]);
-    expect(
-      planRefsFromPart(part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } })),
-    ).toEqual([".opencode/plans/b.md"]);
-    expect(planRefsFromPart(part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }))).toEqual([
-      ".opencode/plans/c.md",
-    ]);
-    expect(
-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } })),
-    ).toEqual([]);
-  });
-
-  it("does not treat a read reference as an authoring signal", () => {
-    expect(
-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })),
-    ).toEqual([]);
-  });
-
-  it("deduplicates identical refs within a part", () => {
-    expect(
-      planRefsFromPart(
-        part({
-          tool: "plan",
-          state: { status: "completed", input: { path: ".opencode/plans/same.md" } },
-          text: ".opencode/plans/same.md",
-        }),
-      ),
-    ).toEqual([".opencode/plans/same.md"]);
-  });
-});
-
 describe("resolveDelegateModel", () => {
   const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
     ({ providerID, modelID });
@@ -5878,48 +5005,6 @@ describe("dispatchMedia", () => {
   });
 });
 
-// ===== Optimizer P2.5 formatters (BET-1347) =====
-
-describe("describePressure", () => {
-  it("renders the neutral 'no pressure signal yet' with no signal, and NO warn", () => {
-    expect(describePressure(0, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
-    expect(describePressure(40, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
-  });
-  it("renders 'on pace' (ok) when on or below pace", () => {
-    expect(describePressure(0, true)).toEqual({ text: "on pace", tone: "ok" });
-    expect(describePressure(-5, true)).toEqual({ text: "on pace", tone: "ok" });
-  });
-  it("renders '+N pts ahead of pace' (warn) when ahead of pace", () => {
-    expect(describePressure(23, true)).toEqual({ text: "+23 pts ahead of pace", tone: "warn" });
-    expect(describePressure(0.4, true)).toEqual({ text: "+0 pts ahead of pace", tone: "warn" });
-  });
-});
-
-describe("describeActivityEntry", () => {
-  it("builds a headline from verdict + subject and an evidence line", () => {
-    const entry = {
-      kind: "tune",
-      subject: "trim threshold 16 → 12 tool uses",
-      from: 16,
-      to: 12,
-      verdict: "kept",
-      evidence: { turns: 62, hit: 74.1, churn: 0.4 },
-    };
-    const out = describeActivityEntry(entry);
-    expect(out.headline).toBe("Kept — trim threshold 16 → 12 tool uses");
-    expect(out.detail).toContain("62");
-    expect(out.detail).toContain("74.1");
-  });
-  it("marks a rolled-back entry distinctly", () => {
-    const out = describeActivityEntry({ kind: "tune", subject: "protected tail", verdict: "rolled-back", evidence: {} });
-    expect(out.headline).toBe("Rolled back — protected tail");
-  });
-  it("falls back to a safe headline when subject/verdict are absent", () => {
-    const out = describeActivityEntry({ kind: "tune", verdict: "kept" });
-    expect(out.headline).toContain("optimizer change");
-  });
-});
-
 describe("chartAxisTicks", () => {
   const day = (n: number) => new Date(`2026-08-${String(n).padStart(2, "0")}T00:00:00`).getTime();
 
@@ -5976,20 +5061,6 @@ describe("chartAxisTicks", () => {
   });
 });
 
-describe("formatCompactionSaving", () => {
-  it("renders the arrowed before -> after saving", () => {
-    expect(formatCompactionSaving(128_000, 31_000)).toBe("128k → 31k");
-    expect(formatCompactionSaving(10_000, 2000)).toBe("10k → 2k");
-  });
-  it("returns '0' when there is no saving (before == after, or after > before)", () => {
-    expect(formatCompactionSaving(128_000, 128_000)).toBe("0");
-    expect(formatCompactionSaving(10_000, 20_000)).toBe("0");
-  });
-  it("returns '0' for missing/non-finite inputs", () => {
-    expect(formatCompactionSaving(0, 0)).toBe("0");
-    expect(formatCompactionSaving(Number.NaN, 1000)).toBe("0");
-  });
-});
 
 
 // ===== Endpoint health formatting (BET-1537 S5 review Blocks 1+3) =====
@@ -6095,16 +5166,6 @@ describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
       expect(endpointStateLabel(state)).toBe(ENDPOINT_STATE_LABEL[state]);
     }
     expect(endpointStateLabel("nonexistent-state")).toBeNull();
-  });
-});
-
-import { isReadOnlyJob } from "./chatUtils";
-describe("isReadOnlyJob", () => {
-  it("plain delegate jobs are read-only; CTO work workers are writable sessions", () => {
-    expect(isReadOnlyJob({ correlation: null })).toBe(true);
-    expect(isReadOnlyJob({})).toBe(true);
-    expect(isReadOnlyJob({ correlation: { kind: "work" } })).toBe(false);
-    expect(isReadOnlyJob(null)).toBe(false);
   });
 });
 

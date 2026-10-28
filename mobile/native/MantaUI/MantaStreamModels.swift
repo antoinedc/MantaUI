@@ -225,9 +225,74 @@ struct StreamTruncationPayload: Codable, Equatable, Sendable {
 }
 
 /// `sub: "sessionError"` — a real turn failure (aborts are filtered box-side).
+///
+/// `display` is the box's sentence for the error and, for a credential failure,
+/// the provider to reconnect (WS02 server-first: the box classifies against the
+/// session's current model). An older box sends none: the raw `message` is then
+/// shown as it is, never reclassified here.
 struct StreamSessionErrorPayload: Codable, Equatable, Sendable {
     var name: String?
     var message: String
+    var rawMessage: String? = nil
+    var display: StreamSessionErrorDisplay? = nil
+
+    /// The line to show: the box's text, else the raw message.
+    var shownText: String { display?.text ?? message }
+}
+
+struct StreamSessionErrorDisplay: Codable, Equatable, Sendable {
+    struct Reconnect: Codable, Equatable, Sendable {
+        var providerID: String
+        var label: String
+        /// The id the Accounts screen accepts as its focus provider.
+        var accountsId: String
+    }
+
+    var text: String
+    var reconnect: Reconnect?
+}
+
+/// `sub: "retry"` — the provider is being retried (rate limit, overload). A
+/// `null` payload clears it. `headline` / `caption` / `body` are the BOX's copy;
+/// an older box sends none (the card then falls back to a fixed label + `message`).
+struct StreamRetryAction: Codable, Equatable, Sendable {
+    var title: String?
+    var message: String?
+    var label: String?
+    var link: String?
+}
+
+struct StreamRetryPayload: Codable, Equatable, Sendable {
+    var attempt: Double
+    var message: String
+    var next: Double? = nil
+    var action: StreamRetryAction? = nil
+    var headline: String? = nil
+    var caption: String? = nil
+    var body: String? = nil
+}
+
+/// `sub: "compaction"` — started / delta / ended. `firstLine` rides the `ended`
+/// frame (the box's first non-blank line of what the compaction streamed).
+struct StreamCompactionPayload: Codable, Equatable, Sendable {
+    var phase: String
+    var text: String? = nil
+    var reason: String? = nil
+    var firstLine: String? = nil
+}
+
+/// `sub: "optimizer.compacted"` — a background compaction of the open
+/// conversation. `text` is the box's whole line; an older box sends none.
+struct StreamOptimizerCompactedPayload: Codable, Equatable, Sendable {
+    var text: String? = nil
+}
+
+/// `sub: "commandExecuted"` — the origin of a slash-command user message. The
+/// box always sends `arguments` as a string (`""` when absent).
+struct StreamCommandExecutedPayload: Codable, Equatable, Sendable {
+    var messageID: String
+    var name: String
+    var arguments: String
 }
 
 /// `sub: "context"` — computeContextBreakdown output (all box-computed).

@@ -1,20 +1,27 @@
 import SwiftUI
 
 // ===========================================================================
-// Multi-account & seats, phase 3 — Settings → Accounts.
+// Multi-account & seats — Settings → Accounts.
 //
-// Providers → accounts → seats. Each seat shows its label, email, plan, 5h and
-// weekly meters, how many conversations are on it, whether it is the box's live
-// login, and its sign-in state. With two or more seats a provider gets a
-// Manual / Automatic switch; in manual mode a seat can be made the one every
-// conversation uses. Seats can be renamed, and removed — the live one too (the box
-// switches to another seat first); a provider's only seat stays.
+// One screen for everything about how the box signs in to models:
+//
+//   * a section per subscription provider (Claude, Codex, Kimi, in the box's
+//     order): the connection row (state + one control — Connect, Disconnect or
+//     Try again), then, when the provider has seats, the Manual / Automatic
+//     switch, accounts and seats, and "Add <Provider> account";
+//   * a Custom endpoints section: each saved endpoint with a switch per model,
+//     and "Add endpoint…".
+//
+// Seats: label, email, plan, 5h and weekly meters, how many conversations are on
+// it, whether it is the box's live login, and its sign-in state. Seats can be
+// renamed and removed (the live one too — the box switches to another first; a
+// provider's only seat stays). A signed-out or expired seat that is not the
+// box's live login offers "Sign in again" (same account only).
 //
 // Every control does something and SAYS so: a success or a specific failure
-// lands in the feedback banner (`AccountsFeedbackBanner`). There is no "add a
-// seat" button on purpose — the sign-in that adds one runs a CLI/OAuth flow the
-// phone has no way to host — so that entry is plain text pointing at the
-// desktop, never a control that does nothing.
+// lands in the feedback banner (`AccountsFeedbackBanner`). Sign-ins run in
+// sheets (`AccountsSignInSheet`, `ProviderConnectSheet`); nothing here points
+// the user at another device.
 //
 // The screen has no navigation stack of its own: it is pushed from Settings and
 // from the usage sheet, each of which owns one.
@@ -88,24 +95,60 @@ extension View {
 
 struct AccountsScreen: View {
     @ObservedObject var store: AccountsStore
-    /// A provider to show first (tapped through from "Other subscriptions").
+    /// A provider to show first (tapped through from "Other subscriptions", or a
+    /// Reconnect prompt). Accepts a seat provider id (`claude`, `codex`), an
+    /// opencode id (`anthropic`, `openai`, `kimi-for-coding`) or the alias `kimi`.
     var focusProvider: String? = nil
     /// True when this screen is the only thing keeping the store reading (the
     /// Settings entry). False when an owner — the chat — already runs it.
     var ownsLifecycle = false
 
+    @StateObject private var connections: ProviderConnectionsStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var renaming: SeatRenameRequest?
     @State private var renameDraft = ""
     @State private var removeTarget: SeatRemoveRequest?
     @State private var confirmRemove = false
     @State private var pendingSwitch: SeatSwitchRequest?
+    @State private var signInRequest: AccountsSignInRequest?
+    @State private var connectRequest: ConnectSheetRequest?
+    /// The subscription whose Connect is deciding which flow to open (it reads a
+    /// fresh seat list first).
+    @State private var deciding: String?
+    @State private var disconnectTarget: SubscriptionStatus?
+    @State private var confirmDisconnect = false
+
+    init(store: AccountsStore, focusProvider: String? = nil, ownsLifecycle: Bool = false) {
+        self.store = store
+        self.focusProvider = focusProvider
+        self.ownsLifecycle = ownsLifecycle
+        _connections = StateObject(wrappedValue: ProviderConnectionsStore(
+            api: store.api,
+            announce: { [weak store] text, isError in store?.announce(text, isError: isError) },
+            refreshAccounts: { [weak store] in await store?.refresh() }
+        ))
+    }
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
     private var removeTitle: String {
         let label = removeTarget?.seat.label ?? ""
         return "Remove \(label.isEmpty ? "this seat" : label)?"
+    }
+
+    private var plan: AccountsSectionPlan {
+        AccountsSectionPlan.build(
+            statuses: connections.statuses,
+            seatProviders: store.providers,
+            endpoints: connections.endpoints,
+            focus: focusProvider
+        )
+    }
+
+    /// Any flow or action is in progress: every control that would start another disables.
+    private var anyBusy: Bool {
+        store.acting || connections.busyProvider != nil || deciding != nil
+            || signInRequest != nil || connectRequest != nil
     }
 
     var body: some View {
@@ -115,7 +158,10 @@ struct AccountsScreen: View {
         .listStyle(.insetGrouped)
         .navigationTitle("Accounts")
         .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await store.refresh() }
+        .refreshable {
+            await store.refresh()
+            await connections.load()
+        }
         .overlay(alignment: .bottom) { AccountsFeedbackBanner(store: store, tokens: tokens) }
         .onAppear {
             if ownsLifecycle {
@@ -123,6 +169,7 @@ struct AccountsScreen: View {
             } else {
                 Task { await store.refresh() }
             }
+            Task { await connections.load() }
         }
         .onDisappear {
             if ownsLifecycle { store.stop() }
@@ -157,68 +204,212 @@ struct AccountsScreen: View {
                 }
             }
         )
+        .confirmActionSheet(
+            isPresented: $confirmDisconnect,
+            title: "Disconnect \(disconnectTarget?.displayName ?? "this provider")?",
+            message: ProviderConnectCopy.disconnectConfirmMessage,
+            destructiveTitle: "Disconnect",
+            destructiveAction: {
+                if let target = disconnectTarget {
+                    Task { await connections.disconnect(target) }
+                }
+            }
+        )
+        .sheet(item: $signInRequest) { request in
+            AccountsSignInSheet(request: request, store: store)
+        }
+        .sheet(item: $connectRequest) { request in
+            ProviderConnectSheet(status: request.status, accounts: store, connections: connections)
+        }
     }
 
     // MARK: - Content
 
     @ViewBuilder
     private var content: some View {
-        if store.providers.isEmpty {
-            switch store.phase {
-            case .idle, .loading:
-                Section {
-                    HStack(spacing: Metrics.spacing.sp2) {
-                        ProgressView()
-                        Text("Loading accounts…").foregroundStyle(.secondary)
-                    }
-                }
-            case .failed(let reason):
-                Section {
-                    VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                        Text(reason == AccountsCopy.staleBox ? reason : AccountsCopy.failure("load accounts", reason: reason))
-                            .foregroundColor(tokens.danger)
-                        Button("Try again") { Task { await store.refresh() } }
-                            .buttonStyle(.bordered)
-                    }
-                }
-            case .loaded:
-                Section {
-                    Text(AccountsCopy.noSeats).foregroundStyle(.secondary)
-                }
+        if let reason = store.refreshError, !store.providers.isEmpty {
+            Section {
+                Text("Couldn't refresh — showing the last reading. \(reason)")
+                    .font(.footnote)
+                    .foregroundColor(tokens.warn)
             }
+        }
+        sourceFailures
+        let sections = plan.subscriptions
+        if sections.isEmpty {
+            placeholder
         } else {
-            if let reason = store.refreshError {
-                Section {
-                    Text("Couldn't refresh — showing the last reading. \(reason)")
-                        .font(.footnote)
-                        .foregroundColor(tokens.warn)
-                }
+            ForEach(sections) { section in
+                subscriptionSection(section)
             }
-            ForEach(AccountsSelectors.ordered(store.providers, focus: focusProvider)) { provider in
-                providerSection(provider)
+        }
+        endpointsSection
+    }
+
+    /// One footnote row per failed source, each with its own retry — one failing
+    /// call never hides the others. A failed health read shows nothing (its rows
+    /// simply carry no health state).
+    @ViewBuilder
+    private var sourceFailures: some View {
+        if case .failed(let reason) = connections.statusPhase {
+            Section {
+                failureRow("Couldn't load subscriptions — \(reason)") { await connections.loadStatuses() }
+            }
+        }
+        if case .failed(let reason) = store.phase, store.providers.isEmpty {
+            Section {
+                failureRow(reason == AccountsCopy.staleBox ? reason : AccountsCopy.failure("load accounts", reason: reason)) {
+                    await store.refresh()
+                }
             }
         }
     }
 
-    // MARK: - Provider
+    private func failureRow(_ text: String, retry: @escaping () async -> Void) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            Text(text)
+                .font(.footnote)
+                .foregroundColor(tokens.danger)
+            Button("Try again") { Task { await retry() } }
+                .buttonStyle(.bordered)
+        }
+    }
 
-    private func providerSection(_ provider: AccountsProvider) -> some View {
-        Section {
-            if AccountsSelectors.hasChoice(provider) {
-                modeControl(provider)
+    /// Nothing to list yet: still loading, or genuinely empty.
+    @ViewBuilder
+    private var placeholder: some View {
+        let loading = [ProviderSourcePhase.idle, .loading].contains(connections.statusPhase)
+            || store.phase == .idle || store.phase == .loading
+        if loading {
+            Section {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    ProgressView()
+                    Text("Loading accounts…").foregroundStyle(.secondary)
+                }
             }
-            ForEach(provider.accounts) { account in
-                accountRows(account, provider: provider)
+        } else if connections.statusPhase == .loaded, store.phase == .loaded {
+            Section {
+                Text(AccountsCopy.nothingConnected).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Subscription section
+
+    private func subscriptionSection(_ section: SubscriptionSection) -> some View {
+        Section {
+            if let status = section.status {
+                connectionRow(status)
+            }
+            if let provider = section.seats {
+                if AccountsSelectors.hasChoice(provider) {
+                    modeControl(provider)
+                }
+                ForEach(provider.accounts) { account in
+                    accountRows(account, provider: provider)
+                }
+                addAccountRow(provider)
             }
         } header: {
-            Text(AccountsSelectors.providerName(provider.provider))
-        } footer: {
-            providerFooter(provider)
+            Text(section.title)
         }
     }
 
-    private func providerFooter(_ provider: AccountsProvider) -> some View {
-        Text(AccountsCopy.addSeatOnDesktop)
+    // MARK: - Connection row
+
+    private func connectionRow(_ status: SubscriptionStatus) -> some View {
+        let health = connections.health(for: status.id)
+        let state = AccountRowState.describe(status: status, health: health)
+        let control = AccountRowState.control(status: status, health: health)
+        let working = connections.busyProvider == status.id || deciding == status.id
+        let help = ["Supported", "subscription", status.plan].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.displayName)
+                    .font(.body.weight(.semibold))
+                Text(help)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text(state.text)
+                    .font(.footnote)
+                    .foregroundColor(color(for: state.tone))
+            }
+            Spacer(minLength: 0)
+            if working {
+                ProgressView()
+            } else {
+                switch control {
+                case .connect:
+                    Button("Connect") { beginConnect(status) }
+                        .buttonStyle(.bordered)
+                        .disabled(anyBusy)
+                case .disconnect:
+                    Button("Disconnect") {
+                        disconnectTarget = status
+                        confirmDisconnect = true
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(anyBusy)
+                case .tryAgain:
+                    Button("Try again") {
+                        Task { await connections.tryAgain(status) }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(anyBusy)
+                case .none:
+                    EmptyView()
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func color(for tone: AccountRowState.Tone) -> Color {
+        switch tone {
+        case .ok: return tokens.ok
+        case .warn: return tokens.warn
+        case .danger: return tokens.danger
+        case .quiet: return tokens.tx3
+        }
+    }
+
+    /// A provider that already has seats must never be connected through the live
+    /// login (it would replace the box's credentials outside the isolated seat
+    /// directory): its Connect opens "Add account" instead — decided from a FRESH
+    /// read, never from a stale or never-loaded list. A failed read opens nothing
+    /// and says why.
+    private func beginConnect(_ status: SubscriptionStatus) {
+        guard deciding == nil else { return }
+        deciding = status.id
+        Task {
+            defer { deciding = nil }
+            let seatProvider = SeatProviderMap.seatProvider(forStatusId: status.id)
+            var fresh: Result<[AccountsProvider], Error>?
+            if seatProvider != nil {
+                do {
+                    fresh = .success(try await store.freshProviders())
+                } catch {
+                    fresh = .failure(error)
+                }
+            }
+            switch ConnectRoute.decide(statusId: status.id, seatProviderId: seatProvider, fresh: fresh) {
+            case .connect:
+                connectRequest = ConnectSheetRequest(status: status)
+            case .addAccount:
+                signInRequest = AccountsSignInRequest(mode: .add(provider: seatProvider ?? "", accountId: nil, accountLabel: nil))
+            case .blocked(let reason):
+                store.announce(ConnectRoute.blockedMessage(label: status.displayName, reason: reason), isError: true)
+            }
+        }
+    }
+
+    private func addAccountRow(_ provider: AccountsProvider) -> some View {
+        Button {
+            signInRequest = AccountsSignInRequest(mode: .add(provider: provider.provider, accountId: nil, accountLabel: nil))
+        } label: {
+            Label("Add \(AccountsSelectors.providerName(provider.provider)) account", systemImage: "plus.circle")
+        }
+        .disabled(anyBusy)
     }
 
     private func modeControl(_ provider: AccountsProvider) -> some View {
@@ -260,6 +451,10 @@ struct AccountsScreen: View {
         }
     }
 
+    private func addSeatRequest(_ account: AccountsAccount, provider: AccountsProvider) -> AccountsSignInRequest {
+        AccountsSignInRequest(mode: .add(provider: provider.provider, accountId: account.id, accountLabel: account.label))
+    }
+
     private func accountHeader(_ account: AccountsAccount, provider: AccountsProvider) -> some View {
         HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
             VStack(alignment: .leading, spacing: 2) {
@@ -279,10 +474,13 @@ struct AccountsScreen: View {
                     beginRename(SeatRenameRequest(provider: provider.provider, target: .account,
                                                   targetId: account.id, current: account.label))
                 }
+                Button("Add seat to \(account.label.isEmpty ? "this account" : account.label)…", systemImage: "plus") {
+                    signInRequest = addSeatRequest(account, provider: provider)
+                }
             } label: {
                 Image(systemName: "ellipsis.circle").font(.title3)
             }
-            .disabled(store.acting)
+            .disabled(anyBusy)
             .accessibilityLabel("Account actions")
         }
     }
@@ -338,13 +536,46 @@ struct AccountsScreen: View {
                 }
             }
             if action == .fix {
-                Text("Sign in to this seat again from the MantaUI desktop app (Settings → Accounts).")
-                    .font(.caption)
-                    .foregroundColor(tokens.warn)
+                fixRow(seat, account: account, provider: provider)
             }
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .contain)
+    }
+
+    /// A signed-out or expired seat. Not the box's live login → "Sign in again".
+    /// The live login cannot be re-signed (the box refuses): the caption says
+    /// only what the box will actually accept.
+    @ViewBuilder
+    private func fixRow(_ seat: AccountsSeat, account: AccountsAccount, provider: AccountsProvider) -> some View {
+        if seat.live {
+            Text(AccountsSignInRules.liveSeatAdvice(provider: provider, seat: seat, managedBy: managedBy(provider)))
+                .font(.caption)
+                .foregroundColor(tokens.warn)
+        } else {
+            Button {
+                signInRequest = AccountsSignInRequest(mode: .resign(
+                    provider: provider.provider,
+                    seatId: seat.id,
+                    seatLabel: seat.label.isEmpty ? "this seat" : seat.label,
+                    accountLabel: account.label,
+                    email: seat.email
+                ))
+            } label: {
+                Label("Sign in again", systemImage: "person.crop.circle.badge.exclamationmark")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(anyBusy)
+        }
+    }
+
+    /// Who owns the provider's login when it is managed outside Manta (the
+    /// Claude CLI), from its status row.
+    private func managedBy(_ provider: AccountsProvider) -> String? {
+        guard let id = SeatProviderMap.statusId(forSeatProvider: provider.provider),
+              let status = connections.statuses.first(where: { $0.id == id }), status.managedExternally else { return nil }
+        return status.managedBy
     }
 
     @ViewBuilder
@@ -379,6 +610,11 @@ struct AccountsScreen: View {
                                                   targetId: seat.id, current: seat.label))
                 }
             }
+            if single {
+                Button("Add seat to \(account.label.isEmpty ? "this account" : account.label)…", systemImage: "plus") {
+                    signInRequest = addSeatRequest(account, provider: provider)
+                }
+            }
             // Removing the live seat is allowed: the box switches to another
             // seat first. The provider's only seat stays — disabled, with the
             // reason in the item's own title.
@@ -393,7 +629,7 @@ struct AccountsScreen: View {
         } label: {
             Image(systemName: "ellipsis.circle").font(.title3)
         }
-        .disabled(store.acting)
+        .disabled(anyBusy)
         .accessibilityLabel("Seat actions")
     }
 
@@ -417,6 +653,62 @@ struct AccountsScreen: View {
         }
         return ""
     }
+
+    // MARK: - Custom endpoints
+
+    @ViewBuilder
+    private var endpointsSection: some View {
+        Section {
+            ForEach(plan.endpoints) { endpoint in
+                ProviderEndpointSection(endpoint: endpoint, store: connections, tokens: tokens)
+            }
+            addEndpointRow
+        } header: {
+            Text("Custom endpoints")
+        } footer: {
+            // A plain stack so further links can be appended below the text.
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("Custom endpoints are OpenAI-compatible servers you add yourself.")
+                // M-09-6: unpriced models are set up in Settings → Models.
+                NavigationLink {
+                    ModelsScreen()
+                } label: {
+                    Text("Set prices for unpriced models")
+                        .font(.footnote)
+                        .foregroundColor(tokens.accentTx)
+                }
+                .accessibilityIdentifier("accounts-set-prices")
+            }
+        }
+    }
+
+    /// "Add endpoint…" needs a COMPLETE endpoint inventory (its collision guard
+    /// checks the new id against it), so it is only offered while that is loaded.
+    @ViewBuilder
+    private var addEndpointRow: some View {
+        switch AccountsSectionPlan.addEndpointState(inventory: connections.endpointPhase) {
+        case .loading:
+            HStack(spacing: Metrics.spacing.sp2) {
+                ProgressView()
+                Text("Add endpoint…").foregroundStyle(.secondary)
+            }
+        case .retry(let reason):
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("\(ProviderEndpointDraft.inventoryUnavailable) — \(reason)")
+                    .font(.footnote)
+                    .foregroundColor(tokens.danger)
+                Button("Try again") { Task { await connections.loadEndpoints() } }
+                    .buttonStyle(.bordered)
+            }
+        case .enabled:
+            NavigationLink {
+                ProviderEndpointForm(connections: connections, accounts: store)
+            } label: {
+                Label("Add endpoint…", systemImage: "plus")
+            }
+            .disabled(anyBusy)
+        }
+    }
 }
 
 // MARK: - Shared pieces
@@ -430,7 +722,7 @@ struct SeatMeterBar: View {
     var inactive = false
 
     var body: some View {
-        let tint = inactive ? tokens.tx4 : MeterRing.tint(UsageMeters.band(window.pct), tokens)
+        let tint = inactive ? tokens.tx4 : (UsageMeters.band(window).map { MeterRing.tint($0, tokens) } ?? tokens.tx4)
         HStack(spacing: Metrics.spacing.sp2) {
             Text(title)
                 .font(.caption)

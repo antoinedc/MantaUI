@@ -110,3 +110,76 @@ describe("PaletteShell — Escape (BET-724)", () => {
     expect(picked).toBe(0);
   });
 });
+
+// WS06: onPick may veto the close by returning `false` (the search palette
+// keeps itself open to show "That conversation is no longer open.").
+describe("PaletteShell — pick veto (WS06)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  function render(onPick: (i: number) => void | false, onClose: () => void) {
+    h = mount(
+      <PaletteShell
+        label="Test palette"
+        placeholder="Search…"
+        query=""
+        setQuery={() => {}}
+        itemCount={1}
+        sel={0}
+        setSel={() => {}}
+        onPick={onPick}
+        onClose={onClose}
+      >
+        {(pick) => <button data-row onClick={() => pick(0)}>row</button>}
+      </PaletteShell>,
+    );
+  }
+  const settle = () =>
+    act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+
+  it("onPick returning false: neither a click nor Enter closes the palette", async () => {
+    let closed = 0;
+    let picked = 0;
+    render(() => {
+      picked++;
+      return false;
+    }, () => closed++);
+    act(() => {
+      (h!.container.querySelector("button[data-row]") as HTMLButtonElement).click();
+    });
+    act(() => {
+      h!.container
+        .querySelector("input")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(picked).toBe(2);
+    expect(closed).toBe(0);
+  });
+
+  it("onPick returning undefined: a click closes, and so does Enter", async () => {
+    let closed = 0;
+    render(() => {}, () => closed++);
+    act(() => {
+      (h!.container.querySelector("button[data-row]") as HTMLButtonElement).click();
+    });
+    await settle();
+    expect(closed).toBe(1);
+    h!.unmount();
+    h = null;
+    closed = 0;
+    render(() => {}, () => closed++);
+    act(() => {
+      h!.container
+        .querySelector("input")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(closed).toBe(1);
+  });
+});

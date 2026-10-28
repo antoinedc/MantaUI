@@ -6,13 +6,9 @@
 // None of them depend on the message-row rendering stack, so they import
 // cleanly. ToolCall.tsx's ToolBody dispatcher wires them to tool names.
 
-import { Fragment, memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import {
-  commentableLines,
-  resolveToolOutput,
-  trimOutputEdges,
-  type CommentableLine,
-} from "./chatUtils";
+import { memo, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { parsePatch } from "diff";
+import { resolveToolOutput, trimOutputEdges } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
@@ -287,219 +283,130 @@ function CollapsibleLines({
 // from the header strip. Background blocks are saturated green/red for proper
 // contrast; the copy is the bright cream `text-text` from the well.
 //
-// Line numbers come from `@@ -A,B +C,D @@` parsed per hunk; `+` and context
-// use NEW line numbers, `-` uses OLD.
-//
-// Generalised in place for the review pane (BET-792) so the SAME component
-// renders both the tool diff and the PR review diff. The extra props are all
-// optional and default to the original behaviour — the existing call sites
-// (`<UnifiedDiff text={output} />`) and their tests are untouched:
-//   - `bare` — skip the OutputWell (the review pane's diff is the panel body,
-//     not a recessed card), so added/removed backgrounds bleed edge to edge.
-//   - `showHunks` — render `@@` hunk headers as muted rows (the mockup shows
-//     them; the tool diff still hides them as noise).
-//   - `gutter` — add a fixed-width comment gutter with a `+` reveal on
-//     hover AND keyboard focus-within of the row (the row is the tab stop;
-//     the `+` is never itself in the tab order). Clicking/or Entering composes
-//     a comment at that line's anchor.
-//   - `notes` — inline blocks (incoming forge threads / your drafts) placed
-//     directly in the diff after their anchor line, or at the top when the
-//     anchor is null (a file-level comment).
-export type UnifiedDiffGutter = {
-  commentable: (a: CommentableLine) => boolean;
-  onCompose: (a: CommentableLine, el: HTMLElement) => void;
-};
-export type UnifiedDiffNote = {
-  key: string;
-  anchor: CommentableLine | null;
-  node: ReactNode;
-};
+// Line numbers come from the SAME `diff` parser the box uses (`parsePatch`,
+// see `diffLineNumbers`): `+` and context use NEW line numbers, `-` uses OLD,
+// and a header-like line INSIDE a hunk (an added `+++ heading`) is content, not
+// a file marker. The PR review diff does not render here — it is the box's
+// structured `files` (ReviewPane's ReviewDiffRows); this is for a tool's raw
+// output text only.
 
-export function UnifiedDiff({
-  text,
-  bare = false,
-  showHunks = false,
-  gutter,
-  notes = [],
-}: {
-  text: string;
-  /** Render without the recessed OutputWell (review pane body). Default false. */
-  bare?: boolean;
-  /** Render `@@` hunk headers as muted rows (review pane). Default false. */
-  showHunks?: boolean;
-  gutter?: UnifiedDiffGutter;
-  notes?: UnifiedDiffNote[];
-}) {
-  const children: ReactNode[] = [];
+type DiffRowInfo = { inHunk: boolean; number: number | null };
+
+// One entry per input line: whether the parser placed the line inside a hunk,
+// and its line number (old for a removed line, new for an added / context
+// line, null for anything else). A throw or a text with no hunks yields
+// all-null / not-in-hunk — never an error. `hunk.lines` follows the hunk's own
+// counts, so it maps 1:1 onto the lines after its `@@` header.
+function diffRowInfo(text: string): DiffRowInfo[] {
   const lines = text.split("\n");
-  // THE single source of truth for `(path, side, line)` anchors: commentableLines
-  // (pure, tested) walks hunks and derives every anchor up front. UnifiedDiff
-  // renders rows but does NOT re-derive anchor geometry itself — it consumes
-  // the precomputed set in the exact order content lines appear, so the line-
-  // classification / `side` rule lives in exactly one place (BET-859), not two.
-  const anchors = commentableLines(text);
-  let ci = 0;
-
-  const rowKey = (a: CommentableLine) => `${a.path}\u0000${a.side}\u0000${a.line}`;
-  const notesByAnchor = new Map<string, UnifiedDiffNote[]>();
-  const topNotes: UnifiedDiffNote[] = [];
-  for (const n of notes) {
-    if (n.anchor == null) topNotes.push(n);
-    else {
-      const arr = notesByAnchor.get(rowKey(n.anchor)) ?? [];
-      arr.push(n);
-      notesByAnchor.set(rowKey(n.anchor), arr);
+  const out: DiffRowInfo[] = lines.map(() => ({ inHunk: false, number: null }));
+  let patches: ReturnType<typeof parsePatch>;
+  try {
+    patches = parsePatch(text);
+  } catch {
+    return out;
+  }
+  let cursor = 0;
+  for (const patch of patches) {
+    for (const hunk of patch.hunks) {
+      while (cursor < lines.length && !lines[cursor].startsWith("@@")) cursor++;
+      if (cursor >= lines.length) return out;
+      cursor++; // the `@@` header itself
+      let oldLine = hunk.oldStart;
+      let newLine = hunk.newStart;
+      for (const l of hunk.lines) {
+        if (cursor >= lines.length) return out;
+        const c = l.charAt(0);
+        if (c === "\\") {
+          out[cursor] = { inHunk: true, number: null };
+        } else if (c === "+") {
+          out[cursor] = { inHunk: true, number: newLine++ };
+        } else if (c === "-") {
+          out[cursor] = { inHunk: true, number: oldLine++ };
+        } else {
+          out[cursor] = { inHunk: true, number: newLine };
+          oldLine++;
+          newLine++;
+        }
+        cursor++;
+      }
     }
   }
+  return out;
+}
 
-  const anchorNotes = (a: CommentableLine) => notesByAnchor.get(rowKey(a)) ?? [];
+/** The number shown beside each line of a tool's diff output (one entry per
+ *  input line; null where none applies). Bare hunks without file headers are
+ *  numbered too; text the parser rejects, or with no hunks, gets none. */
+export function diffLineNumbers(text: string): (number | null)[] {
+  return diffRowInfo(text).map((r) => r.number);
+}
 
-  for (const n of topNotes) children.push(<Fragment key={n.key}>{n.node}</Fragment>);
+export function UnifiedDiff({ text }: { text: string }) {
+  const children: ReactNode[] = [];
+  const lines = text.split("\n");
+  const info = diffRowInfo(text);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const row = info[i];
 
-    // Hunk header.
-    if (line.startsWith("@@")) {
-      // The tool diff treats hunks as noise and drops them; the review pane
-      // keeps them as the mockup's muted `.diffline.meta` rows.
-      if (showHunks) {
-        children.push(
-          <div
-            key={`meta-${i}`}
-            className="flex whitespace-pre text-text-quiet"
-          >
-            {/* Mirror the line-row chrome so the `@@` text sits at the same
-                offset as line bodies (the review row has no line number / sign
-                — only the gutter stays reserved). */}
-            {gutter && <span className="w-[26px] shrink-0" aria-hidden />}
-            <span className="shrink-0 select-none w-[30px]" />
-            <span className="shrink-0 w-3" />
-            <span className="flex-1">{line}</span>
-          </div>,
-        );
+    // A `\ No newline at end of file` marker inside a hunk is not a row.
+    if (row.inHunk && line.startsWith("\\")) continue;
+
+    if (!row.inHunk) {
+      // Hunk headers are noise in a tool diff; file markers / Index preamble
+      // are dropped too. (Text the parser could not place in a hunk keeps the
+      // old prefix rules below, so odd tool output still renders.)
+      if (
+        line.startsWith("@@") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("Index: ") ||
+        /^=+$/.test(line)
+      ) {
+        continue;
       }
-      continue;
     }
 
-    // File markers / Index preamble — drop entirely in BOTH modes (they're
-    // noise next to the changes). No local `--- a/` / `+++ b/` path tracking is
-    // needed here — commentableLines already carries the per-file path on every
-    // anchor in the precomputed set.
-    if (
-      line.startsWith("--- ") ||
-      line.startsWith("+++ ") ||
-      line.startsWith("Index: ") ||
-      /^=+$/.test(line)
-    ) {
-      continue;
-    }
-
-    // +/− /context line classification — the row's CHROME (sign, colors, body)
-    // is decided here from the prefix, but the anchor geometry `(path, side,
-    // line)` is taken from the precomputed set below, NOT re-derived, so the
-    // `side` rule cannot drift from commentableLines' (BET-859).
     let bg = "";
     let signCls = "text-text-faint";
     let lnCls = "text-text-faint";
     let sign: string | null = null;
     let body = line;
 
-    if (line.startsWith("+") && !line.startsWith("+++")) {
+    if (line.startsWith("+")) {
       bg = "bg-[var(--diff-add)]";
       signCls = "text-ok";
       lnCls = "text-ok/70";
       sign = "+";
       body = line.slice(1);
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
+    } else if (line.startsWith("-")) {
       bg = "bg-[var(--diff-del)]";
       signCls = "text-danger";
       lnCls = "text-danger/70";
       sign = "−";
       body = line.slice(1);
-    } else if (line.startsWith(" ")) {
+    } else if (line.startsWith(" ") || (row.inHunk && line === "")) {
       sign = " ";
       body = line.slice(1);
     }
+    if (sign === null) continue;
 
-    if (sign !== null) {
-      // Consume the next precomputed anchor for this content row. Its `line` is
-      // the row's gutter line number, and its `side` is what decides
-      // commentability on the new/old/both side. `anchors` and the content
-      // rows share the same hunk walk, so the index is always in sync.
-      const anchor = anchors[ci] ?? null;
-      const ln = anchor?.line ?? null;
-      const commentable = anchor != null && gutter?.commentable(anchor) === true;
-      const rowClass = [
-        "flex whitespace-pre",
-        bg,
-        gutter ? "group relative" : "",
-      ].join(" ").trim();
-      const row = (
-        <div
-          key={i}
-          className={rowClass}
-          {...(gutter
-            ? {
-                tabIndex: 0,
-                role: "button",
-                "aria-label": commentable
-                  ? "Comment on this line"
-                  : "Diff line",
-                onKeyDown: commentable
-                  ? (e: React.KeyboardEvent<HTMLDivElement>) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        gutter.onCompose(anchor!, e.currentTarget);
-                      }
-                    }
-                  : undefined,
-              }
-            : {})}
-        >
-          {gutter && (
-            <span className="w-[26px] shrink-0 select-none" aria-hidden>
-              {commentable && (
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  aria-label="Comment on this line"
-                  title="Comment on this line"
-                  onClick={(e: React.MouseEvent<HTMLButtonElement>) =>
-                    gutter.onCompose(anchor!, e.currentTarget)
-                  }
-                  className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-xs text-text-muted opacity-0 transition-opacity hover:text-text group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                >
-                  <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden>
-                    <path d="M5.5 2v7M2 5.5h7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  </svg>
-                </button>
-              )}
-            </span>
-          )}
-          <span className={`select-none shrink-0 text-right pr-2 w-[30px] ${lnCls}`}>
-            {ln ?? ""}
-          </span>
-          <span className={`select-none shrink-0 w-3 ${signCls}`}>
-            {sign}
-          </span>
-          <span className="flex-1 text-text">{body || " "}</span>
-        </div>
-      );
-      children.push(row);
-      if (anchor) {
-        for (const n of anchorNotes(anchor)) {
-          children.push(<Fragment key={n.key}>{n.node}</Fragment>);
-        }
-      }
-      // Advance to the next precomputed anchor — one content row consumes one
-      // anchor (added/removed/context), in the same hunk order.
-      ci++;
-    }
+    children.push(
+      <div key={i} className={["flex whitespace-pre", bg].join(" ").trim()}>
+        <span className={`select-none shrink-0 text-right pr-2 w-[30px] ${lnCls}`}>
+          {row.number ?? ""}
+        </span>
+        <span className={`select-none shrink-0 w-3 ${signCls}`}>{sign}</span>
+        <span className="flex-1 text-text">{body || " "}</span>
+      </div>,
+    );
   }
 
-  const body = (
-    <div className="leading-snug w-max min-w-full">{children}</div>
+  return (
+    <OutputWell variant="attached">
+      <div className="leading-snug w-max min-w-full">{children}</div>
+    </OutputWell>
   );
-  return bare ? body : <OutputWell variant="attached">{body}</OutputWell>;
 }

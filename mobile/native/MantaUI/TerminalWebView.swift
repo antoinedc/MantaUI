@@ -208,6 +208,8 @@ final class TerminalContainerController: UIViewController {
     let sessionName: String
     private let windowIndex: Int
     private let defaultCwd: String
+    private let mode: SessionMode
+    private let launcher: SessionPtyLauncher?
 
     /// The session's danger (red) accent, resolved from the generated tokens
     /// by the SwiftUI chrome — never a literal here.
@@ -232,13 +234,15 @@ final class TerminalContainerController: UIViewController {
     private var baseFont: Double = TerminalSessionState.storedFontSize()
     private var activePinchScale: CGFloat = 1
 
-    init(state: TerminalSessionState, sessionName: String, windowIndex: Int, windowName: String, projectName: String, defaultCwd: String, danger: UIColor) {
+    init(state: TerminalSessionState, sessionName: String, windowIndex: Int, windowName: String, projectName: String, defaultCwd: String, danger: UIColor, mode: SessionMode = .terminal, launcher: SessionPtyLauncher? = nil) {
         self.state = state
         self.sessionName = sessionName
         self.windowIndex = windowIndex
         self.windowName = windowName
         self.projectName = projectName
         self.defaultCwd = defaultCwd
+        self.mode = mode
+        self.launcher = launcher
         self.dangerColor = danger
         super.init(nibName: nil, bundle: nil)
     }
@@ -425,8 +429,9 @@ final class TerminalContainerController: UIViewController {
     // MARK: - Socket
 
     private func sessionKey() -> String {
-        // Stable per (session,window) so reconnect reuses/re-attaches.
-        "\(sessionName):\(windowIndex)"
+        // Stable per (session,window,mode) so reconnect reuses/re-attaches. A
+        // CLI gets its own key so it can never reattach to a shell's pty.
+        SessionPtyKey.key(project: sessionName, windowIndex: windowIndex, mode: mode)
     }
 
     private func connectSocket() {
@@ -435,7 +440,7 @@ final class TerminalContainerController: UIViewController {
         let key = sessionKey()
         let cols = 80
         let rows = 24
-        let socket = TerminalSocket(serverURL: serverURL, sessionKey: key, token: token, cwd: defaultCwd, cols: cols, rows: rows) { [weak self] _ in
+        let socket = TerminalSocket(serverURL: serverURL, sessionKey: key, token: token, cwd: defaultCwd, launcher: launcher, cols: cols, rows: rows) { [weak self] _ in
             // state transition — nothing to do beyond re-fit on reconnect
         } onData: { [weak self] data in
             self?.writeToWebview(data)
@@ -565,6 +570,9 @@ struct TerminalContainerView: UIViewControllerRepresentable {
     let defaultCwd: String
     /// The danger accent resolved from the generated tokens.
     let danger: UIColor
+    /// A plain shell (`.terminal`) or an AI CLI (`.cli`) — spec 04 §2.
+    var mode: SessionMode = .terminal
+    var launcher: SessionPtyLauncher? = nil
 
     func makeUIViewController(context: Context) -> TerminalContainerController {
         TerminalContainerController(
@@ -574,7 +582,9 @@ struct TerminalContainerView: UIViewControllerRepresentable {
             windowName: windowName,
             projectName: projectName,
             defaultCwd: defaultCwd,
-            danger: danger
+            danger: danger,
+            mode: mode,
+            launcher: launcher
         )
     }
 

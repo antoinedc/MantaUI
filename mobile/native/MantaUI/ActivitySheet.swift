@@ -157,6 +157,8 @@ struct ActivitySheet: View {
     /// The user's own expand/collapse intent per call (part id). User intent
     /// always beats the state-driven default.
     @State private var userToggled: [String: Bool] = [:]
+    /// "Show reasoning & full output" (desktop Ctrl+O): app-wide, persisted.
+    @AppStorage(TranscriptDisplayOptions.defaultsKey) private var showDetails = false
 
     var body: some View {
         let run = store.activityRun(id: runID)
@@ -170,6 +172,7 @@ struct ActivitySheet: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) { displayOptionsMenu }
                 ToolbarItem(placement: .principal) { titleBlock(run) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
@@ -179,6 +182,24 @@ struct ActivitySheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .accessibilityIdentifier("activity-sheet")
+    }
+
+    /// The display switch. It goes through `setShowDetails` so an open transcript
+    /// re-maps (reasoning rows appear) as well as this sheet's own output.
+    private var displayOptionsMenu: some View {
+        Menu {
+            Toggle(
+                "Show reasoning & full output",
+                isOn: Binding(
+                    get: { showDetails },
+                    set: { TranscriptDisplayOptions.setShowDetails($0) }
+                )
+            )
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("Display options")
+        .accessibilityIdentifier("activity-display-options")
     }
 
     /// The run summary over "running" or the total duration.
@@ -246,6 +267,8 @@ struct ActivityCallRow: View {
     let onToggle: (Bool) -> Void
     let onOpenSubagent: (SubagentSession) -> Void
 
+    @AppStorage(TranscriptDisplayOptions.defaultsKey) private var showDetails = false
+
     private var activity: Activity { ToolActivity.describe(part) }
     private var detail: ToolActivity.Detail { ToolActivity.detail(of: part) }
 
@@ -269,7 +292,9 @@ struct ActivityCallRow: View {
             callCount: callCount,
             status: activity.status,
             isTool: part.type == "tool",
-            userToggled: userToggled
+            userToggled: userToggled,
+            kind: activity.kind,
+            verbose: showDetails
         )
     }
 
@@ -364,6 +389,13 @@ struct ActivityCallRow: View {
     private var detailView: some View {
         let d = detail
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+            // Copy gives the FULL text, whatever the wells below trim.
+            if let copyText = ToolActivity.copyText(of: part) {
+                HStack {
+                    Spacer(minLength: 0)
+                    TranscriptCopyButton(text: copyText, tokens: tokens)
+                }
+            }
             if let command = d.command {
                 codeWell(command, lineLimit: 12)
             }
@@ -379,7 +411,7 @@ struct ActivityCallRow: View {
             // An edit's or write's output only ever echoes "applied
             // successfully"; its diff (above) is the record.
             if let output = d.output, activity.kind != .edit, activity.kind != .write {
-                codeWell(ToolOutputPreview.tail(output), lineLimit: nil)
+                outputWell(output)
             }
             if let error = d.error {
                 Text(error)
@@ -391,6 +423,11 @@ struct ActivityCallRow: View {
             }
         }
         .accessibilityIdentifier("activity-call-detail")
+    }
+
+    /// The call's output (see `ActivityOutputWell`).
+    private func outputWell(_ output: String) -> some View {
+        ActivityOutputWell(partID: part.id, output: output, verbose: showDetails, tokens: tokens)
     }
 
     private func codeWell(_ text: String, lineLimit: Int?) -> some View {
@@ -411,6 +448,87 @@ struct ActivityCallRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Metrics.spacing.sp2)
             .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+    }
+}
+
+// MARK: - Output well
+
+/// A call's output: the tailed preview, or — with "Show reasoning & full
+/// output" on — the last 2,000 lines in a scroll well with an EXPLICIT height
+/// (a vertical `ScrollView` inside a self-sizing `List` row collapses without
+/// one), plus a note when it was trimmed.
+///
+/// The trimmed text is computed ONCE per `(part id, output length, verbose)` in
+/// a `.task`, not in `body`: splitting a 50,000-line output on every re-render
+/// (the sheet re-renders on every store change while a run is live) is what
+/// would freeze it.
+private struct ActivityOutputWell: View {
+    let partID: String
+    let output: String
+    let verbose: Bool
+    let tokens: Tokens
+
+    @State private var shown: (text: String, trimmed: Bool)?
+
+    private var key: String { "\(partID)|\(output.utf8.count)|\(verbose)" }
+
+    var body: some View {
+        Group {
+            if let shown {
+                if verbose { verboseWell(shown) } else { plainWell(shown.text) }
+            } else {
+                // Reserve a row's height until the first computation lands.
+                Color.clear.frame(height: 44)
+            }
+        }
+        .task(id: key) {
+            shown = ToolActivity.outputForDisplay(output, verbose: verbose)
+        }
+    }
+
+    private func plainWell(_ text: String) -> some View {
+        Text(text)
+            .textSelection(.enabled)
+            .font(.manta(size: Metrics.type.xs, design: .monospaced))
+            .foregroundColor(tokens.tx3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.spacing.sp2)
+            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+    }
+
+    private func verboseWell(_ shown: (text: String, trimmed: Bool)) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            ScrollView(.vertical) {
+                Text(shown.text)
+                    .textSelection(.enabled)
+                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
+                    .foregroundColor(tokens.tx3)
+                    .lineLimit(nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Metrics.spacing.sp2)
+            }
+            .frame(height: Self.wellHeight(for: shown.text))
+            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+            if shown.trimmed {
+                Text("Showing the last \(ToolOutputPreview.verboseMaxLines.formatted()) lines \u{2014} Copy gets the full output")
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
+            }
+        }
+    }
+
+    /// `min(480, estimated content height)`. The estimate counts a long line as
+    /// several (about 60 characters per line on a phone), so a single huge line
+    /// is not squeezed into one row — it scrolls inside the well either way.
+    private static let maxHeight: CGFloat = 480
+
+    private static func wellHeight(for text: String) -> CGFloat {
+        var lines = 1
+        for byte in text.utf8 where byte == UInt8(ascii: "\n") { lines += 1 }
+        let estimated = max(lines, text.utf8.count / 60)
+        let lineHeight = MantaDynamicType.scaled(Metrics.type.xs) * 1.4
+        let height = CGFloat(estimated) * lineHeight + 2 * Metrics.spacing.sp2
+        return min(maxHeight, height)
     }
 }
 

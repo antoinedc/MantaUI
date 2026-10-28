@@ -26,8 +26,10 @@ import {
   setSubagents,
   setSkillRegistryUrls,
   syncSubagents,
+  syncSubagentsDetailed,
   setReferences,
   setModelCost,
+  setModelCostDetailed,
   mantaPlanAgentBlock,
   ensureMantaPlanAgent,
   selectCacheTtlTargets,
@@ -2342,5 +2344,81 @@ describe("setModelCost", () => {
     assert.ok(r.error);
     assert.equal(broken.state.text, "{ not json", "never overwritten");
     assert.equal(broken.state.writes, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WS09 SF-M1 / SF-M13 — outcome-aware variants. The plain helpers must keep
+// their old contracts byte-for-byte while the detailed ones expose what the
+// writer actually did.
+// ---------------------------------------------------------------------------
+
+describe("syncSubagentsDetailed (WS09)", () => {
+  const haiku = { providerID: "anthropic", id: "claude-haiku-4" };
+
+  it("read failure → read:failed, agents:[] (syncSubagents still returns [])", async () => {
+    const read = async () => { throw new Error("boom"); };
+    const d = await syncSubagentsDetailed({ models: [haiku] }, read, async () => ({ ok: true }));
+    assert.equal(d.read, "failed");
+    assert.deepEqual(d.agents, []);
+    assert.deepEqual(await syncSubagents({ models: [haiku] }, read, async () => ({ ok: true })), []);
+  });
+
+  it("a successful no-op is write:noop (nothing applied)", async () => {
+    const calls = [];
+    const first = await syncSubagentsDetailed({ models: [haiku] }, async () => ({}), async (ops) => { calls.push(ops); return { ok: true }; });
+    assert.equal(first.write, "ok");
+    assert.equal(first.reload, "ok");
+    const cfg = { agent: Object.fromEntries(first.agents.map((a) => [a.name, { model: a.model, mode: "subagent", description: a.description }])) };
+    calls.length = 0;
+    const second = await syncSubagentsDetailed({ models: [haiku] }, async () => cfg, async (ops) => { calls.push(ops); return { ok: true }; });
+    assert.equal(second.write, "noop");
+    assert.equal(second.reload, "n/a");
+    assert.equal(calls.length, 0);
+  });
+
+  it("a failed write is write:failed and returns the OLD list (same as syncSubagents)", async () => {
+    const apply = async () => ({ ok: false, error: "disk full" });
+    const d = await syncSubagentsDetailed({ models: [haiku] }, async () => ({}), apply);
+    assert.equal(d.write, "failed");
+    assert.equal(d.reload, "n/a");
+    assert.equal(d.error, "disk full");
+    assert.deepEqual(d.agents, []);
+    assert.deepEqual(await syncSubagents({ models: [haiku] }, async () => ({}), apply), []);
+  });
+
+  it("written but live reload refused → write:ok, reload:failed", async () => {
+    const d = await syncSubagentsDetailed({ models: [haiku] }, async () => ({}), async () => ({ ok: false, changed: true, error: "reload 500" }));
+    assert.equal(d.write, "ok");
+    assert.equal(d.reload, "failed");
+  });
+});
+
+describe("setModelCostDetailed (WS09)", () => {
+  const input = { providerID: "p", modelID: "m", cost: { input: 1, output: 2 } };
+
+  it("written + reloaded → ok/changed/reloaded; setModelCost keeps its old shape", async () => {
+    const { deps } = memConfig();
+    const d = await setModelCostDetailed(input, deps);
+    assert.deepEqual(d, { ok: true, changed: true, reloaded: true });
+    const { deps: deps2 } = memConfig();
+    assert.deepEqual(await setModelCost(input, deps2), { ok: true });
+  });
+
+  it("written but reload refused → ok:false, changed:true; setModelCost still {ok:false, error}", async () => {
+    const mk = () => memConfig("{}", { reload: async () => ({ ok: false, error: "nope" }) });
+    const d = await setModelCostDetailed(input, mk().deps);
+    assert.equal(d.ok, false);
+    assert.equal(d.changed, true);
+    assert.equal(d.error, "nope");
+    assert.deepEqual(await setModelCost(input, mk().deps), { ok: false, error: "nope" });
+  });
+
+  it("validation failure → ok:false, changed:false (nothing written)", async () => {
+    const { state, deps } = memConfig();
+    const d = await setModelCostDetailed({ providerID: "p", modelID: "m", cost: { input: 1 } }, deps);
+    assert.equal(d.ok, false);
+    assert.equal(d.changed, false);
+    assert.equal(state.writes, 0);
   });
 });

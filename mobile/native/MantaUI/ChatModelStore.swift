@@ -46,12 +46,18 @@ final class ChatModelStore: ObservableObject {
     /// first. Persisted in the BOX store (a habit that follows the user across
     /// devices — BET-1282), unlike the pre-upgrade device-local UserDefaults.
     @Published private(set) var recents: [ModelChoice] = []
-    /// "providerID/modelID" keys of deprecated models the user has explicitly
-    /// opted back in to (BET-1140). Per box (UserDefaults), like recents — not
-    /// per session, so the choice follows the user across sessions. A
-    /// deprecated model NOT in this set renders greyed/disabled in the
-    /// catalogue list until opted in.
-    @Published private(set) var deprecatedOptIns: Set<String> = []
+    /// The box's picker decision (`models:picker`), mirrored from the catalog:
+    /// which models are selectable, which deprecated ones are locked, the recents
+    /// that survive. Nil until read, and on an older box (`pickerUnsupported`).
+    @Published private(set) var picker: ModelsPickerWire?
+    @Published private(set) var pickerUnsupported = false
+    @Published private(set) var pickerError: String?
+    /// The model whose deprecated opt-in is in flight (`models:opt-in`), and the
+    /// last failure for it — the catalogue row shows a spinner / "Try again".
+    @Published private(set) var optInPendingKey: String?
+    @Published private(set) var optInError: String?
+    /// The key `optInError` belongs to, so only that row says "Try again".
+    @Published private(set) var optInErrorKey: String?
     /// Plan mode is ON for this session (the per-session `manta:chat:<sid>:plan`
     /// boolean — BET-952). A plain Bool, deliberately NOT folded into the model
     /// blob: plan mode changes the agent, never the model (one model per
@@ -61,6 +67,9 @@ final class ChatModelStore: ObservableObject {
     /// yet (the plan chip shows a loading placeholder); a list with no `plan`
     /// primary agent makes the chip unavailable.
     @Published private(set) var agents: [OpencodeAgent]?
+    /// Why the agent list failed to load (`agents` stays nil); cleared by
+    /// `retryAgents()`. The composer's `@`-typeahead shows it with a retry (M-03-5).
+    @Published private(set) var agentsLoadError: String?
 
     let sessionId: String
     private let catalog: ChatModelCatalog
@@ -94,7 +103,9 @@ final class ChatModelStore: ObservableObject {
         self.configDefault = catalog.configDefault
         self.loaded = catalog.loaded
         self.recents = prefs.recents
-        self.deprecatedOptIns = DeprecatedModelOptIns.load()
+        self.picker = catalog.picker
+        self.pickerUnsupported = catalog.pickerUnsupported
+        self.pickerError = catalog.pickerError
         catalog.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.mirrorCatalog() }
@@ -113,6 +124,9 @@ final class ChatModelStore: ObservableObject {
         defaultModel = catalog.defaultModel
         configDefault = catalog.configDefault
         loaded = catalog.loaded
+        picker = catalog.picker
+        pickerUnsupported = catalog.pickerUnsupported
+        pickerError = catalog.pickerError
     }
 
     private func mirrorPrefs() {
@@ -138,9 +152,31 @@ final class ChatModelStore: ObservableObject {
         guard !didLoadAgents else { return }
         didLoadAgents = true
         Task {
-            let result = (try? await api.agents()) ?? []
-            await MainActor.run { self.agents = result }
+            do {
+                let result = try await api.agents()
+                await MainActor.run { self.agents = result }
+            } catch {
+                // `agents` stays nil (not loaded) and the failure is shown with a retry.
+                await MainActor.run { self.agentsLoadError = Self.describe(error) }
+            }
         }
+    }
+
+    /// Clear the agent-list error and read the list again.
+    func retryAgents() {
+        agentsLoadError = nil
+        didLoadAgents = false
+        loadAgentsIfNeeded()
+    }
+
+    private static func describe(_ error: Error) -> String {
+        if case MantaError.server(let message) = error { return message }
+        return "Couldn't load the agent list."
+    }
+
+    /// Re-read the picker after a failed first read (the picker's Retry).
+    func retryPicker() {
+        catalog.reloadPicker()
     }
 
     /// Carry the current selection to a NEW session id. Called just before a
@@ -227,12 +263,15 @@ final class ChatModelStore: ObservableObject {
     /// override + variant, then move it to the front of recents. Selecting a
     /// recent IS the act of using it, so it is recorded on apply. The recents
     /// list is written to the box via the shared cache.
-    func apply(_ choice: ModelChoice) {
+    @discardableResult
+    func apply(_ choice: ModelChoice) -> Bool {
         let targetID = choice.fast ? ChatModel.fastModelID(choice.modelID) : choice.modelID
+        guard isSelectable("\(choice.providerID)/\(targetID)") else { return false }
         setOverride(OpencodeModelID(providerID: choice.providerID, modelID: targetID))
         setVariant(choice.variant)
         recents = ModelRecents.record(choice, into: recents)
         prefs.setRecents(recents)
+        return true
     }
 
     /// Record the current effective (model, effort, fast) as a recent — called
@@ -261,23 +300,85 @@ final class ChatModelStore: ObservableObject {
     /// here from the sheet so the menu and the sheet share one implementation.
     func setFast(_ on: Bool) {
         guard let active = ChatModel.activeModel(models, override: override, configuration: configDefault, provider: defaultModel) else { return }
-        let f = ChatModel.fastToggle(models: models, active: active, variantId: variant)
-        guard let target = f.target else { return }
+        let f = ChatModel.fastToggle(models: selectableModels, active: active, variantId: variant)
+        guard let target = f.target, isSelectable("\(target.providerID)/\(target.modelID)") else { return }
         let currentVariant = variant
         setOverride(OpencodeModelID(providerID: target.providerID, modelID: target.modelID))
         if let currentVariant { setVariant(currentVariant) }
     }
 
-    // MARK: - Deprecated-model opt-in (BET-1140)
+    // MARK: - Picker policy (the box decides; D24)
 
-    /// Persist the user's opt-in for a deprecated model, flipping its catalogue
-    /// row from disabled to selectable. Idempotent — a second opt-in for the
-    /// same model is a no-op.
-    func optIn(_ model: OpencodeModel) {
+    /// Whether the user may pick `key` ("providerID/modelID"). Every selection
+    /// path — catalogue row, recent chip, fast toggle — goes through here. An
+    /// older box derives nothing, so everything enabled stays selectable; until
+    /// the picker has been read nothing is.
+    func isSelectable(_ key: String) -> Bool {
+        if pickerUnsupported { return true }
+        guard let picker else { return false }
+        return picker.selectable.contains(key)
+    }
+
+    /// The recent chips to show: the box already dropped the ones that are no longer
+    /// selectable; an older box shows the stored list unfiltered.
+    var visibleRecents: [ModelChoice] {
+        if pickerUnsupported { return recents }
+        guard let picker else { return [] }
+        // The box keeps a recent when its key OR its `-fast` twin is selectable; a
+        // chip must be applicable, so keep only those whose own target is.
+        return picker.recents
+            .map { ModelChoice(providerID: $0.providerID, modelID: $0.modelID, variant: $0.variant, fast: $0.fast ?? false) }
+            .filter { isSelectable("\($0.providerID)/\($0.fast ? ChatModel.fastModelID($0.modelID) : $0.modelID)") }
+    }
+
+    /// The catalogue groups the picker lists: the box's `groups` (provider + keys)
+    /// mapped to the model objects this device holds (a key with no object is
+    /// skipped); an older box falls back to the raw enabled list.
+    var pickerGroups: [(provider: String, models: [OpencodeModel])] {
+        if pickerUnsupported { return ChatModel.catalogueGroups(models) }
+        guard let picker else { return [] }
+        let byKey = Dictionary(models.map { ("\($0.providerID)/\($0.id)", $0) }, uniquingKeysWith: { first, _ in first })
+        return picker.groups.compactMap { group in
+            let found = group.keys.compactMap { byKey[$0] }
+            return found.isEmpty ? nil : (group.provider, found)
+        }
+    }
+
+    /// A deprecated model the user has not enabled yet (renders disabled with "Enable").
+    func isLocked(_ key: String) -> Bool {
+        picker?.locked.contains(key) == true
+    }
+
+    /// The models the user may pick, from the box's `selectable` set.
+    var selectableModels: [OpencodeModel] {
+        models.filter { isSelectable("\($0.providerID)/\($0.id)") }
+    }
+
+    /// Enable a deprecated model on the BOX (`models:opt-in`), which also registers
+    /// it as a subagent. Shows a pending state, then either the catalogue unlocks
+    /// the row (the box answered `ok`) or `optInError` says why it did not.
+    @discardableResult
+    func optIn(_ model: OpencodeModel) async -> Bool {
         let key = "\(model.providerID)/\(model.id)"
-        guard !deprecatedOptIns.contains(key) else { return }
-        deprecatedOptIns.insert(key)
-        DeprecatedModelOptIns.save(deprecatedOptIns)
+        guard optInPendingKey == nil else { return false }
+        optInPendingKey = key
+        optInError = nil
+        optInErrorKey = nil
+        defer { optInPendingKey = nil }
+        do {
+            let reply = try await api.modelsOptIn(keys: [key])
+            guard reply.ok else {
+                optInError = "Couldn't enable \(model.name) — \(reply.message)"
+                optInErrorKey = key
+                return false
+            }
+            catalog.reload()
+            return true
+        } catch {
+            optInError = "Couldn't enable \(model.name) — \(Self.describe(error))"
+            optInErrorKey = key
+            return false
+        }
     }
 
     // MARK: - Plan mode (BET-952)

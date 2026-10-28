@@ -39,6 +39,7 @@ export function ModelMenu({
   onSelectAuto,
   presetLabel,
   autoReason,
+  footerNote,
 }: {
   groups: Array<[string, OpencodeModel[]]> | null;
   modelOverride: ModelSelection | null;
@@ -73,6 +74,8 @@ export function ModelMenu({
    * active and a decision exists.
    */
   autoReason?: string;
+  /** A muted line above "Manage models…" (the "Update your box…" note on an older box). */
+  footerNote?: string;
   /**
    * Copy override for the pinned top (server-default) row ONLY — the row that
    * means "no override". A second consumer (the delegate model picker) needs
@@ -355,19 +358,22 @@ export function ModelMenu({
         // (not a MenuOption — not selectable, no tick/trailing slot). Kept
         // local to this file: one call site, which does not clear the
         // two-adopter rule for promoting it to a primitive (standing decision 2).
-        <button
-          type="button"
-          onClick={() => {
-            window.dispatchEvent(
-              new CustomEvent("manta-open-settings", { detail: { section: "models" } }),
-            );
-            onClose();
-          }}
-          className="inline-flex w-full items-center gap-[7px] rounded-md px-2 py-2 text-left text-meta text-text-faint hover:bg-fill-hover hover:text-text"
-        >
-          <Sliders size={14} aria-hidden="true" className="flex-none" />
-          <span>Manage models…</span>
-        </button>
+        <>
+          {footerNote && <div className="px-2 pt-2 text-meta text-text-faint">{footerNote}</div>}
+          <button
+            type="button"
+            onClick={() => {
+              window.dispatchEvent(
+                new CustomEvent("manta-open-settings", { detail: { section: "models" } }),
+              );
+              onClose();
+            }}
+            className="inline-flex w-full items-center gap-[7px] rounded-md px-2 py-2 text-left text-meta text-text-faint hover:bg-fill-hover hover:text-text"
+          >
+            <Sliders size={14} aria-hidden="true" className="flex-none" />
+            <span>Manage models…</span>
+          </button>
+        </>
       }
     >
       {body}

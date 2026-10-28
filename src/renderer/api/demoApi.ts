@@ -36,6 +36,7 @@
 import type { Api } from "../../shared/api.js";
 import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo, DirListing } from "../../shared/types.js";
 import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
+import { demoArtifactsList } from "./demoArtifacts.js";
 import { pickDemoState, type DemoState } from "../demoLayout.js";
 import { useStore } from "../store.js";
 import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
@@ -481,6 +482,9 @@ const servePageList = (): Promise<ServedPageMeta[]> => Promise.resolve(demoState
 // have resolved a no-op; keep it explicit for parity with servePageList.
 const outboxList = (): Promise<OutboxFile[]> => Promise.resolve([]);
 
+const artifactsList = ({ sessionId }: { sessionId: string }) =>
+  Promise.resolve(demoArtifactsList(DEMO_STATE, sessionId, demoState));
+
 // Folder picker listing (BET-562). Without these the Proxy fallback resolves
 // null and the picker's folder list renders a raw "Cannot read properties of
 // null" error in the empty-state capture. The listing is fictional (see
@@ -513,7 +517,7 @@ const projectCreateScratch = (input: { root: string; name: string }): Promise<{ 
 const getClientVersion = (): Promise<{ version: string }> =>
   Promise.resolve({ version: "0.0.13" });
 
-const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string }> =>
+const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }> =>
   Promise.resolve({
     version: DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
     minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",
@@ -624,6 +628,7 @@ export const explicitMethods = {
   launchersList,
   servePageList,
   outboxList,
+  artifactsList,
   fsListDirs,
   gitListWorktrees,
   projectCreateScratch,

@@ -8,7 +8,25 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, installMockApi, type Harness } from "./testHarness";
 import { ModelLedgerCard } from "./ModelLedgerCard";
-import type { LedgerSummary } from "../shared/types";
+import type { LedgerSummary, LedgerView } from "../shared/types";
+
+// The box-computed render model (src/server/ledgerView.mjs); the card renders
+// this verbatim, so the fixture is written by hand, not derived from the raw rows.
+function viewFor(f: LedgerSummary): LedgerView {
+  return {
+    segments: [
+      { kind: "cacheRead", label: "cache read", pct: 70, inline: true },
+      { kind: "cacheWrite", label: "cache write", pct: 15, inline: true },
+      { kind: "output", label: "output", pct: 5, inline: true },
+      { kind: "input", label: "fresh input", pct: 10, inline: true },
+    ],
+    caption: "Cache is 85% of your bill — carrying the conversation, not generating answers.",
+    topModels: f.byModel.slice(0, 6).map((m) => ({ key: m.key, turns: m.turns, costPerTurn: m.costPerTurn, tokensPerSec: m.tokensPerSec, cost: m.cost })),
+    agents: f.byAgent.map((a) => ({ label: a.agent ?? "main", isChild: a.isChild, turns: a.turns, costPerTurn: a.costPerTurn, cost: a.cost })),
+    emptyModels: "No model spend recorded.",
+    emptyAgents: "No agent spend recorded.",
+  };
+}
 
 // A realistic summary: cacheRead dwarfs everything (70%), a couple of models
 // (one without a measured tok/s), and a main + one subagent.
@@ -31,6 +49,7 @@ function fixture(): LedgerSummary {
     byProject: [],
   };
 }
+const withView = (f: LedgerSummary): LedgerSummary => ({ ...f, view: viewFor(f) });
 
 // A summary whose TOP-by-cost model has no tok/s measurement — the guard that
 // must render "—" rather than NaN/null.
@@ -69,7 +88,7 @@ describe("ModelLedgerCard", () => {
   });
 
   it("renders the four legend entries and the top-model row from a fixture summary", async () => {
-    installMockApi({ ledgerSummary: () => Promise.resolve(fixture()) });
+    installMockApi({ ledgerSummary: () => Promise.resolve(withView(fixture())) });
     h = mount(<ModelLedgerCard />);
     await h.flush();
     const text = h.text();
@@ -91,12 +110,37 @@ describe("ModelLedgerCard", () => {
   });
 
   it("renders — for a model whose tokensPerSec is null, never NaN or null", async () => {
-    installMockApi({ ledgerSummary: () => Promise.resolve(fixtureNoTok()) });
+    installMockApi({ ledgerSummary: () => Promise.resolve(withView(fixtureNoTok())) });
     h = mount(<ModelLedgerCard />);
     await h.flush();
     const text = h.text();
     expect(text).toContain("—");
     expect(text).not.toContain("NaN");
     expect(text).not.toMatch(/\bnull\b/);
+  });
+
+  it("a box older than the ledger view (supported but no `view`) says to update, with no figures", async () => {
+    installMockApi({ ledgerSummary: () => Promise.resolve(fixture()) });
+    h = mount(<ModelLedgerCard />);
+    await h.flush();
+    expect(h.text()).toContain("Update your box to use this.");
+    expect(h.text()).not.toContain("$");
+  });
+
+  it("renders the box's caption, in-bar percentages only where the box says inline, and its empty states", async () => {
+    const f = fixture();
+    const v = viewFor(f);
+    v.segments[3] = { ...v.segments[3], pct: 3, inline: false };
+    v.topModels = [];
+    v.agents = [];
+    installMockApi({ ledgerSummary: () => Promise.resolve({ ...f, view: v }) });
+    h = mount(<ModelLedgerCard />);
+    await h.flush();
+    const text = h.text();
+    expect(text).toContain("Cache is 85% of your bill");
+    expect(text).toContain("No model spend recorded.");
+    expect(text).toContain("No agent spend recorded.");
+    // 3% appears in the legend only (once), not also inside the bar.
+    expect(text.match(/3%/g)?.length).toBe(1);
   });
 });

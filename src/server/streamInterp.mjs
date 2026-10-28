@@ -47,6 +47,9 @@ import {
   applyPermissionEvent,
   extractSubagentInfo,
   humanizeProviderError,
+  compactionFirstLine,
+  describeRetry,
+  describeSessionError,
 } from "../shared/streamInterpretation.mjs";
 import { isPlanAgent } from "../shared/planMode.mjs";
 import {
@@ -753,6 +756,12 @@ export function createStreamInterpreter({
           name: err?.name ?? null,
           message: human,
           ...(human !== message ? { rawMessage: message } : {}),
+          // WS02 (SF-3): the sentence + reconnect target, classified against the
+          // provider of the session's current model.
+          display: describeSessionError(
+            { name: err?.name ?? null, message: human, rawMessage: message },
+            st.model?.providerID ?? null,
+          ),
         });
         emitRunning(sid, st, false);
         emitTurnComplete(sid, st, true);
@@ -773,10 +782,14 @@ export function createStreamInterpreter({
         // matching `null` follows on the next step / turn edge.
         st.retryActive = true;
         st.runningType = "retry";
+        const retryAttempt = typeof d.attempt === "number" ? d.attempt : 0;
+        const retryMessage = textOf(d.error?.message);
         emit(sid, "retry", {
-          attempt: typeof d.attempt === "number" ? d.attempt : 0,
-          message: textOf(d.error?.message),
+          attempt: retryAttempt,
+          message: retryMessage,
           ...(typeof d.at === "number" ? { next: d.at } : {}),
+          // WS02 (SF-1): the box writes the card's copy.
+          ...describeRetry({ attempt: retryAttempt, message: retryMessage, action: null }),
         });
         return;
       }
@@ -971,15 +984,20 @@ export function createStreamInterpreter({
         return;
       }
       case "session.compaction.started": {
+        st.compactionText = textOf(d.text);
         emit(sid, "compaction", { phase: "started", text: "", ...(d.reason != null ? { reason: String(d.reason) } : {}) });
         return;
       }
       case "session.compaction.delta": {
-        emit(sid, "compaction", { phase: "delta", text: textOf(d.text) });
+        const piece = textOf(d.text);
+        st.compactionText = (st.compactionText ?? "") + piece;
+        emit(sid, "compaction", { phase: "delta", text: piece });
         return;
       }
       case "session.compaction.ended": {
-        emit(sid, "compaction", { phase: "ended" });
+        // WS02 (SF-2): the box takes the first line of what the compaction streamed.
+        emit(sid, "compaction", { phase: "ended", firstLine: compactionFirstLine(st.compactionText ?? "") });
+        st.compactionText = "";
         st.compacted = true;
         return;
       }

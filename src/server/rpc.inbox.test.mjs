@@ -96,7 +96,12 @@ test("opencode:inbox answers the interpreter snapshot; the CTO conversation is r
 
 test("opencode:inbox-cancel wires DELETE + message lookup into the interpreter; refuses CTO and a missing id", async () => {
   const { handlers, log } = rig();
-  assert.deepEqual(await dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a", id: "msg_1" }]), { outcome: "cancelled" });
+  assert.deepEqual(await dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a", id: "msg_1" }]), {
+    outcome: "cancelled",
+    notice: null,
+    error: null,
+    restoreText: null,
+  });
   assert.deepEqual(log, [["cancelInboxItem", "ses_a", "msg_1"], ["getMessage", "ses_a", "msg_1"], ["cancelInbox", "ses_a", "msg_1"]]);
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_cto", id: "msg_1" }]), /not available for the CTO conversation/);
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a" }]), /id is required/);
@@ -104,7 +109,11 @@ test("opencode:inbox-cancel wires DELETE + message lookup into the interpreter; 
 
 test("opencode:inbox-set-delivery wires PATCH + message lookup into the interpreter; validates input; refuses CTO", async () => {
   const { handlers, log } = rig();
-  assert.deepEqual(await dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "steer" }]), { outcome: "changed" });
+  assert.deepEqual(await dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "steer" }]), {
+    outcome: "changed",
+    notice: null,
+    error: null,
+  });
   assert.deepEqual(log, [["setInboxDelivery", "ses_a", "msg_1", "steer"], ["getMessage", "ses_a", "msg_1"], ["interpSetDelivery", "ses_a", "msg_1", "steer"]]);
   await dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "msg_1", delivery: "queue" }]);
   assert.deepEqual(log.at(-1), ["interpSetDelivery", "ses_a", "msg_1", "queue"]);
@@ -123,4 +132,13 @@ test("without the interpreter wired the inbox channels fail clearly (never an em
   await assert.rejects(dispatch(handlers, "opencode:inbox", ["ses_a"]), /not available on this box/);
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a", id: "x" }]), /not available on this box/);
   await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "x", delivery: "steer" }]), /not available on this box/);
+});
+
+// WS05 (M-05-srv-1): forge:inbox joins each repo to its local checkout on the box,
+// so the registration must hand forgeInbox the (60s-cached) repo probe. Pinned at
+// the source because a live call would resolve a real forge token.
+test("forge:inbox is registered with probeRepos wired to local.forgeProbe", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./rpc.mjs", import.meta.url), "utf8");
+  assert.match(src, /"forge:inbox":\s*\(\)\s*=>\s*forgeInbox\(\{\s*probeRepos:\s*\(\)\s*=>\s*local\.forgeProbe\(\)\s*\}\)/);
 });

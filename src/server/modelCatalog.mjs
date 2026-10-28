@@ -252,7 +252,7 @@ export function createModelCatalogController({
       return startPoller(refresh, { intervalMs, label: "modelCatalog" });
     },
     lookupModel: (id) => catalog.lookupModel(id),
-    matchModel: (id) => catalog.matchModel(id),
+    matchModel: (id, endpointFacts) => catalog.matchModel(id, endpointFacts),
     allModels: () => catalog.allModels(),
     status: () => ({ supported: catalog.size > 0, size: catalog.size }),
   };
@@ -295,8 +295,8 @@ export function lookupModel(catalogId) {
   return boxCatalog.lookupModel(catalogId);
 }
 
-export function matchModel(localModelId) {
-  return boxCatalog.matchModel(localModelId);
+export function matchModel(localModelId, endpointFacts) {
+  return boxCatalog.matchModel(localModelId, endpointFacts);
 }
 
 export function allModels() {

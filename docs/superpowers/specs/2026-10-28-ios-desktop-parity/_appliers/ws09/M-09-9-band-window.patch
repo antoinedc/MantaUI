@@ -1,0 +1,22 @@
+--- a/mobile/native/MantaUI/ComposerView.swift	2026-10-28 16:47:24.975482626 +0000
++++ b/mobile/native/MantaUI/ComposerView.swift	2026-10-28 16:47:25.065481939 +0000
+@@ -613,7 +613,7 @@
+         if let window = seatUsageWindow ?? UsageMeters.sessionWindow(usageStore.snapshots) {
+             Button { onShowUsage?() } label: {
+                 MeterRing(pct: window.pct,
+-                          color: MeterRing.tint(UsageMeters.band(window.pct), tokens),
++                          color: UsageMeters.band(window).map { MeterRing.tint($0, tokens) } ?? tokens.tx4,
+                           diameter: 13,
+                           lineWidth: 2.5,
+                           track: tokens.borderSubtle)
+--- a/mobile/native/MantaUI/AccountsScreen.swift	2026-10-28 16:47:25.006482389 +0000
++++ b/mobile/native/MantaUI/AccountsScreen.swift	2026-10-28 16:47:25.065481939 +0000
+@@ -713,7 +713,7 @@
+     var inactive = false
+ 
+     var body: some View {
+-        let tint = inactive ? tokens.tx4 : MeterRing.tint(UsageMeters.band(window.pct), tokens)
++        let tint = inactive ? tokens.tx4 : (UsageMeters.band(window).map { MeterRing.tint($0, tokens) } ?? tokens.tx4)
+         HStack(spacing: Metrics.spacing.sp2) {
+             Text(title)
+                 .font(.caption)

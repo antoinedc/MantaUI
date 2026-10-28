@@ -36,3 +36,5 @@ export interface AutoEligibilityResult {
 }
 
 export function autoEligibility(input: AutoEligibilityInput): AutoEligibilityResult;
+
+export function describeMissing(missing: readonly string[]): string | null;

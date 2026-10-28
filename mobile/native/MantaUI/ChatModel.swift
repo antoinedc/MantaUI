@@ -185,7 +185,7 @@ enum ChatModel {
     /// not deprecated. Absent `enabled`/`status` (common) → pickable. A
     /// deprecated model that has NOT been opted in stays non-pickable here; it
     /// remains VISIBLE in the catalogue as a disabled row (see
-    /// `catalogueGroups` / `isCatalogueRowDisabled`) until the user opts in.
+    /// `catalogueGroups`, locked by the box's `models:picker`) until the user opts in.
     static func isPickable(_ m: OpencodeModel) -> Bool {
         if m.enabled == false { return false }
         if isDeprecated(m) { return false }
@@ -208,14 +208,6 @@ enum ChatModel {
             let kept = all.filter { !(isFastModelID($0.id) && ids.contains(baseModelID($0.id))) }
             return kept.isEmpty ? nil : (provider, kept)
         }
-    }
-
-    /// Whether a catalogue row renders disabled — the model is deprecated AND
-    /// its "providerID/modelID" has not been opted in. The single row-disabled
-    /// decision for the catalogue; mirrors the desktop `disabledKeys` set from
-    /// `mainPickerGroups` (BET-1139).
-    static func isCatalogueRowDisabled(_ m: OpencodeModel, optIn deprecatedOptIns: Set<String>) -> Bool {
-        isDeprecated(m) && !deprecatedOptIns.contains("\(m.providerID)/\(m.id)")
     }
 
     /// The effective selection, identical to the desktop's precedence

@@ -149,7 +149,6 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
       id: `media:${meta.path}`,
       kind: kind === "image" ? "image" : "file",
       origin: "agent",
-      key: meta.path.toLowerCase(),
       label,
       href: meta.path,
       mime: meta.mime,
@@ -157,7 +156,9 @@ function ReadyMedia({ entry }: { entry: MediaEntry }) {
       at: 0,
       messageId: null,
       context: null,
-      expiresAt: null,
+      isHosted: false,
+      expiry: null,
+      plan: null,
     };
   }, [meta.path, meta.title, meta.mime, kind]);
 

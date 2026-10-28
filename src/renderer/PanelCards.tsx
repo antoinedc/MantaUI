@@ -15,14 +15,14 @@ import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Pencil, Search, Square, Tras
 import type {
   DelegateApproval,
   DelegateApprovalTool,
-  DelegateJob,
+  DelegateJobView,
   ScheduledJob,
   SecretMeta,
   SecretPatch,
   SecretScope,
   WebhookMeta,
 } from "../shared/types";
-import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
+import { describeCron, describeNextRun } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 import { ConfirmInline } from "./ConfirmInline";
 import { SecretEditor, secretScopeLabel, type SecretSaveResult } from "./SecretEditor";
@@ -586,10 +586,13 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
   approval,
   onApprove,
   onDecline,
+  error = null,
 }: {
   approval: DelegateApproval;
   onApprove: (tools: DelegateApprovalTool[]) => void;
   onDecline: () => void;
+  /** The box refused the rules (or couldn't be reached): shown above the buttons; the card stays. */
+  error?: string | null;
 }) {
   // Edit-access mode: a local, editable copy of the tools list. Start sends
   // the (possibly edited) list; the server rebuilds the ruleset + catch-all.
@@ -679,6 +682,11 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
       <div className="text-text-faint text-label mb-2">
         Anything not listed is denied (the job will not ask again).
       </div>
+      {error && (
+        <div className="text-danger text-label mb-2" data-testid="delegate-approval-error">
+          {error}
+        </div>
+      )}
       <div className="flex items-center gap-2">
         <button
           onClick={() => onApprove(tools)}
@@ -707,59 +715,44 @@ export const DelegateApprovalCard = memo(function DelegateApprovalCard({
 
 // ReadOnlyJobBar — replaces the composer for a background-job session (BET-418
 // §D). A job is read-only: no composer, no permission/question cards, no model
-// picker, no fork/compact/clear. The only live action is Stop (running jobs).
-// "Go to parent" navigates to the parent session's window. Once terminal, the
-// bar shows the outcome (branch + files changed) and Stop is hidden; the view
-// closes when the user navigates away (the window is removed on terminal, so
-// the sidebar no longer lists it).
+// picker, no fork/compact/clear. The only live action is Stop (a stoppable job).
+// "Go to parent" navigates to the parent session's window. Every sentence is
+// the box's (`delegate:job-for-session`, WS02 server-first): the bar renders
+// the view verbatim and decides nothing about job-ness, status or the parent.
 export const ReadOnlyJobBar = memo(function ReadOnlyJobBar({
-  job,
-  parentName,
+  view,
+  error,
   onGoToParent,
   onStop,
-  modelName,
 }: {
-  job: DelegateJob;
-  parentName: string | null;
+  view: DelegateJobView;
+  /** A failed Stop, shown on the bar (never swallowed). */
+  error?: string | null;
   onGoToParent: () => void;
   onStop: () => void;
-  modelName: string | null;
 }) {
-  const terminal = job.status !== "running";
   return (
-    <div className="shrink-0 px-4 py-2 border-t border-border bg-bg-elev text-meta">
+    <div className="shrink-0 px-4 py-2 border-t border-border bg-bg-elev text-meta" data-testid="read-only-job-bar">
       <div className="flex items-center gap-2 mb-1">
         <span style={{ color: "var(--accent)" }} className="inline-flex items-center">
           <Bot size={14} aria-hidden="true" />
         </span>
-        <span className="text-text">
-          {modelName
-            ? <>Read-only — this is a background job running <strong>{modelName}</strong>.</>
-            : "Read-only — this is a background job."}
-        </span>
-        {parentName && (
-          <span className="text-text-faint">It reports to {parentName}.</span>
-        )}
+        <span className="text-text">{view.headline}</span>
+        <span className="text-text-faint">{view.parentLine}</span>
       </div>
-      {terminal ? (
-        <div className="text-text-faint">
-          {formatJobSummary(job)}
-          {job.status === "failed" || job.status === "stopped"
-            ? ` · ${job.error ?? job.status}`
-            : ""}
-        </div>
-      ) : (
-        <div className="text-text-faint">{job.activity || "running…"}</div>
-      )}
+      <div className="text-text-faint" data-testid="read-only-job-status">{view.statusLine}</div>
+      {error && <div className="text-danger mt-1">{error}</div>}
       <div className="flex items-center gap-2 mt-2">
-        <button
-          onClick={onGoToParent}
-          className="px-2 py-1 rounded-xs border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
-          title="Go to the parent session"
-        >
-          <ArrowLeft size={12} aria-hidden="true" /> Go to parent
-        </button>
-        {!terminal && (
+        {view.parent && (
+          <button
+            onClick={onGoToParent}
+            className="px-2 py-1 rounded-xs border border-border-strong text-text hover:bg-bg-soft inline-flex items-center gap-1"
+            title="Go to the parent session"
+          >
+            <ArrowLeft size={12} aria-hidden="true" /> Go to parent
+          </button>
+        )}
+        {view.stoppable && (
           <button
             onClick={onStop}
             className="px-2 py-1 rounded-xs text-warn hover:bg-warn-bg border border-warn/30 inline-flex items-center gap-1"

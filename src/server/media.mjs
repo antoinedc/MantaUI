@@ -40,9 +40,12 @@ import { pushArtifact as defaultPushArtifact } from "./outbox.mjs";
 export const ORPHAN_TIMEOUT_MS = 10 * 60 * 1000;
 export const MEDIA_SWEEP_MS = 30 * 1000;
 
-// Small extension → MIME map for the tools' returns. Video is never measured
-// (see readImageSize) — its mime is still reported from the extension.
-const MIME_BY_EXT = {
+// THE box's extension → MIME allowlist (media tools' returns AND the artifacts
+// list). Video is never measured (see readImageSize) — its mime is still
+// reported from the extension. Deliberately an allowlist, not a MIME database:
+// a full database would label `.ts` as `video/mp2t` and widen what gets
+// previewed; unknown types land on the download path.
+export const MIME_BY_EXT = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -54,10 +57,23 @@ const MIME_BY_EXT = {
   ".mov": "video/quicktime",
   ".webm": "video/webm",
   ".m4v": "video/x-m4v",
+  ".csv": "text/csv",
+  ".tsv": "text/tab-separated-values",
+  ".txt": "text/plain",
+  ".md": "text/markdown",
+  ".json": "application/json",
+  ".pdf": "application/pdf",
+  ".html": "text/html",
+  ".htm": "text/html",
 };
 
+/** MIME type for a file name, or null when its extension is not on the allowlist. */
+export function mimeForName(name) {
+  return MIME_BY_EXT[(extname(name || "") || "").toLowerCase()] ?? null;
+}
+
 export function guessMime(name) {
-  return MIME_BY_EXT[(extname(name || "") || "").toLowerCase()] ?? "application/octet-stream";
+  return mimeForName(name) ?? "application/octet-stream";
 }
 
 // Opaque 128-bit handle id (matches the box_id token pattern: 32 hex chars).

@@ -6,7 +6,7 @@
 //   - the busy-send decision (which path a send takes while a turn runs),
 //   - the K4 cancel outcome → what the user sees.
 
-import type { OpencodeInboxCancelResult, OpencodeInboxItem, OpencodeInboxSnapshot } from "../shared/types";
+import type { OpencodeInboxItem, OpencodeInboxSnapshot } from "../shared/types";
 
 // ===== K3 acceptance rule =====
 
@@ -172,69 +172,7 @@ export function showStoppedFooter(items: ReadonlyArray<Pick<OpencodeInboxItem, "
 }
 
 export const STOPPED_FOOTER_TEXT = "Agent stopped — these are waiting. Send now, or ×.";
-export const SET_DELIVERY_UNCONFIRMED = "Couldn't confirm the change — check the pending list";
 
-/** N1: the result of `opencode:inbox-set-delivery`. */
-export type InboxSetDeliveryResult = { outcome: "changed" | "delivered" | "unknown" };
-
-/**
- * Turn an N1 result into what the user sees. `changed` needs nothing (the next
- * inbox frame flips the badge); `delivered` is a toast; anything else —
- * `unknown`, or a malformed answer — is an error banner. Never silent.
- */
-export function describeInboxSetDelivery(
-  result: InboxSetDeliveryResult | null | undefined,
-): { error: string | null; notice: string | null } {
-  switch (result?.outcome) {
-    case "changed":
-      return { error: null, notice: null };
-    case "delivered":
-      return { error: null, notice: "Already sent to the agent" };
-    default:
-      return { error: SET_DELIVERY_UNCONFIRMED, notice: null };
-  }
-}
-
-// ===== Cancel outcome =====
-
-export const ATTACHMENTS_NOT_RESTORED = "Attachments weren't restored — re-attach them";
-
-export type InboxCancelReport = {
-  /** Text to put back in the composer (only with `cancelled`, and only when the gesture asked to restore). */
-  restoreText: string | null;
-  /** A failure / uncertainty the user must see (error banner). */
-  error: string | null;
-  /** A neutral notice (toast). */
-  notice: string | null;
-};
-
-/**
- * Turn a K4 cancel result into what the user sees. Only `cancelled` proves the
- * message will not be sent, so only it may restore text — restoring after
- * `unknown` could make the user send it twice.
- */
-export function describeInboxCancel(
-  result: OpencodeInboxCancelResult | null | undefined,
-  item: OpencodeInboxItem,
-  opts: { restore: boolean },
-): InboxCancelReport {
-  switch (result?.outcome) {
-    case "cancelled": {
-      const cancelled = result.item ?? item;
-      const lost = opts.restore && cancelled.attachmentCount > 0;
-      return {
-        restoreText: opts.restore ? cancelled.text : null,
-        error: null,
-        notice: lost ? ATTACHMENTS_NOT_RESTORED : null,
-      };
-    }
-    case "delivered":
-      return { restoreText: null, error: null, notice: "Already sent to the agent" };
-    default:
-      return {
-        restoreText: null,
-        error: "Couldn't confirm it was cancelled — it may still be sent",
-        notice: null,
-      };
-  }
-}
+// The outcome sentences of cancel / set-delivery (and what may be restored into the
+// composer) are written by the box — src/server/inboxCopy.mjs; the renderer only shows
+// `notice` / `error` / `restoreText` from the result.

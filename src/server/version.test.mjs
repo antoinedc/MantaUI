@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import http from "node:http";
 import { OPENCODE_V2_VERSION } from "../../scripts/opencode-v2/version.mjs";
+import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
 import {
   readServerVersion,
   writeVersionResponse,
@@ -112,6 +113,15 @@ test("writeVersionResponse writes 200 + JSON { version, minClient, opencodeVersi
   // BET-428: opencodeVersion MUST be present so Settings → About renders it
   // in the same getServerVersion round-trip — no new IPC channel.
   assert.equal(body.opencodeVersion, "1.18.10");
+});
+
+test("writeVersionResponse carries the capabilities list (master D25)", () => {
+  let captured = null;
+  writeVersionResponse({ writeHead() {}, end(body) { captured = body; } }, { version: "1.2.3" });
+  const body = JSON.parse(captured);
+  assert.ok(Array.isArray(body.capabilities));
+  assert.deepEqual(body.capabilities, [...BOX_CAPABILITIES]);
+  assert.ok(body.capabilities.includes("chat-cards-1"));
 });
 
 test("writeVersionResponse defaults opencodeVersion to the pinned OpenCode version (never the 0.0.0 fallback)", () => {
