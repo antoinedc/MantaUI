@@ -110,7 +110,9 @@ final class ClaudeLoginSession: ObservableObject {
         subscription = events
             .filter { SignInAttemptGate.accepts(ptyEventKey: $0.sessionKey, attemptKey: key) }
             .sink { [weak self] event in
-                Task { @MainActor in self?.handle(event) }
+                // The subject is fed on the main actor, so this runs there already;
+                // handling in place keeps chunk order for the link buffer.
+                MainActor.assumeIsolated { self?.handle(event) }
             }
         let limit = linkTimeout
         linkTimer = Task { [weak self] in
@@ -215,6 +217,8 @@ final class AccountsSeatSignIn: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var pendingTeardown: Task<Void, Never>?
     private var begun = false
+    /// Cancel / Close / the sheet going away has happened: nothing may start again.
+    private var closed = false
 
     init(request: AccountsSignInRequest, accounts: AccountsStore, defaults: UserDefaults = .standard) {
         self.request = request
@@ -323,6 +327,9 @@ final class AccountsSeatSignIn: ObservableObject {
             beginTeardown(old)
         }
         await pendingTeardown?.value
+        // Cancel / Close during the old attempt's release: a closed flow starts
+        // nothing (it would allocate a seat / flow on the box with no UI).
+        guard !closed else { return }
 
         let attempt = SignInAttempt()
         current = attempt
@@ -535,17 +542,20 @@ final class AccountsSeatSignIn: ObservableObject {
     }
 
     private func finishResigned(_ id: UUID, message: String) async {
+        guard SignInAttemptGate.accepts(resultFor: id, current: current?.id) else { return }
         stopClaudeSession()
+        // The outcome is settled on the box: report it NOW, so swiping the sheet
+        // away during the hold cannot drop the banner or the picker's notice,
+        // and a later disappear has nothing left to tear down.
+        current = nil
         phase = .done(message)
-        // Hold the confirmation while the list shows the seat healthy again.
+        ProviderChange.announce()
+        accounts.announce(message)
+        // Then hold the confirmation while the list shows the seat healthy again.
         let held = Date()
         await accounts.refresh()
         let remaining = 1.5 - Date().timeIntervalSince(held)
         if remaining > 0 { try? await Task.sleep(for: .seconds(remaining)) }
-        guard SignInAttemptGate.accepts(resultFor: id, current: current?.id) else { return }
-        current = nil
-        ProviderChange.announce()
-        accounts.announce(message)
         shouldDismiss = true
     }
 
@@ -605,6 +615,7 @@ final class AccountsSeatSignIn: ObservableObject {
     /// The explicit Cancel: tell the box, report BOTH outcomes, close.
     func cancel() async {
         guard !cancelling else { return }
+        closed = true
         cancelling = true
         stopLocalWork()
         await pendingTeardown?.value
@@ -631,6 +642,7 @@ final class AccountsSeatSignIn: ObservableObject {
     /// The sheet went away with the flow still open (the parent screen popped,
     /// the app dismissed it): best-effort cleanup, logged — not a user action.
     func abandonIfOpen() {
+        closed = true
         stopLocalWork()
         guard let attempt = current else { return }
         current = nil

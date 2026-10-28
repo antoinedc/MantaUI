@@ -1859,3 +1859,14 @@ mention WS01:**
 3. **NIT: F4 acceptance.** The persistence checkbox is now qualified: "when
    canonical finish metadata is available".
 
+
+## Reconciliation notes (server-first) — notes only, no contract change
+
+- Received in wave B (integration agent B, master ledger): **M-09-8** —
+  `struct UsageWindow` in `MantaModels.swift` gains `var tone: String? = nil`
+  (decode-if-present, WS09 SF-M18). WS01's other symbols are unchanged.
+- WS11 (wave D) moves turn footers, truncation, canonical media, plan data and
+  tool activity to the box (`11-server-consolidation.md` D8–D11). It keeps the
+  mapper entry points WS02 wired (M-01-1…M-01-4, M-01-7) or migrates their
+  call sites in the same step; `TranscriptLiveTruncation` / `TranscriptFooterRule`
+  stay.

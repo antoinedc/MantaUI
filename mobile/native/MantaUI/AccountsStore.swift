@@ -67,7 +67,22 @@ final class AccountsStore: ObservableObject {
     /// install (`kind:"pty"` bus frames, published to every `/events`
     /// subscriber). A sign-in controller subscribes BEFORE it spawns and filters
     /// on its own `sessionKey`.
-    let ptyEvents = PassthroughSubject<PtyEvent, Never>()
+    ///
+    /// The raw-frame handler list has no unsubscribe, and every opened chat makes
+    /// an `AccountsStore`, so the handler is installed on FIRST USE (a sign-in
+    /// subscribing before it spawns), never for a store that only reads seats.
+    var ptyEvents: PassthroughSubject<PtyEvent, Never> {
+        if !ptyHandlerInstalled, let eventStore {
+            ptyHandlerInstalled = true
+            eventStore.addRawFrameHandler { [weak self] frame in
+                guard let event = PtyEvent.from(frame) else { return }
+                self?.ptyEventSubject.send(event)
+            }
+        }
+        return ptyEventSubject
+    }
+    private let ptyEventSubject = PassthroughSubject<PtyEvent, Never>()
+    private var ptyHandlerInstalled = false
 
     /// False when the store was built without an event stream: the Claude
     /// sign-in cannot show its link then, and says so instead of spinning.
@@ -103,12 +118,6 @@ final class AccountsStore: ObservableObject {
         self.defaults = defaults
         let saved = defaults.dictionary(forKey: Self.hiddenMovesDefaultsKey) as? [String: Double] ?? [:]
         self.moveTracker = SeatMoveTracker(hidden: saved)
-        // The raw-frame handler list has no unsubscribe, so this is registered
-        // once for the store's lifetime and holds the store weakly.
-        eventStore?.addRawFrameHandler { [weak self] frame in
-            guard let event = PtyEvent.from(frame) else { return }
-            self?.ptyEvents.send(event)
-        }
     }
 
     /// The bound conversation's resolved seat: the box's `session-seat` joined
@@ -202,6 +211,7 @@ final class AccountsStore: ObservableObject {
         if list != providers { providers = list }
         lastFetch = Date()
         phase = .loaded
+        refreshError = nil
         // A coalesced fetch already in flight may carry an older reading; queue
         // one more so it cannot be the last word.
         if refreshing { refreshQueued = true }

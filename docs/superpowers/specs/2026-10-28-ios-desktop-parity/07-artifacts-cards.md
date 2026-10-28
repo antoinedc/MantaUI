@@ -1,7 +1,7 @@
 # WS07 — Artifacts, agent-sent files, webhooks, shared secrets
 
 Status: draft (revised, round 1) · Wave B · Owner files:
-`SessionResourceCards.swift`, `ArtifactDerivation.swift`,
+`SessionResourceCards.swift`, `ArtifactDerivation.swift` (deleted, server-first),
 `ChatOverflowSheet.swift`, `mobile/native/Package.swift` + `project.yml` (D1;
 edits routed through the wave-B integration step per D18), new `Artifact*` /
 `Webhook*` files. Binding rules: `00-master.md` (C1–C7, D1–D19).
@@ -30,17 +30,18 @@ Features in scope (7):
   (`:455-466`), 3 s poll while open (`:425-430`), tap → QuickLook via
   `/api/peek` staging (`:484-534`), long-press → Share / Copy path (`:536-557`).
   Loads `api.messages`, `api.servePageList()`, `api.listOutbox` (`:468-482`).
-- `ArtifactDerivation` (`MantaUI/ArtifactDerivation.swift`): a port of the
-  desktop `deriveArtifacts`, **but** it lacks: the `plan` kind, `messageId`,
+- `ArtifactDerivation` (`MantaUI/ArtifactDerivation.swift`) — **deleted by
+  this spec (D23, "Server-first")**: a port of the desktop `deriveArtifacts`
+  that lacks: the `plan` kind, `messageId`,
   link `context`, `isHosted`, the plan-page exclusion from Links, the outbox
   row's `messageID`, and the video extensions. Expiry is only shown when
   ≤ 48 h (`ArtifactFormat.ageOrExpiry`, `:282-293`) — the desktop always shows
   a pill on hosted pages and outbox files.
 - `PlanDerivation` (`MantaUI/PlanDerivation.swift`, not owned by anyone; read
-  only here): already ports `planRefsFromPart` (`:82`), `planSubdomain`
-  (`:182`) and `planPageURL(sessionID:baseURL:)` (`:193`). **Reuse them.**
-  Its `planMetrics` (`:162`) is the plan *card's* rule, NOT the desktop
-  Plans-tab step rule — do not reuse it for F1.
+  only here): ports `planRefsFromPart` (`:82`), `planSubdomain` (`:182`) and
+  `planPageURL(sessionID:baseURL:)` (`:193`) for the plan CARD. Since the
+  server-first revision WS07 does **not** use any of them — the box returns
+  plan titles, steps and page URLs (`artifacts:list`).
 - `SecretsCard` + `SecretAddForm` (`SessionResourceCards.swift:134-346`):
   scope picker offers only `session` / `project` (`:295-298`), default
   `session` (`:269`), always sends `sessionID` (`:339`). Row shows raw scope.
@@ -56,6 +57,210 @@ Features in scope (7):
   registered handlers (`:576`). Used by `UpgradeStore`, `WidgetLiveStore`,
   `SessionListStore`, `ChatModelPrefs`. **F6 uses this; it does not edit
   `MantaEventStore.swift`.**
+
+## Server-first (D23/D24)
+
+Authority: `server-first-audit.md` §WS07. Folded MOVE-NOW items: **A1, A2,
+A3, A5**. Everything else in the WS07 audit table is KEEP-CLIENT (A4 day
+grouping, A6 search, A7 action eligibility, A8 byte routing, A9 notice
+machine — the announce decision is already server-side, A10 webhook display,
+A11a scope encoding, A12 key pre-check) and stays as specified below. A11b is
+MOVE-LATER (WS11 follow-ups), not built here.
+
+### SF-A1/A2/A3/A5 → new `src/server/artifacts.mjs`, channel `artifacts:list`
+
+The box already holds all four inputs: the transcript (`oc.listMessages`,
+`src/server/opencode.mjs:511`), the serve-page registry
+(`listPages({baseUrl})`, `src/server/servePage.mjs:212`), the outbox
+(`listOutbox()`, `src/server/outbox.mjs`, rows carry `messageID`) and the
+session directory (`oc.getSessionDirectory`, `opencode.mjs:905`). The module
+ports the desktop's `deriveArtifacts` (`src/renderer/artifacts.ts:329-399`)
+and its helpers line-for-line and becomes the ONLY implementation; the iOS
+port (`ArtifactDerivation.swift`) is deleted and the desktop switches in the
+same change.
+
+**Module (`src/server/artifacts.mjs`, owned by WS07):**
+
+```js
+// pure — no I/O
+export function deriveArtifacts({ messages, pages, outbox, sessionId, directory, baseUrl }) // → ArtifactCore[] (no expiry state)
+export function planRefsFromPart(part)            // moved from src/renderer/chatUtils.ts:2638-2678 (PLAN_REF_RE, PLAN_AUTHORING_TOOLS)
+export function planStepCount(text)               // /^#{2,3}\s+.+$/gm count (artifacts.ts:190-193)
+export function planTitleFromPath(file)           // artifacts.ts:180-185
+export function expiryState(expiresAt, now)       // "live" | "soon" (≤ 6 h) | "expired" | null — artifacts.ts:444-452
+export function countByKind(items)                // { link, image, file, plan }
+export function view(core, now)                   // core items + expiry + counts → response body
+// service — injected I/O, memoized
+export function createArtifactsService({ listMessages, listPages, listOutbox, sessionDirectory, baseUrl /* () => string */, now = Date.now, ttlMs = 30_000, maxSessions = 32 })
+  // → { list(sessionId): Promise<ArtifactsListResult> }
+```
+
+Derivation rules are exactly `artifacts.ts` today (file parts, user-text
+links with 160-char context and `.N` id suffixes, plan refs from any
+non-synthetic part with step count from prose → tool `content` → message
+text, hosted pages with newest-announcing-assistant `messageId`/`context`,
+plan-subdomain page excluded from links, outbox rows with sidecar
+`messageID`, `EXT_MIME` incl. video types, dedupe on `key` keeping the
+greatest `at`, sort newest first). Two server-side refinements, both pinned by
+tests:
+- **Plan `href`** = `getSessionDirectory(sessionId)` + `/` + rel. (The desktop
+  joined the pane cwd, which can differ from the opencode session directory
+  where `.opencode/plans/` is actually written.) Unknown directory → `href`
+  is the rel path and `plan.fileAvailable = false`.
+- **Plan `pageUrl`** = the registry page whose `subdomain === planSubdomain(sessionId)`
+  AND `sessionID === sessionId` (`src/shared/planMode.mjs:49`); else
+  `planPageUrl(sessionId, baseUrl)` (`planMode.mjs:65`) when `baseUrl` is
+  non-empty; else `null`. The desktop's client fallback to its own
+  `serverBase()` and iOS's `PlanDerivation.planPageURL(…, api.serverURL)` are
+  removed — the box knows its public base (`publicBaseUrl()`).
+
+**Wire — `POST /rpc/artifacts:list`**, `args: [{ "sessionId": "ses_…" }]`
+(single object, room for additive options):
+
+```jsonc
+{
+  "result": {
+    "sessionId": "ses_1",
+    "generatedAt": 1761650000000,          // box clock, ms
+    "items": [
+      {
+        "id": "prt_9",                     // part id (".0/.1" suffix), "page:<sub>", "outbox:<path>", "plan:<rel>"
+        "kind": "file",                    // "link" | "image" | "file" | "plan"
+        "origin": "agent",                 // "user" | "agent"
+        "label": "report.pdf",
+        "href": "/home/dev/.manta-outbox/ses_1/report.pdf",  // box path, data: URI, or URL
+        "mime": "application/pdf",         // null for links
+        "size": 63488,                     // null when unknown
+        "at": 1761649000000,               // ms
+        "messageId": "msg_4",              // null when no owning message
+        "context": null,                   // links/pages only
+        "isHosted": false,                 // true only for serve_page rows
+        "expiry": { "state": "live", "expiresAt": 1762253800000 },
+                                           // null = no expiry concept (plain files, links, plans);
+                                           // hosted page with no TTL → { "state": "never", "expiresAt": null }
+        "plan": null                       // kind "plan" only:
+                                           // { "status": "draft", "steps": 3, "pageUrl": "https://…/pages/plan-ses1", "fileAvailable": true }
+      }
+    ],
+    "counts": { "link": 2, "image": 1, "file": 4, "plan": 1 },
+    "degraded": []                         // subset of ["pages","outbox","directory"] whose read failed; those sources are omitted
+  }
+}
+```
+
+- `expiry.state` ∈ `"live" | "soon" | "expired" | "never"`; computed at
+  response time from `now()` (never cached). The **label** ("expires in 5h",
+  "no expiry", the desktop's "5h") stays client-side because it is relative to
+  the device clock (audit A3).
+- `plan.status` is `"draft"` until a plan→job link exists (desktop parity —
+  `planStatus({})`).
+- **Errors** (thrown → `{error}` with HTTP 500 via `handleRpcRequest`,
+  `rpc.mjs:2700-2713`; messages are safe literals — class-1 per BET-1460):
+  missing/blank `sessionId` → `"artifacts:list needs a sessionId"`; the
+  transcript read fails → `"Couldn't read this conversation's artifacts"`.
+  Pages / outbox / directory failures do NOT fail the call: the source is
+  omitted and named in `degraded` (the desktop today swallows those per
+  source, `ArtifactsPanel.tsx:640-652`).
+- **Memoization** (audit risk note — iOS polls every 3 s): per session, key =
+  last message `id` + its `parts.length` + `time.completed ?? ""` (read with
+  `listMessages(sessionId, { limit: 1 })`), outbox signature (sorted
+  `path:mtime` of this session's rows), pages signature (sorted
+  `subdomain:expiresAt:sessionID`) and the directory. Same key and younger
+  than `ttlMs` (30 s) → reuse the derived core; expiry + counts are always
+  recomputed. LRU of 32 sessions. A changed key or an older entry →
+  full `listMessages(sessionId)` + derive. Concurrent calls for one session
+  share one in-flight promise.
+
+**Capability (D24 wire compat).** Id **`artifacts-list-1`**, appended to WS02's
+`src/server/boxCapabilities.mjs` by integration agent B in wave B (M-07-S2,
+master D25), so `GET /api/version` / `server:version` advertise it from this
+wave on. The clients' detection signal is the channel itself (exact, no extra
+round trip): an older box
+answers `{error: "unknown rpc channel: artifacts:list"}` (`rpc.mjs:431-434`).
+Any capability-list read uses WS02's `boxCapabilities()` / `useBoxCapability`
+(never a WS07 copy); WS11 D1 may later gate the card entry through its store.
+Both clients classify exactly that error (or a capabilities list lacking the
+id) as **unsupported** and render, in place of the artifact
+list: **"Update your box to use this."** + secondary "Artifacts need a newer
+box version." No fallback derivation exists on either client. The desktop's
+Review mode (same panel) is unaffected.
+
+**Node tests — `src/server/artifacts.test.mjs`** (port of every derivation
+case in `src/renderer/artifacts.test.ts` and the `planRefsFromPart` cases in
+`chatUtils.test.ts` (`describe` at `:5671`), plus):
+1. file part → `kind/label/href/mime/size/messageId`; image mime → `image`.
+2. user link with context (URL removed, whitespace collapsed, 160 cap); two URLs
+   → `id.0`/`id.1`; assistant text links ignored; synthetic/ignored skipped.
+3. hosted page: other session excluded; `isHosted`, `messageId`/`context`
+   from the newest assistant message containing the URL; plan-subdomain page
+   NOT listed as a link.
+4. outbox: other session excluded; `messageID` carried; `.mp4` → `video/mp4`.
+5. plan: from text, from `write` input `filePath`, from patch `files`; `read`
+   ignored; newest wins; title "ship it"; `steps` 2 for `## A\n### B\n#### C`;
+   `href` joins the session directory; unknown directory → rel href +
+   `fileAvailable:false`; `pageUrl` registry match only for the same
+   `sessionID`, else deterministic from `baseUrl`, else `null`.
+6. dedupe on key keeps the greatest `at`; output newest first; `counts`.
+7. `expiryState` at `now`: null, past → expired, exactly 6 h → soon, 7 h →
+   live; hosted no-TTL → `{state:"never"}`; plain file → `expiry:null`.
+8. service: same key within TTL calls `listMessages` (full) once across two
+   `list()` calls but recomputes expiry with an advanced `now`; a new last
+   message invalidates; concurrent calls share one read; failing `listPages`
+   → `degraded:["pages"]` and no hosted items; failing transcript read →
+   throws the safe literal; blank sessionId throws.
+9. rpc wiring test (in `artifacts.test.mjs`, building the handler the way the
+   M-07-S1 row does with injected deps): `dispatch(handlers, "artifacts:list",
+   [{sessionId:"ses_1"}])` returns the shape above.
+
+### Desktop migration (same change — no parallel implementation)
+
+| File | Change |
+|---|---|
+| `src/renderer/artifacts.ts` | **Delete** `deriveArtifacts`, `deriveFileArtifact`/`LinkArtifact`/`OutboxArtifact`/`PlanArtifact`/`PageArtifact`, `newestAnnouncingMessage`, `dedupeByKey`, `EXT_MIME`, `planTitleFromPath`, `planStepCount`, `planStatus`, `planSubdomain` (duplicate of `planMode.mjs`), `pageState`, `countByKind`. **Keep** `groupByDay` (A4, device timezone). `Artifact` becomes `export type Artifact = ArtifactItem` re-exported from the new `src/shared/artifactsTypes.ts`; `ArtifactKind`, `PlanStatus` re-exported likewise. |
+| `src/shared/artifactsTypes.ts` (new, WS07) | `ArtifactItem`, `ArtifactExpiry`, `ArtifactPlanInfo`, `ArtifactsListResult`, `ArtifactKind`, `ArtifactOrigin`, `PlanStatus` — the wire shape above. |
+| `src/renderer/ArtifactsPanel.tsx` | Replace the `servePageList` + `outboxList` effect (`:637-660`) and the `deriveArtifacts`/`countByKind` memos (`:683-687`) with one fetch of `window.api.artifactsList({ sessionId })`: on open, every 30 s while open (`POLL_MS`, unchanged), and 400 ms after the lifted transcript's last message id / part count changes (so a new attachment appears without waiting for the poll). State: `loading` / `ready(result)` / `error(message)` (inline banner + **Retry**) / `unsupported` ("Update your box to use this."). Tab badges use `result.counts` (search keeps its client counts, A6). `LinkCard` / `FileRow` read `artifact.expiry?.state` (pill tone) and `expiryLabel(artifact.expiry.expiresAt, now)` for the text; `state === "never"` → "no expiry". `PlanRow` reads `artifact.plan.status/steps`; `openPlanPage` opens `artifact.plan.pageUrl` and, when null, sets `planError("Couldn't open the plan page.")` (the `planPageUrl(sessionId, serverBase())` fallback and the `planPageUrl` import are removed). "Open plan file" is hidden when `plan.fileAvailable` is false. `cwd` stays a prop only for `ReviewPane`. `degraded` non-empty → a muted footnote "Some items couldn't be loaded." |
+| `src/renderer/MediaBody.tsx` (`:145-163`) | The inline-media `Artifact` literal adopts the wire shape: drop `key`/`expiresAt`, add `isHosted: false`, `expiry: null`, `plan: null`. |
+| `src/renderer/ArtifactPreview.tsx` | Type-only: uses `Artifact` fields that still exist (`id/label/href/mime/kind`); no logic change. Verify compile. |
+| `src/renderer/chatUtils.ts` (`:2638-2678`) | **Delete** `PLAN_REF_RE`, `PLAN_AUTHORING_TOOLS`, `planRefsFromPart` (its only renderer caller was `artifacts.ts:373`; now in `src/server/artifacts.mjs`). Ledgered (M-07-D1) because WS02 also edits this file in wave B. |
+| `src/renderer/api/demoArtifacts.ts` (new, WS07) | Static `ArtifactsListResult` fixtures for the demo states (the `artifacts` image tile + the hosted pages with literal `live`/`soon`/`expired` states the visual baselines show). Literal data, no derivation. |
+| `src/shared/api.ts`, `src/shared/types.ts` (IPC), `src/renderer/api/httpApi.ts`, `src/renderer/api/demoApi.ts` | One-line registrations — ledgered (M-07-D2…D5). |
+| Tests | `src/renderer/artifacts.test.ts`: delete every case except `groupByDay`. `chatUtils.test.ts`: delete the `describe("planRefsFromPart")` block (starts `:5671`) and its import (`:169`) (ledgered with M-07-D1). New `src/renderer/ArtifactsPanel.server.test.tsx` (vitest, `installMockApi`): renders server items per tab; badges from `counts`; expiry pill tone per `expiry.state` + "no expiry" for `never`; plan row opens `plan.pageUrl`, shows "Couldn't open the plan page." when null; transcript change triggers a debounced refetch; `unknown rpc channel: artifacts:list` → "Update your box to use this."; other error → banner + Retry refetches. `ArtifactsPanel.review.test.tsx` keeps passing (mock `artifactsList` → empty result). Visual baselines (`tests/visual/screens.visual.ts` artifacts states) must be unchanged — the demo fixture reproduces them. |
+
+`servePageList` / `outboxList` stay on the `Api` (other consumers: the iOS
+download path, CTO tooling); only the artifacts panel stops calling them.
+
+### iOS migration
+
+- **Delete** `mobile/native/MantaUI/ArtifactDerivation.swift` and
+  `MantaUITests/ArtifactDerivationTests.swift`. The presentational helpers
+  the card keeps (KEEP-CLIENT) move to a new pure file
+  `ArtifactPresentation.swift`: `ArtifactDayGrouping` (A4),
+  `ArtifactFormat.byteCount/relativeAge/secondaryLine`, `ArtifactSearch` (A6),
+  `ArtifactActions` (A7), `ArtifactByteSource`, `ArtifactDataURI`,
+  `ArtifactStagingError` (A8), `ArtifactAttach`, `ArtifactStaging`,
+  `ArtifactEmptyCopy`, `ArtifactExpiryLabel.text(_ expiry:, now:)` (label only).
+- **Wire types** in `ArtifactModels.swift` (pure): `ArtifactItem`,
+  `ArtifactExpiry { state: ArtifactExpiryState (.live/.soon/.expired/.never), expiresAt: Double? }`,
+  `ArtifactPlanInfo { status: ArtifactPlanStatus, steps: Int, pageUrl: String?, fileAvailable: Bool }`,
+  `ArtifactsListResult { sessionId, generatedAt, items, counts: ArtifactCountsWire, degraded: [String] }`,
+  `ArtifactsCapability.isUnsupported(_ error: Error) -> Bool` (true for
+  `MantaError.server` whose message starts with `"unknown rpc channel: artifacts:list"`).
+  Unknown future `kind` / `state` values decode to `.unknown` and the row is
+  skipped (additive-wire tolerance). `ArtifactOutboxRow` is **removed** (the
+  server reads the outbox).
+- **Client member:** `artifactsList(sessionId:) async throws -> ArtifactsListResult`
+  replaces the card's `messages` + `servePageList` + `listOutbox` triple
+  (`SessionResourceCards.swift:468-482`). `listOutboxRows` is dropped.
+- The card renders the server list as-is: segments + badges from `counts`
+  (search counts client-side), rows from `items`, plan status/steps/pageUrl
+  from `plan`, expiry tone from `expiry.state`, label from the client
+  formatter. States: loading (`ProgressView`), error ("Couldn't load
+  artifacts." + **Retry**), unsupported (`ContentUnavailableView("Update your
+  box to use this", systemImage: "arrow.down.circle", description: Text("Artifacts
+  need a newer box version."))`), `degraded` non-empty → section footer
+  "Some items couldn't be loaded." The 3 s poll is kept (server-memoized).
+- `PlanDerivation.swift` is untouched by WS07 (its plan-card half is WS11 U1);
+  WS07 no longer calls `planRefsFromPart` / `planPageURL` from it.
 
 ---
 
@@ -93,37 +298,28 @@ Features in scope (7):
 - Empty: "No plans yet" / "N links, N images, N files" (`:196-208`).
 
 ### Wire contract
-Unchanged from today's card: `opencode:messages` (`api.messages`),
-`serve-page:list` → `ServedPageMeta[]` (`src/server/rpc.mjs:2529`), and
-`GET /api/peek?path=<abs>` (bearer) for "Open plan file". No new channel.
+`artifacts:list` (Server-first section): items with `kind: "plan"` carry
+`plan { status, steps, pageUrl, fileAvailable }`; `counts.plan`; the plan's own
+page is already excluded from links by the box. "Open plan file" still stages
+bytes via `GET /api/peek?path=<href>` (bearer).
 
 ### iOS design
 - `ArtifactKind` gains `.plan`. Segments become
   **Files · Images · Links · Plans** (keep the existing iOS order + default
   `.file`; append Plans). Label `"Plans \(count)"`.
-- `Artifact` gains: `messageID: String?`, `context: String?`,
-  `isHosted: Bool`, `dedupeKey: String`, `planStepCount: Int?`,
-  `planStatus: ArtifactPlanStatus?` (`draft|approved|building|done`),
-  `pageURL: String?`.
-- `ArtifactDerivation.derive(messages:pages:sessionId:outbox:cwd:)` — `cwd:
-  String? = nil` added; plan pass ported line-for-line from
-  `artifacts.ts:365-380` using `PlanDerivation.planRefsFromPart` and
-  `PlanDerivation.planSubdomain`. Dedupe switches from `href.lowercased()` to
-  `dedupeKey` (desktop `key`) so a plan's key is its rel path, not the
-  cwd-joined href.
-- New `ArtifactDerivation.planTitle(fromPath:)` and
-  `ArtifactDerivation.planStepCount(_ text: String?) -> Int` (desktop rule
-  exactly; `0` when nil/empty).
+- Rows are the server's `ArtifactItem`s (`ArtifactModels.swift`); no client
+  derivation. Plan rows read `item.plan` (`status`, `steps`, `pageUrl`,
+  `fileAvailable`).
 - Plan row (in `ArtifactsCard`): `list.clipboard` glyph, title (middle-truncated),
   trailing status capsule (`draft` = `tokens.tx3` on fill; `approved` = warn;
   `building` = accent; `done` = ok), subline `"3 steps"` / `"1 step"` / `"plan"`.
-  - Tap → open the published page: `ArtifactPlanLink.pageURL(artifact:sessionId:serverURL:)`
-    (artifact `pageURL`, else `PlanDerivation.planPageURL(sessionID:baseURL: api.serverURL)`),
-    `UIApplication.shared.open(url) { ok in … }`; `ok == false` or no URL →
-    the card's inline error banner: **"Couldn't open the plan page."**
+  - Tap → open `item.plan.pageUrl` with `UIApplication.shared.open(url) { ok in … }`;
+    `pageUrl == nil` or `ok == false` → the card's inline error banner:
+    **"Couldn't open the plan page."** (No client-side URL fallback — the box
+    already applied it.)
   - Context menu: **Open published page** · **Open plan file** (only when
-    `cwd` is non-nil; stages via `/api/peek` then QuickLook, same path as files)
-    · **Copy path**. No "implementing session" action (desktop renders none).
+    `plan.fileAvailable`; stages `href` via `/api/peek` then QuickLook, same
+    path as files) · **Copy path**. No "implementing session" action (desktop renders none).
 - Staging fix: `ArtifactsCard.tempURL(for:)` must take the extension from the
   **href's** last path segment when the label has none (a plan's label is a
   title, so `.md` would be lost and QuickLook would not recognise the file).
@@ -165,15 +361,17 @@ Unchanged from today's card: `opencode:messages` (`api.messages`),
 - Query is cleared on session change (`:665-671`).
 
 ### Wire contract
-None (client-side filter over the derived list).
+None — a client-side filter over `artifacts:list` items (audit A6
+KEEP-CLIENT: runs on every keystroke). Unfiltered badges come from the
+server's `counts`; filtered badges from `ArtifactSearch.counts`.
 
 ### iOS design
 - `.searchable(text: $query, placement: .navigationBarDrawer(displayMode:
   .automatic), prompt: "Search links & files")` on the card's
   `NavigationStack` content.
-- Pure `ArtifactSearch.filter(_ items: [Artifact], query: String) -> [Artifact]`
+- Pure `ArtifactSearch.filter(_ items: [ArtifactItem], query: String) -> [ArtifactItem]`
   (trimmed query; empty → unchanged) and
-  `ArtifactSearch.counts(_ items:, query:) -> ArtifactCounts` (per-kind match
+  `ArtifactSearch.counts(_ items:, query:) -> ArtifactCountsWire` (per-kind match
   counts). **Deliberate deviation:** the Images badge shows its real match
   count (the desktop's hard 0 is an artefact of images not being labelled, not
   a behaviour); the image list itself is filtered exactly as on desktop.
@@ -199,28 +397,19 @@ None (client-side filter over the derived list).
   (`:778-785`) — the chat scrolls to and flashes the message.
 
 ### Wire contract
-- `outbox:list` rows carry `messageID: string | null` (`src/shared/types.ts:2200-2210`,
-  `src/server/outbox.mjs:113-145`). The iOS `OutboxFile` drops it; WS07 adds
-  its own wire type (below) instead of editing `MantaModels.swift`.
+- `artifacts:list` items carry `messageId` (null when there is none) and, for
+  links / hosted pages, `context` — all four `messageId` sources above are
+  resolved by the box (the outbox sidecar `messageID` is read server-side).
 - Navigation: C2 `MantaRoute.message(sessionID:messageID:)` (handled by WS02).
 
 ### iOS design
-- New wire type `ArtifactOutboxRow` (in `ArtifactModels.swift`):
-  `path, name, size, sessionID?, mtime?, expiresAt?, messageID?, media?` (all
-  optional except `path`/`name`/`size`, matching `statRow`). Convenience
-  `init(_ file: OutboxFile)` (messageID nil) so existing tests adapt.
-- C1: `MantaAPIClient+Artifacts.swift` adds
-  `func listOutboxRows(sessionId: String) async throws -> [ArtifactOutboxRow]`
-  → `call("outbox:list", args: [sessionId], …) ?? []`. The card uses it
-  instead of `listOutbox`.
-- Derivation fills `messageID` for all sources as above, including the
-  page's newest-announcing-assistant-message rule and the link/page `context`
-  (whitespace collapsed, trimmed, URL's first occurrence removed for links,
-  hard-capped at 160 characters — `artifacts.ts:42-50`, `:294`).
+- The card reads `item.messageId` / `item.context` as delivered; no client
+  derivation (the former `ArtifactOutboxRow` / `listOutboxRows` plan is
+  dropped).
 - `ArtifactsCard` gains `var onJumpToMessage: ((String) -> Void)? = nil`.
   - Context menu item **Jump to message** (`arrow.turn.down.right`) on every
     row kind, rendered **only** when `onJumpToMessage != nil &&
-    artifact.messageID != nil` (`ArtifactActions.canJump`).
+    item.messageId != nil` (`ArtifactActions.canJump`).
   - Link rows show `context` as a second caption line (2-line limit) when
     present.
   - Action: call `onJumpToMessage(messageID)`; the closure (ChatScreen) closes
@@ -255,7 +444,7 @@ None (client-side filter over the derived list).
 Desktop `artifactToBlob` (`ArtifactsPanel.tsx:58-87`) has three branches; iOS
 today has two and sends an `http(s)` href to `/api/peek`
 (`SessionResourceCards.swift:519-532`), which can never succeed. Pure
-classifier in `ArtifactDerivation.swift`:
+classifier in `ArtifactPresentation.swift` (KEEP-CLIENT, audit A8):
 
 ```swift
 enum ArtifactByteSource: Equatable, Sendable {
@@ -269,7 +458,7 @@ enum ArtifactByteSource: Equatable, Sendable {
 
 Resolver `ArtifactBytes.load(_ source:, api:, remote:) async -> Result<Data, ArtifactStagingError>`
 (in `ArtifactsCard`'s file, UIKit-free but needs `MantaAPIClient`):
-- `.dataURI` → existing `decodeDataURI` (moved into `ArtifactDerivation.swift`
+- `.dataURI` → existing `decodeDataURI` (moved into `ArtifactPresentation.swift`
   as `ArtifactDataURI.decode(_:)` so it is package-testable); nil → `.badDataURI`.
 - `.remote(url)` → `remote(url)`: a dedicated `URLSession(configuration:
   .ephemeral)` request built fresh with **no `Authorization` header and no
@@ -345,25 +534,25 @@ Resolver `ArtifactBytes.load(_ source:, api:, remote:) async -> Result<Data, Art
   hours floored, minimum `1h`.
 
 ### Wire contract
-`ServedPageMeta.expiresAt` (ms, nullable), outbox `expiresAt` (ms, nullable).
-Already decoded.
+`artifacts:list` item `expiry`: `null` (no expiry concept) or
+`{ state: "live"|"soon"|"expired"|"never", expiresAt: number|null }`, state
+computed by the box at response time (audit A3). The label text stays client.
 
 ### iOS design
-- Pure `ArtifactExpiry`:
-  - `state(expiresAt: Date?, now: Date) -> ArtifactExpiryState?` (`.live`,
-    `.soon`, `.expired`; 6 h threshold, desktop rule).
-  - `label(_ artifact: Artifact, now: Date) -> String?`:
-    hosted + nil expiry → `"no expiry"`; expired → `"expired"`;
-    remaining < 48 h → `"expires in \(max(1, floor(h)))h"`;
-    else `"expires in \(floor(d))d"`; non-hosted with nil expiry → nil.
-    (Behavioural parity with the desktop pill; the day form replaces the
-    desktop's unreadable "167h".)
-- Row: trailing capsule with that label, tone ok / warn / danger
-  (`Theme.swift` tokens), only for hosted pages and outbox files.
+- Pure `ArtifactExpiryLabel.text(_ expiry: ArtifactExpiry, now: Date) -> String`
+  (presentational only — the STATE comes from the box):
+  `.never` → `"no expiry"`; `.expired` → `"expired"`; otherwise from
+  `expiresAt` relative to the device clock: remaining < 48 h →
+  `"expires in \(max(1, floor(h)))h"`, else `"expires in \(floor(d))d"`
+  (the day form replaces the desktop's "167h"). A `.live`/`.soon` item whose
+  `expiresAt` has passed on the device clock between polls reads `"expired"`
+  until the next poll corrects the tone.
+- Row: trailing capsule with that label when `item.expiry != nil`; tone from
+  `expiry.state` — `.live` ok, `.soon` warn, `.expired` danger, `.never` ok.
   Expired rows: `.opacity(0.5)`, still tappable (desktop does not block).
-- `ArtifactFormat.secondaryLine` stops appending expiry
-  (`ageOrExpiry` → plain `relativeAge`); the pill owns expiry.
-  Update/replace `ageOrExpiry` accordingly (delete it if unused).
+- `ArtifactFormat.secondaryLine` (now in `ArtifactPresentation.swift`) uses
+  plain `relativeAge`; the pill owns expiry. The old `ageOrExpiry` is deleted
+  with `ArtifactDerivation.swift`.
 
 ---
 
@@ -685,29 +874,24 @@ or any SwiftUI/UIKit/Combine file. So:
 
 **Package-safe (Linux `verify.sh` + Mac `test-unit`)** — pure files only:
 
-`MantaUITests/ArtifactDerivationTests.swift` (extend; adapt existing outbox
-tests via `ArtifactOutboxRow(OutboxFile)`):
-1. plan from a user text part mentioning `.opencode/plans/2026-10-28-ship-it.md`
-   → kind `.plan`, label "ship it", href `"/repo/.opencode/plans/…"` with `cwd:
-   "/repo"`, `messageID` set, status `.draft`.
-2. plan from a `write` tool part `state.input.filePath`; a `read` tool part
-   yields nothing.
-3. same plan in two messages → one artifact, newest `at`.
-4. `planStepCount`: `"## A\n### B\n#### C\ntext"` → 2; nil/"" → 0.
-5. plan `pageURL` set only when the page's `sessionID` matches; plan subdomain
-   page is NOT emitted as a link; another page still is.
-6. hosted page `messageID`/`context` from the newest assistant message
-   containing the URL; user message containing it is ignored.
-7. link `context` removes the URL, collapses whitespace, caps at 160.
-8. outbox `messageID` carried through; `.mp4` → `video/mp4`, kind `.file`.
-9. `ArtifactCounts` counts plans.
-10. dedupe uses `dedupeKey` (plan rel path vs cwd-joined href).
+`MantaUITests/ArtifactWireTests.swift` (new; replaces the deleted
+`ArtifactDerivationTests.swift` — derivation is now pinned by the node tests in
+`src/server/artifacts.test.mjs`):
+1. Decodes the exact `artifacts:list` example from the Server-first section:
+   every field, `expiry: null`, `expiry.state "never"` with `expiresAt: null`,
+   `plan` present only on a plan item, `counts`, `degraded`.
+2. Unknown `kind` / `expiry.state` → `.unknown`, and `ArtifactsListResult.renderable`
+   (computed) drops those items without failing the decode.
+3. Missing optional fields (older/newer box) decode with defaults:
+   `context`, `messageId`, `size`, `mime` → nil; `degraded` → `[]`.
+4. `ArtifactsCapability.isUnsupported`: `MantaError.server("unknown rpc channel: artifacts:list")`
+   → true; any other server/transport error → false.
 
 `MantaUITests/ArtifactPresentationTests.swift` (new):
-- `ArtifactExpiry.state` (nil / expired / exactly 6 h → soon / 7 h → live);
-  `ArtifactExpiry.label` (hosted nil → "no expiry", 30 min → "expires in 1h",
-  5.9 h → "expires in 5h", 3.5 d → "expires in 3d", expired → "expired",
-  non-hosted nil → nil).
+- `ArtifactExpiryLabel.text` (state is server-provided; label only):
+  `.never` → "no expiry", `.expired` → "expired", `.live` 30 min ahead →
+  "expires in 1h", 5.9 h → "expires in 5h", 3.5 d → "expires in 3d",
+  `.soon` whose `expiresAt` already passed on the device clock → "expired".
 - `ArtifactSearch.filter` (label match, href match, case-insensitive,
   whitespace-only query = all); `ArtifactSearch.counts`; `ArtifactEmptyCopy.sub`.
 - `ArtifactActions.canAttach(kind:hasComposer:acceptsInput:hasProject:)`
@@ -717,8 +901,7 @@ tests via `ArtifactOutboxRow(OutboxFile)`):
   attached", `.readOnly` → "This chat is read-only.", `.notAbsolute` / nil →
   "Couldn't attach <name>." (takes WS03's pure `ComposerInsertion.AttachRejection`,
   which lives in WS03's Foundation-only `ComposerInsertion` file — package-safe).
-- `ArtifactPlanLink.pageURL` (artifact URL wins, fallback deterministic, nil
-  when neither); `ArtifactAttach.filename`;
+- `ArtifactAttach.filename`;
   `ArtifactStaging.fileExtension(label:href:)` (plan title + `.md` href → `.md`).
 - **Byte source routing (finding 1):** `ArtifactByteSource.classify` —
   `"data:image/png;base64,AAA"` → `.dataURI`; `"DATA:…"` → `.dataURI`;
@@ -785,8 +968,8 @@ with `· 3×`); `displayURL` strips `https://`/`http://`, nil passthrough.
 
 `MantaUITests/ArtifactAPITests.swift` (new): `MantaAPIClient.makeRequest(…
 channel: "webhook:list", args: ["ses_1"])` → path `/rpc/webhook:list`, args
-`["ses_1"]`; same for `webhook:delete` `["ab12cd34"]` and `outbox:list`
-`["ses_1"]` (the channel `listOutboxRows` uses). A remote-fetch request built
+`["ses_1"]`; same for `webhook:delete` `["ab12cd34"]` and `artifacts:list` `[{"sessionId":"ses_1"}]` (the
+single-object args `artifactsList` sends). A remote-fetch request built
 by `ArtifactBytes.remoteRequest(for:)` carries **no `Authorization` header**
 and `httpShouldHandleCookies == false`.
 
@@ -870,6 +1053,18 @@ unaffected.
       workstream".
 - [ ] No control is shown that cannot act (every new action is hidden when its
       closure/input is missing).
+- [ ] The artifacts list on desktop AND iOS comes from `artifacts:list`; no
+      client contains artifact derivation (`deriveArtifacts`, `ArtifactDerivation`
+      are gone; `grep` finds no `planRefsFromPart` in `src/renderer`).
+- [ ] Against a box without `artifacts:list`, both clients show "Update your
+      box to use this." in place of the list (desktop Review mode still works);
+      no control in the list area is dead.
+- [ ] A plan whose page URL the box cannot determine shows "Couldn't open the
+      plan page."; a plan whose session folder is unknown has no "Open plan
+      file" action.
+- [ ] Desktop visual baselines for the artifacts states are unchanged;
+      `npm run typecheck`, `npm test` (incl. `src/server/artifacts.test.mjs`
+      and `ArtifactsPanel.server.test.tsx`) green.
 - [ ] `./verify.sh` green with the package-safe tests; `ios-mantaui`
       `test-unit` green (includes the Xcode-only tests).
 
@@ -878,27 +1073,27 @@ unaffected.
 ## Files
 
 Edit (owned):
-- `mobile/native/MantaUI/ArtifactDerivation.swift` — plan kind, new fields,
-  `cwd`, `ArtifactOutboxRow` input, dedupe key, video MIME, presentation
-  helpers (`ArtifactExpiry`, `ArtifactSearch`, `ArtifactEmptyCopy`,
-  `ArtifactActions`, `ArtifactPlanLink`, `ArtifactAttach`, `ArtifactStaging`,
-  `ArtifactByteSource`, `ArtifactDataURI`, `ArtifactStagingError`). Stays
-  Foundation-only (it is already in `Package.swift`).
+- `mobile/native/MantaUI/ArtifactDerivation.swift` — **deleted** (D23; the
+  derivation lives in `src/server/artifacts.mjs`).
 - `mobile/native/MantaUI/SessionResourceCards.swift` — `ArtifactsCard`
   (Plans, search, jump, attach via `composer`, expiry, error banner, per-tab
   empty states, `ArtifactBytes` three-branch loader, `Result`-returning
-  staging, `listOutboxRows`), `SecretsCard`/`SecretAddForm` (shared scope,
+  staging, renders `artifacts:list` via `artifactsList`, unsupported/error
+  states), `SecretsCard`/`SecretAddForm` (shared scope,
   badge, delete error).
 - `mobile/native/MantaUI/ChatOverflowSheet.swift` — optional `onWebhooks`
   row, plus the received mounts (table below).
-- `mobile/native/MantaUITests/ArtifactDerivationTests.swift` — extend/adapt.
+- `mobile/native/MantaUITests/ArtifactDerivationTests.swift` — **deleted**.
 - `mobile/native/Package.swift`, `mobile/native/project.yml` — owned by WS07
   (D1) but, per D18, written by integration agent B from this manifest (M-07-4).
 
 Create:
 - `mobile/native/MantaUI/MantaAPIClient+Artifacts.swift` — client members
   below (app target only).
-- `mobile/native/MantaUI/ArtifactModels.swift` — `ArtifactOutboxRow` (pure).
+- `mobile/native/MantaUI/ArtifactModels.swift` — `artifacts:list` wire types
+  + `ArtifactsCapability` (pure).
+- `mobile/native/MantaUI/ArtifactPresentation.swift` — the KEEP-CLIENT
+  helpers listed in "iOS migration" (pure).
 - `mobile/native/MantaUI/ArtifactAgentFileModel.swift` — `AgentFileEvent`,
   `AgentFileNoticeCopy`, `AgentFileNotice`, `AgentFileNoticeMachine`,
   `AgentFileFailure` (pure).
@@ -908,22 +1103,41 @@ Create:
 - `mobile/native/MantaUI/WebhookModels.swift` — `WebhookMeta`,
   `WebhookFormat`, `SecretScopeOption` (pure).
 - `mobile/native/MantaUI/WebhooksCard.swift` (SwiftUI, app target only).
-- Tests: `ArtifactPresentationTests.swift`, `ArtifactAgentFileTests.swift`,
-  `WebhookTests.swift`, `SecretScopeTests.swift` (package-safe);
-  `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift` (Xcode-only).
+- Tests: `ArtifactWireTests.swift`, `ArtifactPresentationTests.swift`,
+  `ArtifactAgentFileTests.swift`, `WebhookTests.swift`, `SecretScopeTests.swift`
+  (package-safe); `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift`
+  (Xcode-only).
+
+Server (WS07-owned, new):
+- `src/server/artifacts.mjs`, `src/server/artifacts.test.mjs`.
+
+Desktop (WS07-owned edits — see "Desktop migration"):
+- `src/shared/artifactsTypes.ts` (new), `src/renderer/api/demoArtifacts.ts`
+  (new), `src/renderer/artifacts.ts`, `src/renderer/artifacts.test.ts`,
+  `src/renderer/ArtifactsPanel.tsx`, `src/renderer/ArtifactsPanel.server.test.tsx`
+  (new), `src/renderer/MediaBody.tsx`, `src/renderer/ArtifactPreview.tsx`
+  (type check only).
+
+Shared server/desktop files edited only through ledger rows (M-07-S1, M-07-S2,
+M-07-D1…D5; the desktop ones are WS02-owned in wave B, master D27):
+`src/server/rpc.mjs`, `src/server/boxCapabilities.mjs`, `src/renderer/chatUtils.ts` +
+`chatUtils.test.ts`, `src/shared/api.ts`, `src/shared/types.ts`,
+`src/renderer/api/httpApi.ts`, `src/renderer/api/demoApi.ts`. WS07 does not
+edit `index.mjs` or `streamInterp.mjs`.
 
 ## Client members (D16)
 
 All in `MantaUI/MantaAPIClient+Artifacts.swift`; none duplicates a member
 another spec declares (checked: no other spec in this folder adds an
-`outbox:*` or `webhook:*` member; the existing `listOutbox`,
+`artifacts:*`, `outbox:*` or `webhook:*` member; `listOutboxRows` from round 2
+is withdrawn — the box reads the outbox; the existing `listOutbox`,
 `downloadOutboxFile`, `peekFile`, `upload`, `servePageList`, `setSecret`,
 `deleteSecret`, `listSecrets` in `MantaAPIClient.swift` are reused, not
 redeclared).
 
 | Member | Signature | Wire |
 |---|---|---|
-| `listOutboxRows` | `func listOutboxRows(sessionId: String) async throws -> [ArtifactOutboxRow]` | `outbox:list` `[sessionId]` → `call(…) ?? []` |
+| `artifactsList` | `func artifactsList(sessionId: String) async throws -> ArtifactsListResult` | `artifacts:list` `[{"sessionId": sessionId}]` → `callRequired(…)`; an `unknown rpc channel` error surfaces as `MantaError.server` and is classified by `ArtifactsCapability.isUnsupported` |
 | `listWebhooks` | `func listWebhooks(sessionId: String) async throws -> [WebhookMeta]` | `webhook:list` `[sessionId]` → `call(…) ?? []` |
 | `deleteWebhook` | `func deleteWebhook(id: String) async throws` | `webhook:delete` `[id]` → `callVoid` (`deleted:false` = success) |
 
@@ -937,10 +1151,29 @@ IDs, appliers and symbols match the master's canonical mount ledger
 | M-07-1 | `ChatScreen.swift` | WS02 (wave B) | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07, `SessionResourceCards.swift`); `ComposerTextController` `@StateObject` named `composer` (WS03 M-03-1, A1); `MantaNavigator.open(_:)` with `MantaRoute.message(sessionID:messageID:)` (WS04, C2) | In `destinationCard(.artifacts)` (`ChatScreen.swift:782-785`) construct `ArtifactsCard(sessionId: store.sessionId, onClose: { overflowDestination = nil }, projectName: projectName, cwd: sessionWindow?.cwd, composer: composer, onJumpToMessage: { mid in pendingArtifactJump = mid; overflowDestination = nil })`. **No `onAttach` parameter exists** and ChatScreen adds **no attach hint**: the card performs the upload + `composer.attach`, reports every rejection itself, and closes only after a successful attach. Add `@State private var pendingArtifactJump: String?`; in `flushPendingPush()` (`:825`, the `onDismiss` of the destination sheet at `:632`), before the existing push handling: `if let mid = pendingArtifactJump { pendingArtifactJump = nil; navigator.open(.message(sessionID: store.sessionId, messageID: mid)) }`. | M-03-1 (A1); WS04 navigator (A2); M-03-7 (WS02 keeps `composer.acceptsInput` current — the card's Attach gate depends on it) |
 | M-07-2 | `ChatScreen.swift` | WS02 (wave B) | `WebhooksCard(sessionId:onClose:)` (WS07, `WebhooksCard.swift`); `ChatOverflowSheet.onWebhooks: (() -> Void)?` (WS07) | `OverflowDestination` (`:88`) gains `case webhooks`; `destinationCard` adds `case .webhooks: WebhooksCard(sessionId: store.sessionId, onClose: { overflowDestination = nil })`; `overflowSheet` (`:658`) passes `onWebhooks: { overflowDestination = .webhooks }`. | WS07 `WebhooksCard` (wave B; defaulted param, row hidden until wired) |
 | M-07-3 | `MantaAppRoot.swift` | Integration agent B (IB, after B) | `ArtifactAgentFileNotice()` (WS07, `ArtifactAgentFile.swift`) | On the paired branch (`MantaAppRoot.swift:98-109`, the `SessionListView(store:)` view) add `.overlay(alignment: .bottom) { if scene == nil { ArtifactAgentFileNotice() } }`, placed BEFORE (i.e. beneath) the existing `.overlay { UpgradeScreen }` at `:123-128` so the upgrade screen covers it. Needs `MantaEventStore` + `SessionListStore` environment objects (already injected, `MantaUIApp.swift:46-50`). | WS07 merged (B) |
-| M-07-4 | `mobile/native/Package.swift` | Integration agent B (IB, after B; D18 — file owned by WS07 per D1) | — | Append to target `sources`: `ArtifactModels.swift`, `ArtifactAgentFileModel.swift`, `WebhookModels.swift`. Append to test `sources`: `ArtifactPresentationTests.swift`, `ArtifactAgentFileTests.swift`, `WebhookTests.swift`, `SecretScopeTests.swift`. Do NOT add `MantaAPIClient+Artifacts.swift`, `ArtifactAgentFile.swift`, `WebhooksCard.swift`, `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift`. Then run `./verify.sh`. | WS07 merged; WS03's `ComposerInsertion.swift` already in the package (M-03-8, IA) — `ArtifactPresentationTests` uses `ComposerInsertion.AttachRejection` |
+| M-07-4 | `mobile/native/Package.swift` | Integration agent B (IB, after B; D18 — file owned by WS07 per D1) | — | **Remove** `ArtifactDerivation.swift` from target `sources` and `ArtifactDerivationTests.swift` from test `sources` (both files deleted, server-first). Append to target `sources`: `ArtifactModels.swift`, `ArtifactPresentation.swift`, `ArtifactAgentFileModel.swift`, `WebhookModels.swift`. Append to test `sources`: `ArtifactWireTests.swift`, `ArtifactPresentationTests.swift`, `ArtifactAgentFileTests.swift`, `WebhookTests.swift`, `SecretScopeTests.swift`. Do NOT add `MantaAPIClient+Artifacts.swift`, `ArtifactAgentFile.swift`, `WebhooksCard.swift`, `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift`. Then run `./verify.sh`. | WS07 merged; WS03's `ComposerInsertion.swift` already in the package (M-03-8, IA) — `ArtifactPresentationTests` uses `ComposerInsertion.AttachRejection` |
 
 `project.yml`: no change (the `MantaUI` / `MantaUITests` folder entries pick
-up new files). `.pbxproj` is regenerated once by the orchestrator (O-final, D18).
+up new files and drop deleted ones). `.pbxproj` is regenerated once by the
+orchestrator (O-final, D18).
+
+### Server and shared-desktop registrations (D24 — applied by integration agent B, order 02 → 07 → 09 → 06)
+
+| ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
+|---|---|---|---|---|---|
+| M-07-S1 | `src/server/rpc.mjs` | IB (after WS02's rows) | `createArtifactsService` (WS07, `src/server/artifacts.mjs`) | `import { createArtifactsService } from "./artifacts.mjs";`. Inside `buildHandlers`, once: `const artifacts = createArtifactsService({ listMessages: (sid, o) => oc.listMessages(sid, o), listPages: () => servePageListStore({ baseUrl: publicBaseUrl() }), listOutbox: () => listOutbox(), sessionDirectory: (sid) => oc.getSessionDirectory(sid), baseUrl: () => publicBaseUrl() });` (`baseUrl` is a function so a gateway host provisioned after boot is picked up, as `serve-page:list` does at `:2529`). Handler next to `"outbox:list"` (`:2537`): `"artifacts:list": (opts) => artifacts.list(opts?.sessionId),`. Run `npm run test:server`. | WS07 merged |
+| M-07-S2 | `src/server/boxCapabilities.mjs` (WS02, wave B) + `boxCapabilities.test.mjs` | IB (right after M-07-S1) | `BOX_CAPABILITIES` (WS02) | Append `"artifacts-list-1"`; extend the test's expected ids. No `version.mjs` edit (WS02 already returns the list). | WS02 SF-0 landed; M-07-S1 |
+| M-07-D1 | `src/renderer/chatUtils.ts`, `src/renderer/chatUtils.test.ts` | IB (after WS02's chatUtils edits) | `planRefsFromPart` now in `src/server/artifacts.mjs` | Delete `PLAN_REF_RE`, `PLAN_AUTHORING_TOOLS`, `planRefsFromPart` (`chatUtils.ts:2638-2678`, keep the surrounding plan-card helpers); in the test file delete the `planRefsFromPart` import (`:169`) and its `describe` block (`:5671`). | WS07 desktop switch merged (no remaining caller) |
+| M-07-D2 | `src/shared/types.ts` | IB | — | In the `IPC` map next to `outboxList` (`:1743`): `artifactsList: "artifacts:list", // ({sessionId}) → ArtifactsListResult`. | — |
+| M-07-D3 | `src/shared/api.ts` | IB | `ArtifactsListResult` (`src/shared/artifactsTypes.ts`) | In `Api` next to `outboxList` (`:1530`): `artifactsList(opts: { sessionId: string }): Promise<ArtifactsListResult>;` + type import. | M-07-D2 |
+| M-07-D4 | `src/renderer/api/httpApi.ts` | IB | IPC.artifactsList | Next to `outboxList` (`:1291`): `artifactsList: (opts) => rpc(IPC.artifactsList, opts),` — **`rpc`, not `rpcOptional`**: the panel must see the unknown-channel error to show "Update your box to use this". | M-07-D3 |
+| M-07-D5 | `src/renderer/api/demoApi.ts` | IB | `demoArtifactsList` (WS07, `src/renderer/api/demoArtifacts.ts`) | Next to `outboxList` (`:482`): `const artifactsList = ({ sessionId }: { sessionId: string }) => Promise.resolve(demoArtifactsList(DEMO_STATE, sessionId, demoState));` and add `artifactsList` to the exported api object. | M-07-D3 |
+
+WS07's own desktop/server files (`artifacts.mjs`, `artifactsTypes.ts`,
+`ArtifactsPanel.tsx`, `artifacts.ts`, `MediaBody.tsx`, tests) are edited by the
+WS07 worker; until IB applies M-07-D2…D4 the worker verifies with those rows
+applied locally in its worktree and lists them in its manifest (it does not
+commit them).
 
 WS02's receipt rows M-07-1 / M-07-2 match the text above verbatim (pass
 `composer`, no `onAttach`, no external hint; deferred jump kept).
@@ -970,6 +1203,13 @@ M-02-3, M-06-3, M-07-4, M-09-7 → IB; M-05-4 → IC), not by WS07.
 
 ## Contracts provided / consumed
 
+- **Server-first provided (D23/D24):** `artifacts:list` (`src/server/artifacts.mjs`),
+  capability id `artifacts-list-1` (appended to `boxCapabilities.mjs` in wave B,
+  M-07-S2).
+- **Server symbol provided to WS11 (D10):** `planRefsFromPart(part)` exported
+  from `src/server/artifacts.mjs` — the ONE implementation once M-07-D1 deletes
+  the renderer copy; WS11's plan-question decorator imports it.
+
 - **C1 provided:** `MantaAPIClient+Artifacts.swift` (see Client members). Wire
   types live in `ArtifactModels.swift` / `WebhookModels.swift`.
 - **C2 consumed:** `MantaNavigator.open(.message(sessionID:messageID:))`,
@@ -987,8 +1227,8 @@ M-02-3, M-06-3, M-07-4, M-09-7 → IB; M-05-4 → IC), not by WS07.
 - **C6:** not used. **C7:** tests above (package-safe vs Xcode-only split).
 - **D9:** secrets default scope = shared; agent-file notice always shown.
 - **Existing helpers consumed:** `SessionHaptics.fire(_:enabled:)` and
-  `SessionListStore.hapticsEnabled` (WS04 files, read-only use);
-  `PlanDerivation.planRefsFromPart/planSubdomain/planPageURL` (read-only use).
+  `SessionListStore.hapticsEnabled` (WS04 files, read-only use). (No
+  `PlanDerivation` use since the server-first revision — reconciled.)
 
 ## Deferred
 
@@ -1122,3 +1362,51 @@ Cross-cutting (`reviews/round2/00-cross-cutting.md`):
   (M-07-1/2 → WS02, M-07-3/4 → IB; received M-01-5, M-02-2, M-04-1, M-04-2).
 - **Ledger M-07-4** — prerequisite on WS03's `ComposerInsertion.swift` (M-03-8)
   recorded, since `ArtifactPresentationTests` now uses its `AttachRejection`.
+
+## Review responses (server-first)
+
+Applied `_serverfirst-revise-brief.md` against `server-first-audit.md` §WS07
+and master D23/D24.
+
+- **Folded MOVE-NOW items A1, A2, A3, A5** into a new "Server-first (D23/D24)"
+  section: new module `src/server/artifacts.mjs` (pure derivation ported from
+  `src/renderer/artifacts.ts` + `planRefsFromPart` from `chatUtils.ts`, plus a
+  memoized service) and channel `artifacts:list` with the full request /
+  response JSON, `expiry.state` computed at response time, `plan {status,
+  steps, pageUrl, fileAvailable}`, `counts`, `degraded`, safe-literal errors,
+  and node tests `src/server/artifacts.test.mjs`. Two deliberate refinements:
+  plan `href` uses the opencode session directory; plan `pageUrl` fallback uses
+  the box's `publicBaseUrl()` instead of each client's server URL.
+- **iOS rewritten to render**: F1/F3/F5 wire + design now read server fields;
+  `ArtifactDerivation.swift` and its tests are deleted (not extended);
+  KEEP-CLIENT helpers (day grouping, search, eligibility, byte routing,
+  staging, attach copy, expiry LABEL) move to `ArtifactPresentation.swift`;
+  `ArtifactOutboxRow` / `listOutboxRows` withdrawn; new client member
+  `artifactsList(sessionId:)`; decode tests in `ArtifactWireTests.swift`.
+  `PlanDerivation.swift` is no longer used by WS07.
+- **Desktop migration in the same change**: `ArtifactsPanel.tsx` consumes
+  `artifacts:list` (open / 30 s poll / debounced on transcript change);
+  derivation functions deleted from `artifacts.ts` (only `groupByDay` and the
+  re-exported wire type remain); `planRefsFromPart` deleted from `chatUtils.ts`;
+  `MediaBody.tsx` literal adapted; new `src/shared/artifactsTypes.ts`,
+  `src/renderer/api/demoArtifacts.ts`, `ArtifactsPanel.server.test.tsx`;
+  derivation vitests removed (now node tests).
+- **Wire compat (D24)**: additive new channel only; capability id
+  `artifacts.list`; until WS11 U5 ships `capabilities`, both clients gate on
+  the box's `unknown rpc channel: artifacts:list` error and show "Update your
+  box to use this." — no fallback derivation.
+- **Ledger**: new rows M-07-S1 (`rpc.mjs`, IB, order 02 → 07 → 09 → 06),
+  M-07-S2 (capability id → WS11 U5), M-07-D1…D5 (`chatUtils.ts`/test,
+  `types.ts`, `api.ts`, `httpApi.ts`, `demoApi.ts`, IB). M-07-4 now removes
+  the deleted Swift files from `Package.swift` and adds the new ones.
+  `index.mjs` and `streamInterp.mjs` are not touched.
+- **Reconciliation (master "Reconciliation log (server-first)"):** id renamed
+  `artifacts-list-1` and appended in wave B by IB (M-07-S2 now targets
+  `boxCapabilities.mjs`, not WS11); stale `PlanDerivation` consumption line
+  removed; `planRefsFromPart` in `artifacts.mjs` is the symbol WS11 D10
+  imports; the shared desktop files of M-07-D1…D5 are WS02-owned in wave B
+  (D27) — IB applies WS07's rows after WS02's commit.
+- **Rejected audit items for WS07:** none. KEEP-CLIENT rows A4, A6–A10, A11a,
+  A12 stay client as the audit recommends; A11b is MOVE-LATER (WS11).
+- Everything else (F4 attach, F6 agent-file notice, F7 webhooks, F7b secrets,
+  overflow mounts) is unchanged.

@@ -788,3 +788,12 @@ Cross-cutting review (round 2):
 - **#4 (agent retry receipt)** — same as WS03 item 1 (M-03-5/6).
 - **#5 (writability propagation)** — same as WS03 item 1 (M-03-7), using WS02's `isBackgroundJobReadOnly`; WS05's `acceptsInput` bridge now has a real provider value.
 - **#10 (ledger integrity)** — request IDs M-03-1…9 use the ledger's IDs/appliers/waves (A1, IA, IB); the stale claim that WS02 keeps a `composerText` fallback is removed (WS02 now consumes `composer`, `02-chat-cards-queue.md:49-50`); "Mounts applied" lists only real rows and the consumers that need none.
+
+## Reconciliation notes (server-first) — notes only, no contract change
+
+- Received after wave B (integration agent B, master ledger): **M-09-9** in
+  `ComposerView.swift` — `UsageMeters.band(window.pct)` (`:616`) becomes
+  `UsageMeters.band(window)` (WS09's tone-based band; nil → neutral `tx4`).
+  Applied after M-03-6 and M-03-9 on the same file.
+- WS03's MOVE-LATER items (P2/P3/P8) are WS11 follow-ups; nothing in WS03 is
+  deleted by WS11.

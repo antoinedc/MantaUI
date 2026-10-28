@@ -1411,3 +1411,17 @@ Server address, shared-pairing revoke not offered.)
 | 3 | SHOULD — reset/undo vs commit interleaving | §0.2 adds a shared mutation guard (`batchWriting`, `isMutating`): reset/undo are no-ops while any commit saves, commits are refused while a reset/undo write runs, and the screen disables Reset/Reset all/Undo and rows accordingly. T1 adds gated-store interleaving tests (a)–(d). Optimistic reset itself stays deferred. |
 | 4 | SHOULD — non-existent members | F18 now cites `UpgradeStatus.isUpgradeRefusal(statusCode: 503, body: body)` (`UpgradeModels.swift:381-391`); F14 uses `KeychainCredentialStore.shared.serverURL?.absoluteString` (`KeychainCredentialStore.swift:21`) and F21's prefill uses the loaded credentials' `serverUrl`. `RawRPCResponse` moved to the Foundation-only `SettingsUpdatesModels.swift` so the [pkg] classifier does not depend on `BoxRESTClient`. |
 | 5 | SHOULD — deep-link scrolling + ledger IDs | Contracts "C2 deep link" restores concrete behaviour: `ScrollViewReader`, per-section ids, pure `SettingsDeepLink.target(_:available:)` (nil/unknown → top), one-shot scroll after `load()`; T2 tests a non-first section ("extensions"). Ledger IDs reconciled with the consolidated ledger: M-10-1/M-10-2 (WS04, A2), M-10-3 = Package.swift (integration agent A); WS09's request listed as M-09-1; the Settings presentation is WS04's own C2 work, not a WS10 mount. |
+
+## Reconciliation notes (server-first) — notes only, no contract change
+
+- `serverVersion()` / `ServerVersionInfo` stay as built in waves B/C. The box's
+  `capabilities` list is read in those waves through WS02's
+  `MantaAPIClient.boxCapabilities()` (master D25). WS11 D1 (wave D) adds
+  `ServerVersionInfo.capabilities: [String]?` and folds the accessor into an
+  app-level `BoxCapabilitiesStore`.
+- Received after wave B (integration agent B): **M-09-1** (Models row) as before.
+- WS11 D3 (wave D) moves X1/X3/X5/X6/X9 to the box and deletes the matching
+  WS10 ports (`ExtensionsLaunchers.resolve/update/savedFlags/payload`,
+  `UpdateTargets.*`, `UpgradePresentation.*`, `BoxDevices.sorted/canRevoke`,
+  `ExtensionsForge.secondary`), migrating their callers. `AvailableLauncher`
+  gains `flags[].value`; `launchersList()` keeps its signature (consumed by WS04).

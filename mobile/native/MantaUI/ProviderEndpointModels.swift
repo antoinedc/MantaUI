@@ -224,6 +224,8 @@ enum ProviderEndpointCopy {
 
     static func refreshFailed(name: String, text: String) -> String { "Couldn't refresh \(name) — \(text)" }
 
+    static func copiedURL(name: String) -> String { "Copied \(name)'s URL." }
+
     static func removeTitle(name: String) -> String { "Remove \(name)?" }
     static let removeMessage = "Its models leave the model picker. Conversations using one of them will need another model."
     static let removeDestructive = "Remove endpoint"
@@ -488,6 +490,12 @@ enum EndpointWriteReconcile {
         return .partial(error)
     }
 
+    /// What "the write landed" means: the endpoint exists with the expected SET of
+    /// models (or is gone). Deliberately narrower than `ProviderEndpoint.comparable`
+    /// (name + base URL + models): a toggle never changes the name or URL, and a
+    /// new endpoint's id was proven free by the fresh inventory, so the model set
+    /// is the only part of the write that can come out differently. `recheck`
+    /// compares the base URL itself.
     private static func matches(_ after: ProviderEndpoint?, _ expect: EndpointWriteExpectation) -> Bool {
         switch expect {
         case .absent:

@@ -18,7 +18,6 @@ struct ProviderEndpointSection: View {
     let tokens: Tokens
 
     @State private var confirmRemove = false
-    @State private var copiedURL = false
 
     private var isWriting: Bool { store.writing.contains(endpoint.id) }
     private var isUnconfirmed: Bool { store.unconfirmed.contains(endpoint.id) }
@@ -32,9 +31,9 @@ struct ProviderEndpointSection: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .contextMenu {
-                    Button(copiedURL ? "Copied" : "Copy URL", systemImage: "doc.on.doc") {
+                    Button("Copy URL", systemImage: "doc.on.doc") {
                         UIPasteboard.general.string = endpoint.baseURL
-                        copiedURL = true
+                        store.reportCopied(endpoint)
                     }
                 }
             if isUnconfirmed { unconfirmedRow }

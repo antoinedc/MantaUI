@@ -1,6 +1,6 @@
 # WS02 — Chat cards, queue, and chat-screen hotspot
 
-Status: revised (round 1) · Date: 2026-10-28 · Wave: **B** · Master: `00-master.md`
+Status: revised (server-first, D23/D24) · Date: 2026-10-28 · Wave: **B** · Master: `00-master.md`
 
 WS02 owns the chat screen hotspot (C4), stream decoding (C5), and — per D1 —
 `InboxModels.swift`, `PendingMessagesCard.swift`, `HandoffStore.swift`. It
@@ -22,7 +22,13 @@ this workstream").
 | F10 | C2 `.message` route: open chat, show the message, highlight | build |
 | F11 | C5 frame decoding (`commandExecuted` per D15) | build |
 
-No server edits and no new server routes.
+**Server-first (D23/D24).** Audit items C1, C2, C5, C9, C10, C11 and S16
+(`server-first-audit.md` §WS02) are computed on the box; the clients render the
+result. New server pieces: `src/server/delegateView.mjs` (+ `delegate:job-for-session`,
+decorated `delegate:list`, `delegate:approve` rule check, read-only job refusal),
+`src/server/inboxCopy.mjs`, `src/server/boxCapabilities.mjs`, and additive frame
+fields from `src/shared/streamInterpretation.mjs`. Contract in
+"## Server-first (D23/D24)". The desktop switches in this same workstream.
 
 ---
 
@@ -77,9 +83,10 @@ frame with payload `null` (`clearRetry`, 308–312). `action` exists in the TS
 type (`types.ts:2932–2937`) but is never set by the interpreter — decode it
 optionally.
 
-### iOS design
+### iOS design (renders the server's copy — audit C1)
 - `MantaStreamModels.swift`: `StreamRetryAction {title, message, label, link: String?}`,
-  `StreamRetryPayload {attempt: Double; message: String; next: Double?; action: StreamRetryAction?}`.
+  `StreamRetryPayload {attempt: Double; message: String; next: Double?; action: StreamRetryAction?; headline: String?; caption: String?; body: String?}`
+  (the last three are the box's copy, SF-1).
 - `MantaSessionStreamState.retry: StreamRetryPayload?`. Router `"retry"`:
   `s.retry = try? frame.decodedPayload(...)` (JSON `null` → nil). Also cleared
   by `ChatCardStreamRules.clearsRetry(sub:running:complete:)` on `running`
@@ -87,13 +94,15 @@ optionally.
   sessions absent from the set (the box does not replay `retry`).
 - `ChatSessionStore.retry` (published, copied in `applyStreamState`).
 - View `ChatCardRetry` (`ChatCardViews.swift`) in `bottomCards` when non-nil:
-  `arrow.clockwise` + headline + caption; body ≤ 3 lines; `Link` when the
-  action link is a valid URL. Headline = `action.title` if non-empty else
-  **"Retrying…"**; caption "attempt N" when `attempt > 0` (desktop prints the
-  attempt twice; iOS once — intentional).
+  `arrow.clockwise` + `headline` + `caption` (when non-nil); `body` ≤ 3 lines;
+  `Link(action.label ?? "Open", destination:)` when `action.link` parses as a
+  URL (presentational). No client copy rule: the box decides headline/caption/
+  body (`describeRetry`, SF-1). **Old box** (fields absent): the fixed label
+  "Retrying…" and the raw `message`, no caption.
 
 ### Pure logic (`ChatCardLogic.swift`)
-`ChatCardRetryCopy.headline/caption/body/link`, `ChatCardStreamRules.clearsRetry`.
+`ChatCardStreamRules.clearsRetry` only. (`ChatCardRetryCopy` is deleted —
+server-first.)
 
 ### Acceptance
 - A `retry` frame shows the card; the `null` frame removes it; a reconnect whose
@@ -169,28 +178,33 @@ the chat store, or the next snapshot resurrects it. So:
   - `transcriptStaleSeq` advance (vs. last seen, seeded the same way) →
     `scheduleRefetch()` once.
   - Timer `Task`s are cancelled in `stop()`.
+- **Server copy (audit C2):** the `compaction` `ended` frame carries
+  `firstLine` (the box accumulates the started text + deltas and takes the
+  first non-blank line), folded into `ChatCardCompactionState.firstLine`; the
+  `optimizer.compacted` frame carries `text` (e.g. "⟳ Compacted while you were
+  away · 128k → 31k"), which iOS shows verbatim. iOS formats no token counts.
 - Published: `compaction: ChatCardCompactionState?`,
-  `compactionNotice: ChatCardCompactionNotice?` (`{text: String}` built by
-  `ChatCardCompactionNotice.text(before:after:away:)`).
+  `compactionNotice: ChatCardCompactionNotice?` (`{text: String}` = the frame's
+  `text`; a frame without `text` (old box) publishes nothing).
 - Views: `ChatCardCompaction` (`sparkle`, `.symbolEffect(.pulse)` while
-  running; copy as desktop), `ChatCardCompactionNotice` (one quiet line).
+  running; "Compacting…"/"Compacted", `reason`, streamed text while running,
+  `firstLine` when done — omitted when absent), `ChatCardCompactionNotice`
+  (one quiet line).
 - `ChatSessionStore.compact()` keeps its existing request hints.
 
 ### Pure logic
-`ChatCardCompactionReducer`, `ChatCardCompactionState.firstLine`,
-`ChatCardExpiryLatch`, `ChatCardCompactionNotice.text`, and
-`ChatCardTokens.desktopCompact(_:)` (port of `formatTokens` minus " tokens":
-`<1000` whole; `<100k` one decimal, trailing `.0` dropped, "k"; else rounded
-"k"). Not `UsageMeters.formatTokens` (different rounding).
+`ChatCardCompactionReducer` (folds phases; copies `firstLine` from `ended`),
+`ChatCardExpiryLatch` (view timing, KEEP-CLIENT per audit C3).
+`ChatCardCompactionNotice.text` and `ChatCardTokens` are deleted (server-first).
 
 ### Acceptance
 - started → delta → ended shows growing text, then "Compacted" + first line,
   gone ≤ 3.5 s later, and does not come back on later frames.
 - A `transcriptStale` frame triggers exactly one refetch and the card is gone
   for good.
-- `optimizer.compacted {away:true, 128000, 31000}` → "⟳ Compacted while you
-  were away · 128k → 31k" for 10 s; `{away:false, null, null}` →
-  "⟳ Compacted in the background".
+- `optimizer.compacted` with the box's `text` shows that text for 10 s (the
+  box produces "⟳ Compacted while you were away · 128k → 31k" /
+  "⟳ Compacted in the background", pinned by node tests SF-2).
 - Opening a chat with an old compaction/notice in the event store shows neither.
 
 ---
@@ -250,15 +264,16 @@ round-trip; a later state hides it; inline `code` renders monospaced.
 (`streamInterp.mjs:751–757`). No error id exists (resolves review #7 below).
 Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecycle:)`.
 
-### iOS design
-- `StreamSessionErrorPayload` gains `rawMessage: String?`.
+### iOS design (renders the server's `display` — audit C5)
+- `StreamSessionErrorPayload` gains `rawMessage: String?` and
+  `display: StreamSessionErrorDisplay?` with
+  `StreamSessionErrorDisplay { text: String; reconnect: Reconnect? }`,
+  `Reconnect { providerID: String; label: String; accountsId: String }` (SF-3).
+  The box classifies the failure against the provider of the session's
+  current model (it tracks it from `session.step.started` /
+  `session.model.selected`), so iOS needs no model-store plumbing.
 - Router: `sessionErrorSeq: Int` bumped on every `sessionError` frame
   (identical payloads are distinct occurrences).
-- `ChatCardSendError.describe(name:message:rawMessage:providerID:) -> ChatCardSendErrorDescription {text; reconnect: (label, accountsProvider)?}`
-  — port of `describeSessionError` + `authErrorAdvice` + `isAuthErrorName`
-  (same regex, case-insensitive); `accountsProvider` maps
-  anthropic→`claude`, openai→`codex`, kimi-for-coding→`kimi` (the ids
-  `AccountsSelectors.ordered` matches).
 - `ChatSessionStore`:
   - `dismissedSessionErrorSeq: Int?`; `dismissSessionError()` records the
     current `sessionErrorSeq`. The published `sessionError` is nil while
@@ -266,15 +281,15 @@ Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecy
     identical payload) has a higher seq and shows; a `running:true` edge resets
     the dismissal (the router already clears the error on a new turn,
     `MantaEventStore.swift` `running` case).
-  - `sessionErrorProviderID: String?` set by ChatScreen from
-    `ChatModel.activeModel(modelStore.models, override:…, configuration:…, provider:…)?.providerID ?? modelStore.override?.providerID`.
-  - `trailingBlocks` takes `sessionErrorText: String?` (from `describe(...).text`)
-    instead of reading `sessionError.message`, and gets `nil` when `reconnect`
-    is non-nil — that error is shown pinned (one copy, actionable). Existing
+  - `trailingBlocks` takes `sessionErrorText: String?` = `display?.text ??
+    message` (an old box has no `display`: the raw message is shown, never a
+    client-side reclassification) and gets `nil` when `display?.reconnect` is
+    non-nil — that error is shown pinned (one copy, actionable). Existing
     `trailingBlocks` tests updated.
 - View `ChatCardSendErrorLine` (pinned, reconnect case only): danger-tinted,
-  text, **Reconnect**, × ("Dismiss error"). Reconnect →
-  `reconnectTarget = ReconnectTarget(provider:)`; ChatScreen presents
+  `display.text`, **Reconnect**, × ("Dismiss error"). Reconnect →
+  `reconnectTarget = ReconnectTarget(provider: display.reconnect.accountsId)`;
+  ChatScreen presents
   `.sheet(item:) { NavigationStack { AccountsScreen(store: accountsStore, focusProvider: $0.provider, ownsLifecycle: false).toolbar { Done } } }`
   and calls `dismissSessionError()`.
 - **Reset health: deferred** (D8).
@@ -283,7 +298,9 @@ Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecy
 - `ProviderAuthError` on an anthropic session → pinned "Claude needs to be
   reconnected." with Reconnect, no duplicate transcript notice; Reconnect opens
   Accounts with Claude first.
-- `ApiError` "rate limit window expired" → plain notice "API error: …".
+- `ApiError` "rate limit window expired" → the box's `display.text`
+  ("API error: …") as a plain notice (classification pinned by SF-3 tests).
+- Old box (no `display`): the raw `message` as a plain notice, no Reconnect.
 - × hides the line; a second identical error frame shows it again.
 
 ---
@@ -316,8 +333,12 @@ Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecy
   `delegate:decline` (`2479–2480`) `id` → `{ok}`. `ok:false` only means the
   entry is no longer pending (`delegate.mjs:2501–2505`) — expired (2 min,
   `:125`) **or already resolved elsewhere**.
-- **Empty edited list is NOT deny-all:** the server uses edited tools only when
+- **Empty edited list is NOT deny-all:** the engine uses edited tools only when
   non-empty, otherwise the original request (`delegate.mjs:4783–4787`).
+  **New (audit C6 enforcement, folded into SF-4):** `delegate:approve` refuses
+  an explicit empty list or any rule with a blank `permission`/`pattern`:
+  `{ok:false, error:"A job needs at least one rule with a permission and a pattern."}`
+  — the approval stays pending.
 - Bus `kind:"delegate.approval.requested"`, payload = approval (`:4782`), not
   session-enveloped. Trust on → no approval is ever created (`:4769–4775`).
 
@@ -340,9 +361,11 @@ Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecy
   - `approve(tools:)` / `decline()`: guarded by
     `ChatCardApprovalLogic.canStart(tools:)` for approve; `busy` while in flight;
     `ok:true` → tombstone, `pending = nil`, hint "Background job approved" /
-    "Background job declined"; `ok:false` → tombstone, `pending = nil`, hint
-    **"That request is no longer pending"**, then refresh; thrown error → keep
-    the card, `error = "Couldn't reach your box — try again"`.
+    "Background job declined"; `ok:false` **with** `error` (the box refused the
+    rules) → keep the card, `error = <box error>`; `ok:false` without `error` →
+    tombstone, `pending = nil`, hint **"That request is no longer pending"**,
+    then refresh; thrown error → keep the card,
+    `error = "Couldn't reach your box — try again"`.
 - View `ChatCardApprovalCard`: desktop copy; edit mode rows with two
   `TextField`s (monospaced, no autocorrect/autocapitalisation) and a trash
   button; "Add rule" appends `{bash, ""}`. **Start job** disabled when
@@ -354,7 +377,8 @@ Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecy
 
 ### Pure logic
 `ChatCardApprovalLogic.canStart(tools:)` (non-empty AND every field
-non-blank), `.footnote(tools:)`, `.outcomeHint(ok:approved:)`,
+non-blank — client gating, KEEP-CLIENT per audit C6; the box re-checks),
+`.footnote(tools:)`, `.outcomeHint(ok:approved:)`,
 `.filterResolved(_:resolved:)`; `ChatCardApprovalsDecoding.decode(_:)`
 (both shapes).
 
@@ -383,12 +407,19 @@ non-blank), `.footnote(tools:)`, `.outcomeHint(ok:approved:)`,
   `formatJobSummary` (`chatUtils.ts:1901–1911`) + `" · <error ?? status>"` for
   failed/stopped. **Go to parent**, **Stop** (running only).
 
-### Wire
-`delegate:list` no arg → all jobs (`rpc.mjs:2434–2435`; fields `id,
-parentSessionID, childSessionID, status, model, branch, worktree, activity,
-error, filesChanged, correlation{kind}`); `delegate:stop` (`:2437`) via the
-existing `api.delegateStop(id:)` (throws on refusal); `api.projects()` to find
-the parent window; freshness via `eventStore.delegateUpdates`.
+### Wire (server-first — audit C9/C10)
+- **NEW** `delegate:job-for-session` (SF-4): arg `{sessionId}` →
+  `{readOnly:false}` or `{readOnly:true, job: DelegateJobView}`; the box decides
+  job-ness (`correlation.kind !== "work"`), the headline (with the catalog
+  model name), status line, parent line, parent window and stoppability. iOS and
+  desktop render it.
+- `delegate:stop` (`rpc.mjs:2437`) via the existing `api.delegateStop(id:)`
+  (throws on refusal). Freshness via `eventStore.delegateUpdates`.
+- **NEW refusal (C10):** the box itself refuses `opencode:prompt`,
+  `opencode:inbox-cancel`, `opencode:inbox-set-delivery`,
+  `opencode:compact-session`, `opencode:run-command` aimed at a read-only job
+  session: HTTP 409 `{error:"This is a background job — it can't take messages", code:"read_only_job"}`.
+  The client policy below remains the UX; the box is the authority.
 
 ### Ownership states (resolves review #8)
 `enum ChatCardMutationPolicy: Equatable, Sendable { case resolving, allowed, readOnlyJob }`
@@ -421,25 +452,27 @@ the parent window; freshness via `eventStore.delegateUpdates`.
     rendered, so the refusal is never user-visible).
 - `ChatCardJobOwnershipStore` (`@MainActor final class`, own file, owned by
   ChatScreen) resolves the policy with the pure
-  `ChatCardOwnershipResolver.next(current:result:sessionID:)`:
-  - success with a read-only record for this `childSessionID` → `.readOnlyJob`
-    (the record itself is published as the ownership store's `job`);
-  - success with none (or a `work` record) → `.allowed`;
+  `ChatCardOwnershipResolver.next(current:result:)` over the box's answer
+  (the `.resolving` machine is connection state — KEEP-CLIENT per audit C9):
+  - capability `chat-cards-1` present and `delegate:job-for-session` →
+    `{readOnly:true, job}` → `.readOnlyJob` (the `job` view is published as the
+    ownership store's `job`);
+  - `{readOnly:false}` → `.allowed`;
+  - capability absent (old box, read once via `boxCapabilities()`) →
+    `.allowed` and `jobBarUnavailable = true` (D24: the dependent feature is
+    hidden; there is no bar to disable, and the old box has no refusal either —
+    exactly today's behaviour);
   - **any failure, of any error class → keep the current state** (a known job
-    stays read-only; `.resolving` stays resolving). Only a successful list can
+    stays read-only; `.resolving` stays resolving). Only a successful answer can
     release held prompts. Rationale: `MantaAPIClient` maps every non-empty RPC
     `error` string to `MantaError.server` (`MantaAPIClient.swift:923–929`), and
-    `delegate:list` is a live read (`rpc.mjs:2434–2435`) that can fail
-    transiently on a box that does have jobs. No unsupported-box exception is
-    needed: iOS already calls `delegate:list` today (`MantaAPIClient.swift:205`,
-    Background jobs sheet), and a box without the delegate engine answers
-    `{jobs: []}` (`rpc.mjs:2435`) — a success, which resolves `.allowed`.
+    the lookup is a live read of the job store that can fail transiently.
   Re-resolves on appear, `delegateUpdates`, reconnect, app foreground, and every
   30 s while `.resolving` or while the bar shows a running job (recovers a
   missed `delegate.updated`). Pushes the result into
-  `store.applyMutationPolicy`. Publishes `job: ChatCardJob?` (non-nil only for a
-  read-only job), `parentWindowKey: String?`, `parentName: String?`,
-  `stopping`, `lastFailure: String?`. ChatScreen holds it as
+  `store.applyMutationPolicy`. Publishes `job: ChatCardJobView?` (non-nil only
+  for a read-only job), `stopping`, `lastFailure: String?`,
+  `jobBarUnavailable: Bool`. ChatScreen holds it as
   `@StateObject private var jobOwnership: ChatCardJobOwnershipStore`
   (WS02-internal; no other workstream references it).
 - **Feedback while resolving after a failure:** `bottomCards` shows
@@ -456,9 +489,8 @@ the parent window; freshness via `eventStore.delegateUpdates`.
   the shared controller still accepts typing and insertions (sends are held,
   never delivered), and a read-only job refuses them — WS05's send-to-agent
   bridge and WS07's attach read the same controller value.
-- iOS's `DelegateJob` (WS04's `SessionModels.swift`) lacks the needed fields;
-  WS02 decodes its own lenient `ChatCardJob` (skip-bad-element list decoding
-  like `LenientDelegateJobs`).
+- The wire type is WS02's `ChatCardJobView` (decoded leniently, see SF-4); iOS
+  no longer reads raw job records for this feature.
 - ChatScreen when `.readOnlyJob`:
   - `ChatCardReadOnlyJobBar` replaces `ComposerView` in the overlay slot and
     reports its height through the same measurement that feeds
@@ -471,28 +503,31 @@ the parent window; freshness via `eventStore.delegateUpdates`.
   - `store.isBackgroundJobReadOnly` (`mutationPolicy == .readOnlyJob`) is the
     one read-only signal for consumers: M-02-2 (overflow), M-03-7 (composer),
     M-05-1 (git header, which also reads `composer.acceptsInput`).
-- Bar copy per desktop; model name via `ChatCardJobLogic.parseModelRef` then
-  `modelStore.models` name lookup.
-- **Stop** when `ChatCardJobLogic.isStoppable(status)` (running or paused,
-  matching `stopJob`): confirm ("Stop this job?" / "The job stops and its window
-  stays open.") → `api.delegateStop` → hint "Job stopped" + re-resolve; failure
-  → "Couldn't stop the job: <reason>".
-- **Go to parent** (D9):
-  `navigator.open(.session(windowKey: MantaNavigator.windowKey(project: parent.project, windowIndex: parent.index)))`
-  — WS04 declares `windowKey` **static** (`04-sessions.md` §11), so it is called
-  on the type. `parent` = the window whose `opencodeSessionId ==
-  parentSessionID` from `api.projects()` (stored as `parentWindowKey`). Parent window not found → no button;
-  line reads "It reports to a session that's closed."
+- Bar content = the box's view, verbatim: `job.headline`, `job.parentLine`,
+  `job.statusLine`. No client-side model lookup, summary or status rule.
+- **Stop** when `job.stoppable`: confirm ("Stop this job?" / "The job stops and
+  its window stays open.") → `api.delegateStop(id: job.id)` → hint "Job
+  stopped" + re-resolve; failure → "Couldn't stop the job: <reason>".
+- **Go to parent** (D9), shown only when `job.parent != nil`:
+  `navigator.open(.session(windowKey: MantaNavigator.windowKey(project: job.parent.project, windowIndex: job.parent.windowIndex)))`
+  — WS04's key builder is static and the key format is a client navigation
+  concern, so the box returns `project` + `windowIndex`, not a key. No parent
+  window → no button; the box's `parentLine` already says "It reports to a
+  session that's closed."
 
 ### Pure logic
-`ChatCardJobLogic.isReadOnly`, `.job(forSession:in:)`, `.parseModelRef`,
-`.summary` (formatJobSummary port), `.headline(modelName:)`, `.statusLine`,
-`.isStoppable`; `ChatCardOwnershipResolver.next`; `ChatCardMutationGate.decide(policy:action:) -> .run | .hold | .refuse(String)`.
+`ChatCardOwnershipResolver.next` (maps the box answer / failure / missing
+capability onto the policy); `ChatCardMutationGate.decide(policy:action:) -> .run | .hold | .refuse(String)`
+(client UX gate — the box refuses anyway, C10). `ChatCardJobLogic` is deleted
+(server-first, SF-4).
 
 ### Acceptance
 - A job session opened from Background jobs shows the bar; permission cards are
   inert; no store mutation runs even if called.
-- A CTO work worker opens writable.
+- A CTO work worker opens writable (box answers `{readOnly:false}`).
+- An old client (or a bug) that POSTs a prompt into a job session gets the
+  box's 409 refusal; nothing reaches opencode.
+- Old box without `chat-cards-1`: the session resolves writable, no bar.
 - Initial `delegate:list` failure (transport OR server error) → composer usable,
   sends held as waiting, the resolving line with Retry appears; nothing is
   delivered until a successful list; after it resolves `.allowed` they go out;
@@ -529,20 +564,30 @@ non-busy item with `restore:true`; `describeInboxCancel`
 **"Attachments weren't restored — re-attach them"**; `delivered` → "Already
 sent to the agent"; else "Couldn't confirm it was cancelled — it may still be sent".
 
-### Wire
-`opencode:inbox-cancel {sessionId, id}` → `{outcome, item?}` — existing
-`api.inboxCancel`, `InboxCancelResult` (`InboxModels.swift:201`).
+### Wire (server-first — audit C11)
+`opencode:inbox-cancel {sessionId, id, restore?}` → `{outcome, item?, notice,
+error, restoreText}` and `opencode:inbox-set-delivery {sessionId, id, delivery}`
+→ `{outcome, notice, error}` (SF-5). The box writes every outcome sentence and
+decides whether text may be restored (only `cancelled` with `restore:true`).
 
 ### iOS design
 - `PendingMessagesCard`: header `HStack` adds trailing **"Edit last"**
   (`arrow.up`, id `pending-edit-last`), disabled when no non-busy item; new
   closure `onEditLast`.
-- `InboxModels.swift` is not edited: `ChatCardEditLast` lives in
-  `ChatCardLogic.swift` (it only reads `InboxItem` / `InboxCancelResult`).
-- `ChatSessionStore.editLastInboxItem() async -> String?` (guarded by
-  `canMutate`): pick via `ChatCardEditLast.pick(items:busy:)`, cancel through
-  the shared private cancel helper, return text only for `cancelled`, hint for
-  every other outcome via `ChatCardEditLast.report(result:item:)`.
+- `InboxModels.swift` (WS02, D1): `InboxCancelResult` and
+  `InboxSetDeliveryResult` decode the new optional `notice`, `error`,
+  `restoreText`; `InboxActionReport.cancel(_:)` / `.setDelivery(_:)` (the
+  outcome→sentence rules) are **deleted**. Only the transport-failure strings
+  (`cancelFailed`, `setDeliveryFailed` — no box answer exists) stay.
+- `ChatSessionStore`: `cancelInboxItem` / `setInboxDelivery` /
+  `editLastInboxItem` call the box and show `error ?? notice` as `actionHint`
+  (refresh the inbox when either is non-nil, as today).
+  `editLastInboxItem() async -> String?` (guarded by `canMutate`) picks via
+  `ChatCardEditLast.pick(items:busy:)` (KEEP-CLIENT, audit C12), calls
+  `api.inboxCancelReported(sessionId:id:restore: true)` and returns
+  `restoreText`. **Old box** (capability absent): the "Edit last" button is
+  disabled with the caption "Update your box to use this"; × still works and
+  shows only what the box returns (no notice) plus the inbox refresh.
 - ChatScreen: if `composer.text` is non-blank, confirm first ("Replace your
   draft with the pending message?", D9) — before any cancel RPC. Then
   `if let t = await store.editLastInboxItem() { if !composer.insert(text: t, mode: .replace) { UIPasteboard.general.string = t; store.actionHint = "Removed from the queue — it couldn't go back in the composer, so it's on your clipboard" } }`
@@ -552,8 +597,9 @@ sent to the agent"; else "Couldn't confirm it was cancelled — it may still be 
 
 ### Acceptance
 Edit last removes the newer of two items and puts its text in the composer,
-focused; `delivered`/`unknown` never restore and always say why; an
-attachment-bearing item restores text and says attachments weren't restored;
+focused; `delivered`/`unknown` never restore and show the box's sentence; an
+attachment-bearing item restores text and shows the box's "attachments weren't
+restored" notice;
 a non-empty draft is never overwritten without confirmation.
 
 ---
@@ -746,43 +792,271 @@ Dropped (no consumer): `stepEnded`, `stepEndedByMessageID`. Not decoded:
 
 ---
 
+## Server-first (D23/D24)
+
+Audit items folded (`server-first-audit.md` §WS02, MOVE-NOW): **C1, C2, C5, C9,
+C10, C11, S16** (plus C6's server enforcement, which the audit folds into C9's
+module). KEEP-CLIENT items stay client: C3 expiry latch, C4 `state == "blocked"`,
+C6 edit gating (UX), C12 edit-last pick, C13 inbox acceptance, C15 pending-row
+labels, C17 focus planner, C18 drain. MOVE-LATER (C7, C8, C14, C16) are WS11
+follow-ups and are not built here.
+
+Every piece is additive (new fields / channel / opt-in arg); an old client on a
+new box keeps working unchanged (audit §4 "Old desktop ↔ new box"). One
+capability id, **`chat-cards-1`**, covers all of SF-1…SF-5.
+
+### SF-0 Capabilities (`src/server/boxCapabilities.mjs`, NEW)
+- `export const BOX_CAPABILITIES = Object.freeze(["chat-cards-1"])`. This is
+  the ONE capability module of the whole effort (master D25 + id registry).
+  Other wave-B workstreams append their ids through integration agent B
+  (M-07-S2, M-09-srv-2, M-06-srv-2, order 02 → 07 → 09 → 06); WS05 appends its
+  own in wave C; WS11 D1 extends the same file in wave D (no second module).
+- `src/server/version.mjs` (edited by the WS02 worker — not one of the three
+  integration-only files): `writeVersionResponse` adds
+  `capabilities: [...BOX_CAPABILITIES]` to `GET /api/version`.
+- `rpc.mjs` `"server:version"` adds the same `capabilities` field (mount
+  M-02-srv-1).
+- Response: `{version, minClient, opencodeVersion, opencode, capabilities: string[]}`
+  (REST) / `{version, minClient, opencodeVersion, capabilities: string[]}` (RPC).
+- Node tests `src/server/boxCapabilities.test.mjs`: list is frozen, contains
+  `chat-cards-1`, no duplicates; `version.test.mjs` adds a case that the REST
+  body carries `capabilities`.
+- **Client gate.** iOS: `MantaAPIClient.boxCapabilities() async throws -> Set<String>`
+  (reads `server:version`; absent field → empty set), read by ChatScreen once
+  on appear and on reconnect into `ChatCardCapabilities` (`@MainActor` store,
+  `has(_:) -> Bool?`, nil = unknown → treat as `.resolving` for F6, hide
+  Edit last until known). Desktop: new `src/renderer/hooks/useBoxCapabilities.ts`
+  → `useBoxCapability(id: string): boolean | null` (reads
+  `window.api.getServerVersion().capabilities`; refetched on reconnect via the
+  same refresh key `useCompatibilityCard` takes). These two are the ONLY
+  client accessors in waves B/C (master D25): WS05/06/07/09 call them, never a
+  copy. `ChatCardCapabilities` is WS02-internal (chat screen). WS11 D1 later
+  folds `boxCapabilities()` into `ServerVersionInfo.capabilities` + an app-level
+  store and keeps `useBoxCapability` as the desktop hook. Missing capability → the
+  dependent control is hidden or disabled with **"Update your box to use this"**
+  (static copy); no fallback copy of the moved logic is kept on either client.
+
+### SF-1 Retry copy (C1) — `src/shared/streamInterpretation.mjs` + `streamInterp.mjs`
+- New pure `describeRetry({attempt, message, action}) -> {headline, caption, body}`:
+  `headline = action?.title || "Retrying…"`; `caption = attempt > 0 ? "attempt N" : null`;
+  `body = action?.message || message || null`.
+- `streamInterp.mjs` `session.retry.scheduled` (`:771–783`) spreads it into
+  the payload (mount M-02-srv-2): frame `retry` =
+  `{attempt, message, next?, headline, caption, body}`. `null` clear unchanged.
+- Desktop behaviour change (PR note): the headline no longer repeats the
+  attempt ("Retrying… (attempt 2) · attempt 2" → "Retrying… · attempt 2").
+- Tests: `src/shared/streamInterpretation.test.ts` (`describeRetry` 4 cases);
+  `src/server/streamInterp.chatCards.test.mjs` (frame carries the fields).
+
+### SF-2 Compaction copy (C2)
+- NEW `src/shared/formatTokens.mjs` (+ `.d.mts`, test `src/shared/formatTokens.test.ts`;
+  master D26 — the ONE token formatter, created by WS02 in wave B, consumed by
+  WS09 and WS11): `formatTokenCount(n) -> string` (compact, no unit: `<1000` →
+  whole number, `<100k` → one decimal with `.0` dropped + "k", else rounded
+  "k") and `formatTokens(n) -> string` (`n < 1000 ? "<n> tokens" : "<formatTokenCount(n)> tokens"`,
+  byte-identical to today's `chatUtils.ts:219`).
+- `streamInterpretation.mjs`: `compactionFirstLine(text) -> string|null` (first
+  non-blank line, trimmed); imports `formatTokenCount` from `./formatTokens.mjs`;
+  `describeBackgroundCompaction({beforeTokens, afterTokens, away}) -> string`
+  (`"⟳ Compacted while you were away"` when `away`, else
+  `"⟳ Compacted in the background"`, plus `" · <before> → <after>"` only when
+  both are positive finite and `after < before`).
+- `streamInterp.mjs` (mount M-02-srv-3): per-session `st.compactionText`
+  reset on `session.compaction.started` (seeded with its `text`), appended on
+  `.delta`; the `ended` frame becomes
+  `{phase:"ended", firstLine: compactionFirstLine(st.compactionText)}`.
+- `index.mjs` (mount M-02-srv-4): the `optimizer.compacted` publish
+  (`:1925–1937`) adds `text: describeBackgroundCompaction({beforeTokens, afterTokens, away})`.
+- Tests: `streamInterpretation.test.ts` (firstLine blank/indent/multi-line;
+  `formatTokenCount` 999/1000/12_340/128_000; notice away/background/zero
+  saving/after ≥ before/nulls); `streamInterp.chatCards.test.mjs`
+  (started+2 deltas+ended → `firstLine`; a new started resets).
+
+### SF-3 Session-error display (C5)
+- Moved verbatim from `src/renderer/chatUtils.ts` (800–826, 1777–1853) into
+  `streamInterpretation.mjs`: `AUTH_PROVIDER_LABELS`, `isAuthErrorName`,
+  `authErrorAdvice`, `describeSessionError`. New shape:
+  `describeSessionError({name, message, rawMessage}, providerID) -> {text, reconnect: {providerID, label, accountsId} | null}`
+  where `accountsId` = `{anthropic:"claude", openai:"codex", "kimi-for-coding":"kimi"}[providerID]`
+  (the ids WS08's `AccountsScreen(focusProvider:)` accepts).
+- `streamInterp.mjs` `session.execution.failed` (`:742–760`, mount M-02-srv-5):
+  frame `sessionError` = `{name, message, rawMessage?, display: describeSessionError({name, message: human, rawMessage: message}, st.model?.providerID)}`.
+  The box's `st.model` is set from `session.created` / `step.started` /
+  `model.selected` (`streamInterp.mjs:907`, `:783`, `:931`).
+- Tests: the existing desktop cases move from `chatUtils.frames.test.ts` (29–56)
+  and `chatUtils.test.ts` (2027–2085, `authErrorAdvice`) to
+  `streamInterpretation.test.ts`, plus `accountsId` cases;
+  `streamInterp.chatCards.test.mjs`: a failed execution after a step on
+  `anthropic` with `ProviderAuthError` → `display.reconnect.accountsId == "claude"`;
+  no model known → `reconnect: null`.
+
+### SF-4 Job view, refusal, approve check, list labels (C9, C10, C6-enforce, S16) — `src/server/delegateView.mjs` (NEW)
+```js
+export class ReadOnlyJobError extends Error { code = "read_only_job"; rpcStatus = 409 }
+export const READ_ONLY_JOB_MESSAGE = "This is a background job — it can't take messages";
+export function createDelegateView({ listJobs, listProjects, listModels, now = Date.now }) → {
+  jobForSession(sessionId) → Promise<{readOnly:false} | {readOnly:true, job: DelegateJobView}>,
+  assertWritable(sessionId) → Promise<void>,        // throws ReadOnlyJobError
+  decorateList(jobs) → jobs.map(j => ({...j, statusLabel, summary})),
+  validateApprovalTools(tools) → string | null,     // null = ok
+}
+// pure, exported for tests:
+isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName), jobStatusLine(job), parseModelRef(ref)
+```
+- `DelegateJobView = {id, status, statusLabel, headline, statusLine, parentLine, stoppable: boolean, parent: {sessionId, name, project, windowIndex} | null}`.
+- Rules (ported from the desktop, then deleted there): job for a session = the
+  newest non-superseded record with `childSessionID === sessionId`;
+  read-only = `correlation?.kind !== "work"` (`chatUtils.ts:1869`);
+  `headline` = `"Read-only — this is a background job running <model name>."`
+  when `parseModelRef(job.model)` resolves in `listModels()` (memoized 5 min),
+  else `"Read-only — this is a background job."`; `parentLine` = `"It reports to <window name>."`
+  when the parent window is found in `listProjects()` (window whose
+  `opencodeSessionId === parentSessionID`; name = `window.name ?? project.tmuxSession`),
+  else `"It reports to a session that's closed."`; `statusLine` = running/paused →
+  `activity || "running…"`, terminal → `jobSummary(job)` (`"<branch> · N files changed"` /
+  `"N file(s) changed"`, `chatUtils.ts:1901`) + `" · <error ?? status>"` for
+  failed/stopped; `stoppable` = `status ∈ {running, paused}` (matches
+  `stopJob`; desktop used running only — PR note); `statusLabel` = the status
+  word, `"unknown"` when empty (S16); `summary` = `jobSummary(job)` (S16).
+- `validateApprovalTools(tools)`: `undefined` → null (use original request);
+  an array that is empty, or has a rule with blank `permission`/`pattern` →
+  `"A job needs at least one rule with a permission and a pattern."`.
+- RPC (mounts M-02-srv-6…9, `rpc.mjs`):
+  - NEW `"delegate:job-for-session": (input) => delegateView.jobForSession(input?.sessionId)`;
+    missing `sessionId` → `throw new Error("sessionId is required")`.
+  - `"delegate:list"` returns `delegateView.decorateList(...)` (array shape
+    unchanged, two fields added; the `{jobs: []}` no-engine fallback untouched).
+  - `"delegate:approve"`: `const err = delegateView.validateApprovalTools(input?.tools); if (err) return {ok:false, error: err};`
+    before resolving.
+  - `await delegateView.assertWritable(<sessionId>)` first in
+    `opencode:prompt` (`input.sessionId`), `opencode:inbox-cancel`,
+    `opencode:inbox-set-delivery` (`input.sessionId`), `opencode:compact-session`
+    (arg), `opencode:run-command` (`input.sessionId`).
+  - `handleRpcRequest` catch: `if (typeof e?.rpcStatus === "number") { sendJson(e.rpcStatus, {error: e.message, code: e.code}); return; }`
+    — the body's `error` is the human sentence, so an old desktop shows it as-is
+    (audit §4).
+- `index.mjs` (mount M-02-srv-10): `const delegateView = createDelegateView({ listJobs: (f) => delegateEngine.listJobs(f ?? {}), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() })`
+  and pass `delegateView` into `buildHandlers`.
+- Node tests `src/server/delegateView.test.mjs`: work vs delegate vs subagent
+  record; superseded record ignored; headline with/without a catalog hit;
+  parent found/closed; statusLine running (activity / fallback), done (0/1/2
+  files ± worktree), failed with/without error, stopped; stoppable
+  running/paused/done; `assertWritable` throws for a read-only job, not for a
+  work job or a non-job; `validateApprovalTools` undefined/empty/blank/ok;
+  `decorateList` adds both fields; models fetched once within the memo window.
+  `src/server/rpc.delegateView.test.mjs` (integration, after the mounts):
+  `delegate:job-for-session` round trip; `opencode:prompt` to a job → 409 body.
+
+### SF-5 Inbox outcome copy (C11) — `src/server/inboxCopy.mjs` (NEW)
+- Moved from `src/renderer/inboxState.ts` (175–230):
+  `describeInboxCancel(result, {restore}) -> {notice, error, restoreText}`,
+  `describeInboxSetDelivery(result) -> {notice, error}`, constants
+  `ATTACHMENTS_NOT_RESTORED`, `SET_DELIVERY_UNCONFIRMED`, `ALREADY_SENT`,
+  `CANCEL_UNCONFIRMED`. `restoreText` = `result.item.text` only for
+  `outcome:"cancelled"` with `restore:true`; attachments notice only then and
+  when `item.attachmentCount > 0`.
+- RPC (mount M-02-srv-11): `opencode:inbox-cancel` accepts optional
+  `input.restore` (boolean) and returns `{...r, ...describeInboxCancel(r, {restore: input?.restore === true})}`;
+  `opencode:inbox-set-delivery` returns `{...r, ...describeInboxSetDelivery(r)}`.
+- Node tests `src/server/inboxCopy.test.mjs`: the existing `inboxState.test.ts`
+  cases (145–211) ported 1:1, plus `restore:false` never returns text.
+
+### Desktop migration (same workstream, no parallel implementation)
+| File | Change |
+|---|---|
+| `src/renderer/chatUtils.ts` | **Delete** `describeSessionError`, `authErrorAdvice`, `AUTH_PROVIDER_LABELS`, `isAuthErrorName`, `formatCompactionSaving`, `formatTokensCompact`, `isReadOnlyJob`, `parseModelRef`, `formatJobSummary`. `formatTokens` becomes `export { formatTokens } from "../shared/formatTokens.mjs"` (one implementation, D26). `formatLastMove` (`:3803`, still live until WS11 D4) switches from the deleted `formatTokensCompact` to `formatTokenCount`. WS02 is the wave-B OWNER of this file (D27); WS07/WS09 hunks are ledger rows IB applies after WS02's commit. |
+| `src/shared/formatTokens.mjs` / `.d.mts` / `formatTokens.test.ts` (NEW) | D26 formatter (see SF-2). |
+| `src/renderer/SessionHeader.tsx` | Its private `formatTokensCompact` (`:75`) is deleted; the two call sites (`:668`, `:699`) use `formatTokenCount` (no other wave-B worker edits this file; WS05 edits it in wave C). |
+| `src/renderer/api/demoApi.ts`, `src/renderer/api/demoCoverage.test.ts` | WS02 owns both in wave B (D27): add `delegateJobForSession` to `DEMO_UNIMPLEMENTED` (or a stub); WS07/WS09 entries are ledger rows. |
+| `src/renderer/chatUtils.test.ts`, `chatUtils.frames.test.ts` | Remove the moved cases (they now live in `streamInterpretation.test.ts`); keep a `formatTokens` case. |
+| `src/renderer/inboxState.ts` (+ test) | **Delete** `describeInboxCancel`, `describeInboxSetDelivery`, `ATTACHMENTS_NOT_RESTORED`, `SET_DELIVERY_UNCONFIRMED` and their tests. |
+| `src/renderer/hooks/useSseBus.ts` | `sessionError`: `setSendError(p.display?.text ?? p.message)`, `setAuthReconnect(p.display?.reconnect?.label ?? null)`; remove the `describeSessionError` import and `providerIDRef` if no other use remains. `compaction` `ended`: store `firstLine` from the frame. |
+| `src/renderer/Cards.tsx` | `RetryCard` renders `info.headline ?? "Retrying…"`, `info.caption`, `info.body ?? info.message`, link unchanged. `CompactionCard` shows `state.firstLine` when done (no client split). |
+| `src/renderer/ChatPanel.tsx` | Compaction notice line = `compactionNotice.text` (omit when absent; `useSseBus` stores `text` from `optimizer.compacted`). Read-only job: replace `jobs[sessionId]`/`isReadOnlyJob` (360–373) with `window.api.delegateJobForSession(sessionId)` on mount and on `onDelegateUpdated`, gated by `useBoxCapability("chat-cards-1")`; `ReadOnlyJobBar` (3509–3550) gets the view. Inbox cancel/set-delivery (858–906): send `restore`, show `result.error ?? result.notice` (`setSendError` for `error`, system notice for `notice`), restore `result.restoreText`; Edit last disabled with "Update your box to use this" when the capability is missing. Approve: show the box's `error` instead of swallowing it. |
+| `src/renderer/PanelCards.tsx` | `ReadOnlyJobBar` props → `{view: DelegateJobView, onGoToParent, onStop}`; renders `headline`, `parentLine`, `statusLine`; Stop when `view.stoppable`; drop `formatJobSummary` import. |
+| `src/renderer/hooks/useBoxCapabilities.ts` (NEW) | SF-0 hook. |
+| `src/shared/types.ts` | `StreamRetryPayload` + `headline?`, `caption?`, `body?`; `StreamSessionErrorPayload` + `display?`; `StreamCompactionPayload` + `firstLine?`; `OpencodeInboxCancelResult` + `notice?`, `error?`, `restoreText?`; `OpencodeInboxSetDeliveryResult` + `notice?`, `error?`; `DelegateJob` + `statusLabel?`, `summary?`; NEW `DelegateJobView`, `DelegateJobForSession`; IPC `delegateJobForSession: "delegate:job-for-session"`. |
+| `src/shared/api.ts`, `src/renderer/api/httpApi.ts` | `delegateJobForSession(sessionId): Promise<DelegateJobForSession>`; `opencodeInboxCancel` input gains `restore?`; `getServerVersion` type + `capabilities?: string[]`. |
+| `src/shared/streamInterpretation.mjs` / `.d.mts` / `.test.ts` | SF-1…SF-3 functions + types + tests. |
+| vitest | `src/renderer/hooks/useSseBusFrames.test.tsx`: frames with the new fields render the box's text; `PanelCards` ReadOnlyJobBar snapshot from a view; `ChatPanel.harness.test.tsx` inbox cancel uses result fields. |
+
+**Same-wave desktop file ledger (D24, D27).** WS02 is the wave-B OWNER of
+`chatUtils.ts` (+ tests), `ChatPanel.tsx`, `src/shared/types.ts`,
+`src/shared/api.ts`, `httpApi.ts`, `demoApi.ts`, `demoCoverage.test.ts` and
+creates `src/shared/formatTokens.mjs`. Every other wave-B worker's hunk in those
+files is a ledger row (M-07-D1…D5, M-09-dsk-1/2/4/5, M-06-dsk-1/2) applied by
+integration agent B after WS02's commit, in the order 02 → 07 → 09 → 06; those
+workers apply their rows locally (uncommitted) only to verify.
+
+### iOS consumption (summary)
+SF-1 → F1, SF-2 → F2, SF-3 → F4, SF-4 → F5/F6 (+ S16 mounts M-02-4/5), SF-5 → F8.
+Deleted from the iOS plan: `ChatCardRetryCopy`, `ChatCardCompactionNotice.text`,
+`ChatCardTokens`, `ChatCardSendError`, `sessionErrorProviderID`,
+`ChatCardJobLogic`, `ChatCardEditLast.report`, `InboxActionReport.cancel/
+setDelivery`, `ChatCardJob` (raw record decoding). Their XCTests become decode
+tests of the server shapes.
+
+---
+
 ## Files
 
-**Edit (owned):**
-- `MantaUI/MantaStreamModels.swift` — retry/compaction/notice/command payloads,
-  `rawMessage`.
+**Server (WS02 worker creates/edits; never `rpc.mjs` / `index.mjs` /
+`streamInterp.mjs` — those are mounts M-02-srv-*, applied by integration agent B
+first in the 02 → 07 → 09 → 06 order):**
+- NEW `src/server/delegateView.mjs` + `delegateView.test.mjs` (SF-4).
+- NEW `src/server/inboxCopy.mjs` + `inboxCopy.test.mjs` (SF-5).
+- NEW `src/server/boxCapabilities.mjs` + `boxCapabilities.test.mjs` (SF-0).
+- EDIT `src/server/version.mjs` (+ `version.test.mjs`): `capabilities` in the REST body.
+- NEW `src/server/streamInterp.chatCards.test.mjs` and `src/server/rpc.delegateView.test.mjs`
+  (written by the worker; green once the M-02-srv mounts are applied — integration
+  agent B runs `npm run test:server` after applying them).
+- EDIT `src/shared/streamInterpretation.mjs`, `.d.mts`, `.test.ts` (SF-1…SF-3).
+- NEW `src/shared/formatTokens.mjs`, `.d.mts`, `formatTokens.test.ts` (D26).
+
+**Desktop:** see "Desktop migration" (SF section).
+
+**iOS — edit (owned):**
+- `MantaUI/MantaStreamModels.swift` — retry/compaction/notice/command payloads
+  incl. the box's copy fields (`headline`, `caption`, `body`, `firstLine`,
+  `text`), `rawMessage`, `display`.
 - `MantaUI/MantaEventStore.swift` — router cases + state fields
   (`retry`, `compactionGeneration`, `compaction`, `transcriptStaleSeq`,
   `compactionNotice`, `compactionNoticeSeq`, `sessionErrorSeq`,
   `commandByMessageID`), running-set retry clear, subjects `progressUpdates`,
   `delegateApprovalRequests`.
 - `MantaUI/ChatSessionStore.swift` — F1–F4, F6 policy + guards, F8, F10,
-  F11, `remap()`/`mapOptions`, and the received WS01 mounts.
+  F11, `remap()`/`mapOptions`, M-01-7 fetch slimness, and the received WS01 mounts.
 - `MantaUI/ChatScreen.swift` — `bottomCards`, read-only branch +
   `composer.acceptsInput` sync, resolving line, reconnect sheet, navigator
-  observation, focus scrolling, context-sheet args, and the received mounts.
+  observation, focus scrolling, context-sheet args, capabilities load, and the
+  received mounts.
 - `MantaUI/UsageSheets.swift` (context sheet only) — `seat`, `allowsActions`.
-- `MantaUI/PendingMessagesCard.swift` — Edit last.
+- `MantaUI/PendingMessagesCard.swift` — Edit last (+ disabled "Update your box
+  to use this" state).
+- `MantaUI/InboxModels.swift` (WS02, D1) — result fields `notice` / `error` /
+  `restoreText`; delete `InboxActionReport.cancel` / `.setDelivery`.
+- `MantaUI/BackgroundJobsSheet.swift` (WS02 from wave B, master D28) — M-02-5:
+  render the box's `statusLabel` / `summary`.
+- `MantaUI/UsageSheets.swift` usage-sheet rows — receipt M-09-9 only (WS09's
+  `UsageMeters.band(_ window:)`).
 
-**Create:**
+**iOS — create:**
 - `MantaUI/MantaAPIClient+ChatCards.swift` — client members + `ChatCardApprovalAPI` conformance.
 - `MantaUI/ChatCardModels.swift` — **Foundation only**: `ChatCardApproval`,
-  `ChatCardApprovalTool`, `ChatCardJob`, `ChatCardCompactionState`,
-  `ChatCardCompactionNotice`, `ChatCardMutationPolicy`, `ChatCardFocusPhase`,
-  `ChatCardBoundedLog`.
-- `MantaUI/ChatCardLogic.swift` — **Foundation only**: every pure enum/struct
-  named above (retry copy, stream rules, compaction reducer, expiry latch,
-  tokens, send-error, approval logic/decoding, job logic, ownership resolver,
-  mutation gate, edit-last, seat line, progress rule, focus planner/policy/
-  machine, `ChatCardMarkdown` (Foundation `AttributedString`)). Depends only
-  on package files (`MantaStreamModels`, `InboxModels`, `AccountsModels`,
-  `MantaError`, `MantaModels`); never on `SessionModels` / `ChatModels`.
+  `ChatCardApprovalTool`, `ChatCardApproveResult`, `ChatCardJobView`,
+  `ChatCardJobForSession`, `ChatCardCompactionState`, `ChatCardCompactionNotice`,
+  `ChatCardMutationPolicy`, `ChatCardFocusPhase`, `ChatCardBoundedLog`.
+- `MantaUI/ChatCardLogic.swift` — **Foundation only**: stream rules,
+  compaction reducer, expiry latch, approval gating/decoding, ownership
+  resolver, mutation gate, edit-last pick, seat line, progress rule, focus
+  planner/policy/machine, `ChatCardMarkdown`. Depends only on package files
+  (`MantaStreamModels`, `InboxModels`, `AccountsModels`, `MantaError`,
+  `MantaModels`). (No copy rules: those are on the box.)
 - `MantaUI/ChatCardViews.swift`, `MantaUI/ChatCardApprovalStore.swift`,
-  `MantaUI/ChatCardJobOwnershipStore.swift`, `MantaUI/ChatCardMessageFocus.swift`
-  (environment key; SwiftUI).
+  `MantaUI/ChatCardJobOwnershipStore.swift`, `MantaUI/ChatCardMessageFocus.swift`,
+  `MantaUI/ChatCardCapabilities.swift` (SwiftUI / Combine).
 - `MantaUITests/ChatCardsTests.swift` (pure; Linux + Mac) and
-  `MantaUITests/ChatCardsStoreTests.swift` (router, stores; Mac only — needs
-  Combine/SwiftUI).
+  `MantaUITests/ChatCardsStoreTests.swift` (router, stores; Mac only).
 - Manifest for the integration step (D18/D19): add `ChatCardModels.swift`,
   `ChatCardLogic.swift` to `Package.swift` sources and `ChatCardsTests.swift`
   to the test target (M-02-3). No `project.yml` edit; workers never touch the
@@ -790,46 +1064,57 @@ Dropped (no consumer): `stepEnded`, `stepEndedByMessageID`. Not decoded:
 
 ## Client members
 
-All in `MantaUI/MantaAPIClient+ChatCards.swift`; no other spec declares these
-names (grep of all specs and `MantaAPIClient*.swift`, 2026-10-28):
+All in `MantaUI/MantaAPIClient+ChatCards.swift` (WS02 is the registry owner;
+this revision replaces `chatCardJobs()` and changes `delegateApprove`'s return
+type — both unbuilt, no other consumer):
 
 ```swift
-func delegatePendingApprovals(sessionId: String) async throws -> [ChatCardApproval]   // delegate:pending-approvals
-func delegateApprove(id: String, tools: [ChatCardApprovalTool]) async throws -> Bool  // delegate:approve → ok
-func delegateDecline(id: String) async throws -> Bool                                 // delegate:decline → ok
-func chatCardJobs() async throws -> [ChatCardJob]                                     // delegate:list (no arg)
+func delegatePendingApprovals(sessionId: String) async throws -> [ChatCardApproval]              // delegate:pending-approvals
+func delegateApprove(id: String, tools: [ChatCardApprovalTool]) async throws -> ChatCardApproveResult  // delegate:approve → {ok, error?}
+func delegateDecline(id: String) async throws -> Bool                                            // delegate:decline → ok
+func delegateJobForSession(sessionId: String) async throws -> ChatCardJobForSession              // delegate:job-for-session (NEW, SF-4)
+func inboxCancelReported(sessionId: String, id: String, restore: Bool) async throws -> InboxCancelResult  // opencode:inbox-cancel {…, restore} (SF-5)
+func boxCapabilities() async throws -> Set<String>                                               // server:version → capabilities (SF-0)
 ```
 Existing members used, not redeclared: `progressGet(sessionID:)`,
-`delegateStop(id:)`, `projects()`, `inboxCancel(sessionId:id:)`.
+`delegateStop(id:)`, `projects()`, `inboxCancel(sessionId:id:)` (× keeps it;
+the server adds `notice`/`error` there too), `inboxSetDelivery(...)`,
+`messages(sessionId:limit:slim:)`. WS10's `serverVersion()` is not reused: its
+`ServerVersionInfo` (WS10-owned) has no `capabilities` field, and WS02 must not
+edit it. Decided (master D25): `boxCapabilities()` is the single iOS accessor in
+waves B/C; WS11 D1 folds it into `ServerVersionInfo.capabilities` +
+`BoxCapabilitiesStore` and deletes it (migrating every caller) in wave D.
 
 ## Tests
 
 `MantaUITests/ChatCardsTests.swift` (Foundation; runs under `verify.sh` and Mac):
-1. `ChatCardRetryCopy` (title override, attempt 0, fallback body, invalid link);
-   `ChatCardStreamRules.clearsRetry`.
-2. `ChatCardCompactionReducer`: started→delta→ended; delta/ended without prior → nil; generation carried.
+1. Decoding of the box's retry payload (with and without
+   `headline`/`caption`/`body`); `ChatCardStreamRules.clearsRetry`.
+2. `ChatCardCompactionReducer`: started→delta→ended; delta/ended without prior → nil; generation carried; `firstLine` copied from the `ended` frame (absent → nil).
 3. `ChatCardExpiryLatch`: unrelated observations during the window don't
    reschedule; after `expire` the same key stays hidden; a new key while an old
    timer is pending is visible and the old `expire` doesn't hide it; seed hides
    an existing `.done`; stale (nil state) followed by an unrelated observation
    stays nil.
-4. `ChatCardTokens.desktopCompact` (999, 1000→"1k", 12_340→"12.3k", 128_000→"128k");
-   `ChatCardCompactionNotice.text` (away, background, zero saving, after ≥ before, nils).
-5. `ChatCardSendError.describe` (auth/anthropic, ApiError api-key/openai,
-   "rate limit window expired" not auth, unknown provider, rawMessage used,
-   typed prefixes).
+4. `optimizer.compacted` decode: `text` present → notice; absent (old box) →
+   no notice.
+5. `sessionError` decode: `display` with/without `reconnect`; absent `display`
+   → `sessionErrorText == message`, no reconnect.
 6. `ChatCardApprovalLogic`: `canStart` false for empty list and blank fields;
    footnotes; `outcomeHint(ok:false)` = "That request is no longer pending";
-   `filterResolved`; decoding both shapes.
-7. `ChatCardJobLogic` (work worker not read-only, lookup, parseModelRef edge
-   cases, summary 0/1/2 files ± worktree, status line, isStoppable).
-8. `ChatCardOwnershipResolver`: resolving+success-none → allowed;
-   resolving+transport failure → resolving; resolving+`MantaError.server`
-   (transient server read failure) → **resolving**; readOnlyJob+any failure →
-   readOnlyJob; work record → allowed.
+   `filterResolved`; decoding both shapes; `ChatCardApproveResult` with
+   `error` (box refusal) vs without.
+7. `ChatCardJobForSession` decode: `{readOnly:false}`; `{readOnly:true, job}`
+   with/without `parent`; unknown extra fields ignored.
+8. `ChatCardOwnershipResolver`: resolving+`{readOnly:false}` → allowed;
+   resolving+`{readOnly:true}` → readOnlyJob; capability absent → allowed +
+   `jobBarUnavailable`; resolving+transport failure → resolving;
+   resolving+`MantaError.server` → **resolving**; readOnlyJob+any failure →
+   readOnlyJob.
 9. `ChatCardMutationGate`: resolving send → hold, resolving reply → refuse,
    readOnlyJob → refuse, allowed → run.
-10. `ChatCardEditLast` pick/report.
+10. `ChatCardEditLast.pick`; `InboxCancelResult` / `InboxSetDeliveryResult`
+    decode `notice`/`error`/`restoreText` (present and absent).
 11. `ChatCardSeatLine.value` (nil, empty, normal).
 12. `ChatCardFocusPlanner` (found → present; target shifted by appended ids →
     same id found; missing+hasEarlier → widen capped at 500; missing+hasEarlier
@@ -849,8 +1134,9 @@ Existing members used, not redeclared: `progressGet(sessionID:)`,
     (bounded to 200).
 15. `ChatCardApprovalStore` with a fake `ChatCardApprovalAPI`: a matching
     pending permission never triggers approve; a fetch completing after a local
-    approve does not restore the card; `ok:false` → hint + refresh; empty list
-    → no approve call.
+    approve does not restore the card; `ok:false` → hint + refresh;
+    `ok:false, error` → card kept with the box's error; empty list → no
+    approve call.
 16. `ChatSessionStore.trailingBlocks`: auth error omitted, typed text used;
     dismissal by seq (two identical errors). M-01-4: `footerTruncationIDs`
     empty → notice kept; containing M with truncation on M → omitted.
@@ -872,9 +1158,19 @@ Existing members used, not redeclared: `progressGet(sessionID:)`,
     unchanged and reveals 12 rows (no refetch); at index 0 it also widens;
     `.tooFarBack` copy for a target beyond 500.
 
-Checks before reporting done: `mobile/native/verify.sh` (pure suite) green,
-`ios-mantaui action: test-unit` green on the branch, `npm run typecheck` and
-`npm test` unchanged-green.
+20. M-01-7: with `TranscriptDisplayOptions.showDetails` off the fetch passes
+    `slim: true`; on → `slim: false`; posting `didChange` triggers one refetch
+    (and the remap of M-01-3).
+21. Capabilities: `ChatCardCapabilities` unknown → Edit last hidden-disabled;
+    absent `chat-cards-1` → "Update your box to use this" caption.
+
+Server/desktop tests: SF-0…SF-5 node tests listed above; vitest per "Desktop
+migration".
+
+Checks before reporting done: `npm run typecheck`, `npm test` (incl. the new
+node tests — the two integration test files run green after integration agent B
+applies M-02-srv-*), `mobile/native/verify.sh` (pure suite) green,
+`ios-mantaui action: test-unit` green on the branch.
 
 ## Mount requests
 
@@ -885,6 +1181,23 @@ IDs match the master's canonical mount ledger (`00-master.md`).
 | M-02-1 | `TranscriptRow.swift` (WS01) | Integration agent B (WS01 does not run in B) | `EnvironmentValues.transcriptHighlightedRowID: String?` (WS02, `ChatCardMessageFocus.swift`) | In `TranscriptCellReveal` add `@Environment(\.transcriptHighlightedRowID) private var highlightedRowID`; on `cellContent` add `.background(item.id == highlightedRowID ? tokens.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: Metrics.radius.md))` and `.animation(.easeOut, value: highlightedRowID)`. Nothing else. | WS02 commit containing `ChatCardMessageFocus.swift` |
 | M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 (wave B) | — (plain parameter) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete, the Trust-mode toggle, Rename (M-04-1) and the Mode rows (M-04-2). ChatScreen passes `isReadOnlyJob: store.isBackgroundJobReadOnly`. The default keeps either landing order compiling. | none |
 | M-02-3 | `mobile/native/Package.swift` | Integration agent B | `ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift` (WS02) | Append the two files to the `MantaUI` target `sources` and the test file to `MantaUITests` `sources`, then run `./verify.sh`. Do NOT add `MantaAPIClient+ChatCards.swift`, `ChatCardViews.swift`, `ChatCardApprovalStore.swift`, `ChatCardJobOwnershipStore.swift`, `ChatCardMessageFocus.swift`, `ChatCardsStoreTests.swift`. | WS02 commit |
+| M-02-4 | `SessionModels.swift` (WS04) | Integration agent B (WS04 not in B) | `delegate:list` row fields `statusLabel`, `summary` (SF-4, S16) | `DelegateJob` gains `var statusLabel: String? = nil`, `var summary: String? = nil` (CodingKeys + lenient decode in the existing `init(from:)`); **delete** `BackgroundJobFormat.statusLabel(_:)` (the box owns it). `timing`, `sorted`, `failureReason` stay (clock/sort/transport — KEEP-CLIENT). | WS02 commit (SF-4 server) |
+| M-02-5 | `BackgroundJobsSheet.swift` (WS02 from wave B, master D28) | WS02 (wave B, own file) | `DelegateJob.statusLabel: String?`, `.summary: String?` (pinned; added to WS04's `SessionModels.swift` by IB via M-02-4) | In `detailLine(_:)` (~:376) use `job.statusLabel ?? job.status` instead of `BackgroundJobFormat.statusLabel(job)`; for a terminal job append `job.summary` when non-nil. Old box: the raw `status` word (data, no rule). | M-02-4 |
+| M-02-srv-1 | `src/server/rpc.mjs` (`"server:version"`, :2584) | Integration agent B (1st in wave-B server order) | `BOX_CAPABILITIES` (`boxCapabilities.mjs`) | `({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion, capabilities: [...BOX_CAPABILITIES] })` + import. | WS02 commit |
+| M-02-srv-2 | `src/server/streamInterp.mjs` (`session.retry.scheduled`, :771–782) | Integration agent B | `describeRetry` (`streamInterpretation.mjs`) | Emit `{attempt, message, ...(next), ...describeRetry({attempt, message, action: null})}`. | WS02 commit |
+| M-02-srv-3 | `src/server/streamInterp.mjs` (compaction cases, :973–985) | Integration agent B | `compactionFirstLine` | `started`: `st.compactionText = textOf(d.text)`; `delta`: `st.compactionText += textOf(d.text)`; `ended`: `emit(sid, "compaction", { phase: "ended", firstLine: compactionFirstLine(st.compactionText ?? "") })`, then `st.compactionText = ""`. | WS02 commit |
+| M-02-srv-4 | `src/server/index.mjs` (`optimizer.compacted` publish, :1925–1937) | Integration agent B | `describeBackgroundCompaction` | Add `text: describeBackgroundCompaction({ beforeTokens: before ?? null, afterTokens: after ?? null, away })` to the payload + import. | WS02 commit |
+| M-02-srv-5 | `src/server/streamInterp.mjs` (`session.execution.failed`, :742–760) | Integration agent B | `describeSessionError` | Add `display: describeSessionError({ name: err?.name ?? null, message: human, rawMessage: message }, st.model?.providerID ?? null)` to the `sessionError` payload + import. | WS02 commit |
+| M-02-srv-6 | `src/server/rpc.mjs` (`buildHandlers` deps + delegate channels, :2434–2480) | Integration agent B | `createDelegateView` instance `delegateView` | Destructure `delegateView` from deps; `"delegate:list"` → `delegateView ? delegateView.decorateList(list) : list` (array case only); NEW `"delegate:job-for-session"`; `"delegate:approve"` → `validateApprovalTools` check first (SF-4). | M-02-srv-10 |
+| M-02-srv-7 | `src/server/rpc.mjs` (`opencode:prompt` :1344, `opencode:inbox-cancel` :1388, `opencode:inbox-set-delivery` :1402, `opencode:compact-session` :1968, `opencode:run-command` :2055) | Integration agent B | `delegateView.assertWritable` | First statement of each handler: `await delegateView?.assertWritable(<sessionId>)` (`input?.sessionId`, or the arg for compact). | M-02-srv-6 |
+| M-02-srv-8 | `src/server/rpc.mjs` (`handleRpcRequest` catch, :2705) | Integration agent B | `ReadOnlyJobError.rpcStatus/code` | Before the HandoffError branch: `if (typeof e?.rpcStatus === "number") { sendJson(e.rpcStatus, { error: String(e.message), code: e.code }); return; }`. | M-02-srv-7 |
+| M-02-srv-9 | `src/server/rpc.mjs` (inbox handlers :1388–1419) | Integration agent B | `describeInboxCancel`, `describeInboxSetDelivery` (`inboxCopy.mjs`) | Wrap results: `{...r, ...describeInboxCancel(r, { restore: input?.restore === true })}` / `{...r, ...describeInboxSetDelivery(r)}`. | WS02 commit |
+| M-02-srv-10 | `src/server/index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | Integration agent B | `createDelegateView` | `const delegateView = createDelegateView({ listJobs: (f) => delegateEngine.listJobs(f ?? {}), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() });` and pass `delegateView` into `buildHandlers({...})`. | WS02 commit |
+
+Server-mount order inside integration agent B: M-02-srv-1 → 10 → 6 → 7 → 8 → 9
+→ 2 → 3 → 5 → 4, then `npm run test:server` (includes WS02's
+`streamInterp.chatCards.test.mjs` and `rpc.delegateView.test.mjs`), all before
+any 07/09/06 server mount (D24 order).
 
 ## Mounts applied by this workstream (wave B)
 
@@ -899,12 +1212,15 @@ providers' specs.
 | M-01-2 | WS01 | `ChatSessionStore.swift` (`rebuildBlocks`) | `ChatTranscriptMapper.liveMediaTail(messages:live:isLiveWindow:)` | In both branches append, through `uniqueTranscriptRows`, `ChatTranscriptMapper.liveMediaTail(messages: presentedMessages, live: TranscriptMediaStore.shared.entries(for: sessionId), isLiveWindow: presentedMessages.last?.info.id == messages.last?.info.id)` after `liveTranscript`, before the live prose tail and `trailing`. Same `presentedMessages` as M-01-1 (keeps the two media segments disjoint). | M-01-1 |
 | M-01-3 | WS01 | `ChatSessionStore.swift` | `TranscriptMediaStore.shared.$sessions`, `TranscriptDisplayOptions.didChange` | Next to the widget sink (~445–450): `TranscriptMediaStore.shared.$sessions.map { $0[sessionId] }.removeDuplicates()` and `NotificationCenter.default.publisher(for: TranscriptDisplayOptions.didChange)`, each → private `remap()` (re-map `transcript` from `presentedMessages` with `mapOptions()` under the `refreshWidgets` no-blank-clobber guard, then `rebuildBlocks()`). Also `remap()` when `commandByMessageID` or `truncation` changes and when `running` flips to false. | M-01-1 |
 | M-01-4 | WS01 | `ChatSessionStore.swift` (`trailingBlocks`, `rebuildBlocks`) | `ChatTranscriptMapper.footerTruncationMessageIDs(_:)` | New `trailingBlocks` parameter `footerTruncationIDs: Set<String> = []`, passed `ChatTranscriptMapper.footerTruncationMessageIDs(liveTranscript)` from `rebuildBlocks`; skip the truncation `.notice` only when `truncation.messageID` is non-nil and in that set (the old "message exists in `messages`" rule is removed). Tests #16 (incl. WS01's incomplete-snapshot integration case). | M-01-1 |
+| M-01-7 | WS01 (master D22) | `ChatSessionStore.swift` (`fetchTranscript`, ~1013; M-01-3 sink) | `TranscriptDisplayOptions.fetchSlim: Bool`, `TranscriptDisplayOptions.didChange: Notification.Name` (WS01, `TranscriptDisplayOptions.swift`) | Read the persisted toggle at fetch time: `api.messages(sessionId: sessionId, limit: limit, slim: TranscriptDisplayOptions.fetchSlim)` (replaces the hard-coded `slim: true`), so "show reasoning & full output" ON fetches full parts (reasoning is slim-dropped, D22). On `didChange` the M-01-3 subscription calls `scheduleRefetch()` (a real refetch at the new slimness — the canonical history changes shape) in addition to `remap()`. Test #20. | M-01-3; WS01 `TranscriptDisplayOptions.fetchSlim` (shipped, A1) |
 | M-03-7 | WS03 | `ChatScreen.swift` (`ChatScreenContent`) | `ComposerTextController.acceptsInput` (WS03); `ChatSessionStore.isBackgroundJobReadOnly` (WS02) | `.onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }` and `.onChange(of: store.isBackgroundJobReadOnly) { _, ro in composer.acceptsInput = !ro }` (F6 "Composer writability"). `.resolving` keeps `true`. | M-03-1 (A1); WS02 F6 |
 | M-04-3 | WS04 | `ChatScreen.swift` | `SessionListStore.window(forSessionID:) -> (project: String, window: MantaWindow)?` | `.navigationTitle(sessionStore.window(forSessionID: store.sessionId)?.window.name ?? title)` (`:342`). | WS04 merged (A2) |
 | M-04-4 | WS04 | `ChatScreen.swift` | `SessionRenameSheet(title:initialName:onSave:)`, `SessionListStore.renameSession(project:index:newName:) async -> String?`, `ChatOverflowSheet.onRename` (M-04-1, WS07) | Pass `onRename:` → dismiss the overflow, then present `SessionRenameSheet(title: "Rename session", initialName: <live window name>, onSave: { await sessionStore.renameSession(project: projectName, index: w.index, newName: $0) })`; window unresolved → `store.actionHint = "Can't rename — session's window not found."`. | M-04-1 (WS07, same wave, param pinned) |
 | M-04-5 | WS04 | `ChatScreen.swift` | `MantaNavigator.switchMode(windowKey:sessionID:to:)`, static `MantaNavigator.windowKey(project:windowIndex:)`, `SessionModeStore.read(sessionID:)`, `SessionListStore.launchers: [AvailableLauncher]`, `.launcherCatalog: SessionLauncherCatalog`, `.refreshLaunchers()`; overflow params from M-04-2 | Pass to `ChatOverflowSheet`: `mode: sessionWindow == nil ? nil : SessionModeStore.read(sessionID: store.sessionId)`, `launchers: sessionStore.launchers`, `launcherCatalog: sessionStore.launcherCatalog`, `onSelectMode: { m in guard m != .chat, let w = sessionWindow else { return }; navigator.switchMode(windowKey: MantaNavigator.windowKey(project: projectName, windowIndex: w.index), sessionID: store.sessionId, to: m) }`, `onRetryLaunchers: { Task { await sessionStore.refreshLaunchers() } }`. Add `@EnvironmentObject private var navigator: MantaNavigator`. | M-04-2 (WS07, same wave, params pinned) |
 | M-04-6 | WS04 | `ChatScreen.swift` | `MantaNavigator.presentSwitcher()` | `ToolbarItem(placement: .topBarTrailing)` before the overflow button (`:346`): `Button { navigator.presentSwitcher() } label: { Image(systemName: "rectangle.stack") }.accessibilityLabel("Switch session")`. | WS04 merged |
-| M-06-1 | WS06 | `ChatScreen.swift` | `SearchScreen(scope:seed:search:)`, `SearchScope.fromProjects(_:primarySessionId:)` | In `.toolbar` (`:345–351`), before the ellipsis: `ToolbarItem(placement: .primaryAction) { Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search conversations") }`; `@State private var showSearch = false`; `.sheet(isPresented: $showSearch) { SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: store.sessionId)) }`. Not on the read-only subagent screen. | WS06 symbols (same wave, pinned) |
+| M-06-1 | WS06 | `ChatScreen.swift` | `SearchScreen(primarySessionId:seed:search:)` (server-first: no `scope:` argument; `SearchScope` no longer exists) | In `.toolbar` (`:345–351`), before the ellipsis: `ToolbarItem(placement: .primaryAction) { Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search conversations") }`; `@State private var showSearch = false`; `.sheet(isPresented: $showSearch) { SearchScreen(primarySessionId: store.sessionId) }`. Not on the read-only subagent screen. | WS06 symbols (same wave, pinned) |
+| M-09-9 (UsageSheets part) | WS09 | `UsageSheets.swift` (usage-sheet rows, `:513`) | `UsageMeters.band(_ window: UsageWindow) -> MeterBand?` (WS09); `UsageWindow.tone` (M-09-8, IB) | Replace `UsageMeters.band(window.pct)` with `UsageMeters.band(window)`; a nil band tints with `tokens.tx4` (neutral). | WS09 (B, pinned); M-09-8 |
+| M-02-5 | WS02 (own) | `BackgroundJobsSheet.swift` | M-02-4 fields | as in Mount requests | M-02-4 (IB) |
 | M-07-1 | WS07 | `ChatScreen.swift` | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)`, `composer` (WS03 M-03-1), `MantaNavigator.open(.message(sessionID:messageID:))` | In `destinationCard(.artifacts)` (`:782–785`): `ArtifactsCard(sessionId: store.sessionId, onClose: { overflowDestination = nil }, projectName: projectName, cwd: sessionWindow?.cwd, composer: composer, onJumpToMessage: { mid in pendingArtifactJump = mid; overflowDestination = nil })`; `@State private var pendingArtifactJump: String?`; in `flushPendingPush()` (`:825`), first: `if let mid = pendingArtifactJump { pendingArtifactJump = nil; navigator.open(.message(sessionID: store.sessionId, messageID: mid)) }` → F10. No `onAttach`, no attach hint — the card owns attach feedback. | M-03-1 (A1), WS04 navigator (A2), WS07 params (B, defaulted) |
 | M-07-2 | WS07 | `ChatScreen.swift` | `WebhooksCard(sessionId:onClose:)`, `ChatOverflowSheet.onWebhooks: (() -> Void)?` | `OverflowDestination` (`:88`) + `case webhooks`; `destinationCard`: `case .webhooks: WebhooksCard(sessionId: store.sessionId, onClose: { overflowDestination = nil })`; `overflowSheet` (`:658`) passes `onWebhooks: { overflowDestination = .webhooks }`. | WS07 (B) |
 | M-09-5 | WS09 | `ChatScreen.swift` | `UsageAlertsStore.shared.activeSessionId` | Beside the two `reportFocus(sessionId: store.sessionId, visible: true)` calls (`:371`, `:472`): `UsageAlertsStore.shared.activeSessionId = store.sessionId`. Beside the two `visible: false` calls (`:381`, `:475`): `if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }`. | WS09 symbol (same wave, pinned) |
@@ -950,10 +1266,19 @@ providers' specs.
   `SessionListStore`, `SessionRenameSheet`, `SessionModeStore`; WS01
   `TranscriptMapOptions`, `TranscriptMediaStore`, `TranscriptDisplayOptions`,
   `TranscriptCommandOrigin`, `TranscriptLiveTruncation`, `ChatTranscriptMapper`
-  extensions; WS06 `SearchScreen`,
-  `SearchScope.fromProjects`; WS07 `ArtifactsCard`, `WebhooksCard`; WS09
-  `UsageAlertsStore`.
-- **C7:** the two test files; no node tests.
+  extensions; WS06 `SearchScreen(primarySessionId:seed:search:)`; WS07
+  `ArtifactsCard`, `WebhooksCard`; WS09 `UsageAlertsStore`,
+  `UsageMeters.band(_ window:)`.
+- **Server-first (D23/D24) provided:** `delegate:job-for-session`,
+  decorated `delegate:list` (`statusLabel`, `summary`), `delegate:approve`
+  rule check, read-only-job 409 refusal, inbox result `notice`/`error`/
+  `restoreText`, frame fields `retry.headline/caption/body`,
+  `sessionError.display`, `compaction.firstLine`, `optimizer.compacted.text`,
+  capability `chat-cards-1` in `server:version` / `GET /api/version`, and the
+  `BOX_CAPABILITIES` list other workstreams append to.
+- **C7:** the two XCTest files; node tests `delegateView`, `inboxCopy`,
+  `boxCapabilities`, `version`, `streamInterp.chatCards`, `rpc.delegateView`;
+  vitest `streamInterpretation.test.ts` + the desktop updates.
 
 ## Deferred
 
@@ -963,9 +1288,13 @@ providers' specs.
 - ↑ on an empty composer for Edit last — keyboard shortcut, out of scope.
 - Approval expiry countdown — desktop has none.
 - **Desktop bugs reported (D10, renderer-only, not fixed):** Reconnect
-  dispatches an unheard event; approve/decline/stop swallow errors; approval
+  dispatches an unheard event; decline/stop swallow errors; approval
   auto-approve trusts *pending* permissions' `always[]` patterns
-  (`ChatPanel.tsx:956–960`).
+  (`ChatPanel.tsx:956–960`, audit C7 → WS11 follow-up). (Approve now shows the
+  box's refusal, because the desktop switches to SF-4 in this workstream.)
+- Audit MOVE-LATER for WS02 (C7 auto-approve on the box, C8 single
+  pending-approvals shape, C14 prompt error codes, C16 seat `displayName`) —
+  WS11 follow-ups, not built here.
 
 ## Open questions
 
@@ -1005,3 +1334,21 @@ Q3 (Edit last over a draft) by D9.
 | Cross #7 (search scope) | M-06-1 uses `.fromProjects(sessionStore.projects, primarySessionId: store.sessionId)` verbatim. |
 | Cross #8 (artifacts) | M-07-1 passes `composer: composer`; no `onAttach`; M-07-2 under its canonical ID. |
 | Cross #10 (ledger IDs) | Both tables use ledger IDs; withdrawn/void requests moved to a "not received / superseded" list; M-08-2 recorded as declined; `.message` handling relabelled as WS02's own C2 work. |
+
+## Review responses (server-first)
+
+| Item | Change |
+|---|---|
+| D23/D24 scope | New "## Server-first (D23/D24)" section folds audit C1, C2, C5, C9, C10, C11, S16 (+ C6 server enforcement) with modules, wire shapes, errors and node tests. |
+| C1 retry copy | `describeRetry` in `src/shared/streamInterpretation.mjs`; `retry` frame + `headline/caption/body` (M-02-srv-2). iOS `ChatCardRetryCopy` deleted; desktop `RetryCard` renders the fields. |
+| C2 compaction copy | `compaction` `ended` + `firstLine` (box accumulates text, M-02-srv-3); `optimizer.compacted` + `text` (M-02-srv-4); one shared `formatTokenCount` (desktop `formatTokens` built on it). iOS `ChatCardTokens`/`ChatCardCompactionNotice.text` deleted; desktop `formatCompactionSaving` deleted. |
+| C5 send-error | `describeSessionError`/`authErrorAdvice`/`AUTH_PROVIDER_LABELS` moved from `chatUtils.ts` to the shared module, run in streamInterp against the box's own model record (`sessionError.display`, M-02-srv-5). iOS `ChatCardSendError` + `sessionErrorProviderID` deleted; desktop `useSseBus` reads `display`. |
+| C9 job view | NEW `src/server/delegateView.mjs` + `delegate:job-for-session` (M-02-srv-6/10). iOS `ChatCardJobLogic` and raw `ChatCardJob` decoding deleted, bar renders the view; desktop `isReadOnlyJob`/`parseModelRef`/`formatJobSummary` deleted, `ReadOnlyJobBar` takes the view. The `.resolving` machine stays client (audit). Deviation from the audit's sketch: the parent is returned as `{sessionId, name, project, windowIndex}` instead of a `windowKey`, because the key format is a client navigation concern (`MantaNavigator.windowKey` is static client code). |
+| C10 refusal | `assertWritable` on prompt / inbox-cancel / inbox-set-delivery / compact / run-command, 409 `{error: <sentence>, code:"read_only_job"}` via a generic `rpcStatus` branch in `handleRpcRequest` (M-02-srv-7/8). Client gate kept as UX. |
+| C11 inbox copy | NEW `src/server/inboxCopy.mjs`; results gain `notice`/`error`/`restoreText`, cancel takes `restore` (M-02-srv-9). iOS `InboxActionReport.cancel/setDelivery` deleted; desktop `describeInboxCancel/describeInboxSetDelivery` deleted. |
+| S16 list labels | `delegate:list` rows + `statusLabel`, `summary`; iOS `BackgroundJobFormat.statusLabel` deleted via M-02-4/5 (integration B). |
+| Wire compat | Additive only; capability `chat-cards-1` (`boxCapabilities.mjs`, `server:version`, `/api/version`); per-feature old-box behaviour stated in F1/F2/F4/F6/F8 and SF-0 — hidden/disabled with "Update your box to use this", never a fallback copy of the moved logic. |
+| D22 / M-01-7 | Added to "Mounts applied": fetch with `slim: TranscriptDisplayOptions.fetchSlim`, refetch on `didChange`; test #20. |
+| Client members | `chatCardJobs()` replaced by `delegateJobForSession(sessionId:)`; `delegateApprove` returns `ChatCardApproveResult`; NEW `inboxCancelReported(sessionId:id:restore:)`, `boxCapabilities()`. Master registry row for WS02 must be updated accordingly. |
+| Rejected audit items | None. |
+| Reconciliation (master "Reconciliation log (server-first)") | `formatTokenCount` moved to the ONE module `src/shared/formatTokens.mjs` (D26, also exports `formatTokens`); `formatLastMove` + `SessionHeader.tsx` stop using deleted/duplicate compact formatters; WS02 is the wave-B owner of the shared desktop files (D27) incl. `demoApi.ts`/`demoCoverage.test.ts`; `BackgroundJobsSheet.swift` is WS02's (D28) so M-02-5 is WS02's own edit; M-06-1 receipt now `SearchScreen(primarySessionId:)`; M-09-9 receipt (UsageSheets band) added; `boxCapabilities.mjs` / `boxCapabilities()` / `useBoxCapability` confirmed as the single module/accessors (D25). |

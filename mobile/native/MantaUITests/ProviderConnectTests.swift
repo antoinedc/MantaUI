@@ -366,6 +366,21 @@ final class ProviderConnectTests: XCTestCase {
         XCTAssertEqual(state.reduce(.cancelFinished), [.runStart(b)])
     }
 
+    func testLeaseGrantedButRetiredBeforeRunningFreesWithoutACancel() {
+        var state = ProviderOAuthLeaseState(provider: "openai")
+        _ = state.reduce(.request(a))                       // A owns, start in flight
+        XCTAssertEqual(state.reduce(.retire(a)), [])        // retired before its reply
+        XCTAssertEqual(state.reduce(.request(b)), [])       // B queues
+        // A's start was never actually sent: free the slot, no oauth-cancel.
+        XCTAssertEqual(state.reduce(.grantedButRetired(a)), [.runStart(b)])
+        XCTAssertEqual(state.owner, b)
+        XCTAssertEqual(state.reduce(.grantedButRetired(a)), [], "only the owner, once")
+        // Not retired → not applicable.
+        var other = ProviderOAuthLeaseState(provider: "openai")
+        _ = other.reduce(.request(a))
+        XCTAssertEqual(other.reduce(.grantedButRetired(a)), [])
+    }
+
     func testLeaseProvidersAreIndependent() {
         var openai = ProviderOAuthLeaseState(provider: "openai")
         var other = ProviderOAuthLeaseState(provider: "other")

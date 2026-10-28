@@ -284,6 +284,12 @@ final class ProviderConnectionsStore: ObservableObject {
         }
     }
 
+    /// A copy the user asked for happened: the banner says so (a menu item that
+    /// closes on tap shows nothing by itself).
+    func reportCopied(_ endpoint: ProviderEndpoint) {
+        say(ProviderEndpointCopy.copiedURL(name: endpoint.name), false)
+    }
+
     /// Whether "Send probe" has anything to probe.
     func probeKey(_ endpoint: ProviderEndpoint) -> String? {
         EndpointHealth.probeKey(providerID: endpoint.id, rows: healthRows(endpoint), enabledModels: endpoint.enabledModels)

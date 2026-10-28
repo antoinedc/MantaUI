@@ -56,6 +56,8 @@ final class ProviderConnectFlow: ObservableObject {
     private var installerExited = false
     private var pendingTeardown: Task<Void, Never>?
     private var begun = false
+    /// Cancel / Close / the sheet going away has happened: nothing may start again.
+    private var closed = false
 
     init(status: SubscriptionStatus, accounts: AccountsStore, connections: ProviderConnectionsStore,
          lease: ProviderOAuthLease = ProviderOAuthLease.shared) {
@@ -112,6 +114,10 @@ final class ProviderConnectFlow: ObservableObject {
             beginTeardown(old)
         }
         await pendingTeardown?.value
+        // The user may have pressed Cancel / Close while the old attempt was
+        // being released: a closed flow starts nothing (it would run with no UI
+        // and, for a device wait, own the provider-wide slot forever).
+        guard !closed else { return }
 
         let attempt = SignInAttempt()
         current = attempt
@@ -149,6 +155,18 @@ final class ProviderConnectFlow: ObservableObject {
             // is not: release it here.
             if reply.shape == .claudeLogin, let key = reply.sessionKey, !key.isEmpty {
                 beginTeardown(SignInAttempt(loginSessionKey: key))
+            }
+            if reply.shape == .oauthAuto {
+                // Idempotent: a no-op when the retire already happened or this
+                // attempt no longer owns the slot.
+                let lease = self.lease
+                let providerId = status.id
+                let attemptId = attempt.id
+                Task { @MainActor in
+                    if case .failure(let error) = await lease.retire(provider: providerId, attempt: attemptId) {
+                        NSLog("[accounts] cleanup of a late device start failed: %@", String(describing: error))
+                    }
+                }
             }
             if reply.shape != .oauthAuto { lease.settled(provider: status.id, attempt: attempt.id) }
             return
@@ -215,7 +233,7 @@ final class ProviderConnectFlow: ObservableObject {
             .filter { SignInAttemptGate.accepts(ptyEventKey: $0.sessionKey, attemptKey: installerKey) }
             .sink { [weak self] event in
                 guard case .exit = event.kind else { return }
-                Task { @MainActor in self?.installerExited = true }
+                MainActor.assumeIsolated { self?.installerExited = true }
             }
         do {
             try await api.signInPtySpawn(
@@ -525,6 +543,7 @@ final class ProviderConnectFlow: ObservableObject {
     /// failure to do so, close.
     func cancel() async {
         guard !cancelling else { return }
+        closed = true
         cancelling = true
         stopLocalWork()
         await pendingTeardown?.value
@@ -543,6 +562,7 @@ final class ProviderConnectFlow: ObservableObject {
 
     /// The sheet went away with the flow still open: best-effort cleanup, logged.
     func abandonIfOpen() {
+        closed = true
         stopLocalWork()
         keyDraft = ""
         codeDraft = ""

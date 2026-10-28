@@ -31,6 +31,9 @@ enum ProviderOAuthLeaseEvent: Equatable, Sendable {
     case cancelFinished
     /// The wait reached a terminal state on the box: free without cancelling.
     case settled(UUID)
+    /// The attempt was granted the slot but retired before its start was ever
+    /// sent: free it without a cancel (there is nothing on the box to cancel).
+    case grantedButRetired(UUID)
 }
 
 enum LeaseAction: Equatable, Sendable {
@@ -94,6 +97,10 @@ struct ProviderOAuthLeaseState: Equatable, Sendable {
 
         case .settled(let attempt):
             guard owner == attempt, !cancelling else { return [] }
+            return release()
+
+        case .grantedButRetired(let attempt):
+            guard owner == attempt, ownerStartInFlight, retirePending, !cancelling else { return [] }
             return release()
         }
     }
@@ -161,7 +168,10 @@ final class ProviderOAuthLease {
 
         // Retired in the gap between being granted the slot and running.
         if let current = states[provider], current.owner == attempt, current.retirePending {
-            apply(provider, .startFinished(attempt))
+            // Its start was never sent, so there is no wait on the box to cancel.
+            apply(provider, .grantedButRetired(attempt))
+            let waiting = cancelWaiters.removeValue(forKey: provider) ?? []
+            for continuation in waiting { continuation.resume(returning: .success(())) }
             return nil
         }
 

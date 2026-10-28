@@ -1167,3 +1167,16 @@ None remaining. Round-0 questions are settled:
    through the shared classifier and reports *partial* (not confirmed) when the
    selection differs. Editing the draft never rewrites the pending attempt's
    expectation. Test: same id/URL, different model selection → partial.
+
+## Reconciliation notes (server-first) — notes only, no contract change
+
+- Received after wave B (integration agent B): **M-09-9** in
+  `AccountsScreen.swift` — `UsageMeters.band(window.pct)` (`:716`) becomes
+  `UsageMeters.band(window)`; and the optional **M-09-6** Models link.
+- WS11 D4 (wave D) moves K2/K3/K5/K7 copy to the box and deletes
+  `AccountsCopy.reason(forCode:)`, `AccountsSelectors.moveNoticeText`,
+  `EndpointHealth.stateLine`, `AccountRowState.describe`, migrating their
+  callers in `AccountsStore`, `AccountsScreen`, `ProviderConnectionModels`,
+  `ProviderConnectionsStore`, `ProviderEndpointModels`,
+  `ProviderEndpointFormModel` (per WS11 Files). `AccountsStore.conversationSeat`
+  (read by WS02, D17) is not changed.

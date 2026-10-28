@@ -142,6 +142,7 @@ final class ProviderEndpointTests: XCTestCase {
         XCTAssertEqual(ProviderEndpointCopy.removed(name: "V"), "Removed V.")
         XCTAssertEqual(ProviderEndpointCopy.removeFailed(name: "V", reason: "boom"), "Couldn't remove V — boom")
         XCTAssertEqual(ProviderEndpointCopy.removeDestructive, "Remove endpoint")
+        XCTAssertEqual(ProviderEndpointCopy.copiedURL(name: "V"), "Copied V's URL.")
     }
 
     // MARK: - Model checklist

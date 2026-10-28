@@ -1519,3 +1519,29 @@ None. (Round 1's `TerminalSocket.swift` ownership question is settled by D20.)
 - M-04-2 gates the mode rows on `!isReadOnlyJob` (matches WS07/M-02-2).
 - §15 M-09-2/M-09-4 receipts copied from WS09's requests; stale "M1/M2/M3"
   labels replaced by canonical IDs or relabelled as own C2 work.
+
+## Reconciliation notes (server-first) — notes only, no contract change
+
+- **M-02-4 (wave B, integration agent B)** edits `SessionModels.swift`:
+  `DelegateJob` gains `statusLabel: String?` and `summary: String?` (lenient
+  decode) and `BackgroundJobFormat.statusLabel(_:)` is deleted (the box owns
+  it). `BackgroundJobFormat.timing/sorted/failureReason` stay.
+- **`BackgroundJobsSheet.swift` is owned by WS02 from wave B** (master D28) —
+  it applies M-02-5 itself.
+- **Stopped state (master D29):** WS04's `usageStoppedList()`,
+  `SessionListStore.stoppedRecords` / `stoppedLastLooked` / `unarmedStoppedCount`
+  / `isStopped(sessionID:)` remain the source for row markers and the WS09
+  M-09-2 capsule. WS09's `usage-stopped:view` drives only the resume screen.
+  WS11 D7 may later feed row markers from `windowStatus.stopped`, migrating
+  both consumers in the same step.
+- WS11 (wave D) deletes and migrates WS04's ported rules (naming, rename
+  validation, workspace root, clone copy, close flow, job nesting, subagent
+  count — `11-server-consolidation.md` D5–D7). `MantaNavigator`,
+  `SessionListStore.window(forSessionID:)`, `renameSession(project:index:newName:)`,
+  `SessionModeRows` and every other registry symbol consumed by waves B/C keep
+  their signatures.
+- **M-06-2 receipt (§15) is superseded by the master ledger:** the provider is
+  now `SearchScreen(primarySessionId: nil, seed:)` plus
+  `SearchCopy.isActive/normalized`; `SearchScope.fromProjects` no longer exists
+  (WS06 server-first). Integration agent B applies the ledger text.
+- **M-09-2 receipt** is unchanged (`unarmedStoppedCount`, D29).

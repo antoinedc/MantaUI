@@ -35,6 +35,7 @@ everything that crosses workstreams: scope, ownership, waves, shared contracts.
 | 08 | `08-accounts.md` | add seat; re-sign a logged-out seat; connect provider (Claude / Codex / Kimi); custom endpoint form; per-model on/off; disconnect / refresh / remove |
 | 09 | `09-models-usage.md` | models table (default / in picker / subagent); spend ledger; optimizer dashboard (read-only view); unidentified models fix-up; model price form; resume-after-limit screen; usage alerts (90% / limit with remind / keep going) |
 | 10 | `10-settings-box.md` | missing settings (worktree toggles, auto-save files, theme override, haptics toggle, opencode port, restore windows); extensions (plugins list, forge rules + GitHub, skill registries, references, CLI launch options); box (add a device, remove server, restart opencode, device list + revoke); server update check/apply; upgrade screen actions (retry / roll back / copy details); pairing: "Link this phone?" confirm + no Box ID field |
+| 11 | `11-server-consolidation.md` | server-first consolidation (D23/D24): moves logic already ported in waves A–C (WS01/03/04/08/10 + older ports) onto the box, switches the desktop, deletes the Swift ports; capability store/guardrail (runs alone, wave D) |
 
 ## Ground rules for every workstream
 
@@ -155,7 +156,7 @@ pure logic, and node tests for any server module it adds. The desktop suites
 | WS | Owns (may edit) | New files prefix |
 |---|---|---|
 | 01 | `ChatModels.swift`, `TranscriptComponents.swift`, `TranscriptRow.swift`, `ToolActivity.swift`, `ActivitySheet.swift`, `VoiceNotePlayer.swift` | `Transcript*` |
-| 02 | `ChatScreen.swift`, `ChatSessionStore.swift`, `MantaEventStore.swift`, `MantaStreamModels.swift`, `PendingPrompt.swift`, `RunningIndicator.swift`, `UsageSheets.swift` (context sheet only) | `ChatCard*` |
+| 02 | `ChatScreen.swift`, `ChatSessionStore.swift`, `MantaEventStore.swift`, `MantaStreamModels.swift`, `PendingPrompt.swift`, `RunningIndicator.swift`, `UsageSheets.swift` (context sheet + M-09-9 receipt), `BackgroundJobsSheet.swift` (D28) | `ChatCard*` |
 | 03 | `ComposerView.swift`, `ComposerTypeahead.swift`, `ComposerHistory.swift` | `Composer*` |
 | 04 | `SessionListView.swift`, `SessionListStore.swift`, `SessionModels.swift`, `SessionCreateSheet.swift`, `FolderPickerView.swift`, `RootView.swift`, `MantaAppRoot.swift` | `Session*`, `MantaNavigation.swift`, `CloneFromGitHub*` |
 | 05 | — (new files only + mounts) | `Git*`, `Review*`, `Inbox*` |
@@ -164,6 +165,7 @@ pure logic, and node tests for any server module it adds. The desktop suites
 | 08 | `AccountsScreen.swift`, `AccountsStore.swift`, `AccountsModels.swift` | `Accounts*`, `Provider*` |
 | 09 | `UsageMeters.swift`, `ModelPickerSheet.swift`, `ChatModelCatalog.swift` | `Models*`, `Usage*`, `Optimizer*` |
 | 10 | `SettingsScreen.swift`, `MantaSettingsStore.swift`, `MantaSettingsModels.swift`, `UpgradeScreen.swift`, `UpgradeStore.swift`, `UpgradeModels.swift`, `MantaOnboarding.swift`, `MantaPairingModels.swift`, `src/shared/settingsSchema.ts`, `generated/swift/SettingsSchema.swift` | `Settings*`, `Box*`, `Extensions*` |
+| 11 | any file (wave D runs alone, D24) | `BoxCapabilit*`, `UpdateBoxNote*`, `TranscriptView*` |
 
 Server-side: any new server module is owned by the workstream that adds it;
 registering a channel in `src/server/rpc.mjs` / a route in `index.mjs` is an
@@ -181,10 +183,12 @@ Workstreams in the same wave never share a file.
 - **Wave B:** WS02, WS07, WS09, WS06 (WS06 adds its session-list entry point
   after WS04 has landed).
 - **Wave C:** WS05 (needs WS02's ChatScreen and WS03's insertion API).
+- **Wave D:** WS11 alone (D24), after C-int; sub-steps D1…D11 in order.
 
-Server-file conflicts: only one workstream per wave may edit `rpc.mjs` /
-`index.mjs`; if two in the same wave need it, the second serialises behind the
-first within the wave.
+Server-file conflicts (superseded by D24/D27): in wave B no worker edits
+`rpc.mjs` / `index.mjs` / `streamInterp.mjs`; integration agent B applies every
+registration in the ordered "Server registration mounts" table. Waves C and D
+have a single worker that edits them directly.
 
 ## Consolidation decisions (binding; override any workstream spec that disagrees)
 
@@ -409,6 +413,68 @@ D24. **Server-first execution (user decisions 2026-10-28).**
   renderer files touched by two same-wave workers are ledgered like Swift mounts.
 - WS08 (in flight) is not churned: its wording/error items go to WS11.
 
+D25. **One capability module, one id list, one client accessor per client.**
+- Server: `src/server/boxCapabilities.mjs` (`export const BOX_CAPABILITIES`),
+  created by WS02 in wave B with `chat-cards-1`; WS02 also returns it as
+  `capabilities: string[]` from `GET /api/version` (`version.mjs`) and
+  `server:version` (M-02-srv-1). Every other id is APPENDED to that list:
+  wave B by integration agent B (M-07-S2, M-09-srv-2, M-06-srv-2, in the D24
+  order), wave C by WS05 itself (M-05-srv-2), wave D by WS11 (D1…D11). No other
+  module (`serverCapabilities.mjs`, `boxFeatures.mjs`) is created.
+- Ids follow `kebab-name-N` (`/^[a-z0-9-]+-\d+$/`); the full list is the
+  "Capability id registry" below (a node test pins it).
+- Client accessors (waves B/C): iOS `MantaAPIClient.boxCapabilities() async
+  throws -> Set<String>` (WS02, `+ChatCards`; chat-scoped cache
+  `ChatCardCapabilities` is WS02-internal); desktop `useBoxCapability(id):
+  boolean | null` in `src/renderer/hooks/useBoxCapabilities.ts` (WS02). WS10's
+  `serverVersion()` does NOT grow a second copy. Specs 05/06/07/09 keep their
+  exact response-shape / unknown-channel detection (same "Update your box to
+  use this" state, no extra round trip); any list read they do goes through
+  the accessors above.
+- Wave D (decided): WS11 D1 adds `ServerVersionInfo.capabilities` +
+  `BoxCapabilitiesStore`, DELETES `boxCapabilities()` and `ChatCardCapabilities`
+  after migrating every caller, and keeps `useBoxCapability` as the desktop
+  hook (no new `boxCapabilities.ts`).
+
+D26. **One token formatter.** `src/shared/formatTokens.mjs` (+ `.d.mts`, test),
+created by WS02 in wave B, exports `formatTokenCount(n)` (compact, no unit) and
+`formatTokens(n)` ("N tokens", byte-identical to today's `chatUtils.ts:219`).
+`streamInterpretation.mjs`, WS09's box views, WS11's `resentText` and every
+renderer caller import it; `chatUtils.ts` re-exports `formatTokens`; the
+private copies (`chatUtils.formatTokensCompact`, `SessionHeader.tsx`'s
+`formatTokensCompact`) are deleted by WS02. WS09 consumes it and creates no
+second module. (The iOS token-formatter consolidation stays a WS11 hygiene
+follow-up.)
+
+D27. **One owner per shared desktop/server file per wave** (extends D24). Wave
+B owners and the IB ledger rows for everyone else are the table "Wave-B shared
+desktop / server file ownership" below. A non-owner applies its rows locally
+(uncommitted) to verify; integration agent B applies them after the owner's
+commit, desktop order 02 → 07 → 09 → 06, then runs `npm run typecheck` and
+`npm test`. Waves C and D have one worker each, which edits any file.
+
+D28. **`BackgroundJobsSheet.swift` → WS02 from wave B** (D1-style amendment;
+it was unowned). WS02 applies M-02-5 itself; M-02-4 (`SessionModels.swift`,
+WS04-owned, built) is applied by integration agent B. WS11 D7 does not touch
+the sheet (job nesting is a session-list concern).
+
+D29. **Stopped state: two channels, two jobs.** WS04's built
+`usageStoppedList()` + `SessionListStore.stoppedRecords` / `stoppedLastLooked` /
+`unarmedStoppedCount` / `isStopped(sessionID:)` remain the source for ROW
+markers and WS09's M-09-2 capsule; WS09's `usage-stopped:view` /
+`usage-stopped:apply` drive ONLY the resume screen. WS09 creates no stopped
+store (D16 holds). WS11 D7 may later drive row markers from
+`windowStatus.stopped`; if it retires WS04's API it migrates M-09-2 and the
+desktop Sidebar marker in the same step.
+
+D30. **WS11 open questions accepted with their defaults** (written into
+`11-server-consolidation.md` "Decisions"): per-family capability ids;
+per-feature gating, no compatibility-matrix bump; repeat the full `RunView` on
+every message a run touches with a 30 % iOS tail-payload guard (switch to
+`{id}` references beyond it); context basis falls back to the last reply's
+model and is labelled "(last reply's model)"; seat-move text comes from the
+box for both the notice and the dial line.
+
 D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
 job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
 fixed by the workstream that touches the matching iOS feature ONLY if the fix is
@@ -422,7 +488,9 @@ ledger and every workstream table that disagrees. Sub-waves: **A1** (WS10,
 WS01, WS03) → **A2** (WS04, WS08) → **A-int** (integration agent A,
 single-threaded) → **B** (WS02, WS07, WS09, WS06) →
 **B-int** (integration agent B) → **C** (WS05) → **C-int** (integration
-agent C) → **final** (orchestrator regenerates `.pbxproj`). Files are under
+agent C) → **D** (WS11 alone; no ledger rows — it edits any file) → **final**
+(orchestrator regenerates `.pbxproj`). Server registrations, capability ids and
+shared desktop files have their own tables after this one (D24–D27). Files are under
 `mobile/native/MantaUI/` unless a path is given. Within an integration step,
 rows on the same file are applied top-to-bottom in this table's order.
 
@@ -437,6 +505,8 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-02-1 | `TranscriptRow.swift` (WS01) | IB | B-int | `EnvironmentValues.transcriptHighlightedRowID: String?` (WS02, `ChatCardMessageFocus.swift`) | WS02 (B) |
 | M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.isReadOnlyJob: Bool = false` (param, WS07); caller passes `ChatSessionStore.isBackgroundJobReadOnly: Bool` (WS02) — hides Compact, Clear, Fork, Delete, Trust toggle, Rename, Mode rows | — |
 | M-02-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS02 manifest (`ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift`) | WS02 (B) |
+| M-02-4 | `SessionModels.swift` (WS04, built) | IB | B-int | `delegate:list` row fields `statusLabel`, `summary` (WS02 SF-4/S16). Change: `DelegateJob` gains `var statusLabel: String? = nil`, `var summary: String? = nil` (CodingKeys + lenient decode); delete `BackgroundJobFormat.statusLabel(_:)` | WS02 (B) |
+| M-02-5 | `BackgroundJobsSheet.swift` (WS02, D28) | WS02 | B | `DelegateJob.statusLabel: String?`, `.summary: String?` (pinned, M-02-4). Change: `detailLine(_:)` uses `job.statusLabel ?? job.status`; terminal jobs append `job.summary` when non-nil | M-02-4 (compiles after B-int) |
 | M-03-1 | `ChatScreen.swift` (WS02) | WS03 (D13) | A1 | `ComposerTextController.init(text: String = "", attachments: [ComposerAttachment] = [], draft: NewSessionDraft? = nil)` (WS03) | wave-0 scaffold |
 | M-03-2 | `ChatScreen.swift` (WS02) | WS03 | A1 | `ComposerTextController.text: String`, `.attachments: [ComposerAttachment]` (WS03) | M-03-1 |
 | M-03-3 | `ChatScreen.swift` (WS02) | WS03 | A1 | `EnvironmentValues.composerController: ComposerTextController?`, `.focusRequest: Int`, `insert(text: String, mode: ComposerInsertMode) -> Bool` (WS03) | M-03-1 |
@@ -457,14 +527,14 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-05-1 | `ChatScreen.swift` (WS02) | WS05 | C | `GitSessionHeaderRow(branch:relPath:cwd:sessionId:shipModel:readOnly:tokens:)` (WS05); `ChatSessionStore.isBackgroundJobReadOnly` (WS02); `EnvironmentValues.composerController`, `ComposerTextController.acceptsInput` (WS03); verifies M-03-7 | WS02 (B), M-03-3, M-03-7 |
 | M-05-2 | `SessionListView.swift` (WS04) | WS05 | C | `InboxWorkScreen(onClose:)` (WS05); `MantaNavigator.startNewSession(_: NewSessionDraft)` (WS04) | WS04 (A2) |
 | M-05-3 | `SessionListView.swift` (WS04) | WS05 | C | `ReviewScreen.forSession(_ sessionID: String)` (WS05) | WS04 (A2); after M-05-2 |
-| M-05-4 | `mobile/native/Package.swift` (WS07) | IC | C-int | WS05 manifest (`GitForgeModels`, `ReviewDiff`, `InboxWorkModels` + 3 tests) | WS05 (C) |
-| M-06-1 | `ChatScreen.swift` (WS02) | WS02 | B | `SearchScreen.init(scope: SearchScope, seed: String = "", search: SearchFunction? = nil)`, `SearchScope.fromProjects(_ projects: [MantaProject], primarySessionId: String?) -> SearchScope` (WS06). Call: `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: store.sessionId))` | WS06 (B, pinned) |
-| M-06-2 | `SessionListView.swift` (WS04) | IB | B-int | `SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive(_:)`, `SearchCopy.normalized(_:)` (WS06) | WS04 (A2), WS06 (B) |
+| M-05-4 | `mobile/native/Package.swift` (WS07) | IC | C-int | WS05 manifest (`GitForgeModels`, `InboxWorkModels` + `GitForgeTests`, `InboxWorkTests`; `ReviewDiff` withdrawn server-first) | WS05 (C) |
+| M-06-1 | `ChatScreen.swift` (WS02) | WS02 | B | `SearchScreen.init(primarySessionId: String?, seed: String = "", search: SearchFunction? = nil)` (WS06; server-first: no `scope:` arg, `SearchScope` deleted). Call: `SearchScreen(primarySessionId: store.sessionId)` | WS06 (B, pinned) |
+| M-06-2 | `SessionListView.swift` (WS04) | IB | B-int | `SearchScreen(primarySessionId:seed:search:)` — call `SearchScreen(primarySessionId: nil, seed: seed)`; `SearchCopy.isActive(_:)`, `SearchCopy.normalized(_:)` (WS06) | WS04 (A2), WS06 (B) |
 | M-06-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS06 manifest (`SearchModels.swift`, `SearchTests.swift`) | WS06 (B) |
 | M-07-1 | `ChatScreen.swift` (WS02) | WS02 | B | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07); `composer` (M-03-1); `MantaNavigator.open(.message(sessionID:messageID:))` (WS04/C2). No `onAttach`. | M-03-1, WS04 (A2), M-03-7 |
 | M-07-2 | `ChatScreen.swift` (WS02) | WS02 | B | `WebhooksCard(sessionId:onClose:)`, `ChatOverflowSheet.onWebhooks: (() -> Void)? = nil` (WS07) | WS07 (B, pinned) |
 | M-07-3 | `MantaAppRoot.swift` (WS04) | IB | B-int | `ArtifactAgentFileNotice()` (WS07) | WS07 (B) |
-| M-07-4 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS07 manifest (`ArtifactModels`, `ArtifactAgentFileModel`, `WebhookModels` + 4 tests) | WS07 (B); M-03-8 |
+| M-07-4 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS07 manifest: REMOVE `ArtifactDerivation.swift` + `ArtifactDerivationTests.swift` (deleted server-first); ADD `ArtifactModels`, `ArtifactPresentation`, `ArtifactAgentFileModel`, `WebhookModels` + 5 tests | WS07 (B); M-03-8 |
 | M-08-1 | `ChatModelCatalog.swift` (WS09) | WS09 | B | `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`); `ChatModelCatalog.reload()` (WS09) | WS08 (A2) |
 | ~~M-08-2~~ | `UsageSheets.swift` (WS02) | — | — | **Declined** by WS02; no edit, no WS08 API kept. | — |
 | M-08-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS08 manifest (4 sources, 3 tests) | WS08 (A2) |
@@ -474,7 +544,9 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-09-4 | `MantaAppRoot.swift` (WS04) | IB | B-int | `UsageAlertsStore.resetForBoxChange()`, `ChatModelCatalog.resetForBoxChange()` (WS09) — in `commitPairing` switch branch AND in the M-10-2 closure | M-09-3, M-10-2 |
 | M-09-5 | `ChatScreen.swift` (WS02) | WS02 | B | `UsageAlertsStore.shared.activeSessionId: String?` (WS09) | WS09 (B, pinned) |
 | M-09-6 | `AccountsScreen.swift` (WS08) | IB | B-int | `ModelsScreen()` (WS09) — accepted (optional) | WS08 (A2), WS09 (B) |
-| M-09-7 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS09 manifest (10 sources, 5 tests) | WS09 (B) |
+| M-09-7 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS09 manifest (6 sources: `ModelsWire`, `OptimizerLogic`, `ModelsIdentifyLogic`, `UsageResumeLogic`, `UsageAlertsLogic`, `ModelsBoxBinding`; 5 tests) | WS09 (B) |
+| M-09-8 | `MantaModels.swift` (WS01, built) | IB | B-int | `struct UsageWindow` gains `var tone: String? = nil` (decode-if-present; box `tone`, WS09 SF-M18) | WS09 (B) |
+| M-09-9 | `ComposerView.swift` (WS03), `AccountsScreen.swift` (WS08) → IB B-int; `UsageSheets.swift` usage-sheet rows (WS02) → WS02 B | IB / WS02 | B-int / B | `UsageMeters.band(_ window: UsageWindow) -> MeterBand?` (WS09; nil = neutral `tx4`). Change: `UsageMeters.band(window.pct)` → `UsageMeters.band(window)` at `ComposerView.swift:616`, `AccountsScreen.swift:716`, `UsageSheets.swift:513`; the context meter (`ChatScreen.swift:1143`) keeps `band(_ pct:)` until WS11 D2 | M-09-8; ComposerView after M-03-6/M-03-9; AccountsScreen after M-09-6 |
 | M-10-1 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `SettingsAppearance.storageKey`, `.systemValue`, `static func preference(for stored: String?) -> ThemePreference` (`SettingsAppearance.swift`), `ThemePreference.colorScheme: ColorScheme?` (`SettingsAppearanceView.swift`) (WS10). Call: `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | WS10 (A1) |
 | M-10-2 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `Notification.Name.mantaBoxRemoved` (WS10, `BoxDevicesModels.swift`); `MantaOnboardingFlow.backToEntry()` (WS10); `SessionListStore.resetForBoxChange()` (WS04) | WS10 (A1); after M-10-1 |
 | M-10-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS10 [pkg] manifest | WS10 (A1) |
@@ -482,10 +554,121 @@ rows on the same file are applied top-to-bottom in this table's order.
 
 Same-file / same-sub-wave audit: A1 — WS03 alone edits `ChatScreen.swift`;
 A2 — WS04 alone edits `MantaAppRoot.swift`/`SessionListView.swift`; B — WS02
-alone edits `ChatScreen.swift`/`ChatSessionStore.swift`, WS07 alone edits
+alone edits `ChatScreen.swift`/`ChatSessionStore.swift`/`UsageSheets.swift`/
+`BackgroundJobsSheet.swift`, WS07 alone edits
 `ChatOverflowSheet.swift`, WS09 alone edits `ChatModelCatalog.swift`/
 `ChatModelStore.swift`; every other cross-owner edit is in a single-threaded
 integration step (A-int/B-int/C-int) or in wave C (WS05 alone).
+
+### Server registration mounts (D24 — ordered; integration agent B in wave B)
+
+`src/server/rpc.mjs`, `index.mjs`, `streamInterp.mjs` are edited ONLY by
+integration agent B in wave B, in exactly this order (02 → 07 → 09 → 06), then
+`npm run test:server`; by WS05 itself in wave C; by WS11 itself in wave D.
+Exact text of each row lives in the owning spec's mount table.
+
+| # | ID | File (anchor) | Change | Owner spec |
+|---|---|---|---|---|
+| 1 | M-02-srv-1 | `rpc.mjs` `"server:version"` (:2584) | add `capabilities: [...BOX_CAPABILITIES]` + import | 02 |
+| 2 | M-02-srv-10 | `index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | build `delegateView`, pass into `buildHandlers` | 02 |
+| 3 | M-02-srv-6 | `rpc.mjs` delegate channels (:2434–2480) | NEW `delegate:job-for-session`; decorate `delegate:list`; `delegate:approve` rule check | 02 |
+| 4 | M-02-srv-7 | `rpc.mjs` `opencode:prompt` / `inbox-cancel` / `inbox-set-delivery` / `compact-session` / `run-command` | `await delegateView?.assertWritable(…)` first | 02 |
+| 5 | M-02-srv-8 | `rpc.mjs` `handleRpcRequest` catch (:2705) | generic `rpcStatus` branch | 02 |
+| 6 | M-02-srv-9 | `rpc.mjs` inbox handlers (:1388–1419) | wrap with `describeInboxCancel` / `describeInboxSetDelivery` | 02 |
+| 7 | M-02-srv-2 | `streamInterp.mjs` `session.retry.scheduled` (:771) | `retry` + `headline/caption/body` | 02 |
+| 8 | M-02-srv-3 | `streamInterp.mjs` compaction cases (:973) | `compaction` ended + `firstLine` | 02 |
+| 9 | M-02-srv-5 | `streamInterp.mjs` `session.execution.failed` (:742) | `sessionError.display` | 02 |
+| 10 | M-02-srv-4 | `index.mjs` `optimizer.compacted` (:1925) | `text` | 02 |
+| 11 | M-07-S1 | `rpc.mjs` (next to `"outbox:list"`, :2537) | `createArtifactsService` + NEW `artifacts:list` | 07 |
+| 12 | M-07-S2 | `boxCapabilities.mjs` (+ test) | append `artifacts-list-1` | 07 |
+| 13 | M-09-srv-1 | `rpc.mjs` | NEW `models:table`, `models:picker`, `models:set-default`, `models:set-main`, `models:set-sub`, `models:retry-sub-sync`, `models:opt-in`, `models:set-override`, `models:unidentified`, `models:declare`, `models:set-price`, `usage-stopped:view`, `usage-stopped:apply`, `usage:alerts`, `usage:remind-at-reset`; wrap `ledger:summary` (:2024), `optimizer:summary` (:2030), `optimizer:series` (:2037), `optimizer:prices` (:2045) | 09 |
+| 14 | M-09-srv-2 | `boxCapabilities.mjs` (+ test) | append the nine WS09 ids | 09 |
+| 15 | M-06-srv-1 | `rpc.mjs` `"opencode:search-messages"` (:2017) | pass `listProjects` from `syncState` | 06 |
+| 16 | M-06-srv-2 | `boxCapabilities.mjs` (+ test) | append `search-scope-all-1` | 06 |
+| C1 | M-05-srv-1 | `rpc.mjs` `"forge:inbox"` (:990) | `forgeInbox({ probeRepos })` (WS05 itself, wave C) | 05 |
+| C2 | M-05-srv-2 | `boxCapabilities.mjs` (+ test) | append the four WS05 ids (WS05 itself, wave C) | 05 |
+
+**Collision check (grep of `rpc.mjs` / `index.mjs` / `src/server/*.mjs` at
+`cc54b741`, re-run at reconciliation):** none of the new channel names exists
+today — `delegate:job-for-session`, `artifacts:list`, every `models:*` above,
+`usage-stopped:view` / `usage-stopped:apply` (existing: `list`, `arm`, `disarm`,
+`stamp-last-looked`, `mark-ran`), `usage:alerts`, `usage:remind-at-reset`, and
+WS11's `opencode:cache`, `launchers:set-flag` (existing: `launchers:list`),
+`accounts:row-states`, `sessions:propose-name`, `sessions:close-preview`,
+`sessions:close`, `sessions:window-status`. No two specs register the same
+channel. Raw bus kinds `models.updated`, `usage.alert` (WS09) and stream subs
+`toolRuns`, `windowStatus` (WS11) are new; no existing `kind`/`sub` uses them.
+Additive fields per existing channel/frame have a single owner: `retry`,
+`compaction`, `sessionError`, `optimizer.compacted`, `delegate:list`,
+`delegate:approve`, inbox results, `server:version` → 02; `ledger:summary`,
+`optimizer:*`, `usage:list` windows (`tone`, via `usage.mjs`) → 09;
+`opencode:search-messages` → 06; `forge:pull-request` / `diff` / `merge` /
+`ship*` / `draft-*` / `thread-reply` / `inbox` → 05 (WS11 later adds disjoint
+fields to `forge:probe`, `forge:clone-*`, `forge:repos`, `forge:status`);
+`cache`, `context`, `questions`, `opencode:messages` / `message`, `tmux:list`,
+`accounts:*`, `/auth/devices`, `/api/upgrade`, `launchers:list`,
+`server:update-check`, `routing:choose` → 11.
+
+### Wave-B shared desktop / server file ownership (D27)
+
+| File | Wave-B owner (edits directly) | Other wave-B workers → IB ledger rows (order 07 → 09 → 06) |
+|---|---|---|
+| `src/renderer/chatUtils.ts` + `chatUtils.test.ts` | WS02 | M-07-D1 (WS07), M-09-dsk-4 (WS09) |
+| `src/renderer/ChatPanel.tsx` | WS02 | M-09-dsk-5, ChatPanel part (WS09) |
+| `src/shared/types.ts` | WS02 | M-07-D2, M-09-dsk-1, M-06-dsk-1 |
+| `src/shared/api.ts` | WS02 | M-07-D3, M-09-dsk-1, M-06-dsk-2 |
+| `src/renderer/api/httpApi.ts` | WS02 | M-07-D4, M-09-dsk-2 |
+| `src/renderer/api/demoApi.ts`, `demoCoverage.test.ts` | WS02 | M-07-D5, M-09-dsk-2 |
+| `src/shared/formatTokens.mjs` (+ `.d.mts`, test) — NEW | WS02 (D26) | — (WS09 consumes) |
+| `src/shared/streamInterpretation.mjs` (+ `.d.mts`, test), `hooks/useSseBus.ts`, `hooks/useBoxCapabilities.ts` (NEW), `Cards.tsx`, `PanelCards.tsx`, `inboxState.ts`, `SessionHeader.tsx` | WS02 | — |
+| `src/renderer/App.tsx`, `src/renderer/store.ts` | WS09 (M-09-dsk-3, store half of M-09-dsk-5 applied by WS09 itself) | — |
+| `ModelsCard.tsx`, `ModelPicker.tsx`, `modelsPicker.ts` (NEW), `ModelLedgerCard.tsx`, `OptimizerCard.tsx`, `ModelsWeCouldntIdentify.tsx`, `ModelPriceForm.tsx`, `UsageResumeModal.tsx`, `usageResume.ts`, `usageEscalation.ts` (delete), `UsageDial.tsx`, `routingCatalog.ts`, `AccountsCard.tsx`, `src/shared/autoEligibility.mjs` | WS09 | — |
+| `artifacts.ts`, `ArtifactsPanel.tsx`, `MediaBody.tsx`, `ArtifactPreview.tsx`, `src/shared/artifactsTypes.ts` (NEW), `api/demoArtifacts.ts` (NEW) | WS07 | — |
+| `SearchPalette.tsx` (+ NEW test) | WS06 | — |
+| `src/server/boxCapabilities.mjs` (+ test) — NEW | WS02 | M-07-S2, M-09-srv-2, M-06-srv-2 |
+| `src/server/version.mjs` (+ test) | WS02 | — |
+| `src/server/delegateView.mjs`, `inboxCopy.mjs` (NEW) | WS02 | — |
+| `src/server/artifacts.mjs` (NEW) | WS07 | — |
+| `src/server/usage.mjs`, `modelsTable.mjs`, `modelsUnidentified.mjs`, `ledgerView.mjs`, `optimizer/view.mjs`, `modelsPricing.mjs`, `usageResumeView.mjs`, `usageAlerts.mjs`, `usageWindowView.mjs` | WS09 | — |
+| `src/server/messageSearch.mjs` | WS06 | — |
+| `src/server/rpc.mjs`, `index.mjs`, `streamInterp.mjs` | IB only (table above) | — |
+
+Wave C: WS05 alone edits `SessionHeader.tsx`, `ChatPanel.tsx`, `chatUtils.ts`,
+`ReviewPane.tsx`, `ToolBodies.tsx`, `InboxPalette.tsx`, `src/shared/types.ts`,
+`forge/*.mjs`, `rpc.mjs`, `boxCapabilities.mjs`. Wave D: WS11 alone.
+
+### Capability id registry (D25)
+
+All ids live in `src/server/boxCapabilities.mjs` `BOX_CAPABILITIES`; format
+`/^[a-z0-9-]+-\d+$/`.
+
+| Id | Owner | Covers | Added (wave, by) | Client detection |
+|---|---|---|---|---|
+| `chat-cards-1` | WS02 | retry/compaction/send-error copy, job view + refusal, inbox outcome copy | B, WS02 (creates the file) | `boxCapabilities()` / `useBoxCapability` |
+| `artifacts-list-1` | WS07 | `artifacts:list` | B, IB M-07-S2 | `unknown rpc channel: artifacts:list` |
+| `models-table-1` | WS09 | SF-M1 | B, IB M-09-srv-2 | unknown channel |
+| `models-picker-1` | WS09 | SF-M2 | B, IB M-09-srv-2 | unknown channel |
+| `models-unidentified-1` | WS09 | SF-M9/M10/M11 | B, IB M-09-srv-2 | unknown channel |
+| `models-price-form-1` | WS09 | SF-M13 | B, IB M-09-srv-2 | unknown channel / no `unpricedByProvider` |
+| `ledger-view-1` | WS09 | SF-M6 | B, IB M-09-srv-2 | no `view` |
+| `optimizer-view-1` | WS09 | SF-M7 | B, IB M-09-srv-2 | no `view` |
+| `usage-resume-view-1` | WS09 | SF-M14/M15 | B, IB M-09-srv-2 | unknown channel |
+| `usage-alerts-1` | WS09 | SF-M16/M17 | B, IB M-09-srv-2 | unknown channel |
+| `usage-window-tone-1` | WS09 | SF-M18 | B, IB M-09-srv-2 | no `tone` |
+| `search-scope-all-1` | WS06 | Q1–Q3 | B, IB M-06-srv-2 | no `groups` |
+| `forge-pr-view-1` | WS05 | G1/G2/G5/G6/G7 | C, WS05 M-05-srv-2 | accessor; no `view` |
+| `forge-diff-view-1` | WS05 | G10 | C, WS05 | accessor; no `files` |
+| `forge-inbox-view-1` | WS05 | G13 | C, WS05 | accessor; no `label` |
+| `forge-messages-1` | WS05 | G3/G4/G11 | C, WS05 | accessor; no `message` |
+| `cache-stale-at-1`, `context-selected-model-1` | WS11 | D2 | D, WS11 | `BoxCapabilitiesStore` |
+| `devices-view-1`, `forge-status-secondary-1`, `update-targets-view-1`, `upgrade-view-1`, `launchers-flags-1` | WS11 | D3 | D, WS11 | `BoxCapabilitiesStore` |
+| `accounts-copy-1` | WS11 | D4 | D, WS11 | `BoxCapabilitiesStore` |
+| `sessions-naming-1`, `forge-clone-view-1` | WS11 | D5 | D, WS11 | `BoxCapabilitiesStore` |
+| `sessions-close-1` | WS11 | D6 | D, WS11 | `BoxCapabilitiesStore` |
+| `sessions-window-status-1` | WS11 | D7 | D, WS11 | `BoxCapabilitiesStore` |
+| `transcript-view-1` | WS11 | D8/D9 | D, WS11 | `BoxCapabilitiesStore` |
+| `questions-plan-1` | WS11 | D10 | D, WS11 | `BoxCapabilitiesStore` |
+| `transcript-runs-1` | WS11 | D11 | D, WS11 | `BoxCapabilitiesStore` |
 
 ## Shared member registry
 
@@ -498,32 +681,47 @@ the owner):
 | Owner (file) | Members |
 |---|---|
 | WS01 (`+Transcript`) | `peekFileSize(path:) async throws -> Int64?`, `downloadPeekFile(path:to:maxBytes:) async throws`, internal `static peekRequest(url:method:token:) -> URLRequest` |
-| WS02 (`+ChatCards`) | `delegatePendingApprovals(sessionId:)`, `delegateApprove(id:tools:) -> Bool`, `delegateDecline(id:) -> Bool`, `chatCardJobs() -> [ChatCardJob]` |
+| WS02 (`+ChatCards`) | `delegatePendingApprovals(sessionId:) -> [ChatCardApproval]`, `delegateApprove(id:tools:) -> ChatCardApproveResult`, `delegateDecline(id:) -> Bool`, `delegateJobForSession(sessionId:) -> ChatCardJobForSession` (replaces the withdrawn `chatCardJobs()`), `inboxCancelReported(sessionId:id:restore:) -> InboxCancelResult`, `boxCapabilities() -> Set<String>` (THE iOS capability accessor in waves B/C, D25; deleted by WS11 D1). WS11 adds `opencodeCache(sessionId:)` here in wave D |
 | WS03 (`+Composer`) | `commands(directory:) -> [OpencodeCommandInfo]`, `references() -> [OpencodeReferenceInfo]` (consumed by WS10), `runCommand(_:) -> RunCommandResult?` |
-| WS04 (`+Sessions`) | `createSession(_:)`, `createWindow(_:)`, `tmuxRenameSession(oldName:newName:)`, `tmuxKillSession(_:)`, `projectMetaDelete(_:)`, `gitAddWorktree(cwd:name:)`, `gitRemoveWorktree(path:force:)`, `fsListDirectory(_:)`, `projectCreateScratch(root:name:)`, `forgeProbe() -> ForgeProbeResult` (consumed by WS05), `forgeDeviceStart()`, `forgeDevicePoll(grantId:)`, `forgeDeviceCancel(grantId:) async throws`, `forgeRepos()`, `forgeCloneStart(url:dest:name:)`, `forgeCloneStatus(id:)`, `forgeCloneCancel(id:)`, `usageStoppedList() -> SessionStoppedList` |
-| WS05 (`+Git`) | `forgePullRequest(cwd:)`, `forgeShipPreview(cwd:model:sessionId:)`, `forgeShip(cwd:title:body:)`, `forgeMerge(cwd:number:sha:)`, `forgeDiff(_:)`, `forgeDraftGet(_:)`, `forgeDraftComment(_:op:)`, `forgeDraftSubmit(_:verdict:)`, `forgeThreadReply(_:threadId:body:)`, `forgeInbox()`, `delegateStart(prompt:sessionID:directory:)` |
+| WS04 (`+Sessions`) | (wave D, WS11: `sessionsProposeName(_:) -> SessionNameProposal`, `sessionsClosePreview(_:)`, `sessionsClose(_:)`, `sessionsWindowStatus()`) · `createSession(_:)`, `createWindow(_:)`, `tmuxRenameSession(oldName:newName:)`, `tmuxKillSession(_:)`, `projectMetaDelete(_:)`, `gitAddWorktree(cwd:name:)`, `gitRemoveWorktree(path:force:)`, `fsListDirectory(_:)`, `projectCreateScratch(root:name:)`, `forgeProbe() -> ForgeProbeResult` (consumed by WS05), `forgeDeviceStart()`, `forgeDevicePoll(grantId:)`, `forgeDeviceCancel(grantId:) async throws`, `forgeRepos()`, `forgeCloneStart(url:dest:name:)`, `forgeCloneStatus(id:)`, `forgeCloneCancel(id:)`, `usageStoppedList() -> SessionStoppedList` (row markers + M-09-2 count; D29) |
+| WS05 (`+Git`) | `forgePullRequest(cwd:)`, `forgeShipPreview(cwd:model:sessionId:)`, `forgeShip(cwd:title:body:)`, `forgeMerge(cwd:number:sha:)`, `forgeDiff(_:)` (also returns the placed draft), `forgeDraftComment(_:op:)`, `forgeDraftSubmit(_:verdict:)`, `forgeThreadReply(_:threadId:body:)`, `forgeInbox()`, `delegateStart(prompt:sessionID:directory:)`. (`forgeDraftGet` withdrawn server-first; WS05 no longer calls `forgeProbe()`.) |
 | WS06 (`+Search`) | `searchMessages(_: SearchRequest) -> SearchResponse` |
-| WS07 (`+Artifacts`) | `listOutboxRows(sessionId:)`, `listWebhooks(sessionId:)`, `deleteWebhook(id:)` |
-| WS08 (`+Accounts`) | `accountsResignSeat`, `accountsResignStatus`, `accountsResignCancel`, `accountsHealth`, `accountsRetry`, `accountsEndpointProbe`, `providerAuthStatus`, `providerAuthStart`, `providerAuthCode`, `providerAuthKey`, `providerAuthDisconnect`, `providerAuthClaudeStatus`, `providerAuthOauthStatus`, `providerAuthOauthCancel`, `providerClaudeCliStatus`, `providerClaudeLoginCancel`, `signInPtySpawn`, `signInPtyWrite`, `signInPtyKill`, `providerEndpoints`, `providerSetEndpoints`, `providerDiscoverModels` (signatures in WS08 "Client members") |
-| WS09 (`+Models`) | `modelsSyncSubagents(models:deactivated:optIn:)`, `ledgerSummary()`, `optimizerSummary()`, `optimizerSeries(range:)`, `optimizerPrices()`, `setModelCost(providerID:modelID:cost:)`, `modelCatalog()`, `modelsUnidentified()`, `usageStoppedArm(conversation:)`, `usageStoppedDisarm(conversation:)`, `usageStoppedStampLastLooked()`, `scheduleCreate(_:)` |
-| WS10 (`+Settings`) | `serverVersion()`, `serverUpdateCheck()`, `serverCliUpdate(cliID:)`, `restorePreview()`, `restoreTopology()`, `authPair()`, `opencodeRestart() -> OkResult` (consumed by WS08), `pluginsRegistry()`, `forgeStatus(validate: Bool) -> ForgeConnectionStatus` (consumed by WS05), `forgeRulesList()`, `forgeDisconnect()`, `opencodeSetReferences(upsert:)`, `launchersList() -> [AvailableLauncher]` (consumed by WS04) |
+| WS07 (`+Artifacts`) | `artifactsList(sessionId:) -> ArtifactsListResult` (`artifacts:list`), `listWebhooks(sessionId:)`, `deleteWebhook(id:)`. (`listOutboxRows` withdrawn — the box reads the outbox.) |
+| WS08 (`+Accounts`) | (wave D, WS11: `accountsRowStates()`) · `accountsResignSeat`, `accountsResignStatus`, `accountsResignCancel`, `accountsHealth`, `accountsRetry`, `accountsEndpointProbe`, `providerAuthStatus`, `providerAuthStart`, `providerAuthCode`, `providerAuthKey`, `providerAuthDisconnect`, `providerAuthClaudeStatus`, `providerAuthOauthStatus`, `providerAuthOauthCancel`, `providerClaudeCliStatus`, `providerClaudeLoginCancel`, `signInPtySpawn`, `signInPtyWrite`, `signInPtyKill`, `providerEndpoints`, `providerSetEndpoints`, `providerDiscoverModels` (signatures in WS08 "Client members") |
+| WS09 (`+Models`) | `modelsTable()`, `modelsSetDefault(key:)`, `modelsSetMain(key:on:)`, `modelsSetSub(key:on:)`, `modelsRetrySubSync()`, `modelsOptIn(keys:)`, `modelsSetOverride(key:name:description:context:)`, `modelsPicker()`, `ledgerSummary()`, `optimizerSummary()`, `optimizerSeries(range:)`, `optimizerPrices()`, `modelsSetPrice(providerID:modelID:input:output:cacheRead:cacheWrite:)`, `modelCatalog()`, `modelsUnidentified()`, `modelsDeclare(key:catalogId:)`, `modelsDeclare(key:form:)`, `usageStoppedView()` (resume screen only, D29), `usageStoppedApply(selected:dryRun:)`, `usageStoppedStampLastLooked()`, `usageAlerts()`, `usageRemindAtReset(key:sessionID:)`. (Withdrawn server-first: `modelsSyncSubagents`, `setModelCost`, `usageStoppedArm/Disarm`, `scheduleCreate`.) |
+| WS10 (`+Settings`) | (wave D, WS11: `launchersSetFlag(id:key:value:)`; `ServerVersionInfo.capabilities`) · `serverVersion()` (no capabilities in B/C — D25), `serverUpdateCheck()`, `serverCliUpdate(cliID:)`, `restorePreview()`, `restoreTopology()`, `authPair()`, `opencodeRestart() -> OkResult` (consumed by WS08), `pluginsRegistry()`, `forgeStatus(validate: Bool) -> ForgeConnectionStatus` (consumed by WS05), `forgeRulesList()`, `forgeDisconnect()`, `opencodeSetReferences(upsert:)`, `launchersList() -> [AvailableLauncher]` (consumed by WS04) |
 
 Existing base members (`MantaAPIClient.swift`) are reused, never redeclared.
+WS11 (wave D, alone) adds `view: Bool = false` to the base
+`messages(sessionId:limit:slim:view:)` — the only base-file edit of the effort.
+
+**Desktop `window.api` members added (single owner each):** WS02
+`delegateJobForSession`, `opencodeInboxCancel` input `restore?`,
+`getServerVersion` type `capabilities?`; WS07 `artifactsList`; WS09
+`modelsTable`, `modelsPicker`, `modelsSetDefault`, `modelsSetMain`,
+`modelsSetSub`, `modelsRetrySubSync`, `modelsOptIn`, `modelsSetOverride`,
+`modelsUnidentified`, `modelsDeclare`, `modelsSetPrice`, `usageStoppedView`,
+`usageStoppedApply`, `usageAlerts`, `usageRemindAtReset`, `onModelsUpdated`,
+`onUsageAlert`; WS06 `opencodeSearchMessages` (types only); WS05 none (fields
+only); WS11 one member per new channel (`opencode:cache`, `launchers:set-flag`,
+`accounts:row-states`, `sessions:*`). Desktop hooks: `useBoxCapability` (WS02,
+kept by WS11), `useModelsPicker` (WS09).
 
 **Cross-workstream types / properties:**
 
 | Owner | Symbols |
 |---|---|
 | WS01 | `TranscriptMapOptions`, `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options:)` / `.liveMediaTail(messages:live:isLiveWindow:)` / `.footerTruncationMessageIDs(_:)`, `OpencodeCommandOrigin`, `TranscriptCommandOrigin.fromLive(name:arguments:)`, `TranscriptLiveTruncation.from(kind:messageID:)`, `TranscriptMediaStore.shared` (`$sessions`, `entries(for:)`), `TranscriptDisplayOptions` (`showDetails`, `defaultsKey`, `setShowDetails(_:)`, `didChange`) |
-| WS02 | `ChatSessionStore.commandByMessageID: [String: StreamCommandExecutedPayload]`, `.truncation` (existing), `.presentedMessages`, `.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`), `.isBackgroundJobReadOnly: Bool`, `.canMutate`; `StreamCommandExecutedPayload {messageID, name, arguments: String}`; `EnvironmentValues.transcriptHighlightedRowID`; `ChatCardJobOwnershipStore` (`jobOwnership`, `job: ChatCardJob?` — WS02-internal) |
+| WS02 | `ChatSessionStore.commandByMessageID: [String: StreamCommandExecutedPayload]`, `.truncation` (existing), `.presentedMessages`, `.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`), `.isBackgroundJobReadOnly: Bool`, `.canMutate`; `StreamCommandExecutedPayload {messageID, name, arguments: String}`; `EnvironmentValues.transcriptHighlightedRowID`; `ChatCardJobOwnershipStore` (`jobOwnership`, `job: ChatCardJobView?` — WS02-internal); `ChatCardCapabilities` (WS02-internal until WS11 D1); `DelegateJob.statusLabel` / `.summary` (added to WS04's file by M-02-4); server `BOX_CAPABILITIES`, `createDelegateView`, `describeRetry`, `describeSessionError`, `describeBackgroundCompaction`, `compactionFirstLine`; shared `formatTokenCount` / `formatTokens` (`src/shared/formatTokens.mjs`, D26) |
 | WS03 | `ComposerTextController` (`text`, `attachments`, `acceptsInput`, `focusRequest`, `seedNotice`, `init(text:attachments:draft:)`, `insert(text:mode:) -> Bool`, `attach(remotePath:displayName:mime:) -> Bool`, `lastAttachRejection`, `newSessionDraft(cwd:)`, `apply(_:) -> Int`, `consumeSeedNotice()`), `ComposerInsertMode`, `ComposerInsertion` (`AttachRejection`), `EnvironmentValues.composerController`, `ChatScreen(…, draft:)`, `ComposerTypeahead.agentRows(agents:loadError:query:limit:)`, `OpencodeReferenceInfo`, `OpencodeCommandInfo` |
 | WS04 | `MantaRoute`, `MantaNavigator` (`pending`, `open(_:)`, `pendingDraft`, `startNewSession(_:)`, `switcherPresented`, `presentSwitcher()`, `switchMode(windowKey:sessionID:to:)`, `static windowKey(project:windowIndex:)`), `NewSessionDraft` / `NewSessionDraftAttachment` (D2), `SessionMode`, `SessionLauncherCatalog`, `SessionModeStore`, `SessionModeRows`, `SessionRenameSheet`, `SessionListStore` (`window(forSessionID:)`, `renameSession(project:index:newName:)`, `launchers`, `launcherCatalog`, `refreshLaunchers()`, `stoppedRecords: [SessionStoppedRecord]`, `stoppedLastLooked: Double?` (epoch ms), `stoppedConversations`, `unarmedStoppedCount`, `isStopped(sessionID:)`, `refreshStopped()`, `resetForBoxChange()`), `SessionStoppedRecord {…, stoppedAt: Double}`, `SessionStoppedList`, `GitHubDeviceSignInStore` (`cancel() async`, attempt `generation`), `GitHubDeviceSignInView(onConnected:onCancel:)`, `GitHubDeviceSignInAPI`, `GitHubDeviceFlow`, `GitHubDevice*` wire types, `ForgeProbeResult`, `RepoHit` |
-| WS05 | `GitSessionHeaderRow`, `InboxWorkScreen(onClose:)`, `ReviewScreen.forSession(_:)` |
-| WS06 | `SearchScreen(scope:seed:search:)`, `SearchScope.fromProjects(_:primarySessionId:)`, `SearchScope.build(windows:primarySessionId:)`, `SearchCopy.isActive/normalized` |
-| WS07 | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)`, `WebhooksCard(sessionId:onClose:)`, `ArtifactAgentFileNotice()`, all `ChatOverflowSheet` parameters (`isReadOnlyJob`, `onRename`, `mode`, `launchers`, `launcherCatalog`, `onSelectMode`, `onRetryLaunchers`, `onWebhooks`), `Package.swift` (written only by IA/IB/IC) |
+| WS05 | `GitSessionHeaderRow`, `InboxWorkScreen(onClose:)`, `ReviewScreen.forSession(_:)`; server `src/server/forge/view.mjs`, `forge/diffView.mjs` |
+| WS06 | `SearchScreen(primarySessionId:seed:search:)`, `SearchCopy.isActive/normalized`; server `resolveSearchScope`, `groupHits` (`messageSearch.mjs`). (`SearchScope.*` deleted server-first.) |
+| WS07 | server `createArtifactsService`, `planRefsFromPart` (`src/server/artifacts.mjs` — consumed by WS11 D10); `ArtifactsListResult`; `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)`, `WebhooksCard(sessionId:onClose:)`, `ArtifactAgentFileNotice()`, all `ChatOverflowSheet` parameters (`isReadOnlyJob`, `onRename`, `mode`, `launchers`, `launcherCatalog`, `onSelectMode`, `onRetryLaunchers`, `onWebhooks`), `Package.swift` (written only by IA/IB/IC) |
 | WS08 | `Notification.Name.mantaProvidersChanged`, `AccountsScreen(store:focusProvider:ownsLifecycle:)` (unchanged), `AccountsStore.conversationSeat` (unchanged, read by WS02), `EndpointHealth` |
-| WS09 | `ChatModelStore.agentsLoadError`, `.retryAgents()`, `ChatModelCatalog.reload()` / `.resetForBoxChange()`, `UsageAlertsStore.shared` (`bind(eventStore:)`, `activeSessionId`, `resumeSheetPresented`, `presentResume()`, `resetForBoxChange()`), `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)`, `UsageStoppedCapsule(count:action:)`, `UsageStoppedEntry`, `ModelsScreen()` |
+| WS09 | `ChatModelStore.agentsLoadError`, `.retryAgents()`, `ChatModelCatalog.reload()` / `.resetForBoxChange()`, `UsageAlertsStore.shared` (`bind(eventStore:)`, `activeSessionId`, `resumeSheetPresented`, `presentResume()`, `resetForBoxChange()`), `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)`, `UsageStoppedCapsule(count:action:)`, `ModelsScreen()`, `UsageMeters.band(_ window: UsageWindow) -> MeterBand?`, `UsageWindow.tone` (added to WS01's file by M-09-8). (`UsageStoppedEntry` withdrawn server-first.) |
 | WS10 | `AvailableLauncher {id, label, flags}`, `AvailableLauncherFlag {key, label, type, default}`, `ExtensionsLaunchers.resolve(schema:saved:)` / `.update(…)` / `.savedFlags(from:)`, `SettingsAppearance` (`storageKey`, `systemValue`, `preference(for:)`), `ThemePreference.colorScheme`, `Notification.Name.mantaBoxRemoved`, `SettingsScreen(eventStore:initialSection:)`, `OkResult`, `ForgeConnectionStatus`, `BoxRESTClient` |
+| WS11 | `BoxCapability`, `BoxCapabilities`, `BoxCapabilitiesStore`, `UpdateBoxNote` (iOS + desktop), `TranscriptViewModels` types (`TranscriptMessageView`, `TranscriptPartView`, `TranscriptRunView`, …), server modules listed in WS11 Files |
 
 ## Definition of done (whole effort)
 
@@ -602,3 +800,89 @@ spelling in its provider spec; no `MantaAPIClient` member or top-level type is
 declared by two specs (`Kind`/`Phase` are nested; `GitHubDeviceSignIn*` in
 WS05 is a quoted consumed signature); no two workers edit one file in one
 sub-wave.
+
+## Reconciliation log (server-first)
+
+Run after the server-first revision of 02/05/06/07/09 and the first draft of
+11. Binding decisions taken: **D25–D30** (above). Tables added/updated above:
+"Server registration mounts", "Wave-B shared desktop / server file ownership",
+"Capability id registry", the Mount ledger and the Shared member registry.
+
+Drifts resolved:
+1. **Three capability modules → one.** WS02's `src/server/boxCapabilities.mjs`
+   (wave B) is canonical; WS05's conditional `serverCapabilities.mjs` and
+   WS11's `boxFeatures.mjs` are withdrawn. Ids were renamed to one format
+   (`forge.prView` → `forge-pr-view-1`, `search.scope-all` →
+   `search-scope-all-1`, `artifacts.list` → `artifacts-list-1`, `models.table`
+   → `models-table-1`, …). Wave-B ids are appended by IB (new rows M-07-S2
+   retargeted, M-09-srv-2, M-06-srv-2), wave-C ids by WS05 (M-05-srv-2
+   retargeted, no `index.mjs`/`rpc.mjs` edit), wave-D ids by WS11. Client
+   accessors: iOS `boxCapabilities()`, desktop `useBoxCapability` (WS02);
+   WS11 D1 unifies iOS into `BoxCapabilitiesStore` and deletes the B-wave
+   accessor; WS10's `serverVersion()` grows nothing until then.
+2. **Search mount signature.** M-06-1 / M-06-2 now call
+   `SearchScreen(primarySessionId:seed:search:)` (no `scope:`); WS02 receipt,
+   ledger and registry updated; `SearchScope.*` removed from the registry.
+3. **Job-list labels.** M-02-4 (`SessionModels.swift`, built WS04 file) is an
+   IB row; `BackgroundJobsSheet.swift` is assigned to WS02 (D28) so M-02-5 is
+   WS02's own wave-B edit. WS11 D7 does not touch either (checked).
+4. **Member registry.** WS02 row rewritten (`delegateJobForSession`,
+   `ChatCardApproveResult`, `inboxCancelReported`, `boxCapabilities`); WS05
+   loses `forgeDraftGet`; WS07 `artifactsList` replaces `listOutboxRows`;
+   WS09 row replaced by its server-first set; WS11 members recorded under the
+   area files they extend; desktop `window.api` members listed once each.
+   Stopped state: WS04's built API stays for row markers, WS09's
+   `usage-stopped:view` only for the resume screen (D29).
+5. **Server registration order.** One ordered table (02 → 07 → 09 → 06, then
+   wave C WS05) with every `*-srv-*` / `M-07-S*` row; every new channel and
+   frame kind grepped against `rpc.mjs` / `src/server/*.mjs`: no collision,
+   no channel or field registered by two specs.
+6. **Shared desktop files.** WS02 owns `chatUtils.ts`, `ChatPanel.tsx`,
+   `types.ts`, `api.ts`, `httpApi.ts`, `demoApi.ts`, `demoCoverage.test.ts` in
+   wave B; WS07/WS09/WS06 hunks are IB rows (M-07-D1…D5, M-09-dsk-1/2/4/5,
+   new M-06-dsk-1/2). WS09 owns `App.tsx` and `store.ts` (sole editor). Token
+   formatter: ONE module `src/shared/formatTokens.mjs` created by WS02 (D26);
+   WS09's planned creation became consumption. Found and fixed while checking:
+   WS02's deletion of `formatTokensCompact` would have broken `formatLastMove`
+   (`chatUtils.ts:3803`) — now switched to `formatTokenCount`; `SessionHeader.tsx`
+   had a private duplicate formatter — deleted by WS02.
+7. **WS11 vs built code.** WS11's iOS/desktop file lists rebuilt per sub-step
+   from a grep of every caller of each deleted symbol (added e.g.
+   `AccountsStore`, `ProviderConnection*`, `ProviderEndpoint*`,
+   `SessionCreateSheet`, `SessionSetupStore`, `SessionForgeModels`,
+   `SessionRenameSheet`, `CloneFromGitHubView`, `SessionWorktreePromptSheet`,
+   `BoxDevicesScreen`, `BoxRESTClient`, `Extensions*Screen`,
+   `SettingsCustomRows`, `SettingsUpdates*`, `UpgradeScreen/Store`,
+   `TranscriptMediaStore`, `TranscriptTurnFooterView`, desktop `ToolCall.tsx`,
+   `UpgradeGate.tsx`, `SessionHeader.tsx`, server `push.mjs`). Dependencies of
+   waves B/C on logic WS11 deletes: WS02's mapper call sites (signatures kept
+   or migrated in-step), WS09's capsule + desktop stopped marker (D29), WS07's
+   `planRefsFromPart` (WS11 imports it from `artifacts.mjs`; WS11 no longer
+   lists it as a desktop deletion — M-07-D1 already did it). A second
+   server-side `isPlanExitQuestion` in `push.mjs` is folded into WS11 D10.
+8. **WS11 open questions** accepted with their defaults (D30), written into
+   WS11 "Decisions".
+
+Mount-ledger rows added: **M-02-4, M-02-5, M-09-8, M-09-9**. Rows changed:
+**M-06-1, M-06-2** (signature), **M-05-4, M-07-4, M-09-7** (manifest contents).
+New non-Swift rows (own tables): M-02-srv-1…10, M-07-S1/S2, M-07-D1…D5,
+M-09-srv-1/2, M-09-dsk-1…5, M-06-srv-1/2, M-06-dsk-1/2, M-05-srv-1/2.
+
+Spec edits: `02` (SF-0/SF-2/desktop table/Files/members/M-02-5/receipts
+M-06-1, M-09-9), `05` (ids, M-05-srv-2, S.6 accessor, Files, §12), `06`
+(id, M-06-srv-2, M-06-dsk-1/2, Files), `07` (id, M-07-S2, stale
+`PlanDerivation` line, `planRefsFromPart` provided to WS11), `09` (ids,
+M-09-srv-2, desktop ownership, formatter consumed, M-09-7/8/9 renumbered, D29
+note), `11` (D1 rewritten, D4/D7/D10 notes, wave-B call-site section, Files,
+Contracts, Decisions, reconciliation notes); notes-only appendices in `01`,
+`03`, `04`, `08`, `10`.
+
+Unresolved (recommendation recorded, not blocking): see the reply to the
+orchestrator — (a) wave-B workers 06/07/09 compile against WS02-owned shared
+desktop files that only exist after IB; they verify with locally applied,
+uncommitted rows (pattern WS07 already specified). (b) WS07's
+`ArtifactsCapability.isUnsupported` and WS09's `ModelsCapability.isUnsupported`
+classify the same "unknown rpc channel" prefix twice on iOS (two tiny
+decode guards in two same-wave workers' own files); tolerated in wave B and
+folded by WS11 D1 into one `BoxCapabilities.isUnknownChannel(_:)` (written into
+WS11).

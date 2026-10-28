@@ -85,7 +85,7 @@ struct ProviderConnectSheet: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .disabled(flow.submitting)
-                fieldError(error ?? flow.fieldError)
+                fieldError(flow.fieldError ?? error)
                 Button {
                     Task { await flow.submitCode() }
                 } label: {
@@ -108,7 +108,7 @@ struct ProviderConnectSheet: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .disabled(flow.submitting)
-                fieldError(error ?? flow.fieldError)
+                fieldError(flow.fieldError ?? error)
                 Button {
                     Task { await flow.submitKey() }
                 } label: {

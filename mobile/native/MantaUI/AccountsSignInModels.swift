@@ -361,7 +361,7 @@ enum AccountsSignInRules {
             return "This is the box's own login and no other login is ready to take over. Sign in another account with Add \(name) account first; then this seat can be removed and added again."
         }
         if let managedBy, !managedBy.isEmpty {
-            return "This login belongs to \(managedBy), so it has to be signed in again there — open a terminal session and run `claude auth login`. That isn't available from this screen."
+            return "This login belongs to \(managedBy), so it has to be signed in again there — open a terminal session and run “claude auth login”. That isn't available from this screen."
         }
         return "This is the box's only \(name) login, and signing it in again isn't available from this screen yet."
     }

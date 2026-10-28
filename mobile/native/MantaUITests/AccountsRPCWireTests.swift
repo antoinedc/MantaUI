@@ -312,6 +312,20 @@ final class AccountsRPCWireTests: XCTestCase {
     }
 
     @MainActor
+    func testASuccessfulFreshReadClearsAStaleRefreshWarning() async throws {
+        let client = makeClient()
+        let store = AccountsStore(api: client, defaults: UserDefaults(suiteName: "AccountsRPCWireTests.\(UUID().uuidString)") ?? .standard)
+        AccountsCapturingURLProtocol.result = #"{"result": {"providers": [{"provider": "claude", "accounts": [{"id": "a", "label": "Work", "seats": [{"id": "s1"}]}]}]}}"#
+        await store.refresh()
+        AccountsCapturingURLProtocol.failure = URLError(.notConnectedToInternet)
+        await store.refresh()
+        XCTAssertNotNil(store.refreshError, "the failed refresh is surfaced")
+        AccountsCapturingURLProtocol.failure = nil
+        _ = try await store.freshProviders()
+        XCTAssertNil(store.refreshError, "a good read clears the warning")
+    }
+
+    @MainActor
     func testFreshProvidersIssuesItsOwnRequestEvenWhileARefreshIsInFlight() async throws {
         let client = makeClient()
         let store = AccountsStore(api: client, defaults: UserDefaults(suiteName: "AccountsRPCWireTests.\(UUID().uuidString)") ?? .standard)

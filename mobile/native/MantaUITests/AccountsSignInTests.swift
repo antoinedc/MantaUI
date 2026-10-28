@@ -417,7 +417,7 @@ final class AccountsSignInTests: XCTestCase {
         let sole = provider(active: "s1", seats: [seat("s1", status: .expired, live: true)])
         XCTAssertEqual(
             AccountsSignInRules.liveSeatAdvice(provider: sole, seat: sole.accounts[0].seats[0], managedBy: "the Claude CLI on this box"),
-            "This login belongs to the Claude CLI on this box, so it has to be signed in again there — open a terminal session and run `claude auth login`. That isn't available from this screen."
+            "This login belongs to the Claude CLI on this box, so it has to be signed in again there — open a terminal session and run “claude auth login”. That isn't available from this screen."
         )
 
         // 3b. Sole seat, not externally managed → no path is promised.

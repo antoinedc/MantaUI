@@ -4,8 +4,7 @@ Status: draft, revised after review round 2 · Wave: **C** (runs alone) · Owner
 Depends on (all land before wave C): WS02 (ChatScreen, read-only job state
 `ChatSessionStore.isBackgroundJobReadOnly`), WS03 (C3 `ComposerTextController`
 adopted in `ChatScreen`, `EnvironmentValues.composerController`), WS04 (C2
-`MantaNavigator` + `startNewSession`, D14 `GitHubDeviceSignInView`,
-`forgeProbe() -> ForgeProbeResult`), WS10 (D16/D21 `forgeStatus(validate:) ->
+`MantaNavigator` + `startNewSession`, D14 `GitHubDeviceSignInView`), WS10 (D16/D21 `forgeStatus(validate:) ->
 ForgeConnectionStatus`).
 
 This workstream brings the desktop's GitHub surface to the phone: the branch/PR
@@ -13,7 +12,13 @@ sheet behind the chat's branch chip, the checks chip, the "Connect GitHub"
 offer (sign-in itself is WS04's shared view, D5/D14), the review screen (PR
 diff, line comments, threads, verdict, submit) and the work inbox.
 
-**No new server routes.** Every feature uses the existing `forge:*`,
+**Server-first (D23/D24).** The box owns the rules: PR panel/ship/merge state,
+checks view, failure prompt, error copy, the structured review diff with
+thread/draft placement, and the inbox row fields are computed by two new
+modules (`src/server/forge/view.mjs`, `src/server/forge/diffView.mjs`) and
+returned as **additive fields on the existing** `forge:*` channels — see
+"Server-first" below. No new channel names. The desktop switches to the same
+fields in this workstream. Otherwise every feature uses the existing `forge:*`,
 `delegate:start` and `config:*` RPC channels exactly as the desktop does. The
 only Electron-local pieces on desktop are `openExternal` (→ iOS `openURL`) and
 `clipboardWriteText` (→ `UIPasteboard`). No `/events` frames are involved: the
@@ -48,7 +53,6 @@ adds only the methods in "Client members" (§12) to
 | Consumed member | Owner (D16) | Channel |
 |---|---|---|
 | `forgeStatus(validate: Bool) async throws -> ForgeConnectionStatus` (`connected`, `login`, `kind`, `source`, `valid`; type in WS10's `SettingsWireModels.swift`) | WS10, `MantaAPIClient+Settings.swift` (wave A1; D16/D21) | `forge:status` `[{validate}]` — WS05 always passes `validate: false` (desktop `ChatPanel.tsx:1055` calls it with no args; `rpc.mjs:952` → `validate === true` only when asked) |
-| `forgeProbe() async throws -> ForgeProbeResult` (`repos: [RepoHit]`, WS05 reads `RepoHit.path` + `repoKey`; types in WS04's `SessionForgeModels.swift`) | WS04, `MantaAPIClient+Sessions.swift` (wave A2) | `forge:probe` |
 | `GitHubDeviceSignInView(onConnected:onCancel:)` (+ WS04's `GitHubDeviceSignInStore`, `forgeDeviceStart/Poll/Cancel`) | WS04 (D14) | `forge:device-*` — WS05 never calls the `forgeDevice*` members; it only presents the view |
 | `configGet()` / `configUpdate(_:)` | existing (`MantaAPIClient.swift:752,757`) | `config:get` / `config:update` |
 | `projects()` | existing (`MantaAPIClient.swift:192`) | `tmux:list` |
@@ -59,16 +63,16 @@ implementations `src/server/forge/index.mjs`; args shape as
 
 | Channel | args[0] | Result (TS source) |
 |---|---|---|
-| `forge:pull-request` | `{cwd}` | `ForgePullRequestResult` (types.ts:655) |
+| `forge:pull-request` | `{cwd}` | `ForgePullRequestResult` (types.ts:655) + `view`, toned/ordered `checks` (S.1) |
 | `forge:ship-preview` | `{cwd, model?:{providerID,modelID}, sessionId?}` | `ForgeShipPreviewResult` (types.ts:781) |
 | `forge:ship` | `{cwd, title, body}` | `ForgeShipResult` (types.ts:759) |
 | `forge:merge` | `{cwd, number, method:"merge", sha}` | `ForgeMergeResult` (types.ts:802) |
-| `forge:diff` | `GitRef` | `ForgeDiffResult` (types.ts:701) |
+| `forge:diff` | `GitRef` | `ForgeDiffResult` (types.ts:701) + `files`, `threads[].placement`, `draft`, `message` (S.2) |
 | `forge:draft-get` | `GitRef` | `ForgeDraftGetResult` (types.ts:842) |
 | `forge:draft-comment` | `GitRef ∪ {op, comment?, verdict?}` | `ForgeDraftCommentResult` (types.ts:866) |
 | `forge:draft-submit` | `GitRef ∪ {verdict?}` | `ForgeDraftSubmitResult` (types.ts:878) |
 | `forge:thread-reply` | `GitRef ∪ {threadId, body}` | `ForgeThreadReplyResult` (types.ts:890) |
-| `forge:inbox` | none (`args: []`) | `ForgeInboxResult` (types.ts:741) |
+| `forge:inbox` | none (`args: []`) | `ForgeInboxResult` (types.ts:741) + per-item row fields and `localPath` (S.1) |
 | `delegate:start` | `{prompt, sessionID, directory}` | `{ok, error?}` (types.ts:2643-2649; rpc.mjs:2448) |
 
 `GitRef` is the forge target (types.ts:691):
@@ -97,6 +101,260 @@ Foundation-only):
 - `ForgeInboxItem.updatedAt` is epoch **milliseconds**.
 - A thrown transport error is caught at the store and turned into a visible
   message (never `try?` silently on a user action — AGENTS.md "no dead controls").
+
+---
+
+## Server-first (D23/D24)
+
+The box computes every MOVE-NOW item the audit assigns to WS05
+(`server-first-audit.md` §WS05: **G1–G7, G10, G11, G13**) and returns it ready
+to render. Both clients render the result; neither keeps a copy of the rule.
+KEEP-CLIENT items stay in the clients: G8 (connect-offer decision with its
+device-local dismissed flag), G9 (ship-preview request sequencing), G12
+(composer-insert policy), G14 (inbox filter), G15 (delegate parent
+candidates), G16 (inbox → `NewSessionDraft`). The pending-comment plural
+("1 comment" / "N comments") also stays in the client (audit G11 note).
+
+WS05 is the sole worker of wave C, so it registers its own changes in
+`src/server/rpc.mjs` / `index.mjs` (D24). All changes are **additive** fields on
+existing channels — no channel is renamed, no field removed or retyped.
+
+### S.1 New module `src/server/forge/view.mjs` (G1, G2, G3, G4, G5, G6, G7, G11, G13)
+
+Pure functions (no I/O except the injectable cache). The logic moves from
+`src/renderer/chatUtils.ts`, `SessionHeader.tsx` and `InboxPalette.tsx`
+verbatim, then is deleted there:
+
+| Export | Moved from | Items |
+|---|---|---|
+| `checkTone(check) → "ok"\|"running"\|"error"` | `chatUtils.ts:4010` | G6 |
+| `orderChecks(checks)` (failed → running → passed, stable) | `chatUtils.ts:4020` | G6 |
+| `countChecks(checks) → {passed, failed, running}` | `chatUtils.ts:4027` | G6 |
+| `checksChip(rollup, counts) → {glyph, label, tone} \| null` | `chatUtils.ts:4052` (registry priority stays client — layout) | G6 |
+| `failuresPrompt(checks) → string \| null` | `chatUtils.ts:4101` (`""` → `null`) | G7 |
+| `logsUrl(checks, prUrl) → string \| null` | `SessionHeader.tsx:1555-1558` | G7 |
+| `panelState({error, branch, pr}) → "none"\|"no-pr"\|"pr"` | `chatUtils.ts:4379` + the round-2 rule (recognised forge, i.e. `error == null`, and a forge branch) | G1 |
+| `shipState({branch, base, aheadCount, hasPr})` + `NO_SHIP_COPY` + the no-commits sentence | `chatUtils.ts:4414`, `SessionHeader.tsx:1284-1288, 1336` | G1 |
+| `canMerge({rollup, unresolvedThreads, mergeable}) → {can, reason}` | `chatUtils.ts:4331` | G2 |
+| `mergeableDisplay(pr) → {text, tone: "ok"\|"danger"\|"muted"}` | `SessionHeader.tsx:1390-1395` | G2 |
+| `mergeFailureMessage(kind)` | `chatUtils.ts:4358` (`describeMergeFailure`) | G3 |
+| `shipErrorMessage(raw)` | new (the desktop showed raw codes) — table below | G4 |
+| `reviewErrorMessage(op, error, kind)` | `ReviewPane.tsx:480-488` + new — table below | G11 |
+| `pullRequestView(result) → view` | composition of the above | G1, G2, G6, G7 |
+| `createLastPrCache({max = 64})` → `{get(cwd, branch), set(cwd, branch, entry), drop(cwd, branch)}` | new | G5 |
+| `inboxRowView(item, localPaths) → {label, identifier, secondary, repoName, tone, branchName, localPath}` | `chatUtils.ts:4934` (`inboxReasonLabel`), `InboxPalette.tsx:36-80` | G13 |
+
+**`forge:pull-request` (G1, G2, G5, G6, G7)** — `pullRequestForCwd`
+(forge/index.mjs:723-791) keeps its result and adds:
+
+```jsonc
+{
+  "pr": PullRequest|null,
+  "checks": [ { "name", "status"?, "conclusion"?, "url"?,
+                "tone": "ok"|"running"|"error" } ],      // NOW pre-ordered failed→running→passed, each with tone
+  "rollup", "stale", "error", "branch", "base", "aheadCount",   // unchanged
+  "view": {                                                       // NEW
+    "panel": "none" | "no-pr" | "pr",
+    "chipLabel": "feat/x · #412" | "feat/x" | null,               // null when panel == "none"
+    "ship": { "state": "has-pr"|"detached"|"unknown"|"on-base"|"no-commits"|"ready",
+              "copy": "On the base branch — nothing to ship." | … | null },   // null for ready / has-pr
+    "merge": null | { "can": true|false, "reason": "checks failing"|…|null,
+                      "mergeable": { "text": "mergeable"|"computing…"|<mergeBlockedReason>,
+                                     "tone": "ok"|"muted"|"danger" } },        // null when no PR
+    "checks": { "counts": {"passed","failed","running"},
+                "chip": null | { "glyph": "✓"|"✗"|"◐", "label": "✓ 7"|"✗ 2 failed"|"◐ 3 running",
+                                 "tone": "ok"|"danger"|"warn" },               // null unless PR + ≥1 check + rollup ≠ none
+                "failuresPrompt": string|null, "logsUrl": string|null }
+  }
+}
+```
+
+`panel` = `"none"` when `error != null` (no_forge / not_connected) or there is
+no forge branch; `"pr"` when a PR exists; else `"no-pr"`. This is the round-2
+interactivity rule (connected + recognised forge + forge branch), computed once.
+
+**Last-PR cache (G5).** `pullRequestForCwd` takes `deps.lastPr` (default: a
+module-level `createLastPrCache()`). A rate-limited read (`rateLimited`,
+forge/index.mjs:758), or a read whose `getPullRequest` and list both fail,
+returns the cached `{pr, checks, rollup}` for `(cwd, branch)` with
+`stale: true` instead of `pr: null`. A fresh non-stale read stores the entry,
+or drops it when the branch has no PR. Bounded LRU (64 entries), memory only.
+**Changes desktop behaviour**: the popover no longer flips to "Create pull
+request" on a rate-limited poll.
+
+**`forge:merge` (G2, G3)** — `mergePullRequest` (forge/index.mjs:1218)
+re-checks the gate on the box before calling the adapter: it reads the PR
+(`adapter.getPullRequest`) and its checks; if the PR head differs from `sha` →
+`{ok:false, error, kind:"sha_mismatch", message}` without merging; if
+`canMerge` fails → `{ok:false, error:"blocked", kind:"blocked", message:"Can't
+merge yet: <reason>"}`. Every failure carries `message`
+(`mergeFailureMessage(kind)`: the desktop strings verbatim plus `blocked`).
+
+**`forge:ship` / `forge:ship-preview` (G4)** — every `{ok:false, error}` adds
+`message: shipErrorMessage(error)`:
+
+| `error` | `message` |
+|---|---|
+| `no_forge` | "This folder isn't linked to a GitHub repository." |
+| `not_connected` | "GitHub isn't connected on this server." |
+| `no_branch` | "Detached HEAD — check out a branch first." |
+| `unknown_base` | "Couldn't tell which branch to target." |
+| `push failed: <x>` | "Couldn't push the branch: <x>" |
+| `create pull request failed: <x>` | "GitHub refused the pull request: <x>" |
+| other | the raw error |
+
+**Review messages (G11)** — `forge:diff`, `forge:draft-get`,
+`forge:draft-comment`, `forge:draft-submit`, `forge:thread-reply` add
+`message` beside every `error` (`null` on success):
+
+| op | `error` / `kind` | `message` |
+|---|---|---|
+| any | `no_pr` | "No pull request on this session's branch." |
+| any | `not_connected` | "No forge connection to this repository." |
+| any | `no_forge` | "No linked forge repository." |
+| draft-comment | `comment body is required` | "Write a comment first." |
+| draft-comment | `invalid comment anchor` | "That line can't take a comment." |
+| draft-comment | `comment not found` | "That comment was already removed." |
+| thread-reply | `empty reply` | "Write a reply first." |
+| thread-reply | `missing threadId` | "That thread is no longer available." |
+| thread-reply | other | "GitHub didn't accept the reply: <error>" |
+| draft-submit | `nothing to submit` | "Add at least one line comment before submitting." |
+| draft-submit | `kind: http_422` | "GitHub rejected the review — a comment may point at a line that's no longer in the pull request. Your comments are kept." |
+| draft-submit | other | "Couldn't submit — your comments are kept. (<error>)" |
+
+**`forge:inbox` (G13)** — `defaultForgeInbox` already dedupes with precedence
+(`mergeInboxSources`, github.mjs:175) and sorts by `updatedAt` desc
+(forge/index.mjs:859-861). It now takes `deps.probeRepos` (the rpc registration
+passes `local.forgeProbe`, 60 s cache, local.mjs:1027-1045) and adds to every
+item `inboxRowView(item, localPaths)`:
+
+```jsonc
+{ …existing ForgeInboxItem…,
+  "label": "checks red"|"review requested"|"issue · assigned to you",
+  "identifier": "!412" | "#88",
+  "secondary": "checks red · manta" | "issue · assigned to you",
+  "repoName": "manta",                               // last segment of repoKey
+  "tone": "danger"|"warn"|"muted",
+  "branchName": "manta/pr-412-fix-the-thing",        // InboxPalette.tsx:73-80 verbatim
+  "localPath": "/home/dev/projects/manta" | null }    // repoKey → probed checkout; null when none
+```
+
+A probe failure leaves `localPath: null` (never fails the inbox).
+
+### S.2 New module `src/server/forge/diffView.mjs` (G10)
+
+`buildDiffView(diffText, threads, draftComments, {maxRowsPerFile = 2000})`:
+
+- Parses the unified diff into files with the rules of `commentableLines`
+  (chatUtils.ts:4454-4492): path from `+++ b/`, or `--- a/` for a deletion to
+  `/dev/null`; preamble lines (`Index:`, `===`, `--- `, `+++ `, `diff --git`,
+  `index `) dropped; `@@` kept as `hunk` rows; line counters reset per hunk;
+  row `text` without its `+`/`-`/space prefix.
+- Places every thread and draft comment by **coordinate**: thread `LEFT` → the
+  row whose `oldLine` equals its line (removed or context rows); otherwise
+  (`RIGHT`) → `newLine` (added or context rows); draft `new` → added row
+  `newLine`; `old` → removed row `oldLine`; `both` → context row `newLine`;
+  no line → top of its file; no match → top of its file when the path is in
+  the diff, else `unplaced`. (Fixes the desktop losing threads on context
+  lines, `ToolBodies.tsx:343-355`.)
+- A file with more than `maxRowsPerFile` rows returns `rows: []`,
+  `truncated: true`, its counts and `rowCount`; notes in it are placed
+  `{at:"file"}`.
+
+**`forge:diff`** adds (raw `diff`, `threads`, `headSha`, `stale`, `error`
+unchanged — the raw `diff` stays for compatibility):
+
+```jsonc
+{
+  "files": [ { "path": "src/a.ts", "added": 3, "removed": 1, "rowCount": 42, "truncated": false,
+               "rows": [ { "kind": "hunk"|"added"|"removed"|"context", "text": "…",
+                           "oldLine": 10|null, "newLine": 13|null,
+                           "anchor": { "path": "src/a.ts", "line": 13, "side": "new"|"old"|"both" } | null } ] } ],
+  "threads": [ { …ForgeThread…, "placement": { "at": "row", "file": 0, "row": 7 }
+                                            | { "at": "file", "file": 0 } | { "at": "unplaced" } } ],
+  "draft": null | { …ForgeDraft…, "comments": [ { …ForgeDraftComment…, "placement": … } ] },
+  "message": string|null
+}
+```
+
+`forge:diff` also reads the box-side draft (the same reconcile as
+`draftGetForCwd`, forge/index.mjs:1332-1340, including marking it stale when
+the head moved), so one call returns diff, threads, draft and their placement.
+The audit says "`forge:draft-get` places drafts the same way"; doing it inside
+`forge:diff` gives the same result without fetching the diff twice.
+`forge:draft-get` keeps its shape (compatibility) and gains only `message`. A
+comment added later is shown under the row the user tapped (view state) until
+the next `forge:diff` refresh re-places it.
+
+### S.3 Registrations (sole worker, wave C)
+
+| ID | File | Change |
+|---|---|---|
+| M-05-srv-1 | `src/server/rpc.mjs` (`forge:inbox`, :990) | `"forge:inbox": () => forgeInbox({ probeRepos: () => local.forgeProbe() })`. All other forge handlers keep their registration; the new fields come from `forge/index.mjs` calling `view.mjs` / `diffView.mjs`. No new channel names. |
+| M-05-srv-2 | `src/server/boxCapabilities.mjs` (created by WS02 in wave B, master D25) + `boxCapabilities.test.mjs` | Append `forge-pr-view-1`, `forge-diff-view-1`, `forge-inbox-view-1`, `forge-messages-1` to `BOX_CAPABILITIES`; extend the test's expected ids. `GET /api/version` and `server:version` already return the list (WS02 SF-0) — no `index.mjs` / `rpc.mjs` / `version.mjs` edit, and NO second module (`serverCapabilities.mjs` is withdrawn). |
+| — | `src/server/streamInterp.mjs` | none (no frame changes). |
+
+### S.4 Node tests
+
+- `src/server/forge/view.test.mjs` (new): every moved function, with the
+  desktop's existing vitest cases ported (checkTone, orderChecks stable order,
+  counts, chip per rollup and `none` → null, failuresPrompt exact text with and
+  without URL and `null` when nothing failed, logsUrl fallbacks, panelState
+  incl. connected-but-`no_forge` → `none`, shipState first-match order and
+  `aheadCount: null` → ready, no-ship copy, canMerge every blocking reason,
+  mergeableDisplay, mergeFailureMessage per kind incl. `blocked`,
+  shipErrorMessage table, reviewErrorMessage table, inboxRowView labels /
+  identifier / secondary / repoName / tone / branchName slug + 40-char cap /
+  localPath join, `createLastPrCache` LRU bound).
+- `src/server/forge/diffView.test.mjs` (new): two-file parse with counts;
+  deleted file uses the `a/` path; hunk resets counters; preamble dropped;
+  empty diff → `[]`; LEFT thread on a context row with unequal old/new offsets
+  lands on the old-line row; RIGHT on context; draft `both` uses the new line;
+  unmatched → file top; unknown path → unplaced; truncation over
+  `maxRowsPerFile`.
+- `src/server/forge/index.test.mjs` (extend): `pullRequestForCwd` returns
+  `view` and ordered toned checks; a rate-limited read returns the cached PR
+  with `stale:true` (G5) and a fresh no-PR read drops it; `mergePullRequest`
+  refuses `blocked` and `sha_mismatch` without calling `adapter.merge` and
+  failures carry `message`; ship/ship-preview failures carry `message`;
+  `forgeDiffForCwd` returns `files`, placed threads and the reconciled draft;
+  draft-comment / submit / thread-reply failures carry `message`; `forgeInbox`
+  items carry the row fields and `localPath` (probe injected; probe throw →
+  `null`).
+- `src/server/rpc.inbox.test.mjs` (extend): the `forge:inbox` registration
+  passes `probeRepos`.
+
+### S.5 Desktop migration (same change, no parallel implementation)
+
+| Desktop file | Change |
+|---|---|
+| `src/shared/types.ts` | Add `ForgePullRequestView`; `checks[].tone`; optional `view` on `ForgePullRequestResult`; optional `files` / `placement` / `draft` / `message` on `ForgeDiffResult`; optional `message` on ship / merge / draft / reply results; optional row fields on `ForgeInboxItem`. All optional (old box). |
+| `src/renderer/chatUtils.ts` | **Delete** `checkTone`, `orderChecks`, `countsForChecks`, `checksChipDescriptor`, `branchChipLabel` (unused in production), `failuresToAgentPrompt`, `canMerge`, `describeMergeFailure`, `branchPanelState`, `resolveShipState`, `ShipState`, `commentableLines`, `CommentableLine`, `inboxReasonLabel`, `sortInbox`, `INBOX_REASON_PRIORITY`. Keep `shouldOfferForgeConnect` (G8) and `formatAge` (clock). |
+| `src/renderer/chatUtils.test.ts` | Delete the `describe` blocks of the removed functions (`checkTone` :4452 … `describeMergeFailure` :4735, `commentableLines` :4749, `branchPanelState` :5166, `inboxReasonLabel` :5281, `sortInbox` :5289); their cases move to `view.test.mjs` / `diffView.test.mjs`. |
+| `src/renderer/SessionHeader.tsx` | Takes `view?: ForgePullRequestView` instead of deriving: the branch chip from `view.panel` / `view.chipLabel`; `BranchPanel` from `view.ship` and `view.merge` (deletes `NO_SHIP_COPY`, the mergeable ternary and the `canMerge` call); `ChecksChip` from `view.checks.chip` (registry priority 90 for `danger`, else 40 — layout); `ChecksPanel` lists `checks` as received (pre-ordered; `tone` drives `StatusDot`), "Send failures" fills `view.checks.failuresPrompt`, "Open logs" uses `view.checks.logsUrl`. |
+| `src/renderer/ChatPanel.tsx` | `refreshForge` stores `prResult.view`; `doMerge` shows `res.message` (drops the `describeMergeFailure` import); ship / preview errors show `message ?? error`. A box without `view` keeps the plain tag and the header shows "Update your box to see pull requests and checks here." (only when GitHub is connected). |
+| `src/renderer/ReviewPane.tsx` | Renders `files[].rows` with the comment gutter and places notes by `placement` (new local `ReviewDiffRows` component in this file); deletes `threadAnchor`, `diffHeader`, the per-anchor note map and the separate `forgeDraftGet` call on load (the draft comes from `forge:diff`). Errors and failed add / reply / submit / remove show `message` (the desktop stops swallowing them). A box without `files` → "Update your box to review pull requests here." |
+| `src/renderer/ToolBodies.tsx` | `UnifiedDiff` loses the `gutter` / `notes` props and the `UnifiedDiffGutter` / `UnifiedDiffNote` types and stops importing `commentableLines` (tool-output diffs need no anchors). |
+| `src/renderer/InboxPalette.tsx` | Renders `item.label` / `identifier` / `secondary` / `tone`; uses `item.branchName`, `item.repoName` and `item.localPath`; **deletes** the `forgeProbe` call, `dotTone`, `identifier`, `repoName`, `secondary`, `inboxBranchName` and the `sortInbox` use. Items without `label` → "Update your box to use the inbox here." |
+| `src/renderer/SessionHeader.branch.test.tsx`, `SessionHeader.checks.test.tsx` | Pass a `view` fixture instead of raw state; assert the rendered copy comes from the fixture; add an old-box case (no `view`). |
+| `src/renderer/ReviewPane.test.tsx` (new) | Renders rows and placed notes from a `forge:diff` fixture (incl. a LEFT context-line thread); shows `message` on a failed add. |
+| `src/renderer/InboxPalette.test.tsx` (new) | Renders the box's row fields; "Start a session" uses `localPath` + `branchName`; asserts `forgeProbe` is never called. |
+
+### S.6 Compatibility (D24)
+
+| Capability id (`capabilities`) | Field the client also checks | Without it (older box) |
+|---|---|---|
+| `forge-pr-view-1` | `forge:pull-request` → `view` | Branch shown as a plain label; no checks chip; one-line note "Update your box to see pull requests and checks here." (only when the box reports GitHub connected). |
+| `forge-diff-view-1` | `forge:diff` → `files` | Review screen shows "Update your box to review pull requests here." with **Open on GitHub**. |
+| `forge-inbox-view-1` | `forge:inbox` → `items[].label` | Inbox shows "Update your box to use the inbox here." |
+| `forge-messages-1` | `message` on failures | Show the raw `error` string (still the box's own text). |
+
+Clients read the capability list through the single accessors created by WS02
+in wave B (master D25): iOS `MantaAPIClient.boxCapabilities()` (once per
+store load), desktop `useBoxCapability(id)`. An id missing (incl. an old box
+with no list → empty set) selects the fallback column. The field-presence check
+in the same response stays as a decode guard that renders the same fallback.
+No client re-derives the old logic.
 
 ---
 
@@ -179,17 +437,21 @@ through an injected `GitForgeClient` (a struct of `async throws` closures whose
 `.live` value wraps `MantaAPIClient`), so the store is unit-testable
 (pattern: `UpgradeStoreTests`, `BackgroundJobsStoreTests`).
 
-- `@Published private(set) var state: GitForgeState` (pure value: `connected`,
-  `kind: String?`, `pr`, `checks`, `rollup`, `stale`, `branch` (the **forge**
-  result's branch, nil on a forge error), `base`, `aheadCount`,
-  `offerDismissed`).
+- `@Published private(set) var state: GitForgeState` (value: `connected`
+  (from WS10's `ForgeConnectionStatus`), `kind: String?` (`"github"` unless the
+  PR read answered `no_forge`), `pr`, `checks` (server-ordered, each with
+  `tone`), `stale`, `branch` (the **forge** branch), `base`, `aheadCount`,
+  `view: GitPullRequestView?` (the server's `view`, S.1), `offerDismissed`).
+  The store copies the response; it derives nothing (G1/G2/G5/G6/G7 are the
+  box's).
 - `func run(cwd: String) async` — the poll loop: fetch immediately, then every
   5 s (`BranchFreshnessPolicy.pollInterval`) while not cancelled. Started from
   `.task(id: cwd)` on the mounted header view, so it stops when the chat screen
   disappears and restarts on cwd change. Skips a tick while `scenePhase !=
   .active`.
 - Each tick: `async let` `forgeStatus(validate: false)` + `forge:pull-request`;
-  merge with `GitForgeState.applying(status:, pr:)` (pure, A.4). On throw: keep
+  build the state with `GitForgeState(status:, result:)` (plain field copy). A
+  rate-limited poll already returns the box's cached last PR (G5). On throw: keep
   last-known, no UI noise (desktop `ChatPanel.tsx:1074-1076` — the poll is
   ambient, not a user action).
 - `offerDismissed` loaded once from `configGet()["forgeConnectOfferDismissed"]`.
@@ -214,13 +476,15 @@ through an injected `GitForgeClient` (a struct of `async throws` closures whose
 - `createPullRequest()` — guard `canCreate`; calls `forge:ship {cwd, title,
   body}` from the `.ready` payload; on `ok` sets `state.pr = pr` immediately
   (no flicker), `justShipped = pr.number` (cleared after 4 s), clears the
-  preview, triggers a refresh. On failure sets `.failed(key,
-  GitCopy.shipError(error))`. `shipBusy` true for the duration.
+  preview, triggers a refresh. On failure sets `.failed(key, message ??
+  error)` — the box's `message` (G4). `shipBusy` true for the duration.
 - **Merge, tied to an immutable snapshot.**
   `struct GitMergeTarget: Equatable, Sendable { cwd: String; number: Int; title:
   String; base: String; headSha: String }` (pure, `GitForgeModels.swift`).
   - `func mergeTarget() -> GitMergeTarget?` returns nil unless `state.pr` exists
-    and `canMerge` is true (no force unwraps; `pr` is optional throughout).
+    and `state.view?.merge?.can == true` (the box's gate, G2; no force unwraps).
+    The box re-checks the gate and the head SHA when the merge arrives
+    (`forge:merge`, S.1), so a stale client view can never merge.
   - The sheet captures it **when the Merge button is tapped** into
     `@State pendingMerge: GitMergeTarget?`; the confirmation dialog's title and
     the request are rendered/built from that value only.
@@ -230,8 +494,8 @@ through an injected `GitForgeClient` (a struct of `async throws` closures whose
     the PR while the dialog is open changes nothing about what is merged
     (desktop captures the PR before awaiting, `ChatPanel.tsx:1144-1146`).
   - `mergeBusy`, `mergeMessage: GitBanner?` (`.ok("Merged #N")` or
-    `.error(GitPanel.describeMergeFailure(kind))`). If the server reports
-    `sha_mismatch`, the message tells the user the PR changed.
+    `.error(result.message ?? result.error)` — the box's `message`, G3; it
+    covers `sha_mismatch`, `cannot_merge`, `permission`, `blocked`).
 
 **Mounted view `GitSessionHeaderRow`** (`MantaUI/GitSessionHeaderRow.swift`),
 replaces the `subtitleChip` call in `sessionHeaderBlock` (M-05-1). Inputs:
@@ -248,18 +512,21 @@ offer):
 1. **Branch chip** — the label is always ChatScreen's ordinary branch (same
    look as today's `subtitleChip`: `arrow.triangle.branch`,
    `BranchLabel.display`, `· relPath`), plus ` · #N` when a PR exists.
-   - Interactive only when `GitPanel.isInteractive(connected:, kind:,
-     forgeBranch:)` — connected **and** a recognised forge kind (the PR read
-     did not answer `no_forge`) **and** a non-nil forge branch. Otherwise a
+   - Interactive only when `state.view?.panel` is `"no-pr"` or `"pr"` (the
+     box's rule: recognised forge, token, forge branch — S.1). Otherwise a
      plain `Label`, not a button — this covers a connected account in a repo
-     whose origin is not GitHub (`pullRequestForCwd` returns `branch: null`
-     with `error: "no_forge"`, forge/index.mjs:735,754-755).
+     whose origin is not GitHub (`panel: "none"`). The ` · #N` suffix is the
+     box's `view.chipLabel` when interactive.
+   - Box without `view` (capability `forge-pr-view-1` absent) and
+     `state.connected == true`: plain label, and a footnote row "Update your
+     box to see pull requests and checks here." (D24).
    - Interactive → `Button` presenting `GitBranchSheet` (`.sheet`,
      `.presentationDetents([.medium, .large])`). VoiceOver label
      "Pull request #N: title" or "Current branch: name" + hint "Opens git actions".
 2. **Checks chip** (Feature B) to the right of the branch chip.
 3. Under the row: the **Connect offer** (Feature C) when
-   `GitPanel.shouldOfferConnect(...)`.
+   `GitConnectOffer.shouldShow(connected:, forgeKind:, dismissed:)` (G8,
+   KEEP-CLIENT — it reads a device-local dismissed flag).
 
 **A.3a Read-only chats.** A background-job chat is read-only (WS02 F6:
 `ChatSessionStore.isBackgroundJobReadOnly == true` when `mutationPolicy ==
@@ -308,9 +575,9 @@ path: `.interactiveDismissDisabled(busy)` blocks the swipe, and **Done** is
 (desktop blocks the popover's close while creating, `SessionHeader.tsx:1235-1238`).
 `.onAppear` and every branch change while open: if no PR, `ensureShipPreview`.
 
-- **Not-shippable states** (`on-base`, `detached`, `unknown`): branch name +
-  the desktop line verbatim (see A.1). No buttons.
-- **`no-commits`**: "Nothing to ship — no commits ahead of {base}".
+- **Not-shippable states** (`view.ship.state` ∈ `on-base`, `detached`,
+  `unknown`, `no-commits`): branch name + `view.ship.copy` (the box's
+  sentence). No buttons.
 - **`ready`**: a `Form`/list section: row "From → To" `{branch} → {base}`
   (base from preview, else poll's base, else "—"), row "Changes" `N file(s)`
   (hidden until the preview for this branch lands), section "Title" with the
@@ -319,17 +586,18 @@ path: `.interactiveDismissDisabled(busy)` blocks the swipe, and **Done** is
   enabled only when `canCreate` and not busy; busy shows `ProgressView` +
   "Creating…". Footnote: "Pushes {branch} and opens a pull request into
   {base}. You can edit the title and description on GitHub." Preview/ship
-  failure → red text (`GitCopy.shipError`) and a "Try again" button that
+  failure → red text (the box's `message`, G4) and a "Try again" button that
   re-runs the preview for the current branch.
 - **PR state**: header `#N title` (2 lines max), subtitle `state · head →
   base`; optional green banner "Opened #N" when `justShipped`; `LabeledContent`
-  rows Reviewers / Unresolved threads / Mergeable (value tinted: blocked reason
-  → `tokens.danger`, "mergeable" → `tokens.ok`, "computing…" → `tokens.tx4`).
+  rows Reviewers / Unresolved threads / Mergeable (`view.merge.mergeable.text`,
+  tinted from its `tone`: `danger` → `tokens.danger`, `ok` → `tokens.ok`,
+  `muted` → `tokens.tx4`).
   When `state.stale`: footnote "Showing last known state — GitHub didn't
   answer." Buttons:
-  - **Merge** — enabled iff `store.mergeTarget() != nil`; when disabled, the
-    reason is shown as a footnote ("Can't merge yet: checks failing") — iOS has
-    no hover tooltips. Tap → `pendingMerge = store.mergeTarget()` →
+  - **Merge** — enabled iff `store.mergeTarget() != nil`; when disabled,
+    `view.merge.reason` is shown as a footnote ("Can't merge yet: {reason}") —
+    iOS has no hover tooltips. Tap → `pendingMerge = store.mergeTarget()` →
     `confirmationDialog("Merge #\(t.number) into \(t.base)?", presenting:
     pendingMerge)` with **Merge** and **Cancel** → `store.merge(t)`. Busy:
     "Merging…". Result banners as above.
@@ -341,58 +609,41 @@ path: `.interactiveDismissDisabled(busy)` blocks the swipe, and **Done** is
 Deliberate iOS differences (behaviour, not visuals): Merge asks for a
 confirmation (a phone tap is easy to misfire); after creating a PR the app does
 **not** jump to Safari — it shows "Opened #N" with an **Open on GitHub** button;
-blocked-merge reason is visible text; preview/ship error codes are translated
-to plain words.
+blocked-merge reason is visible text. (Plain-word error copy is now the box's
+and shared with the desktop.)
 
-### A.4 Pure logic — `GitForgeModels.swift` (Foundation-only)
+### A.4 Client-side logic left — `GitForgeModels.swift` (Foundation-only)
 
-Port verbatim from `chatUtils.ts`:
+The rules moved to the box (S.1). What stays is decoding plus KEEP-CLIENT
+state:
 
-- `enum GitPanel`
-  - `branchState(pr:, connected:, branch:) -> .none | .noPR | .pr` (chatUtils.ts:4379), always called with the **forge** branch
-  - `isInteractive(connected:, kind:, forgeBranch:) -> Bool` (A.3 rule)
-  - `shipState(branch:, base:, aheadCount:, hasPR:) -> GitShipState` (`.hasPR,
-    .detached, .unknown, .onBase, .noCommits, .ready`; :4414)
-  - `noShipCopy(_:) -> String?` (SessionHeader.tsx:1284-1288 strings)
-  - `canMerge(rollup:, unresolvedThreads:, mergeable:) -> (can: Bool, reason: String?)` (:4331)
-  - `describeMergeFailure(_ kind: String?) -> String` (:4358)
-  - `mergeableDisplay(pr) -> (text, tone)` (SessionHeader.tsx:1390-1395)
-  - `shouldOfferConnect(connected:, forgeKind:, dismissed:)` (:4084)
-  - `chipLabel(branch:, prNumber:)` → `"branch"` / `"branch · #N"`
-- `struct GitMergeTarget` + `static func target(state: GitForgeState, cwd:) -> GitMergeTarget?` (nil without PR / when `canMerge` fails)
+- Decodable wire types for the S.1 fields: `GitPullRequestView { panel,
+  chipLabel, ship {state, copy}, merge? {can, reason, mergeable {text, tone}},
+  checks {counts, chip? {glyph, label, tone}, failuresPrompt, logsUrl} }`,
+  `GitCheckRun.tone`, `message` on every `*Result` failure case. Unknown enum
+  strings decode to an `.other(String)` case and render neutrally.
+- `GitConnectOffer.shouldShow(connected:, forgeKind:, dismissed:)` (G8,
+  KEEP-CLIENT: device-local dismissed flag).
+- `struct GitMergeTarget` + `static func target(state:, cwd:) ->
+  GitMergeTarget?` (nil without PR or when `view.merge.can` is false) —
+  client snapshot of what the user confirmed.
 - `GitShipKey`, `GitShipPreviewState` with `accept(response:for:current:)`,
-  `invalidated(by newState:)`, `canCreate(current:)`.
-- `enum GitCopy.shipError(_ raw: String) -> String`:
-  `no_forge` → "This folder isn't linked to a GitHub repository.",
-  `not_connected` → "GitHub isn't connected on this server.",
-  `no_branch` → "Detached HEAD — check out a branch first.",
-  `unknown_base` → "Couldn't tell which branch to target.",
-  prefix `push failed: ` → "Couldn't push the branch: <rest>",
-  prefix `create pull request failed: ` → "GitHub refused the pull request: <rest>",
-  anything else → raw.
-- `GitForgeState.applying(status:, pr:) -> GitForgeState`: copies desktop's
-  merge (kind = "github" unless `error == "no_forge"`), **plus one rule**: if
-  the new result is `stale && pr == nil` and the previous state had a PR on the
-  same branch, keep the previous PR/checks/rollup (a rate-limited poll,
-  forge/index.mjs:758, must not flip the sheet to "Create pull request").
-  `status` is WS10's `ForgeConnectionStatus`; `applying` reads only `connected`.
+  `invalidated(by newState:)`, `canCreate(current:)` (G9, KEEP-CLIENT request
+  sequencing); title falls back to `head` when empty.
+- `GitComposerPolicy.canInsert` (G12, KEEP-CLIENT, A.3a).
+- `GitForgeState(status:, result:)` — field copy, no rules.
 
 Tests — `MantaUITests/GitForgeTests.swift` (pure, runs under `verify.sh`):
-`testBranchStateNoneWithoutBranchOrConnection`, `testBranchStatePRvsNoPR`,
-`testInteractiveRequiresConnectedForgeKindAndForgeBranch`,
-`testConnectedAccountNonForgeRepoIsNotInteractive` (`error:"no_forge", branch:null`),
-`testShipStateOrderFirstMatchWins` (all six), `testShipStateUnknownAheadIsReady`,
-`testNoShipCopy`, `testCanMergeEveryBlockingReason` (null/false/yellow/red/none/
-1 thread/2 threads/ok), `testDescribeMergeFailureKinds`, `testMergeableDisplay`,
-`testMergeTargetNilWithoutPRAndWhenBlocked`, `testMergeTargetCapturesHeadSha`,
-`testShipErrorCopy` (each code + both prefixes + passthrough),
+`testDecodePullRequestViewFull` (fixture copied from `view.test.mjs` output),
+`testDecodeViewMissingIsNil` (old box), `testDecodeUnknownPanelAndToneKept`,
+`testDecodeChecksKeepServerOrderAndTone`, `testDecodeMergeFailureMessage`,
+`testDecodeShipFailureMessage`, `testConnectOfferShouldShow`,
+`testMergeTargetNilWithoutPRAndWhenBoxSaysCannot`,
+`testMergeTargetCapturesHeadSha`,
 `testShipPreviewDiscardsLateResponseForOldBranch`,
 `testShipPreviewInvalidatedBySameCwdBranchSwitch`,
 `testCanCreateFalseUntilPreviewMatchesCurrentBranch`,
-`testPreviewTitleFallsBackToHead`,
-`testApplyingKeepsLastPRWhenStaleAndEmpty`, `testApplyingNoForgeClearsKind`,
-`testDecodePullRequestResultWithNullMergeable`, `testDecodeUnknownRollupIsNone`,
-`testDecodeShipResultFailedAndOK`.
+`testPreviewTitleFallsBackToHead`, `testCanInsertPolicyTruthTable`.
 
 Store tests — `MantaUITests/GitForgeStoreTests.swift` (Xcode only, uses a fake
 `GitForgeClient`):
@@ -413,7 +664,12 @@ sha `a`, apply a poll with PR #2 sha `b`, call `merge(target)` → client got
 - [ ] Creating a PR swaps the sheet to the PR view with "Opened #N" in the same
   moment; neither swipe nor Done closes the sheet while creating.
 - [ ] On the base branch / detached HEAD / unknown base / no commits ahead, the
-  sheet shows the matching desktop sentence and no action.
+  sheet shows the box's `view.ship.copy` sentence and no action — the same text
+  the desktop shows.
+- [ ] A rate-limited poll keeps showing the last PR (marked last-known) instead
+  of flipping to "Create pull request", on both clients (G5).
+- [ ] Against a box without `view`, the branch is a plain label and the
+  "Update your box…" note shows when GitHub is connected.
 - [ ] Not connected, a non-git/scratch folder, or a connected account in a repo
   whose origin isn't GitHub: the branch is a plain label (no tap target).
 - [ ] With a PR: reviewers, unresolved threads and mergeability are shown;
@@ -460,36 +716,36 @@ sha `a`, apply a poll with PR #2 sha `b`, call `merge(target)` → client got
 
 ### B.2 iOS design
 
-- `GitChecksChip` (in `GitSessionHeaderRow.swift`): capsule with the
-  descriptor label, tinted `tokens.ok/warn/danger`; `Button` → `GitChecksSheet`
+- `GitChecksChip` (in `GitSessionHeaderRow.swift`): capsule with the box's
+  `view.checks.chip.label` (glyph included), tinted from `chip.tone`
+  (`ok/warn/danger` → `tokens.ok/warn/danger`); `Button` → `GitChecksSheet`
   (`.presentationDetents([.medium, .large])`). Rendered only when
-  `GitChecks.descriptor(...) != nil` and a PR exists.
-- `GitChecksSheet` (`MantaUI/GitChecksSheet.swift`): `List` of
-  `GitChecks.ordered(checks)`; each row: status symbol (`checkmark.circle.fill`
-  ok, `xmark.circle.fill` error, `circle.dotted` running — symbol + colour),
+  `view.checks.chip != nil` (the box returns nil without a PR, without checks
+  or with rollup `none`).
+- `GitChecksSheet` (`MantaUI/GitChecksSheet.swift`): `List` of `checks` **in
+  the order received** (the box orders failed → running → passed, G6); each
+  row: status symbol from the check's `tone` (`checkmark.circle.fill` ok,
+  `xmark.circle.fill` error, `circle.dotted` running — symbol + colour),
   name, secondary text = raw conclusion/status (the desktop tooltip, made
   visible). Rows with a URL are `Button`s → `openURL(url)` with a trailing
   `arrow.up.right`; rows without a URL are plain. Toolbar title "Checks (N)".
   Bottom bar (`safeAreaInset(edge: .bottom)`):
-  - **Send failures to the agent** — only when the prompt is non-empty AND
-    `onSendFailures != nil` (nil for read-only chats, A.3a). Calls it with the
-    prompt (C3 `insert(text:mode: .append)` — D6; append = existing draft +
+  - **Send failures to the agent** — only when `view.checks.failuresPrompt`
+    is non-nil (the box's text, G7) AND `onSendFailures != nil` (nil for
+    read-only chats, A.3a). Calls it with that prompt (C3 `insert(text:mode: .append)` — D6; append = existing draft +
     blank line + text, just the text into an empty draft), dismisses the sheet
     on `true`, and the composer now shows the text (the visible outcome); on
     `false` the sheet stays with "Couldn't add it to your message." **Deliberate
     difference (D6):** desktop replaces the composer text; iOS keeps an
     in-progress draft.
-  - **Open logs** — `openURL(GitChecks.logURL(checks:, prURL:))`; hidden if nil.
+  - **Open logs** — `openURL(view.checks.logsUrl)`; hidden if nil (G7).
 
-### B.3 Pure logic (in `GitForgeModels.swift`) + tests
+### B.3 Client logic + tests
 
-`enum GitChecks { tone(_:), ordered(_:), counts(_:), descriptor(rollup:counts:),
-failuresPrompt(_:), logURL(checks:prURL:) }`. Tests in `GitForgeTests.swift`:
-`testToneRunningWhenNoConclusionOrQueued`, `testToneOkAndError`
-(success/failure/cancelled/timed_out), `testOrderedFailedRunningPassedStable`,
-`testCounts`, `testDescriptorPerRollupAndNoneIsNil`,
-`testFailuresPromptExactText` (with and without URL), `testFailuresPromptEmptyWhenNoFailures`,
-`testLogURLPrefersFirstFailingThenAnyThenPR`.
+None — tone, order, counts, chip and prompt are the box's (S.1, tested in
+`view.test.mjs`). `GitForgeTests` decodes them
+(`testDecodeChecksKeepServerOrderAndTone`, `testDecodeChecksChipNilWhenAbsent`,
+`testDecodeFailuresPromptAndLogsUrl`).
 
 ### B.4 Acceptance
 
@@ -696,16 +952,25 @@ returns C3's Bool; `false` is surfaced as "Couldn't add it to your message."
 
 - **Toolbar**: title "Review" + subtitle `#N` when known; trailing menu:
   **Open on GitHub** (if `prURL`), **Refresh**.
-- **States**: loading → `ProgressView("Loading diff…")`; `error` → desktop
-  sentence + **Try again**; empty diff → "No diff."; `stale` diff result →
-  footnote banner "Showing last known diff — GitHub didn't answer.".
-  `.refreshable` re-runs both loads.
+- **Load**: ONE call, `forge:diff(ref)`, returns rows, placed threads and the
+  reconciled draft with placed comments (S.2) — no separate `draft-get` on load.
+- **States**: loading → `ProgressView("Loading diff…")`; `error` → the box's
+  `message` + **Try again**; `files` empty → "No diff."; `stale` diff result →
+  footnote banner "Showing last known diff — GitHub didn't answer."; response
+  without `files` (old box, capability `forge-diff-view-1`) → "Update your box to
+  review pull requests here." + **Open on GitHub**. `.refreshable` reloads.
 - **Body**: `ScrollView` + `LazyVStack(pinnedViews: .sectionHeaders)`, one
-  `Section` per file from `ReviewDiff.parse`: header = path (middle-truncated,
-  monospaced) + `+A −D`; file-level/unplaced threads first; then rows. Each row
+  `Section` per server `files[i]`: header = `path` (middle-truncated,
+  monospaced) + `+added −removed`; notes placed `{at:"file", file:i}` first;
+  then `rows` with notes placed `{at:"row", file:i, row:j}` under row `j`.
+  Notes placed `{at:"unplaced"}` render in a "Other comments" section at the
+  top. A file with `truncated: true` shows "Too large to show here ({rowCount}
+  lines)" with **Open on GitHub**. Each row
   is monospaced, wraps (no horizontal scroll), with old/new line numbers and a
-  coloured background (`tokens.ok`/`tokens.danger` at low opacity), hunk
-  headers as muted rows. Row ids are deterministic: `"\(fileIndex):\(rowIndex)"`.
+  coloured background (`tokens.ok`/`tokens.danger` at low opacity) by `kind`,
+  `hunk` rows muted. A row is commentable iff its `anchor` is non-nil; the
+  comment is sent with exactly that anchor. Row ids are deterministic:
+  `"\(fileIndex):\(rowIndex)"`.
   Files over 400 rows start collapsed with "Show N lines" (perf on a phone).
 - **Commenting**: tapping a commentable row (or its context menu "Comment on
   this line") opens `ReviewCommentSheet` (`.presentationDetents([.medium])`)
@@ -720,71 +985,46 @@ returns C3's Bool; `false` is surfaced as "Couldn't add it to your message."
     your message — not sent yet" confirms (the composer is not visible from
     here); on `false` the sheet stays open with the error.
   - Add to review → busy spinner; success closes the sheet and the comment
-    appears inline; failure keeps the sheet open with the text and shows the
-    server error in red.
+    appears under the row that was tapped (view state) until the next load
+    re-places it from the box; failure keeps the sheet open with the text and
+    shows the box's `message` in red.
 - **Threads** inline under their row as cards: author (+ " · resolved"),
   comments in order with author and relative time when `createdAt` is present,
   **Reply** → `ReviewReplySheet` (TextEditor "Reply…", **Reply** / **Cancel**);
-  success refetches the diff (threads) and closes; failure keeps text + error.
+  success refetches the diff (threads) and closes; failure keeps text + the
+  box's `message`.
 - **Your draft comments** inline as "You · draft" cards with **Send to agent**
   (when available and not yet sent this screen) and **Remove** (also as a
   swipe/context action); after sending: "↳ added to your message · not yet
-  published". Remove failure → inline error, card stays.
+  published". Remove failure → inline `message`, card stays.
 - **Pending bar** (`safeAreaInset(edge: .bottom)`), only when ≥1 draft comment:
   stale warning (desktop copy) when `draft.stale`; "N comment(s) not yet
-  published"; a segmented `Picker` Approve / Request changes / Comment bound to
+  published" (the plural is client formatting); a segmented `Picker` Approve /
+  Request changes / Comment bound to
   `draft.verdict` (no selection = none; choosing calls `set-verdict`,
   optimistic, reverted with an error on failure); **Submit review** primary
   ("Submitting…"). Success → banner "Review submitted" then the bar
-  disappears and the threads refetch. Failure → "Couldn't submit — your
-  comments are kept. ({error})"; `nothing to submit` → "Add at least one line
-  comment before submitting." (server rule; desktop never reaches it because
-  the bar is hidden at zero).
-- Threads whose anchor does not match any rendered row are **not dropped** —
-  they show at the top of their file (or the top of the review if the file
-  isn't in the diff). (Desktop silently loses a thread on a context line
-  because it keys rows by side, `ToolBodies.tsx:340-355`; iOS matches by the
-  line coordinate of the thread's side — see `ReviewDiff.place`.)
+  disappears and the threads refetch. Failure → the box's `message` (G11 table
+  in S.1: `nothing to submit`, `http_422`, other).
+- No thread is ever dropped: placement is the box's (S.2), which fixes the
+  desktop's loss of threads on context lines for both clients.
 
-### D.3 Pure logic — `ReviewDiff.swift` (Foundation-only) + tests
+### D.3 Client logic + tests
 
-```swift
-struct ReviewAnchor: Hashable, Sendable { var path: String; var line: Int; var side: Side; enum Side: String { case new, old, both } }
-struct ReviewDiffRow: Equatable, Sendable { enum Kind { case hunk, added, removed, context }; var kind: Kind; var text: String; var oldLine: Int?; var newLine: Int?; var anchor: ReviewAnchor? }
-struct ReviewDiffFile: Equatable, Sendable { var path: String; var rows: [ReviewDiffRow]; var added: Int; var removed: Int }
-enum ReviewDiff {
-  static func parse(_ diff: String) -> [ReviewDiffFile]          // splits on `diff --git` / `--- `+`+++ `; drops Index:/===/--- /+++ preamble; keeps @@ as .hunk
-  static func anchors(_ diff: String) -> [ReviewAnchor]           // exact port of commentableLines (chatUtils.ts:4454)
-  static func threadAnchor(path: String?, line: Int?, side: String?) -> ReviewAnchor?  // LEFT → .old else .new; nil line → nil
-  static func place(threads: [GitThread], drafts: [GitDraftComment], in files: [ReviewDiffFile]) -> ReviewPlacement
-       // ReviewPlacement: byRow[(fileIndex,rowIndex)] → [note ids], topOfFile[fileIndex], unplaced
-       // matching is by COORDINATE, never by comparing a note's line to a .both anchor's line:
-       //   thread LEFT  (.old)  → the row in that file whose oldLine == line (removed or context rows)
-       //   thread RIGHT (.new)  → the row whose newLine == line (added or context rows)
-       //   draft .new → added row with newLine == line; draft .old → removed row with oldLine == line;
-       //   draft .both → context row with newLine == line (commentableLines emits the NEW counter for context, chatUtils.ts:4486-4489)
-       //   no match → topOfFile (path known) or unplaced
-  static func pendingLabel(_ count: Int) -> String   // "1 comment" / "N comments"
-  static func submitErrorCopy(error: String, kind: String?) -> String
-}
-```
+Parsing, anchors and placement are the box's (`diffView.mjs`, S.2) — there is
+no `ReviewDiff.swift`. Decode types live in `GitForgeModels.swift`:
+`GitDiffFile { path, added, removed, rowCount, truncated, rows }`,
+`GitDiffRow { kind (hunk|added|removed|context|other), text, oldLine?, newLine?,
+anchor? {path, line, side} }`, `GitPlacement` (`.row(file, row)`,
+`.file(file)`, `.unplaced`; unknown `at` → `.unplaced`), `placement` on
+`GitThread` and `GitDraftComment`. Client-only: `ReviewCopy.pendingLabel(_:)`
+("1 comment" / "N comments").
 
-Tests — `MantaUITests/ReviewDiffTests.swift`:
-`testAnchorsMatchDesktopCommentableLines` (fixture with two files, add/remove/
-context; expected array copied from `chatUtils.test.ts` cases),
-`testDeletedFileUsesAPath`, `testHunkHeaderResetsLineNumbers`,
-`testParseSplitsFilesAndCountsPlusMinus`, `testParseDropsPreambleKeepsHunks`,
-`testEmptyDiffYieldsNoFiles`, `testThreadAnchorLeftIsOld`,
-`testThreadAnchorNoLineIsNil`, `testPlaceExactMatch`,
-`testPlaceNewThreadOnContextRow`,
-`testPlaceLeftThreadOnContextRowUsesOldLine` (fixture where a hunk inserted 3
-lines above, so one context row is old 10 / new 13 and another is new 10: a
-LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
-`testPlaceLeftThreadOnRemovedRow`, `testPlaceDraftBothUsesNewLine`,
-`testPlaceUnmatchedGoesTopOfFile`,
-`testPlaceUnknownFileGoesUnplaced`, `testPendingLabel`,
-`testSubmitErrorCopyNothingToSubmit`, `testDecodeDraftWithNullVerdict`,
-`testDecodeThreadComments`.
+Tests — `MantaUITests/GitForgeTests.swift` (pure, `verify.sh`):
+`testDecodeDiffFilesRowsAnchors` (fixture copied from `diffView.test.mjs`),
+`testDecodePlacementVariantsAndUnknownAt`, `testDecodeTruncatedFile`,
+`testDecodeDiffWithoutFilesIsOldBox`, `testDecodeDraftWithPlacedComments`,
+`testDecodeReviewFailureMessage`, `testPendingLabel`.
 
 ### D.4 Acceptance
 
@@ -794,7 +1034,8 @@ LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
 - [ ] With ≥1 draft comment the bottom bar shows the count, a verdict choice and Submit review; submit success clears the draft; failure keeps it with a message.
 - [ ] When the branch moved since the comments were written, the desktop warning appears and nothing is discarded.
 - [ ] Opened from the inbox (no session) or from a read-only background-job chat, no "Send to agent" control is shown anywhere (line composer or saved drafts).
-- [ ] A thread on the old side of an unchanged line appears under the right line even when lines were added above it.
+- [ ] A thread on the old side of an unchanged line appears under the right line even when lines were added above it — on iOS and on the desktop (both render the box's placement).
+- [ ] Against a box without `files`, the review screen says "Update your box to review pull requests here." and offers Open on GitHub.
 - [ ] A 3,000-line diff scrolls smoothly (large files collapsed by default).
 
 ---
@@ -841,27 +1082,28 @@ LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
   accessibility "Inbox") → `sheetRoute = .inbox` (new `SheetRoute` case,
   M-05-2) → `InboxWorkScreen` (large detent).
 - **`InboxWorkStore`** (`MantaUI/InboxWorkStore.swift`, `@MainActor final
-  class`): `load()` on appear and on pull-to-refresh (no polling) running
-  `forge:inbox` and WS04's `forgeProbe()` concurrently (probe failure ignored,
-  as desktop); holds `items`, `repoPaths: [String: String]` (repoKey → path),
+  class`): `load()` on appear and on pull-to-refresh (no polling) calling
+  `forge:inbox` only — items arrive sorted, deduplicated and carrying their row
+  fields and `localPath` (G13, S.1); no `forgeProbe()` call. Holds `items`,
   `phase: .loading | .loaded | .notConnected | .failed(String)`,
   `actionError: String?`, `actionNotice: String?`, `busyItem: String?`.
 - **`InboxWorkScreen`** (`MantaUI/InboxWorkScreen.swift`): `NavigationStack`,
   title "Inbox" with the count in the subtitle; `.searchable(prompt: "Filter
   inbox…")`; states with the desktop copy; for `.notConnected` also a
   **Connect GitHub** button presenting WS04's `GitHubDeviceSignInView`
-  (§C.4; on connected → reload). Rows: leading SF Symbol + tint by reason
-  (`xmark.circle.fill` red / `eye.circle.fill` amber / `circle` grey — symbol,
-  not colour alone), identifier + title (2 lines), secondary line, trailing age
-  (ticks every 60 s).
+  (§C.4; on connected → reload). Items without `label` (old box, capability
+  `forge-inbox-view-1`) → "Update your box to use the inbox here." Rows: leading SF
+  Symbol + tint from the box's `tone` (`danger` → `xmark.circle.fill` red,
+  `warn` → `eye.circle.fill` amber, `muted` → `circle` grey — symbol, not
+  colour alone), `identifier` + title (2 lines), `secondary`, trailing age
+  (client clock formatting, ticks every 60 s).
 - **Row actions**: tapping a row shows a `confirmationDialog` titled with the
   identifier + title (also available as the row's context menu):
-  - **Start a session** — always listed. No local checkout → the desktop
-    message "No local checkout of {repo} on this server to start a session in."
-    Otherwise (D12) the inbox **creates nothing**: it builds
-    `WorkInbox.draft(for: item, repoPath:)` =
-    `NewSessionDraft(cwd: repoPath, text: item.seed, attachments: [],
-    worktreeBranch: WorkInbox.branchName(item), linkedIssueURL: item.url)`
+  - **Start a session** — always listed. `localPath == nil` → the desktop
+    message "No local checkout of {repoName} on this server to start a session
+    in." Otherwise (D12) the inbox **creates nothing**: it builds
+    `NewSessionDraft(cwd: item.localPath, text: item.seed, attachments: [],
+    worktreeBranch: item.branchName, linkedIssueURL: item.url)`
     (seed is the box's "Complete {url}", forge/index.mjs:803, so it contains
     the issue/PR URL), dismisses the inbox (`sheetRoute = nil`) and calls
     `navigator.startNewSession(draft)`. WS04's create sheet then shows the
@@ -874,12 +1116,12 @@ LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
   - **Open review** — PRs only (not listed for issues — no dead control);
     pushes `ReviewScreen(target: .pr(repoKey:, number:), sessionId: nil, title:
     "!N title", prURL: item.url, onSendToAgent: nil)`.
-  - **Delegate in background** — listed when a local checkout exists. The
+  - **Delegate in background** — listed when `localPath != nil`. The
     parent session is chosen from a second dialog "Run under which session?"
     (D9) listing chat sessions (windows with `opencodeSessionId` and not job
     windows, from `projects()`), sessions whose cwd is inside the repo path
     first. No chat sessions → the action isn't listed. Calls
-    `delegateStart(prompt: item.seed, sessionID: parent, directory: repoPath)`
+    `delegateStart(prompt: item.seed, sessionID: parent, directory: item.localPath)`
     (the delegate engine makes its own worktree, as desktop). Success →
     `actionNotice` "Background job started under {session}" (the sheet stays;
     the banner is the visible confirmation). `ok:false` → its error or
@@ -887,35 +1129,30 @@ LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
   - **Open on GitHub** — the row's `url` (desktop shows it as the row
     tooltip; on a phone it must be an action to be reachable).
 
-### E.3 Pure logic — `InboxWorkModels.swift` (Foundation-only) + tests
+### E.3 Client logic — `InboxWorkModels.swift` (Foundation-only) + tests
 
-`WorkInboxItem` (Decodable, `kind`, `repoKey`, `number`, `title`, `url`,
-`state`, `rollup`, `updatedAt` ms, `reason: WorkInboxReason`
-(`checksFailing|reviewRequested|assigned|other(String)`), `seed`), and
-`enum WorkInbox { sorted(_:) (dedupe+priority+updatedAt desc), filter(_:query:)
-(title contains, case-insensitive, or number contains), reasonLabel(_:),
-identifier(_:), repoName(_:), secondary(_:), branchName(_:) (exact port of
-InboxPalette.tsx:73-80), formatAge(ms:) (chatUtils.ts:542),
-draft(for:repoPath:) -> NewSessionDraft?` (nil when `repoPath` is nil; the
-`NewSessionDraft` type is WS04's, declared in `MantaNavigation.swift` per D2 —
-that file is not in the Linux package, so `draft(for:)` lives in
-`InboxWorkStore.swift` instead and is tested from Xcode; the pure file returns
-a `WorkInboxDraftFields { cwd, text, worktreeBranch, linkedIssueURL }` value
-that the store maps 1:1), `parentCandidates(sessions:, repoPath:)` (takes plain
-`(sessionID, name, cwd)` tuples, not `MantaWindow`).
+`WorkInboxItem` (Decodable: `kind`, `repoKey`, `number`, `title`, `url`,
+`state`, `rollup`, `updatedAt` ms, `reason`, `seed`, and the box's `label`,
+`identifier`, `secondary`, `repoName`, `tone`, `branchName`, `localPath?`).
+Sorting, dedupe, labels, identifier, branch name and the checkout join are the
+box's (G13). KEEP-CLIENT helpers only: `WorkInbox.filter(_:query:)` (G14;
+title contains, case-insensitive, or number contains), `formatAge(ms:now:)`
+(clock), `parentCandidates(sessions:, repoPath:)` (G15; plain
+`(sessionID, name, cwd)` tuples), `draftFields(for:) ->
+WorkInboxDraftFields? { cwd, text, worktreeBranch, linkedIssueURL }` (G16;
+nil when `localPath` is nil; the store maps it 1:1 onto WS04's
+`NewSessionDraft`, which is not in the Linux package).
 
 Tests — `MantaUITests/InboxWorkTests.swift` (pure, `verify.sh`):
-`testSortDedupesMoreUrgentReasonWins`, `testSortUpdatedAtDescending`,
-`testFilterByTitleAndNumber`, `testReasonLabels`, `testIdentifierBangForPR`,
-`testSecondaryHasRepoOnlyForPR`, `testBranchNameSlugAndCap` (punctuation,
-40-char cap, empty title), `testFormatAgeBuckets`,
-`testDraftFieldsCarryRepoBranchSeedAndURL`, `testDraftFieldsNilWithoutCheckout`,
-`testParentCandidatesRepoFirst`, `testDecodeUnknownReasonKept`,
-`testDecodeNotConnected`.
+`testDecodeRowFieldsFromBox` (fixture copied from `view.test.mjs`
+`inboxRowView` output), `testDecodeOldBoxItemWithoutLabel`,
+`testFilterByTitleAndNumber`, `testFormatAgeBuckets`,
+`testDraftFieldsCarryPathBranchSeedAndURL`, `testDraftFieldsNilWithoutCheckout`,
+`testParentCandidatesRepoFirst`, `testDecodeNotConnected`.
 Xcode-only — `MantaUITests/InboxWorkStoreTests.swift`:
 `testStartSessionCallsNavigatorAndCreatesNothing` (fake client records zero
 `git:add-worktree`/`tmux:new-session` calls; navigator's `pendingDraft` equals
-the expected draft).
+the expected draft), `testLoadCallsInboxOnlyNotProbe`.
 
 ### E.4 Acceptance
 
@@ -931,33 +1168,57 @@ the expected draft).
 
 ## 7. Files
 
-All new, within WS05's prefixes. WS05 edits existing files only through the
-mounts in §8 (wave C runs alone, D18).
+**iOS** — all new, within WS05's prefixes. WS05 edits existing iOS files only
+through the mounts in §8 (wave C runs alone, D18).
 
 | File | Kind | In Linux `Package.swift` (D19)? |
 |---|---|---|
 | `MantaUI/MantaAPIClient+Git.swift` | API extension (C1), members in §12 | no |
-| `MantaUI/GitForgeModels.swift` | wire types + `GitPanel`/`GitChecks`/`GitCopy`/`GitForgeState`/`GitMergeTarget`/`GitShipPreviewState` (Foundation-only) | **yes** |
+| `MantaUI/GitForgeModels.swift` | decode types for the box's views (`GitPullRequestView`, checks with `tone`, `GitDiffFile`/`GitDiffRow`/`GitPlacement`, `message`s) + KEEP-CLIENT `GitConnectOffer`, `GitMergeTarget`, `GitShipPreviewState`, `GitComposerPolicy`, `ReviewCopy.pendingLabel`, `GitForgeState` (Foundation-only) | **yes** |
 | `MantaUI/GitForgeStore.swift` | `@MainActor` store (poll, ship, merge) + `GitForgeClient` + `GitSessionLookup` | no |
 | `MantaUI/GitSessionHeaderRow.swift` | branch chip + checks chip + connect offer + `GitComposerBridge` (mounted view) | no |
 | `MantaUI/GitBranchSheet.swift` | branch/PR sheet | no |
 | `MantaUI/GitChecksSheet.swift` | checks list sheet | no |
-| `MantaUI/ReviewDiff.swift` | diff parse, anchors, placement (Foundation-only) | **yes** |
 | `MantaUI/ReviewStore.swift` | `@MainActor` review store | no |
 | `MantaUI/ReviewScreen.swift` | review screen + `ReviewCommentSheet` + `ReviewReplySheet` + `ReviewScreen.forSession(_:)` | no |
-| `MantaUI/InboxWorkModels.swift` | work-inbox types + pure helpers (Foundation-only) | **yes** |
+| `MantaUI/InboxWorkModels.swift` | work-inbox decode types + KEEP-CLIENT filter / age / parent candidates / draft fields (Foundation-only) | **yes** |
 | `MantaUI/InboxWorkStore.swift` | `@MainActor` inbox store (+ `NewSessionDraft` mapping) | no |
 | `MantaUI/InboxWorkScreen.swift` | inbox sheet | no |
-| `MantaUITests/GitForgeTests.swift` | XCTest, pure | **yes** |
-| `MantaUITests/ReviewDiffTests.swift` | XCTest, pure | **yes** |
-| `MantaUITests/InboxWorkTests.swift` | XCTest, pure | **yes** |
+| `MantaUITests/GitForgeTests.swift` | XCTest, decode + client logic | **yes** |
+| `MantaUITests/InboxWorkTests.swift` | XCTest, decode + client logic | **yes** |
 | `MantaUITests/GitForgeStoreTests.swift` | XCTest, store (fake client) | no |
 | `MantaUITests/InboxWorkStoreTests.swift` | XCTest, store | no |
 
-No device-flow files (D14 — WS04's `CloneFromGitHubSignIn.swift`). Never touch
-`InboxModels.swift`. `project.yml` sources the `MantaUI/` directory, so no
-project edit is needed; `project.pbxproj` is regenerated once by the
-orchestrator (D18) — WS05 never edits it.
+There is no `ReviewDiff.swift` / `ReviewDiffTests.swift` any more (G10 is the
+box's). No device-flow files (D14 — WS04's `CloneFromGitHubSignIn.swift`).
+Never touch `InboxModels.swift`. `project.yml` sources the `MantaUI/`
+directory, so no project edit is needed; `project.pbxproj` is regenerated once
+by the orchestrator (D18) — WS05 never edits it.
+
+**Server** (WS05 owns the new modules; S.1–S.4):
+
+| File | Change |
+|---|---|
+| `src/server/forge/view.mjs` | new (S.1) |
+| `src/server/forge/view.test.mjs` | new |
+| `src/server/forge/diffView.mjs` | new (S.2) |
+| `src/server/forge/diffView.test.mjs` | new |
+| `src/server/forge/index.mjs` | `pullRequestForCwd` adds `view` + last-PR cache; `mergePullRequest` re-check + `message`; `shipPreview` / `shipPullRequest` `message`; `forgeDiffForCwd` adds `files` / placement / `draft`; draft / reply ops add `message`; `defaultForgeInbox` adds row fields via `probeRepos` |
+| `src/server/forge/index.test.mjs` | extended (S.4) |
+| `src/server/rpc.mjs`, `src/server/rpc.inbox.test.mjs` | M-05-srv-1 |
+| `src/server/boxCapabilities.mjs` + `boxCapabilities.test.mjs` (WS02's module, append only) | M-05-srv-2 |
+
+**Desktop** (same change, S.5): `src/shared/types.ts`,
+`src/renderer/chatUtils.ts`, `src/renderer/chatUtils.test.ts`,
+`src/renderer/SessionHeader.tsx`, `src/renderer/ChatPanel.tsx`,
+`src/renderer/ReviewPane.tsx`, `src/renderer/ToolBodies.tsx`,
+`src/renderer/InboxPalette.tsx`, `src/renderer/SessionHeader.branch.test.tsx`,
+`src/renderer/SessionHeader.checks.test.tsx`, new
+`src/renderer/ReviewPane.test.tsx`, new `src/renderer/InboxPalette.test.tsx`.
+
+Verification for the server/desktop half: `npm run typecheck`, `npm test`
+(vitest + `node --test src/server/**`), all green; any test that fails must be
+shown to fail identically on `main` before it is dismissed.
 
 ## 8. Mount requests
 
@@ -969,13 +1230,17 @@ file; `Package.swift` goes through the wave-C integration step (D18/D1).
 | M-05-1 | `ChatScreen.swift` (`ChatScreenContent.sessionHeaderBlock`, today :1131-1150) | WS05, wave C | `GitSessionHeaderRow(branch:relPath:cwd:sessionId:shipModel:readOnly:tokens:)`; consumes `ChatSessionStore.isBackgroundJobReadOnly` (WS02), `EnvironmentValues.composerController` + `ComposerTextController.acceptsInput` (WS03) | (a) Replace the `subtitleChip` call with `GitSessionHeaderRow(branch: branch, relPath: branchRelPath, cwd: sessionWindow?.cwd, sessionId: store.sessionId, shipModel: modelStore.override, readOnly: store.isBackgroundJobReadOnly, tokens: tokens)`; delete the now-unused `subtitleChip` / `branchCapsuleInfo` (the row renders the identical plain label when the forge isn't in play). (b) Verify WS02's M-03-7 binding (`.onAppear` + `.onChange(of: store.isBackgroundJobReadOnly)` setting `composer.acceptsInput = !store.isBackgroundJobReadOnly`) is present (A.3a layer 2); add exactly that binding only if missing. ChatScreen's own branch poll is untouched. | WS02 wave B landed (`isBackgroundJobReadOnly`, M-03-7); WS03 M-03-3 (`composerController` env on `ChatScreenContent`) |
 | M-05-2 | `SessionListView.swift` | WS05, wave C | `InboxWorkScreen(onClose:)` (WS05); `MantaNavigator.startNewSession(_:)` (WS04) | (a) `SheetRoute` gains `case inbox` (`id: "inbox"`); (b) new `ToolbarItem(placement: .topBarTrailing)` before the `+` button: `Image(systemName: "tray")`, `.accessibilityLabel("Inbox")`, action `sheetRoute = .inbox` (with the existing selection haptic); (c) `sheetContent` case `.inbox` → `InboxWorkScreen(onClose: { sheetRoute = nil })`. The inbox's Start-a-session sets `sheetRoute = nil` then `navigator.startNewSession(draft)`, which WS04's `pendingDraft` consumer turns into `.create`. | WS04 wave A2 (`MantaNavigator.startNewSession`, `pendingDraft` consumer) |
 | M-05-3 | `SessionListView.swift` (WS04's `navigator.pending` consumer) | WS05, wave C | `ReviewScreen.forSession(_:)` | WS04's consumer ignores `.review` (04-sessions §11). Add: `case .review(let sid)`: dismiss the settings cover, `sheetRoute = .review(sessionID: sid)` (new `SheetRoute` case, `id: "review:\(sid)"`), clear `pending`; `sheetContent` → `NavigationStack { ReviewScreen.forSession(sid) }` (resolves cwd via `GitSessionLookup.cwd(for:in: store.projects)`; unknown session → "That session is no longer open"; `onSendToAgent: nil`). | WS04 wave A2 navigator consumer |
-| M-05-4 | `mobile/native/Package.swift` | Integration agent C (IC), after C (D18/D20; owner WS07 per D1) | — | Append `GitForgeModels.swift`, `ReviewDiff.swift`, `InboxWorkModels.swift` to the `MantaUI` target `sources`, and `GitForgeTests.swift`, `ReviewDiffTests.swift`, `InboxWorkTests.swift` to `MantaUITests` `sources`; then `./verify.sh` must pass (D19). | WS05 files exist (end of wave C) |
+| M-05-4 | `mobile/native/Package.swift` | Integration agent C (IC), after C (D18/D20; owner WS07 per D1) | — | Append `GitForgeModels.swift`, `InboxWorkModels.swift` to the `MantaUI` target `sources`, and `GitForgeTests.swift`, `InboxWorkTests.swift` to `MantaUITests` `sources`; then `./verify.sh` must pass (D19). (`ReviewDiff*` removed by the server-first revision.) | WS05 files exist (end of wave C) |
+| M-05-srv-1 | `src/server/rpc.mjs` (`forge:inbox`, :990) | WS05, wave C (sole worker, D24) | `forgeInbox(deps)` with `deps.probeRepos` (WS05, `forge/index.mjs`) | `"forge:inbox": () => forgeInbox({ probeRepos: () => local.forgeProbe() })` | `view.mjs` landed |
+| M-05-srv-2 | `src/server/boxCapabilities.mjs` (WS02, wave B) | WS05, wave C (sole worker, D24) | `BOX_CAPABILITIES` (WS02) | Append `forge-pr-view-1`, `forge-diff-view-1`, `forge-inbox-view-1`, `forge-messages-1` (S.3/S.6) | WS02 SF-0 landed (B) |
+| — | `src/server/streamInterp.mjs` | — | — | no change | — |
 
 ## 9. Mounts applied by this workstream
 
 | ID | Requested by | Receiving file | Status |
 |---|---|---|---|
 | M-05-1 … M-05-3 | WS05 | as above | applied by WS05 in wave C |
+| M-05-srv-1, M-05-srv-2 | WS05 | `rpc.mjs`, `index.mjs` | applied by WS05 in wave C (sole worker, D24 — no integration agent needed for server registrations in wave C) |
 
 Matches the master's canonical mount ledger (`00-master.md`, rows M-05-1 …
 M-05-4: same files, appliers WS05/C and IC after C) and the receiving tables of
@@ -1004,11 +1269,20 @@ button — `10-settings-box.md:368-369`.)
 - **D5/D14**: `GitHubDeviceSignInView(onConnected:onCancel:)`.
 - **C4**: M-05-1 (branch chip → `GitBranchSheet`, checks chip beside it).
 - **C5/C6**: none. `forgeConnectOfferDismissed` uses `config:*`, not the schema.
-- **C7/D19**: pure tests under `verify.sh`; store tests on the Mac. No server
-  change → no node tests.
+- **C7/D19**: pure tests under `verify.sh`; store tests on the Mac; node tests
+  for `view.mjs`, `diffView.mjs` and the extended `forge/index.mjs` (S.4);
+  vitest updates for the desktop switch (S.5).
+- **D23/D24/D25**: server-first section above; capability ids
+  `forge-pr-view-1`, `forge-diff-view-1`, `forge-inbox-view-1`,
+  `forge-messages-1` in WS02's `boxCapabilities.mjs`; read via WS02's
+  `MantaAPIClient.boxCapabilities()` (iOS) and `useBoxCapability(id)`
+  (desktop) — WS05 declares no capability accessor of its own.
 
 **Provided**
 - `ReviewScreen` + `ReviewScreen.forSession(_:)` (C2 `.review`).
+- Box fields (S.1/S.2) consumed by the desktop in this change and available to
+  WS11: `forge:pull-request.view`, `forge:diff.files/placement/draft`,
+  `forge:inbox` row fields, `message` on forge failures.
 - The §C.3 behavioural contract that WS04's sign-in view implements (D5).
 
 ## 11. Deferred
@@ -1035,7 +1309,6 @@ func forgeShipPreview(cwd: String, model: OpencodeModelID?, sessionId: String?) 
 func forgeShip(cwd: String, title: String, body: String) async throws -> GitShipResult   // forge:ship
 func forgeMerge(cwd: String, number: Int, sha: String) async throws -> GitMergeResult    // forge:merge (method "merge")
 func forgeDiff(_ ref: GitRef) async throws -> GitDiffResult                               // forge:diff
-func forgeDraftGet(_ ref: GitRef) async throws -> GitDraftGetResult                       // forge:draft-get
 func forgeDraftComment(_ ref: GitRef, op: GitDraftOp) async throws -> GitDraftCommentResult  // forge:draft-comment
      // GitDraftOp: .add(path:line:side:body:) | .delete(id:) | .setVerdict(GitVerdict?)
 func forgeDraftSubmit(_ ref: GitRef, verdict: GitVerdict?) async throws -> GitDraftSubmitResult  // forge:draft-submit
@@ -1044,9 +1317,13 @@ func forgeInbox() async throws -> WorkInboxResult                               
 func delegateStart(prompt: String, sessionID: String, directory: String) async throws -> GitDelegateStartResult  // delegate:start
 ```
 
-**Not declared by WS05** (consumed, D16/D21): `forgeStatus(validate:)` +
-`ForgeConnectionStatus` (WS10); `forgeProbe()` + `ForgeProbeResult`/`RepoHit`
-and `forgeDeviceStart/Poll/Cancel` (WS04; WS05 never calls the device members);
+(`forgeDraftGet` is not declared: the draft now arrives with `forge:diff`.)
+
+**Not declared by WS05** (consumed, D16/D21/D25): `boxCapabilities() -> Set<String>`
+(WS02, `MantaAPIClient+ChatCards.swift`); `forgeStatus(validate:)` +
+`ForgeConnectionStatus` (WS10); `forgeDeviceStart/Poll/Cancel` (WS04; WS05
+never calls them, it presents the view). WS05 no longer calls WS04's
+`forgeProbe()` either — the inbox's `localPath` comes from the box (G13);
 `configGet`/`configUpdate`/`projects` (existing). WS05 must not declare any of
 these, nor `gitAddWorktree`, a zero-argument `forgeStatus()`, or any alias such
 as `repoProbe()`.
@@ -1146,3 +1423,43 @@ Cross-cutting review (`reviews/round2/00-cross-cutting.md`), findings naming WS0
 - **#9 missing probe method** — same fix as finding 1.
 - **Ledger rows M-05-1 … M-05-4** — §8/§9 match the consolidated ledger;
   M-05-1's prerequisite now cites WS02's M-03-7 instead of leaving it missing.
+
+## Review responses (server-first)
+
+Per `_serverfirst-revise-brief.md`, D23/D24 and `server-first-audit.md` §WS05:
+
+- **Folded (MOVE-NOW):** G1 (panel/ship state + copy, chip label,
+  interactivity), G2 (merge gate + mergeable display, re-checked by
+  `forge:merge`), G3 (merge failure `message`), G4 (ship / ship-preview
+  `message`), G5 (box-side last-PR cache — fixes the desktop flip), G6 (checks
+  pre-ordered with `tone`, counts, chip), G7 (`failuresPrompt`, `logsUrl`), G10
+  (structured diff + coordinate placement of threads and drafts in
+  `forge:diff`), G11 (review `message`s), G13 (inbox row fields + `localPath`).
+  New modules `src/server/forge/view.mjs` and `src/server/forge/diffView.mjs`
+  with node tests; additive fields only, no new channel names.
+- **iOS rewritten to render** (A.3, A.4, B.2, B.3, D.2, D.3, E.2, E.3): the
+  planned `GitPanel`, `GitChecks`, `GitCopy`, `ReviewDiff` and `WorkInbox`
+  derivations are deleted from the plan; their XCTests became decode tests of
+  the box's shapes; `forgeProbe()` and `forgeDraftGet` are no longer called by
+  iOS.
+- **Desktop migrated in the same change** (S.5): the matching `chatUtils.ts`
+  functions and their vitest blocks are deleted; `SessionHeader`, `ChatPanel`,
+  `ReviewPane`, `InboxPalette` render the box's fields; `UnifiedDiff` loses the
+  review gutter; the desktop stops swallowing review errors and no longer drops
+  context-line threads.
+- **Compatibility (D24):** capability ids (renamed to the master id format in
+  reconciliation) `forge-pr-view-1`, `forge-diff-view-1`,
+  `forge-inbox-view-1`, `forge-messages-1`; on an older box each dependent
+  surface shows "Update your box to …" (S.6). No fallback logic.
+- **Reconciliation (server-first):** the ids are appended to WS02's
+  `src/server/boxCapabilities.mjs` (D25) — the conditional
+  `serverCapabilities.mjs` is withdrawn, and M-05-srv-2 no longer touches
+  `index.mjs` / `rpc.mjs`. Clients use WS02's accessors. `forgeDraftGet` and the
+  client `forgeProbe()` call are removed from the master registry row.
+- **KEEP-CLIENT (unchanged in the clients):** G8, G9, G12, G14, G15, G16, and
+  the comment-count plural.
+- **One deviation from the audit wording:** drafts are placed by `forge:diff`
+  (which now also returns the reconciled draft) rather than by
+  `forge:draft-get`, because placement needs the diff and `forge:diff` already
+  has it; `forge:draft-get` gains only `message`.
+- No audit item rejected.

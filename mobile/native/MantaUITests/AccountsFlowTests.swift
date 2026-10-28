@@ -157,6 +157,11 @@ private final class Harness {
 }
 
 @MainActor
+private final class ResultBox {
+    var value: String?
+}
+
+@MainActor
 private func waitFor(_ timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
     let end = Date().addingTimeInterval(timeout)
     while Date() < end {
@@ -337,6 +342,29 @@ final class AccountsFlowTests: XCTestCase {
         XCTAssertTrue(FlowStub.calls("accounts:cancel-seat").isEmpty)
     }
 
+    @MainActor
+    func testCancelDuringARetrysCleanupStartsNothingOnTheBox() async {
+        let h = Harness()
+        FlowStub.handler = { channel, _ in
+            switch channel {
+            case "accounts:add-seat": return .result(#"{"seatId":"seat-1","connect":{"shape":"oauth-code"}}"#)   // cannot be driven
+            case "accounts:cancel-seat": return .delayed(0.6, #"{"ok":true}"#)                                   // the release is slow
+            default: return .result("null")
+            }
+        }
+        let flow = AccountsSeatSignIn(request: AccountsSignInRequest(mode: .add(provider: "codex", accountId: nil, accountLabel: nil)), accounts: h.store, defaults: h.defaults)
+        flow.begin()
+        _ = await waitFor { if case .failed = flow.phase { return true } else { return false } }
+
+        flow.retry()
+        await flow.cancel()   // pressed while the old attempt is still being released
+
+        try? await Task.sleep(for: .milliseconds(1_000))
+        XCTAssertTrue(flow.shouldDismiss)
+        XCTAssertEqual(FlowStub.calls("accounts:add-seat").count, 1, "a closed flow allocates nothing new")
+        XCTAssertEqual(FlowStub.calls("accounts:cancel-seat").count, 1, "and the first seat was still released")
+    }
+
     // MARK: - Claude through the pty RPCs
 
     @MainActor
@@ -504,6 +532,39 @@ final class AccountsFlowTests: XCTestCase {
         XCTAssertEqual(h.store.feedback?.text, "Sign-in cancelled — Seat 1 was not changed.")
     }
 
+    @MainActor
+    func testSwipingAwayDuringTheResignHoldStillDeliversTheBannerAndTheNotice() async {
+        let h = Harness()
+        var reads = 0
+        FlowStub.handler = { channel, _ in
+            switch channel {
+            case "accounts:resign-seat": return .result(#"{"flowId":"f1","connect":\#(deviceConnect)}"#)
+            case "accounts:resign-status":
+                reads += 1
+                return reads == 1 ? .result(#"{"state":"pending"}"#) : .result(#"{"state":"ok","seat":{"id":"s1","label":"Seat 1","email":"a@x"}}"#)
+            case "accounts:list": return .result(#"{"providers":[]}"#)
+            default: return .result("null")
+            }
+        }
+        let flow = AccountsSeatSignIn(
+            request: AccountsSignInRequest(mode: .resign(provider: "codex", seatId: "s1", seatLabel: "Seat 1", accountLabel: "Work", email: "a@x")),
+            accounts: h.store, defaults: h.defaults
+        )
+        flow.begin()
+        let held = await waitFor(8) { if case .done = flow.phase { return true } else { return false } }
+        XCTAssertTrue(held)
+
+        flow.abandonIfOpen()   // the sheet is swiped away during the 1.5 s hold
+        _ = await waitFor(2) { h.providersChangedPosts >= 1 }
+
+        XCTAssertEqual(h.store.feedback?.text, "Signed back in as a@x")
+        XCTAssertEqual(h.providersChangedPosts, 1, "the picker is told even though the sheet is gone")
+        try? await Task.sleep(for: .milliseconds(1_800))
+        XCTAssertTrue(FlowStub.calls("accounts:resign-cancel").isEmpty, "a settled flow has nothing to release")
+        XCTAssertTrue(FlowStub.calls("pty:kill").isEmpty)
+        XCTAssertTrue(FlowStub.calls("claude:login-cancel").isEmpty)
+    }
+
     // MARK: - Connect a subscription
 
     @MainActor
@@ -623,6 +684,42 @@ final class AccountsFlowTests: XCTestCase {
         // B's own cancel is the only one that may follow.
         await flowB.cancel()
         XCTAssertEqual(FlowStub.providerAuthActions.filter { $0 == "oauth-cancel" }.count, 2)
+    }
+
+    @MainActor
+    func testConnectCancelDuringARetrysCleanupStartsNothingAndLeavesTheLeaseFree() async {
+        let h = Harness(withEventStream: false)   // Claude cannot show its link: the first attempt fails
+        FlowStub.handler = { channel, args in
+            switch channel {
+            case "opencode:provider-auth":
+                return (args.first as? [String: Any])?["action"] as? String == "start"
+                    ? .result(#"{"action":"start","shape":"claude-login","sessionKey":"claude-login-1","startedAt":1750000000000,"cwd":"/home/dev"}"#)
+                    : .result("null")
+            case "opencode:claude-cli-status": return .result(#"{"installed":true}"#)
+            case "claude:login-cancel": return .delayed(0.6, #"{"ok":true}"#)   // the release is slow
+            default: return .result("null")
+            }
+        }
+        let lease = ProviderOAuthLease()
+        let flow = ProviderConnectFlow(status: SubscriptionStatus(id: "anthropic", label: "Claude"), accounts: h.store, connections: connections(h), lease: lease)
+        flow.begin()
+        _ = await waitFor { if case .failed = flow.phase { return true } else { return false } }
+
+        flow.retry()
+        await flow.cancel()   // pressed while the old attempt is still being released
+
+        try? await Task.sleep(for: .milliseconds(1_000))
+        XCTAssertTrue(flow.shouldDismiss)
+        XCTAssertEqual(FlowStub.providerAuthActions.filter { $0 == "start" }.count, 1, "a closed flow starts nothing")
+
+        // The provider-wide slot is not held by an orphan: the next start runs at once.
+        let box = ResultBox()
+        let next = Task { @MainActor in
+            box.value = try? await lease.start(provider: "anthropic", attempt: UUID()) { "ran" }
+        }
+        let ran = await waitFor(2) { box.value == "ran" }
+        XCTAssertTrue(ran, "the lease is free")
+        _ = await next.value
     }
 
     @MainActor
