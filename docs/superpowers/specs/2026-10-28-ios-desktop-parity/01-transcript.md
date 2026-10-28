@@ -1,6 +1,6 @@
 # WS01 — Transcript parity
 
-Status: revised after review round 1 · Wave A.
+Status: revised after review round 2 · Wave A1 (D20).
 
 Owner files: `ChatModels.swift`, `TranscriptComponents.swift`,
 `TranscriptRow.swift`, `ToolActivity.swift`, `ActivitySheet.swift`,
@@ -47,7 +47,7 @@ already sends: the `opencode:messages` transcript (via `src/shared/opencodeV2.mj
     WS02 wave-B deliverable. The live-only inputs are:
     - media placeholders that are still pending;
     - WS02's `commandByMessageID` (D15);
-    - WS02's `truncationByMessageID`;
+    - WS02's existing single `truncation` (the latest warning, with its `messageID`);
     - the `running` gate.
   - Until then those options default to empty, and features degrade to "shows
     after the turn settles". Nothing breaks.
@@ -236,6 +236,14 @@ struct TranscriptFileRef: Equatable, Sendable {
   enum Source: Equatable, Sendable { case boxPath(String), dataURL(mime: String?, base64: String), none }
   let partID: String; let filename: String; let mime: String?; let source: Source
 }
+enum TranscriptStagingKey {
+  /// Canonical, collision-free key INPUT (hashing happens app-side with CryptoKit — finding 3, round 2).
+  static func input(boxID: String?, serverURL: String?, source: TranscriptFileRef.Source) -> String
+}
+enum TranscriptPeekRequest {
+  /// "<serverURL>/api/peek?path=<encoded>" via URLComponents; nil if serverURL is unusable.
+  static func url(serverURL: URL, path: String) -> URL?
+}
 enum TranscriptFileParse {
   static func refs(of message: OpencodeMessage) -> [TranscriptFileRef]
   /// Decoded byte count of a base64 payload without decoding it (len*3/4 − padding).
@@ -343,13 +351,19 @@ which is not in the package.
 ```
 
 - **Scope (finding 6).**
-  - The cache key is
-    `TranscriptStagingKey.make(boxID:serverURL:source:)`, a pure SHA-256 hex in
-    the pure file. It hashes `boxID + "\n" + serverURL + "\n" + <source>`.
+  - **The key input is pure; the hashing is app-only (round 2, finding 3).**
+    - `TranscriptStagingKey.input(boxID:serverURL:source:) -> String` lives in
+      the Foundation-only pure file and is tested on Linux. It returns
+      `boxID + "\n" + serverURL + "\n" + <source tag>`, where the source tag is
+      `"path:" + path`, or `"data:" + mime + ":" + String(base64.count) + ":" + prefix(64)`.
+    - `TranscriptFileStager` (app-only) hashes that string with
+      `CryptoKit.SHA256` to get the file name. Swift Foundation has no SHA-256,
+      the Linux package has no crypto dependency (`Package.swift:31-65`), and
+      none is added.
   - On every call the stager reads the current identity
     (`KeychainCredentialStore.shared.boxId` and `.serverURL`). If it differs
     from the identity the cache was built for, the stager calls `reset()` first.
-  - Files live under `temporaryDirectory/transcript-files/<sha(identity)>/<key>.<ext>`.
+  - Files live under `temporaryDirectory/transcript-files/<SHA256(boxID+serverURL)>/<SHA256(input)>.<ext>`.
 - **Lifecycle.**
   - The first use in a process deletes the whole `transcript-files/` directory,
     so there are no stale files from earlier runs.
@@ -403,9 +417,23 @@ which is not in the package.
   sheet keeps them. `ToolActivity.layout` is unchanged, because it is a shared
   parity fixture with the desktop.
 - **New pure helper for WS02:**
-  `static func liveMediaTail(messages: [OpencodeMessage], live: [TranscriptMediaEntry]) -> [TranscriptBlock]`.
-  It returns `.file(.media)` blocks for entries (canonical ∪ live-only) whose
-  owner is not a settled message, in `(seq, id)` order.
+  `static func liveMediaTail(messages: [OpencodeMessage], live: [TranscriptMediaEntry], isLiveWindow: Bool) -> [TranscriptBlock]`.
+  It returns `.file(.media)` blocks, in `(seq, id)` order, for entries
+  (canonical ∪ live-only) whose owner is one of these:
+  - (a) a message in `messages` that is NOT settled;
+  - (b) only when `isLiveWindow`, a message ABSENT from `messages`. This is the
+    normal case for the running step, because the transcript is not refetched
+    mid-turn.
+- **One message list, disjoint segments (round 2, finding 1).** The mapper
+  emits only entries whose owner is a SETTLED message of the list it was given.
+  `liveMediaTail` emits only cases (a) and (b). So **as long as both calls
+  receive the same array**, an owner can never appear in both segments.
+  - WS02 maps `presentedMessages` (its F10 focus slice, or all messages), so it
+    passes `presentedMessages` to BOTH calls, with
+    `isLiveWindow: presentedMessages.last?.info.id == messages.last?.info.id`.
+  - A historical focus slice therefore never shows the live tail's media, and
+    an owner outside the slice shows nowhere until the user returns to the live
+    window.
 - **Row id** is `"f" + entry.id`. It is the same id for pending, ready and
   canonical, so the row updates in place.
 
@@ -494,10 +522,16 @@ which is not in the package.
   - filename fallbacks;
   - `decodedSize` for padding cases 0, 1 and 2, and for a payload of
     26 214 401 decoded bytes, which is over the cap.
-- **`TranscriptStagingKey`**
-  - **the same path on two boxes gives different keys**;
-  - the same box and the same path give an equal key;
-  - a server URL change gives a different key.
+- **`TranscriptStagingKey.input`**
+  - **the same path on two boxes gives different inputs**;
+  - the same box and the same path give an equal input;
+  - a server URL change gives a different input;
+  - a path and a data URL never collide, because of the tag prefix.
+- **`TranscriptPeekRequest.url(serverURL:path:)`** (Foundation `URLComponents`,
+  no networking types):
+  - the path is `/api/peek`;
+  - the query encodes a path containing spaces, `#` and `&`;
+  - a server URL with a trailing path segment is kept.
 
 `MantaUITests/TranscriptMapperTests.swift` runs on the Mac, because it needs
 `TranscriptBlock`.
@@ -508,6 +542,12 @@ which is not in the package.
 - Begin in A plus show in B, mapped with live data and then canonically, gives
   exactly one `media:h:` row each time, under A, with no `#dup` suffix.
 - `liveMediaTail` excludes owners that are settled.
+- `liveMediaTail` with an owner absent from `messages`: emitted when
+  `isLiveWindow`, omitted when not.
+- **Disjointness:** for one entry list and one message array, the ids from
+  `blocks(…options:)` media and from `liveMediaTail` never intersect. The test
+  covers a settled owner, an unsettled owner, an absent owner, and both values
+  of `isLiveWindow`.
 - Ids are identical across two mappings.
 - `TranscriptFileStager` with an identity change clears its memory map. This is
   tested with an injected identity provider and file manager. The init has a
@@ -695,7 +735,7 @@ Reasoning parts already arrive in `opencode:messages`:
   `TranscriptTurns.swift`:
   ```swift
   enum TranscriptCommandOrigin {
-    static func fromLive(name: String, arguments: String) -> OpencodeCommandOrigin   // arguments "" stays ""
+    static func fromLive(name: String, arguments: String) -> OpencodeCommandOrigin   // "" → nil (same as WS02 F11's inline conversion)
     /// Durable info.command wins; live only fills a message with no durable origin.
     static func resolve(durable: OpencodeCommandOrigin?, live: OpencodeCommandOrigin?) -> OpencodeCommandOrigin?
   }
@@ -703,7 +743,7 @@ Reasoning parts already arrive in `opencode:messages`:
   `TranscriptMapOptions.liveCommands: [String: OpencodeCommandOrigin]` is filled
   by WS02 (M-01-1) as
   `store.commandByMessageID.mapValues { TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments) }`.
-  WS01 never references WS02's type, so WS01 compiles in wave A before WS02
+  WS01 never references WS02's type, so WS01 compiles in wave A1 before WS02
   exists.
 - **New block** `.command(TranscriptCommandTurn)` (`TranscriptComponents.swift`):
   ```swift
@@ -746,7 +786,8 @@ Reasoning parts already arrive in `opencode:messages`:
     message still decodes;
   - the memberwise init is still available.
 - `TranscriptCommandOrigin` (Linux):
-  - `fromLive(name:"x", arguments:"")` keeps `""`;
+  - `fromLive(name:"x", arguments:"")` → `arguments == nil`;
+    `fromLive(name:"x", arguments:"a")` → `"a"`;
   - `resolve(durable: A, live: B)` → A, **durable precedence**;
   - `resolve(nil, B)` → B;
   - `resolve(nil, nil)` → nil.
@@ -826,11 +867,31 @@ Reasoning parts already arrive in `opencode:messages`:
     which the desktop's does not.
   - The canonical source is not always available. The `step-finish` part exists
     only when the message has `tokens` (`opencodeV2.mjs:276`), and the mapper
-    skips incomplete messages (`ChatModels.swift:189-191`). So the footer's kind
-    is `canonical ?? options.liveTruncations[messageID]`.
-  - `liveTruncations: [String: TranscriptTruncationKind]` is filled by WS02 (M-01-1) from
-    its `truncationByMessageID` (`02-chat-cards-queue.md` F11) through
-    `TranscriptTruncationKind(rawValue: payload.kind)`. An unknown kind gives no badge.
+    skips incomplete messages (`ChatModels.swift:189-191`). So the footer's
+    **effective** kind is `canonical ?? live`, where `live` is
+    `options.liveTruncation?.kind` when `options.liveTruncation?.messageID == m.id`.
+  - **Round-2 redesign (finding 1): no new WS02 map.** WS02's F11 explicitly
+    drops `truncationByMessageID` and keeps only its existing single
+    `truncation: StreamTruncationPayload?`, which is the latest warning,
+    `{kind, label, messageID?}` (`02-chat-cards-queue.md` F11;
+    `ChatSessionStore.swift:203`). WS01 consumes exactly that property, which
+    matches D15 ("no step/truncation property is required from WS02 … beyond
+    what WS02 already decodes").
+  - Only the latest warning can lack a canonical record: the server emits it at
+    the end of a step, and the next refetch carries the `step-finish` part
+    whenever the message has usage. So one value is enough. Older messages rely
+    on the transcript.
+  - The pure value lives in `TranscriptTurns.swift`:
+    ```swift
+    struct TranscriptLiveTruncation: Equatable, Sendable {
+      let messageID: String; let kind: TranscriptTruncationKind
+      /// nil when messageID is nil/empty or kind is not one of the three raw values.
+      static func from(kind: String, messageID: String?) -> TranscriptLiveTruncation?
+    }
+    ```
+    WS02 fills `TranscriptMapOptions.liveTruncation` with
+    `truncation.flatMap { TranscriptLiveTruncation.from(kind: $0.kind, messageID: $0.messageID) }`
+    (M-01-1). An unknown kind gives no badge.
 - **Pure (new `TranscriptTurns.swift`, Foundation-only):**
   ```swift
   enum TranscriptTruncationKind: String, Sendable { case outputCap = "output-cap", contextWall = "context-wall", toolCutoff = "tool-cutoff" }
@@ -861,25 +922,43 @@ Reasoning parts already arrive in `opencode:messages`:
   struct TranscriptTurnFooter: Equatable, Sendable {
     let messageID: String            // the message the footer follows
     let summary: String?             // "Pondered for 1m44s · 12.4k tokens" (nil if no duration)
-    let truncation: TranscriptTruncationKind?
-    let turnText: String             // the turn's prose joined "\n\n" — feeds F6
+    let truncation: TranscriptTruncationKind?   // the EFFECTIVE kind (canonical ?? live)
+    let isTurnEnd: Bool              // true only for the last assistant message of a FINISHED turn (turns[id] != nil)
+    let turnText: String             // the turn's prose joined "\n\n" — feeds F6; "" when !isTurnEnd
+  }
+  enum TranscriptFooterRule {
+    /// Pure emission predicate (round 2, finding 2).
+    static func shouldEmit(finishedTurn: Bool, effectiveTruncation: TranscriptTruncationKind?) -> Bool   // finishedTurn || effectiveTruncation != nil
   }
   ```
   `present` is exported so WS02 can make `RunningIndicator`'s verb match the
   footer, which is the desktop rule. RunningIndicator currently uses a random
   verb (`RunningIndicator.swift:33-39`, WS02-owned). That alignment is optional
   for WS02.
-- **Mapper:** compute `turns = TranscriptTurns.info(messages, running: options.running)`
-  over ALL messages before filtering to `settled`. After each settled assistant
-  message's blocks (and widgets), emit `.turnFooter(...)` when any of these hold:
-  - `turns[id]` exists, or
-  - `TranscriptTruncation.kind(of: msg) != nil` (a mid-turn truncation gives a
-    footer with no summary), or
-  - `id` is the turn's last assistant message and the turn has prose (F6
-    needs that menu).
-  Row id: `"tf-" + messageID`.
-  `summary` is `"\(past) for \(duration)"`, plus `" · \(tokens)"` when tokens > 0;
-  it is nil when there is no duration.
+- **Mapper.** First compute `turns = TranscriptTurns.info(messages, running: options.running)`
+  over ALL messages, before filtering to `settled`.
+  - Like the desktop (`chatUtils.ts:3137-3151`), `turns` has an entry for every
+    FINISHED turn's last assistant message, even when its duration is nil. It
+    has none for a turn still running.
+  - For each settled assistant message `m`, after its blocks and widgets:
+    1. `effective = TranscriptTruncation.kind(of: m) ?? live(m)`, computed
+       BEFORE deciding emission.
+    2. `finishedTurn = turns[m.id] != nil`.
+    3. Emit `.turnFooter` iff
+       `TranscriptFooterRule.shouldEmit(finishedTurn:effectiveTruncation:)`.
+  - Field values:
+    - `isTurnEnd = finishedTurn`.
+    - `summary` is set only when `finishedTurn` and the duration is non-nil:
+      `"\(past) for \(duration)"`, plus `" · \(tokens)"` when tokens > 0.
+    - `turnText` is filled only when `finishedTurn`.
+  - So:
+    - a mid-turn or running-turn warning gives a **warning-only** row, with no
+      summary and no reply menu;
+    - a completed last step while the session is still `running` gives no
+      footer (no entry in `turns`);
+    - the old "last message with prose" condition is removed, because it is
+      subsumed by `finishedTurn`.
+  - Row id: `"tf-" + messageID`.
 - **View `TranscriptTurnFooterView`:** one line, `Metrics.type.xs`, tx3, padded
   like prose.
   - `MantaLogoMark(size: 12)` followed by the summary.
@@ -887,7 +966,7 @@ Reasoning parts already arrive in `opencode:messages`:
     label (warn text, `tokens.warn.opacity(0.12)` background, warn 33% border,
     `Metrics.radius.xs`). The pill is a `Button`; tapping it shows the hint in a
     `.popover` with `.presentationCompactAdaptation(.popover)`.
-  - Trailing `Spacer` then the F6 reply menu.
+  - Trailing `Spacer`, then the F6 reply menu, only when `isTurnEnd`.
   - `.lineLimit(1)` with the summary tail-truncated; the pill never truncates.
 - **No duplicate notice, and no lost warning (finding 7).** The mapper exposes
   the warnings that are actually on screen:
@@ -930,14 +1009,23 @@ Reasoning parts already arrive in `opencode:messages`:
     M** gives no footer for M and M is not in `footerTruncationMessageIDs`, so
     WS02 keeps the notice.
   - **A completed M with no `step-finish` part (missing usage) plus
-    `liveTruncations[M]`** gives a footer with the live kind, and M is in the
-    set.
+    `liveTruncation = (M, outputCap)`** gives a footer with the live kind, and M
+    is in the set.
+  - **Live-only truncation on a NON-final message** (M is a mid-turn step with
+    no usage and the turn continues with N) gives a warning-only footer on M:
+    `isTurnEnd == false`, `summary == nil`, no menu. M is in the set (round 2,
+    finding 2).
+  - **A completed last step with prose while `running: true`** gives no footer
+    and no reply menu (round 2, finding 2).
+  - `liveTruncation` for a different message id does not affect M.
   - **A completed M with no `step-finish` and no live entry** gives no badge,
     and M is not in the set.
   - Canonical beats live when both exist and differ.
 
-`TranscriptTurns`, `TranscriptTruncation`, `TranscriptTurnFormat` and
-`TranscriptTurnVerb` tests are pure, so they run on Linux in
+`TranscriptTurns`, `TranscriptTruncation`, `TranscriptTurnFormat`,
+`TranscriptTurnVerb`, `TranscriptLiveTruncation.from` (nil message id,
+unknown kind, valid) and `TranscriptFooterRule.shouldEmit` (four
+combinations) tests are pure, so they run on Linux in
 `TranscriptParityTests.swift`.
 
 ### Acceptance
@@ -1098,7 +1186,9 @@ Items:
    `turnText` is non-empty. Copying is read-only, so it is available on
    read-only surfaces too.
 
-If no item is shown, no menu is rendered.
+If no item is shown, no menu is rendered. The menu exists only on footers with
+`isTurnEnd == true`. A warning-only footer (mid-turn, or while running) has
+`turnText == ""`, so it gets no menu.
 
 `turnText` is the turn's `.prose` texts joined with `"\n\n"`.
 `QuoteText.buildQuoteBlock`, which `ChatScreen.quote` already uses, collapses it
@@ -1216,13 +1306,13 @@ struct TranscriptMapOptions: Equatable, Sendable {
   var showReasoning: Bool = false
   var running: Bool = false
   var liveCommands: [String: OpencodeCommandOrigin] = [:]          // user messageID → origin (from WS02 commandByMessageID)
-  var liveTruncations: [String: TranscriptTruncationKind] = [:]    // assistant messageID → kind (from WS02 truncationByMessageID)
+  var liveTruncation: TranscriptLiveTruncation? = nil              // WS02's existing single `truncation`, converted (F4)
   var liveMedia: [TranscriptMediaEntry] = []                       // this session's live entries (session-wide, NOT keyed by message)
   static var current: TranscriptMapOptions { .init(showReasoning: TranscriptDisplayOptions.showDetails) }
 }
 extension ChatTranscriptMapper {
   static func blocks(from: [OpencodeMessage], voiceNotes: [VoiceNote], widgets: [WidgetRef], options: TranscriptMapOptions) -> [TranscriptBlock]
-  static func liveMediaTail(messages: [OpencodeMessage], live: [TranscriptMediaEntry]) -> [TranscriptBlock]
+  static func liveMediaTail(messages: [OpencodeMessage], live: [TranscriptMediaEntry], isLiveWindow: Bool) -> [TranscriptBlock]
   static func footerTruncationMessageIDs(_ blocks: [TranscriptBlock]) -> Set<String>
 }
 ```
@@ -1289,9 +1379,11 @@ The existing three `blocks(from:…)` overloads forward `.current`.
 **Create — pure, Foundation-only (Package manifest):**
 
 - `TranscriptMediaModel.swift`: entry, frame, identity, session state,
-  parse, reconcile, geometry, file refs/parse, `TranscriptStagingKey`.
+  parse, reconcile, geometry, file refs/parse, `TranscriptStagingKey.input`,
+  `TranscriptPeekRequest.url`. No `URLRequest`, no hashing.
 - `TranscriptTurns.swift`: `TranscriptTruncationKind`, `TranscriptTruncation`,
-  `TranscriptTurns`, `TranscriptTurnFormat`, `TranscriptTurnVerb`,
+  `TranscriptLiveTruncation`, `TranscriptFooterRule`, `TranscriptTurns`,
+  `TranscriptTurnFormat`, `TranscriptTurnVerb`, `TranscriptTurnFooter` (model),
   `TranscriptCommandOrigin`, `TranscriptSelection`.
 - `TranscriptDisplayOptions.swift`.
 
@@ -1303,8 +1395,9 @@ The existing three `blocks(from:…)` overloads forward `.current`.
 - `TranscriptFileStager.swift`.
 - `TranscriptReasoning.swift`: the model and `TranscriptReasoningView`.
 - `TranscriptCommand.swift`: the row and sheet.
-- `TranscriptTurnFooter.swift`: the footer model and view, the reply menu, and
-  `TranscriptReplyMenuModel`.
+- `TranscriptTurnFooterView.swift`: the footer view, the reply menu and
+  `TranscriptReplyMenuModel`. The footer MODEL is in the pure
+  `TranscriptTurns.swift`.
 - `TranscriptSelectText.swift`.
 - `TranscriptCopy.swift`.
 - `MantaAPIClient+Transcript.swift`: see **Client members**.
@@ -1341,9 +1434,12 @@ them.
 extension MantaAPIClient {
   /// HEAD /api/peek?path= → content-length, or nil when the header is absent. Throws authRequired on 401, server(msg) on ≥400.
   func peekFileSize(path: String) async throws -> Int64?
-  /// GET /api/peek?path= streamed to `destination` (URLSession.download — disk, never memory).
-  /// Throws TranscriptFileStager.Failure.tooLarge when the response's expectedContentLength > maxBytes
-  /// or the written file exceeds maxBytes (file deleted); authRequired on 401; server(msg) on ≥400.
+  /// GET /api/peek?path= streamed to `destination` via `URLSession.bytes(for:)`, written in 64 KiB
+  /// chunks through a FileHandle — disk, never memory. Aborts AS SOON AS the running byte count
+  /// exceeds maxBytes (cancels the task, deletes the partial file) — not after the download — and
+  /// also refuses up front when response.expectedContentLength > maxBytes. Throws
+  /// TranscriptFileStager.Failure.tooLarge, CancellationError (reset/cancel), authRequired on 401,
+  /// server(msg) on ≥400.
   func downloadPeekFile(path: String, to destination: URL, maxBytes: Int64) async throws
 }
 ```
@@ -1355,74 +1451,102 @@ extension MantaAPIClient {
   `MantaAPIClient.live()` uses as its default `tokenProvider`
   (`MantaAPIClient.swift:9`).
 - They use `URLSession.shared`.
-- The request is built by a pure, Linux-testable
-  `TranscriptPeekRequest.make(serverURL:path:method:token:) -> URLRequest`, placed
-  in `TranscriptMediaModel.swift`. Its tests check the path, the query encoding
-  (a path with spaces and `#`), the method, and that there is no auth header
-  when the token is nil.
+- **Portability (round 2, finding 3).** `URLRequest` is a FoundationNetworking
+  type on Linux (see the note in `MantaError.swift:3-5`). So the split is:
+  - Only the URL is pure: `TranscriptPeekRequest.url(serverURL:path:) -> URL?`,
+    built from `URLComponents` in `TranscriptMediaModel.swift`, Foundation-only,
+    tested on Linux.
+  - The `URLRequest` (method, `Authorization: Bearer`) is assembled inside
+    `MantaAPIClient+Transcript.swift`, which is app-only and not in the
+    package. Its auth-header and method behaviour is tested on the Mac in
+    `TranscriptMapperTests.swift` through an internal
+    `static func peekRequest(url:method:token:) -> URLRequest`, declared in
+    that same extension file.
 
 No other client member is added or changed. `peekFile(path:)` stays as it is
 (WS07 uses it).
 
 ## Mount requests (D18)
 
-| ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
+The IDs, appliers, waves and symbols match the master's canonical mount ledger
+(`00-master.md`). Provider symbols are WS01's exact current
+names. The WS02 symbols consumed are WS02's exact current names from F11:
+`commandByMessageID: [String: StreamCommandExecutedPayload]`, the existing
+`truncation: StreamTruncationPayload?`, and `presentedMessages` (F10).
+
+| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-01-1 | `ChatSessionStore.swift` | WS02 (wave B) | `TranscriptMapOptions`, `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options:)`, `TranscriptCommandOrigin.fromLive`, `TranscriptTruncationKind`, `TranscriptMediaStore.shared.entries(for:)`, `TranscriptDisplayOptions.showDetails` | Replace the three `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:)` calls (`fetchTranscript` ~1064, `refreshVoiceNotes` ~1111, `refreshWidgets` ~1137) with one private `func mapOptions() -> TranscriptMapOptions` and the `options:` overload. The fields: `showReasoning: TranscriptDisplayOptions.showDetails`; `running: running`; `liveCommands: commandByMessageID.mapValues { TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments) }`; `liveTruncations: truncationByMessageID.compactMapValues { TranscriptTruncationKind(rawValue: $0.kind) }`; `liveMedia: TranscriptMediaStore.shared.entries(for: sessionId)`. | WS01 merged (wave A). WS02's own F11 (`commandByMessageID`, `truncationByMessageID`). |
-| M-01-2 | `ChatSessionStore.swift` | WS02 (wave B) | `ChatTranscriptMapper.liveMediaTail(messages:live:)` | In `rebuildBlocks`, append `ChatTranscriptMapper.liveMediaTail(messages: messages, live: TranscriptMediaStore.shared.entries(for: sessionId))` after `liveTranscript` and BEFORE the live prose tail and `trailing`, in both branches. Wrap it with `uniqueTranscriptRows` like the other segments. | M-01-1 |
-| M-01-3 | `ChatSessionStore.swift` | WS02 (wave B) | `TranscriptMediaStore.shared.$sessions`, `TranscriptDisplayOptions.didChange` | Add two subscriptions next to the widget sink (`ChatSessionStore.swift:445-450`): `$sessions.map { $0[sessionId] }.removeDuplicates()`, and `NotificationCenter.default.publisher(for: TranscriptDisplayOptions.didChange)`. Each calls a private `remap()`, which re-maps `transcript` from `messages` with `mapOptions()` and the same no-blank-clobber guard as `refreshWidgets` (`:1133-1141`), then calls `rebuildBlocks()`. Also call `remap()` when `commandByMessageID` or `truncationByMessageID` changes, and when `running` flips to false. | M-01-1 |
-| M-01-4 | `ChatSessionStore.swift` (`trailingBlocks`, `rebuildBlocks`) | WS02 (wave B) | `ChatTranscriptMapper.footerTruncationMessageIDs(_:)` | Pass `footerTruncationIDs: ChatTranscriptMapper.footerTruncationMessageIDs(liveTranscript)` into `trailingBlocks` (a new parameter with default `[]`). Skip the truncation `.notice` only when `truncation.messageID` is non-nil and in that set. Add a test to `ChatStreamMergeTests`: set to empty → notice kept; set containing M with truncation on M → notice omitted. | M-01-1 |
-| M-01-5 | `ChatOverflowSheet.swift` | WS07 (wave B, per D18) | `TranscriptDisplayOptions.defaultsKey`, `TranscriptDisplayOptions.setShowDetails(_:)` | After the "Trust mode" toggle (`ChatOverflowSheet.swift:118-126`), add a `Toggle` titled "Show reasoning & full output" with the subtitle "Thinking steps and complete tool output". It is bound through `@AppStorage(TranscriptDisplayOptions.defaultsKey)`, and its setter calls `TranscriptDisplayOptions.setShowDetails`. It needs no new parameter and no ChatScreen change. Show it for read-only job sessions too, since it only affects display. | WS01 merged (wave A). |
-| M-01-6 | `mobile/native/Package.swift` | Wave-A integration agent (D18) | the files in **Package manifest** | Add the three sources and the one test file listed there; then `verify.sh` must pass. | WS01 merged. |
+| M-01-1 | `ChatSessionStore.swift` | WS02 (wave B) | `TranscriptMapOptions`, `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options:)`, `TranscriptCommandOrigin.fromLive(name:arguments:)`, `TranscriptLiveTruncation.from(kind:messageID:)`, `TranscriptMediaStore.shared.entries(for:)`, `TranscriptDisplayOptions.showDetails` | Replace the three `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:)` calls (`fetchTranscript` ~1064, `refreshVoiceNotes` ~1111, `refreshWidgets` ~1137) with one private `func mapOptions() -> TranscriptMapOptions` and the `options:` overload, mapping **`presentedMessages`**. The value is `TranscriptMapOptions(showReasoning: TranscriptDisplayOptions.showDetails, running: running, liveCommands: commandByMessageID.mapValues { TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments) }, liveTruncation: truncation.flatMap { TranscriptLiveTruncation.from(kind: $0.kind, messageID: $0.messageID) }, liveMedia: TranscriptMediaStore.shared.entries(for: sessionId))`. **No `truncationByMessageID` is needed** (round-2 redesign; WS02 F11 drops it). WS02's existing inline conversion, `OpencodeCommandOrigin(name:, arguments: isEmpty ? nil : …)`, is value-identical to `fromLive` and also compiles; `fromLive` is preferred. | WS01 merged (A1); WS02 F11 `commandByMessageID`; WS02 F10 `presentedMessages` |
+| M-01-2 | `ChatSessionStore.swift` | WS02 (wave B) | `ChatTranscriptMapper.liveMediaTail(messages:live:isLiveWindow:)` | In `rebuildBlocks`, append `ChatTranscriptMapper.liveMediaTail(messages: presentedMessages, live: TranscriptMediaStore.shared.entries(for: sessionId), isLiveWindow: presentedMessages.last?.info.id == messages.last?.info.id)` after `liveTranscript` and BEFORE the live prose tail and `trailing`, in both branches, through `uniqueTranscriptRows`. **Use the same `presentedMessages` array as M-01-1**; that is what keeps the two media segments disjoint (F1). | M-01-1 |
+| M-01-3 | `ChatSessionStore.swift` | WS02 (wave B) | `TranscriptMediaStore.shared.$sessions`, `TranscriptDisplayOptions.didChange` | Next to the widget sink (`ChatSessionStore.swift:445-450`), add two subscriptions: `TranscriptMediaStore.shared.$sessions.map { $0[sessionId] }.removeDuplicates()` and `NotificationCenter.default.publisher(for: TranscriptDisplayOptions.didChange)`. Each calls the private `remap()`, which re-maps `transcript` from `presentedMessages` with `mapOptions()` under the same no-blank-clobber guard as `refreshWidgets` (`:1133-1141`), then calls `rebuildBlocks()`. Also call `remap()` when `commandByMessageID` or `truncation` changes, and when `running` flips to false. | M-01-1 |
+| M-01-4 | `ChatSessionStore.swift` (`trailingBlocks`, `rebuildBlocks`) | WS02 (wave B) | `ChatTranscriptMapper.footerTruncationMessageIDs(_:)` | Add a parameter `footerTruncationIDs: Set<String> = []` to `trailingBlocks`, and pass `ChatTranscriptMapper.footerTruncationMessageIDs(liveTranscript)` from `rebuildBlocks`. Skip the truncation `.notice` **only** when `truncation.messageID` is non-nil and in that set. The rule "the message exists in `messages`" is **replaced**, not kept. Required tests in `ChatStreamMergeTests`: (1) empty set → notice kept; (2) set contains M and the truncation is on M → notice omitted; (3) **integration**: a live truncation on M, then a transcript snapshot where M is incomplete (`time.completed == nil`), run through the real `mapOptions()` → `blocks(options:)` → `footerTruncationMessageIDs` → `trailingBlocks` → notice kept. | M-01-1 |
+| M-01-5 | `ChatOverflowSheet.swift` | WS07 (wave B) | `TranscriptDisplayOptions.defaultsKey`, `TranscriptDisplayOptions.setShowDetails(_:)`, both declared in **`TranscriptDisplayOptions.swift`** (WS01, A1) | After the "Trust mode" toggle (`ChatOverflowSheet.swift:116-131`), add a `Toggle` "Show reasoning & full output" with the subtitle "Thinking steps and complete tool output", bound with `@AppStorage(TranscriptDisplayOptions.defaultsKey) var showDetails = false` and `Binding(get: { showDetails }, set: { TranscriptDisplayOptions.setShowDetails($0) })`. Show it regardless of `isReadOnlyJob`. No new parameter, no ChatScreen change. (WS07's receipt row M-01-5 matches.) | WS01 merged (A1) |
+| M-01-6 | `mobile/native/Package.swift` | Integration agent A (after A2) | the WS01 package manifest (below) | Add the three sources to `targets[0].sources` and the one test file to the test target. `verify.sh` must pass. | WS01 merged |
 
-The former M1 (`MantaModels.swift`) and M2 (`MantaUIApp.swift`) are no longer
-mounts: D1 gives those files to WS01, so WS01 edits them directly in wave A. The
-former M3e (a WS01-requested decoder) is dropped: D15 has WS02 decode
-`commandExecuted` as part of its own F11.
+**Superseded IDs, for ledger cleanup:**
 
-### Mounts received (WS01-owned receiving files)
+- The round-0/1 `M1`/`M2` (`MantaModels.swift`, `MantaUIApp.swift`) are WS01's
+  own edits under D1.
+- `M3a`–`M3d` are renamed `M-01-1`–`M-01-4`, with the symbols above.
+- `M3e` (the command decoder) is withdrawn; per D15, WS02 F11 owns it.
+- `M4` is now `M-01-5`.
+- WS02's receipt rows now carry M-01-1 to M-01-4 verbatim (reconciliation
+  after round 2); the `entries[sessionId]` / `$entries` / "message exists"
+  forms are gone.
 
-Cross-checked with `grep` over `02-…`–`10-…`. Only one other spec targets a
-WS01 file.
+### Package manifest (M-01-6)
 
-| ID | Receiving file (WS01) | Requester | Applier (D18) | Change | Prerequisite |
+- Sources:
+  - `TranscriptMediaModel.swift`
+  - `TranscriptTurns.swift`
+  - `TranscriptDisplayOptions.swift`
+- Test: `TranscriptParityTests.swift`.
+- Dependencies: `MantaModels.swift` and `ChatJSON.swift`, both already listed.
+- None of these files uses `URLRequest`, `URLSession`, CryptoKit, SwiftUI or
+  UIKit (round 2, finding 3).
+
+## Mounts applied by this workstream
+
+**None.** I cross-checked every mount table in `02`–`10`. The only request
+targeting a WS01-owned file is M-02-1. Its receiving file is
+`TranscriptRow.swift`, but WS01 does not run in wave B, so per D18 it is
+applied by **integration agent B**, not by WS01. It is recorded here for
+completeness:
+
+| ID | Receiving file (WS01-owned) | Applier (D18) | Provider symbol | Change | Prerequisite |
 |---|---|---|---|---|---|
-| WS02 M1 (`02-chat-cards-queue.md` §Mount requests) | `TranscriptRow.swift` (`TranscriptCellReveal`) | WS02 | **Wave-B integration agent.** WS01 does not run in wave B, so the file is "not owned by a worker running in that wave". | Add `@Environment(\.transcriptHighlightedRowID)` and a `.background(...)` highlight on `cellContent`, as pinned in WS02's spec. | WS02's `ChatCardMessageFocus.swift` (provides the env key) merged. |
+| M-02-1 | `TranscriptRow.swift` (`TranscriptCellReveal`) | Integration agent B | `EnvironmentValues.transcriptHighlightedRowID` (`ChatCardMessageFocus.swift`, WS02) | `@Environment(\.transcriptHighlightedRowID) private var highlightedRowID`, plus a `.background(item.id == highlightedRowID ? tokens.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: Metrics.radius.md))` and `.animation(.easeOut, value: highlightedRowID)` on `cellContent`. WS01's A1 edits only add switch cases inside `transcriptBlockView`, so they do not conflict. | WS02 commit with `ChatCardMessageFocus.swift` |
 
-**Mounts applied by this workstream: none.** No other spec targets
-`MantaModels.swift`, `MantaUIApp.swift`, `ChatModels.swift`,
-`TranscriptComponents.swift`, `ToolActivity.swift`, `ActivitySheet.swift` or
-`VoiceNotePlayer.swift`. WS07 explicitly avoids `MantaModels.swift`
-(`07-artifacts-cards.md:188`), and WS09 binds its stores in `MantaAppRoot`,
-not `MantaUIApp` (`09-models-usage.md:41-44`).
+No other spec targets `MantaModels.swift`, `MantaUIApp.swift`,
+`ChatModels.swift`, `TranscriptComponents.swift`, `ToolActivity.swift`,
+`ActivitySheet.swift` or `VoiceNotePlayer.swift`:
 
-**WS01-side preparation for WS02 M1:** none is needed. WS02's change is
-additive inside `TranscriptCellReveal` and does not conflict with WS01's
-changes to `cellContent`: WS01 only adds switch cases inside
-`transcriptBlockView`.
+- WS07 uses its own wire type instead of `MantaModels.swift`
+  (`07-artifacts-cards.md:188`).
+- WS09 binds its stores in `MantaAppRoot` (M-09-3/M-09-4), not `MantaUIApp`.
 
 ## Contracts provided / consumed
 
-- **C1:** provides the two `MantaAPIClient+Transcript.swift` members above.
+- **C1:** provides two members in `MantaAPIClient+Transcript.swift` (see
+  Client members). No other spec declares them; checked with `grep` across
+  `02`–`10`.
 - **C2:** not used.
-- **C3:** not called directly. Quote goes through the existing
-  `TranscriptCardActions.onQuote` → `ChatScreen.quote`, which builds the line
-  with `QuoteText.buildQuoteBlock` (D4). If WS02 or WS03 move `ChatScreen.quote`
-  onto `insert(text:mode: .quote)`, they pass the RAW selection, never an
-  already-built block, so there is no double `> `. Per C3 the `Bool` is
-  surfaced on rejection. "Quote in new session" stays a fork with a seed (D12),
-  with no `NewSessionDraft`.
-- **C4:** WS01 makes no ChatScreen edit. `onQuote` becoming optional compiles
-  against the existing call site unchanged.
-- **C5 (amended by D15):**
-  - Consumed: `commandByMessageID` and `truncationByMessageID` (the latter as a
-    fallback only), both converted in M-01-1.
-  - The footer is otherwise transcript-derived. `stepEnded` is not consumed.
-  - Provided: `TranscriptTurnVerb.present`, which WS02 may optionally use to
-    align `RunningIndicator`.
+- **C3:** not called directly.
+  - Quote goes through the existing `TranscriptCardActions.onQuote` →
+    `ChatScreen.quote`, which builds the line with `QuoteText.buildQuoteBlock`
+    (D4).
+  - Any later move onto `insert(text:mode: .quote)` passes the RAW selection,
+    and the `Bool` result is surfaced to the user.
+  - "Quote in new session" stays a fork with a seed (D12).
+- **C4:** WS01 makes no ChatScreen edit.
+- **C5 (D15):**
+  - Consumes WS02 `commandByMessageID` and the existing single `truncation`.
+  - Consumes no per-message truncation map and no `stepEnded`.
+  - The footer is transcript-derived, with the latest live warning as a fallback.
+  - Provides `TranscriptTurnVerb.present` (optional use by WS02).
 - **C6:** no schema change.
 - **C7:** `TranscriptParityTests.swift` (Linux and Mac) and
-  `TranscriptMapperTests.swift` (Mac). No server change, so no node tests.
+  `TranscriptMapperTests.swift` (Mac).
 
 ## Deferred
 
@@ -1497,7 +1621,7 @@ changes to `cellContent`: WS01 only adds switch cases inside
    - Tests: the same path on two boxes gives different keys, and an identity
      change clears the map.
 7. **SHOULD, premature truncation suppression.** Resolved.
-   - The footer kind is `canonical ?? liveTruncations`.
+   - The footer kind is `canonical ?? liveTruncations`. (Superseded in round 2: the fallback is now WS02's existing single `truncation`, see round 2 finding 1.)
    - WS02 suppresses the notice only for `messageID`s in
      `footerTruncationMessageIDs` of the blocks actually rendered (M-01-4).
    - Tests: incomplete snapshot, missing usage, missing usage with live data,
@@ -1528,3 +1652,71 @@ mention WS01:**
 - **#10 (package and pbxproj).** WS01 supplies a Package manifest (M-01-6), never
   edits `project.yml` or the `.pbxproj`, and leaves regeneration to the
   orchestrator.
+
+## Review responses (round2)
+
+**Per-workstream review (`reviews/round2/01-transcript.md`):**
+
+1. **BLOCKING, M-01-1 to M-01-4 do not match WS02 / the truncation map was
+   dropped.** Resolved on WS01's side by redesigning to WS02's current surface.
+   - WS01 now consumes WS02's **existing single** `truncation`
+     (`ChatSessionStore.swift:203`; kept in WS02 F11), through
+     `TranscriptLiveTruncation.from(kind:messageID:)`, into
+     `TranscriptMapOptions.liveTruncation`. No `truncationByMessageID` is
+     needed, which satisfies D15's "nothing beyond what WS02 already decodes".
+     Rationale (F4): only the latest warning can lack a canonical record.
+   - The M-01 table now pins exact expressions over WS01's current symbols:
+     `entries(for:)`, `$sessions`, `fromLive`, `footerTruncationMessageIDs`.
+   - It explicitly replaces the "message exists in `messages`" suppression rule.
+   - It requires an integration test that runs the real
+     `mapOptions` → `blocks(options:)` → `footerTruncationMessageIDs` →
+     `trailingBlocks` chain on an incomplete-truncation snapshot (M-01-4).
+   - **`presentedMessages` reconciliation:** M-01-1 to M-01-3 all map
+     `presentedMessages`. `liveMediaTail` gained an `isLiveWindow` parameter and
+     a disjointness rule, so one owner never appears in both segments. A
+     disjointness test was added (F1).
+   - WS02's receipt rows are WS02's to update; the ledger cleanup note lists the
+     obsolete forms.
+2. **SHOULD, footer emission predicates.** Resolved (F4).
+   - The effective truncation (`canonical ?? live`) is computed BEFORE emission.
+   - Emission is `TranscriptFooterRule.shouldEmit(finishedTurn:effectiveTruncation:)`.
+   - The old "last message with prose" condition is removed. Reply actions
+     require `isTurnEnd` (`turns[id] != nil`), which is never true for a
+     running turn.
+   - Tests added: live-only truncation on a non-final message gives a
+     warning-only footer; a completed last step with prose while `running`
+     gives no footer and no menu; the predicate's four combinations.
+3. **SHOULD, portability of `URLRequest` and SHA-256.** Resolved.
+   - The pure file now holds only `TranscriptPeekRequest.url(serverURL:path:)`
+     (`URLComponents`) and `TranscriptStagingKey.input(...)` (a plain string).
+   - `URLRequest` assembly (`peekRequest(url:method:token:)`) lives in the
+     app-only `MantaAPIClient+Transcript.swift`, with Mac tests.
+   - SHA-256 is computed with CryptoKit in the app-only `TranscriptFileStager`.
+   - No package dependency is added (the manifest is unchanged in kind).
+   - Also from round 1 #8's note: `downloadPeekFile` now streams with
+     `URLSession.bytes(for:)` and aborts mid-download the moment the byte count
+     exceeds the limit, not after a completed `download(for:)`.
+4. **NIT, retired IDs and file names.** Resolved on WS01's side.
+   - The received row is labelled `M-02-1`.
+   - M-01-5 names `TranscriptDisplayOptions.swift` as the provider file, and
+     notes that WS07's "WS01 M4" receipt is this request.
+   - The superseded-ID list is in **Mount requests**.
+
+**Cross-cutting review (`reviews/round2/00-cross-cutting.md`):**
+
+- **#2 (WS01 / WS02 transcript integration).** Resolved on WS01's side as in
+  finding 1 above.
+  - Command conversion: `fromLive` now maps `""` to `nil`, value-identical to
+    WS02 F11's inline expression, so either compiles and behaves the same.
+  - Media: `entries(for:)` and `$sessions`.
+  - Truncation: the existing single property; no new WS02 map. This matches the
+    master's C5/D15 text unchanged.
+  - Suppression: the rendered-footer predicate only.
+- **#10 (ledger integrity).** All WS01 rows now use M-01-1 to M-01-6, with the
+  ledger's appliers and waves (WS02 B ×4, WS07 B, IA after A2). The received
+  row uses M-02-1, applied by IB. Removed requests are marked superseded.
+- **Ledger rows M-01-1…M-01-6, M-02-1:** match the consolidated ledger, except
+  M-01-1's provider symbols: `truncationByMessageID` is replaced by the existing
+  `truncation` plus `TranscriptLiveTruncation.from` (finding 1 redesign), and
+  M-01-2's signature gains `isLiveWindow:`.
+

@@ -339,7 +339,7 @@ remains `ios-mantaui` `test-unit` on the Mac.
 
 D20. **Wave A is two sub-waves.** A1: WS10, WS01, WS03 (parallel). A2: WS04 and
 WS08 (parallel), after A1 is committed — WS04 consumes WS10's launcher
-symbols and applies WS10's `MantaAppRoot`/`SessionListView` mounts; WS08 calls
+symbols and applies WS10's `MantaAppRoot` mounts (M-10-1, M-10-2); WS08 calls
 WS10's `opencodeRestart()`. `TerminalSocket.swift` → WS04 (additive only).
 Integration agent A runs after A2 (`Package.swift` manifests from all wave-A
 workstreams). Wave C also gets an integration step for WS05's `Package.swift`
@@ -361,6 +361,116 @@ fixed by the workstream that touches the matching iOS feature ONLY if the fix is
 in a shared/pure module both clients use; desktop-renderer-only fixes are out of
 scope and reported at the end.
 
+## Mount ledger (canonical)
+
+Binding after round 2; supersedes `reviews/round2/00-cross-cutting.md`'s
+ledger and every workstream table that disagrees. Sub-waves: **A1** (WS10,
+WS01, WS03) → **A2** (WS04, WS08) → **A-int** (integration agent A,
+single-threaded) → **B** (WS02, WS07, WS09, WS06) →
+**B-int** (integration agent B) → **C** (WS05) → **C-int** (integration
+agent C) → **final** (orchestrator regenerates `.pbxproj`). Files are under
+`mobile/native/MantaUI/` unless a path is given. Within an integration step,
+rows on the same file are applied top-to-bottom in this table's order.
+
+| ID | Receiving file (owner) | Applier | Sub-wave | Provider symbol(s) — exact signature (owner) | Prereq |
+|---|---|---|---|---|---|
+| M-01-1 | `ChatSessionStore.swift` (WS02) | WS02 | B | `struct TranscriptMapOptions { showReasoning: Bool; running: Bool; liveCommands: [String: OpencodeCommandOrigin]; liveTruncation: TranscriptLiveTruncation?; liveMedia: [TranscriptMediaEntry] }`, `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options:) -> [TranscriptBlock]`, `TranscriptCommandOrigin.fromLive(name: String, arguments: String) -> OpencodeCommandOrigin`, `TranscriptLiveTruncation.from(kind: String, messageID: String?) -> TranscriptLiveTruncation?`, `TranscriptMediaStore.shared.entries(for: String) -> [TranscriptMediaEntry]`, `TranscriptDisplayOptions.showDetails` (WS01); `ChatSessionStore.commandByMessageID: [String: StreamCommandExecutedPayload]`, `.truncation: StreamTruncationPayload?` (existing), `.presentedMessages` (WS02) | WS01 (A1) |
+| M-01-2 | `ChatSessionStore.swift` (WS02) | WS02 | B | `ChatTranscriptMapper.liveMediaTail(messages: [OpencodeMessage], live: [TranscriptMediaEntry], isLiveWindow: Bool) -> [TranscriptBlock]` (WS01) | M-01-1 |
+| M-01-3 | `ChatSessionStore.swift` (WS02) | WS02 | B | `TranscriptMediaStore.shared.$sessions`, `TranscriptDisplayOptions.didChange: Notification.Name` (WS01) | M-01-1 |
+| M-01-4 | `ChatSessionStore.swift` (WS02) | WS02 | B | `ChatTranscriptMapper.footerTruncationMessageIDs(_ blocks: [TranscriptBlock]) -> Set<String>` (WS01); new `trailingBlocks(…, footerTruncationIDs: Set<String> = [])` (WS02) | M-01-1 |
+| M-01-5 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `TranscriptDisplayOptions.defaultsKey: String`, `TranscriptDisplayOptions.setShowDetails(_: Bool)` (WS01, `TranscriptDisplayOptions.swift`) | WS01 (A1) |
+| M-01-6 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS01 package manifest | WS01 (A1) |
+| M-02-1 | `TranscriptRow.swift` (WS01) | IB | B-int | `EnvironmentValues.transcriptHighlightedRowID: String?` (WS02, `ChatCardMessageFocus.swift`) | WS02 (B) |
+| M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.isReadOnlyJob: Bool = false` (param, WS07); caller passes `ChatSessionStore.isBackgroundJobReadOnly: Bool` (WS02) — hides Compact, Clear, Fork, Delete, Trust toggle, Rename, Mode rows | — |
+| M-02-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS02 manifest (`ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift`) | WS02 (B) |
+| M-03-1 | `ChatScreen.swift` (WS02) | WS03 (D13) | A1 | `ComposerTextController.init(text: String = "", attachments: [ComposerAttachment] = [], draft: NewSessionDraft? = nil)` (WS03) | wave-0 scaffold |
+| M-03-2 | `ChatScreen.swift` (WS02) | WS03 | A1 | `ComposerTextController.text: String`, `.attachments: [ComposerAttachment]` (WS03) | M-03-1 |
+| M-03-3 | `ChatScreen.swift` (WS02) | WS03 | A1 | `EnvironmentValues.composerController: ComposerTextController?`, `.focusRequest: Int`, `insert(text: String, mode: ComposerInsertMode) -> Bool` (WS03) | M-03-1 |
+| M-03-4 | `ChatScreen.swift` (WS02) | WS03 | A1 | `ChatScreen.draft: NewSessionDraft? = nil`, `ChatScreenContent.init(…, draft:)`, `ComposerTextController.consumeSeedNotice() -> String?`, `apply(_: NewSessionDraft) -> Int` (WS03); `NewSessionDraft` (D2) | M-03-1 |
+| M-03-5 | `ChatModelStore.swift` (WS09) | WS09 | B | `@Published private(set) var agentsLoadError: String?`, `func retryAgents()` (WS09 adds, WS03 specifies) | — |
+| M-03-6 | `ComposerView.swift` (WS03) | IB | B-int | `ComposerTypeahead.agentRows(agents: [OpencodeAgent]?, loadError: String?, query: String, limit: Int = 12) -> [MentionRow]` (WS03); M-03-5 members | M-03-5 |
+| M-03-7 | `ChatScreen.swift` (WS02) | WS02 | B | `ComposerTextController.acceptsInput: Bool` (WS03); `ChatSessionStore.isBackgroundJobReadOnly: Bool { mutationPolicy == .readOnlyJob }` (WS02). Change: `.onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }` + `.onChange(of: store.isBackgroundJobReadOnly) { _, ro in composer.acceptsInput = !ro }` | M-03-1 |
+| M-03-8 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS03 manifest (`ComposerModels.swift`, `ComposerInsertion.swift` + 2 tests) | WS03 (A1) |
+| M-03-9 | `ComposerView.swift` (WS03) | IB | B-int | `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`) (WS02) | WS02 (B); after M-03-6 |
+| M-04-1 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.onRename: (() -> Void)? = nil` (param) | — |
+| M-04-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | params `mode: SessionMode? = nil`, `launchers: [AvailableLauncher] = []`, `launcherCatalog: SessionLauncherCatalog = .loading`, `onSelectMode: ((SessionMode) -> Void)? = nil`, `onRetryLaunchers: (() -> Void)? = nil`; `SessionModeRows(current: SessionMode, launchers: [AvailableLauncher], catalog: SessionLauncherCatalog, onSelect: (SessionMode) -> Void, onRetry: () -> Void)` (WS04); `AvailableLauncher` (WS10) | WS04 (A2), WS10 (A1) |
+| M-04-3 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionListStore.window(forSessionID: String) -> (project: String, window: MantaWindow)?` (WS04) | WS04 (A2) |
+| M-04-4 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionRenameSheet(title:initialName:onSave:)`, `SessionListStore.renameSession(project: String, index: Int, newName: String) async -> String?` (WS04) | M-04-1 |
+| M-04-5 | `ChatScreen.swift` (WS02) | WS02 | B | `MantaNavigator.switchMode(windowKey: String, sessionID: String, to: SessionMode)`, `static MantaNavigator.windowKey(project: String, windowIndex: Int) -> String`, `SessionModeStore.read(sessionID:defaults:) -> SessionMode`, `SessionListStore.launchers: [AvailableLauncher]`, `.launcherCatalog: SessionLauncherCatalog`, `.refreshLaunchers() async` (WS04) | M-04-2 |
+| M-04-6 | `ChatScreen.swift` (WS02) | WS02 | B | `MantaNavigator.presentSwitcher()` (WS04) | WS04 (A2) |
+| ~~M-04-7~~ | — | — | — | **Superseded**: the create flow passes the draft through `ChatScreen(…, draft:)` (M-03-4). No `initialCarryOver`, no `seedAttachments`. | — |
+| M-04-8 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS04 manifest (§13) | WS04 (A2) |
+| M-05-1 | `ChatScreen.swift` (WS02) | WS05 | C | `GitSessionHeaderRow(branch:relPath:cwd:sessionId:shipModel:readOnly:tokens:)` (WS05); `ChatSessionStore.isBackgroundJobReadOnly` (WS02); `EnvironmentValues.composerController`, `ComposerTextController.acceptsInput` (WS03); verifies M-03-7 | WS02 (B), M-03-3, M-03-7 |
+| M-05-2 | `SessionListView.swift` (WS04) | WS05 | C | `InboxWorkScreen(onClose:)` (WS05); `MantaNavigator.startNewSession(_: NewSessionDraft)` (WS04) | WS04 (A2) |
+| M-05-3 | `SessionListView.swift` (WS04) | WS05 | C | `ReviewScreen.forSession(_ sessionID: String)` (WS05) | WS04 (A2); after M-05-2 |
+| M-05-4 | `mobile/native/Package.swift` (WS07) | IC | C-int | WS05 manifest (`GitForgeModels`, `ReviewDiff`, `InboxWorkModels` + 3 tests) | WS05 (C) |
+| M-06-1 | `ChatScreen.swift` (WS02) | WS02 | B | `SearchScreen.init(scope: SearchScope, seed: String = "", search: SearchFunction? = nil)`, `SearchScope.fromProjects(_ projects: [MantaProject], primarySessionId: String?) -> SearchScope` (WS06). Call: `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId))` | WS06 (B, pinned) |
+| M-06-2 | `SessionListView.swift` (WS04) | IB | B-int | `SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive(_:)`, `SearchCopy.normalized(_:)` (WS06) | WS04 (A2), WS06 (B) |
+| M-06-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS06 manifest (`SearchModels.swift`, `SearchTests.swift`) | WS06 (B) |
+| M-07-1 | `ChatScreen.swift` (WS02) | WS02 | B | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07); `composer` (M-03-1); `MantaNavigator.open(.message(sessionID:messageID:))` (WS04/C2). No `onAttach`. | M-03-1, WS04 (A2), M-03-7 |
+| M-07-2 | `ChatScreen.swift` (WS02) | WS02 | B | `WebhooksCard(sessionId:onClose:)`, `ChatOverflowSheet.onWebhooks: (() -> Void)? = nil` (WS07) | WS07 (B, pinned) |
+| M-07-3 | `MantaAppRoot.swift` (WS04) | IB | B-int | `ArtifactAgentFileNotice()` (WS07) | WS07 (B) |
+| M-07-4 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS07 manifest (`ArtifactModels`, `ArtifactAgentFileModel`, `WebhookModels` + 4 tests) | WS07 (B); M-03-8 |
+| M-08-1 | `ChatModelCatalog.swift` (WS09) | WS09 | B | `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`); `ChatModelCatalog.reload()` (WS09) | WS08 (A2) |
+| ~~M-08-2~~ | `UsageSheets.swift` (WS02) | — | — | **Declined** by WS02; no edit, no WS08 API kept. | — |
+| M-08-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS08 manifest (4 sources, 3 tests) | WS08 (A2) |
+| M-09-1 | `SettingsScreen.swift` (WS10) | IB | B-int | `ModelsScreen()` (WS09) | WS10 (A1), WS09 (B) |
+| M-09-2 | `SessionListView.swift` (WS04) | IB | B-int | `UsageStoppedCapsule(count: Int, action: () -> Void)`, `UsageAlertsStore.shared.presentResume()` (WS09); `SessionListStore.unarmedStoppedCount: Int` (WS04) | WS04 (A2), WS09 (B); after M-06-2 |
+| M-09-3 | `MantaAppRoot.swift` (WS04) | IB | B-int | `UsageAlertsStore.shared.bind(eventStore:)`, `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions: SessionListStore, usage: UsageAlertsStore)`, `UsageAlertsStore.resumeSheetPresented` (WS09) | WS04 (A2), WS09 (B); after M-07-3 |
+| M-09-4 | `MantaAppRoot.swift` (WS04) | IB | B-int | `UsageAlertsStore.resetForBoxChange()`, `ChatModelCatalog.resetForBoxChange()` (WS09) — in `commitPairing` switch branch AND in the M-10-2 closure | M-09-3, M-10-2 |
+| M-09-5 | `ChatScreen.swift` (WS02) | WS02 | B | `UsageAlertsStore.shared.activeSessionId: String?` (WS09) | WS09 (B, pinned) |
+| M-09-6 | `AccountsScreen.swift` (WS08) | IB | B-int | `ModelsScreen()` (WS09) — accepted (optional) | WS08 (A2), WS09 (B) |
+| M-09-7 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS09 manifest (10 sources, 5 tests) | WS09 (B) |
+| M-10-1 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `SettingsAppearance.storageKey`, `.systemValue`, `static func preference(for stored: String?) -> ThemePreference` (`SettingsAppearance.swift`), `ThemePreference.colorScheme: ColorScheme?` (`SettingsAppearanceView.swift`) (WS10). Call: `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | WS10 (A1) |
+| M-10-2 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `Notification.Name.mantaBoxRemoved` (WS10, `BoxDevicesModels.swift`); `MantaOnboardingFlow.backToEntry()` (WS10); `SessionListStore.resetForBoxChange()` (WS04) | WS10 (A1); after M-10-1 |
+| M-10-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS10 [pkg] manifest | WS10 (A1) |
+| O-final | `MantaUI.xcodeproj/project.pbxproj` | orchestrator | final | xcodegen from `project.yml` (no worker edits it; no workstream needs a `project.yml` change) | C-int |
+
+Same-file / same-sub-wave audit: A1 — WS03 alone edits `ChatScreen.swift`;
+A2 — WS04 alone edits `MantaAppRoot.swift`/`SessionListView.swift`; B — WS02
+alone edits `ChatScreen.swift`/`ChatSessionStore.swift`, WS07 alone edits
+`ChatOverflowSheet.swift`, WS09 alone edits `ChatModelCatalog.swift`/
+`ChatModelStore.swift`; every other cross-owner edit is in a single-threaded
+integration step (A-int/B-int/C-int) or in wave C (WS05 alone).
+
+## Shared member registry
+
+Single owner per member/type (D16 is member-level). No other spec may declare
+these; consumers call them by exactly these names.
+
+**`MantaAPIClient` extension members** (file `MantaAPIClient+<Area>.swift` of
+the owner):
+
+| Owner (file) | Members |
+|---|---|
+| WS01 (`+Transcript`) | `peekFileSize(path:) async throws -> Int64?`, `downloadPeekFile(path:to:maxBytes:) async throws`, internal `static peekRequest(url:method:token:) -> URLRequest` |
+| WS02 (`+ChatCards`) | `delegatePendingApprovals(sessionId:)`, `delegateApprove(id:tools:) -> Bool`, `delegateDecline(id:) -> Bool`, `chatCardJobs() -> [ChatCardJob]` |
+| WS03 (`+Composer`) | `commands(directory:) -> [OpencodeCommandInfo]`, `references() -> [OpencodeReferenceInfo]` (consumed by WS10), `runCommand(_:) -> RunCommandResult?` |
+| WS04 (`+Sessions`) | `createSession(_:)`, `createWindow(_:)`, `tmuxRenameSession(oldName:newName:)`, `tmuxKillSession(_:)`, `projectMetaDelete(_:)`, `gitAddWorktree(cwd:name:)`, `gitRemoveWorktree(path:force:)`, `fsListDirectory(_:)`, `projectCreateScratch(root:name:)`, `forgeProbe() -> ForgeProbeResult` (consumed by WS05), `forgeDeviceStart()`, `forgeDevicePoll(grantId:)`, `forgeDeviceCancel(grantId:) async throws`, `forgeRepos()`, `forgeCloneStart(url:dest:name:)`, `forgeCloneStatus(id:)`, `forgeCloneCancel(id:)`, `usageStoppedList() -> SessionStoppedList` |
+| WS05 (`+Git`) | `forgePullRequest(cwd:)`, `forgeShipPreview(cwd:model:sessionId:)`, `forgeShip(cwd:title:body:)`, `forgeMerge(cwd:number:sha:)`, `forgeDiff(_:)`, `forgeDraftGet(_:)`, `forgeDraftComment(_:op:)`, `forgeDraftSubmit(_:verdict:)`, `forgeThreadReply(_:threadId:body:)`, `forgeInbox()`, `delegateStart(prompt:sessionID:directory:)` |
+| WS06 (`+Search`) | `searchMessages(_: SearchRequest) -> SearchResponse` |
+| WS07 (`+Artifacts`) | `listOutboxRows(sessionId:)`, `listWebhooks(sessionId:)`, `deleteWebhook(id:)` |
+| WS08 (`+Accounts`) | `accountsResignSeat`, `accountsResignStatus`, `accountsResignCancel`, `accountsHealth`, `accountsRetry`, `accountsEndpointProbe`, `providerAuthStatus`, `providerAuthStart`, `providerAuthCode`, `providerAuthKey`, `providerAuthDisconnect`, `providerAuthClaudeStatus`, `providerAuthOauthStatus`, `providerAuthOauthCancel`, `providerClaudeCliStatus`, `providerClaudeLoginCancel`, `signInPtySpawn`, `signInPtyWrite`, `signInPtyKill`, `providerEndpoints`, `providerSetEndpoints`, `providerDiscoverModels` (signatures in WS08 "Client members") |
+| WS09 (`+Models`) | `modelsSyncSubagents(models:deactivated:optIn:)`, `ledgerSummary()`, `optimizerSummary()`, `optimizerSeries(range:)`, `optimizerPrices()`, `setModelCost(providerID:modelID:cost:)`, `modelCatalog()`, `modelsUnidentified()`, `usageStoppedArm(conversation:)`, `usageStoppedDisarm(conversation:)`, `usageStoppedStampLastLooked()`, `scheduleCreate(_:)` |
+| WS10 (`+Settings`) | `serverVersion()`, `serverUpdateCheck()`, `serverCliUpdate(cliID:)`, `restorePreview()`, `restoreTopology()`, `authPair()`, `opencodeRestart() -> OkResult` (consumed by WS08), `pluginsRegistry()`, `forgeStatus(validate: Bool) -> ForgeConnectionStatus` (consumed by WS05), `forgeRulesList()`, `forgeDisconnect()`, `opencodeSetReferences(upsert:)`, `launchersList() -> [AvailableLauncher]` (consumed by WS04) |
+
+Existing base members (`MantaAPIClient.swift`) are reused, never redeclared.
+
+**Cross-workstream types / properties:**
+
+| Owner | Symbols |
+|---|---|
+| WS01 | `TranscriptMapOptions`, `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options:)` / `.liveMediaTail(messages:live:isLiveWindow:)` / `.footerTruncationMessageIDs(_:)`, `OpencodeCommandOrigin`, `TranscriptCommandOrigin.fromLive(name:arguments:)`, `TranscriptLiveTruncation.from(kind:messageID:)`, `TranscriptMediaStore.shared` (`$sessions`, `entries(for:)`), `TranscriptDisplayOptions` (`showDetails`, `defaultsKey`, `setShowDetails(_:)`, `didChange`) |
+| WS02 | `ChatSessionStore.commandByMessageID: [String: StreamCommandExecutedPayload]`, `.truncation` (existing), `.presentedMessages`, `.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`), `.isBackgroundJobReadOnly: Bool`, `.canMutate`; `StreamCommandExecutedPayload {messageID, name, arguments: String}`; `EnvironmentValues.transcriptHighlightedRowID`; `ChatCardJobOwnershipStore` (`jobOwnership`, `job: ChatCardJob?` — WS02-internal) |
+| WS03 | `ComposerTextController` (`text`, `attachments`, `acceptsInput`, `focusRequest`, `seedNotice`, `init(text:attachments:draft:)`, `insert(text:mode:) -> Bool`, `attach(remotePath:displayName:mime:) -> Bool`, `lastAttachRejection`, `newSessionDraft(cwd:)`, `apply(_:) -> Int`, `consumeSeedNotice()`), `ComposerInsertMode`, `ComposerInsertion` (`AttachRejection`), `EnvironmentValues.composerController`, `ChatScreen(…, draft:)`, `ComposerTypeahead.agentRows(agents:loadError:query:limit:)`, `OpencodeReferenceInfo`, `OpencodeCommandInfo` |
+| WS04 | `MantaRoute`, `MantaNavigator` (`pending`, `open(_:)`, `pendingDraft`, `startNewSession(_:)`, `switcherPresented`, `presentSwitcher()`, `switchMode(windowKey:sessionID:to:)`, `static windowKey(project:windowIndex:)`), `NewSessionDraft` / `NewSessionDraftAttachment` (D2), `SessionMode`, `SessionLauncherCatalog`, `SessionModeStore`, `SessionModeRows`, `SessionRenameSheet`, `SessionListStore` (`window(forSessionID:)`, `renameSession(project:index:newName:)`, `launchers`, `launcherCatalog`, `refreshLaunchers()`, `stoppedRecords: [SessionStoppedRecord]`, `stoppedLastLooked: Double?` (epoch ms), `stoppedConversations`, `unarmedStoppedCount`, `isStopped(sessionID:)`, `refreshStopped()`, `resetForBoxChange()`), `SessionStoppedRecord {…, stoppedAt: Double}`, `SessionStoppedList`, `GitHubDeviceSignInStore` (`cancel() async`, attempt `generation`), `GitHubDeviceSignInView(onConnected:onCancel:)`, `GitHubDeviceSignInAPI`, `GitHubDeviceFlow`, `GitHubDevice*` wire types, `ForgeProbeResult`, `RepoHit` |
+| WS05 | `GitSessionHeaderRow`, `InboxWorkScreen(onClose:)`, `ReviewScreen.forSession(_:)` |
+| WS06 | `SearchScreen(scope:seed:search:)`, `SearchScope.fromProjects(_:primarySessionId:)`, `SearchScope.build(windows:primarySessionId:)`, `SearchCopy.isActive/normalized` |
+| WS07 | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)`, `WebhooksCard(sessionId:onClose:)`, `ArtifactAgentFileNotice()`, all `ChatOverflowSheet` parameters (`isReadOnlyJob`, `onRename`, `mode`, `launchers`, `launcherCatalog`, `onSelectMode`, `onRetryLaunchers`, `onWebhooks`), `Package.swift` (written only by IA/IB/IC) |
+| WS08 | `Notification.Name.mantaProvidersChanged`, `AccountsScreen(store:focusProvider:ownsLifecycle:)` (unchanged), `AccountsStore.conversationSeat` (unchanged, read by WS02), `EndpointHealth` |
+| WS09 | `ChatModelStore.agentsLoadError`, `.retryAgents()`, `ChatModelCatalog.reload()` / `.resetForBoxChange()`, `UsageAlertsStore.shared` (`bind(eventStore:)`, `activeSessionId`, `resumeSheetPresented`, `presentResume()`, `resetForBoxChange()`), `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)`, `UsageStoppedCapsule(count:action:)`, `UsageStoppedEntry`, `ModelsScreen()` |
+| WS10 | `AvailableLauncher {id, label, flags}`, `AvailableLauncherFlag {key, label, type, default}`, `ExtensionsLaunchers.resolve(schema:saved:)` / `.update(…)` / `.savedFlags(from:)`, `SettingsAppearance` (`storageKey`, `systemValue`, `preference(for:)`), `ThemePreference.colorScheme`, `Notification.Name.mantaBoxRemoved`, `SettingsScreen(eventStore:initialSection:)`, `OkResult`, `ForgeConnectionStatus`, `BoxRESTClient` |
+
 ## Definition of done (whole effort)
 
 - Every gap in the table above is either built per its spec or explicitly
@@ -370,3 +480,71 @@ scope and reported at the end.
   both test bundles compile, `MantaUITests` pass). `.pbxproj` regenerated.
 - Opus review rounds report nothing blocking.
 - Squash-merged to `main` via PR.
+
+## Reconciliation log (after round 2)
+
+Canonical decisions taken here (binding, recorded in the ledger/registry above):
+- **Live truncation:** WS02 publishes no per-message truncation map; WS01
+  consumes the existing single `truncation` via
+  `TranscriptLiveTruncation.from(kind:messageID:)` (D15 unchanged).
+- **Read-only job API:** provider WS02. Consumers read
+  `ChatSessionStore.isBackgroundJobReadOnly` (yes/no) and, only where
+  "still checking" matters, `ChatSessionStore.mutationPolicy`
+  (`.resolving/.allowed/.readOnlyJob`). `jobOwnership.job` is WS02-internal.
+  M-03-7 = `composer.acceptsInput = !store.isBackgroundJobReadOnly` on appear
+  and on change.
+- **New-session draft:** only `ChatScreen(…, draft:)` (M-03-4). M-04-7 /
+  `initialCarryOver` / `seedAttachments` superseded.
+- **Stopped timestamps:** `stoppedLastLooked: Double?` and
+  `SessionStoppedRecord.stoppedAt: Double`, both epoch ms; no conversion.
+- **Device sign-in lifecycle:** WS05 §C.3 is specified inside WS04's API
+  (`cancel() async`, attempt `generation`, wake channel, logged cancel failure,
+  five lifecycle tests).
+- **Package manifests** all have IDs (M-04-8, M-08-3, M-09-7 added).
+
+Edits:
+- `00-master.md` → added "Mount ledger (canonical)", "Shared member registry",
+  this log; D20 wording (WS04 applies WS10's `MantaAppRoot` mounts M-10-1/2).
+- `01-transcript.md` → mount-table header points to the canonical ledger;
+  M-01-5 note and superseded-ID note updated (WS07/WS02 receipts now match).
+- `02-chat-cards-queue.md` → F6: added `isBackgroundJobReadOnly`, canonical
+  read-only API note, resolver wording, `jobOwnership` internal, M-03-7 keyed
+  on `isBackgroundJobReadOnly`, acceptance; F11: dropped
+  `truncationByMessageID` (table, router state, decision paragraph, conversion
+  → `liveTruncation`); Files/Tests #14/#16/#18 aligned; M-02-2 also hides
+  Rename + Mode rows; "Mounts applied" rewritten (M-01-1…4 verbatim from WS01
+  incl. `presentedMessages` + `isLiveWindow:` + `footerTruncationIDs`; M-03-7;
+  M-04-7 removed → superseded list; M-03-9 noted); Contracts (C5, provided
+  read-only API, consumed WS01 symbols); four round-2 response rows amended.
+- `03-composer.md` → M-03-7 uses `isBackgroundJobReadOnly`; M-03-9 provider
+  symbol pinned; header → canonical ledger; consumed-from-WS02 list; seed call
+  spelled `ChatScreen(…, seed: target.seed ?? "", draft: target.draft)`;
+  cross-check paragraph; round-2 response wording.
+- `04-sessions.md` → §6 `GitHubDeviceSignInStore` API (`cancel() async`,
+  `generation`, wake channel), API seam logging, polling paragraph, five WS05
+  lifecycle tests; `forgeDeviceCancel` `async throws` (awaited, logged);
+  M-04-2 gated on `!isReadOnlyJob`; §14 header; §15 M-09-2 / M-09-4 receipts
+  copied from WS09; §13 Files and §11 stale "M1/M2/M3" labels fixed; WS05
+  `repoProbe` note removed; reconciliation note appended.
+- `05-git-pr-review.md` → A.3a + M-05-1 read-only source =
+  `isBackgroundJobReadOnly` (no `jobOwnership`); M-05-1(b) verifies the
+  canonical M-03-7 binding; M-05-2 provider symbols + A2 prerequisites;
+  M-05-4 applier = IC; §9 cross-refs; C.3 note (WS04 now specifies it);
+  round-2 responses amended.
+- `06-search.md` → stale "WS04 M2"/"WS02 M2" refs → WS04 §11 / WS02 F10;
+  WS02 receipt notes resolved; M-06-2 ordered before M-09-2.
+- `07-artifacts-cards.md` → header → canonical ledger; "receiver-side sync"
+  note replaced (WS02 matches); Package request list completed.
+- `08-accounts.md` → header; M-08-1 receipt recorded by WS09; M-08-3 ID;
+  M-09-6 note.
+- `09-models-usage.md` → `stoppedLastLooked: Double?` / `stoppedAt: Double`
+  everywhere, `lastLookedMs` removed, tests reworded to ms; manifest row is
+  M-09-7; M-09-5/M-09-6/M-09-1/M-09-2/M-09-4 cross-refs updated;
+  cross-spec dependencies; round-2 response #2.
+- `10-settings-box.md` → header → canonical ledger; M-09-1 ref; WS04 C2 note.
+
+Verified by grep: every provider symbol in the ledger appears with the same
+spelling in its provider spec; no `MantaAPIClient` member or top-level type is
+declared by two specs (`Kind`/`Phase` are nested; `GitHubDeviceSignIn*` in
+WS05 is a quoted consumed signature); no two workers edit one file in one
+sub-wave.

@@ -1,8 +1,10 @@
 # WS10 — Settings, extensions, box, updates, upgrade actions, pairing
 
-Status: revised (round 1) · Date: 2026-10-28 · Parent: `00-master.md` · Wave: **A**
-(F11 references screen and F12 launch-options screen start after WS03/WS04's
-provider members have merged inside wave A — see "Client members").
+Status: revised (round 2) · Date: 2026-10-28 · Parent: `00-master.md` · Wave: **A1** (D20)
+WS10 runs in A1 alongside WS01 and WS03. Same-wave consumption of WS03's
+`references()` codes against the pinned signature (D21); the UI compile happens
+on the Mac after wave A is integrated. WS10 depends on nothing from A2 (WS04,
+WS08); those consume WS10's providers.
 
 Scope: settings the desktop has and iOS does not, the Extensions section, the
 Box section (add a device, linked devices, remove server, restart opencode),
@@ -111,9 +113,28 @@ toggle / segmented / text row become failure-safe:
   shows `store.lastError` (also covers load/reset/restore failures), with a ×
   that calls new `store.clearError()`. It clears on the next successful save.
 - `setBool` (chat trust toggle, BET-748) is unchanged.
-- Reset / undo keep their current optimistic batch write (out of scope).
+- **Shared mutation guard (reset/undo vs. commit).** Reset / undo keep their
+  existing optimistic batch write (redesign deferred) but are serialized
+  against commits through one guard on the store:
+  - new `@Published private(set) var batchWriting = false`;
+  - `var isMutating: Bool { batchWriting || !saving.isEmpty }`;
+  - `resetSection`, `resetAll`, `undoLastReset` return immediately (no change,
+    no write) when `isMutating`; otherwise set `batchWriting = true` before
+    their `configuration.update` and clear it when that write completes
+    (success or failure). They become `async` internally; the public API keeps
+    its synchronous signatures by spawning the `Task` and setting
+    `batchWriting` synchronously before returning, so the guard is visible to
+    the very next call;
+  - `commit` for a config entry also returns `false` without writing when
+    `batchWriting` is true;
+  - `SettingsScreen` disables every config-driven row while `batchWriting`,
+    and disables the per-section "Reset", the "Reset all settings…" button and
+    the toast's "Undo" while `isMutating`.
+  So a pending toggle and a reset can never interleave; the box and the
+  screen always end with the same value.
 
-Tests: §T1 (injected failing/succeeding `SettingsConfigurationStore`).
+Tests: §T1 (injected failing/succeeding/gated `SettingsConfigurationStore`,
+including the commit-vs-reset interleavings).
 
 ---
 
@@ -401,8 +422,10 @@ repository — e.g. ../docs or owner/repo" / "optional description"; "Add"
 `references() async throws -> [OpencodeReferenceInfo]` (`03-composer.md` F4,
 `MantaAPIClient+Composer.swift`) — WS10 does not add a second
 reader. The write `opencodeSetReferences(upsert:)` is WS10's (no other spec
-writes references). Prerequisite: WS03's commit defining `references()` /
-`OpencodeReferenceInfo` has merged before this screen is built.
+writes references). WS03 runs in the same sub-wave (A1); per D21 WS10 codes
+against WS03's pinned signature (`03-composer.md` F4: `func references() async
+throws -> [OpencodeReferenceInfo]`, fields `name, path?, repository?, branch?,
+description?, hidden?`) and the screen compiles once wave A is integrated.
 
 **iOS design.** Anchor `referencesMobile` → `ExtensionsReferencesScreen.swift`:
 list + a Form section "Add a reference" with the three fields, inline field
@@ -432,25 +455,69 @@ flag." on failure.
 (`launchers.mjs:37`, `rpc.mjs:2645`). Config key `launcherFlags`:
 `{[launcherId]: {[flagKey]: Bool}}`; `config:update [{"launcherFlags": {...}}]`.
 
-**Client members (D16).** The read is **WS04's** member `launchers()` returning
-`[SessionLauncher]` (with `[SessionLauncherFlag]`), and the value rule is
-WS04's `SessionLauncherFlags.resolve(schema:saved:)` (`04-sessions.md` §2,
-`SessionForgeModels.swift`). WS10 adds neither a `launchers:list` reader nor a
-second resolver. Prerequisite: WS04's commit defining those has merged.
-WS04 also reads `launcherFlags` in `SessionListStore.loadConfig`; Settings
-calls `sessionStore.loadConfig()` on disappear (F5) so a change reaches it.
+**Provider (D21 — WS10 owns launcher discovery; WS04 consumes, A2).**
+Everything below is declared by WS10 and is the ONLY launcher API in the app:
 
-**iOS design.** Anchor `launcherFlagsMobile` → `ExtensionsLaunchersScreen.swift`:
-one `Section` per launcher with flags, a `Toggle` per flag. Empty: "No AI CLI
-with launch options is installed on your box." Each flag write is awaited and
-serialized (all toggles disabled while one save runs); failure reverts and
-shows "Couldn't save launcher flag." Load failure: "Couldn't load the AI CLIs on
-your box. <error>" + "Try again".
+- Wire types, `SettingsWireModels.swift` (Foundation-only, [pkg]):
+  ```swift
+  struct AvailableLauncherFlag: Decodable, Equatable, Hashable, Sendable {
+    var key: String          // stable config key, e.g. "skipPermissions"
+    var label: String        // user-facing
+    var type: String         // always "boolean" today; rows render only type == "boolean"
+    var `default`: Bool      // JSON key "default"
+  }
+  struct AvailableLauncher: Decodable, Equatable, Hashable, Sendable, Identifiable {
+    var id: String           // launcher id, e.g. "claude"
+    var label: String        // e.g. "Claude Code"
+    var flags: [AvailableLauncherFlag]   // [] when the CLI has no flags
+  }
+  ```
+  Decoding is strict for `id`/`label`/`key`/`label`; a missing `flags` array
+  decodes as `[]`, a missing `type` as `"boolean"`, a missing `default` as
+  `false` (custom `init(from:)`), so an older box never blanks the list.
+- Client member, `MantaAPIClient+Settings.swift`:
+  `func launchersList() async throws -> [AvailableLauncher]` —
+  `callRequired("launchers:list", args: [], as: [AvailableLauncher].self)`
+  (server returns installed, non-hidden launchers in registry order,
+  `launchers.mjs:37-60`, `rpc.mjs:2645`; a missing result throws — the caller
+  shows a retry, never an empty list as success).
+- Pure resolver + writer, `ExtensionsModels.swift` (Foundation-only, [pkg]):
+  ```swift
+  enum ExtensionsLaunchers {
+    /// Port of resolveLauncherFlags (chatShared.tsx:504-511): for every flag in
+    /// `schema`, saved[key] ?? flag.default. Keys in `saved` not in `schema` are dropped.
+    static func resolve(schema: [AvailableLauncherFlag], saved: [String: Bool]?) -> [String: Bool]
+    /// Port of updateLauncherFlag (settingsShared.ts:41-57): returns `prev` with
+    /// prev[launcherID] replaced by the launcher's FULL resolved map plus
+    /// [flagKey] = checked. Unknown launcherID → `prev` unchanged.
+    static func update(launchers: [AvailableLauncher], launcherID: String, flagKey: String,
+                       checked: Bool, prev: [String: [String: Bool]]) -> [String: [String: Bool]]
+    /// Reads config["launcherFlags"] (`[String: JSONValue]` from configGet) into
+    /// the typed map; non-object / non-bool entries are skipped.
+    static func savedFlags(from config: [String: JSONValue]?) -> [String: [String: Bool]]
+  }
+  ```
+  `JSONValue` is in `MantaModels.swift` — that file must be in the [pkg]
+  target with `ExtensionsModels.swift` (manifest M-10-3; WS01 already owns
+  `MantaModels.swift` per D1 and it is already listed in `Package.swift`).
+- Consumers: WS04 (A2) — session-mode rows / launcher catalog
+  (`04-sessions.md:158-163,1295-1296,1353`). WS04 declares no launcher member,
+  type or resolver. WS10 consumes nothing launcher-related from WS04.
 
-**Pure:** `ExtensionsLaunchers.update(flags:launcherID:flagKey:checked:prev:)`
-— port of `updateLauncherFlag`; takes the launcher's flag schema as
-`[(key: String, default: Bool)]` and calls the same resolution rule (saved ??
-default) so it is testable without WS04's types.
+**iOS design.** Anchor `launcherFlagsMobile` → `ExtensionsLaunchersScreen.swift`
+(state in the screen's `@StateObject ExtensionsLaunchersModel`, `@MainActor
+final class`): on appear, `launchersList()` and `configGet()` concurrently;
+then one `Section(launcher.label)` per launcher with non-empty `flags`, a
+`Toggle(flag.label)` per flag bound to
+`ExtensionsLaunchers.resolve(schema: launcher.flags, saved: saved[launcher.id])[flag.key]`.
+Empty (no launcher has flags): "No AI CLI with launch options is installed on
+your box." Writing: `ExtensionsLaunchers.update(...)` →
+`configUpdate(["launcherFlags": <map>])`, awaited and serialized (all toggles
+disabled with a spinner while one save runs); success adopts the saved map
+from the returned config (`savedFlags(from:)`), failure reverts and shows
+"Couldn't save launcher flag." Load failure: "Couldn't load the AI CLIs on
+your box. <error>" + "Try again". Settings calls `sessionStore.loadConfig()`
+on disappear (F5) so WS04's cached flags refresh.
 
 ### F13. Box status card (replaces the dead "Server URL" field)
 
@@ -502,7 +569,8 @@ is loopback-only and must NOT be used).
   (`TimelineView(.periodic(every: 1))`), "Refresh code" button (spinner
   "Refreshing…").
   `manualAddress` returns the phone's own normalized connected URL
-  (`KeychainCredentialStore.shared.serverUrl` through
+  (`KeychainCredentialStore.shared.serverURL?.absoluteString` — the store exposes
+  `serverURL: URL?`, `KeychainCredentialStore.swift:21` — through
   `MantaPairing.normalizeServerURL`) — the address this phone actually reaches
   the box at. So on a Tailscale/private box (where the Server ID's derived
   `https://<id>.boxes.mantaui.com` does not exist, `pairPanel.ts:46-74`) the
@@ -605,7 +673,7 @@ registries banner (F10).
 
 Client member: `opencodeRestart() async throws -> OkResult` is **owned by
 WS10** (D16) and **consumed by WS08** (`08-accounts.md:534,988,1026`; WS08
-dropped its own `providerRestartOpencode()`). Wave-A order: WS10 → WS08. The
+dropped its own `providerRestartOpencode()`). Order (D20): WS10 in A1, WS08 in A2. The
 signature and `OkResult { ok: Bool; error: String? }` are frozen by this spec.
 
 ### F17. Linked devices + revoke
@@ -671,6 +739,9 @@ use `call` for `server:update-apply`; `BoxRESTClient.rpcRaw(channel:args:)`
 (WS10 file, see Client members) POSTs `/rpc/server:update-apply` with body
 `{"args": []}` and the bearer, 30 s timeout, and returns
 `RawRPCResponse { status: Int?, body: Data, transportError: URLError? }`
+(declared in the Foundation-only `SettingsUpdatesModels.swift`, NOT in
+`BoxRESTClient.swift`, so the [pkg] classifier never depends on the app-only
+HTTP client)
 without interpreting it. No edit to `MantaAPIClient.swift` is needed (so no
 C1 foundation mount).
 
@@ -684,7 +755,7 @@ C1 foundation mount).
 | `transportError` code ∈ {`.networkConnectionLost`, `.cannotConnectToHost`, `.timedOut`, `.notConnectedToInternet`, `.cannotFindHost`, `.dnsLookupFailed`, `.cancelled`} | `.restartLikely` |
 | any other `transportError` | `.failed(localizedDescription)` |
 | status 401 | `.authRequired` |
-| status 503 and `UpgradePresentation.isUpgradeRefusal(503, body)` | `.upgrading` |
+| status 503 and `UpgradeStatus.isUpgradeRefusal(statusCode: 503, body: body)` (`UpgradeModels.swift:381-391`) | `.upgrading` |
 | status ∈ {502, 503, 504, 521, 522, 524} (any body: HTML, text, JSON) | `.restartLikely` |
 | status 200, body `{"result": {"ok": true}}` | `.started` |
 | status 200, body `{"result": {"ok": false, "error": E}}` | `.failed(E ?? "Server update failed")` — includes `self-update: …` messages, never transient |
@@ -825,7 +896,7 @@ pairing becomes one "Server address" field + code.
 always-visible field **"Server address"** (placeholder "Server ID or address"),
 help "On your desktop: Settings → Box → Add a phone shows the Server ID. On
 another phone: Settings → Box → Add a device shows the server address. Or run
-`manta pair` on the box." Prefilled from the Keychain's `serverUrl` on re-pair
+`manta pair` on the box." Prefilled on re-pair from the loaded credentials' `serverUrl` (`try? KeychainCredentialStore.shared.load()?.serverUrl`, as `MantaOnboarding.swift:79-84` already does)
 (today it prefills `boxId`). Order: six-digit code first, then Server address,
 then "Continue" (enabled only when the code is six digits AND
 `resolveManualTarget` returns `.ok`). Errors are shown under the field from the
@@ -917,7 +988,7 @@ without the whole-box reset. Additive; never exposes tokens.
   false for revoked/other/absent token, no `token` field in any row;
   `auth.test.mjs` — engine passes the token through.
 
-Wave note: accepted by master D7 (wave A: WS10 edits `devices.mjs`, `auth.mjs`,
+Wave note: accepted by master D7 (wave A1: WS10 edits `devices.mjs`, `auth.mjs`,
 `index.mjs`; WS08's wave-A server edit is `ptyWs.mjs` only, so no conflict).
 
 No other server change. Every other feature uses existing channels/routes.
@@ -946,6 +1017,7 @@ spec declares these names:
 | `func forgeRulesList() async throws -> [ForgeRuleRow]` | `forge:rules-list` | `[]` |
 | `func forgeDisconnect() async throws -> OkResult` | `forge:disconnect` | `[]` |
 | `func opencodeSetReferences(upsert: [[String: String]]) async throws -> OkResult` | `opencode:set-references` | `[["upsert": upsert]]` |
+| `func launchersList() async throws -> [AvailableLauncher]` (**also consumed by WS04**, D21; types + `ExtensionsLaunchers.resolve` in F12) | `launchers:list` | `[]` |
 
 `server:update-apply` is deliberately **not** a `MantaAPIClient` member — it
 goes through `BoxRESTClient.rpcRaw` (F18) to keep the HTTP status.
@@ -953,7 +1025,6 @@ goes through `BoxRESTClient.rpcRaw` (F18) to keep the HTTP status.
 **Consumed, owned elsewhere (not redeclared):**
 `configGet()` / `configUpdate(_:)` (existing, `MantaAPIClient.swift:752-760`);
 `references() -> [OpencodeReferenceInfo]` (WS03, F11);
-`launchers() -> [SessionLauncher]` + `SessionLauncherFlags.resolve` (WS04, F12);
 `SessionListStore.loadConfig()` / `refresh()` (existing/WS04).
 
 **Non-`MantaAPIClient` HTTP helper** — `BoxRESTClient.swift` (WS10; `struct`,
@@ -990,8 +1061,17 @@ Foundation-only logic and must also run under `mobile/native/verify.sh` (D19)
   second update; while suspended `current` shows the pending value and
   `saving` contains the id; `clearError()` clears; device-local commit never
   touches the store.
+  **Mutation guard (§0.2)** with a gated store (each `update` suspends until the
+  test releases it): (a) commit A pending → `resetAll()` is a no-op (no second
+  update issued, `undoMessage` unchanged); release → A confirmed. (b)
+  `resetAll()` pending (`batchWriting == true`) → `commit` returns false without
+  an update and `current` is unchanged; release → reset values confirmed,
+  `batchWriting == false`. (c) reset pending → `undoLastReset()` no-op until
+  release, then works. (d) `isMutating` reflects both.
 - **T2 `SettingsAppearanceTests.swift` [pkg]:** system/light/dark/garbage/nil →
-  `ThemePreference`; `storageKey == "manta.settings.local.themeMobile"`.
+  `ThemePreference`; `storageKey == "manta.settings.local.themeMobile"`;
+  `SettingsDeepLink.target`: `"extensions"` (a non-first section) → `"extensions"`,
+  `"general"` → `"general"`, `nil`/`""`/`"secrets"`/`"nope"` → `nil`.
 - **T3 `SettingsBoxTests.swift` [pkg]:** `BoxPairing.universalLink` (with/without
   server; output parses back via `MantaPairing.parsePairPayload` to the same
   payload); `qrServerOverride` (nil when equal to the direct URL, nil for public
@@ -1016,8 +1096,14 @@ Foundation-only logic and must also run under `mobile/native/verify.sh` (D19)
   `validateReferenceAlias`/`classifyReferenceTarget`; `upsertPayload` (path vs
   repository, description omitted when blank); `displayTarget`;
   `ExtensionsRegistries.add` (trim, blank, duplicate) / `remove`;
-  `ExtensionsLaunchers.update` (saved wins, default fallback, full map
-  written, unknown launcher → prev unchanged); `ExtensionsForge.secondary`
+  `AvailableLauncher` decoding (full payload from `launchers.mjs`; missing
+  `flags` → `[]`; missing `type` → "boolean"; missing `default` → false;
+  missing `id` → throws); `ExtensionsLaunchers.resolve` (saved wins, default
+  fallback, nil saved → all defaults, extra saved keys dropped, empty schema →
+  `[:]`); `ExtensionsLaunchers.update` (full resolved map written + the toggled
+  key, other launchers untouched, unknown launcher → prev unchanged);
+  `ExtensionsLaunchers.savedFlags(from:)` (object of bools, non-object skipped,
+  non-bool entries skipped, nil config → `[:]`); `ExtensionsForge.secondary`
   (all source × valid combos, exact strings); `ExtensionsFormat.timeout`.
 - **T5 `SettingsUpdatesTests.swift` [pkg]:** `UpdateTargets.build` order (server,
   opencode, rest alphabetical; desktop never present; server `ok:false` when
@@ -1075,7 +1161,14 @@ Node: `src/server/devices.test.mjs`, `src/server/auth.test.mjs` (S1);
       and Server address shown there.
 - [ ] Every config toggle/segment (incl. worktree toggles) is disabled while
       saving and returns to the confirmed value on a failed save, with a
-      visible error.
+      visible error; Reset / Reset all / Undo are disabled while any save runs,
+      and rows are disabled while a reset/undo write runs.
+- [ ] `launchersList()`, `AvailableLauncher`, `AvailableLauncherFlag` and
+      `ExtensionsLaunchers.resolve/update/savedFlags` exist in WS10 files with
+      the pinned signatures before A2 starts; CLI launch options toggles save
+      the full resolved map.
+- [ ] Opening Settings with `initialSection: "extensions"` lands scrolled to
+      Extensions; nil/unknown sections land at the top.
 - [ ] Restore windows shows an error + Try again when the preview fails and
       never offers Restore without a successful preview.
 - [ ] A box update whose apply call ends in a proxy 5xx / connection drop
@@ -1148,7 +1241,9 @@ tests `MantaSettingsTests.swift`, `UpgradeModelsTests.swift`,
   `SettingsAppearance.swift`, `SettingsBackupModels.swift`,
   `SettingsUpdatesModels.swift`, `SettingsNotificationModels.swift`,
   `BoxPairingModels.swift`, `BoxDevicesModels.swift`, `ExtensionsModels.swift`.
-  (`UpgradeModels.swift` already listed; its new action types stay Foundation-only.)
+  (`UpgradeModels.swift` and `MantaModels.swift` — needed for `JSONValue` and
+  `UpgradeStatus.isUpgradeRefusal` — are already listed; the new action types
+  in `UpgradeModels.swift` stay Foundation-only.)
 - add to `MantaUITests` `sources`: `SettingsAppearanceTests.swift`,
   `SettingsBoxTests.swift`, `SettingsExtensionsTests.swift`,
   `SettingsUpdatesTests.swift`, `SettingsBackupTests.swift`,
@@ -1165,32 +1260,33 @@ only for the run (or let the integration agent run it); final gate
 
 ---
 
-## Mount requests (D18)
+## Mount requests (D18 / D20 / D21 — matches the master's canonical mount ledger)
 
-| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
+| ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-10-1 | `MantaAppRoot.swift` (WS04) | WS04 (wave A — owner running in the same wave); if WS04 has already merged when WS10 merges, integration agent A | `SettingsAppearance.storageKey`, `.systemValue`, `.preference(for:)` (`SettingsAppearance.swift`), `ThemePreference.colorScheme` (`SettingsAppearanceView.swift`) | Add `@AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue`; on the root `Group` (after the existing `.overlay { … UpgradeScreen … }`): `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | WS10 commit with the two files merged |
-| M-10-2 | `MantaAppRoot.swift` (WS04) | same as M-10-1 | `Notification.Name.mantaBoxRemoved` (`BoxDevicesModels.swift`) | On the root `Group`: `.onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in store.stop(); sessionStore.resetForBoxChange(); flow.isSwitching = false; flow.backToEntry(); paired = false }` | WS10 commit merged |
-| M-10-3 | `Package.swift` (WS07 per D1) | integration agent A | the [pkg] files above | Add the source/test lists in "Package manifest" | WS10 merged |
+| M-10-1 | `MantaAppRoot.swift` (WS04) | WS04, wave A2 (D20/D21) | `SettingsAppearance.storageKey`, `SettingsAppearance.systemValue`, `SettingsAppearance.preference(for:) -> ThemePreference` (`SettingsAppearance.swift`); `ThemePreference.colorScheme: ColorScheme?` (`SettingsAppearanceView.swift`) | Add `@AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue`; on the root `Group`, after the existing `.overlay { … UpgradeScreen … }`: `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | A1 committed with BOTH `SettingsAppearance.swift` and `SettingsAppearanceView.swift` |
+| M-10-2 | `MantaAppRoot.swift` (WS04) | WS04, wave A2 | `Notification.Name.mantaBoxRemoved` (`BoxDevicesModels.swift`); `MantaOnboardingFlow.backToEntry()`, `.isSwitching` (existing, `MantaOnboarding.swift`); consumer-side `SessionListStore.resetForBoxChange()` (existing, WS04) | On the root `Group`: `.onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in store.stop(); sessionStore.resetForBoxChange(); flow.isSwitching = false; flow.backToEntry(); paired = false }` | A1 committed with `BoxDevicesModels.swift` |
+| M-10-3 | `mobile/native/Package.swift` | Integration agent A, after A2 | WS10 [pkg] manifest (Files → "Package manifest") | Add the listed sources and tests | WS10 (A1) merged |
 
-Not a request (already in WS04's own plan, `04-sessions.md:909-910,1053`):
-WS04 presents `SettingsScreen(eventStore:initialSection:)` for C2
-`.settings(section:)`; WS10 provides that init (default `nil`, so WS04's
-existing call keeps compiling until it switches).
+Not a request: WS04 presenting `SettingsScreen(eventStore:initialSection:)` for
+C2 `.settings(section:)` is WS04's own C2 work in its own file
+(`04-sessions.md` §11 — WS04's own C2 work).
+WS10's side of it is the provider behaviour specified in "C2 deep link" below.
 
 ## Mounts applied by this workstream
 
-None. Cross-check of the other specs' tables for mounts into WS10-owned files:
+None — WS10 applies no mount. Mounts INTO WS10-owned files (cross-checked
+against 01–09):
 
-| Requested by | ID | Receiving file (WS10) | Applier per D18 | Note |
+| ID | Requested by | Receiving file (WS10) | Applier (D18) | Note |
 |---|---|---|---|---|
-| WS09 | M1 (`09-models-usage.md:937`) | `SettingsScreen.swift` | integration agent B (wave B, D18 bullet 1) | "Models" row above the schema sections, styled like `accountsEntry`. WS10 keeps `accountsEntry` and the section list in `sectionList` so the row has an obvious insertion point (directly after `accountsEntry`). |
+| M-09-1 | WS09 (`09-models-usage.md` M-09-1) | `SettingsScreen.swift` | Integration agent B, after wave B | Fixed "Models" row directly under `accountsEntry`, `NavigationLink { ModelsScreen() }`, search words per WS09. WS10 keeps `accountsEntry` as the first item of `sectionList` so the insertion point stays obvious. |
 
 No other spec requests a mount in `MantaSettingsStore.swift`,
 `MantaSettingsModels.swift`, `UpgradeScreen.swift`, `UpgradeStore.swift`,
 `UpgradeModels.swift`, `MantaOnboarding.swift`, `MantaPairingModels.swift` or
-the schema (grep of 01–09 on 2026-10-28; WS07 only places its notice beside the
-existing `UpgradeScreen` overlay in `MantaAppRoot`, not inside it).
+the schema (WS07's M-07-3 places its notice beside the `UpgradeScreen` overlay
+in `MantaAppRoot`, not inside a WS10 file).
 
 ---
 
@@ -1198,11 +1294,29 @@ existing `UpgradeScreen` overlay in `MantaAppRoot`, not inside it).
 
 - **C1 / D16:** see "Client members". Provided to others: `opencodeRestart()`
   (WS08), `forgeStatus(validate:)` + `ForgeConnectionStatus` (WS05).
-  Consumed: WS03 `references()`, WS04 `launchers()` + `SessionLauncherFlags.resolve`.
-- **C2 (provided to WS04):** `SettingsScreen(eventStore:initialSection:)`;
-  section ids are `SettingsSchema.sections[].id` (`general`, `box`, `accounts`,
-  `models`, `sessions`, `files`, `extensions`, `voice`). WS10 never calls
-  `MantaNavigator.open`.
+  `launchersList()` + `AvailableLauncher` + `AvailableLauncherFlag` +
+  `ExtensionsLaunchers.resolve` (WS04, D21). Consumed: WS03 `references()` /
+  `OpencodeReferenceInfo` only.
+- **C2 deep link (provided to WS04):**
+  `SettingsScreen(eventStore: MantaEventStore? = nil, initialSection: String? = nil)`.
+  Behaviour (WS10 implements; today's screen has neither the parameter nor any
+  scrolling, `SettingsScreen.swift:35-76,156-164`):
+  - `sectionList` is wrapped in `ScrollViewReader`; each `sectionView` gets
+    `.id("settings-section-\(section.id)")`.
+  - Target = `SettingsDeepLink.target(initialSection, available: SettingsSchema.sections.map(\.id))`
+    (pure, `SettingsAppearance.swift`, [pkg]): returns the id when it is one of
+    the available ids; `nil` for nil, empty or unknown ids (e.g. a desktop-only
+    `secrets`/`cto`) → the screen stays at the top.
+  - The scroll runs once, after content exists: in `.task` after
+    `await store.load()` returns (the list is rendered from the static schema,
+    so rows exist; `load()` only fills values), then
+    `proxy.scrollTo("settings-section-<id>", anchor: .top)` inside
+    `withAnimation(nil)`. A one-shot `@State didApplyInitialSection` stops it
+    re-running on later loads. Search mode is off on open, so the section list
+    is the visible content.
+  - Section ids: `general`, `box`, `accounts`, `models`, `sessions`, `files`,
+    `extensions`, `voice` (`SettingsSchema.sections[].id`). WS10 never calls
+    `MantaNavigator.open`.
 - **C6 (owner):** this spec is the only schema editor; WS04 reads
   `worktreePerSession` / `worktreeCleanOnClose` from box config at action time (F1).
 - **C7:** tests as listed; Foundation-only tests also under `verify.sh` (D19).
@@ -1280,6 +1394,18 @@ Server address, shared-pairing revoke not offered.)
 | 6 | SHOULD — backup preview failure | F7: `BackupPreviewState` with a `.failed` state ("Couldn't load the saved window layout." + Try again); Restore hidden unless a successful preview; a failed refresh discards the old preview. T6 covers initial and refresh failure. |
 | 7 | SHOULD — manual fallback on private boxes | F14 shows and copies "Server address" = this phone's normalized connected URL (`BoxPairing.manualAddress`), so a Tailscale box shows its private address. Acceptance case added. |
 | 8 | SHOULD — manual address validation | F21 defines 12 explicit rules (whitespace, scheme, userinfo, query/fragment, host charset/labels, port range, http only for private hosts, path kept) returning `.ok/.invalid(reason)`, plus an exact input → output table used verbatim by T10. |
-| X6 | Cross-cutting #6 (duplicate client members) | Same as #1. Also: `opencodeRestart()` stays WS10's and is consumed by WS08 (its revision dropped `providerRestartOpencode`); WS10 dropped its own `opencodeReferences()` and `launchersList()` and consumes WS03 `references()` and WS04 `launchers()`/`SessionLauncherFlags.resolve`. |
+| X6 | Cross-cutting #6 (duplicate client members) | Same as #1. Also: `opencodeRestart()` stays WS10's and is consumed by WS08 (its revision dropped `providerRestartOpencode`); WS10 dropped its own `opencodeReferences()` and consumes WS03 `references()`. (Round-1 text that consumed a WS04 launcher member is superseded by D21 — see round-2 #1: WS10 provides `launchersList()`.) |
 | X7 | Cross-cutting #7 (integration ownership) | WS09's mount into `SettingsScreen.swift` is listed under "Mounts applied by this workstream" as applied by integration agent B, not WS10. |
 | X10 | Cross-cutting #10 (package/pbxproj) | Removed "regenerate .pbxproj"; WS10 supplies a Package manifest (M-10-3) for the integration agent; pure files are Foundation-only so `verify.sh` runs them (D19). |
+
+---
+
+## Review responses (round2)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | BLOCKING — launcher provider absent (also cross-cutting #1) | Per D21 WS10 now owns and fully specifies launcher discovery (F12 "Provider"): `AvailableLauncherFlag {key, label, type, default}`, `AvailableLauncher {id, label, flags}` (tolerant decoding), `launchersList() async throws -> [AvailableLauncher]` (`callRequired("launchers:list")`), `ExtensionsLaunchers.resolve(schema:saved:)`, `.update(launchers:launcherID:flagKey:checked:prev:)`, `.savedFlags(from:)`. Added to Client members, Contracts (provided to WS04) and T4 tests. Every WS04-launcher prerequisite/reference removed, incl. the header's A2 prerequisite and review-response X6 (marked superseded). |
+| 2 | BLOCKING — M-10-1 vs WS04 receipt (also cross-cutting #6) | WS10 side: M-10-1 row pins `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)`, applier WS04 in A2, prerequisite = A1 commit with BOTH `SettingsAppearance.swift` and `SettingsAppearanceView.swift`; same-wave/rebase fallback wording removed. WS04's receiving row (`04-sessions.md:1323`) must be updated by WS04 to this exact call — WS04's contracts list (`:1388`) already names `preference(for:)` + `colorScheme`. |
+| 3 | SHOULD — reset/undo vs commit interleaving | §0.2 adds a shared mutation guard (`batchWriting`, `isMutating`): reset/undo are no-ops while any commit saves, commits are refused while a reset/undo write runs, and the screen disables Reset/Reset all/Undo and rows accordingly. T1 adds gated-store interleaving tests (a)–(d). Optimistic reset itself stays deferred. |
+| 4 | SHOULD — non-existent members | F18 now cites `UpgradeStatus.isUpgradeRefusal(statusCode: 503, body: body)` (`UpgradeModels.swift:381-391`); F14 uses `KeychainCredentialStore.shared.serverURL?.absoluteString` (`KeychainCredentialStore.swift:21`) and F21's prefill uses the loaded credentials' `serverUrl`. `RawRPCResponse` moved to the Foundation-only `SettingsUpdatesModels.swift` so the [pkg] classifier does not depend on `BoxRESTClient`. |
+| 5 | SHOULD — deep-link scrolling + ledger IDs | Contracts "C2 deep link" restores concrete behaviour: `ScrollViewReader`, per-section ids, pure `SettingsDeepLink.target(_:available:)` (nil/unknown → top), one-shot scroll after `load()`; T2 tests a non-first section ("extensions"). Ledger IDs reconciled with the consolidated ledger: M-10-1/M-10-2 (WS04, A2), M-10-3 = Package.swift (integration agent A); WS09's request listed as M-09-1; the Settings presentation is WS04's own C2 work, not a WS10 mount. |

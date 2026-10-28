@@ -1,6 +1,6 @@
 # WS04 — Sessions (iOS ↔ desktop parity)
 
-Status: draft · Date: 2026-10-28 · Wave: **A** · Master: `00-master.md`
+Status: draft (round 2) · Date: 2026-10-28 · Wave: **A2** (D20, after WS10/WS01/WS03 in A1) · Master: `00-master.md`
 
 Scope (from the master table): rename inside chat; per-session mode switch
 (chat / terminal / installed AI CLI); create a terminal-only or CLI session;
@@ -238,8 +238,7 @@ falls back to a plain shell (`pty.mjs:72-90`).
     inside, so the current one is checked) for the terminal header.
   - Selecting the current mode just dismisses (desktop: harmless close).
   - Not rendered for a window without an opencode session (desktop hides it).
-- **Terminal screen / socket** (D1 ownership + amendment for
-  `TerminalSocket.swift`, §18.1): `TerminalScreen` takes `mode: SessionMode`
+- **Terminal screen / socket** (D1 + D20 ownership, additive only): `TerminalScreen` takes `mode: SessionMode`
   (default `.terminal`) and `sessionID: String?`; subtitle shows the launcher
   label for `.cli`; the empty trailing slot (`TerminalScreen.swift:103-106`)
   becomes `SessionModeMenu` + the switcher button (§10) when `sessionID !=
@@ -428,8 +427,9 @@ the red error row with the server message via `SessionCreateFailure.message`):
   cwd: path, windowName: "default", chatMode: true, createDir: false))`.
 - On success: resolve the window by `windowIndex` (fallback: name, then last
   window), write the mode (§3), call `onCreated`. `SessionListView` adopts the
-  projects and pushes `SessionOpenTarget(…, mode:, seed: draft?.text,
-  carryOver: SessionDraftCarry.carryOver(draft))` (§12).
+  projects and pushes `SessionOpenTarget(…, mode:, seed: nil, draft: draft)`
+  (§12 — the draft is the ONLY carrier of its text; `seed` stays for the
+  quote-fork path).
 
 **Deliberate deviation:** the desktop pre-fills a random three-word name from a
 53 KB vendored word list (`src/shared/friendlyWords.mjs`). iOS starts the name
@@ -632,10 +632,13 @@ names; WS05 consumes it unchanged.
   @MainActor final class GitHubDeviceSignInStore: ObservableObject {
       @Published private(set) var flow: GitHubDeviceFlow
       init(api: GitHubDeviceSignInAPI = ServerGitHubDeviceSignIn(), now: @escaping () -> Date = Date.init)
-      func start()                 // forge:device-start; restart = start() again
-      func cancel()                // forge:device-cancel (result ignored), stops polling
-      func sceneBecameActive()     // foreground resume, see "Polling"
+      func start()                 // bumps `generation` BEFORE awaiting api.start(); replaces pollTask; restart = start() again
+      func cancel() async          // bump generation, cancel pollTask, then (if a grant exists) await api.cancel(grantId:);
+                                   // awaited; failure logged by the live adapter (never blocks dismissal)
+      func sceneBecameActive()     // tick(now:) then yields to the existing loop's wake channel; never polls/spawns by itself
       func copyCode() / copyLink() // UIPasteboard + transient "Copied" note
+      // private: var generation = 0 (attempt counter); var pollTask: Task<Void, Never>?;
+      //          wake: AsyncStream<Void>.Continuation? (the loop's sleep races against it)
   }
   struct GitHubDeviceSignInView: View {
       init(onConnected: @escaping () -> Void, onCancel: @escaping () -> Void)
@@ -643,7 +646,9 @@ names; WS05 consumes it unchanged.
   protocol GitHubDeviceSignInAPI: Sendable {   // seam for tests; live adapter wraps the client
       func start() async throws -> GitHubDeviceStart
       func poll(grantId: String) async throws -> GitHubDevicePoll
-      func cancel(grantId: String) async
+      func cancel(grantId: String) async      // non-throwing for callers; the live adapter
+                                              // `ServerGitHubDeviceSignIn` catches the client error
+                                              // and logs `os_log(.error, "github device cancel failed: …")`
   }
   ```
 - **Pure state machine** (`CloneFromGitHubSignInLogic.swift`), the WS05 C.3
@@ -677,16 +682,26 @@ names; WS05 consumes it unchanged.
   **Back**. `.expired` → "The sign-in code expired before it was entered." +
   **Try again** / **Skip for now**. `.error(m)` → "Couldn't sign in: m" + **Try
   again** / **Cancel**. `.connected` → `onConnected()`.
-- **Polling (one owner):** a single `Task` held by the store; it sleeps the full
-  interval before the first poll (never polls immediately), and after every
-  `await` checks `Task.isCancelled` and that the grant id is still current
-  before mutating state (a late reply from a cancelled/restarted grant is
-  dropped). `start()`/`cancel()`/view `onDisappear` cancel the task.
-  `sceneBecameActive()` (view observes `scenePhase == .active`; the user is
-  usually returning from Safari) first calls `tick(now:)`, then, if still
-  `.code`, polls at once **only if** `shouldPollNow(lastPoll:now:interval:)`,
-  otherwise reschedules for the remainder — never faster than the interval.
-  When the deadline passes the loop stops and shows `.expired` without a
+- **Polling (one owner, WS05 §C.3 lifecycle — binding):** a single `pollTask`
+  held by the store; `start()` cancels and replaces it, nothing else creates
+  one. It sleeps the full interval before the first poll (never polls
+  immediately). **Attempt counter:** `start()` increments `generation` before
+  awaiting `api.start()`; every await site (start reply, each poll reply, every
+  sleep wake) proceeds only if its captured generation still equals
+  `generation` and `!Task.isCancelled` — so a late start reply (before any grant
+  exists) and a late poll reply from a cancelled/restarted attempt are both
+  dropped and can never call `onConnected`, change `flow`, or reschedule.
+  **Cancel:** `cancel() async` bumps `generation`, cancels `pollTask`, then
+  awaits `api.cancel(grantId:)` if a grant exists. The view's Cancel / Back /
+  Skip buttons run `Task { await store.cancel(); onCancel() }` (so `onCancel`
+  follows the cancel's completion); `onDisappear` calls the same `cancel()`
+  without awaiting. **Foreground:** `sceneBecameActive()` (view observes
+  `scenePhase == .active`; the user is usually returning from Safari) calls
+  `tick(now:)` (may expire), then yields to the loop's wake channel; the loop,
+  on wake, polls at once **only if** `shouldPollNow(lastPoll:now:interval:)`,
+  otherwise sleeps the remainder — never faster than the interval. With no
+  running loop (e.g. `.expired`) the wake is a no-op and cannot spawn a second
+  loop. When the deadline passes the loop stops and shows `.expired` without a
   network call.
 
 **Clone from GitHub.**
@@ -731,7 +746,10 @@ floor), `testDisplayURL`, `testDeviceStartDecodesAllThreeShapes`,
 Store (Mac, `GitHubDeviceSignInStoreTests.swift`, fake API + fake clock):
 `testNoPollBeforeFirstInterval`, `testResumeBeforeIntervalDoesNotPoll`,
 `testResumeAfterIntervalPollsOnce`, `testResumeAfterDeadlineExpiresWithoutPoll`,
-`testLateReplyAfterCancelIsDropped`, `testRestartDiscardsOldGrantReplies`.
+`testLateReplyAfterCancelIsDropped`, `testRestartDiscardsOldGrantReplies`, and
+the five WS05 §C.3 lifecycle tests: `testDismissDuringStartIgnoresLateStartReply`,
+`testRetryDuringOutstandingPollDropsOldReply`, `testWakeDuringSleepUsesExistingLoop`,
+`testCancelAwaitsDeviceCancelBeforeOnCancel`, `testCancelFailureIsLoggedAndStillDismisses`.
 
 `CloneFromGitHubLogic.swift` → `MantaUITests/CloneFromGitHubTests.swift`
 (Linux-eligible):
@@ -976,11 +994,19 @@ Store (Mac, `SessionStoreTests.swift`, fake seam):
   keeps the previous set) and on a raw frame with `kind ==
   "usage-stopped.updated"` (same pattern as `trackDelegate`,
   `SessionListStore.swift:457-460`). Publishes `stoppedRecords:
-  [SessionStoppedRecord]`, `stoppedLastLooked`, `stoppedConversations:
+  [SessionStoppedRecord]`, `stoppedLastLooked: Double?` (epoch ms, the wire
+  `lastLooked` unchanged — WS09 compares it with `stoppedAt`),
+  `stoppedConversations:
   Set<String>`, `unarmedStoppedCount` (records with `armed != true`, port of
   `usageResume.ts:24-26`), `isStopped(sessionID:)` and `refreshStopped()`.
   This is the ONLY stopped-state source on iOS (D16); WS09's resume screen
-  reads it.
+  reads it. Wire types (in `SessionForgeModels.swift`, property names = wire
+  keys, `stoppedStore.mjs:274-290` / `types.ts:2333-2343`):
+  `SessionStoppedRecord {workspace: String, conversation: String, provider:
+  String, model: String?, window: String?, stoppedAt: Double, cachedTokens:
+  Double?, armed: Bool?, attempts: Int?}` (lenient: unknown `provider`/`window`
+  strings kept as-is) and `SessionStoppedList {records: [SessionStoppedRecord],
+  lastLooked: Double?}`.
 - Subtitle precedence (`SessionRowSubtitle.text`, `SessionModels.swift:391-411`):
   1. background jobs (unchanged) → 2. **`N subagent(s)`** → 3. running
   (progress / `running · model` / `running`) → 4. `needs you` →
@@ -998,7 +1024,10 @@ Store (Mac, `SessionStoreTests.swift`, fake seam):
   `testSubagentCountCountsPending`.
 - `testHaltedSubtitleWhenIdle`, `testAttentionOutranksHalted` (dot + subtitle),
   `testRunningOutranksHalted`, `testDotHalted`.
-- `testStoppedListDecodesAndIgnoresUnknownFields`, `testUnarmedCountIgnoresArmed`.
+- `testStoppedListDecodesAndIgnoresUnknownFields`, `testUnarmedCountIgnoresArmed`,
+  `testLastLookedDecodesAsEpochMillis` (`{"lastLooked": 1730000000000}` →
+  `1730000000000.0`; `null` → nil), `testStoppedAtComparesWithLastLooked`
+  (`stoppedAt > lastLooked` is the "new since you looked" signal; same units).
 - `SessionSubagentCount.running(_:parentRunning:)` lives in `SessionModels.swift`
   (uses `StreamSubagentPayload`, already in the package).
 - Store (Mac): `testStoppedRefetchOnUsageStoppedFrame`,
@@ -1101,15 +1130,15 @@ Consumer — `SessionListView` (`.onChange(of: navigator.pending)` + `.onAppear`
   once more; still missing → feedback toast "That session is no longer open"
   and clear `pending`. Found → `path = NavigationPath()`, append the target
   (mode from §2 resolution), `store.noteOpened`, clear `pending`.
-- `.message(sessionID, _)` (also WS02's M2): resolve the window by
+- `.message(sessionID, _)` (WS04's own C2 work): resolve the window by
   `opencodeSessionId`; if the stack top is not that chat, reset the path to its
   chat target (`mode: .chat`); if no window, push the bare target the push link
   uses (`SessionListView.swift:238-239`). **Leave `pending` set** — WS02's
   `ChatScreen` consumes it (scroll + highlight) and clears it.
 - `.settings(section)`: dismiss sheets, open the existing settings cover
   (`SessionListView.swift:157-159`) as
-  `SettingsScreen(eventStore:, initialSection: section)` (WS10's init, M-10-3
-  applied by WS04); clear `pending`.
+  `SettingsScreen(eventStore:, initialSection: section)` (WS10's init; WS04's
+  own C2 work, not a mount); clear `pending`.
 - `.review`: **not touched** — left pending for WS05's handler (wave C, applied
   by WS05 in this file).
 - `MantaPushRouter` stays as is (no behaviour change).
@@ -1171,16 +1200,18 @@ the session and queues the first prompt (`NewSessionScreen.tsx:655-760`).
     preview) and "N attachment(s)", with "Don't carry over" which drops both.
     For a non-chat "Open as" the section footer reads "Terminal sessions don't
     take a first message" and the seed is dropped on Create.
-- On create the pushed `SessionOpenTarget` carries `seed: draft.text` and a new
-  non-identity field `carryOver: HandoffCarryOver?` built by
-  `SessionDraftCarry.carryOver(draft) -> HandoffCarryOver` (each
-  `NewSessionDraftAttachment` → `ComposerAttachment(filename: displayName, mime:
-  mime ?? "application/octet-stream", remotePath: remotePath, isImage: mime has
-  prefix "image/")`, `skippedUploads: 0`) — D11: HandoffStore carry-over is
-  WS04's internal transport. The destination passes it to `ChatScreen`'s new
-  `initialCarryOver:` parameter (M-04-7), which seeds the existing
-  `ChatScreenContent(carryOver:)` path (`ChatScreen.swift:297-309`): text + chips
-  in the composer, **never auto-sent**.
+- On create the pushed `SessionOpenTarget` carries a new non-identity field
+  `draft: NewSessionDraft?` (the post-confirmation draft: "Don't carry over"
+  already applied) and **`seed: nil`**. `SessionListView`'s destination calls
+  WS03's A1 entry point `ChatScreen(sessionId:, title:, projectName:,
+  eventStore:, path:, seed: target.seed ?? "", draft: target.draft)` (WS03
+  M-03-4; WS03's `ChatScreen` forwards it to `ChatScreenContent` only while
+  `currentSessionId == nil`, and `ComposerTextController.apply(_:)` appends the
+  text once and attaches each attachment through `attach(remotePath:
+  displayName:mime:)`, reporting rejections via `actionHint`). Text and chips
+  land in the composer, **never auto-sent**. There is exactly one text carrier
+  (the draft), so the text cannot appear twice; no `HandoffCarryOver`, no new
+  ChatScreen parameter, no WS02 mount (former M-04-7 superseded).
 
 ### Tests (`SessionsTests.swift`, Linux-eligible except the last)
 `testPrefillMatchesProjectDefaultCwd`, `testPrefillLongestPrefixWins`,
@@ -1191,8 +1222,14 @@ the session and queues the first prompt (`NewSessionScreen.tsx:655-760`).
 "worktree"), **`testPrefillNilBranchUsesBoxDefault`**,
 **`testPrefillCarriesLinkedIssueURL`**, `testPrefillNilIssueHasNoHeader`.
 Plan: **`testCreatePlanPreservesDraftBranchIntoWorktreeCreate`** (the plan's
-`gitAddWorktree` name = draft branch). Mac: `testCarryOverMapsAttachments`
-(mime nil → octet-stream, image detection, remotePath kept).
+`gitAddWorktree` name = draft branch), `testCreatedTargetCarriesDraftAndNoSeed`
+(pure `SessionCreatePlan.openTarget(...)` returns `seed == nil` and the draft with
+"Don't carry over" applied). Mac end-to-end, `SessionDraftHandoffTests.swift`:
+**`testNewChatComposerHasDraftTextExactlyOnce`** — build the composer exactly as
+WS03's adopted `ChatScreenContent.init` does for `seed: ""`, no carry-over and
+the draft (`ComposerTextController(text: HandoffComposerCarry.appendBelow("", ""),
+attachments: [])` then `apply(draft)`) → `text == draft.text`, one chip per
+attachment; **`testDuplicateAttachmentInDraftRejectedOnce`** (`apply` returns 1).
 
 ### Acceptance
 - [ ] An inbox "Start a session" opens the create sheet pointed at the repo,
@@ -1213,8 +1250,8 @@ All within WS04 ownership (`Session*`, `MantaNavigation.swift`,
 - `SessionListView.swift` — group header menu, create-sheet init, mode-aware
   destinations (`SessionModePendingView`), navigator consumer, switcher sheet
   host, worktree prompt host, close feedback, empty state, rename via
-  `SessionRenameSheet`, `SessionOpenTarget` fields (`mode`, `carryOver`),
-  WS10's M3 (`initialSection`).
+  `SessionRenameSheet`, `SessionOpenTarget` fields (`mode`, `draft`),
+  `.settings` → `SettingsScreen(eventStore:initialSection:)` (own C2 work).
 - `SessionListStore.swift` — launcher catalog, stopped records (D16 owner),
   subagent/halted row status, rename/close/project APIs, close queue + prompts +
   feedback, recents, mutation seam extension.
@@ -1223,10 +1260,10 @@ All within WS04 ownership (`Session*`, `MantaNavigation.swift`,
 - `SessionCreateSheet.swift` — §3–§5, §12.
 - `FolderPickerView.swift` — B1; `title:` parameter.
 - `MantaAppRoot.swift` — `@StateObject navigator` + `.environmentObject`;
-  WS10's M1/M2.
+  WS10's M-10-1/M-10-2 (applied by WS04 in A2).
 - `MantaNavigation.swift` — fill the wave-0 scaffold (§11).
 - `TerminalScreen.swift`, `TerminalWebView.swift`, `TerminalModels.swift` (D1),
-  `TerminalSocket.swift` (amendment requested, §18.1) — additive only (§2).
+  `TerminalSocket.swift` (D20) — additive only (§2).
 
 **Create**
 - `MantaAPIClient+Sessions.swift` — see "Client members".
@@ -1285,7 +1322,7 @@ No server files. No `generated/swift/*` edits.
 | `func forgeProbe() async throws -> ForgeProbeResult` | `forge:probe` | `[]` | probe |
 | `func forgeDeviceStart() async throws -> GitHubDeviceStart` | `forge:device-start` | `[]` | 3 shapes |
 | `func forgeDevicePoll(grantId: String) async throws -> GitHubDevicePoll` | `forge:device-poll` | `[{grantId}]` | 4 shapes |
-| `func forgeDeviceCancel(grantId: String) async` | `forge:device-cancel` | `[{grantId}]` | result ignored |
+| `func forgeDeviceCancel(grantId: String) async throws` | `forge:device-cancel` | `[{grantId}]` | `{ok}`; awaited by the store; the live adapter catches + logs a failure |
 | `func forgeRepos() async throws -> GitHubRepoList` | `forge:repos` | `[]` | `{repos, stale, error?}` |
 | `func forgeCloneStart(url: String, dest: String, name: String) async throws -> CloneStartResult` | `forge:clone-start` | `[{url, dest, name}]` | `{id?, error?, message?}` |
 | `func forgeCloneStatus(id: String) async throws -> CloneJobStatus?` | `forge:clone-status` | `[{id}]` | status or `null` |
@@ -1296,39 +1333,48 @@ No server files. No `generated/swift/*` edits.
 `AvailableLauncher` + `ExtensionsLaunchers.resolve` (WS10), existing
 `configGet()` / `configUpdate(_:)` / `renameWindow` / `deleteSession` /
 `killWindow` / `listWorktrees` / `projects()` / `delegateList()` (base client).
-**Reused by others:** WS05 calls `forgeProbe()`, `forgeDevice*`,
+**Reused by others (canonical names, no aliases):** WS05 calls `forgeProbe()`
+(its inbox checkout lookup), `forgeDevice*` (only via the shared view),
 `gitAddWorktree(cwd:name:)` and must not redeclare them or the wire types
 `ForgeProbeResult` / `RepoHit` / `GitHubDevice*`; WS09 calls
 `usageStoppedList()` only through `SessionListStore` (below).
 
 ## 14. Mount requests
 
-Per D18. Provider symbols are defined in this spec (WS04, wave A), so wave-B
-appliers can write the calls.
+Per D18; IDs, appliers and symbols match the master's canonical mount ledger (`00-master.md`). Provider symbols are
+defined in this spec (WS04, wave A2) unless marked otherwise. Every new
+`ChatOverflowSheet` parameter is optional/defaulted (WS07's capture-safe rule:
+`ChatOverflowCaptureScene.swift` and un-wired callers keep compiling, and a nil
+closure hides its row).
 
 | ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-04-1 | `ChatOverflowSheet.swift` | WS07 (wave B) | — | Add `var onRename: () -> Void` and a row "Rename session" (`pencil`) in the second section, before "Fork session" (`:110`). | WS04 merged |
-| M-04-2 | `ChatOverflowSheet.swift` | WS07 (wave B) | `SessionModeRows`, `SessionMode`, `SessionLauncherCatalog`, `AvailableLauncher` (WS10) | Add params `mode: SessionMode?` (nil = window has no chat session → no Mode rows), `launchers: [AvailableLauncher]`, `launcherCatalog: SessionLauncherCatalog`, `onSelectMode: (SessionMode) -> Void`, `onRetryLaunchers: () -> Void`; replace the "Open terminal" row (`:111`) with `SessionModeRows(current: mode, launchers:, catalog:, onSelect: { dismiss(); onSelectMode($0) }, onRetry: onRetryLaunchers)` when `mode != nil`. | WS04 + WS10 merged |
-| M-04-3 | `ChatScreen.swift` | WS02 (wave B) | `SessionListStore.window(forSessionID:)` | `.navigationTitle(sessionStore.window(forSessionID: store.sessionId)?.window.name ?? title)` (`:342`). | WS04 merged |
-| M-04-4 | `ChatScreen.swift` | WS02 (wave B) | `SessionRenameSheet`, `SessionListStore.renameSession(project:index:newName:) -> String?` | Pass `onRename:` to `ChatOverflowSheet` → dismiss overflow, then present `SessionRenameSheet(title: "Rename session", initialName: <live name>, onSave: { await sessionStore.renameSession(project: projectName, index: w.index, newName: $0) })`; when the window is unresolved show `actionHint = "Can't rename — session's window not found."`. | M-04-1 |
-| M-04-5 | `ChatScreen.swift` | WS02 (wave B) | `MantaNavigator.switchMode`, `MantaNavigator.windowKey`, `SessionModeStore.read`, `SessionListStore.launchers/launcherCatalog/refreshLaunchers()` | Pass to the overflow: `mode: sessionWindow == nil ? nil : SessionModeStore.read(sessionID: store.sessionId)`, `launchers: sessionStore.launchers`, `launcherCatalog: sessionStore.launcherCatalog`, `onSelectMode: { m in guard m != .chat, let w = sessionWindow else { return }; navigator.switchMode(windowKey: MantaNavigator.windowKey(project: projectName, windowIndex: w.index), sessionID: store.sessionId, to: m) }`, `onRetryLaunchers: { Task { await sessionStore.refreshLaunchers() } }`. Add `@EnvironmentObject var navigator: MantaNavigator`. | M-04-2 |
-| M-04-6 | `ChatScreen.swift` | WS02 (wave B) | `MantaNavigator.presentSwitcher()` | Toolbar `ToolbarItem(placement: .topBarTrailing)` before the overflow button (`:346`): `Button { navigator.presentSwitcher() } label: { Image(systemName: "rectangle.stack") }.accessibilityLabel("Switch session")`. | WS04 merged |
-| M-04-7 | `ChatScreen.swift` | WS02 (wave B) | `HandoffCarryOver` (existing), `SessionOpenTarget.carryOver` | `ChatScreen` gains `var initialCarryOver: HandoffCarryOver? = nil`; `init` sets `_carryOver = State(initialValue: initialCarryOver)` (`:135`). `SessionListView`'s destination (WS04) passes `target.carryOver`. Default nil keeps every other call site compiling. | WS03's D13 adoption merged (carryOver still seeds the adopted controller) |
+| M-04-1 | `ChatOverflowSheet.swift` | WS07 (wave B) | — | Add `var onRename: (() -> Void)? = nil`; row "Rename session" (`pencil`) in the second section, before "Compact session", via the existing `row(...)` helper; shown only when `onRename != nil` and not `isReadOnlyJob`. | none |
+| M-04-2 | `ChatOverflowSheet.swift` | WS07 (wave B) | `SessionModeRows(current:launchers:catalog:onSelect:onRetry:)`, `SessionMode`, `SessionLauncherCatalog` (WS04); `AvailableLauncher` (WS10, D21) | Add `var mode: SessionMode? = nil`, `var launchers: [AvailableLauncher] = []`, `var launcherCatalog: SessionLauncherCatalog = .loading`, `var onSelectMode: ((SessionMode) -> Void)? = nil`, `var onRetryLaunchers: (() -> Void)? = nil`. When `!isReadOnlyJob` (M-02-2) and `let mode, let onSelectMode` are both non-nil: replace the "Open terminal" row (`:111`) with `SessionModeRows(current: mode, launchers: launchers, catalog: launcherCatalog, onSelect: { m in dismiss(); onSelectMode(m) }, onRetry: { onRetryLaunchers?() })`. Otherwise keep the existing "Open terminal" row (non-read-only only). | WS04 (A2) + WS10 (A1) merged |
+| M-04-3 | `ChatScreen.swift` | WS02 (wave B) | `SessionListStore.window(forSessionID:) -> (project: String, window: MantaWindow)?` | `.navigationTitle(sessionStore.window(forSessionID: store.sessionId)?.window.name ?? title)` (`:342`). | WS04 merged |
+| M-04-4 | `ChatScreen.swift` | WS02 (wave B) | `SessionRenameSheet(title:initialName:onSave:)`, `SessionListStore.renameSession(project:index:newName:) async -> String?` | Pass `onRename:` to `ChatOverflowSheet`: dismiss the overflow, then present `SessionRenameSheet(title: "Rename session", initialName: <live window name>, onSave: { await sessionStore.renameSession(project: projectName, index: w.index, newName: $0) })`; window unresolved → `store.actionHint = "Can't rename — session's window not found."`. | M-04-1 |
+| M-04-5 | `ChatScreen.swift` | WS02 (wave B) | `MantaNavigator.switchMode(windowKey:sessionID:to:)`, `MantaNavigator.windowKey(project:windowIndex:)`, `SessionModeStore.read(sessionID:)`, `SessionListStore.launchers` (`[AvailableLauncher]`), `.launcherCatalog`, `.refreshLaunchers()` | Pass to `ChatOverflowSheet`: `mode: sessionWindow == nil ? nil : SessionModeStore.read(sessionID: store.sessionId)`, `launchers: sessionStore.launchers`, `launcherCatalog: sessionStore.launcherCatalog`, `onSelectMode: { m in guard m != .chat, let w = sessionWindow else { return }; navigator.switchMode(windowKey: MantaNavigator.windowKey(project: projectName, windowIndex: w.index), sessionID: store.sessionId, to: m) }`, `onRetryLaunchers: { Task { await sessionStore.refreshLaunchers() } }`. Add `@EnvironmentObject private var navigator: MantaNavigator`. | M-04-2 |
+| M-04-6 | `ChatScreen.swift` | WS02 (wave B) | `MantaNavigator.presentSwitcher()` | `ToolbarItem(placement: .topBarTrailing)` before the overflow button (`:346`): `Button { navigator.presentSwitcher() } label: { Image(systemName: "rectangle.stack") }.accessibilityLabel("Switch session")`. | WS04 merged |
+| ~~M-04-7~~ | — | — | — | **Superseded (round 2).** The draft reaches the chat through WS03's A1 `ChatScreen(draft:)` (M-03-4), called by WS04's own destination. WS02 must drop its old `seedAttachments` / `initialCarryOver` receipt. | — |
+| M-04-8 | `mobile/native/Package.swift` | Integration agent A (after A2) | WS04 manifest (§13 "Package manifest") | Add the listed sources and test files. | WS04 files exist; `verify.sh` green on a local copy |
 
 ## 15. Mounts applied by this workstream
 
-| ID (requester) | Receiving file | Applier | Change | Prerequisite |
+| ID (requester) | Receiving file | Applier | Exact change | Prerequisite |
 |---|---|---|---|---|
-| M1 (WS10) | `MantaAppRoot.swift` | WS04 (wave A — owner running in that wave) | `@AppStorage(SettingsAppearance.storageKey)` + `.preferredColorScheme(SettingsAppearance.colorScheme(for:))` on the root `Group`. | WS10's `SettingsAppearance` (same wave; WS04 rebases onto it before its last commit) |
-| M2 (WS10) | `MantaAppRoot.swift` | WS04 (wave A) | `.onReceive(… .mantaBoxRemoved)` → stop store, `sessionStore.resetForBoxChange()`, `flow.isSwitching = false`, `flow.backToEntry()`, `paired = false`. `resetForBoxChange` also clears WS04's new state (launcher catalog, stopped records, close queue/prompts, recents are device-local and kept). | WS10's `.mantaBoxRemoved`, `flow.backToEntry()` |
-| M3 (WS10) | `SessionListView.swift` | WS04 (wave A) | `.settings(section)` → `SettingsScreen(eventStore:, initialSection:)` (§11). | WS10's init param |
-| M2 (WS02) | `SessionListView.swift` | WS04 (wave A) | `.message` handling in the navigator consumer + `MantaNavigator.windowKey` (§11) — built here, nothing for WS02 to apply. | — |
-| Search entry (WS06 M2) | `SessionListView.swift` | integration agent B (D18) | `SheetRoute.conversationSearch(seed:)` + list/no-match rows, per `06-search.md`. | WS04 merged |
-| Stopped pill (WS09 M2) | `SessionListView.swift` | integration agent B | Toolbar capsule when `store.unarmedStoppedCount > 0` opening WS09's resume sheet; **must read `SessionListStore` (D16), not a second store**. | WS04 merged |
-| Usage overlay/sheet (WS09 M3) | `MantaAppRoot.swift` | integration agent B | Per `09-models-usage.md`, minus any stopped-store binding (D16). | WS04 merged |
-| Agent-file notice (WS07) | `MantaAppRoot.swift` | integration agent B | `.overlay(alignment: .bottom) { ArtifactAgentFileNotice() }` under the upgrade overlay. | WS04 merged |
-| Inbox button + `.review` handler (WS05 M2/M3) | `SessionListView.swift` | WS05 (wave C) | Inbox toolbar sheet whose "Start a session" calls `navigator.startNewSession(draft)` (D12); `.review` case in the navigator consumer. | WS04 merged |
+| M-10-1 (WS10) | `MantaAppRoot.swift` | WS04 (A2, D21) | Add `@AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue`; on the root `Group` (after the existing `.overlay { … UpgradeScreen … }`): `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)`. | WS10 A1 commit with `SettingsAppearance.swift` and `SettingsAppearanceView.swift` |
+| M-10-2 (WS10) | `MantaAppRoot.swift` | WS04 (A2) | On the root `Group`: `.onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in store.stop(); sessionStore.resetForBoxChange(); flow.isSwitching = false; flow.backToEntry(); paired = false }`. `resetForBoxChange` also clears WS04's new box state (launcher catalog → `.loading`, stopped records/lastLooked, close queue/prompts/feedback); device-local recents and saved modes are kept. | WS10 A1 commit (`BoxDevicesModels.swift`, `flow.backToEntry()`) |
+| M-06-2 (WS06) | `SessionListView.swift` | Integration agent B | Per `06-search.md` M-06-2 (`SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive`, `SearchCopy.normalized`). WS04 keeps `SheetRoute` an enum with one `.sheet` so a new case slots in. | WS04 + WS06 merged |
+| M-09-2 (WS09) | `SessionListView.swift` | Integration agent B | Per `09-models-usage.md` M-09-2: a `ToolbarItem(placement: .topBarTrailing)` before `orderMenu`, rendered only when `store.unarmedStoppedCount > 0`: `UsageStoppedCapsule(count: store.unarmedStoppedCount) { UsageAlertsStore.shared.presentResume() }` (reads WS04's count only, D16). | WS04 + WS09 merged; after M-06-2 on the same file |
+| M-09-3 (WS09) | `MantaAppRoot.swift` | Integration agent B | Per `09-models-usage.md` M-09-3 (`UsageAlertsStore.shared.bind(eventStore:)`, `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions: sessionStore, usage:)`). | WS04 + WS09 merged |
+| M-09-4 (WS09) | `MantaAppRoot.swift` | Integration agent B | (a) In `commitPairing`'s `if flow.isSwitching { … }` after `sessionStore.resetForBoxChange()`, and (b) in the M-10-2 `.onReceive(… .mantaBoxRemoved)` closure after `sessionStore.resetForBoxChange()`: `UsageAlertsStore.shared.resetForBoxChange(); ChatModelCatalog.shared.resetForBoxChange()`. | as M-09-3; M-10-2 applied (A2) |
+| M-07-3 (WS07) | `MantaAppRoot.swift` | Integration agent B | `.overlay(alignment: .bottom) { if scene == nil { ArtifactAgentFileNotice() } }` on the paired branch, beneath the `UpgradeScreen` overlay. | WS07 merged |
+| M-05-2 (WS05) | `SessionListView.swift` | WS05 (wave C) | `SheetRoute.inbox` + "Inbox" toolbar button + `InboxWorkScreen(onClose:)`; Start a session → `sheetRoute = nil` then `navigator.startNewSession(draft)` (D12), consumed by WS04's `pendingDraft` handler. | WS04 merged |
+| M-05-3 (WS05) | `SessionListView.swift` | WS05 (wave C) | `case .review(let sid)` in WS04's `navigator.pending` consumer → `SheetRoute.review(sessionID:)` → `ReviewScreen.forSession(sid)`; WS04 leaves `.review` pending until then. | WS04 merged |
+
+Not received mounts (WS04's own C2 work, relabelled per the ledger):
+`.settings(section)` → `SettingsScreen(eventStore:initialSection:)` (WS10 provides
+the init, not a request) and `.message` push-to-chat (WS02 withdrew its request).
 
 ## 16. Contracts provided / consumed
 
@@ -1339,20 +1385,25 @@ appliers can write the calls.
   left pending for WS05; additive `presentSwitcher()`, `switchMode(...)`,
   `windowKey(project:windowIndex:)`.
 - **D2/D11/D12 (consumed):** `NewSessionDraft` + `startNewSession(_:)`; prefill
-  of all five fields (§12); HandoffCarryOver transport internal.
+  of all five fields (§12); hand-off to the chat through WS03's
+  `ChatScreen(draft:)` (M-03-4).
 - **D5/D14 (provided to WS05):** `GitHubDeviceSignInView`,
   `GitHubDeviceSignInStore`, `GitHubDeviceFlow`, `GitHubDevice*` wire types and
   `forgeDevice*` members — WS05 creates no device flow of its own.
 - **D16 (provided to WS09):** `SessionListStore` is the only stopped-state
-  source: `stoppedRecords: [SessionStoppedRecord]`, `stoppedLastLooked: Date?`,
+  source: `stoppedRecords: [SessionStoppedRecord]`, `stoppedLastLooked: Double?`
+  (epoch milliseconds, exactly the wire `lastLooked`; convert to `Date` only for
+  display),
   `stoppedConversations: Set<String>`, `unarmedStoppedCount: Int`,
   `isStopped(sessionID:) -> Bool`, `refreshStopped() async` (also triggered by
   `usage-stopped.updated` frames). WS09's arm/disarm/stamp/mark-ran actions call
   `refreshStopped()` after a successful write (or rely on the bus frame).
 - **Provided to WS06:** `SessionListStore.window(forSessionID:)`.
-- **Consumed from WS10:** `launchersList()`, `AvailableLauncher`,
-  `ExtensionsLaunchers.resolve`, `SettingsScreen(initialSection:)`,
-  `SettingsAppearance`, `.mantaBoxRemoved`; config keys `worktreePerSession` /
+- **Consumed from WS10 (D21):** `launchersList() -> [AvailableLauncher]`,
+  `AvailableLauncher {id, label, flags}`, `ExtensionsLaunchers.resolve(schema:
+  saved:)` (as pinned in WS10 F12), `SettingsScreen(eventStore:initialSection:)`,
+  `SettingsAppearance.preference(for:)` + `ThemePreference.colorScheme`,
+  `Notification.Name.mantaBoxRemoved`; config keys `worktreePerSession` /
   `worktreeCleanOnClose` read fresh at the moment of action.
 - C4–C7: no frames added (uses existing `subagent`, `status`,
   `usage-stopped.updated`); no schema edits; tests per C7.
@@ -1375,10 +1426,7 @@ appliers can write the calls.
 
 ## 18. Open questions
 
-1. **`TerminalSocket.swift` ownership.** D1 gave WS04 the other three terminal
-   files but not the socket, which owns the `/pty` URL and reconnects
-   (`TerminalSocket.swift:122-131`). *Default:* WS04 owns it under the same
-   "additive only" rule; no other workstream touches it.
+None. (Round 1's `TerminalSocket.swift` ownership question is settled by D20.)
 
 ## Review responses (round 1)
 
@@ -1420,3 +1468,49 @@ appliers can write the calls.
    reads it; WS09's pill/overlay mounts must not bind a second store.
 10. Package/pbxproj schedule → §13 "Package manifest" for integration agent A;
     workers never edit pbxproj.
+
+## Review responses (round2)
+
+**`reviews/round2/04-sessions.md`**
+1. BLOCKING draft text twice → §4/§12: one carrier. The created target has
+   `seed: nil` and `draft:`; the destination uses WS03's A1 `ChatScreen(draft:)`
+   (`apply` appends once, attaches once). `HandoffCarryOver` path and M-04-7
+   removed. End-to-end composer test `testNewChatComposerHasDraftTextExactlyOnce`.
+2. BLOCKING receiving ledgers use obsolete signatures → §14 M-04-1/M-04-2 now
+   match WS07's capture-safe optional/defaulted form, with `AvailableLauncher`,
+   `SessionLauncherCatalog`, `onRetryLaunchers` and an unwrapped optional mode;
+   M-04-7 marked superseded so WS02 drops `seedAttachments`/`initialCarryOver`.
+   (The receiver tables themselves are in WS07/WS02's files; this spec states the
+   exact text they must copy.)
+3. BLOCKING probe name → canonical `forgeProbe()` / `forgeDevice*` kept (WS04
+   owns, §13); "Reused by others" now states WS05 must rename its `repoProbe()`
+   call. No alias added.
+4. BLOCKING theme mount → §15 M-10-1 copied verbatim from WS10:
+   `SettingsAppearance.preference(for: themePref).colorScheme`, both provider
+   files as prerequisites; canonical IDs used; the old "M3 settings init" is
+   relabelled as WS04's own C2 work (not M-10-3).
+5. SHOULD stopped timestamp type → `stoppedLastLooked: Double?` epoch ms (wire
+   value unchanged), record fields pinned to wire keys; tests for decoding and
+   the stoppedAt/lastLooked comparison (§9, §16).
+6. SHOULD D21 / stale open question → §16 consumes WS10's `launchersList()`,
+   `AvailableLauncher`, `ExtensionsLaunchers.resolve(schema:saved:)`; WS04
+   declares none of them. §18.1 removed (D20).
+
+**`reviews/round2/00-cross-cutting.md`** (WS04 rows)
+- Finding 1 → M-04-2/M-04-5 exact parameters (above); no WS04 launcher provider.
+- Finding 3 → M-03-4 `draft:` path adopted; M-04-7 superseded.
+- Finding 6 → M-10-1 corrected.
+- Finding 9 → canonical `forgeProbe()`; WS05 to rename.
+- Finding 10 / ledger → §14/§15 use ledger IDs (M-04-1…6, M-04-8 for the
+  package manifest, M-05-2/3, M-06-2, M-07-3, M-09-2/3/4, M-10-1/2); non-mount
+  C2 work relabelled.
+
+**Reconciliation after round 2 (master ledger)**
+- `GitHubDeviceSignInStore` now specifies WS05 §C.3's lifecycle in WS04's own
+  API (§6): `cancel() async`, the `generation` attempt counter bumped before
+  `api.start()`, the wake channel for `sceneBecameActive()`, failure logging in
+  the live adapter, and the five WS05 lifecycle tests; `forgeDeviceCancel` is
+  `async throws` (awaited, failure logged).
+- M-04-2 gates the mode rows on `!isReadOnlyJob` (matches WS07/M-02-2).
+- §15 M-09-2/M-09-4 receipts copied from WS09's requests; stale "M1/M2/M3"
+  labels replaced by canonical IDs or relabelled as own C2 work.

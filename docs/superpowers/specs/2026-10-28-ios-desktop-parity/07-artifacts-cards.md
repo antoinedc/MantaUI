@@ -290,11 +290,18 @@ Resolver `ArtifactBytes.load(_ source:, api:, remote:) async -> Result<Data, Art
   WS03's `.environment(\.composerController, …)` sits relative to the `.sheet`
   modifier).
 - Context menu **Attach to message** (`paperclip`) on `.file`/`.image` rows
-  only, rendered only when `composer != nil && projectName != nil`
-  (`ArtifactActions.canAttach(kind:hasComposer:hasProject:)`), so read-only
-  surfaces never show a dead control (WS03 rule).
+  only, rendered only when `composer != nil && composer.acceptsInput &&
+  projectName != nil` (`ArtifactActions.canAttach(kind:hasComposer:acceptsInput:hasProject:)`).
+  M-07-1 always passes the chat's controller, and WS03 keeps that controller on
+  a read-only background-job chat with `acceptsInput == false` (set by WS02,
+  M-03-7; `03-composer.md` `ComposerTextController.acceptsInput`) — so presence
+  alone is not enough. The menu item lives in a small subview
+  `ArtifactAttachMenuItem` that holds `@ObservedObject var composer`, so the
+  item appears/disappears live when `acceptsInput` flips while the card is open.
 - Flow (row spinner while running; same `staging` set; a second tap on a row
   that is already working is ignored):
+  0. Gate check: if `!composer.acceptsInput` → banner **"This chat is
+     read-only."**, stop (no download, no upload).
   1. Bytes: reuse `stagedFiles[id]` if present, else `ArtifactBytes.load`
      (three branches above).
   2. Upload a fresh copy: `api.upload(project: projectName, filename:
@@ -302,10 +309,19 @@ Resolver `ArtifactBytes.load(_ source:, api:, remote:) async -> Result<Data, Art
      on desktop) because the original may be an old upload or an outbox file
      the box sweeps before the message is sent, or a remote URL the box cannot
      read at all.
+  2b. Gate re-check after the upload (the chat may have become read-only while
+     the bytes were in flight): `!composer.acceptsInput` → banner **"This chat
+     is read-only."**, stop. (The uploaded copy is left in `~/.manta-uploads`,
+     which the box's hourly upload sweep removes.)
   3. `let ok = composer.attach(remotePath:, displayName: artifact.label, mime: artifact.mime)`.
-     `ok == true` → `onClose()`; the ready chip in the composer is the visible
-     success. `ok == false` → banner **"<name> couldn't be added to the message."**
-     (C3 rule: a rejection is always surfaced.)
+     `ok == true` → `onClose()` — the card closes ONLY after a successful
+     attach; the ready chip in the composer is the visible success. `ok ==
+     false` → the card stays open and shows `ArtifactAttach.rejectionMessage(
+     composer.lastAttachRejection, name:)` using WS03's copy:
+     `.duplicate` → **"Already attached"**, `.readOnly` → **"This chat is
+     read-only."**, `.notAbsolute`/nil → **"Couldn't attach <name>."** (C3 rule:
+     a rejection is always surfaced.) The card is the ONLY place that reports
+     attach outcomes; ChatScreen adds no hint (M-07-1).
 - Failures → the inline error banner, card stays open:
   - staging error → **"Couldn't attach <name> — " + the F1 staging reason**
     (e.g. "it may no longer be on the box." / "couldn't download it from <host>.")
@@ -413,7 +429,7 @@ type (D19) and the UIKit part stays thin.
       case idle
       case downloading(Op, opID: UInt64)
       case presenting(Op, opID: UInt64, fileURL: URL)   // exporter / share sheet is up
-      case saved(opID: UInt64)                          // 2 s confirmation
+      case saved(opID: UInt64, fileURL: URL)            // 2 s confirmation; file kept until close
       case failed(String)
     }
   }
@@ -422,12 +438,19 @@ type (D19) and the UIKit part stays thin.
     private(set) var queued: [AgentFileEvent]           // arrivals while `current` is busy
     mutating func receive(_ e: AgentFileEvent)
     mutating func begin(_ op: Op) -> (token: UInt64, opID: UInt64)?      // nil = refused
-    mutating func downloadFinished(token:, opID:, result: Result<URL, AgentFileFailure>) -> Effect
-    mutating func presentationFinished(token:, opID:, completed: Bool) -> Effect
-    mutating func savedTimerFired(token:, opID:)
-    mutating func dismiss() -> Effect
+    mutating func downloadFinished(token: UInt64, opID: UInt64, result: Result<URL, AgentFileFailure>) -> AgentFileEffect
+    // `fileURL` is the URL the caller presented — captured by the picker /
+    // share-sheet delegate at presentation time — so a stale callback can
+    // still clean up its own file without the machine remembering it.
+    mutating func presentationFinished(token: UInt64, opID: UInt64, fileURL: URL, completed: Bool) -> AgentFileEffect
+    mutating func savedTimerFired(token: UInt64, opID: UInt64) -> AgentFileEffect
+    mutating func dismiss() -> AgentFileEffect
   }
-  enum Effect: Equatable { case none, deleteTemp(URL), scheduleSavedTimer(token: UInt64, opID: UInt64) }
+  enum AgentFileEffect: Equatable, Sendable {
+    case none
+    case deleteTemp(URL)
+    case scheduleSavedTimer(token: UInt64, opID: UInt64)
+  }
   ```
 
   Rules (all pinned by tests):
@@ -440,22 +463,40 @@ type (D19) and the UIKit part stays thin.
   - **Re-entrancy.** `begin` is refused (returns nil, no state change) unless
     `current` is `.idle` or `.failed`. The UI disables both buttons for every
     other phase, so a double tap or Save-then-Share cannot start two downloads.
+  - **Temp-file ownership (single rule).** A staged file belongs to exactly
+    one place at a time: the download result (until handed to the machine),
+    then the phase (`.presenting` / `.saved` carry `fileURL`), then an effect.
+    Every path that drops a file from the phase returns `.deleteTemp(thatURL)`;
+    the store executes it (`try? FileManager.default.removeItem` on the
+    file's `<UUID>` directory — failure is logged with `os_log`, never
+    swallowed silently). No other code deletes these files.
   - **Download finished.** Token/opID mismatch (the notice was dismissed or
-    replaced) → `.deleteTemp(url)` on success, nothing else. Match + failure →
-    `.failed(copy)`. Match + success → `.presenting(op, opID, url)`.
+    replaced) → success: `.deleteTemp(url)`; failure: `.none`. Match +
+    failure → `.failed(copy)`, `.none`. Match + success →
+    `.presenting(op, opID, url)`, `.none` (the store presents `url`).
   - **Presentation finished** (exporter picked / cancelled, share completed /
-    cancelled). Mismatch → `.deleteTemp`. Match: save + completed → `.saved`
-    and `.scheduleSavedTimer`; share + completed → notice closes (promote);
-    cancelled → `.idle` (notice stays, retry possible). Temp file deleted in
-    every match case except `.saved` (deleted when the notice closes).
-  - **Saved timer.** Fires 2 s later; closes the notice ONLY if `current`
-    still has that token and is `.saved(opID)` with the same opID — a later
-    notice is never closed by an older timer.
-  - **Dismiss** (× or timer close). Clears `current` and promotes the first
-    `queued` event (fresh token, `.idle`); returns `.deleteTemp` for any
-    staged file. Dismiss during `.downloading` is allowed: the late completion
-    then mismatches and only deletes its temp file. Dismiss is disabled while
-    `.presenting` (the picker / share sheet is on top anyway).
+    cancelled), called with the `fileURL` the delegate captured. "Match"
+    means `current.token == token` AND `current.phase` is `.presenting` with
+    the same `opID`; anything else is a mismatch:
+    - mismatch → `.deleteTemp(fileURL)` (stale callback cleans its own file);
+    - match, save, completed → `.saved(opID, fileURL)` +
+      `.scheduleSavedTimer(token, opID)` (file kept; the system already made
+      its copy, it is deleted when the notice closes);
+    - match, share, completed → notice closes, queued promoted,
+      `.deleteTemp(fileURL)`;
+    - match, cancelled (either op) → `.idle`, `.deleteTemp(fileURL)` (a retry
+      downloads again — no stale bytes reused).
+  - **Saved timer.** Fires 2 s later. If `current` has that token and is
+    `.saved(opID, url)` with the same opID → notice closes, queued promoted,
+    `.deleteTemp(url)`. Otherwise `.none` (a later notice is never closed by
+    an older timer; the old file was already deleted by whatever closed it).
+  - **Dismiss** (×). Allowed in `.idle`, `.failed`, `.downloading`, `.saved`;
+    refused (`.none`, no change) in `.presenting` — the picker / share sheet is
+    on top, and its delegate completion owns the file. Clears `current`,
+    promotes the first `queued` event (fresh token, `.idle`), and returns
+    `.deleteTemp(url)` when the dismissed phase was `.saved(_, url)`, else
+    `.none`. Dismiss during `.downloading` leaves the file to the late
+    completion, which mismatches and returns `.deleteTemp`.
   - **Promotion.** Whenever `current` closes, the oldest queued event becomes
     current; the queue is capped at 5 (oldest dropped — every file is still
     listed in the Artifacts card).
@@ -472,8 +513,11 @@ sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(fo
   writes `tempRoot/manta-agentfile/<UUID>/<name>` (real filename for Files /
   share sheet); hands the result to `machine.downloadFinished(token:opID:…)`
   and executes the returned `Effect`.
-- `presentationFinished(token:opID:completed:)`, `dismiss()` — forward to the
-  machine, execute effects (`.scheduleSavedTimer` → `Task { await sleep(.seconds(2)); savedTimerFired(...) }`).
+- `presentationFinished(token:opID:fileURL:completed:)`, `dismiss()` — forward
+  to the machine and execute the returned `AgentFileEffect`
+  (`.scheduleSavedTimer` → `Task { await sleep(.seconds(2)); execute(machine.savedTimerFired(token:opID:)) }`;
+  `.deleteTemp` → remove the file's directory). On `deinit`-free teardown
+  nothing is needed: the temp root is the app's `tmp/`, which iOS purges.
 - Haptic on save success: `SessionHaptics.fire(.success, enabled: hapticsEnabled)`
   (existing helper, `SessionListView.swift:1009-1023`) where `hapticsEnabled`
   is read from the `SessionListStore` passed in by the view
@@ -497,10 +541,11 @@ sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(fo
   the root overlay — a second SwiftUI presentation on `MantaAppRoot` would
   collide with the session list's own `.sheet` / `.fullScreenCover`
   (`SessionListView.swift:146-158`). `UIDocumentPickerViewController(forExporting:
-  [url], asCopy: true)` delegate → `presentationFinished(completed: !urls.isEmpty)`
+  [url], asCopy: true)` delegate → `presentationFinished(…, completed: !urls.isEmpty)`
   / `documentPickerWasCancelled` → `completed: false`;
   `UIActivityViewController.completionWithItemsHandler` → `completed`. Each
-  completion passes the `(token, opID)` captured when it was presented.
+  delegate object is created per presentation and stores the `(token, opID,
+  fileURL)` it was presented with; its completion passes all three.
 - No auto-dismiss while idle (desktop parity: the toast has actions).
 - `accessibilityIdentifier("agent-file-notice")`; VoiceOver announcement on
   arrival (`AccessibilityNotification.Announcement("AI sent you a file: <name>")`).
@@ -665,8 +710,13 @@ tests via `ArtifactOutboxRow(OutboxFile)`):
   non-hosted nil → nil).
 - `ArtifactSearch.filter` (label match, href match, case-insensitive,
   whitespace-only query = all); `ArtifactSearch.counts`; `ArtifactEmptyCopy.sub`.
-- `ArtifactActions.canAttach(kind:hasComposer:hasProject:)` (file/image only,
-  false without composer or project), `canJump`, `canOpenPlanFile`.
+- `ArtifactActions.canAttach(kind:hasComposer:acceptsInput:hasProject:)`
+  (file/image only; false without composer, with `acceptsInput == false`, or
+  without project), `canJump`, `canOpenPlanFile`.
+- `ArtifactAttach.rejectionMessage(_:name:)` — `.duplicate` → "Already
+  attached", `.readOnly` → "This chat is read-only.", `.notAbsolute` / nil →
+  "Couldn't attach <name>." (takes WS03's pure `ComposerInsertion.AttachRejection`,
+  which lives in WS03's Foundation-only `ComposerInsertion` file — package-safe).
 - `ArtifactPlanLink.pageURL` (artifact URL wins, fallback deterministic, nil
   when neither); `ArtifactAttach.filename`;
   `ArtifactStaging.fileExtension(label:href:)` (plan title + `.md` href → `.md`).
@@ -691,12 +741,25 @@ tests via `ArtifactOutboxRow(OutboxFile)`):
   1. *A starts, B arrives, A finishes:* receive(A); begin(.save) → (tA, op1);
      receive(B) → B queued, current still A `.downloading`;
      downloadFinished(tA, op1, .success(u)) → A `.presenting`; B still queued.
-  2. *Old picker completion after replacement:* A `.presenting` (tA, op1);
-     dismiss() is refused while presenting → state unchanged; then
-     presentationFinished(tA, op1, completed: true) → A `.saved`,
-     effect `.scheduleSavedTimer(tA, op1)`.
-  3. *Old success timer:* A `.saved`; dismiss() → B promoted with token tB;
-     savedTimerFired(tA, op1) → B untouched (still `.idle`, still current).
+  2. *Old picker completion after replacement:* A `.presenting` (tA, op1, u);
+     dismiss() is refused while presenting → state unchanged, effect `.none`;
+     then presentationFinished(tA, op1, fileURL: u, completed: true) → A
+     `.saved(op1, u)`, effect `.scheduleSavedTimer(tA, op1)` (file kept).
+  3. *Old success timer:* A `.saved(op1, u)`; dismiss() → effect
+     `.deleteTemp(u)`, B promoted with token tB; savedTimerFired(tA, op1) →
+     `.none`, B untouched (still `.idle`, still current).
+  3b. *Saved then timer closes:* A `.saved(op1, u)`; savedTimerFired(tA, op1)
+     → `.deleteTemp(u)`, current = next queued (or nil).
+  3c. *Share completed:* A `.presenting(.share, op1, u)`;
+     presentationFinished(tA, op1, fileURL: u, completed: true) →
+     `.deleteTemp(u)`, notice closed.
+  3d. *Stale presentation callback:* a presenting notice can only go stale
+     through a duplicate delegate callback (UIKit may call the activity
+     completion more than once) — A `.presenting(.share, op1, u)`;
+     presentationFinished(tA, op1, u, completed: false) → `.idle`,
+     `.deleteTemp(u)`; the same call again → `.deleteTemp(u)` (idempotent
+     removal), state unchanged; and with a foreign `(token, opID)` while B is
+     current → `.deleteTemp(<its own fileURL>)`, B unchanged.
   4. *Dismiss during download:* receive(A); begin(.share) → (tA, op1);
      dismiss() → current nil; downloadFinished(tA, op1, .success(u)) →
      effect `.deleteTemp(u)`, state unchanged.
@@ -706,8 +769,8 @@ tests via `ArtifactOutboxRow(OutboxFile)`):
      begin(.save) allowed again with a new opID.
   7. *Idle replacement:* receive(A) (idle); receive(B) → B current, A dropped,
      token increases. Duplicate `remotePath` ignored. Queue cap 5.
-  8. *Cancelled exporter:* presentationFinished(completed: false) → `.idle`,
-     effect `.deleteTemp`.
+  8. *Cancelled exporter:* presentationFinished(tA, op1, fileURL: u,
+     completed: false) → `.idle`, effect `.deleteTemp(u)`.
 
 `MantaUITests/WebhookTests.swift` (new; pure): decode `WebhookMeta` full +
 nulls + missing `provider`/`instructions`; `WebhookFormat.lastDelivery`
@@ -736,6 +799,10 @@ demand, and a temp dir:
 - Dismiss while A is downloading; resume A → temp file deleted, no state change.
 - Save completes → saved timer fires → B promoted; a second (stale) timer for A
   fired later does not close B.
+- **The actual temp files are removed** (assert `FileManager.fileExists ==
+  false` on the staged URL's directory) after: save success + timer close;
+  save success + × dismiss; exporter cancel; share completion; share cancel;
+  a stale presentation callback; a stale download completion.
 - `bind(eventStore:)` called twice registers one handler (a second frame
   produces one arrival).
 
@@ -762,9 +829,16 @@ unaffected.
       choosing it closes the card and the chat scrolls to and highlights that
       message (via C2 `.message`).
 - [ ] "Attach to message" appears only on files/images and only where a
-      composer exists; it closes the card and a ready chip appears in the
-      composer; a vanished file, a failed upload or a composer rejection shows
-      the matching inline error and the card stays open.
+      composer exists and accepts input; it closes the card only after the
+      attach succeeds and a ready chip appears in the composer; a vanished
+      file, a failed upload or a composer rejection ("Already attached", …)
+      shows the matching inline error and the card stays open.
+- [ ] In a read-only background-job chat the artifacts card offers no "Attach
+      to message"; if the chat turns read-only while an attach is in flight,
+      the card says "This chat is read-only." and attaches nothing.
+- [ ] Every temporary copy of an agent-sent file is removed once its notice
+      closes, its exporter/share sheet is cancelled or completes, or its
+      download finishes after the notice was dismissed.
 - [ ] An image whose source is an `https://` URL can be previewed and attached;
       the request to that URL carries no box token; a 404 from it shows
       "Couldn't download <name> from <host>."
@@ -855,34 +929,44 @@ redeclared).
 
 ## Mount requests (D18)
 
+IDs, appliers and symbols match the master's canonical mount ledger
+(`00-master.md`, rows M-07-1…M-07-4).
+
 | ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-07-1 | `ChatScreen.swift` | WS02 (wave B) | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07); `ComposerTextController` instance `composer` (WS03, D3/D13); `MantaNavigator.open(.message(sessionID:messageID:))` (WS04 C2) | In `destinationCard(.artifacts)` (`ChatScreen.swift:782-785`) pass `projectName: projectName`, `cwd: sessionWindow?.cwd`, `composer: composer`, `onJumpToMessage: { mid in pendingArtifactJump = mid; overflowDestination = nil }`. Add `@State private var pendingArtifactJump: String?`; in `flushPendingPush()` (`:825`, already the `onDismiss` of the destination sheet at `:632`) — before the existing push handling — `if let mid = pendingArtifactJump { pendingArtifactJump = nil; navigator.open(.message(sessionID: store.sessionId, messageID: mid)) }`. | WS03 composer adoption landed (wave A); WS04 navigator (wave A); WS07 `ArtifactsCard` params (wave B; defaults nil, so order-independent) |
-| M-07-2 | `ChatScreen.swift` | WS02 (wave B) | `WebhooksCard(sessionId:onClose:)` (WS07); `ChatOverflowSheet.onWebhooks` (WS07) | `OverflowDestination` (`:88`) gains `case webhooks`; `destinationCard` adds `case .webhooks: WebhooksCard(sessionId: store.sessionId, onClose: { overflowDestination = nil })`; `overflowSheet` (`:658`) passes `onWebhooks: { overflowDestination = .webhooks }`. | WS07 `WebhooksCard` (wave B; the overflow row stays hidden until wired) |
-| M-07-3 | `MantaAppRoot.swift` | Integration agent B | `ArtifactAgentFileNotice()` (WS07) | On the paired branch (`MantaAppRoot.swift:98-109`, the `SessionListView(store:)` view) add `.overlay(alignment: .bottom) { if scene == nil { ArtifactAgentFileNotice() } }`, placed BEFORE (i.e. beneath) the existing `.overlay { UpgradeScreen }` at `:123-128` so the upgrade screen covers it. Needs `MantaEventStore` + `SessionListStore` environment objects (already injected, `MantaUIApp.swift:46-50`). | WS07 `ArtifactAgentFile.swift` landed (wave B) |
-| M-07-4 | `mobile/native/Package.swift` | Integration agent B (D18; file owned by WS07 per D1) | — | Append to target `sources`: `ArtifactModels.swift`, `ArtifactAgentFileModel.swift`, `WebhookModels.swift`. Append to test `sources`: `ArtifactPresentationTests.swift`, `ArtifactAgentFileTests.swift`, `WebhookTests.swift`, `SecretScopeTests.swift`. Do NOT add `MantaAPIClient+Artifacts.swift`, `ArtifactAgentFile.swift`, `WebhooksCard.swift`, `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift`. Then run `./verify.sh`. | WS07 files landed |
+| M-07-1 | `ChatScreen.swift` | WS02 (wave B) | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07, `SessionResourceCards.swift`); `ComposerTextController` `@StateObject` named `composer` (WS03 M-03-1, A1); `MantaNavigator.open(_:)` with `MantaRoute.message(sessionID:messageID:)` (WS04, C2) | In `destinationCard(.artifacts)` (`ChatScreen.swift:782-785`) construct `ArtifactsCard(sessionId: store.sessionId, onClose: { overflowDestination = nil }, projectName: projectName, cwd: sessionWindow?.cwd, composer: composer, onJumpToMessage: { mid in pendingArtifactJump = mid; overflowDestination = nil })`. **No `onAttach` parameter exists** and ChatScreen adds **no attach hint**: the card performs the upload + `composer.attach`, reports every rejection itself, and closes only after a successful attach. Add `@State private var pendingArtifactJump: String?`; in `flushPendingPush()` (`:825`, the `onDismiss` of the destination sheet at `:632`), before the existing push handling: `if let mid = pendingArtifactJump { pendingArtifactJump = nil; navigator.open(.message(sessionID: store.sessionId, messageID: mid)) }`. | M-03-1 (A1); WS04 navigator (A2); M-03-7 (WS02 keeps `composer.acceptsInput` current — the card's Attach gate depends on it) |
+| M-07-2 | `ChatScreen.swift` | WS02 (wave B) | `WebhooksCard(sessionId:onClose:)` (WS07, `WebhooksCard.swift`); `ChatOverflowSheet.onWebhooks: (() -> Void)?` (WS07) | `OverflowDestination` (`:88`) gains `case webhooks`; `destinationCard` adds `case .webhooks: WebhooksCard(sessionId: store.sessionId, onClose: { overflowDestination = nil })`; `overflowSheet` (`:658`) passes `onWebhooks: { overflowDestination = .webhooks }`. | WS07 `WebhooksCard` (wave B; defaulted param, row hidden until wired) |
+| M-07-3 | `MantaAppRoot.swift` | Integration agent B (IB, after B) | `ArtifactAgentFileNotice()` (WS07, `ArtifactAgentFile.swift`) | On the paired branch (`MantaAppRoot.swift:98-109`, the `SessionListView(store:)` view) add `.overlay(alignment: .bottom) { if scene == nil { ArtifactAgentFileNotice() } }`, placed BEFORE (i.e. beneath) the existing `.overlay { UpgradeScreen }` at `:123-128` so the upgrade screen covers it. Needs `MantaEventStore` + `SessionListStore` environment objects (already injected, `MantaUIApp.swift:46-50`). | WS07 merged (B) |
+| M-07-4 | `mobile/native/Package.swift` | Integration agent B (IB, after B; D18 — file owned by WS07 per D1) | — | Append to target `sources`: `ArtifactModels.swift`, `ArtifactAgentFileModel.swift`, `WebhookModels.swift`. Append to test `sources`: `ArtifactPresentationTests.swift`, `ArtifactAgentFileTests.swift`, `WebhookTests.swift`, `SecretScopeTests.swift`. Do NOT add `MantaAPIClient+Artifacts.swift`, `ArtifactAgentFile.swift`, `WebhooksCard.swift`, `ArtifactAPITests.swift`, `ArtifactAgentFileStoreTests.swift`. Then run `./verify.sh`. | WS07 merged; WS03's `ComposerInsertion.swift` already in the package (M-03-8, IA) — `ArtifactPresentationTests` uses `ComposerInsertion.AttachRejection` |
 
 `project.yml`: no change (the `MantaUI` / `MantaUITests` folder entries pick
-up new files). `.pbxproj` is regenerated once by the orchestrator (D18).
+up new files). `.pbxproj` is regenerated once by the orchestrator (O-final, D18).
+
+WS02's receipt rows M-07-1 / M-07-2 match the text above verbatim (pass
+`composer`, no `onAttach`, no external hint; deferred jump kept).
 
 ## Mounts applied by this workstream (D18: all `ChatOverflowSheet` mounts → WS07, wave B)
 
 Every new parameter is optional / defaulted so `ChatOverflowCaptureScene.swift:29-43`
-and ChatScreen compile before their wiring lands, and a missing closure hides
-its row (no dead controls).
+(unowned; never edited) and ChatScreen compile before their wiring lands, and a
+missing closure hides its row (no dead controls). Line refs are
+`ChatOverflowSheet.swift` today: first section `:91-100`, Compact `:102-109`,
+Fork `:110`, Open terminal `:111`, Trust/handoff `:116-135`, Clear/Delete `:142-148`.
 
 | ID | Requested by | Provider symbol(s) | Exact change in `ChatOverflowSheet.swift` | Prerequisite |
 |---|---|---|---|---|
-| WS01 M4 | `01-transcript.md` Mount requests M4 | `TranscriptDisplayOptions.defaultsKey`, `TranscriptDisplayOptions.setShowDetails(_:)` (WS01 `TranscriptReasoning.swift`, wave A) | In the Trust-mode `Section` (`:116-131`), after the trust toggle: `Toggle` "Show reasoning & full output", subtitle "Thinking steps and complete tool output", bound with `@AppStorage(TranscriptDisplayOptions.defaultsKey) var showDetails = false` and a `Binding(get: { showDetails }, set: { TranscriptDisplayOptions.setShowDetails($0) })`. Shown regardless of `isReadOnlyJob` (display-only). No ChatScreen change. | WS01 landed (wave A) |
-| WS02 M3 | `02-chat-cards-queue.md` Mount requests M3 | — (ChatScreen passes it) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete and the Trust-mode toggle (`:120-131`, `:142-146`). Webhooks/Secrets/Artifacts/Scheduled rows stay (read + revoke parity with desktop's read-only view). | none |
-| WS04 (a) | `04-sessions.md` §14 row "WS07 (B)" | — (ChatScreen wires `onRename`, WS02) | Add `var onRename: (() -> Void)? = nil`; row "Rename session" (`pencil`) in the second section (before Compact) via the existing `row(...)` helper, shown only when non-nil and not `isReadOnlyJob`. | none |
-| WS04 (b) | `04-sessions.md` §14 row "WS07 (B)" | `SessionModeRows(current:launchers:onSelect:)`, `SessionMode`, `SessionLauncher` (WS04, wave A) | Add `var mode: SessionMode = .chat`, `var launchers: [SessionLauncher] = []`, `var onSelectMode: ((SessionMode) -> Void)? = nil`. When `onSelectMode != nil`: replace the "Open terminal" row (`:111`) with `SessionModeRows(current: mode, launchers: launchers, onSelect: { m in dismiss(); onSelectMode?(m) })`. When nil: keep the existing "Open terminal" row (the capture scene and any un-wired caller keep working). | WS04 landed (wave A) |
+| M-01-5 | `01-transcript.md` M-01-5 | `TranscriptDisplayOptions.defaultsKey`, `TranscriptDisplayOptions.setShowDetails(_:)` (WS01, A1) | In the Trust-mode `Section`, after the trust toggle: `Toggle` "Show reasoning & full output", subtitle "Thinking steps and complete tool output", bound with `@AppStorage(TranscriptDisplayOptions.defaultsKey) private var showDetails = false` and `Binding(get: { showDetails }, set: { TranscriptDisplayOptions.setShowDetails($0) })`. No new parameter. Shown also when `isReadOnlyJob` (display-only). | WS01 merged (A1) |
+| M-02-2 | `02-chat-cards-queue.md` M-02-2 | — (plain param; ChatScreen passes `store.isBackgroundJobReadOnly`) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete and the Trust-mode toggle; also hide Rename (M-04-1) and the Mode rows (M-04-2, falling back to nothing — a read-only job cannot switch mode). Scheduled / Secrets / Artifacts / Webhooks / Background jobs rows and the M-01-5 toggle stay. | none |
+| M-04-1 | `04-sessions.md` M-04-1 | — (ChatScreen wires it, M-04-4) | Add `var onRename: (() -> Void)? = nil`; row "Rename session" (`pencil`) in the second section, **before "Compact session"** (WS04's current text), via the existing `row(...)` helper; shown only when `onRename != nil && !isReadOnlyJob`. Optional by agreement with WS04 (its §14 preamble adopts this capture-safe default). | none |
+| M-04-2 | `04-sessions.md` M-04-2 | `SessionModeRows(current:launchers:catalog:onSelect:onRetry:)`, `SessionMode`, `SessionLauncherCatalog` (WS04, `SessionModeMenu.swift` / `SessionModeLogic.swift`, A2); `AvailableLauncher` (WS10, D21, A1) | Add `var mode: SessionMode? = nil`, `var launchers: [AvailableLauncher] = []`, `var launcherCatalog: SessionLauncherCatalog = .loading`, `var onSelectMode: ((SessionMode) -> Void)? = nil`, `var onRetryLaunchers: (() -> Void)? = nil`. When `!isReadOnlyJob`, `let mode`, `let onSelectMode` are all present: replace the "Open terminal" row (`:111`) with `SessionModeRows(current: mode, launchers: launchers, catalog: launcherCatalog, onSelect: { m in dismiss(); onSelectMode(m) }, onRetry: { onRetryLaunchers?() })`. Otherwise keep the existing "Open terminal" row (non-read-only) — legacy callers and the capture scene are unchanged. | WS04 (A2) + WS10 (A1) merged |
+| (own) | WS07 F7 | `WebhooksCard` | Add `var onWebhooks: (() -> Void)? = nil` and the "Webhooks" row (first section, after Secrets) when non-nil. | — |
 
-Cross-check: these are all `ChatOverflowSheet` mounts listed in the other
-specs (`grep ChatOverflowSheet` over `01`–`10`): WS01 M4, WS02 M3, WS04 §14
-(a)/(b). WS05/06/08/09/10 request none. Package.swift requests from other
-workstreams (e.g. `05-git-pr-review.md` §files) are applied by the integration
-agent of THEIR wave per D18, not by WS07.
+Cross-check (`grep -n ChatOverflowSheet` over `01`–`10` at round 2): the only
+requests into this file are M-01-5, M-02-2, M-04-1, M-04-2 — each matched above
+with the provider's current symbols and defaults. WS03/05/06/08/09/10 request
+none. Package.swift requests from other workstreams are applied by the
+integration agent of THEIR wave (M-01-6, M-03-8, M-04-8, M-08-3, M-10-3 → IA;
+M-02-3, M-06-3, M-07-4, M-09-7 → IB; M-05-4 → IC), not by WS07.
 
 ## Contracts provided / consumed
 
@@ -890,9 +974,12 @@ agent of THEIR wave per D18, not by WS07.
   types live in `ArtifactModels.swift` / `WebhookModels.swift`.
 - **C2 consumed:** `MantaNavigator.open(.message(sessionID:messageID:))`,
   called from ChatScreen's flush (M-07-1); WS02 owns handling.
-- **C3 consumed:** `ComposerTextController.attach(remotePath:displayName:mime:) -> Bool`
-  (WS03), called inside `ArtifactsCard` on the instance passed by M-07-1; a
-  `false` result is surfaced.
+- **C3 consumed:** `ComposerTextController.attach(remotePath:displayName:mime:) -> Bool`,
+  `ComposerTextController.acceptsInput`, `ComposerTextController.lastAttachRejection`
+  and `ComposerInsertion.AttachRejection` (WS03), used inside `ArtifactsCard` on
+  the instance passed by M-07-1; every `false` result is surfaced by the card.
+- **Launcher types consumed (M-04-2 only):** `SessionModeRows`, `SessionMode`,
+  `SessionLauncherCatalog` (WS04) and `AvailableLauncher` (WS10, D21).
 - **C4:** M-07-1, M-07-2 (ChatScreen, applied by WS02 per D18).
 - **C5:** not used — `agentFile` is a bus kind (no `sub`), observed through
   the existing `addRawFrameHandler`; `MantaStreamModels.swift` /
@@ -984,3 +1071,54 @@ Cross-cutting review (`reviews/round1/00-cross-cutting.md`):
   pbxproj is left to the orchestrator.
 - **C3 change** — `attach` now returns `Bool`; the card surfaces `false`.
 - **D16** — Client members table added; no duplicates.
+
+## Review responses (round2)
+
+Own review (`reviews/round2/07-artifacts-cards.md`):
+
+1. **BLOCKING M-04-2 superseded launcher API — resolved.** "Mounts applied"
+   row M-04-2 now uses WS04's current text: `mode: SessionMode? = nil`,
+   `launchers: [AvailableLauncher] = []`, `launcherCatalog:
+   SessionLauncherCatalog = .loading`, optional `onSelectMode` /
+   `onRetryLaunchers`, and the full `SessionModeRows(current:launchers:catalog:onSelect:onRetry:)`
+   call, rendered only when mode + select closure are present (mode unwrapped
+   first); otherwise the existing "Open terminal" row stays. WS10 (A1) added to
+   prerequisites. Old `SessionLauncher` / 3-argument initializer removed.
+2. **BLOCKING M-07-1 vs WS02 receipt — resolved on the provider side.** M-07-1
+   now spells the exact initializer, states that no `onAttach` parameter
+   exists, that ChatScreen adds no attach hint, and that the card closes only
+   after a successful attach; the deferred jump is kept. Added an explicit
+   "receiver-side sync" note naming WS02's stale row (`02-chat-cards-queue.md:832`);
+   that file is not editable from this spec.
+3. **SHOULD temp-file cleanup — resolved.** `.saved` now carries `fileURL`;
+   `savedTimerFired` and `dismiss` return `AgentFileEffect`;
+   `presentationFinished` takes the `fileURL` captured by its per-presentation
+   delegate, so stale/duplicate callbacks clean their own file. One ownership
+   rule states which path deletes each file. Machine tests 2/3/3b/3c/3d/8
+   assert the exact `.deleteTemp(u)`; the Xcode store test asserts the file is
+   actually gone after save+timer, save+dismiss, exporter cancel, share
+   complete/cancel, stale presentation and stale download. Acceptance case
+   added.
+4. **SHOULD Attach in read-only jobs — resolved.** Attach is gated on
+   `composer.acceptsInput` (observed live via `ArtifactAttachMenuItem`), checked
+   again before the download and again after the upload; a mid-flight change
+   reports "This chat is read-only." Rejections use WS03's
+   `lastAttachRejection` copy. `canAttach` gains `acceptsInput`; tests and a
+   read-only-job acceptance case added. Prerequisite M-03-7 (WS02) listed on
+   M-07-1.
+5. **NIT IDs / placement — resolved.** Received rows use canonical IDs M-01-5,
+   M-02-2, M-04-1, M-04-2. Rename placement is "before Compact session" and
+   optional, matching WS04's current M-04-1 text (WS04 adopted the
+   capture-safe default). Cross-check paragraph rewritten against the
+   round-2 ledger.
+
+Cross-cutting (`reviews/round2/00-cross-cutting.md`):
+
+- **#1 (launcher API)** — WS07's part is the M-04-2 receipt, fixed as above
+  with WS10's `AvailableLauncher` (D21).
+- **#8 (M-07-1 receipt)** — provider text pinned as above; WS02 must update its
+  row.
+- **#10 (ledger integrity)** — both tables now use ledger IDs/appliers
+  (M-07-1/2 → WS02, M-07-3/4 → IB; received M-01-5, M-02-2, M-04-1, M-04-2).
+- **Ledger M-07-4** — prerequisite on WS03's `ComposerInsertion.swift` (M-03-8)
+  recorded, since `ArtifactPresentationTests` now uses its `AttachRejection`.

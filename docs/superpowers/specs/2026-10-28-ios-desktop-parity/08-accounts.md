@@ -65,8 +65,8 @@ hides the others. Owned by `AccountsScreen` as `@StateObject` (created with
 `MantaAPIClient.live()`). The existing initializer
 `AccountsScreen(store:focusProvider:ownsLifecycle:)` is kept **unchanged** — it is called by
 `SettingsScreen.swift:175`, `UsageSheets.swift:310` and WS02's Reconnect sheet
-(`02-chat-cards-queue.md`, F-sendError). New parameters are appended with defaults
-(`resignSeatId: String? = nil`).
+(`02-chat-cards-queue.md`, F-sendError). No parameter is added (the round-1 `resignSeatId`
+existed only for M-08-2, which WS02 declined).
 
 `focusProvider` accepts any of the ids callers already pass: a seat provider id (`claude`,
 `codex`), an opencode status id (`anthropic`, `openai`, `kimi-for-coding`) or WS02's alias `kimi`
@@ -254,7 +254,7 @@ lists the calls, in this order, for whatever was allocated:
 |---|---|
 | `seatId` | `accounts:cancel-seat {seatId}` (server also kills the Claude pty and drops its registration, `index.mjs:760–766`; a login that already landed is placed, not dropped, `accountsManager.mjs:958–975`) |
 | `flowId` | `accounts:resign-cancel {flowId}` (waits for a landing in progress, `accountsManager.mjs:1070–1082`) |
-| `oauthProviderId` | `opencode:provider-auth {action:"oauth-cancel", id}` |
+| `oauthProviderId` | `opencode:provider-auth {action:"oauth-cancel", id}` — **only through `ProviderOAuthLease`** (below), never directly, because this cancel is provider-wide, not attempt-scoped |
 | `installerKey` | `pty:kill [installerKey]` |
 | `loginSessionKey` (F3, no seat/flow) | `pty:kill [key]` if `loginSpawned`, then `claude:login-cancel [key]` — **also during the installing phase**, where the login registration exists but was never spawned (`rpc.mjs:313–340`) |
 
@@ -277,7 +277,55 @@ box already dropped something.
 submit) captures `attempt.id` and drops its result when `attempt.id != current?.id`. A start reply
 that arrives after its attempt was cancelled or retired is torn down immediately (its new
 `seatId`/`flowId`/key is fed straight into a one-off teardown) and never shown. The attempt's pty
-subscription (`AnyCancellable`) and polling `Task` are cancelled in teardown.
+subscription (`AnyCancellable`) and polling `Task` are cancelled in teardown. This is safe for
+everything keyed by a server-minted unique id (seat id, flow id, `claude-login-<uuid>`,
+`claude-install-<ms>`); the provider-wide device wait needs the lease below.
+
+### `ProviderOAuthLease` — serialising the provider-wide device wait (F3 only)
+
+The box keeps ONE device-wait slot per provider id (`_oauthCallbacks`, `rpc.mjs:138–155`), fills it
+inside `start` before replying (`rpc.mjs:418–423`), and `oauth-cancel {id}` deletes that slot
+whoever filled it (`rpc.mjs:2262–2266`). A client attempt UUID cannot scope it. Without
+serialisation: start A in flight → Cancel → Connect again (B starts and fills the slot) → A's late
+reply → A's one-off teardown cancels **B's** wait → B's poll fails although the user approved
+B's code.
+
+Rule: for a given opencode provider id, a device-wait **start** and the **cleanup** of the attempt
+that issued it form one critical section; a newer attempt's start for the same provider waits
+until the previous section has finished, and a provider-wide cancel is only ever sent by the
+attempt that currently owns the slot.
+
+```swift
+@MainActor final class ProviderOAuthLease {           // new file ProviderOAuthLease.swift (Foundation only)
+  static let shared = ProviderOAuthLease()             // app-lifetime, like ChatModelCatalog.shared:
+                                                       // must outlive sheet dismissal and screen recreation
+  init(cancel: @escaping @MainActor (String) async -> Void = { _ in })   // injectable for tests
+  /// Production: `ProviderConnectFlow` calls this once before its first start with
+  /// `{ try? await api.providerAuthOauthCancel(id: $0) }` (logs a thrown error).
+  func configure(cancel: @escaping @MainActor (String) async -> Void)
+  /// Waits until no earlier attempt holds or is cleaning up `provider`, then marks `attempt` the
+  /// owner and runs `start`. Returns nil (and starts nothing) if `attempt` was retired while waiting.
+  func start<T>(provider: String, attempt: UUID, _ start: () async throws -> T) async throws -> T?
+  /// Retire `attempt`. If it owns `provider`'s slot (its start has replied, or is still in flight),
+  /// the cancel is sent when that start finishes (or now, if it already has); the slot is freed only
+  /// after the cancel completes. Retiring a non-owner is a no-op for the server.
+  func retire(provider: String, attempt: UUID) async
+  /// The device wait reached a terminal state on the box (ok / error): free the slot without cancelling.
+  func settled(provider: String, attempt: UUID)
+}
+```
+
+State is a pure value type `ProviderOAuthLeaseState` (per provider: `owner: UUID?`,
+`ownerStartInFlight: Bool`, `retirePending: Bool`, `waiters: [UUID]`) with a reducer
+`reduce(_ event) -> [LeaseAction]` (`.runStart(UUID)`, `.sendCancel(provider)`, `.drop(UUID)`);
+the class only executes actions. While B waits, its sheet shows "Closing the previous sign-in…"
+(Cancel available — it retires B, which is just dropped from the waiters). Wait is bounded by the
+in-flight request's own URLSession timeout; if A's cleanup cancel throws, the slot is still freed
+(the box's own expiry is the backstop) and B proceeds.
+
+Not leased (unique keys): Claude login/installer keys and all F1/F2 seat/flow cleanup, which stay
+on the plain teardown above. F1/F2 Codex use seat/flow cancels, which the box scopes itself
+(`accountsManager.mjs:958–975, 1070–1082`).
 
 ---
 
@@ -458,8 +506,8 @@ methods in `MantaAPIClient+Accounts.swift` (C1).
   can't be signed in again from here." Add this as a resign-specific mapping in
   `AccountsSignInCopy`, not in `AccountsCopy.reason(forCode:)` (whose `live-seat` text is about
   removal).
-- Usage sheet: its existing "Fix" → Accounts screen (focused) is the entry; the optional
-  M-08-2 lets it open the re-sign sheet directly.
+- Usage sheet: its existing "Fix" → Accounts screen (focused) is the entry; the user then taps
+  "Sign in again" (M-08-2, a direct jump, was declined by WS02).
 
 ### Tests (`AccountsSignInTests.swift`)
 
@@ -567,6 +615,12 @@ desktop's Terminal teardown does); `opencode:restart` `[]` → `{ok}` | `{ok:fal
   installer `pty:kill` **and** `claude:login-cancel` for the login key minted at start (it is
   registered server-side even though not yet spawned). The explicit Cancel reports a failure in
   the banner.
+- `opencode:provider-auth {action:"start", id}` for a provider whose start can return
+  `oauth-auto` (`openai`) — and, defensively, every F3 start — goes through
+  `ProviderOAuthLease.shared.start(provider:attempt:)`; the waiting phase's teardown is
+  `ProviderOAuthLease.shared.retire(provider:attempt:)`; an `oauth-status` terminal state calls
+  `settled(provider:attempt:)`. Claude-login and api-key starts hold the lease only until the
+  start reply arrives (they never fill the device slot, so `settled` is called at once).
 - Install pty: `pty:spawn [{sessionKey: "claude-install-<epoch ms>", cwd, cols: 120, rows: 40,
   launcher: {id: "claude-cli-install", flags: {}}}]`; the exit frame without a binary = installer
   failed. "Show what's happening" is deferred (see Deferred).
@@ -590,6 +644,14 @@ desktop's Terminal teardown does); `opencode:restart` `[]` → `{ok}` | `{ok:fal
   with instructions, empty).
 - `formatRemaining` (0, mid, past limit, NaN-safe → "0:00 remaining").
 - `keyErrorText` / `codeErrorText` (`unauthorized` vs other vs nil).
+- `ProviderOAuthLeaseState` reducer (pure, verify.sh) — the review scenario: start A in flight →
+  retire A → request B (B queued, no `.runStart(B)`) → A's late reply (`.sendCancel` for A) →
+  A cleanup done (`.runStart(B)`) → B owns the slot; no `.sendCancel` is ever emitted while B is
+  owner unless B is retired. Also: retire A after its reply (immediate cancel), retire a queued
+  waiter (dropped, nothing sent), `settled` frees without cancel, cancel failure still frees.
+- `ProviderOAuthLease` async test (Mac + verify.sh; `@MainActor` XCTest, injected `cancel` closure
+  and a `start` closure gated by a continuation): same scenario end-to-end — the injected cancel is
+  called exactly once, before B's start closure runs, and B's attempt is never cancelled.
 - `ConnectRoute.decide` — Kimi (no seat provider) → connect without a fetch; first-load failure
   (`.failure`) → blocked even though the store still holds its initial empty list; stale empty
   store data but the fresh list has seats → addAccount; fresh list where the provider gained seats
@@ -661,19 +723,19 @@ writes go through exactly ONE writer").
      saved — try again." A collision (e.g. the same name was added from another device after the
      test) → no write, the collision message.
   2. `set-providers {upsert:[…]}`.
-  3. Reconcile (see "Write reconciliation" below) with `expect: .present(id, models)`:
-     - `.confirmed` → pop back, banner "Added <name> with N models.", `ProviderChange.announce()`.
-     - `.partial(err)` (box answered `ok:false` or the reply was lost, but the read-back shows the
-       endpoint exists) → pop back, banner (error tone) "Saved <name>, but the model list couldn't
+  3. Reconcile (see "Write reconciliation" below) with `before: nil` (the endpoint did not exist
+     — step 1 proved it) and `expect: .present(id, models)`. The screen only maps the shared
+     classifier's outcome; it does not re-derive it:
+     - `.confirmed` (reply ok, or reply lost and the read-back matches) → pop back, banner
+       "Added <name> with N models.", `ProviderChange.announce()`.
+     - `.partial(err)` → pop back, banner (error tone) "Saved <name>, but the model list couldn't
        be fully applied — <err>. Check its switches in Accounts.", announce. The endpoint block
        shows what the box actually has.
-     - `.rejected(err)` (`ok:false` and the read-back shows no such endpoint) → stay, error under
-       the button, form kept.
-     - `.unconfirmed` (write threw AND the read-back failed) → stay, message "Couldn't confirm
-       whether <name> was saved. Go back and pull to refresh before trying again." Save is
-       disabled until the next successful collision recheck (a retry would otherwise create a
-       second identical write blindly; the recheck catches the already-saved case as a
-       collision).
+     - `.rejected(err)` → stay, error under the button, form kept.
+     - `.unconfirmed` → stay, message "Couldn't confirm whether <name> was saved." Save stays
+       enabled and re-runs step 1 first; if that fresh list now contains this id with the same
+       base URL, the earlier write landed: treat it as `.confirmed` (no second write) instead of
+       showing the collision message.
 - **Id collision guard (iOS addition):** if the slug equals an existing endpoint id or a
   subscription id (`anthropic`, `openai`, `kimi-for-coding`, or any id in the status list), show
   "An endpoint with the id “<slug>” already exists — choose another name." and disable Test.
@@ -689,23 +751,30 @@ selection is applied, and a selection failure is returned as `{ok:false}` withou
 config write (`providers.mjs:528–564`); a lost response can also follow a committed write. So no
 endpoint write ever assumes "failed ⇒ nothing changed". After any `{ok:false}` or thrown write,
 the store re-reads `opencode:get-providers` and calls pure
-`EndpointWriteReconcile.outcome(reply:readBack:expect:) -> EndpointWriteOutcome`:
+`EndpointWriteReconcile.outcome(reply:before:readBack:expect:) -> EndpointWriteOutcome`:
 
 ```swift
+enum EndpointWriteReply { case ok, refused(String), threw(String) }   // {ok:true} / {ok:false,error} / transport error
 enum EndpointWriteExpectation { case present(id: String, enabledModels: [String]); case absent(id: String) }
-enum EndpointWriteOutcome { case confirmed, partial(String), rejected(String), unconfirmed }
+enum EndpointWriteOutcome: Equatable { case confirmed, partial(String), rejected(String), unconfirmed }
+static func outcome(reply: EndpointWriteReply,
+                    before: ProviderEndpoint?,               // captured from the store right before the write (nil = did not exist)
+                    readBack: Result<[ProviderEndpoint], Error>?, // nil when reply == .ok (no read-back needed)
+                    expect: EndpointWriteExpectation) -> EndpointWriteOutcome
 ```
 
-- reply ok → `.confirmed` (the normal refresh follows).
-- reply failed/threw, read-back OK and it matches `expect` exactly → `.partial(reason)` when the
-  reply was `ok:false` (the box said something didn't finish) or `.confirmed` when the reply
-  merely threw (lost response).
-- reply failed/threw, read-back OK and the endpoint is still in its pre-write state →
-  `.rejected(reason)`.
-- reply failed/threw, read-back OK but in a third state (e.g. block written, selection not) →
-  `.partial(reason)`.
-- read-back failed → `.unconfirmed`.
+"State of the endpoint" = absent, or present with (`name`, `baseURL`, set of `enabledModels`).
+Checked in this order:
 
+1. reply `.ok` → `.confirmed`.
+2. read-back failed → `.unconfirmed`.
+3. read-back state == `expect` → `.confirmed` if reply `.threw` (lost response); `.partial(err)`
+   if reply `.refused` (the box reported something didn't finish).
+4. read-back state == `before` state → `.rejected(err)` (nothing changed).
+5. otherwise (a third state, e.g. block written but selection not applied) → `.partial(err)`.
+
+Callers: F4 save (`before: nil`), F5 toggle (`before:` the endpoint as listed before the tap,
+`expect: .present(id, newSelection)`), F6 removal (`before:` the endpoint, `expect: .absent(id)`).
 The UI always ADOPTS the read-back (never the optimistic or pre-write guess).
 
 ### Pure logic + tests (`MantaUITests/ProviderEndpointTests.swift`)
@@ -720,10 +789,13 @@ The UI always ADOPTS the read-back (never the optimistic or pre-write guess).
 - Wire (`AccountsRPCWireTests.swift`, Mac): `discover-models` sends `args: [baseURL, apiKey]`
   (two strings, NOT an object); `set-providers` sends one object; upsert omits `apiKey` key
   entirely when nil.
-- `EndpointWriteReconcile.outcome` — ok; `ok:false` + endpoint absent (rejected); `ok:false` +
-  endpoint present with requested models (partial); `ok:false` + block present but old/no
-  selection (partial); threw + matches expectation (lost response → confirmed); threw + pre-write
-  state (rejected); read-back failed (unconfirmed); `.absent` expectation for removal in each case.
+- `EndpointWriteReconcile.outcome` — ok; read-back failed (unconfirmed); refused + matches expect
+  (partial); threw + matches expect (lost response → confirmed); refused/threw + equals `before`
+  (rejected); refused + third state (partial). **Same reply/read-back/expect, different `before`**
+  (review R2-2): toggle on an endpoint whose read-back is `[a]`, expecting `[a,b]` — with
+  `before = [a]` → rejected, with `before = [b]` → partial. New endpoint (`before: nil`) +
+  absent read-back → rejected. Removal: `.absent` expect met after a throw → confirmed; still
+  present and equal to `before` → rejected.
 - `ProviderEndpointDraft.collision(slug:endpoints:statusIds:)` — against a fresh list; a collision
   introduced after Test (fresh list contains the slug) refuses Save; static subscription ids
   always reserved even when the status list is unavailable.
@@ -764,7 +836,8 @@ baseURL, enabledModels}]}` (no `apiKey` → key kept). Per-model badges from `ac
   keeps it re-tickable). Sorted as the box returns them; dedup.
 - A toggle writes immediately, single-flight per endpoint (the endpoint's toggles disable while a
   write is in flight). The switch moves at once (pending style: a small spinner on that row).
-  Outcome via "Write reconciliation" (F4) with `expect: .present(id, newEnabledModels)`:
+  Outcome via "Write reconciliation" (F4) with `before:` the endpoint as listed before the tap and
+  `expect: .present(id, newEnabledModels)`:
   - `.confirmed` → quiet (the switch is the confirmation); `providers.refresh()`;
     `ProviderChange.announce()`.
   - `.partial(err)` → switches adopt the read-back; banner "Saved <name>, but the model list
@@ -856,7 +929,7 @@ baseURL, enabledModels}]}` (no `apiKey` → key kept). Per-model badges from `ac
   - Send probe: banner with the box's `message` (ok/error).
   - Remove: confirm "Remove <name>?" message "Its models leave the model picker. Conversations
     using one of them will need another model." destructive "Remove endpoint" →
-    `set-providers {remove:[id]}`, reconciled with `expect: .absent(id)`: confirmed (incl. a lost
+    `set-providers {remove:[id]}`, reconciled with `before:` the endpoint and `expect: .absent(id)`: confirmed (incl. a lost
     reply whose read-back shows it gone) → banner "Removed <name>." + `ProviderChange.announce()`;
     rejected → "Couldn't remove <name> — <err>" (block stays); unconfirmed → block marked
     unconfirmed as in F5.
@@ -904,7 +977,7 @@ No new routes, no `rpc.mjs` / `index.mjs` edits.
 **Edit (owned):**
 - `mobile/native/MantaUI/AccountsScreen.swift` — F0 layout, F1 entry points, F2 button / live-seat
   advice, sheets, connection rows and endpoint section mounts (views live in new files); keeps
-  `init(store:focusProvider:ownsLifecycle:)` and appends `resignSeatId: String? = nil`.
+  `init(store:focusProvider:ownsLifecycle:)` unchanged (no new parameters).
 - `mobile/native/MantaUI/AccountsStore.swift` — `ptyEvents` subject + one raw frame handler in
   `init`; public `announce(_:isError:)`; `freshProviders() async throws`.
 - `mobile/native/MantaUI/AccountsModels.swift` — copy changes (F0); `ResignStatusReply` +
@@ -926,6 +999,8 @@ No new routes, no `rpc.mjs` / `index.mjs` edits.
   `ProviderConnectRules`, `ConnectRoute`, seat↔opencode id table, `ProviderChangeOutcome`,
   `ProviderChange` (`shouldAnnounce`, `announce` with injectable poster),
   `Notification.Name.mantaProvidersChanged`.
+- `MantaUI/ProviderOAuthLease.swift` (Foundation only) — `ProviderOAuthLeaseState` (pure
+  reducer) + `ProviderOAuthLease` (`@MainActor`, `static let shared`, injectable cancel).
 - `MantaUI/ProviderConnectionsStore.swift`, `MantaUI/ProviderConnectFlow.swift`,
   `MantaUI/ProviderConnectSheet.swift`.
 - `MantaUI/ProviderEndpointModels.swift` (Foundation only) — `ProviderEndpoint`,
@@ -938,10 +1013,11 @@ No new routes, no `rpc.mjs` / `index.mjs` edits.
   (Mac only — needs `MantaAPIClient`; own private capturing `URLProtocol`, copied from
   `MantaActionRPCWireTests.swift:611`, which is file-private).
 
-**Manifest for the integration step (D18/D19)** — WS08 does not edit `Package.swift`,
+**Manifest for the integration step (M-08-3, D18/D19/D20)** — WS08 does not edit `Package.swift`,
 `project.yml` or the pbxproj:
 - `Package.swift` `MantaUI` target sources += `AccountsSignInModels.swift`,
-  `ProviderConnectionModels.swift`, `ProviderEndpointModels.swift` (Foundation only; they depend
+  `ProviderConnectionModels.swift`, `ProviderEndpointModels.swift`, `ProviderOAuthLease.swift`
+  (Foundation only; they depend
   only on files already in the package: `AccountsModels.swift`, `ChatJSON.swift`,
   `MantaStreamModels.swift`, `MantaModels.swift`, `MantaError.swift`).
 - `Package.swift` test sources += `AccountsSignInTests.swift`, `ProviderConnectTests.swift`,
@@ -990,22 +1066,24 @@ Plus one store method (not a client member): `AccountsStore.freshProviders()` (c
 
 ## Mount requests
 
-| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
+IDs, appliers and symbols match the master's canonical mount ledger (`00-master.md`).
+
+| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite | Status |
+|---|---|---|---|---|---|---|
+| M-08-1 | `MantaUI/ChatModelCatalog.swift` (WS09) | WS09, wave B (owns the file) | `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`); `ChatModelCatalog.reload()` (WS09) | Observe `.mantaProvidersChanged` and call `reload()` — WS09 already plans exactly this inside its own ChatModelCatalog edits ("It observes `Notification.Name.mantaProvidersChanged` … and calls `reload()`", `09-models-usage.md:234–235`). Requested check (WS09 test): a catalog that has finished loading re-fetches `opencode:models` once after the notification is posted, so the picker changes without relaunch. | WS08 merged in A2 (symbol exists before B). | Active; received by WS09 (its "Mounts applied" row M-08-1, test `ModelsStoreTests.testProvidersChangedReloadsCatalog`). |
+| M-08-2 | `MantaUI/UsageSheets.swift` usage-sheet seat row (WS02) | — | — | (Was: pass the seat id from "Fix" so Accounts opens F2's sheet directly.) | — | **Declined** by WS02 (`02-chat-cards-queue.md:803`); superseded — no edit scheduled, no WS08 API kept for it. |
+| M-08-3 | `mobile/native/Package.swift` | Integration agent A, after A2 (D18/D20) | WS08 pure files | Target `MantaUI` sources += `AccountsSignInModels.swift`, `ProviderConnectionModels.swift`, `ProviderEndpointModels.swift`, `ProviderOAuthLease.swift`; test target sources += `AccountsSignInTests.swift`, `ProviderConnectTests.swift`, `ProviderEndpointTests.swift`. | WS08 merged in A2. | Active (canonical ledger ID M-08-3). |
+
+## Mounts received (applied into WS08 files)
+
+| ID | From | Receiving file | Applier (D18) | Provider symbol | Disposition |
 |---|---|---|---|---|---|
-| M-08-1 (**mandatory**) | `MantaUI/ChatModelCatalog.swift` (WS09) | WS09, wave B (owns the file, runs in B) | `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`, wave A) | In `init`, register `NotificationCenter.default.addObserver(forName: .mantaProvidersChanged, object: nil, queue: .main)` that runs `Task { @MainActor in self?.reload() }` (weak self; token stored in a property). WS09 adds an XCTest: a loaded catalog re-fetches `opencode:models` once after the notification is posted (picker list changes without relaunch). | WS08 wave A merged (symbol exists); WS09's own `reload()` (`09-models-usage.md`, ChatModelCatalog edits). |
-| M-08-2 (optional) | `MantaUI/UsageSheets.swift` usage-sheet seat row (WS02) | WS02, wave B | `AccountsScreen(store:focusProvider:ownsLifecycle:resignSeatId:)` (WS08, wave A) | Where `.fix` sets `destination = AccountsDestination(focus: provider.provider)` (`UsageSheets.swift:422`), also carry `seat.id` and pass it as `resignSeatId:`; `AccountsScreen` opens F2's sheet on appear for that seat when it is not live. Skipping it leaves today's behaviour (user taps "Sign in again" on the Accounts screen). | WS08 wave A merged. |
-
-WS08 asks WS09 to mirror M-08-1 in its own Mount/contract section.
-
-## Mounts applied by this workstream / received
-
-| ID | From | Receiving file | Applier (D18) | Disposition |
-|---|---|---|---|---|
-| M7 (09-models-usage.md, optional) | WS09 | `AccountsScreen.swift` (WS08) | Integration agent B (WS08 does not run in wave B) | **Accepted** — footer row "Set prices for unpriced models" → `ModelsScreen()`; WS08 leaves the Custom endpoints section footer free for it. No WS08 work. |
-| WS02 Reconnect sheet (`02-chat-cards-queue.md`, sendError) | WS02 | `ChatScreen.swift` (WS02) | WS02, wave B | Not a mount into WS08 files; WS08 guarantees the `AccountsScreen(store:focusProvider:ownsLifecycle:)` signature and accepts `focusProvider` values `claude`/`codex`/`kimi` (F0 `normalizeFocus`). |
+| M-09-6 | WS09 | `AccountsScreen.swift` (WS08) | Integration agent B, after B (WS08 does not run in B) | `ModelsScreen()` (WS09, `ModelsScreen.swift`) | **Accepted.** Add, as the footer of the Custom endpoints section (below WS08's footer text), a `NavigationLink("Set prices for unpriced models") { ModelsScreen() }`. WS08 keeps that footer a plain `VStack` so the link can be appended. WS09's M-09-6 row records it as accepted. |
 
 No other spec requests a mount into `AccountsScreen.swift`, `AccountsStore.swift` or
 `AccountsModels.swift` (grep of 01–10). WS08 applies no mounts in other workstreams' files.
+WS02's Reconnect sheet only *calls* `AccountsScreen(store:focusProvider:ownsLifecycle:)`; that is
+a provided contract (below), not a mount.
 
 ## Contracts provided / consumed
 
@@ -1023,12 +1101,12 @@ No other spec requests a mount into `AccountsScreen.swift`, `AccountsStore.swift
   state line) for WS09's model badges, so the two surfaces word states identically.
 - **Provided to WS02:** unchanged `AccountsScreen(store:focusProvider:ownsLifecycle:)`; focus
   aliases as above; `AccountsStore.conversationSeat` untouched (D17).
-- **Consumed from WS10 (same wave A):** `opencodeRestart() -> OkResult`. WS08 codes against the
-  signature pinned in `10-settings-box.md`; if WS10 has not merged when WS08 runs its checks,
-  WS08 rebases on WS10 before its final verify (order: WS10 → WS08 within wave A).
-- **Coordinate with WS04** (same wave): S1 touches `ptyWs.mjs`; WS04's terminal launchers come
-  from `launchers:list`, which already excludes hidden launchers (`04-sessions.md` §mode,
-  `launcherRegistry.mjs:12–18`), so S1 changes nothing for WS04.
+- **Consumed from WS10:** `func opencodeRestart() async throws -> OkResult` (`OkResult` = `{ok:
+  Bool, error: String?}`, `10-settings-box.md:943`). WS10 runs in A1 and WS08 in A2 (D20), so the
+  member exists when WS08 starts.
+- **Coordinate with WS04** (A2): S1 touches `ptyWs.mjs`; WS04's terminal launchers come from
+  WS10's `launchersList()` (D21) over `launchers:list`, which already excludes hidden launchers
+  (`launcherRegistry.mjs:12–18`), so S1 changes nothing for WS04.
 
 ## Deferred
 
@@ -1068,3 +1146,12 @@ None remaining. Round-0 questions are settled:
 | Cross-cutting #10 / D19 | WS08 no longer regenerates the project; pure files + tests given as a manifest for the integration step's `Package.swift` update. |
 | Cross-cutting #11 / D17 | No change needed: WS08 keeps `AccountsStore.conversationSeat` untouched for WS02's seat row. |
 | Open questions | Closed by D9 and the R4 fix. |
+
+## Review responses (round 2)
+
+| Finding | Resolution |
+|---|---|
+| R2-1 BLOCKING — provider-wide `oauth-cancel` vs late start | New `ProviderOAuthLease` (app-lifetime `.shared`, like `ChatModelCatalog.shared`, so it survives sheet dismissal/recreation) + pure `ProviderOAuthLeaseState` reducer. A same-provider start and the cleanup of the attempt that issued it are one critical section; a newer start waits ("Closing the previous sign-in…") and a cancel is only sent by the current slot owner. Evidence for the need: `rpc.mjs:138–155, 418–423, 2262–2266`. Unique-key Claude/installer and seat/flow cleanup stay on the plain teardown. Tests: reducer scenario A-in-flight → retire → B queued → late A reply → cancel A → B starts, never cancelled; plus an async `@MainActor` test with gated closures. |
+| R2-2 SHOULD — reconcile needs pre-write state | `EndpointWriteReconcile.outcome(reply:before:readBack:expect:)` now takes `before: ProviderEndpoint?` and a typed `EndpointWriteReply` (`ok` / `refused` / `threw`); ordered rules given. F4 save (`before: nil`), F5 toggle and F6 removal pass `before`. F4's outcome text now maps the classifier only (a thrown write whose read-back matches is confirmed). Added the test with identical reply/read-back/expect and different `before` (rejected vs partial). Also: after `.unconfirmed`, Save's fresh recheck recognises the endpoint as already saved instead of reporting a collision. |
+| R2-3 SHOULD — ledgers out of sync | Tables rewritten against the consolidated ledger: M-08-1 (applier WS09 B, implemented in WS09's own ChatModelCatalog edits at `09:234–235`, with the requested test); M-08-2 marked **declined** (`02:803`) and its `resignSeatId` parameter removed; M-08-3 gives the Package.swift manifest an ID (integration A after A2); received M-09-6 (canonical ID, `ModelsScreen()`) **accepted** for integration B. WS02 Reconnect moved from "received mounts" to contracts. |
+| Master D20/D21 | WS10 (A1) precedes WS08 (A2), so `opencodeRestart() async throws -> OkResult` exists when WS08 starts; the rebase note was removed. WS04 launchers now cited via WS10's `launchersList()`. |

@@ -1,10 +1,12 @@
 # WS05 — Git, pull requests, review, work inbox (iOS)
 
-Status: draft, revised after review round 1 · Wave: **C** (runs alone) · Owner prefix: `Git*`, `Review*`, `Inbox*`
+Status: draft, revised after review round 2 · Wave: **C** (runs alone) · Owner prefix: `Git*`, `Review*`, `Inbox*`
 Depends on (all land before wave C): WS02 (ChatScreen, read-only job state
-`jobOwnership`), WS03 (C3 `ComposerTextController` adopted in `ChatScreen`),
-WS04 (C2 `MantaNavigator` + `startNewSession`, D14 GitHub device sign-in,
-`repoProbe()`), WS10 (`forgeStatus(validate:)`, D16).
+`ChatSessionStore.isBackgroundJobReadOnly`), WS03 (C3 `ComposerTextController`
+adopted in `ChatScreen`, `EnvironmentValues.composerController`), WS04 (C2
+`MantaNavigator` + `startNewSession`, D14 `GitHubDeviceSignInView`,
+`forgeProbe() -> ForgeProbeResult`), WS10 (D16/D21 `forgeStatus(validate:) ->
+ForgeConnectionStatus`).
 
 This workstream brings the desktop's GitHub surface to the phone: the branch/PR
 sheet behind the chat's branch chip, the checks chip, the "Connect GitHub"
@@ -45,9 +47,9 @@ adds only the methods in "Client members" (§12) to
 
 | Consumed member | Owner (D16) | Channel |
 |---|---|---|
-| `forgeStatus(validate: Bool)` → WS10's forge-status type (`connected`, `login`, `source`, `valid`) | WS10, `MantaAPIClient+Settings.swift` (wave A) | `forge:status` `[{validate}]` — WS05 always passes `validate: false` (desktop `ChatPanel.tsx:1055` calls it with no args; `rpc.mjs:952` → `validate === true` only when asked) |
-| `repoProbe()` → `{repos:[RepoHit{path, repoKey?…}], …}` | WS04, `MantaAPIClient+Sessions.swift` (wave A) | `forge:probe` |
-| `githubDeviceStart/Poll/Cancel` + `GitHubDeviceSignInStore`/`GitHubDeviceSignInView` | WS04 (D14) | `forge:device-*` — WS05 never calls these directly; it only presents the view |
+| `forgeStatus(validate: Bool) async throws -> ForgeConnectionStatus` (`connected`, `login`, `kind`, `source`, `valid`; type in WS10's `SettingsWireModels.swift`) | WS10, `MantaAPIClient+Settings.swift` (wave A1; D16/D21) | `forge:status` `[{validate}]` — WS05 always passes `validate: false` (desktop `ChatPanel.tsx:1055` calls it with no args; `rpc.mjs:952` → `validate === true` only when asked) |
+| `forgeProbe() async throws -> ForgeProbeResult` (`repos: [RepoHit]`, WS05 reads `RepoHit.path` + `repoKey`; types in WS04's `SessionForgeModels.swift`) | WS04, `MantaAPIClient+Sessions.swift` (wave A2) | `forge:probe` |
+| `GitHubDeviceSignInView(onConnected:onCancel:)` (+ WS04's `GitHubDeviceSignInStore`, `forgeDeviceStart/Poll/Cancel`) | WS04 (D14) | `forge:device-*` — WS05 never calls the `forgeDevice*` members; it only presents the view |
 | `configGet()` / `configUpdate(_:)` | existing (`MantaAPIClient.swift:752,757`) | `config:get` / `config:update` |
 | `projects()` | existing (`MantaAPIClient.swift:192`) | `tmux:list` |
 
@@ -235,10 +237,11 @@ through an injected `GitForgeClient` (a struct of `async throws` closures whose
 replaces the `subtitleChip` call in `sessionHeaderBlock` (M-05-1). Inputs:
 `branch: String?` (ChatScreen's ordinary git branch), `relPath: String?`,
 `cwd: String?`, `sessionId: String`, `shipModel: OpencodeModelID?` (the chat's
-model **override** only, as desktop), `tokens`.
+model **override** only, as desktop), `readOnly: Bool` (bound by M-05-1 to
+WS02's `ChatSessionStore.isBackgroundJobReadOnly`, which WS02 provides to WS05,
+02-chat-cards-queue.md:845), `tokens`.
 It reads the composer from `@Environment(\.composerController)` (WS03,
-injected on `ChatScreenContent` by M-03-3); writability is that controller's
-`acceptsInput`, which WS02 sets to `jobOwnership.job == nil` (M-03-7). See A.3a.
+injected on `ChatScreenContent` by M-03-3). See A.3a.
 
 Renders, in one `HStack` row (nothing at all if there is no branch AND no
 offer):
@@ -258,22 +261,44 @@ offer):
 3. Under the row: the **Connect offer** (Feature C) when
    `GitPanel.shouldOfferConnect(...)`.
 
-**A.3a Read-only chats.** A background-job chat is read-only (WS02 F6,
-`jobOwnership.job != nil`); the master excludes typing into such sessions.
-Two guards, both keyed on WS03's `ComposerTextController.acceptsInput`:
-1. **Not rendered.** `GitComposerBridge.make(controller:)` (in
-   `GitSessionHeaderRow.swift`) returns nil when the environment controller is
-   nil or `acceptsInput == false`. The header builds it when presenting a
-   sheet; with nil, `GitBranchSheet` passes `onSendToAgent: nil` to
-   `ReviewScreen` and `GitChecksSheet` gets `onSendFailures: nil`, so "Send to
-   agent" (line composer AND saved-draft cards) and "Send failures to the
-   agent" are not rendered.
-2. **Re-checked on use.** The bridge closure reads `controller.acceptsInput`
-   again at call time and calls `insert(text:mode: .append)`, which itself
-   returns `false` when `acceptsInput` is false (WS03 contract). A chat that
-   became read-only while a sheet was open therefore inserts nothing and shows
-   "This chat is read-only."; any other `false` shows "Couldn't add it to your
-   message." (C3: callers never ignore the Bool).
+**A.3a Read-only chats.** A background-job chat is read-only (WS02 F6:
+`ChatSessionStore.isBackgroundJobReadOnly == true` when `mutationPolicy ==
+.readOnlyJob`); the master excludes typing into such sessions. The **source of
+truth is WS02's canonical read-only signal** — `store.isBackgroundJobReadOnly`,
+which WS02 also mirrors into `composer.acceptsInput` (M-03-7, WS02 F6
+"Composer writability") — never the composer's default (`acceptsInput`
+defaults to `true`, WS03 F6). Three layers:
+1. **Not rendered.** The decision is pure:
+   `GitComposerPolicy.canInsert(readOnly: Bool, hasController: Bool,
+   acceptsInput: Bool) -> Bool` (in `GitForgeModels.swift`) = `!readOnly &&
+   hasController && acceptsInput`. `GitComposerBridge.make(readOnly:,
+   controller:)` (in `GitSessionHeaderRow.swift`) returns nil unless it is
+   true. The header builds the bridge when presenting a sheet; with nil,
+   `GitBranchSheet` passes `onSendToAgent: nil` to `ReviewScreen` and
+   `GitChecksSheet` gets `onSendFailures: nil`, so "Send to agent" (line
+   composer AND saved-draft cards) and "Send failures to the agent" are not
+   rendered. The sheets are also given `readOnly` and re-evaluate on change: if
+   a chat resolves to read-only while a sheet is open, those controls disappear.
+2. **Controller kept in sync (WS02, M-03-7).** WS02 sets
+   `composer.acceptsInput = !store.isBackgroundJobReadOnly` on appear and on
+   every change of `store.isBackgroundJobReadOnly`, both directions. M-05-1
+   step (b) verifies this binding exists when WS05 lands and adds exactly that
+   line if it is missing — WS05 never introduces a second, differently-keyed
+   binding.
+3. **Re-checked on use.** The bridge closure re-evaluates `canInsert` (reading
+   `readOnly` through a closure over the store, and `controller.acceptsInput`)
+   at call time and calls `insert(text:mode: .append)`, which itself returns
+   `false` when `acceptsInput` is false (WS03 contract). A chat that became
+   read-only while a sheet was open inserts nothing and shows "This chat is
+   read-only."; any other `false` shows "Couldn't add it to your message."
+   (C3: callers never ignore the Bool).
+
+Tests: `GitForgeTests.testCanInsertPolicyTruthTable` (pure, all 8 rows);
+`GitForgeStoreTests.testBridgeNilForReadOnlyJob` and
+`testBridgeRefusesAfterTurningReadOnly` (Xcode: a real
+`ComposerTextController`, a fake store flipping `isBackgroundJobReadOnly`
+true → assert `make` returns nil, a previously built bridge returns false and
+the controller's `text` is unchanged; flip back → bridge non-nil and inserts).
 
 **`GitBranchSheet`** (`MantaUI/GitBranchSheet.swift`) — `NavigationStack`
 inside the sheet (so Review can push). Title = branch name; toolbar **Done**.
@@ -350,7 +375,7 @@ Port verbatim from `chatUtils.ts`:
   the new result is `stale && pr == nil` and the previous state had a PR on the
   same branch, keep the previous PR/checks/rollup (a rate-limited poll,
   forge/index.mjs:758, must not flip the sheet to "Create pull request").
-  `status` is WS10's forge-status value; `applying` reads only `connected`.
+  `status` is WS10's `ForgeConnectionStatus`; `applying` reads only `connected`.
 
 Tests — `MantaUITests/GitForgeTests.swift` (pure, runs under `verify.sh`):
 `testBranchStateNoneWithoutBranchOrConnection`, `testBranchStatePRvsNoPR`,
@@ -515,8 +540,10 @@ The device sign-in is built **once, by WS04 in wave A**:
 `CloneFromGitHubSignIn.swift` declares `@MainActor final class
 GitHubDeviceSignInStore: ObservableObject` and `struct GitHubDeviceSignInView:
 View { init(onConnected: @escaping () -> Void, onCancel: @escaping () -> Void) }`;
-the `githubDeviceStart/Poll/Cancel` client methods live in WS04's
-`MantaAPIClient+Sessions.swift`; its pure logic and tests are WS04's. WS05
+the `forgeDeviceStart()` / `forgeDevicePoll(grantId:)` /
+`forgeDeviceCancel(grantId:)` client members live in WS04's
+`MantaAPIClient+Sessions.swift` (04-sessions.md:1286-1288); its pure logic
+(`GitHubDeviceFlow`) and tests are WS04's. WS05
 creates **no** device-flow store, view, pure type or client method. §C.3 is the
 behavioural contract D5 says WS04 implements; §C.4 is the only part WS05 builds.
 
@@ -543,35 +570,48 @@ failed." when empty; transport → "Couldn't reach the server. Try again.");
 `done` → connected; `expired`, or the local deadline passing → `.expired` and
 polling stops.
 
-**Lifecycle (required, review finding 8):**
-1. **One loop owner.** The store owns at most one poll `Task` (`pollTask`).
-   Starting a loop always cancels and replaces the previous one; there is no
-   second entry point that can spawn a loop.
-2. **Generation guard.** Every start (first open and every **Try again**)
-   increments `generation`; each start/poll reply is applied only if the
-   generation it was issued under is still current. A late `device-start` or
-   `device-poll` reply from a dismissed or restarted flow is dropped — it can
-   never call `onConnected`, change the stage, or reschedule.
-3. **Cancellation on every exit.** `onDisappear` (swipe dismissal, Done, parent
-   navigation), Cancel/Back/Skip and Try again all: cancel `pollTask`, bump
-   `generation`, and — if a grant exists — send `forge:device-cancel`.
-   Cancel/Back/Skip **await** that call before invoking `onCancel()`; a failed
-   cancel is logged (`os_log`, desktop logs via `ship("warn", …)`) and does not
-   block local dismissal (the grant simply expires box-side; the server's
-   cancel is a no-op for an unknown grant, forge/index.mjs:465-473).
-   `onDisappear` fires the cancel without awaiting (the view is gone).
-4. **Foreground wake.** On `scenePhase` → `.active` the store does **not**
-   start a loop; it only signals the existing `pollTask` (an
-   `AsyncStream`/continuation "wake" the loop awaits alongside its sleep). The
-   loop then polls at once only if `now - lastPoll >= interval`
-   (`shouldPollNow`), else resumes sleeping for the remainder — so returning
-   from Safari can neither double-poll nor beat the interval.
+**Lifecycle (required; round-1 finding 8, round-2 finding 3).** Stated against
+WS04's pinned API (04-sessions.md:631-648) so the implementer has one reading:
 
-Lifecycle tests WS04 must include (in its `CloneFromGitHub*` test file):
-dismissal during `.starting` (late start reply ignored, no `onConnected`),
-Try again while a poll is outstanding (old reply ignored, one loop running),
-foreground wake during sleep (no extra loop; poll only when interval elapsed),
-Cancel awaits `device-cancel` and still dismisses when it throws.
+1. **One loop owner.** `GitHubDeviceSignInStore` owns at most one poll `Task`
+   (`pollTask`). `start()` cancels and replaces it; nothing else creates one.
+2. **Generation guard, covering the start itself.** The store keeps
+   `private var generation = 0`. `start()` increments it **before** awaiting
+   `api.start()`, and every await site (start reply, each poll reply, every
+   sleep wake) proceeds only if its captured generation still equals
+   `generation` (and `!Task.isCancelled`). A grant-id check alone is
+   insufficient because a late **start** reply arrives before any grant
+   exists; the generation covers it. A stale reply can never call
+   `onConnected`, change `flow`, or reschedule.
+3. **Cancellation on every exit, with an awaited completion.** WS04's
+   `cancel()` must be `func cancel() async` (not fire-and-forget) and do, in
+   order: bump `generation`, cancel `pollTask`, then — if a grant exists —
+   `await api.cancel(grantId:)`. The view's Cancel / Back / Skip buttons run
+   `Task { await store.cancel(); onCancel() }` so `onCancel` follows the
+   cancel's completion; `onDisappear` (swipe, parent navigation) calls the
+   same `cancel()` without awaiting. **Failure reporting:** the API seam's
+   `cancel(grantId:)` stays non-throwing for callers, but the live adapter
+   (`ServerGitHubDeviceSignIn`) catches the client error and logs it with
+   `os_log(.error, "github device cancel failed: …")` (desktop logs via
+   `ship("warn", …)`); dismissal is never blocked (the grant expires
+   box-side; an unknown grant is a server no-op, forge/index.mjs:465-473).
+   WS04's API (§6) states exactly this ("awaited; failure logged by the live
+   adapter").
+4. **Foreground wake through the existing loop.** `sceneBecameActive()` never
+   polls or reschedules by itself: it calls `flow.tick(now:)` (may expire) and
+   then yields to the loop's wake channel (`AsyncStream<Void>` continuation the
+   loop's sleep races against). The loop, on wake, polls at once only if
+   `GitHubDeviceFlow.shouldPollNow(lastPoll:now:interval:)`, else sleeps the
+   remainder. With no running loop (e.g. `.expired`) the wake is a no-op —
+   it cannot spawn a second loop.
+
+Lifecycle tests WS04 must include (`GitHubDeviceSignInStoreTests.swift`, fake
+API + fake clock), in addition to its current list:
+`testDismissDuringStartIgnoresLateStartReply` (no `onConnected`, no grant,
+stage untouched), `testRetryDuringOutstandingPollDropsOldReply` (exactly one
+loop running afterwards), `testWakeDuringSleepUsesExistingLoop` (no extra loop;
+polls only when the interval elapsed), `testCancelAwaitsDeviceCancelBeforeOnCancel`,
+`testCancelFailureIsLoggedAndStillDismisses`.
 
 ### C.4 What WS05 builds
 
@@ -802,7 +842,7 @@ LEFT thread at line 10 lands on the old-10 row, not the new-10 row),
   M-05-2) → `InboxWorkScreen` (large detent).
 - **`InboxWorkStore`** (`MantaUI/InboxWorkStore.swift`, `@MainActor final
   class`): `load()` on appear and on pull-to-refresh (no polling) running
-  `forge:inbox` and WS04's `repoProbe()` concurrently (probe failure ignored,
+  `forge:inbox` and WS04's `forgeProbe()` concurrently (probe failure ignored,
   as desktop); holds `items`, `repoPaths: [String: String]` (repoKey → path),
   `phase: .loading | .loaded | .notConnected | .failed(String)`,
   `actionError: String?`, `actionNotice: String?`, `busyItem: String?`.
@@ -926,10 +966,10 @@ file; `Package.swift` goes through the wave-C integration step (D18/D1).
 
 | ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-05-1 | `ChatScreen.swift` (`sessionHeaderBlock`, today :1131-1150) | WS05, wave C | `GitSessionHeaderRow` | Replace the `subtitleChip` call with `GitSessionHeaderRow(branch: branch, relPath: branchRelPath, cwd: sessionWindow?.cwd, sessionId: store.sessionId, shipModel: modelStore.override, tokens: tokens)`; delete the now-unused `subtitleChip` / `branchCapsuleInfo` (the row renders the identical plain label when the forge isn't in play). ChatScreen's own branch poll is untouched. | WS02 wave B landed (`ChatScreen` + `jobOwnership`); WS03 M-03-3 (`composerController` env on `ChatScreenContent`) and WS02 M-03-7 (`acceptsInput`) applied |
-| M-05-2 | `SessionListView.swift` | WS05, wave C | `InboxWorkScreen` | (a) `SheetRoute` gains `case inbox` (`id: "inbox"`); (b) new `ToolbarItem(placement: .topBarTrailing)` before the `+` button: `Image(systemName: "tray")`, `.accessibilityLabel("Inbox")`, action `sheetRoute = .inbox` (with the existing selection haptic); (c) `sheetContent` case `.inbox` → `InboxWorkScreen(onClose: { sheetRoute = nil })`. The inbox's Start-a-session sets `sheetRoute = nil` then `navigator.startNewSession(draft)`, which WS04's `pendingDraft` consumer turns into `.create`. | WS04 wave A (`MantaNavigator.startNewSession`, `pendingDraft` consumer) |
-| M-05-3 | `SessionListView.swift` (WS04's `navigator.pending` consumer) | WS05, wave C | `ReviewScreen.forSession(_:)` | WS04's consumer ignores `.review` (04-sessions §11). Add: `case .review(let sid)`: dismiss the settings cover, `sheetRoute = .review(sessionID: sid)` (new `SheetRoute` case, `id: "review:\(sid)"`), clear `pending`; `sheetContent` → `NavigationStack { ReviewScreen.forSession(sid) }` (resolves cwd via `GitSessionLookup.cwd(for:in: store.projects)`; unknown session → "That session is no longer open"; `onSendToAgent: nil`). | WS04 wave A navigator consumer |
-| M-05-4 | `mobile/native/Package.swift` | Integration agent, wave C (D18; owner WS07 per D1) | — | Append `GitForgeModels.swift`, `ReviewDiff.swift`, `InboxWorkModels.swift` to the `MantaUI` target `sources`, and `GitForgeTests.swift`, `ReviewDiffTests.swift`, `InboxWorkTests.swift` to `MantaUITests` `sources`; then `./verify.sh` must pass (D19). | WS05 files exist (end of wave C) |
+| M-05-1 | `ChatScreen.swift` (`ChatScreenContent.sessionHeaderBlock`, today :1131-1150) | WS05, wave C | `GitSessionHeaderRow(branch:relPath:cwd:sessionId:shipModel:readOnly:tokens:)`; consumes `ChatSessionStore.isBackgroundJobReadOnly` (WS02), `EnvironmentValues.composerController` + `ComposerTextController.acceptsInput` (WS03) | (a) Replace the `subtitleChip` call with `GitSessionHeaderRow(branch: branch, relPath: branchRelPath, cwd: sessionWindow?.cwd, sessionId: store.sessionId, shipModel: modelStore.override, readOnly: store.isBackgroundJobReadOnly, tokens: tokens)`; delete the now-unused `subtitleChip` / `branchCapsuleInfo` (the row renders the identical plain label when the forge isn't in play). (b) Verify WS02's M-03-7 binding (`.onAppear` + `.onChange(of: store.isBackgroundJobReadOnly)` setting `composer.acceptsInput = !store.isBackgroundJobReadOnly`) is present (A.3a layer 2); add exactly that binding only if missing. ChatScreen's own branch poll is untouched. | WS02 wave B landed (`isBackgroundJobReadOnly`, M-03-7); WS03 M-03-3 (`composerController` env on `ChatScreenContent`) |
+| M-05-2 | `SessionListView.swift` | WS05, wave C | `InboxWorkScreen(onClose:)` (WS05); `MantaNavigator.startNewSession(_:)` (WS04) | (a) `SheetRoute` gains `case inbox` (`id: "inbox"`); (b) new `ToolbarItem(placement: .topBarTrailing)` before the `+` button: `Image(systemName: "tray")`, `.accessibilityLabel("Inbox")`, action `sheetRoute = .inbox` (with the existing selection haptic); (c) `sheetContent` case `.inbox` → `InboxWorkScreen(onClose: { sheetRoute = nil })`. The inbox's Start-a-session sets `sheetRoute = nil` then `navigator.startNewSession(draft)`, which WS04's `pendingDraft` consumer turns into `.create`. | WS04 wave A2 (`MantaNavigator.startNewSession`, `pendingDraft` consumer) |
+| M-05-3 | `SessionListView.swift` (WS04's `navigator.pending` consumer) | WS05, wave C | `ReviewScreen.forSession(_:)` | WS04's consumer ignores `.review` (04-sessions §11). Add: `case .review(let sid)`: dismiss the settings cover, `sheetRoute = .review(sessionID: sid)` (new `SheetRoute` case, `id: "review:\(sid)"`), clear `pending`; `sheetContent` → `NavigationStack { ReviewScreen.forSession(sid) }` (resolves cwd via `GitSessionLookup.cwd(for:in: store.projects)`; unknown session → "That session is no longer open"; `onSendToAgent: nil`). | WS04 wave A2 navigator consumer |
+| M-05-4 | `mobile/native/Package.swift` | Integration agent C (IC), after C (D18/D20; owner WS07 per D1) | — | Append `GitForgeModels.swift`, `ReviewDiff.swift`, `InboxWorkModels.swift` to the `MantaUI` target `sources`, and `GitForgeTests.swift`, `ReviewDiffTests.swift`, `InboxWorkTests.swift` to `MantaUITests` `sources`; then `./verify.sh` must pass (D19). | WS05 files exist (end of wave C) |
 
 ## 9. Mounts applied by this workstream
 
@@ -937,16 +977,21 @@ file; `Package.swift` goes through the wave-C integration step (D18/D1).
 |---|---|---|---|
 | M-05-1 … M-05-3 | WS05 | as above | applied by WS05 in wave C |
 
-Cross-checked the `Mount requests` tables of 01–04 and 06–10 in this folder:
-no other workstream requests a mount in a `Git*`, `Review*` or `Inbox*` file,
-and none is assigned to WS05 as applier. (WS10's GitHub settings row explicitly
-does not add a Connect button — `10-settings-box.md:278-279`.)
+Matches the master's canonical mount ledger (`00-master.md`, rows M-05-1 …
+M-05-4: same files, appliers WS05/C and IC after C) and the receiving tables of
+WS02 ("Not received / superseded": `sessionHeaderBlock` applied by WS05) and
+WS04 (§15: inbox button + `.review` handler applied by WS05). M-03-7 is applied
+by WS02 in wave B (WS02 F6); M-05-1(b) only verifies it. No other
+workstream requests a mount in a `Git*`, `Review*` or `Inbox*` file, and none is
+assigned to WS05 as applier. (WS10's GitHub settings row does not add a Connect
+button — `10-settings-box.md:368-369`.)
 
 ## 10. Contracts provided / consumed
 
 **Consumed**
-- **C1/D16**: internal `call`/`callRequired`/`jsonObject`; WS10's
-  `forgeStatus(validate:)` + its status type; WS04's `repoProbe()`; existing
+- **C1/D16/D21**: internal `call`/`callRequired`/`jsonObject`; WS10's
+  `forgeStatus(validate:) -> ForgeConnectionStatus`; WS04's
+  `forgeProbe() -> ForgeProbeResult` (`RepoHit`); existing
   `configGet`/`configUpdate`/`projects()`.
 - **C2**: `MantaNavigator.startNewSession(_:)` (inbox) and `.review(sessionID:)`
   handling (M-05-3, WS05 implements it per C2).
@@ -999,10 +1044,12 @@ func forgeInbox() async throws -> WorkInboxResult                               
 func delegateStart(prompt: String, sessionID: String, directory: String) async throws -> GitDelegateStartResult  // delegate:start
 ```
 
-**Not declared by WS05** (consumed, D16): `forgeStatus(validate:)` (WS10),
-`repoProbe()` and `githubDevice*` (WS04), `configGet`/`configUpdate`/`projects`
-(existing). WS05 must not add `forgeProbe`, `gitAddWorktree`,
-`forgeDeviceStart/Poll/Cancel` or a zero-argument `forgeStatus()`.
+**Not declared by WS05** (consumed, D16/D21): `forgeStatus(validate:)` +
+`ForgeConnectionStatus` (WS10); `forgeProbe()` + `ForgeProbeResult`/`RepoHit`
+and `forgeDeviceStart/Poll/Cancel` (WS04; WS05 never calls the device members);
+`configGet`/`configUpdate`/`projects` (existing). WS05 must not declare any of
+these, nor `gitAddWorktree`, a zero-argument `forgeStatus()`, or any alias such
+as `repoProbe()`.
 
 ## 13. Open questions
 
@@ -1020,14 +1067,14 @@ Per-workstream review (`reviews/round1/05-git-pr-review.md`):
    "cancelling the create sheet leaves nothing behind" + store test asserting
    zero mutating calls.
 2. **BLOCKING — device-flow ownership.** Fixed (§4 C.2–C.4, §7, §12): WS04 owns
-   `GitHubDeviceSignInView`/`GitHubDeviceSignInStore` + `githubDevice*` (D14);
+   `GitHubDeviceSignInView`/`GitHubDeviceSignInStore` + `forgeDevice*` (D14; name corrected in round 2);
    WS05 deleted `GitConnectGitHubSheet`, `GitDeviceFlow*`, their tests and its
    device client methods, and only presents WS04's view. §C.3 is the behavioural
    contract D5 points at.
 3. **BLOCKING — read-only chats.** Fixed (A.3a, B.2, D.2, acceptance A.5/D.4):
    bridge is nil when `composerController` is nil or `acceptsInput` is false →
    `onSendToAgent: nil` / `onSendFailures: nil`; second guard re-checks at call
-   time and `insert` itself returns false (WS03 M-03-7).
+   time and `insert` itself returns false (WS03 contract, kept current by M-03-7).
 4. **BLOCKING — merge snapshot.** Fixed (A.3): `GitMergeTarget` captured on tap,
    dialog rendered from it, `merge(_ target:)` never rereads state; no force
    unwraps; store tests for a poll replacing and clearing the PR.
@@ -1063,3 +1110,39 @@ Cross-cutting review (`reviews/round1/00-cross-cutting.md`), findings naming WS0
 - **#12 append semantics** — `.append` is one blank line everywhere (C3), Send
   failures appends (D6); the desktop's single-newline review bridge noted as an
   accepted cosmetic difference (D.2).
+
+## Review responses (round 2)
+
+Per-workstream review (`reviews/round2/05-git-pr-review.md`):
+
+1. **BLOCKING — nonexistent `repoProbe()`.** Fixed (header, §1 consumed table,
+   §E.2, §10, §12): the inbox calls WS04's `forgeProbe() async throws ->
+   ForgeProbeResult` and reads `RepoHit.path`/`repoKey` (04-sessions.md:1285,
+   1236); device members are named `forgeDeviceStart/Poll/Cancel`
+   (04-sessions.md:1286-1288) and documented as not called by WS05. No alias
+   added; §12 forbids one. WS05 calls only `forgeProbe()` of that list (WS04's
+   reuse note now agrees).
+2. **BLOCKING — read-only guard source.** Fixed (A.3a, M-05-1): the header now
+   takes `readOnly:` bound to `ChatSessionStore.isBackgroundJobReadOnly` (the
+   member WS02 provides, 02:845) AND relies on WS02's M-03-7 binding
+   `composer.acceptsInput = !store.isBackgroundJobReadOnly` (canonical form
+   after reconciliation), which WS02 applies and acknowledges (WS02 F6). Pure `GitComposerPolicy.canInsert`
+   truth-table test plus Xcode bridge tests against a real
+   `ComposerTextController` through read-only → writable transitions.
+   M-05-1(b) verifies the binding instead of adding a second one.
+3. **SHOULD — device lifecycle in WS04's API.** Tightened §C.3 against WS04's
+   pinned API: `cancel()` must be `async` and awaited before `onCancel`;
+   failure logged by the live adapter `ServerGitHubDeviceSignIn` (`os_log`);
+   generation token bumped before `api.start()` so late start replies are
+   dropped; `sceneBecameActive()` only wakes the existing loop. Five named
+   store tests. Reconciliation: WS04 §6 now specifies all of it (API,
+   comment, the five tests); WS05 calls `forgeProbe()` only.
+
+Cross-cutting review (`reviews/round2/00-cross-cutting.md`), findings naming WS05:
+
+- **#5 writability never propagated** — WS02 now applies M-03-7 (02:444-449);
+  WS05 consumes it and additionally gates on `isBackgroundJobReadOnly`
+  (A.3a); transition tests specified.
+- **#9 missing probe method** — same fix as finding 1.
+- **Ledger rows M-05-1 … M-05-4** — §8/§9 match the consolidated ledger;
+  M-05-1's prerequisite now cites WS02's M-03-7 instead of leaving it missing.

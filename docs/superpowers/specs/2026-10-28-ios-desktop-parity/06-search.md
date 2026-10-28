@@ -555,11 +555,16 @@ Manifest for the integration step:
 
 | ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-06-1 | `MantaUI/ChatScreen.swift` | **WS02**, wave B | `SearchScreen`, `SearchScope.fromProjects(_:primarySessionId:)` | See the M-06-1 notes below the table. | WS06's files exist in wave B (symbols are pinned here, so WS02 can write the call before they land). C2 `.message` handling (WS02 F10 + WS04 M2) is in the same wave. |
+| M-06-1 | `MantaUI/ChatScreen.swift` | **WS02**, wave B | `SearchScreen`, `SearchScope.fromProjects(_:primarySessionId:)` | See the M-06-1 notes below the table. | WS06's files exist in wave B (symbols are pinned here, so WS02 can write the call before they land). C2 `.message` handling (WS02 F10 in wave B; WS04 §11 `SessionListView` consumer in A2). |
 | M-06-2 | `MantaUI/SessionListView.swift` | **Integration agent B** | `SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive`, `SearchCopy.normalized` | See the M-06-2 notes below the table. | WS04 landed (wave A) and the WS06 files landed (wave B). Apply in ledger order alongside WS09's mount on this file. |
 | M-06-3 | `mobile/native/Package.swift` | **Integration agent B** | none | Add `"SearchModels.swift"` to `MantaUI` target `sources` and `"SearchTests.swift"` to `MantaUITests` `sources` (alphabetical). | WS06's files landed. |
 
 **M-06-1 exact change** (`ChatScreen.swift`):
+- **The receiver must call `SearchScope.fromProjects(_:primarySessionId:)`**
+  (defined in `SearchScreen.swift`). There is NO `SearchScope.build(projects:…)`
+  overload. The pure builder is `build(windows:primarySessionId:)` and stays
+  free of `MantaProject`, so `SearchModels.swift` remains Foundation-only (D19).
+  WS02's receipt row M-06-1 uses the call below verbatim (reconciled).
 - In `.toolbar` (`ChatScreen.swift:345-351`), before the "Session actions"
   ellipsis, add
   `ToolbarItem(placement: .primaryAction) { Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search conversations") }`.
@@ -571,7 +576,10 @@ Manifest for the integration step:
   screen.
 - `MantaNavigator` and `SessionListStore` are already in the environment.
 
-**M-06-2 exact change** (`SessionListView.swift`):
+**M-06-2 exact change** (`SessionListView.swift`). This matches WS04's
+receipt (§15, delegated to integration agent B) and the master's canonical
+mount ledger. Integration agent B applies it BEFORE WS09's M-09-2 on the same
+file.
 - Add `case conversationSearch(seed: String)` to `SheetRoute`
   (`:1029-1041`), with id `"search:\(seed)"`. It renders
   `SearchScreen(scope: .fromProjects(store.projects, primarySessionId: nil), seed: seed)`.
@@ -604,7 +612,7 @@ Consumed, owned elsewhere:
 - **C1**: adds `MantaAPIClient+Search.swift`, with one member (see Client
   members). It uses the internal `callRequired` / `jsonObject`.
 - **C2 consumed**: calls `open(.message(sessionID:messageID:))` only. This needs
-  WS02 F10 (same session) and WS04's root handler from WS02 M2 (other session).
+  WS02 F10 (same session) and WS04's §11 `SessionListView` `.message` consumer (other session).
 - **C4 consumed**: the chat nav-bar search mount (M-06-1), applied by WS02 per
   D18.
 - **C7**: `MantaUITests/SearchTests.swift`. No server module.
@@ -668,5 +676,42 @@ D9 (`maxPrimary: 3`).
   - `SearchModels.swift` was made Foundation-only by replacing `MantaProject`
     with `SearchScopeWindow` and moving the wire types into it, so it and its
     tests run under `verify.sh` (D19).
+
+No rebuttals.
+
+## Review responses (round 2)
+
+**06-search.md**
+
+1. **BLOCKING, the WS02 receipt calls the removed `SearchScope.build(projects:)`.**
+   No change is needed to WS06's provider. This spec already pins only
+   `build(windows:primarySessionId:)` (pure, Foundation-only) plus the app
+   adapter `SearchScope.fromProjects(_:primarySessionId:)` in
+   `SearchScreen.swift`. Per the finding, no compatibility overload was added.
+   - M-06-1 now states explicitly that the receiver must use
+     `.fromProjects(sessionStore.projects, primarySessionId: sessionId)` and the
+     ID `M-06-1`.
+   - WS02's receipt now matches (reconciliation after round 2).
+
+**00-cross-cutting.md**
+
+- **#7 (same issue).** Handled as above.
+- **Consolidated ledger rows M-06-1/2/3.** My table matches them exactly:
+  - M-06-1: ChatScreen.swift, applied by WS02 in wave B, providers
+    `SearchScreen` / `SearchScope.fromProjects`.
+  - M-06-2: SessionListView.swift, applied by integration agent B after wave B,
+    providers `SearchScreen` / `fromProjects` / `SearchCopy.isActive` /
+    `SearchCopy.normalized`.
+  - M-06-3: Package.swift, applied by integration agent B, `SearchModels` /
+    `SearchTests`.
+
+Provider symbol names were re-verified against current spec text:
+- `SessionListStore.window(forSessionID:) -> (project: String, window: MantaWindow)?`
+  (`04-sessions.md:97,1352`).
+- `MantaNavigator.open(_ route: MantaRoute)` (`04-sessions.md:1081`).
+- The `.message` route is left pending by WS04 for WS02 to consume
+  (`04-sessions.md:1104-1108`).
+
+D20 (wave A sub-waves) and D21 do not affect WS06, which runs in wave B.
 
 No rebuttals.

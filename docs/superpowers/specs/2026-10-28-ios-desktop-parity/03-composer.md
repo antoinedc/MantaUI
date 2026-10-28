@@ -1,6 +1,6 @@
 # WS03 — Composer: `/` commands + skills, `@` agents + references, insertion API (C3)
 
-Status: revised (round 1) · Wave: **A** · Depends on: wave-0 foundation (C1 helpers are
+Status: revised (round 2) · Wave: **A1** (D20) · Depends on: wave-0 foundation (C1 helpers are
 already `internal`, `MantaAPIClient.swift:944-984`; `NewSessionDraft` /
 `NewSessionDraftAttachment` scaffolded in `MantaNavigation.swift` per D2) · Provides:
 **C3** (`ComposerTextController`, `insert`, `attach`, `newSessionDraft(cwd:)`, the
@@ -214,10 +214,14 @@ text only if unchanged (`shouldClearDraft`, `inboxState.ts:144-146`), and guard 
       let agentNames: [String]
   }
   enum ComposerSubmissionSettle {
-      /// After the box ACCEPTED: drop only the submitted chips; clear text + agent
-      /// selections only if the draft is still exactly the submitted text.
+      /// After the box ACCEPTED a message/command: drop only the submitted chips; clear text +
+      /// agent selections only if the draft is still exactly the submitted text.
       static func accepted(_ s: ComposerSubmission, text: String, attachments: [ComposerAttachment],
                            agentNames: [String]) -> (text: String, attachments: [ComposerAttachment], agentNames: [String])
+      /// After a LOCAL built-in (/compact, /fork, confirmed /clear) was triggered: nothing was
+      /// sent, so chips and agent selections are never touched; only the typed command text is
+      /// consumed, and only if the draft is still exactly the submitted text.
+      static func localAction(_ s: ComposerSubmission, text: String) -> String
   }
   ```
   `ComposerAttachment` moves verbatim from `ComposerView.swift:26-37` into
@@ -255,27 +259,44 @@ text only if unchanged (`shouldClearDraft`, `inboxState.ts:144-146`), and guard 
   listed above already calls `submit()`, so all are covered. Flow:
   1. `/handoff` branch (unchanged).
   2. If the trimmed text starts with `/` and is not handoff: **synchronously** set
-     `submitInFlight = true` and capture `snapshot = ComposerSubmission(text:, attachmentIDs:
-     ready chip ids, agentNames:)`, plus `ready: [SendPromptInput.Attachment]`, `delivery`,
-     `running = store.running`, `model`, `planAgent` — then start one `Task { @MainActor in … }`
-     which releases `submitInFlight = false` on every exit path (written as a single
-     `defer` at the top of the task body).
+     `submitInFlight = true` and capture the user's **payload** — `snapshot =
+     ComposerSubmission(text:, attachmentIDs: ready chip ids, agentNames:)`, `ready:
+     [SendPromptInput.Attachment]`, the chosen `delivery` preference (Now / After this turn),
+     `modelPref = modelStore.promptModel`, `planAgentPref`, `background` (F3) — then start one
+     `Task { @MainActor in … }` that releases `submitInFlight = false` on every exit path
+     (a single `defer` at the top of the task body). **Session state (`store.running`, the
+     mutation policy after M-03-9) is NOT snapshotted** — it may change during the lookup.
   3. In the task: `remote = sources.loaded list` or `await sources.awaitCommands(timeout: .seconds(3))`
-     (nil → treated as unknown). All later steps use the **snapshot**, never the live draft.
-  4. `planSlashSend(text: snapshot.text.trimmed, running:, remote:)`:
-     - `.prompt` → the existing prompt path with the snapshot's text/chips/mentions, then
-       `ComposerSubmissionSettle.accepted` (the existing path already clears synchronously
-       for non-`/` text; for `/…` text that resolves to a prompt the settle rule is used);
-     - `.builtin(.compact)` → `store.compact()`; `.clear` → `showClearConfirm = true` (draft kept
-       until confirmed); `.fork` → `onSlashFork?()` then settle; a nil callback → `.prompt`;
+     (nil → treated as unknown). Payload comes from the snapshot, never the live draft.
+  4. **Immediately before dispatch**, re-read the live state: `let runningNow = store.running`
+     (and, after M-03-9, `store.mutationPolicy`). Then
+     `planSlashSend(text: snapshot.text.trimmed, running: runningNow, remote:)`:
+     - `.prompt` → `store.sendOrSteer(text:attachments:model:mentions:agent:delivery:)` with the
+       snapshot payload (the store itself re-checks `running` at dispatch,
+       `ChatSessionStore.swift:1276-1290`, and owns failure recovery via failed pending rows,
+       exactly like today's synchronous path), then `ComposerSubmissionSettle.accepted`;
+     - `.builtin(.compact)` → `store.compact()`, then `localAction`; `.clear` →
+       `showClearConfirm = true` (draft untouched; the dialog's Clear runs `onSlashClear` —
+       which swaps the session and rebuilds the screen); `.fork` → `onSlashFork?()`, then
+       `localAction` — **chips and agent selections stay in this composer whether the fork
+       succeeds or fails** (the callback is `Void` and fork failures are reported by ChatScreen
+       itself, `ChatScreen.swift:968-993`); a nil callback → `.prompt`;
      - `.refuse(msg)` → `surfaceHint(msg)`, draft untouched;
-     - `.command` → `runCommand` with the snapshot (model/agent nil and `delivery` set when
-       `running`; background per F3).
+     - `.command` → `runCommand` with the snapshot payload: if `runningNow` (and not
+       background) → `delivery: <preference>.wire`, `model: nil`, `agent: nil`; if idle →
+       `delivery: nil`, `model: modelPref`, `agent: planAgentPref`; background → F3.
+       So a turn that started during the lookup gets a steer/queue delivery (no model sync,
+       `opencode.mjs:2987-2992`), and a turn that ended during the lookup gets an ordinary idle
+       command instead of a refusal.
   5. Command success → `PromptHistoryStore.append`, apply `ComposerSubmissionSettle.accepted`
      to the live `text` / `attachments` / `agentMentionNames`, then `store.refreshInbox()` if
      it was a running-turn send else `await store.refetch()`.
   6. Failure → nothing cleared; `surfaceHint("Couldn't run /<name> — \(message)")` using the
      `MantaError` server/transport text.
+  7. After M-03-9 (wave B): if `store.mutationPolicy == .resolving` at step 4 and the plan is
+     `.command` or a built-in → `surfaceHint("One moment — checking this session")`, draft
+     untouched (WS02's copy for refused mutations while resolving; a command cannot be parked
+     in WS02's prompt outbox). `.prompt` still goes to `sendOrSteer`, which WS02 parks.
   Plain (non-`/`) text keeps today's synchronous path untouched.
 - No optimistic transcript row (that pipeline is WS02's store); the spinner covers the gap.
 
@@ -292,9 +313,17 @@ New `ComposerModelsTests.swift` (runs under `verify.sh`):
 - **a chip added during the request survives** (only snapshot ids removed);
 - **text edited during the request survives** with its agent selections, while submitted
   chips are still removed (no double send);
-- snapshot ids already removed by the user → no crash, nothing else removed.
-Guard behaviour (Mac-only `ComposerTextControllerTests.swift` is not needed; the guard is a
-view `@State`): covered by acceptance below.
+- snapshot ids already removed by the user → no crash, nothing else removed;
+- `localAction` (`/fork` with one ready chip + one agent selection): returns `""` when the
+  draft is unchanged and the edited text when it changed; the caller never passes chips or
+  agents to it, so both survive — asserted by a test that runs `localAction` and then checks
+  the untouched arrays for the "fork succeeded" and "fork failed" cases (the composer's
+  behaviour is identical because it does not learn the fork's outcome).
+`ComposerTypeaheadTests.swift` also covers the dispatch-time re-read: `planSlashSend` for the
+same snapshot text with `running: false` vs `true` (idle→running: `.command` either way, the
+caller picks delivery from `runningNow`; running→idle for `/compact`: `.refuse` becomes
+`.builtin(.compact)`).
+Guard behaviour (a view `@State`) is covered by acceptance below.
 
 ### Acceptance
 - [ ] `/review the auth module` + Send (idle) runs the command; the literal text is not posted.
@@ -304,6 +333,14 @@ view `@State`): covered by acceptance below.
 - [ ] A refused command keeps text + chips and shows "Couldn't run /<name> — …".
 - [ ] Two rapid Sends during the command-list wait dispatch once.
 - [ ] Editing the draft or adding a chip during the request keeps the edit / new chip.
+- [ ] `/fork` with a ready chip: the chip stays in the original composer after a successful
+      fork and after a failed one.
+- [ ] Idle when Send is tapped, a turn starts during the command-list wait → the command goes
+      out with the chosen delivery and appears in the pending card (no model switch).
+- [ ] Running when Send is tapped, the turn ends during the wait → an idle command runs (with
+      model/agent); `/compact` in the same situation compacts instead of being refused.
+- [ ] (after M-03-9) A command sent while the session is still being checked shows
+      "One moment — checking this session" and keeps the draft.
 - [ ] `/usr/local is full` is sent as a normal message.
 
 ---
@@ -480,11 +517,20 @@ New **`ComposerTextController.swift`** (SwiftUI; app target only):
 @MainActor final class ComposerTextController: ObservableObject {
     @Published var text: String
     @Published var attachments: [ComposerAttachment]
-    /// false while the chat is read-only (WS02 sets it, M-03-7); insert/attach then return false.
+    /// false only while the chat is a background job (WS02 keeps it in sync, M-03-7);
+    /// insert/attach then return false. `.resolving` and `.allowed` both keep it true —
+    /// typing and inserting stay possible while WS02 checks the session (its outbox parks
+    /// sends); sending is gated separately by WS02's store.
     @Published var acceptsInput = true
     /// Bumped on every successful insert/attach; ChatScreen focuses the field on change.
     @Published private(set) var focusRequest = 0
-    init(text: String = "", attachments: [ComposerAttachment] = [])
+    /// Set by the seeding init when some draft attachments were rejected; ChatScreen shows it
+    /// once on appear and clears it.
+    @Published private(set) var seedNotice: String?
+    init(text: String = "", attachments: [ComposerAttachment] = [], draft: NewSessionDraft? = nil)
+        // seeds text/chips, then `apply(draft)` once; rejected count > 0 →
+        // seedNotice = "1 attachment couldn't be carried over" / "N attachments couldn't be carried over"
+    func consumeSeedNotice() -> String?
     @discardableResult func insert(text: String, mode: ComposerInsertMode) -> Bool   // quoteBlock = QuoteText.buildQuoteBlock
     @discardableResult func attach(remotePath: String, displayName: String, mime: String?) -> Bool
         // mime ?? ChatVoice.mime(forFilename: displayName) (falls back to the path's last
@@ -509,17 +555,27 @@ Rules:
 
 ### ChatScreen adoption (WS03, wave A — D3/D13; ledger M-03-1…M-03-4)
 1. `ChatScreen.swift:264-269` → `@StateObject private var composer: ComposerTextController`;
-   init (297-309) seeds `ComposerTextController(text: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""), attachments: carryOver?.attachments ?? [])`,
-   then `composer.apply(draft)` when a draft is passed (see 4).
+   init (297-309) sets `_composer = StateObject(wrappedValue: ComposerTextController(text:
+   HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""), attachments:
+   carryOver?.attachments ?? [], draft: draft))`. The `StateObject` autoclosure runs once per
+   screen identity, so re-renders of the struct never re-seed.
 2. All uses → `composer.text` / `composer.attachments` (459, 574-575 as `$composer.text` /
    `$composer.attachments`, 710-712, 733, 741-742, 1004). ComposerView's API is unchanged.
 3. `.environment(\.composerController, composer)` on the `ChatScreenContent` root (so sheets it
    presents inherit it) and `.onChange(of: composer.focusRequest) { _, _ in composerFocused = true }`.
    `quote(_:into:)` `.thisSession` → `if !composer.insert(text: selection, mode: .quote) { store.actionHint = "Nothing to quote" }`;
    `.newSession` keeps `forkSession(seed: block)` (D12).
-4. `ChatScreen` and `ChatScreenContent` gain `draft: NewSessionDraft? = nil`; the wrapper passes
-   it only while `currentSessionId == nil` (a clear/handoff swap never re-applies it). A
-   rejected-attachment count > 0 sets `store.actionHint = "N attachment(s) couldn't be carried over"`.
+4. `ChatScreen` (wrapper, memberwise) gains `var draft: NewSessionDraft? = nil`;
+   `ChatScreenContent.init` gains `draft: NewSessionDraft? = nil`. The wrapper passes
+   `currentSessionId == nil ? draft : nil`, so a clear or handoff swap (which rebuilds the
+   content via `.id(sid)`, `ChatScreen.swift:140-160`) never re-applies it; handoffs keep using
+   the existing `carryOver` path only. In the content's existing `onAppear` block (≈`:355`):
+   `if let n = composer.consumeSeedNotice() { store.actionHint = n }`.
+   **The one new-chat seed contract (finding 2):** the create flow (WS04) carries the
+   confirmed draft to the destination and calls `ChatScreen(…, seed: target.seed ?? "", draft: target.draft)`
+   with `target.seed == nil`, i.e. an empty seed (`seed` stays the quote-fork channel, D12). No `initialCarryOver`, no
+   `seedAttachments`: chips reach the composer only through `apply` → `attach`, so they are
+   validated (absolute path, no duplicates) as D11 requires.
 No legacy-binding fallback remains; WS02 builds on `composer` in wave B.
 
 ### Tests
@@ -551,13 +607,24 @@ The type is `NewSessionDraft` / `NewSessionDraftAttachment` in `MantaNavigation.
   draft.text, mode: .append)` when non-blank, then `attach(remotePath:displayName:mime:)` per
   attachment; returns how many attachments were rejected. `cwd`, `worktreeBranch`,
   `linkedIssueURL` are create-sheet concerns (WS04) and are ignored here.
-- The `ChatScreen(draft:)` parameter (adoption step 4) is the consumption point for WS04's
-  create flow (D11: "maps back via `attach`").
+- `ComposerTextController(…, draft:)` + the `ChatScreen(draft:)` parameter (adoption step 4,
+  wave A1) is the **only** consumption point for WS04's create flow (D11: "maps back via
+  `attach`"). WS04's consumer (A2, after A1): put the confirmed `NewSessionDraft` on its
+  `SessionOpenTarget` as a non-identity `draft` field and pass `ChatScreen(…, draft: target.draft)`;
+  this replaces M-04-7 (`initialCarryOver`) and WS04's `SessionDraftCarry.carryOver` conversion,
+  and WS02's old `seedAttachments` receipt for this flow.
 
 Tests (`ComposerTextControllerTests.swift`): `newSessionDraft` drops uploading chips, maps
 fields, leaves metadata nil and passes `cwd` through (including nil); `apply` seeds text into
 an empty composer, appends below an existing draft, attaches each attachment, and counts a
-duplicate as rejected.
+duplicate as rejected; the seeding init with a draft holding one valid and one relative-path
+attachment yields text once, one chip, and `seedNotice == "1 attachment couldn't be carried over"`;
+`consumeSeedNotice()` returns it once then nil; a controller built without a draft (the
+post-clear/handoff rebuild) has no seed text and no notice.
+
+Acceptance (with WS04's consumer): after Create, the new chat shows the draft text once and
+its chips; a rejected attachment shows the notice once; clearing that chat or handing it off
+does not bring the draft back.
 
 ---
 
@@ -588,23 +655,41 @@ No server files. No `generated/swift/*` change.
 
 ## Mount requests
 
+Waves per D20 (A1 = WS10/WS01/WS03; A2 = WS04/WS08; IA/IB = integration agents after A2/B).
+IDs, appliers and provider symbols match the master's canonical mount ledger (`00-master.md`).
+
 | ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-03-1 | `ChatScreen.swift` | WS03, wave A (D13) | `ComposerTextController` | Replace `@State composerText`/`composerAttachments` (264-269) with `@StateObject composer`; seed in init (297-309) | WS03 `ComposerTextController.swift` |
-| M-03-2 | `ChatScreen.swift` | WS03, wave A | `composer.text`, `composer.attachments` | Rewrite uses at 459, 574-575, 710-712, 733, 741-742, 1004 | M-03-1 |
-| M-03-3 | `ChatScreen.swift` | WS03, wave A | `EnvironmentValues.composerController`, `focusRequest`, `insert(text:mode:)` | Inject environment on `ChatScreenContent`; focus on `focusRequest`; quote `.thisSession` → `insert(.quote)` with hint on `false` | M-03-1 |
-| M-03-4 | `ChatScreen.swift` | WS03, wave A | `NewSessionDraft` (wave 0), `apply(_:)` | `draft: NewSessionDraft? = nil` on `ChatScreen` + `ChatScreenContent`, applied once; hint on rejected count | M-03-1; D2 scaffold |
-| M-03-5 | `ChatModelStore.swift` | WS09, wave B (owns file) | `agentsLoadError: String?`, `retryAgents()` | `loadAgentsIfNeeded` records the error message (instead of `[]`) and leaves `agents` nil; `retryAgents()` clears the error, resets `didLoadAgents` and reloads; success clears the error | — |
-| M-03-6 | `ComposerView.swift` | Integration agent B (WS03 not in wave B) | `ComposerTypeahead.agentRows(…loadError:)`, M-03-5 symbols | Pass `modelStore.agentsLoadError` instead of `nil`; the retry row's tap calls `modelStore.retryAgents()` | M-03-5 |
-| M-03-7 | `ChatScreen.swift` | WS02, wave B | `ComposerTextController.acceptsInput` | Set `composer.acceptsInput = (jobOwnership.job == nil)` wherever WS02 swaps ComposerView for its read-only bar | M-03-1; WS02 read-only job store |
-| M-03-8 | `Package.swift` | Integration agent A | files listed in the manifest above | Add 2 sources + 2 test files | WS03 files exist |
+| M-03-1 | `ChatScreen.swift` | WS03, A1 (D13) | `ComposerTextController.init(text:attachments:draft:)` | Replace `@State composerText` / `composerAttachments` (264-269) with `@StateObject private var composer: ComposerTextController`, created in `init` (297-309) via `StateObject(wrappedValue:)` from `seed` + `carryOver` + `draft` | WS03 `ComposerTextController.swift` |
+| M-03-2 | `ChatScreen.swift` | WS03, A1 | `ComposerTextController.text`, `.attachments` | Rewrite uses at 459, 574-575 (`$composer.text`, `$composer.attachments`), 710-712, 733, 741-742, 1004 | M-03-1 |
+| M-03-3 | `ChatScreen.swift` | WS03, A1 | `EnvironmentValues.composerController`, `ComposerTextController.focusRequest`, `insert(text:mode:)` | `.environment(\.composerController, composer)` on the `ChatScreenContent` root; `.onChange(of: composer.focusRequest) { _, _ in composerFocused = true }`; quote `.thisSession` → `insert(text: selection, mode: .quote)`, `false` → `store.actionHint = "Nothing to quote"` | M-03-1 |
+| M-03-4 | `ChatScreen.swift` | WS03, A1 | `NewSessionDraft` (D2 scaffold), `ComposerTextController.consumeSeedNotice()` | `var draft: NewSessionDraft? = nil` on `ChatScreen`; `draft:` on `ChatScreenContent.init`; wrapper passes `currentSessionId == nil ? draft : nil`; `onAppear` shows `consumeSeedNotice()` via `store.actionHint` | M-03-1; D2 scaffold |
+| M-03-5 | `ChatModelStore.swift` | WS09, B (owns file, D1) | — (WS09 adds) `@Published private(set) var agentsLoadError: String?`; `func retryAgents()` | `loadAgentsIfNeeded()` (135-143): on failure set `agentsLoadError = <MantaError message>` and leave `agents == nil` (instead of `[]`); on success set `agents` and `agentsLoadError = nil`. `retryAgents()`: `agentsLoadError = nil; didLoadAgents = false; loadAgentsIfNeeded()`. WS09 tests: failure → error set + agents nil; retry → loaded + error nil; success path unchanged (plan chip still sees the same `agents`). | — |
+| M-03-6 | `ComposerView.swift` | IB (WS03 not in B) | `ComposerTypeahead.agentRows(agents:loadError:query:limit:)`, M-03-5 members | Replace the wave-A argument `loadError: nil` with `modelStore.agentsLoadError`; the tappable status row's action calls `modelStore.retryAgents()` | M-03-5 committed |
+| M-03-7 | `ChatScreen.swift` | WS02, B (owns file) | `ComposerTextController.acceptsInput` (WS03); `ChatSessionStore.isBackgroundJobReadOnly` (WS02, canonical read-only signal) | In `ChatScreenContent`: `.onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }` and `.onChange(of: store.isBackgroundJobReadOnly) { _, ro in composer.acceptsInput = !ro }` — covers a job screen opened directly, reclassified after opening, and transitions back to `.allowed`. `.resolving` keeps `true` (typing allowed; sends are parked by WS02). | M-03-1; WS02 F6 (`isBackgroundJobReadOnly`) |
+| M-03-8 | `mobile/native/Package.swift` | IA | WS03 manifest (Files) | Add `ComposerModels.swift`, `ComposerInsertion.swift` to `MantaUI` sources; `ComposerModelsTests.swift`, `ComposerInsertionTests.swift` to test sources | WS03 files committed |
+| M-03-9 | `ComposerView.swift` | IB (WS03 not in B) | WS02's `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`) | In the F2 task, step 4: read `store.mutationPolicy`; when `.resolving` and the plan is `.command` / `.builtin` → `surfaceHint("One moment — checking this session")`, draft untouched (F2 step 7) | WS02 `mutationPolicy` committed |
+
+Integration acceptance (checked by IB after M-03-5/6/7/9): agents request fails → "Couldn't
+load agents — tap to retry" → tap after the box recovers → agents listed; a background-job chat
+opened directly has `composer.acceptsInput == false` (WS05's fill controls and WS07's Attach
+report the read-only rejection); a chat reclassified to a job while open flips to `false`, and
+back to `true` if re-resolved as `.allowed`.
 
 ## Mounts applied by this workstream
 
-| ID | Source | Note |
-|---|---|---|
-| M-03-1 … M-03-4 | WS03 (own, D13) | ChatScreen adoption in wave A. |
-| — | other specs (cross-checked 01, 02, 04, 05, 07 as of this round) | No other spec requests a mount in `ComposerView.swift`, `ComposerTypeahead.swift` or `ComposerHistory.swift`. WS02's "Edit last" (02 §F8) and WS05's failures fill call the C3 API from their own code; WS04 passes `draft:` to `ChatScreen(…)` from its own `SessionListView` navigation destination. WS02's spec still names a `composerText` fallback — per D13 it must use `composer` instead. |
+| ID | From | Receiving file | Change | Prerequisite |
+|---|---|---|---|---|
+| M-03-1 … M-03-4 | WS03 (own, D13) | `ChatScreen.swift` | Composer adoption, A1 (see above) | WS03 controller |
+
+Cross-checked the current request tables of 01, 02, 04, 05, 06, 07, 08, 09, 10 and the
+master's canonical mount ledger: apart from WS03's own M-03-6 / M-03-9 (applied by IB), no
+request targets `ComposerView.swift`,
+`ComposerTypeahead.swift`, `ComposerHistory.swift` or a WS03 new file. Consumers that call C3
+from their own code (no mount into WS03 files): WS02 "Edit last" (`composer.insert(…, .replace)`,
+02 §F8), WS05 M-05-1 (`composerController` + `acceptsInput`), WS07 M-07-1
+(`ArtifactsCard(…composer:…)`), WS04's create-flow destination (`ChatScreen(…, draft:)`, see
+F7 — this supersedes M-04-7).
 
 ## Client members
 
@@ -622,12 +707,17 @@ Reused, not redeclared: `findFiles(query:directory:)`, `agents()`, `sendPrompt(_
 - **C2:** consumes `NewSessionDraft` / `NewSessionDraftAttachment` types only (D2).
 - **C3 provided:** `ComposerInsertMode`, `ComposerInsertion`, `ComposerTextController`
   (`insert` → Bool, `attach` → Bool, `lastAttachRejection`, `acceptsInput`, `focusRequest`,
-  `newSessionDraft(cwd:)`, `apply(_:)`), `EnvironmentValues.composerController`, and the
+  `newSessionDraft(cwd:)`, `apply(_:)`, `init(text:attachments:draft:)`, `seedNotice` /
+  `consumeSeedNotice()`), `EnvironmentValues.composerController`, and the
   ChatScreen adoption (D13). `.append` = one blank line (`HandoffComposerCarry.appendBelow`);
   `.quote` = raw selection through `QuoteText.buildQuoteBlock`, prepended. Consumers: WS01
   (quote via ChatScreen), WS02 (`.replace` for Edit last; `acceptsInput`), WS04 (draft →
   `ChatScreen(draft:)`), WS05 (`.append` for failures, D6; drafts via the navigator), WS07 (`attach`).
-- **C4:** M-03-1…4 (own, D13), M-03-7 (WS02).
+- **C4:** M-03-1…4 (own, D13); M-03-7 (WS02); M-03-5 (WS09); M-03-6, M-03-9 (IB).
+- **Consumed from WS02 (wave B, via M-03-7/9):** `ChatSessionStore.isBackgroundJobReadOnly`
+  (M-03-7) and `ChatSessionStore.mutationPolicy` / `ChatCardMutationPolicy`
+  (`.resolving`, `.allowed`, `.readOnlyJob`) (M-03-9).
+- **Consumed from WS09 (wave B, via M-03-5/6):** `ChatModelStore.agentsLoadError`, `retryAgents()`.
 - **C5:** none decoded here; command turns render from D15's `commandByMessageID` (WS01/WS02).
 - **C7:** `ComposerTypeaheadTests`, `ComposerModelsTests`, `ComposerInsertionTests`
   (`verify.sh`), `ComposerTextControllerTests` (Mac).
@@ -678,3 +768,17 @@ Cross-cutting review:
   (`ComposerAttachment` moved into `ComposerModels.swift` for that reason).
 - **#12** — C3 documented here with Bool returns, rejection-surfacing rule and copy, blank-line
   append, raw-selection quote; WS05 failures use `.append`.
+
+## Review responses (round2)
+
+WS03 review:
+1. **BLOCKING M-03-5/6/7 receipts** — M-03-5 now pins WS09's exact members (`@Published private(set) var agentsLoadError: String?`, `func retryAgents()`), behaviour and WS09-side tests; M-03-6 stays gated on M-03-5 being committed. M-03-7 is rewritten against WS02's store-level symbols (reconciled after round 2 to the canonical read-only signal `ChatSessionStore.isBackgroundJobReadOnly`, derived from `mutationPolicy == .readOnlyJob`; the ownership store's `job` stays WS02-internal) with `onAppear` + `onChange` sync covering direct open, reclassification and return to `.allowed`, and `.resolving` pinned as writable. Integration acceptance added for retry and both job-screen paths. The receiving specs (WS09, WS02) must add these rows to their applied tables — recorded as a cross-spec dependency; WS03 cannot edit them.
+2. **BLOCKING new-chat seed entry points** — one contract: `ComposerTextController.init(text:attachments:draft:)` + `ChatScreen(draft:)` (A1). The draft is applied once (StateObject autoclosure; wrapper passes it only before the first clear/handoff), chips go through `attach` validation, rejections surface once via `seedNotice`. WS04 must carry `draft` on `SessionOpenTarget` and pass it with `seed` nil; this supersedes M-04-7 (`initialCarryOver`), `SessionDraftCarry.carryOver`, and WS02's `seedAttachments` receipt. Handoff keeps the existing `carryOver` path only. Tests for one-time seeding, rejection notice, and no reseed after clear/handoff added.
+3. **BLOCKING `/fork` cleanup** — added `ComposerSubmissionSettle.localAction` for local built-ins: consumes only unchanged command text, never chips or agent selections; `/fork` and `/compact` use it, not `accepted`. Test + acceptance for `/fork` with a ready chip, success and failure.
+4. **SHOULD stale running state** — the snapshot now holds only the user's payload and preferences (text, chip ids, agent names, delivery preference, model/agent preference, background); `store.running` (and after M-03-9 the mutation policy) is re-read immediately before planning/dispatch. Idle→running and running→idle acceptance cases + `planSlashSend` tests added. New M-03-9 also blocks command/built-in dispatch while WS02 is still resolving (a command cannot be parked in WS02's outbox).
+
+Cross-cutting review (round 2):
+- **#3 (draft handoff)** — same as WS03 item 2.
+- **#4 (agent retry receipt)** — same as WS03 item 1 (M-03-5/6).
+- **#5 (writability propagation)** — same as WS03 item 1 (M-03-7), using WS02's `isBackgroundJobReadOnly`; WS05's `acceptsInput` bridge now has a real provider value.
+- **#10 (ledger integrity)** — request IDs M-03-1…9 use the ledger's IDs/appliers/waves (A1, IA, IB); the stale claim that WS02 keeps a `composerText` fallback is removed (WS02 now consumes `composer`, `02-chat-cards-queue.md:49-50`); "Mounts applied" lists only real rows and the consumers that need none.

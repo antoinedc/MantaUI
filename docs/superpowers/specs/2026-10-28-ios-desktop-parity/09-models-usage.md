@@ -56,14 +56,42 @@ posts `Notification.Name.mantaBoxRemoved` on "Remove server". WS09 has two
 process-wide singletons, `UsageAlertsStore.shared` and
 `ChatModelCatalog.shared`. Both:
 
-- keep `private var generation = 0` and `private(set) var boxKey: String?`
-  (`KeychainCredentialStore.shared.boxId ?? serverURL?.absoluteString`,
-  captured when a seed starts);
+- **own their client per box.** Today `ChatModelCatalog` holds
+  `private let api` built once with `.live()` (`ChatModelCatalog.swift:30-37`);
+  `.live()` fixes the URL at construction (or the `https://127.0.0.1`
+  placeholder when unpaired) while its default token provider re-reads the
+  Keychain on every request (`MantaAPIClient.swift:8-21`). After a switch from
+  box A to box B that client would send B's token to A's URL. So both
+  singletons replace `api` with
+  `private var api: MantaAPIClient?` + `private(set) var binding: ModelsBoxBinding?`,
+  and every request goes through `private func currentClient() -> MantaAPIClient?`:
+  1. read ONE credentials snapshot from an injected
+     `credentials: @MainActor () -> ModelsBoxCredentials?` (default: one
+     `try? KeychainCredentialStore.shared.load()` mapped to
+     `ModelsBoxCredentials`);
+  2. `ModelsBoxBinding.resolve(current: binding, credentials: snapshot)`
+     (pure, below) → `.unpaired` (no credentials or unparseable URL → return
+     nil, issue NO request, publish nothing new), `.same` (reuse `api`), or
+     `.rebind(newBinding, boxChanged: Bool)`;
+  3. on `.rebind`: if `boxChanged`, run `resetForBoxChange()` first; then
+     `api = makeClient(newBinding)` where
+     `makeClient` = `MantaAPIClient(serverURL: binding.serverURL, tokenProvider: { [token = binding.token] in token })`
+     — URL and token come from the SAME snapshot and the token is captured,
+     never re-read, so a request can only ever pair box B's URL with box B's
+     token. `makeClient` is injectable (`(ModelsBoxBinding) -> MantaAPIClient`)
+     for tests.
+  The request's generation is captured AFTER `currentClient()` returns, so a
+  rebind-triggered reset can never be raced by its own request. Tests inject
+  the old shared `api:` init parameter only through `makeClient`;
+- keep `private var generation = 0`;
 - expose `func resetForBoxChange()`: `generation += 1`, cancel in-flight
-  tasks, clear all published state (snapshots, baseline, queue,
-  `activeSessionId`, `resumeSheetPresented`; for the catalogue: models,
-  defaults, `deactivatedMain`, `configOptIns`, `loaded = false`,
-  `didStart = false`). Nothing is fetched until the new box's stream connects;
+  tasks, `api = nil`, `binding = nil` (the old client is invalidated), clear
+  all published state (snapshots, baseline, queue, `activeSessionId`,
+  `resumeSheetPresented`; for the catalogue: models, defaults,
+  `deactivatedMain`, `configOptIns`, `loaded = false`, `didStart = false`).
+  Nothing is fetched until the new box's stream connects (alerts) or a chat /
+  the Models screen asks (catalogue); the next request rebinds from the new
+  credentials;
 - drop any response whose captured `generation` differs from the current one
   (a late old-box answer can never land on the new box);
 - call `resetForBoxChange()` themselves on `mantaBoxRemoved`, and are called by
@@ -72,9 +100,42 @@ process-wide singletons, `UsageAlertsStore.shared` and
 - refuse actions (Remind, Keep going) whose alert was raised under an older
   generation.
 
-The pure part — "is this response still current?" and the baseline ordering
-in F7 — lives in `UsageBaseline` (Foundation-only, F7) so it is tested under
-`verify.sh` (D19).
+The pure parts are Foundation-only and tested under `verify.sh` (D19):
+"is this response still current?" and the baseline ordering live in
+`UsageBaseline` (F7); the client binding decision lives in
+`ModelsBoxBinding.swift`:
+
+```swift
+struct ModelsBoxBinding: Equatable, Sendable {
+  let boxKey: String        // credentials.boxId, or serverUrl when boxId is empty
+  let serverURL: URL
+  let token: String
+}
+enum ModelsBoxBindingDecision: Equatable { case unpaired, same, rebind(ModelsBoxBinding, boxChanged: Bool) }
+extension ModelsBoxBinding {
+  static func resolve(current: ModelsBoxBinding?, credentials: ModelsBoxCredentials?) -> ModelsBoxBindingDecision
+  // nil / empty serverUrl / unparseable URL / empty token → .unpaired
+  // equal to current → .same
+  // different → .rebind(new, boxChanged: current == nil || current!.boxKey != new.boxKey)
+  //   (a re-pair of the SAME box with a new token rebinds without a reset)
+}
+```
+
+`MantaCredentials` lives in `KeychainCredentialStore.swift`, which imports
+Security; so the package-buildable input is a three-field mirror
+`ModelsBoxCredentials { serverUrl, boxId, boxToken }` declared in
+`ModelsBoxBinding.swift`; the stores convert at the call site.
+
+Tests (`MantaUITests/ModelsBoxBindingTests.swift`, Foundation-only):
+nil → unpaired; empty token → unpaired; first pairing → rebind(boxChanged:
+true); same snapshot → same; same box, rotated token → rebind(boxChanged:
+false); box B → rebind(boxChanged: true); boxId empty falls back to the URL as
+the key. Store tests (Mac, `URLProtocol` stub recording `request.url.host` and
+the `Authorization` header): **unpaired → paired**: no request while unpaired,
+then the first request goes to the paired host with that box's bearer;
+**A → B**: after the Keychain changes to B, the next catalogue reload and the
+next alert seed both hit B's host with B's token (never A's host), and a
+response from A that lands after the switch is dropped.
 
 ---
 
@@ -232,7 +293,8 @@ New files:
     `configDefault`/`deactivatedMain`/`configOptIns` from a config the caller
     already holds), and the box lifecycle above. It observes
     `Notification.Name.mantaProvidersChanged` (WS08, posted after a provider
-    connect/disconnect/endpoint change) and calls `reload()`.
+    connect/disconnect/endpoint change) and calls `reload()` — received
+    mount **M-08-1**, exact form in "Mounts applied by this workstream".
   - **One selection policy** in `ChatModelStore`:
     `var effectiveOptIns: Set<String> { deprecatedOptIns ∪ catalog.configOptIns }`
     and `func isSelectable(_ m: OpencodeModel) -> Bool` =
@@ -273,6 +335,23 @@ New files:
     key, `local.mjs`).
     The disabled row's `Button("Enable")` (`ModelPickerSheet.swift:438`)
     becomes `Task { await modelStore.optIn(m) }`.
+  - **Agent-list error + retry (received mount M-03-5, WS03).** Today
+    `loadAgentsIfNeeded()` (`ChatModelStore.swift:137-143`) turns a failed
+    `opencode:agents` read into `[]`, indistinguishable from "no agents". WS09
+    adds exactly the members WS03 requests (`03-composer.md:597`):
+    `@Published private(set) var agentsLoadError: String?` and
+    `func retryAgents()`. `loadAgentsIfNeeded()` now `do { agents = try await
+    api.agents() ; agentsLoadError = nil } catch { agents = nil;
+    agentsLoadError = <MantaError message> }` (`agents` stays nil on failure).
+    `retryAgents()` clears `agentsLoadError`, resets `didLoadAgents = false`
+    and calls `loadAgentsIfNeeded()`; success clears the error. So the plan
+    chip does not sit on its loading placeholder forever, `planToggle` passes
+    `agents ?? (agentsLoadError != nil ? [] : nil)` to `ChatModel.planToggle`
+    (error → "unavailable", unchanged behaviour on success). `agents` keeps its
+    name and type for WS03's existing read (`03-composer.md:44`). Store test
+    (`ModelsStoreTests.swift`, URLProtocol stub): agents call fails →
+    `agentsLoadError` set, `agents == nil`; `retryAgents()` with the stub now
+    answering → agents listed, error nil.
 
 ### Pure logic — `ModelsTable` (in `ModelsLogic.swift`)
 
@@ -354,6 +433,12 @@ Store tests (Mac-only, `MantaUITests/ModelsStoreTests.swift`, injected
   holds another key) → the written list holds both keys.
 - `ChatModelCatalog`: `resetForBoxChange()` then a late old-generation
   response → ignored.
+- `testProvidersChangedReloadsCatalog` (M-08-1): a loaded catalog re-fetches
+  `opencode:models` exactly once after `.mantaProvidersChanged` is posted and
+  publishes the new list.
+- `testAgentsLoadErrorThenRetry` (M-03-5).
+- Box binding (see "Box lifecycle"): unpaired → no request; unpaired → paired
+  and A → B assert the request host and `Authorization` header pair.
 
 ### Acceptance criteria
 
@@ -697,9 +782,17 @@ Reused channels:
 - Save / Confirm / candidate pick: `ModelsStore.declare(key:decl:)` → fresh
   `config:get`, merge, `config:update {modelRouting}`, then re-read
   `models:unidentified`. The result is decided by the REFRESHED rows, not by
-  the action (`ModelsIdentify.declareOutcome(key:, refreshed:)`):
-  - key absent from the refreshed rows → feedback "Saved — Auto can now
-    describe <modelID>"; the row disappears;
+  the action (`ModelsIdentify.declareOutcome(key:, refreshed:)`, which takes
+  the WHOLE `UnidentifiedList?` envelope, `supported` included):
+  - refreshed list `supported == true` and key absent → feedback "Saved — Auto
+    can now describe <modelID>"; the row disappears. Only a SUPPORTED refresh
+    proves resolution;
+  - refreshed list `supported == false` (catalogue unavailable — the endpoint
+    answers `{supported:false, rows:[]}`) → feedback "Saved. Manta couldn't
+    load the model catalogue, so it can't confirm what Auto still needs —
+    reopen Settings in a minute."; the section switches to its
+    catalogue-unavailable sentence (the write is still reported as saved,
+    never as "Auto can now describe");
   - key still present (typical after Confirm or a candidate pick, which only
     declare `{catalogId}` — price and caching are endpoint facts that identity
     never supplies, `modelIdentity.mjs:78-88`, `autoEligibility.mjs:42-55`) →
@@ -722,8 +815,9 @@ when empty, else id/name/family substring, cap 50),
 `mergedRouting(config:, key:, decl:) -> [String: Any]` (preset default
 "balanced", preserves other keys and other declarations; for the same key,
 fields of the new declaration overwrite, absent fields keep the existing
-value), `declareOutcome(key:, refreshed: [UnidentifiedRow]?) ->
-.resolved | .stillNeeds(String) | .refreshFailed`.
+value), `declareOutcome(key:, refreshed: UnidentifiedList?) ->
+.resolved | .stillNeeds(String) | .catalogueUnavailable | .refreshFailed`
+(nil = the refresh threw).
 
 ### Tests
 
@@ -735,7 +829,9 @@ value), `declareOutcome(key:, refreshed: [UnidentifiedRow]?) ->
   declarations and preset; same-key merge keeps the earlier `catalogId` when
   the new declaration only adds price; `declareOutcome` resolved /
   stillNeeds (candidate with no price/cache metadata → "what it costs, and
-  whether it caches") / refreshFailed.
+  whether it caches") / refreshFailed (nil) / **successful write followed by
+  an unsupported refresh (`supported:false, rows:[]`) → `.catalogueUnavailable`,
+  never `.resolved`**.
 - `src/server/modelsUnidentified.test.mjs` (node:test): eligible model skipped;
   exact certain/probable; ambiguous with candidates; none; declared catalogId
   wins; a model with only `{catalogId}` declared and no cost stays listed with
@@ -872,8 +968,17 @@ Stopped records are READ through WS04 (D16) — WS09 makes no
 
 | Source | Owner | Used for |
 |---|---|---|
-| `SessionListStore.stoppedRecords: [SessionStoppedRecord]` (fetched from `usage-stopped:list`, `rpc.mjs:2394` → `stoppedStore.mjs:287-290`, refetched on `usage-stopped.updated`) | WS04 §9 | the rows; unarmed count |
-| `SessionListStore.stoppedLastLooked: Double?` (the `lastLooked` field of the same `SessionStoppedList` answer) | WS04 — **new dependency, see Cross-spec dependencies** | "new" badges, header text |
+| `SessionListStore.stoppedRecords: [SessionStoppedRecord]` (fetched from `usage-stopped:list`, `rpc.mjs:2394` → `stoppedStore.mjs:287-290`, refetched on `usage-stopped.updated`) | WS04 §9 / D16 (`04-sessions.md:977-983,1346-1351`) | the rows |
+| `SessionListStore.stoppedLastLooked: Double?` (the wire `lastLooked` unchanged, epoch ms, `stoppedStore.mjs:274-289`) | WS04 (provided, §9/§16) | "new" badges, header text — passed through unchanged (below) |
+| `SessionListStore.unarmedStoppedCount: Int` | WS04 (provided) | the session-list capsule (M-09-2) |
+| `SessionListStore.refreshStopped() async` | WS04 (provided) | called after each successful arm/disarm/stamp (the bus frame also triggers it; calling it makes the sheet update even if the frame is missed) |
+
+**Units.** WS09's pure logic uses epoch MILLISECONDS throughout (as the wire,
+desktop and WS04 do). No conversion exists: the sheet passes
+`sessions.stoppedLastLooked` (`Double?`, ms) straight through, and
+`UsageStoppedEntry(record)` copies WS04's `SessionStoppedRecord.stoppedAt`
+(`Double`, ms) into `stoppedAtMs`. That mapping is the only place that touches
+WS04's types.
 
 Mutations are WS09's own client members:
 
@@ -887,7 +992,8 @@ Mutations are WS09's own client members:
 | `config:get` (existing) | | `cacheTtl` ("5m" default) |
 
 After a mutation the box publishes `usage-stopped.updated`; WS04's store
-refetches and the sheet re-renders from `stoppedRecords`. No new frame.
+refetches (and WS09 also awaits `refreshStopped()`) and the sheet re-renders
+from `stoppedRecords`. No new frame.
 
 ### iOS design
 
@@ -897,12 +1003,15 @@ refetches and the sheet re-renders from `stoppedRecords`. No new frame.
 - `UsageResumeSheet.swift` — `struct UsageResumeSheet: View` with
   `@ObservedObject var sessions: SessionListStore` and
   `@ObservedObject var usage: UsageAlertsStore`; presented ONCE at app root
-  (M-09-3). It maps `sessions.stoppedRecords` → `[UsageStoppedEntry]`
-  (WS09's own Foundation value: `workspace, conversation, provider, model?,
-  window?, stoppedAt, cachedTokens?, armed`) through
-  `UsageStoppedEntry.init(_ record: SessionStoppedRecord)` in the sheet file —
-  the only place that touches WS04's type, so the pure logic stays
-  Package-buildable. `NavigationStack` + `List`:
+  (M-09-3). It maps `sessions.stoppedRecords` → `[UsageStoppedEntry]` and
+  passes `sessions.stoppedLastLooked` (`Double?`, ms) unchanged.
+  `struct UsageStoppedEntry: Equatable, Sendable { workspace: String;
+  conversation: String; provider: String; model: String?; window: String?;
+  stoppedAtMs: Double; cachedTokens: Double?; armed: Bool }` is DECLARED in
+  `UsageResumeLogic.swift` (Foundation-only, in the package). The sheet file
+  holds only `extension UsageStoppedEntry { init(_ record: SessionStoppedRecord) }`
+  — the one place that touches WS04's type — plus `UsageStoppedCapsule` and
+  the view. `NavigationStack` + `List`:
   - Header text (desktop copy) as the first section's header.
   - Toolbar: leading "Cancel" (nothing armed) / "Close"; trailing primary
     button titled by `UsageResume.applyTitle(plan:, hasArmed:, selectedCount:)`
@@ -916,7 +1025,8 @@ refetches and the sheet re-renders from `stoppedRecords`. No new frame.
     `checkmark.circle.fill` / `circle`) with name, "armed" / "new" chips,
     snippet, provider·model, window chip, cost chip — desktop copy. Footer
     callout for cold selections (desktop copy).
-  - Apply: sequential awaits over the plan (arms first, then disarms). Success
+  - Apply: sequential awaits over the plan (arms first, then disarms), then
+    `await sessions.refreshStopped()`. Success
     → dismiss + banner (through `UsageAlertsStore`'s queue) "Updated — N
     conversation(s) will carry on at reset." (or "Removed N conversation(s)
     from resume." for a disarm-only plan). First failure → stop, keep the sheet
@@ -934,12 +1044,13 @@ refetches and the sheet re-renders from `stoppedRecords`. No new frame.
 - Session-list entry point (M-09-2): `UsageStoppedCapsule(count:action:)`
   (in `UsageResumeSheet.swift`) — `pause.circle` + N in warn tint, accessibility
   label "N conversation(s) stopped by a provider limit". Shown only when
-  `UsageResume.unarmedCount(sessions.stoppedRecords mapped) > 0`; action
+  WS04's `store.unarmedStoppedCount > 0` (D16 — no second count); action
   `UsageAlertsStore.shared.presentResume()`.
 
 ### Pure logic — `UsageResume` (in `UsageResumeLogic.swift`, Foundation-only)
 
-Ports of `usageResume.ts` over `UsageStoppedEntry`: `unarmedCount`,
+Declares `UsageStoppedEntry` (above). Ports of `usageResume.ts` over it:
+`unarmedCount` (used for the header only; the capsule reads WS04's count),
 `extractLastSnippet(texts:)` (input = assistant text parts newest-last, so it
 does not depend on transcript types), `resetAt(entry, snapshots) -> Double?`,
 `resumeCost(entry, resetsAt, now, ttl)`, `costs(entries, snapshots, now, ttl)`,
@@ -960,7 +1071,12 @@ unchanged → nothing); **`canApply`: one armed row unchecked (zero selected) �
 true, title "Update"; all armed rows unchecked → true; zero selected and
 nothing armed → false; selection equal to armed set → false**;
 `windowChipLabel` fallbacks (no window → "Limit", unknown kind →
-capitalised); name lookup + fallback; warm/cold boundary exactly at TTL.
+capitalised); name lookup + fallback; warm/cold boundary exactly at TTL;
+**lastLooked comparison (epoch ms, no conversion)**: `lastLooked == nil` →
+every entry `isNew`; `lastLooked = 1_700_000_000_000` and an entry stopped at
+exactly that ms → not new; 1 ms before → not new; 1 ms after → new.
+This file compiles under `verify.sh` with only `UsageResumeLogic.swift` +
+`UsageMeters.swift` + `MantaModels.swift` in the package (no sheet file).
 
 ### Acceptance criteria
 
@@ -1167,9 +1283,11 @@ Create (all `mobile/native/MantaUI/` unless noted):
 | `OptimizerLogic.swift` / `OptimizerScreen.swift` | F3 (`OptimizerGauge` inside the screen) | yes / no |
 | `ModelsIdentifyLogic.swift` / `ModelsUnidentifiedView.swift` | F4 (section + `ModelsIdentifyForm`) | yes / no |
 | `ModelsPriceLogic.swift` / `ModelsPriceForm.swift` | F5 | yes / no |
-| `UsageResumeLogic.swift` / `UsageResumeSheet.swift` | F6 (`UsageStoppedEntry`, `UsageStoppedCapsule` in the sheet file; the `SessionStoppedRecord` mapping lives in the sheet file) | yes / no |
+| `UsageResumeLogic.swift` | F6: declares `UsageStoppedEntry` + all `UsageResume` helpers | yes |
+| `UsageResumeSheet.swift` | F6: `extension UsageStoppedEntry { init(_ record: SessionStoppedRecord) }`, `UsageStoppedCapsule`, `UsageResumeSheet` | no |
+| `ModelsBoxBinding.swift` | `ModelsBoxBinding`, `ModelsBoxBindingDecision`, `ModelsBoxCredentials` (box lifecycle) | yes |
 | `UsageEscalation.swift`, `UsageBaseline.swift` / `UsageAlertsStore.swift`, `UsageAlertBanner.swift` | F7 | yes / no |
-| `MantaUITests/ModelsTests.swift`, `OptimizerTests.swift`, `UsageResumeTests.swift`, `UsageEscalationTests.swift` | pure XCTests | yes |
+| `MantaUITests/ModelsTests.swift`, `OptimizerTests.swift`, `UsageResumeTests.swift`, `UsageEscalationTests.swift`, `ModelsBoxBindingTests.swift` | pure XCTests | yes |
 | `MantaUITests/ModelsStoreTests.swift`, `UsageAlertsStoreTests.swift` | store tests (Combine/URLProtocol) | no |
 | `src/server/modelsUnidentified.mjs`, `src/server/modelsUnidentified.test.mjs` | F4 server module + node test (D7) | — |
 
@@ -1177,20 +1295,30 @@ Create (all `mobile/native/MantaUI/` unless noted):
 dropped — D16, D17.)
 
 Edit (owned): `ChatModelCatalog.swift` (reload, applyConfig,
-deactivatedMain, configOptIns, provider-change observer, box lifecycle),
-`ChatModelStore.swift` (D1: `effectiveOptIns`, `isSelectable`,
-`selectableModels`, guarded `apply`/`setFast`, async `optIn` with
-pending/error), `ModelPickerSheet.swift` (catalogue/recents/fast filtering,
+deactivatedMain, configOptIns, per-box client binding + box lifecycle,
+received mount M-08-1), `ChatModelStore.swift` (D1: `effectiveOptIns`,
+`isSelectable`, `selectableModels`, guarded `apply`/`setFast`, async `optIn`
+with pending/error, received mount M-03-5 `agentsLoadError` /
+`retryAgents()`), `ModelPickerSheet.swift` (catalogue/recents/fast filtering,
 async Enable with spinner + error line), `UsageMeters.swift` (only if a shared
 helper is needed; no behaviour change).
 
 Edit (additive, wave-B server slot, D7): `src/server/rpc.mjs` — import
 `modelsUnidentified.mjs` and register `"models:unidentified"`.
 
-Manifest for integration agent B (D18): add the "yes" rows above to
-`mobile/native/Package.swift` `sources` / test `sources`. WS09 edits neither
-`Package.swift`, `project.yml` nor the `.pbxproj`; `project.yml` needs no
-change (the `MantaUI` folder is a directory source).
+Manifest for integration agent B (D18; ledger ID M-09-7): add to
+`mobile/native/Package.swift` `sources`: `ModelsWire.swift`, `ModelsLogic.swift`,
+`ModelsInsightsLogic.swift`, `OptimizerLogic.swift`, `ModelsIdentifyLogic.swift`,
+`ModelsPriceLogic.swift`, `UsageResumeLogic.swift`, `UsageEscalation.swift`,
+`UsageBaseline.swift`, `ModelsBoxBinding.swift`; test `sources`:
+`ModelsTests.swift`, `OptimizerTests.swift`, `UsageResumeTests.swift`,
+`UsageEscalationTests.swift`, `ModelsBoxBindingTests.swift`. Their only
+in-package dependencies are `MantaModels.swift`, `UsageMeters.swift`,
+`ChatModel.swift`, `ModelRecents.swift` (all already listed,
+`Package.swift:39-56`). Integration B must run `mobile/native/verify.sh` after
+adding them; the resume tests must compile WITHOUT `UsageResumeSheet.swift`.
+WS09 edits neither `Package.swift`, `project.yml` nor the `.pbxproj`;
+`project.yml` needs no change (the `MantaUI` folder is a directory source).
 
 ## Client members
 
@@ -1220,53 +1348,60 @@ these names (checked against specs 01–08, 10 at revision time: none do).
 
 ## Mount requests
 
-Per D18. "Integration B" = the single wave-B integration agent.
+Per D18 and the master's canonical mount ledger
+(`00-master.md`, rows M-09-1…M-09-7). "IB" = the single
+wave-B integration agent. Provider symbols are WS09's unless marked.
 
 | ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-09-1 | `SettingsScreen.swift` (WS10) | Integration B | `ModelsScreen()` (WS09, `ModelsScreen.swift`) | A fixed "Models" row styled like `accountsEntry` (`SettingsScreen.swift:174-200`), placed directly under it: title "Models", subtitle "Default, picker, subagents, spend and optimizer", `NavigationLink { ModelsScreen() }`; matched by search for "models default subagent picker spend cost optimizer prices identify" (same mechanism as `accountsMatchesQuery`, `:167-171`). | WS10 wave A landed; WS09 `ModelsScreen.swift` landed. |
-| M-09-2 | `SessionListView.swift` (WS04) | Integration B | `UsageStoppedCapsule(count:action:)`, `UsageResume.unarmedCount(_:)`, `UsageStoppedEntry.init(_:)` (WS09); `store.stoppedRecords` (WS04) | A `ToolbarItem(placement: .topBarTrailing)` before the `orderMenu` item (`SessionListView.swift:116`), rendered only when the unarmed count > 0: `UsageStoppedCapsule(count: n) { UsageAlertsStore.shared.presentResume() }`. | WS04 §9 (`stoppedRecords`) landed; WS09 landed; applied in ledger order with WS06's search entry in the same file. |
-| M-09-3 | `MantaAppRoot.swift` (WS04) | Integration B | `UsageAlertsStore.shared.bind(eventStore:)`, `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)` | (a) in the paired branch's `.onAppear`, next to `startModelPrefs()` (`MantaAppRoot.swift:104`), AND in `commitPairing` after `startModelPrefs()` (`:197`): `UsageAlertsStore.shared.bind(eventStore: store)`; (b) on the root `Group`, only when `paired && scene == nil`: `.overlay(alignment: .top) { UsageAlertBanner(store: .shared) }` and `.sheet(isPresented: $usageAlerts.resumeSheetPresented) { UsageResumeSheet(sessions: sessionStore, usage: .shared) }` with `@ObservedObject private var usageAlerts = UsageAlertsStore.shared`. | WS04 + WS09 landed; applied in ledger order with WS07's agent-file notice in the same file. |
-| M-09-4 | `MantaAppRoot.swift` (WS04) | Integration B | `UsageAlertsStore.resetForBoxChange()`, `ChatModelCatalog.resetForBoxChange()` (WS09) | In `commitPairing`'s `if flow.isSwitching { … }` block (`MantaAppRoot.swift:187-190`), after `sessionStore.resetForBoxChange()`: `UsageAlertsStore.shared.resetForBoxChange(); ChatModelCatalog.shared.resetForBoxChange()`. | as M-09-3 |
-| M-09-5 | `ChatScreen.swift` (WS02) | WS02 (wave B, per D18) | `UsageAlertsStore.shared.activeSessionId` (WS09) | Beside the two `reportFocus(sessionId: store.sessionId, visible: true)` calls (`ChatScreen.swift:371`, `:472`): `UsageAlertsStore.shared.activeSessionId = store.sessionId`. Beside the two `visible: false` calls (`:381`, `:475`): `if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }`. | WS09's `UsageAlertsStore.swift` (provider symbol pinned here, so WS02 may write it in the same wave). |
-| M-09-6 (optional) | `AccountsScreen.swift` (WS08) | Integration B, only if WS08 accepts | `ModelsScreen()` | A footer link "Set prices for unpriced models" → `ModelsScreen()`, mirroring where desktop mounts the panel. Default: not applied. | WS08 landed. |
+| M-09-1 | `SettingsScreen.swift` (WS10) | IB (after B) | `ModelsScreen()` | A fixed "Models" row styled like `accountsEntry` (`SettingsScreen.swift:174-200`), placed directly after it (WS10 keeps that insertion point; its "Mounts applied" row M-09-1): title "Models", subtitle "Default, picker, subagents, spend and optimizer", `NavigationLink { ModelsScreen() }`; matched by search for "models default subagent picker spend cost optimizer prices identify" (same mechanism as `accountsMatchesQuery`, `:167-171`). | WS10 (A) and WS09 (B) landed |
+| M-09-2 | `SessionListView.swift` (WS04) | IB (after B) | `UsageStoppedCapsule(count:action:)`, `UsageAlertsStore.shared.presentResume()`; WS04: `SessionListStore.unarmedStoppedCount` | A `ToolbarItem(placement: .topBarTrailing)` before the `orderMenu` item (`SessionListView.swift:116`), rendered only when `store.unarmedStoppedCount > 0`: `UsageStoppedCapsule(count: store.unarmedStoppedCount) { UsageAlertsStore.shared.presentResume() }`. Reads WS04's store only (D16; WS04 §15 receipt). | WS04 §9 (A) and WS09 (B) landed; applied in ledger order with M-06-2 on the same file |
+| M-09-3 | `MantaAppRoot.swift` (WS04) | IB (after B) | `UsageAlertsStore.shared.bind(eventStore:)`, `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)`, `UsageAlertsStore.resumeSheetPresented` | (a) in the paired branch's `.onAppear`, next to `startModelPrefs()` (`MantaAppRoot.swift:104`), AND in `commitPairing` after `startModelPrefs()` (`:197`): `UsageAlertsStore.shared.bind(eventStore: store)`; (b) add `@ObservedObject private var usageAlerts = UsageAlertsStore.shared`; on the root `Group`, only when `paired && scene == nil`: `.overlay(alignment: .top) { UsageAlertBanner(store: usageAlerts) }` and `.sheet(isPresented: $usageAlerts.resumeSheetPresented) { UsageResumeSheet(sessions: sessionStore, usage: usageAlerts) }`. No stopped-store binding (D16). | WS04 (A), WS09 (B) landed; applied in ledger order with M-07-3 on the same file |
+| M-09-4 | `MantaAppRoot.swift` (WS04) | IB (after B) | `UsageAlertsStore.resetForBoxChange()`, `ChatModelCatalog.resetForBoxChange()` | (a) In `commitPairing`'s `if flow.isSwitching { … }` block (`MantaAppRoot.swift:187-190`), after `sessionStore.resetForBoxChange()`: `UsageAlertsStore.shared.resetForBoxChange(); ChatModelCatalog.shared.resetForBoxChange()`. (b) In WS04's M-10-2 `.onReceive(… .mantaBoxRemoved)` closure (applied by WS04 in A2), after `sessionStore.resetForBoxChange()`: the same two calls. (Both stores ALSO observe `.mantaBoxRemoved` themselves and rebind on credential change — the explicit calls make the order with `sessionStore` deterministic; the calls are idempotent.) | as M-09-3; M-10-2 applied (A2) |
+| M-09-5 | `ChatScreen.swift` (WS02) | WS02 (B) | `UsageAlertsStore.shared.activeSessionId` | Beside the two `reportFocus(sessionId: store.sessionId, visible: true)` calls (`ChatScreen.swift:371`, `:472`): `UsageAlertsStore.shared.activeSessionId = store.sessionId`. Beside the two `visible: false` calls (`:381`, `:475`): `if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }`. WS02's receipt row is M-09-5. | WS09 symbol pinned here (same wave) |
+| M-09-6 (optional — **accepted** by WS08, its "Mounts received" table) | `AccountsScreen.swift` (WS08) | IB (after B) | `ModelsScreen()` | Footer row "Set prices for unpriced models" in the Custom endpoints section footer (WS08 leaves it free) → `NavigationLink { ModelsScreen() }`, mirroring where desktop mounts the panel. | WS08 (A) and WS09 (B) landed |
+| M-09-7 | `mobile/native/Package.swift` | IB (after B) | files listed under Files → Manifest | add sources/tests; run `verify.sh` | WS09 landed |
 
-The draft's M5 (ChatModelStore) is no longer a mount — D1 gives the file to
-WS09. The draft's M6 (seat row) is void — D17.
+Superseded (history only, not active): draft M5 (ChatModelStore — D1 gives the
+file to WS09), draft M6 (seat row — void by D17), draft M7 (= M-09-6).
 
 ## Mounts applied by this workstream
 
-None. Cross-checked the mount tables of specs 01–08 and 10 in this folder: no
-request targets a WS09-owned file (`UsageMeters.swift`, `ModelPickerSheet.swift`,
-`ChatModelCatalog.swift`, `ChatModelStore.swift`). WS03 reads
-`ChatModelStore.agents` (`03-composer.md:44,601`); WS09 does not change that
-member. WS08's `Notification.Name.mantaProvidersChanged` (`08-accounts.md:741-744`)
-is a provided contract WS09 consumes inside its own file (`ChatModelCatalog`),
-not a mount.
+| ID | From | Receiving file | Applier | Change | Check | Prerequisite |
+|---|---|---|---|---|---|---|
+| M-08-1 (mandatory) | WS08 | `ChatModelCatalog.swift` | WS09 (B, owns the file) | In `init`, `providersObserver = NotificationCenter.default.addObserver(forName: .mantaProvidersChanged, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.reload() } }`; token stored in `private var providersObserver: NSObjectProtocol?` (removed in `deinit`). Provider symbol: `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`). `reload()` goes through `currentClient()`, so it never fetches while unpaired. | `ModelsStoreTests.testProvidersChangedReloadsCatalog`: a loaded catalog re-fetches `opencode:models` exactly once after the notification is posted and publishes the new list (no relaunch). | WS08 (A) merged |
+| M-03-5 | WS03 | `ChatModelStore.swift` | WS09 (B, owns the file, D1) | Adds `@Published private(set) var agentsLoadError: String?` and `func retryAgents()` exactly as requested (`03-composer.md:597`); `loadAgentsIfNeeded()` records the error and leaves `agents` nil instead of `[]`; `retryAgents()` clears the error, resets `didLoadAgents`, reloads; success clears the error (F1 "Agent-list error + retry"). M-03-6 (IB, ComposerView) consumes them after this commit. | `ModelsStoreTests.testAgentsLoadErrorThenRetry` (failure → error set, agents nil; retry → listed, error nil). | — (WS09's own commit; M-03-6 depends on it) |
+
+No other request targets a WS09-owned file (`UsageMeters.swift`,
+`ModelPickerSheet.swift`, `ChatModelCatalog.swift`, `ChatModelStore.swift`):
+checked against every `Mount requests` table in specs 01–08 and 10 and the
+round-2 ledger. WS03's existing read of `ChatModelStore.agents`
+(`03-composer.md:44`) is unaffected (name and type unchanged).
 
 ## Contracts provided / consumed
 
 - **C1 provided**: `MantaAPIClient+Models.swift` (Client members above).
   Consumed: the internal `call/callRequired/callVoid/jsonObject` helpers.
 - **C4**: no ChatScreen mount other than M-09-5. The seat row is WS02's (D17).
-- **D16 consumed from WS04**: `SessionStoppedRecord`, `SessionListStore.stoppedRecords`,
-  `SessionListStore.stoppedLastLooked` (new — see below), `SessionListStore.projects`.
+- **D16 consumed from WS04** (exact names, `04-sessions.md:1346-1351`):
+  `SessionStoppedRecord`, `SessionListStore.stoppedRecords`,
+  `SessionListStore.stoppedLastLooked: Double?` (epoch ms), `SessionListStore.unarmedStoppedCount`,
+  `SessionListStore.refreshStopped() async`, `SessionListStore.projects`.
   WS04's row marker keeps reading its own `stoppedConversations`; WS09 offers
   `UsageResume.showsStoppedMarker` but WS04 is free to keep its own.
+- **Provided to WS03**: `ChatModelStore.agentsLoadError`, `retryAgents()` (M-03-5).
 - **Consumed**: `MantaEventStore.addRawFrameHandler` and `$connectionState`
-  (no edit to WS02's store); WS08 `Notification.Name.mantaProvidersChanged`;
+  (no edit to WS02's store); WS08 `Notification.Name.mantaProvidersChanged`
+  (M-08-1);
   WS10 `Notification.Name.mantaBoxRemoved`; C6 untouched (`optimizerEnabled`,
   `cacheTtl`, `alwaysShowUsage` already exist).
 - C2/C3/C5: none. C7: tests as listed.
 
 ## Cross-spec dependencies
 
-- **WS04 (wave A)** must publish `SessionListStore.stoppedLastLooked: Double?`
-  from the `lastLooked` field of the `usage-stopped:list` answer it already
-  decodes (`04-sessions.md:766`). Without it the "new" badges and the armed
-  header fall back to "never looked" (every row "new") — degraded, not broken.
-  If WS04 names its `SessionStoppedRecord` properties differently from the wire
-  keys, only `UsageStoppedEntry.init(_:)` adapts.
+None outstanding. The round-1 request for `stoppedLastLooked` is satisfied by
+WS04 as `Double?` epoch ms (the wire value), and `SessionStoppedRecord.stoppedAt`
+is `Double` epoch ms (WS04 §9); WS09 compares them directly (F6).
 
 ## Deferred
 
@@ -1357,3 +1492,48 @@ Cross-cutting review (`reviews/round1/00-cross-cutting.md`):
   Integration B; WS09 does not touch `Package.swift`, `project.yml` or the
   `.pbxproj`.
 - **#11 seat row** — F8 and `UsageSeatLine` removed (D17).
+
+## Review responses (round2)
+
+WS09 review (`reviews/round2/09-models-usage.md`):
+
+1. **BLOCKING, client not rebound to the new box** — "Box lifecycle": both
+   singletons replace their fixed `api` with a per-box client built by
+   `currentClient()` from ONE credentials snapshot (URL + captured token from
+   the same box), via the pure `ModelsBoxBinding.resolve` (unpaired → no
+   request; same → reuse; rebind with/without reset). `resetForBoxChange()`
+   invalidates the client. Tests: pure binding decisions
+   (`ModelsBoxBindingTests`) and Mac store tests asserting request host +
+   `Authorization` for unpaired→paired and A→B, plus late-response rejection.
+   M-09-4 now also hooks the `mantaBoxRemoved` path.
+2. **BLOCKING, `stoppedLastLooked` type** — (reconciled after round 2) F6
+   consumes WS04's `Double?` epoch ms unchanged, no conversion; entries carry
+   `stoppedAtMs` (epoch ms, pinned). Stale "WS04 has not provided" text
+   removed. Tests: nil, equal, 1 ms before, 1 ms after (all in ms).
+3. **BLOCKING, `UsageStoppedEntry` in an excluded file** — the struct is
+   declared in `UsageResumeLogic.swift` (package); the sheet file holds only
+   the `init(_ record: SessionStoppedRecord)` extension, the capsule and the
+   view. Manifest lists exact files; IB must run `verify.sh` with the resume
+   tests compiling without the sheet file.
+4. **SHOULD, stale received-mount check** — "Mounts applied by this
+   workstream" now records M-08-1 (observer + `testProvidersChangedReloadsCatalog`)
+   and M-03-5; WS02's legacy "M4" noted as the same request as M-09-5; M-09-6
+   recorded as accepted.
+5. **SHOULD, unsupported refresh mistaken for success** — `declareOutcome`
+   takes the whole `UnidentifiedList?`; only `supported == true` with the key
+   absent is `.resolved`; `supported:false` → `.catalogueUnavailable` ("Saved.
+   Manta couldn't load the model catalogue …"). Test: successful write →
+   unsupported refresh.
+
+Cross-cutting (`reviews/round2/00-cross-cutting.md`):
+
+- **#4 M-03-5/M-03-6** — WS09 implements `agentsLoadError` + `retryAgents()`
+  in `ChatModelStore` (F1, received-mount table, store test); plan chip reads
+  "unavailable" rather than loading forever on an error. M-03-6 (IB) is
+  unblocked by this commit.
+- **#10 ledger integrity** — mount tables now use only current IDs matching the
+  consolidated ledger (M-09-1…6, manifest row); superseded draft IDs moved to a
+  history line; M-08-1 and M-03-5 receipts added; M-09-2 uses WS04's exact
+  `unarmedStoppedCount`; M-09-6 marked accepted; the stale "no request targets
+  my files" claim removed.
+
