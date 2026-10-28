@@ -14,7 +14,8 @@
 // The textarea's onChange routes through `updateInput` which both updates
 // `input` state and detects active typeahead. Three triggers:
 //   /<word>      at byte 0 → command typeahead
-//   @<token>     after whitespace (or BOF) → file+agent typeahead
+//   @<token>     after whitespace (or BOF) → file / reference typeahead
+//   @@<token>    after whitespace (or BOF) → agent typeahead (inserts @<name>)
 // The popup tracks the [anchorStart, anchorEnd) slice and replaces it
 // verbatim on selection.
 
@@ -22,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OpencodeCommand, OpencodeReference } from "../../shared/types";
 import { backgroundApi } from "../backgroundRun";
 import {
+  detectTypeaheadTrigger,
   filterCommands,
   dedupeAgainstBuiltins,
   MANTA_BUILTIN_COMMANDS,
@@ -158,42 +160,8 @@ export function useTypeahead(params: {
 
   const detectTypeahead = useCallback(
     (text: string, caret: number): TypeaheadState | null => {
-      // Command typeahead — fires only when "/" is the very first character
-      // of the input AND the caret is somewhere inside the first word.
-      if (text.startsWith("/")) {
-        const m = /^\/([\w-]*)/.exec(text);
-        if (m && caret <= m[0].length) {
-          return {
-            mode: "command",
-            query: m[1],
-            anchorStart: 0,
-            anchorEnd: m[0].length,
-            selectedIdx: 0,
-          };
-        }
-      }
-      // @-mention typeahead — fires when an @ token starts at BOF or after
-      // whitespace and the caret is inside that token.
-      const left = text.slice(0, caret);
-      const at = left.lastIndexOf("@");
-      if (at >= 0) {
-        const prev = at > 0 ? text[at - 1] : "";
-        if (at === 0 || /\s/.test(prev)) {
-          const after = text.slice(at + 1, caret);
-          if (!/\s/.test(after)) {
-            let end = caret;
-            while (end < text.length && !/\s/.test(text[end])) end++;
-            return {
-              mode: after.startsWith("@") ? "agent" : "file",
-              query: after.replace(/^@/, ""),
-              anchorStart: at,
-              anchorEnd: end,
-              selectedIdx: 0,
-            };
-          }
-        }
-      }
-      return null;
+      const t = detectTypeaheadTrigger(text, caret);
+      return t && { ...t, selectedIdx: 0 };
     },
     [],
   );
@@ -244,7 +212,7 @@ export function useTypeahead(params: {
       return filtered.slice(0, 12).map((a) => ({
         kind: "agent",
         key: a.name,
-        primary: `@@${a.name}`,
+        primary: `@${a.name}`,
         secondary: a.description,
       }));
     }

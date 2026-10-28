@@ -611,6 +611,9 @@ export function useComposerController(config: ComposerControllerConfig): Compose
   // computed here from the CURRENT input so the host does not recompute it.
   const typeaheadExactMatch = useMemo(() => {
     if (!typeahead || typeaheadRows.length === 0) return false;
+    // Agent mode never takes the shortcut: only a selection rewrites the draft
+    // and records the mention, so Enter on a fully typed `@@build` must complete.
+    if (typeahead.mode === "agent") return false;
     const idx = Math.min(typeahead.selectedIdx, typeaheadRows.length - 1);
     const row = typeaheadRows[idx];
     return input.trim() === row.primary;

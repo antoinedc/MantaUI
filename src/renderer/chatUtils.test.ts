@@ -18,6 +18,7 @@ import {
   ctxStageColor,
   cssVar,
   filterCommands,
+  detectTypeaheadTrigger,
   dedupeAgainstBuiltins,
   formatModelContextSize,
   shouldClearMissingModel,
@@ -6103,5 +6104,68 @@ describe("isReadOnlyJob", () => {
     expect(isReadOnlyJob({})).toBe(true);
     expect(isReadOnlyJob({ correlation: { kind: "work" } })).toBe(false);
     expect(isReadOnlyJob(null)).toBe(false);
+  });
+});
+
+// ===== detectTypeaheadTrigger =====
+
+describe("detectTypeaheadTrigger", () => {
+  const t = (text: string, caret: number) => detectTypeaheadTrigger(text, caret);
+
+  it("opens the agent typeahead on @@ and @@partial", () => {
+    expect(t("@@", 2)).toEqual({ mode: "agent", query: "", anchorStart: 0, anchorEnd: 2 });
+    expect(t("@@bu", 4)).toEqual({ mode: "agent", query: "bu", anchorStart: 0, anchorEnd: 4 });
+    expect(t("hi @@bu", 7)).toEqual({ mode: "agent", query: "bu", anchorStart: 3, anchorEnd: 7 });
+    expect(t("hi\n@@x", 6)).toMatchObject({ mode: "agent", query: "x", anchorStart: 3 });
+  });
+
+  it("extends the anchor to the end of the token when the caret is mid-token", () => {
+    expect(t("@@build ok", 4)).toEqual({ mode: "agent", query: "bu", anchorStart: 0, anchorEnd: 7 });
+  });
+
+  it("keeps single-@ file typeahead", () => {
+    expect(t("@", 1)).toEqual({ mode: "file", query: "", anchorStart: 0, anchorEnd: 1 });
+    expect(t("@src/fo", 7)).toMatchObject({ mode: "file", query: "src/fo" });
+    expect(t("see @a", 6)).toMatchObject({ mode: "file", query: "a", anchorStart: 4 });
+  });
+
+  it("opens nothing for email-like or malformed tokens", () => {
+    for (const [text, caret] of [
+      ["a@b", 3],
+      ["foo@", 4],
+      ["x@@y", 4],
+      ["@foo@bar", 8],
+      ["@@foo@bar", 9],
+      ["@@@", 3],
+      ["@a b", 4],
+      ["", 0],
+    ] as const) {
+      expect(t(text, caret), `${JSON.stringify(text)}@${caret}`).toBeNull();
+    }
+  });
+
+  it("treats a caret between the two @ as file mode", () => {
+    expect(t("@@x", 1)).toMatchObject({ mode: "file", query: "" });
+  });
+
+  describe("slash commands (semantics preserved)", () => {
+    it("uses the whole first token as the query, wherever the caret sits in it", () => {
+      expect(t("/review rest", 3)).toEqual({ mode: "command", query: "review", anchorStart: 0, anchorEnd: 7 });
+      expect(t("/review rest", 0)).toMatchObject({ mode: "command", query: "review" });
+    });
+
+    it("stops the command token at punctuation", () => {
+      expect(t("/review.foo", 7)).toEqual({ mode: "command", query: "review", anchorStart: 0, anchorEnd: 7 });
+    });
+
+    it("does not trigger on a leading-space slash or past the first word", () => {
+      expect(t(" /rev", 5)).toBeNull();
+      expect(t("/rev x", 6)).toBeNull();
+      expect(t("/@@x", 4)).toBeNull();
+    });
+
+    it("falls through to file mentions once the caret leaves the command token", () => {
+      expect(t("/rev @file", 10)).toEqual({ mode: "file", query: "file", anchorStart: 5, anchorEnd: 10 });
+    });
   });
 });
