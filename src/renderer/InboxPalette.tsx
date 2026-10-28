@@ -29,8 +29,8 @@ import { Pill } from "./Pill";
 import { ReviewPane } from "./ReviewPane";
 import { useStore } from "./store";
 import { formatAge } from "./chatUtils";
+import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
-import { deriveProjectName, uniqueSessionName } from "../shared/projectName.mjs";
 import type { ForgeInboxItem } from "../shared/types";
 
 // The box's semantic row tone mapped onto StatusDot's vocabulary — presentation
@@ -117,6 +117,7 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   // An older box sends rows without the row fields — say so instead of drawing
   // half-empty rows.
   const rowFieldsCapability = useBoxCapability("forge-inbox-view-1");
+  const namingCapability = useBoxCapability("sessions-naming-1");
   const outdated = loaded && (rowFieldsCapability === false || items.some((i) => i.label === undefined));
 
   useEffect(() => {
@@ -132,14 +133,17 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
       setError(`No local checkout of ${repoNameOf(item)} on this server to start a session in.`);
       return;
     }
+    if (namingCapability === false) {
+      setError(UPDATE_BOX_NOTE_TEXT);
+      return;
+    }
     setError(null);
-    const existing = useStore.getState().projects.map((p) => p.tmuxSession);
-    const name = uniqueSessionName(deriveProjectName(path), new Set(existing));
     try {
       const wt = await window.api.gitAddWorktree({ cwd: path, name: item.branchName ?? `manta/${item.kind}-${item.number}` });
       const dir = wt.path ?? path;
+      // The box names the session from the repo folder and returns the final name (WS11 D5 / S1).
       const created = await window.api.tmuxNewSession({
-        name,
+        nameHint: path,
         cwd: dir,
         windowName: "default",
         chatMode: true,
@@ -150,6 +154,8 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
         ...(item.kind !== "pr" ? { forgeIssue: { repoKey: item.repoKey, number: item.number } } : {}),
       });
       applyProjects(Array.isArray(created) ? created : created.projects);
+      const name = Array.isArray(created) ? null : created.name;
+      if (!name) throw new Error("The box didn't report the new session's name.");
       const proj = useStore.getState().projects.find((p) => p.tmuxSession === name);
       const win = proj?.windows.find((w) => w.active) ?? proj?.windows[0];
       const sessionId =

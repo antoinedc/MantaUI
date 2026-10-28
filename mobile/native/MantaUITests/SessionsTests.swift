@@ -27,18 +27,17 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 // MARK: - Rename
 
 final class SessionRenameLogicTests: XCTestCase {
-    func testRenameRejectsEmptyAndWhitespace() {
-        XCTAssertNil(SessionRenameLogic.validated("", current: "a"))
-        XCTAssertNil(SessionRenameLogic.validated("   \n", current: "a"))
+    // Whether a name is valid is the box's call (sentences pinned in sessionNaming.test.mjs); the phone only
+    // skips the call for an unchanged name.
+    func testRenameSkipsAnUnchangedName() {
+        XCTAssertNil(SessionRenameLogic.changed("a", current: "a"))
+        XCTAssertNil(SessionRenameLogic.changed("  a  ", current: "a"))
     }
 
-    func testRenameRejectsUnchanged() {
-        XCTAssertNil(SessionRenameLogic.validated("a", current: "a"))
-        XCTAssertNil(SessionRenameLogic.validated("  a  ", current: "a"))
-    }
-
-    func testRenameTrims() {
-        XCTAssertEqual(SessionRenameLogic.validated("  b  ", current: "a"), "b")
+    func testRenameSendsTheTrimmedName() {
+        XCTAssertEqual(SessionRenameLogic.changed("  b  ", current: "a"), "b")
+        // An empty name is sent too: the box refuses it with its sentence, which the sheet then shows.
+        XCTAssertEqual(SessionRenameLogic.changed("   ", current: "a"), "")
     }
 
     func testActionErrorNeverShowsTransportText() {
@@ -153,58 +152,12 @@ final class SessionModeLogicTests: XCTestCase {
 // MARK: - Create: naming, hints, roots
 
 final class SessionNamingTests: XCTestCase {
-    func testSlugify() {
-        XCTAssertEqual(SessionNaming.slugify("My App!"), "my-app")
-        XCTAssertEqual(SessionNaming.slugify("Café"), "cafe")
-        XCTAssertEqual(SessionNaming.slugify("!!!"), "")
-        XCTAssertEqual(SessionNaming.slugify("项目"), "")
-        let long = SessionNaming.slugify(String(repeating: "ab ", count: 20))
-        XCTAssertLessThanOrEqual(long.count, 32)
-        XCTAssertFalse(long.hasSuffix("-"))
-        XCTAssertEqual(SessionNaming.slugify("  --Hello   World--  "), "hello-world")
-    }
-
     func testDeriveProjectName() {
         XCTAssertEqual(SessionNaming.deriveProjectName("/a/b/"), "b")
         XCTAssertEqual(SessionNaming.deriveProjectName("~"), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName(""), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName("/"), "project")
         XCTAssertEqual(SessionNaming.deriveProjectName("~/code/api"), "api")
-    }
-
-    func testUnique() {
-        XCTAssertEqual(SessionNaming.unique("x", taken: ["x", "x-2"]), "x-3")
-        XCTAssertEqual(SessionNaming.unique("y", taken: ["x"]), "y")
-    }
-
-    func testTmuxSafeReplacesDotAndColon() {
-        XCTAssertEqual(SessionNaming.tmuxSafe("next.js"), "next_js")
-        XCTAssertEqual(SessionNaming.tmuxSafe("a.b:c.d"), "a_b_c_d")
-        XCTAssertEqual(SessionNaming.tmuxSafe("plain-name"), "plain-name")
-        XCTAssertEqual(SessionNaming.tmuxSafe(""), "")
-    }
-
-    func testUniqueProjectNameSanitisesBeforeDeduplicating() {
-        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: []), "next_js")
-        // Uniqueness is judged on the name tmux will KEEP.
-        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: ["next_js"]), "next_js-2")
-    }
-
-    func testScratchHint() {
-        XCTAssertEqual(SessionScratchHint.text(slug: "", taken: []), SessionScratchHint.emptySlug)
-        XCTAssertEqual(SessionScratchHint.text(slug: "app", taken: ["app"]), "app already exists — will create app-2")
-        XCTAssertEqual(SessionScratchHint.text(slug: "app", taken: ["app", "app-2"]), "app already exists — will create app-3")
-        XCTAssertNil(SessionScratchHint.text(slug: "app", taken: ["other"]))
-    }
-
-    func testWorkspaceRoot() {
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: [], homeDir: "/home/u"), "/home/u/projects")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a", "/home/u/code/b"], homeDir: "/home/u"), "/home/u/code")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/a/x", "/b/y"], homeDir: "/home/u"), "/home/u/projects")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: [], homeDir: nil), "")
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a"], homeDir: nil), "/home/u/code")
-        // A shared prefix that is not a folder boundary is not a common parent.
-        XCTAssertEqual(SessionWorkspaceRoot.proposed(repoPaths: ["/home/u/code/a", "/home/u/codex/b"], homeDir: "/home/u"), "/home/u")
     }
 }
 
@@ -225,19 +178,23 @@ final class SessionCreatePlanTests: XCTestCase {
     }
 
     func testNewProjectWithEmptyNameIsDisabled() {
-        let p = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = " " }
+        // A typed-then-emptied name is refused; an untouched field lets the box name the session.
+        let p = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = " "; $0.nameEdited = true }
         XCTAssertFalse(p.enabled)
-        let ok = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = "b" }
+        let ok = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b"; $0.newProjectName = "b"; $0.nameEdited = true }
         XCTAssertTrue(ok.enabled)
+        let hinted = form { $0.target = .newProject; $0.source = .folder; $0.folder = "/a/b" }
+        XCTAssertTrue(hinted.enabled)
     }
 
     func testScratchEmptySlugIsDisabledWithItsLabel() {
-        let p = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "!!!" }
+        // `scratchUsable` is the box's verdict on the name (an empty slug → not usable).
+        let p = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "!!!"; $0.scratchUsable = false }
         XCTAssertFalse(p.enabled)
         XCTAssertEqual(p.label, "Create workspace")
-        let ok = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "My App" }
+        let ok = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = "/r"; $0.scratchName = "My App"; $0.scratchUsable = true }
         XCTAssertTrue(ok.enabled)
-        let noRoot = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = ""; $0.scratchName = "x" }
+        let noRoot = form { $0.target = .newProject; $0.source = .scratch; $0.scratchRoot = ""; $0.scratchName = "x"; $0.scratchUsable = true }
         XCTAssertFalse(noRoot.enabled)
     }
 
@@ -320,7 +277,6 @@ final class SessionCreatePlanTests: XCTestCase {
     }
 
     func testCreatedWindowFoundBySessionIdWhenNameDiffers() {
-        // We asked for "next.js"; tmux kept "next_js".
         let projects = [project("other", "", [window(0, "x", sid: "ses_o")]), project("next_js", "", [window(0, "default", sid: "ses_new")])]
         let located = SessionCreatedWindow.locate(in: projects, project: "next.js", windowIndex: nil, sessionId: "ses_new", name: "default")
         XCTAssertEqual(located?.project, "next_js")
@@ -332,11 +288,27 @@ final class SessionCreatePlanTests: XCTestCase {
         XCTAssertNil(SessionCreatedWindow.locate(in: projects, project: "nope", windowIndex: 0, sessionId: "ses_none", name: nil))
     }
 
-    func testCreatedWindowFoundByTmuxSafeNameWithoutASessionId() {
+    func testCreatedWindowFoundByTheNameTheBoxReported() {
         let projects = [project("api_v2", "", [window(1, "default")])]
-        let located = SessionCreatedWindow.locate(in: projects, project: "api:v2", windowIndex: 1, sessionId: nil, name: "default")
+        let located = SessionCreatedWindow.locate(in: projects, project: "api_v2", windowIndex: 1, sessionId: nil, name: "default")
         XCTAssertEqual(located?.project, "api_v2")
         XCTAssertEqual(located?.window.index, 1)
+    }
+
+    func testCreateResultDecodesTheBoxsName() throws {
+        let with = try JSONDecoder().decode(TmuxCreateResult.self, from: Data(#"{"name":"next_js","projects":[],"sessionId":"s","windowIndex":0}"#.utf8))
+        XCTAssertEqual(with.name, "next_js")
+        let old = try JSONDecoder().decode(TmuxCreateResult.self, from: Data(#"{"projects":[],"sessionId":"s","windowIndex":0}"#.utf8))
+        XCTAssertNil(old.name)
+        XCTAssertNil(try JSONDecoder().decode(TmuxCreateResult.self, from: Data("[]".utf8)).name)
+    }
+
+    func testProposalAndProbeDecode() throws {
+        let p = try JSONDecoder().decode(SessionNameProposal.self, from: Data(#"{"name":"app-2","hint":"app already exists — will create app-2"}"#.utf8))
+        XCTAssertEqual(p, SessionNameProposal(name: "app-2", hint: "app already exists — will create app-2"))
+        XCTAssertNil(try JSONDecoder().decode(SessionNameProposal.self, from: Data(#"{"name":"app","hint":null}"#.utf8)).hint)
+        let probe = try JSONDecoder().decode(ForgeProbeResult.self, from: Data(#"{"repos":[],"cli":{},"partial":false,"homeDir":"/home/u","proposedRoot":"/home/u/code"}"#.utf8))
+        XCTAssertEqual(probe.proposedRoot, "/home/u/code")
     }
 
     func testChatLandingWritesNothing() {
@@ -485,20 +457,14 @@ final class SessionRepoScanTests: XCTestCase {
         XCTAssertEqual(RepoRowFormat.age(ms: -5), "now")
     }
 
-    func testBatchNamesAreUniqueAcrossTheBatch() {
-        let two = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: [])
-        XCTAssertEqual(two.rows.map(\.name), ["api", "api-2"])
-        let withExisting = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: ["api"])
-        XCTAssertEqual(withExisting.rows.map(\.name), ["api-2", "api-3"])
-    }
-
-    func testBatchNameForDottedRepoIsTmuxSafe() {
-        let batch = SessionSetupBatch(paths: ["/r/next.js", "/s/next_js", "/t/api:v2"], taken: [])
-        XCTAssertEqual(batch.rows.map(\.name), ["next_js", "next_js-2", "api_v2"])
+    func testBatchRowsAreLabelledByTheirFolder() {
+        let two = SessionSetupBatch(paths: ["/a/api", "/b/api"])
+        XCTAssertEqual(two.rows.map(\.name), ["api", "api"], "a label only — the box names each session uniquely")
+        XCTAssertEqual(SessionSetupBatch(paths: ["/r/next.js"]).rows.map(\.name), ["next.js"])
     }
 
     func testFailCreatingLeavesNoRowStuckCreating() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b", "/c"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b", "/c"])
         batch.markCreating(at: 0)
         batch.markReady(path: "/a")
         batch.markCreating(at: 1)
@@ -509,7 +475,7 @@ final class SessionRepoScanTests: XCTestCase {
     }
 
     func testBatchRunsInOrderAndTracksPhases() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         XCTAssertEqual(batch.nextQueuedIndex, 0)
         batch.markCreating(at: 0)
         XCTAssertTrue(batch.isRunning)
@@ -522,31 +488,30 @@ final class SessionRepoScanTests: XCTestCase {
     }
 
     func testBatchLandsOnFirstSuccess() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         batch.markReady(path: "/a")
         batch.markReady(path: "/b")
         XCTAssertEqual(batch.autoLandingPath, "/a")
     }
 
     func testBatchPartialFailureDoesNotLand() {
-        var batch = SessionSetupBatch(paths: ["/a", "/b"], taken: [])
+        var batch = SessionSetupBatch(paths: ["/a", "/b"])
         batch.markFailed(path: "/a", message: "boom")
         batch.markReady(path: "/b")
         XCTAssertNil(batch.autoLandingPath)
         XCTAssertTrue(batch.hasFailures)
         // "Done" lands on the first success.
         XCTAssertEqual(batch.doneLandingPath, "/b")
-        var none = SessionSetupBatch(paths: ["/a"], taken: [])
+        var none = SessionSetupBatch(paths: ["/a"])
         none.markFailed(path: "/a", message: "boom")
         XCTAssertNil(none.doneLandingPath)
     }
 
-    func testRetryRequeuesOnlyAFailedRowAndKeepsItsName() {
-        var batch = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: [])
+    func testRetryRequeuesOnlyAFailedRow() {
+        var batch = SessionSetupBatch(paths: ["/a/api", "/b/api"])
         batch.markFailed(path: "/b/api", message: "boom")
         batch.requeue(path: "/b/api")
         XCTAssertEqual(batch.rows[1].phase, .queued)
-        XCTAssertEqual(batch.rows[1].name, "api-2")
         XCTAssertNil(batch.rows[1].error)
         batch.markReady(path: "/a/api")
         batch.requeue(path: "/a/api")

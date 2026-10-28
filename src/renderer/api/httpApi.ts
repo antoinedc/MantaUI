@@ -832,6 +832,7 @@ export const httpApi: Api = {
     rpcWithTimeout(IPC.syncSnapshot, RPC_METADATA_TIMEOUT_MS, args),
   tmuxNewSession: (input) => rpc(IPC.tmuxNewSession, input),
   tmuxNewWindow: (input) => rpc(IPC.tmuxNewWindow, input),
+  sessionsProposeName: (input) => rpc(IPC.sessionsProposeName, input),
   tmuxRenameSession: (input) => rpc(IPC.tmuxRenameSession, input),
   tmuxRenameWindow: (input) => rpc(IPC.tmuxRenameWindow, input),
   tmuxKillSession: (sessionName) => rpc(IPC.tmuxKillSession, sessionName),

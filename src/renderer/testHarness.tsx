@@ -38,6 +38,7 @@ import { SessionHeader } from "./SessionHeader";
 // from the mapping.
 import { createStreamInterpreter } from "../server/streamInterp.mjs";
 import { buildAccountRowStates } from "../server/accountsRowState.mjs";
+import { proposeProjectName, proposeScratchName } from "../server/sessionNaming.mjs";
 // The interpreter reads OpenCode V2 events; this harness's tests are written with
 // V1-shaped literals, so each one is re-expressed as V2 first (test support only).
 import { createV1ToV2 } from "../server/fixtures/v1EventsAsV2.mjs";
@@ -173,6 +174,11 @@ function defaultApiImpl(): Record<string, unknown> {
         health: await window.api.accountHealth().catch(() => null),
         nowMs: Date.now(),
       }),
+    // WS11 D5 (S1): the box previews names; the harness runs the REAL box rules over an empty "taken" set.
+    sessionsProposeName: async (input: { kind: "project" | "scratch"; hint?: string; cwd?: string }) =>
+      input.kind === "scratch"
+        ? proposeScratchName(input.hint ?? "", new Set<string>())
+        : { name: proposeProjectName({ hint: input.hint, cwd: input.cwd }, new Set<string>()), hint: null },
     // The capability read mirrors whatever `getServerVersion` answers (a test overrides one).
     apiVersion: () => window.api.getServerVersion(),
     delegateJobForSession: () => Promise.resolve({ readOnly: false }),

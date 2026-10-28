@@ -26,7 +26,7 @@ struct SessionRenameSheet: View {
     }
 
     private var validated: String? {
-        SessionRenameLogic.validated(name, current: initialName)
+        SessionRenameLogic.changed(name, current: initialName)
     }
 
     var body: some View {

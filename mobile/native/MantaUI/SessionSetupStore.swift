@@ -71,11 +71,9 @@ final class SessionSetupStore: ObservableObject {
         )
     }
 
-    /// Where new workspaces go (and where clones land): the common parent of the
-    /// scanned repositories, else `<home>/projects`; empty when nothing is known.
-    var proposedRoot: String {
-        SessionWorkspaceRoot.proposed(repoPaths: (probeResult?.repos ?? []).map(\.path), homeDir: homeDir)
-    }
+    /// Where new workspaces go (and where clones land) — the box's proposal (`forge:probe` →
+    /// `proposedRoot`, WS11 D5 / S3); empty when the box knows nothing (or is older).
+    var proposedRoot: String { probeResult?.proposedRoot ?? "" }
 
     func runProbe() async {
         guard probe == .idle || probe == .failed else { return }
@@ -109,16 +107,16 @@ final class SessionSetupStore: ObservableObject {
 
     // MARK: - Batch
 
-    /// Starts the batch for `paths`. Names are unique across the batch and
-    /// against `taken` (the existing project names).
-    func setUp(paths: [String], taken: Set<String>) {
+    /// Starts the batch for `paths`. The box names each session (unique across the batch and the
+    /// existing projects) as the rows are created, one at a time.
+    func setUp(paths: [String]) {
         guard !paths.isEmpty, !(batch?.isRunning ?? false) else { return }
         let known = Set(repos.map(\.path))
         for path in paths where !known.contains(path) {
             extraRepos.append(RepoHit(path: path, name: SessionNaming.deriveProjectName(path)))
         }
         checked.formUnion(paths)
-        batch = SessionSetupBatch(paths: paths, taken: taken)
+        batch = SessionSetupBatch(paths: paths)
         createdByPath = [:]
         startWorker()
     }
@@ -164,13 +162,13 @@ final class SessionSetupStore: ObservableObject {
             current.markCreating(at: index)
             batch = current
             let input = SessionNewProjectInput(
-                name: row.name, cwd: row.path, windowName: "default", chatMode: true, createDir: false
+                nameHint: row.path, cwd: row.path, windowName: "default", chatMode: true, createDir: false
             )
             do {
                 let reply = try await api.createSession(input)
                 guard !Task.isCancelled else { break }
-                guard let located = SessionCreatedWindow.locate(
-                    in: reply.projects, project: row.name, windowIndex: reply.windowIndex,
+                guard let name = reply.name, let located = SessionCreatedWindow.locate(
+                    in: reply.projects, project: name, windowIndex: reply.windowIndex,
                     sessionId: reply.sessionId, name: "default"
                 ) else {
                     throw MantaError.transport("created session was not returned")

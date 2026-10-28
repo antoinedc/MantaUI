@@ -61,17 +61,14 @@ import {
   zeroStateMode,
   type RepoRow,
 } from "./chatUtils";
-import {
-  deriveProjectName,
-  generateProjectName,
-  promptWindowName,
-  slugifyProjectName,
-  uniqueSessionName,
-} from "../shared/projectName.mjs";
+import { generateProjectName, promptWindowName } from "../shared/projectName.mjs";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import type { VoicePhase } from "./voice";
 import type {
   ForgeCliStatus,
   Project,
+  SessionNameProposal,
   RepoHit,
   TmuxCreateResult,
   WorktreeInfo,
@@ -90,11 +87,12 @@ import {
 // the first prompt.
 function normalizeCreate(
   result: TmuxCreateResult | Project[],
-): { sessionId: string | null; windowIndex: number | undefined; projects: Project[] } {
+): { name: string | null; sessionId: string | null; windowIndex: number | undefined; projects: Project[] } {
   if (Array.isArray(result)) {
-    return { sessionId: null, windowIndex: undefined, projects: result };
+    return { name: null, sessionId: null, windowIndex: undefined, projects: result };
   }
   return {
+    name: result.name ?? null,
     sessionId: result.sessionId ?? null,
     windowIndex: result.windowIndex,
     projects: result.projects,
@@ -172,15 +170,16 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const projectName =
     draft.mode === "new-project" ? null : draft.mode.projectName;
   const isNewProject = projectName === null;
+  // WS11 D5: naming is the box's. An older box can't name a new project (an unsafe name would be
+  // silently rewritten by tmux), so creating one is disabled with the note.
+  const namingCapability = useBoxCapability("sessions-naming-1");
+  const namingBlocked = isNewProject && namingCapability === false;
 
   // ---- local (non-persisted) UI state ----
   const [pickerOpen, setPickerOpen] = useState(false);
   // What the folder picker is editing right now: the composer's cwd ("cwd",
   // today's behaviour) or the scratch root ("root", BET-1093). Default "cwd".
   const [pickerTarget, setPickerTarget] = useState<"cwd" | "root">("cwd");
-  // Entry names returned by fsListDirs(scratchRoot), the local collision hint
-  // for scratch mode (BET-1093 §5).
-  const [fsEntries, setFsEntries] = useState<Set<string>>(new Set());
   const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
   const [isGitRepo, setIsGitRepo] = useState(false);
   const [sending, setSending] = useState(false);
@@ -258,6 +257,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // The box's $HOME from the probe, used to render a no-remote repo under the
   // home dir as `~/…` instead of the absolute path (describeRepoRow).
   const [homeDir, setHomeDir] = useState<string | null>(null);
+  // The box's proposal for where new workspaces go (forge:probe → proposedRoot; WS11 D5 / S3).
+  const [proposedRoot, setProposedRoot] = useState("");
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   // The user chose "Browse for a folder…" (or the picker returned a worktree
   // fan-out) → render today's full composer for that folder. This is how the
@@ -294,6 +295,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     setProbeRepos([]);
     setCliStatus(null);
     setHomeDir(null);
+    setProposedRoot("");
     setBrowseChosen(false);
     setChecked(new Set());
     setRowPhase({});
@@ -310,6 +312,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           setProbeRepos(res?.repos ?? []);
           setCliStatus(res?.cli ?? null);
           setHomeDir(res?.homeDir ?? null);
+          setProposedRoot(res?.proposedRoot ?? "");
         })
         .catch(() => {
           if (cancelled) return;
@@ -359,13 +362,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
   // Create one repo's workspace, tracking per-row progress. Partial failure
   // surfaces but never aborts the batch (submitFanOut's rule).
-  const createRow = async (
-    row: RepoRow,
-    taken: Set<string>,
-    createdOut: CreatedSession[],
-  ) => {
-    const name = uniqueSessionName(deriveProjectName(row.path), taken);
-    taken.add(name);
+  const createRow = async (row: RepoRow, createdOut: CreatedSession[]) => {
     setRowPhase((p) => ({ ...p, [row.path]: "creating" }));
     setRowError((e) => {
       const n = { ...e };
@@ -373,8 +370,9 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       return n;
     });
     try {
+      // The box names the session (tmux-safe, unique, allocated under one lock) and returns the name.
       const res = await window.api.tmuxNewSession({
-        name,
+        nameHint: row.path,
         cwd: row.path,
         windowName: "default",
         chatMode: true,
@@ -382,7 +380,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       });
       const norm = normalizeCreate(res);
       applyProjects(norm.projects);
-      const entry: CreatedSession = { name, windowIndex: norm.windowIndex };
+      if (!norm.name) throw new Error("The box didn't report the new session's name.");
+      const entry: CreatedSession = { name: norm.name, windowIndex: norm.windowIndex };
       createdOut.push(entry);
       errorPathsRef.current.delete(row.path);
       setRowPhase((p) => ({ ...p, [row.path]: "ready" }));
@@ -401,7 +400,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // recently touched success and dismiss. Partial failure stays on the screen
   // with the errored row visible + retryable (done via "Done").
   const setupWorkspaces = async () => {
-    if (sending) return;
+    if (sending || namingBlocked) return;
     const chosen = rows.filter((r) => checked.has(r.path));
     if (chosen.length === 0) return;
     setSending(true);
@@ -411,9 +410,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     errorPathsRef.current = new Set();
     setRowPhase(Object.fromEntries(chosen.map((r) => [r.path, "queued"])));
     setRowError({});
-    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
     for (const r of chosen) {
-      await createRow(r, taken, createdRef.current);
+      await createRow(r, createdRef.current);
     }
     const created = createdRef.current;
     setSending(false);
@@ -426,9 +424,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // Retry a single failed row (same partial-failure path). When the retry
   // clears the last error and something was created, proceed as normal.
   const retryRow = async (row: RepoRow) => {
-    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
-    for (const c of createdRef.current) taken.add(c.name);
-    await createRow(row, taken, createdRef.current);
+    await createRow(row, createdRef.current);
     if (errorPathsRef.current.size === 0 && createdRef.current.length > 0) {
       await landIn(createdRef.current[0]);
     }
@@ -466,9 +462,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
     // view shows per-row progress / retry just like probed repos.
     setProbeRepos((prev) => [...prev, ...cloneRows]);
     setCloneOpen(false);
-    const taken = new Set(existingProjects.map((p) => p.tmuxSession));
     for (const r of cloneRows) {
-      await createRow(r, taken, createdRef.current);
+      await createRow(r, createdRef.current);
     }
     const created = createdRef.current;
     setSending(false);
@@ -482,19 +477,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // two consumers — the GitHub clone root [S6] and scratch mode's `scratchRoot`
   // (BET-1093). Editable inside the picker. When homeDir is unknown the root is
   // empty and callers stay disabled — never invent a fallback string.
-  const proposedWorkspaceRoot = useMemo(() => {
-    const dirs = probeRepos
-      .map((r) => (r.path?.includes("/") ? r.path.split("/").slice(0, -1).join("/") : ""))
-      .filter(Boolean);
-    if (dirs.length === 0) return homeDir ? `${homeDir}/projects` : "";
-    let common = dirs[0];
-    for (const d of dirs.slice(1)) {
-      while (common && !d.startsWith(common)) {
-        common = common.slice(0, common.lastIndexOf("/"));
-      }
-    }
-    return common && common !== "/" ? common : homeDir ? `${homeDir}/projects` : "";
-  }, [probeRepos, homeDir]);
+  const proposedWorkspaceRoot = proposedRoot;
 
   // BET-1093: "Start from scratch" — flip this draft into scratch mode and name
   // it immediately (generation is local + instant, so the composer never opens
@@ -506,43 +489,34 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       scratchRoot: proposedWorkspaceRoot,
     });
 
-  // Collision hint for scratch mode: the entry names under scratchRoot plus
-  // every existing project session. Non-fatal — an unreadable root yields an
-  // empty set and no hint.
-  const scratchTaken = useMemo(() => {
-    const s = new Set(fsEntries);
-    for (const p of existingProjects) s.add(p.tmuxSession);
-    return s;
-  }, [fsEntries, existingProjects]);
-
-  // The folder name is DERIVED from the typed project name — the user types
-  // freely, the filesystem gets a safe slug. One derivation, read by the
-  // destination line, the collision hint and the create button.
-  const scratchFolder = useMemo(
-    () => slugifyProjectName(draft.projectName),
-    [draft.projectName],
-  );
-
+  // The scratch folder name and its one hint ("needs a letter or number" / "x already exists —
+  // will create x-2") are the BOX's (`sessions:propose-name`, WS11 D5 / S1), previewed on a
+  // 250 ms debounce. It is only a preview — the create re-checks — so a failed or pending
+  // read never blocks the button: null = "not known yet".
+  const [scratchProposal, setScratchProposal] = useState<SessionNameProposal | null>(null);
   useEffect(() => {
-    if (!draft.scratch || !draft.scratchRoot) {
-      setFsEntries(new Set());
+    if (!draft.scratch) {
+      setScratchProposal(null);
       return;
     }
     let cancelled = false;
-    window.api
-      .fsListDirs(draft.scratchRoot)
-      .then((listing) => {
-        if (cancelled) return;
-        setFsEntries(new Set((listing?.entries ?? []).map((e) => e.name)));
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setFsEntries(new Set());
-      });
+    const t = setTimeout(() => {
+      window.api
+        .sessionsProposeName({ kind: "scratch", hint: draft.projectName, root: draft.scratchRoot })
+        .then((p) => {
+          if (!cancelled) setScratchProposal(p);
+        })
+        .catch(() => {
+          if (!cancelled) setScratchProposal(null);
+        });
+    }, 250);
     return () => {
       cancelled = true;
+      clearTimeout(t);
     };
-  }, [draft.scratch, draft.scratchRoot]);
+  }, [draft.scratch, draft.projectName, draft.scratchRoot]);
+  const scratchFolder = scratchProposal?.name ?? "";
+  const scratchCreatable = scratchProposal ? scratchProposal.name !== "" : draft.projectName.trim() !== "";
 
   // Model state — the SHARED cached catalog (same hook as ChatPanel), so the
   // picker renders its last-known models synchronously on remount instead of
@@ -653,7 +627,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // Everything is driven by the server's returned window identity (no name
   // lookup, no transient panel, no depending on extra server fields).
   const submit = async () => {
-    if (sending) return;
+    if (sending || namingBlocked) return;
     const text = draft.input.trim();
     if (!text && !draft.scratch) return;
     setSending(true);
@@ -682,24 +656,18 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
       const dir = scratchPath ?? worktreePath ?? draft.cwd;
       const newProject = isNewProject;
       // The session name comes from the REAL directory (the server may have
-      // suffixed / slugified the scratch name) — the folder is the truth.
-      const sessionName = newProject
-        ? uniqueSessionName(
-            deriveProjectName(dir),
-            new Set(existingProjects.map((p) => p.tmuxSession)),
-          )
-        : projectName!;
-
+      // suffixed / slugified the scratch name) — the folder is the truth; the box turns it
+      // into the final tmux-safe, unique name and returns it (WS11 D5).
       const created = newProject
         ? await window.api.tmuxNewSession({
-            name: sessionName,
+            nameHint: dir,
             cwd: dir,
             windowName: "default",
             chatMode: true,
             ...(worktreePath || draft.scratch ? {} : { createDir: true }),
           })
         : await window.api.tmuxNewWindow({
-            sessionName,
+            sessionName: projectName!,
             windowName: promptWindowName(text),
             cwd: dir,
             chatMode: true,
@@ -707,6 +675,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
           });
       const createdNorm = normalizeCreate(created);
       applyProjects(createdNorm.projects);
+      const sessionName = newProject ? createdNorm.name : projectName!;
+      if (!sessionName) throw new Error("The box didn't report the new session's name.");
 
       const proj = useStore
         .getState()
@@ -777,23 +747,20 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // "leasebot" not "main" shows in the sidebar. The first prompt goes to the
   // first window.
   const submitFanOut = async (baseCwd: string, wts: WorktreeInfo[]) => {
-    if (sending) return;
+    if (sending || namingBlocked) return;
     const text = draft.input.trim();
     setSending(true);
     setError(null);
     try {
-      const sessionName = uniqueSessionName(
-        deriveProjectName(baseCwd),
-        new Set(existingProjects.map((p) => p.tmuxSession)),
-      );
-
       const [first, ...rest] = wts;
       const created = await window.api.tmuxNewSession({
-        name: sessionName,
+        nameHint: baseCwd,
         cwd: first.path,
         windowName: worktreeName(first),
         chatMode: true,
       });
+      const sessionName = normalizeCreate(created).name;
+      if (!sessionName) throw new Error("The box didn't report the new session's name.");
       for (const w of rest) {
         try {
           await window.api.tmuxNewWindow({
@@ -906,13 +873,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   const createLabel = draft.scratch && !draft.input.trim() ? "Create workspace" : "Start a session";
   // One hint slot for the scratch name: either it cannot produce a folder at
   // all, or it collides with something already under the root. Never both.
-  const scratchHint = !draft.scratch
-    ? null
-    : !scratchFolder
-      ? "Add at least one letter or number — that becomes the folder name."
-      : scratchTaken.has(scratchFolder)
-        ? `${scratchFolder} already exists — will create ${uniqueSessionName(scratchFolder, scratchTaken)}`
-        : null;
+  const scratchHint = draft.scratch ? (scratchProposal?.hint ?? null) : null;
 
   return (
     // data-screen is the visual harness's handle on this screen (see
@@ -1105,7 +1066,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
 
           <button
             onClick={() => void submit()}
-            disabled={sending || (draft.scratch ? !scratchFolder : !draft.input.trim())}
+            disabled={sending || namingBlocked || (draft.scratch ? !scratchCreatable : !draft.input.trim())}
             aria-label={createLabel}
             title={
               sending
@@ -1292,7 +1253,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                           label: `Set up ${checked.size} workspace${checked.size === 1 ? "" : "s"}`,
                           tone: "primary",
                           onClick: () => void setupWorkspaces(),
-                          disabled: checked.size === 0,
+                          disabled: checked.size === 0 || namingBlocked,
                         },
                         { label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) },
                         { label: "Clone from GitHub…", tone: "default", onClick: () => setCloneOpen(true) },
@@ -1370,6 +1331,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         </>
         )}
 
+        {namingBlocked && <UpdateBoxNote />}
         {error && (
           <Card danger>
             <span className="text-meta text-danger break-words">{error}</span>

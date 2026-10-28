@@ -43,12 +43,18 @@ function makeDeps(projects, liveProjects = []) {
     createSession: [],
     forkSession: [],
     projectMetaUpsert: [],
+    renameWindow: [],
+    renameSession: [],
   };
   return {
     calls,
     deps: {
       tmux: {
         listProjects: async () => liveProjects,
+        listSessionNames: async () => liveProjects.map((p) => p.tmuxSession),
+        renamed: [],
+        renameWindow: async (i) => { calls.renameWindow.push(i); return liveProjects; },
+        renameSession: async (i) => { calls.renameSession.push(i); return liveProjects; },
         newWindow: async (i) => {
           calls.newWindow.push(i);
           return { sessionId: null, windowIndex: 1, projects: liveProjects };
@@ -390,7 +396,40 @@ test("tmux:new-session swallows projectMetaUpsert failures (best-effort)", async
     chatMode: true,
   });
   // tmux.newSession result returned (no throw), NOT unboxed to projects.
-  assert.deepEqual(result, { sessionId: "ses_new", windowIndex: 1, projects: [] });
+  assert.deepEqual(result, { sessionId: "ses_new", windowIndex: 1, projects: [], name: "newproj" });
+});
+
+test("tmux:new-session with no name: the box picks a tmux-safe, unique name from nameHint (WS11 D5 / S1)", async () => {
+  const live = [{ tmuxSession: "next_js", windows: [] }];
+  const { deps, calls } = makeDeps([], live);
+  const handlers = buildHandlers(deps);
+  const out = await handlers["tmux:new-session"]({ nameHint: "/home/dev/next.js", cwd: "/home/dev/next.js", windowName: "default" });
+  assert.equal(out.name, "next_js-2");
+  assert.equal(calls.newSession.at(-1).name, "next_js-2");
+  assert.equal(calls.projectMetaUpsert.at(-1).tmuxSession, "next_js-2", "metadata is written under the FINAL name");
+  // The folder is the hint when none is sent.
+  const bare = await handlers["tmux:new-session"]({ cwd: "/home/dev/alpha", windowName: "default" });
+  assert.equal(bare.name, "alpha");
+  // An explicit name is made tmux-safe, never renamed.
+  const explicit = await handlers["tmux:new-session"]({ name: "a.b", cwd: "/home/dev/alpha" });
+  assert.equal(explicit.name, "a_b");
+});
+
+test("sessions:propose-name previews project and scratch names; rename validates and skips an unchanged name (WS11 D5)", async () => {
+  const live = [{ tmuxSession: "alpha", windows: [{ index: 0, name: "default" }] }];
+  const { deps, calls } = makeDeps([], live);
+  const handlers = buildHandlers(deps);
+  assert.deepEqual(await handlers["sessions:propose-name"]({ kind: "project", cwd: "/x/alpha" }), { name: "alpha-2", hint: null });
+  const scratch = await handlers["sessions:propose-name"]({ kind: "scratch", hint: "  ", root: "/nonexistent-root-d5" });
+  assert.match(scratch.hint, /Add at least one letter or number/);
+  await assert.rejects(handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: "a:b" }), /can't contain/);
+  await assert.rejects(handlers["tmux:rename-session"]({ oldName: "alpha", newName: "" }), /can't be empty/);
+  await handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: " default " });
+  assert.equal(calls.renameWindow.length, 0, "unchanged → no tmux call");
+  await handlers["tmux:rename-window"]({ sessionName: "alpha", windowIndex: 0, newName: " fresh " });
+  assert.deepEqual(calls.renameWindow, [{ sessionName: "alpha", windowIndex: 0, newName: "fresh" }]);
+  await handlers["tmux:rename-session"]({ oldName: "alpha", newName: "alpha" });
+  assert.equal(calls.renameSession.length, 0);
 });
 
 // The create return contract: the renderer needs the newly-created window's

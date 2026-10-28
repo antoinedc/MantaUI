@@ -7,6 +7,7 @@
 // drag-drop local paths, peek-remote-file-then-open-in-Mac-app, mosh transport)
 // are no-ops documented below.
 
+import { proposedRoot } from "./sessionNaming.mjs";
 import { run } from "./tmux.mjs";
 import { spawn as nodeSpawn } from "node:child_process";
 import { readdir, readFile, stat, realpath, mkdir } from "node:fs/promises";
@@ -1040,7 +1041,8 @@ export async function forgeProbe() {
   const projectCwds = (cfg.projects ?? []).map((p) => p.defaultCwd).filter(Boolean);
   const { repos, partial } = await scanRepos({ roots: buildRoots(projectCwds) });
   const cli = await detectForgeCli();
-  const result = { repos, cli, partial, homeDir: homedir() };
+  // WS11 D5 (S3): where new workspaces go, decided here (boundary-aware) so both clients show one answer.
+  const result = { repos, cli, partial, homeDir: homedir(), proposedRoot: proposedRoot(repos.map((r) => r.path), homedir()) };
   _forgeCache = { at: now, result };
   return result;
 }

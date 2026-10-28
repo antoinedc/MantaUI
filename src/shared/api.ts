@@ -1,6 +1,7 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
   AccountsRowStates,
+  SessionNameProposal,
   StreamCachePayload,
   StreamContextPayload,
   AgentFileReady,
@@ -1025,7 +1026,10 @@ export interface Api {
   // re-locating it by name (which mixed new sessions up with existing ones
   // on name collisions).
   tmuxNewSession(input: {
-    name: string;
+    // Omit `name` to let the box pick one (tmux-safe, unique, allocated under a lock) from `nameHint`
+    // (else the folder); the final name comes back as `name` on the result (WS11 D5 / S1).
+    name?: string;
+    nameHint?: string;
     cwd: string;
     windowName?: string;
     chatMode?: boolean;
@@ -1053,6 +1057,14 @@ export interface Api {
     // it on the new window.
     existingSessionId?: string;
   }): Promise<TmuxCreateResult>;
+  // WS11 D5 (S1): preview the name a create would pick. `project`: from a hint/folder against live
+  // sessions; `scratch`: the folder slug under `root`, with the collision hint.
+  sessionsProposeName(input: {
+    kind: "project" | "scratch";
+    hint?: string;
+    cwd?: string;
+    root?: string;
+  }): Promise<SessionNameProposal>;
   tmuxRenameSession(input: { oldName: string; newName: string }): Promise<Project[]>;
   tmuxRenameWindow(input: {
     sessionName: string;

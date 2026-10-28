@@ -20,6 +20,7 @@ import {
 } from "../shared/streamInterpretation.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
+import { createSessionUnderAllocator, listChildDirNames, proposeProjectName, proposeScratchName, sharedNameAllocator, validateSessionName } from "./sessionNaming.mjs";
 import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
 import { buildAccountRowStates } from "./accountsRowState.mjs";
 import { createLauncherFlagWriter, launchersView, resolveLauncherForSpawn } from "./launchersConfig.mjs";
@@ -610,6 +611,8 @@ export function buildHandlers({
   syncSubagentsDetailed = providers.syncSubagentsDetailed,
   // WS11 D4: the custom endpoints behind `opencode:get-providers` (injectable for tests).
   getProviderEndpoints = providers.getProviderEndpoints,
+  // WS11 D5: the one session-name allocator (injectable so a test gets a fresh one).
+  nameAllocator = sharedNameAllocator,
   getUsageAlerts = getUsageAlertsImpl,
   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
@@ -1358,10 +1361,22 @@ export function buildHandlers({
       // the renderer. formatIssueRef returns null for invalid input, which
       // simply skips the stamp.
       const forgeIssueRef = i?.forgeIssue ? formatIssueRef(i.forgeIssue) : null;
-      const result = await tmux.newSession({ ...i, cwd, oc, forgeIssueRef });
+      // WS11 D5 (S1): the box names the session. No `name` → a tmux-safe, unique name from `nameHint`
+      // (else the folder), allocated under one mutex so two clients can never take the same name; an
+      // explicit `name` is made tmux-safe and never renamed. The final name comes back as `name`.
+      const { result, name } = await createSessionUnderAllocator({
+        explicitName: i?.name,
+        hint: typeof i?.nameHint === "string" && i.nameHint.trim() ? i.nameHint : cwd,
+        existingSessionId: i?.existingSessionId,
+        create: ({ name: finalName, existingSessionId }) =>
+          tmux.newSession({ ...i, name: finalName, cwd, oc, forgeIssueRef, existingSessionId }),
+        listNames: () => tmux.listSessionNames(),
+        deleteSession: (id) => oc.deleteSessionRaw(id),
+        allocator: nameAllocator,
+      });
       await local
         .projectMetaUpsert({
-          tmuxSession: i.name,
+          tmuxSession: name,
           defaultCwd: expandTilde(cwd),
         })
         .catch(() => {});
@@ -1371,7 +1386,16 @@ export function buildHandlers({
       // sessions up with existing ones on name collisions).
       // BET-675: refresh materialized state so the sync delta publishes now.
       await syncState.refreshNow();
-      return result;
+      return { ...result, name };
+    },
+    // WS11 D5 (S1): a preview of the name a create would pick; the create re-checks.
+    "sessions:propose-name": async (i) => {
+      if (i?.kind === "scratch") {
+        const taken = await listChildDirNames(i.root);
+        return proposeScratchName(i.hint ?? "", taken);
+      }
+      const taken = new Set(await tmux.listSessionNames());
+      return { name: proposeProjectName({ hint: i?.hint, cwd: i?.cwd }, taken), hint: null };
     },
     // Resolve cwd: prefer explicit cwd in input, then fall back to the
     // project's stored defaultCwd (set when the workspace was created).
@@ -1385,12 +1409,21 @@ export function buildHandlers({
       return result;
     },
     "tmux:rename-session": async (i) => {
-      const result = await tmux.renameSession(i);
+      // WS11 D5 (S2): validated on the box with a sentence a person can read; unchanged → no tmux call.
+      const valid = validateSessionName(i?.newName);
+      if (!valid.ok) throw new Error(valid.error);
+      if (valid.name === i?.oldName) return tmux.listProjects();
+      const result = await tmux.renameSession({ ...i, newName: valid.name });
       await syncState.refreshNow();
       return result;
     },
     "tmux:rename-window": async (i) => {
-      const result = await tmux.renameWindow(i);
+      const valid = validateSessionName(i?.newName);
+      if (!valid.ok) throw new Error(valid.error);
+      const projects = await tmux.listProjects();
+      const current = projects.find((p) => p.tmuxSession === i?.sessionName)?.windows?.find((w) => w.index === i?.windowIndex);
+      if (current && current.name === valid.name) return projects;
+      const result = await tmux.renameWindow({ ...i, newName: valid.name });
       await syncState.refreshNow();
       return result;
     },

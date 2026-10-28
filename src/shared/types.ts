@@ -437,6 +437,8 @@ export type Project = {
 // re-locating it by name, which mixed new sessions up with existing ones on
 // name collisions. `projects` is the refreshed listing.
 export type TmuxCreateResult = {
+  /** The final session (project) name — the box picks it (WS11 D5 / S1). Absent on an older box. */
+  name?: string;
   sessionId: string | null;
   windowIndex: number;
   projects: Project[];
@@ -507,7 +509,12 @@ export type ForgeProbeResult = {
   // instead of the absolute path. null when not provided (renderer degrades
   // to the absolute path).
   homeDir: string | null;
+  /** Where new workspaces go, decided by the box (WS11 D5 / S3). Absent on an older box. */
+  proposedRoot?: string;
 };
+
+/** `sessions:propose-name` (WS11 D5 / S1): a preview of the name a create would pick. */
+export type SessionNameProposal = { name: string; hint: string | null };
 
 // ----- Forge clone flow (BET-796) -----
 
@@ -1348,6 +1355,7 @@ export const IPC = {
   tmuxList: "tmux:list",
   tmuxNewSession: "tmux:new-session",         // creates tmux session + first window
   tmuxNewWindow: "tmux:new-window",
+  sessionsProposeName: "sessions:propose-name",
   tmuxRenameSession: "tmux:rename-session",
   tmuxRenameWindow: "tmux:rename-window",
   tmuxKillSession: "tmux:kill-session",

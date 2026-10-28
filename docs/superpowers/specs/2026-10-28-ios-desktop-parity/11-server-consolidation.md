@@ -2282,3 +2282,18 @@ Review: `reviews/server-first-3/11-server-consolidation.md`, plus
   The client adds only its own clock: the "· 2h ago" suffix and the 5h visibility window.
 - Older box: desktop and iOS show the static "That didn't work. Try again." for errors, no row state/control and
   the "Update your box to use this" note on the Accounts screen; no client copy of the moved logic remains.
+
+## Implementation notes (D5, naming half — `sessions-naming-1`)
+
+- Shipped as its own step. The clone half (S8, `forge-clone-view-1`) is a separate step, so the two capability
+  ids stay independently gateable.
+- An explicit `name` on `tmux:new-session` is also made tmux-safe (never renamed, never retried) and returned as
+  `name`; before, tmux rewrote `.`/`:` silently and the client had to guess. A collision with an explicit name is
+  the sentence "A project named “x” already exists.".
+- Hinted create retries at most 3 attempts in total (three collisions fail), reusing the opencode session.
+- The scratch preview unions nothing but the directories under `root` (what `project:create-scratch` actually
+  de-duplicates against); the old clients also unioned live session names, which could promise a name the
+  create then did not use.
+- iOS: `SessionNaming` keeps only `deriveProjectName` (a display basename for the batch rows); the batch rows are
+  labelled by folder and the box names each session. A typed name field is sent as the explicit name only once
+  edited; otherwise the box names the session from the folder.

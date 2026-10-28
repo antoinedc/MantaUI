@@ -161,15 +161,18 @@ struct ForgeProbeResult: Decodable, Equatable, Sendable {
     var cli: ForgeCliStatus
     var partial: Bool
     var homeDir: String?
+    /// Where new workspaces go, decided by the box (WS11 D5 / S3). nil on an older box.
+    var proposedRoot: String?
 
-    init(repos: [RepoHit], cli: ForgeCliStatus = ForgeCliStatus(), partial: Bool = false, homeDir: String? = nil) {
+    init(repos: [RepoHit], cli: ForgeCliStatus = ForgeCliStatus(), partial: Bool = false, homeDir: String? = nil, proposedRoot: String? = nil) {
         self.repos = repos
         self.cli = cli
         self.partial = partial
         self.homeDir = homeDir
+        self.proposedRoot = proposedRoot
     }
 
-    private enum CodingKeys: String, CodingKey { case repos, cli, partial, homeDir }
+    private enum CodingKeys: String, CodingKey { case repos, cli, partial, homeDir, proposedRoot }
 
     /// Decodes anything and consumes exactly one element, so a malformed repo is
     /// stepped over instead of failing the whole scan.
@@ -184,7 +187,15 @@ struct ForgeProbeResult: Decodable, Equatable, Sendable {
         cli = ((try? c.decodeIfPresent(ForgeCliStatus.self, forKey: .cli)) ?? nil) ?? ForgeCliStatus()
         partial = ((try? c.decodeIfPresent(Bool.self, forKey: .partial)) ?? nil) ?? false
         homeDir = (try? c.decodeIfPresent(String.self, forKey: .homeDir)) ?? nil
+        proposedRoot = (try? c.decodeIfPresent(String.self, forKey: .proposedRoot)) ?? nil
     }
+}
+
+/// `sessions:propose-name` — a preview of the name a create would pick (WS11 D5 / S1). `hint` is the one
+/// line under a scratch name ("Add at least one letter or number…" / "x already exists — will create x-2").
+struct SessionNameProposal: Decodable, Equatable, Sendable {
+    var name: String
+    var hint: String?
 }
 
 // MARK: - GitHub device sign-in
@@ -512,7 +523,10 @@ struct SessionStoppedList: Decodable, Equatable, Sendable {
 
 /// `tmux:new-session` — a new project (a tmux session) with its first window.
 struct SessionNewProjectInput: Equatable, Sendable {
-    var name: String
+    /// An explicit name (the box makes it tmux-safe but never renames it). nil = the box names the
+    /// session from `nameHint` (tmux-safe, unique, allocated under a lock) — WS11 D5 / S1.
+    var name: String? = nil
+    var nameHint: String? = nil
     var cwd: String
     var windowName: String
     var chatMode: Bool

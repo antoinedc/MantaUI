@@ -21,25 +21,7 @@ import * as tmux from "./tmux.mjs";
 import * as oc from "./opencode.mjs";
 import { resolveWorkspace } from "./peers.mjs";
 import { fuzzyMatchModel, suggestModels } from "../shared/modelGuide.mjs";
-
-// Window names tmux tolerates: anything except the `:` target separator and
-// control characters (a newline in a window name would corrupt the tab- and
-// newline-delimited -F listing). We reject rather than sanitise — the caller
-// (the model) gets a clear message and can retry with a different name.
-export function validateSessionName(name) {
-  if (typeof name !== "string") return { ok: false, error: "A session name is required." };
-  const trimmed = name.trim();
-  if (trimmed.length < 1 || trimmed.length > 40) {
-    return { ok: false, error: "Session name must be 1–40 characters." };
-  }
-  if (/[:]/.test(trimmed) || /[\x00-\x1f\x7f]/.test(trimmed)) {
-    return {
-      ok: false,
-      error: "Session name cannot contain ':' or control characters.",
-    };
-  }
-  return { ok: true, name: trimmed };
-}
+import { validateSessionName } from "./sessionNaming.mjs";
 
 // Compact the caller's session. opencode already emits `session.compacted`
 // and the renderer already reacts to it, so no bus event is needed here.

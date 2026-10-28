@@ -337,13 +337,16 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
     let projects: [MantaProject]
     let sessionId: String?
     let windowIndex: Int?
+    /// The final session (project) name — the box picks it (WS11 D5 / S1). nil on an older box.
+    let name: String?
 
-    private enum CodingKeys: String, CodingKey { case projects, sessionId, windowIndex }
+    private enum CodingKeys: String, CodingKey { case projects, sessionId, windowIndex, name }
 
-    init(projects: [MantaProject], sessionId: String? = nil, windowIndex: Int? = nil) {
+    init(projects: [MantaProject], sessionId: String? = nil, windowIndex: Int? = nil, name: String? = nil) {
         self.projects = projects
         self.sessionId = sessionId
         self.windowIndex = windowIndex
+        self.name = name
     }
 
     init(from decoder: Decoder) throws {
@@ -351,6 +354,7 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
             projects = list
             sessionId = nil
             windowIndex = nil
+            name = nil
             return
         }
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -358,6 +362,8 @@ struct TmuxCreateResult: Decodable, Equatable, Sendable {
         let sid = (try? container.decodeIfPresent(String.self, forKey: .sessionId)) ?? nil
         sessionId = (sid?.isEmpty == false) ? sid : nil
         windowIndex = (try? container.decodeIfPresent(Int.self, forKey: .windowIndex)) ?? nil
+        let reported = (try? container.decodeIfPresent(String.self, forKey: .name)) ?? nil
+        name = (reported?.isEmpty == false) ? reported : nil
     }
 }
 

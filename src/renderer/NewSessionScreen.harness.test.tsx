@@ -60,6 +60,9 @@ function mountDraft(overrides: Partial<NewSessionDraft> = {}): Harness {
   return mount(<NewSessionScreen draftId={d.id} />);
 }
 
+// WS11 D5: a box that names sessions itself advertises sessions-naming-1; without it creating a project is disabled.
+const BOX_NAMES = { apiVersion: () => Promise.resolve({ capabilities: ["sessions-naming-1"] } as never) };
+
 describe("NewSessionScreen mount against an unpaired window.api", () => {
   let h: Harness | null = null;
 
@@ -276,6 +279,12 @@ describe("NewSessionScreen composer parity (BET-1088)", () => {
 // submit with and without a prompt.
 describe("NewSessionScreen scratch mode (BET-1093)", () => {
   let h: Harness | null = null;
+  // The folder preview is the box's (`sessions:propose-name`), debounced 250 ms.
+  const settlePreview = async () => {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 320));
+    });
+  };
 
   const scratchDraft = (overrides: Partial<NewSessionDraft> = {}): NewSessionDraft =>
     draft({
@@ -305,6 +314,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
     storeOverrides: Partial<ReturnType<typeof useStore.getState>> = {},
   ): MockApi {
     const { api } = installMockApi({
+      ...BOX_NAMES,
       fsListDirs: () => Promise.resolve({ dir: "/home", entries: [] }),
       ...apiOverrides,
     });
@@ -364,7 +374,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
       'input[aria-label="Project name"]',
     ) as HTMLInputElement;
     act(() => typeIntoInput(nameInput, "My App"));
-    await h!.flush();
+    await settlePreview();
 
     // The field keeps the typed text verbatim — never rewritten to a slug.
     expect(
@@ -385,7 +395,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
       'input[aria-label="Project name"]',
     ) as HTMLInputElement;
     act(() => typeIntoInput(nameInput, "!!!"));
-    await h!.flush();
+    await settlePreview();
 
     const create = h!.container.querySelector(
       'button[aria-label="Create workspace"]',
@@ -415,7 +425,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
       projectCreateScratch: (input: { root: string; name: string }) =>
         Promise.resolve({ path: `${input.root}/${input.name}`, name: input.name }),
       tmuxNewSession: () =>
-        Promise.resolve({ sessionId: "ses-x", windowIndex: 0, projects: [] }),
+        Promise.resolve({ name: "fresh-app", sessionId: "ses-x", windowIndex: 0, projects: [] }),
     }, {
       // Neutralize dismissDraft so the post-submit draft removal doesn't drop
       // the directly-mounted screen's hooks (mirrors the composer-parity tests).
@@ -449,7 +459,7 @@ describe("NewSessionScreen scratch mode (BET-1093)", () => {
       projectCreateScratch: (input: { root: string; name: string }) =>
         Promise.resolve({ path: `${input.root}/${input.name}`, name: input.name }),
       tmuxNewSession: () =>
-        Promise.resolve({ sessionId: "ses-y", windowIndex: 0, projects: [] }),
+        Promise.resolve({ name: "fresh-app", sessionId: "ses-y", windowIndex: 0, projects: [] }),
     }, {
       dismissDraft: () => {},
     });
@@ -735,12 +745,13 @@ describe("NewSessionScreen fan-out submit carries staged attachments (BET-1127)"
     const { api } = installMockApi({
       // Reach the "fresh" zero state so "Browse for a folder…" opens the
       // picker at the draft's cwd (/x) with pickerTarget "cwd".
+      ...BOX_NAMES,
       forgeProbe: () => Promise.resolve({ repos: [], cli: null, homeDir: "/home/dev" }),
       fsListDirs: (dir: unknown) => Promise.resolve({ dir: dir as string, entries: [] }),
       gitListWorktrees: (dir: unknown) =>
         Promise.resolve(dir === "/x" ? FANOUT_WTS : []),
       tmuxNewSession: () =>
-        Promise.resolve({ sessionId: "ses-fan-1", windowIndex: 0, projects: [] }),
+        Promise.resolve({ name: "x", sessionId: "ses-fan-1", windowIndex: 0, projects: [] }),
       tmuxNewWindow: () =>
         Promise.resolve({ sessionId: "ses-fan-1", windowIndex: 1, projects: [] }),
       uploadBuffer: () => Promise.resolve("/remote/note.md"),
@@ -805,5 +816,22 @@ describe("NewSessionScreen fan-out submit carries staged attachments (BET-1127)"
     expect(prompts[0]?.[3]).toEqual([
       { remotePath: "/remote/note.md", mime: "text/markdown", filename: "note.md" },
     ]);
+  });
+});
+
+describe("NewSessionScreen on a box without sessions-naming-1 (WS11 D5)", () => {
+  it("disables creating a project and says to update the box — never a dead button", async () => {
+    const d = draft({ mode: "new-project", cwd: "/x", wantWorktree: false, scratch: true, projectName: "fresh-app", scratchRoot: "/home" });
+    installMockApi({ apiVersion: () => Promise.resolve({ capabilities: [] } as never), fsListDirs: () => Promise.resolve({ dir: "/home", entries: [] }) });
+    refreshModelCatalog();
+    refreshAgentCatalog();
+    resetStore({ projects: [], activeDraftId: d.id, drafts: [d], autoSubmitPrompt: null });
+    const h = mount(<NewSessionScreen draftId={d.id} />);
+    await h.flush();
+    await h.flush();
+    expect(h.text()).toContain("Update your box to use this");
+    const create = h.container.querySelector('button[aria-label="Create workspace"]') as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    h.unmount();
   });
 });

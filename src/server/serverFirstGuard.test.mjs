@@ -39,6 +39,9 @@ export const DELETED = [
   // D4 — Accounts words and row states are the box's.
   { scopes: ["renderer"], regex: /export function (accountsErrorMessage|formatEndpointStateLine|formatNoHealthyEndpointCopy|formatRetryMinutes|formatAgeAt|describeAccountState|usagePace)\b|\bENDPOINT_STATE_BADNESS\b|\bworstEndpointFor\b/, why: "D4: the box words accounts errors, endpoint lines, the no-healthy banner and each row's state (accounts:row-states)" },
   { scopes: ["swift", "swiftTests"], regex: /\benum EndpointHealth\b|\benum ProviderHealthFormat\b|static func (moveNoticeText|reasonText|normalizedLabel|reason\(forCode)|\bstruct SeatMoveNoticeInput\b|static func (describe|control)\(status:/, why: "D4: iOS shows the box's words (error message, endpoint stateLine, move text/line, row states)" },
+  // D5 (naming) — session names, scratch hints and the proposed root are the box's.
+  { scopes: ["renderer"], regex: /\b(uniqueSessionName|deriveProjectName|slugifyProjectName)\(|const proposedWorkspaceRoot = useMemo/, why: "D5: the box names sessions (nameHint → tmux-safe, unique, allocated under a lock), previews them (sessions:propose-name) and proposes the root (forge:probe.proposedRoot)" },
+  { scopes: ["swift", "swiftTests"], regex: /static func (slugify|uniqueProjectName|tmuxSafe|unique)\(|\benum SessionScratchHint\b|\benum SessionWorkspaceRoot\b|static func validated\(/, why: "D5: iOS sends a hint and shows the box's name/preview/root; rename validity is the box's" },
 ];
 
 function* walk(dir, recursive) {

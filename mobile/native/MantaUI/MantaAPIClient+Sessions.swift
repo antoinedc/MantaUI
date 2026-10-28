@@ -18,14 +18,25 @@ extension MantaAPIClient {
     /// `tmux:new-session` — a new project with its first window. The reply names
     /// the created window (B2): use `windowIndex` before falling back to a name.
     func createSession(_ input: SessionNewProjectInput) async throws -> TmuxCreateResult {
-        let dict: [String: Any] = [
-            "name": input.name,
+        var dict: [String: Any] = [
             "cwd": input.cwd,
             "windowName": input.windowName,
             "createDir": input.createDir,
             "chatMode": input.chatMode,
         ]
+        if let name = input.name, !name.isEmpty { dict["name"] = name }
+        if let hint = input.nameHint, !hint.isEmpty { dict["nameHint"] = hint }
         return try await callRequired("tmux:new-session", args: [dict], as: TmuxCreateResult.self)
+    }
+
+    /// `sessions:propose-name` — preview the name a create would pick (the create re-checks).
+    /// `project`: from a folder/hint against the live sessions; `scratch`: the folder slug under `root`.
+    func sessionsProposeName(project cwd: String) async throws -> SessionNameProposal {
+        try await callRequired("sessions:propose-name", args: [["kind": "project", "cwd": cwd]], as: SessionNameProposal.self)
+    }
+
+    func sessionsProposeName(scratch hint: String, root: String) async throws -> SessionNameProposal {
+        try await callRequired("sessions:propose-name", args: [["kind": "scratch", "hint": hint, "root": root]], as: SessionNameProposal.self)
     }
 
     /// `tmux:new-window` — a new session in an existing project. `worktreePath`
