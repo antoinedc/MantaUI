@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { restartOpencode } from "./opencodeAdmin.mjs";
 import {
   apiUrl,
   _setApiBase,
@@ -62,6 +63,8 @@ import {
   invalidateProvidersCache,
   _resetProvidersCacheForTests,
   PROVIDERS_CACHE_TTL_MS,
+  PROVIDERS_EMPTY_TTL_MS,
+  PROVIDERS_RESTART_GRACE_MS,
   getDefaultModel,
   generateSessionTitle,
   generateText,
@@ -1169,6 +1172,122 @@ test("getProviders: a partial failure (/api/model or /api/integration 500) count
   await withV2(h.routes, async () => {
     _resetProvidersCacheForTests({ now: () => h.clock.t });
     assert.equal((await getProviders()).unavailable, true);
+  });
+});
+
+// The 2026-10-28 incident: opencode restarted while manta was up, and a catalogue read in that
+// window answered provider+model but every integration still had `connections: []` (opencode
+// serves the catalogue before its auth plugins load). The scenario provider set has no
+// `activation: "enabled"` member — every provider depends on an integration connection.
+function restartHarness() {
+  const base = PROVIDER_ROUTES();
+  const providers = { data: base["GET /api/provider"].data.filter((p) => p.activation !== "enabled") };
+  const state = { connectionsEmpty: false };
+  const routes = {
+    ...base,
+    "GET /api/provider": () => providers,
+    "GET /api/integration": () => state.connectionsEmpty
+      ? { data: base["GET /api/integration"].data.map((i) => ({ ...i, connections: [] })) }
+      : base["GET /api/integration"],
+  };
+  return { clock: { t: 1_000_000 }, state, routes };
+}
+const RESTART_WARN = "[providers] read after an opencode restart is missing connected providers, serving last-good snapshot";
+
+test("getProviders: right after an opencode restart, a read that lost connected providers serves last-good; the next read heals", async () => {
+  const h = restartHarness();
+  await warnSilently((warnings) => withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    assert.deepEqual(good.connected, ["anthropic"]);
+    h.state.connectionsEmpty = true;
+    invalidateProvidersCache({ restarted: true });
+    assert.equal(await getProviders(), good, "the mid-restart read is refused; last-good served");
+    assert.equal(await getProviders(), good, "still refused, still not cached");
+    assert.equal(warnings.filter((w) => w.includes(RESTART_WARN)).length, 1, "logged once per restart window");
+    h.state.connectionsEmpty = false;
+    h.clock.t += 5_000;
+    const healed = await getProviders(); // the refused read was not cached → re-reads
+    assert.deepEqual(healed.connected, ["anthropic"]);
+    assert.notEqual(healed, good, "healed from a fresh read");
+  }));
+});
+
+test("restartOpencode opens the grace window itself: a partial read before the event-stream reconnect serves last-good", async () => {
+  const h = restartHarness();
+  await warnSilently((warnings) => withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    h.state.connectionsEmpty = true;
+    assert.equal((await restartOpencode(async () => ({ stdout: "", stderr: "" }))).ok, true);
+    assert.equal(await getProviders(), good);
+    assert.equal(warnings.filter((w) => w.includes(RESTART_WARN)).length, 1);
+  }));
+});
+
+test("getProviders: the restart grace is bounded — a provider genuinely gone across a restart drops out once it ends", async () => {
+  const h = restartHarness();
+  await warnSilently(() => withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    h.state.connectionsEmpty = true;
+    invalidateProvidersCache({ restarted: true });
+    assert.equal(await getProviders(), good);
+    h.clock.t += PROVIDERS_RESTART_GRACE_MS;
+    const after = await getProviders();
+    assert.deepEqual(after.connected, []);
+    assert.deepEqual(await listModels({}, { strict: true }), []);
+  }));
+});
+
+test("getProviders: removing the last provider shows an empty list on the next read, even right after a restart", async () => {
+  const h = restartHarness();
+  await warnSilently((warnings) => withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    await getProviders();
+    invalidateProvidersCache({ restarted: true }); // e.g. a reconnect a moment earlier
+    h.state.connectionsEmpty = true;
+    invalidateProvidersCache({ removed: true }); // what removeProviderAuth does
+    const after = await getProviders();
+    assert.deepEqual(after.connected, []);
+    assert.equal(after.unavailable, undefined);
+    assert.deepEqual(await listModels({}, { strict: true }), [], "no stale models from the removed provider");
+    assert.deepEqual(warnings.filter((w) => w.includes("[providers]")), ["[providers] opencode reports no connected provider (2 in catalogue)"], "logged once, never as a refused restart read");
+    h.clock.t += PROVIDERS_EMPTY_TTL_MS + 1;
+    await getProviders();
+    assert.equal(warnings.length, 1, "not re-logged while it stays empty");
+  }));
+});
+
+test("getProviders: without a restart, a read with no connected provider is the answer (not last-good)", async () => {
+  const h = restartHarness();
+  await withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    await getProviders();
+    h.state.connectionsEmpty = true;
+    invalidateProvidersCache();
+    assert.deepEqual((await getProviders()).connected, []);
+  });
+});
+
+test("getProviders: a fresh box with nothing connected gets an empty list (not unavailable), cached only briefly", async () => {
+  const h = restartHarness();
+  h.state.connectionsEmpty = true;
+  await withV2(h.routes, async (calls) => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const empty = await getProviders();
+    assert.deepEqual(empty.connected, []);
+    assert.equal(empty.unavailable, undefined);
+    assert.ok(Array.isArray(empty.all) && empty.all.length > 0, "the catalogue is still served");
+    assert.deepEqual(await listModels({}, { strict: true }), [], "strict listModels resolves, so the UI shows 'connect a provider', not an error");
+    h.clock.t += PROVIDERS_EMPTY_TTL_MS - 1;
+    assert.equal(await getProviders(), empty, "served from the snapshot inside the short TTL");
+    assert.equal(only(calls, "GET", "/api/provider").length, 1);
+    // manta started mid-restart: the empty read heals within the short TTL, not the full one.
+    h.state.connectionsEmpty = false;
+    h.clock.t += 2;
+    assert.deepEqual((await getProviders()).connected, ["anthropic"]);
+    assert.equal(only(calls, "GET", "/api/provider").length, 2);
   });
 });
 

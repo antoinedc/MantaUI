@@ -1620,13 +1620,16 @@ async function readSoft(read) {
  * opencode, and `invalidateProvidersCache()` marks it stale on the events that really change it.
  * A refresh only counts when `/api/provider`, `/api/model` and `/api/integration` all answered
  * (`/api/model/default` failing alone keeps the previous default); a failed refresh serves the
- * last good snapshot and leaves it stale so the next call retries. `unavailable: true` (with
+ * last good snapshot and leaves it stale so the next call retries. Within
+ * `PROVIDERS_RESTART_GRACE_MS` of an opencode restart, a read missing a previously-connected
+ * provider is treated the same way (opencode answers before its auth plugins load); a read with
+ * nothing connected is cached for only `PROVIDERS_EMPTY_TTL_MS`. `unavailable: true` (with
  * `connected: []`) appears only when nothing good was ever read.
  *
  * @returns {Promise<{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string>, unavailable?: true }>}
  */
 export function getProviders() {
-  if (providersSnapshot && providersSnapshot.gen === providersGen && providersNow() - providersSnapshot.at < PROVIDERS_CACHE_TTL_MS) {
+  if (providersSnapshot && providersSnapshot.gen === providersGen && providersNow() - providersSnapshot.at < providersSnapshot.ttl) {
     return Promise.resolve(providersSnapshot.value);
   }
   // Single-flight: concurrent callers share ONE in-flight read. The catalogue behind it (every
@@ -1651,24 +1654,43 @@ export function getProviders() {
 
 /** How long a good catalogue snapshot is served without re-reading opencode. */
 export const PROVIDERS_CACHE_TTL_MS = 10 * 60_000;
+/** How long a read with NO connected provider is served before re-reading opencode. */
+export const PROVIDERS_EMPTY_TTL_MS = 30_000;
+/** After an opencode restart/reload, how long a read missing previously-connected providers is distrusted. */
+export const PROVIDERS_RESTART_GRACE_MS = 2 * 60_000;
 
 /** @typedef {{ connected: string[], all?: Array<{id:string, name?:string, models:Record<string,object>}>, default?: Record<string,string>, unavailable?: true }} ProvidersResult */
 
 /** @type {{ gen: number, promise: Promise<ProvidersResult> }|null} */
 let providersInFlight = null;
-/** The last SUCCESSFUL read; `gen` is the invalidation generation it was read under. @type {{ value: ProvidersResult, at: number, gen: number }|null} */
+/** The last SUCCESSFUL read; `gen` is the invalidation generation it was read under. @type {{ value: ProvidersResult, at: number, gen: number, ttl: number }|null} */
 let providersSnapshot = null;
 let providersGen = 0;
 let providersNow = () => Date.now();
+/** When opencode last restarted/reloaded (opens the PROVIDERS_RESTART_GRACE_MS window). */
+let providersRestartAt = -Infinity;
+/** Whether the current grace window has already logged a refused read. */
+let providersRestartWarned = false;
 
 /**
  * Mark the cached catalogue stale WITHOUT discarding it: the next `getProviders()` re-reads
  * opencode, but if that read fails the previous good snapshot is still served. Call after
  * anything that changes the catalogue — a config reload/restart, a credential change, an
  * opencode restart.
+ *
+ * `restarted`: opencode restarted or reloaded, so its first reads may predate its auth
+ * plugins — opens the grace window in which a read missing connected providers is distrusted.
+ * `removed`: a credential was deliberately removed, so a provider dropping out is the expected
+ * answer — closes any open grace window so the removal shows immediately.
+ * @param {{ restarted?: boolean, removed?: boolean }} [opts]
  */
-export function invalidateProvidersCache() {
+export function invalidateProvidersCache({ restarted = false, removed = false } = {}) {
   providersGen += 1;
+  if (restarted) {
+    providersRestartAt = providersNow();
+    providersRestartWarned = false;
+  }
+  if (removed) providersRestartAt = -Infinity;
 }
 
 /** Test-only: drop the snapshot and any in-flight read; optionally inject the clock. */
@@ -1678,6 +1700,8 @@ export function _resetProvidersCacheForTests({ now } = {}) {
   providersInFlight = null;
   providersGen += 1;
   providersNow = now ?? (() => Date.now());
+  providersRestartAt = -Infinity;
+  providersRestartWarned = false;
 }
 
 /** @param {number} gen @returns {Promise<ProvidersResult>} */
@@ -1685,8 +1709,30 @@ async function refreshProviders(gen) {
   const previous = providersSnapshot?.value;
   const fresh = await fetchProviders(previous);
   if (fresh) {
+    // The opencode-restart race: a fresh opencode serves the catalogue before its auth plugins
+    // have loaded, so providers that were connected a moment ago report no connection. Right
+    // after a restart, a read that LOST a provider the last-good snapshot had is not trusted:
+    // serve last-good and leave the snapshot stale so the next call re-reads. Bounded by the
+    // grace window, so a provider genuinely gone across a restart still drops out shortly after.
+    const lost = previous?.connected?.some((id) => !fresh.connected.includes(id));
+    if (lost && providersNow() - providersRestartAt < PROVIDERS_RESTART_GRACE_MS) {
+      if (!providersRestartWarned) {
+        providersRestartWarned = true;
+        console.warn("[providers] read after an opencode restart is missing connected providers, serving last-good snapshot");
+      }
+      return previous;
+    }
+    // Nothing connected is a legitimate answer (a fresh box, or the last provider removed) but
+    // also the shape of a race we failed to spot (e.g. manta itself started mid-restart), so it
+    // is only trusted briefly rather than for the full TTL.
+    const ttl = fresh.connected.length === 0 ? PROVIDERS_EMPTY_TTL_MS : PROVIDERS_CACHE_TTL_MS;
+    // Logged on the transition only (cold, or connected → none), so a fresh box is not spammed
+    // every 30 s but the next "model picker went empty" leaves evidence of what opencode answered.
+    if (fresh.connected.length === 0 && (previous?.connected?.length ?? 1) > 0) {
+      console.warn(`[providers] opencode reports no connected provider (${fresh.all?.length ?? 0} in catalogue)`);
+    }
     // A read that began before a newer one's invalidation must not clobber the newer snapshot.
-    if (!providersSnapshot || gen >= providersSnapshot.gen) providersSnapshot = { value: fresh, at: providersNow(), gen };
+    if (!providersSnapshot || gen >= providersSnapshot.gen) providersSnapshot = { value: fresh, at: providersNow(), gen, ttl };
     return fresh;
   }
   if (previous) {
@@ -2162,12 +2208,12 @@ export async function removeProviderAuth(providerID) {
         },
       });
       if (refused) {
-        if (removed) invalidateProvidersCache();
+        if (removed) invalidateProvidersCache({ removed: true });
         return refused;
       }
       removed = true;
     }
-    invalidateProvidersCache();
+    invalidateProvidersCache({ removed: true });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: "unreachable", detail: String(e?.message ?? e) };
