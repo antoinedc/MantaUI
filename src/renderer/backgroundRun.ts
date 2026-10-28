@@ -129,11 +129,13 @@ export function splitSlashText(text: string): { name: string; args: string } | n
 
 // ===== Cards from the job store (N5) =====
 
+// `createdAt` is the job's start time: it anchors the card in the transcript
+// after the message that was current when the job started (anchorBackgroundCards).
 export type BackgroundCard =
-  | { kind: "running"; key: string; jobId: string; name: string; paused: boolean; observed?: true }
-  | { kind: "uncertain"; key: string; jobId: string; name: string; observed?: true }
-  | { kind: "failed"; key: string; jobId: string; name: string; error: string }
-  | { kind: "settling"; key: string; jobId: string; name: string };
+  | { kind: "running"; key: string; jobId: string; name: string; createdAt: number; paused: boolean; observed?: true }
+  | { kind: "uncertain"; key: string; jobId: string; name: string; createdAt: number; observed?: true }
+  | { kind: "failed"; key: string; jobId: string; name: string; createdAt: number; error: string }
+  | { kind: "settling"; key: string; jobId: string; name: string; createdAt: number };
 
 export function isBackgroundResultPart(p: OpencodePart): p is BackgroundResultPart {
   return p.type === "background-result";
@@ -217,7 +219,7 @@ export function deriveBackgroundCards(
   for (const job of mine) {
     if (finished.jobIds.has(job.id)) continue;
     if (job.childSessionID && finished.childIds.has(job.childSessionID)) continue;
-    const base = { key: job.id, jobId: job.id, name: job.name };
+    const base = { key: job.id, jobId: job.id, name: job.name, createdAt: job.createdAt };
     if (LIVE.has(job.status)) {
       const observed = job.origin === "observed" ? ({ observed: true } as const) : {};
       cards.push(
@@ -235,6 +237,40 @@ export function deriveBackgroundCards(
 }
 
 /** Same cards, field for field — lets the caller keep a stable reference while a streaming transcript re-derives them. */
+/**
+ * Places each card in the transcript, like a tool call: after the last row
+ * that existed when its job started, so it stays where it was added instead of
+ * following the tail. A job older than every loaded row anchors on the first
+ * row. Arrays are reused from `prev` when an anchor's cards are unchanged, so
+ * streaming deltas don't re-render the memo'd card lists.
+ */
+export function anchorBackgroundCards(
+  cards: ReadonlyArray<BackgroundCard>,
+  rows: ReadonlyArray<OpencodeMessage>,
+  prev?: ReadonlyMap<string, BackgroundCard[]>,
+): Map<string, BackgroundCard[]> {
+  const out = new Map<string, BackgroundCard[]>();
+  if (cards.length === 0 || rows.length === 0) return out;
+  for (const card of cards) {
+    let anchor = rows[0].info.id;
+    for (const r of rows) {
+      const t = r.info.time?.created;
+      if (t == null || t > card.createdAt) continue;
+      anchor = r.info.id;
+    }
+    const list = out.get(anchor);
+    if (list) list.push(card);
+    else out.set(anchor, [card]);
+  }
+  if (prev) {
+    for (const [id, list] of out) {
+      const old = prev.get(id);
+      if (old && sameBackgroundCards(old, list)) out.set(id, old);
+    }
+  }
+  return out;
+}
+
 export function sameBackgroundCards(a: ReadonlyArray<BackgroundCard>, b: ReadonlyArray<BackgroundCard>): boolean {
   if (a.length !== b.length) return false;
   return a.every((c, i) => {

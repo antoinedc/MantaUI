@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpencodeMessage } from "../shared/types";
 import { MANTA_BUILTIN_NAMES, computeLiveTurn, computeTurnInfo } from "./chatUtils";
 import {
+  anchorBackgroundCards,
   backgroundBoxVisible,
   backgroundRequested,
   collectFinishedKeys,
@@ -129,7 +130,7 @@ const none = { jobIds: new Set<string>(), childIds: new Set<string>() };
 describe("deriveBackgroundCards (N5)", () => {
   it("a running or paused job of this session gets a running card", () => {
     expect(deriveBackgroundCards([job()], "ses_p", none)).toEqual([
-      { kind: "running", key: "job1", jobId: "job1", name: "/review HEAD~1", paused: false },
+      { kind: "running", key: "job1", jobId: "job1", name: "/review HEAD~1", createdAt: 1, paused: false },
     ]);
     expect(deriveBackgroundCards([job({ status: "paused" })], "ses_p", none)[0]).toMatchObject({
       kind: "running",
@@ -145,13 +146,13 @@ describe("deriveBackgroundCards (N5)", () => {
   });
   it("an uncertain launch is the 'couldn't confirm' card, never a running one", () => {
     expect(deriveBackgroundCards([job({ launchState: "uncertain" })], "ses_p", none)).toEqual([
-      { kind: "uncertain", key: "job1", jobId: "job1", name: "/review HEAD~1" },
+      { kind: "uncertain", key: "job1", jobId: "job1", name: "/review HEAD~1", createdAt: 1 },
     ]);
   });
   it("a job that failed before its child ran becomes a failure card carrying the error", () => {
     const failed = job({ status: "failed", launchState: "submitting", error: "the box is at its limit" });
     expect(deriveBackgroundCards([failed], "ses_p", none)).toEqual([
-      { kind: "failed", key: "job1", jobId: "job1", name: "/review HEAD~1", error: "the box is at its limit" },
+      { kind: "failed", key: "job1", jobId: "job1", name: "/review HEAD~1", createdAt: 1, error: "the box is at its limit" },
     ]);
     expect(deriveBackgroundCards([job({ status: "failed", launchState: "creating", error: null })], "ses_p", none)[0]).toMatchObject({
       kind: "failed",
@@ -177,6 +178,40 @@ describe("deriveBackgroundCards (N5)", () => {
       none,
     );
     expect(cards.map((c) => c.jobId)).toEqual(["a", "b"]);
+  });
+});
+
+const row = (id: string, created?: number): OpencodeMessage => ({
+  info: { id, sessionID: "ses_p", role: "assistant", time: created == null ? undefined : { created } } as OpencodeMessage["info"],
+  parts: [],
+});
+
+describe("anchorBackgroundCards", () => {
+  const cardsAt = (...ts: number[]) =>
+    deriveBackgroundCards(ts.map((t, i) => job({ id: `j${i}`, childSessionID: `ses_c${i}`, createdAt: t })), "ses_p", none);
+
+  it("anchors a card after the last row that existed when its job started — not the tail", () => {
+    const rows = [row("m1", 10), row("m2", 20), row("m3", 30), row("m4", 40)];
+    const map = anchorBackgroundCards(cardsAt(25), rows);
+    expect([...map.keys()]).toEqual(["m2"]);
+    // Later rows arriving do not move it.
+    const more = anchorBackgroundCards(cardsAt(25), [...rows, row("m5", 50), row("m6", 60)]);
+    expect([...more.keys()]).toEqual(["m2"]);
+  });
+  it("groups cards sharing an anchor, skips rows without a time, and puts pre-window jobs on the first row", () => {
+    const rows = [row("m1", 10), row("m2"), row("m3", 30)];
+    const map = anchorBackgroundCards(cardsAt(5, 12, 15, 31), rows);
+    expect(map.get("m1")?.map((c) => c.jobId)).toEqual(["j0", "j1", "j2"]);
+    expect(map.get("m3")?.map((c) => c.jobId)).toEqual(["j3"]);
+    expect(map.has("m2")).toBe(false);
+  });
+  it("is empty with no cards or no rows, and reuses unchanged arrays from the previous map", () => {
+    expect(anchorBackgroundCards([], [row("m1", 1)]).size).toBe(0);
+    expect(anchorBackgroundCards(cardsAt(1), []).size).toBe(0);
+    const rows = [row("m1", 10), row("m2", 20)];
+    const first = anchorBackgroundCards(cardsAt(15), rows);
+    const second = anchorBackgroundCards(cardsAt(15), [...rows, row("m3", 30)], first);
+    expect(second.get("m1")).toBe(first.get("m1"));
   });
 });
 
