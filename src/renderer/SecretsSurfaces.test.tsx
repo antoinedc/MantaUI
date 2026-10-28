@@ -184,6 +184,35 @@ describe("SecretsCard (chat popover)", () => {
     expect(onDelete).toHaveBeenCalledWith("a");
   });
 
+  it("search filters rows by name or hint; Esc clears without bubbling", () => {
+    mountCard();
+    const search = h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement;
+    typeInto(search, "push");
+    expect(h!.text()).toContain("GITHUB_PAT");
+    expect(h!.text()).not.toContain("AWS_KEY");
+    typeInto(search, "aws");
+    expect(h!.text()).toContain("AWS_KEY");
+    expect(h!.text()).not.toContain("GITHUB_PAT");
+    typeInto(search, "nothing-here");
+    expect(h!.text()).toContain("No secrets match “nothing-here”");
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    press(search, "Escape");
+    document.removeEventListener("keydown", outer);
+    expect(outer).not.toHaveBeenCalled();
+    expect(search.value).toBe("");
+    expect(h!.text()).toContain("GITHUB_PAT");
+    expect(h!.text()).toContain("AWS_KEY");
+  });
+
+  it("the row being edited stays visible when the search stops matching it", () => {
+    mountCard();
+    click(h!.container.querySelector('button[aria-label="Edit GITHUB_PAT"]'));
+    typeInto(h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement, "aws");
+    expect(h!.container.querySelector('input[aria-label="Secret name"]')).not.toBeNull();
+    expect(h!.text()).toContain("AWS_KEY");
+  });
+
   it("'Manage all in Settings' opens Settings on the Secrets section", () => {
     mountCard();
     const seen: unknown[] = [];

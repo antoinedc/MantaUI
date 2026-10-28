@@ -11,7 +11,7 @@
 // mobile with no mobile-CSS edits.
 
 import { memo, useEffect, useRef, useState } from "react";
-import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Pencil, Square, Trash2, X } from "lucide-react";
+import { Clock, Bell, Webhook, Key, Bot, ArrowLeft, Pencil, Search, Square, Trash2, X } from "lucide-react";
 import type {
   DelegateApproval,
   DelegateApprovalTool,
@@ -26,7 +26,7 @@ import { describeCron, describeNextRun, formatJobSummary } from "./chatUtils";
 import { MetaBadge } from "./chatShared";
 import { ConfirmInline } from "./ConfirmInline";
 import { SecretEditor, secretScopeLabel, type SecretSaveResult } from "./SecretEditor";
-import { KEY_ERROR, isValidSecretKey } from "./secretsView";
+import { KEY_ERROR, isValidSecretKey, matchesQuery } from "./secretsView";
 
 // ScheduledTasksCard — pinned card above the composer showing this session's
 // scheduled prompts (created by the AI's `schedule` opencode tool) with a
@@ -261,6 +261,7 @@ export const SecretsCard = memo(function SecretsCard({
   const [showAdd, setShowAdd] = useState(!!prefillKey);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const valueRef = useRef<HTMLInputElement>(null);
   const focusPending = useRef(false);
 
@@ -310,6 +311,9 @@ export const SecretsCard = memo(function SecretsCard({
   };
 
   const now = Date.now();
+  // The row being edited stays visible even if the query stops matching it,
+  // so typing in the search box never silently discards an open editor.
+  const visible = secrets.filter((s) => s.id === editingId || matchesQuery(s, query));
 
   return (
     <div
@@ -441,91 +445,127 @@ export const SecretsCard = memo(function SecretsCard({
           without ever seeing the value.
         </div>
       ) : (
-        <div className="flex flex-col gap-1 border-t border-border pt-2 max-h-[40vh] overflow-y-auto">
-          {secrets.map((s) =>
-            editingId === s.id ? (
-              <SecretEditor
-                key={s.id}
-                secret={s}
-                now={now}
-                onSave={(patch) => onUpdate(s.id, patch)}
-                onClose={() => setEditingId(null)}
-              />
-            ) : (
-              <div
-                key={s.id}
-                onDoubleClick={() => { setConfirmingId(null); setEditingId(s.id); }}
-                className="group flex items-center gap-2 rounded-xs px-1 -mx-1 py-1 hover:bg-fill focus-within:bg-fill"
-                style={
-                  s.key === prefillKey
-                    ? {
-                        backgroundColor: "rgb(var(--accent-rgb) / 0.08)",
-                        boxShadow: "inset 2px 0 0 rgb(var(--accent-rgb) / 0.53)",
-                      }
-                    : undefined
+        <div className="border-t border-border pt-2">
+          <label className="flex items-center gap-1.5 mb-1 px-1 -mx-1 text-text-faint focus-within:text-text-muted">
+            <Search size={12} aria-hidden="true" className="shrink-0" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape" && query) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setQuery("");
                 }
+              }}
+              placeholder="Search name or hint"
+              aria-label="Search secrets"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              className="min-w-0 flex-1 bg-transparent text-label text-text placeholder:text-text-faint outline-none"
+            />
+            {query && (
+              <button
+                onClick={() => setQuery("")}
+                className="shrink-0 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
+                title="Clear search"
+                aria-label="Clear search"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-text font-mono truncate">{s.key}</span>
-                    <MetaBadge
-                      title={
-                        s.scope === "shared"
-                          ? "Available to every session"
-                          : s.scope === "project"
-                            ? `Available to every chat in project "${s.project ?? ""}"`
-                            : "Available only to this session"
-                      }
-                    >
-                      {secretScopeLabel(s)}
-                    </MetaBadge>
-                    {s.overrides && (
-                      <MetaBadge
-                        tone="warn"
-                        title={`This ${s.scope === "session" ? "session" : "project"}'s value is used instead of the ${s.overrides} one`}
+                <X size={12} aria-hidden="true" />
+              </button>
+            )}
+          </label>
+          {visible.length === 0 ? (
+            <div className="text-text-muted">No secrets match “{query.trim()}”.</div>
+          ) : (
+            <div className="flex flex-col gap-1 max-h-[40vh] overflow-y-auto">
+              {visible.map((s) =>
+                editingId === s.id ? (
+                  <SecretEditor
+                    key={s.id}
+                    secret={s}
+                    now={now}
+                    onSave={(patch) => onUpdate(s.id, patch)}
+                    onClose={() => setEditingId(null)}
+                  />
+                ) : (
+                  <div
+                    key={s.id}
+                    onDoubleClick={() => { setConfirmingId(null); setEditingId(s.id); }}
+                    className="group flex items-center gap-2 rounded-xs px-1 -mx-1 py-1 hover:bg-fill focus-within:bg-fill"
+                    style={
+                      s.key === prefillKey
+                        ? {
+                            backgroundColor: "rgb(var(--accent-rgb) / 0.08)",
+                            boxShadow: "inset 2px 0 0 rgb(var(--accent-rgb) / 0.53)",
+                          }
+                        : undefined
+                    }
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-text font-mono truncate">{s.key}</span>
+                        <MetaBadge
+                          title={
+                            s.scope === "shared"
+                              ? "Available to every session"
+                              : s.scope === "project"
+                                ? `Available to every chat in project "${s.project ?? ""}"`
+                                : "Available only to this session"
+                          }
+                        >
+                          {secretScopeLabel(s)}
+                        </MetaBadge>
+                        {s.overrides && (
+                          <MetaBadge
+                            tone="warn"
+                            title={`This ${s.scope === "session" ? "session" : "project"}'s value is used instead of the ${s.overrides} one`}
+                          >
+                            overrides {s.overrides}
+                          </MetaBadge>
+                        )}
+                      </div>
+                      <div
+                        className={`text-label truncate ${s.hint ? "text-text-faint" : "text-text-faint italic"}`}
+                        title={s.hint || undefined}
                       >
-                        overrides {s.overrides}
-                      </MetaBadge>
+                        {s.hint || "no hint"}
+                      </div>
+                    </div>
+                    {confirmingId === s.id ? (
+                      <div className="shrink-0 flex items-center gap-1">
+                        <ConfirmInline
+                          label="Delete"
+                          busy={false}
+                          onConfirm={() => { setConfirmingId(null); onDelete(s.id); }}
+                          onCancel={() => setConfirmingId(null)}
+                        />
+                      </div>
+                    ) : (
+                      <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+                        <button
+                          onClick={() => { setConfirmingId(null); setEditingId(s.id); }}
+                          className="px-1 py-px rounded-xs text-text-faint hover:text-text hover:bg-fill-hover inline-flex items-center focus-visible:opacity-100"
+                          title="Edit this secret"
+                          aria-label={`Edit ${s.key}`}
+                        >
+                          <Pencil size={14} aria-hidden="true" />
+                        </button>
+                        <button
+                          onClick={() => setConfirmingId(s.id)}
+                          className="px-1 py-px rounded-xs text-danger hover:bg-danger-bg inline-flex items-center focus-visible:opacity-100"
+                          title="Delete this secret"
+                          aria-label={`Delete ${s.key}`}
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                        </button>
+                      </div>
                     )}
                   </div>
-                  <div
-                    className={`text-label truncate ${s.hint ? "text-text-faint" : "text-text-faint italic"}`}
-                    title={s.hint || undefined}
-                  >
-                    {s.hint || "no hint"}
-                  </div>
-                </div>
-                {confirmingId === s.id ? (
-                  <div className="shrink-0 flex items-center gap-1">
-                    <ConfirmInline
-                      label="Delete"
-                      busy={false}
-                      onConfirm={() => { setConfirmingId(null); onDelete(s.id); }}
-                      onCancel={() => setConfirmingId(null)}
-                    />
-                  </div>
-                ) : (
-                  <div className="shrink-0 flex items-center gap-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-                    <button
-                      onClick={() => { setConfirmingId(null); setEditingId(s.id); }}
-                      className="px-1 py-px rounded-xs text-text-faint hover:text-text hover:bg-fill-hover inline-flex items-center focus-visible:opacity-100"
-                      title="Edit this secret"
-                      aria-label={`Edit ${s.key}`}
-                    >
-                      <Pencil size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      onClick={() => setConfirmingId(s.id)}
-                      className="px-1 py-px rounded-xs text-danger hover:bg-danger-bg inline-flex items-center focus-visible:opacity-100"
-                      title="Delete this secret"
-                      aria-label={`Delete ${s.key}`}
-                    >
-                      <Trash2 size={14} aria-hidden="true" />
-                    </button>
-                  </div>
-                )}
-              </div>
-            ),
+                ),
+              )}
+            </div>
           )}
         </div>
       )}
