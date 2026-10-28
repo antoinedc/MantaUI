@@ -1205,6 +1205,11 @@ export function createHandoffEngine(deps = {}) {
     return [...out];
   }
 
+  /** The session that replaced `sessionId` (one step along its replacement link), or null. */
+  function successorOf(sessionId) {
+    return state.links[sessionId]?.replacedBy ?? null;
+  }
+
   const publicLink = (l) => ({ ...(l.replacedBy ? { replacedBy: l.replacedBy } : {}), ...(l.replaces ? { replaces: l.replaces } : {}), ...(l.branchedFrom ? { branchedFrom: l.branchedFrom } : {}), branches: [...(l.branches ?? [])] });
 
   /** Predecessors of a session, nearest first, then (last) the session its chain was branched from. Ids only. */
@@ -1343,6 +1348,7 @@ export function createHandoffEngine(deps = {}) {
     hasPendingSend,
     isSuccessor,
     chainOf,
+    successorOf,
     policyFor,
     // lifecycle
     recover,

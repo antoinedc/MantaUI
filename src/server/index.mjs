@@ -39,6 +39,7 @@ import { parseConstraints } from "../shared/constraintPin.mjs";
 import { startPoller } from "./startPoller.mjs";
 import { parseTailnetHosts } from "./tailnet.mjs";
 import { getDb, partExists } from "./opencodeDb.mjs";
+import { runDbTask } from "./dbOffload.mjs";
 import {
   resolvePolicy,
   validateRepoTable,
@@ -1140,6 +1141,17 @@ const delegateEngine = createDelegateEngine({
   deferSettlement: (sid) => handoffEngine.hasPendingSend(sid),
   isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
+  // Display parent of an adopted row (delegate.resolveDisplayParents): the replacement successor of a
+  // windowless session, and which windowed session's transcript named a child session (read-only, off-thread;
+  // null when the DB is unavailable or the worker is busy — the rule is then skipped).
+  successorOf: (sid) => handoffEngine.successorOf(sid),
+  findSessionReferences: async (args) => {
+    try {
+      return await runDbTask("sessionReferences", { ...args, budgetMs: 8_000 });
+    } catch {
+      return null;
+    }
+  },
   // The CTO conversation keeps promptDelivery + admission for results (N7).
   isCtoConversationSession: (sid) => ctoConversation.isConversationSession(sid),
   // The CTO's ephemeral inference sessions (provenance tombstones): never adopted as observed jobs.

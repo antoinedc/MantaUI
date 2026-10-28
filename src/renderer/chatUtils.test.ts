@@ -2514,6 +2514,43 @@ describe("fuzzySessionScore", () => {
   });
 });
 
+describe("a job row nests by displayParentID ?? parentSessionID", () => {
+  // The real parent ("old") has no window; the orchestrator that drives the job ("driver") does.
+  const projects = [
+    mkProject("p", [
+      { index: 1, name: "driver", opencodeSessionId: "driver" },
+      { index: 2, name: "job", opencodeSessionId: "child1" },
+      { index: 3, name: "other", opencodeSessionId: "other" },
+    ]),
+  ];
+  const base = { status: "running", parentSessionID: "old", childSessionID: "child1" };
+
+  it("computeJobNesting nests under the display parent when the real parent has no window", () => {
+    const r = computeJobNesting(projects[0], { j: { ...base, displayParentID: "driver" } });
+    expect(r.children.get(1)).toEqual([2]);
+    expect([...r.hidden]).toEqual([2]);
+  });
+
+  it("computeJobNesting prefers the display parent even when the real parent also has a window", () => {
+    const r = computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other", displayParentID: "driver" } });
+    expect(r.children.get(1)).toEqual([2]);
+    expect(r.children.has(3)).toBe(false);
+  });
+
+  it("falls back to parentSessionID without a display parent (absent or null)", () => {
+    expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other" } }).children.get(3)).toEqual([2]);
+    expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other", displayParentID: null } }).children.get(3)).toEqual([2]);
+    expect(computeJobNesting(projects[0], { j: base }).children.size).toBe(0); // windowless real parent → top-level
+  });
+
+  it("sessionsWithActiveWork rolls a running job up to its display parent, not the windowless real parent", () => {
+    const withDisplay = sessionsWithActiveWork([], { child1: "old" }, { j: { ...base, displayParentID: "driver" } });
+    expect([...withDisplay].sort()).toEqual(["child1", "driver"]);
+    const without = sessionsWithActiveWork([], { child1: "old" }, { j: base });
+    expect([...without].sort()).toEqual(["child1", "old"]);
+  });
+});
+
 describe("superseded jobs are invisible to the sidebar inputs", () => {
   const projects = [
     mkProject("p", [

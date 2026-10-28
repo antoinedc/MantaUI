@@ -1162,6 +1162,7 @@ and worktree all belong to it.
   answering a user's "what's running?" question, not for waiting (do NOT
   poll).
 - Jobs appear in the sidebar as ordinary sessions (their own window).
+- An adopted (opencode-owned) row whose real parent has no window also carries a display-only `displayParentID` — a windowed ancestor, a handoff successor, or the windowed session whose transcript named it in the last 24 h (`resolveDisplayParents` in `delegate.mjs`); the sidebar nests by `displayParentID ?? parentSessionID`, and `parentSessionID` (result routing) is never changed.
 - Tests: `src/server/delegate.test.mjs` (model routing at spawn, nesting/cap
   refusal, finishV2Job result assembly, buildJobPrompt/buildCompletionText,
   sweep retention, stop/delete, approvals), `delegateV2Jobs.test.mjs` (the

@@ -307,6 +307,15 @@ test("a held message the successor definitively refuses at release is reported, 
 
 // ---- §6.1 the resolver ----------------------------------------------------------------
 
+test("successorOf: one step along the replacement link, null for a live session (display-parent rule 2)", async () => {
+  const w = standardWorld();
+  const r1 = await readyRecord(w);
+  const o1 = await w.engine.start(r1.id, START_SEND); // ses_p → A
+  assert.equal(w.engine.successorOf("ses_p"), o1.successorId);
+  assert.equal(w.engine.successorOf(o1.successorId), null, "the live end has no successor");
+  assert.equal(w.engine.successorOf("ses_unknown"), null);
+});
+
 test("resolver follows replacement links only, to the live end of a chain", async () => {
   const w = standardWorld();
   const r1 = await readyRecord(w);

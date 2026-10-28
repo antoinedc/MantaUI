@@ -129,6 +129,9 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
   assert.match(index, /isHandoffSuccessor: \(sid\) => handoffEngine\.isSuccessor\(sid\)/);
   assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
+  // display parent of an adopted row (delegate.resolveDisplayParents)
+  assert.match(index, /successorOf: \(sid\) => handoffEngine\.successorOf\(sid\)/);
+  assert.match(index, /findSessionReferences:[\s\S]{0,160}runDbTask\("sessionReferences"/);
   // §15 policy block, per session
   assert.match(index, /handoff: sessionID \? await handoffEngine\.policyFor\(sessionID\) : null/);
   // §5.5 boot recovery runs after the delegate engine exists, and is the FIRST step of the explicit boot chain:

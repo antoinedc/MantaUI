@@ -2067,7 +2067,7 @@ export function fuzzySessionScore(
 // Background-job nesting for one project. A job's child window (the window
 // whose opencodeSessionId === job.childSessionID) renders as an indented
 // CHILD row under its parent window (the window whose opencodeSessionId ===
-// job.parentSessionID) whenever both windows exist.
+// job.displayParentID ?? job.parentSessionID) whenever both windows exist.
 //
 // Returns:
 //   hidden      — child window indices that must be REMOVED from the
@@ -2086,6 +2086,7 @@ export function computeJobNesting(
     {
       status: string;
       parentSessionID: string | null;
+      displayParentID?: string | null;
       childSessionID: string | null;
       supersededBy?: string | null;
     }
@@ -2104,9 +2105,10 @@ export function computeJobNesting(
     if (!job.childSessionID || job.supersededBy) continue;
     const childWin = byOpencodeId.get(job.childSessionID);
     if (!childWin) continue; // job's window isn't in this project
-    const parentWin = job.parentSessionID
-      ? byOpencodeId.get(job.parentSessionID)
-      : undefined;
+    // Nest by the DISPLAY parent when the server resolved one (the real parent has no window); the real
+    // parent still routes results and is the fallback.
+    const nestUnder = job.displayParentID ?? job.parentSessionID;
+    const parentWin = nestUnder ? byOpencodeId.get(nestUnder) : undefined;
     if (!parentWin) continue; // child stays top-level; parent window is gone
     hidden.add(childWin.index);
     const arr = children.get(parentWin.index) ?? [];
@@ -2129,7 +2131,7 @@ export function computeJobNesting(
 // `running`  — session ids currently running a turn (incl. windowless ones)
 // `parents`  — child session id → parent session id
 // `jobs`     — background-job records; a `running` job counts as work in its
-//              child session AND (via parentSessionID) its parent
+//              child session AND (via displayParentID ?? parentSessionID) its parent
 //
 // Returns every running session plus all of its ancestors. Cycle-safe.
 export function sessionsWithActiveWork(
@@ -2137,7 +2139,13 @@ export function sessionsWithActiveWork(
   parents: Record<string, string>,
   jobs: Record<
     string,
-    { status: string; parentSessionID: string | null; childSessionID: string | null; supersededBy?: string | null }
+    {
+      status: string;
+      parentSessionID: string | null;
+      displayParentID?: string | null;
+      childSessionID: string | null;
+      supersededBy?: string | null;
+    }
   >,
 ): Set<string> {
   const links = new Map<string, string>(Object.entries(parents));
@@ -2146,7 +2154,11 @@ export function sessionsWithActiveWork(
     if (job.status !== "running" || job.supersededBy) continue;
     if (job.childSessionID) {
       seeds.push(job.childSessionID);
-      if (job.parentSessionID && !links.has(job.childSessionID)) {
+      // The row nests under its display parent, so that is where its running state rolls up to — even when
+      // the session's own (windowless) parent is known.
+      if (job.displayParentID) {
+        links.set(job.childSessionID, job.displayParentID);
+      } else if (job.parentSessionID && !links.has(job.childSessionID)) {
         links.set(job.childSessionID, job.parentSessionID);
       }
     } else if (job.parentSessionID) {

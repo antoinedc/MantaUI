@@ -200,4 +200,42 @@ function sessionsInRange(db, { start, end, slackMs = 10 * 60 * 1000 }) {
   return out;
 }
 
-export const TASKS = { sessionsInRange, windowedRows, endpointStats, sessionSearch, ledgerScan, ledgerLatest };
+/**
+ * Which of `sessionIds` named each of `targets` (session ids) in their own transcript since `sinceMs`:
+ * `instr(data, target)` over every message type (tool-call input or output, user text, …). Per session it
+ * walks its newest time windows first and asks, per window, for the newest matching message of every target
+ * still unfound there — so one pass answers all targets, and a target is final the moment it hits.
+ * `complete:false` → the budget ran out; the hits are what was found by then.
+ * @returns {{hits: {target: string, sessionId: string, t: number}[], complete: boolean}}
+ */
+function sessionReferences(db, { sessionIds = [], targets = [], sinceMs = 0, budgetMs = 8_000, windowMessages = 200, chunk = 50 } = {}) {
+  const deadlineAt = Date.now() + intOr(budgetMs, 8_000);
+  const since = Math.max(0, intOr(sinceMs, 0));
+  const all = [...new Set((Array.isArray(targets) ? targets : []).filter((t) => typeof t === "string" && t))];
+  const hits = [];
+  if (all.length === 0) return { hits, complete: true };
+  for (const sessionId of Array.isArray(sessionIds) ? sessionIds : []) {
+    let remaining = all;
+    for (const w of windowRanges(db, { dir: "desc", to: since, windowMessages, sessionId })) {
+      if (remaining.length === 0) break;
+      if (Date.now() >= deadlineAt) return { hits, complete: false };
+      const still = [];
+      for (let i = 0; i < remaining.length; i += chunk) {
+        const part = remaining.slice(i, i + chunk);
+        const cols = part.map((_, k) => `MAX(CASE WHEN instr(data, ?) > 0 THEN time_created END) AS t${k}`).join(", ");
+        const row = db
+          .prepare(`SELECT ${cols} FROM session_message WHERE session_id = ? AND time_created >= ${w.lo} AND time_created <= ${w.hi}`)
+          .get(...part, sessionId);
+        part.forEach((target, k) => {
+          const t = row?.[`t${k}`];
+          if (typeof t === "number") hits.push({ target, sessionId, t });
+          else still.push(target);
+        });
+      }
+      remaining = still;
+    }
+  }
+  return { hits, complete: true };
+}
+
+export const TASKS = { sessionsInRange, windowedRows, endpointStats, sessionSearch, ledgerScan, ledgerLatest, sessionReferences };
