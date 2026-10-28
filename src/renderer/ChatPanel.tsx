@@ -51,7 +51,6 @@ import {
   type EntryMotionState,
   type StaleCacheResult,
   type PendingScrollWin,
-  isApprovalCoveredByAlways,
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
@@ -936,13 +935,6 @@ export function ChatPanel({
   // Stable identity so it doesn't defeat ActiveTodos' React.memo.
   const dismissTodos = useCallback(() => setTodosDismissed(true), [setTodosDismissed]);
 
-  // BET-418 §A5: ref mirror of permissions so the approval poll can read the
-  // latest always[] grants without taking permissions as a dep (which would
-  // reset the poll timer on every permission change).
-  const permissionsRef = useRef(permissions);
-  useEffect(() => {
-    permissionsRef.current = permissions;
-  }, [permissions]);
   useEffect(() => {
     setPendingApproval(null);
     if (chatAutoAllowApproval) return; // trust mode → server never requests approval
@@ -952,14 +944,9 @@ export function ChatPanel({
       try {
         const list = await window.api.delegatePendingApprovals(sessionId);
         if (cancelled || list.length === 0) return;
-        const approval = list[0];
-        // BET-418 §A5: if the parent's existing always[] grants cover every
-        // requested tool, auto-approve without rendering the card.
-        if (isApprovalCoveredByAlways(approval, permissionsRef.current)) {
-          void window.api.delegateApprove(approval.id, approval.tools).catch(() => { /* best-effort */ });
-          return;
-        }
-        setPendingApproval(approval);
+        // Never auto-approve: only an explicit user action may start a job. A
+        // pending ask's always[] is what its tool WOULD save, not a grant.
+        setPendingApproval(list[0]);
       } catch { /* non-fatal */ }
     };
     void poll();
