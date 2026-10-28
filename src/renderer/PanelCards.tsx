@@ -263,6 +263,7 @@ export const SecretsCard = memo(function SecretsCard({
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const valueRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const focusPending = useRef(false);
 
   // Deep-link pre-fill (BET-1437). Re-runs when the hint changes (the card
@@ -271,6 +272,7 @@ export const SecretsCard = memo(function SecretsCard({
   // does not exist until the next commit when it was collapsed.
   useEffect(() => {
     if (!prefillKey) return;
+    setQuery("");
     setKey(prefillKey);
     setShowAdd(true);
     if (valueRef.current) valueRef.current.focus();
@@ -446,9 +448,10 @@ export const SecretsCard = memo(function SecretsCard({
         </div>
       ) : (
         <div className="border-t border-border pt-2">
-          <label className="flex items-center gap-1.5 mb-1 px-1 -mx-1 text-text-faint focus-within:text-text-muted">
+          <div className="flex items-center gap-1 mb-1 px-1 -mx-1 text-text-faint focus-within:text-text-muted">
             <Search size={12} aria-hidden="true" className="shrink-0" />
             <input
+              ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -467,7 +470,7 @@ export const SecretsCard = memo(function SecretsCard({
             />
             {query && (
               <button
-                onClick={() => setQuery("")}
+                onClick={() => { setQuery(""); searchRef.current?.focus(); }}
                 className="shrink-0 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
                 title="Clear search"
                 aria-label="Clear search"
@@ -475,7 +478,7 @@ export const SecretsCard = memo(function SecretsCard({
                 <X size={12} aria-hidden="true" />
               </button>
             )}
-          </label>
+          </div>
           {visible.length === 0 ? (
             <div className="text-text-muted">No secrets match “{query.trim()}”.</div>
           ) : (
