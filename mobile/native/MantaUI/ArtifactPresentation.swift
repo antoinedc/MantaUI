@@ -259,6 +259,21 @@ enum ArtifactStaging {
         return "." + ext
     }
 
+    /// The row's content revision: the box's timestamp + size. A staged copy is only
+    /// reused while it matches, so a file the agent rewrites or re-pushes at the same
+    /// path while the card is open is fetched again instead of showing the first copy.
+    static func revision(_ item: ArtifactItem) -> String {
+        "\(item.at)|\(item.size ?? -1)"
+    }
+
+    /// Whether a staged copy made at `stagedRevision` still reflects `item`. A plan is
+    /// never reusable (its row only moves when the plan is referenced again, not when the
+    /// file is edited), so "Open plan file" always fetches afresh.
+    static func isCurrent(stagedRevision: String?, for item: ArtifactItem) -> Bool {
+        guard item.kind != .plan, let stagedRevision else { return false }
+        return stagedRevision == revision(item)
+    }
+
     /// A short, filesystem-safe temp name keyed by the row id (re-staging the same
     /// id overwrites in place): `manta-qp-<readable prefix>-<hash><ext>`.
     static func tempFileName(id: String, label: String, href: String) -> String {

@@ -459,8 +459,9 @@ struct ArtifactsCard: View {
     @State private var errorMessage: String?
     /// Artifact ids currently having their bytes fetched (row spinner).
     @State private var staging: Set<String> = []
-    /// Staged local file URLs keyed by artifact id — what QuickLook can already present.
-    @State private var stagedFiles: [String: URL] = [:]
+    /// Staged local files keyed by artifact id, with the revision they were fetched at —
+    /// what QuickLook / Share / Attach can reuse while the row is unchanged.
+    @State private var stagedFiles: [String: StagedFile] = [:]
     @State private var quickLookURLs: [URL] = []
     @State private var quickLookStartIndex = 0
     @State private var showingQuickLook = false
@@ -774,20 +775,25 @@ struct ArtifactsCard: View {
     /// staged previewable row of the segment (multi-item navigation comes free).
     /// A failure leaves the row untouched and reports in the banner.
     private func presentPreview(_ item: ArtifactItem) async {
-        if stagedFiles[item.id] == nil {
+        if currentStagedURL(item) == nil {
             guard !staging.contains(item.id) else { return }
             staging.insert(item.id)
             defer { staging.remove(item.id) }
             switch await stage(item) {
-            case .success(let url): stagedFiles[item.id] = url
+            case .success(let url):
+                stagedFiles[item.id] = StagedFile(url: url, revision: ArtifactStaging.revision(item))
             case .failure(let error):
                 errorMessage = ArtifactStagingError.message(error, name: item.label)
                 return
             }
         }
         guard let result else { return }
-        let previewables = filtered(result).filter { $0.kind != .link && stagedFiles[$0.id] != nil }
-        let urls = previewables.compactMap { stagedFiles[$0.id] }
+        // The tapped row (just staged — a plan always is) plus every other row whose staged
+        // copy is still current.
+        let previewables = filtered(result).filter {
+            $0.kind != .link && ($0.id == item.id || currentStagedURL($0) != nil)
+        }
+        let urls = previewables.compactMap { stagedFiles[$0.id]?.url }
         guard !urls.isEmpty else { return }
         quickLookURLs = urls
         quickLookStartIndex = max(0, previewables.firstIndex { $0.id == item.id } ?? 0)
@@ -828,7 +834,7 @@ struct ArtifactsCard: View {
             return
         }
         let loaded: Result<Data, ArtifactStagingError>
-        if let staged = stagedFiles[item.id], let data = try? Data(contentsOf: staged) {
+        if let staged = currentStagedURL(item), let data = try? Data(contentsOf: staged) {
             loaded = .success(data)
         } else {
             loaded = await ArtifactBytes.load(ArtifactByteSource.classify(item.href), api: api)
@@ -913,8 +919,22 @@ struct ArtifactsCard: View {
             if case .remote(let url) = ArtifactByteSource.classify(item.href) { return url }
             return nil
         }
-        return stagedFiles[item.id]
+        return currentStagedURL(item)
     }
+
+    /// The staged copy of `item`, only while it still reflects the row (see
+    /// `ArtifactStaging.isCurrent`); nil means it must be fetched again.
+    private func currentStagedURL(_ item: ArtifactItem) -> URL? {
+        guard let staged = stagedFiles[item.id],
+              ArtifactStaging.isCurrent(stagedRevision: staged.revision, for: item) else { return nil }
+        return staged.url
+    }
+}
+
+/// A staged copy and the row revision it was fetched at.
+private struct StagedFile {
+    let url: URL
+    let revision: String
 }
 
 /// "Attach to message" as its own view so it observes the composer: the item appears

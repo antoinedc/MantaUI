@@ -623,6 +623,40 @@ test("service: concurrent calls for one session share one derivation", async () 
   assert.equal(b.counts.link, 1);
 });
 
+test("service: an older derivation finishing after a newer one does not overwrite the newer cache entry", async () => {
+  const gates = [];
+  let state = [msg("u", "user", [textPart("one https://one.example/a")], 1000)];
+  let full = 0;
+  const svc = createArtifactsService({
+    listMessages: async (_sid, o) => {
+      if (o?.limit) return state.slice(-1);
+      full++;
+      const snapshot = state;
+      await new Promise((r) => gates.push(r)); // each full read is released by hand
+      return snapshot;
+    },
+    listPages: async () => [],
+    listOutbox: async () => [],
+    sessionDirectory: async () => null,
+    baseUrl: () => "",
+    now: () => 1_700_000_000_000,
+  });
+  const first = svc.list(SID); // key K1, full read #1 parked
+  await new Promise((r) => setTimeout(r, 10));
+  state = [msg("u2", "user", [textPart("two https://two.example/b")], 2000)];
+  const second = svc.list(SID); // key K2 replaces the in-flight entry, full read #2 parked
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(full, 2);
+  gates[1](); // newer derivation finishes first
+  const newer = await second;
+  gates[0](); // the OLDER one finishes last
+  await first;
+  assert.equal(newer.items[0].href, "https://two.example/b");
+  const again = await svc.list(SID); // same key as the newer one → must be a cache hit
+  assert.equal(full, 2, "the older derivation did not clobber the newer entry");
+  assert.equal(again.items[0].href, "https://two.example/b");
+});
+
 test("service: failing listPages → degraded ['pages'] and no hosted items, then recovery returns them", async () => {
   const { svc, state, calls } = fixture();
   state.pages = [page({ subdomain: "p", url: "https://box.example/pages/p" })];

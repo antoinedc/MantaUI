@@ -231,6 +231,31 @@ final class ArtifactAgentFileTests: XCTestCase {
         XCTAssertEqual(m, before, "a duplicate of a queued file changes nothing")
     }
 
+    /// The sheet could not be shown at all: failed notice + the staged file removed; stale → delete only.
+    func testAnUnavailablePresentationFailsTheNoticeAndDeletesTheFile() throws {
+        for op in [AgentFileNotice.Op.save, .share] {
+            var m = AgentFileNoticeMachine()
+            m.receive(event("a.pdf"))
+            let begun = try XCTUnwrap(m.begin(op))
+            let u = staged("a")
+            _ = m.downloadFinished(token: begun.token, opID: begun.opID, result: .success(u))
+
+            XCTAssertEqual(m.presentationUnavailable(token: begun.token, opID: begun.opID, fileURL: u), .deleteTemp(u))
+            XCTAssertEqual(m.current?.phase, .failed(AgentFileNoticeCopy.presentationFailure(op)))
+            // retry is allowed from the failed state
+            XCTAssertNotNil(m.begin(op))
+        }
+        XCTAssertEqual(AgentFileNoticeCopy.presentationFailure(.save), "Couldn't open the save sheet — try again.")
+        XCTAssertEqual(AgentFileNoticeCopy.presentationFailure(.share), "Couldn't open the share sheet — try again.")
+
+        var stale = AgentFileNoticeMachine()
+        stale.receive(event("a.pdf"))
+        let before = stale
+        let other = staged("zzz")
+        XCTAssertEqual(stale.presentationUnavailable(token: 99, opID: 99, fileURL: other), .deleteTemp(other))
+        XCTAssertEqual(stale, before)
+    }
+
     func testCancellingTheExporterReturnsToIdleAndDeletesTheFile() throws {
         var m = AgentFileNoticeMachine()
         m.receive(event("a.pdf"))

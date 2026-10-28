@@ -262,12 +262,24 @@ describe("ArtifactsPanel — states", () => {
       .mockResolvedValue(SAMPLE);
     const { h, api } = await openPanel(list);
     const banner = h.container.querySelector(".manta-artifacts-load-error");
-    expect(banner?.textContent).toContain("Couldn't load artifacts.");
+    // the box's own sentence is shown as is, without a doubled lead-in
+    expect(banner?.textContent).toContain("Couldn't read this conversation's artifacts");
+    expect(banner?.textContent).not.toContain("Couldn't load artifacts.");
+    // a list that never arrived is not presented as an empty one
+    expect(h.text()).not.toContain("No links yet");
+    expect(h.text()).not.toContain("0 images");
+    expect(h.container.querySelector(".manta-artifacts-loading")).toBeNull();
     const retry = Array.from(banner!.querySelectorAll("button")).find((b) => b.textContent === "Retry")!;
     await click(h, retry);
     expect(api.calls.artifactsList).toHaveLength(2);
     expect(h.container.querySelector(".manta-artifacts-load-error")).toBeNull();
     expect(h.text()).toContain("forever");
+    h.unmount();
+  });
+
+  it("a non-box error gets the 'Couldn't load artifacts.' lead-in", async () => {
+    const { h } = await openPanel(vi.fn().mockRejectedValue(new Error("HTTP 503")));
+    expect(h.container.querySelector(".manta-artifacts-load-error")?.textContent).toContain("Couldn't load artifacts. HTTP 503");
     h.unmount();
   });
 

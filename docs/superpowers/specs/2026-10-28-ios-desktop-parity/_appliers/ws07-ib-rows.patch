@@ -1,6 +1,6 @@
 diff -ruN a/src/renderer/api/demoApi.ts b/src/renderer/api/demoApi.ts
---- a/src/renderer/api/demoApi.ts	2026-10-28 15:59:53.386124307 +0000
-+++ b/src/renderer/api/demoApi.ts	2026-10-28 15:59:53.532123236 +0000
+--- a/src/renderer/api/demoApi.ts
++++ b/src/renderer/api/demoApi.ts
 @@ -36,6 +36,7 @@
  import type { Api } from "../../shared/api.js";
  import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo, DirListing } from "../../shared/types.js";
@@ -28,8 +28,8 @@ diff -ruN a/src/renderer/api/demoApi.ts b/src/renderer/api/demoApi.ts
    gitListWorktrees,
    projectCreateScratch,
 diff -ruN a/src/renderer/api/httpApi.ts b/src/renderer/api/httpApi.ts
---- a/src/renderer/api/httpApi.ts	2026-10-28 15:59:53.359124506 +0000
-+++ b/src/renderer/api/httpApi.ts	2026-10-28 15:59:53.527123272 +0000
+--- a/src/renderer/api/httpApi.ts
++++ b/src/renderer/api/httpApi.ts
 @@ -1289,6 +1289,7 @@
    // Outbox mailbox listing, scoped to the active conversation — degrades to []
    // on a box without the channel.
@@ -39,9 +39,9 @@ diff -ruN a/src/renderer/api/httpApi.ts b/src/renderer/api/httpApi.ts
    // -- background delegation jobs (manta-server owned; in-process on mobile) --
    // list returns the full job records (the engine always returns an array;
 diff -ruN a/src/renderer/chatUtils.test.ts b/src/renderer/chatUtils.test.ts
---- a/src/renderer/chatUtils.test.ts	2026-10-28 15:59:53.433123962 +0000
-+++ b/src/renderer/chatUtils.test.ts	2026-10-28 15:59:53.541123170 +0000
-@@ -166,12 +166,11 @@
+--- a/src/renderer/chatUtils.test.ts
++++ b/src/renderer/chatUtils.test.ts
+@@ -161,12 +161,11 @@
    describeProjectClose,
    isPlanExitQuestion,
    extractPlanData,
@@ -55,7 +55,7 @@ diff -ruN a/src/renderer/chatUtils.test.ts b/src/renderer/chatUtils.test.ts
  
  
  
-@@ -5668,44 +5667,6 @@
+@@ -5463,44 +5462,6 @@
    });
  });
  
@@ -101,9 +101,9 @@ diff -ruN a/src/renderer/chatUtils.test.ts b/src/renderer/chatUtils.test.ts
    const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
      ({ providerID, modelID });
 diff -ruN a/src/renderer/chatUtils.ts b/src/renderer/chatUtils.ts
---- a/src/renderer/chatUtils.ts	2026-10-28 15:59:53.410124131 +0000
-+++ b/src/renderer/chatUtils.ts	2026-10-28 15:59:53.537123199 +0000
-@@ -2625,55 +2625,6 @@
+--- a/src/renderer/chatUtils.ts
++++ b/src/renderer/chatUtils.ts
+@@ -2426,55 +2426,6 @@
    return false;
  }
  
@@ -159,9 +159,34 @@ diff -ruN a/src/renderer/chatUtils.ts b/src/renderer/chatUtils.ts
  /**
   * The plan card's display data: the title (first markdown heading of the plan
   * text, falling back to the question header) and the FULL plan text (what
+diff -ruN a/src/server/boxCapabilities.mjs b/src/server/boxCapabilities.mjs
+--- a/src/server/boxCapabilities.mjs
++++ b/src/server/boxCapabilities.mjs
+@@ -8,6 +8,6 @@
+ // incompatibly). Every later workstream APPENDS its ids here; nothing else may
+ // create a second capability list.
+ 
+-export const BOX_CAPABILITIES = Object.freeze(["chat-cards-1"]);
++export const BOX_CAPABILITIES = Object.freeze(["chat-cards-1", "artifacts-list-1"]);
+ 
+ export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;
+diff -ruN a/src/server/boxCapabilities.test.mjs b/src/server/boxCapabilities.test.mjs
+--- a/src/server/boxCapabilities.test.mjs
++++ b/src/server/boxCapabilities.test.mjs
+@@ -7,6 +7,10 @@
+   assert.ok(BOX_CAPABILITIES.includes("chat-cards-1"));
+ });
+ 
++test("artifacts-list-1 is advertised (WS07 M-07-S2)", () => {
++  assert.ok(BOX_CAPABILITIES.includes("artifacts-list-1"));
++});
++
+ test("no duplicate ids; every id is kebab-name-N", () => {
+   assert.equal(new Set(BOX_CAPABILITIES).size, BOX_CAPABILITIES.length);
+   for (const id of BOX_CAPABILITIES) assert.match(id, CAPABILITY_ID_PATTERN, id);
 diff -ruN a/src/server/rpc.mjs b/src/server/rpc.mjs
---- a/src/server/rpc.mjs	2026-10-28 15:59:53.474123661 +0000
-+++ b/src/server/rpc.mjs	2026-10-28 15:59:53.543123155 +0000
+--- a/src/server/rpc.mjs
++++ b/src/server/rpc.mjs
 @@ -27,6 +27,7 @@
  import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
  import { listPages as servePageListStore } from "./servePage.mjs";
@@ -185,24 +210,26 @@ diff -ruN a/src/server/rpc.mjs b/src/server/rpc.mjs
    return {
      // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
  
-@@ -2534,6 +2543,8 @@
-     // uploads. No write counterpart here — files land via the `send_file` tool
-     // (POST /api/outbox/push — see index.mjs). Non-destructive: entries expire
-     // via the box's TTL sweep, not on download.
+@@ -2540,6 +2549,10 @@
+       return sid ? list.filter((r) => r.sessionID === sid) : list;
+     },
+ 
++    // The conversation's artifacts, derived on the box (src/server/artifacts.mjs) —
++    // links, files, images, hosted pages, agent-sent files, plans, expiry, counts.
 +    "artifacts:list": (opts) => artifacts.list(opts?.sessionId),
 +
-     "outbox:list": async (sessionId) => {
-       const list = await listOutbox();
-       const sid = typeof sessionId === "string" && sessionId ? sessionId : null;
+     // ---- APNs native-push registration (BET-181) ----
+     // iOS Capacitor app registers its APNs device token via the renderer-side
+     // 6-site wiring (window.api.pushRegisterApns(token)). Same single
 diff -ruN a/src/shared/api.ts b/src/shared/api.ts
---- a/src/shared/api.ts	2026-10-28 15:59:53.339124652 +0000
-+++ b/src/shared/api.ts	2026-10-28 15:59:53.526123280 +0000
+--- a/src/shared/api.ts
++++ b/src/shared/api.ts
 @@ -1,3 +1,4 @@
 +import type { ArtifactsListResult } from "./artifactsTypes.js";
  import type {
    AgentFileReady,
    AppConfig,
-@@ -1528,6 +1529,7 @@
+@@ -1529,6 +1530,7 @@
    // workspace). Read-only; entries carry an `expiresAt` TTL and are only
    // removed by the box's expiry sweep, never by a download.
    outboxList(sessionId?: string): Promise<OutboxFile[]>;
@@ -211,8 +238,8 @@ diff -ruN a/src/shared/api.ts b/src/shared/api.ts
    // Background delegation jobs (manta-server owned). list returns the full
    // job records (filtered by parent session when sessionId is passed; all
 diff -ruN a/src/shared/types.ts b/src/shared/types.ts
---- a/src/shared/types.ts	2026-10-28 15:59:53.314124836 +0000
-+++ b/src/shared/types.ts	2026-10-28 15:59:53.519123331 +0000
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
 @@ -1741,6 +1741,7 @@
    // own. Mirrors src/shared/types.ts OutboxFile / src/server/outbox.mjs
    // listOutbox rows.

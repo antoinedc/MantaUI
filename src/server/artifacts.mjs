@@ -572,7 +572,9 @@ export function createArtifactsService({
             directory,
             baseUrl: base,
           });
-          cache.set(sid, { key, core: derived });
+          // An older derivation whose key a newer request has since replaced must not
+          // overwrite the newer entry (it would only cost the next call an extra read).
+          if (inflight.get(sid)?.key === key) cache.set(sid, { key, core: derived });
           return derived;
         })();
         entry = { key, promise };

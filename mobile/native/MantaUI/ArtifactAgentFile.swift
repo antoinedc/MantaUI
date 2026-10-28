@@ -25,8 +25,8 @@ final class ArtifactAgentFileStore: ObservableObject {
     @Published private(set) var machine = AgentFileNoticeMachine()
 
     /// Set by the view: present the exporter / share sheet. When nil (no view to
-    /// present from) the operation ends as a cancelled presentation — the staged
-    /// copy is removed and the notice is back to idle.
+    /// present from) the notice fails with "Couldn't open the … sheet" and the staged
+    /// copy is removed.
     var presenter: ((AgentFilePresentation) -> Void)?
     /// A new notice was accepted (not a duplicate) — the view announces it.
     var onArrival: ((AgentFileEvent) -> Void)?
@@ -37,9 +37,9 @@ final class ArtifactAgentFileStore: ObservableObject {
     private let tempRoot: URL
     private let sleep: @Sendable (Duration) async -> Void
     private var bound = false
-    private static let log = Logger(subsystem: "com.antoinedc.mantaui", category: "agent-file")
+    private nonisolated static let log = Logger(subsystem: "com.antoinedc.mantaui", category: "agent-file")
     /// Parent directory name of every staged `<UUID>` folder; deletion is limited to it.
-    static let stagingDirName = "manta-agentfile"
+    nonisolated static let stagingDirName = "manta-agentfile"
 
     init(
         download: @escaping @Sendable (String) async throws -> Data = { path in
@@ -78,6 +78,12 @@ final class ArtifactAgentFileStore: ObservableObject {
         execute(machine.dismiss())
     }
 
+    /// The sheet could not be presented: the notice reports the failure (and the staged
+    /// copy is removed) instead of silently returning to idle.
+    func presentationUnavailable(token: UInt64, opID: UInt64, fileURL: URL) {
+        execute(machine.presentationUnavailable(token: token, opID: opID, fileURL: fileURL))
+    }
+
     /// Called by the exporter / share-sheet delegate with the `(token, opID,
     /// fileURL)` it was presented with.
     func presentationFinished(token: UInt64, opID: UInt64, fileURL: URL, completed: Bool) {
@@ -92,11 +98,12 @@ final class ArtifactAgentFileStore: ObservableObject {
         guard let begun = machine.begin(op), let event = machine.current?.event else { return }
         let download = self.download
         let root = tempRoot
+        let name = event.name
         Task { [weak self] in
             let result: Result<URL, AgentFileFailure>
             do {
                 let data = try await download(event.remotePath)
-                result = .success(try Self.stage(data, name: event.name, root: root))
+                result = .success(try await Self.stage(data, name: name, root: root))
             } catch let failure as AgentFileFailure {
                 result = .failure(failure)
             } catch {
@@ -117,13 +124,14 @@ final class ArtifactAgentFileStore: ObservableObject {
         if let presenter {
             presenter(presentation)
         } else {
-            presentationFinished(token: token, opID: opID, fileURL: url, completed: false)
+            presentationUnavailable(token: token, opID: opID, fileURL: url)
         }
     }
 
     /// `tempRoot/manta-agentfile/<UUID>/<name>` — the real filename, so Files and
     /// the share sheet show it.
-    private static func stage(_ data: Data, name: String, root: URL) throws -> URL {
+    /// `nonisolated` + async: the (possibly large) write runs off the main actor.
+    private nonisolated static func stage(_ data: Data, name: String, root: URL) async throws -> URL {
         let safe = name.replacingOccurrences(of: "/", with: "_").trimmingCharacters(in: .whitespaces)
         let directory = root
             .appendingPathComponent(stagingDirName, isDirectory: true)
@@ -430,7 +438,8 @@ struct ArtifactAgentFileNotice: View {
                                        fileURL: presentation.fileURL, completed: completed)
         }
         guard let top = ArtifactPresenter.topMost(from: windowBox.window) else {
-            finish(false)
+            store.presentationUnavailable(token: presentation.token, opID: presentation.opID,
+                                          fileURL: presentation.fileURL)
             return
         }
         switch presentation.op {

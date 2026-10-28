@@ -66,6 +66,10 @@ enum AgentFileNoticeCopy {
         "Couldn't download \(event.name) — it's still on the box, try again."
     }
 
+    static func presentationFailure(_ op: AgentFileNotice.Op) -> String {
+        "Couldn't open the \(op == .save ? "save" : "share") sheet — try again."
+    }
+
     /// `"+1 more"`, nil for 0.
     static func pendingBadge(_ count: Int) -> String? {
         count > 0 ? "+\(count) more" : nil
@@ -185,6 +189,19 @@ struct AgentFileNoticeMachine: Equatable, Sendable {
             closeCurrent()
             return .deleteTemp(fileURL)
         }
+    }
+
+    /// The exporter / share sheet could not be put on screen at all (no view to present
+    /// from). The user tapped Save/Share, so the notice says it failed rather than quietly
+    /// returning to idle; the staged copy is removed.
+    mutating func presentationUnavailable(token: UInt64, opID: UInt64, fileURL: URL) -> AgentFileEffect {
+        guard var notice = current, notice.token == token,
+              case .presenting(let op, let runningID, _) = notice.phase, runningID == opID else {
+            return .deleteTemp(fileURL)
+        }
+        notice.phase = .failed(AgentFileNoticeCopy.presentationFailure(op))
+        current = notice
+        return .deleteTemp(fileURL)
     }
 
     mutating func savedTimerFired(token: UInt64, opID: UInt64) -> AgentFileEffect {

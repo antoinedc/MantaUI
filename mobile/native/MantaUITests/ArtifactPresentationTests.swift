@@ -139,6 +139,21 @@ final class ArtifactPresentationTests: XCTestCase {
         XCTAssertEqual(ArtifactStaging.fileExtension(label: "a.toolongextension", href: "/x/y"), "")
     }
 
+    func testAStagedCopyIsReusedOnlyWhileTheRowIsUnchanged() {
+        let v1 = ArtifactItem(id: "o", kind: .file, label: "r.pdf", href: "/r.pdf", size: 100, at: 1000)
+        let rev = ArtifactStaging.revision(v1)
+        XCTAssertTrue(ArtifactStaging.isCurrent(stagedRevision: rev, for: v1))
+        // re-pushed at the same path: new mtime and/or size → fetched again
+        XCTAssertFalse(ArtifactStaging.isCurrent(stagedRevision: rev,
+                                                 for: ArtifactItem(id: "o", kind: .file, label: "r.pdf", href: "/r.pdf", size: 100, at: 2000)))
+        XCTAssertFalse(ArtifactStaging.isCurrent(stagedRevision: rev,
+                                                 for: ArtifactItem(id: "o", kind: .file, label: "r.pdf", href: "/r.pdf", size: 101, at: 1000)))
+        XCTAssertFalse(ArtifactStaging.isCurrent(stagedRevision: nil, for: v1))
+        // a plan is never reusable: opening its file always fetches afresh
+        let plan = ArtifactItem(id: "p", kind: .plan, label: "p", href: "/p.md", at: 5)
+        XCTAssertFalse(ArtifactStaging.isCurrent(stagedRevision: ArtifactStaging.revision(plan), for: plan))
+    }
+
     func testTempFileNamesAreShortSafeAndDistinct() {
         let longID = "outbox:" + String(repeating: "/very/long/path", count: 40) + "/report.pdf"
         let a = ArtifactStaging.tempFileName(id: longID, label: "report.pdf", href: longID)

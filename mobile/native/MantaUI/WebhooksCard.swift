@@ -196,12 +196,16 @@ struct WebhooksCard: View {
     /// hook comes back) and says so inline.
     private func revoke(_ hook: WebhookMeta) async {
         revokeError = nil
+        let previous = hooks
         hooks.removeAll { $0.id == hook.id }
         do {
             try await api.deleteWebhook(id: hook.id)
             await load()
         } catch {
             revokeError = "Couldn't revoke \(WebhookFormat.title(hook)) — \(Self.message(for: error))"
+            // The hook still exists (and can still wake the session): put it back before the
+            // reload, so a reload that also fails cannot leave it hidden.
+            hooks = previous
             await load()
         }
     }

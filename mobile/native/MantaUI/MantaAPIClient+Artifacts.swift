@@ -18,6 +18,8 @@ extension MantaAPIClient {
     /// `webhook:list` — this session's inbound webhooks (metadata only; the
     /// signing secret never leaves the box).
     func listWebhooks(sessionId: String) async throws -> [WebhookMeta] {
+        // The box maps a blank id to "every webhook on the box" — never ask that from a session card.
+        guard !sessionId.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
         try await call("webhook:list", args: [sessionId], as: [WebhookMeta].self) ?? []
     }
 

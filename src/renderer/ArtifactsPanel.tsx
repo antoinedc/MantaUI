@@ -279,6 +279,13 @@ function RowActions({
 
 // ===== Tab 1 — Links =======================================================
 
+// The box's own failure sentence already says what went wrong; any other message
+// (a network error, an HTTP status) gets a lead-in.
+const BOX_READ_FAILED = "Couldn't read this conversation's artifacts";
+function loadErrorText(message: string): string {
+  return message === BOX_READ_FAILED ? message : `Couldn't load artifacts. ${message}`;
+}
+
 // A muted footnote under the list when the box left something out.
 function degradedFootnote(degraded: readonly string[]): string | null {
   const parts: string[] = [];
@@ -717,6 +724,7 @@ export function ArtifactsPanel({
     return () => window.removeEventListener("manta-open-review", handler);
   }, []);
 
+  const hasResult = !!result && result.sessionId === sessionId;
   const now = useMemo(() => Date.now(), [result]);
   const artifacts = useMemo<Artifact[]>(
     () => (result && result.sessionId === sessionId ? result.items : []),
@@ -1021,7 +1029,7 @@ export function ArtifactsPanel({
           <>
           {loadError && (
             <div className="manta-artifacts-load-error shrink-0 mx-3 mt-2 mb-1 px-2 py-1 text-meta text-danger bg-danger-bg border border-danger/30 rounded-xs break-words flex items-start gap-2">
-              <span className="min-w-0 flex-1">Couldn't load artifacts. {loadError}</span>
+              <span className="min-w-0 flex-1">{loadErrorText(loadError)}</span>
               <button
                 type="button"
                 onClick={() => void refresh()}
@@ -1031,7 +1039,7 @@ export function ArtifactsPanel({
               </button>
             </div>
           )}
-          {groups.length === 0 ? (
+          {groups.length === 0 && !hasResult && loadError ? null : groups.length === 0 ? (
             <div className="px-4 py-8 text-center">
               {!(result && result.sessionId === sessionId) && !loadError ? (
                 <div className="manta-artifacts-loading text-label text-text-faint">Loading artifacts…</div>
