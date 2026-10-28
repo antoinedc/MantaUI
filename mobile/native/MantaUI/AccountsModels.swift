@@ -296,11 +296,83 @@ struct AccountsActionReply: Decodable, Equatable, Sendable {
     }
 }
 
-/// `accounts:add-seat` reply. `connect` is the existing connect-flow shape the
-/// desktop drives; iOS has no such flow, so it is kept opaque.
+/// `accounts:add-seat` reply. `connect` is the connect-flow shape shared with
+/// `accounts:resign-seat` and `opencode:provider-auth` start; it is kept as the
+/// opaque wire value and read by `SignInConnect(json:)`.
 struct AddSeatReply: Decodable, Equatable, Sendable {
     var seatId: String
     var connect: JSONValue? = nil
+}
+
+/// `accounts:resign-seat` reply: the flow that signs a logged-out seat back in
+/// (same account only) and the connect shape that drives it.
+struct ResignSeatReply: Decodable, Equatable, Sendable {
+    var flowId: String
+    var connect: JSONValue? = nil
+}
+
+/// `accounts:resign-status` reply. Every field is optional on the wire; an
+/// unrecognised state is `pending` (keep polling) rather than a verdict.
+struct ResignStatusReply: Decodable, Equatable, Sendable {
+    enum State: String, Sendable { case pending, ok, failed }
+
+    var state: State = .pending
+    /// "login-failed" | "different-account" | "unknown-flow".
+    var error: String? = nil
+    var expectedEmail: String? = nil
+    var gotEmail: String? = nil
+    var seat: AccountsSeat? = nil
+
+    private enum CodingKeys: String, CodingKey { case state, error, expectedEmail, gotEmail, seat }
+
+    init(state: State = .pending, error: String? = nil, expectedEmail: String? = nil,
+         gotEmail: String? = nil, seat: AccountsSeat? = nil) {
+        self.state = state
+        self.error = error
+        self.expectedEmail = expectedEmail
+        self.gotEmail = gotEmail
+        self.seat = seat
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = (try? c.decodeIfPresent(String.self, forKey: .state)) ?? nil
+        state = raw.flatMap(State.init(rawValue:)) ?? .pending
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+        expectedEmail = try? c.decodeIfPresent(String.self, forKey: .expectedEmail)
+        gotEmail = try? c.decodeIfPresent(String.self, forKey: .gotEmail)
+        seat = try? c.decodeIfPresent(AccountsSeat.self, forKey: .seat)
+    }
+}
+
+/// One `kind:"pty"` bus frame: output or exit of a pty the box spawned through
+/// `pty:spawn` (the Claude sign-in and CLI installer). Published to every
+/// `/events` subscriber, so a flow filters on its own `sessionKey`.
+struct PtyEvent: Equatable, Sendable {
+    enum Kind: Equatable, Sendable {
+        case data(String)
+        case exit(code: Int?)
+    }
+
+    var sessionKey: String
+    var kind: Kind
+
+    static func from(_ frame: MantaStreamFrame) -> PtyEvent? {
+        guard frame.kind == "pty", case .object(let payload)? = frame.payload,
+              case .string(let sessionKey)? = payload["sessionKey"], !sessionKey.isEmpty,
+              case .string(let rawKind)? = payload["kind"] else { return nil }
+        switch rawKind {
+        case "data":
+            guard case .string(let data)? = payload["data"] else { return nil }
+            return PtyEvent(sessionKey: sessionKey, kind: .data(data))
+        case "exit":
+            var code: Int?
+            if case .number(let n)? = payload["code"], n.isFinite, let whole = Int(exactly: n) { code = whole }
+            return PtyEvent(sessionKey: sessionKey, kind: .exit(code: code))
+        default:
+            return nil
+        }
+    }
 }
 
 /// `accounts:seat-status` reply.
@@ -656,8 +728,8 @@ enum AccountsCopy {
     static let resendMessage = "Conversations will re-send their history to the new seat on their next message."
     static let resendConfirm = "Use this seat"
 
-    static let addSeatOnDesktop = "To add a seat, sign in from the MantaUI desktop app (Settings → Accounts)."
-    static let noSeats = "No subscription seats yet. Sign in to a Claude or Codex account from the MantaUI desktop app to add one."
+    static let noSeats = "No subscription seats yet. Use Connect or Add account to sign one in."
+    static let nothingConnected = "Nothing is connected yet. Connect a subscription or add an endpoint below."
     static let routingInactive = "Seat routing isn't active on this box yet, so conversations keep using the live login for now."
     static let staleBox = "This box doesn't support multiple accounts yet — update it to manage seats here."
 
@@ -671,9 +743,9 @@ enum AccountsCopy {
     static func removeConfirmMessage(replacement: AccountsSeat?) -> String {
         if let replacement {
             let name = replacement.label.isEmpty ? "another seat" : "“\(replacement.label)”"
-            return "The box will switch to \(name), and this seat's conversations move to other seats on their next message. You can add it again by signing in from the desktop app."
+            return "The box will switch to \(name), and this seat's conversations move to other seats on their next message. You can add it again with Add account."
         }
-        return "Its conversations move to another seat on their next message. You can add it again by signing in from the desktop app."
+        return "Its conversations move to another seat on their next message. You can add it again with Add account."
     }
 
     /// "Removed Seat 1. The box now uses Seat 2; …".

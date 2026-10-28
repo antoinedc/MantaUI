@@ -9,6 +9,8 @@
 // standing up the full HTTP server (src/server/index.mjs owns the upgrade
 // listener that calls into here).
 
+import { findLauncher } from "./launcherRegistry.mjs";
+
 // Lazy import: ./pty.mjs pulls in node-pty, which is not available in CI.
 // Keeping the import dynamic lets this module load (and `parsePtyQuery`
 // get unit-tested) without forcing every test runner to install node-pty.
@@ -60,6 +62,22 @@ export function attachPtyWs(ws, url, opts = {}) {
     return;
   }
   const { sessionKey, cwd, cols, rows, launcher } = params;
+
+  // Hidden launchers (claude-auth-login, claude-cli-install) exist only for the
+  // `pty:spawn` RPC, which owns the sign-in registry and points a seat sign-in
+  // at the seat's own directory. Spawned here they would run an unregistered
+  // login against the box's LIVE credentials, so refuse before any spawn.
+  if (launcher && typeof launcher === "object" && typeof launcher.id === "string") {
+    if (findLauncher(launcher.id)?.hidden === true) {
+      try {
+        ws.send(JSON.stringify({ type: "error", error: "launcher_not_allowed" }));
+      } catch {
+        /* socket already closing */
+      }
+      ws.close(1008, "launcher_not_allowed");
+      return;
+    }
+  }
 
   // Resolve the pty module: an injected one (tests) wins; production
   // resolves lazily so this module loads even on a CI runner without
