@@ -2537,6 +2537,33 @@ describe("a job row nests by displayParentID ?? parentSessionID", () => {
     expect(r.children.has(3)).toBe(false);
   });
 
+  it("computeJobNesting lifts a row whose parent is itself a nested row to the top-level ancestor", () => {
+    const proj = mkProject("p", [
+      { index: 1, name: "orch", opencodeSessionId: "orch" },
+      { index: 2, name: "a", opencodeSessionId: "a" },
+      { index: 3, name: "b", opencodeSessionId: "b" },
+    ]);
+    const r = computeJobNesting(proj, {
+      a: { status: "running", parentSessionID: "orch", childSessionID: "a" },
+      b: { status: "running", parentSessionID: "x", displayParentID: "a", childSessionID: "b" },
+    });
+    expect(r.children.get(1)).toEqual([2, 3]);
+    expect(r.children.has(2)).toBe(false);
+    expect([...r.hidden].sort()).toEqual([2, 3]);
+  });
+
+  it("computeJobNesting leaves a parent cycle top-level instead of hiding it", () => {
+    const proj = mkProject("p", [
+      { index: 1, name: "a", opencodeSessionId: "a" },
+      { index: 2, name: "b", opencodeSessionId: "b" },
+    ]);
+    const r = computeJobNesting(proj, {
+      a: { status: "running", parentSessionID: "b", childSessionID: "a" },
+      b: { status: "running", parentSessionID: "a", childSessionID: "b" },
+    });
+    expect(r.hidden.size).toBe(0);
+  });
+
   it("falls back to parentSessionID without a display parent (absent or null)", () => {
     expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other" } }).children.get(3)).toEqual([2]);
     expect(computeJobNesting(projects[0], { j: { ...base, parentSessionID: "other", displayParentID: null } }).children.get(3)).toEqual([2]);

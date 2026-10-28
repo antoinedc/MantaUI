@@ -2101,19 +2101,32 @@ export function computeJobNesting(
     if (w.opencodeSessionId) byOpencodeId.set(w.opencodeSessionId, w);
   }
 
+  // child window index → parent window index. Nest by the DISPLAY parent when the server resolved one (the
+  // real parent has no window); the real parent still routes results and is the fallback.
+  const parentOf = new Map<number, number>();
   for (const job of Object.values(jobs)) {
     if (!job.childSessionID || job.supersededBy) continue;
     const childWin = byOpencodeId.get(job.childSessionID);
     if (!childWin) continue; // job's window isn't in this project
-    // Nest by the DISPLAY parent when the server resolved one (the real parent has no window); the real
-    // parent still routes results and is the fallback.
     const nestUnder = job.displayParentID ?? job.parentSessionID;
     const parentWin = nestUnder ? byOpencodeId.get(nestUnder) : undefined;
-    if (!parentWin) continue; // child stays top-level; parent window is gone
-    hidden.add(childWin.index);
-    const arr = children.get(parentWin.index) ?? [];
-    arr.push(childWin.index);
-    children.set(parentWin.index, arr);
+    if (!parentWin || parentWin.index === childWin.index) continue; // child stays top-level; parent window is gone
+    parentOf.set(childWin.index, parentWin.index);
+  }
+  // Only top-level rows render children, so a row whose parent is itself nested is lifted to the nearest
+  // top-level ancestor (cycle-safe: a cycle leaves its members top-level).
+  for (const [child] of parentOf) {
+    const seen = new Set([child]);
+    let top = parentOf.get(child)!;
+    while (parentOf.has(top) && !seen.has(top)) {
+      seen.add(top);
+      top = parentOf.get(top)!;
+    }
+    if (seen.has(top)) continue;
+    hidden.add(child);
+    const arr = children.get(top) ?? [];
+    arr.push(child);
+    children.set(top, arr);
   }
 
   // Sort children by window index for stable render order.

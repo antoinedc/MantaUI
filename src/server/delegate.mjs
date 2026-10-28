@@ -884,6 +884,9 @@ export async function resolveDisplayParents(targets, deps = {}, opts = {}) {
     }
     return false;
   };
+  const jobRowSessions = new Set(
+    ((await (deps.load ?? loadJobs)()) ?? []).filter((j) => !isTerminal(j) && j.childSessionID).map((j) => j.childSessionID),
+  );
   for (const job of wanted) {
     const hits = found.hits
       .filter((h) => h?.target === job.childSessionID && typeof h.sessionId === "string")
@@ -891,6 +894,9 @@ export async function resolveDisplayParents(targets, deps = {}, opts = {}) {
     let driver = null;
     for (const h of hits) {
       if (!acceptable(job, h.sessionId)) continue;
+      // Another background row is never a driver: its own row is nested, so a child under it would not render,
+      // and a builder that merely mentions a sibling's id is not running it.
+      if (jobRowSessions.has(h.sessionId)) continue;
       if (await descendsFrom(h.sessionId, job.childSessionID)) continue;
       driver = h.sessionId;
       break;

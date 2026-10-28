@@ -154,6 +154,17 @@ test("rule 3: skips the child itself, its own descendants, other workspaces, and
   assert.deepEqual(r, { displayParentID: "ses_ok", rule: 3 });
 });
 
+test("rule 3: another live background row is never a driver (a builder naming a sibling's id), even when newest", async () => {
+  const w = world({
+    sessions: { [CHILD]: "ses_old", ses_old: null, ses_sib: null, ses_orch: null },
+    windows: { [WS]: ["ses_sib", "ses_orch"] },
+    jobs: [job(), job({ id: "job00002", childSessionID: "ses_sib", parentSessionID: "ses_old" })],
+    references: refs(hit("ses_sib", T0 - 1), hit("ses_orch", T0 - 50)),
+  });
+  const r = await resolveDisplayParent(w.store[0], w.deps);
+  assert.deepEqual(r, { displayParentID: "ses_orch", rule: 3 });
+});
+
 test("rule 3: a hit that is the newest only in another workspace never wins", async () => {
   const w = world({
     sessions: { [CHILD]: "ses_old", ses_old: null },
