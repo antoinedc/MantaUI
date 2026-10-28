@@ -334,11 +334,18 @@ private struct TranscriptCellReveal: View {
     /// here, so it never crosses the nonisolated cell boundary. Nil on
     /// read-only surfaces (subagent drill-in, capture fixture).
     @Environment(\.transcriptCardActions) private var cardActions
+    /// M-02-1: the row a `.message` route jumped to (WS02 `focusedRowID`).
+    @Environment(\.transcriptHighlightedRowID) private var highlightedRowID
 
     var body: some View {
         let reveal = cellReveal?.rubberbandedOffset(max: TranscriptGutter.gutterWidth) ?? 0
 
         return cellContent
+            .background(
+                item.id == highlightedRowID ? tokens.accentSoft : Color.clear,
+                in: RoundedRectangle(cornerRadius: Metrics.radius.md)
+            )
+            .animation(.easeOut, value: highlightedRowID)
             .offset(x: -reveal)
             .overlay(alignment: .trailing) {
                 TimestampGutterLabel(

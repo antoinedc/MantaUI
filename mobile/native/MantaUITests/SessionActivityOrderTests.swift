@@ -358,10 +358,15 @@ final class SessionActivityOrderTests: XCTestCase {
         XCTAssertEqual(BackgroundJobFormat.sorted([done, old, new]).map(\.id), ["new", "old", "done"])
     }
 
-    func testStatusLabelShowsAnUnknownStatusAsTheBoxWroteIt() {
-        XCTAssertEqual(BackgroundJobFormat.statusLabel(job("a", parent: nil, child: nil, status: "running")), "running")
-        XCTAssertEqual(BackgroundJobFormat.statusLabel(job("a", parent: nil, child: nil, status: "queued")), "queued")
-        XCTAssertEqual(BackgroundJobFormat.statusLabel(job("a", parent: nil, child: nil, status: "")), "unknown")
+    func testBoxStatusLabelAndSummaryDecodeAndAreOptionalOnAnOlderBox() throws {
+        let jobs = try decodeJobs(#"""
+        [{"id":"a","status":"done","statusLabel":"finished","summary":"3 files changed"},
+         {"id":"b","status":"queued"}]
+        """#)
+        XCTAssertEqual(jobs[0].statusLabel, "finished")
+        XCTAssertEqual(jobs[0].summary, "3 files changed")
+        XCTAssertNil(jobs[1].statusLabel)
+        XCTAssertNil(jobs[1].summary)
     }
 
     func testFailureReasonPassesThroughOnlyHumanMessages() {

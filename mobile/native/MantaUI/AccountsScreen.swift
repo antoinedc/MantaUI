@@ -669,6 +669,15 @@ struct AccountsScreen: View {
             // A plain stack so further links can be appended below the text.
             VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                 Text("Custom endpoints are OpenAI-compatible servers you add yourself.")
+                // M-09-6: unpriced models are set up in Settings → Models.
+                NavigationLink {
+                    ModelsScreen()
+                } label: {
+                    Text("Set prices for unpriced models")
+                        .font(.footnote)
+                        .foregroundColor(tokens.accentTx)
+                }
+                .accessibilityIdentifier("accounts-set-prices")
             }
         }
     }
@@ -713,7 +722,7 @@ struct SeatMeterBar: View {
     var inactive = false
 
     var body: some View {
-        let tint = inactive ? tokens.tx4 : MeterRing.tint(UsageMeters.band(window.pct), tokens)
+        let tint = inactive ? tokens.tx4 : (UsageMeters.band(window).map { MeterRing.tint($0, tokens) } ?? tokens.tx4)
         HStack(spacing: Metrics.spacing.sp2) {
             Text(title)
                 .font(.caption)

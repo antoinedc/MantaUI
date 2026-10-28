@@ -559,6 +559,10 @@ struct UsageWindow: Codable, Equatable, Sendable {
     /// `false` when the provider says this window is not in force — shown
     /// greyed and never drives the dot or a warning. Absent means active.
     var active: Bool? = nil
+    /// The BOX's own band for `pct` — "under" (< 70), "warn" (70–89), "danger"
+    /// (90–99), "over" (≥ 100) (WS09 SF-M18, M-09-8). Absent on an older box: the
+    /// meters then draw neutral (`UsageMeters.band(_ window:)` → nil).
+    var tone: String? = nil
 }
 
 /// One provider's full `usage:list` snapshot.

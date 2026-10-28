@@ -127,6 +127,13 @@ struct SessionListView: View {
                     }
                     .accessibilityLabel("Settings")
                 }
+                if store.unarmedStoppedCount > 0 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        UsageStoppedCapsule(count: store.unarmedStoppedCount) {
+                            UsageAlertsStore.shared.presentResume()
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     orderMenu
                 }
@@ -287,6 +294,10 @@ struct SessionListView: View {
         case .confirmDelete(let window):
             confirmDeleteSheet(target: window)
                 .presentationDetents([.height(320)])
+        case .conversationSearch(let seed):
+            // M-06-2: search every conversation's messages, seeded with the
+            // session-list capsule's text (no conversation is favoured).
+            SearchScreen(primarySessionId: nil, seed: seed)
         }
     }
 
@@ -546,6 +557,7 @@ struct SessionListView: View {
                     groupHeader(project)
                 }
             }
+            messageSearchSection
         }
         .listStyle(.plain)
         .listSectionSpacing(Metrics.spacing.sp6)
@@ -575,6 +587,7 @@ struct SessionListView: View {
                         )
                 }
             }
+            messageSearchSection
         }
         .listStyle(.plain)
         .listSectionSpacing(Metrics.spacing.sp6)
@@ -1115,8 +1128,45 @@ struct SessionListView: View {
             Text("Nothing named “\(searchText)”.")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx4)
+            if SearchCopy.isActive(searchText) {
+                messageSearchButton
+                    .padding(.top, Metrics.spacing.sp2)
+            }
         }
         .accessibilityIdentifier("sessions-no-match")
+    }
+
+    // MARK: - Message search entry (M-06-2)
+
+    /// Opens conversation search seeded with the capsule's text. The capsule
+    /// filters session NAMES; this reaches into what was said.
+    private var messageSearchButton: some View {
+        Button {
+            sheetRoute = .conversationSearch(seed: SearchCopy.normalized(searchText))
+        } label: {
+            Label("Search messages for “\(SearchCopy.normalized(searchText))”",
+                  systemImage: "text.magnifyingglass")
+                .font(.manta(size: Metrics.type.small, weight: .medium))
+                .foregroundColor(tokens.accentTx)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("sessions-search-messages")
+    }
+
+    /// The list's final row when the capsule holds a real query.
+    @ViewBuilder
+    private var messageSearchSection: some View {
+        if SearchCopy.isActive(searchText) {
+            Section {
+                messageSearchButton
+                    .padding(.vertical, Metrics.spacing.sp2)
+                    .listRowInsets(EdgeInsets(top: 0, leading: Metrics.spacing.sp3,
+                                              bottom: 0, trailing: Metrics.spacing.sp3))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(tokens.canvas)
+            }
+        }
     }
 
     @ViewBuilder
@@ -1328,6 +1378,7 @@ private enum SheetRoute: Identifiable {
     case renameSession(project: String, index: Int, name: String)
     case renameProject(name: String)
     case confirmDelete(window: MantaWindow)
+    case conversationSearch(seed: String)
 
     var id: String {
         switch self {
@@ -1336,6 +1387,7 @@ private enum SheetRoute: Identifiable {
         case .renameSession(let project, let index, _): return "rename:\(project):\(index)"
         case .renameProject(let name): return "rename-project:\(name)"
         case .confirmDelete(let window): return "delete:\(window.index)"
+        case .conversationSearch(let seed): return "search:\(seed)"
         }
     }
 }

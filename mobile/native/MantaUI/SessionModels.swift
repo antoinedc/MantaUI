@@ -103,11 +103,17 @@ struct DelegateJob: Codable, Equatable, Sendable, Identifiable {
     var createdAt: Double? = nil
     var startedAt: Double? = nil
     var finishedAt: Double? = nil
+    /// The box's wording of `status` (`delegate:list` `statusLabel`, WS02 SF-4).
+    /// Absent on an older box: callers show the raw `status` word.
+    var statusLabel: String? = nil
+    /// The box's one-line outcome for a finished job (`delegate:list` `summary`).
+    var summary: String? = nil
 
     fileprivate enum CodingKeys: String, CodingKey {
         case id, parentSessionID, childSessionID, status
         case name, origin, branch, activity
         case createdAt, startedAt, finishedAt
+        case statusLabel, summary
     }
 
     /// Whether the job is still live. `done`/`failed`/`stopped` are terminal;
@@ -138,6 +144,8 @@ extension DelegateJob {
         createdAt = Self.lenientMillis(c, .createdAt)
         startedAt = Self.lenientMillis(c, .startedAt)
         finishedAt = Self.lenientMillis(c, .finishedAt)
+        statusLabel = Self.lenientString(c, .statusLabel)
+        summary = Self.lenientString(c, .summary)
     }
 
     private static func lenientString(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> String? {
@@ -753,15 +761,6 @@ enum SessionActivityOrder {
 // MARK: - Background job presentation (spec §4)
 
 enum BackgroundJobFormat {
-    /// The status word shown beside the dot. A status a newer box invented is
-    /// shown as the box wrote it rather than hidden.
-    static func statusLabel(_ job: DelegateJob) -> String {
-        switch job.status {
-        case "running", "paused", "done", "failed", "stopped": return job.status
-        default: return job.status.isEmpty ? "unknown" : job.status
-        }
-    }
-
     /// Elapsed time for a live job, the finish time for a finished one.
     ///
     /// Running/paused: "4m" since it started. Finished: "finished 12m ago", or

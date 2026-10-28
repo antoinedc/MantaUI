@@ -206,6 +206,10 @@ struct SettingsScreen: View {
                 accountsEntry
                     .padding(.bottom, Metrics.spacing.sp2)
             }
+            if modelsMatchesQuery {
+                modelsEntry
+                    .padding(.bottom, Metrics.spacing.sp2)
+            }
             Text(hits.count == 1 ? "1 match" : "\(hits.count) matches")
                 .font(.manta(size: Metrics.type.small))
                 .foregroundColor(tokens.tx3)
@@ -245,6 +249,8 @@ struct SettingsScreen: View {
     private var sectionList: some View {
         VStack(alignment: .leading, spacing: 0) {
             accountsEntry
+            modelsEntry
+                .padding(.top, Metrics.spacing.sp2)
             ForEach(SettingsSchema.sections) { section in
                 sectionView(section)
             }
@@ -291,6 +297,47 @@ struct SettingsScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("settings-accounts")
+    }
+
+    // MARK: - Models entry (M-09-1)
+
+    /// Like Accounts, Models is a screen rather than a schema value: a fixed row
+    /// directly after Accounts, found by search for the words someone would type.
+    private var modelsMatchesQuery: Bool {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return false }
+        return "models default subagent picker spend cost optimizer prices identify".contains(q)
+    }
+
+    private var modelsEntry: some View {
+        NavigationLink {
+            ModelsScreen()
+        } label: {
+            HStack(spacing: Metrics.spacing.sp2) {
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+                    Text("Models")
+                        .font(.manta(size: Metrics.type.body, weight: .medium))
+                        .foregroundColor(tokens.tx1)
+                    Text("Default, picker, subagents, spend and optimizer")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx3)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx4)
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp3)
+            .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.radius.md)
+                    .stroke(tokens.border, lineWidth: 1)
+            )
+            .padding(.horizontal, Metrics.spacing.sp3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("settings-models")
     }
 
     private func sectionView(_ section: SettingSection) -> some View {

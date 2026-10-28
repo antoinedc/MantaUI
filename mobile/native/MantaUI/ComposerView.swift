@@ -356,6 +356,9 @@ struct ComposerView: View {
             // composer; a failed one leaves the draft (including a typed
             // `/clear`) in place next to the failure hint. Cancel changes nothing.
             Button("Clear", role: .destructive) {
+                // M-03-9: the ownership check can resolve to a read-only job while
+                // the dialog is open — re-evaluate before clearing.
+                guard mutationGateAllows() else { return }
                 onSlashClear?()
             }
             Button("Cancel", role: .cancel) {}
@@ -613,7 +616,7 @@ struct ComposerView: View {
         if let window = seatUsageWindow ?? UsageMeters.sessionWindow(usageStore.snapshots) {
             Button { onShowUsage?() } label: {
                 MeterRing(pct: window.pct,
-                          color: MeterRing.tint(UsageMeters.band(window.pct), tokens),
+                          color: UsageMeters.band(window).map { MeterRing.tint($0, tokens) } ?? tokens.tx4,
                           diameter: 13,
                           lineWidth: 2.5,
                           track: tokens.borderSubtle)
@@ -1564,14 +1567,17 @@ struct ComposerView: View {
             case .builtin(let action):
                 switch action {
                 case .compact:
+                    guard mutationGateAllows() else { return }
                     store.compact()
                     settleLocal(snapshot)
                 case .clear:
                     guard onSlashClear != nil else { await sendAsMessage(); return }
+                    guard mutationGateAllows() else { return }
                     // The confirm dialog owns the rest; the draft stays as typed.
                     showClearConfirm = true
                 case .fork:
                     guard let onSlashFork else { await sendAsMessage(); return }
+                    guard mutationGateAllows() else { return }
                     // Chips and agent selections stay in this composer whether the
                     // fork succeeds or fails — ChatScreen reports a failed fork itself.
                     onSlashFork()
@@ -1582,6 +1588,9 @@ struct ComposerView: View {
             case .refuse(let message):
                 surfaceHint(message)
             case .command(let name, let args, let alwaysBackground):
+                // M-03-9: evaluated AFTER the command lookup, immediately before
+                // the RPC — a command can't be parked in the prompt outbox.
+                guard mutationGateAllows() else { return }
                 let background = alwaysBackground || snapshot.background
                 var input = RunCommandInput(
                     sessionId: sessionId, command: name, arguments: args,
@@ -1613,6 +1622,22 @@ struct ComposerView: View {
                     await store.refetch()
                 }
             }
+        }
+    }
+
+    /// M-03-9: the exhaustive dispatch gate for a typed command / built-in, read
+    /// from the store's LIVE mutation policy. Refusal surfaces the hint, sends no
+    /// RPC and leaves the draft and chips untouched.
+    private func mutationGateAllows() -> Bool {
+        switch ChatCardMutationGate.decide(policy: store.mutationPolicy, action: .mutate) {
+        case .run:
+            return true
+        case .hold:
+            surfaceHint(ChatCardMutationGate.checkingMessage)
+            return false
+        case .refuse(let message):
+            surfaceHint(message)
+            return false
         }
     }
 
@@ -1702,12 +1727,10 @@ struct ComposerView: View {
         }
     }
 
-    // The agent catalog's load error and its retry. Not available until the
-    // model store reports them (mount M-03-6 replaces both with
-    // `modelStore.agentsLoadError` and `{ modelStore.retryAgents() }`); until
-    // then a failed load reads as "Loading agents…" and no retry row appears.
-    private var agentsLoadError: String? { nil }
-    private var retryAgents: (() -> Void)? { nil }
+    // The agent catalog's load error and its retry (M-03-6), straight from the
+    // model store: a failed load shows the box's reason with a retry row.
+    private var agentsLoadError: String? { modelStore.agentsLoadError }
+    private var retryAgents: (() -> Void)? { { modelStore.retryAgents() } }
 
     /// A popup's rounded panel: background, hairline, clipped to the corner.
     private func popupChrome<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
