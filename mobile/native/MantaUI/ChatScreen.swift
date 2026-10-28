@@ -136,6 +136,10 @@ struct ChatScreen: View {
     /// "Quote in new session" composer seed, forwarded to the content screen
     /// (BET-1353). Empty for every normal open.
     let seed: String?
+    /// A "start a new session with this" draft (the create flow): seeds the
+    /// composer ONCE, when the screen first opens. A clear or handoff swap (which
+    /// rebuilds the content below) never re-applies it.
+    var draft: NewSessionDraft? = nil
 
     var body: some View {
         let sid = currentSessionId ?? sessionId
@@ -154,7 +158,8 @@ struct ChatScreen: View {
                 currentSessionId = newId
             },
             seed: seed ?? "",
-            carryOver: carryOver
+            carryOver: carryOver,
+            draft: currentSessionId == nil ? draft : nil
         )
         .id(sid)
     }
@@ -257,16 +262,13 @@ private struct ChatScreenContent: View {
     /// above the glass box and must stay undimmed).
     @State private var composerGlassHeight: CGFloat = 0
 
-    /// The composer draft, owned HERE so quote actions (which live on the
-    /// transcript, outside ComposerView) can prepend to it, and passed down to
-    /// ComposerView as a binding (BET-1353). Seeded from `seed` when this
-    /// screen opens a "quote in new session" fork.
-    @State private var composerText = ""
-
-    /// The composer's attachment chips, owned HERE for the same reason as
-    /// `composerText`: a handoff replacement moves them to the successor
-    /// (auto-handoff §8).
-    @State private var composerAttachments: [ComposerAttachment] = []
+    /// The composer draft + attachment chips, owned HERE so features outside
+    /// ComposerView (quote, handoff, a new-session draft, …) can put things into
+    /// it through one API (C3), and passed down to ComposerView as bindings
+    /// (BET-1353). Seeded from `seed` ("quote in new session" fork), the handoff
+    /// carry-over and the new-session `draft`; a handoff replacement moves the
+    /// text and chips to the successor (auto-handoff §8).
+    @StateObject private var composer: ComposerTextController
 
     /// Uploads that were still running when a handoff carried the composer over;
     /// they are bound to the old composer and cannot follow, so the new screen
@@ -294,7 +296,7 @@ private struct ChatScreenContent: View {
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
@@ -304,8 +306,13 @@ private struct ChatScreenContent: View {
         // Seed the composer draft for a "quote in new session" fork (BET-1353);
         // empty for every normal open, which leaves the draft empty. A handoff
         // replacement appends the predecessor's unsent text below it (§8).
-        _composerText = State(initialValue: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""))
-        _composerAttachments = State(initialValue: carryOver?.attachments ?? [])
+        // The StateObject autoclosure runs once per screen identity, so a
+        // re-render of this struct never re-seeds the draft.
+        _composer = StateObject(wrappedValue: ComposerTextController(
+            text: HandoffComposerCarry.appendBelow(seed, carryOver?.text ?? ""),
+            attachments: carryOver?.attachments ?? [],
+            draft: draft
+        ))
         self.skippedUploads = carryOver?.skippedUploads ?? 0
         let api = MantaAPIClient.live()
         self.api = api
@@ -339,6 +346,9 @@ private struct ChatScreenContent: View {
         // refuse to restart.
         content
             .environmentObject(voicePlayer)
+            // The composer's insertion API (C3) for everything this screen
+            // presents (sheets inherit the environment).
+            .environment(\.composerController, composer)
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .mantaNavigationBarBackground(tokens)
@@ -371,6 +381,13 @@ private struct ChatScreenContent: View {
                 Task { try? await MantaAPIClient.live().reportFocus(sessionId: store.sessionId, visible: true) }
                 clearDeliveredNotifications(for: store.sessionId)
                 Task { await resolveWindowAndBranch() }
+                // A new-session draft whose attachments couldn't all be carried
+                // over says so once (the notice is consumed).
+                if let notice = composer.consumeSeedNotice() { store.actionHint = notice }
+            }
+            // Any successful insert/attach into the composer focuses it.
+            .onChange(of: composer.focusRequest) { _, _ in
+                composerFocused = true
             }
             .onDisappear {
                 store.stop()
@@ -456,7 +473,7 @@ private struct ChatScreenContent: View {
             }
             // The local copy of a loaded handoff draft has done its job once the
             // composer is empty again (sent, or cleared by the user).
-            .onChange(of: composerText) { _, text in
+            .onChange(of: composer.text) { _, text in
                 if text.isEmpty { handoffStore.clearLocalDraft() }
             }
             .onChange(of: scenePhase) { _, phase in
@@ -571,8 +588,8 @@ private struct ChatScreenContent: View {
                         onSlashHandoff: { goal in handoffStore.create(trigger: "user", goal: goal) },
                         historyTmuxSession: sessionWindow?.name,
                         historyWindowIndex: sessionWindow?.index,
-                        text: $composerText,
-                        attachments: $composerAttachments,
+                        text: $composer.text,
+                        attachments: $composer.attachments,
                         inputFocused: $composerFocused
                     )
                 }
@@ -707,9 +724,9 @@ private struct ChatScreenContent: View {
     /// successor — the same swap a clear does, plus the carry-over.
     private func handedOff(to successorId: String) {
         let carry = HandoffCarryOver(
-            text: composerText,
-            attachments: composerAttachments.filter { !$0.isUploading },
-            skippedUploads: composerAttachments.filter { $0.isUploading }.count
+            text: composer.text,
+            attachments: composer.attachments.filter { !$0.isUploading },
+            skippedUploads: composer.attachments.filter { $0.isUploading }.count
         )
         modelStore.rebind(to: successorId)
         onHandedOff(successorId, carry)
@@ -730,7 +747,7 @@ private struct ChatScreenContent: View {
     /// A draft from "Edit first": already persisted locally by the store. An
     /// existing composer text is appended BELOW it, never overwritten (§8).
     private func loadHandoffDraft(_ draft: String) {
-        composerText = HandoffComposerCarry.appendBelow(draft, composerText)
+        composer.text = HandoffComposerCarry.appendBelow(draft, composer.text)
         composerFocused = true
         store.actionHint = "Handoff draft loaded — edit it, then send"
     }
@@ -738,8 +755,8 @@ private struct ChatScreenContent: View {
     /// A draft that was loaded but never sent (the app was killed, or the chat
     /// was left): put it back, below anything already typed.
     private func restoreHandoffDraft() {
-        guard let local = handoffStore.restoreLocalDraft(), !composerText.contains(local) else { return }
-        composerText = HandoffComposerCarry.appendBelow(local, composerText)
+        guard let local = handoffStore.restoreLocalDraft(), !composer.text.contains(local) else { return }
+        composer.text = HandoffComposerCarry.appendBelow(local, composer.text)
     }
 
     // MARK: - Trust mode (BET-748 gap #14)
@@ -997,14 +1014,20 @@ private struct ChatScreenContent: View {
     /// composer and opens it. Both run through `QuoteText.buildQuoteBlock`, so
     /// whatever lands in the composer is exactly the sent form.
     private func quote(_ selection: String, into destination: QuoteDestination) async {
-        guard let block = QuoteText.buildQuoteBlock(selection) else { return }
         switch destination {
         case .thisSession:
+            // The controller turns the raw selection into the blockquote itself
+            // (never pass an already-built block) and focuses the composer.
             await MainActor.run {
-                composerText = block + composerText
-                composerFocused = true
+                if !composer.insert(text: selection, mode: .quote) {
+                    store.actionHint = "Nothing to quote"
+                }
             }
         case .newSession:
+            guard let block = QuoteText.buildQuoteBlock(selection) else {
+                await MainActor.run { store.actionHint = "Nothing to quote" }
+                return
+            }
             await forkSession(seed: block)
         }
     }

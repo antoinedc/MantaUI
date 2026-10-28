@@ -1,98 +1,252 @@
 import Foundation
 
 // ===========================================================================
-// @-file typeahead + / slash palette — pure logic (BET-749 gap #10).
+// `@` typeahead + `/` slash palette + typed-command planning — pure logic
+// (BET-749 gap #10, extended by the iOS↔desktop parity WS03).
 //
-// The native composer has no server-side command registry and its file
-// mentions already serialize onto sends via the `Mention` DTO, so all the
-// custom logic here is pure and unit-testable — no view, no HTTP.
+// Everything here is pure and unit-testable — no view, no HTTP.
 //
-//  * `detectMention` / `applyMention` — mirror the desktop's `useTypeahead`
-//    @-token detection (anchored at line start or after whitespace, caret
-//    inside the token) and substitution. Offsets are UTF-16 code units so they
-//    line up with `NSString` ranges and the `Mention.source` start/end the
-//    box expects.
-//  * `slashCommands` / `filterSlashCommands` — the compact `/` palette, listing
-//    exactly the actions the composer/store already implement and the overflow
-//    sheet. Nothing new is invented here; a typed token that matches nothing is
-//    honestly absent from the palette.
+//  * `detectMention` / `applyMentionToken` — mirror the desktop's `useTypeahead`
+//    `@`-token detection (anchored at line start or after whitespace, caret
+//    inside the token) and substitution; a `@@` token is an AGENT mention.
+//    Offsets are UTF-16 code units so they line up with `NSString` ranges and
+//    the `Mention.source` start/end the box expects.
+//  * `mentionRows` / `agentRows` — the rows of the `@` popup (references and
+//    files; agents). Files and references are inserted as plain `@text`; only an
+//    agent selection becomes a wire `Mention` (`resolveAgentMentions`).
+//  * `slashCommands` / `paletteRows` — the `/` palette: Manta's built-in
+//    actions first, then the box's opencode commands and skills.
+//  * `splitSlashText` / `planSlashSend` / `backgroundState` — what Send does
+//    with a typed `/command args`.
 // ===========================================================================
 
 enum ComposerTypeahead {
 
-    // MARK: - @-file mention
+    // MARK: - @ mention
+
+    enum MentionKind: Equatable, Sendable {
+        /// `@token` — a configured reference or a file.
+        case file
+        /// `@@token` — an agent.
+        case agent
+    }
 
     /// An active `@` token in the draft: `start..<end` is the whole token in
-    /// UTF-16 code units, `query` is what was typed after the `@`.
+    /// UTF-16 code units, `query` is what was typed after the `@` (or `@@`).
     struct MentionAnchor: Equatable {
         let start: Int
         let end: Int
         let query: String
+        let kind: MentionKind
+
+        init(start: Int, end: Int, query: String, kind: MentionKind = .file) {
+            self.start = start
+            self.end = end
+            self.query = query
+            self.kind = kind
+        }
     }
 
-    /// The outcome of selecting a file: the rewritten draft plus the `Mention`
-    /// that must serialize onto the next send.
-    struct MentionInsertion: Equatable {
-        let newText: String
-        let mention: SendPromptInput.Mention
+    private static func isSpace(_ ch: unichar) -> Bool {
+        ch == 0x20 || ch == 0x0A || ch == 0x09
     }
 
-    /// Detect an active `@`-file token the cursor is inside. Mirrors the
-    /// desktop: `@` at the start of the line or after whitespace, with the
-    /// caret inside the token that follows it.
+    /// Detect an active `@` / `@@` token the cursor is inside: the
+    /// whitespace-delimited token under the caret must START with `@` (at the
+    /// start of the text or after whitespace). `@@` makes it an agent token with
+    /// the query after the second `@`.
     static func detectMention(in text: String, caret: Int) -> MentionAnchor? {
         let ns = text as NSString
         guard caret >= 0, caret <= ns.length else { return nil }
 
-        // Walk backwards from the caret to find the `@` that owns the token.
-        var atIndex: Int?
-        var i = caret - 1
-        while i >= 0 {
-            let ch = ns.character(at: i)
-            if ch == 0x40 { atIndex = i; break }                 // "@"
-            if ch == 0x20 || ch == 0x0A || ch == 0x09 { break }  // space / newline / tab
-            i -= 1
+        // Walk back to the start of the whitespace-delimited token.
+        var start = caret
+        while start > 0, !isSpace(ns.character(at: start - 1)) {
+            start -= 1
         }
-        guard let at = atIndex else { return nil }
-
-        // The `@` must sit after whitespace (or at the very start).
-        if at > 0 {
-            let prev = ns.character(at: at - 1)
-            if !(prev == 0x20 || prev == 0x0A || prev == 0x09) { return nil }
-        }
+        guard start < caret, ns.character(at: start) == 0x40 else { return nil }  // "@"
 
         // The token runs forward until whitespace / end of text.
-        var end = at + 1
-        while end < ns.length {
-            let ch = ns.character(at: end)
-            if ch == 0x20 || ch == 0x0A || ch == 0x09 { break }
+        var end = start + 1
+        while end < ns.length, !isSpace(ns.character(at: end)) {
             end += 1
         }
-        // The caret must still be inside the token (not past its end).
         guard caret <= end else { return nil }
 
-        let query = ns.substring(with: NSRange(location: at + 1, length: min(end, caret) - (at + 1)))
-        return MentionAnchor(start: at, end: end, query: query)
+        let isAgent = start + 1 < caret && ns.character(at: start + 1) == 0x40
+        let queryStart = isAgent ? start + 2 : start + 1
+        let queryEnd = min(end, caret)
+        let query = queryEnd > queryStart
+            ? ns.substring(with: NSRange(location: queryStart, length: queryEnd - queryStart))
+            : ""
+        return MentionAnchor(start: start, end: end, query: query, kind: isAgent ? .agent : .file)
     }
 
-    /// Substitute a chosen file into the draft at the anchor and build the
-    /// `Mention` whose `source` references the substituted `@<file>` range.
-    static func applyMention(_ file: String, to text: String, anchor: MentionAnchor) -> MentionInsertion {
-        let token = "@" + file
+    /// Replace the anchor with `token` (the full text including its `@`, e.g.
+    /// `"@docs"`) plus one space. Returns the new draft and the UTF-16 caret just
+    /// after that space. Records nothing: files and references travel as plain
+    /// text; an agent selection is tracked by the caller.
+    static func applyMentionToken(_ token: String, to text: String, anchor: MentionAnchor) -> (text: String, caret: Int) {
         let ns = text as NSString
-        let newText = ns.replacingCharacters(
-            in: NSRange(location: anchor.start, length: anchor.end - anchor.start),
-            with: token + " "
+        let start = min(max(anchor.start, 0), ns.length)
+        let end = min(max(anchor.end, start), ns.length)
+        let inserted = token + " "
+        let newText = ns.replacingCharacters(in: NSRange(location: start, length: end - start), with: inserted)
+        return (newText, start + (inserted as NSString).length)
+    }
+
+    private static func isWordChar(_ ch: unichar?) -> Bool {
+        guard let ch else { return false }
+        return (ch >= 0x30 && ch <= 0x39) || (ch >= 0x41 && ch <= 0x5A) || (ch >= 0x61 && ch <= 0x7A) || ch == 0x5F
+    }
+
+    /// Resolve the chosen agent names against the text ACTUALLY being sent (port
+    /// of the desktop's `resolveAgentMentions`). Offsets are recomputed here —
+    /// never trusted from insertion time — by finding the first `@name` on word
+    /// boundaries (so `@build` is not found inside `@builder`). A name whose token
+    /// is gone from the text is dropped. A name chosen twice yields one mention.
+    static func resolveAgentMentions(text: String, names: [String]) -> [SendPromptInput.Mention] {
+        let ns = text as NSString
+        var seen = Set<String>()
+        var resolved: [SendPromptInput.Mention] = []
+        for name in names where !name.isEmpty && seen.insert(name).inserted {
+            let token = "@" + name
+            let tokenLength = (token as NSString).length
+            var pos = 0
+            while pos < ns.length {
+                let found = ns.range(of: token, options: [.literal], range: NSRange(location: pos, length: ns.length - pos))
+                if found.location == NSNotFound { break }
+                let prev: unichar? = found.location > 0 ? ns.character(at: found.location - 1) : nil
+                let nextIndex = found.location + tokenLength
+                let next: unichar? = nextIndex < ns.length ? ns.character(at: nextIndex) : nil
+                if !isWordChar(prev) && !isWordChar(next) {
+                    resolved.append(SendPromptInput.Mention(
+                        name: name,
+                        source: SendPromptInput.MentionSource(value: token, start: found.location, end: nextIndex)
+                    ))
+                    break
+                }
+                pos = nextIndex
+            }
+        }
+        return resolved
+    }
+
+    private static func contains(_ haystack: String, _ query: String) -> Bool {
+        query.isEmpty || haystack.lowercased().contains(query.lowercased())
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// The `@` popup's selectable rows: non-hidden references whose name contains
+    /// the query (case-insensitive) first, then the matching files; capped at `limit`.
+    static func mentionRows(
+        query: String,
+        references: [OpencodeReferenceInfo],
+        files: [String],
+        limit: Int = 20
+    ) -> [MentionRow] {
+        var rows: [MentionRow] = []
+        for reference in references where reference.hidden != true && contains(reference.name, query) {
+            let icon: String
+            if nonEmpty(reference.repository) != nil {
+                icon = "link"
+            } else if nonEmpty(reference.path) != nil {
+                icon = "folder"
+            } else {
+                icon = "at"
+            }
+            rows.append(MentionRow(
+                id: "reference:\(reference.name)",
+                kind: .reference,
+                insertText: reference.name,
+                title: "@\(reference.name)",
+                subtitle: nonEmpty(reference.description) ?? nonEmpty(reference.repository) ?? nonEmpty(reference.path) ?? "",
+                systemImage: icon
+            ))
+        }
+        for file in files {
+            rows.append(MentionRow(
+                id: "file:\(file)",
+                kind: .file,
+                insertText: file,
+                title: "@\(file)",
+                subtitle: "",
+                systemImage: "doc"
+            ))
+        }
+        return Array(rows.prefix(limit))
+    }
+
+    /// The single status line of the file/reference popup when it has no rows.
+    static func fileStatusRow(searching: Bool) -> MentionRow {
+        MentionRow(
+            id: searching ? "status:searching" : "status:no-files",
+            kind: .status(tappable: false),
+            insertText: "",
+            title: searching ? "Searching…" : "No matching files",
+            subtitle: "",
+            systemImage: "magnifyingglass"
         )
-        let mention = SendPromptInput.Mention(
-            name: file,
-            source: SendPromptInput.MentionSource(
-                value: token,
-                start: anchor.start,
-                end: anchor.start + (token as NSString).length
-            )
-        )
-        return MentionInsertion(newText: newText, mention: mention)
+    }
+
+    /// The `@@` popup's rows. `agents == nil` means "not loaded": a load error
+    /// gives a tappable retry line, otherwise a loading line. A loaded catalog
+    /// yields the agents whose name contains the query (capped at `limit`), or
+    /// "No matching agents".
+    static func agentRows(
+        agents: [OpencodeAgent]?,
+        loadError: String?,
+        query: String,
+        limit: Int = 12
+    ) -> [MentionRow] {
+        guard let agents else {
+            if loadError != nil {
+                return [MentionRow(
+                    id: "status:agents-retry",
+                    kind: .status(tappable: true),
+                    insertText: "",
+                    title: "Couldn't load agents — tap to retry",
+                    subtitle: "",
+                    systemImage: "arrow.clockwise"
+                )]
+            }
+            return [MentionRow(
+                id: "status:agents-loading",
+                kind: .status(tappable: false),
+                insertText: "",
+                title: "Loading agents…",
+                subtitle: "",
+                systemImage: "person.crop.circle"
+            )]
+        }
+        let rows = agents
+            .filter { contains($0.name, query) }
+            .prefix(limit)
+            .map { agent in
+                MentionRow(
+                    id: "agent:\(agent.name)",
+                    kind: .agent,
+                    insertText: agent.name,
+                    title: "@\(agent.name)",
+                    subtitle: agent.description ?? "",
+                    systemImage: "person.crop.circle"
+                )
+            }
+        if rows.isEmpty {
+            return [MentionRow(
+                id: "status:agents-none",
+                kind: .status(tappable: false),
+                insertText: "",
+                title: "No matching agents",
+                subtitle: "",
+                systemImage: "person.crop.circle"
+            )]
+        }
+        return Array(rows)
     }
 
     // MARK: - / slash palette
@@ -104,6 +258,8 @@ enum ComposerTypeahead {
         case fork
         case handoff
         case abort
+        /// An opencode command or skill: choosing it INSERTS `/name ` — nothing runs.
+        case insert(name: String)
     }
 
     struct SlashCommand: Identifiable, Equatable {
@@ -111,7 +267,20 @@ enum ComposerTypeahead {
         let title: String
         let subtitle: String
         let kind: SlashAction
+        let isSkill: Bool
+
+        init(id: String, title: String, subtitle: String, kind: SlashAction, isSkill: Bool = false) {
+            self.id = id
+            self.title = title
+            self.subtitle = subtitle
+            self.kind = kind
+            self.isSkill = isSkill
+        }
     }
+
+    /// Manta's own palette entries. A remote command with one of these names is
+    /// hidden, so a name never appears twice.
+    static let builtinIDs: Set<String> = ["submit", "compact", "clear", "fork", "handoff", "abort"]
 
     /// An active `/` palette anchor: only the LEADING line of the composer
     /// triggers it (mirrors the desktop, whose command typeahead fires when
@@ -136,9 +305,9 @@ enum ComposerTypeahead {
         return SlashAnchor(query: query)
     }
 
-    /// The actions the composer/store already implement and the overflow sheet,
-    /// nothing more. Abort appears only while a turn is running (that is the
-    /// only time it is meaningful).
+    /// The actions the composer/store already implement and the overflow sheet.
+    /// Abort appears only while a turn is running (that is the only time it is
+    /// meaningful).
     static func slashCommands(running: Bool) -> [SlashCommand] {
         var commands = [
             SlashCommand(id: "submit", title: "Submit", subtitle: "Send this message", kind: .submit),
@@ -173,12 +342,105 @@ enum ComposerTypeahead {
         return first.lowercased() == "/handoff"
     }
 
-    /// Keep only commands whose token/title match what was typed after `/`. A
-    /// typed token that matches nothing yields an empty list — the box has no
-    /// further commands to offer honestly (nothing is fabricated here).
+    /// Keep only commands whose token/title match what was typed after `/`.
     static func filterSlashCommands(_ commands: [SlashCommand], query: String) -> [SlashCommand] {
         guard !query.isEmpty else { return commands }
         let q = query.lowercased()
         return commands.filter { $0.id.lowercased().contains(q) || $0.title.lowercased().contains(q) }
+    }
+
+    /// The palette's rows: the filtered built-ins first, then the box's opencode
+    /// commands and skills (minus the built-in names) whose name contains the
+    /// query, capped at `limit`.
+    static func paletteRows(
+        builtins: [SlashCommand],
+        remote: [OpencodeCommandInfo],
+        query: String,
+        limit: Int = 12
+    ) -> [SlashCommand] {
+        var rows = filterSlashCommands(builtins, query: query)
+        for command in remote where !builtinIDs.contains(command.name) && contains(command.name, query) {
+            rows.append(SlashCommand(
+                id: command.name,
+                title: command.name,
+                subtitle: command.description ?? "",
+                kind: .insert(name: command.name),
+                isSkill: command.isSkill
+            ))
+        }
+        return Array(rows.prefix(limit))
+    }
+
+    /// The draft after choosing a remote command: its leading `/token` becomes
+    /// `/name`, followed by a single space when nothing followed the token.
+    /// `"/re"` → `"/review "`, `"/re some args"` → `"/review some args"`.
+    static func applySlashInsertion(name: String, to text: String) -> String {
+        let head = "/" + name
+        guard let whitespace = text.firstIndex(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) else {
+            return head + " "
+        }
+        return head + String(text[whitespace...])
+    }
+
+    // MARK: - Typed `/command args`
+
+    /// `/name args` → (`name`, `args`), or nil when the text isn't a slash
+    /// command. Port of the desktop's `^/(\S+)(?:\s+([\s\S]*))?$`.
+    static func splitSlashText(_ text: String) -> (name: String, args: String)? {
+        guard text.hasPrefix("/") else { return nil }
+        let body = text.dropFirst()
+        guard let boundary = body.firstIndex(where: { $0.isWhitespace }) else {
+            return body.isEmpty ? nil : (String(body), "")
+        }
+        let name = String(body[body.startIndex..<boundary])
+        guard !name.isEmpty else { return nil }
+        let args = body[boundary...].drop(while: { $0.isWhitespace })
+        return (name, String(args))
+    }
+
+    /// What Send does with a draft that starts with `/`.
+    enum SlashSendPlan: Equatable {
+        /// An ordinary message (not a known command).
+        case prompt
+        /// A Manta built-in run locally (`.compact` / `.clear` / `.fork`).
+        case builtin(SlashAction)
+        /// Refused with this message; the draft is untouched.
+        case refuse(String)
+        /// An opencode command or skill.
+        case command(name: String, args: String, alwaysBackground: Bool)
+    }
+
+    /// `remote == nil` means the command list is unknown (still loading or
+    /// failed): only the built-ins are recognised and everything else is a
+    /// message — the same answer the desktop gives before its list arrives.
+    static func planSlashSend(text: String, running: Bool, remote: [OpencodeCommandInfo]?) -> SlashSendPlan {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parts = splitSlashText(trimmed) else { return .prompt }
+        let builtin: SlashAction?
+        switch parts.name.lowercased() {
+        case "compact": builtin = .compact
+        case "clear": builtin = .clear
+        case "fork": builtin = .fork
+        default: builtin = nil
+        }
+        if let builtin {
+            if running {
+                return .refuse("Stop the agent or wait for it to finish before /\(parts.name.lowercased())")
+            }
+            return .builtin(builtin)
+        }
+        guard let remote, let info = remote.first(where: { $0.name == parts.name }) else { return .prompt }
+        return .command(name: info.name, args: parts.args, alwaysBackground: info.background == true)
+    }
+
+    /// The "Run in background" toggle for a draft: present only when the first
+    /// token is a known opencode command/skill (never a built-in).
+    static func backgroundState(text: String, remote: [OpencodeCommandInfo]?) -> BackgroundToggleState? {
+        guard let remote else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parts = splitSlashText(trimmed),
+              !builtinIDs.contains(parts.name.lowercased()),
+              let info = remote.first(where: { $0.name == parts.name }) else { return nil }
+        return BackgroundToggleState(name: info.name, locked: info.background == true)
     }
 }

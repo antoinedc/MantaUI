@@ -23,18 +23,7 @@ import UniformTypeIdentifiers
 // RPCs). Every colour/spacing/radius/size resolves through the tokens.
 // ===========================================================================
 
-struct ComposerAttachment: Identifiable, Equatable {
-    let id = UUID()
-    let filename: String
-    var mime: String
-    /// Set once the upload completes; nil while the attachment is still being
-    /// read + uploaded. A chip with a nil path renders a loading spinner.
-    var remotePath: String?
-    let isImage: Bool
-
-    /// True until the upload finishes — the chip is a placeholder.
-    var isUploading: Bool { remotePath == nil }
-}
+// `ComposerAttachment` lives in ComposerModels.swift (Foundation-only).
 
 /// The transient composer-state of a completed voice take while it uploads +
 /// transcribes (and, on the 409 path, the stored note offered a Retry).
@@ -110,7 +99,7 @@ struct ComposerView: View {
     /// The composer draft (BET-1353). Promoted from `@State` to a `@Binding`
     /// so the quote actions — which live on the transcript, in ChatScreen —
     /// can PREPEND a blockquote to whatever is already here. Storage moved up
-    /// to ChatScreen's single `composerText`; every existing writer of `text`
+    /// to ChatScreen's `ComposerTextController`; every existing writer of `text`
     /// inside this view (keyboard `@`/`/`, voice, caret insert, history,
     /// submit, file select, slash) writes through the binding unchanged.
     @Binding var text: String
@@ -155,19 +144,21 @@ struct ComposerView: View {
     @State private var isTall = false
     /// The near-full-screen editing sheet, opened by the expand control.
     @State private var showExpanded = false
-    /// The active `@`-file token the cursor is inside (nil when no mention is
+    /// The active `@` / `@@` token the cursor is inside (nil when no mention is
     /// being composed) — BET-749 gap #10.
     @State private var activeMention: ComposerTypeahead.MentionAnchor?
-    /// The `findFiles` matches for the active mention query, capped to bound
-    /// RPC chatter. Empty hides the typeahead.
-    @State private var fileResults: [String] = []
-    /// Mentions chosen from the `@` typeahead, pending on the draft. They
-    /// serialize onto the next send via the existing `Mention` path.
-    @State private var draftMentions: [SendPromptInput.Mention] = []
-    /// Debounced `findFiles` task (owned here so a fast typist doesn't pile up
-    /// parallel RPCs) + the sequence guard that discards stale responses.
-    @State private var fileSearchTask: Task<Void, Never>?
-    @State private var fileSearchSeq = 0
+    /// The remote typeahead sources: opencode commands + skills for the `/`
+    /// palette, and the debounced `@` file / reference search (WS03).
+    @StateObject private var sources = ComposerTypeaheadSources()
+    /// Agents chosen from the `@@` typeahead, pending on the draft. Resolved
+    /// against the final text at send; files and references are plain text and
+    /// record nothing.
+    @State private var agentMentionNames: [String] = []
+    /// A send/command is being prepared (the command list may still be loading):
+    /// a second Send is ignored until it settles.
+    @State private var submitInFlight = false
+    /// The "Run in background" choice for a typed known `/command` (F3).
+    @State private var runInBackground = false
     /// The prompt-history up/down navigator (BET-1305). Re-seeded from the
     /// merged persisted + transcript history on each recall.
     @State private var navigator = ComposerHistoryNavigator(entries: [])
@@ -199,8 +190,8 @@ struct ComposerView: View {
                 slashPaletteView(palette)
                     .transition(.opacity)
             }
-            if activeMention != nil, !fileResults.isEmpty {
-                mentionTypeahead
+            if let rows = mentionPopupRows {
+                mentionTypeahead(rows)
                     .transition(.opacity)
             }
             // The jump-to-bottom control sits right above the composer,
@@ -244,6 +235,7 @@ struct ComposerView: View {
                 .transition(.opacity)
             }
             keyboardBarRow
+            backgroundToggleRow
             // ONE glass box, always. The composer stays MOUNTED while the take is
             // HELD (BET-1051) because the mic button owns the in-flight touch — but
             // that mounting lives INSIDE `inputBox`, whose contents swap for the
@@ -331,6 +323,16 @@ struct ComposerView: View {
                 navigator.reset()
                 handleTextChange(newValue)
             }
+            // The toggle's box resets when the first token stops being a known
+            // command.
+            if runInBackground, backgroundToggle == nil { runInBackground = false }
+        }
+        // The command list is per working directory: a directory that becomes
+        // known (or changes) after the draft already starts with "/" reloads it.
+        .onChange(of: sessionDirectory) { _, _ in
+            if text.hasPrefix("/") {
+                sources.ensureCommands(api: api, directory: sessionDirectory)
+            }
         }
         .animation(.smooth(duration: 0.18), value: typeaheadOpen)
         .onChange(of: store.actionHint) { _, hint in
@@ -347,7 +349,13 @@ struct ComposerView: View {
         }
         .confirmationDialog("Clear this session?", isPresented: $showClearConfirm,
                             titleVisibility: .visible) {
-            Button("Clear", role: .destructive) { onSlashClear?() }
+            // One dialog for every entry point (keyboard bar, palette, typed
+            // `/clear`): Clear runs it and empties the draft; Cancel leaves the
+            // draft exactly as it was.
+            Button("Clear", role: .destructive) {
+                onSlashClear?()
+                text = ""
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Starts a fresh session in this window.")
@@ -1295,7 +1303,17 @@ struct ComposerView: View {
     /// from the keyboard bar's esc key and returns the moment the draft is empty.
     @ViewBuilder
     private var sendButton: some View {
-        if store.running && canSend {
+        if submitInFlight {
+            // A send is being prepared (e.g. the command list is loading): the
+            // spinner replaces the glyph so a second tap can't double-send.
+            ProgressView()
+                .controlSize(.small)
+                .tint(tokens.onAccent)
+                .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
+                .background(tokens.accentSolid, in: Circle())
+                .accessibilityLabel("Sending")
+                .accessibilityIdentifier("send-button")
+        } else if store.running && canSend {
             runningSendMenu
         } else {
             Button(action: { store.running ? store.abort() : submit() }) {
@@ -1303,7 +1321,7 @@ struct ComposerView: View {
             }
             .buttonStyle(.plain)
             .disabled(!store.running && !canSend)
-            .accessibilityLabel(store.running ? "Stop" : "Send")
+            .accessibilityLabel(store.running ? "Stop" : (isBackgroundRun ? "Run in background" : "Send"))
             .accessibilityIdentifier("send-button")
         }
     }
@@ -1324,7 +1342,7 @@ struct ComposerView: View {
             submit(delivery: .steer)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Send now")
+        .accessibilityLabel(isBackgroundRun ? "Run in background" : "Send now")
         .accessibilityHint("Long press for Send after this turn")
         .accessibilityAction(named: "Send after this turn") { submit(delivery: .queue) }
         .accessibilityIdentifier("send-button")
@@ -1341,6 +1359,50 @@ struct ComposerView: View {
     private var canSend: Bool {
         (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty)
             && !attachments.contains { $0.isUploading }
+            && !submitInFlight
+    }
+
+    // MARK: - Run in background (F3)
+
+    /// The "Run in background" toggle's state: present only while the draft's
+    /// first token is a known opencode command/skill (never a built-in).
+    private var backgroundToggle: BackgroundToggleState? {
+        ComposerTypeahead.backgroundState(text: text, remote: sources.loadedCommands)
+    }
+
+    /// Whether Send would currently run the command in the background.
+    private var isBackgroundRun: Bool {
+        guard let state = backgroundToggle else { return false }
+        return state.locked || runInBackground
+    }
+
+    /// The toggle + its helper line. The helper keeps its layout slot and only
+    /// fades, so flipping the toggle never resizes the composer.
+    @ViewBuilder
+    private var backgroundToggleRow: some View {
+        if let state = backgroundToggle {
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle(isOn: Binding(
+                    get: { state.locked || runInBackground },
+                    set: { runInBackground = $0 }
+                )) {
+                    Text("Run in background")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx2)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(state.locked)
+                .accessibilityHint(state.locked ? "This command always runs in the background" : "Runs /\(state.name) in its own session")
+                .accessibilityIdentifier("run-in-background")
+                Text("Runs in its own session, without this chat's history; the result comes back here")
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx3)
+                    .opacity(isBackgroundRun ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Metrics.spacing.sp2)
+        }
     }
 
     // MARK: - Prompt history (BET-1305)
@@ -1377,6 +1439,10 @@ struct ComposerView: View {
     /// `delivery` only matters while a turn runs: "Now" (the default) or "After
     /// this turn". When idle the message is an ordinary send.
     private func submit(delivery: InboxDelivery = .steer) {
+        // A send/command is already being prepared: every entry point (send
+        // button, expanded editor, palette, voice) lands here, so one guard
+        // covers them all.
+        guard !submitInFlight else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // A typed `/handoff [goal]` runs the handoff instead of posting it as a
         // message — the palette closes after the first word, so Send is the only
@@ -1390,19 +1456,23 @@ struct ComposerView: View {
         // disabled too; this guards the non-button paths like voice submit).
         guard (!trimmed.isEmpty || !attachments.isEmpty),
               !attachments.contains(where: { $0.isUploading }) else { return }
+        // A draft that starts with "/" may be an opencode command or skill: that
+        // needs the box's command list, so it takes the guarded async path.
+        if trimmed.hasPrefix("/") {
+            submitSlash(trimmed: trimmed, delivery: delivery)
+            return
+        }
         // Persist the freshly-submitted prompt for ↑/↓ recall. No-op when the
         // session identity is nil or the text was whitespace-only; collapses a
         // consecutive duplicate (BET-1305).
         PromptHistoryStore.append(trimmed, tmuxSession: historyTmuxSession,
                                   windowIndex: historyWindowIndex)
         let model = modelStore.promptModel
-        // canSend gates on no attachment still uploading, so none are dropped
-        // here; compactMap keeps the unwrap type-safe.
-        let sendAttachments: [SendPromptInput.Attachment] = attachments.compactMap { attachment in
-            guard let remotePath = attachment.remotePath else { return nil }
-            return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
-        }
-        let mentions = draftMentions.isEmpty ? nil : draftMentions
+        let sendAttachments = readyAttachments()
+        // Only agent selections become wire mentions; files and references are
+        // plain `@text`. Offsets are resolved against the exact text sent.
+        let resolved = ComposerTypeahead.resolveAgentMentions(text: trimmed, names: agentMentionNames)
+        let mentions = resolved.isEmpty ? nil : resolved
         // Send the resolved plan agent only while plan mode is actually on.
         let agent = modelStore.planToggle.on ? modelStore.planToggle.agent : nil
         Task { @MainActor in
@@ -1413,7 +1483,7 @@ struct ComposerView: View {
         }
         text = ""
         attachments = []
-        draftMentions = []
+        agentMentionNames = []
         // Return to the compact form explicitly rather than waiting for the
         // emptied editor to re-measure. The measurement does arrive, but a beat
         // later — long enough for the box to sit stacked and empty after a
@@ -1422,13 +1492,146 @@ struct ComposerView: View {
         inputFocused.wrappedValue = true
     }
 
-    // MARK: - @-file typeahead + / slash palette (BET-749 gap #10)
+    /// The READY chips as wire attachments. Send is gated on no chip still
+    /// uploading, so none are dropped here; compactMap keeps the unwrap type-safe.
+    private func readyAttachments() -> [SendPromptInput.Attachment] {
+        attachments.compactMap { attachment in
+            guard let remotePath = attachment.remotePath else { return nil }
+            return SendPromptInput.Attachment(remotePath: remotePath, mime: attachment.mime, filename: attachment.filename)
+        }
+    }
+
+    /// Send for a draft that starts with `/` (not `/handoff`): a Manta built-in,
+    /// an opencode command or skill, or — when the name is unknown — an ordinary
+    /// message. The user's payload is snapshotted synchronously; the SESSION state
+    /// (`store.running`) is read again right before dispatch, because the turn
+    /// can start or end while the command list loads. Nothing is cleared before
+    /// the box has accepted the send.
+    private func submitSlash(trimmed: String, delivery: InboxDelivery) {
+        submitInFlight = true
+        let readyIDs = Set(attachments.filter { !$0.isUploading }.map(\.id))
+        let snapshot = ComposerSubmission(
+            text: text,
+            attachmentIDs: readyIDs,
+            agentNames: agentMentionNames,
+            background: runInBackground
+        )
+        let ready = readyAttachments()
+        let modelPref = modelStore.promptModel
+        let planAgentPref = modelStore.planToggle.on ? modelStore.planToggle.agent : nil
+        let directory = sessionDirectory
+        Task { @MainActor in
+            defer { submitInFlight = false }
+
+            let remote = await sources.awaitCommands(api: api, directory: directory, timeout: .seconds(3))
+            let runningNow = store.running
+            let plan = ComposerTypeahead.planSlashSend(text: trimmed, running: runningNow, remote: remote)
+
+            // The snapshot's text, sent as an ordinary message.
+            func sendAsMessage() async {
+                let resolved = ComposerTypeahead.resolveAgentMentions(text: trimmed, names: snapshot.agentNames)
+                PromptHistoryStore.append(trimmed, tmuxSession: historyTmuxSession,
+                                          windowIndex: historyWindowIndex)
+                await store.sendOrSteer(text: trimmed, attachments: ready, model: modelPref,
+                                        mentions: resolved.isEmpty ? nil : resolved,
+                                        agent: planAgentPref, delivery: delivery)
+                settleAccepted(snapshot)
+            }
+
+            switch plan {
+            case .prompt:
+                await sendAsMessage()
+            case .builtin(let action):
+                switch action {
+                case .compact:
+                    store.compact()
+                    settleLocal(snapshot)
+                case .clear:
+                    guard onSlashClear != nil else { await sendAsMessage(); return }
+                    // The confirm dialog owns the rest; the draft stays as typed.
+                    showClearConfirm = true
+                case .fork:
+                    guard let onSlashFork else { await sendAsMessage(); return }
+                    // Chips and agent selections stay in this composer whether the
+                    // fork succeeds or fails — ChatScreen reports a failed fork itself.
+                    onSlashFork()
+                    settleLocal(snapshot)
+                case .submit, .handoff, .abort, .insert:
+                    await sendAsMessage()
+                }
+            case .refuse(let message):
+                surfaceHint(message)
+            case .command(let name, let args, let alwaysBackground):
+                let background = alwaysBackground || snapshot.background
+                var input = RunCommandInput(
+                    sessionId: sessionId, command: name, arguments: args,
+                    model: modelPref, agent: planAgentPref, attachments: ready,
+                    delivery: nil, background: background
+                )
+                // A command sent to a running turn joins it: no model/agent sync.
+                let joinsRunningTurn = runningNow && !background
+                if joinsRunningTurn {
+                    input.model = nil
+                    input.agent = nil
+                    input.delivery = delivery.wire
+                }
+                do {
+                    _ = try await api.runCommand(input)
+                } catch {
+                    surfaceHint("Couldn't run /\(name) — \(ComposerErrorCopy.message(for: error))")
+                    return
+                }
+                PromptHistoryStore.append(trimmed, tmuxSession: historyTmuxSession,
+                                          windowIndex: historyWindowIndex)
+                settleAccepted(snapshot)
+                if background {
+                    surfaceHint("Running /\(name) in the background — the result comes back here")
+                }
+                if joinsRunningTurn {
+                    store.refreshInbox()
+                } else {
+                    await store.refetch()
+                }
+            }
+        }
+    }
+
+    /// The box accepted the submission: drop what was sent, keep anything the
+    /// user added or edited meanwhile.
+    private func settleAccepted(_ submission: ComposerSubmission) {
+        let settled = ComposerSubmissionSettle.accepted(
+            submission, text: text, attachments: attachments, agentNames: agentMentionNames)
+        text = settled.text
+        attachments = settled.attachments
+        agentMentionNames = settled.agentNames
+        finishSend(clearedDraft: settled.text.isEmpty)
+    }
+
+    /// A local built-in ran: only the typed command text is consumed.
+    private func settleLocal(_ submission: ComposerSubmission) {
+        text = ComposerSubmissionSettle.localAction(submission, text: text)
+        finishSend(clearedDraft: text.isEmpty)
+    }
+
+    private func finishSend(clearedDraft: Bool) {
+        if clearedDraft {
+            // See `submit`: return to the compact form without waiting for the
+            // emptied editor to re-measure.
+            withAnimation(.smooth(duration: 0.22)) { isTall = false }
+        }
+        inputFocused.wrappedValue = true
+    }
+
+    // MARK: - @ typeahead + / slash palette (BET-749 gap #10, WS03)
 
     /// True when either the `@` typeahead or the `/` palette is showing — the
     /// single value the popup animation keys off.
     private var typeaheadOpen: Bool {
-        (activeMention != nil && !fileResults.isEmpty) || slashPalette != nil
+        mentionPopupRows != nil || slashPalette != nil
     }
+
+    /// The tallest a popup grows before it scrolls.
+    private static let popupMaxHeight: CGFloat = 240
 
     /// The live caret, in UTF-16 units — read from the focused text view the
     /// same way dictation's insert-at-caret does. Falls back to end-of-text
@@ -1437,145 +1640,277 @@ struct ComposerView: View {
         Self.activeTextView()?.selectedRange.location ?? (text as NSString).length
     }
 
-    /// The active `/` palette's filtered command list, or nil when the slash
-    /// isn't being composed (no leading `/` / caret out of the word / no match).
-    private var slashPalette: [ComposerTypeahead.SlashCommand]? {
-        guard let anchor = ComposerTypeahead.detectSlash(in: text, caret: composerCaret) else { return nil }
-        let filtered = ComposerTypeahead.filterSlashCommands(
-            ComposerTypeahead.slashCommands(running: store.running)
-                .filter { $0.kind != .handoff || onSlashHandoff != nil },
-            query: anchor.query
-        )
-        return filtered.isEmpty ? nil : filtered
+    /// What the `/` palette shows while a leading `/` word is being typed.
+    private enum SlashPalette {
+        case rows([ComposerTypeahead.SlashCommand])
+        case loading
+        case empty
+        case failed
     }
 
-    /// The `@`-file typeahead: a compact floating list of `findFiles` matches.
-    private var mentionTypeahead: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(fileResults, id: \.self) { file in
-                Button {
-                    selectFile(file)
-                } label: {
-                    HStack(spacing: Metrics.spacing.sp2) {
-                        Image(systemName: "doc")
-                            .font(.system(size: Metrics.type.xs, weight: .medium))
-                            .foregroundColor(tokens.accentTx)
-                        Text("@\(file)")
-                            .font(.manta(size: Metrics.type.small))
-                            .foregroundColor(tokens.tx1)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, Metrics.spacing.sp3)
-                    .padding(.vertical, Metrics.spacing.sp1)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("mention-row")
-            }
+    /// The active `/` palette, or nil when the slash isn't being composed (no
+    /// leading `/` / caret out of the word). Manta's built-ins first, then the
+    /// box's opencode commands and skills.
+    private var slashPalette: SlashPalette? {
+        guard let anchor = ComposerTypeahead.detectSlash(in: text, caret: composerCaret) else { return nil }
+        let builtins = ComposerTypeahead.slashCommands(running: store.running)
+            .filter { $0.kind != .handoff || onSlashHandoff != nil }
+        let rows = ComposerTypeahead.paletteRows(
+            builtins: builtins,
+            remote: sources.loadedCommands ?? [],
+            query: anchor.query
+        )
+        if !rows.isEmpty { return .rows(rows) }
+        switch sources.commands {
+        case .idle, .loading: return .loading
+        case .loaded: return .empty
+        case .failed: return .failed
+        }
+    }
+
+    /// The `@` popup's rows for the active token: references + files, or agents
+    /// for an `@@` token. nil when no mention is being composed.
+    private var mentionPopupRows: [MentionRow]? {
+        guard let anchor = activeMention else { return nil }
+        switch anchor.kind {
+        case .agent:
+            return ComposerTypeahead.agentRows(agents: modelStore.agents, loadError: agentsLoadError, query: anchor.query)
+        case .file:
+            let rows = ComposerTypeahead.mentionRows(
+                query: anchor.query, references: sources.references, files: sources.fileResults)
+            return rows.isEmpty ? [ComposerTypeahead.fileStatusRow(searching: sources.fileSearching)] : rows
+        }
+    }
+
+    // The agent catalog's load error and its retry. Not available until the
+    // model store reports them (mount M-03-6 replaces both with
+    // `modelStore.agentsLoadError` and `{ modelStore.retryAgents() }`); until
+    // then a failed load reads as "Loading agents…" and no retry row appears.
+    private var agentsLoadError: String? { nil }
+    private var retryAgents: (() -> Void)? { nil }
+
+    /// A popup's rounded panel: background, hairline, clipped to the corner.
+    private func popupChrome<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ComposerPopupScroll(maxHeight: Self.popupMaxHeight) {
+            content()
         }
         .padding(.vertical, Metrics.spacing.sp1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
                 .stroke(tokens.borderSubtle, lineWidth: 1)
+        }
+    }
+
+    private func popupStatusLabel(_ title: String, tint: Color) -> some View {
+        Text(title)
+            .font(.manta(size: Metrics.type.small))
+            .foregroundColor(tint)
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+    }
+
+    /// The `@` popup: references and files (or agents), one scrolling list.
+    private func mentionTypeahead(_ rows: [MentionRow]) -> some View {
+        popupChrome {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(rows) { row in
+                    mentionRowView(row)
+                }
+            }
         }
         .accessibilityIdentifier("mention-typeahead")
     }
 
-    /// The `/` command palette: one row per supported action. Selecting a row
-    /// performs the corresponding existing store/screen action.
-    private func slashPaletteView(_ commands: [ComposerTypeahead.SlashCommand]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(commands) { command in
-                Button {
-                    performSlash(command)
-                } label: {
-                    HStack(spacing: Metrics.spacing.sp2) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("/\(command.id)")
-                                .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                                .foregroundColor(tokens.tx1)
-                            Text(command.subtitle)
-                                .font(.manta(size: Metrics.type.twoXS))
-                                .foregroundColor(tokens.tx2)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, Metrics.spacing.sp3)
-                    .padding(.vertical, Metrics.spacing.sp1)
-                    .contentShape(Rectangle())
+    @ViewBuilder
+    private func mentionRowView(_ row: MentionRow) -> some View {
+        switch row.kind {
+        case .status(let tappable):
+            if tappable, let retry = retryAgents {
+                Button(action: retry) {
+                    popupStatusLabel(row.title, tint: tokens.accentTx)
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("slash-row-\(command.id)")
+                .accessibilityIdentifier("mention-retry")
+            } else {
+                popupStatusLabel(row.title, tint: tokens.tx3)
+                    .accessibilityIdentifier("mention-status")
             }
+        case .reference, .file, .agent:
+            Button {
+                selectMention(row)
+            } label: {
+                HStack(spacing: Metrics.spacing.sp2) {
+                    Image(systemName: row.systemImage)
+                        .font(.system(size: Metrics.type.xs, weight: .medium))
+                        .foregroundColor(tokens.accentTx)
+                    Text(row.title)
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx1)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !row.subtitle.isEmpty {
+                        Text(row.subtitle)
+                            .font(.manta(size: Metrics.type.twoXS))
+                            .foregroundColor(tokens.tx3)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, Metrics.spacing.sp3)
+                .padding(.vertical, Metrics.spacing.sp1)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("mention-row")
         }
-        .padding(.vertical, Metrics.spacing.sp1)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: Metrics.radius.lg, style: .continuous)
-                .stroke(tokens.borderSubtle, lineWidth: 1)
+    }
+
+    /// The `/` command palette: Manta's actions first, then the box's commands
+    /// and skills. Choosing a built-in performs it; choosing a command or skill
+    /// only inserts `/name ` into the draft.
+    private func slashPaletteView(_ palette: SlashPalette) -> some View {
+        popupChrome {
+            VStack(alignment: .leading, spacing: 0) {
+                switch palette {
+                case .rows(let commands):
+                    ForEach(commands) { command in
+                        slashRow(command)
+                    }
+                case .loading:
+                    popupStatusLabel("Loading commands…", tint: tokens.tx3)
+                case .empty:
+                    popupStatusLabel("No matching commands", tint: tokens.tx3)
+                case .failed:
+                    Button {
+                        sources.ensureCommands(api: api, directory: sessionDirectory)
+                    } label: {
+                        popupStatusLabel("Couldn't load this project's commands — tap to retry", tint: tokens.accentTx)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("slash-retry")
+                }
+            }
         }
         .accessibilityIdentifier("slash-palette")
     }
 
-    /// Re-run the `@` detection whenever the draft changes: update the active
-    /// anchor and (debounced) fetch matches, or clear the typeahead when the
-    /// mention composition has ended.
+    private func slashRow(_ command: ComposerTypeahead.SlashCommand) -> some View {
+        Button {
+            performSlash(command)
+        } label: {
+            HStack(spacing: Metrics.spacing.sp2) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("/\(command.id)")
+                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                        .foregroundColor(tokens.tx1)
+                    if !command.subtitle.isEmpty {
+                        Text(command.subtitle)
+                            .font(.manta(size: Metrics.type.twoXS))
+                            .foregroundColor(tokens.tx2)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                Spacer(minLength: 0)
+                if command.isSkill {
+                    Text("skill")
+                        .font(.manta(size: Metrics.type.twoXS))
+                        .foregroundColor(tokens.tx3)
+                }
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("slash-row-\(command.id)")
+    }
+
+    /// Re-run the `@` / `/` detection whenever the draft changes: update the
+    /// active anchor and (debounced) fetch matches, or clear the typeahead when
+    /// the mention composition has ended.
     private func handleTextChange(_ newText: String) {
         let caret = Self.activeTextView()?.selectedRange.location ?? (newText as NSString).length
+        // The command list loads lazily, the first time the draft starts with "/".
+        if newText.hasPrefix("/") {
+            sources.ensureCommands(api: api, directory: sessionDirectory)
+        }
         if let anchor = ComposerTypeahead.detectMention(in: newText, caret: caret) {
             activeMention = anchor
-            searchFiles(query: anchor.query)
+            switch anchor.kind {
+            case .file:
+                sources.search(api: api, query: anchor.query, directory: sessionDirectory)
+            case .agent:
+                sources.cancelSearch()
+            }
         } else {
             activeMention = nil
-            fileResults = []
-            fileSearchTask?.cancel()
+            sources.cancelSearch()
         }
     }
 
-    /// Debounced `findFiles`, sequence-guarded so a stale response can't
-    /// clobber the latest. ~250 ms matches the desktop's fire-on-type look.
-    private func searchFiles(query: String) {
-        fileSearchTask?.cancel()
-        let seq = fileSearchSeq + 1
-        fileSearchSeq = seq
-        fileSearchTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            let results = (try? await api.findFiles(query: query, directory: sessionDirectory)) ?? []
-            guard fileSearchSeq == seq else { return }
-            fileResults = Array(results.prefix(10))
-        }
-    }
-
-    /// Insert a chosen file into the draft at the mention anchor and record the
-    /// `Mention` so it serializes onto the next send.
-    private func selectFile(_ file: String) {
+    /// Insert a chosen reference / file / agent into the draft at the anchor as
+    /// plain `@text`. Only an agent is remembered: it becomes a wire mention at
+    /// send time.
+    private func selectMention(_ row: MentionRow) {
         guard let anchor = activeMention else { return }
-        let insertion = ComposerTypeahead.applyMention(file, to: text, anchor: anchor)
-        text = insertion.newText
-        draftMentions.append(insertion.mention)
+        switch row.kind {
+        case .status:
+            return
+        case .agent:
+            if !agentMentionNames.contains(row.insertText) {
+                agentMentionNames.append(row.insertText)
+            }
+        case .reference, .file:
+            break
+        }
+        let inserted = ComposerTypeahead.applyMentionToken("@" + row.insertText, to: text, anchor: anchor)
+        text = inserted.text
+        placeCaret(inserted.caret, expecting: inserted.text)
         activeMention = nil
-        fileResults = []
-        fileSearchTask?.cancel()
+        sources.cancelSearch()
         inputFocused.wrappedValue = true
     }
 
-    /// Perform a `/` palette selection: route to the corresponding existing
-    /// store/screen action, then clear the composition so the palette doesn't
-    /// reopen on the same text.
+    /// Put the caret at `location` once the new text has reached the editor.
+    /// Best effort: if the editor hasn't taken `expected` (or the user already
+    /// typed on), nothing moves.
+    private func placeCaret(_ location: Int, expecting expected: String) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            guard let tv = Self.activeTextView(), tv.text == expected else { return }
+            tv.selectedRange = NSRange(location: min(location, (expected as NSString).length), length: 0)
+        }
+    }
+
+    /// Perform a `/` palette selection. A built-in routes to the existing
+    /// store/screen action and consumes the draft; an opencode command or skill
+    /// only inserts `/name ` and keeps the keyboard up — nothing runs until Send.
     private func performSlash(_ command: ComposerTypeahead.SlashCommand) {
         switch command.kind {
+        case .insert(let name):
+            let updated = ComposerTypeahead.applySlashInsertion(name: name, to: text)
+            text = updated
+            let head = "/" + name + " "
+            placeCaret(min((head as NSString).length, (updated as NSString).length), expecting: updated)
+            activeMention = nil
+            sources.cancelSearch()
+            inputFocused.wrappedValue = true
+            return
         case .submit:
             submit()
         case .compact:
             store.compact()
         case .clear:
-            onSlashClear?()
+            // Destructive: the shared confirm dialog runs it (and empties the
+            // draft). Cancel leaves the draft untouched.
+            showClearConfirm = true
         case .fork:
             onSlashFork?()
         case .handoff:
@@ -1584,10 +1919,9 @@ struct ComposerView: View {
         case .abort:
             store.abort()
         }
-        if command.kind != .submit { text = "" }
+        if command.kind != .submit && command.kind != .clear { text = "" }
         activeMention = nil
-        fileResults = []
-        fileSearchTask?.cancel()
+        sources.cancelSearch()
         inputFocused.wrappedValue = true
     }
 
@@ -1694,5 +2028,33 @@ struct BoxChrome: ViewModifier {
                     shape.strokeBorder(stroke, lineWidth: 1)
                 }
         }
+    }
+}
+
+
+/// A popup's scrolling body: sizes to its content up to `maxHeight`, then
+/// scrolls. The height is measured from the content, so a short list is not
+/// stretched to the cap and a long one never grows the composer.
+private struct ComposerPopupScroll<Content: View>: View {
+    let maxHeight: CGFloat
+    private let content: Content
+    @State private var contentHeight: CGFloat = 0
+
+    init(maxHeight: CGFloat, @ViewBuilder content: () -> Content) {
+        self.maxHeight = maxHeight
+        self.content = content()
+    }
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            content
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    contentHeight = height
+                }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: min(contentHeight, maxHeight))
     }
 }
