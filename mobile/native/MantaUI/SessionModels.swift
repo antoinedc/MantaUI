@@ -993,8 +993,6 @@ enum SessionCreateFailure {
             return "Not signed in to this box."
         case MantaError.server(let text) where !text.isEmpty:
             return text
-        case MantaError.transport(let text) where !text.isEmpty:
-            return text
         default:
             return generic
         }

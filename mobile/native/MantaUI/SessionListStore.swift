@@ -200,6 +200,12 @@ final class SessionListStore: ObservableObject {
     /// Closes run through ONE worker, in the order they were asked for.
     private var closeQueue: [SessionCloseRequest] = []
     private var closeWorker: Task<Void, Never>?
+    /// Bumped by `resetForBoxChange`. A worker (or refresh) started before the
+    /// reset sees a stale generation and neither publishes into the new box's
+    /// state nor clears the handle of the worker that replaced it.
+    private var closeGeneration = 0
+    private var boxGeneration = 0
+    private var launcherTask: Task<Void, Never>?
     /// A job-list refetch (driven by `delegate.updated`) in flight, and one
     /// asked for meanwhile — coalesced the same way `refresh()` is.
     private var jobsRefreshing = false
@@ -300,14 +306,18 @@ final class SessionListStore: ObservableObject {
             // and no count shows — never a blank list. On success adopt it; on
             // failure keep whatever we had (stale jobs still resolve to real
             // windows) and just re-derive nesting against the new projects.
+            // More decoration, same rule: a failure keeps what we had. The stopped
+            // list is cheap, so it runs alongside the job list. Launcher discovery
+            // is NOT here — it spawns a login shell per CLI (seconds), so it runs
+            // once after launch / box change, on foreground and on demand.
+            async let stopped: Void = refreshStopped()
             if let jobs = try? await api.delegateList() {
                 applyJobs(jobs)
             } else {
                 recomputeNesting()
             }
-            // More decoration, same rule: a failure keeps what we had.
-            await refreshLaunchers()
-            await refreshStopped()
+            await stopped
+            if launcherCatalog == .loading { Task { await refreshLaunchers() } }
         } catch {
             // Keep whatever was already on screen — a failed fetch must never
             // blank a list we successfully loaded before.
@@ -703,8 +713,9 @@ final class SessionListStore: ObservableObject {
         if closeQueue.contains(where: { $0.key == request.key && $0.decision == request.decision }) { return }
         closeQueue.append(request)
         guard closeWorker == nil else { return }
+        let generation = closeGeneration
         closeWorker = Task { [weak self] in
-            await self?.drainCloseQueue()
+            await self?.drainCloseQueue(generation: generation)
         }
     }
 
@@ -714,18 +725,22 @@ final class SessionListStore: ObservableObject {
         await closeWorker?.value
     }
 
-    private func drainCloseQueue() async {
-        while !closeQueue.isEmpty {
+    private func drainCloseQueue(generation: Int) async {
+        while generation == closeGeneration, !closeQueue.isEmpty {
             let request = closeQueue.removeFirst()
-            await processClose(request)
+            await processClose(request, generation: generation)
         }
-        closeWorker = nil
+        // Only the CURRENT worker may clear the handle: a stale one finishing
+        // after a box reset must not wipe the new worker's, or the next enqueue
+        // would start a second concurrent worker.
+        if generation == closeGeneration { closeWorker = nil }
     }
 
-    private func processClose(_ request: SessionCloseRequest) async {
+    private func processClose(_ request: SessionCloseRequest, generation: Int) async {
         let window = projects.first(where: { $0.tmuxSession == request.project })?
             .windows.first(where: { $0.index == request.index })
         let cleanOnClose = await readCleanOnClose()
+        guard generation == closeGeneration else { return }
         var removal: SessionWorktreeRemoval?
         var removalError: String?
         var step = SessionCloseDecision.next(
@@ -742,6 +757,7 @@ final class SessionListStore: ObservableObject {
                     removal = .otherFailure
                     removalError = SessionActionError.message("remove the worktree", error: error)
                 }
+                guard generation == closeGeneration else { return }
                 step = SessionCloseDecision.next(
                     cleanOnClose: cleanOnClose, worktreePath: window?.worktreePath, removal: removal, decision: request.decision
                 )
@@ -754,13 +770,14 @@ final class SessionListStore: ObservableObject {
                 worktreePrompts = SessionWorktreePromptQueue.append(prompt, to: worktreePrompts)
                 return
             case .kill(let outcome):
-                await kill(window: window, request: request, outcome: outcome, removalError: removalError)
+                await kill(window: window, request: request, outcome: outcome, removalError: removalError, generation: generation)
                 return
             }
         }
     }
 
-    private func kill(window: MantaWindow?, request: SessionCloseRequest, outcome: SessionCloseOutcome, removalError: String?) async {
+    private func kill(window: MantaWindow?, request: SessionCloseRequest, outcome: SessionCloseOutcome,
+                      removalError: String?, generation: Int) async {
         do {
             if let sid = window?.opencodeSessionId, !sid.isEmpty {
                 try await mutations.deleteSession(sessionId: sid, sessionName: request.project, windowIndex: request.index)
@@ -768,11 +785,14 @@ final class SessionListStore: ObservableObject {
                 try await mutations.killWindow(session: request.project, index: request.index)
             }
         } catch {
+            guard generation == closeGeneration else { return }
             // The row's real state is shown instead of a phantom removal.
             publishFeedback(.failed(SessionActionError.message("delete", error: error)))
             await refresh()
             return
         }
+        // The close belonged to a box we have since left: say nothing about it.
+        guard generation == closeGeneration else { return }
         switch outcome {
         case .plain:
             publishFeedback(.closed)
@@ -948,18 +968,44 @@ final class SessionListStore: ObservableObject {
 
     // MARK: - Launchers (spec 04 §2)
 
-    /// Refresh which AI CLIs are installed. Decoration: a failure keeps the last
-    /// good list and never touches the session list.
+    /// Refresh which AI CLIs are installed and the user's saved launch flags.
+    /// Decoration: a failure keeps the last good list and never touches the
+    /// session list. Callers coalesce onto one in-flight refresh, and nothing is
+    /// published unless it changed (the list re-renders on every publish).
     func refreshLaunchers() async {
+        if let running = launcherTask {
+            await running.value
+            return
+        }
+        let task = Task { await self.performLauncherRefresh() }
+        launcherTask = task
+        await task.value
+    }
+
+    private func performLauncherRefresh() async {
+        let generation = boxGeneration
+        defer { if generation == boxGeneration { launcherTask = nil } }
+        let catalog: SessionLauncherCatalog
+        var list: [AvailableLauncher]?
         do {
-            let list = try await mutations.launchersList()
-            launchers = list
-            launcherCatalog = .loaded(ids: list.map(\.id))
+            let fetched = try await mutations.launchersList()
+            list = fetched
+            catalog = .loaded(ids: fetched.map(\.id))
         } catch {
-            launcherCatalog = .failed(
+            catalog = .failed(
                 message: SessionActionError.message("check the installed AI CLIs", error: error),
                 lastGood: launcherCatalog.authoritativeIDs
             )
+        }
+        // The saved flags are read from the box at the same moment, so a CLI
+        // launches with what the user last chose (never a copy from app start).
+        let config = try? await mutations.configGet()
+        guard generation == boxGeneration else { return }
+        if let list, list != launchers { launchers = list }
+        if catalog != launcherCatalog { launcherCatalog = catalog }
+        if let config {
+            let flags = ExtensionsLaunchers.savedFlags(from: config)
+            if flags != launcherFlags { launcherFlags = flags }
         }
     }
 
@@ -1049,9 +1095,13 @@ final class SessionListStore: ObservableObject {
         stoppedRecords = []
         stoppedLastLooked = nil
         stoppedConversations = []
+        closeGeneration += 1
+        boxGeneration += 1
         closeQueue = []
         closeWorker?.cancel()
         closeWorker = nil
+        launcherTask?.cancel()
+        launcherTask = nil
         worktreePrompts = []
         closeFeedback = []
     }

@@ -241,6 +241,14 @@ struct FolderPickerView: View {
             guard !Task.isCancelled else { return }
             rows = listing.visibleEntries.map { FolderRow(name: $0.name, full: $0.path) }
             worktreeCounts = [:]
+            // `~` has no parent, so ↑ and ".." would do nothing from the starting
+            // folder. The box answers the ABSOLUTE directory it expanded `~` to;
+            // adopt it so the path walks up normally (the re-list it triggers
+            // shows the same entries). Only for a bare `~`: a path the user is
+            // typing is never rewritten under them.
+            if dir == "~", listing.dir.hasPrefix("/"), current(of: path) == "~" {
+                path = listing.dir
+            }
         } catch {
             guard !Task.isCancelled else { return }
             self.error = SessionActionError.message("list this folder", error: error)

@@ -334,18 +334,33 @@ struct SessionListView: View {
     /// mode — notes when the catalog can't confirm the CLI yet (the pending view
     /// waits) or has just told us it is gone (opened in chat, said so).
     private func push(_ target: SessionOpenTarget) {
+        var target = target
         if !target.project.isEmpty { store.noteOpened(project: target.project, index: target.windowIndex) }
         if let sid = target.sessionId, !sid.isEmpty {
+            // Resolve the saved mode INTO the value (mode is identity), so a row
+            // tap and a route to the same session in the same mode are equal.
             let saved = target.mode ?? SessionModeStore.read(sessionID: sid)
-            if case .cli(let id) = saved {
-                switch SessionModeResolution.resolve(saved: saved, catalog: store.launcherCatalog) {
-                case .waiting: waitingMode = (sid, id)
-                case .ready(.chat): showFeedback("\(id) isn't installed on your server — opened in chat")
-                case .ready: break
-                }
-            }
+            target.mode = saved
+            noteResolution(sessionID: sid, saved: saved)
+        } else {
+            routedSessionID = nil
         }
         path.append(target)
+    }
+
+    /// Records what is on top of the stack (for `.message`) and handles a saved
+    /// AI-CLI mode the catalog can't confirm yet, or has just told us is gone.
+    private func noteResolution(sessionID sid: String, saved: SessionMode) {
+        routedSessionID = nil
+        switch SessionModeResolution.resolve(saved: saved, catalog: store.launcherCatalog) {
+        case .waiting(let id):
+            waitingMode = (sid, id)
+        case .ready(.chat):
+            routedSessionID = sid
+            if case .cli(let id) = saved { showFeedback("\(id) isn't installed on your server — opened in chat") }
+        case .ready:
+            break
+        }
     }
 
     private func settleWaitingMode() {
@@ -371,9 +386,7 @@ struct SessionListView: View {
             openMessageRoute(sessionID: sessionID)
         case .settings(let section):
             navigator.pending = nil
-            sheetRoute = nil
-            settingsSection = section
-            showSettings = true
+            Task { await presentSettings(section: section) }
         case .review:
             // Not ours: left pending for the review screen's owner.
             break
@@ -392,21 +405,19 @@ struct SessionListView: View {
             showFeedback("That session is no longer open")
             return
         }
-        let opened = SessionOpenTarget(project: target.project, windowIndex: target.windowIndex, name: target.name, sessionId: target.sessionId)
+        // The saved mode goes INTO the target: a mode switch then produces a value
+        // different from the one on screen (a real replace), where a plain route
+        // to a session already open in the same mode stays equal.
+        let opened = SessionOpenTarget.opened(
+            project: target.project, windowIndex: target.windowIndex, name: target.name, sessionId: target.sessionId
+        )
         var next = NavigationPath()
         openRow = SessionRowEntry.id(project: target.project, windowIndex: target.windowIndex)
-        routedSessionID = target.sessionId
-        // Built first and assigned once, so the stack is REPLACED (a mode
-        // switch lands on the same session in its new mode) without a flash of
-        // the list in between.
         if !target.project.isEmpty { store.noteOpened(project: target.project, index: target.windowIndex) }
-        if let sid = target.sessionId, !sid.isEmpty,
-           case .cli(let id) = SessionModeStore.read(sessionID: sid) {
-            switch SessionModeResolution.resolve(saved: .cli(launcherID: id), catalog: store.launcherCatalog) {
-            case .waiting: waitingMode = (sid, id)
-            case .ready(.chat): showFeedback("\(id) isn't installed on your server — opened in chat")
-            case .ready: break
-            }
+        if let sid = target.sessionId, !sid.isEmpty, let mode = opened.mode {
+            noteResolution(sessionID: sid, saved: mode)
+        } else {
+            routedSessionID = nil
         }
         next.append(opened)
         path = next
@@ -427,15 +438,27 @@ struct SessionListView: View {
         path = next
     }
 
+    /// UIKit refuses a new presentation while another is still dismissing, so
+    /// anything presented over a sheet that was up waits for it to finish.
+    private func dismissPresentations() async {
+        let hadSheet = sheetRoute != nil || showSettings || navigator.switcherPresented
+        sheetRoute = nil
+        showSettings = false
+        navigator.switcherPresented = false
+        if hadSheet { try? await Task.sleep(nanoseconds: 350_000_000) }
+    }
+
+    private func presentSettings(section: String?) async {
+        await dismissPresentations()
+        settingsSection = section
+        showSettings = true
+    }
+
     private func handleDraft(_ draft: NewSessionDraft?) {
         guard let draft else { return }
         navigator.pendingDraft = nil
-        let hadSheet = sheetRoute != nil || showSettings
-        sheetRoute = nil
-        showSettings = false
         Task {
-            // Let a sheet that was up finish dismissing before the next presents.
-            if hadSheet { try? await Task.sleep(nanoseconds: 350_000_000) }
+            await dismissPresentations()
             sheetRoute = .create(project: nil, draft: draft, startNew: false)
         }
     }

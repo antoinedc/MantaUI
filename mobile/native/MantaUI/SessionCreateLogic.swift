@@ -14,14 +14,15 @@ import Foundation
 // MARK: - Failure wording
 
 enum SessionActionError {
-    /// "Couldn't <verb> — <the box's reason>". Only text the box wrote for a
-    /// person is passed through; anything else (a decode failure, a URLError)
-    /// reads "check the connection".
+    /// "Couldn't <verb> — <the box's reason>". Anything that is not the box's own
+    /// words (a transport string, a decode failure, a URLError) reads "check the
+    /// connection".
     static func message(_ verb: String, error: Error) -> String {
+        // Only text the box wrote for a person is passed through; a transport
+        // string ("tmux:new-session returned no result") means nothing to them.
         var reason = ""
         switch error {
         case MantaError.server(let text): reason = text
-        case MantaError.transport(let text): reason = text
         case MantaError.authRequired: reason = "this device isn't signed in to the box"
         default: reason = ""
         }
@@ -76,6 +77,22 @@ enum SessionNaming {
         if clean.isEmpty || clean == "~" { return "project" }
         let last = clean.split(separator: "/", omittingEmptySubsequences: true).last
         return last.map(String.init) ?? "project"
+    }
+
+    /// The session name tmux KEEPS: it silently rewrites every `.` and `:` to `_`
+    /// (`session_check_name`). A name sent to `tmux:new-session` must go through
+    /// this first, or the project is created under a different name than the one
+    /// we then look for (a folder like `next.js` became `next_js`, and the
+    /// create "failed" after it had succeeded).
+    static func tmuxSafe(_ name: String) -> String {
+        name.replacingOccurrences(of: ".", with: "_").replacingOccurrences(of: ":", with: "_")
+    }
+
+    /// A project (tmux session) name for a folder: its basename, made tmux-safe
+    /// FIRST and de-duplicated after, so uniqueness is judged on the name tmux
+    /// will actually keep.
+    static func uniqueProjectName(forFolder path: String, taken: Set<String>) -> String {
+        unique(tmuxSafe(deriveProjectName(path)), taken: taken)
     }
 
     /// `base` when free, else the first free `base-2`, `base-3`, …
@@ -287,10 +304,39 @@ struct SessionCreated: Equatable, Sendable {
 }
 
 enum SessionCreatedWindow {
-    /// The window the box just created: by the index it reported (the only
-    /// reliable key — names collide), else by name, else the project's last.
-    static func find(in projects: [MantaProject], project: String, windowIndex: Int?, name: String?) -> MantaWindow? {
-        guard let proj = projects.first(where: { $0.tmuxSession == project }) else { return nil }
+    /// The window the box just created, and the project it really lives in.
+    ///
+    /// By the index it reported (the only reliable key — names collide), else by
+    /// name, else the project's last window. When no project carries the name we
+    /// asked for (tmux rewrote it), the window whose opencode session id the box
+    /// reported is found across ALL projects, and ITS project name is returned —
+    /// the name to put in the navigation value, not the one we sent.
+    static func locate(in projects: [MantaProject], project: String, windowIndex: Int?, sessionId: String?,
+                       name: String?) -> (project: String, window: MantaWindow)? {
+        let candidates = [project, SessionNaming.tmuxSafe(project)]
+        for candidate in candidates {
+            if let proj = projects.first(where: { $0.tmuxSession == candidate }),
+               let window = pick(in: proj, windowIndex: windowIndex, name: name) {
+                return (proj.tmuxSession, window)
+            }
+        }
+        if let sessionId, !sessionId.isEmpty {
+            for proj in projects {
+                if let window = proj.windows.first(where: { $0.opencodeSessionId == sessionId }) {
+                    return (proj.tmuxSession, window)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Same, for callers that only need the window.
+    static func find(in projects: [MantaProject], project: String, windowIndex: Int?, name: String?,
+                     sessionId: String? = nil) -> MantaWindow? {
+        locate(in: projects, project: project, windowIndex: windowIndex, sessionId: sessionId, name: name)?.window
+    }
+
+    private static func pick(in proj: MantaProject, windowIndex: Int?, name: String?) -> MantaWindow? {
         if let windowIndex, let byIndex = proj.windows.first(where: { $0.index == windowIndex }) { return byIndex }
         if let name, let byName = proj.windows.first(where: { $0.name == name }) { return byName }
         return proj.windows.last
@@ -445,7 +491,7 @@ struct SessionSetupBatch: Equatable, Sendable {
         var used = taken
         var rows: [Row] = []
         for path in paths {
-            let name = SessionNaming.unique(SessionNaming.deriveProjectName(path), taken: used)
+            let name = SessionNaming.uniqueProjectName(forFolder: path, taken: used)
             used.insert(name)
             rows.append(Row(path: path, name: name))
         }
@@ -480,6 +526,15 @@ struct SessionSetupBatch: Equatable, Sendable {
         guard let i = rows.firstIndex(where: { $0.path == path }) else { return }
         rows[i].phase = .failed
         rows[i].error = message
+    }
+
+    /// Rows caught mid-create when the batch was cancelled become failed (with
+    /// `message`), so none is left showing "Creating…" with nothing running.
+    mutating func failCreating(message: String) {
+        for i in rows.indices where rows[i].phase == .creating {
+            rows[i].phase = .failed
+            rows[i].error = message
+        }
     }
 
     /// Puts a failed row back in the queue (keeps its reserved name).

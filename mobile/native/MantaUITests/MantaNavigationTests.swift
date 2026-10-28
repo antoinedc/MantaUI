@@ -45,6 +45,39 @@ final class MantaNavigationTests: XCTestCase {
         XCTAssertTrue(nav.switcherPresented)
     }
 
+    func testResetForgetsEverythingAddressedToTheOldBox() {
+        let nav = MantaNavigator()
+        nav.open(.review(sessionID: "s"))
+        nav.startNewSession(NewSessionDraft(text: "x"))
+        nav.presentSwitcher()
+
+        nav.reset()
+
+        XCTAssertNil(nav.pending)
+        XCTAssertNil(nav.pendingDraft)
+        XCTAssertFalse(nav.switcherPresented)
+    }
+
+    func testModeSwitchProducesADifferentNavigationValue() throws {
+        let suite = "MantaNavigationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let asChat = SessionOpenTarget.opened(project: "p", windowIndex: 1, name: "n", sessionId: "ses_1", defaults: defaults)
+        SessionModeStore.write(.terminal, sessionID: "ses_1", defaults: defaults)
+        let asTerminal = SessionOpenTarget.opened(project: "p", windowIndex: 1, name: "n", sessionId: "ses_1", defaults: defaults)
+        let again = SessionOpenTarget.opened(project: "p", windowIndex: 1, name: "n", sessionId: "ses_1", defaults: defaults)
+
+        // A switch is a real replace (the values differ)…
+        XCTAssertNotEqual(asChat, asTerminal)
+        XCTAssertEqual(asChat.mode, .chat)
+        XCTAssertEqual(asTerminal.mode, .terminal)
+        // …and re-opening in the mode it is already in is the same value.
+        XCTAssertEqual(asTerminal, again)
+        // A window with no chat session has no mode.
+        XCTAssertNil(SessionOpenTarget.opened(project: "p", windowIndex: 2, name: "t", sessionId: nil, defaults: defaults).mode)
+    }
+
     func testWindowKeyBuilder() {
         XCTAssertEqual(MantaNavigator.windowKey(project: "a#b", windowIndex: 3), "a#b#3")
     }

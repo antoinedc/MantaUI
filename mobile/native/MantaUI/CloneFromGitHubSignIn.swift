@@ -121,15 +121,24 @@ final class GitHubDeviceSignInStore: ObservableObject {
 
     /// The app is foreground again (the user is usually back from Safari).
     func sceneBecameActive() {
-        flow.tick(now: now())
+        applyTick()
         wake?.yield()
     }
 
     /// Called once a second by the countdown: expires the code with no request.
     func tick() {
         let before = flow.stage
-        flow.tick(now: now())
+        applyTick()
         if flow.stage != before { wake?.yield() }
+    }
+
+    /// `tick` on a copy, assigned only when it changed anything: `flow` is
+    /// `@Published`, so mutating it in place would re-render the view every
+    /// second even when nothing happened.
+    private func applyTick() {
+        var next = flow
+        next.tick(now: now())
+        if next != flow { flow = next }
     }
 
     func copyCode() {
@@ -246,6 +255,9 @@ final class GitHubDeviceSignInStore: ObservableObject {
 
 // MARK: - View
 
+/// Every appearance starts a NEW sign-in attempt and every disappearance
+/// releases it (the grant is cancelled), so hosting this view where
+/// `onAppear`/`onDisappear` pair (a tab, a cover over it, a pushed child) is safe.
 struct GitHubDeviceSignInView: View {
     let onConnected: () -> Void
     let onCancel: () -> Void
@@ -280,7 +292,9 @@ struct GitHubDeviceSignInView: View {
             store.start()
         }
         .onDisappear {
-            // Swipe-down / parent navigation: release the grant, don't wait.
+            // Swipe-down / parent navigation: release the grant, don't wait. The
+            // store is now spent, so the next appearance starts a fresh attempt.
+            started = false
             Task { await store.cancel() }
         }
         .onChange(of: scenePhase) { _, phase in

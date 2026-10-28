@@ -118,4 +118,6 @@ enum CloneProgressCopy {
 enum CloneTiming {
     static let pollInterval: TimeInterval = 0.5
     static let timeout: TimeInterval = 130
+    /// Consecutive failed status reads before the clone UI gives up.
+    static let maxConsecutiveThrows = 3
 }

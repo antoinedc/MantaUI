@@ -41,6 +41,12 @@ final class SessionRenameLogicTests: XCTestCase {
         XCTAssertEqual(SessionRenameLogic.validated("  b  ", current: "a"), "b")
     }
 
+    func testActionErrorNeverShowsTransportText() {
+        XCTAssertEqual(SessionActionError.message("create", error: MantaError.transport("tmux:new-session returned no result")),
+                       "Couldn't create — check the connection")
+        XCTAssertEqual(SessionCreateFailure.message(for: MantaError.transport("invalid rpc envelope")), SessionCreateFailure.generic)
+    }
+
     func testActionErrorUsesServerReasonOrFallsBack() {
         XCTAssertEqual(SessionActionError.message("rename", error: MantaError.server("duplicate session name")),
                        "Couldn't rename — duplicate session name")
@@ -167,6 +173,19 @@ final class SessionNamingTests: XCTestCase {
     func testUnique() {
         XCTAssertEqual(SessionNaming.unique("x", taken: ["x", "x-2"]), "x-3")
         XCTAssertEqual(SessionNaming.unique("y", taken: ["x"]), "y")
+    }
+
+    func testTmuxSafeReplacesDotAndColon() {
+        XCTAssertEqual(SessionNaming.tmuxSafe("next.js"), "next_js")
+        XCTAssertEqual(SessionNaming.tmuxSafe("a.b:c.d"), "a_b_c_d")
+        XCTAssertEqual(SessionNaming.tmuxSafe("plain-name"), "plain-name")
+        XCTAssertEqual(SessionNaming.tmuxSafe(""), "")
+    }
+
+    func testUniqueProjectNameSanitisesBeforeDeduplicating() {
+        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: []), "next_js")
+        // Uniqueness is judged on the name tmux will KEEP.
+        XCTAssertEqual(SessionNaming.uniqueProjectName(forFolder: "/r/next.js", taken: ["next_js"]), "next_js-2")
     }
 
     func testScratchHint() {
@@ -296,6 +315,26 @@ final class SessionCreatePlanTests: XCTestCase {
         let l = SessionCreateLanding.make(mode: .cli(launcherID: "claude"), sessionId: nil)
         XCTAssertEqual(l, SessionCreateLanding(mode: .terminal, sessionId: nil, writesMode: false))
         XCTAssertEqual(SessionCreateLanding.make(mode: .terminal, sessionId: "").sessionId, nil)
+    }
+
+    func testCreatedWindowFoundBySessionIdWhenNameDiffers() {
+        // We asked for "next.js"; tmux kept "next_js".
+        let projects = [project("other", "", [window(0, "x", sid: "ses_o")]), project("next_js", "", [window(0, "default", sid: "ses_new")])]
+        let located = SessionCreatedWindow.locate(in: projects, project: "next.js", windowIndex: nil, sessionId: "ses_new", name: "default")
+        XCTAssertEqual(located?.project, "next_js")
+        XCTAssertEqual(located?.window.opencodeSessionId, "ses_new")
+        // Even a name that is wrong in another way resolves by the session id.
+        let renamed = SessionCreatedWindow.locate(in: projects, project: "totally-else", windowIndex: 0, sessionId: "ses_new", name: nil)
+        XCTAssertEqual(renamed?.project, "next_js")
+        XCTAssertNil(SessionCreatedWindow.locate(in: projects, project: "nope", windowIndex: 0, sessionId: nil, name: nil))
+        XCTAssertNil(SessionCreatedWindow.locate(in: projects, project: "nope", windowIndex: 0, sessionId: "ses_none", name: nil))
+    }
+
+    func testCreatedWindowFoundByTmuxSafeNameWithoutASessionId() {
+        let projects = [project("api_v2", "", [window(1, "default")])]
+        let located = SessionCreatedWindow.locate(in: projects, project: "api:v2", windowIndex: 1, sessionId: nil, name: "default")
+        XCTAssertEqual(located?.project, "api_v2")
+        XCTAssertEqual(located?.window.index, 1)
     }
 
     func testChatLandingWritesNothing() {
@@ -449,6 +488,22 @@ final class SessionRepoScanTests: XCTestCase {
         XCTAssertEqual(two.rows.map(\.name), ["api", "api-2"])
         let withExisting = SessionSetupBatch(paths: ["/a/api", "/b/api"], taken: ["api"])
         XCTAssertEqual(withExisting.rows.map(\.name), ["api-2", "api-3"])
+    }
+
+    func testBatchNameForDottedRepoIsTmuxSafe() {
+        let batch = SessionSetupBatch(paths: ["/r/next.js", "/s/next_js", "/t/api:v2"], taken: [])
+        XCTAssertEqual(batch.rows.map(\.name), ["next_js", "next_js-2", "api_v2"])
+    }
+
+    func testFailCreatingLeavesNoRowStuckCreating() {
+        var batch = SessionSetupBatch(paths: ["/a", "/b", "/c"], taken: [])
+        batch.markCreating(at: 0)
+        batch.markReady(path: "/a")
+        batch.markCreating(at: 1)
+        batch.failCreating(message: "Cancelled")
+        XCTAssertEqual(batch.rows.map(\.phase), [.ready, .failed, .queued])
+        XCTAssertEqual(batch.rows[1].error, "Cancelled")
+        XCTAssertFalse(batch.rows.contains { $0.phase == .creating })
     }
 
     func testBatchRunsInOrderAndTracksPhases() {

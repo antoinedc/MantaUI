@@ -355,6 +355,21 @@ signatures; the UI compile happens on the Mac after the wave is integrated.
 WS10's `MantaAppRoot.swift` mounts (M-10-1 theme, M-10-2 return to onboarding)
 are applied by WS04 in A2.
 
+D22. **Slim transcripts vs WS01 (code-review finding).** iOS fetches
+`opencode:messages` with `slim: true`, which drops `reasoning` and `step-finish`.
+(a) Server: `step-finish` is removed from `SLIM_DROP_PART_TYPES`
+(`src/server/opencode.mjs`, + node test) so finish metadata (tokens, reason →
+truncation kind) survives a reload. Applied by WS01's fix round. (b) Reasoning
+stays slim-dropped; while `TranscriptDisplayOptions` "show reasoning & full
+output" is ON, WS02's `ChatSessionStore` fetches with `slim: false`, and flipping
+the toggle triggers a refetch — new mount **M-01-7** (receiving file
+`ChatSessionStore.swift`, applier WS02, wave B, provider
+`TranscriptDisplayOptions` (WS01) — read the persisted toggle at fetch time and
+observe its change). Provider symbols (shipped): `TranscriptDisplayOptions.fetchSlim: Bool`
+(pass as `slim:`), `TranscriptDisplayOptions.didChange: Notification.Name` (refetch on it).
+Also: `TranscriptMediaStore.shared.resetForBoxChange()` must be called from the
+`.mantaBoxRemoved` handler in `MantaAppRoot.swift` (integration B, with M-09-4).
+
 D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
 job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
 fixed by the workstream that touches the matching iOS feature ONLY if the fix is
@@ -393,7 +408,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-03-8 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS03 manifest (`ComposerModels.swift`, `ComposerInsertion.swift` + 2 tests) | WS03 (A1) |
 | M-03-9 | `ComposerView.swift` (WS03) | IB | B-int | `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`) (WS02) | WS02 (B); after M-03-6 |
 | M-04-1 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.onRename: (() -> Void)? = nil` (param) | — |
-| M-04-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | params `mode: SessionMode? = nil`, `launchers: [AvailableLauncher] = []`, `launcherCatalog: SessionLauncherCatalog = .loading`, `onSelectMode: ((SessionMode) -> Void)? = nil`, `onRetryLaunchers: (() -> Void)? = nil`; `SessionModeRows(current: SessionMode, launchers: [AvailableLauncher], catalog: SessionLauncherCatalog, onSelect: (SessionMode) -> Void, onRetry: () -> Void)` (WS04); `AvailableLauncher` (WS10) | WS04 (A2), WS10 (A1) |
+| M-04-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | params `mode: SessionMode? = nil`, `launchers: [AvailableLauncher] = []`, `launcherCatalog: SessionLauncherCatalog = .loading`, `onSelectMode: ((SessionMode) -> Void)? = nil`, `onRetryLaunchers: (() -> Void)? = nil`; `SessionModeRows(current: SessionMode, launchers: [AvailableLauncher], catalog: SessionLauncherCatalog, onSelect: (SessionMode) -> Void, onRetry: () -> Void)` (WS04); `AvailableLauncher` (WS10) | WS04 (A2), WS10 (A1). **Placement (code review):** `SessionModeRows` renders TWO top-level Sections — mount it as a SIBLING Section between the Compact/Fork section and the Trust-mode section (never inside a `Section {}`), wrapping `onSelect` as `{ m in dismiss(); onSelectMode(m) }`; keep "Open terminal" only when `mode == nil || onSelectMode == nil`. Exact code: `reviews/code/04-sessions.md` finding 11. |
 | M-04-3 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionListStore.window(forSessionID: String) -> (project: String, window: MantaWindow)?` (WS04) | WS04 (A2) |
 | M-04-4 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionRenameSheet(title:initialName:onSave:)`, `SessionListStore.renameSession(project: String, index: Int, newName: String) async -> String?` (WS04) | M-04-1 |
 | M-04-5 | `ChatScreen.swift` (WS02) | WS02 | B | `MantaNavigator.switchMode(windowKey: String, sessionID: String, to: SessionMode)`, `static MantaNavigator.windowKey(project: String, windowIndex: Int) -> String`, `SessionModeStore.read(sessionID:defaults:) -> SessionMode`, `SessionListStore.launchers: [AvailableLauncher]`, `.launcherCatalog: SessionLauncherCatalog`, `.refreshLaunchers() async` (WS04) | M-04-2 |

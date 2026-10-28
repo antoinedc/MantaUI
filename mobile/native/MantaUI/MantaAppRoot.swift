@@ -140,6 +140,7 @@ struct MantaAppRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
             store.stop()
             sessionStore.resetForBoxChange()
+            navigator.reset()
             flow.isSwitching = false
             flow.backToEntry()
             paired = false
@@ -162,6 +163,9 @@ struct MantaAppRoot: View {
             MantaPushService.applyRegistrationState()
             store.resume()
             Task { await sessionStore.refresh() }
+            // Which AI CLIs are installed (and the user's launch flags) can change
+            // while the app is away; not part of every list refresh (it is slow).
+            Task { await sessionStore.refreshLaunchers() }
             Task { await upgradeStore.refresh() }
         }
         .onOpenURL { url in
@@ -206,6 +210,7 @@ struct MantaAppRoot: View {
             if flow.isSwitching {
                 store.stop()
                 sessionStore.resetForBoxChange()
+                navigator.reset()
             }
             paired = true
             // Wire the box model-prefs mirror for the newly-paired box (also

@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import MantaUI
 
 // ===========================================================================
@@ -46,8 +47,20 @@ final class SessionListFake: SessionListMutationAPI {
     var stopped: Result<SessionStoppedList, Error> = .success(SessionStoppedList())
     var stoppedCalls = 0
 
+    /// Keys (`"<project>#<index>"`) whose `killWindow` suspends until `release`.
+    var heldKills: Set<String> = []
+    /// Kills that have STARTED (before any hold), in order.
+    private(set) var killEntered: [String] = []
+    private var gates: [String: CheckedContinuation<Void, Never>] = [:]
+
     private(set) var inFlight = 0
     private(set) var maxInFlight = 0
+
+    func isHolding(_ key: String) -> Bool { gates[key] != nil }
+
+    func release(_ key: String) {
+        gates.removeValue(forKey: key)?.resume()
+    }
 
     private func enter() async {
         inFlight += 1
@@ -81,6 +94,10 @@ final class SessionListFake: SessionListMutationAPI {
     func killWindow(session: String, index: Int) async throws {
         await enter()
         let key = "\(session)#\(index)"
+        killEntered.append(key)
+        if heldKills.contains(key) {
+            await withCheckedContinuation { gates[key] = $0 }
+        }
         killWindowCalls.append(key)
         if killFailures.contains(key) { throw MantaError.server("tmux said no") }
     }
@@ -109,7 +126,11 @@ final class SessionListFake: SessionListMutationAPI {
         return config
     }
 
+    private(set) var launcherCalls = 0
+
     func launchersList() async throws -> [AvailableLauncher] {
+        launcherCalls += 1
+        await Task.yield()
         guard !launcherResults.isEmpty else { return [] }
         return try launcherResults.removeFirst().get()
     }
@@ -541,6 +562,101 @@ final class SessionStoreTests: XCTestCase {
         XCTAssertNil(store.stoppedLastLooked)
         XCTAssertTrue(store.worktreePrompts.isEmpty)
         XCTAssertEqual(store.recents, ["p#0"])
+    }
+
+    func testBoxResetDuringCloseDoesNotStartSecondWorker() async {
+        let fake = SessionListFake()
+        fake.heldKills = ["p#0", "p#1"]
+        let store = makeStore(fake)
+        store.applyProjects([project("p", [window(0), window(1), window(2)])])
+
+        store.enqueueClose(project: "p", index: 0)           // old worker, held mid-kill
+        await waitUntil { fake.isHolding("p#0") }
+        store.resetForBoxChange()
+        store.applyProjects([project("p", [window(0), window(1), window(2)])])
+        store.enqueueClose(project: "p", index: 1)           // new worker, held mid-kill
+        await waitUntil { fake.isHolding("p#1") }
+
+        fake.release("p#0")                                   // the OLD worker finishes
+        await waitUntil { fake.killWindowCalls.contains("p#0") }
+        for _ in 0..<5 { await Task.yield() }
+        store.enqueueClose(project: "p", index: 2)            // must queue behind p#1
+
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertFalse(fake.killEntered.contains("p#2"), "a second concurrent worker started")
+        fake.release("p#1")
+        await store.waitForCloseQueue()
+        XCTAssertEqual(fake.killWindowCalls, ["p#0", "p#1", "p#2"])
+        // The close that belonged to the old box says nothing in the new one.
+        XCTAssertEqual(store.closeFeedback.count, 2)
+    }
+
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if condition() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("timed out", file: file, line: line)
+    }
+
+    // MARK: - Launch flags are fresh (finding 4)
+
+    func testRefreshLaunchersReReadsSavedFlags() async {
+        let fake = SessionListFake()
+        fake.launcherResults = [.success([claude]), .success([claude])]
+        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(true)])])]
+        let store = makeStore(fake)
+
+        await store.refreshLaunchers()
+        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": true])
+
+        // The user changes the flag in Settings; the next refresh sees it.
+        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(false)])])]
+        await store.refreshLaunchers()
+        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": false])
+    }
+
+    func testBoxChangeThenRefreshRestoresFlags() async {
+        let fake = SessionListFake()
+        fake.launcherResults = [.success([claude]), .success([claude])]
+        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(true)])])]
+        let store = makeStore(fake)
+        await store.refreshLaunchers()
+
+        store.resetForBoxChange()
+        XCTAssertTrue(store.launcherFlags.isEmpty)
+        await store.refreshLaunchers()
+
+        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": true])
+        XCTAssertEqual(store.launcherCatalog, .loaded(ids: ["claude"]))
+    }
+
+    func testConcurrentLauncherRefreshesCoalesce() async {
+        let fake = SessionListFake()
+        fake.launcherResults = [.success([claude])]
+        let store = makeStore(fake)
+
+        async let a: Void = store.refreshLaunchers()
+        async let b: Void = store.refreshLaunchers()
+        _ = await (a, b)
+
+        XCTAssertEqual(fake.launcherCalls, 1)
+        XCTAssertEqual(store.launchers, [claude])
+    }
+
+    func testUnchangedLauncherRefreshDoesNotRepublish() async {
+        let fake = SessionListFake()
+        fake.launcherResults = [.success([claude]), .success([claude])]
+        let store = makeStore(fake)
+        await store.refreshLaunchers()
+        var publishes = 0
+        let sub = store.objectWillChange.sink { publishes += 1 }
+        defer { sub.cancel() }
+
+        await store.refreshLaunchers()
+
+        XCTAssertEqual(publishes, 0)
     }
 
     // MARK: - Stopped conversations

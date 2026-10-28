@@ -38,6 +38,9 @@ final class SessionSetupStore: ObservableObject {
     private(set) var latestProjects: [MantaProject] = []
     private var createdByPath: [String: SessionCreated] = [:]
     private var worker: Task<Void, Never>?
+    /// Bumped by `cancel()`: a worker from before it must not clear the handle of
+    /// the worker that replaced it (that would let two run at once).
+    private var workerGeneration = 0
     private let api: SessionSetupAPI
 
     init(api: SessionSetupAPI = MantaAPIClient.live()) {
@@ -136,19 +139,27 @@ final class SessionSetupStore: ObservableObject {
     }
 
     func cancel() {
+        workerGeneration += 1
         worker?.cancel()
         worker = nil
+        // A row caught mid-create must not stay "Creating…" if the view returns.
+        if var current = batch {
+            current.failCreating(message: "Cancelled")
+            batch = current
+        }
     }
 
     private func startWorker() {
         guard worker == nil else { return }
+        let generation = workerGeneration
         worker = Task { [weak self] in
-            await self?.drain()
+            await self?.drain(generation: generation)
         }
     }
 
-    private func drain() async {
-        while !Task.isCancelled, var current = batch, let index = current.nextQueuedIndex {
+    private func drain(generation: Int) async {
+        defer { if generation == workerGeneration { worker = nil } }
+        while !Task.isCancelled, generation == workerGeneration, var current = batch, let index = current.nextQueuedIndex {
             let row = current.rows[index]
             current.markCreating(at: index)
             batch = current
@@ -158,14 +169,16 @@ final class SessionSetupStore: ObservableObject {
             do {
                 let reply = try await api.createSession(input)
                 guard !Task.isCancelled else { break }
-                guard let window = SessionCreatedWindow.find(
-                    in: reply.projects, project: row.name, windowIndex: reply.windowIndex, name: "default"
+                guard let located = SessionCreatedWindow.locate(
+                    in: reply.projects, project: row.name, windowIndex: reply.windowIndex,
+                    sessionId: reply.sessionId, name: "default"
                 ) else {
                     throw MantaError.transport("created session was not returned")
                 }
+                let window = located.window
                 latestProjects = reply.projects
                 createdByPath[row.path] = SessionCreated(
-                    project: row.name,
+                    project: located.project,
                     windowIndex: window.index,
                     sessionId: window.opencodeSessionId ?? reply.sessionId,
                     projects: reply.projects,
@@ -178,6 +191,5 @@ final class SessionSetupStore: ObservableObject {
                 batch?.markFailed(path: row.path, message: SessionCreateFailure.message(for: error))
             }
         }
-        worker = nil
     }
 }

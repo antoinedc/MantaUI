@@ -533,7 +533,7 @@ struct SessionCreateSheet: View {
                 source = .folder
                 folder = prefill.folder ?? ""
                 nameEdited = false
-                newProjectName = SessionNaming.unique(SessionNaming.deriveProjectName(folder), taken: projectNames)
+                newProjectName = SessionNaming.uniqueProjectName(forFolder: folder, taken: projectNames)
                 placed = true
             case .unspecified:
                 break
@@ -563,7 +563,7 @@ struct SessionCreateSheet: View {
         if target == .newProject {
             source = .folder
             if !nameEdited {
-                newProjectName = SessionNaming.unique(SessionNaming.deriveProjectName(path), taken: projectNames)
+                newProjectName = SessionNaming.uniqueProjectName(forFolder: path, taken: projectNames)
             }
         }
     }
@@ -719,7 +719,8 @@ struct SessionCreateSheet: View {
     }
 
     private func createNewProject(_ plan: SessionCreatePlan) async throws -> SessionCreated {
-        let projectName = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The name tmux will KEEP (it rewrites `.` and `:` to `_`).
+        let projectName = SessionNaming.tmuxSafe(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines))
         let windowName = resolvedSessionName
         var cwd = folder.trimmingCharacters(in: .whitespacesAndNewlines)
         var createDir = true
@@ -747,7 +748,7 @@ struct SessionCreateSheet: View {
     /// the first becomes the project's initial window, the rest are added.
     private func createFanOut(_ plan: SessionCreatePlan) async throws -> SessionCreated {
         guard let worktrees = fanOut, let first = worktrees.first else { throw MantaError.transport("no worktrees to open") }
-        let projectName = newProjectName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectName = SessionNaming.tmuxSafe(newProjectName.trimmingCharacters(in: .whitespacesAndNewlines))
         let firstName = WorktreeInfoLogic.name(first)
         var reply = try await api.createSession(SessionNewProjectInput(
             name: projectName, cwd: first.path, windowName: firstName, chatMode: true, createDir: false
@@ -766,7 +767,7 @@ struct SessionCreateSheet: View {
 
     private func createScratch(_ plan: SessionCreatePlan) async throws -> SessionCreated {
         let scratch = try await api.projectCreateScratch(root: scratchRoot, name: scratchName)
-        let name = SessionNaming.unique(SessionNaming.deriveProjectName(scratch.path), taken: projectNames)
+        let name = SessionNaming.uniqueProjectName(forFolder: scratch.path, taken: projectNames)
         let reply = try await api.createSession(SessionNewProjectInput(
             name: name, cwd: scratch.path, windowName: "default", chatMode: true, createDir: false
         ))
@@ -776,17 +777,20 @@ struct SessionCreateSheet: View {
     /// Resolve the created window (by the index the box reported first), save the
     /// chosen mode for it, and describe where to land.
     private func finish(reply: TmuxCreateResult, project: String, windowName: String, plan: SessionCreatePlan) throws -> SessionCreated {
-        guard let window = SessionCreatedWindow.find(
-            in: reply.projects, project: project, windowIndex: reply.windowIndex, name: windowName
+        guard let located = SessionCreatedWindow.locate(
+            in: reply.projects, project: project, windowIndex: reply.windowIndex,
+            sessionId: reply.sessionId, name: windowName
         ) else {
             throw MantaError.transport("created session was not returned")
         }
+        let window = located.window
         let landing = SessionCreateLanding.make(mode: plan.mode, sessionId: window.opencodeSessionId ?? reply.sessionId)
         if landing.writesMode, let sid = landing.sessionId {
             SessionModeStore.write(landing.mode, sessionID: sid)
         }
         return SessionCreated(
-            project: project,
+            // The project's REAL name (tmux may have rewritten the one we sent).
+            project: located.project,
             windowIndex: window.index,
             sessionId: landing.sessionId,
             projects: reply.projects,

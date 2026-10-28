@@ -24,3 +24,16 @@ extension SessionCreated {
         )
     }
 }
+
+extension SessionOpenTarget {
+    /// A target for opening an existing session, with this device's saved mode
+    /// resolved INTO the value. `mode` is part of a target's identity, so
+    /// switching a session's mode produces a different value (a real stack
+    /// replace) while re-opening it in the mode it is already in stays equal (no
+    /// flicker). A window with no chat session has no mode.
+    static func opened(project: String, windowIndex: Int, name: String, sessionId: String?,
+                       defaults: UserDefaults = .standard) -> SessionOpenTarget {
+        let mode = (sessionId ?? "").isEmpty ? nil : SessionModeStore.read(sessionID: sessionId ?? "", defaults: defaults)
+        return SessionOpenTarget(project: project, windowIndex: windowIndex, name: name, sessionId: sessionId, mode: mode)
+    }
+}

@@ -40,6 +40,14 @@ final class MantaNavigator: ObservableObject {
         open(.session(windowKey: windowKey))
     }
 
+    /// Forget everything addressed to the previous box (a pending route, a draft,
+    /// the switcher): none of it means anything on another box.
+    func reset() {
+        pending = nil
+        pendingDraft = nil
+        switcherPresented = false
+    }
+
     static func windowKey(project: String, windowIndex: Int) -> String {
         SessionRouteLogic.windowKey(project: project, windowIndex: windowIndex)
     }

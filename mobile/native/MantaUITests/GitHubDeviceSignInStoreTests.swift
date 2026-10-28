@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import MantaUI
 
 // ===========================================================================
@@ -24,6 +25,8 @@ actor FakeDeviceAPI: GitHubDeviceSignInAPI {
     private(set) var pollCalls: [String] = []
     private(set) var cancelCalls: [String] = []
     private(set) var cancelCompleted = false
+    /// How long a cancel takes (a slow box); the store must still await it.
+    var cancelDelayNanoseconds: UInt64 = 0
 
     private var startWaiters: [CheckedContinuation<GitHubDeviceStart, Error>] = []
     private var pollWaiters: [(grantId: String, continuation: CheckedContinuation<GitHubDevicePoll, Error>)] = []
@@ -36,7 +39,8 @@ actor FakeDeviceAPI: GitHubDeviceSignInAPI {
     }
 
     func configure(grants: [GitHubDeviceStart]? = nil, pollReplies: [GitHubDevicePoll]? = nil,
-                   holdStart: Bool? = nil, holdPolls: Bool? = nil) {
+                   holdStart: Bool? = nil, holdPolls: Bool? = nil, cancelDelayNanoseconds: UInt64? = nil) {
+        if let cancelDelayNanoseconds { self.cancelDelayNanoseconds = cancelDelayNanoseconds }
         if let grants { self.grants = grants }
         if let pollReplies { self.pollReplies = pollReplies }
         if let holdStart { self.holdStart = holdStart }
@@ -62,6 +66,7 @@ actor FakeDeviceAPI: GitHubDeviceSignInAPI {
 
     func cancel(grantId: String) async {
         cancelCalls.append(grantId)
+        if cancelDelayNanoseconds > 0 { try? await Task.sleep(nanoseconds: cancelDelayNanoseconds) }
         await Task.yield()
         cancelCompleted = true
     }
@@ -397,18 +402,41 @@ final class GitHubDeviceSignInStoreTests: XCTestCase {
         XCTAssertTrue(calls.isEmpty)
     }
 
-    func testCancelFailureIsLoggedAndStillDismisses() async {
-        // The live adapter swallows (and logs) a failed cancel: `cancel` never
-        // throws, so dismissal can't be blocked by it. A dead port fails fast.
+    func testSlowCancelIsStillAwaitedBeforeDismissal() async {
+        // A slow box: `cancel()` must not return (and so `onCancel` must not run)
+        // until the server cancel has finished.
+        let api = FakeDeviceAPI()
+        await api.configure(cancelDelayNanoseconds: 80_000_000)
+        let store = makeStore(api, FakeClock())
+        store.start()
+        await waitUntil("code") { store.flow.stage == .code }
+
+        await store.cancel()
+
+        let done = await api.cancelCompleted
+        XCTAssertTrue(done, "dismissal ran before the server cancel finished")
+        XCTAssertNotEqual(store.flow.stage, .connected)
+    }
+
+    func testLiveAdapterCancelNeverThrowsOnAnUnreachableBox() async {
+        // The live adapter swallows (and logs) a failed cancel, so a dead box can
+        // never block a dismissal. The log line itself is not observable here.
         let live = ServerGitHubDeviceSignIn(client: MantaAPIClient(serverURL: URL(string: "https://127.0.0.1:1")!))
         await live.cancel(grantId: "g1")
+    }
 
+    func testTickWithNothingToDoDoesNotRepublishTheFlow() async {
         let api = FakeDeviceAPI()
         let store = makeStore(api, FakeClock())
         store.start()
         await waitUntil("code") { store.flow.stage == .code }
-        await store.cancel()
-        XCTAssertNotEqual(store.flow.stage, .connected)
+        var publishes = 0
+        let sub = store.objectWillChange.sink { publishes += 1 }
+        defer { sub.cancel() }
+
+        for _ in 0..<5 { store.tick() }
+
+        XCTAssertEqual(publishes, 0, "the countdown must not re-render the view every second")
     }
 }
 

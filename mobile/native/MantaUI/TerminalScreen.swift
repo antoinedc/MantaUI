@@ -32,6 +32,9 @@ struct TerminalScreen: View {
     @ObservedObject var sessionStore: SessionListStore
     @StateObject private var terminal = TerminalSessionState()
     @EnvironmentObject private var navigator: MantaNavigator
+    /// A CLI starts only after the launch flags have been re-read from the box,
+    /// so it launches with what the user last chose, never a stale copy.
+    @State private var launcherReady: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
 
@@ -44,6 +47,7 @@ struct TerminalScreen: View {
         self.defaultCwd = window.paneCurrentPath
         self.mode = mode
         self.sessionID = sessionID
+        if case .cli = mode { _launcherReady = State(initialValue: false) } else { _launcherReady = State(initialValue: true) }
         self._sessionStore = ObservedObject(wrappedValue: sessionStore)
     }
 
@@ -77,17 +81,31 @@ struct TerminalScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            TerminalContainerView(
-                state: terminal,
-                sessionName: sessionName,
-                windowIndex: windowIndex,
-                windowName: windowName,
-                projectName: projectName,
-                defaultCwd: defaultCwd,
-                danger: UIColor(tokens.danger),
-                mode: mode,
-                launcher: launcher
-            )
+            if launcherReady {
+                TerminalContainerView(
+                    state: terminal,
+                    sessionName: sessionName,
+                    windowIndex: windowIndex,
+                    windowName: windowName,
+                    projectName: projectName,
+                    defaultCwd: defaultCwd,
+                    danger: UIColor(tokens.danger),
+                    mode: mode,
+                    launcher: launcher
+                )
+            } else {
+                ProgressView()
+                    .tint(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .task {
+            guard !launcherReady else { return }
+            // Coalesces with any refresh already running. A failure still
+            // launches (with the last known flags) — the box decides if the CLI
+            // can start.
+            await sessionStore.refreshLaunchers()
+            launcherReady = true
         }
         .background(Color.black.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)

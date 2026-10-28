@@ -1300,7 +1300,8 @@ only `MantaError`, already in the package), `SessionForgeModels.swift`,
 `SessionCreateLogic.swift`, `SessionModeLogic.swift`, `SessionCloseLogic.swift`,
 `SessionSwitcherLogic.swift`, `SessionRouteLogic.swift`,
 `CloneFromGitHubLogic.swift`, `CloneFromGitHubSignInLogic.swift`; to
-`MantaUITests` `sources`: `SessionModelsTests.swift`, `SessionsTests.swift`,
+`MantaUITests` `sources`: `SessionModelsTests.swift` (the PURE half only — its store/URLProtocol suites were split
+into the Mac-only `SessionListStoreMacTests.swift`, round-1 code review #9), `SessionsTests.swift`,
 `CloneFromGitHubTests.swift`, `GitHubDeviceSignInTests.swift`. Each must pass
 `mobile/native/verify.sh` before hand-off; if `SessionModels.swift` turns out to
 pull a non-package type, it and `SessionModelsTests.swift` stay Mac-only and the

@@ -104,7 +104,8 @@ final class CloneFromGitHubStore: ObservableObject {
 
     func cloneSelected() {
         guard canClone else { return }
-        clonedPaths = []
+        // Repositories cloned earlier (before a failure and "Pick another repo")
+        // are kept: they are on disk and still get set up as workspaces.
         finished = false
         run(selected)
     }
@@ -171,6 +172,9 @@ final class CloneFromGitHubStore: ObservableObject {
             phase = .cloning(name: repo.name, index: offset, total: repos.count)
             status = nil
             let dest = ClonePicker.dest(root: root.trimmingCharacters(in: .whitespacesAndNewlines), name: repo.name)
+            // Already cloned in an earlier pass: nothing to do (cloning again
+            // would fail on a non-empty destination).
+            if clonedPaths.contains(dest) { continue }
 
             let start: CloneStartResult
             do {
@@ -219,12 +223,27 @@ final class CloneFromGitHubStore: ObservableObject {
 
     private func poll(id: String) async -> PollResult {
         let deadline = Date().addingTimeInterval(CloneTiming.timeout)
+        var consecutiveThrows = 0
         while !Task.isCancelled {
             if Date() > deadline { return .failed(.network, "The clone timed out.") }
-            let snapshot = try? await api.forgeCloneStatus(id: id)
+            let reply: CloneJobStatus?
+            do {
+                reply = try await api.forgeCloneStatus(id: id)
+                consecutiveThrows = 0
+            } catch {
+                guard !Task.isCancelled else { return .cancelled }
+                // One network blip must not end the clone UI while the box keeps
+                // cloning: only a run of failures does.
+                consecutiveThrows += 1
+                if consecutiveThrows >= CloneTiming.maxConsecutiveThrows {
+                    return .failed(.network, "Lost contact with the server while cloning.")
+                }
+                try? await Task.sleep(nanoseconds: UInt64(CloneTiming.pollInterval * 1_000_000_000))
+                continue
+            }
             guard !Task.isCancelled else { return .cancelled }
-            // `null` (or an unreadable answer) means the box forgot the job.
-            guard let snapshot else { return .failed(.unknown, "The clone job went away.") }
+            // `null` means the box forgot the job.
+            guard let snapshot = reply else { return .failed(.unknown, "The clone job went away.") }
             status = snapshot
             if snapshot.done {
                 if snapshot.ok { return .done }
