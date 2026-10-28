@@ -184,6 +184,71 @@ describe("SecretsCard (chat popover)", () => {
     expect(onDelete).toHaveBeenCalledWith("a");
   });
 
+  it("search filters rows by name or hint; Esc clears without bubbling", () => {
+    mountCard();
+    const search = h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement;
+    typeInto(search, "push");
+    expect(h!.text()).toContain("GITHUB_PAT");
+    expect(h!.text()).not.toContain("AWS_KEY");
+    typeInto(search, "aws");
+    expect(h!.text()).toContain("AWS_KEY");
+    expect(h!.text()).not.toContain("GITHUB_PAT");
+    typeInto(search, "nothing-here");
+    expect(h!.text()).toContain("No secrets match “nothing-here”");
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    press(search, "Escape");
+    document.removeEventListener("keydown", outer);
+    expect(outer).not.toHaveBeenCalled();
+    expect(search.value).toBe("");
+    expect(h!.text()).toContain("GITHUB_PAT");
+    expect(h!.text()).toContain("AWS_KEY");
+  });
+
+  it("× clears the search and refocuses it; Esc on an empty search still bubbles", () => {
+    mountCard();
+    const search = h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement;
+    expect(h!.container.querySelector('button[aria-label="Clear search"]')).toBeNull();
+    typeInto(search, "aws");
+    click(h!.container.querySelector('button[aria-label="Clear search"]'));
+    expect(search.value).toBe("");
+    expect(document.activeElement).toBe(search);
+    expect(h!.text()).toContain("GITHUB_PAT");
+    const outer = vi.fn();
+    document.addEventListener("keydown", outer);
+    press(search, "Escape");
+    document.removeEventListener("keydown", outer);
+    expect(outer).toHaveBeenCalledTimes(1);
+  });
+
+  it("a deep link arriving while the card is open clears the search so the target row shows", () => {
+    const props = {
+      secrets,
+      error: null,
+      sessionId: "ses_1",
+      onSave: vi.fn().mockResolvedValue(true),
+      onUpdate: vi.fn().mockResolvedValue({ ok: true }),
+      onDelete: vi.fn(),
+      onClose: () => {},
+    };
+    h = mount(<SecretsCard {...props} />);
+    const search = h.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement;
+    typeInto(search, "aws");
+    expect(h.text()).not.toContain("GITHUB_PAT");
+    h.rerender(<SecretsCard {...props} prefillKey="GITHUB_PAT" />);
+    expect(search.value).toBe("");
+    const row = Array.from(h.container.querySelectorAll("div.group")).find((d) => d.textContent?.includes("GITHUB_PAT"));
+    expect((row as HTMLElement).style.boxShadow).toContain("inset");
+  });
+
+  it("the row being edited stays visible when the search stops matching it", () => {
+    mountCard();
+    click(h!.container.querySelector('button[aria-label="Edit GITHUB_PAT"]'));
+    typeInto(h!.container.querySelector('input[aria-label="Search secrets"]') as HTMLInputElement, "aws");
+    expect(h!.container.querySelector('input[aria-label="Secret name"]')).not.toBeNull();
+    expect(h!.text()).toContain("AWS_KEY");
+  });
+
   it("'Manage all in Settings' opens Settings on the Secrets section", () => {
     mountCard();
     const seen: unknown[] = [];
