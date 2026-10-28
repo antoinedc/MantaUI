@@ -1172,6 +1172,57 @@ test("getProviders: a partial failure (/api/model or /api/integration 500) count
   });
 });
 
+test("getProviders: a mid-restart read (providers answered, zero connections anywhere) is NOT cached as good; last-good survives and the next read heals", async () => {
+  // The 2026-10-28 incident: opencode restarted while manta was up, and the catalogue read in
+  // that window answered provider+model but every integration still had `connections: []`.
+  // Caching it pinned `connected: []` and the model picker went empty until manta restarted.
+  // The scenario provider set has no `activation: "enabled"` member — every provider depends on
+  // an integration connection, like the box that hit it.
+  const base = PROVIDER_ROUTES();
+  const providers = { data: base["GET /api/provider"].data.filter((p) => p.activation !== "enabled") };
+  let connectionsEmpty = false;
+  const routes = {
+    ...base,
+    "GET /api/provider": () => providers,
+    "GET /api/integration": () => connectionsEmpty
+      ? { data: base["GET /api/integration"].data.map((i) => ({ ...i, connections: [] })) }
+      : base["GET /api/integration"],
+  };
+  const h = { clock: { t: 1_000_000 } };
+  await warnSilently((warnings) => withV2(routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    assert.deepEqual(good.connected, ["anthropic"]);
+    connectionsEmpty = true;
+    h.clock.t += PROVIDERS_CACHE_TTL_MS + 1; // past the TTL → one re-read
+    const during = await getProviders();
+    assert.equal(during, good, "the suspect read is refused; last-good served");
+    assert.equal(warnings.filter((w) => w.includes("[providers] refresh failed, serving last-good snapshot")).length, 1);
+    connectionsEmpty = false;
+    const healed = await getProviders(); // the failed read did not reset the TTL → re-reads
+    assert.deepEqual(healed.connected, ["anthropic"]);
+    assert.notEqual(healed, good, "healed from a fresh read");
+  }));
+});
+
+test("getProviders cold boot during an opencode restart: the suspect read → unavailable, so strict listModels rejects and the renderer keeps its list", async () => {
+  _resetProvidersCacheForTests();
+  const base = PROVIDER_ROUTES();
+  await withV2(
+    {
+      "GET /api/provider": { data: [{ id: "anthropic", integrationID: "anthropic", name: "Anthropic", activation: "auto" }] },
+      "GET /api/integration": { data: [{ id: "anthropic", methods: [], connections: [] }] },
+      "GET /api/model": base["GET /api/model"],
+      "GET /api/model/default": base["GET /api/model/default"],
+    },
+    async () => {
+      assert.deepEqual(await getProviders(), { connected: [], unavailable: true });
+      assert.deepEqual(await listModels(), []);
+      await assert.rejects(listModels({}, { strict: true }), /model list unavailable/);
+    },
+  );
+});
+
 test("getProviders: /api/model/default failing alone is not a failure and keeps the previous default", async () => {
   const h = cacheHarness();
   await withV2(h.routes, async () => {

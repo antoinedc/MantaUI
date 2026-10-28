@@ -1724,6 +1724,17 @@ async function fetchProviders(previous) {
       if (hasConnection.get(p.integrationID ?? p.id) || p.activation === "enabled") connected.push(p.id);
       all.push({ id: p.id, name: p.name, models: modelsByProvider.get(p.id) ?? {} });
     }
+    // A read where the catalogue answered but NOTHING is connected is the opencode-restart race:
+    // a fresh opencode serves /api/provider and /api/model before its auth plugins have loaded,
+    // so every integration still reports `connections: []`. Caching that shape as a good
+    // snapshot pinned `connected: []` for the cache lifetime — every provider was filtered out
+    // of `listModels` and the model picker served an empty list until manta restarted
+    // (observed 2026-10-28: the empty list survived ~8 h). Treat it as a failed read: the
+    // caller serves last-good (or `unavailable` when cold, which strict `listModels` already
+    // turns into a rejection so the renderer keeps its own list) and the next call re-reads
+    // and heals. A box with genuinely no connected provider just loses caching — the served
+    // result is the same empty list either way.
+    if (connected.length === 0 && prov.data.length > 0) return null;
     const d = def?.data;
     let defaults = d?.providerID && (d.modelID ?? d.id) ? { [d.providerID]: d.modelID ?? d.id } : undefined;
     // The default read failing (null) is not a failed refresh: keep the one we already had.
