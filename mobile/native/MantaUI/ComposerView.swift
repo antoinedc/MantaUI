@@ -1551,7 +1551,7 @@ struct ComposerView: View {
             let plan = ComposerTypeahead.planSlashSend(text: trimmed, running: runningNow, remote: remote)
 
             // The snapshot's text, sent as an ordinary message.
-            func sendAsMessage() async {
+            @MainActor func sendAsMessage() async {
                 let resolved = ComposerTypeahead.resolveAgentMentions(text: trimmed, names: snapshot.agentNames)
                 PromptHistoryStore.append(trimmed, tmuxSession: historyTmuxSession,
                                           windowIndex: historyWindowIndex)
