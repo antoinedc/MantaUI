@@ -18,7 +18,7 @@ async function turn(engine, sid, { ctx = 250_000, outcome = "ok", model = OPUS, 
 }
 const records = (w, sid = "ses_p") => Object.values(w.engine._state.records).filter((r) => r.fromSessionId === sid);
 
-test("auto mode: a successful turn over budget starts an armed replacement — nothing runs in the successor yet", async () => {
+test("auto mode: a successful turn over budget starts a replacement and sends the handoff — the work continues with no message from the user", async () => {
   const w = standardWorld();
   await turn(w.engine, "ses_p");
   const [rec] = records(w);
@@ -26,11 +26,13 @@ test("auto mode: a successful turn over budget starts an armed replacement — n
   assert.equal(rec.kind, "auto");
   assert.equal(rec.state, "committed");
   assert.equal(rec.how, "clear");
-  assert.equal(rec.disposition, "armed");
+  assert.equal(rec.disposition, "send");
   assert.equal(w.generateCalls.length, 1);
-  assert.equal(w.accepted(rec.successorId).length, 0);
+  const sent = w.accepted(rec.successorId);
+  assert.equal(sent.length, 1, "the handoff itself is the successor's first message");
+  assert.ok(sent[0].text.includes("## Goal"));
   assert.equal(w.windows[0].sid, rec.successorId);
-  assert.ok(w.engine._state.continuations[rec.successorId].preamble);
+  assert.equal(w.engine._state.continuations[rec.successorId].preamble, undefined, "nothing is held for a later message");
 });
 
 test("no trigger: under budget, aborted turn, errored turn, drain-abort", async () => {
@@ -223,12 +225,12 @@ test("with a known window the budget is 60% of it for every family; with an unkn
   assert.equal(records(big).length, 0, "unknown window: opus ceiling 200k");
 });
 
-test("the armed preamble carries the labelled facts; the card text never goes into model context via the tool path", async () => {
+test("the automatic handoff carries the labelled facts into the successor's first message", async () => {
   const w = standardWorld();
   w.engine = w.build({ gather: { facts: async () => ({ predecessor: { id: "ses_p", title: "T" }, editedFiles: ["/proj/x.ts"], constraints: { items: ["no emojis"], at: 5 } }), measureContext: async () => null } });
   await turn(w.engine, "ses_p");
   const succ = records(w)[0].successorId;
-  const pre = w.engine._state.continuations[succ].preamble;
+  const pre = w.accepted(succ)[0].text;
   assert.match(pre, /- \(observed\) files this session edited: 1/);
   assert.match(pre, /- \(inferred\) standing instructions/);
 });
