@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -1803,7 +1803,8 @@ export function terminalShortcut(
 // The banner this helper feeds into fixes both. When the error is recognisably
 // a credential/auth failure on one of the three providers in the subscription
 // registry, the banner shows `<Label> needs to be reconnected.` with a single
-// [Reconnect] button that dispatches `manta-open-subscriptions`. Claude's own
+// [Reconnect] button that opens Settings → Accounts on the failing provider
+// (openAccountsSettings). Claude's own
 // server-side auto-refresh (`maybeRecoverCredentials`, the 10-min pre-expiry
 // poller) still runs in parallel — it is additive, not a replacement.
 //
@@ -1822,6 +1823,21 @@ export const AUTH_PROVIDER_LABELS: Record<string, string> = {
   openai: "Codex",
   "kimi-for-coding": "Kimi",
 };
+
+/**
+ * The seat-provider id (Settings → Accounts seat panel) for an auth-banner
+ * provider id. Kimi (API key) has no seat panel → undefined.
+ */
+export function authProviderSeatId(providerID: string | null | undefined): SeatProviderId | undefined {
+  if (providerID === "anthropic") return "claude";
+  if (providerID === "openai") return "codex";
+  return undefined;
+}
+
+/** A banner provider that signs in with an API key and has no seat panel (Kimi). */
+export function isKeyOnlyAuthProvider(providerID: string | null | undefined): boolean {
+  return typeof providerID === "string" && providerID in AUTH_PROVIDER_LABELS && authProviderSeatId(providerID) === undefined;
+}
 
 /**
  * Decide whether to surface a "needs to be reconnected" banner for a
@@ -3867,6 +3883,29 @@ export function accountsErrorMessage(code: AccountsError | string | undefined): 
     default:
       return "That didn't work. Try again.";
   }
+}
+
+/**
+ * What a seat that is the box's own login can be told: the server refuses to
+ * re-sign it (`live-seat`), so say what actually works instead of a button.
+ * `command` is shown as code by the caller (no backticks in the copy).
+ */
+export function liveSeatNoteParts(
+  provider: SeatProviderId,
+): { before: string; command: string | null; after: string } {
+  return provider === "claude"
+    ? {
+        before: "This is the login this box itself uses (the Claude CLI owns it). To sign in again, run ",
+        command: "claude auth login",
+        after: " on the box and sign in with the same account.",
+      }
+    : { before: "This is the login this box itself uses; it can't be re-signed from here yet.", command: null, after: "" };
+}
+
+/** The same note as one plain string (for places that render text only). */
+export function liveSeatNoteText(provider: SeatProviderId): string {
+  const n = liveSeatNoteParts(provider);
+  return `${n.before}${n.command ?? ""}${n.after}`;
 }
 
 /** A seat that cannot serve requests says why, in two words; a healthy one

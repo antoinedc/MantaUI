@@ -17,11 +17,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { SeatProviderId } from "../shared/types";
-import { accountsErrorMessage, isPollExpired } from "./chatUtils";
+import { accountsErrorMessage, isPollExpired, liveSeatNoteParts } from "./chatUtils";
 import { Callout } from "./Callout";
 import { Modal } from "./Modal";
 import { useStore } from "./store";
-import { refreshAccountsAndUsage } from "./accountsData";
+import { refreshAccounts, refreshAccountsAndUsage } from "./accountsData";
 import {
   CLIENT_LIMIT_MS,
   SEAT_POLL_INTERVAL_MS,
@@ -115,6 +115,15 @@ export function ResignSeatFlow({
         return;
       }
       if (cancelled) return;
+      if (res && "error" in res && res.error === "live-seat") {
+        // The seat became the box's own login since the list was read. Say what
+        // works instead, and refresh so the panel swaps the button for the note.
+        const n = liveSeatNoteParts(provider);
+        const how = n.command ? ` Run ${n.command}${n.after}` : "";
+        set({ kind: "failed", message: `${seatLabel} is now the login this box itself uses, so it can't be re-signed here.${how}` });
+        void refreshAccounts();
+        return;
+      }
       if (!res || "error" in res) {
         set({ kind: "failed", message: accountsErrorMessage(res && "error" in res ? res.error : undefined) });
         return;
