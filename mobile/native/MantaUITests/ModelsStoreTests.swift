@@ -93,9 +93,9 @@ final class ModelsStoreTests: XCTestCase {
         ModelsStubProtocol.responses = ["models:table": reply(table)]
         let (store, catalog) = store()
         store.start()
-        XCTAssertTrue(await eventually { ModelsStubProtocol.count("models:table") == 1 })
+        do { let ok = await eventually { ModelsStubProtocol.count("models:table") == 1 }; XCTAssertTrue(ok) }
         catalog.modelsUpdates.send()
-        XCTAssertTrue(await eventually { ModelsStubProtocol.count("models:table") == 2 })
+        do { let ok = await eventually { ModelsStubProtocol.count("models:table") == 2 }; XCTAssertTrue(ok) }
         try? await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(ModelsStubProtocol.count("models:table"), 2)
     }
@@ -199,7 +199,7 @@ final class ModelsStoreTests: XCTestCase {
         XCTAssertEqual(ModelsStubProtocol.count("opencode:models"), 1)
 
         NotificationCenter.default.post(name: .mantaProvidersChanged, object: nil)
-        XCTAssertTrue(await eventually { ModelsStubProtocol.count("opencode:models") == 2 })
+        do { let ok = await eventually { ModelsStubProtocol.count("opencode:models") == 2 }; XCTAssertTrue(ok) }
         await catalog.waitForLoad()
         XCTAssertEqual(ModelsStubProtocol.count("models:picker"), 2, "the picker is refetched with the list")
     }
@@ -212,14 +212,14 @@ final class ModelsStoreTests: XCTestCase {
         let catalog = ChatModelCatalog(api: api, defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
         let modelStore = ChatModelStore(sessionId: "s1", api: api, catalog: catalog, prefs: ChatModelPrefs(api: api))
         modelStore.loadAgentsIfNeeded()
-        XCTAssertTrue(await eventually { modelStore.agentsLoadError != nil })
+        do { let ok = await eventually { modelStore.agentsLoadError != nil }; XCTAssertTrue(ok) }
         XCTAssertNil(modelStore.agents)
         XCTAssertEqual(modelStore.agentsLoadError, "agents unavailable")
 
         ModelsStubProtocol.responses["opencode:agents"] = reply(#"[{"name":"plan","mode":"primary"}]"#)
         modelStore.retryAgents()
         XCTAssertNil(modelStore.agentsLoadError)
-        XCTAssertTrue(await eventually { modelStore.agents != nil })
+        do { let ok = await eventually { modelStore.agents != nil }; XCTAssertTrue(ok) }
     }
 
     // MARK: Box lifecycle + one-time copy
@@ -260,7 +260,7 @@ final class ModelsStoreTests: XCTestCase {
         let catalog = ChatModelCatalog(api: ModelsStubProtocol.client(), defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
         ModelsStubProtocol.held = ["opencode:models"]
         catalog.loadIfNeeded()
-        XCTAssertTrue(await eventually { ModelsStubProtocol.count("opencode:models") == 1 })
+        do { let ok = await eventually { ModelsStubProtocol.count("opencode:models") == 1 }; XCTAssertTrue(ok) }
         catalog.resetForBoxChange()
         ModelsStubProtocol.releaseHeld()
         try? await Task.sleep(for: .milliseconds(150))

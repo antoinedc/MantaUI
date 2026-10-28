@@ -20,7 +20,7 @@ extension MantaAPIClient {
     func listWebhooks(sessionId: String) async throws -> [WebhookMeta] {
         // The box maps a blank id to "every webhook on the box" — never ask that from a session card.
         guard !sessionId.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-        try await call("webhook:list", args: [sessionId], as: [WebhookMeta].self) ?? []
+        return try await call("webhook:list", args: [sessionId], as: [WebhookMeta].self) ?? []
     }
 
     /// `webhook:delete` — revoke a webhook by id. `deleted: false` (already gone)

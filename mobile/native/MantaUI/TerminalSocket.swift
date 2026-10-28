@@ -128,7 +128,7 @@ final class TerminalSocket {
     /// built — the first connect and every reconnect both come through here, so
     /// the launcher is never dropped. The bearer stays in a header, never in the
     /// URL.
-    static func makeRequest(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String?,
+    nonisolated static func makeRequest(serverURL: URL, sessionKey: String, cols: Int, rows: Int, cwd: String?,
                             launcher: SessionPtyLauncher?, token: String?) -> URLRequest? {
         guard let url = TerminalURLBuilder.ptyURL(
             serverURL: serverURL, sessionKey: sessionKey, cols: cols, rows: rows, cwd: cwd, launcher: launcher

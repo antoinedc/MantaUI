@@ -711,7 +711,7 @@ final class ChatCardsStubBoxTests: XCTestCase {
         h.store.start()
         await waitUntil { h.store.messages.count == 30 }
         h.store.focus(messageID: "m000")
-        await waitUntil(timeout: 15) { h.store.actionHint == ChatCardFocusMachine.tooFarBackMessage }
+        await waitUntil({ h.store.actionHint == ChatCardFocusMachine.tooFarBackMessage }, timeout: 15)
         XCTAssertEqual(h.store.actionHint, "That message is too far back to open here — it's more than 500 messages ago")
         XCTAssertEqual(h.store.focusPhase, .none)
     }

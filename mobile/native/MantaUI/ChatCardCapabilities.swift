@@ -18,7 +18,7 @@ import Combine
 final class ChatCardCapabilities: ObservableObject {
     /// The capability behind retry / compaction / send-error copy, the job view
     /// and refusal, and the inbox outcome copy.
-    static let chatCards = "chat-cards-1"
+    nonisolated static let chatCards = "chat-cards-1"
     static let updateBoxNote = ChatCardInboxGate.updateBoxNote
 
     @Published private(set) var ids: Set<String>?
