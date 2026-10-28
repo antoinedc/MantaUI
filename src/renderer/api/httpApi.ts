@@ -368,6 +368,11 @@ async function rpc<T>(channel: string, ...args: unknown[]): Promise<T> {
 // shell (config + project list). A stall here should fail fast and be retried,
 // not pin the empty/new-session screen until a manual reload.
 const RPC_METADATA_TIMEOUT_MS = 15000;
+// Approve/decline of a background-job approval only resolves an in-memory entry
+// on the box (it does not wait for job creation), so a stalled connection must
+// fail fast into the card's "couldn't confirm" outcome. This is the existing
+// fetch timeout (bounds waiting for response headers).
+const RPC_APPROVAL_TIMEOUT_MS = 15000;
 async function rpcWithTimeout<T>(
   channel: string,
   timeoutMs: number,
@@ -1312,8 +1317,9 @@ export const httpApi: Api = {
       (r) => (Array.isArray(r) ? r : Array.isArray(r?.approvals) ? r.approvals : []),
     ),
   delegateApprove: (id, tools) =>
-    rpc<{ ok: boolean }>(IPC.delegateApprove, { id, tools }),
-  delegateDecline: (id) => rpc<{ ok: boolean }>(IPC.delegateDecline, id),
+    rpcWithTimeout<{ ok: boolean }>(IPC.delegateApprove, RPC_APPROVAL_TIMEOUT_MS, { id, tools }),
+  delegateDecline: (id) =>
+    rpcWithTimeout<{ ok: boolean }>(IPC.delegateDecline, RPC_APPROVAL_TIMEOUT_MS, id),
   // BET-414: the box publishes `delegate.updated` on the /events WS whenever a
   // job's status/activity changes. The sidebar subscribes so new jobs nest
   // under their parent within ~1s (vs. the 30s poll). The payload is the raw
