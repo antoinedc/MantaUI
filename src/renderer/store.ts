@@ -405,7 +405,7 @@ type State = {
   cacheTtl: "5m" | "1h";
   // Per-launcher CLI flag overrides for AI CLI TUI launch modes (BET-138
   // refinement). Keyed by launcher id, then flag key; missing keys fall back
-  // to the launcher's registry default (see resolveLauncherFlags). Empty
+  // to the launcher's registry default (the box resolves them — launchers:list `value`). Empty
   // object = no user overrides for any launcher.
   launcherFlags: Record<string, Record<string, boolean>>;
   // Voice / Groq STT. `groqApiKey` is the gating signal — empty string

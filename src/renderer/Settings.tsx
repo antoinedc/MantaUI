@@ -30,7 +30,6 @@ import { AddPhonePanel } from "./AddPhonePanel";
 import { ReclaimRow } from "./ReclaimRow";
 import { SecretsSettings } from "./SecretsSettings";
 import { getMantaPreload } from "./preloadAccess";
-import { resolveLauncherFlags } from "./chatShared";
 import { applyTheme, type ThemePref } from "./theme";
 import { ChipGroup } from "./Chip";
 import { Card } from "./Card";
@@ -41,15 +40,15 @@ import { useApplySetting } from "./settingsApply";
 import { SettingsRow } from "./SettingsRow";
 import { BANNER_BTN } from "./Toast";
 import { errorDisclosure } from "./settingsError";
-import { describeUpdateTarget, voiceUi } from "./chatUtils";
+import { voiceUi } from "./chatUtils";
+import { describeUpdateTarget } from "../shared/updateTargets.mjs";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 import { refreshUpdateTargets } from "./updateCheck";
 import { rowUpdateState, isCliTarget, desktopUpdateBusy } from "../shared/updateTargets.mjs";
-import { forgeCredentialSecondary } from "./chatUtils";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
 import {
   useLaunchers,
-  updateLauncherFlag,
   useRegistryUrls,
 } from "./settingsShared";
 import type {
@@ -319,7 +318,10 @@ function UpdateTargetRow({
   rowState: { kind: "updating" } | { kind: "busy" } | { kind: "idle" };
   error: string | null;
 }) {
-  const row = describeUpdateTarget(target);
+  // The box words the box/CLI rows; the shared describe function words the Electron
+  // leg. A box row with no `view` is an older box: the static note, no button.
+  const oldBox = target.id !== "desktop" && !target.view;
+  const row = target.id === "desktop" ? describeUpdateTarget(target) : (target.view ?? { tone: "muted" as const, text: "" });
   const hasUpdate = target.latest != null && target.latest !== target.current;
   const updating = rowState.kind === "updating";
   const busy = rowState.kind === "busy";
@@ -341,7 +343,9 @@ function UpdateTargetRow({
   // rest are quiet text (ok / error) or a manual link (muted, when there is a
   // URL to offer).
   let action: ReactNode = null;
-  if (target.id === "desktop" && desktopBusy) {
+  if (oldBox) {
+    action = <UpdateBoxNote className="shrink-0 text-text-quiet" />;
+  } else if (target.id === "desktop" && desktopBusy) {
     // BET-1195: the desktop row shows its REAL in-flight state — the download
     // percent, or the terminal "Restarting Manta Desktop…" beat — from the
     // shared helper, instead of the generic "Updating…" spinner. Same label the
@@ -478,7 +482,6 @@ export function Settings({
   const theme = useStore((s) => s.theme);
   const cto = useStore((s) => s.cto);
   const skillRegistryUrls = useStore((s) => s.skillRegistryUrls);
-  const launcherFlags = useStore((s) => s.launcherFlags);
   const updatePrompt = useStore((s) => s.updatePrompt);
   const updateTargets = useStore((s) => s.updateTargets);
   // BET-1160: in-flight/result update state, read from the shared store so
@@ -782,16 +785,20 @@ export function Settings({
   };
 
   // Launcher flags (custom control — instant apply per flag).
-  const [availableLaunchers] = useLaunchers();
-  const [launcherFlagValues, setLauncherFlagValues] = useState(launcherFlags ?? {});
+  const [availableLaunchers, setAvailableLaunchers] = useLaunchers();
+  // The box owns the saved choice and its default: flip the box value, show the
+  // updated row it returns, and say so if it refuses (WS11 D3).
   const setLauncherFlag = (launcherId: string, flagKey: string, checked: boolean) => {
-    const prev = launcherFlagValues;
-    const nextFlags = updateLauncherFlag(availableLaunchers, launcherId, flagKey, checked, prev);
-    setLauncherFlagValues(nextFlags);
-    useStore.setState({ launcherFlags: nextFlags });
-    void window.api.configUpdate({ launcherFlags: nextFlags })
-      .then((r) => { const saved = (r as Record<string, unknown>).launcherFlags; useStore.setState({ launcherFlags: (saved && typeof saved === "object" ? saved : nextFlags) as Record<string, Record<string, boolean>> }); })
-      .catch((e: unknown) => { useStore.setState({ launcherFlags: prev }); setLauncherFlagValues(prev); push({ id: `err-launcher-${Date.now()}`, message: errorDisclosure("Couldn't save launcher flag.", e) }); });
+    const before = availableLaunchers;
+    setAvailableLaunchers((list) =>
+      list.map((l) => (l.id === launcherId ? { ...l, flags: l.flags.map((f) => (f.key === flagKey ? { ...f, value: checked } : f)) } : l)),
+    );
+    window.api.launchersSetFlag({ id: launcherId, key: flagKey, value: checked })
+      .then((row) => setAvailableLaunchers((list) => list.map((l) => (l.id === row.id ? row : l))))
+      .catch((e: unknown) => {
+        setAvailableLaunchers(before);
+        push({ id: `err-launcher-${Date.now()}`, message: errorDisclosure("Couldn't save launcher flag.", e) });
+      });
   };
 
   // Plugins (desktop-only Mac-local toggle + registry list).
@@ -1256,7 +1263,7 @@ export function Settings({
               <ListRow
                 leading={<StatusDot tone={forgeStatus.valid === false ? "warn" : "ok"} />}
                 name="GitHub"
-                secondary={forgeCredentialSecondary(forgeStatus)}
+                secondary={forgeStatus.secondary ?? (forgeStatus.login ? `@${forgeStatus.login}` : "connected")}
                 trailing={<button onClick={() => void disconnectForge()} className="text-label px-3 py-1 rounded-full border border-border text-text-muted hover:text-text">Disconnect</button>}
               />
             ) : (
@@ -1367,7 +1374,11 @@ export function Settings({
                     <div className="text-body font-medium text-text">{l.label}</div>
                     {l.flags.map((f) => (
                       <SettingsRow key={f.key} name={f.label}>
-                        <Checkbox checked={resolveLauncherFlags(l.flags, launcherFlagValues[l.id])[f.key]} onChange={(v) => setLauncherFlag(l.id, f.key, v)} ariaLabel={f.label} />
+                        {f.value === undefined ? (
+                          <UpdateBoxNote className="text-meta text-text-faint" />
+                        ) : (
+                          <Checkbox checked={f.value} onChange={(v) => setLauncherFlag(l.id, f.key, v)} ariaLabel={f.label} />
+                        )}
                       </SettingsRow>
                     ))}
                   </div>

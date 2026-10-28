@@ -51,12 +51,11 @@ struct TerminalScreen: View {
         self._sessionStore = ObservedObject(wrappedValue: sessionStore)
     }
 
-    /// The launcher to start: the CLI's id plus the user's saved flags laid over
-    /// the schema defaults (`ExtensionsLaunchers.resolve`). Nil for a shell.
+    /// The launcher to start: just the CLI's id — the box applies the saved launch
+    /// options (WS11 D3). Nil for a shell.
     private var launcher: SessionPtyLauncher? {
         guard case .cli(let id) = mode else { return nil }
-        let schema = sessionStore.launchers.first(where: { $0.id == id })?.flags ?? []
-        return SessionPtyLauncher(id: id, flags: ExtensionsLaunchers.resolve(schema: schema, saved: sessionStore.launcherFlags[id]))
+        return SessionPtyLauncher(id: id)
     }
 
     /// The header's second line: the CLI's name (when it is one) and the live

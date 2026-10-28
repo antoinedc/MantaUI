@@ -628,6 +628,7 @@ export const explicitMethods = {
   onOpencodeEvent,
   onStreamEvent,
   launchersList,
+  launchersSetFlag: () => Promise.reject(new Error("Not available in the demo.")),
   servePageList,
   outboxList,
   artifactsList,

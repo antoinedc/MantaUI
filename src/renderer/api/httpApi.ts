@@ -1132,6 +1132,7 @@ export const httpApi: Api = {
 
   // -- AI CLI TUI launchers --
   launchersList: () => rpc(IPC.launchersList),
+  launchersSetFlag: (input) => rpc(IPC.launchersSetFlag, input),
 
   // -- window status --
   onStatusEvent: (cb) => on<WindowStatus[]>("status", cb),

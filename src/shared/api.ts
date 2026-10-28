@@ -162,7 +162,26 @@ export type UpgradeStatus = {
     needBytes?: number;
     haveBytes?: number;
   } | null;
+  /** The gate's wording, computed by the box (WS11 D3 / X5). Absent on an older box. */
+  view?: UpgradeView;
 };
+export type UpgradeView =
+  | { kind: "idle" | "completed" }
+  | { kind: "running"; currentStepId: UpgradeStepId | null; currentFraction: number | null; etaText: string | null; details: string }
+  | {
+      kind: "failed";
+      currentStepId: UpgradeStepId | null;
+      failedStep: UpgradeStepId;
+      message: string;
+      disk: string | null;
+      diskSentence: string | null;
+      retryLabel: "Retry" | "Check again";
+      canRetry: boolean;
+      retryDisabledReason: string | null;
+      canRollback: boolean;
+      details: string;
+    }
+  | { kind: "rolled_back"; details: string };
 /** `POST /api/upgrade/retry` and `/rollback` outcome. */
 export type UpgradeActionResult = { ok: true } | { ok: false; error: string };
 
@@ -1203,6 +1222,7 @@ export interface Api {
   // Which AI CLI TUI launchers are available on this box right now (BET-138
   // refinement). Cheap; call on active-session change, no polling needed.
   launchersList(): Promise<AvailableLauncher[]>;
+  launchersSetFlag(input: { id: string; key: string; value: boolean }): Promise<AvailableLauncher>;
 
   onStatusEvent(cb: (batch: WindowStatus[]) => void): () => void;
 

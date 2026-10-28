@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { UpdateTarget } from "./types";
-import { describeUpdateTarget } from "../renderer/chatUtils";
 import {
   buildUpdateTargets,
+  describeUpdateTarget,
   summarizeUpdates,
   describeUpdateBanner,
   planUpdateAll,
@@ -519,5 +519,28 @@ describe("isCliTarget", () => {
   it("null/undefined is never a cli target", () => {
     expect(isCliTarget(null)).toBe(false);
     expect(isCliTarget(undefined)).toBe(false);
+  });
+});
+
+describe("buildUpdateTargets carries the box's row wording (WS11 D3)", () => {
+  it("attaches view to the server and CLI rows only", () => {
+    const targets = buildUpdateTargets({
+      desktopCheck: { supported: true, available: false, version: null },
+      serverCheck: {
+        ok: true, available: true, version: "2",
+        targets: [{ id: "opencode", label: "opencode", current: "1", latest: "2", available: true, ok: true, manual: false, disruption: "ends-turns" }],
+        view: { targets: [
+          { id: "server", label: "Manta Server", tone: "action", text: "Update available", hasUpdate: true, versionText: "1 → 2" },
+          { id: "opencode", label: "opencode", tone: "action", text: "Update available", hasUpdate: true, versionText: "1 → 2" },
+        ] },
+      } as never,
+    });
+    expect(targets.find((t) => t.id === "desktop")?.view).toBeUndefined();
+    expect(targets.find((t) => t.id === "server")?.view?.text).toBe("Update available");
+    expect(targets.find((t) => t.id === "opencode")?.view?.hasUpdate).toBe(true);
+  });
+  it("an older box (no view) leaves the rows without one", () => {
+    const targets = buildUpdateTargets({ serverCheck: { ok: true, available: false } as never });
+    expect(targets.find((t) => t.id === "server")?.view).toBeUndefined();
   });
 });

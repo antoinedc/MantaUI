@@ -130,6 +130,41 @@ struct UpgradeFailure: Decodable, Equatable, Sendable {
     }
 }
 
+/// The box's wording of the gate (`view` on the K3 object): the current step, ETA text,
+/// disk sentence, Retry / Roll back rules and the "Copy details" text. Lenient: every
+/// field is optional so a newer box never breaks an older app.
+struct UpgradeView: Decodable, Equatable, Sendable {
+    var kind: String
+    var currentStepId: String?
+    var currentFraction: Double?
+    var etaText: String?
+    var details: String?
+    var failedStep: String?
+    var message: String?
+    var diskSentence: String?
+    var retryLabel: String?
+    var canRetry: Bool?
+    var retryDisabledReason: String?
+    var canRollback: Bool?
+
+    init(kind: String, currentStepId: String? = nil, currentFraction: Double? = nil, etaText: String? = nil,
+         details: String? = nil, failedStep: String? = nil, message: String? = nil, diskSentence: String? = nil,
+         retryLabel: String? = nil, canRetry: Bool? = nil, retryDisabledReason: String? = nil, canRollback: Bool? = nil) {
+        self.kind = kind
+        self.currentStepId = currentStepId
+        self.currentFraction = currentFraction
+        self.etaText = etaText
+        self.details = details
+        self.failedStep = failedStep
+        self.message = message
+        self.diskSentence = diskSentence
+        self.retryLabel = retryLabel
+        self.canRetry = canRetry
+        self.retryDisabledReason = retryDisabledReason
+        self.canRollback = canRollback
+    }
+}
+
 /// The K3 object, from `GET /api/upgrade` or an `upgrade` frame's payload.
 /// Tolerant: a malformed step or field is repaired or dropped rather than
 /// failing the whole decode; only an unknown `state` throws (nothing to show).
@@ -140,17 +175,20 @@ struct UpgradeStatus: Decodable, Equatable, Sendable {
     var overall: Double
     var etaSeconds: Double?
     var error: UpgradeFailure?
+    /// The gate's wording, computed by the box (WS11 D3 / X5). nil on an older box.
+    var view: UpgradeView?
 
     init(state: UpgradeState, steps: [UpgradeStep] = [], overall: Double = 0,
-         etaSeconds: Double? = nil, error: UpgradeFailure? = nil) {
+         etaSeconds: Double? = nil, error: UpgradeFailure? = nil, view: UpgradeView? = nil) {
         self.state = state
         self.steps = steps
         self.overall = min(1, max(0, overall))
         self.etaSeconds = etaSeconds
         self.error = error
+        self.view = view
     }
 
-    private enum CodingKeys: String, CodingKey { case state, steps, overall, etaSeconds, error }
+    private enum CodingKeys: String, CodingKey { case state, steps, overall, etaSeconds, error, view }
 
     /// Decodes an element without letting its failure fail the surrounding array.
     private struct LossyStep: Decodable {
@@ -172,6 +210,7 @@ struct UpgradeStatus: Decodable, Equatable, Sendable {
         let eta = UpgradeProgress.finite((try? c.decodeIfPresent(Double.self, forKey: .etaSeconds)) ?? nil)
         etaSeconds = (eta ?? -1) >= 0 ? eta : nil
         error = (try? c.decodeIfPresent(UpgradeFailure.self, forKey: .error)) ?? nil
+        view = (try? c.decodeIfPresent(UpgradeView.self, forKey: .view)) ?? nil
     }
 
     /// Parse an HTTP body. nil when it is not a K3 object.
@@ -297,7 +336,7 @@ struct UpgradeScreenModel: Equatable, Sendable {
     var currentStep: UpgradeStep?
     /// nil → indeterminate
     var currentFraction: Double?
-    /// "needs 31 GB free, has 3 GB" on a disk failure.
+    /// "Needs 31 GB free, has 3 GB." on a disk failure — worded by the box.
     var disk: String?
     /// Reserved for a state the phone cannot act on. Always nil now that a failed
     /// upgrade is actionable from here.
@@ -317,8 +356,10 @@ struct UpgradeScreenModel: Equatable, Sendable {
     var nothingChanged: Bool = false
     var retry: UpgradeActionOutcome = .idle
     var rollback: UpgradeActionOutcome = .idle
-    /// Plain-text snapshot for "Copy details" (running, failed, rolled back).
+    /// Plain-text snapshot for "Copy details" (running, failed, rolled back) — the box's.
     var details: String = ""
+    /// The box sent no `view` (an older box): no Retry / Roll back; the screen shows the update note.
+    var needsBoxUpdate: Bool = false
 
     /// The success line under the Retry button, matching the label.
     var retryOkText: String { retryLabel == "Retry" ? "Retry requested" : "Checking again…" }
@@ -329,29 +370,29 @@ struct UpgradeScreenModel: Equatable, Sendable {
         if let status = s.status {
             switch status.state {
             case .running:
-                let current = UpgradePresentation.currentStep(status)
+                let v = status.view
+                let current = v?.currentStepId.flatMap { id in status.steps.first(where: { $0.id == id }) }
                 return UpgradeScreenModel(
                     kind: .running,
                     title: "Your box is upgrading",
                     message: "Conversations are unavailable until this finishes. You can leave the app; it will pick up where the box is.",
                     steps: status.steps,
                     overall: status.overall,
-                    eta: UpgradePresentation.etaText(status.etaSeconds),
+                    eta: v?.etaText,
                     currentStep: current,
-                    currentFraction: UpgradePresentation.fraction(current),
+                    currentFraction: v?.currentFraction,
                     disk: nil,
                     hint: nil,
-                    details: UpgradePresentation.details(heading: "running", steps: status.steps, failure: nil)
+                    details: v?.details ?? ""
                 )
             case .failed:
-                let message = status.error?.message
+                let v = status.view
+                let message = v?.message
+                    ?? status.error?.message
                     ?? status.steps.first(where: { $0.status == .failed })?.error
                     ?? "The upgrade failed."
-                let current = UpgradePresentation.currentStep(status)
-                let disk = UpgradePresentation.diskText(status.error)
-                let failedStep = status.error?.step ?? current?.id ?? "preflight"
-                let fixedInPlace = UpgradePresentation.fixedInPlaceSteps.contains(failedStep)
-                let retryable = status.error?.retryable != false
+                let failedStep = v?.failedStep ?? status.error?.step ?? "preflight"
+                let current = v?.currentStepId.flatMap { id in status.steps.first(where: { $0.id == id }) }
                 return UpgradeScreenModel(
                     kind: .failed,
                     title: "The upgrade couldn't finish",
@@ -361,19 +402,18 @@ struct UpgradeScreenModel: Equatable, Sendable {
                     eta: nil,
                     currentStep: current,
                     currentFraction: nil,
-                    disk: disk,
+                    disk: v?.diskSentence,
                     hint: nil,
                     failedStep: failedStep,
-                    retryLabel: fixedInPlace ? "Check again" : "Retry",
-                    canRetry: retryable,
-                    retryDisabledReason: retryable ? nil : "This failure can't be retried — roll back instead.",
-                    canRollback: !fixedInPlace,
+                    retryLabel: v?.retryLabel ?? "Retry",
+                    canRetry: v?.canRetry ?? false,
+                    retryDisabledReason: v?.retryDisabledReason,
+                    canRollback: v?.canRollback ?? false,
                     nothingChanged: failedStep == "preflight",
                     retry: s.retry,
                     rollback: s.rollback,
-                    details: UpgradePresentation.details(
-                        heading: "failed", steps: status.steps,
-                        failure: (step: failedStep, message: message, disk: disk))
+                    details: v?.details ?? "",
+                    needsBoxUpdate: v == nil
                 )
             case .rolledBack:
                 return UpgradeScreenModel(
@@ -387,7 +427,7 @@ struct UpgradeScreenModel: Equatable, Sendable {
                     currentFraction: nil,
                     disk: nil,
                     hint: nil,
-                    details: UpgradePresentation.details(heading: "rolled back", steps: status.steps, failure: nil)
+                    details: status.view?.details ?? ""
                 )
             case .idle, .completed:
                 break
@@ -413,95 +453,8 @@ struct UpgradeScreenModel: Equatable, Sendable {
 }
 
 enum UpgradePresentation {
-    /// Failures fixed in place: a preflight stop touched nothing, and a verify
-    /// failure (e.g. a Claude login) has a specific fix — so "Check again", and no
-    /// rollback offered.
-    static let fixedInPlaceSteps: Set<String> = ["preflight", "verify"]
-
-    /// Plain-text snapshot for "Copy details" — the one thing a stuck user can
-    /// hand to whoever is helping. Port of `describeGateDetails`
-    /// (upgradeGateLogic.ts): a heading, one line per step (status, measured
-    /// progress, caption, error), then the failure and the disk numbers.
-    static func details(heading: String, steps: [UpgradeStep],
-                        failure: (step: String, message: String, disk: String?)?) -> String {
-        var lines = ["Manta box upgrade — \(heading)"]
-        for step in steps {
-            var line = "\(step.id): \(step.status.rawValue)"
-            if let p = step.progress {
-                if let n = p.numerator, let d = p.denominator { line += " (\(number(n))/\(number(d)))" }
-                if let label = p.label { line += " — \(label)" }
-            }
-            if let error = step.error { line += " — \(error)" }
-            lines.append(line)
-        }
-        if let failure {
-            lines.append("error (\(failure.step)): \(failure.message)")
-            if let disk = failure.disk { lines.append("disk: \(disk)") }
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    /// A number the way `String(n)` prints it in JavaScript: 25 not 25.0.
-    private static func number(_ n: Double) -> String {
-        n == n.rounded() && abs(n) < 1e15 ? String(Int(n)) : String(n)
-    }
-
-    /// The running step, else the failed one.
-    static func currentStep(_ status: UpgradeStatus) -> UpgradeStep? {
-        status.steps.first(where: { $0.status == .running })
-            ?? status.steps.first(where: { $0.status == .failed })
-    }
-
-    /// numerator/denominator → 0...1, or nil (indeterminate) when not measurable.
-    static func fraction(_ step: UpgradeStep?) -> Double? {
-        guard let p = step?.progress, let n = p.numerator, let d = p.denominator, d > 0 else { return nil }
-        return min(1, max(0, n / d))
-    }
-
-    /// "about 4 min left"; nil when the box gave no estimate.
-    static func etaText(_ seconds: Double?) -> String? {
-        guard let seconds, seconds.isFinite, seconds >= 0 else { return nil }
-        if seconds < 45 { return "less than a minute left" }
-        let minutes = Int((seconds / 60).rounded())
-        if minutes < 60 { return "about \(minutes) min left" }
-        let h = minutes / 60
-        let m = minutes % 60
-        return m == 0 ? "about \(h) h left" : "about \(h) h \(m) min left"
-    }
-
-    /// "needs 31 GB free, has 3 GB"; nil unless the failure carries disk numbers.
-    static func diskText(_ failure: UpgradeFailure?) -> String? {
-        guard let need = failure?.needBytes, need > 0 else { return nil }
-        let needText = "needs \(bytes(need)) free"
-        guard let have = failure?.haveBytes, have >= 0 else { return needText }
-        return "\(needText), has \(have == 0 ? "0 B" : bytes(have))"
-    }
-
-    /// "needs 31 GB free, has 3 GB" → "Needs 31 GB free, has 3 GB."
-    static func sentence(_ text: String) -> String {
-        guard let first = text.first else { return text }
-        return first.uppercased() + text.dropFirst() + "."
-    }
-
-    /// Binary units, same shape as the desktop's `formatBytes` (31 GB, 1.5 GB).
-    static func bytes(_ n: Double) -> String {
-        guard n.isFinite, n > 0 else { return "0 B" }
-        if n < 1024 { return "\(Int(n)) B" }
-        let units = ["KB", "MB", "GB", "TB"]
-        var value = n / 1024
-        var i = 0
-        while value >= 1024, i < units.count - 1 {
-            value /= 1024
-            i += 1
-        }
-        if value < 10 {
-            let tenths = (value * 10).rounded() / 10
-            let text = tenths == tenths.rounded() ? String(Int(tenths)) : String(tenths)
-            return "\(text) \(units[i])"
-        }
-        return "\(Int(value.rounded())) \(units[i])"
-    }
-
+    // The gate's wording (current step, ETA, disk sentence, details, retry rules) is the
+    // BOX's now (`view`, WS11 D3); only the fallback label of a step the box did not name stays.
     static func defaultLabel(for id: String) -> String {
         switch id {
         case "preflight": return "Check disk space"

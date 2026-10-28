@@ -45,7 +45,7 @@ type Props = {
   active: boolean;
   // Present only when this Terminal is an AI CLI TUI launch mode (BET-138
   // refinement). Absent = plain login shell (base "terminal" mode).
-  launcher?: { id: string; flags: Record<string, boolean> };
+  launcher?: { id: string; flags?: Record<string, boolean> };
   // BET-347: set iff this Terminal is a window Manta did not create (a
   // pre-existing tmux session). The server then runs `tmux attach-session
   // -t <target>` instead of spawning a fresh shell. Format matches

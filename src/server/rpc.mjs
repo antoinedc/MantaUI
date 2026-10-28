@@ -19,6 +19,8 @@ import {
   computeStaleCache,
 } from "../shared/streamInterpretation.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
+import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
+import { createLauncherFlagWriter, launchersView, resolveLauncherForSpawn } from "./launchersConfig.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
 import {
@@ -815,6 +817,10 @@ export function buildHandlers({
     syncState.applyConfig(next);
     return next;
   };
+  const setLauncherFlag = createLauncherFlagWriter({
+    configGet: () => local.configGet(),
+    configUpdate: configUpdateSynced,
+  });
   const modelsTable = createModelsTable({
     listModels: (overrides) => oc.listModels(overrides, { strict: true }),
     configGet: () => local.configGet(),
@@ -1027,7 +1033,11 @@ export function buildHandlers({
     // server resolves cwd → origin → repo.
     // preload: ipcRenderer.invoke(IPC.forgeStatus)             → no args
     // preload: ipcRenderer.invoke(IPC.forgePullRequest, {cwd}) → args[0] = { cwd }
-    "forge:status": (input) => forgeStatus({ validate: input?.validate === true }),
+    // WS11 D3 (X9): `secondary` is the Settings row's second line, worded here.
+    "forge:status": async (input) => {
+      const status = await forgeStatus({ validate: input?.validate === true });
+      return status?.connected === true ? { ...status, secondary: forgeCredentialSecondary(status) } : status;
+    },
     "forge:pull-request": (input) =>
       pullRequestForCwd(typeof input === "object" && input !== null ? input.cwd : input),
     // A forge ref is either the session cwd ({ cwd }) — resolved box-side to
@@ -2049,6 +2059,8 @@ export function buildHandlers({
           // Detection threw or timed out — return the box verdict untouched.
         }
       }
+      // WS11 D3 (X3): the rows' wording (box + CLI targets), ready to render.
+      result.view = updateTargetsView({ check: result, serverVersion });
       return result;
     },
 
@@ -2786,7 +2798,7 @@ export function buildHandlers({
     //   Side-effect: data/exit events flow to bus as { kind:"pty", payload: PtyEvent }
     //   where PtyEvent = { kind:"data"|"exit", sessionKey, data? / code? }
     //   (matches src/shared/types.ts PtyEvent)
-    "pty:spawn": (opts) => {
+    "pty:spawn": async (opts) => {
       // `extraEnv` is SERVER-owned: whatever the caller sent is dropped, and the
       // only value ever set comes from a registered multi-account seat sign-in
       // (CLAUDE_CONFIG_DIR → that seat's own directory), for its own launcher.
@@ -2799,7 +2811,13 @@ export function buildHandlers({
       if (safe.launcher?.id === "claude-auth-login" && !login) {
         throw new Error("This sign-in has expired. Close it and start again.");
       }
-      const spawnOpts = login?.configDir ? { ...safe, extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : safe;
+      // WS11 D3 (X1): a launcher sent without `flags` runs with the box's saved options.
+      const launcher = await resolveLauncherForSpawn(safe.launcher, { configGet: () => local.configGet() });
+      const spawnOpts = {
+        ...safe,
+        ...(launcher ? { launcher } : {}),
+        ...(login?.configDir ? { extraEnv: { CLAUDE_CONFIG_DIR: login.configDir } } : {}),
+      };
       return pty.spawn(spawnOpts, (e) => bus.publish({ kind: "pty", payload: e }));
     },
 
@@ -2820,7 +2838,15 @@ export function buildHandlers({
     // src/server/launcherRegistry.mjs) are available on this box right now:
     // binary on PATH. Cheap; the renderer fetches on active-session change,
     // no polling.
-    "launchers:list": () => launchers.listAvailableLaunchers(),
+    "launchers:list": async () =>
+      launchersView(await launchers.listAvailableLaunchers(), await local.configGet()),
+    // WS11 D3 (X1): flip ONE launch option; returns the updated launcher row.
+    "launchers:set-flag": (input) =>
+      setLauncherFlag({
+        id: input?.id,
+        key: input?.key,
+        value: input?.value,
+      }),
   };
 }
 

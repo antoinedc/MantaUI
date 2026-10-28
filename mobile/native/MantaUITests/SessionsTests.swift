@@ -145,6 +145,8 @@ final class SessionModeLogicTests: XCTestCase {
         let b = SessionPtyLauncher(id: "claude", flags: ["a": false, "b": true])
         XCTAssertEqual(a.queryJSON, b.queryJSON)
         XCTAssertEqual(a.queryJSON, "{\"flags\":{\"a\":false,\"b\":true},\"id\":\"claude\"}")
+        // WS11 D3: with no flags the box applies the saved launch options.
+        XCTAssertEqual(SessionPtyLauncher(id: "claude").queryJSON, "{\"id\":\"claude\"}")
     }
 }
 

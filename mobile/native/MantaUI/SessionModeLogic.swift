@@ -103,19 +103,26 @@ enum SessionPtyKey {
     }
 }
 
-/// The `launcher` query value `/pty` reads: `{id, flags}`.
+/// The `launcher` query value `/pty` reads: `{id}` (the box applies the saved launch
+/// options) or `{id, flags}` when explicit flags are given.
 struct SessionPtyLauncher: Equatable, Sendable {
     var id: String
-    var flags: [String: Bool]
+    var flags: [String: Bool]?
+
+    init(id: String, flags: [String: Bool]? = nil) {
+        self.id = id
+        self.flags = flags
+    }
 
     /// Compact JSON with sorted keys, so the same launcher always produces the
-    /// same URL: `{"flags":{…},"id":"…"}`.
+    /// same URL: `{"id":"…"}` or `{"flags":{…},"id":"…"}`.
     var queryJSON: String {
-        let object: [String: Any] = ["id": id, "flags": flags]
+        var object: [String: Any] = ["id": id]
+        if let flags { object["flags"] = flags }
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
-            return "{\"flags\":{},\"id\":\"\(id)\"}"
+            return "{\"id\":\"\(id)\"}"
         }
         return text
     }

@@ -741,6 +741,9 @@ test("server:update-apply routes to runServerSelfUpdate with SELF_UPDATE_SCRIPT 
   assert.deepEqual(result, { ok: true, pid: 9999 });
 });
 
+// WS11 D3 (X3): the check also carries `view` (row wording); these tests pin the verdict itself.
+const withoutView = ({ view: _view, ...rest }) => rest;
+
 test("server:update-check routes to the injected checkServerUpdate and returns its verdict", async () => {
   // The channel behind Settings → About's "Check for updates" button. It must
   // hand back the poller's verdict verbatim — including `available:false`,
@@ -756,11 +759,12 @@ test("server:update-check routes to the injected checkServerUpdate and returns i
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
   assert.equal(calls, 1, "checkServerUpdate invoked exactly once");
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutView(result), {
     available: true,
     version: "9.9.9",
     notesUrl: "https://mantaui.com/releases",
   });
+  assert.ok(result.view.targets.some((t) => t.id === "server" && t.hasUpdate), "WS11 D3: the rows are worded on the box");
 });
 
 test("server:update-check defaults to 'no update' when the dep is not wired", async () => {
@@ -771,7 +775,7 @@ test("server:update-check defaults to 'no update' when the dep is not wired", as
   const { deps } = makeDeps([]);
   delete deps.checkServerUpdate;
   const handlers = buildHandlers(deps);
-  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+  assert.deepEqual(withoutView(await handlers["server:update-check"]()), { available: false });
 });
 
 test("server:update-check attaches CLI `targets` from the cliDetector", async () => {
@@ -799,7 +803,7 @@ test("server:update-check swallows a throwing cliDetector and keeps the box verd
   deps.cliDetector = { detect: async () => { throw new Error("probe exploded"); } };
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
-  assert.deepEqual(result, { available: true, version: "9.9.9" });
+  assert.deepEqual(withoutView(result), { available: true, version: "9.9.9" });
 });
 
 test("server:update-check swallows a timing-out cliDetector and keeps the box verdict", async () => {
@@ -811,7 +815,7 @@ test("server:update-check swallows a timing-out cliDetector and keeps the box ve
   deps.cliProbeTimeoutMs = 20; // tiny bound for the test
   const handlers = buildHandlers(deps);
   const result = await handlers["server:update-check"]();
-  assert.deepEqual(result, { available: false });
+  assert.deepEqual(withoutView(result), { available: false });
 });
 
 test("server:update-check works with no cliDetector wired (older box)", async () => {
@@ -820,7 +824,7 @@ test("server:update-check works with no cliDetector wired (older box)", async ()
   const { deps } = makeDeps([]);
   deps.checkServerUpdate = async () => ({ available: false });
   const handlers = buildHandlers(deps);
-  assert.deepEqual(await handlers["server:update-check"](), { available: false });
+  assert.deepEqual(withoutView(await handlers["server:update-check"]()), { available: false });
 });
 
 test("server:update-apply propagates runServerSelfUpdate's failure result through the RPC", async () => {
@@ -2302,4 +2306,20 @@ test("opencode:cache derives the stream's cache payload from the transcript; nul
   assert.equal((await running["opencode:cache"]("s")).staleAt, null);
   deps.oc.listMessages = async () => [{ info: { role: "user" } }];
   assert.equal(await buildHandlers(deps)["opencode:cache"]("s"), null);
+});
+
+test("launchers:set-flag writes the option through config and returns the updated row (WS11 D3)", async () => {
+  const { deps } = makeDeps([]);
+  let config = { launcherFlags: {} };
+  deps.local.configGet = async () => config;
+  deps.local.configUpdate = async (patch) => ((config = { ...config, ...patch }), config);
+  deps.syncState = { applyConfig: () => {} };
+  const handlers = buildHandlers(deps);
+  const row = await handlers["launchers:set-flag"]({ id: "claude", key: "skipPermissions", value: false });
+  assert.equal(row.id, "claude");
+  assert.equal(row.flags[0].value, false);
+  assert.deepEqual(config.launcherFlags, { claude: { skipPermissions: false } });
+  await assert.rejects(handlers["launchers:set-flag"]({ id: "ghost", key: "x", value: true }), /Unknown launcher\./);
+  const list = await handlers["launchers:list"]();
+  for (const l of list) for (const f of l.flags) assert.equal(typeof f.value, "boolean");
 });

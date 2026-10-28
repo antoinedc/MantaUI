@@ -4,10 +4,8 @@ import Foundation
 // WS10 F18 — software updates. Pure decisions behind the Updates screen,
 // Foundation-only ([pkg], D19):
 //
-//   - `UpdateTargets`   the display list + row wording (port of
-//                       src/shared/updateTargets.mjs `buildUpdateTargets` and
-//                       src/renderer/chatUtils.ts `describeUpdateTarget` /
-//                       `boxUpgradeLanded`, minus the desktop row);
+//   - `UpdateTargets`   `landed` — did the box restart onto a new build (the row list
+//                       and its wording are the box's `view`, WS11 D3);
 //   - `UpdateApplyClassifier`  what the `server:update-apply` answer means. The
 //                       box restarts ITSELF as the last step of a successful
 //                       update, so a dropped connection or a proxy 5xx is the
@@ -118,46 +116,21 @@ enum UpdateApplyClassifier {
 
 enum UpdateTone: Equatable, Sendable {
     case ok, action, muted, error
+
+    /// The box's `tone` string; an unknown value reads as muted (never "ok").
+    init(wire: String) {
+        switch wire {
+        case "ok": self = .ok
+        case "action": self = .action
+        case "error": self = .error
+        default: self = .muted
+        }
+    }
 }
 
+/// The wording of every row comes from the box (`server:update-check` → `view.targets`,
+/// WS11 D3); only the edge "did the box land on a new build" is a client decision.
 enum UpdateTargets {
-
-    /// The rows, in a FIXED order (never discovery order): the box server, then
-    /// opencode, then the other AI CLIs alphabetically by label. The desktop row
-    /// is never present on the phone. A missing check (it timed out or threw) is
-    /// a server row with `ok == false` — never "up to date".
-    static func build(check: ServerUpdateCheck?, serverVersion: String?) -> [UpdateTarget] {
-        let server = UpdateTarget(
-            id: "server",
-            label: "Manta Server",
-            current: serverVersion,
-            latest: check?.version,
-            available: check?.available == true,
-            ok: check != nil && check?.ok != false,
-            manual: false,
-            disruption: "reconnect"
-        )
-        let clis = (check?.targets ?? []).filter { $0.id != "desktop" && $0.id != "server" }
-        let opencode = clis.first { $0.id == "opencode" }
-        let rest = clis
-            .filter { $0.id != "opencode" }
-            .sorted { $0.label < $1.label }
-        return [server] + (opencode.map { [$0] } ?? []) + rest
-    }
-
-    /// The row's status wording. Order IS the semantics: an unanswerable check
-    /// wins over everything and is NEVER rendered as ok.
-    static func describe(_ t: UpdateTarget) -> (tone: UpdateTone, text: String) {
-        if !t.ok { return (.error, "Couldn't check") }
-        if t.manual { return (.muted, "Update manually") }
-        if t.available { return (.action, "Update available") }
-        return (.ok, "Up to date")
-    }
-
-    /// True when an Update button should be offered for this row.
-    static func hasUpdate(_ t: UpdateTarget) -> Bool {
-        t.ok && t.available && !t.manual
-    }
 
     /// Has the box restarted onto a different build than the one it was running
     /// when the update started? The ONLY signal that ends the restarting state:
@@ -166,12 +139,6 @@ enum UpdateTargets {
     static func landed(from: String?, current: String?) -> Bool {
         guard let from, !from.isEmpty, let current, !current.isEmpty else { return false }
         return from != current
-    }
-
-    /// "current → latest" for a row, omitting what is unknown.
-    static func versionText(_ t: UpdateTarget) -> String? {
-        if let c = t.current, let l = t.latest, c != l { return "\(c) → \(l)" }
-        return t.current ?? t.latest
     }
 }
 

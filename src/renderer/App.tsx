@@ -21,7 +21,6 @@ import {
   type ModelSelection,
   readSavedMode,
   writeSavedMode,
-  resolveLauncherFlags,
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
@@ -243,7 +242,6 @@ function Shell() {
   // the App-local `desktopRestarting` below (the desktop analogue of boxRestarting).
   const desktopDownloadPercent = useStore((s) => s.desktopDownloadPercent);
   const connectionState = useStore((s) => s.connectionState);
-  const launcherFlags = useStore((s) => s.launcherFlags);
   const createDraft = useStore((s) => s.createDraft);
   const boxStale = useStore((s) => s.boxStale);
   // BET-708: first-time pairing swaps window.api in place with no reload
@@ -2174,9 +2172,8 @@ function Shell() {
                 const launcherDef = m.modeId === "terminal"
                   ? undefined
                   : availableLaunchers.find((l) => l.id === m.modeId);
-                const launcher = launcherDef
-                  ? { id: launcherDef.id, flags: resolveLauncherFlags(launcherDef.flags, launcherFlags[launcherDef.id]) }
-                  : undefined;
+                // The box resolves the saved launch options at spawn (WS11 D3).
+                const launcher = launcherDef ? { id: launcherDef.id } : undefined;
                 return (
                   <PanelShell key={`term:${key}`} active={isActiveThisMode}>
                     <Terminal

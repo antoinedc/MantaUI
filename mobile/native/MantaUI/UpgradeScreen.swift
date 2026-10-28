@@ -104,7 +104,7 @@ struct UpgradeScreen: View {
     private var failureBlock: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             if let disk = model.disk {
-                Text(UpgradePresentation.sentence(disk))
+                Text(disk)
                     .font(.manta(size: Metrics.type.body, weight: .semibold))
                     .foregroundColor(tokens.danger)
                     .accessibilityIdentifier("upgrade-disk")
@@ -125,7 +125,13 @@ struct UpgradeScreen: View {
 
     private var failureActions: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+            // An older box sends no `view`: the Retry / Roll back rules are the box's,
+            // so neither control is offered — the update note says why.
+            if model.needsBoxUpdate {
+                UpdateBoxNote(showsLink: false)
+            }
             HStack(spacing: Metrics.spacing.sp3) {
+              if !model.needsBoxUpdate {
                 Button {
                     Task { await upgradeStore.retry() }
                 } label: {
@@ -166,6 +172,7 @@ struct UpgradeScreen: View {
                     .opacity(busy ? 0.4 : 1)
                     .accessibilityIdentifier("upgrade-rollback")
                 }
+              }
             }
 
             outcomeLine(model.retry, okText: model.retryOkText)
@@ -198,7 +205,12 @@ struct UpgradeScreen: View {
         }
     }
 
+    @ViewBuilder
     private var copyDetailsRow: some View {
+        if !model.details.isEmpty { copyDetailsContent }
+    }
+
+    private var copyDetailsContent: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             Button {
                 UIPasteboard.general.string = model.details
@@ -240,7 +252,7 @@ struct UpgradeScreen: View {
                 if step.status == .running {
                     // The CURRENT step's own bar: determinate when the box reports
                     // numerator/denominator, an indeterminate spinner otherwise.
-                    if let fraction = UpgradePresentation.fraction(step) {
+                    if step.id == model.currentStep?.id, let fraction = model.currentFraction {
                         ProgressView(value: fraction)
                             .tint(tokens.accent)
                             .accessibilityLabel("\(step.label) progress")

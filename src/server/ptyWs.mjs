@@ -106,21 +106,26 @@ export function attachPtyWs(ws, url, opts = {}) {
   }
 
   withPty((ptyModule) => {
-    ptyModule.spawn({ sessionKey, cwd, cols, rows, launcher }, (e) => {
-      if (e.kind === "data") {
-        try {
-          ws.send(typeof e.data === "string" ? e.data : Buffer.from(e.data));
-        } catch {
-          /* socket closing */
+    const spawnWith = (resolvedLauncher) =>
+      ptyModule.spawn({ sessionKey, cwd, cols, rows, launcher: resolvedLauncher }, (e) => {
+        if (e.kind === "data") {
+          try {
+            ws.send(typeof e.data === "string" ? e.data : Buffer.from(e.data));
+          } catch {
+            /* socket closing */
+          }
+        } else if (e.kind === "exit") {
+          try {
+            ws.close(1000, JSON.stringify({ kind: "exit", code: e.code ?? null }));
+          } catch {
+            /* already closed */
+          }
         }
-      } else if (e.kind === "exit") {
-        try {
-          ws.close(1000, JSON.stringify({ kind: "exit", code: e.code ?? null }));
-        } catch {
-          /* already closed */
-        }
-      }
-    });
+      });
+    // WS11 D3 (X1): a launcher sent without `flags` gets the box's saved options
+    // (only that case waits; every other spawn stays synchronous).
+    if (opts.resolveLauncher && launcher) return Promise.resolve(opts.resolveLauncher(launcher)).then(spawnWith);
+    return spawnWith(launcher);
   });
 
   ws.on("message", (raw) => {

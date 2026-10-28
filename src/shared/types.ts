@@ -656,6 +656,8 @@ export type ForgeStatusResult =
        *  rejected (only reachable for a `gh` CLI / env credential — a rejected
        *  stored credential is cleared, so it reports `connected: false`). */
       valid: boolean | null;
+      /** The row's second line, worded by the box (WS11 D3 / X9); absent on an older box. */
+      secondary?: string;
     }
   | { connected: false };
 
@@ -992,7 +994,7 @@ export type SpawnOptions = {
   cols: number;
   rows: number;
   // Present only for a TUI launch mode (absent = plain login shell).
-  launcher?: { id: string; flags: Record<string, boolean> };
+  launcher?: { id: string; flags?: Record<string, boolean> };
   // Present only when attaching to an existing tmux window (a window Manta
   // did not create). WINS over `launcher`. Server-only behavior today; the
   // renderer half to wire this through is the follow-up issue.
@@ -1012,6 +1014,8 @@ export type LauncherFlagSchema = {
   label: string;
   type: "boolean";
   default: boolean;
+  /** The box-resolved current value (saved choice, else the default). Absent on an older box. */
+  value?: boolean;
 };
 
 export type AvailableLauncher = {
@@ -1104,6 +1108,12 @@ export type UpdateTarget = {
   manual: boolean; // no safe upgrade command → link, not a button
   manualUrl?: string;
   disruption: "none" | "reconnect" | "ends-turns" | "app-restart";
+  /**
+   * The row wording the BOX computed for a box-side target (WS11 D3 / X3):
+   * `server:update-check`'s `view.targets`. Absent on the desktop row (the shared
+   * `describeUpdateTarget` words that Electron leg) and on an older box.
+   */
+  view?: { tone: "ok" | "action" | "muted" | "error"; text: string; hasUpdate: boolean; versionText: string | null };
 };
 
 // Result of an ON-DEMAND desktop update check (`autoUpdate:check`).
@@ -1480,6 +1490,8 @@ export const IPC = {
   // right now — binary on PATH AND its opencode provider connected. Drives
   // the session-mode dropdown's launcher options (BET-138 refinement).
   launchersList: "launchers:list",
+  // Flip ONE launch option on the box ({id, key, value}) → the updated launcher row.
+  launchersSetFlag: "launchers:set-flag",
 
   // Per-window activity status, pushed every ~2s from a remote pane-capture poll
   statusEvent: "status:event",

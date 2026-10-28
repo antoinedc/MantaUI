@@ -88,6 +88,32 @@ struct UpdateTarget: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// One update row as the box words it (`server:update-check` → `view.targets`).
+struct UpdateTargetView: Decodable, Equatable, Sendable, Identifiable {
+    var id: String
+    var label: String
+    /// "ok" | "action" | "muted" | "error"
+    var tone: String
+    var text: String
+    var hasUpdate: Bool
+    var versionText: String?
+
+    init(id: String, label: String, tone: String, text: String, hasUpdate: Bool = false, versionText: String? = nil) {
+        self.id = id
+        self.label = label
+        self.tone = tone
+        self.text = text
+        self.hasUpdate = hasUpdate
+        self.versionText = versionText
+    }
+}
+
+struct ServerUpdateView: Decodable, Equatable, Sendable {
+    var targets: [UpdateTargetView]
+
+    init(targets: [UpdateTargetView]) { self.targets = targets }
+}
+
 /// `server:update-check` — the box verdict plus the box-side CLI targets.
 struct ServerUpdateCheck: Decodable, Equatable, Sendable {
     var available: Bool
@@ -96,17 +122,20 @@ struct ServerUpdateCheck: Decodable, Equatable, Sendable {
     /// nil on an old box (treated as true).
     var ok: Bool?
     var targets: [UpdateTarget]?
+    /// The rows' wording, computed by the box (WS11 D3 / X3). nil on an older box.
+    var view: ServerUpdateView?
 
     init(available: Bool, version: String? = nil, notesUrl: String? = nil,
-         ok: Bool? = nil, targets: [UpdateTarget]? = nil) {
+         ok: Bool? = nil, targets: [UpdateTarget]? = nil, view: ServerUpdateView? = nil) {
         self.available = available
         self.version = version
         self.notesUrl = notesUrl
         self.ok = ok
         self.targets = targets
+        self.view = view
     }
 
-    private enum CodingKeys: String, CodingKey { case available, version, notesUrl, ok, targets }
+    private enum CodingKeys: String, CodingKey { case available, version, notesUrl, ok, targets, view }
 
     /// Decodes an element without letting its failure drop the whole list.
     private struct LossyTarget: Decodable {
@@ -120,6 +149,7 @@ struct ServerUpdateCheck: Decodable, Equatable, Sendable {
         version = (try? c.decodeIfPresent(String.self, forKey: .version)) ?? nil
         notesUrl = (try? c.decodeIfPresent(String.self, forKey: .notesUrl)) ?? nil
         ok = (try? c.decodeIfPresent(Bool.self, forKey: .ok)) ?? nil
+        view = (try? c.decodeIfPresent(ServerUpdateView.self, forKey: .view)) ?? nil
         if let lossy = try? c.decodeIfPresent([LossyTarget].self, forKey: .targets) {
             targets = lossy.compactMap(\.target)
         } else {
@@ -379,13 +409,16 @@ struct ForgeConnectionStatus: Decodable, Equatable, Sendable {
     var source: String?
     /// nil = not probed.
     var valid: Bool?
+    /// The row's second line, worded by the box (WS11 D3 / X9). nil on an older box.
+    var secondary: String?
 
-    init(connected: Bool, login: String? = nil, kind: String? = nil, source: String? = nil, valid: Bool? = nil) {
+    init(connected: Bool, login: String? = nil, kind: String? = nil, source: String? = nil, valid: Bool? = nil, secondary: String? = nil) {
         self.connected = connected
         self.login = login
         self.kind = kind
         self.source = source
         self.valid = valid
+        self.secondary = secondary
     }
 }
 
@@ -419,14 +452,18 @@ struct AvailableLauncherFlag: Decodable, Equatable, Hashable, Sendable {
     var type: String
     /// JSON key "default".
     var `default`: Bool
+    /// The box-resolved current value (saved choice, else the default — WS11 D3 / X1).
+    /// `nil` = an older box: the row is shown disabled with the update note.
+    var value: Bool?
 
-    private enum CodingKeys: String, CodingKey { case key, label, type, `default` }
+    private enum CodingKeys: String, CodingKey { case key, label, type, `default`, value }
 
-    init(key: String, label: String, type: String = "boolean", default defaultValue: Bool = false) {
+    init(key: String, label: String, type: String = "boolean", default defaultValue: Bool = false, value: Bool? = nil) {
         self.key = key
         self.label = label
         self.type = type
         self.default = defaultValue
+        self.value = value
     }
 
     init(from decoder: Decoder) throws {
@@ -435,6 +472,7 @@ struct AvailableLauncherFlag: Decodable, Equatable, Hashable, Sendable {
         label = try c.decode(String.self, forKey: .label)
         type = ((try? c.decodeIfPresent(String.self, forKey: .type)) ?? nil) ?? "boolean"
         `default` = ((try? c.decodeIfPresent(Bool.self, forKey: .default)) ?? nil) ?? false
+        value = (try? c.decodeIfPresent(Bool.self, forKey: .value)) ?? nil
     }
 }
 

@@ -143,8 +143,6 @@ final class SessionListStore: ObservableObject {
     @Published private(set) var launcherCatalog: SessionLauncherCatalog = .loading
     /// The last good `launchers:list` (kept across a failed refresh).
     @Published private(set) var launchers: [AvailableLauncher] = []
-    /// `config.launcherFlags`: the user's saved flags per launcher.
-    @Published private(set) var launcherFlags: [String: [String: Bool]] = [:]
     /// The box's durable list of conversations a provider limit stopped (D16 —
     /// the ONLY stopped-state source on iOS; WS09 reads it).
     @Published private(set) var stoppedRecords: [SessionStoppedRecord] = []
@@ -997,16 +995,11 @@ final class SessionListStore: ObservableObject {
                 lastGood: launcherCatalog.authoritativeIDs
             )
         }
-        // The saved flags are read from the box at the same moment, so a CLI
-        // launches with what the user last chose (never a copy from app start).
-        let config = try? await mutations.configGet()
+        // The box resolves the saved launch options when the CLI starts (WS11 D3), so
+        // there is nothing to read here but the list.
         guard generation == boxGeneration else { return }
         if let list, list != launchers { launchers = list }
         if catalog != launcherCatalog { launcherCatalog = catalog }
-        if let config {
-            let flags = ExtensionsLaunchers.savedFlags(from: config)
-            if flags != launcherFlags { launcherFlags = flags }
-        }
     }
 
     // MARK: - Stopped conversations (spec 04 §9, D16)
@@ -1052,7 +1045,6 @@ final class SessionListStore: ObservableObject {
             } else {
                 cacheTtlMs = SessionCacheTtl.ms(for: nil)
             }
-            launcherFlags = ExtensionsLaunchers.savedFlags(from: config)
         }
     }
 
@@ -1091,7 +1083,6 @@ final class SessionListStore: ObservableObject {
         // are the user's habits on this phone, not facts about a box.
         launcherCatalog = .loading
         launchers = []
-        launcherFlags = [:]
         stoppedRecords = []
         stoppedLastLooked = nil
         stoppedConversations = []

@@ -600,35 +600,18 @@ final class SessionStoreTests: XCTestCase {
         XCTFail("timed out", file: file, line: line)
     }
 
-    // MARK: - Launch flags are fresh (finding 4)
+    // MARK: - Launch options are the box's (WS11 D3)
 
-    func testRefreshLaunchersReReadsSavedFlags() async {
+    func testBoxChangeThenRefreshReloadsTheCatalog() async {
         let fake = SessionListFake()
         fake.launcherResults = [.success([claude]), .success([claude])]
-        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(true)])])]
-        let store = makeStore(fake)
-
-        await store.refreshLaunchers()
-        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": true])
-
-        // The user changes the flag in Settings; the next refresh sees it.
-        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(false)])])]
-        await store.refreshLaunchers()
-        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": false])
-    }
-
-    func testBoxChangeThenRefreshRestoresFlags() async {
-        let fake = SessionListFake()
-        fake.launcherResults = [.success([claude]), .success([claude])]
-        fake.config = ["launcherFlags": .object(["claude": .object(["skipPermissions": .bool(true)])])]
         let store = makeStore(fake)
         await store.refreshLaunchers()
 
         store.resetForBoxChange()
-        XCTAssertTrue(store.launcherFlags.isEmpty)
+        XCTAssertTrue(store.launchers.isEmpty)
         await store.refreshLaunchers()
 
-        XCTAssertEqual(store.launcherFlags["claude"], ["skipPermissions": true])
         XCTAssertEqual(store.launcherCatalog, .loaded(ids: ["claude"]))
     }
 

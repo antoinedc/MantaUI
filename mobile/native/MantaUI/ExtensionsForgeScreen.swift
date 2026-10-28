@@ -188,7 +188,7 @@ struct ExtensionsForgeScreen: View {
                             .font(.manta(size: Metrics.type.body, weight: .medium))
                             .foregroundColor(tokens.tx1)
                         Text(status.connected
-                             ? ExtensionsForge.secondary(login: status.login, source: status.source, valid: status.valid)
+                             ? (status.secondary ?? status.login.map { "@\($0)" } ?? "connected")
                              : "Not connected.")
                             .font(.manta(size: Metrics.type.small))
                             .foregroundColor(status.valid == false ? tokens.warn : tokens.tx3)

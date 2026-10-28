@@ -80,6 +80,8 @@ import { blendedPrice } from "../shared/blendedPrice.mjs";
 }
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
+import { resolveLauncherForSpawn } from "./launchersConfig.mjs";
+import { devicesView, hasBlankDeviceId } from "./settingsViews.mjs";
 import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 import {
   buildHandlers,
@@ -3988,6 +3990,12 @@ const handleRequest = async (req, res) => {
         // absent → legacy whole-box reset.
         const token = parseBearer(req.headers["authorization"]);
         const q = Object.fromEntries(url.searchParams);
+        // WS11 D3 (X6): a `device_id` that is PRESENT but blank must never fall
+        // through to the whole-identity reset (an ABSENT one keeps that meaning).
+        if (hasBlankDeviceId(q)) {
+          respondJson(res, 400, { error: "device_id_required" });
+          return;
+        }
         const result = await authEngine.revoke({
           token,
           device_id: q.device_id ?? q.deviceId ?? null,
@@ -4158,7 +4166,8 @@ const handleRequest = async (req, res) => {
   if (req.method === "GET" && path === "/auth/devices") {
     respondJson(res, 200, {
       box_id: authEngine.box_id,
-      devices: authEngine.listDevices({ currentToken: parseBearer(req.headers["authorization"]) }),
+      // WS11 D3 (X6): sorted (this device first, then most recently active) with `revocable`.
+      devices: devicesView(authEngine.listDevices({ currentToken: parseBearer(req.headers["authorization"]) })),
     });
     return;
   }
@@ -6410,7 +6419,7 @@ const handleUpgrade = (req, socket, head) => {
     // Binary-safe terminal bridge (BET-158). Direct clients (header bearer
     // or ?token=<box_token>) connect here for a low-latency raw-byte
     // terminal stream.
-    wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url));
+    wss.handleUpgrade(req, socket, head, (ws) => attachPtyWs(ws, url, { resolveLauncher: (l) => resolveLauncherForSpawn(l, { configGet: local.configGet }) }));
     return;
   }
   if (url.pathname === "/call") {

@@ -41,7 +41,9 @@ private final class UpdatesFake: @unchecked Sendable {
                 lock.lock(); checkGate = c; lock.unlock()
             }
         }
-        return ServerUpdateCheck(available: true, version: "0.0.40")
+        return ServerUpdateCheck(
+            available: true, version: "0.0.40",
+            view: ServerUpdateView(targets: [UpdateTargetView(id: "server", label: "Manta Server", tone: "action", text: "Update available", hasUpdate: true, versionText: "0.0.39 → 0.0.40")]))
     }
     func openGate() {
         lock.lock(); let c = checkGate; checkGate = nil; lock.unlock()
@@ -175,6 +177,6 @@ final class SettingsUpdatesStoreTests: XCTestCase {
         await second.value
         XCTAssertTrue(secondDone.value)
         XCTAssertFalse(store.checking)
-        XCTAssertEqual(store.targets.first?.latest, "0.0.40")
+        XCTAssertEqual(store.targets.first?.versionText, "0.0.39 → 0.0.40")
     }
 }

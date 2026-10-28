@@ -32,6 +32,10 @@ export const DELETED = [
   // D2 — the stale-cache instant and the context percentage come from the box.
   { scopes: ["renderer"], regex: /\b(computeStaleCache|computeContextBreakdown|resolveContextLimit|selectLastAssistantCompletion)\(/, why: "D2: the box sends `cache.staleAt` and a `context` measured against the selected model — no client recompute" },
   { scopes: ["swift", "swiftTests"], regex: /static func recompute\(_ ctx: StreamContextPayload|UsageMeters\.recompute\(/, why: "D2: iOS shows the box's context payload as sent (UsageMeters.recompute is deleted)" },
+  // D3 — box-derived Settings fields.
+  { scopes: ["renderer"], regex: /\b(forgeCredentialSecondary|resolveLauncherFlags|updateLauncherFlag|describeGateDetails|describeDiskShortfall|formatEtaSeconds)\b/, why: "D3: the box words these (forge:status.secondary, launchers:list value, /api/upgrade view) — no client copy" },
+  { scopes: ["renderer"], regex: /export function describeUpdateTarget\b/, why: "D3: ONE describeUpdateTarget, in src/shared/updateTargets.mjs" },
+  { scopes: ["swift", "swiftTests"], regex: /\bisRevocableID\(|static func (canRevoke|sorted)\(_ devices|enum ExtensionsLaunchers\b.*|UpdateTargets\.(build|describe|hasUpdate|versionText)\(/, why: "D3: iOS renders the box's devices view / update view / launcher values as sent" },
 ];
 
 function* walk(dir, recursive) {

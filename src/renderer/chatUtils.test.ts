@@ -48,7 +48,6 @@ import {
   chooseUpdateSkewVariant,
   isTransientUpdateNetworkError,
   boxUpgradeLanded,
-  describeUpdateTarget,
   arrowUpNavigatesHistory,
   arrowDownNavigatesHistory,
   parseDeviceCode,
@@ -122,7 +121,6 @@ import {
   planHighlightRanges,
   cloneErrorKind,
   repoListErrorMessage,
-  forgeCredentialSecondary,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -146,7 +144,7 @@ import {
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest, UpdateTarget } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest } from "../shared/types";
 
 
 
@@ -1496,56 +1494,6 @@ describe("chooseUpdateSkewVariant", () => {
 });
 
 // ===== "Check for updates" verdict rows =====
-describe("describeUpdateTarget", () => {
-  const target = (over: Partial<UpdateTarget>): UpdateTarget => ({
-    id: "desktop",
-    label: "Desktop app",
-    current: null,
-    latest: null,
-    available: false,
-    ok: true,
-    manual: false,
-    disruption: "app-restart",
-    ...over,
-  });
-
-  it("reports a current target as 'ok', up to date", () => {
-    expect(describeUpdateTarget(target({ id: "desktop" }))).toEqual({
-      tone: "ok",
-      text: "Up to date",
-    });
-  });
-
-  it("reports an available target as 'action', update available", () => {
-    const row = describeUpdateTarget(target({ available: true }));
-    expect(row.tone).toBe("action");
-    expect(row.text).toBe("Update available");
-  });
-
-  it("reports a manual target as 'muted' — never 'up to date'", () => {
-    // A dev build (supported:false → manual) and a CLI with no safe upgrade
-    // command have to read as "not applicable", not as a clean bill of health.
-    const row = describeUpdateTarget(target({ manual: true }));
-    expect(row.tone).toBe("muted");
-    expect(row.tone).not.toBe("ok");
-  });
-
-  it("a failed check is an ERROR and outranks every other reading", () => {
-    // Even a manual, available target must render as a failure, not as an
-    // action or a reassuring "up to date". The invariant: an unanswerable
-    // check is NEVER rendered as "ok".
-    const row = describeUpdateTarget(target({ ok: false, manual: true, available: true }));
-    expect(row).toEqual({ tone: "error", text: "Couldn't check" });
-  });
-
-  it("manual outranks available", () => {
-    // A target that is both manual and available (e.g. a broken updater) must
-    // be muted "Update manually", not an actionable "Update available".
-    const row = describeUpdateTarget(target({ manual: true, available: true }));
-    expect(row.tone).toBe("muted");
-    expect(row.text).toBe("Update manually");
-  });
-});
 
 // ===== isTransientUpdateNetworkError =====
 describe("isTransientUpdateNetworkError", () => {
@@ -4260,46 +4208,6 @@ describe("repoListErrorMessage (BET-1011)", () => {
   });
 });
 
-describe("forgeCredentialSecondary (BET-1059)", () => {
-  it("explains a rejected gh CLI credential", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "cli", valid: false })).toBe(
-      "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.",
-    );
-  });
-
-  it("explains a rejected env-var credential", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "env", valid: false })).toBe(
-      "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.",
-    );
-  });
-
-  it("explains a rejected stored credential without a provenance hint", () => {
-    expect(forgeCredentialSecondary({ login: "a", source: "stored", valid: false })).toBe(
-      "GitHub rejected this sign-in. Disconnect, then connect again.",
-    );
-    expect(forgeCredentialSecondary({ login: null, source: null, valid: false })).toBe(
-      "GitHub rejected this sign-in. Disconnect, then connect again.",
-    );
-  });
-
-  it("valid with a login → @login · <where>", () => {
-    expect(forgeCredentialSecondary({ login: "antoinedc", source: "cli", valid: true })).toBe(
-      "@antoinedc · from the gh CLI on your server",
-    );
-  });
-
-  it("valid with no login → the bare <where>", () => {
-    expect(forgeCredentialSecondary({ login: null, source: "stored", valid: true })).toBe(
-      "signed in on this server",
-    );
-  });
-
-  it("valid null is treated like valid true — not-yet-probed never renders as rejected", () => {
-    expect(forgeCredentialSecondary({ login: "antoinedc", source: "env", valid: null })).toBe(
-      "@antoinedc · from the MANTA_GITHUB_TOKEN env var",
-    );
-  });
-});
 
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {

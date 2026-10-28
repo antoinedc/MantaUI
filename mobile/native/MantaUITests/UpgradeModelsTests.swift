@@ -14,8 +14,6 @@ import XCTest
 
 final class UpgradeModelsTests: XCTestCase {
 
-    private let GiB = 1_073_741_824.0
-
     private func parse(_ json: String) -> UpgradeStatus? {
         UpgradeStatus.parse(Data(json.utf8))
     }
@@ -139,8 +137,8 @@ final class UpgradeModelsTests: XCTestCase {
 
     // MARK: - Gate state transitions
 
-    private func status(_ state: UpgradeState, steps: [UpgradeStep] = [], error: UpgradeFailure? = nil) -> UpgradeStatus {
-        UpgradeStatus(state: state, steps: steps, overall: 0.3, etaSeconds: nil, error: error)
+    private func status(_ state: UpgradeState, steps: [UpgradeStep] = [], error: UpgradeFailure? = nil, view: UpgradeView? = nil) -> UpgradeStatus {
+        UpgradeStatus(state: state, steps: steps, overall: 0.3, etaSeconds: nil, error: error, view: view)
     }
 
     func testNothingToShowForAnIdleOrOldBox() {
@@ -189,99 +187,11 @@ final class UpgradeModelsTests: XCTestCase {
 
     // MARK: - What the screen says
 
-    func testRunningModelCarriesStepsOverallEtaAndTheCurrentBar() throws {
-        let steps = [
-            UpgradeStep(id: "preflight", status: .done),
-            UpgradeStep(id: "copy", status: .running,
-                        progress: UpgradeProgress(label: "1 GB of 4 GB", numerator: 25, denominator: 100)),
-            UpgradeStep(id: "migrate", status: .pending),
-        ]
-        var s = status(.running, steps: steps)
-        s.etaSeconds = 240
-        var g = UpgradeGateState()
-        g.apply(status: s)
-        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
-        XCTAssertEqual(m.kind, .running)
-        XCTAssertEqual(m.title, "Your box is upgrading")
-        XCTAssertEqual(m.overall, 0.3)
-        XCTAssertEqual(m.eta, "about 4 min left")
-        XCTAssertEqual(m.currentStep?.id, "copy")
-        XCTAssertEqual(try XCTUnwrap(m.currentFraction), 0.25, accuracy: 0.0001)
-        XCTAssertEqual(m.steps.count, 3)
-    }
-
-    func testAStepWithoutMeasurableProgressIsIndeterminate() throws {
-        var g = UpgradeGateState()
-        g.apply(status: status(.running, steps: [UpgradeStep(id: "stop", status: .running)]))
-        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
-        XCTAssertNil(m.currentFraction)
-        XCTAssertEqual(m.currentStep?.id, "stop")
-    }
-
-    func testFailedModelShowsTheMessageTheDiskNumbersAndWhereToAct() throws {
-        let failure = UpgradeFailure(step: "preflight", message: "Not enough free disk space",
-                                     needBytes: 31 * GiB, haveBytes: 3 * GiB)
-        var g = UpgradeGateState()
-        g.apply(status: status(.failed, steps: [UpgradeStep(id: "preflight", status: .failed)], error: failure))
-        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
-        XCTAssertEqual(m.kind, .failed)
-        XCTAssertEqual(m.message, "Not enough free disk space")
-        XCTAssertEqual(m.disk, "needs 31 GB free, has 3 GB")
-        // The phone can act on a failure now (WS10 F19): there is no "go to your
-        // computer" hint any more.
-        XCTAssertNil(m.hint)
-    }
-
-    // MARK: - Failed-state actions (WS10 F19)
-
-    private func failedModel(step: String, retryable: Bool = true, steps: [UpgradeStep]? = nil) throws -> UpgradeScreenModel {
-        let failure = UpgradeFailure(step: step, message: "It broke", retryable: retryable)
-        var g = UpgradeGateState()
-        g.apply(status: status(.failed, steps: steps ?? [UpgradeStep(id: step, status: .failed)], error: failure))
-        return try XCTUnwrap(UpgradeScreenModel.make(g))
-    }
-
-    func testRetryLabelAndRollbackPerFailedStep() throws {
-        // Preflight / verify are fixed in place: "Check again", and no rollback.
-        for step in ["preflight", "verify"] {
-            let m = try failedModel(step: step)
-            XCTAssertEqual(m.retryLabel, "Check again", step)
-            XCTAssertFalse(m.canRollback, step)
-            XCTAssertEqual(m.retryOkText, "Checking again…", step)
-        }
-        // Everything else: "Retry", and rolling back is offered.
-        for step in ["stop", "copy", "migrate", "cutover"] {
-            let m = try failedModel(step: step)
-            XCTAssertEqual(m.retryLabel, "Retry", step)
-            XCTAssertTrue(m.canRollback, step)
-            XCTAssertEqual(m.retryOkText, "Retry requested", step)
-        }
-    }
-
-    func testAnUnretryableFailureDisablesRetryWithTheReason() throws {
-        let m = try failedModel(step: "migrate", retryable: false)
-        XCTAssertFalse(m.canRetry)
-        XCTAssertEqual(m.retryDisabledReason, "This failure can't be retried — roll back instead.")
-        XCTAssertTrue(m.canRollback)
-        let ok = try failedModel(step: "migrate")
-        XCTAssertTrue(ok.canRetry)
-        XCTAssertNil(ok.retryDisabledReason)
-    }
-
     func testNothingChangedOnlyForPreflight() throws {
         XCTAssertTrue(try failedModel(step: "preflight").nothingChanged)
         for step in ["stop", "copy", "migrate", "verify", "cutover"] {
             XCTAssertFalse(try failedModel(step: step).nothingChanged, step)
         }
-    }
-
-    func testFailedStepFallsBackToTheCurrentStepThenPreflight() throws {
-        var g = UpgradeGateState()
-        g.apply(status: status(.failed, steps: [UpgradeStep(id: "copy", status: .failed)]))
-        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).failedStep, "copy")
-        var none = UpgradeGateState()
-        none.apply(status: status(.failed))
-        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(none)).failedStep, "preflight")
     }
 
     func testOutcomesResetWhenTheBoxMovesToAnotherState() throws {
@@ -328,54 +238,78 @@ final class UpgradeModelsTests: XCTestCase {
         XCTAssertEqual(m.retry, .idle)
     }
 
-    // MARK: - Copy details (describeGateDetails)
+    // MARK: - The box's wording (WS11 D3 / X5)
 
-    func testDetailsForARunningUpgrade() throws {
+    private func failedModel(step: String, view: UpgradeView? = nil, steps: [UpgradeStep]? = nil) throws -> UpgradeScreenModel {
+        let failure = UpgradeFailure(step: step, message: "It broke")
+        var g = UpgradeGateState()
+        g.apply(status: status(.failed, steps: steps ?? [UpgradeStep(id: step, status: .failed)], error: failure, view: view))
+        return try XCTUnwrap(UpgradeScreenModel.make(g))
+    }
+
+    func testRunningModelRendersTheBoxsView() throws {
         let steps = [
             UpgradeStep(id: "preflight", status: .done),
-            UpgradeStep(id: "copy", status: .running,
-                        progress: UpgradeProgress(label: "1 GB of 4 GB", numerator: 25, denominator: 100)),
-            UpgradeStep(id: "migrate", status: .pending),
+            UpgradeStep(id: "copy", status: .running, progress: UpgradeProgress(label: "1 GB of 4 GB", numerator: 25, denominator: 100)),
         ]
+        let view = UpgradeView(kind: "running", currentStepId: "copy", currentFraction: 0.25, etaText: "about 4 min left", details: "Manta box upgrade — running")
         var g = UpgradeGateState()
-        g.apply(status: status(.running, steps: steps))
-        XCTAssertEqual(
-            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
-            """
-            Manta box upgrade — running
-            preflight: done
-            copy: running (25/100) — 1 GB of 4 GB
-            migrate: pending
-            """)
+        g.apply(status: status(.running, steps: steps, view: view))
+        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
+        XCTAssertEqual(m.kind, .running)
+        XCTAssertEqual(m.eta, "about 4 min left")
+        XCTAssertEqual(m.currentStep?.id, "copy")
+        XCTAssertEqual(try XCTUnwrap(m.currentFraction), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(m.details, "Manta box upgrade — running")
+        XCTAssertEqual(m.steps.count, 2)
     }
 
-    func testDetailsForAFailureIncludeTheErrorAndTheDiskNumbers() throws {
-        let failure = UpgradeFailure(step: "preflight", message: "Not enough free disk space",
-                                     needBytes: 31 * GiB, haveBytes: 3 * GiB)
+    func testRunningOnAnOlderBoxShowsTheStepsWithoutEtaOrBar() throws {
         var g = UpgradeGateState()
-        g.apply(status: status(.failed, steps: [UpgradeStep(id: "preflight", status: .failed, error: "no space")], error: failure))
-        XCTAssertEqual(
-            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
-            """
-            Manta box upgrade — failed
-            preflight: failed — no space
-            error (preflight): Not enough free disk space
-            disk: needs 31 GB free, has 3 GB
-            """)
+        g.apply(status: status(.running, steps: [UpgradeStep(id: "stop", status: .running)]))
+        let m = try XCTUnwrap(UpgradeScreenModel.make(g))
+        XCTAssertNil(m.eta)
+        XCTAssertNil(m.currentFraction)
+        XCTAssertNil(m.currentStep)
+        XCTAssertEqual(m.details, "")
     }
 
-    func testDetailsForARolledBackBox() throws {
-        var g = UpgradeGateState()
-        g.apply(status: status(.rolledBack, steps: [UpgradeStep(id: "stop", status: .done)]))
-        XCTAssertEqual(
-            try XCTUnwrap(UpgradeScreenModel.make(g)).details,
-            "Manta box upgrade — rolled back\nstop: done")
+    func testFailedModelRendersTheBoxsDiskSentenceAndRetryRules() throws {
+        let view = UpgradeView(kind: "failed", currentStepId: "preflight", details: "Manta box upgrade — failed",
+                               failedStep: "preflight", message: "Not enough free disk space",
+                               diskSentence: "Needs 31 GB free, has 3 GB.", retryLabel: "Check again",
+                               canRetry: true, canRollback: false)
+        let m = try failedModel(step: "preflight", view: view)
+        XCTAssertEqual(m.message, "Not enough free disk space")
+        XCTAssertEqual(m.disk, "Needs 31 GB free, has 3 GB.")
+        XCTAssertEqual(m.retryLabel, "Check again")
+        XCTAssertEqual(m.retryOkText, "Checking again…")
+        XCTAssertTrue(m.canRetry)
+        XCTAssertFalse(m.canRollback)
+        XCTAssertTrue(m.nothingChanged)
+        XCTAssertFalse(m.needsBoxUpdate)
+        XCTAssertEqual(m.details, "Manta box upgrade — failed")
+        XCTAssertNil(m.hint)
     }
 
-    func testTheWaitingStateHasNoDetails() throws {
-        var g = UpgradeGateState()
-        g.markUpgradeMode()
-        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).details, "")
+    func testAnUnretryableFailureDisablesRetryWithTheBoxsReason() throws {
+        let view = UpgradeView(kind: "failed", failedStep: "migrate", retryLabel: "Retry", canRetry: false,
+                               retryDisabledReason: "This failure can't be retried — roll back instead.", canRollback: true)
+        let m = try failedModel(step: "migrate", view: view)
+        XCTAssertFalse(m.canRetry)
+        XCTAssertEqual(m.retryDisabledReason, "This failure can't be retried — roll back instead.")
+        XCTAssertTrue(m.canRollback)
+        XCTAssertFalse(m.nothingChanged)
+    }
+
+    func testFailedOnAnOlderBoxOffersNoRetryOrRollbackAndSaysWhy() throws {
+        let m = try failedModel(step: "migrate")
+        XCTAssertEqual(m.message, "It broke")
+        XCTAssertFalse(m.canRetry)
+        XCTAssertFalse(m.canRollback)
+        XCTAssertTrue(m.needsBoxUpdate)
+        XCTAssertEqual(m.failedStep, "migrate")
+        XCTAssertEqual(m.details, "")
     }
 
     func testFailedFallsBackToTheFailedStepsOwnError() throws {
@@ -384,53 +318,27 @@ final class UpgradeModelsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).message, "disk went away")
     }
 
+    func testTheWaitingStateHasNoDetails() throws {
+        var g = UpgradeGateState()
+        g.markUpgradeMode()
+        XCTAssertEqual(try XCTUnwrap(UpgradeScreenModel.make(g)).details, "")
+    }
+
     func testRolledBackModel() throws {
         var g = UpgradeGateState()
-        g.apply(status: status(.rolledBack))
+        g.apply(status: status(.rolledBack, view: UpgradeView(kind: "rolled_back", details: "Manta box upgrade — rolled back")))
         let m = try XCTUnwrap(UpgradeScreenModel.make(g))
         XCTAssertEqual(m.kind, .rolledBack)
         XCTAssertEqual(m.title, "Your box was rolled back")
         XCTAssertNil(m.overall)
+        XCTAssertEqual(m.details, "Manta box upgrade — rolled back")
     }
 
-    // MARK: - Formatting
-
-    func testDiskText() {
-        XCTAssertEqual(UpgradePresentation.diskText(UpgradeFailure(step: "p", message: "m", needBytes: 31 * GiB, haveBytes: 3 * GiB)),
-                       "needs 31 GB free, has 3 GB")
-        XCTAssertEqual(UpgradePresentation.diskText(UpgradeFailure(step: "p", message: "m", needBytes: 31 * GiB)),
-                       "needs 31 GB free")
-        XCTAssertEqual(UpgradePresentation.diskText(UpgradeFailure(step: "p", message: "m", needBytes: 5 * GiB, haveBytes: 0)),
-                       "needs 5 GB free, has 0 B")
-        XCTAssertNil(UpgradePresentation.diskText(UpgradeFailure(step: "migrate", message: "m")))
-        XCTAssertNil(UpgradePresentation.diskText(nil))
-    }
-
-    func testBytesMatchTheDesktopsFormatting() {
-        XCTAssertEqual(UpgradePresentation.bytes(512), "512 B")
-        XCTAssertEqual(UpgradePresentation.bytes(1.5 * GiB), "1.5 GB")
-        XCTAssertEqual(UpgradePresentation.bytes(31 * GiB), "31 GB")
-        XCTAssertEqual(UpgradePresentation.bytes(2 * 1024 * GiB), "2 TB")
-    }
-
-    func testEtaText() {
-        XCTAssertNil(UpgradePresentation.etaText(nil))
-        XCTAssertEqual(UpgradePresentation.etaText(10), "less than a minute left")
-        XCTAssertEqual(UpgradePresentation.etaText(240), "about 4 min left")
-        XCTAssertEqual(UpgradePresentation.etaText(3600), "about 1 h left")
-        XCTAssertEqual(UpgradePresentation.etaText(5400), "about 1 h 30 min left")
-    }
-
-    func testFractionClampsAndRefusesAZeroDenominator() {
-        func step(_ p: UpgradeProgress?) -> UpgradeStep { UpgradeStep(id: "copy", status: .running, progress: p) }
-        XCTAssertNil(UpgradePresentation.fraction(step(UpgradeProgress(numerator: 5, denominator: 0))))
-        XCTAssertEqual(UpgradePresentation.fraction(step(UpgradeProgress(numerator: 500, denominator: 100))), 1)
-        XCTAssertNil(UpgradePresentation.fraction(step(UpgradeProgress(label: "x"))))
-        XCTAssertNil(UpgradePresentation.fraction(nil))
-    }
-
-    func testSentenceCapitalisesAndTerminates() {
-        XCTAssertEqual(UpgradePresentation.sentence("needs 31 GB free, has 3 GB"), "Needs 31 GB free, has 3 GB.")
-        XCTAssertEqual(UpgradePresentation.sentence(""), "")
+    func testTheViewDecodesFromTheWire() throws {
+        let s = try XCTUnwrap(parse(#"{"state":"failed","steps":[],"overall":0,"etaSeconds":null,"error":{"step":"preflight","message":"m","retryable":true},"view":{"kind":"failed","failedStep":"preflight","message":"m","diskSentence":"Needs 31 GB free.","retryLabel":"Check again","canRetry":true,"canRollback":false,"details":"d"}}"#))
+        XCTAssertEqual(s.view?.diskSentence, "Needs 31 GB free.")
+        XCTAssertEqual(s.view?.retryLabel, "Check again")
+        let old = try XCTUnwrap(parse(#"{"state":"running","steps":[],"overall":0,"etaSeconds":null,"error":null}"#))
+        XCTAssertNil(old.view)
     }
 }

@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -285,18 +285,8 @@ function tickLabel(t: number, bucket: "hour" | "day"): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "";
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let val = n / 1024;
-  let i = 0;
-  while (val >= 1024 && i < units.length - 1) {
-    val /= 1024;
-    i++;
-  }
-  return `${val < 10 ? val.toFixed(1).replace(/\.0$/, "") : Math.round(val)} ${units[i]}`;
-}
+import { formatBytes } from "../shared/formatBytes.mjs";
+export { formatBytes };
 
 // ===== Download confirmation (BET-1198) =====
 //
@@ -1241,37 +1231,6 @@ export function chooseUpdateSkewVariant(
 // this app shipped a macOS updater that could never install anything for its
 // whole life without anyone noticing. So an unanswerable check is NEVER
 // rendered as "ok".
-
-export type UpdateRowTone = "ok" | "action" | "muted" | "error";
-export type UpdateRow = { tone: UpdateRowTone; text: string };
-
-/**
- * Describe ONE update target for its row.
- *
- * One function for every target. The old code had two bespoke functions
- * (`describeDesktopUpdate` / `describeServerUpdate`) doing the same job for
- * two targets; there are about to be six, so both are replaced by this single
- * one keyed off the shared `UpdateTarget` shape.
- *
- * Rules, in this exact order — the ordering IS the semantics:
- *  - `!t.ok`       → error, "Couldn't check"
- *  - `t.manual`    → muted, "Update manually"
- *  - `t.available` → action, "Update available"
- *  - else          → ok, "Up to date"
- *
- * The invariant that must survive: an unanswerable check is NEVER rendered as
- * "ok". "Up to date" and "couldn't check" otherwise look identical — both are
- * a sentence with no button — and a reassuring silence over a failed check is
- * exactly how a permanently broken macOS updater passed for a healthy one. So
- * `!ok` wins over everything, and `manual` (a dev build with no updater, or a
- * CLI with no safe upgrade command) is "muted", never "ok".
- */
-export function describeUpdateTarget(t: UpdateTarget): UpdateRow {
-  if (!t.ok) return { tone: "error", text: "Couldn't check" };
-  if (t.manual) return { tone: "muted", text: "Update manually" };
-  if (t.available) return { tone: "action", text: "Update available" };
-  return { tone: "ok", text: "Up to date" };
-}
 
 // ===== Box self-update: transient network failure vs real failure =====
 //
@@ -3794,30 +3753,6 @@ export function repoListErrorMessage(code: string | null | undefined): string {
     return "Couldn't reach GitHub from your server. Check its connection and try again.";
   }
   return "Couldn't list your repositories from GitHub.";
-}
-
-/** The secondary line on the Settings GitHub row: who is connected, where the
- *  credential came from, and — when GitHub has rejected it — what to do. Pure. */
-export function forgeCredentialSecondary(status: {
-  login: string | null;
-  source: "cli" | "env" | "stored" | null;
-  valid: boolean | null;
-}): string {
-  if (status.valid === false) {
-    if (status.source === "cli") {
-      return "GitHub rejected the gh CLI sign-in on your server. Run `gh auth login` there, or Disconnect.";
-    }
-    if (status.source === "env") {
-      return "GitHub rejected the MANTA_GITHUB_TOKEN environment variable on your server. Replace it there, or Disconnect.";
-    }
-    return "GitHub rejected this sign-in. Disconnect, then connect again.";
-  }
-  const where =
-    status.source === "cli" ? "from the gh CLI on your server"
-    : status.source === "env" ? "from the MANTA_GITHUB_TOKEN env var"
-    : status.source === "stored" ? "signed in on this server"
-    : "connected";
-  return status.login ? `@${status.login} · ${where}` : where;
 }
 
 // The plain text of a USER message — its non-synthetic text parts concatenated

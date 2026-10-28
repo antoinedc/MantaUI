@@ -24,6 +24,7 @@ const EXPECTED_AFTER_STEP = [
   "search-scope-all-1",
   "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1",
   "cache-stale-at-1", "context-selected-model-1", // D2
+  "devices-view-1", "forge-status-secondary-1", "update-targets-view-1", "upgrade-view-1", "launchers-flags-1", // D3
 ];
 
 test("the capability list is frozen and carries chat-cards-1", () => {

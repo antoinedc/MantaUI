@@ -37,7 +37,14 @@ final class SettingsUpdatesStore: ObservableObject {
         }
     }
 
-    @Published private(set) var targets: [UpdateTarget] = []
+    /// The rows, as the box worded them (`server:update-check` → `view.targets`).
+    @Published private(set) var targets: [UpdateTargetView] = []
+    /// No verdict arrived (the check timed out or failed): never shown as "up to date".
+    /// "Update manually" links by target id (from the raw targets; a link is data, not wording).
+    @Published private(set) var manualUrls: [String: String] = [:]
+    @Published private(set) var checkFailed = false
+    /// A verdict arrived without `view`: an older box — the rows are replaced by the update note.
+    @Published private(set) var needsBoxUpdate = false
     @Published private(set) var checking = false
     @Published private(set) var checkedAt: Date?
     @Published private(set) var serverVersion: String?
@@ -102,7 +109,16 @@ final class SettingsUpdatesStore: ObservableObject {
         } catch {
             verdict = nil
         }
-        targets = UpdateTargets.build(check: verdict, serverVersion: serverVersion)
+        manualUrls = Dictionary(uniqueKeysWithValues: (verdict?.targets ?? []).compactMap { t in t.manualUrl.map { (t.id, $0) } })
+        if let view = verdict?.view {
+            targets = view.targets
+            checkFailed = false
+            needsBoxUpdate = false
+        } else {
+            targets = []
+            checkFailed = verdict == nil
+            needsBoxUpdate = verdict != nil
+        }
         checkedAt = now()
         checking = false
     }

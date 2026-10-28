@@ -31,6 +31,12 @@ export const BOX_CAPABILITIES = Object.freeze([
   // WS11 D2 (stale-cache instant, context against the selected model)
   "cache-stale-at-1",
   "context-selected-model-1",
+  // WS11 D3 (box-derived Settings fields)
+  "devices-view-1",
+  "forge-status-secondary-1",
+  "update-targets-view-1",
+  "upgrade-view-1",
+  "launchers-flags-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

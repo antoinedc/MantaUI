@@ -89,4 +89,10 @@ extension MantaAPIClient {
     func launchersList() async throws -> [AvailableLauncher] {
         try await callRequired("launchers:list", args: [], as: [AvailableLauncher].self)
     }
+
+    /// `launchers:set-flag` — flip ONE launch option on the box (WS11 D3 / X1);
+    /// returns the updated launcher row. A refusal is the box's own sentence.
+    func launchersSetFlag(id: String, key: String, value: Bool) async throws -> AvailableLauncher {
+        try await callRequired("launchers:set-flag", args: [["id": id, "key": key, "value": value]], as: AvailableLauncher.self)
+    }
 }
