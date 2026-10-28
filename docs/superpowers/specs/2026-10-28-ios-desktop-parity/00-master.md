@@ -99,12 +99,18 @@ Quote (WS01), "send failures to agent" (WS05), Attach artifact (WS07), inbox
 adds to the composer controller (`ComposerTextController`) one public API:
 
 ```swift
-func insert(text: String, mode: ComposerInsertMode)  // .append | .replace | .quote (prefix "> " per line + blank line)
-func attach(remotePath: String, displayName: String, mime: String?) // existing chip pipeline, already-uploaded file
+@discardableResult func insert(text: String, mode: ComposerInsertMode) -> Bool
+  // .append = existing draft + blank line + text (just text if draft empty)
+  // .replace = whole draft replaced
+  // .quote   = the quote format iOS already ships (QuoteText.buildQuoteBlock) — see D4
+@discardableResult func attach(remotePath: String, displayName: String, mime: String?) -> Bool
+  // existing chip pipeline for an already-uploaded file
 ```
 
-and a `NewSessionDraft { cwd, text, attachments }` value consumed by WS04's
-create flow ("Quote in new session", inbox "start a session").
+Both return `false` when they reject (e.g. composer read-only, attachment limit
+reached, duplicate); EVERY caller must surface a rejection to the user (hint or
+toast) — never ignore the Bool. The new-session value is `NewSessionDraft`,
+defined once per D2.
 
 ### C4. Chat-screen mount points (hotspot)
 
@@ -119,7 +125,8 @@ later-wave owner, see Waves — applies it. Allowed mounts:
 - WS05: the branch chip `onTap` → present `BranchSheet`; a checks chip view
   beside the branch chip.
 - WS06: a search button in the chat nav bar → present `SearchScreen`.
-- WS09: context sheet gains a "Seat" row (WS02 owns, WS09 provides data).
+- (WS09 seat-row bullet voided by D17.) Further allowed mounts are exactly
+  those listed in workstream `Mount requests` tables under D18.
 
 ### C5. New stream frames
 
@@ -242,6 +249,93 @@ custom-endpoint save does not restart opencode, API-key / device-code connect
 keeps desktop's restart-and-poll; "Edit last" queued message asks before
 replacing a non-empty draft; "Go to parent" uses `MantaNavigator.open(.session)`;
 background job from the inbox asks "Run under which session?".
+
+D11. **One `NewSessionDraft`, no other.** WS03 declares NO draft type; its
+`ComposerTextController.newSessionDraft(cwd:) -> NewSessionDraft` maps READY
+`ComposerAttachment` chips → `NewSessionDraftAttachment` (`remotePath`,
+`displayName`, `mime`), and WS04's create flow maps back via
+`ComposerTextController.attach(...)` on the new chat's composer. Defaults:
+`worktreeBranch = nil`, `linkedIssueURL = nil` unless the producer sets them.
+WS04's prefill: `cwd` preselects the project/folder; `worktreeBranch` pre-ticks
+"new worktree" with that branch; `linkedIssueURL` shows as a header line; `text`
++ attachments seed the new chat's composer (`HandoffStore` carry-over is the
+transport WS04 uses internally — not a public contract).
+
+D12. **Producers of a NEW session go through
+`MantaNavigator.startNewSession(_:)` and the WS04 create sheet with one
+Create tap.** Exception: "Quote in new session" (WS01) keeps desktop parity —
+it FORKS the current session and seeds the fork's composer with the quote
+(desktop `QuoteToolbar.tsx:3`, `ChatPanel.tsx:2130`; iOS already does this in
+`ChatScreen.swift`), so it does not use `NewSessionDraft`. WS05's
+inbox "Start a session" passes `cwd` (repo path), `worktreeBranch`, `linkedIssueURL`
+and a seed `text` that includes the issue URL; it creates NO worktree or session
+itself (creation happens on Create). Any `forgeIssue` association is dropped.
+Only the Quote BUTTON wiring is new (WS01 rows → existing ChatScreen callback).
+
+D13. **WS03 does all composer-adoption edits in `ChatScreen.swift` in wave A**
+(D3), as a declared exception in its Files list. WS02 consumes the adopted
+controller; no legacy-binding fallback.
+
+D14. **GitHub device sign-in canonical API** (owned by WS04, wave A, files
+`CloneFromGitHubSignIn.swift` + `MantaAPIClient+Sessions.swift` methods + tests):
+
+```swift
+@MainActor final class GitHubDeviceSignInStore: ObservableObject { ... }
+struct GitHubDeviceSignInView: View {
+  init(onConnected: @escaping () -> Void, onCancel: @escaping () -> Void)
+}
+```
+WS05 consumes exactly this; WS05 creates no device-flow store/sheet of its own.
+
+D15. **C5 command frame contract:** WS02 publishes on `ChatSessionStore`
+`@Published var commandByMessageID: [String: StreamCommandExecutedPayload]`
+where `StreamCommandExecutedPayload { messageID: String; name: String; arguments: String }`
+(server always sends a string, `""` when absent — `streamInterp.mjs`). WS01
+consumes this name and converts to its own mapper input. WS01's footer uses
+transcript-derived data (accepted amendment to C5); no step/truncation property
+is required from WS02 for the footer beyond what WS02 already decodes. Every
+WS01 mount in `ChatScreen.swift`/`ChatSessionStore.swift` (mapper inputs, media,
+command, display toggle) is a WS02 wave-B deliverable.
+
+D16. **Single owners for shared client members (C1 is member-level, not
+file-level).** `usageStoppedList()` + its decoding + stopped records live in
+WS04 (`SessionListStore` is the one source of stopped state, wave A). WS09's
+resume screen reads WS04's records/API — WS09 creates NO stopped store and no
+second fetch. `forgeStatus(validate: Bool)` + its wire type are owned by WS10
+(wave A, `MantaAPIClient+Settings.swift`); WS05 calls it. Before dispatching each
+wave the orchestrator greps all `MantaAPIClient+*.swift` member names for
+duplicates.
+
+D17. **Seat row in the context sheet:** WS02 renders it from the existing
+`AccountsStore.conversationSeat` projection; WS09 F8 is removed. C4's WS09 bullet
+is void.
+
+D18. **Integration steps (fixes same-wave shared-file edits).** After each wave's
+workers finish, ONE integration agent (dispatched by the orchestrator) applies
+every mount whose receiving file is NOT owned by a worker running in that wave,
+in ledger order, and updates `Package.swift` (pure-logic files only) and
+`project.yml` from the workers' manifests. Specifically:
+- Wave B: `SessionListView.swift` (WS06 search entry, WS09 resume/stopped entry),
+  `MantaAppRoot.swift` (WS07 agent-file notice, WS09 stores/overlay/sheet),
+  `SettingsScreen.swift` (WS09 models/usage rows) → integration agent B.
+- ChatScreen/ChatSessionStore/MantaEventStore mounts requested by WS01, WS06,
+  WS07, WS09 in waves A/B → WS02 applies them in wave B (provider symbols are
+  pinned in the requesting spec, so WS02 can write the call even if the provider
+  lands in the same wave).
+- ChatOverflowSheet mounts (WS01 display toggle, WS02 read-only guard, WS04
+  rename/mode rows) → WS07 applies them in wave B.
+- Wave C: WS05 runs alone and applies all of its own mounts in any file.
+- `MantaUI.xcodeproj/project.pbxproj` is regenerated once, at the end, by the
+  orchestrator via the Mac (`ios-regen-pbxproj` / build). Workers never edit it.
+Workers list mounts in a `Mount requests` table with columns: ID (`M-<ws>-<n>`),
+receiving file, applier (per this rule), provider symbol(s), exact change,
+prerequisite.
+
+D19. **Inner-loop verification:** `mobile/native/verify.sh` compiles + tests the
+Foundation-only subset (`Package.swift`) in Docker on the Linux box. Pure-logic
+files that import only Foundation must be added to `Package.swift` (by the
+integration step) and their XCTests must pass under `verify.sh`. The merge gate
+remains `ios-mantaui` `test-unit` on the Mac.
 
 D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
 job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
