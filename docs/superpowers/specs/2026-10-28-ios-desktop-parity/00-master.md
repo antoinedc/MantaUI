@@ -370,6 +370,45 @@ observe its change). Provider symbols (shipped): `TranscriptDisplayOptions.fetch
 Also: `TranscriptMediaStore.shared.resetForBoxChange()` must be called from the
 `.mantaBoxRemoved` handler in `MantaAppRoot.swift` (integration B, with M-09-4).
 
+D23. **Server-first logic (user directive, 2026-10-28).** The box server is the
+single owner of logic; desktop and iOS are presentation layers. Anything that is
+a business rule, a derivation/aggregation/classification of server data, an
+eligibility decision, or copy that must match across clients is computed on the
+server and returned ready to render (one `/rpc` channel or `/events` frame, one
+node-tested module). Clients keep only view state, gestures, local device
+preferences, layout/formatting that is purely presentational, and optimistic UI.
+When a server channel replaces logic the desktop already has, the desktop switches
+to it in the same change (no parallel implementations, no "parity fixtures" as
+the drift guard). Applies to all unbuilt workstreams (02, 05, 06, 07, 09) and,
+via the consolidation workstream WS11, to logic already ported in wave A.
+Authority: `server-first-audit.md` in this folder.
+
+D24. **Server-first execution (user decisions 2026-10-28).**
+- Scope = FULL: every MOVE-NOW item in `server-first-audit.md` is built in this
+  effort. Items assigned to unbuilt specs (02, 05, 06, 07, 09) are folded into
+  those specs; the rest form **WS11 "server consolidation"** (`11-server-consolidation.md`),
+  which runs ALONE as **wave D** after wave C and also migrates logic already
+  ported in wave A (WS01/03/04/08/10) and the desktop onto the server.
+  MOVE-LATER items become follow-up tickets listed in WS11 "Follow-ups".
+- D7 is superseded: new server modules/channels/frame fields are allowed wherever
+  the audit says MOVE-NOW. Each is its own module + node tests; the desktop
+  switches in the same workstream (no dual implementations). WS09's
+  `models:unidentified` is consumed by the desktop too.
+- Usage 90% / limit alerts are computed by the box and shown IN-APP only on both
+  clients; no new push notification type.
+- Deprecated-model opt-ins move to the box config (desktop's location); iOS does
+  a one-time copy of its on-device opt-ins to the box, then reads the config.
+- Wire compat: additive only (new fields/channels/opt-in args). The box advertises
+  a capabilities list; a client on an older box hides/disables the dependent
+  feature with an "Update your box to use this" note — no fallback copy of the
+  old logic.
+- Server file contention: workers create their own server modules + tests and
+  desktop/iOS consumers; registrations in `src/server/rpc.mjs` / `index.mjs` /
+  `streamInterp.mjs` are applied by the wave's integration agent in order
+  02 → 07 → 09 → 06 (wave B), or by the sole worker in waves C/D. Desktop
+  renderer files touched by two same-wave workers are ledgered like Swift mounts.
+- WS08 (in flight) is not churned: its wording/error items go to WS11.
+
 D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
 job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
 fixed by the workstream that touches the matching iOS feature ONLY if the fix is
