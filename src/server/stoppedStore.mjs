@@ -51,6 +51,16 @@ export { STORE_PATH };
  * @property {number} [attempts]
  */
 
+// Every mutation is a read-modify-write of one JSON file (sync load, async
+// save). Run them one at a time so two writers can never interleave and drop
+// each other's change (the reconciler sweep made that a real race).
+let mutationChain = Promise.resolve();
+function serialized(fn) {
+  const run = mutationChain.then(fn, fn);
+  mutationChain = run.catch(() => {});
+  return run;
+}
+
 export function loadStoppedState(path = STORE_PATH) {
   const parsed = readJsonSync(path, {});
   return {
@@ -116,29 +126,31 @@ function indexOfRecord(state, conversation) {
  * @param {(s: object) => Promise<void>} [deps.save]
  * @param {(evt: object) => void} [deps.publish]
  */
-export async function upsertStopped(input, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  if (!input?.conversation) return;
-  const state = load();
-  const idx = indexOfRecord(state, input.conversation);
-  const record = buildStoppedRecord(input);
-  if (idx === -1) {
-    state.records.push(record);
-  } else {
-    // Update in place; attempts increments so a permanently-refused
-    // conversation stops looping. armed is preserved across repeats.
-    state.records[idx] = {
-      ...state.records[idx],
-      workspace: record.workspace,
-      provider: record.provider,
-      ...(record.model ? { model: record.model } : {}),
-      window: record.window,
-      stoppedAt: record.stoppedAt,
-      ...(record.cachedTokens !== undefined ? { cachedTokens: record.cachedTokens } : {}),
-      attempts: (state.records[idx].attempts ?? 0) + 1,
-    };
-  }
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { conversation: input.conversation } });
+export function upsertStopped(input, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    if (!input?.conversation) return;
+    const state = load();
+    const idx = indexOfRecord(state, input.conversation);
+    const record = buildStoppedRecord(input);
+    if (idx === -1) {
+      state.records.push(record);
+    } else {
+      // Update in place; attempts increments so a permanently-refused
+      // conversation stops looping. armed is preserved across repeats.
+      state.records[idx] = {
+        ...state.records[idx],
+        workspace: record.workspace,
+        provider: record.provider,
+        ...(record.model ? { model: record.model } : {}),
+        window: record.window,
+        stoppedAt: record.stoppedAt,
+        ...(record.cachedTokens !== undefined ? { cachedTokens: record.cachedTokens } : {}),
+        attempts: (state.records[idx].attempts ?? 0) + 1,
+      };
+    }
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { conversation: input.conversation } });
+  });
 }
 
 /**
@@ -147,14 +159,16 @@ export async function upsertStopped(input, { load = loadStoppedState, save = sav
  * @param {string} input.conversation
  * @param {object} [deps]
  */
-export async function armStopped({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  if (!conversation) return;
-  const state = load();
-  const idx = indexOfRecord(state, conversation);
-  if (idx === -1) return;
-  state.records[idx] = { ...state.records[idx], armed: true };
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+export function armStopped({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    if (!conversation) return;
+    const state = load();
+    const idx = indexOfRecord(state, conversation);
+    if (idx === -1) return;
+    state.records[idx] = { ...state.records[idx], armed: true };
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+  });
 }
 
 /**
@@ -164,14 +178,16 @@ export async function armStopped({ conversation }, { load = loadStoppedState, sa
  * @param {string} input.conversation
  * @param {object} [deps]
  */
-export async function disarmStopped({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  if (!conversation) return;
-  const state = load();
-  const idx = indexOfRecord(state, conversation);
-  if (idx === -1) return;
-  state.records.splice(idx, 1);
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+export function disarmStopped({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    if (!conversation) return;
+    const state = load();
+    const idx = indexOfRecord(state, conversation);
+    if (idx === -1) return;
+    state.records.splice(idx, 1);
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+  });
 }
 
 /**
@@ -181,35 +197,48 @@ export async function disarmStopped({ conversation }, { load = loadStoppedState,
  * @param {string} input.conversation
  * @param {object} [deps]
  */
-export async function markStoppedRan({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  if (!conversation) return;
-  const state = load();
-  const idx = indexOfRecord(state, conversation);
-  if (idx === -1) return;
-  state.records.splice(idx, 1);
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+export function markStoppedRan({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    if (!conversation) return;
+    const state = load();
+    const idx = indexOfRecord(state, conversation);
+    if (idx === -1) return;
+    state.records.splice(idx, 1);
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+  });
 }
 
 /**
  * Remove several entries in one write (the reconciler's stale sweep — see
- * stoppedReconcile.mjs). Reads the store fresh so a concurrent enrolment of a
- * different conversation is never clobbered. Publishes once, only on a change.
+ * stoppedReconcile.mjs). Each entry is the record AS IT WAS JUDGED: the current
+ * entry is removed only if it is still that record (same stoppedAt, same armed
+ * state), so an entry armed or re-enrolled while the sweep was deciding
+ * survives. Publishes once, only on a change.
  * @param {object} input
- * @param {string[]} input.conversations
+ * @param {Array<{conversation:string, stoppedAt?:number, armed?:boolean}>} input.entries
  * @param {object} [deps]
  * @returns {Promise<string[]>} the conversations actually removed
  */
-export async function removeStopped({ conversations }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  const drop = new Set((conversations ?? []).filter((c) => typeof c === "string" && c));
-  if (drop.size === 0) return [];
-  const state = load();
-  const removed = state.records.filter((r) => drop.has(r?.conversation)).map((r) => r.conversation);
-  if (removed.length === 0) return [];
-  state.records = state.records.filter((r) => !drop.has(r?.conversation));
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { removed } });
-  return removed;
+export function removeStopped({ entries }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    const judged = new Map();
+    for (const e of entries ?? []) {
+      if (typeof e?.conversation === "string" && e.conversation) judged.set(e.conversation, e);
+    }
+    if (judged.size === 0) return [];
+    const state = load();
+    const unchanged = (r) => {
+      const e = judged.get(r?.conversation);
+      return !!e && r.stoppedAt === e.stoppedAt && (r.armed === true) === (e.armed === true);
+    };
+    const removed = state.records.filter(unchanged).map((r) => r.conversation);
+    if (removed.length === 0) return [];
+    state.records = state.records.filter((r) => !unchanged(r));
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { removed } });
+    return removed;
+  });
 }
 
 /**
@@ -224,14 +253,16 @@ export async function removeStopped({ conversations }, { load = loadStoppedState
  * @param {string} input.conversation
  * @param {object} [deps]
  */
-export async function bumpStoppedAttempts({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  if (!conversation) return;
-  const state = load();
-  const idx = indexOfRecord(state, conversation);
-  if (idx === -1) return;
-  state.records[idx] = { ...state.records[idx], attempts: (state.records[idx].attempts ?? 0) + 1 };
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+export function bumpStoppedAttempts({ conversation }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    if (!conversation) return;
+    const state = load();
+    const idx = indexOfRecord(state, conversation);
+    if (idx === -1) return;
+    state.records[idx] = { ...state.records[idx], attempts: (state.records[idx].attempts ?? 0) + 1 };
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: { conversation } });
+  });
 }
 
 /**
@@ -240,11 +271,13 @@ export async function bumpStoppedAttempts({ conversation }, { load = loadStopped
  * @param {() => number} [input.now]
  * @param {object} [deps]
  */
-export async function stampStoppedLastLooked({ now = Date.now } = {}, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
-  const state = load();
-  state.lastLooked = now();
-  await save(state);
-  publish?.({ kind: "usage-stopped.updated", payload: {} });
+export function stampStoppedLastLooked({ now = Date.now } = {}, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  return serialized(async () => {
+    const state = load();
+    state.lastLooked = now();
+    await save(state);
+    publish?.({ kind: "usage-stopped.updated", payload: {} });
+  });
 }
 
 /**

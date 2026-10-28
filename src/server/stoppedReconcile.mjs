@@ -66,7 +66,7 @@ export function staleReason(record, { exists, visible, snapshots }) {
 /**
  * @param {object} deps
  * @param {() => {records: Array<object>}} [deps.load]
- * @param {(input: {conversations: string[]}) => Promise<string[]>} deps.remove  wire to removeStopped
+ * @param {(input: {entries: Array<object>}) => Promise<string[]>} deps.remove  wire to removeStopped
  * @param {(sessionId: string) => Promise<boolean>} deps.sessionExists
  * @param {() => Promise<Set<string>>} deps.visibleSessionIds  session ids stamped on tmux windows
  * @param {() => Array<object>} deps.snapshots  current usage poller snapshots
@@ -98,22 +98,24 @@ export function createStoppedReconciler({
       visible = null; // unknown → skip the window check, never drop on it
     }
     const snaps = snapshots() ?? [];
+    const live = records.filter((r) => r?.conversation);
+    // Few entries in practice; check them in parallel so a sweep is one round trip.
+    const existence = await Promise.all(
+      live.map((r) => Promise.resolve().then(() => sessionExists(r.conversation)).catch(() => true)),
+    );
     const drop = [];
-    for (const r of records) {
-      if (!r?.conversation) continue;
-      let exists = true;
-      try {
-        exists = await sessionExists(r.conversation);
-      } catch {
-        exists = true;
-      }
-      const reason = staleReason(r, { exists, visible, snapshots: snaps });
+    const reasons = new Map();
+    live.forEach((r, i) => {
+      const reason = staleReason(r, { exists: existence[i] !== false, visible, snapshots: snaps });
       if (reason) {
-        drop.push(r.conversation);
-        console.log(`[usage-stopped] clearing ${r.conversation} (${reason})`);
+        drop.push(r);
+        reasons.set(r.conversation, reason);
       }
-    }
-    return drop.length ? remove({ conversations: drop }) : [];
+    });
+    if (drop.length === 0) return [];
+    const removed = await remove({ entries: drop });
+    for (const c of removed) console.log(`[usage-stopped] cleared ${c} (${reasons.get(c)})`);
+    return removed;
   }
 
   /** Run one sweep; overlapping calls coalesce into one follow-up run. */

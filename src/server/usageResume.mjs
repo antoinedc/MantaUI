@@ -288,6 +288,13 @@ export function createUsageResumeEngine({
   // Send one "Keep going" on the model pinned in the record, through the shared
   // prompt-delivery engine (which defers to idle if the conversation is busy).
   async function sendOne(send) {
+    // Re-check at send time: the batch was planned up to a stagger earlier, and
+    // in between the entry may have been unchecked or cleared as stale (its
+    // session deleted or windowless). Never resume a conversation no longer
+    // armed in the record.
+    const { records = [] } = await load();
+    const entry = records.find((r) => r?.conversation === send.conversation);
+    if (entry?.armed !== true) return;
     pendingResume.add(send.conversation);
     const providerID = send.provider ? providerIDForAdapter(send.provider) : null;
     const model =

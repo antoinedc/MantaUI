@@ -4,7 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { staleReason, providerRecoveredSince, createStoppedReconciler } from "./stoppedReconcile.mjs";
-import { removeStopped, stampStoppedLastLooked } from "./stoppedStore.mjs";
+import { removeStopped, stampStoppedLastLooked, armStopped, upsertStopped } from "./stoppedStore.mjs";
+import { createUsageResumeEngine } from "./usageResume.mjs";
 
 const REC = { conversation: "ses_a", provider: "codex", window: null, stoppedAt: 1000, armed: false, attempts: 1 };
 const recovered = [{ provider: "codex", fetchedAt: 2000, windows: [{ kind: "session", pct: 4 }] }];
@@ -103,7 +104,7 @@ test("a throwing existence check never drops", async () => {
 test("removeStopped with nothing matching writes nothing", async () => {
   let saves = 0;
   const store = memStore([{ ...REC }]);
-  const out = await removeStopped({ conversations: ["nope"] }, { load: store.load, save: async () => { saves++; } });
+  const out = await removeStopped({ entries: [{ conversation: "nope", stoppedAt: 1000 }] }, { load: store.load, save: async () => { saves++; } });
   assert.deepEqual(out, []);
   assert.equal(saves, 0);
 });
@@ -113,4 +114,78 @@ test("stampStoppedLastLooked works with no injected clock (the RPC calls it with
   const before = Date.now();
   await stampStoppedLastLooked({}, { load: store.load, save: store.save });
   assert.ok(store.get().lastLooked >= before);
+});
+
+test("an entry armed while the sweep was deciding survives the removal", async () => {
+  const store = memStore([{ ...REC }]);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const rec = createStoppedReconciler({
+    load: store.load,
+    remove: (input) => removeStopped(input, { load: store.load, save: store.save }),
+    sessionExists: async () => { await gate; return true; },
+    visibleSessionIds: async () => visibleA,
+    snapshots: () => recovered,
+  });
+  const running = rec.run();
+  await new Promise((r) => setImmediate(r));
+  await armStopped({ conversation: "ses_a" }, { load: store.load, save: store.save });
+  release();
+  assert.deepEqual(await running, []);
+  assert.equal(store.get().records[0].armed, true);
+});
+
+test("an entry re-enrolled while the sweep was deciding survives the removal", async () => {
+  const store = memStore([{ ...REC }]);
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const rec = createStoppedReconciler({
+    load: store.load,
+    remove: (input) => removeStopped(input, { load: store.load, save: store.save }),
+    sessionExists: async () => { await gate; return false; },
+    visibleSessionIds: async () => visibleA,
+    snapshots: () => [],
+  });
+  const running = rec.run();
+  await new Promise((r) => setImmediate(r));
+  await upsertStopped({ ...REC, stoppedAt: 5000 }, { load: store.load, save: store.save });
+  release();
+  assert.deepEqual(await running, []);
+  assert.equal(store.get().records[0].stoppedAt, 5000);
+});
+
+test("concurrent store mutations never drop each other's change", async () => {
+  // A deliberately slow, read-copy-write store: without serialization the
+  // second writer would overwrite the first.
+  let disk = { lastLooked: null, records: [{ ...REC, conversation: "ses_x" }] };
+  const load = () => structuredClone(disk);
+  const save = async (s) => { await new Promise((r) => setTimeout(r, 5)); disk = structuredClone(s); };
+  await Promise.all([
+    removeStopped({ entries: [{ conversation: "ses_x", stoppedAt: 1000, armed: false }] }, { load, save }),
+    upsertStopped({ ...REC, conversation: "ses_y" }, { load, save }),
+    upsertStopped({ ...REC, conversation: "ses_z" }, { load, save }),
+  ]);
+  assert.deepEqual(disk.records.map((r) => r.conversation).sort(), ["ses_y", "ses_z"]);
+});
+
+test("a staggered resume is skipped if its entry left the record before the send", async () => {
+  let records = [
+    { ...REC, conversation: "ses_1", armed: true, stoppedAt: 1 },
+    { ...REC, conversation: "ses_2", armed: true, stoppedAt: 2 },
+  ];
+  const timers = [];
+  const delivered = [];
+  const engine = createUsageResumeEngine({
+    load: async () => ({ records, lastLooked: null }),
+    deliver: async ({ sessionId }) => { delivered.push(sessionId); },
+    setTimeoutFn: (fn) => { timers.push(fn); return timers.length; },
+    clearTimeoutFn: () => {},
+    now: () => 3000,
+  });
+  await engine.deliverSnapshots(recovered);
+  // ses_2 is cleared (e.g. its window closed) between planning and its send.
+  records = records.filter((r) => r.conversation !== "ses_2");
+  for (const fn of timers) fn();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(delivered, ["ses_1"]);
 });
