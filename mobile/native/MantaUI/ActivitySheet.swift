@@ -425,34 +425,9 @@ struct ActivityCallRow: View {
         .accessibilityIdentifier("activity-call-detail")
     }
 
-    /// The call's output: the tailed preview, or — with the display switch on — the
-    /// last 2,000 lines in a bounded scroll well (so a huge output never sizes the
-    /// row), with a note when it was trimmed.
-    @ViewBuilder
+    /// The call's output (see `ActivityOutputWell`).
     private func outputWell(_ output: String) -> some View {
-        let shown = ToolActivity.outputForDisplay(output, verbose: showDetails)
-        if showDetails {
-            VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-                ScrollView(.vertical) {
-                    Text(shown.text)
-                        .textSelection(.enabled)
-                        .font(.manta(size: Metrics.type.xs, design: .monospaced))
-                        .foregroundColor(tokens.tx3)
-                        .lineLimit(nil)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(Metrics.spacing.sp2)
-                }
-                .frame(maxHeight: 480)
-                .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
-                if shown.trimmed {
-                    Text("Showing the last \(ToolOutputPreview.verboseMaxLines.formatted()) lines \u{2014} Copy gets the full output")
-                        .font(.manta(size: Metrics.type.twoXS))
-                        .foregroundColor(tokens.tx4)
-                }
-            }
-        } else {
-            codeWell(shown.text, lineLimit: nil)
-        }
+        ActivityOutputWell(partID: part.id, output: output, verbose: showDetails, tokens: tokens)
     }
 
     private func codeWell(_ text: String, lineLimit: Int?) -> some View {
@@ -473,6 +448,87 @@ struct ActivityCallRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(Metrics.spacing.sp2)
             .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+    }
+}
+
+// MARK: - Output well
+
+/// A call's output: the tailed preview, or — with "Show reasoning & full
+/// output" on — the last 2,000 lines in a scroll well with an EXPLICIT height
+/// (a vertical `ScrollView` inside a self-sizing `List` row collapses without
+/// one), plus a note when it was trimmed.
+///
+/// The trimmed text is computed ONCE per `(part id, output length, verbose)` in
+/// a `.task`, not in `body`: splitting a 50,000-line output on every re-render
+/// (the sheet re-renders on every store change while a run is live) is what
+/// would freeze it.
+private struct ActivityOutputWell: View {
+    let partID: String
+    let output: String
+    let verbose: Bool
+    let tokens: Tokens
+
+    @State private var shown: (text: String, trimmed: Bool)?
+
+    private var key: String { "\(partID)|\(output.utf8.count)|\(verbose)" }
+
+    var body: some View {
+        Group {
+            if let shown {
+                if verbose { verboseWell(shown) } else { plainWell(shown.text) }
+            } else {
+                // Reserve a row's height until the first computation lands.
+                Color.clear.frame(height: 44)
+            }
+        }
+        .task(id: key) {
+            shown = ToolActivity.outputForDisplay(output, verbose: verbose)
+        }
+    }
+
+    private func plainWell(_ text: String) -> some View {
+        Text(text)
+            .textSelection(.enabled)
+            .font(.manta(size: Metrics.type.xs, design: .monospaced))
+            .foregroundColor(tokens.tx3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.spacing.sp2)
+            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+    }
+
+    private func verboseWell(_ shown: (text: String, trimmed: Bool)) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+            ScrollView(.vertical) {
+                Text(shown.text)
+                    .textSelection(.enabled)
+                    .font(.manta(size: Metrics.type.xs, design: .monospaced))
+                    .foregroundColor(tokens.tx3)
+                    .lineLimit(nil)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(Metrics.spacing.sp2)
+            }
+            .frame(height: Self.wellHeight(for: shown.text))
+            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+            if shown.trimmed {
+                Text("Showing the last \(ToolOutputPreview.verboseMaxLines.formatted()) lines \u{2014} Copy gets the full output")
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
+            }
+        }
+    }
+
+    /// `min(480, estimated content height)`. The estimate counts a long line as
+    /// several (about 60 characters per line on a phone), so a single huge line
+    /// is not squeezed into one row — it scrolls inside the well either way.
+    private static let maxHeight: CGFloat = 480
+
+    private static func wellHeight(for text: String) -> CGFloat {
+        var lines = 1
+        for byte in text.utf8 where byte == UInt8(ascii: "\n") { lines += 1 }
+        let estimated = max(lines, text.utf8.count / 60)
+        let lineHeight = MantaDynamicType.scaled(Metrics.type.xs) * 1.4
+        let height = CGFloat(estimated) * lineHeight + 2 * Metrics.spacing.sp2
+        return min(maxHeight, height)
     }
 }
 

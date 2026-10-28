@@ -35,6 +35,8 @@ struct TranscriptMediaCardView: View {
     @State private var load: Load = .idle
     @State private var attempt = 0
     @State private var preview: URL?
+    /// The column width the card was laid out in (see `box`).
+    @State private var measuredWidth: CGFloat?
     @Environment(\.displayScale) private var displayScale
 
     private var aspect: Double { TranscriptMediaGeometry.aspect(entry.reserved) }
@@ -90,17 +92,33 @@ struct TranscriptMediaCardView: View {
 
     // MARK: The reserved box
 
+    /// The box is sized by `TranscriptMediaGeometry.box(_:availableWidth:)` from
+    /// the measured column width, so every state draws at exactly the same size.
+    /// Until the first measurement lands, an aspect-ratio view with the same max
+    /// width stands in (same shape, so no visible step).
+    @ViewBuilder
     private var box: some View {
-        Color.clear
-            .aspectRatio(CGFloat(aspect), contentMode: .fit)
-            .frame(maxWidth: CGFloat(maxBoxWidth))
-            .overlay { boxContent }
-            .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-            .overlay(
-                RoundedRectangle(cornerRadius: Metrics.radius.md)
-                    .stroke(tokens.border, lineWidth: Metrics.spacing.spPx)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.md))
+        let frame = measuredWidth.map { TranscriptMediaGeometry.box(entry.reserved, availableWidth: Double($0)) }
+        Group {
+            if let frame {
+                Color.clear.frame(width: CGFloat(frame.width), height: CGFloat(frame.height))
+            } else {
+                Color.clear
+                    .aspectRatio(CGFloat(aspect), contentMode: .fit)
+                    .frame(maxWidth: CGFloat(maxBoxWidth))
+            }
+        }
+        .overlay { boxContent }
+        .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.md)
+                .stroke(tokens.border, lineWidth: Metrics.spacing.spPx)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: Metrics.radius.md))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            if width > 0, measuredWidth != width { measuredWidth = width }
+        }
     }
 
     @ViewBuilder
@@ -202,7 +220,7 @@ struct TranscriptMediaCardView: View {
                 .frame(minHeight: 44)
             }
         case .tooLarge(let bytes):
-            label("\u{26A0} Too large to preview here (\(Self.megabytes(bytes)))")
+            label("\u{26A0} Too large to preview here (\(Self.sizeLabel(bytes)))")
         }
     }
 
@@ -276,8 +294,8 @@ struct TranscriptMediaCardView: View {
         }
     }
 
-    private static func megabytes(_ bytes: Int64) -> String {
-        "\(max(1, Int((Double(bytes) / 1_048_576).rounded()))) MB"
+    private static func sizeLabel(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

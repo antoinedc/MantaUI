@@ -262,10 +262,9 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertNil(TranscriptMediaMime.forPath("/a/noext"))
     }
 
-    func testToolNameMatchingAcceptsAPrefixedSpelling() {
+    func testToolNameMatchingIsExact() {
         XCTAssertTrue(TranscriptMediaParse.isTool("media_show", "media_show"))
-        XCTAssertTrue(TranscriptMediaParse.isTool("manta_media_show", "media_show"))
-        XCTAssertTrue(TranscriptMediaParse.isTool("manta.media_show", "media_show"))
+        XCTAssertFalse(TranscriptMediaParse.isTool("manta_media_show", "media_show"))
         XCTAssertFalse(TranscriptMediaParse.isTool("media_showcase", "media_show"))
     }
 
@@ -737,7 +736,26 @@ final class TranscriptParityTests: XCTestCase {
         TranscriptDisplayOptions.setShowDetails(true)
         wait(for: [posted], timeout: 2)
         XCTAssertTrue(TranscriptDisplayOptions.showDetails)
+        XCTAssertFalse(TranscriptDisplayOptions.fetchSlim, "a fetch is slim only while the switch is off: on → full")
         TranscriptDisplayOptions.setShowDetails(false)
         XCTAssertFalse(TranscriptDisplayOptions.showDetails)
+        XCTAssertTrue(TranscriptDisplayOptions.fetchSlim)
+    }
+
+    func testSetShowDetailsToTheCurrentValuePostsNothing() {
+        let key = TranscriptDisplayOptions.defaultsKey
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        UserDefaults.standard.set(false, forKey: key)
+        let quiet = expectation(description: "no notification")
+        quiet.isInverted = true
+        let token = NotificationCenter.default.addObserver(forName: TranscriptDisplayOptions.didChange, object: nil, queue: nil) { _ in
+            quiet.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        TranscriptDisplayOptions.setShowDetails(false)
+        wait(for: [quiet], timeout: 0.3)
     }
 }

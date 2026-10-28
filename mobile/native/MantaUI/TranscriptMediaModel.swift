@@ -325,11 +325,12 @@ enum TranscriptMediaMime {
 // MARK: - Parsing the persisted tool parts
 
 enum TranscriptMediaParse {
-    /// A tool name matches when it is exactly `base`, or is namespaced with a
-    /// trailing `_base` / `.base` (open question 1: the V2 wire may prefix the
-    /// plugin tool's name).
+    /// The Manta plugin registers the tools under their plain names
+    /// (`docs/opencode-plugins-v2/manta/tools/media.ts`) and the box passes an
+    /// unknown tool name through unchanged (`toolNameFromV2`), so the match is
+    /// exact — no namespace-prefix spellings.
     static func isTool(_ name: String, _ base: String) -> Bool {
-        name == base || name.hasSuffix("_" + base) || name.hasSuffix("." + base)
+        name == base
     }
 
     /// `"Handle: <hex>"` out of a `media_begin` result.

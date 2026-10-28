@@ -927,7 +927,8 @@ test("listMessages ALWAYS strips a byte-identical tool stdout duplicate (no slim
 
 test("listMessages {slim:true} drops the part types the iOS client never renders", async () => {
   await withV2({ "GET /api/session/ses_a/message": { data: [A("a1", [{ type: "reasoning", text: "r" }, { type: "text", text: "t" }], { tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } })], cursor: { next: null } } }, async () => {
-    assert.deepEqual((await listMessages("ses_a", { slim: true }))[0].parts.map((p) => p.type), ["text"]);
+    // step-finish survives slim: it carries the raw finish reason the iOS turn footer classifies.
+    assert.deepEqual((await listMessages("ses_a", { slim: true }))[0].parts.map((p) => p.type), ["text", "step-finish"]);
     assert.deepEqual((await listMessages("ses_a"))[0].parts.map((p) => p.type), ["reasoning", "text", "step-finish"]);
   });
 });
@@ -1947,15 +1948,21 @@ test("slimTranscript drops unrendered parts + the duplicated tool stdout", () =>
   const slim = slimTranscript(messages);
   assert.deepEqual(
     slim[0].parts.map((p) => p.type),
-    ["text", "tool"],
-    "only the part types the client renders survive",
+    ["step-finish", "text", "tool"],
+    "only the part types the client renders survive (step-finish carries the raw finish reason)",
   );
   assert.deepEqual(
-    slim[0].parts[1].state,
+    slim[0].parts[2].state,
     { output: "OUT", metadata: { exit: 0 } },
     "the duplicate metadata.output is dropped, the rest of metadata kept",
   );
   assert.equal(messages[0].parts.length, 5, "the input must not be mutated");
+});
+
+test("slimTranscript keeps step-finish with its raw reason and tokens", () => {
+  const finish = { type: "step-finish", id: "m1:step-finish", reason: "model_context_window_exceeded", tokens: { input: 1, output: 2 } };
+  const slim = slimTranscript([{ id: "m1", parts: [{ type: "step-start" }, { type: "reasoning", text: "r" }, finish] }]);
+  assert.deepEqual(slim[0].parts, [finish]);
 });
 
 test("slimTranscript keeps a RUNNING tool's live output", () => {

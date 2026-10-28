@@ -73,8 +73,16 @@ final class TranscriptMediaStore: ObservableObject {
             sessions[sessionID] = state
         } else if var state = sessions[sessionID], state.turnOpen {
             state.observeRunning(false)
-            sessions[sessionID] = state
+            // A session that ran a turn but showed no media keeps no state.
+            sessions[sessionID] = state.byID.isEmpty ? nil : state
         }
+    }
+
+    /// Drop everything (the paired box changed). Call from the box-removed path;
+    /// live media of the old box must not outlive it.
+    func resetForBoxChange() {
+        sessions = [:]
+        lastRunning = [:]
     }
 
     /// This session's live entries, in (seq, id) order with `inCurrentTurn` set.

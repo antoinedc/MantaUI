@@ -21,6 +21,9 @@ struct TranscriptTurnFooterView: View {
 
     @State private var showHint = false
     @State private var showSelect = false
+    /// A quote chosen in the select-text sheet, fired once the sheet is really
+    /// gone (`onDismiss`) so a fork's navigation never races the dismissal.
+    @State private var pendingQuote: (text: String, destination: QuoteDestination)?
 
     private var menuItems: [TranscriptReplyMenuModel.Item] {
         guard footer.isTurnEnd else { return [] }
@@ -56,8 +59,12 @@ struct TranscriptTurnFooterView: View {
         .frame(minHeight: items.isEmpty ? 1 : 44)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("transcript-turn-footer")
-        .sheet(isPresented: $showSelect) {
-            TranscriptSelectTextSheet(text: footer.turnText, tokens: tokens, onQuote: onQuote)
+        .sheet(isPresented: $showSelect, onDismiss: firePendingQuote) {
+            TranscriptSelectTextSheet(
+                text: footer.turnText,
+                tokens: tokens,
+                onQuote: onQuote == nil ? nil : { text, destination in pendingQuote = (text, destination) }
+            )
         }
     }
 
@@ -109,6 +116,12 @@ struct TranscriptTurnFooterView: View {
         }
         .accessibilityLabel("Reply actions")
         .accessibilityIdentifier("transcript-reply-menu")
+    }
+
+    private func firePendingQuote() {
+        guard let pending = pendingQuote else { return }
+        pendingQuote = nil
+        onQuote?(pending.text, pending.destination)
     }
 
     private func title(of item: TranscriptReplyMenuModel.Item) -> String {

@@ -29,13 +29,10 @@ struct TranscriptSelectTextSheet: View {
                 tokens: tokens,
                 quoteAvailable: onQuote != nil,
                 onQuote: { selection, destination in
-                    // Dismiss first, then quote, so a fork's navigation does not
-                    // race the sheet's own dismissal.
+                    // The CALLER fires the quote from the sheet's onDismiss, once
+                    // the sheet is really gone.
+                    onQuote?(selection, destination)
                     dismiss()
-                    Task {
-                        try? await Task.sleep(nanoseconds: 350_000_000)
-                        onQuote?(selection, destination)
-                    }
                 }
             )
             .background(tokens.canvas.ignoresSafeArea())
@@ -74,7 +71,6 @@ struct TranscriptSelectableTextView: UIViewRepresentable {
             bottom: Metrics.spacing.sp3, right: Metrics.spacing.sp3
         )
         view.delegate = context.coordinator
-        view.adjustsFontForContentSizeCategory = true
         view.accessibilityIdentifier = "transcript-select-text-view"
         apply(to: view)
         return view
@@ -88,32 +84,43 @@ struct TranscriptSelectableTextView: UIViewRepresentable {
         }
     }
 
+    private func baseFont() -> UIFont {
+        UIFontMetrics.default.scaledFont(for: UIFont.systemFont(ofSize: Metrics.type.body))
+    }
+
+    /// The turn's text with its INLINE markdown applied. `UITextView` does not
+    /// render `inlinePresentationIntent`, so bold / italic / code are mapped to
+    /// fonts here while the runs are enumerated; the markers themselves are gone.
+    /// Falls back to plain text when the markdown does not parse.
     private func attributed() -> NSAttributedString {
-        let font = UIFont.systemFont(ofSize: MantaDynamicType.scaled(Metrics.type.body))
+        let base = baseFont()
         let color = UIColor(tokens.tx1)
-        let base: AttributedString
-        if let parsed = try? AttributedString(
+        guard let parsed = try? AttributedString(
             markdown: text,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        ) {
-            base = parsed
-        } else {
-            base = AttributedString(text)
+        ) else {
+            return NSAttributedString(string: text, attributes: [.font: base, .foregroundColor: color])
         }
-        let result = NSMutableAttributedString(attributedString: NSAttributedString(base))
-        let whole = NSRange(location: 0, length: result.length)
-        // The inline markdown parse can set bold/italic/code traits through
-        // `inlinePresentationIntent`; the platform font and colour are the base.
-        result.addAttribute(.foregroundColor, value: color, range: whole)
-        result.enumerateAttribute(.font, in: whole) { value, range, _ in
-            if value == nil { result.addAttribute(.font, value: font, range: range) }
+        let result = NSMutableAttributedString()
+        for run in parsed.runs {
+            let piece = String(parsed[run.range].characters)
+            let intent = run.inlinePresentationIntent ?? []
+            var font = base
+            var traits: UIFontDescriptor.SymbolicTraits = []
+            if intent.contains(.stronglyEmphasized) { traits.insert(.traitBold) }
+            if intent.contains(.emphasized) { traits.insert(.traitItalic) }
+            if intent.contains(.code) {
+                font = UIFont.monospacedSystemFont(ofSize: base.pointSize, weight: .regular)
+            }
+            if !traits.isEmpty, let descriptor = font.fontDescriptor.withSymbolicTraits(traits) {
+                font = UIFont(descriptor: descriptor, size: base.pointSize)
+            }
+            result.append(NSAttributedString(string: piece, attributes: [.font: font, .foregroundColor: color]))
         }
         return result
     }
 
     private func apply(to view: UITextView) {
-        view.font = UIFont.systemFont(ofSize: MantaDynamicType.scaled(Metrics.type.body))
-        view.textColor = UIColor(tokens.tx1)
         view.attributedText = attributed()
     }
 

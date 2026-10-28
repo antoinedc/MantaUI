@@ -307,8 +307,12 @@ enum ChatTranscriptMapper {
                         process(part, at: at, into: &blocks)
                     }
                 }
-                for case .prose(let text, _) in blocks[blocksStart...] {
-                    turnProse.append(text)
+                // A background result is the HEAD of a turn, not part of the
+                // reply: its own text never joins the reply menu's turn text.
+                if !TranscriptTurns.isBackgroundResult(msg) {
+                    for case .prose(let text, _) in blocks[blocksStart...] {
+                        turnProse.append(text)
+                    }
                 }
                 // A turn's widgets follow its tools/prose: the model rendered
                 // them as part of that assistant message.

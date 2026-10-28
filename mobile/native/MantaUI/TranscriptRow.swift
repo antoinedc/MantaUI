@@ -428,7 +428,11 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
             .padding(.horizontal, Metrics.spacing.sp3)
             .padding(.bottom, Metrics.spacing.sp3)
     case .turnFooter(let footer):
-        TranscriptTurnFooterView(footer: footer, tokens: tokens, onQuote: actions.onQuote)
+        TranscriptTurnFooterView(
+            footer: footer,
+            tokens: tokens,
+            onQuote: TranscriptQuoteCapability.canQuote(cards) ? actions.onQuote : nil
+        )
             .padding(.horizontal, Metrics.spacing.sp3)
     case .notice(let text, let kind):
         SystemNoticeView(text: text, kind: kind, tokens: tokens)

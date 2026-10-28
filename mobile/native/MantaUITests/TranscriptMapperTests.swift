@@ -351,6 +351,35 @@ final class TranscriptMapperTests: XCTestCase {
         XCTAssertFalse(map(messages, TranscriptMapOptions(showReasoning: true)).contains { if case .reasoning = $0 { return true }; return false })
     }
 
+    // MARK: - The shape the store actually fetches (slim)
+
+    /// The box's slim filter (`SLIM_DROP_PART_TYPES` in src/server/opencode.mjs):
+    /// reasoning, step-start and snapshot parts are dropped; step-finish stays.
+    private func slim(_ messages: [OpencodeMessage]) -> [OpencodeMessage] {
+        messages.map { message in
+            var copy = message
+            copy.parts = message.parts.filter { !["step-start", "reasoning", "snapshot"].contains($0.type) }
+            return copy
+        }
+    }
+
+    func testASlimTranscriptStillCarriesTheRawFinishReasonSoContextWallSurvivesAReload() {
+        let m = assistant("m", parts: [
+            OpencodePart(type: "step-start", id: "m:ss", messageID: "m"),
+            text("m", "cut"),
+            stepFinish("m", reason: "model_context_window_exceeded"),
+        ], tokens: output(5))
+        let blocks = map(slim([user("u1"), m]))
+        XCTAssertEqual(footers(blocks).first?.truncation, .contextWall)
+    }
+
+    func testASlimTranscriptHasNoReasoningRowsEvenWithTheSwitchOn() {
+        let blocks = map(slim(reasoningMessages()), TranscriptMapOptions(showReasoning: true))
+        XCTAssertFalse(blocks.contains { if case .reasoning = $0 { return true }; return false },
+                       "the fetch must be unslimmed while the switch is on (TranscriptDisplayOptions.fetchSlim)")
+        XCTAssertFalse(blocks.isEmpty)
+    }
+
     // MARK: - F3 command turns
 
     func testUserMessageWithACommandBecomesACommandBand() {
@@ -494,6 +523,18 @@ final class TranscriptMapperTests: XCTestCase {
         XCTAssertEqual(footers(blocks).map(\.messageID), ["a1", "a2"], "the result message draws nothing and carries no footer")
         XCTAssertEqual(footers(blocks).first?.turnText, "started")
         XCTAssertEqual(footers(blocks).last?.turnText, "review passed", "the second turn's text never includes the first's")
+    }
+
+    func testABackgroundResultsOwnTextIsNotPartOfTheNextTurnsReplyText() {
+        let bg = OpencodePart(type: "background-result", id: "bgm:bg", messageID: "bgm", text: "result", extra: [:])
+        let bgText = text("bgm", "SHOULD NOT LEAK")
+        let messages = [
+            user("u1"),
+            assistant("a1", parts: [text("a1", "started")]),
+            assistant("bgm", created: 5_000, completed: 5_000, parts: [bg, bgText]),
+            assistant("a2", created: 6_000, completed: 8_000, parts: [text("a2", "review passed")]),
+        ]
+        XCTAssertEqual(footers(map(messages)).last?.turnText, "review passed")
     }
 
     func testTheFooterMessageIDsHelperReadsOnlyTruncatedFooters() {
