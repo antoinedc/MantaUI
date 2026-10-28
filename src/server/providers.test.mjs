@@ -605,6 +605,21 @@ describe("setProviders", () => {
     assert.deepEqual(seen, [{ removed: true }], "upsert-only leaves the window alone");
   });
 
+  it("a mixed remove+upsert batch closes the grace window AFTER the selection's own reload", async () => {
+    const seq = [];
+    const { deps } = memConfig(JSON.stringify({ provider: { voska: { name: "Voska AI" } } }), {
+      reload: async () => { seq.push("reload"); return { ok: true, reloaded: true }; },
+    });
+    deps.listModelIds = async (id) => (id === "openrouter" ? ["m1", "m2"] : []);
+    deps.invalidateProviders = (opts) => seq.push(opts.removed ? "close" : "other");
+    const result = await setProviders(
+      { remove: ["voska"], upsert: [{ id: "openrouter", name: "O", baseURL: "https://o/v1", apiKey: "k", enabledModels: ["m2"] }] },
+      deps,
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(seq, ["reload", "reload", "close"], "the marker write's reload must not reopen the window after it closed");
+  });
+
   it("upserts a provider block in ONE write and ONE reload, comments kept", async () => {
     const { state, deps } = memConfig('{\n  // keep me\n  "model": "x/y"\n}');
     const result = await setProviders({ upsert: [VOSKA] }, deps);

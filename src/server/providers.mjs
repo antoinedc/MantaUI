@@ -548,15 +548,20 @@ export async function setProviders(ops, deps = {}) {
     return edits;
   }, deps);
   if (!r.ok) return r;
-  // The reload above opened the post-restart grace window, in which a provider dropping out is
-  // distrusted. Here it dropped out on purpose: close the window so the removal shows now.
-  if (removes.length > 0) (deps.invalidateProviders ?? invalidateProvidersCache)({ removed: true });
 
+  let result = { ok: true };
   for (const input of upserts) {
     const sel = await applyModelSelection(input.id, input.enabledModels ?? [], deps);
-    if (!sel.ok) return sel;
+    if (!sel.ok) {
+      result = sel;
+      break;
+    }
   }
-  return { ok: true };
+  // Every reload above opened the post-restart grace window, in which a provider dropping out is
+  // distrusted. Here it dropped out on purpose: close the window AFTER the last reload so the
+  // removal shows now. The removal is already on disk even if a selection step failed.
+  if (removes.length > 0) (deps.invalidateProviders ?? invalidateProvidersCache)({ removed: true });
+  return result;
 }
 
 // Reconcile one provider's hidden-model markers with its selection. Non-fatal
