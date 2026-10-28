@@ -1020,7 +1020,7 @@ private struct ChatScreenContent: View {
             // (never pass an already-built block) and focuses the composer.
             await MainActor.run {
                 if !composer.insert(text: selection, mode: .quote) {
-                    store.actionHint = "Nothing to quote"
+                    store.actionHint = composer.acceptsInput ? "Nothing to quote" : "This chat is read-only"
                 }
             }
         case .newSession:

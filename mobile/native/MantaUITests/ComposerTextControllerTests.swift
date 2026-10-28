@@ -137,6 +137,19 @@ final class ComposerTextControllerTests: XCTestCase {
         XCTAssertNil(controller.consumeSeedNotice())
     }
 
+    /// A read-only composer takes neither the text nor the chips, and reports
+    /// every attachment as rejected instead of dropping the draft silently.
+    func testApplyOnReadOnlyComposerRejectsEverything() {
+        let controller = ComposerTextController()
+        controller.acceptsInput = false
+        let draft = NewSessionDraft(text: "hello", attachments: [
+            NewSessionDraftAttachment(remotePath: "/box/a.txt", displayName: "a.txt", mime: nil),
+        ])
+        XCTAssertEqual(controller.apply(draft), 1)
+        XCTAssertEqual(controller.text, "")
+        XCTAssertTrue(controller.attachments.isEmpty)
+    }
+
     func testSeedNoticeIsPluralForSeveralRejections() {
         let bad = NewSessionDraftAttachment(remotePath: "x", displayName: "x", mime: nil)
         let controller = ComposerTextController(draft: NewSessionDraft(attachments: [bad, bad]))

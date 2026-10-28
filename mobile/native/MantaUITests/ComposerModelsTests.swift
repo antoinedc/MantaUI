@@ -70,13 +70,6 @@ final class ComposerModelsTests: XCTestCase {
 
         XCTAssertEqual(ComposerSubmissionSettle.localAction(snapshot, text: "/fork"), "")
         XCTAssertEqual(ComposerSubmissionSettle.localAction(snapshot, text: "/fork now"), "/fork now")
-
-        // "Fork succeeded" and "fork failed" leave the composer's other state identical.
-        let attachmentsAfterSuccess = [ready]
-        let attachmentsAfterFailure = [ready]
-        XCTAssertEqual(attachmentsAfterSuccess, attachmentsAfterFailure)
-        XCTAssertEqual(attachmentsAfterSuccess.map(\.id), [ready.id])
-        XCTAssertEqual(agents, ["general"])
     }
 
     // MARK: - Wire types

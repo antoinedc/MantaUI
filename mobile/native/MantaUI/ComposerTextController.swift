@@ -111,6 +111,9 @@ final class ComposerTextController: ObservableObject {
     /// `linkedIssueURL` belong to the create sheet and are ignored here.
     @discardableResult
     func apply(_ draft: NewSessionDraft) -> Int {
+        // A read-only composer takes nothing: report every attachment as
+        // rejected rather than silently dropping the draft text.
+        guard acceptsInput else { return draft.attachments.count }
         if !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             insert(text: draft.text, mode: .append)
         }

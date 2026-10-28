@@ -335,7 +335,9 @@ struct ComposerView: View {
             }
         }
         .animation(.smooth(duration: 0.18), value: typeaheadOpen)
-        .onChange(of: store.actionHint) { _, hint in
+        // `initial: true`: a hint set while this view was unmounted (the loading
+        // skeleton replaces the composer on open) must still surface on mount.
+        .onChange(of: store.actionHint, initial: true) { _, hint in
             guard let hint else { return }
             surfaceHint(hint)
             store.actionHint = nil
@@ -350,11 +352,11 @@ struct ComposerView: View {
         .confirmationDialog("Clear this session?", isPresented: $showClearConfirm,
                             titleVisibility: .visible) {
             // One dialog for every entry point (keyboard bar, palette, typed
-            // `/clear`): Clear runs it and empties the draft; Cancel leaves the
-            // draft exactly as it was.
+            // `/clear`). A successful clear rebuilds the screen with an empty
+            // composer; a failed one leaves the draft (including a typed
+            // `/clear`) in place next to the failure hint. Cancel changes nothing.
             Button("Clear", role: .destructive) {
                 onSlashClear?()
-                text = ""
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -782,7 +784,7 @@ struct ComposerView: View {
     /// this turn.
     @ViewBuilder
     private var expandedSendButton: some View {
-        if store.running {
+        if store.running && !isBackgroundRun {
             Menu {
                 Button {
                     submit(delivery: .queue)
@@ -809,7 +811,7 @@ struct ComposerView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
-            .accessibilityLabel("Send")
+            .accessibilityLabel(isBackgroundRun ? "Run in background" : "Send")
         }
     }
 
@@ -1219,6 +1221,13 @@ struct ComposerView: View {
     /// the composed text and reuses `submit()` unchanged).
     @MainActor
     private func submitVoiceTranscript(_ transcript: String) {
+        // A send is still being prepared: `submit()` would refuse silently and
+        // the dictation would replace what was typed. Keep both, and say so.
+        if submitInFlight {
+            text = HandoffComposerCarry.appendBelow(text, transcript)
+            surfaceHint("Still sending — your dictation is in the composer")
+            return
+        }
         text = transcript
         submit()
     }
@@ -1303,9 +1312,11 @@ struct ComposerView: View {
     /// from the keyboard bar's esc key and returns the moment the draft is empty.
     @ViewBuilder
     private var sendButton: some View {
-        if submitInFlight {
+        if submitInFlight && !store.running {
             // A send is being prepared (e.g. the command list is loading): the
-            // spinner replaces the glyph so a second tap can't double-send.
+            // spinner replaces the glyph so a second tap can't double-send. Not
+            // while a turn runs — Stop must stay reachable then (`canSend` is
+            // false during a send in flight, so that case falls to Stop below).
             ProgressView()
                 .controlSize(.small)
                 .tint(tokens.onAccent)
@@ -1313,6 +1324,15 @@ struct ComposerView: View {
                 .background(tokens.accentSolid, in: Circle())
                 .accessibilityLabel("Sending")
                 .accessibilityIdentifier("send-button")
+        } else if store.running && canSend && isBackgroundRun {
+            // A background run never joins the running turn, so there is no
+            // "Send now / after this turn" choice to offer.
+            Button { submit() } label: {
+                sendGlyph(filled: true, systemName: "arrow.up")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Run in background")
+            .accessibilityIdentifier("send-button")
         } else if store.running && canSend {
             runningSendMenu
         } else {
@@ -1342,7 +1362,7 @@ struct ComposerView: View {
             submit(delivery: .steer)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isBackgroundRun ? "Run in background" : "Send now")
+        .accessibilityLabel("Send now")
         .accessibilityHint("Long press for Send after this turn")
         .accessibilityAction(named: "Send after this turn") { submit(delivery: .queue) }
         .accessibilityIdentifier("send-button")
