@@ -1238,7 +1238,10 @@ test("getProviders: removing the last provider shows an empty list on the next r
     assert.deepEqual(after.connected, []);
     assert.equal(after.unavailable, undefined);
     assert.deepEqual(await listModels({}, { strict: true }), [], "no stale models from the removed provider");
-    assert.equal(warnings.length, 0);
+    assert.deepEqual(warnings.filter((w) => w.includes("[providers]")), ["[providers] opencode reports no connected provider (2 in catalogue)"], "logged once, never as a refused restart read");
+    h.clock.t += PROVIDERS_EMPTY_TTL_MS + 1;
+    await getProviders();
+    assert.equal(warnings.length, 1, "not re-logged while it stays empty");
   }));
 });
 

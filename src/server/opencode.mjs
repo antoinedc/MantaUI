@@ -1717,6 +1717,11 @@ async function refreshProviders(gen) {
     // also the shape of a race we failed to spot (e.g. manta itself started mid-restart), so it
     // is only trusted briefly rather than for the full TTL.
     const ttl = fresh.connected.length === 0 ? PROVIDERS_EMPTY_TTL_MS : PROVIDERS_CACHE_TTL_MS;
+    // Logged on the transition only (cold, or connected → none), so a fresh box is not spammed
+    // every 30 s but the next "model picker went empty" leaves evidence of what opencode answered.
+    if (fresh.connected.length === 0 && (previous?.connected?.length ?? 1) > 0) {
+      console.warn(`[providers] opencode reports no connected provider (${fresh.all?.length ?? 0} in catalogue)`);
+    }
     // A read that began before a newer one's invalidation must not clobber the newer snapshot.
     if (!providersSnapshot || gen >= providersSnapshot.gen) providersSnapshot = { value: fresh, at: providersNow(), gen, ttl };
     return fresh;
