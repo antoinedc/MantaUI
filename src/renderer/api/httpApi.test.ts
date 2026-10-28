@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   AuthRequiredError,
   ServerNotConfiguredError,
@@ -738,5 +738,56 @@ describe("httpApi revealInFolder", () => {
   it("stays a no-op on a phone/browser (no preload, nothing to reveal into)", async () => {
     vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     await expect(httpApi.revealInFolder("/Users/a/Downloads/report.pdf")).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Background-job approval decisions are bounded: a stalled connection must end
+// in a rejection (the card's "couldn't confirm" outcome), not hang forever.
+// The mock observes init.signal like a real fetch, so the existing 15 s fetch
+// timeout (headers only) is what rejects it.
+// ---------------------------------------------------------------------------
+
+describe("httpApi approval decisions fail fast on a stalled connection", () => {
+  beforeEach(() => {
+    mockLocalStorage["manta_server"] = "https://example.com";
+    mockLocalStorage["manta_token"] = HEX32;
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const stalled = () =>
+    stubFetch().mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_res, rej) => {
+          init?.signal?.addEventListener("abort", () => rej(new DOMException("aborted", "AbortError")));
+        }),
+    );
+
+  it("delegateDecline rejects after 15 s", async () => {
+    stalled();
+    const p = httpApi.delegateDecline("a1");
+    const assertion = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(15000);
+    await assertion;
+  });
+
+  it("delegateApprove rejects after 15 s", async () => {
+    stalled();
+    const p = httpApi.delegateApprove("a1", [{ permission: "bash", pattern: "ls" }]);
+    const assertion = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(15000);
+    await assertion;
+  });
+
+  it("a normal reply still resolves with the same channel and body", async () => {
+    const fetchMock = stubFetch().mockImplementation(async () => jsonResponse({ ok: true }));
+    await expect(httpApi.delegateApprove("a1", [{ permission: "bash", pattern: "ls" }])).resolves.toEqual({ ok: true });
+    await expect(httpApi.delegateDecline("a1")).resolves.toEqual({ ok: true });
+    expect(String(fetchMock.mock.calls[0][0])).toContain(`/rpc/${encodeURIComponent(IPC.delegateApprove)}`);
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ args: [{ id: "a1", tools: [{ permission: "bash", pattern: "ls" }] }] });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ args: ["a1"] });
   });
 });
