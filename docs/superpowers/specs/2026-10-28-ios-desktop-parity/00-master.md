@@ -197,7 +197,7 @@ project change lists it as a mount request. Navigator injection happens in
 `MantaAppRoot.swift` (not `RootView`, which is the capture-harness fixture).
 WS07 mounts its agent-file notice in `MantaAppRoot.swift` in wave B.
 
-D2. **`NewSessionDraft` is defined once, in `MantaNavigation.swift`** (wave-0
+D2. **`NewSessionDraft` is defined once, in `MantaNavigationModels.swift`** — a Foundation-only file (listed in `Package.swift` by M-04-8) holding ONLY `NewSessionDraft`, `NewSessionDraftAttachment` and `MantaRoute`; the observable `MantaNavigator` stays in app-only `MantaNavigation.swift` (round-3 seam fix) (wave-0
 scaffold, owned by WS04 afterwards):
 
 ```swift
@@ -404,7 +404,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-05-2 | `SessionListView.swift` (WS04) | WS05 | C | `InboxWorkScreen(onClose:)` (WS05); `MantaNavigator.startNewSession(_: NewSessionDraft)` (WS04) | WS04 (A2) |
 | M-05-3 | `SessionListView.swift` (WS04) | WS05 | C | `ReviewScreen.forSession(_ sessionID: String)` (WS05) | WS04 (A2); after M-05-2 |
 | M-05-4 | `mobile/native/Package.swift` (WS07) | IC | C-int | WS05 manifest (`GitForgeModels`, `ReviewDiff`, `InboxWorkModels` + 3 tests) | WS05 (C) |
-| M-06-1 | `ChatScreen.swift` (WS02) | WS02 | B | `SearchScreen.init(scope: SearchScope, seed: String = "", search: SearchFunction? = nil)`, `SearchScope.fromProjects(_ projects: [MantaProject], primarySessionId: String?) -> SearchScope` (WS06). Call: `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId))` | WS06 (B, pinned) |
+| M-06-1 | `ChatScreen.swift` (WS02) | WS02 | B | `SearchScreen.init(scope: SearchScope, seed: String = "", search: SearchFunction? = nil)`, `SearchScope.fromProjects(_ projects: [MantaProject], primarySessionId: String?) -> SearchScope` (WS06). Call: `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: store.sessionId))` | WS06 (B, pinned) |
 | M-06-2 | `SessionListView.swift` (WS04) | IB | B-int | `SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive(_:)`, `SearchCopy.normalized(_:)` (WS06) | WS04 (A2), WS06 (B) |
 | M-06-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS06 manifest (`SearchModels.swift`, `SearchTests.swift`) | WS06 (B) |
 | M-07-1 | `ChatScreen.swift` (WS02) | WS02 | B | `ArtifactsCard(sessionId:onClose:projectName:cwd:composer:onJumpToMessage:)` (WS07); `composer` (M-03-1); `MantaNavigator.open(.message(sessionID:messageID:))` (WS04/C2). No `onAttach`. | M-03-1, WS04 (A2), M-03-7 |

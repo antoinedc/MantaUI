@@ -509,7 +509,7 @@ extension SearchScope {   // in SearchScreen.swift (needs MantaProject)
 1. **Chat nav bar** (mount M-06-1, applied by WS02):
    - A magnifyingglass toolbar button labelled "Search conversations".
    - It presents
-     `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId))`.
+     `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: store.sessionId))`.
    - It appears only on the main chat screen, never on the read-only subagent
      screen.
 2. **Session list** (mount M-06-2, applied by integration agent B):
@@ -570,7 +570,7 @@ Manifest for the integration step:
   `ToolbarItem(placement: .primaryAction) { Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search conversations") }`.
 - Add `@State private var showSearch = false`.
 - Add
-  `.sheet(isPresented: $showSearch) { SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId)) }`,
+  `.sheet(isPresented: $showSearch) { SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: store.sessionId)) }`,
   or a case in the screen's sheet enum if WS02 has one.
 - Only on the main chat screen (non-empty `sessionId`), not the subagent
   screen.
@@ -689,7 +689,7 @@ No rebuttals.
    adapter `SearchScope.fromProjects(_:primarySessionId:)` in
    `SearchScreen.swift`. Per the finding, no compatibility overload was added.
    - M-06-1 now states explicitly that the receiver must use
-     `.fromProjects(sessionStore.projects, primarySessionId: sessionId)` and the
+     `.fromProjects(sessionStore.projects, primarySessionId: store.sessionId)` and the
      ID `M-06-1`.
    - WS02's receipt now matches (reconciliation after round 2).
 

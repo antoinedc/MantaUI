@@ -1223,8 +1223,12 @@ the session and queues the first prompt (`NewSessionScreen.tsx:655-760`).
 **`testPrefillCarriesLinkedIssueURL`**, `testPrefillNilIssueHasNoHeader`.
 Plan: **`testCreatePlanPreservesDraftBranchIntoWorktreeCreate`** (the plan's
 `gitAddWorktree` name = draft branch), `testCreatedTargetCarriesDraftAndNoSeed`
-(pure `SessionCreatePlan.openTarget(...)` returns `seed == nil` and the draft with
-"Don't carry over" applied). Mac end-to-end, `SessionDraftHandoffTests.swift`:
+(MAC-ONLY, moved to `SessionDraftHandoffTests.swift`: `SessionOpenTarget` lives in app-only
+`SessionListView.swift`, so the `openTarget(...)` adapter is app-only in `SessionCreateAdapters.swift`;
+the Linux test instead asserts the pure `SessionCreatePlan` value carries `seed == nil` and the draft
+with "Don't carry over" applied). The draft types come from Foundation-only
+`MantaNavigationModels.swift` (master D2), which M-04-8 adds to `Package.swift` together with
+`SessionCreateLogic.swift`; `verify.sh` must pass on the complete A-int manifest. Mac end-to-end, `SessionDraftHandoffTests.swift`:
 **`testNewChatComposerHasDraftTextExactlyOnce`** — build the composer exactly as
 WS03's adopted `ChatScreenContent.init` does for `seed: ""`, no carry-over and
 the draft (`ComposerTextController(text: HandoffComposerCarry.appendBelow("", ""),
