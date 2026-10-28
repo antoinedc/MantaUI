@@ -237,7 +237,13 @@ describe("ChatPanel background-job approval card", () => {
       const d = deferred();
       decideImpl[method] = () => d.promise;
       await open();
-      await click(button(btn));
+      // Two presses before React re-renders: the synchronous in-flight guard must drop the second.
+      const el = button(btn);
+      await act(async () => {
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await h!.flush();
       await tick();
       expect(cardShown()).toBe(false);
       expect(calls(method)).toHaveLength(1);
@@ -257,6 +263,21 @@ describe("ChatPanel background-job approval card", () => {
       await h!.flush();
       expect(cardShown()).toBe(false);
     });
+  });
+
+  it.each(KINDS)("$kind: a poll issued AFTER the press but resolving after completion cannot resurrect it", async ({ btn, method }) => {
+    const d = deferred();
+    decideImpl[method] = () => d.promise;
+    await open();
+    await click(button(btn));
+    const held = deferred();
+    pollImpl = () => held.promise;
+    await tick(); // poll issued while the decision is in flight
+    await act(async () => { d.resolve({ ok: true }); });
+    await h!.flush();
+    await act(async () => { held.resolve([AP]); });
+    await h!.flush();
+    expect(cardShown()).toBe(false);
   });
 
   it("an authoritative empty poll clears a displayed (restored) approval", async () => {

@@ -371,7 +371,8 @@ const RPC_METADATA_TIMEOUT_MS = 15000;
 // Approve/decline of a background-job approval only resolves an in-memory entry
 // on the box (it does not wait for job creation), so a stalled connection must
 // fail fast into the card's "couldn't confirm" outcome. This is the existing
-// fetch timeout (bounds waiting for response headers).
+// fetch timeout (bounds waiting for response headers only; a stalled reply BODY
+// is not covered, and would leave that approval in flight in the panel).
 const RPC_APPROVAL_TIMEOUT_MS = 15000;
 async function rpcWithTimeout<T>(
   channel: string,

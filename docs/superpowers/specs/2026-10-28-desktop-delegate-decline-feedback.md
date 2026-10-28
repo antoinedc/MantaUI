@@ -189,8 +189,9 @@ background session (Approve) is the visible result.
 The `tools` array passed to `onApprove` is snapshotted (deep copy) at click and
 stored in the `retry` entry. Every restore/poll/remount for that id uses the
 snapshot (§3.3), so a user who narrowed access and hit a failure cannot, by
-pressing Start job again, submit the original broader grant. The snapshot is
-dropped when the id settles or the session changes.
+pressing Start job again, submit the original broader grant. The retry entry is
+dropped when a successful poll no longer lists the id (ids are unique per
+approval, so no per-session reset is needed).
 
 ## 4. Libraries / existing helpers considered
 
@@ -366,3 +367,23 @@ Each finding was verified against the code before acting.
 - **R2-4 NIT — redundant unit coverage.** *Accepted.* Unit tests reduced to the
   classification edges and reconciler; component cases are `describe.each` over
   approve/decline (§5.1, §5.2).
+
+### Opus code review (approved; 1 SHOULD, 6 NIT)
+
+- **O-1 SHOULD — auto-cover removal regression test / same-named test file.**
+  Resolved by rebasing onto `origin/main` after PR #1635 (the sibling) merges and
+  keeping the union of cases in `ChatPanel.delegateApproval.test.tsx` (its
+  "never auto-approve" tests + this branch's decision tests); the sibling's
+  deletion of `globCovers`/`isApprovalCoveredByAlways` from `chatUtils` is kept.
+  This supersedes the §3.4 note that the helper is left for the other branch.
+- **O-2 NIT** double-press guard — test added (two clicks in one `act`).
+- **O-3 NIT** completion-epoch bump — test added (poll issued after the press,
+  resolving after completion).
+- **O-4 NIT** a failed Decline restores the box's original rules, not unsubmitted
+  card edits. Accepted: the restored card lists them, so a later Start is an
+  informed choice; no `PanelCards` change.
+- **O-5 NIT** §3.5 wording aligned with the implementation.
+- **O-6 NIT** residual body-stall case noted in a comment at
+  `RPC_APPROVAL_TIMEOUT_MS`.
+- **O-7 NIT** toast naming the job — declined; copy is spec-frozen and the
+  toast text is deliberately generic.
