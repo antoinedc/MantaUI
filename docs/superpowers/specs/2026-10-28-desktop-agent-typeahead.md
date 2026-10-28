@@ -274,6 +274,15 @@ existing three smoke tests stay.
   the agent-fetch failure path is verified or complete. Follow-up to track: add a
   `loading`/`error` field to the shared agent catalog snapshot, a `.catch`, and a
   "Loading agents…" / "Couldn't load agents" hint, with a rejection test.
+- **A draft ending in `@@` opens the agent list (accepted trade-off, Opus NIT).**
+  E.g. a pasted diff hunk header ending in `@@` with the caret right after it:
+  the popup opens and Enter completes the first agent instead of sending (Escape
+  dismisses it, then Enter sends). On `main` nothing opened. Accepted: typing `@@`
+  at the start of a token is exactly the trigger the feature defines, it is the
+  same class as the existing bare-`@` file popup, and the popup only counts as open
+  for the keyboard when the agent list has rows (`@@zzz` or a still-loading catalog
+  sends as before). Narrowing the trigger (e.g. requiring a following letter) would
+  make `@@` alone — the discoverable way to list agents — dead.
 - iOS has no agent typeahead; adding one is a separate feature.
 
 
@@ -328,3 +337,19 @@ of the label.
 - **R2-2 NIT — stale "no other hook changes" sentence.** Accepted: §3 item 2 now
   says "Apart from the row-label change in item 5, catalog refresh and
   `applyTypeahead` remain unchanged."
+
+### Code review (Opus: APPROVE, 1 SHOULD, 2 NIT)
+
+Review: `docs/superpowers/specs/reviews/2026-10-28-desktop-agent-typeahead-opus.md`.
+
+1. **SHOULD — single-`@` / `/` "unchanged" tests too weak.** Accepted and verified
+   by mutation. §5B tests 5-6 now assert: `@` opens the reference popup (`@docs`)
+   and a fully typed `@docs` + Enter still SENDS (`opencodePrompt` once, text
+   `@docs`); `/rev` lists `/review` and `/review` + Enter still RUNS the command
+   (`opencodeRunCommand` once, not a completion to `/review `). Widening the guard
+   to `mode !== "command"` fails the file test; `mode !== "file"` fails the command
+   test.
+2. **NIT — draft ending in `@@` opens the agent popup.** Decision: acceptable, kept
+   as is; documented as a trade-off in §7 (reasoning there).
+3. **NIT — stale "Three triggers" comment.** Fixed: the `useTypeahead.ts` header now
+   says "Triggers:".

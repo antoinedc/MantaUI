@@ -135,8 +135,9 @@ describe("useTypeahead via ChatPanel", () => {
 
   // The agent catalog is a module-level cache shared across tests, so force a
   // re-fetch against THIS test's mock api before mounting.
-  async function mountWithAgents() {
+  async function mountWithAgents(extra: Record<string, unknown> = {}) {
     const { api } = installMockApi({
+      ...extra,
       opencodeAgents: () => Promise.resolve(AGENTS),
       opencodeModels: () =>
         Promise.resolve([
@@ -211,18 +212,42 @@ describe("useTypeahead via ChatPanel", () => {
     ]);
   });
 
-  it("a single @ still opens the file picker, not agents", async () => {
-    await mountWithAgents();
+  it("a single @ still opens the file/reference picker, and an exact @ref + Enter still sends", async () => {
+    const { api } = await mountWithAgents({
+      opencodeReferences: () => Promise.resolve([{ name: "docs", description: "d" }]),
+    });
     await h!.flush();
     await typeText(h!, "@");
-    expect(h!.text()).not.toContain("No matching agents");
+    // The file search is debounced 80ms.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 150));
+    });
+    await h!.flush();
+    expect(h!.text()).toContain("@docs");
     expect(h!.text()).not.toContain("@build");
+
+    await typeText(h!, "@docs");
+    await press(h!, "Enter");
+    const sent = api.calls.opencodePrompt ?? [];
+    expect(sent).toHaveLength(1);
+    expect(String(sent[0][1]).trim()).toBe("@docs");
   });
 
-  it("a slash command still opens the command popup", async () => {
-    await mountWithAgents();
+  it("a slash command still opens the command popup, and an exact /command + Enter still runs it", async () => {
+    const { api } = await mountWithAgents({
+      opencodeCommands: () => Promise.resolve([{ name: "review", description: "r" }]),
+      opencodeRunCommand: () => Promise.resolve({ ok: true }),
+    });
     await h!.flush();
-    await typeText(h!, "/");
-    expect(h!.text()).toContain("/clear");
+    await typeText(h!, "/rev");
+    expect(h!.text()).toContain("/review");
+
+    await typeText(h!, "/review");
+    await press(h!, "Enter");
+    // Exact match submits; it must not complete to "/review ".
+    expect(taOf(h!).value).not.toBe("/review ");
+    const ran = api.calls.opencodeRunCommand ?? [];
+    expect(ran).toHaveLength(1);
+    expect((ran[0][0] as { command: string }).command).toBe("review");
   });
 });

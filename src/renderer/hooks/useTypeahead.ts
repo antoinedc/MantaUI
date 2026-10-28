@@ -12,7 +12,7 @@
 // render harness.
 //
 // The textarea's onChange routes through `updateInput` which both updates
-// `input` state and detects active typeahead. Three triggers:
+// `input` state and detects active typeahead. Triggers:
 //   /<word>      at byte 0 → command typeahead
 //   @<token>     after whitespace (or BOF) → file / reference typeahead
 //   @@<token>    after whitespace (or BOF) → agent typeahead (inserts @<name>)
