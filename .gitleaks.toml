@@ -74,6 +74,10 @@ paths = [
   '''src/gateway/apns\.test\.mjs''',
   '''mobile-rn/src/pure/__tests__/claim\.test\.ts''',
   '''src/renderer/api/demoFixture\.ts''',                   # demo-mode sample data
+  # `key: "anthropic/opus"` model ids next to a `key` field (feat/ios-desktop-
+  # parity, commit 69067c71). Full-history scan reaches every fetched branch, so
+  # this blocked every PR. Audited 2026-10-28: 12 findings, all model ids.
+  '''src/renderer/ModelsCard\.test\.tsx''',
 
   # --- Anthropic beta-flag names ("interleaved-thinking-2025-05-14" etc.) trip
   # generic-api-key next to a `BETAS` identifier. Public header values, audited
