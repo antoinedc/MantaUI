@@ -1,0 +1,1035 @@
+diff --git a/src/renderer/ChatPanel.tsx b/src/renderer/ChatPanel.tsx
+index 1457abf..6189319 100644
+--- a/src/renderer/ChatPanel.tsx
++++ b/src/renderer/ChatPanel.tsx
+@@ -30,6 +30,7 @@ import type {
+   QuestionRequest,
+ } from "../shared/types";
+ import { useStore } from "./store";
++import { useModelsPicker } from "./modelsPicker";
+ import { flashMessageRow } from "./messageFlash";
+ import {
+   allTodosTerminal,
+@@ -60,7 +61,6 @@ import {
+   progressAttentionKind,
+   isPlanExitQuestion,
+   extractPlanData,
+-  selectableModelGroups,
+   titleCase,
+   formatNoHealthyEndpointCopy,
+   providersFromExcludedKeys,
+@@ -242,7 +242,6 @@ export function ChatPanel({
+   // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
+   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
+   const configDefaultModel = useStore((s) => s.defaultModel);
+-  const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
+   // BET-1274 10d: the routing preset drives the Auto row's display label; the
+   // value lives on the same store block Settings writes (modelRouting.preset).
+   const routingPreset = useStore((s) => s.modelRouting?.preset);
+@@ -2960,10 +2959,8 @@ export function ChatPanel({
+         : null),
+     [modelOverride, defaultModel],
+   );
+-  const delegateSelectable = useMemo(
+-    () => selectableModelGroups(models, deactivatedMainModels),
+-    [models, deactivatedMainModels],
+-  );
++  // The delegate picker's candidates are the box's (`models:picker.delegateGroups`).
++  const delegateSelectable = useModelsPicker(models).delegateGroups;
+   // Level 2 — the remembered delegation model for this project (written ONLY on
+   // an explicit pick; an inherited default is never promoted into it).
+   const delegateProjectKey = tmuxSession ?? sessionId;
+diff --git a/src/renderer/api/demoCoverage.test.ts b/src/renderer/api/demoCoverage.test.ts
+index dd35403..5cf8ec3 100644
+--- a/src/renderer/api/demoCoverage.test.ts
++++ b/src/renderer/api/demoCoverage.test.ts
+@@ -137,6 +137,17 @@ export const DEMO_UNIMPLEMENTED = [
+   "modelPrefsGet",
+   "modelPrefsSeed",
+   "modelPrefsSet",
++  "modelsDeclare",
++  "modelsOptIn",
++  "modelsPicker",
++  "modelsRetrySubSync",
++  "modelsSetDefault",
++  "modelsSetMain",
++  "modelsSetOverride",
++  "modelsSetPrice",
++  "modelsSetSub",
++  "modelsTable",
++  "modelsUnidentified",
+   "onAccountsMoved",
+   "onAccountsUpdated",
+   "onAgentFileReady",
+@@ -151,6 +162,7 @@ export const DEMO_UNIMPLEMENTED = [
+   "onHandoff",
+   "onMedia",
+   "onModelPrefsUpdated",
++  "onModelsUpdated",
+   "onProgressUpdated",
+   "onPtyEvent",
+   "onRunningSet",
+@@ -159,6 +171,7 @@ export const DEMO_UNIMPLEMENTED = [
+   "onServerUpdateProgress",
+   "onSyncDelta",
+   "onUpgrade",
++  "onUsageAlert",
+   "onUsageStoppedUpdated",
+   "onUsageUpdated",
+   "onWidget",
+@@ -239,11 +252,15 @@ export const DEMO_UNIMPLEMENTED = [
+   "upgradeRollback",
+   "uploadBuffer",
+   "uploadFiles",
++  "usageAlerts",
+   "usageList",
++  "usageRemindAtReset",
++  "usageStoppedApply",
+   "usageStoppedArm",
+   "usageStoppedDisarm",
+   "usageStoppedList",
+   "usageStoppedStampLastLooked",
++  "usageStoppedView",
+   "voiceFetchNote",
+   "voiceListNotes",
+   "voiceRetryNote",
+diff --git a/src/renderer/api/httpApi.ts b/src/renderer/api/httpApi.ts
+index 55e29b1..1d34b48 100644
+--- a/src/renderer/api/httpApi.ts
++++ b/src/renderer/api/httpApi.ts
+@@ -15,6 +15,7 @@ import {
+   type StreamEnvelope,
+   type RunningSetPayload,
+   type UsageSnapshot,
++  type UsageAlertFrame,
+   type AccountsUpdatedPayload,
+   type AccountsMovedPayload,
+   type StoppedListResult,
+@@ -423,6 +424,8 @@ type Kind =
+   | "accounts.moved"
+   | "usage-stopped.updated"
+   | "model-prefs.updated"
++  | "models.updated"
++  | "usage.alert"
+   | "progress.updated"
+   | "appControl"
+   | "handoff"
+@@ -453,6 +456,8 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
+   "accounts.moved": new Set(),
+   "usage-stopped.updated": new Set(),
+   "model-prefs.updated": new Set(),
++  "models.updated": new Set(),
++  "usage.alert": new Set(),
+   "progress.updated": new Set(),
+   appControl: new Set(),
+   handoff: new Set(),
+@@ -1254,6 +1259,22 @@ export const httpApi: Api = {
+   usageStoppedArm: (conversation) => rpc(IPC.usageStoppedArm, conversation),
+   usageStoppedDisarm: (conversation) => rpc(IPC.usageStoppedDisarm, conversation),
+   usageStoppedStampLastLooked: () => rpc(IPC.usageStoppedStampLastLooked),
++  // WS09 box views (09-models-usage.md "Server-first")
++  usageStoppedView: () => rpc(IPC.usageStoppedView),
++  usageStoppedApply: (input) => rpc(IPC.usageStoppedApply, input),
++  usageAlerts: () => rpc(IPC.usageAlerts),
++  usageRemindAtReset: (input) => rpc(IPC.usageRemindAtReset, input),
++  modelsTable: () => rpc(IPC.modelsTable),
++  modelsPicker: () => rpc(IPC.modelsPicker),
++  modelsSetDefault: (input) => rpc(IPC.modelsSetDefault, input),
++  modelsSetMain: (input) => rpc(IPC.modelsSetMain, input),
++  modelsSetSub: (input) => rpc(IPC.modelsSetSub, input),
++  modelsRetrySubSync: () => rpc(IPC.modelsRetrySubSync),
++  modelsOptIn: (input) => rpc(IPC.modelsOptIn, input),
++  modelsSetOverride: (input) => rpc(IPC.modelsSetOverride, input),
++  modelsUnidentified: () => rpc(IPC.modelsUnidentified),
++  modelsDeclare: (input) => rpc(IPC.modelsDeclare, input),
++  modelsSetPrice: (input) => rpc(IPC.modelsSetPrice, input),
+ 
+   // -- per-session model prefs (manta-server owned; BET-1279) --
+   // rpcOptional so an older box that lacks the `model-prefs:*` channels
+@@ -1345,6 +1366,11 @@ export const httpApi: Api = {
+   onUsageStoppedUpdated: (cb) =>
+     on<{ conversation?: string }>("usage-stopped.updated", cb),
+ 
++  // WS09: box-computed usage alerts (raw bus frame `usage.alert`) and the
++  // `models.updated` hint (refetch models:table / models:picker / the catalogue).
++  onUsageAlert: (cb) => on<UsageAlertFrame>("usage.alert", cb),
++  onModelsUpdated: (cb) => on<Record<string, never>>("models.updated", cb),
++
+   // BET-1279: the box publishes `model-prefs.updated` ({sessionId}) on the bus
+   // whenever the model-pref store changes. The payload is a hint only —
+   // subscribers refetch modelPrefsGet() and apply it to the composer.
+diff --git a/src/renderer/chatUtils.test.ts b/src/renderer/chatUtils.test.ts
+index b687057..d83daa1 100644
+--- a/src/renderer/chatUtils.test.ts
++++ b/src/renderer/chatUtils.test.ts
+@@ -78,14 +78,10 @@ import {
+   isFastModelId,
+   baseModelId,
+   fastModelId,
+-  hideFastSiblingGroups,
+   resolveFastToggle,
+   resolvePlanToggle,
+-  selectableModelGroups,
+   filterModelGroups,
+   moveMenuHighlight,
+-  isDeprecated,
+-  mainPickerGroups,
+   MAX_PREVIEW_BYTES,
+   resolvePreviewType,
+   isWithinPreviewSize,
+@@ -105,8 +101,6 @@ import {
+   decodeDataUri,
+   fetchTranscriptWithRetry,
+   selectUsageSnapshot,
+-  describePressure,
+-  describeActivityEntry,
+   formatRetryMinutes,
+   formatAgeAt,
+   formatEndpointStateLine,
+@@ -2747,32 +2741,8 @@ describe("fast-mode model helpers", () => {
+     expect(fastModelId("gpt-5.6-fast")).toBe("gpt-5.6-fast");
+   });
+ 
+-  it("hideFastSiblingGroups drops a -fast model when its base is present", () => {
+-    const groups: Array<[string, OpencodeModel[]]> = [
+-      ["openai", [M("openai", "gpt-5.6"), M("openai", "gpt-5.6-fast"), M("openai", "gpt-5.4-mini")]],
+-    ];
+-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual([
+-      "gpt-5.6",
+-      "gpt-5.4-mini",
+-    ]);
+-  });
+ 
+-  it("hideFastSiblingGroups KEEPS an orphan -fast model (nothing else reaches it)", () => {
+-    const groups: Array<[string, OpencodeModel[]]> = [
+-      ["x", [M("x", "solo-fast")]],
+-    ];
+-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual(["solo-fast"]);
+-  });
+ 
+-  it("hideFastSiblingGroups drops a group left empty", () => {
+-    const groups: Array<[string, OpencodeModel[]]> = [
+-      ["a", [M("a", "m"), M("a", "m-fast")]],
+-      ["b", [M("b", "only-fast"), M("b", "only")]],
+-    ];
+-    const out = hideFastSiblingGroups(groups);
+-    expect(out.map(([p]) => p)).toEqual(["a", "b"]);
+-    expect(out[1][1].map((m) => m.id)).toEqual(["only"]);
+-  });
+ 
+   it("resolveFastToggle: base model with a fast twin is available and off", () => {
+     const models = [M("openai", "gpt-5.6", ["low", "high"]), M("openai", "gpt-5.6-fast", ["low", "high"])];
+@@ -2934,125 +2904,6 @@ describe("resolvePlanToggle — agent preference", () => {
+   });
+ });
+ 
+-// ===== selectableModelGroups =====
+-
+-describe("selectableModelGroups", () => {
+-  const M = (
+-    providerID: string,
+-    id: string,
+-    extra: Partial<OpencodeModel> = {},
+-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
+-
+-  it("returns null for null input (the loading signal)", () => {
+-    expect(selectableModelGroups(null, undefined)).toBeNull();
+-  });
+-
+-  it("filters out disabled, deprecated and deactivated models", () => {
+-    const models = [
+-      M("a", "keep"),
+-      M("a", "disabled", { enabled: false }),
+-      M("a", "deprecated", { status: "deprecated" }),
+-      M("a", "deactivated"),
+-    ];
+-    const out = selectableModelGroups(models, ["a/deactivated"]);
+-    const ids = out![0][1].map((m) => m.id);
+-    expect(ids).toEqual(["keep"]);
+-  });
+-
+-  it("groups and sorts by providerID", () => {
+-    const models = [
+-      M("zetta", "z1"),
+-      M("alpha", "a1"),
+-      M("alpha", "a2"),
+-      M("zetta", "z2"),
+-    ];
+-    const out = selectableModelGroups(models, undefined)!;
+-    expect(out.map(([p]) => p)).toEqual(["alpha", "zetta"]);
+-    expect(out[0][1].map((m) => m.id)).toEqual(["a1", "a2"]);
+-    expect(out[1][1].map((m) => m.id)).toEqual(["z1", "z2"]);
+-  });
+-
+-  it("folds fast siblings but keeps an orphan whose base is gone", () => {
+-    const models = [
+-      M("openai", "gpt-5.6"),
+-      M("openai", "gpt-5.6-fast"),
+-      M("x", "solo-fast"),
+-    ];
+-    const out = selectableModelGroups(models, undefined)!;
+-    const openai = out.find(([p]) => p === "openai")![1].map((m) => m.id);
+-    expect(openai).toEqual(["gpt-5.6"]);
+-    // The orphan fast model (no base to fold into / reach it by) survives.
+-    const x = out.find(([p]) => p === "x")![1].map((m) => m.id);
+-    expect(x).toEqual(["solo-fast"]);
+-  });
+-
+-  it("an empty selection yields an empty (not null) grouped list", () => {
+-    const models = [M("a", "off", { enabled: false })];
+-    expect(selectableModelGroups(models, undefined)).toEqual([]);
+-  });
+-});
+-
+-// ===== isDeprecated =====
+-
+-describe("isDeprecated", () => {
+-  it("is true only for status === 'deprecated'", () => {
+-    expect(isDeprecated({ status: "deprecated" })).toBe(true);
+-    expect(isDeprecated({ status: "live" })).toBe(false);
+-    expect(isDeprecated({})).toBe(false);
+-  });
+-
+-  it("handles null / undefined / absent status", () => {
+-    expect(isDeprecated(null)).toBe(false);
+-    expect(isDeprecated(undefined)).toBe(false);
+-    expect(isDeprecated({ status: undefined })).toBe(false);
+-  });
+-});
+-
+-// ===== mainPickerGroups (BET-1139) =====
+-
+-describe("mainPickerGroups", () => {
+-  const M = (
+-    providerID: string,
+-    id: string,
+-    extra: Partial<OpencodeModel> = {},
+-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
+-
+-  it("returns null groups for null input, with empty disabledKeys", () => {
+-    expect(mainPickerGroups(null, undefined, undefined)).toEqual({
+-      groups: null,
+-      disabledKeys: [],
+-    });
+-  });
+-
+-  it("keeps a deprecated model present but DISABLED until opted in", () => {
+-    const models = [
+-      M("a", "live"),
+-      M("a", "old", { status: "deprecated" }),
+-    ];
+-    const out = mainPickerGroups(models, undefined, undefined);
+-    const ids = out.groups![0][1].map((m) => m.id);
+-    expect(ids).toEqual(["live", "old"]);
+-    expect(out.disabledKeys).toEqual(["a/old"]);
+-  });
+-
+-  it("makes a deprecated model selectable once opted in", () => {
+-    const models = [M("a", "old", { status: "deprecated" })];
+-    const out = mainPickerGroups(models, undefined, ["a/old"]);
+-    expect(out.groups![0][1].map((m) => m.id)).toEqual(["old"]);
+-    expect(out.disabledKeys).toEqual([]);
+-  });
+-
+-  it("still applies the enabled + deactivated gates", () => {
+-    const models = [
+-      M("a", "disabled", { enabled: false }),
+-      M("a", "deactivated", { status: "deprecated" }),
+-      M("a", "dep-disabled", { status: "deprecated", enabled: false }),
+-    ];
+-    const out = mainPickerGroups(models, ["a/deactivated"], undefined);
+-    expect(out.groups).toEqual([]);
+-    expect(out.disabledKeys).toEqual([]);
+-  });
+-});
+ 
+ // ===== Transcript entry motion =====
+ //
+@@ -3541,14 +3392,21 @@ describe("computeTurnInfo", () => {
+ 
+ // ===== Subscription plan usage (BET-738) =====
+ 
++// The box stamps `tone` on every window it publishes (WS09 SF-M18,
++// src/server/usageWindowView.mjs); mirror that here so fixtures look like a
++// real snapshot. An explicit `tone` (or `tone: undefined`) on a window wins.
++const boxTone = (pct: number): "under" | "warn" | "danger" | "over" =>
++  pct >= 100 ? "over" : pct >= 90 ? "danger" : pct >= 70 ? "warn" : "under";
++
+ function usageSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
+-  return {
++  const snap: UsageSnapshot = {
+     provider: "claude",
+     providerIDs: ["anthropic"],
+     windows: [{ kind: "session", label: "Session (5h)", pct: 42 }],
+     fetchedAt: 1_000_000,
+     ...overrides,
+   };
++  return { ...snap, windows: snap.windows.map((w) => ({ tone: boxTone(w.pct), ...w })) };
+ }
+ 
+ describe("selectUsageSnapshot", () => {
+@@ -3577,6 +3435,11 @@ describe("selectUsageSnapshot", () => {
+ });
+ 
+ describe("usageDialState", () => {
++  it("a window with no box tone (an older box) reports tone null — no colour is invented", () => {
++    const snap = usageSnapshot({ windows: [{ kind: "session", label: "5h", pct: 95, tone: undefined }] });
++    expect(usageDialState(snap, false).tone).toBeNull();
++  });
++
+   it("an inactive window never drives visibility or the reported window", () => {
+     const snap = usageSnapshot({
+       windows: [
+@@ -5763,48 +5626,6 @@ describe("dispatchMedia", () => {
+   });
+ });
+ 
+-// ===== Optimizer P2.5 formatters (BET-1347) =====
+-
+-describe("describePressure", () => {
+-  it("renders the neutral 'no pressure signal yet' with no signal, and NO warn", () => {
+-    expect(describePressure(0, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
+-    expect(describePressure(40, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
+-  });
+-  it("renders 'on pace' (ok) when on or below pace", () => {
+-    expect(describePressure(0, true)).toEqual({ text: "on pace", tone: "ok" });
+-    expect(describePressure(-5, true)).toEqual({ text: "on pace", tone: "ok" });
+-  });
+-  it("renders '+N pts ahead of pace' (warn) when ahead of pace", () => {
+-    expect(describePressure(23, true)).toEqual({ text: "+23 pts ahead of pace", tone: "warn" });
+-    expect(describePressure(0.4, true)).toEqual({ text: "+0 pts ahead of pace", tone: "warn" });
+-  });
+-});
+-
+-describe("describeActivityEntry", () => {
+-  it("builds a headline from verdict + subject and an evidence line", () => {
+-    const entry = {
+-      kind: "tune",
+-      subject: "trim threshold 16 → 12 tool uses",
+-      from: 16,
+-      to: 12,
+-      verdict: "kept",
+-      evidence: { turns: 62, hit: 74.1, churn: 0.4 },
+-    };
+-    const out = describeActivityEntry(entry);
+-    expect(out.headline).toBe("Kept — trim threshold 16 → 12 tool uses");
+-    expect(out.detail).toContain("62");
+-    expect(out.detail).toContain("74.1");
+-  });
+-  it("marks a rolled-back entry distinctly", () => {
+-    const out = describeActivityEntry({ kind: "tune", subject: "protected tail", verdict: "rolled-back", evidence: {} });
+-    expect(out.headline).toBe("Rolled back — protected tail");
+-  });
+-  it("falls back to a safe headline when subject/verdict are absent", () => {
+-    const out = describeActivityEntry({ kind: "tune", verdict: "kept" });
+-    expect(out.headline).toContain("optimizer change");
+-  });
+-});
+-
+ describe("chartAxisTicks", () => {
+   const day = (n: number) => new Date(`2026-08-${String(n).padStart(2, "0")}T00:00:00`).getTime();
+ 
+diff --git a/src/renderer/chatUtils.ts b/src/renderer/chatUtils.ts
+index 01c2eaf..3ffde75 100644
+--- a/src/renderer/chatUtils.ts
++++ b/src/renderer/chatUtils.ts
+@@ -221,73 +221,6 @@ export function moveMenuHighlight(
+ // in src/shared/formatTokens.mjs; this re-export keeps every renderer import path.
+ export { formatTokens };
+ 
+-// ---- Optimizer P2.5 (BET-1347) pure formatters ------------------------------
+-
+-export type PressureTone = "neutral" | "ok" | "warn";
+-
+-/**
+- * Describe a subscription window's pacing pressure for the pressure chip that
+- * sits under its gauge. `hasSignal` is false when there is no pressure signal
+- * yet (tokensPerPct is null or there are too few samples) — that renders the
+- * documented NEUTRAL state, never a fabricated pace.
+- *
+- *   hasSignal=false        -> "no pressure signal yet"      (neutral)
+- *   hasSignal, deficit<=0  -> "on pace"                     (ok)
+- *   hasSignal, deficit>0   -> "+N pts ahead of pace"        (warn)
+- */
+-export function describePressure(deficit: number, hasSignal: boolean): { text: string; tone: PressureTone } {
+-  if (!hasSignal) return { text: "no pressure signal yet", tone: "neutral" };
+-  const pts = Math.round(deficit);
+-  if (deficit > 0) return { text: `+${pts} pts ahead of pace`, tone: "warn" };
+-  return { text: "on pace", tone: "ok" };
+-}
+-
+-export type ActivityEntry = {
+-  id?: string;
+-  ts?: number;
+-  kind: string;
+-  subject?: string;
+-  from?: string | number;
+-  to?: string | number;
+-  verdict: string;
+-  evidence?: Record<string, string | number>;
+-  revertedAt?: number;
+-};
+-
+-const VERDICT_WORD: Record<string, string> = {
+-  kept: "Kept",
+-  "rolled-back": "Rolled back",
+-  applied: "Applied",
+-};
+-
+-// A compact evidence line: "62 turns · hit 74.1% · churn 0.4%" — joined from
+-// the counts/measurements, never content.
+-function evidenceLine(evidence?: Record<string, string | number>): string {
+-  if (!evidence) return "";
+-  const parts: string[] = [];
+-  for (const [k, v] of Object.entries(evidence)) {
+-    if (v === undefined || v === null || String(v) === "") continue;
+-    const label = k.replace(/([A-Z])/g, " $1").replace(/^[a-z]/g, (c) => c.toUpperCase()).trim();
+-    parts.push(`${label} ${v}`);
+-  }
+-  return parts.join(" · ");
+-}
+-
+-/**
+- * Describe one activity-log entry for the feed: a headline (the verdict with
+- * the change it describes) and the evidence line. The prefix is derived from
+- * `verdict` (so a rolled-back entry is visually distinct); `subject` is the
+- * change itself.
+- */
+-export function describeActivityEntry(entry: ActivityEntry): { headline: string; detail: string } {
+-  const word = VERDICT_WORD[entry.verdict] ?? entry.verdict ?? "Changed";
+-  const subject = typeof entry.subject === "string" && entry.subject ? entry.subject : "optimizer change";
+-  return {
+-    headline: `${word} — ${subject}`,
+-    detail: evidenceLine(entry.evidence),
+-  };
+-}
+-
+ // Build an SVG path string for a CUMULATIVE series over `values` (oldest →
+ // newest), for the Optimizer's "sent vs raw counterfactual" consumption chart
+ // (BET-1337). Each point's x is spaced linearly across `width`; its y is the
+@@ -2147,25 +2080,6 @@ export function fastModelId(modelID: string): string {
+   return isFastModelId(modelID) ? modelID : `${modelID}${FAST_SUFFIX}`;
+ }
+ 
+-/**
+- * Drop `-fast` models from the grouped dropdown list, but ONLY where the base
+- * twin survives in the same provider group — a `-fast` model whose base is
+- * absent (or deactivated) has no toggle to reach it by, so hiding it would
+- * make it unselectable. Groups left empty are dropped so the menu never
+- * renders a provider heading with nothing under it.
+- */
+-export function hideFastSiblingGroups(
+-  groups: Array<[string, OpencodeModel[]]>,
+-): Array<[string, OpencodeModel[]]> {
+-  const out: Array<[string, OpencodeModel[]]> = [];
+-  for (const [providerID, models] of groups) {
+-    const ids = new Set(models.map((m) => m.id));
+-    const kept = models.filter((m) => !(isFastModelId(m.id) && ids.has(baseModelId(m.id))));
+-    if (kept.length > 0) out.push([providerID, kept]);
+-  }
+-  return out;
+-}
+-
+ // ===== deprecated-model predicate (BET-1139) =====
+ //
+ // `isDeprecated` (a model the provider still serves but flags as deprecated)
+@@ -2177,104 +2091,6 @@ export function hideFastSiblingGroups(
+ // re-compare the literal.
+ export { isDeprecated };
+ 
+-// ===== selectableModelGroups =====
+-//
+-// The model set a user may actually switch TO — the answer to "does
+-// delegation respect the Main toggle?". Enabled, not deprecated, not
+-// deactivated in Settings (`deactivatedMainModels`), grouped by provider,
+-// sorted, then `hideFastSiblingGroups`. Shared by ModelPicker's dropdown and
+-// the delegate model picker so both read one source of truth (the `enabled !==
+-// false` filter lives here and nowhere else in the renderer).
+-
+-/**
+- * The flat selectable model list (enabled, not deprecated, not deactivated).
+- * `null` input → `null` (the loading signal callers rely on). The flat list,
+- * not the grouped one, is what `resolveFastToggle` needs — it must still see a
+- * `-fast` twin whose base is present, which `hideFastSiblingGroups` would fold
+- * out of the groups.
+- */
+-export function selectableModelList(
+-  models: OpencodeModel[] | null,
+-  deactivatedMainModels: string[] | undefined,
+-): OpencodeModel[] | null {
+-  if (!models) return null;
+-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
+-  return models.filter(
+-    (m) =>
+-      m.enabled !== false &&
+-      !isDeprecated(m) &&
+-      !deactivatedMain.has(`${m.providerID}/${m.id}`),
+-  );
+-}
+-
+-/**
+- * The grouped, sorted, fast-sibling-folded selectable list — the candidate
+- * model set for dropdowns and pickers. `null` models → `null` (loading).
+- */
+-export function selectableModelGroups(
+-  models: OpencodeModel[] | null,
+-  deactivatedMainModels: string[] | undefined,
+-): Array<[string, OpencodeModel[]]> | null {
+-  const selectable = selectableModelList(models, deactivatedMainModels);
+-  if (selectable === null) return null;
+-  const map = new Map<string, OpencodeModel[]>();
+-  for (const m of selectable) {
+-    const arr = map.get(m.providerID) ?? [];
+-    arr.push(m);
+-    map.set(m.providerID, arr);
+-  }
+-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+-  return hideFastSiblingGroups(sorted);
+-}
+-
+-export type MainPickerGroups = {
+-  /** Groups for the main model menu — includes deprecated models so they stay
+-   *  importable/visible, with the same enabled/deactivated/fast-folding gates
+-   *  as `selectableModelGroups`. */
+-  groups: Array<[string, OpencodeModel[]]> | null;
+-  /** "providerID/modelID" keys of DEPRECATED models shown disabled (not yet
+-   *  opted in). Deprecated-but-opted-in models are ordinary selectable rows. */
+-  disabledKeys: string[];
+-};
+-
+-/**
+- * The main picker's candidate set (BET-1139). Unlike `selectableModelGroups`,
+- * a deprecated model is KEPT in the list — the user must be able to see and
+- * opt in to a model the provider is deprecating — but it is rendered disabled
+- * unless its "providerID/modelID" is in `optInModels` (`disabledKeys`). A
+- * deprecated model that HAS been opted in is fully selectable, same as a live
+- * model. Non-deprecated models behave exactly as `selectableModelGroups`.
+- * Used ONLY by the main composer picker; the delegate picker keeps filtering
+- * deprecated models via `selectableModelGroups`. `null` models → `null`
+- * groups (loading).
+- */
+-export function mainPickerGroups(
+-  models: OpencodeModel[] | null,
+-  deactivatedMainModels: string[] | undefined,
+-  optInModels: string[] | undefined,
+-): MainPickerGroups {
+-  if (!models) return { groups: null, disabledKeys: [] };
+-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
+-  const optIn = new Set(optInModels ?? []);
+-  const disabledKeys: string[] = [];
+-  const kept = models.filter((m) => {
+-    const key = `${m.providerID}/${m.id}`;
+-    if (m.enabled === false) return false;
+-    if (deactivatedMain.has(key)) return false;
+-    if (isDeprecated(m) && !optIn.has(key)) {
+-      disabledKeys.push(key);
+-    }
+-    return true;
+-  });
+-  const map = new Map<string, OpencodeModel[]>();
+-  for (const m of kept) {
+-    const arr = map.get(m.providerID) ?? [];
+-    arr.push(m);
+-    map.set(m.providerID, arr);
+-  }
+-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+-  return { groups: hideFastSiblingGroups(sorted), disabledKeys };
+-}
+ 
+ export type FastToggleState = {
+   /** The toggle can be clicked (a counterpart exists that keeps the effort). */
+@@ -3110,7 +2926,9 @@ export type UsageDialTone = "under" | "warn" | "danger" | "over";
+ export type UsageDialState = {
+   visible: boolean;
+   pct: number;
+-  tone: UsageDialTone;
++  // The BOX's colour band for the primary window (`window.tone`, WS09 SF-M18);
++  // null on an older box → the dial renders the neutral track.
++  tone: UsageDialTone | null;
+   // The reported window has passed its reset instant and the provider has not
+   // published its replacement numbers yet.
+   awaitingReset: boolean;
+@@ -3120,13 +2938,6 @@ export type UsageDialState = {
+   window: UsageWindow | null;
+ };
+ 
+-export function usageTone(pct: number): UsageDialTone {
+-  if (pct >= 100) return "over";
+-  if (pct >= 90) return "danger";
+-  if (pct >= 70) return "warn";
+-  return "under";
+-}
+-
+ /**
+  * Derive the composer dial's visibility/colour/headline window from a usage
+  * snapshot. Pure — every threshold for the dial lives here, so the trigger
+@@ -3173,7 +2984,7 @@ export function usageDialState(
+   return {
+     visible: worstPct >= 70 || alwaysShow,
+     pct: awaitingReset ? 0 : primary.pct,
+-    tone: awaitingReset ? "under" : usageTone(primary.pct),
++    tone: awaitingReset ? "under" : (primary.tone ?? null),
+     awaitingReset,
+     window: primary,
+   };
+diff --git a/src/shared/api.ts b/src/shared/api.ts
+index 4ec5267..4739320 100644
+--- a/src/shared/api.ts
++++ b/src/shared/api.ts
+@@ -1,6 +1,20 @@
+ import type { ArtifactsListResult } from "./artifactsTypes.js";
+ import type {
+   AgentFileReady,
++  ModelsTableResult,
++  ModelsWriteReply,
++  ModelsPickerResult,
++  UnidentifiedList,
++  ModelsDeclareInput,
++  ModelsDeclareReply,
++  ModelsSetPriceInput,
++  ModelsSetPriceReply,
++  UsageResumeView,
++  UsageResumeApplyInput,
++  UsageResumeApplyReply,
++  UsageAlertsList,
++  UsageAlertFrame,
++  UsageRemindReply,
+   AppConfig,
+   AuthClaimInput,
+   AuthPairResult,
+@@ -839,6 +853,8 @@ export type OptimizerPricesResult = {
+   fetchedAt: number;
+   models: Record<string, OptimizerPriceRecord>;
+   unpriced: string[];
++  // WS09 SF-M13: `unpriced` grouped by provider by the box; absent on an older box.
++  unpricedByProvider?: { providerID: string; models: string[] }[];
+ };
+ 
+ // Sticky-trims spec §6 C6: body of `opencode:set-model-cost`, $ per million.
+@@ -1426,6 +1442,30 @@ export interface Api {
+   usageStoppedArm(conversation: string): Promise<void>;
+   usageStoppedDisarm(conversation: string): Promise<void>;
+   usageStoppedStampLastLooked(): Promise<void>;
++  // WS09: box-computed resume screen view + apply (arm/disarm in one call).
++  usageStoppedView(): Promise<UsageResumeView>;
++  usageStoppedApply(input: UsageResumeApplyInput): Promise<UsageResumeApplyReply>;
++  // WS09: box-computed 90% / limit alerts (snapshot + `usage.alert` frames).
++  usageAlerts(): Promise<UsageAlertsList>;
++  usageRemindAtReset(input: { key: string; sessionID: string }): Promise<UsageRemindReply>;
++  onUsageAlert(cb: (payload: UsageAlertFrame) => void): () => void;
++  // WS09: box-owned models table / picker / writes (replaces the client-side
++  // config read-modify-write). `models.updated` is a hint frame — refetch.
++  modelsTable(): Promise<ModelsTableResult>;
++  modelsPicker(): Promise<ModelsPickerResult>;
++  modelsSetDefault(input: { key: string | null }): Promise<ModelsWriteReply>;
++  modelsSetMain(input: { key: string; on: boolean }): Promise<ModelsWriteReply>;
++  modelsSetSub(input: { key: string; on: boolean }): Promise<ModelsWriteReply>;
++  modelsRetrySubSync(): Promise<ModelsWriteReply>;
++  modelsOptIn(input: { keys: string[] }): Promise<ModelsWriteReply>;
++  modelsSetOverride(input: {
++    key: string;
++    fields: { name?: string; description?: string; context?: string };
++  }): Promise<ModelsWriteReply>;
++  modelsUnidentified(): Promise<UnidentifiedList>;
++  modelsDeclare(input: ModelsDeclareInput): Promise<ModelsDeclareReply>;
++  modelsSetPrice(input: ModelsSetPriceInput): Promise<ModelsSetPriceReply>;
++  onModelsUpdated(cb: (payload: Record<string, never>) => void): () => void;
+ 
+   // Session progress (manta-server owned, BET-790). Reads the durable
+   // "where are we right now" record for a session, written by the AI's
+diff --git a/src/shared/types.ts b/src/shared/types.ts
+index 6f45d4c..2572cd9 100644
+--- a/src/shared/types.ts
++++ b/src/shared/types.ts
+@@ -1682,6 +1682,22 @@ export const IPC = {
+   usageStoppedArm: "usage-stopped:arm", // (conversation) → void
+   usageStoppedDisarm: "usage-stopped:disarm", // (conversation) → void
+   usageStoppedStampLastLooked: "usage-stopped:stamp-last-looked", // () → void
++  // WS09 box views (09-models-usage.md "Server-first")
++  usageStoppedView: "usage-stopped:view", // () → UsageResumeView
++  usageStoppedApply: "usage-stopped:apply", // ({selected, dryRun?}) → UsageResumeApplyReply
++  usageAlerts: "usage:alerts", // () → UsageAlertsList
++  usageRemindAtReset: "usage:remind-at-reset", // ({key, sessionID}) → UsageRemindReply
++  modelsTable: "models:table", // () → ModelsTableResult
++  modelsPicker: "models:picker", // () → ModelsPickerResult
++  modelsSetDefault: "models:set-default", // ({key|null}) → ModelsWriteReply
++  modelsSetMain: "models:set-main", // ({key,on}) → ModelsWriteReply
++  modelsSetSub: "models:set-sub", // ({key,on}) → ModelsWriteReply
++  modelsRetrySubSync: "models:retry-sub-sync", // () → ModelsWriteReply
++  modelsOptIn: "models:opt-in", // ({keys}) → ModelsWriteReply
++  modelsSetOverride: "models:set-override", // ({key,fields}) → ModelsWriteReply
++  modelsUnidentified: "models:unidentified", // () → UnidentifiedList
++  modelsDeclare: "models:declare", // ({key,catalogId}|{key,form}) → ModelsDeclareReply
++  modelsSetPrice: "models:set-price", // ({providerID,modelID,draft}) → ModelsSetPriceReply
+ 
+   // ---- per-session model prefs (manta-server owned; BET-1279) ----
+   // Durable box-side record of per-conversation model selection (provider+
+@@ -1968,6 +1984,8 @@ export type LedgerSummary = {
+   }[];
+   byAgent: { agent: string | null; isChild: boolean; turns: number; cost: number; costPerTurn: number }[];
+   byProject: { directory: string; turns: number; cost: number }[];
++  // WS09 SF-M6: box-computed render model; absent on an older box.
++  view?: LedgerView;
+ };
+ 
+ // BET-1333: the Manta Optimizer's P1.1 read model (`optimizer:summary` RPC).
+@@ -2062,6 +2080,8 @@ export type OptimizerSummary = {
+     role: string;
+     price: string;
+   }[];
++  // WS09 SF-M7: box-computed render model; absent on an older box.
++  view?: OptimizerSummaryView;
+ };
+ 
+ // BET-1369: the window selector on the optimizer card. The window is PER-CALL:
+@@ -2123,6 +2143,8 @@ export type OptimizerSeries = {
+     pricedShare: number;
+     basis: "measured" | "partial" | "unpriced";
+   };
++  // WS09 SF-M7: box-computed render model; absent on an older box.
++  view?: OptimizerSeriesView;
+ };
+ 
+ // Sticky-trims C1 (`optimizer:prices` RPC; the same body minus `unpriced` is
+@@ -2298,6 +2320,9 @@ export type UsageWindow = {
+   // alert from a stale window; the dial carries the last reading forward and
+   // labels it "resetting…" rather than blanking.
+   stale?: boolean;
++  // WS09 SF-M18: box-computed colour band for `pct` (<70 under · 70–89 warn ·
++  // 90–99 danger · ≥100 over). Absent on an older box → neutral rings.
++  tone?: "under" | "warn" | "danger" | "over";
+ };
+ export type UsageSnapshot = {
+   provider: string; // adapter id: "claude" | "codex" | "kimi"
+@@ -3490,3 +3515,231 @@ export type OpencodeProviderAuthResult =
+   | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string }
+   | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string }
+   | { action: "oauth-cancel"; ok: boolean };
++
++// ===== WS09 box views (iOS↔desktop parity, 09-models-usage.md "Server-first") =====
++// The wire shapes of the `models:*`, `usage-stopped:view/apply`, `usage:alerts`
++// and `usage:remind-at-reset` channels and the additive `view` / `tone` /
++// `unpricedByProvider` fields. The box (src/server/modelsTable.mjs & friends)
++// owns every rule; clients render these verbatim.
++
++export type ModelsTableRow = {
++  key: string; // "providerID/modelID"
++  providerID: string;
++  modelID: string;
++  name: string;
++  contextLabel: string | null; // "200k" / "1M"
++  tier: "fast" | "balanced" | "deep" | null;
++  description: string | null;
++  searchText: string; // lower-case; client search = substring
++  deprecated: boolean;
++  deprecatedLocked: boolean;
++  isMain: boolean;
++  isSub: boolean;
++  isDefault: boolean;
++  canMakeDefault: boolean;
++  defaultHint: string | null;
++  editable: { name: string; description: string; context: number | null };
++};
++export type ModelsTableResult = {
++  supported: true;
++  defaultKey: string | null;
++  defaultLine: { name: string; providerID: string } | null;
++  rows: ModelsTableRow[];
++};
++export type ModelsSubOutcome = "applied" | "not-applied" | "saved-not-live";
++export type ModelsWriteOk = {
++  ok: true;
++  table: ModelsTableResult;
++  message: string;
++  outcome?: ModelsSubOutcome;
++  retry?: boolean;
++  ignored?: string[];
++};
++export type ModelsWriteErr = { ok: false; field?: string; code: string; message: string };
++export type ModelsWriteReply = ModelsWriteOk | ModelsWriteErr;
++
++export type ModelsPickerResult = {
++  supported: true;
++  groups: { provider: string; keys: string[] }[];
++  locked: string[];
++  selectable: string[];
++  delegateGroups: { provider: string; keys: string[] }[];
++  recents: { providerID: string; modelID: string; variant?: string; fast?: boolean; key: string }[];
++};
++
++export type UnidentifiedRow = {
++  key: string;
++  label: string;
++  providerID: string;
++  modelID: string;
++  state: "exact" | "ambiguous" | "none";
++  confidence?: "certain" | "probable";
++  evidence?: string;
++  catalogId: string | null;
++  match?: { id: string; name: string; tier?: "fast" | "balanced" | "deep"; context?: number; description?: string };
++  candidates: { id: string; name: string }[];
++  missing: ("identity" | "price" | "caching" | "quality")[];
++  help: string;
++  actions: ("confirm" | "change" | "pick" | "identify")[];
++  chips?: boolean;
++};
++export type UnidentifiedList = {
++  supported: boolean;
++  intro: string;
++  footer: string;
++  unavailableText?: string;
++  rows: UnidentifiedRow[];
++};
++export type ModelsDeclareForm = {
++  catalogId: string;
++  price: "free" | "custom" | null;
++  costIn: string;
++  costOut: string;
++  caching: "none" | "custom";
++  reads: boolean;
++  writes: boolean;
++};
++export type ModelsDeclareInput =
++  | { key: string; catalogId: string }
++  | { key: string; form: ModelsDeclareForm };
++export type ModelsDeclareReply =
++  | {
++      ok: true;
++      outcome: "resolved" | "still-needs" | "catalogue-unavailable";
++      row: UnidentifiedRow | null;
++      list: UnidentifiedList;
++      message: string;
++    }
++  | { ok: false; field?: string; code?: string; message: string };
++
++export type ModelsSetPriceInput = {
++  providerID: string;
++  modelID: string;
++  draft: { input: string; output: string; cacheRead: string; cacheWrite: string };
++};
++export type ModelsSetPriceReply =
++  | {
++      ok: true;
++      message: string;
++      warning?: string;
++      unpricedByProvider: { providerID: string; models: string[] }[];
++    }
++  | { ok: false; field?: string; message: string };
++
++export type LedgerView = {
++  segments: { kind: "cacheRead" | "cacheWrite" | "output" | "input"; label: string; pct: number; inline: boolean }[];
++  caption: string;
++  topModels: { key: string; turns: number; costPerTurn: number; tokensPerSec: number | null; cost: number }[];
++  agents: { label: string; isChild: boolean; turns: number; costPerTurn: number; cost: number }[];
++  emptyModels: string;
++  emptyAgents: string;
++};
++
++export type OptimizerStatView = {
++  id: string;
++  label: string;
++  value: string;
++  detail: string;
++  tone: "neutral" | "ok" | "warn";
++};
++export type OptimizerSummaryView = {
++  switch: { on: boolean; label: string; body: string };
++  subrows: { id: string; name: string; text: string; chip: string }[];
++  windowsCaption: string;
++  windows: {
++    key: string;
++    title: string;
++    resetsAt: number | null;
++    pct: number;
++    pctLabel: string;
++    band: "ok" | "warn" | "danger";
++    forecastPct: number | null;
++    forecastWarn: boolean;
++    forecastLabel: string;
++    pressure: { text: string; tone: "neutral" | "ok" | "warn" };
++  }[];
++  metered: { name: string; role: string; price: string }[];
++  meteredCaption: string;
++  activity: { id: string; ts: number; headline: string; detail: string; rolledBack: boolean }[];
++  activityCaption: string;
++  activityEmpty: string;
++  stats: OptimizerStatView[];
++};
++export type OptimizerSeriesView = {
++  heading: string;
++  trimming: { name: string; text: string; chip: string } | null;
++  hasCounterfactual: boolean;
++  noActivity: boolean;
++  emptyText: string;
++  legend: { sent: string; raw: string; noCounterfactual: string | null };
++  savingLabel: { text: string; tone: "ok" | "warn" } | null;
++  potentialLine: string | null;
++  rawValues: number[];
++  stats: OptimizerStatView[];
++};
++
++export type UsageResumeRowView = {
++  conversation: string;
++  name: string;
++  armed: boolean;
++  isNew: boolean;
++  snippet: string | null;
++  provider: string | null;
++  model: string | null;
++  window: { label: string; resetsAt: number | null };
++  cost: { warm: boolean; reReadTokens: number; label: string };
++};
++export type UsageResumeView = {
++  supported: true;
++  title: string;
++  header: string;
++  hasArmed: boolean;
++  unarmedCount: number;
++  totalCount: number;
++  emptyText: string;
++  groups: { workspace: string; rows: UsageResumeRowView[] }[];
++  coldNote: { one: string; many: string };
++};
++export type UsageResumeApplyInput = { selected: string[]; dryRun?: boolean };
++export type UsageResumeApplyReply = {
++  ok: boolean;
++  canApply: boolean;
++  title: string;
++  arm: string[];
++  disarm: string[];
++  applied?: { armed: string[]; disarmed: string[] };
++  failed?: { conversation: string; name: string; message: string }[];
++  message?: string;
++};
++
++export type UsageAlert = {
++  id: string;
++  key: string;
++  level: "warn" | "limit";
++  provider: string;
++  windowKind: string;
++  windowLabel: string;
++  pct: number;
++  resetsAt: number | null;
++  text: string;
++  raisedAt: number;
++  expiresAt: number | null;
++  sticky: boolean;
++  canRemind: boolean;
++  canKeepGoing: boolean;
++};
++export type UsageAlertsList = {
++  supported: true;
++  bootId: string | null;
++  revision: number;
++  alerts: UsageAlert[];
++};
++export type UsageAlertFrame = {
++  bootId: string;
++  revision: number;
++  alert?: UsageAlert;
++  retired?: string[];
++};
++export type UsageRemindReply =
++  | { ok: true; job?: unknown; fireAt: number }
++  | { ok: false; code: string; message: string };

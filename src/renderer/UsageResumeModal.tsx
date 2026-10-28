@@ -1,118 +1,142 @@
 // UsageResumeModal.tsx — the "resume after limit reset" management surface
-// (BET-1049). One list across all providers, grouped by workspace, of the
-// conversations a subscription provider limit stopped (the box-side record,
-// src/server/stoppedStore.mjs). The user picks which should carry on by
-// themselves when quota returns; arming writes the SAME record the sidebar
-// indicator + row markers read, so everything stays in sync and survives a
-// restart.
+// (BET-1049, server-first WS09). One list across all providers, grouped by
+// workspace, of the conversations a subscription provider limit stopped. The
+// BOX builds the whole screen (`usage-stopped:view`: rows, header, chips, the
+// warm/cold cost, snippets) and plans the writes (`usage-stopped:apply`, with a
+// dry run that decides whether the button is enabled and what it says), so the
+// desktop and iOS show the same thing and unchecking the only armed row can be
+// applied. This component keeps only view state: the checkbox selection, the
+// request sequencing and the footer arithmetic over the box's numbers.
 //
-// Built only from existing primitives — Modal, Checkbox, Pill, Callout,
-// Button, --sp/* and --r-* scales. Nothing hand-rolled: the mockup
-// (docs/screens/usage-resume/mockup.html) maps every element onto these, and
-// a new bespoke button/checkbox/chip/dialog here is a review defect.
-//
-// The row content is display-only except the checkbox: the model chip shows
-// the model that was in flight (deliberately not a picker), cost is the
-// cold-cache estimate (0 when the reset is inside the prompt-cache window),
-// and "new" is the stoppedAt-vs-lastLooked badge. Nothing is ever enrolled
-// automatically.
+// Built only from existing primitives — Modal, Checkbox, Pill, Callout, Button.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { Pill } from "./Pill";
 import { Callout } from "./Callout";
 import { Checkbox } from "./Checkbox";
-import { useStore } from "./store";
-import { formatResetAt, formatResetDistance, formatTokens, selectCacheTtlMs } from "./chatUtils";
-import { extractLastSnippet, groupStoppedByWorkspace, isNewStopped, resumeCosts, selectionSummary } from "./usageResume";
-import type { StoppedRecord, UsageSnapshot } from "../shared/types";
+import { formatResetAt, formatResetDistance, formatTokens } from "./chatUtils";
+import { reconcileResumeSelection } from "./usageResume";
+import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
+import type { UsageResumeApplyReply, UsageResumeRowView, UsageResumeView } from "../shared/types";
 
-function windowChipLabel(record: StoppedRecord, snapshots: readonly UsageSnapshot[]): string {
-  if (!record.window) return "Limit";
-  const snap = (snapshots ?? []).find((s) => s.provider === record.provider);
-  const win = snap?.windows.find((w) => w.kind === record.window);
-  if (win?.label) return win.label;
-  return record.window.charAt(0).toUpperCase() + record.window.slice(1);
-}
+const PLAN_DEBOUNCE_MS = 150;
 
-export function UsageResumeModal({
-  open,
-  onClose,
-  nameFor,
-}: {
-  open: boolean;
-  onClose: () => void;
-  /** conversation (opencode session id) → sidebar display name. */
-  nameFor: (conversation: string) => string;
-}) {
-  const records = useStore((s) => s.usageStopped);
-  const lastLooked = useStore((s) => s.lastLookedStopped);
-  const usage = useStore((s) => s.usage);
-  const cacheTtl = useStore((s) => s.cacheTtl);
+type Loaded = { state: "loading" } | { state: "unsupported" } | { state: "error"; message: string } | { state: "ready"; view: UsageResumeView };
 
+export function UsageResumeModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [snippets, setSnippets] = useState<Record<string, string | null>>({});
+  const [pristine, setPristine] = useState(true);
+  const [plan, setPlan] = useState<UsageResumeApplyReply | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState<{ message: string; ok: boolean } | null>(null);
+  const viewSeq = useRef(0);
+  const planSeq = useRef(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const pristineRef = useRef(pristine);
+  pristineRef.current = pristine;
 
-  const nowMs = Date.now();
-  const ttlMs = selectCacheTtlMs(cacheTtl);
+  // Load the box's view; only the newest response is applied. Every applied view
+  // reconciles the selection (shared rule) and invalidates the dry-run plan.
+  const load = useCallback(async () => {
+    const seq = ++viewSeq.current;
+    try {
+      const view = await window.api.usageStoppedView();
+      if (seq !== viewSeq.current) return;
+      const rows = view.groups.flatMap((g) => g.rows);
+      setSelected((prev) =>
+        reconcileResumeSelection({
+          selected: prev,
+          pristine: pristineRef.current,
+          viewIds: new Set(rows.map((r) => r.conversation)),
+          armedIds: new Set(rows.filter((r) => r.armed).map((r) => r.conversation)),
+        }),
+      );
+      setPlan(null);
+      setLoaded({ state: "ready", view });
+    } catch (e) {
+      if (seq !== viewSeq.current) return;
+      setLoaded(isUnknownChannel(e) ? { state: "unsupported" } : { state: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
 
-  const costs = useMemo(() => resumeCosts(records, usage, nowMs, ttlMs), [records, usage, nowMs, ttlMs]);
-  const summary = useMemo(() => selectionSummary(records, selected, costs), [records, selected, costs]);
-  const groups = useMemo(() => groupStoppedByWorkspace(records), [records]);
-
-  const hasArmed = records.some((r) => r.armed === true);
-  const newCount = records.filter((r) => isNewStopped(r, lastLooked)).length;
-  const coldSelected = records.filter((r) => selected.has(r.conversation) && (costs.get(r.conversation) ?? 0) > 0).length;
-
-  // On open: default the selection to the already-armed rows; fetch a
-  // best-effort last-activity snippet per conversation. Reads the store fresh
-  // so the effect only runs on the open transition.
+  // On open: reset view state and load. While open: reload on the box's change
+  // hint and on the client's reconnect signal (`resync`).
   useEffect(() => {
     if (!open) return;
-    const recs = useStore.getState().usageStopped;
-    setSelected(new Set(recs.filter((r) => r.armed === true).map((r) => r.conversation)));
-    let cancelled = false;
-    for (const r of recs) {
-      window.api.opencodeMessages(r.conversation, { limit: 5 }).then(
-        (msgs) => {
-          if (cancelled) return;
-          setSnippets((s) => ({ ...s, [r.conversation]: extractLastSnippet(msgs) }));
+    setPristine(true);
+    setResult(null);
+    setLoaded({ state: "loading" });
+    void load();
+    const offUpdated = window.api.onUsageStoppedUpdated?.(() => void load());
+    const offStream = window.api.onStreamEvent?.((ev) => {
+      if (ev.sub === "resync") void load();
+    });
+    return () => {
+      viewSeq.current += 1;
+      offUpdated?.();
+      offStream?.();
+    };
+  }, [open, load]);
+
+  // The dry-run plan: debounced, seq-guarded, recomputed after every selection or view change.
+  const view = loaded.state === "ready" ? loaded.view : null;
+  useEffect(() => {
+    if (!open || !view || view.totalCount === 0) return;
+    const seq = ++planSeq.current;
+    const timer = setTimeout(() => {
+      window.api.usageStoppedApply({ selected: [...selected], dryRun: true }).then(
+        (r) => {
+          if (seq === planSeq.current) setPlan(r);
         },
         () => {
-          if (!cancelled) setSnippets((s) => ({ ...s, [r.conversation]: null }));
+          if (seq === planSeq.current) setPlan(null);
         },
       );
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+    }, PLAN_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [open, view, selected]);
+
+  const rows: UsageResumeRowView[] = useMemo(() => view?.groups.flatMap((g) => g.rows) ?? [], [view]);
+  const selectedRows = rows.filter((r) => selected.has(r.conversation));
+  const batchTotal = selectedRows.reduce((n, r) => n + r.cost.reReadTokens, 0);
+  const coldSelected = selectedRows.filter((r) => !r.cost.warm).length;
+  const allSelected = rows.length > 0 && selectedRows.length === rows.length;
 
   const close = () => {
-    void window.api.usageStoppedStampLastLooked();
+    window.api.usageStoppedStampLastLooked().catch((e) => console.warn("[usage-resume] stamp-last-looked failed:", e));
     onClose();
   };
 
-  const apply = () => {
-    // Arm every currently-selected conversation; explicitly remove (disarm)
-    // any that were armed but are no longer selected.
-    void (async () => {
-      for (const r of records) {
-        if (selected.has(r.conversation)) {
-          if (r.armed !== true) await window.api.usageStoppedArm(r.conversation);
-        } else if (r.armed === true) {
-          await window.api.usageStoppedDisarm(r.conversation);
-        }
+  const apply = async () => {
+    setApplying(true);
+    setResult(null);
+    try {
+      const r = await window.api.usageStoppedApply({ selected: [...selected] });
+      if (r.ok && !(r.failed && r.failed.length > 0)) {
+        close();
+        return;
       }
-    })().finally(close);
+      // Failures keep the modal open with the box's message (it names the row).
+      setResult({ ok: false, message: r.message ?? "Couldn't update." });
+      void load();
+    } catch (e) {
+      setResult({ ok: false, message: `Couldn't update — ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setApplying(false);
+    }
   };
 
   const toggleAll = () => {
-    setSelected(summary.allSelected ? new Set() : new Set(records.map((r) => r.conversation)));
+    setPristine(false);
+    setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.conversation)));
   };
 
   const toggleOne = (conversation: string, checked: boolean) => {
+    setPristine(false);
     setSelected((prev) => {
       const next = new Set(prev);
       if (checked) next.add(conversation);
@@ -121,113 +145,113 @@ export function UsageResumeModal({
     });
   };
 
-  const header = hasArmed
-    ? `${records.filter((r) => r.armed === true).length} armed · ${newCount} stopped since you last looked.`
-    : `${records.length} conversation${records.length === 1 ? "" : "s"} ${
-        records.length === 1 ? "was" : "were"
-      } stopped by a provider limit. Pick which ones should carry on by themselves when quota returns.`;
+  const nowMs = Date.now();
+  const title = view?.title ?? "Resume after limit reset";
+  const hasArmed = view?.hasArmed ?? false;
 
   return (
-    <Modal open={open} size="lg" tall onDismiss={close} label="Resume after limit reset">
+    <Modal open={open} size="lg" tall onDismiss={close} label={title}>
       <div className="flex flex-col min-h-0">
         <div className="p-5 pb-3">
-          <h2 className="text-title font-semibold">Resume after limit reset</h2>
-          <p className="mt-1 text-meta text-text-faint">{header}</p>
+          <h2 className="text-title font-semibold">{title}</h2>
+          {view && <p className="mt-1 text-meta text-text-faint">{view.header}</p>}
         </div>
 
-        <div className="flex items-center justify-between gap-3 border-y border-border-subtle bg-bg-elev px-5 py-2">
-          <button type="button" className="text-label font-medium text-accent hover:underline" onClick={toggleAll}>
-            {summary.allSelected ? "Uncheck all" : "Check all"}
-          </button>
-          <span className="text-meta text-text-faint">
-            {summary.selectedCount} of {summary.totalCount} selected
-          </span>
-        </div>
+        {loaded.state === "unsupported" ? (
+          <p className="px-5 py-4 text-body text-text-faint">{UPDATE_YOUR_BOX}</p>
+        ) : loaded.state === "error" ? (
+          <p role="alert" className="px-5 py-4 text-body text-danger">
+            Couldn't load the list — {loaded.message}
+          </p>
+        ) : !view ? (
+          <p className="px-5 py-4 text-body text-text-faint">Loading…</p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-3 border-y border-border-subtle bg-bg-elev px-5 py-2">
+              <button type="button" className="text-label font-medium text-accent hover:underline" onClick={toggleAll}>
+                {allSelected ? "Uncheck all" : "Check all"}
+              </button>
+              <span className="text-meta text-text-faint">
+                {selectedRows.length} of {rows.length} selected
+              </span>
+            </div>
 
-        <div className="overflow-auto px-3 pb-4">
-          {groups.length === 0 ? (
-            <p className="px-2 py-4 text-body text-text-faint">
-              No conversations are stopped by a provider limit right now.
-            </p>
-          ) : (
-            groups.map((group) => (
-              <div key={group.workspace}>
-                <div className="flex items-center gap-2 px-2 pb-1 pt-3 text-micro font-semibold uppercase tracking-wider text-text-quiet">
-                  <span>{group.workspace}</span>
-                  <span className="h-px flex-1 bg-border-subtle" />
-                </div>
-                {group.rows.map((r) => {
-                  const cost = costs.get(r.conversation) ?? 0;
-                  const resetsAt = (() => {
-                    const snap = (usage ?? []).find((s) => s.provider === r.provider);
-                    return snap?.windows.find((w) => w.kind === r.window)?.resetsAt;
-                  })();
-                  const warm = cost === 0;
-                  return (
-                    <div
-                      key={r.conversation}
-                      className={"flex gap-3 rounded-md p-3 " + (selected.has(r.conversation) ? "bg-fill border border-border-subtle" : "border border-transparent")}
-                    >
-                      <div className="mt-px">
-                        <Checkbox
-                          checked={selected.has(r.conversation)}
-                          onChange={(c) => toggleOne(r.conversation, c)}
-                          ariaLabel={`Resume ${nameFor(r.conversation) || r.conversation}`}
-                        />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-label font-medium text-text">{nameFor(r.conversation) || r.conversation}</span>
-                          {r.armed === true && <Pill tone="accent" size="meta">armed</Pill>}
-                          {isNewStopped(r, lastLooked) && <Pill tone="warn" size="meta">new</Pill>}
-                        </div>
-                        {snippets[r.conversation] && (
-                          <div className="mt-1 truncate text-meta text-text-faint">{snippets[r.conversation]}</div>
-                        )}
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <Pill tone="neutral" size="meta" border>
-                            <span className="font-mono">{r.provider}</span>
-                            <span className="text-text-muted">{r.model ?? "—"}</span>
-                          </Pill>
-                          <Pill tone="warn" size="meta">
-                            {resetsAt != null
-                              ? `${windowChipLabel(r, usage)} · ${formatResetAt(resetsAt, nowMs)} · in ${formatResetDistance(resetsAt - nowMs)}`
-                              : windowChipLabel(r, usage)}
-                          </Pill>
-                          {warm ? (
-                            <Pill tone="ok" size="meta">cache still warm · no extra cost</Pill>
-                          ) : (
-                            <Pill tone="neutral" size="meta">≈ {formatTokens(cost)} re-read</Pill>
-                          )}
-                        </div>
-                      </div>
+            <div className="overflow-auto px-3 pb-4">
+              {view.groups.length === 0 ? (
+                <p className="px-2 py-4 text-body text-text-faint">{view.emptyText}</p>
+              ) : (
+                view.groups.map((group) => (
+                  <div key={group.workspace}>
+                    <div className="flex items-center gap-2 px-2 pb-1 pt-3 text-micro font-semibold uppercase tracking-wider text-text-quiet">
+                      <span>{group.workspace}</span>
+                      <span className="h-px flex-1 bg-border-subtle" />
                     </div>
-                  );
-                })}
-              </div>
-            ))
-          )}
+                    {group.rows.map((r) => (
+                      <div
+                        key={r.conversation}
+                        className={"flex gap-3 rounded-md p-3 " + (selected.has(r.conversation) ? "bg-fill border border-border-subtle" : "border border-transparent")}
+                      >
+                        <div className="mt-px">
+                          <Checkbox
+                            checked={selected.has(r.conversation)}
+                            onChange={(c) => toggleOne(r.conversation, c)}
+                            ariaLabel={`Resume ${r.name}`}
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-label font-medium text-text">{r.name}</span>
+                            {r.armed && <Pill tone="accent" size="meta">armed</Pill>}
+                            {r.isNew && <Pill tone="warn" size="meta">new</Pill>}
+                          </div>
+                          {r.snippet && <div className="mt-1 truncate text-meta text-text-faint">{r.snippet}</div>}
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <Pill tone="neutral" size="meta" border>
+                              <span className="font-mono">{r.provider ?? "—"}</span>
+                              <span className="text-text-muted">{r.model ?? "—"}</span>
+                            </Pill>
+                            <Pill tone="warn" size="meta">
+                              {r.window.resetsAt != null
+                                ? `${r.window.label} · ${formatResetAt(r.window.resetsAt, nowMs)} · in ${formatResetDistance(r.window.resetsAt - nowMs)}`
+                                : r.window.label}
+                            </Pill>
+                            <Pill tone={r.cost.warm ? "ok" : "neutral"} size="meta">
+                              {r.cost.label}
+                            </Pill>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))
+              )}
 
-          {coldSelected > 0 && (
-            <Callout tone="warn" size="note">
-              {coldSelected === 1
-                ? "One of these resets well past your prompt-cache window, so its history is re-read from scratch. The estimate is per conversation above."
-                : `${coldSelected} of these reset well past your prompt-cache window, so their history is re-read from scratch. The estimate is per conversation above.`}
-            </Callout>
-          )}
-        </div>
+              {coldSelected > 0 && (
+                <Callout tone="warn" size="note">
+                  {coldSelected === 1 ? view.coldNote.one : view.coldNote.many.replace("{n}", String(coldSelected))}
+                </Callout>
+              )}
+            </div>
+          </>
+        )}
+
+        {result && (
+          <div role="alert" className="px-5 pb-2 text-meta text-danger">
+            {result.message}
+          </div>
+        )}
 
         <div className="flex items-center justify-between gap-3 border-t border-border-subtle bg-bg-elev px-5 py-3">
           <span className="text-meta text-text-faint">
-            <b className="font-semibold text-text">{summary.selectedCount} selected</b>
-            {summary.batchTotal > 0 ? ` · ≈ ${formatTokens(summary.batchTotal)} re-read` : " · no extra cost"}
+            <b className="font-semibold text-text">{selectedRows.length} selected</b>
+            {batchTotal > 0 ? ` · ≈ ${formatTokens(batchTotal)} re-read` : " · no extra cost"}
           </span>
           <div className="flex gap-2">
             <Button tone="default" onClick={close}>
               {hasArmed ? "Close" : "Cancel"}
             </Button>
-            <Button tone="primary" onClick={apply} disabled={summary.selectedCount === 0}>
-              {hasArmed ? "Update" : `Resume ${summary.selectedCount} at reset`}
+            <Button tone="primary" onClick={() => void apply()} disabled={!plan?.canApply || applying}>
+              {plan?.title ?? (hasArmed ? "Update" : `Resume ${selectedRows.length} at reset`)}
             </Button>
           </div>
         </div>
@@ -235,4 +259,3 @@ export function UsageResumeModal({
     </Modal>
   );
 }
-

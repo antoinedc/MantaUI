@@ -25,7 +25,7 @@ import {
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
 import { UpgradeGate } from "./UpgradeGate";
@@ -52,15 +52,9 @@ import type {
   UpdateTarget,
   WidgetEventPayload,
 } from "../shared/types";
-import {
-  buildLimitMessage,
-  buildUsageLevels,
-  buildWarnMessage,
-  shouldFireUsageAlert,
-  type UsageAlertLevel,
-} from "./usageEscalation";
-
-import { providerLabel } from "./UsageDial";
+import { createAlertQueue } from "./usageAlertsQueue";
+import { refreshModelCatalog } from "./modelCatalog";
+import { isUnknownChannel } from "./modelsPicker";
 import { refreshAccounts, refreshSessionSeat } from "./accountsData";
 
 // BET-373 (channel-aware wire format): the deep-link URL the OS hands this
@@ -227,18 +221,6 @@ function Shell() {
   // On-call CTO (BET-1166): whether the call window is available + a handler
   // that opens it via the genuine preload bridge (window.api is httpApi here).
   const ctoEnabled = useStore((s) => s.cto?.enabled === true);
-  // BET-1049: resolve a stopped record's `conversation` (an opencode session
-  // id) to its sidebar window name, for the resume modal rows. Records whose
-  // window can't be resolved fall back to the raw id.
-  const nameForStopped = useMemo(() => {
-    const bySession = new Map<string, string>();
-    for (const p of projects) {
-      for (const w of p.windows ?? []) {
-        if (w.opencodeSessionId) bySession.set(w.opencodeSessionId, w.name);
-      }
-    }
-    return (conversation: string) => bySession.get(conversation) ?? conversation;
-  }, [projects]);
   const setActive = useStore((s) => s.setActive);
   const refresh = useStore((s) => s.refresh);
   const applyStatusBatch = useStore((s) => s.applyStatusBatch);
@@ -508,9 +490,6 @@ function Shell() {
   const activeChatRef = useRef(activeChatSessionId);
   activeChatRef.current = activeChatSessionId;
 
-  // ---- Subscription usage escalation (BET-739) ----
-  // Fire-once level map (per `provider:window.kind`); see usageEscalation.ts.
-  const usageLevelsRef = useRef<Record<string, UsageAlertLevel>>({});
   // BET-1049: the "resume after limit reset" modal. Opened from the sidebar
   // pill or the limit toast's "Keep going at reset" action; closed stamps
   // the record's last-looked so "new" badges clear.
@@ -524,10 +503,6 @@ function Shell() {
       const snapshots = await window.api.usageList();
       const list = Array.isArray(snapshots) ? snapshots : [];
       useStore.getState().setUsage(list);
-      // Seed the escalation baseline from the SAME payload that primes the dial,
-      // so the first live update after a launch does not re-fire for a window
-      // that was already over the threshold.
-      usageLevelsRef.current = buildUsageLevels(list);
     } catch {
       // Older box or a transport blip — leave the slice as-is; UsageDial's own
       // null-snapshot path already renders nothing.
@@ -791,130 +766,135 @@ function Shell() {
     }
   }, [activeProjectName]);
 
-  // ---- Subscription usage escalation (BET-739) ----
-  // The warn (>=90%) / limit (>=100%) toasts, pushed through the existing
-  // global host via pushAppToast. Consumes the SAME `usage.updated` bus event
-  // as the store-priming effect above — this must work no matter which pane is
-  // in front, which is why it lives here at App (same BET-723 reasoning as the
-  // toast host). All transition logic is pure; the fire-once level map lives
-  // in usageLevelsRef (re-armed by writing back the new levels, so a window
-  // that resets and later crosses up again fires once more).
+  // ---- Subscription usage alerts (BET-739, server-first WS09) ----
+  // The BOX decides when a 90% / limit alert fires (src/server/usageAlerts.mjs)
+  // and publishes `usage.alert` frames; `usage:alerts` is the authoritative
+  // snapshot. This effect only reconciles the two with the shared hydration
+  // contract (usageAlertsQueue.ts) and mirrors the visible queue into the
+  // global toast host. Alerts raised while the app was disconnected arrive in
+  // the snapshot on reconnect — nothing is seeded or baselined here.
   const pushAppToastStore = useStore((s) => s.pushAppToast);
   const dismissAppToastStore = useStore((s) => s.dismissAppToast);
 
-  // The ONE remaining use of this offset is the "Remind me at reset" NOTIFY
-  // action below, which spec §9 explicitly keeps unchanged. The old
-  // "Keep going at reset" continuation path (which used this same helper as
-  // its fixed reset+60s fire instant) is DELETED — resuming an armed
-  // conversation is now entirely the box-side usage-resume engine's job, and
-  // nothing fires a resume at a fixed reset offset any more.
-  const fireAtFor = (resetsAt: number | undefined): number | null =>
-    resetsAt != null ? resetsAt + 60_000 : null;
-
-  // A one-shot job at `fireAt` via the existing scheduler store (window.api
-  // schedule path). Same store/poller/⏰ card as the AI `schedule` tool.
-  const scheduleAtReset = useCallback(
-    async (input: {
-      kind: "prompt" | "notify";
-      prompt: string;
-      label: string;
-      fireAt: number;
-      sessionID: string;
-    }) => {
-      try {
-        return await window.api.scheduleCreate({
-          fireAt: input.fireAt,
-          prompt: input.prompt,
-          recurring: false,
-          label: input.label,
-          sessionID: input.sessionID,
-          kind: input.kind,
-        });
-      } catch (err) {
-        return { ok: false as const, error: String((err as Error)?.message ?? err) };
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
-    if (!window.api.onUsageUpdated) return;
-    const off = window.api.onUsageUpdated(({ snapshots }) => {
-      const next = Array.isArray(snapshots) ? snapshots : [];
-      const fired = shouldFireUsageAlert(usageLevelsRef.current, next);
-      for (const alert of fired) {
-        const label = providerLabel(alert.provider);
-        const windowLabel = alert.window.label;
-        const resetsAt = alert.window.resetsAt;
-        if (alert.level === "limit") {
-          const fireAt = fireAtFor(resetsAt);
-          const sessionID = activeChatRef.current;
-          const toastId = `usage-limit-${alert.key}-${Date.now()}`;
-          // Actions are hidden when the window has no resetsAt (can't compute a
-          // fireAt) OR when no chat session is active (a job needs a sessionID).
-          // The toast still shows its message either way.
-          const hasActions = fireAt != null && sessionID != null;
-          pushAppToastStore({
-            id: toastId,
-            tone: "error",
-            message: buildLimitMessage(label, windowLabel, resetsAt, Date.now()),
-            actions: hasActions
-              ? [
-                  {
-                    label: "Remind me at reset",
-                    onClick: () => {
-                      if (fireAt == null || !sessionID) return;
-                      dismissAppToastStore(toastId);
-                      void (async () => {
-                        const res = await scheduleAtReset({
-                          kind: "notify",
-                          prompt: `${label} ${windowLabel} has reset — you can keep working.`,
-                          label: `Reminder: ${label} ${windowLabel} reset`,
-                          fireAt,
-                          sessionID,
-                        });
-                        if (res.ok && res.job) {
-                          pushAppToastStore({
-                            message: toastLine(Bell, `Reminder set for ${formatResetAt(fireAt, Date.now())}.`),
-                          });
-                        } else {
-                          pushAppToastStore({
-                            tone: "error",
-                            message: `Couldn't set a reminder: ${res.error ?? "unknown error"}`,
-                          });
-                        }
-                      })();
-                    },
-                  },
-                  {
-                    // BET-1049: "Keep going at reset" now opens the resume
-                    // modal (listing the conversations actually stopped, which
-                    // the user checks to arm for resume) rather than scheduling
-                    // the focused conversation at a fixed offset. It still
-                    // needs a session to be worth offering, so gated on
-                    // sessionID like "Remind me". Nothing is scheduled here —
-                    // the box-side resume engine (BET-1048) drives the reset.
-                    label: "Keep going at reset",
-                    onClick: () => {
-                      if (fireAt == null || !sessionID) return;
-                      setResumeModalOpen(true);
-                    },
-                  },
-                ]
-              : undefined,
-          });
-        } else {
-          pushAppToastStore({
-            message: buildWarnMessage(label, windowLabel, alert.window.pct, resetsAt, Date.now()),
-          });
+    if (!window.api.usageAlerts || !window.api.onUsageAlert) return;
+    const queue = createAlertQueue();
+    // alert id → toast id of the toast we raised for it (kept after the toast
+    // closes, so a closed alert never re-shows).
+    const toastFor = new Map<string, string>();
+    let alive = true;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const showToast = (alert: ReturnType<typeof queue.visible>[number]) => {
+      const toastId = `usage-alert-${alert.id}`;
+      toastFor.set(alert.id, toastId);
+      const line = formatWindowReset(alert.resetsAt ?? undefined, Date.now());
+      const message = `${alert.text}${line ? ` — ${line}` : ""}.`;
+      if (alert.level === "warn") {
+        pushAppToastStore({ id: toastId, message });
+        return;
+      }
+      const sessionID = activeChatRef.current;
+      const actions = [];
+      if (alert.canRemind && sessionID != null) {
+        actions.push({
+          label: "Remind me at reset",
+          onClick: () => {
+            dismissAppToastStore(toastId);
+            void (async () => {
+              try {
+                const res = await window.api.usageRemindAtReset({ key: alert.key, sessionID });
+                if (res.ok) {
+                  pushAppToastStore({ message: toastLine(Bell, `Reminder set for ${formatResetAt(res.fireAt, Date.now())}.`) });
+                } else {
+                  pushAppToastStore({ tone: "error", message: res.message });
+                }
+              } catch (e) {
+                pushAppToastStore({ tone: "error", message: `Couldn't set a reminder: ${e instanceof Error ? e.message : String(e)}` });
+              }
+            })();
+          },
+        });
+      }
+      // BET-1049: "Keep going at reset" opens the resume modal (the conversations
+      // actually stopped, which the user checks to arm for resume).
+      if (alert.canKeepGoing && sessionID != null) {
+        actions.push({ label: "Keep going at reset", onClick: () => setResumeModalOpen(true) });
+      }
+      pushAppToastStore({
+        id: toastId,
+        tone: "error",
+        message,
+        actions: actions.length > 0 ? actions : undefined,
+        // A limit alert stays until the user closes it or the box retires it.
+        ttl: null,
+      });
+    };
+
+    // Mirror the queue into toasts: raise the new ones, close the retired ones.
+    const sync = () => {
+      const visible = queue.visible();
+      const live = new Set(visible.map((a) => a.id));
+      for (const [alertId, toastId] of [...toastFor]) {
+        if (!live.has(alertId)) {
+          dismissAppToastStore(toastId);
+          toastFor.delete(alertId);
         }
       }
-      // Write back the CURRENT levels so a holding level doesn't re-fire and a
-      // drop (after reset) re-arms the key for the next crossing.
-      usageLevelsRef.current = buildUsageLevels(next);
+      for (const a of visible) if (!toastFor.has(a.id)) showToast(a);
+    };
+
+    const hydrate = () => {
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
+      const epoch = queue.startHydration();
+      const retry = () => {
+        const delay = [1000, 2000, 5000][attempt] ?? 30_000;
+        attempt += 1;
+        retryTimer = setTimeout(hydrate, delay);
+      };
+      window.api.usageAlerts().then(
+        (list) => {
+          if (!alive) return;
+          if (!list || !Array.isArray(list.alerts)) return retry();
+          attempt = 0;
+          if (queue.applySnapshot(list, epoch) === "hydrate") hydrate();
+          else sync();
+        },
+        (e) => {
+          // An older box has no alerts: nothing to show, nothing to retry.
+          if (!alive || isUnknownChannel(e)) return;
+          retry();
+        },
+      );
+    };
+
+    hydrate();
+    const offFrame = window.api.onUsageAlert((frame) => {
+      if (queue.applyFrame(frame) === "hydrate") hydrate();
+      else sync();
     });
-    return off;
-  }, [apiGeneration, scheduleAtReset, pushAppToastStore, dismissAppToastStore]);
+    // The client's reconnect signal (the synthesised `resync` stream frame).
+    const offStream = window.api.onStreamEvent?.((ev) => {
+      if (ev.sub === "resync") hydrate();
+    });
+    return () => {
+      alive = false;
+      if (retryTimer) clearTimeout(retryTimer);
+      offFrame();
+      offStream?.();
+    };
+  }, [apiGeneration, pushAppToastStore, dismissAppToastStore]);
+
+  // The box's `models.updated` hint: another device (or the Models card with
+  // the Settings pane closed) changed models, defaults or overrides — refresh the
+  // composer's raw model list. Config mirrors (store.defaultModel) arrive through
+  // the existing `sync` path.
+  useEffect(() => {
+    if (!window.api.onModelsUpdated) return;
+    return window.api.onModelsUpdated(() => refreshModelCatalog());
+  }, [apiGeneration]);
 
   // Screenshot detection — subscribe ONCE at the app level. Every ChatPanel
   // used to register its own listener, so a single detection fanned out into
@@ -2364,13 +2344,8 @@ function Shell() {
       {/* Resume after limit reset (BET-1049). Rendered at App level (like the
           toasts) so it works over any pane. Opened from the sidebar pill or
           the limit toast's "Keep going at reset"; closing stamps last-looked
-          so "new" badges clear. nameFor resolves the opencode session id on a
-          stopped record to the sidebar window name. */}
-      <UsageResumeModal
-        open={resumeModalOpen}
-        onClose={() => setResumeModalOpen(false)}
-        nameFor={nameForStopped}
-      />
+          so "new" badges clear. The box supplies the rows (and their names). */}
+      <UsageResumeModal open={resumeModalOpen} onClose={() => setResumeModalOpen(false)} />
     </div>
   );
 }

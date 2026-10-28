@@ -36,6 +36,19 @@ enum UsageMeters {
         return .ok
     }
 
+    /// Band a plan window from the BOX's own `tone` (SF-M18: under < 70, warn
+    /// 70–89, danger 90–99, over ≥ 100). A window without a `tone` — an older
+    /// box — has no band: callers tint it neutral (`tx4`) rather than computing a
+    /// colour from `pct` here. The context meter keeps `band(_ pct:)`.
+    static func band(_ window: UsageWindow) -> MeterBand? {
+        switch window.tone {
+        case "under": return .ok
+        case "warn": return .warn
+        case "danger", "over": return .danger
+        default: return nil
+        }
+    }
+
     /// Clamp a 0-100 percentage (providers can report over 100).
     static func clamp(_ pct: Double) -> Double {
         min(max(pct, 0), 100)

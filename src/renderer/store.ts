@@ -18,6 +18,7 @@ import type { SyncPayload } from "../shared/api.js";
 import { clientToken } from "./api/httpApi";
 import { isAssistantTurnInProgress, runWithConcurrency, type MediaEntry, type WidgetEntry } from "./chatUtils";
 import { applyTheme, type ThemePref } from "./theme";
+import { refreshModelCatalog } from "./modelCatalog";
 import type { ToastItem } from "./Toast";
 import {
   type Attachment,
@@ -1182,13 +1183,26 @@ export const useStore = create<State>((set, get) => ({
     set({ defaultModel: next.defaultModel ?? null });
   },
 
+  // The box owns the opt-in (WS09 `models:opt-in`: config write + subagent
+  // reconcile, serialized). Report both outcomes — a swallowed failure would
+  // leave the model silently locked.
   optInModel: async (key) => {
-    const cur = get().optInModels;
-    if (cur.includes(key)) return;
-    const next = [...cur, key];
-    set({ optInModels: next });
-    const saved = await window.api.configUpdate({ optInModels: next });
-    set({ optInModels: saved.optInModels ?? next });
+    try {
+      const r = await window.api.modelsOptIn({ keys: [key] });
+      if (!r.ok) {
+        get().pushAppToast({ tone: "error", message: r.message });
+        return;
+      }
+      get().pushAppToast(
+        r.outcome && r.outcome !== "applied" ? { tone: "error", message: r.message } : { message: r.message },
+      );
+      refreshModelCatalog();
+    } catch (e) {
+      get().pushAppToast({
+        tone: "error",
+        message: `Couldn't enable the model — ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
   },
 
   setChatAutoAllow: async (v) => {

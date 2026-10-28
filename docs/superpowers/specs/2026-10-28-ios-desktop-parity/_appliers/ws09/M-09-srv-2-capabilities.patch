@@ -1,0 +1,40 @@
+diff --git a/src/server/boxCapabilities.mjs b/src/server/boxCapabilities.mjs
+index 9976585..f675c83 100644
+--- a/src/server/boxCapabilities.mjs
++++ b/src/server/boxCapabilities.mjs
+@@ -8,6 +8,19 @@
+ // incompatibly). Every later workstream APPENDS its ids here; nothing else may
+ // create a second capability list.
+ 
+-export const BOX_CAPABILITIES = Object.freeze(["chat-cards-1", "artifacts-list-1"]);
++export const BOX_CAPABILITIES = Object.freeze([
++  "chat-cards-1",
++  "artifacts-list-1",
++  // WS09 (models / spend / usage)
++  "models-table-1",
++  "models-picker-1",
++  "models-unidentified-1",
++  "models-price-form-1",
++  "ledger-view-1",
++  "optimizer-view-1",
++  "usage-resume-view-1",
++  "usage-alerts-1",
++  "usage-window-tone-1",
++]);
+ 
+ export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;
+diff --git a/src/server/boxCapabilities.test.mjs b/src/server/boxCapabilities.test.mjs
+index 4b153f8..4ec1dbc 100644
+--- a/src/server/boxCapabilities.test.mjs
++++ b/src/server/boxCapabilities.test.mjs
+@@ -21,3 +21,10 @@ test("the id pattern rejects malformed ids", () => {
+     assert.doesNotMatch(bad, CAPABILITY_ID_PATTERN, bad);
+   }
+ });
++
++test("WS09 ids are advertised", () => {
++  for (const id of [
++    "models-table-1", "models-picker-1", "models-unidentified-1", "models-price-form-1", "ledger-view-1",
++    "optimizer-view-1", "usage-resume-view-1", "usage-alerts-1", "usage-window-tone-1",
++  ]) assert.ok(BOX_CAPABILITIES.includes(id), id);
++});

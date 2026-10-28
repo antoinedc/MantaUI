@@ -40,7 +40,7 @@ struct ModelPickerSheet: View {
     }
 
     private var fastToggleState: ChatModel.FastToggle {
-        ChatModel.fastToggle(models: modelStore.models, active: activeModel, variantId: modelStore.variant)
+        ChatModel.fastToggle(models: modelStore.selectableModels, active: activeModel, variantId: modelStore.variant)
     }
 
     private var showFastToggle: Bool {
@@ -211,7 +211,7 @@ struct ModelPickerSheet: View {
     /// Show the block unless the only chip it would render is an unselected
     /// "Server default" — i.e. no recents AND an override is set.
     private var showRecents: Bool {
-        !modelStore.recents.isEmpty || modelStore.override == nil
+        !modelStore.visibleRecents.isEmpty || modelStore.override == nil
     }
 
     private var recentsBlock: some View {
@@ -220,14 +220,13 @@ struct ModelPickerSheet: View {
                 .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
                 .foregroundColor(tokens.tx3)
             WrapLayout(spacing: Metrics.spacing.sp2) {
-                ForEach(modelStore.recents, id: \.self) { choice in
+                ForEach(modelStore.visibleRecents, id: \.self) { choice in
                     ModelChip(
                         title: ModelRecents.label(for: choice, models: modelStore.models),
                         selected: modelStore.activeChoice == choice,
                         tokens: tokens
                     ) {
-                        modelStore.apply(choice)
-                        dismiss()
+                        if modelStore.apply(choice) { dismiss() }
                     }
                 }
                 ModelChip(
@@ -302,8 +301,17 @@ struct ModelCatalogueView: View {
     /// `groups`/`filteredGroups` handle the pickable grouping and the search.
     private var groups: [(provider: String, models: [OpencodeModel])] {
         let all = modelStore.models
-        let filtered = all.filter { ChatModel.matches($0, filter: filter, in: all) }
-        return ChatModel.filteredGroups(ChatModel.catalogueGroups(filtered), query: query)
+        // The box's picker decides what is listed (an older box: the raw list);
+        // the capability filter and the search stay client-side.
+        let base = modelStore.pickerGroups.compactMap { group -> (provider: String, models: [OpencodeModel])? in
+            let kept = group.models.filter { ChatModel.matches($0, filter: filter, in: all) }
+            return kept.isEmpty ? nil : (group.provider, kept)
+        }
+        return ChatModel.filteredGroups(base, query: query)
+    }
+
+    private func isLocked(_ m: OpencodeModel) -> Bool {
+        modelStore.isLocked("\(m.providerID)/\(m.id)")
     }
 
     private func isSelected(_ m: OpencodeModel) -> Bool {
@@ -316,7 +324,7 @@ struct ModelCatalogueView: View {
     /// Button is disabled — but the guard keeps the store from ever setting a
     /// deprecated override it wasn't meant to allow.
     private func select(_ m: OpencodeModel) {
-        guard !ChatModel.isCatalogueRowDisabled(m, optIn: modelStore.deprecatedOptIns) else { return }
+        guard modelStore.isSelectable("\(m.providerID)/\(m.id)") else { return }
         modelStore.setOverride(OpencodeModelID(providerID: m.providerID, modelID: m.id))
         modelStore.recordCurrentChoice()
     }
@@ -326,6 +334,7 @@ struct ModelCatalogueView: View {
             if modelStore.loaded {
                 List {
                     capabilityFilterSection
+                    pickerStatusSection
                     providerSections
                 }
                 .searchable(
@@ -341,6 +350,34 @@ struct ModelCatalogueView: View {
         .navigationTitle("All models")
         .navigationBarTitleDisplayMode(.inline)
         // Pushed view: no Done button, no detents — those belong to the sheet root.
+    }
+
+    /// What the box's picker could not tell us, and the enable failure: an older
+    /// box (nothing is hidden or locked here), a failed first read (Retry — until it
+    /// lands nothing is offered), a failed "Enable" (the reason).
+    @ViewBuilder
+    private var pickerStatusSection: some View {
+        if modelStore.pickerUnsupported {
+            Section {
+                Text("Update your box to hide models and manage deprecated ones.")
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx3)
+            }
+        } else if let error = modelStore.pickerError, modelStore.picker == nil {
+            Section {
+                Text("\(error) Models can't be picked until it loads.")
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx3)
+                Button("Retry") { modelStore.retryPicker() }
+            }
+        }
+        if let error = modelStore.optInError {
+            Section {
+                Text(error)
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.tx3)
+            }
+        }
     }
 
     /// The catalogue's capability filter row: "All · Reasoning · Vision ·
@@ -381,7 +418,7 @@ struct ModelCatalogueView: View {
             ForEach(groups, id: \.provider) { group in
                 Section {
                     ForEach(group.models, id: \.id) { m in
-                        if ChatModel.isCatalogueRowDisabled(m, optIn: modelStore.deprecatedOptIns) {
+                        if isLocked(m) {
                             disabledRow(for: m)
                         } else {
                             Button { select(m); onPick() } label: {
@@ -436,10 +473,18 @@ struct ModelCatalogueView: View {
             Text("deprecated")
                 .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
                 .foregroundColor(tokens.tx4)
-            Button("Enable") { modelStore.optIn(m) }
+            if modelStore.optInPendingKey == "\(m.providerID)/\(m.id)" {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button(modelStore.optInError != nil ? "Try again" : "Enable") {
+                    Task { await modelStore.optIn(m) }
+                }
                 .font(.manta(size: Metrics.type.xs, weight: .semibold))
                 .foregroundColor(tokens.accentTx)
+                .disabled(modelStore.optInPendingKey != nil)
                 .accessibilityIdentifier("model-enable-deprecated")
+            }
         }
         .accessibilityIdentifier("model-deprecated-disabled-\(m.id)")
     }

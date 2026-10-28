@@ -1,31 +1,25 @@
-// ===== ModelsCard (BET-215) =====
+// ===== ModelsCard (BET-215, server-first WS09) =====
 //
-// Replaces three AI-tab sections in Settings with one consolidated model table:
-//   - the legacy "Default model" <select> block
-//   - the read-only "Model reference" catalog
-//   - the legacy `SubagentsCard` (kept verbatim here minus the rename / add-
-//     custom-subagent affordances the consolidation drops)
+// The Settings → Models table. Every rule — which models exist, what Main / Sub /
+// Default mean for each, the deprecated lock, which controls are allowed, the
+// search text and the config writes — lives on the BOX (`models:table` and the
+// `models:set-*` writes, src/server/modelsTable.mjs). This card only renders the
+// rows it is given and calls one write per control; it never reads config and
+// re-derives row state.
 //
 // Per-row controls:
-//   - **Default**  : single-select radio (one radio group across the whole
-//                    table). Disabled when Main is off. Writes AppConfig.defaultModel.
-//   - **Main**     : toggle. Off → hidden from the chat composer's ModelPicker.
-//                    On→off on the current default also clears defaultModel
-//                    in the SAME save (a default must be Main-available).
-//   - **Sub**      : toggle. Off → the model is removed from opencode.jsonc's
-//                    agent block list (BET-123 / opencodeSyncSubagents).
-//
-// "Default" reflects the SAVED value (not in-table unsaved edits), so the
-// banner only updates after a configUpdate round-trip — mirrors the existing
-// opt-out semantics (configGet / configUpdate only, no store live mirroring
-// inside the card).
+//   - **Default**  : single-select radio. Enabled only when the box says
+//                    `canMakeDefault` (title = the box's `defaultHint`).
+//   - **Main**     : off hides the model from the composer's picker. Hiding the
+//                    current default clears it in the same save (the box does it).
+//   - **Sub**      : dispatchable as a subagent; the box reconciles opencode's
+//                    agent blocks and says whether that worked.
+//   - **Edit**     : name / description / context size override.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pencil, X } from "lucide-react";
-import { describeModel } from "../shared/modelGuide.mjs";
-import { formatModelContextSize } from "./chatUtils";
 import { useStore } from "./store";
-import type { AppConfig, ModelOverride, OpencodeModel } from "../shared/types";
+import type { ModelsTableResult, ModelsTableRow, ModelsWriteReply } from "../shared/types";
 import { Checkbox } from "./Checkbox";
 import { Tag } from "./Tag";
 import { Modal } from "./Modal";
@@ -33,11 +27,10 @@ import { Button } from "./Button";
 import { refreshModelCatalog } from "./modelCatalog";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
-import { isDeprecated } from "./chatUtils";
+import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
 
-function modelKey(providerID: string, id: string): string {
-  return `${providerID}/${id}`;
-}
+const UNSUPPORTED = "unsupported" as const;
+type TableData = ModelsTableResult | typeof UNSUPPORTED;
 
 const TIER_CLASS: Record<string, string> = {
   fast: "bg-ok-bg text-ok",
@@ -45,67 +38,58 @@ const TIER_CLASS: Record<string, string> = {
   deep: "bg-accent-bg text-accent-tx",
 };
 
-// The overlay dialog for editing a model's display name / description /
-// context size. Prefilled from the model's current effective values; Save
-// returns a ModelOverride with ONLY the fields that differ (empty object = no
-// effective override → the caller removes the model's key from the store).
+/** What the card tells the user after a write (box copy, verbatim). */
+type Feedback =
+  | { kind: "ok"; message: string }
+  | { kind: "partial"; message: string; retry: boolean }
+  | { kind: "error"; message: string };
+
+// The overlay dialog for editing a model's display name / description / context
+// size. Prefilled from the box's `editable` values; Save sends the three strings
+// AS TYPED and the box decides what differs from the provider's own values. A
+// refused save keeps the dialog open with the box's message (under the context
+// field when it names that field).
 function EditModelModal({
-  model,
+  row,
   open = true,
   onSave,
   onCancel,
 }: {
-  model: OpencodeModel;
-  // Controlled presence. The modal stays mounted (portaled) so Modal can play
-  // its exit; `open` comes from the caller's editing state.
+  row: ModelsTableRow;
   open?: boolean;
-  onSave: (override: ModelOverride) => void;
+  onSave: (fields: { name: string; description: string; context: string }) => Promise<{ message: string; field?: string } | null>;
   onCancel: () => void;
 }) {
-  const info = describeModel(model.providerID, model.id);
   const nameRef = useRef<HTMLInputElement | null>(null);
-  const [name, setName] = useState(model.name);
-  const [description, setDescription] = useState(
-    model.description ?? info?.blurb ?? "",
-  );
-  const [context, setContext] = useState(
-    typeof model.limit?.context === "number" ? String(model.limit.context) : "",
-  );
+  const [name, setName] = useState(row.editable.name);
+  const [description, setDescription] = useState(row.editable.description);
+  const [context, setContext] = useState(row.editable.context != null ? String(row.editable.context) : "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<{ message: string; field?: string } | null>(null);
 
-  // The dialog lives under a full-screen container that re-renders on store
-  // updates; `autoFocus` can be visually disrupted by sibling re-renders, so
-  // grab focus explicitly once on mount rather than relying on it.
   useEffect(() => {
     nameRef.current?.focus();
   }, []);
 
-  const save = () => {
-    const override: ModelOverride = {};
-    const n = name.trim();
-    if (n !== "" && n !== model.name) override.name = n;
-    const d = description.trim();
-    if (d !== "" && d !== (model.description ?? info?.blurb ?? "")) override.description = d;
-    const c = context.trim();
-    if (c !== "") {
-      const num = Number(c);
-      if (Number.isFinite(num) && num > 0 && num !== model.limit?.context) override.context = num;
-    }
-    onSave(override);
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    const err = await onSave({ name, description, context });
+    setSaving(false);
+    if (err) setError(err);
   };
 
   const fieldCls =
     "w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent";
 
   return (
-    <Modal open={open} size="md" onDismiss={onCancel} label={`Edit ${model.name}`}>
-      {/* Escape is owned by Modal (BET-724) via onDismiss above — no
-          hand-rolled handler needed here. */}
+    <Modal open={open} size="md" onDismiss={onCancel} label={`Edit ${row.name}`}>
       <div className="space-y-4">
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="text-body font-semibold text-text">Edit model</div>
             <div className="text-meta text-text-faint">
-              {model.providerID} / {model.id}
+              {row.providerID} / {row.modelID}
             </div>
           </div>
           <button
@@ -120,280 +104,135 @@ function EditModelModal({
 
         <label className="block">
           <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Name</span>
-          <input
-            ref={nameRef}
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className={fieldCls}
-          />
+          <input ref={nameRef} type="text" value={name} onChange={(e) => setName(e.target.value)} className={fieldCls} />
         </label>
 
         <label className="block">
           <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Description</span>
-          <textarea
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            rows={3}
-            className={`${fieldCls} resize-y`}
-          />
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} className={`${fieldCls} resize-y`} />
         </label>
 
         <label className="block">
           <span className="block text-micro font-semibold uppercase text-text-muted mb-1">Context size (tokens)</span>
           <input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
             value={context}
             onChange={(e) => setContext(e.target.value)}
             placeholder="e.g. 200000"
             className={fieldCls}
           />
+          {error?.field === "context" && (
+            <span role="alert" className="block text-meta text-danger mt-1">
+              {error.message}
+            </span>
+          )}
         </label>
 
-        <div className="text-meta text-text-faint">
-          Leave a field blank to keep the provider's default for it.
-        </div>
+        {error && error.field !== "context" && (
+          <div role="alert" className="text-meta text-danger">
+            {error.message}
+          </div>
+        )}
+
+        <div className="text-meta text-text-faint">Leave a field blank to keep the provider's default for it.</div>
 
         <div className="flex justify-end gap-2 pt-1">
-          <Button onClick={onCancel} tone="ghost">Cancel</Button>
-          <Button onClick={save} tone="primary">Save</Button>
+          <Button onClick={onCancel} tone="ghost">
+            Cancel
+          </Button>
+          <Button onClick={() => void save()} tone="primary" disabled={saving}>
+            {saving ? "Saving…" : "Save"}
+          </Button>
         </div>
       </div>
     </Modal>
   );
 }
 
-// The Main + Sub column toggles. Migrated to the Checkbox primitive (BET-589)
-// from the old iOS-style toggle switch; the bound state, disabled flag, and
-// an optional aria-label are the only per-call-site differences.
+// The Main + Sub column toggles use the Checkbox primitive (BET-589).
 export function ModelsCard() {
-  const setStoreDefaultModel = useStore((s) => s.setDefaultModel);
-  // Saved default echoed in the banner above the search. Mirror the SAVED
-  // value, not local unsaved edits — read from the store (which is fed by
-  // configGet on refresh / configUpdate after a save).
-  const savedDefault = useStore((s) => s.defaultModel);
-
-  // Local working state for the toggles. Hydrated from configGet on mount.
-  const [deactivatedMain, setDeactivatedMain] = useState<Set<string>>(new Set());
-  const [deactivatedSub, setDeactivatedSub] = useState<Set<string>>(new Set());
-  // BET-1139: deprecated models the user explicitly opted back in to
-  // ("providerID/modelID"). Shared with the main picker's opt-in rows.
-  const [optIn, setOptIn] = useState<Set<string>>(new Set());
-  // The model list + config are fetched through the shared cache (BET-1057).
-  // The synchronized subagent reconcile stays inside the fetcher so it runs
-  // on every (re)load exactly as before.
-  const {
-    data,
-    loading,
-    error,
-    refresh,
-    mutate,
-  } = useCachedResource<{ models: OpencodeModel[]; cfg: AppConfig }>("models", async () => {
-    const [modelList, cfg] = await Promise.all([
-      window.api.opencodeModels(),
-      window.api.configGet(),
-    ]);
-    const deactivatedSubList = cfg.deactivatedSubagents ?? [];
-    const optInList = cfg.optInModels ?? [];
-    // The server (opencode:models) is the single source of truth for display
-    // overrides, so the model list it returns is already overridden — use it
-    // as-is.
-    await window.api.opencodeSyncSubagents({
-      models: modelList,
-      deactivated: deactivatedSubList,
-      optIn: optInList,
-    });
-    return { models: modelList, cfg };
+  // The default shown in the banner is the box's saved value, echoed in every table reply.
+  const { data, loading, error, refresh } = useCachedResource<TableData>("models", async () => {
+    try {
+      return await window.api.modelsTable();
+    } catch (e) {
+      if (isUnknownChannel(e)) return UNSUPPORTED;
+      throw e;
+    }
   });
-  const models = data?.models ?? null;
-  // Hydrate the toggle state from the freshly-fetched config. The toggles
-  // write their own local state on mutation, so this only runs when the
-  // cached config actually changes (mount + explicit refresh).
-  useEffect(() => {
-    if (!data) return;
-    setDeactivatedMain(new Set(data.cfg.deactivatedMainModels ?? []));
-    setDeactivatedSub(new Set(data.cfg.deactivatedSubagents ?? []));
-    setOptIn(new Set(data.cfg.optInModels ?? []));
-  }, [data]);
-  // Tracks which model row is mid-mutation (key), or "__main__" /
-  // "__default__" for the banner-side actions.
+  // A write's reply carries the new table; show it at once instead of waiting for the refetch.
+  const [replied, setReplied] = useState<ModelsTableResult | null>(null);
+  const table: TableData | null = replied ?? data;
+  const unsupported = table === UNSUPPORTED;
+  const rows = table && table !== UNSUPPORTED ? table.rows : null;
+
   const [busy, setBusy] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  // Key ("providerID/modelID") of the model whose edit dialog is open, or null.
   const [editing, setEditing] = useState<string | null>(null);
-  // Keeps the edit modal rendered with the last-edited model while it plays
-  // its close exit (see the portal below).
-  const lastEditModel = useRef<OpencodeModel | null>(null);
+  // Keeps the edit modal rendered with the last-edited row while it plays its close exit.
+  const lastEditRow = useRef<ModelsTableRow | null>(null);
 
-  // (Reused as-is from the prior SubagentsCard — subagent reconcile is the
-  // only opencode.jsonc writing the table triggers.) A sub toggle change
-  // needs an opencode restart to take effect; rather than show a per-card
-  // restart prompt (BET-420 collapsed the three prompts into one panel-level
-  // banner), we raise the shared `opencodeRestartNeeded` flag and let the
-  // Settings panel offer the single restart button.
+  // Another device's write (or this one's, with the card closed) refreshes the table.
+  useEffect(() => {
+    const off = window.api.onModelsUpdated?.(() => {
+      void refresh().then(() => setReplied(null));
+    });
+    return () => off?.();
+  }, [refresh]);
 
-  // ---- Toggles ----
-  //
-  // Main toggle: off → adds key to deactivatedMainModels. If the row is the
-  // CURRENT default, also clear defaultModel in the same configUpdate so the
-  // invariant "defaultModel implies Main-available" holds in the persisted
-  // config. Sub toggle: off → adds key to deactivatedSubagents + sync, same
-  // as the prior SubagentsCard.
+  // Apply a successful reply: new table, mirror the saved default into the store
+  // (new drafts seed from it), and refresh the composer's model list.
+  const applyReply = useCallback((reply: Extract<ModelsWriteReply, { ok: true }>) => {
+    setReplied(reply.table);
+    const d = reply.table.defaultKey ? reply.table.rows.find((r) => r.key === reply.table.defaultKey) : null;
+    useStore.setState({ defaultModel: d ? { providerID: d.providerID, modelID: d.modelID } : null });
+    refreshModelCatalog();
+    if (reply.outcome && reply.outcome !== "applied") {
+      setFeedback({ kind: "partial", message: reply.message, retry: reply.retry === true });
+    } else {
+      setFeedback({ kind: "ok", message: reply.message });
+    }
+  }, []);
 
-  const toggleMain = useCallback(
-    async (key: string, currentlyMain: boolean) => {
-      if (busy || !models) return;
+  const run = useCallback(
+    async (
+      key: string,
+      call: () => Promise<ModelsWriteReply>,
+      // The edit dialog shows its own errors (under the field); the card banner stays quiet then.
+      surfaceErrors = true,
+    ): Promise<ModelsWriteReply | null> => {
+      if (busy) return null;
       setBusy(key);
-      const nextMain = new Set(deactivatedMain);
-      if (currentlyMain) nextMain.add(key);
-      else nextMain.delete(key);
-      const nextMainList = [...nextMain];
-      // Invariant: a saved defaultModel MUST be Main-available. When the
-      // user turns Main off on the current default, clear defaultModel in
-      // the SAME save so the persisted config never violates the invariant.
-      const isCurrentDefault =
-        currentlyMain &&
-        savedDefault != null &&
-        modelKey(savedDefault.providerID, savedDefault.modelID) === key;
-      const patch: Record<string, unknown> = { deactivatedMainModels: nextMainList };
-      if (isCurrentDefault) {
-        // `null` (not `undefined`) — JSON.stringify drops `undefined` keys,
-        // so passing null is the only way the server actually clears the
-        // field. The store's applyConfig normalizes any null back to null
-        // and the existing defaultModel?: type allows absence.
-        patch.defaultModel = null;
-      }
-      await mutate(async () => {
-        const cfg = await window.api.configUpdate(patch);
-        const resolvedList = cfg.deactivatedMainModels ?? nextMainList;
-        setDeactivatedMain(new Set(resolvedList));
-        if (isCurrentDefault) {
-          // Mirror the cleared default into the store so the banner + every
-          // other reader of `defaultModel` flips off in the same tick. Use
-          // setState directly (not setStoreDefaultModel — that helper is
-          // typed for setting, not clearing).
-          useStore.setState({ defaultModel: null });
+      setFeedback(null);
+      try {
+        const reply = await call();
+        if (reply.ok) applyReply(reply);
+        else if (surfaceErrors) setFeedback({ kind: "error", message: reply.message });
+        return reply;
+      } catch (e) {
+        if (surfaceErrors) {
+          setFeedback({
+            kind: "error",
+            message: isUnknownChannel(e) ? UPDATE_YOUR_BOX : `Couldn't save — ${e instanceof Error ? e.message : String(e)}`,
+          });
         }
-        refreshModelCatalog();
-      });
-      setBusy(null);
+        return null;
+      } finally {
+        setBusy(null);
+      }
     },
-    [busy, mutate, models, deactivatedMain, savedDefault],
+    [busy, applyReply],
   );
-
-  const toggleSub = useCallback(
-    async (key: string, currentlyActive: boolean) => {
-      if (busy || !models) return;
-      setBusy(key);
-      const nextSet = new Set(deactivatedSub);
-      if (currentlyActive) nextSet.add(key);
-      else nextSet.delete(key);
-      const nextList = [...nextSet];
-      await mutate(async () => {
-        const cfg = await window.api.configUpdate({ deactivatedSubagents: nextList });
-        const resolvedList = cfg.deactivatedSubagents ?? nextList;
-        await window.api.opencodeSyncSubagents({
-          models,
-          deactivated: resolvedList,
-          optIn: [...optIn],
-        });
-        setDeactivatedSub(new Set(resolvedList));
-        // Sub toggles write opencode.jsonc agent blocks — a restart is
-        // required for opencode to re-read them. Raise the panel banner.
-        useStore.getState().setOpencodeRestartNeeded(true);
-        refreshModelCatalog();
-      });
-      setBusy(null);
-    },
-    [busy, mutate, models, deactivatedSub, optIn],
-  );
-
-  // BET-1139: persist the user's opt-in for a deprecated model. Reconcile the
-  // subagents so the now-opted-in model's block is registered (and, being a
-  // shared set, the main picker row becomes selectable too).
-  const enableDeprecated = useCallback(
-    async (key: string) => {
-      if (busy || !models) return;
-      setBusy(key);
-      const nextList = [...new Set([...optIn, key])];
-      await mutate(async () => {
-        const cfg = await window.api.configUpdate({ optInModels: nextList });
-        const resolvedList = cfg.optInModels ?? nextList;
-        await window.api.opencodeSyncSubagents({
-          models,
-          deactivated: [...deactivatedSub],
-          optIn: resolvedList,
-        });
-        setOptIn(new Set(resolvedList));
-        useStore.getState().setOpencodeRestartNeeded(true);
-        refreshModelCatalog();
-      });
-      setBusy(null);
-    },
-    [busy, mutate, models, deactivatedSub, optIn],
-  );
-
-  // Default radio — single-select. Writes defaultModel via the store's
-  // setDefaultModel so the banner + everything else mirrors consistently.
-  const setDefault = useCallback(
-    async (providerID: string, modelID: string) => {
-      if (busy) return;
-      setBusy("__default__");
-      await mutate(async () => {
-        await setStoreDefaultModel({ providerID, modelID });
-        void refresh();
-      });
-      setBusy(null);
-    },
-    [busy, mutate, setStoreDefaultModel, refresh],
-  );
-
-  // Save a model display override (name / description / context) drafted in the
-  // edit modal. Writes the full modelOverrides map to config, then re-fetches
-  // the model list from the server (the single source of truth, which applies
-  // the override in opencode:models) so both the table and the composed model
-  // catalog reflect the change in the same tick.
-  const saveOverride = useCallback(
-    async (key: string, override: ModelOverride) => {
-      if (busy) return;
-      setBusy(key);
-      await mutate(async () => {
-        const cfg = await window.api.configGet();
-        const existing = cfg.modelOverrides ?? {};
-        const next = { ...existing };
-        if (Object.keys(override).length === 0) delete next[key];
-        else next[key] = override;
-        await window.api.configUpdate({ modelOverrides: next });
-        // Server re-reads config per opencode:models call, so a fresh cache
-        // refresh is already overridden.
-        await refresh();
-        setEditing(null);
-        refreshModelCatalog();
-      });
-      setBusy(null);
-    },
-    [busy, mutate, refresh],
-  );
-
-  // ---- Render ----
 
   const filtered = useMemo(() => {
-    if (!models) return [];
-    if (!searchQuery.trim()) return models;
-    const q = searchQuery.toLowerCase();
-    return models.filter((m) => {
-      const info = describeModel(m.providerID, m.id);
-      return (
-        m.name.toLowerCase().includes(q) ||
-        m.providerID.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        (m.description?.toLowerCase().includes(q) ?? false) ||
-        (info?.blurb.toLowerCase().includes(q) ?? false) ||
-        (info?.goodFor.some((g) => g.toLowerCase().includes(q)) ?? false)
-      );
-    });
-  }, [models, searchQuery]);
+    if (!rows) return [];
+    const q = searchQuery.trim().toLowerCase();
+    return q ? rows.filter((r) => r.searchText.includes(q)) : rows;
+  }, [rows, searchQuery]);
+
+  const defaultLine = table && table !== UNSUPPORTED ? table.defaultLine : null;
 
   return (
     <div className="space-y-3">
@@ -405,213 +244,194 @@ export function ModelsCard() {
         </div>
       </div>
 
-      {/* Saved & active default banner — reads from the store, NOT local
-          edits, so it stays in sync with what's actually persisted. */}
-      <div
-        className={`flex items-center gap-2 bg-bg-soft border border-border rounded-xs px-3 py-2 ${
-          savedDefault ? "" : "text-text-faint italic"
-        }`}
-      >
-        <span className="text-micro font-semibold uppercase text-text-faint">Default</span>
-        {savedDefault ? (() => {
-          const m = models?.find(
-            (x) => x.providerID === savedDefault.providerID && x.id === savedDefault.modelID,
-          );
-          return (
-            <span className="text-label text-text font-semibold inline-flex items-center gap-2">
-              {m?.name ?? savedDefault.modelID}
-              <span className="text-text-faint font-normal">{savedDefault.providerID}</span>
-            </span>
-          );
-        })() : (
-          <span className="text-label">No default set — opencode default (server decides)</span>
-        )}
-      </div>
-
-      {error && <div className="text-meta text-danger">{error}</div>}
-
-      <input
-        type="text"
-        placeholder="Search models by name, provider, capability…"
-        value={searchQuery}
-        onChange={(e) => setSearchQuery(e.target.value)}
-        className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent"
-      />
-
-      {loading ? (
-        <div className="py-2">
-          <MantaLoader size="inline" label="Loading models" />
-        </div>
+      {unsupported ? (
+        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
       ) : (
-      <div className="border border-border rounded-xs overflow-x-auto">
-        <table className="w-full text-body">
-          <thead>
-            <tr className="border-b border-border">
-              <th className="text-left text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2">
-                Model
-              </th>
-              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
-                Default
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
-                  main
-                </span>
-              </th>
-              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
-                Main
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
-                  agent
-                </span>
-              </th>
-              <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
-                Sub
-                <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">
-                  agent
-                </span>
-              </th>
-              {/* Unlabeled trailing column: per-row edit affordance. */}
-              <th className="w-[48px]" aria-hidden="true" />
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-3 py-4 text-center text-meta text-text-faint">
-                  No models found
-                </td>
-              </tr>
+        <>
+          {/* The saved default, as the box reports it. */}
+          <div
+            className={`flex items-center gap-2 bg-bg-soft border border-border rounded-xs px-3 py-2 ${
+              defaultLine ? "" : "text-text-faint italic"
+            }`}
+          >
+            <span className="text-micro font-semibold uppercase text-text-faint">Default</span>
+            {defaultLine ? (
+              <span className="text-label text-text font-semibold inline-flex items-center gap-2">
+                {defaultLine.name}
+                <span className="text-text-faint font-normal">{defaultLine.providerID}</span>
+              </span>
+            ) : (
+              <span className="text-label">No default set — opencode default (server decides)</span>
             )}
-            {filtered.map((m) => {
-              const key = modelKey(m.providerID, m.id);
-              // BET-1139: a deprecated model is disabled-by-default (all
-              // row controls locked) until the user opts it back in via the
-              // shared optIn set — the same opt-in that enables it in the
-              // main picker and registers it as a subagent.
-              const deprecated = isDeprecated(m);
-              const optedIn = optIn.has(key);
-              const deprecatedDisabled = deprecated && !optedIn;
-              const isMain = deprecatedDisabled ? false : !deactivatedMain.has(key);
-              const isSub = deprecatedDisabled ? false : !deactivatedSub.has(key);
-              const isDefault =
-                savedDefault != null &&
-                savedDefault.providerID === m.providerID &&
-                savedDefault.modelID === m.id;
-              const info = describeModel(m.providerID, m.id);
-              const ctxSize = formatModelContextSize(m.limit?.context);
-              const desc = m.description ?? info?.blurb;
-              const isBusy = busy === key;
-              const rowDisabled = isBusy || deprecatedDisabled;
-              return (
-                <tr
-                  key={key}
-                  className={`border-b border-border/40 hover:bg-bg-soft/40 ${
-                    deprecatedDisabled ? "opacity-60" : ""
-                  }`}
+          </div>
+
+          {error && <div className="text-meta text-danger">{error}</div>}
+          {feedback && (
+            <div
+              role={feedback.kind === "error" ? "alert" : "status"}
+              className={`flex items-center gap-3 text-meta ${
+                feedback.kind === "error" ? "text-danger" : feedback.kind === "partial" ? "text-warn" : "text-text-faint"
+              }`}
+            >
+              <span>{feedback.message}</span>
+              {feedback.kind === "partial" && feedback.retry && (
+                <button
+                  type="button"
+                  className="text-accent hover:underline disabled:opacity-40"
+                  disabled={busy != null}
+                  onClick={() => void run("__retry__", () => window.api.modelsRetrySubSync())}
                 >
-                  <td className="px-3 py-2 align-middle">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-body text-text font-medium">{m.name}</span>
-                      <span className="text-meta text-text-faint">{m.providerID}</span>
-                      {ctxSize && <Tag numeric>{ctxSize}</Tag>}
-                      {deprecated && <Tag numeric>deprecated</Tag>}
-                      {info && (
-                        <span className={`px-2 py-px rounded-xs text-meta ${TIER_CLASS[info.tier]}`}>
-                          {info.tier}
-                        </span>
-                      )}
-                    </div>
-                    {desc && (
-                      <div className="text-label text-text-faint mt-1 max-w-[440px]">
-                        {desc}
-                      </div>
-                    )}
-                    {deprecatedDisabled && (
-                      <button
-                        type="button"
-                        onClick={() => void enableDeprecated(key)}
-                        disabled={isBusy}
-                        className="mt-1 text-meta text-accent hover:underline disabled:opacity-40"
+                  Try again
+                </button>
+              )}
+            </div>
+          )}
+
+          <input
+            type="text"
+            placeholder="Search models by name, provider, capability…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-bg-soft border border-border px-3 py-2 text-body rounded-xs focus:outline-none focus:border-accent"
+          />
+
+          {loading && !table ? (
+            <div className="py-2">
+              <MantaLoader size="inline" label="Loading models" />
+            </div>
+          ) : (
+            <div className="border border-border rounded-xs overflow-x-auto">
+              <table className="w-full text-body">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2">Model</th>
+                    <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
+                      Default
+                      <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">main</span>
+                    </th>
+                    <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
+                      Main
+                      <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">agent</span>
+                    </th>
+                    <th className="text-center text-micro font-semibold uppercase text-text-faint font-semibold px-3 py-2 w-[80px]">
+                      Sub
+                      <span className="block text-meta normal-case tracking-normal text-text-faint font-normal mt-px">agent</span>
+                    </th>
+                    <th className="w-[48px]" aria-hidden="true" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-4 text-center text-meta text-text-faint">
+                        No models found
+                      </td>
+                    </tr>
+                  )}
+                  {filtered.map((r) => {
+                    const isBusy = busy === r.key;
+                    const rowDisabled = isBusy || r.deprecatedLocked;
+                    return (
+                      <tr
+                        key={r.key}
+                        className={`border-b border-border/40 hover:bg-bg-soft/40 ${r.deprecatedLocked ? "opacity-60" : ""}`}
                       >
-                        Enable deprecated (also registers as a subagent)
-                      </button>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 align-middle text-center">
-                    <input
-                      type="radio"
-                      name="defaultModel"
-                      checked={isDefault}
-                      disabled={!isMain || rowDisabled}
-                      onChange={() => void setDefault(m.providerID, m.id)}
-                      title={
-                        deprecatedDisabled
-                          ? "Enable this deprecated model first"
-                          : isMain
-                            ? "Set as default main model"
-                            : "Enable Main first"
-                      }
-                      className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent-solid disabled:opacity-30 disabled:cursor-not-allowed relative"
-                      style={
-                        isDefault
-                          ? { backgroundColor: "var(--accent-solid)", borderColor: "var(--accent)" }
-                          : undefined
-                      }
-                    />
-                  </td>
-                  <td className="px-3 py-2 align-middle text-center">
-                    <Checkbox
-                      checked={isMain}
-                      disabled={rowDisabled}
-                      onChange={() => void toggleMain(key, isMain)}
-                      ariaLabel={`Main availability for ${m.name}`}
-                    />
-                  </td>
-                  <td className="px-3 py-2 align-middle text-center">
-                    <Checkbox
-                      checked={isSub}
-                      disabled={rowDisabled}
-                      onChange={() => void toggleSub(key, isSub)}
-                      ariaLabel={`Sub availability for ${m.name}`}
-                    />
-                  </td>
-                  <td className="px-3 py-2 align-middle text-center">
-                    <button
-                      type="button"
-                      onClick={() => setEditing(key)}
-                      disabled={rowDisabled}
-                      className="inline-flex items-center justify-center p-2 rounded-xs text-text-faint hover:text-text hover:bg-fill-hover disabled:opacity-30 disabled:cursor-not-allowed"
-                      aria-label={`Edit ${m.name}`}
-                      title="Edit name / description / context"
-                    >
-                      <Pencil size={14} aria-hidden="true" />
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                        <td className="px-3 py-2 align-middle">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-body text-text font-medium">{r.name}</span>
+                            <span className="text-meta text-text-faint">{r.providerID}</span>
+                            {r.contextLabel && <Tag numeric>{r.contextLabel}</Tag>}
+                            {r.deprecated && <Tag numeric>deprecated</Tag>}
+                            {r.tier && (
+                              <span className={`px-2 py-px rounded-xs text-meta ${TIER_CLASS[r.tier] ?? ""}`}>{r.tier}</span>
+                            )}
+                          </div>
+                          {r.description && <div className="text-label text-text-faint mt-1 max-w-[440px]">{r.description}</div>}
+                          {r.deprecatedLocked && (
+                            <button
+                              type="button"
+                              onClick={() => void run(r.key, () => window.api.modelsOptIn({ keys: [r.key] }))}
+                              disabled={isBusy}
+                              className="mt-1 text-meta text-accent hover:underline disabled:opacity-40"
+                            >
+                              Enable deprecated (also registers as a subagent)
+                            </button>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 align-middle text-center">
+                          <input
+                            type="radio"
+                            name="defaultModel"
+                            checked={r.isDefault}
+                            disabled={!r.canMakeDefault || rowDisabled}
+                            onChange={() => void run(r.key, () => window.api.modelsSetDefault({ key: r.key }))}
+                            title={r.defaultHint ?? "Set as default main model"}
+                            className="appearance-none w-4 h-4 rounded-full border-[1.5px] border-border-strong bg-bg cursor-pointer checked:border-accent checked:bg-accent-solid disabled:opacity-30 disabled:cursor-not-allowed relative"
+                            style={r.isDefault ? { backgroundColor: "var(--accent-solid)", borderColor: "var(--accent)" } : undefined}
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-middle text-center">
+                          <Checkbox
+                            checked={r.isMain}
+                            disabled={rowDisabled}
+                            onChange={() => void run(r.key, () => window.api.modelsSetMain({ key: r.key, on: !r.isMain }))}
+                            ariaLabel={`Main availability for ${r.name}`}
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-middle text-center">
+                          <Checkbox
+                            checked={r.isSub}
+                            disabled={rowDisabled}
+                            onChange={() => void run(r.key, () => window.api.modelsSetSub({ key: r.key, on: !r.isSub }))}
+                            ariaLabel={`Sub availability for ${r.name}`}
+                          />
+                        </td>
+                        <td className="px-3 py-2 align-middle text-center">
+                          <button
+                            type="button"
+                            onClick={() => setEditing(r.key)}
+                            disabled={rowDisabled}
+                            className="inline-flex items-center justify-center p-2 rounded-xs text-text-faint hover:text-text hover:bg-fill-hover disabled:opacity-30 disabled:cursor-not-allowed"
+                            aria-label={`Edit ${r.name}`}
+                            title="Edit name / description / context"
+                          >
+                            <Pencil size={14} aria-hidden="true" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
       )}
 
-      {models && (() => {
-        const target = editing
-          ? (models.find((m) => modelKey(m.providerID, m.id) === editing) ?? null)
-          : null;
-        // Keep the modal MOUNTED (so Modal can play its exit) even after the
-        // user closes it; during the fade the last-edited model still renders.
-        if (target) lastEditModel.current = target;
-        const model = lastEditModel.current ?? models[0];
-        if (!model) return null;
-        // Modal portals itself to document.body (BET-885).
-        return (
-          <EditModelModal
-            model={model}
-            open={!!target}
-            onSave={(override) => void saveOverride(modelKey(model.providerID, model.id), override)}
-            onCancel={() => setEditing(null)}
-          />
-        );
-      })()}
+      {rows &&
+        (() => {
+          const target = editing ? (rows.find((r) => r.key === editing) ?? null) : null;
+          // Keep the modal MOUNTED (so Modal can play its exit) even after the user closes it.
+          if (target) lastEditRow.current = target;
+          const row = lastEditRow.current ?? rows[0];
+          if (!row) return null;
+          return (
+            <EditModelModal
+              key={row.key}
+              row={row}
+              open={!!target}
+              onSave={async (fields) => {
+                const reply = await run(row.key, () => window.api.modelsSetOverride({ key: row.key, fields }), false);
+                if (reply?.ok) {
+                  setEditing(null);
+                  return null;
+                }
+                return reply ? { message: reply.message, field: reply.field } : { message: "Couldn't save — try again." };
+              }}
+              onCancel={() => setEditing(null)}
+            />
+          );
+        })()}
     </div>
   );
 }

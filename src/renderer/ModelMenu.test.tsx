@@ -444,3 +444,34 @@ describe("ModelMenu Auto row (BET-1246)", () => {
     expect(serverRow().textContent).toContain("Server default");
   });
 });
+
+describe("ModelMenu footerNote (WS09 older-box note)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  it("shows the note above 'Manage models…' only when a caller supplies it", () => {
+    const mountWith = (footerNote?: string) =>
+      mount(
+        <ModelMenu
+          open
+          anchorRef={anchorRef()}
+          groups={[["anthropic", [{ id: "m", providerID: "anthropic", name: "M" } as OpencodeModel]]]}
+          modelOverride={null}
+          defaultModel={null}
+          footerNote={footerNote}
+          onSelect={() => {}}
+          onClose={() => {}}
+        />,
+      );
+    h = mountWith("Update your box to hide models and manage deprecated ones.");
+    expect(surface().textContent).toContain("Update your box to hide models and manage deprecated ones.");
+    expect(surface().textContent).toContain("Manage models…");
+    h.unmount();
+    h = mountWith(undefined);
+    expect(surface().textContent).not.toContain("Update your box");
+    expect(surface().textContent).toContain("Manage models…");
+  });
+});

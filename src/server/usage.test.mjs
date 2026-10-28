@@ -1122,3 +1122,36 @@ test("listLiveSnapshots: never throws — a rejected fetch returns []", async ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ----------------------------------------------------------------------------
+// WS09 SF-M18 — every window the poller publishes carries the box-computed
+// `tone`, in the caches AND in the live `usage.updated` frame.
+// ----------------------------------------------------------------------------
+
+test("poller decorates windows with `tone`: caches, seat caches and the published frame agree across ticks", async () => {
+  let pct = 10;
+  const adapter = makeAdapter("on", {
+    detect: async () => true,
+    fetch: async () => ({ windows: [{ kind: "session", label: "5h", pct }, { kind: "weekly", label: "Weekly", pct: pct + 5 }] }),
+  });
+  const published = [];
+  const observed = [];
+  const poller = createUsagePoller({
+    adapters: [adapter],
+    now: () => 1000,
+    publish: (evt) => published.push(evt),
+    observe: (results, seatResults) => observed.push([results, seatResults]),
+  });
+  await poller.tick();
+  assert.deepEqual(poller.snapshots[0].windows.map((w) => w.tone), ["under", "under"]);
+  assert.deepEqual(published[0].payload.snapshots[0].windows.map((w) => w.tone), ["under", "under"]);
+
+  pct = 95;
+  await poller.tick();
+  assert.equal(published.length, 2);
+  assert.deepEqual(published[1].payload.snapshots[0].windows.map((w) => [w.pct, w.tone]), [[95, "danger"], [100, "over"]]);
+  assert.deepEqual(poller.snapshots[0].windows.map((w) => w.tone), ["danger", "over"]);
+  assert.deepEqual(observed[1][0][0].windows.map((w) => w.tone), ["danger", "over"], "observe sees the decorated arrays");
+  assert.ok(Array.isArray(published[1].payload.seatSnapshots));
+  assert.deepEqual(poller.seatSnapshots, published[1].payload.seatSnapshots);
+});

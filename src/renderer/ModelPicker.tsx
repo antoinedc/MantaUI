@@ -16,7 +16,8 @@ import { useMemo, useRef, useState } from "react";
 import { ChevronDown, Sparkles, Zap, ZapOff } from "lucide-react";
 import type { OpencodeModel } from "../shared/types";
 import { type ModelSelection, resolveActiveModel } from "./chatShared";
-import { selectableModelList, resolveFastToggle, mainPickerGroups, titleCase } from "./chatUtils";
+import { resolveFastToggle, titleCase } from "./chatUtils";
+import { useModelsPicker } from "./modelsPicker";
 import { SplitChip } from "./Chip";
 import { EffortMenu } from "./EffortMenu";
 import { ModelMenu } from "./ModelMenu";
@@ -44,8 +45,6 @@ export function ModelPicker({
   models,
   modelOverride,
   defaultModel,
-  deactivatedMainModels,
-  optInModels,
   onOptInModel,
   onOpen,
   onSelect,
@@ -84,10 +83,12 @@ export function ModelPicker({
   // BET-215: "providerID/modelID" strings; models in this set are hidden
   // from the picker. Filter lives in the same `groups` chokepoint as the
   // existing enabled/status gate. Default [] = no Main filtering.
+  /** @deprecated The box decides what the picker lists (`models:picker`); ignored. */
   deactivatedMainModels?: string[];
   // BET-1139: "providerID/modelID" strings of deprecated models the user has
   // explicitly opted back in to. Empty/absent = every deprecated model shows
   // disabled. Shared with the subagent path and the store's `optInModels`.
+  /** @deprecated The box decides which deprecated models are enabled; ignored. */
   optInModels?: string[];
   // Persist an opt-in (BET-1139) — flips a deprecated model's disabled row to
   // a normal selectable one.
@@ -133,20 +134,17 @@ export function ModelPicker({
   // (`activeModel` below deliberately resolves against the FULL list — an
   // already-selected model must keep displaying its own name even if it was
   // later deactivated.)
-  const selectableModels = useMemo(
-    () => selectableModelList(models, deactivatedMainModels),
-    [models, deactivatedMainModels],
-  );
+  const pickerView = useModelsPicker(models);
+  const selectableModels = pickerView.selectableModels;
 
-  // The dropdown's candidate set: models grouped by provider, sorted, with
-  // `-fast` siblings folded into their base (they're reached through the ⚡
-  // segment). BET-1139: unlike the selectable set, deprecated models are KEPT
-  // in the list (visible + importable) but flagged disabled unless opted in
-  // (`disabledKeys`) — the user must be able to see and opt in to a model the
-  // provider is deprecating.
+  // The dropdown's candidate set, decided by the box (`models:picker`): models
+  // grouped by provider with `-fast` siblings folded into their base (reached
+  // through the ⚡ segment). Deprecated models are KEPT (visible + importable)
+  // but listed in `disabledKeys` unless opted in. An older box answers nothing
+  // and the raw list is shown with a note.
   const picker = useMemo(
-    () => mainPickerGroups(models, deactivatedMainModels, optInModels),
-    [models, deactivatedMainModels, optInModels],
+    () => ({ groups: pickerView.groups, disabledKeys: pickerView.disabledKeys }),
+    [pickerView.groups, pickerView.disabledKeys],
   );
 
   // Resolve the active model object (for the friendly name + variant list).
@@ -363,6 +361,9 @@ export function ModelPicker({
           groups={picker.groups}
           disabledKeys={picker.disabledKeys}
           onEnableDeprecated={onOptInModel}
+          footerNote={
+            pickerView.unsupported ? "Update your box to hide models and manage deprecated ones." : undefined
+          }
           modelOverride={modelOverride}
           defaultModel={defaultModel}
           onSelect={onSelect}

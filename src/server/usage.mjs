@@ -105,6 +105,8 @@ import { readJsonSync, writeJsonAtomic } from "./jsonStore.mjs";
 import { appendObservation } from "./optimizer/forecast.mjs";
 import { aggregateSnapshot } from "../shared/seatChoice.mjs";
 import { aggregationPolicy, perConversationRoutingActive } from "./accounts.mjs";
+import { decorateSnapshot } from "./usageWindowView.mjs";
+import { createUsageAlerts } from "./usageAlerts.mjs";
 
 export { normalizeWindow };
 
@@ -637,15 +639,24 @@ export function createUsagePoller({
         }
       }
 
-      snapshots = results;
-      seatSnapshots = seatResults;
+      // WS09 SF-M18: decorate the SOURCE arrays once with the box-computed
+      // window `tone`, before anything reads them — the caches behind
+      // `usage:list` / `usage:list-seats`, the content key, `observe` and the
+      // `usage.updated` frame all carry the same tones.
+      const decorated = results.map(decorateSnapshot);
+      const decoratedSeats = seatResults.map(decorateSnapshot);
+      snapshots = decorated;
+      seatSnapshots = decoratedSeats;
       // The per-seat set only widens the key when there are seats, so a box
       // without seats dedupes exactly as it always did.
-      const key = seatResults.length > 0 ? `${contentKey(results)}|${contentKey(seatResults)}` : contentKey(results);
+      const key =
+        decoratedSeats.length > 0
+          ? `${contentKey(decorated)}|${contentKey(decoratedSeats)}`
+          : contentKey(decorated);
       if (key !== lastContentKey) {
         lastContentKey = key;
-        observe?.(results, seatResults);
-        publish?.({ kind: "usage.updated", payload: { snapshots: results, seatSnapshots: seatResults } });
+        observe?.(decorated, decoratedSeats);
+        publish?.({ kind: "usage.updated", payload: { snapshots: decorated, seatSnapshots: decoratedSeats } });
       }
     } finally {
       inFlight = false;
@@ -679,6 +690,7 @@ export function createUsagePoller({
 // `createUsagePoller` directly with injected deps.
 
 let activePoller = null;
+let activeAlerts = null;
 
 /**
  * @param {{ publish: (evt: object) => void }} bus
@@ -692,6 +704,10 @@ export function startUsagePoller(
   bus,
   { intervalMs = POLL_MS, pacing = null, seats = null, onUnauthorized = null, onSeatSignedOut = null, onSeatOk = null } = {},
 ) {
+  // WS09 SF-M16: the 90% / limit alerts live on the box. They are fed from the
+  // SAME observe tap (no second poller) and published as raw `usage.alert`
+  // frames; in-app only, no push.
+  const alerts = createUsageAlerts({ now: Date.now, publish: (evt) => bus.publish(evt) });
   const poller = createUsagePoller({
     publish: (evt) => bus.publish(evt),
     seats,
@@ -701,18 +717,22 @@ export function startUsagePoller(
     observe: (results, seatResults) => {
       recordWindowObservations(results, seatResults);
       pacing?.observe?.(results);
+      alerts.observe(results);
     },
   });
   activePoller = poller;
+  activeAlerts = alerts;
   activeSeatsFor = seats ? (id) => seats.seatsFor(id) : null;
   const p = startPoller(() => poller.tick(), { intervalMs, label: "usage" });
   return {
     stop() {
       p.stop();
       poller.stop();
+      alerts.stop();
       if (activePoller === poller) {
         activePoller = null;
         activeSeatsFor = null;
+        activeAlerts = null;
       }
     },
     // The resume engine reuses THIS poller to force one immediate re-check at
@@ -721,6 +741,15 @@ export function startUsagePoller(
     // re-fetch usage on demand; the engine is the only caller today.
     tick: () => poller.tick(),
   };
+}
+
+/**
+ * The running usage-alert engine (`usage:alerts` / `usage:remind-at-reset`), or
+ * null before `startUsagePoller` has run (tests / early boot).
+ * @returns {ReturnType<typeof createUsageAlerts> | null}
+ */
+export function getUsageAlerts() {
+  return activeAlerts;
 }
 
 /** @returns {UsageSnapshot[]} */

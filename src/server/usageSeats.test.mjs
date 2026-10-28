@@ -299,3 +299,24 @@ test("recheckAdapterAtLimit with seats: auto = every seat at its limit; manual =
   assert.equal(await run(plan("manual", "seat-1", seatDeps(1), seatDeps(2))), true);
   assert.equal(await run(plan("manual", "seat-2", seatDeps(1), seatDeps(2))), false);
 });
+
+// WS09 SF-M18: seat windows carry the same box-computed `tone` as the aggregate,
+// on the cache read by `usage:list-seats` AND on the published frame (second,
+// changed tick included).
+test("seat windows carry `tone` on seatSnapshots and in the usage.updated frame, across a changed tick", async () => {
+  const readings = { "tok-1": { pct5h: 75, pctWeekly: 10 }, "tok-2": { pct5h: 20, pctWeekly: 30 } };
+  const { poller, published } = newPoller(makeSeatAdapter(readings), seatsOf(plan("auto", "seat-1", seatDef(1), seatDef(2))));
+  await poller.tick();
+  const tones = (snaps) => snaps.map((s) => s.windows.slice(0, 2).map((w) => w.tone));
+  assert.deepEqual(tones(poller.seatSnapshots), [["warn", "under"], ["under", "under"]]);
+  assert.deepEqual(tones(published[0].payload.seatSnapshots), [["warn", "under"], ["under", "under"]]);
+  assert.deepEqual(poller.snapshots[0].windows.map((w) => w.tone), ["under", "under"], "the aggregate is decorated too");
+
+  readings["tok-1"].pct5h = 100;
+  readings["tok-2"].pct5h = 91;
+  await poller.tick();
+  assert.equal(published.length, 2);
+  assert.deepEqual(tones(published[1].payload.seatSnapshots), [["over", "under"], ["danger", "under"]]);
+  assert.deepEqual(tones(poller.seatSnapshots), [["over", "under"], ["danger", "under"]]);
+  assert.deepEqual(published[1].payload.snapshots[0].windows[0].tone, "danger");
+});

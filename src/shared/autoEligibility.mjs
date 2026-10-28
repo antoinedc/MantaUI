@@ -63,3 +63,25 @@ export function autoEligibility(input) {
 
   return { eligible: missing.length === 0, missing };
 }
+
+// The machine-key → phrase map. autoEligibility deliberately carries no
+// user-facing copy in its verdict; the ONE place the phrases live is here, so
+// the box's "models we couldn't identify" help lines and the desktop Accounts
+// card say the same thing.
+const MISSING_PHRASE = {
+  [MISSING.IDENTITY]: "which model",
+  [MISSING.PRICE]: "what it costs",
+  [MISSING.CACHING]: "whether it caches",
+  [MISSING.QUALITY]: "how it compares",
+};
+
+/** Join missing-eligibility keys into "which model, what it costs, and …" (null when none). */
+export function describeMissing(missing) {
+  const phrases = (missing ?? []).filter((k) => k in MISSING_PHRASE).map((k) => MISSING_PHRASE[k]);
+  if (phrases.length === 0) return null;
+  if (phrases.length === 1) return phrases[0];
+  const head = phrases.slice(0, -1);
+  // Oxford comma: "which model, and whether it caches" (2+) and
+  // "which model, what it costs, whether it caches, and how it compares" (4).
+  return `${head.join(", ")}, and ${phrases[phrases.length - 1]}`;
+}
