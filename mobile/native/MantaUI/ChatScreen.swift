@@ -1112,31 +1112,6 @@ private struct ChatScreenContent: View {
         return (cwd as NSString).lastPathComponent
     }
 
-    /// The branch + relative path shown in the navigation bar's subtitle chip,
-    /// or nil when there is no branch (non-git cwd, detached HEAD, unreachable
-    /// box) — in which case the chip renders nothing at all.
-    private var branchCapsuleInfo: (name: String, path: String?)? {
-        guard let branch, !branch.isEmpty else { return nil }
-        return (branch, branchRelPath)
-    }
-
-    /// The system navigation bar's subtitle chip (BET-821): the branch name and
-    /// relative working-directory path once a branch is known. Renders NOTHING
-    /// when there is no branch (non-git cwd, detached HEAD, unreachable box) so
-    /// the inline title stands alone rather than showing a dead glyph.
-    @ViewBuilder
-    private var subtitleChip: some View {
-        if let info = branchCapsuleInfo {
-            let path = info.path.flatMap { $0.isEmpty ? nil : $0 }
-            Label(path.map { "\(info.name) · \($0)" } ?? info.name,
-                  systemImage: "arrow.triangle.branch")
-                .labelStyle(.titleAndIcon)
-                .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(tokens.tx4)
-                .lineLimit(1)
-        }
-    }
-
     /// Clear = a fresh opencode session in the SAME window. Stay on the screen
     /// and re-point it at the new id; the transcript comes back empty because
     /// the session really is new.
@@ -1338,7 +1313,7 @@ private struct ChatScreenContent: View {
     /// full-width context row. Its own background is fully opaque `tokens.canvas`
     /// so the bar's default material is not visible — that removes the seam
     /// between the solid nav bar and the block. The branch row drops out
-    /// entirely when there is no branch (`subtitleChip` renders nothing then).
+    /// entirely when there is no branch (`GitSessionHeaderRow` renders nothing then).
     @ViewBuilder
     private var sessionHeaderBlock: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
@@ -1351,7 +1326,18 @@ private struct ChatScreenContent: View {
                     ))
                 }
             }
-            subtitleChip
+            // The branch chip, the checks chip and the "Connect GitHub" offer (WS05
+            // M-05-1). Plain label when GitHub isn't in play; nothing without a branch.
+            GitSessionHeaderRow(
+                branch: branch,
+                relPath: branchRelPath,
+                cwd: sessionWindow?.cwd,
+                sessionId: store.sessionId,
+                shipModel: modelStore.override,
+                readOnly: store.isBackgroundJobReadOnly,
+                tokens: tokens,
+                composer: composer
+            )
             contextStrip
         }
         .padding(.horizontal, Metrics.spacing.sp3)

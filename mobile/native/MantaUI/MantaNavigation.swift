@@ -8,8 +8,8 @@ import Combine
 //
 // Anything can call `open(_:)` / `startNewSession(_:)`; `SessionListView` is the
 // one consumer — it owns the navigation stack, so it resolves a route against
-// the live project list, dismisses whatever sheet is up, and pushes. A route it
-// can't handle yet (`.review`) is left pending for its owner.
+// the live project list, dismisses whatever sheet is up, and pushes (a `.review`
+// route opens the review screen as a sheet).
 // ===========================================================================
 
 @MainActor

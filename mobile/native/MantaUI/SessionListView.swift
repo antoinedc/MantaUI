@@ -135,6 +135,16 @@ struct SessionListView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        SessionHaptics.fire(.selection, enabled: store.hapticsEnabled)
+                        sheetRoute = .inbox
+                    } label: {
+                        Image(systemName: "tray")
+                            .foregroundColor(tokens.tx2)
+                    }
+                    .accessibilityLabel("Inbox")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     orderMenu
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -298,6 +308,21 @@ struct SessionListView: View {
             // M-06-2: search every conversation's messages, seeded with the
             // session-list capsule's text (no conversation is favoured).
             SearchScreen(primarySessionId: nil, seed: seed)
+        case .inbox:
+            // WS05 M-05-2: the work inbox. Start-a-session closes it and hands a
+            // draft to the create sheet through the navigator.
+            InboxWorkScreen(onClose: { sheetRoute = nil })
+                .presentationDetents([.large])
+        case .review(let sessionID):
+            // WS05 M-05-3: the C2 `.review` route — the session's pull request.
+            NavigationStack {
+                ReviewScreen.forSession(sessionID)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { sheetRoute = nil }
+                        }
+                    }
+            }
         }
     }
 
@@ -398,9 +423,10 @@ struct SessionListView: View {
         case .settings(let section):
             navigator.pending = nil
             Task { await presentSettings(section: section) }
-        case .review:
-            // Not ours: left pending for the review screen's owner.
-            break
+        case .review(let sessionID):
+            // WS05 M-05-3: the review screen (a sheet over whatever is up).
+            navigator.pending = nil
+            Task { await presentReview(sessionID: sessionID) }
         }
     }
 
@@ -457,6 +483,11 @@ struct SessionListView: View {
         showSettings = false
         navigator.switcherPresented = false
         if hadSheet { try? await Task.sleep(nanoseconds: 350_000_000) }
+    }
+
+    private func presentReview(sessionID: String) async {
+        await dismissPresentations()
+        sheetRoute = .review(sessionID: sessionID)
     }
 
     private func presentSettings(section: String?) async {
@@ -1379,6 +1410,8 @@ private enum SheetRoute: Identifiable {
     case renameProject(name: String)
     case confirmDelete(window: MantaWindow)
     case conversationSearch(seed: String)
+    case inbox
+    case review(sessionID: String)
 
     var id: String {
         switch self {
@@ -1388,6 +1421,8 @@ private enum SheetRoute: Identifiable {
         case .renameProject(let name): return "rename-project:\(name)"
         case .confirmDelete(let window): return "delete:\(window.index)"
         case .conversationSearch(let seed): return "search:\(seed)"
+        case .inbox: return "inbox"
+        case .review(let sessionID): return "review:\(sessionID)"
         }
     }
 }
