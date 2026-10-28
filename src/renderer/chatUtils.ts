@@ -221,73 +221,6 @@ export function moveMenuHighlight(
 // in src/shared/formatTokens.mjs; this re-export keeps every renderer import path.
 export { formatTokens };
 
-// ---- Optimizer P2.5 (BET-1347) pure formatters ------------------------------
-
-export type PressureTone = "neutral" | "ok" | "warn";
-
-/**
- * Describe a subscription window's pacing pressure for the pressure chip that
- * sits under its gauge. `hasSignal` is false when there is no pressure signal
- * yet (tokensPerPct is null or there are too few samples) — that renders the
- * documented NEUTRAL state, never a fabricated pace.
- *
- *   hasSignal=false        -> "no pressure signal yet"      (neutral)
- *   hasSignal, deficit<=0  -> "on pace"                     (ok)
- *   hasSignal, deficit>0   -> "+N pts ahead of pace"        (warn)
- */
-export function describePressure(deficit: number, hasSignal: boolean): { text: string; tone: PressureTone } {
-  if (!hasSignal) return { text: "no pressure signal yet", tone: "neutral" };
-  const pts = Math.round(deficit);
-  if (deficit > 0) return { text: `+${pts} pts ahead of pace`, tone: "warn" };
-  return { text: "on pace", tone: "ok" };
-}
-
-export type ActivityEntry = {
-  id?: string;
-  ts?: number;
-  kind: string;
-  subject?: string;
-  from?: string | number;
-  to?: string | number;
-  verdict: string;
-  evidence?: Record<string, string | number>;
-  revertedAt?: number;
-};
-
-const VERDICT_WORD: Record<string, string> = {
-  kept: "Kept",
-  "rolled-back": "Rolled back",
-  applied: "Applied",
-};
-
-// A compact evidence line: "62 turns · hit 74.1% · churn 0.4%" — joined from
-// the counts/measurements, never content.
-function evidenceLine(evidence?: Record<string, string | number>): string {
-  if (!evidence) return "";
-  const parts: string[] = [];
-  for (const [k, v] of Object.entries(evidence)) {
-    if (v === undefined || v === null || String(v) === "") continue;
-    const label = k.replace(/([A-Z])/g, " $1").replace(/^[a-z]/g, (c) => c.toUpperCase()).trim();
-    parts.push(`${label} ${v}`);
-  }
-  return parts.join(" · ");
-}
-
-/**
- * Describe one activity-log entry for the feed: a headline (the verdict with
- * the change it describes) and the evidence line. The prefix is derived from
- * `verdict` (so a rolled-back entry is visually distinct); `subject` is the
- * change itself.
- */
-export function describeActivityEntry(entry: ActivityEntry): { headline: string; detail: string } {
-  const word = VERDICT_WORD[entry.verdict] ?? entry.verdict ?? "Changed";
-  const subject = typeof entry.subject === "string" && entry.subject ? entry.subject : "optimizer change";
-  return {
-    headline: `${word} — ${subject}`,
-    detail: evidenceLine(entry.evidence),
-  };
-}
-
 // Build an SVG path string for a CUMULATIVE series over `values` (oldest →
 // newest), for the Optimizer's "sent vs raw counterfactual" consumption chart
 // (BET-1337). Each point's x is spaced linearly across `width`; its y is the
@@ -2147,25 +2080,6 @@ export function fastModelId(modelID: string): string {
   return isFastModelId(modelID) ? modelID : `${modelID}${FAST_SUFFIX}`;
 }
 
-/**
- * Drop `-fast` models from the grouped dropdown list, but ONLY where the base
- * twin survives in the same provider group — a `-fast` model whose base is
- * absent (or deactivated) has no toggle to reach it by, so hiding it would
- * make it unselectable. Groups left empty are dropped so the menu never
- * renders a provider heading with nothing under it.
- */
-export function hideFastSiblingGroups(
-  groups: Array<[string, OpencodeModel[]]>,
-): Array<[string, OpencodeModel[]]> {
-  const out: Array<[string, OpencodeModel[]]> = [];
-  for (const [providerID, models] of groups) {
-    const ids = new Set(models.map((m) => m.id));
-    const kept = models.filter((m) => !(isFastModelId(m.id) && ids.has(baseModelId(m.id))));
-    if (kept.length > 0) out.push([providerID, kept]);
-  }
-  return out;
-}
-
 // ===== deprecated-model predicate (BET-1139) =====
 //
 // `isDeprecated` (a model the provider still serves but flags as deprecated)
@@ -2177,104 +2091,6 @@ export function hideFastSiblingGroups(
 // re-compare the literal.
 export { isDeprecated };
 
-// ===== selectableModelGroups =====
-//
-// The model set a user may actually switch TO — the answer to "does
-// delegation respect the Main toggle?". Enabled, not deprecated, not
-// deactivated in Settings (`deactivatedMainModels`), grouped by provider,
-// sorted, then `hideFastSiblingGroups`. Shared by ModelPicker's dropdown and
-// the delegate model picker so both read one source of truth (the `enabled !==
-// false` filter lives here and nowhere else in the renderer).
-
-/**
- * The flat selectable model list (enabled, not deprecated, not deactivated).
- * `null` input → `null` (the loading signal callers rely on). The flat list,
- * not the grouped one, is what `resolveFastToggle` needs — it must still see a
- * `-fast` twin whose base is present, which `hideFastSiblingGroups` would fold
- * out of the groups.
- */
-export function selectableModelList(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-): OpencodeModel[] | null {
-  if (!models) return null;
-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
-  return models.filter(
-    (m) =>
-      m.enabled !== false &&
-      !isDeprecated(m) &&
-      !deactivatedMain.has(`${m.providerID}/${m.id}`),
-  );
-}
-
-/**
- * The grouped, sorted, fast-sibling-folded selectable list — the candidate
- * model set for dropdowns and pickers. `null` models → `null` (loading).
- */
-export function selectableModelGroups(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-): Array<[string, OpencodeModel[]]> | null {
-  const selectable = selectableModelList(models, deactivatedMainModels);
-  if (selectable === null) return null;
-  const map = new Map<string, OpencodeModel[]>();
-  for (const m of selectable) {
-    const arr = map.get(m.providerID) ?? [];
-    arr.push(m);
-    map.set(m.providerID, arr);
-  }
-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  return hideFastSiblingGroups(sorted);
-}
-
-export type MainPickerGroups = {
-  /** Groups for the main model menu — includes deprecated models so they stay
-   *  importable/visible, with the same enabled/deactivated/fast-folding gates
-   *  as `selectableModelGroups`. */
-  groups: Array<[string, OpencodeModel[]]> | null;
-  /** "providerID/modelID" keys of DEPRECATED models shown disabled (not yet
-   *  opted in). Deprecated-but-opted-in models are ordinary selectable rows. */
-  disabledKeys: string[];
-};
-
-/**
- * The main picker's candidate set (BET-1139). Unlike `selectableModelGroups`,
- * a deprecated model is KEPT in the list — the user must be able to see and
- * opt in to a model the provider is deprecating — but it is rendered disabled
- * unless its "providerID/modelID" is in `optInModels` (`disabledKeys`). A
- * deprecated model that HAS been opted in is fully selectable, same as a live
- * model. Non-deprecated models behave exactly as `selectableModelGroups`.
- * Used ONLY by the main composer picker; the delegate picker keeps filtering
- * deprecated models via `selectableModelGroups`. `null` models → `null`
- * groups (loading).
- */
-export function mainPickerGroups(
-  models: OpencodeModel[] | null,
-  deactivatedMainModels: string[] | undefined,
-  optInModels: string[] | undefined,
-): MainPickerGroups {
-  if (!models) return { groups: null, disabledKeys: [] };
-  const deactivatedMain = new Set(deactivatedMainModels ?? []);
-  const optIn = new Set(optInModels ?? []);
-  const disabledKeys: string[] = [];
-  const kept = models.filter((m) => {
-    const key = `${m.providerID}/${m.id}`;
-    if (m.enabled === false) return false;
-    if (deactivatedMain.has(key)) return false;
-    if (isDeprecated(m) && !optIn.has(key)) {
-      disabledKeys.push(key);
-    }
-    return true;
-  });
-  const map = new Map<string, OpencodeModel[]>();
-  for (const m of kept) {
-    const arr = map.get(m.providerID) ?? [];
-    arr.push(m);
-    map.set(m.providerID, arr);
-  }
-  const sorted = [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  return { groups: hideFastSiblingGroups(sorted), disabledKeys };
-}
 
 export type FastToggleState = {
   /** The toggle can be clicked (a counterpart exists that keeps the effort). */
@@ -2424,55 +2240,6 @@ export function isPlanExitQuestion(
     }
   }
   return false;
-}
-
-// ---- Plan-file discovery (tolerant of how the plan was authored) ----
-//
-// Plan paths live in different part shapes depending on how the plan was
-// authored. The classic announcing message mentions the path in PROSE (a text
-// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool —
-// which records the path in `state.input.filePath` (and sometimes
-// `planPath`/`path`) plus a `patch` part listing the file — so the path never
-// reaches a text part, and `plan_exit` sometimes doesn't echo it either.
-// Scanning only one surface (e.g. only the plan_exit input) misses plans
-// authored via the plan tool. So we scan text, authoring-tool input, and
-// patch-file lists for any `.opencode/plans/*.md` reference. Cheap by design:
-// we never read tool output or file content, only path fields and prose.
-
-const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
-
-// Tools that AUTHOR the plan file (or confirm it at plan_exit). A `read` tool
-// pointed at a plan path is a reference, not an authoring signal, and must not
-// resolve as the plan — the write/plan tool (or a prose mention) already does.
-const PLAN_AUTHORING_TOOLS = new Set([
-  "write", "edit", "multiEdit", "patch", "plan", "plan_exit",
-]);
-
-/** Every distinct `.opencode/plans/*.md` reference a single part carries. */
-export function planRefsFromPart(part: OpencodePart): string[] {
-  const out: string[] = [];
-  const candidates: string[] = [];
-  if (typeof part.text === "string") candidates.push(part.text);
-  const raw = part as Record<string, unknown>;
-  const isTool = raw.type === "tool";
-  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
-    const input =
-      (raw.state as { input?: Record<string, unknown> } | undefined)?.input ??
-      (raw.input as Record<string, unknown> | undefined);
-    if (input) {
-      for (const key of ["filePath", "path", "planPath"]) {
-        const v = input[key];
-        if (typeof v === "string") candidates.push(v);
-      }
-    }
-  }
-  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
-  for (const c of candidates) {
-    for (const m of c.matchAll(PLAN_REF_RE)) {
-      if (!out.includes(m[0])) out.push(m[0]);
-    }
-  }
-  return out;
 }
 
 /**
@@ -3159,7 +2926,9 @@ export type UsageDialTone = "under" | "warn" | "danger" | "over";
 export type UsageDialState = {
   visible: boolean;
   pct: number;
-  tone: UsageDialTone;
+  // The BOX's colour band for the primary window (`window.tone`, WS09 SF-M18);
+  // null on an older box → the dial renders the neutral track.
+  tone: UsageDialTone | null;
   // The reported window has passed its reset instant and the provider has not
   // published its replacement numbers yet.
   awaitingReset: boolean;
@@ -3168,13 +2937,6 @@ export type UsageDialState = {
   // window, but the number and colour shown are the primary window's.
   window: UsageWindow | null;
 };
-
-export function usageTone(pct: number): UsageDialTone {
-  if (pct >= 100) return "over";
-  if (pct >= 90) return "danger";
-  if (pct >= 70) return "warn";
-  return "under";
-}
 
 /**
  * Derive the composer dial's visibility/colour/headline window from a usage
@@ -3222,7 +2984,7 @@ export function usageDialState(
   return {
     visible: worstPct >= 70 || alwaysShow,
     pct: awaitingReset ? 0 : primary.pct,
-    tone: awaitingReset ? "under" : usageTone(primary.pct),
+    tone: awaitingReset ? "under" : (primary.tone ?? null),
     awaitingReset,
     window: primary,
   };

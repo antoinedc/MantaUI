@@ -1682,6 +1682,22 @@ export const IPC = {
   usageStoppedArm: "usage-stopped:arm", // (conversation) → void
   usageStoppedDisarm: "usage-stopped:disarm", // (conversation) → void
   usageStoppedStampLastLooked: "usage-stopped:stamp-last-looked", // () → void
+  // WS09 box views (09-models-usage.md "Server-first")
+  usageStoppedView: "usage-stopped:view", // () → UsageResumeView
+  usageStoppedApply: "usage-stopped:apply", // ({selected, dryRun?}) → UsageResumeApplyReply
+  usageAlerts: "usage:alerts", // () → UsageAlertsList
+  usageRemindAtReset: "usage:remind-at-reset", // ({key, sessionID}) → UsageRemindReply
+  modelsTable: "models:table", // () → ModelsTableResult
+  modelsPicker: "models:picker", // () → ModelsPickerResult
+  modelsSetDefault: "models:set-default", // ({key|null}) → ModelsWriteReply
+  modelsSetMain: "models:set-main", // ({key,on}) → ModelsWriteReply
+  modelsSetSub: "models:set-sub", // ({key,on}) → ModelsWriteReply
+  modelsRetrySubSync: "models:retry-sub-sync", // () → ModelsWriteReply
+  modelsOptIn: "models:opt-in", // ({keys}) → ModelsWriteReply
+  modelsSetOverride: "models:set-override", // ({key,fields}) → ModelsWriteReply
+  modelsUnidentified: "models:unidentified", // () → UnidentifiedList
+  modelsDeclare: "models:declare", // ({key,catalogId}|{key,form}) → ModelsDeclareReply
+  modelsSetPrice: "models:set-price", // ({providerID,modelID,draft}) → ModelsSetPriceReply
 
   // ---- per-session model prefs (manta-server owned; BET-1279) ----
   // Durable box-side record of per-conversation model selection (provider+
@@ -1741,6 +1757,7 @@ export const IPC = {
   // own. Mirrors src/shared/types.ts OutboxFile / src/server/outbox.mjs
   // listOutbox rows.
   outboxList: "outbox:list", // () → OutboxFile[]
+  artifactsList: "artifacts:list", // ({sessionId}) → ArtifactsListResult
 
   // ---- background delegation jobs (manta-server owned) ----
   // Background jobs are started by the AI's global `delegate` opencode tool
@@ -1945,6 +1962,19 @@ export type TranscriptHit = {
   timeCreated: number | null;
 };
 
+// WS06 (server-first): the box groups and labels the hits of
+// `opencode:search-messages` (`groups`). `label` is the only title policy —
+// "<workspace> › <name>", or the session id when either is unknown; clients
+// show it verbatim.
+export type TranscriptHitGroup = {
+  sessionId: string;
+  isCurrent: boolean;
+  workspace: string | null;
+  name: string | null;
+  label: string;
+  hits: TranscriptHit[];
+};
+
 // BET-1219: read-only spend/latency ledger over opencode's store
 // (`ledger:summary` RPC). Crosses the wire, so it lives in shared/types.
 // The four cacheShare fractions sum to ~1 (±0.001): each is that bucket's
@@ -1967,6 +1997,8 @@ export type LedgerSummary = {
   }[];
   byAgent: { agent: string | null; isChild: boolean; turns: number; cost: number; costPerTurn: number }[];
   byProject: { directory: string; turns: number; cost: number }[];
+  // WS09 SF-M6: box-computed render model; absent on an older box.
+  view?: LedgerView;
 };
 
 // BET-1333: the Manta Optimizer's P1.1 read model (`optimizer:summary` RPC).
@@ -2061,6 +2093,8 @@ export type OptimizerSummary = {
     role: string;
     price: string;
   }[];
+  // WS09 SF-M7: box-computed render model; absent on an older box.
+  view?: OptimizerSummaryView;
 };
 
 // BET-1369: the window selector on the optimizer card. The window is PER-CALL:
@@ -2122,6 +2156,8 @@ export type OptimizerSeries = {
     pricedShare: number;
     basis: "measured" | "partial" | "unpriced";
   };
+  // WS09 SF-M7: box-computed render model; absent on an older box.
+  view?: OptimizerSeriesView;
 };
 
 // Sticky-trims C1 (`optimizer:prices` RPC; the same body minus `unpriced` is
@@ -2297,6 +2333,9 @@ export type UsageWindow = {
   // alert from a stale window; the dial carries the last reading forward and
   // labels it "resetting…" rather than blanking.
   stale?: boolean;
+  // WS09 SF-M18: box-computed colour band for `pct` (<70 under · 70–89 warn ·
+  // 90–99 danger · ≥100 over). Absent on an older box → neutral rings.
+  tone?: "under" | "warn" | "danger" | "over";
 };
 export type UsageSnapshot = {
   provider: string; // adapter id: "claude" | "codex" | "kimi"
@@ -3489,3 +3528,231 @@ export type OpencodeProviderAuthResult =
   | { action: "claude-status"; ok: boolean; progress?: ClaudeLoginProgress; error?: string }
   | { action: "oauth-status"; state: "pending" | "ok" | "error"; error?: string }
   | { action: "oauth-cancel"; ok: boolean };
+
+// ===== WS09 box views (iOS↔desktop parity, 09-models-usage.md "Server-first") =====
+// The wire shapes of the `models:*`, `usage-stopped:view/apply`, `usage:alerts`
+// and `usage:remind-at-reset` channels and the additive `view` / `tone` /
+// `unpricedByProvider` fields. The box (src/server/modelsTable.mjs & friends)
+// owns every rule; clients render these verbatim.
+
+export type ModelsTableRow = {
+  key: string; // "providerID/modelID"
+  providerID: string;
+  modelID: string;
+  name: string;
+  contextLabel: string | null; // "200k" / "1M"
+  tier: "fast" | "balanced" | "deep" | null;
+  description: string | null;
+  searchText: string; // lower-case; client search = substring
+  deprecated: boolean;
+  deprecatedLocked: boolean;
+  isMain: boolean;
+  isSub: boolean;
+  isDefault: boolean;
+  canMakeDefault: boolean;
+  defaultHint: string | null;
+  editable: { name: string; description: string; context: number | null };
+};
+export type ModelsTableResult = {
+  supported: true;
+  defaultKey: string | null;
+  defaultLine: { name: string; providerID: string } | null;
+  rows: ModelsTableRow[];
+};
+export type ModelsSubOutcome = "applied" | "not-applied" | "saved-not-live";
+export type ModelsWriteOk = {
+  ok: true;
+  table: ModelsTableResult;
+  message: string;
+  outcome?: ModelsSubOutcome;
+  retry?: boolean;
+  ignored?: string[];
+};
+export type ModelsWriteErr = { ok: false; field?: string; code: string; message: string };
+export type ModelsWriteReply = ModelsWriteOk | ModelsWriteErr;
+
+export type ModelsPickerResult = {
+  supported: true;
+  groups: { provider: string; keys: string[] }[];
+  locked: string[];
+  selectable: string[];
+  delegateGroups: { provider: string; keys: string[] }[];
+  recents: { providerID: string; modelID: string; variant?: string; fast?: boolean; key: string }[];
+};
+
+export type UnidentifiedRow = {
+  key: string;
+  label: string;
+  providerID: string;
+  modelID: string;
+  state: "exact" | "ambiguous" | "none";
+  confidence?: "certain" | "probable";
+  evidence?: string;
+  catalogId: string | null;
+  match?: { id: string; name: string; tier?: "fast" | "balanced" | "deep"; context?: number; description?: string };
+  candidates: { id: string; name: string }[];
+  missing: ("identity" | "price" | "caching" | "quality")[];
+  help: string;
+  actions: ("confirm" | "change" | "pick" | "identify")[];
+  chips?: boolean;
+};
+export type UnidentifiedList = {
+  supported: boolean;
+  intro: string;
+  footer: string;
+  unavailableText?: string;
+  rows: UnidentifiedRow[];
+};
+export type ModelsDeclareForm = {
+  catalogId: string;
+  price: "free" | "custom" | null;
+  costIn: string;
+  costOut: string;
+  caching: "none" | "custom";
+  reads: boolean;
+  writes: boolean;
+};
+export type ModelsDeclareInput =
+  | { key: string; catalogId: string }
+  | { key: string; form: ModelsDeclareForm };
+export type ModelsDeclareReply =
+  | {
+      ok: true;
+      outcome: "resolved" | "still-needs" | "catalogue-unavailable";
+      row: UnidentifiedRow | null;
+      list: UnidentifiedList;
+      message: string;
+    }
+  | { ok: false; field?: string; code?: string; message: string };
+
+export type ModelsSetPriceInput = {
+  providerID: string;
+  modelID: string;
+  draft: { input: string; output: string; cacheRead: string; cacheWrite: string };
+};
+export type ModelsSetPriceReply =
+  | {
+      ok: true;
+      message: string;
+      warning?: string;
+      unpricedByProvider: { providerID: string; models: string[] }[];
+    }
+  | { ok: false; field?: string; message: string };
+
+export type LedgerView = {
+  segments: { kind: "cacheRead" | "cacheWrite" | "output" | "input"; label: string; pct: number; inline: boolean }[];
+  caption: string;
+  topModels: { key: string; turns: number; costPerTurn: number; tokensPerSec: number | null; cost: number }[];
+  agents: { label: string; isChild: boolean; turns: number; costPerTurn: number; cost: number }[];
+  emptyModels: string;
+  emptyAgents: string;
+};
+
+export type OptimizerStatView = {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
+  tone: "neutral" | "ok" | "warn";
+};
+export type OptimizerSummaryView = {
+  switch: { on: boolean; label: string; body: string };
+  subrows: { id: string; name: string; text: string; chip: string }[];
+  windowsCaption: string;
+  windows: {
+    key: string;
+    title: string;
+    resetsAt: number | null;
+    pct: number;
+    pctLabel: string;
+    band: "ok" | "warn" | "danger";
+    forecastPct: number | null;
+    forecastWarn: boolean;
+    forecastLabel: string;
+    pressure: { text: string; tone: "neutral" | "ok" | "warn" };
+  }[];
+  metered: { name: string; role: string; price: string }[];
+  meteredCaption: string;
+  activity: { id: string; ts: number; headline: string; detail: string; rolledBack: boolean }[];
+  activityCaption: string;
+  activityEmpty: string;
+  stats: OptimizerStatView[];
+};
+export type OptimizerSeriesView = {
+  heading: string;
+  trimming: { name: string; text: string; chip: string } | null;
+  hasCounterfactual: boolean;
+  noActivity: boolean;
+  emptyText: string;
+  legend: { sent: string; raw: string; noCounterfactual: string | null };
+  savingLabel: { text: string; tone: "ok" | "warn" } | null;
+  potentialLine: string | null;
+  rawValues: number[];
+  stats: OptimizerStatView[];
+};
+
+export type UsageResumeRowView = {
+  conversation: string;
+  name: string;
+  armed: boolean;
+  isNew: boolean;
+  snippet: string | null;
+  provider: string | null;
+  model: string | null;
+  window: { label: string; resetsAt: number | null };
+  cost: { warm: boolean; reReadTokens: number; label: string };
+};
+export type UsageResumeView = {
+  supported: true;
+  title: string;
+  header: string;
+  hasArmed: boolean;
+  unarmedCount: number;
+  totalCount: number;
+  emptyText: string;
+  groups: { workspace: string; rows: UsageResumeRowView[] }[];
+  coldNote: { one: string; many: string };
+};
+export type UsageResumeApplyInput = { selected: string[]; dryRun?: boolean };
+export type UsageResumeApplyReply = {
+  ok: boolean;
+  canApply: boolean;
+  title: string;
+  arm: string[];
+  disarm: string[];
+  applied?: { armed: string[]; disarmed: string[] };
+  failed?: { conversation: string; name: string; message: string }[];
+  message?: string;
+};
+
+export type UsageAlert = {
+  id: string;
+  key: string;
+  level: "warn" | "limit";
+  provider: string;
+  windowKind: string;
+  windowLabel: string;
+  pct: number;
+  resetsAt: number | null;
+  text: string;
+  raisedAt: number;
+  expiresAt: number | null;
+  sticky: boolean;
+  canRemind: boolean;
+  canKeepGoing: boolean;
+};
+export type UsageAlertsList = {
+  supported: true;
+  bootId: string | null;
+  revision: number;
+  alerts: UsageAlert[];
+};
+export type UsageAlertFrame = {
+  bootId: string;
+  revision: number;
+  alert?: UsageAlert;
+  retired?: string[];
+};
+export type UsageRemindReply =
+  | { ok: true; job?: unknown; fireAt: number }
+  | { ok: false; code: string; message: string };

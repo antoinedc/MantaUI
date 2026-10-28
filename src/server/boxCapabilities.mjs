@@ -8,6 +8,21 @@
 // incompatibly). Every later workstream APPENDS its ids here; nothing else may
 // create a second capability list.
 
-export const BOX_CAPABILITIES = Object.freeze(["chat-cards-1"]);
+export const BOX_CAPABILITIES = Object.freeze([
+  "chat-cards-1",
+  "artifacts-list-1",
+  // WS09 (models / spend / usage)
+  "models-table-1",
+  "models-picker-1",
+  "models-unidentified-1",
+  "models-price-form-1",
+  "ledger-view-1",
+  "optimizer-view-1",
+  "usage-resume-view-1",
+  "usage-alerts-1",
+  "usage-window-tone-1",
+  // WS06 (search)
+  "search-scope-all-1",
+]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

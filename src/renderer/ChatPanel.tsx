@@ -30,6 +30,7 @@ import type {
   QuestionRequest,
 } from "../shared/types";
 import { useStore } from "./store";
+import { useModelsPicker } from "./modelsPicker";
 import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
@@ -60,7 +61,6 @@ import {
   progressAttentionKind,
   isPlanExitQuestion,
   extractPlanData,
-  selectableModelGroups,
   titleCase,
   formatNoHealthyEndpointCopy,
   providersFromExcludedKeys,
@@ -242,7 +242,6 @@ export function ChatPanel({
   // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
   const configDefaultModel = useStore((s) => s.defaultModel);
-  const deactivatedMainModels = useStore((s) => s.deactivatedMainModels);
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
   const routingPreset = useStore((s) => s.modelRouting?.preset);
@@ -2964,10 +2963,8 @@ export function ChatPanel({
         : null),
     [modelOverride, defaultModel],
   );
-  const delegateSelectable = useMemo(
-    () => selectableModelGroups(models, deactivatedMainModels),
-    [models, deactivatedMainModels],
-  );
+  // The delegate picker's candidates are the box's (`models:picker.delegateGroups`).
+  const delegateSelectable = useModelsPicker(models).delegateGroups;
   // Level 2 — the remembered delegation model for this project (written ONLY on
   // an explicit pick; an inherited default is never promoted into it).
   const delegateProjectKey = tmuxSession ?? sessionId;

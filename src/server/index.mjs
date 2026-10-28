@@ -97,7 +97,8 @@ import { createStreamInterpreter } from "./streamInterp.mjs";
 import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
 import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
-import { enrichProviderError } from "../shared/streamInterpretation.mjs";
+import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
+import { createDelegateView } from "./delegateView.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -1198,6 +1199,14 @@ const delegateEngine = createDelegateEngine({
   readProgress: (sid) => readProgressRecord(sid),
   clearProgress: (sid) => clearProgress(sid),
 });
+// WS02 (SF-4): the box's reading of background-job records for the chat screen.
+const delegateView = createDelegateView({
+  // The RAW record list: assertWritable runs on every guarded request, so it must not
+  // pay the per-job progress reads that listJobs does.
+  loadJobs: () => delegateEngine.loadRecords(),
+  listProjects: () => tmux.listProjects(),
+  listModels: () => oc.listModels(),
+});
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
 // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
@@ -1935,6 +1944,8 @@ const compactionScheduler = createCompactionScheduler({
           beforeTokens: before ?? null,
           afterTokens: after ?? null,
           away,
+          // WS02 (SF-2): the box writes the line, clients render it verbatim.
+          text: describeBackgroundCompaction({ beforeTokens: before ?? null, afterTokens: after ?? null, away }),
         },
       });
     } catch (e) {
@@ -2049,6 +2060,7 @@ rpcHandlers = buildHandlers({
   opencodeVersion: OPENCODE_VERSION,
   delegate: delegateEngine,
   handoff: handoffEngine,
+  delegateView,
   // BET-1252: routing-services readers shared with delegate (the routing:choose
   // channel). Same degradation contract:
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.

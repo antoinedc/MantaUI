@@ -2088,11 +2088,11 @@ test("accounts:endpoint-probe reports BOTH branches and validates its input", as
 // Sticky trims: optimizer:prices (C1) + opencode:set-model-cost (C6)
 // ---------------------------------------------------------------------------
 
-test("optimizer:prices returns the shared price reader's body (unpriced included)", async () => {
+test("optimizer:prices returns the shared price reader's body (unpriced included) plus the grouped list (WS09 SF-M13)", async () => {
   const { deps } = makeDeps([]);
   const body = { fetchedAt: 5, models: { "p/m": { input: 1, cacheRead: 0.1, cacheWrite: 1, source: "config" } }, unpriced: ["q/n"] };
   const handlers = buildHandlers({ ...deps, optimizerPrices: { get: async () => body, invalidate: () => {} } });
-  assert.deepEqual(await handlers["optimizer:prices"](), body);
+  assert.deepEqual(await handlers["optimizer:prices"](), { ...body, unpricedByProvider: [{ providerID: "q", models: ["n"] }] });
 });
 
 test("opencode:set-model-cost writes through the injected writer and drops the price memo on success only", async () => {

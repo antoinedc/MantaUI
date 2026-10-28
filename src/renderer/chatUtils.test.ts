@@ -78,14 +78,10 @@ import {
   isFastModelId,
   baseModelId,
   fastModelId,
-  hideFastSiblingGroups,
   resolveFastToggle,
   resolvePlanToggle,
-  selectableModelGroups,
   filterModelGroups,
   moveMenuHighlight,
-  isDeprecated,
-  mainPickerGroups,
   MAX_PREVIEW_BYTES,
   resolvePreviewType,
   isWithinPreviewSize,
@@ -105,8 +101,6 @@ import {
   decodeDataUri,
   fetchTranscriptWithRetry,
   selectUsageSnapshot,
-  describePressure,
-  describeActivityEntry,
   formatRetryMinutes,
   formatAgeAt,
   formatEndpointStateLine,
@@ -161,12 +155,11 @@ import {
   describeProjectClose,
   isPlanExitQuestion,
   extractPlanData,
-  planRefsFromPart,
   resolveDelegateModel,
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
 
 
 
@@ -2748,32 +2741,8 @@ describe("fast-mode model helpers", () => {
     expect(fastModelId("gpt-5.6-fast")).toBe("gpt-5.6-fast");
   });
 
-  it("hideFastSiblingGroups drops a -fast model when its base is present", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["openai", [M("openai", "gpt-5.6"), M("openai", "gpt-5.6-fast"), M("openai", "gpt-5.4-mini")]],
-    ];
-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual([
-      "gpt-5.6",
-      "gpt-5.4-mini",
-    ]);
-  });
 
-  it("hideFastSiblingGroups KEEPS an orphan -fast model (nothing else reaches it)", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["x", [M("x", "solo-fast")]],
-    ];
-    expect(hideFastSiblingGroups(groups)[0][1].map((m) => m.id)).toEqual(["solo-fast"]);
-  });
 
-  it("hideFastSiblingGroups drops a group left empty", () => {
-    const groups: Array<[string, OpencodeModel[]]> = [
-      ["a", [M("a", "m"), M("a", "m-fast")]],
-      ["b", [M("b", "only-fast"), M("b", "only")]],
-    ];
-    const out = hideFastSiblingGroups(groups);
-    expect(out.map(([p]) => p)).toEqual(["a", "b"]);
-    expect(out[1][1].map((m) => m.id)).toEqual(["only"]);
-  });
 
   it("resolveFastToggle: base model with a fast twin is available and off", () => {
     const models = [M("openai", "gpt-5.6", ["low", "high"]), M("openai", "gpt-5.6-fast", ["low", "high"])];
@@ -2935,125 +2904,6 @@ describe("resolvePlanToggle — agent preference", () => {
   });
 });
 
-// ===== selectableModelGroups =====
-
-describe("selectableModelGroups", () => {
-  const M = (
-    providerID: string,
-    id: string,
-    extra: Partial<OpencodeModel> = {},
-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
-
-  it("returns null for null input (the loading signal)", () => {
-    expect(selectableModelGroups(null, undefined)).toBeNull();
-  });
-
-  it("filters out disabled, deprecated and deactivated models", () => {
-    const models = [
-      M("a", "keep"),
-      M("a", "disabled", { enabled: false }),
-      M("a", "deprecated", { status: "deprecated" }),
-      M("a", "deactivated"),
-    ];
-    const out = selectableModelGroups(models, ["a/deactivated"]);
-    const ids = out![0][1].map((m) => m.id);
-    expect(ids).toEqual(["keep"]);
-  });
-
-  it("groups and sorts by providerID", () => {
-    const models = [
-      M("zetta", "z1"),
-      M("alpha", "a1"),
-      M("alpha", "a2"),
-      M("zetta", "z2"),
-    ];
-    const out = selectableModelGroups(models, undefined)!;
-    expect(out.map(([p]) => p)).toEqual(["alpha", "zetta"]);
-    expect(out[0][1].map((m) => m.id)).toEqual(["a1", "a2"]);
-    expect(out[1][1].map((m) => m.id)).toEqual(["z1", "z2"]);
-  });
-
-  it("folds fast siblings but keeps an orphan whose base is gone", () => {
-    const models = [
-      M("openai", "gpt-5.6"),
-      M("openai", "gpt-5.6-fast"),
-      M("x", "solo-fast"),
-    ];
-    const out = selectableModelGroups(models, undefined)!;
-    const openai = out.find(([p]) => p === "openai")![1].map((m) => m.id);
-    expect(openai).toEqual(["gpt-5.6"]);
-    // The orphan fast model (no base to fold into / reach it by) survives.
-    const x = out.find(([p]) => p === "x")![1].map((m) => m.id);
-    expect(x).toEqual(["solo-fast"]);
-  });
-
-  it("an empty selection yields an empty (not null) grouped list", () => {
-    const models = [M("a", "off", { enabled: false })];
-    expect(selectableModelGroups(models, undefined)).toEqual([]);
-  });
-});
-
-// ===== isDeprecated =====
-
-describe("isDeprecated", () => {
-  it("is true only for status === 'deprecated'", () => {
-    expect(isDeprecated({ status: "deprecated" })).toBe(true);
-    expect(isDeprecated({ status: "live" })).toBe(false);
-    expect(isDeprecated({})).toBe(false);
-  });
-
-  it("handles null / undefined / absent status", () => {
-    expect(isDeprecated(null)).toBe(false);
-    expect(isDeprecated(undefined)).toBe(false);
-    expect(isDeprecated({ status: undefined })).toBe(false);
-  });
-});
-
-// ===== mainPickerGroups (BET-1139) =====
-
-describe("mainPickerGroups", () => {
-  const M = (
-    providerID: string,
-    id: string,
-    extra: Partial<OpencodeModel> = {},
-  ): OpencodeModel => ({ id, providerID, name: id, ...extra }) as OpencodeModel;
-
-  it("returns null groups for null input, with empty disabledKeys", () => {
-    expect(mainPickerGroups(null, undefined, undefined)).toEqual({
-      groups: null,
-      disabledKeys: [],
-    });
-  });
-
-  it("keeps a deprecated model present but DISABLED until opted in", () => {
-    const models = [
-      M("a", "live"),
-      M("a", "old", { status: "deprecated" }),
-    ];
-    const out = mainPickerGroups(models, undefined, undefined);
-    const ids = out.groups![0][1].map((m) => m.id);
-    expect(ids).toEqual(["live", "old"]);
-    expect(out.disabledKeys).toEqual(["a/old"]);
-  });
-
-  it("makes a deprecated model selectable once opted in", () => {
-    const models = [M("a", "old", { status: "deprecated" })];
-    const out = mainPickerGroups(models, undefined, ["a/old"]);
-    expect(out.groups![0][1].map((m) => m.id)).toEqual(["old"]);
-    expect(out.disabledKeys).toEqual([]);
-  });
-
-  it("still applies the enabled + deactivated gates", () => {
-    const models = [
-      M("a", "disabled", { enabled: false }),
-      M("a", "deactivated", { status: "deprecated" }),
-      M("a", "dep-disabled", { status: "deprecated", enabled: false }),
-    ];
-    const out = mainPickerGroups(models, ["a/deactivated"], undefined);
-    expect(out.groups).toEqual([]);
-    expect(out.disabledKeys).toEqual([]);
-  });
-});
 
 // ===== Transcript entry motion =====
 //
@@ -3542,14 +3392,21 @@ describe("computeTurnInfo", () => {
 
 // ===== Subscription plan usage (BET-738) =====
 
+// The box stamps `tone` on every window it publishes (WS09 SF-M18,
+// src/server/usageWindowView.mjs); mirror that here so fixtures look like a
+// real snapshot. An explicit `tone` (or `tone: undefined`) on a window wins.
+const boxTone = (pct: number): "under" | "warn" | "danger" | "over" =>
+  pct >= 100 ? "over" : pct >= 90 ? "danger" : pct >= 70 ? "warn" : "under";
+
 function usageSnapshot(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
-  return {
+  const snap: UsageSnapshot = {
     provider: "claude",
     providerIDs: ["anthropic"],
     windows: [{ kind: "session", label: "Session (5h)", pct: 42 }],
     fetchedAt: 1_000_000,
     ...overrides,
   };
+  return { ...snap, windows: snap.windows.map((w) => ({ tone: boxTone(w.pct), ...w })) };
 }
 
 describe("selectUsageSnapshot", () => {
@@ -3578,6 +3435,11 @@ describe("selectUsageSnapshot", () => {
 });
 
 describe("usageDialState", () => {
+  it("a window with no box tone (an older box) reports tone null — no colour is invented", () => {
+    const snap = usageSnapshot({ windows: [{ kind: "session", label: "5h", pct: 95, tone: undefined }] });
+    expect(usageDialState(snap, false).tone).toBeNull();
+  });
+
   it("an inactive window never drives visibility or the reported window", () => {
     const snap = usageSnapshot({
       windows: [
@@ -5463,44 +5325,6 @@ describe("extractPlanData", () => {
   });
 });
 
-describe("planRefsFromPart", () => {
-  const part = (over: Record<string, unknown>): OpencodePart =>
-    ({ type: "tool", id: "p", messageID: "m", ...over }) as OpencodePart;
-
-  it("collects .opencode/plans refs across text, tool input, and patch files", () => {
-    expect(planRefsFromPart(part({ type: "text", text: "Plan: .opencode/plans/a.md" }))).toEqual([
-      ".opencode/plans/a.md",
-    ]);
-    expect(
-      planRefsFromPart(part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } })),
-    ).toEqual([".opencode/plans/b.md"]);
-    expect(planRefsFromPart(part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }))).toEqual([
-      ".opencode/plans/c.md",
-    ]);
-    expect(
-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } })),
-    ).toEqual([]);
-  });
-
-  it("does not treat a read reference as an authoring signal", () => {
-    expect(
-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })),
-    ).toEqual([]);
-  });
-
-  it("deduplicates identical refs within a part", () => {
-    expect(
-      planRefsFromPart(
-        part({
-          tool: "plan",
-          state: { status: "completed", input: { path: ".opencode/plans/same.md" } },
-          text: ".opencode/plans/same.md",
-        }),
-      ),
-    ).toEqual([".opencode/plans/same.md"]);
-  });
-});
-
 describe("resolveDelegateModel", () => {
   const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
     ({ providerID, modelID });
@@ -5799,48 +5623,6 @@ describe("dispatchMedia", () => {
 
   it("still routes when only some handlers are supplied", () => {
     expect(() => dispatchMedia({ action: "show" }, {})).not.toThrow();
-  });
-});
-
-// ===== Optimizer P2.5 formatters (BET-1347) =====
-
-describe("describePressure", () => {
-  it("renders the neutral 'no pressure signal yet' with no signal, and NO warn", () => {
-    expect(describePressure(0, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
-    expect(describePressure(40, false)).toEqual({ text: "no pressure signal yet", tone: "neutral" });
-  });
-  it("renders 'on pace' (ok) when on or below pace", () => {
-    expect(describePressure(0, true)).toEqual({ text: "on pace", tone: "ok" });
-    expect(describePressure(-5, true)).toEqual({ text: "on pace", tone: "ok" });
-  });
-  it("renders '+N pts ahead of pace' (warn) when ahead of pace", () => {
-    expect(describePressure(23, true)).toEqual({ text: "+23 pts ahead of pace", tone: "warn" });
-    expect(describePressure(0.4, true)).toEqual({ text: "+0 pts ahead of pace", tone: "warn" });
-  });
-});
-
-describe("describeActivityEntry", () => {
-  it("builds a headline from verdict + subject and an evidence line", () => {
-    const entry = {
-      kind: "tune",
-      subject: "trim threshold 16 → 12 tool uses",
-      from: 16,
-      to: 12,
-      verdict: "kept",
-      evidence: { turns: 62, hit: 74.1, churn: 0.4 },
-    };
-    const out = describeActivityEntry(entry);
-    expect(out.headline).toBe("Kept — trim threshold 16 → 12 tool uses");
-    expect(out.detail).toContain("62");
-    expect(out.detail).toContain("74.1");
-  });
-  it("marks a rolled-back entry distinctly", () => {
-    const out = describeActivityEntry({ kind: "tune", subject: "protected tail", verdict: "rolled-back", evidence: {} });
-    expect(out.headline).toBe("Rolled back — protected tail");
-  });
-  it("falls back to a safe headline when subject/verdict are absent", () => {
-    const out = describeActivityEntry({ kind: "tune", verdict: "kept" });
-    expect(out.headline).toContain("optimizer change");
   });
 });
 

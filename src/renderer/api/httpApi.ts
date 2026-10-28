@@ -15,6 +15,7 @@ import {
   type StreamEnvelope,
   type RunningSetPayload,
   type UsageSnapshot,
+  type UsageAlertFrame,
   type AccountsUpdatedPayload,
   type AccountsMovedPayload,
   type StoppedListResult,
@@ -423,6 +424,8 @@ type Kind =
   | "accounts.moved"
   | "usage-stopped.updated"
   | "model-prefs.updated"
+  | "models.updated"
+  | "usage.alert"
   | "progress.updated"
   | "appControl"
   | "handoff"
@@ -453,6 +456,8 @@ const listeners: Record<Kind, Set<(p: unknown) => void>> = {
   "accounts.moved": new Set(),
   "usage-stopped.updated": new Set(),
   "model-prefs.updated": new Set(),
+  "models.updated": new Set(),
+  "usage.alert": new Set(),
   "progress.updated": new Set(),
   appControl: new Set(),
   handoff: new Set(),
@@ -1254,6 +1259,22 @@ export const httpApi: Api = {
   usageStoppedArm: (conversation) => rpc(IPC.usageStoppedArm, conversation),
   usageStoppedDisarm: (conversation) => rpc(IPC.usageStoppedDisarm, conversation),
   usageStoppedStampLastLooked: () => rpc(IPC.usageStoppedStampLastLooked),
+  // WS09 box views (09-models-usage.md "Server-first")
+  usageStoppedView: () => rpc(IPC.usageStoppedView),
+  usageStoppedApply: (input) => rpc(IPC.usageStoppedApply, input),
+  usageAlerts: () => rpc(IPC.usageAlerts),
+  usageRemindAtReset: (input) => rpc(IPC.usageRemindAtReset, input),
+  modelsTable: () => rpc(IPC.modelsTable),
+  modelsPicker: () => rpc(IPC.modelsPicker),
+  modelsSetDefault: (input) => rpc(IPC.modelsSetDefault, input),
+  modelsSetMain: (input) => rpc(IPC.modelsSetMain, input),
+  modelsSetSub: (input) => rpc(IPC.modelsSetSub, input),
+  modelsRetrySubSync: () => rpc(IPC.modelsRetrySubSync),
+  modelsOptIn: (input) => rpc(IPC.modelsOptIn, input),
+  modelsSetOverride: (input) => rpc(IPC.modelsSetOverride, input),
+  modelsUnidentified: () => rpc(IPC.modelsUnidentified),
+  modelsDeclare: (input) => rpc(IPC.modelsDeclare, input),
+  modelsSetPrice: (input) => rpc(IPC.modelsSetPrice, input),
 
   // -- per-session model prefs (manta-server owned; BET-1279) --
   // rpcOptional so an older box that lacks the `model-prefs:*` channels
@@ -1289,6 +1310,7 @@ export const httpApi: Api = {
   // Outbox mailbox listing, scoped to the active conversation — degrades to []
   // on a box without the channel.
   outboxList: (sessionId?: string) => rpcOptional(IPC.outboxList, [], sessionId),
+  artifactsList: (opts) => rpc(IPC.artifactsList, opts),
 
   // -- background delegation jobs (manta-server owned; in-process on mobile) --
   // list returns the full job records (the engine always returns an array;
@@ -1343,6 +1365,11 @@ export const httpApi: Api = {
   // store's `usageStopped` slice.
   onUsageStoppedUpdated: (cb) =>
     on<{ conversation?: string }>("usage-stopped.updated", cb),
+
+  // WS09: box-computed usage alerts (raw bus frame `usage.alert`) and the
+  // `models.updated` hint (refetch models:table / models:picker / the catalogue).
+  onUsageAlert: (cb) => on<UsageAlertFrame>("usage.alert", cb),
+  onModelsUpdated: (cb) => on<Record<string, never>>("models.updated", cb),
 
   // BET-1279: the box publishes `model-prefs.updated` ({sessionId}) on the bus
   // whenever the model-pref store changes. The payload is a hint only —

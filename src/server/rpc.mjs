@@ -1,6 +1,8 @@
 // Channel -> handler dispatch. Handlers are async (...args) => result.
 // Mirrors Electron ipcMain.handle semantics.
 
+import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
+import { describeInboxCancel, describeInboxSetDelivery } from "./inboxCopy.mjs";
 import { backgroundCommandNames as defaultBackgroundCommandNames } from "./commandBackground.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +17,7 @@ import {
   selectLatestTokenUsage,
 } from "../shared/streamInterpretation.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
-import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots } from "./usage.mjs";
+import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
 import {
   listStopped as usageStoppedList,
   armStopped as usageStoppedArm,
@@ -27,6 +29,7 @@ import { getModelPrefs as modelPrefsGetStore, setModelPrefs as modelPrefsSetStor
 import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
 import { listPages as servePageListStore } from "./servePage.mjs";
 import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
+import { createArtifactsService } from "./artifacts.mjs";
 import { ledgerStore } from "./ctoStores.mjs";
 import { tierChangeLedgerEntry } from "./ctoTier.mjs";
 import {
@@ -55,7 +58,7 @@ import {
 import { backupClaudeCredentials, CREDENTIALS_PATH } from "./claudeAuth.mjs";
 import { addApnsToken } from "./push.mjs";
 import { getRegistry as pluginsGetRegistry } from "./plugins.mjs";
-import { searchMessages } from "./messageSearch.mjs";
+import { searchMessages, projectsFromSyncState } from "./messageSearch.mjs";
 import { ledgerSummary } from "./modelLedger.mjs";
 import { getDb } from "./opencodeDb.mjs";
 import { ERROR_STATUS as HANDOFF_ERROR_STATUS } from "./handoff/engine.mjs";
@@ -65,7 +68,13 @@ import { createOptimizerSeries } from "./optimizer/series.mjs";
 import { createOptimizerPrices, PRICES_PATH } from "./optimizer/prices.mjs";
 import { readJsonSync } from "./jsonStore.mjs";
 import { shipCtxEvent } from "./optimizer/telemetry.mjs";
-import { allModels as catalogAllModels } from "./modelCatalog.mjs";
+import { allModels as catalogAllModels, lookupModel as catalogLookupModel, matchModel as catalogMatchModel } from "./modelCatalog.mjs";
+import { createModelsTable } from "./modelsTable.mjs";
+import { createModelsUnidentified } from "./modelsUnidentified.mjs";
+import { withLedgerView } from "./ledgerView.mjs";
+import { withSummaryView, withSeriesView } from "./optimizer/view.mjs";
+import { createModelsPricing, withUnpricedGroups } from "./modelsPricing.mjs";
+import { createUsageResumeView } from "./usageResumeView.mjs";
 import { MIN_CLIENT } from "./version.mjs";
 import { forgeDiffForCwd, forgeStatus, pullRequestForCwd, shipPullRequest, shipPreview, mergePullRequest, draftGetForCwd, draftCommentForCwd, draftSubmitForCwd, replyThreadForCwd, forgeInbox, forgeDeviceStart, forgeDevicePoll, forgeDeviceCancel, forgeListRepos, forgeCloneStart, forgeCloneStatus, forgeCloneCancel } from "./forge/index.mjs";
 import { listRules as forgeListRules, formatIssueRef, parseIssueRef } from "./forgeRules.mjs";
@@ -535,6 +544,9 @@ export function buildHandlers({
   // error:"no upgrade path"}` rather than throwing.
   upgradeCli = null,
   delegate,
+  // WS02 (SF-4): the box's reading of background-job records (read-only refusal,
+  // job view, list labels, approve rule check). Null when not wired (tests).
+  delegateView = null,
   progress,
   voiceNotes,
   contextLimitFor = () => null,
@@ -585,6 +597,11 @@ export function buildHandlers({
   // tests never PATCH a live opencode (the default is the real PATCH /global/config
   // writer in providers.mjs).
   setModelCost = providers.setModelCost,
+  // WS09 (models:* / usage:alerts): the outcome-aware writers and the running
+  // alert engine are injectable so tests never touch a live opencode.jsonc.
+  setModelCostDetailed = providers.setModelCostDetailed,
+  syncSubagentsDetailed = providers.syncSubagentsDetailed,
+  getUsageAlerts = getUsageAlertsImpl,
   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
   // Null when not wired (older boxes / tests that don't exercise it) → the
@@ -772,6 +789,55 @@ export function buildHandlers({
     listProviders: () => oc.getProviders(),
     readConfig: () => providers.readOpencodeConfig(),
     loadCatalog: () => readJsonSync(PRICES_PATH, null),
+  });
+
+  const artifacts = createArtifactsService({
+    listMessages: (sid, o) => oc.listMessages(sid, o),
+    listPages: () => servePageListStore({ baseUrl: publicBaseUrl() }),
+    listOutbox: (sid) => listOutbox(undefined, { sessionID: sid }),
+    sessionDirectory: (sid) => oc.getSessionDirectory(sid),
+    baseUrl: () => publicBaseUrl(),
+  });
+
+  // ---- WS09: models / spend / usage views computed on the box (09-models-usage.md) ----
+  const publish = (evt) => bus.publish(evt);
+  // Same post-write step as the "config:update" handler: push the saved config
+  // into syncState so every client's config mirror (desktop store.defaultModel
+  // etc. via the `sync` frame) updates — not only the Models table.
+  const configUpdateSynced = async (patch) => {
+    const next = await local.configUpdate(patch);
+    syncState.applyConfig(next);
+    return next;
+  };
+  const modelsTable = createModelsTable({
+    listModels: (overrides) => oc.listModels(overrides, { strict: true }),
+    configGet: () => local.configGet(),
+    configUpdate: configUpdateSynced,
+    syncSubagentsDetailed: (input) => syncSubagentsDetailed(input),
+    getModelPrefs: () => modelPrefsGetStore(),
+    publish,
+  });
+  const modelsUnidentified = createModelsUnidentified({
+    listModels: (overrides) => oc.listModels(overrides, { strict: true }),
+    configGet: () => local.configGet(),
+    configUpdate: configUpdateSynced,
+    catalog: { lookupModel: catalogLookupModel, matchModel: catalogMatchModel, allModels: catalogAllModels },
+    publish,
+  });
+  const modelsPricing = createModelsPricing({
+    setModelCostDetailed: (input) => setModelCostDetailed(input),
+    invalidatePrices: () => optimizerPricesApi.invalidate(),
+    getPrices: () => optimizerPricesApi.get(),
+  });
+  const usageResumeView = createUsageResumeView({
+    listStopped: () => usageStoppedList(),
+    listSnapshots: () => usageListSnapshots(),
+    configGet: () => local.configGet(),
+    listProjects: () => tmux.listProjects(),
+    listMessages: (sid, opts) => oc.listMessages(sid, opts),
+    arm: ({ conversation }) => usageStoppedArm({ conversation }, { publish }),
+    disarm: ({ conversation }) => usageStoppedDisarm({ conversation }, { publish }),
+    now: Date.now,
   });
 
   return {
@@ -1342,6 +1408,7 @@ export function buildHandlers({
     // resolveAgent — the caller still can never pick an arbitrary agent).
     // Ordinary project sessions take the byte-identical raw path.
     "opencode:prompt": async (input) => {
+      await delegateView?.assertWritable(input?.sessionId);
       checkDelivery(input);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         return ctoConversation.admitDirect(withoutDelivery(input));
@@ -1371,6 +1438,7 @@ export function buildHandlers({
     // inbox is owned by the admission engine, and a resumed admitted turn would
     // be exactly the stray-turn hazard described above.
     "opencode:abort": async (sessionId) => {
+      await delegateView?.assertWritable(sessionId);
       const cto = ctoConversation && (await ctoConversation.isConversationSession(sessionId));
       return oc.interruptSession(sessionId, { resume: !cto });
     },
@@ -1388,12 +1456,15 @@ export function buildHandlers({
     "opencode:inbox-cancel": async (input) => {
       const sessionId = input?.sessionId;
       const id = input?.id;
+      await delegateView?.assertWritable(sessionId);
       await requireInbox(sessionId);
       if (typeof id !== "string" || !id) throw new Error("id is required");
-      return streamInterp.cancelInbox(sessionId, id, {
+      const r = await streamInterp.cancelInbox(sessionId, id, {
         deleteItem: () => oc.cancelInboxItem(sessionId, id),
         getMessage: () => oc.getMessage(sessionId, id),
       });
+      // WS02 (SF-5): the box writes the outcome sentence and decides what may be restored.
+      return { ...r, ...describeInboxCancel(r, { restore: input?.restore === true }) };
     },
 
     // N1: switch one pending message between "steer" (Now) and "queue" (after
@@ -1403,13 +1474,15 @@ export function buildHandlers({
       const sessionId = input?.sessionId;
       const id = input?.id;
       const delivery = input?.delivery;
+      await delegateView?.assertWritable(sessionId);
       await requireInbox(sessionId);
       if (typeof id !== "string" || !id) throw new Error("id is required");
       if (delivery !== "steer" && delivery !== "queue") throw new Error('delivery must be "steer" or "queue"');
-      return streamInterp.setInboxDelivery(sessionId, id, delivery, {
+      const r = await streamInterp.setInboxDelivery(sessionId, id, delivery, {
         patchItem: () => oc.setInboxDelivery(sessionId, id, delivery),
         getMessage: () => oc.getMessage(sessionId, id),
       });
+      return { ...r, ...describeInboxSetDelivery(r) };
     },
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissions, sessionId?) → args[0] = sessionId
@@ -1422,7 +1495,10 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodePermissionReply, { requestId, reply, sessionId })
     // → args[0] = { requestId, reply, sessionId }; opencode.mjs replyPermission expects same shape
-    "opencode:permission-reply": (input) => oc.replyPermission(input),
+    "opencode:permission-reply": async (input) => {
+      await delegateView?.assertWritable(input?.sessionId);
+      return oc.replyPermission(input);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
     // Background-job children no longer surface here (BET-418 §A) — see
@@ -1431,11 +1507,17 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }
-    "opencode:question-reply": (input) => oc.replyQuestion(input),
+    "opencode:question-reply": async (input) => {
+      await delegateView?.assertWritable(input?.sessionId);
+      return oc.replyQuestion(input);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReject, { requestId, sessionId })
     // → opencode.mjs rejectQuestion expects { requestId, sessionId }
-    "opencode:question-reject": (input) => oc.rejectQuestion(input),
+    "opencode:question-reject": async (input) => {
+      await delegateView?.assertWritable(input?.sessionId);
+      return oc.rejectQuestion(input);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeModels)  → no args.
     // Model display overrides (Settings → Models → edit) are applied here so
@@ -1965,7 +2047,10 @@ export function buildHandlers({
 
     // preload: ipcRenderer.invoke(IPC.opencodeCompactSession, sessionId)
     // → args[0] = sessionId (string)
-    "opencode:compact-session": (sessionId) => oc.compactSession(sessionId),
+    "opencode:compact-session": async (sessionId) => {
+      await delegateView?.assertWritable(sessionId);
+      return oc.compactSession(sessionId);
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeCommands)  → no args
     // P1: optional `{ directory }` — the session's directory, so the project's own
@@ -2009,32 +2094,35 @@ export function buildHandlers({
       return res;
     },
 
-    // BET-698: server-side conversation search over opencode's SQLite
-    // (messageSearch.mjs). Args { query, sessionIds } — sessionIds[0] is the
-    // active conversation. Degrades to { supported:false } on a box that
-    // hasn't taken the Node 24 runtime yet.
-    // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, sessionIds })
-    "opencode:search-messages": (input) => searchMessages(input ?? {}),
+    // BET-698 / WS06: server-side conversation search over opencode's SQLite
+    // (messageSearch.mjs). Args { query, scope:"all", primarySessionId? } — the
+    // box resolves the windows itself from the same sync state tmux:list serves
+    // and returns grouped + labelled hits (legacy { query, sessionIds } still
+    // works). Degrades to { supported:false } on a box without the Node 24
+    // runtime; { degraded:true } when the search itself fails.
+    // preload: ipcRenderer.invoke(IPC.opencodeSearchMessages, { query, scope, primarySessionId })
+    "opencode:search-messages": (input) =>
+      searchMessages(input ?? {}, { listProjects: projectsFromSyncState(syncState) }),
 
     // BET-1219: read-only spend/latency ledger over opencode's SQLite
     // (modelLedger.mjs). Args { sinceMs } — filters assistant rows to
     // time_created >= sinceMs (default 0 = all). Measurement only: no
     // routing, no behaviour change. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
-    "ledger:summary": (opts) => ledgerSummary(opts ?? {}),
+    "ledger:summary": async (opts) => withLedgerView(await ledgerSummary(opts ?? {})),
 
     // BET-1333: the Optimizer's memoized read model over the ledger
     // (optimizer/summary.mjs). No arguments. Memoized server-side behind a
     // 60s TTL with an in-flight guard. Degrades to { supported:false } on a
     // box that hasn't taken the Node 24 runtime yet / has no opencode.db.
-    "optimizer:summary": () => optimizerSummaryFn(),
+    "optimizer:summary": async () => withSummaryView(await optimizerSummaryFn(), await local.configGet()),
 
     // BET-1369: the windowed consumption read (optimizer/series.mjs). One
     // argument: the OPTIONAL range ("24h" | "7d" | "30d"; unknown → 24h). The
     // window is per-call and does NOT touch the optimizer:summary memo.
     // Memoized per range behind a 60s TTL. Degrades to { supported:false } on
     // a box without the Node 24 runtime / opencode.db.
-    "optimizer:series": (opts) => optimizerSeriesFn(opts?.range),
+    "optimizer:series": async (opts) => withSeriesView(await optimizerSeriesFn(opts?.range), opts?.range),
 
     // Sticky-trims C1: per-model list prices the optimizer's trim gate uses,
     // resolved config → price cache → unpriced (optimizer/prices.mjs). No
@@ -2042,7 +2130,7 @@ export function buildHandlers({
     // cacheWrite, cacheWrite1h?, tiers?, source} }, unpriced: string[] } —
     // `unpriced` lists the CONNECTED models that resolve to no usable price
     // (the Settings providers card's "No prices" notice). Memoized ~60s.
-    "optimizer:prices": () => optimizerPricesApi.get(),
+    "optimizer:prices": async () => withUnpricedGroups(await optimizerPricesApi.get()),
 
     // preload: ipcRenderer.invoke(IPC.opencodeRunCommand, { sessionId, command, arguments, model?, attachments? })
     // → args[0] = that object; opencode.mjs runCommand expects same shape
@@ -2053,6 +2141,7 @@ export function buildHandlers({
     // than a prompt), never bypassing the queue. Ordinary project sessions
     // take the byte-identical raw route.
     "opencode:run-command": async (input) => {
+      await delegateView?.assertWritable(input?.sessionId);
       checkDelivery(input);
       if (input && ctoConversation && (await ctoConversation.isConversationSession(input.sessionId))) {
         // N2: the CTO conversation never runs a command in the background.
@@ -2405,6 +2494,30 @@ export function buildHandlers({
     "usage-stopped:mark-ran": (conversation) =>
       usageStoppedMarkRan({ conversation }, { publish: (evt) => bus.publish(evt) }),
 
+    // ---- WS09: box-computed views (09-models-usage.md "Server-first") ----
+    // The resume screen's view + apply (SF-M14/M15). Row markers / the
+    // sidebar capsule keep reading usage-stopped:list (master D29).
+    "usage-stopped:view": () => usageResumeView.view(),
+    "usage-stopped:apply": (i) => usageResumeView.apply(i ?? {}),
+    // Usage alerts (SF-M16/M17): the active set + the reminder. In-app only.
+    "usage:alerts": () => getUsageAlerts()?.list() ?? { supported: true, bootId: null, revision: 0, alerts: [] },
+    "usage:remind-at-reset": async (i) =>
+      (await getUsageAlerts()?.remind(i ?? {}, { createJob: (input) => scheduleCreateJob(input, { publish }) })) ??
+      { ok: false, code: "no-reset", message: "This window has no reset time." },
+    // Models table / picker / writes (SF-M1/M2) and the identify + price flows
+    // (SF-M9–M11, M13). Every write publishes `models.updated`.
+    "models:table": () => modelsTable.table(),
+    "models:picker": () => modelsTable.picker(),
+    "models:set-default": (i) => modelsTable.setDefault(i ?? {}),
+    "models:set-main": (i) => modelsTable.setMain(i ?? {}),
+    "models:set-sub": (i) => modelsTable.setSub(i ?? {}),
+    "models:retry-sub-sync": () => modelsTable.retrySubSync(),
+    "models:opt-in": (i) => modelsTable.optIn(i ?? {}),
+    "models:set-override": (i) => modelsTable.setOverride(i ?? {}),
+    "models:unidentified": () => modelsUnidentified.list(),
+    "models:declare": (i) => modelsUnidentified.declare(i ?? {}),
+    "models:set-price": (i) => modelsPricing.setPrice(i ?? {}),
+
     // ---- per-session model prefs (manta-server owned; BET-1279) ----
     // Durable box-side record of per-conversation model selection (provider+
     // model, variant, fast flavour) + the recent-choices list, so the same
@@ -2431,8 +2544,19 @@ export function buildHandlers({
     // card is raised. list/stop/delete route to the engine too. Stop/delete
     // publish delegate.updated so a future UI card refetches live.
     // preload: ipcRenderer.invoke(IPC.delegateList, sessionId) → args[0] = sessionId?
-    "delegate:list": (sessionId) =>
-      delegate ? delegate.listJobs({ sessionID: sessionId || undefined }) : { jobs: [] },
+    "delegate:list": async (sessionId) => {
+      if (!delegate) return { jobs: [] };
+      const list = await delegate.listJobs({ sessionID: sessionId || undefined });
+      return delegateView ? delegateView.decorateList(list) : list;
+    },
+    // WS02 (SF-4): is this session a read-only background job, and the bar's
+    // copy for it. `{readOnly:false}` for every ordinary session and CTO work worker.
+    "delegate:job-for-session": async (input) => {
+      const sessionId = typeof input === "object" && input !== null ? input.sessionId : input;
+      if (typeof sessionId !== "string" || !sessionId) throw new Error("sessionId is required");
+      if (!delegateView) return { readOnly: false };
+      return delegateView.jobForSession(sessionId);
+    },
     // preload: ipcRenderer.invoke(IPC.delegateStop, id) → args[0] = id
     "delegate:stop": (id) => (delegate ? delegate.stopJob(id) : { ok: false, error: "no engine" }),
     // P6: where a job's chat window is (re-created, stamped with the child
@@ -2472,10 +2596,11 @@ export function buildHandlers({
     // is created. approve carries optional edited tools; decline cancels.
     "delegate:pending-approvals": (sessionId) =>
       delegate ? delegate.listPendingApprovals(sessionId || undefined) : [],
-    "delegate:approve": (input) =>
-      delegate
-        ? { ok: delegate.approve(input?.id, input?.tools) }
-        : { ok: false },
+    "delegate:approve": (input) => {
+      const err = delegateView ? delegateView.validateApprovalTools(input?.tools) : null;
+      if (err) return { ok: false, error: err };
+      return delegate ? { ok: delegate.approve(input?.id, input?.tools) } : { ok: false };
+    },
     "delegate:decline": (id) =>
       delegate ? { ok: delegate.decline(id) } : { ok: false },
 
@@ -2540,6 +2665,10 @@ export function buildHandlers({
       return sid ? list.filter((r) => r.sessionID === sid) : list;
     },
 
+    // The conversation's artifacts, derived on the box (src/server/artifacts.mjs) —
+    // links, files, images, hosted pages, agent-sent files, plans, expiry, counts.
+    "artifacts:list": (opts) => artifacts.list(opts?.sessionId),
+
     // ---- APNs native-push registration (BET-181) ----
     // iOS Capacitor app registers its APNs device token via the renderer-side
     // 6-site wiring (window.api.pushRegisterApns(token)). Same single
@@ -2581,7 +2710,7 @@ export function buildHandlers({
     // so Settings → About renders it in the same trip — no new IPC channel.
     // The JSON-RPC envelope wraps the body as
     // { result: { version, minClient, opencodeVersion } }.
-    "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion }),
+    "server:version": () => ({ version: serverVersion, minClient: MIN_CLIENT, opencodeVersion, capabilities: [...BOX_CAPABILITIES] }),
 
     // ---- plugins (BET-189 / BET-190) ----
     // Read the current plugin registry the Mac executor has published.
@@ -2703,6 +2832,12 @@ export async function handleRpcRequest(handlers, channel, req, res) {
       const result = await dispatch(handlers, channel, args);
       sendJson(200, { result: result ?? null });
     } catch (e) {
+      // A handler may refuse with a specific HTTP status (WS02: read_only_job → 409).
+      // The body's `error` is the human sentence, so an older client shows it as-is.
+      if (typeof e?.rpcStatus === "number") {
+        sendJson(e.rpcStatus, { error: String(e.message), ...(e.code ? { code: e.code } : {}) });
+        return;
+      }
       // Auto-handoff errors carry a stable code (§15: "the same {error, message} codes").
       const status = typeof e?.code === "string" ? HANDOFF_ERROR_STATUS[e.code] : undefined;
       if (e?.name === "HandoffError" && status) {
