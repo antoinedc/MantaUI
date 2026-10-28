@@ -224,7 +224,7 @@ test("context: disjoint buckets are summed against the model's limit (resolver);
   assert.equal(ctx[0].payload.hasLimit, true);
   assert.equal(ctx[0].payload.pct, 0);
   assert.deepEqual(seen[0], ["anthropic", "claude-x"]);
-  assert.equal(subs(events, "cache").length, 2); // staleness is re-evaluated every step
+  assert.equal(subs(events, "cache").length, 1); // an identical re-evaluation is deduped
 });
 
 test("a resolver miss passes the unknown limit straight through (no fake window)", () => {
@@ -578,4 +578,69 @@ test("resync on a session the interpreter never saw does nothing", () => {
   const { interp, events } = make();
   interp.resync("ses_unknown", { running: false });
   assert.equal(events.length, 0);
+});
+
+// ---- WS11 D2: stale-cache instant + context against the selected model ----
+
+const BIG_STEP = { ...STEP, tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 6_000, write: 0 } } };
+
+test("D2 cache: the running step-end emit has staleAt null; the idle edge carries lastCompleted + ttl", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.execution.started"));
+  interp.interpret(ev("session.step.ended", { ...BIG_STEP }, undefined));
+  const stepEnd = subs(events, "cache").at(-1).payload;
+  assert.equal(stepEnd.staleAt, null);
+  interp.interpret(ev("session.execution.succeeded"));
+  const idle = subs(events, "cache").at(-1).payload;
+  assert.equal(idle.lastCompleted, 500_000);
+  assert.equal(idle.staleAt, 500_000 + 5 * 60_000);
+  assert.equal(idle.isStale, false);
+});
+
+test("D2 cache: below the minimum cached tokens there is no staleAt", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.step.ended", { ...STEP }));
+  interp.interpret(ev("session.execution.succeeded"));
+  assert.equal(subs(events, "cache").at(-1).payload.staleAt, null);
+});
+
+test("D2 cache: the connect snapshot replays cache + context for a session that finished a step", () => {
+  const { interp } = make();
+  interp.interpret(ev("session.step.ended", { ...BIG_STEP }));
+  interp.interpret(ev("session.execution.succeeded"));
+  const snap = interp.snapshotState();
+  const cache = snap.find((f) => f.sub === "cache");
+  assert.equal(cache.payload.staleAt, 500_000 + 5 * 60_000);
+  assert.ok(snap.find((f) => f.sub === "context"));
+});
+
+test("D2 cache: setCacheTtlLabel re-emits with the new TTL (a config change needs no restart)", () => {
+  const { interp, events } = make();
+  interp.interpret(ev("session.step.ended", { ...BIG_STEP }));
+  interp.interpret(ev("session.execution.succeeded"));
+  const before = subs(events, "cache").length;
+  interp.setCacheTtlLabel("1h");
+  const after = subs(events, "cache");
+  assert.equal(after.length, before + 1);
+  assert.equal(after.at(-1).payload.ttlMs, 3_600_000);
+  assert.equal(after.at(-1).payload.staleAt, 500_000 + 3_600_000);
+});
+
+test("D2 context: measured against the resolved model, and re-emitted when the selection changes", () => {
+  let selected = { providerID: "anthropic", modelID: "small", basis: "selected" };
+  const { interp, events } = make({
+    contextLimitFor: (_p, m) => (m === "big" ? 1_000_000 : 200_000),
+    resolveContextModel: () => selected,
+  });
+  interp.interpret(ev("session.step.ended", { ...BIG_STEP }));
+  assert.equal(subs(events, "context").at(-1).payload.limit, 200_000);
+  assert.equal(subs(events, "context").at(-1).payload.basis, "selected");
+  selected = { providerID: "anthropic", modelID: "big", basis: "selected" };
+  interp.reemitContext(SID);
+  const last = subs(events, "context").at(-1).payload;
+  assert.equal(last.limit, 1_000_000);
+  assert.deepEqual(last.model, { providerID: "anthropic", modelID: "big" });
+  const n = subs(events, "context").length;
+  interp.reemitContext(SID); // nothing changed → deduped
+  assert.equal(subs(events, "context").length, n);
 });

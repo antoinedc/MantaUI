@@ -55,6 +55,13 @@ const assistantMsg = (id: string, input: number) => ({
   parts: [{ id: `${id}-t`, messageID: id, type: "text", text: "hello" }],
 });
 
+// The box measures the context (WS11 D2); the panel renders the payload as given.
+const BOX_CONTEXT = {
+  freshInput: 5000, cacheRead: 0, cacheWrite: 0, totalInput: 5000, pct: 3, hasLimit: true,
+  segments: [{ kind: "fresh" as const, pct: 3 }], limit: 200000,
+  model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "selected" as const,
+};
+
 describe("ChatPanel — auto-handoff", () => {
   let h: Harness | null = null;
   let api: MockApi;
@@ -264,14 +271,14 @@ describe("ChatPanel — auto-handoff", () => {
 
   describe("Hand off button (context popover)", () => {
     it("creates a ready card with trigger button", async () => {
-      await open({ opencodeMessages: () => Promise.resolve([assistantMsg("m1", 5000)]) });
+      await open({ opencodeMessages: () => Promise.resolve([assistantMsg("m1", 5000)]), opencodeContext: () => Promise.resolve(BOX_CONTEXT) });
       await click(h!.container.querySelector(".manta-ctx-pill"));
       await click(byText("Hand off"));
       expect(api.calls.handoffCreate).toEqual([[{ sessionId: SID, trigger: "button", action: "suggest" }]]);
     });
 
     it("a refusal is reported in the panel", async () => {
-      await open({ opencodeMessages: () => Promise.resolve([assistantMsg("m1", 5000)]), handoffCreate: () => Promise.reject(new Error("busy")) });
+      await open({ opencodeMessages: () => Promise.resolve([assistantMsg("m1", 5000)]), opencodeContext: () => Promise.resolve(BOX_CONTEXT), handoffCreate: () => Promise.reject(new Error("busy")) });
       await click(h!.container.querySelector(".manta-ctx-pill"));
       await click(byText("Hand off"));
       expect(sendErrorText()).toMatch(/Couldn't hand off/);

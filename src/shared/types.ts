@@ -1523,6 +1523,11 @@ export const IPC = {
   // during a live turn instead of re-pulling the whole (up to 3 MB) transcript.
   // Returns null on miss/error so the caller can fall back to a full refetch.
   opencodeMessage: "opencode:message",
+  // The box-computed `context` / `cache` payloads for an idle session (WS11 D2):
+  // the same objects the live stream frames carry; null before any billed /
+  // completed turn.
+  opencodeContext: "opencode:context",
+  opencodeCache: "opencode:cache",
   // Live SSE stream from opencode, forwarded raw to the renderer. Renderer
   // filters by sessionID in the event payload.
   opencodeEvent: "opencode:event",
@@ -3091,6 +3096,38 @@ export type StreamStepEndedPayload = {
   tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
   cost?: number;
   finish?: string;
+};
+
+/**
+ * `context`: the context window breakdown, measured by the box against the
+ * session's SELECTED model (WS11 D2). `limit`/`model`/`basis` are absent on an
+ * older box (whose breakdown is against the last reply's model).
+ */
+export type StreamContextPayload = {
+  freshInput: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalInput: number;
+  pct: number | null;
+  hasLimit: boolean;
+  segments: { kind: "fresh" | "cacheRead" | "cacheWrite"; pct: number }[];
+  limit?: number | null;
+  model?: { providerID: string; modelID: string } | null;
+  basis?: "selected" | "default" | "last-used" | null;
+};
+
+/**
+ * `cache`: prompt-cache staleness. `staleAt` is the epoch-ms instant the cache
+ * goes cold (null = nothing to warn about; absent on an older box) — the client
+ * compares it with its own clock (WS11 D2).
+ */
+export type StreamCachePayload = {
+  isStale: boolean;
+  idleMs: number;
+  staleTokens: number;
+  ttlMs: number;
+  lastCompleted?: number | null;
+  staleAt?: number | null;
 };
 
 /** `toolBoundary`: a tool part reached a terminal status (once per part) — the queued-prompt drain trigger. */

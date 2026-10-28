@@ -1145,7 +1145,7 @@ test("opencode:context derives a breakdown from a billed assistant message", asy
   const handlers = buildHandlers({ ...deps, contextLimitFor: () => 400_000 });
   const res = await handlers["opencode:context"]("ses_idle");
   assert.deepEqual(listCalls, [{ slim: true }]);
-  assert.deepEqual(res, computeContextBreakdown(tokens, 400_000));
+  assert.deepEqual(res, { ...computeContextBreakdown(tokens, 400_000), limit: 400_000, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(res.hasLimit, true);
 });
 
@@ -1161,7 +1161,7 @@ test("opencode:context uses contextLimitFor; unknown limit yields hasLimit:false
     contextLimitFor: () => 400_000,
   });
   const limited = await withLimit["opencode:context"]("s");
-  assert.deepEqual(limited, computeContextBreakdown(tokens, 400_000));
+  assert.deepEqual(limited, { ...computeContextBreakdown(tokens, 400_000), limit: 400_000, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(limited.hasLimit, true);
 
   const unknown = buildHandlers({
@@ -1169,7 +1169,7 @@ test("opencode:context uses contextLimitFor; unknown limit yields hasLimit:false
     contextLimitFor: () => null,
   });
   const noLimit = await unknown["opencode:context"]("s");
-  assert.deepEqual(noLimit, computeContextBreakdown(tokens, null));
+  assert.deepEqual(noLimit, { ...computeContextBreakdown(tokens, null), limit: null, model: { providerID: "anthropic", modelID: "claude-sonnet-4-6" }, basis: "last-used" });
   assert.equal(noLimit.hasLimit, false);
   assert.equal(noLimit.pct, null);
 });
@@ -2274,4 +2274,32 @@ test("delegate:open-session hands the job id to the engine and returns its answe
   const { deps } = bgDeps();
   deps.delegate = undefined;
   assert.deepEqual(await buildHandlers(deps)["delegate:open-session"]({ jobId: "x" }), { ok: false, error: "no engine" });
+});
+
+test("opencode:context measures against the SELECTED model when the resolver knows one (WS11 D2)", async () => {
+  const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "small" } }];
+  const contextModels = { resolve: () => ({ providerID: "anthropic", modelID: "big", basis: "selected" }) };
+  const handlers = buildHandlers({ ...deps, contextModels, contextLimitFor: (_p, m) => (m === "big" ? 1_000_000 : 200_000) });
+  const res = await handlers["opencode:context"]("s");
+  assert.equal(res.limit, 1_000_000);
+  assert.equal(res.basis, "selected");
+  assert.equal(res.model.modelID, "big");
+});
+
+test("opencode:cache derives the stream's cache payload from the transcript; null before any completed turn (WS11 D2)", async () => {
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async () => [
+    { info: { role: "assistant", time: { completed: 1_000 }, tokens: { input: 1, cache: { read: 6_000, write: 0 } }, providerID: "a", modelID: "m" } },
+  ];
+  const handlers = buildHandlers({ ...deps, streamInterp: { getState: () => ({ running: false }) } });
+  const res = await handlers["opencode:cache"]("s");
+  assert.equal(res.lastCompleted, 1_000);
+  assert.equal(res.staleAt, 1_000 + 5 * 60_000);
+  assert.equal(res.staleTokens, 6_000);
+  const running = buildHandlers({ ...deps, streamInterp: { getState: () => ({ running: true }) } });
+  assert.equal((await running["opencode:cache"]("s")).staleAt, null);
+  deps.oc.listMessages = async () => [{ info: { role: "user" } }];
+  assert.equal(await buildHandlers(deps)["opencode:cache"]("s"), null);
 });

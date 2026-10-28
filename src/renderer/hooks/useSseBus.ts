@@ -65,6 +65,8 @@ import type {
   StreamRunningPayload,
   StreamSessionErrorPayload,
   StreamStepEndedPayload,
+  StreamContextPayload,
+  StreamCachePayload,
   StreamTodosPayload,
   StreamTruncationPayload,
   StreamQuestionsPayload,
@@ -143,6 +145,10 @@ export type SseBus = {
   setPermissions: React.Dispatch<React.SetStateAction<PermissionRequest[]>>;
   questions: QuestionRequest[];
   setQuestions: React.Dispatch<React.SetStateAction<QuestionRequest[]>>;
+  // The box's `context` / `cache` payloads (WS11 D2): seeded from
+  // `opencode:context` / `opencode:cache` on open and replaced by every frame.
+  contextPayload: StreamContextPayload | null;
+  cachePayload: StreamCachePayload | null;
   stepTokens: (TokenUsage & { cost: number }) | null;
   setStepTokens: React.Dispatch<React.SetStateAction<(TokenUsage & { cost: number }) | null>>;
   compactionState: CompactionState | null;
@@ -266,6 +272,22 @@ export function useSseBus(params: {
   const setPlanOnRef = useRef(setPlanOn);
   setPlanOnRef.current = setPlanOn;
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
+  const [contextPayload, setContextPayload] = useState<StreamContextPayload | null>(null);
+  const [cachePayload, setCachePayload] = useState<StreamCachePayload | null>(null);
+  // Seed both from the box on open (an idle session has no frame coming); a frame
+  // that lands first wins over a slower seed.
+  useEffect(() => {
+    let live = true;
+    void window.api.opencodeContext(sessionId).then((c) => {
+      if (live && c) setContextPayload((cur) => cur ?? c);
+    }).catch(() => {});
+    void window.api.opencodeCache(sessionId).then((c) => {
+      if (live && c) setCachePayload((cur) => cur ?? c);
+    }).catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sessionId]);
   const [compactionState, setCompactionState] = useState<CompactionState | null>(null);
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // BET-1347: a background compaction the BOX did while this conversation was
@@ -629,6 +651,14 @@ export function useSseBus(params: {
           setRunning(false);
           return;
         }
+        case "context": {
+          setContextPayload(ev.payload as StreamContextPayload);
+          return;
+        }
+        case "cache": {
+          setCachePayload(ev.payload as StreamCachePayload);
+          return;
+        }
         case "stepEnded": {
           // Step boundary: refresh the live token snapshot so the context pill
           // updates between tool calls.
@@ -789,6 +819,8 @@ export function useSseBus(params: {
     setPermissions,
     questions,
     setQuestions,
+    contextPayload,
+    cachePayload,
     stepTokens,
     setStepTokens,
     compactionState,

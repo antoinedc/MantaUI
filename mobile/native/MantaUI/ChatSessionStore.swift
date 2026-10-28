@@ -347,6 +347,8 @@ final class ChatSessionStore: ObservableObject {
     /// frame (BET-1030). nil when a brand-new/never-billed session returns
     /// null, or the RPC failed — the meter then stays blank, as before.
     private var transcriptContext: StreamContextPayload?
+    /// The open-time `opencode:cache` fallback (an idle session has no frame coming).
+    private var transcriptCache: StreamCachePayload?
     /// The last `runningSetSeq` this store has folded into its running state. A
     /// change in it means the box has (re)stated the authoritative running set
     /// since `send()` stamped `optimisticRunning`, so the optimistic flag must
@@ -622,7 +624,10 @@ final class ChatSessionStore: ObservableObject {
     private func refreshContextFromTranscript() {
         Task {
             let payload = try? await api.context(sessionId: sessionId)
+            let cachePayload = try? await api.opencodeCache(sessionId: sessionId)
             await MainActor.run {
+                transcriptCache = cachePayload
+                if eventStore.sessionStates[sessionId]?.cache == nil { cache = cachePayload }
                 transcriptContext = payload
                 // Only publish when the live frame has not already filled the
                 // meter — the stream/context frame is the preferred source.
@@ -685,7 +690,7 @@ final class ChatSessionStore: ObservableObject {
         // meter for an idle conversation on open, when no such frame has
         // arrived yet.
         context = s.context ?? transcriptContext
-        if let c = s.cache { cache = c }
+        if let c = s.cache ?? transcriptCache { cache = c }
         let truncationChanged = truncation != s.truncation
         truncation = s.truncation
         // The failure shows until the user dismisses THAT occurrence: a later

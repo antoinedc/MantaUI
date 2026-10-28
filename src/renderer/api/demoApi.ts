@@ -615,6 +615,8 @@ export const explicitMethods = {
   onStatusEvent,
   opencodeMessages,
   opencodeMessage,
+  opencodeContext: () => Promise.resolve(null),
+  opencodeCache: () => Promise.resolve(null),
   opencodePermissions,
   opencodeQuestions,
   opencodeVcsBranch,

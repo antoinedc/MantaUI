@@ -94,6 +94,8 @@ import { startStatusPoller } from "./status.mjs";
 import { createSyncState } from "./syncState.mjs";
 import { createTopologyPersister } from "./topology.mjs";
 import { createStreamInterpreter } from "./streamInterp.mjs";
+import { createContextModelResolver } from "./sessionContext.mjs";
+import { loadModelPrefs } from "./modelPrefs.mjs";
 import { createCommandCorrelator, createOriginStore } from "./commandOrigins.mjs";
 import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
@@ -327,9 +329,21 @@ function contextLimitFor(providerID, modelID) {
 
 // Box-side stream interpretation (BET-551): interprets the opencode stream on
 // the box and republishes derived events on THIS bus (single stream/endpoint).
+// WS11 D2: the model a session's context is measured against (selected → default →
+// last reply). Prefs are cached and invalidated by model-prefs:set/seed; the default
+// is primed from the saved config here and refreshed by config:update.
+const contextModels = createContextModelResolver({ loadPrefs: () => loadModelPrefs() });
+void (async () => {
+  try {
+    contextModels.setDefaultModel((await local.configGet())?.defaultModel);
+  } catch {
+    /* non-fatal: no default until the next config:update */
+  }
+})();
 const streamInterp = createStreamInterpreter({
   publish: (evt) => bus.publish(evt),
   contextLimitFor,
+  resolveContextModel: (a) => contextModels.resolve(a),
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.
@@ -2051,6 +2065,7 @@ rpcHandlers = buildHandlers({
   pty,
   bus,
   streamInterp,
+  contextModels,
   accountsManager,
   local,
   syncState,

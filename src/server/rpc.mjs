@@ -13,9 +13,12 @@ import { existsSync } from "node:fs";
 import { transcribeAudio } from "../shared/groq.mjs";
 import { expandTilde } from "../shared/paths.mjs";
 import {
-  computeContextBreakdown,
   selectLatestTokenUsage,
+  selectLastAssistantCompletion,
+  selectCacheTtlMs,
+  computeStaleCache,
 } from "../shared/streamInterpretation.mjs";
+import { buildContextPayload } from "./sessionContext.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
 import {
@@ -623,6 +626,9 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // WS11 D2: the shared "which model is this session measured against" resolver
+  // (sessionContext.mjs). Null (tests) → the last reply's model, labelled so.
+  contextModels = null,
   // N3: `backgroundCommandNames(directory) → Promise<Set<string>>` — the names
   // whose definitions provably run in the background (commandBackground.mjs).
   // Injectable for tests; the default reads the real definitions.
@@ -925,6 +931,12 @@ export function buildHandlers({
       }
       const prev = await local.configGet();
       const next = await local.configUpdate(patch);
+      // WS11 D2: a changed cache TTL / default model re-measures live sessions
+      // without a restart.
+      if (patch?.cacheTtl === "5m" || patch?.cacheTtl === "1h") streamInterp?.setCacheTtlLabel(patch.cacheTtl);
+      if (patch && "defaultModel" in patch && contextModels?.setDefaultModel(next?.defaultModel)) {
+        streamInterp?.reemitAllContext();
+      }
       // BET-1386 §10.5 card 1: the effort dial is a real, persisted selection
       // AND ledgered on change — only an ACTUAL Low/Med/High switch appends an
       // Activity-ledger row (pure decision in ctoTier.mjs, tested) so the A12
@@ -1389,8 +1401,36 @@ export function buildHandlers({
       const messages = await oc.listMessages(sessionId, { slim: true });
       const found = selectLatestTokenUsage(messages);
       if (!found) return null;
-      const limit = contextLimitFor(found.providerID, found.modelID);
-      return computeContextBreakdown(found.tokens, limit);
+      const lastUsed = found.providerID && found.modelID ? { providerID: found.providerID, modelID: found.modelID } : null;
+      const resolved = contextModels
+        ? contextModels.resolve({ sessionId, lastUsed })
+        : lastUsed && { ...lastUsed, basis: "last-used" };
+      const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+      return buildContextPayload(found.tokens, resolved ?? null, limit);
+    },
+
+    // WS11 D2 (T21): the same `cache` payload the stream emits, computed from the
+    // persisted transcript so an idle session is right on open. null when no
+    // assistant turn has completed. Mirrors opencode:context.
+    "opencode:cache": async (sessionId) => {
+      if (typeof sessionId !== "string" || !sessionId) return null;
+      const messages = await oc.listMessages(sessionId, { slim: true });
+      const lastCompleted = selectLastAssistantCompletion(messages);
+      if (lastCompleted == null) return null;
+      const found = selectLatestTokenUsage(messages);
+      let label = null;
+      try {
+        label = await providers.readCacheTtl();
+      } catch {
+        /* non-fatal: the 5m default */
+      }
+      return computeStaleCache({
+        lastCompleted,
+        now: Date.now(),
+        ttlMs: selectCacheTtlMs(label ?? "5m"),
+        cachedTokens: (found?.tokens?.cache?.read ?? 0) + (found?.tokens?.cache?.write ?? 0),
+        running: streamInterp?.getState(sessionId)?.running === true,
+      });
     },
 
     // Single-message fetch for live-turn splice (returns null on miss).
@@ -2528,11 +2568,20 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.modelPrefsGet)  → no args
     "model-prefs:get": () => modelPrefsGetStore(),
     // preload: ipcRenderer.invoke(IPC.modelPrefsSet, { sessionId?, selection?, recents? })
-    "model-prefs:set": (input) =>
-      modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
+    "model-prefs:set": async (input) => {
+      const out = await modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) });
+      // The session's selected model decides its context percentage (WS11 D2).
+      contextModels?.invalidatePrefs();
+      if (typeof input?.sessionId === "string") streamInterp?.reemitContext(input.sessionId);
+      return out;
+    },
     // preload: ipcRenderer.invoke(IPC.modelPrefsSeed, { sessions?, recents? })
-    "model-prefs:seed": (input) =>
-      modelPrefsSeedStore(input ?? {}, { publish: (evt) => bus.publish(evt) }),
+    "model-prefs:seed": async (input) => {
+      const out = await modelPrefsSeedStore(input ?? {}, { publish: (evt) => bus.publish(evt) });
+      contextModels?.invalidatePrefs();
+      streamInterp?.reemitAllContext();
+      return out;
+    },
 
     // ---- background jobs (manta-server owned; in-process on mobile) ----
     // Mirror of the /api/delegate REST surface for the renderer. Jobs are

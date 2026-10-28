@@ -531,6 +531,7 @@ private struct ChatScreenContent: View {
             // 5s branch poll (desktop cadence) so a terminal-side checkout
             // reflects within one tick (BET-747 gap #13). Cancelled on disappear.
             .task { await pollBranch() }
+            .task(id: store.cache?.staleAt) { await flipAtStaleAt() }
             // A submit starts a turn optimistically (`send()` sets running), so
             // refreshing the branch on the running edge covers "refresh on
             // submit" — the new message is written in `cwd`'s current branch
@@ -1264,12 +1265,10 @@ private struct ChatScreenContent: View {
 
     // MARK: - Context meter (BET-824)
 
-    /// The context breakdown re-derived against the SELECTED model. One read,
-    /// so the pill's percentage and the sheet's "of N" cannot describe two
-    /// different models (which is exactly what "87% — 174k of 1M" was).
-    private var contextBreakdown: StreamContextPayload? {
-        store.context.map { UsageMeters.recompute($0, limit: activeModelContextLimit) }
-    }
+    /// The context breakdown exactly as the box sent it — measured on the box
+    /// against the SELECTED model (WS11 D2), so the pill's percentage and the
+    /// sheet's "of N" describe one model. No client recompute.
+    private var contextBreakdown: StreamContextPayload? { store.context }
 
     /// The context percentage from the SELECTED model's breakdown: a real
     /// percentage when the box reports one, nil when it has none (nil early in
@@ -1282,17 +1281,23 @@ private struct ChatScreenContent: View {
 
     /// Whether the prompt cache has gone cold. One read, so the tint, the label
     /// and the accessibility string cannot disagree.
-    private var cacheIsStale: Bool { store.cache?.isStale == true }
+    private var cacheIsStale: Bool {
+        _ = staleTick   // re-read when the one-shot timer at `staleAt` fires
+        return UsageMeters.isCold(store.cache, now: Date())
+    }
 
-    /// The active model's own context window — the meter's denominator. Opus
-    /// 4.7 reports 1M against Sonnet's 200k, so it is read per-model, never
-    /// hardcoded.
-    private var activeModelContextLimit: Double? {
-        guard let model = ChatModel.activeModel(modelStore.models,
-                                                override: modelStore.override,
-                                                configuration: modelStore.configDefault,
-                                                provider: modelStore.defaultModel) else { return nil }
-        return model.limit?.context
+    /// Bumped by the timer at the box's `staleAt` so the cold state flips with no
+    /// new frame (WS11 D2). The decision itself stays on the box.
+    @State private var staleTick = 0
+
+    private func flipAtStaleAt() async {
+        guard let staleAt = store.cache?.staleAt else { return }
+        let waitMs = staleAt - Date().timeIntervalSince1970 * 1000
+        if waitMs > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(waitMs * 1_000_000) + 50_000_000)
+        }
+        guard !Task.isCancelled else { return }
+        staleTick += 1
     }
 
     private var activeModelName: String {
@@ -1388,7 +1393,7 @@ private struct ChatScreenContent: View {
                 Text("\(Int(pct.rounded()))%")
                     .font(.manta(size: Metrics.type.twoXS, weight: .bold))
                     .foregroundColor(contextBandColor)
-                if let coldLabel = UsageMeters.staleChipLabel(store.cache) {
+                if let coldLabel = UsageMeters.staleChipLabel(store.cache, now: Date()) {
                     Text(coldLabel)
                         .font(.manta(size: Metrics.type.twoXS, weight: .bold))
                         .foregroundColor(tokens.warn)
@@ -1444,7 +1449,7 @@ private struct ChatScreenContent: View {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
-                limit: activeModelContextLimit,
+                limit: ctx.limit,
                 modelName: activeModelName,
                 bandColor: contextBandColor,
                 tokens: tokens,

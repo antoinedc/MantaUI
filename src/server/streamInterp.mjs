@@ -36,7 +36,6 @@
 import {
   classifyFinish,
   describeTruncation,
-  computeContextBreakdown,
   selectCacheTtlMs,
   computeStaleCache,
   isTerminalTodo,
@@ -63,6 +62,7 @@ import {
   toolTitle,
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
+import { buildContextPayload } from "./sessionContext.mjs";
 import { randomUUID } from "node:crypto";
 
 // opencode stamps its cache breakpoints with no `ttl`, so Anthropic applies
@@ -164,7 +164,9 @@ function newSessionState() {
     runningType: null,         // "busy" | "retry" | null; preserved for the connect-time snapshot replay
     todos: null,               // last todo_write list ; null = not seen
     model: null,               // { providerID, modelID } of the latest step
-    contextEmitted: null,      // { totalInput, limit } of the last context emit
+    contextEmitted: null,      // { totalInput, limit, model } of the last context emit
+    lastStepTokens: null,      // normalized tokens of the last step (re-emit on a model change)
+    cacheEmitted: null,        // key of the last `cache` emit (dedup)
     retryActive: false,        // a non-null `retry` frame is outstanding
     attention: null,           // last `attention` kind emitted ("question"|"permission"|null)
     compacted: false,          // a compaction ended; the transcript goes stale when its execution settles
@@ -211,6 +213,11 @@ export function createStreamInterpreter({
   listInbox = null,
   // Minted once per manta-server process: a restarted server is "newer" to a client.
   epoch = randomUUID(),
+  // Which model a session's context is measured against (WS11 D2): selected →
+  // default → the last reply's model (sessionContext.mjs). The default answers
+  // with the last-used model so a bare interpreter still emits a labelled context.
+  resolveContextModel = ({ lastUsed }) =>
+    lastUsed?.providerID && lastUsed?.modelID ? { ...lastUsed, basis: "last-used" } : null,
 }) {
   const sessions = new Map();
   const childParent = new Map(); // child session id -> parent session id
@@ -320,13 +327,40 @@ export function createStreamInterpreter({
   function emitCacheStaleness(sid, st, tokens, nowMs) {
     st.cachedTokens =
       (tokens?.cache?.read ?? 0) + (tokens?.cache?.write ?? 0) || st.cachedTokens;
-    emit(sid, "cache", computeStaleCache({
+    emitCache(sid, st, nowMs);
+  }
+
+  // The `cache` frame for a session. Emitted at step end (running, so `staleAt` is
+  // null) AND at the running->false edge, which is the emit that carries the
+  // instant the cache goes cold. Deduped on what a client would see change.
+  function emitCache(sid, st, nowMs = now()) {
+    if (st.lastCompleted == null) return;
+    const payload = computeStaleCache({
       lastCompleted: st.lastCompleted,
       now: nowMs,
       ttlMs: selectCacheTtlMs(cacheTtlLabel ?? TTL_DEFAULT),
       cachedTokens: st.cachedTokens,
       running: st.running,
-    }));
+    });
+    const key = `${payload.staleAt}|${payload.isStale}|${payload.ttlMs}|${payload.staleTokens}|${payload.lastCompleted}`;
+    if (st.cacheEmitted === key) return;
+    st.cacheEmitted = key;
+    emit(sid, "cache", payload);
+  }
+
+  // The `context` frame, measured against the session's SELECTED model (WS11 D2).
+  function emitContext(sid, st) {
+    const tokens = st.lastStepTokens;
+    if (!tokens) return;
+    const totalInput = (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
+    if (totalInput <= 0) return;
+    const resolved = resolveContextModel({ sessionId: sid, lastUsed: st.model });
+    const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+    const modelKey = resolved ? `${resolved.providerID}/${resolved.modelID}/${resolved.basis}` : "";
+    const prev = st.contextEmitted;
+    if (prev && prev.totalInput === totalInput && prev.limit === limit && prev.model === modelKey) return;
+    st.contextEmitted = { totalInput, limit, model: modelKey };
+    emit(sid, "context", buildContextPayload(tokens, resolved, limit));
   }
 
   // The single place `running` changes. Stamps the idle->busy EDGE only, so a
@@ -341,11 +375,13 @@ export function createStreamInterpreter({
     setRunning(st, running);
     st.runningType = running ? "busy" : null;
     emit(sid, "running", { running, type: running ? "busy" : "idle", since: st.runningSince });
+    if (!running) emitCache(sid, st);
   }
 
   function emitTurnComplete(sid, st, complete) {
     setRunning(st, st.running && !complete);
     emit(sid, "turnComplete", { complete, running: st.running, since: st.runningSince });
+    if (complete) emitCache(sid, st);
   }
 
   // ---- tool frames ---------------------------------------------------------
@@ -907,11 +943,8 @@ export function createStreamInterpreter({
         }
         const totalInput = (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
         if (totalInput > 0) {
-          const limit = st.model ? contextLimitFor(st.model.providerID, st.model.modelID) : null;
-          if (!st.contextEmitted || st.contextEmitted.totalInput !== totalInput || st.contextEmitted.limit !== limit) {
-            st.contextEmitted = { totalInput, limit };
-            emit(sid, "context", computeContextBreakdown(tokens, limit));
-          }
+          st.lastStepTokens = tokens;
+          emitContext(sid, st);
           emitCacheStaleness(sid, st, tokens, now());
         }
         noteMessageChanged(sid, mid);
@@ -1098,8 +1131,41 @@ export function createStreamInterpreter({
         if (st.permissions.length > 0) {
           out.push({ kind: "stream", sub: "permissions", sessionId: sid, payload: { permissions: st.permissions } });
         }
+        // The idle-edge `cache` (carries `staleAt`) and the current `context`, so a
+        // client that connects mid-idle does not wait for the next turn.
+        if (st.lastCompleted != null) {
+          out.push({
+            kind: "stream", sub: "cache", sessionId: sid,
+            payload: computeStaleCache({
+              lastCompleted: st.lastCompleted,
+              now: now(),
+              ttlMs: selectCacheTtlMs(cacheTtlLabel ?? TTL_DEFAULT),
+              cachedTokens: st.cachedTokens,
+              running: st.running,
+            }),
+          });
+        }
+        if (st.lastStepTokens) {
+          const resolved = resolveContextModel({ sessionId: sid, lastUsed: st.model });
+          const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+          out.push({ kind: "stream", sub: "context", sessionId: sid, payload: buildContextPayload(st.lastStepTokens, resolved, limit) });
+        }
       }
       return out;
+    },
+    /** The configured cache TTL changed (`config:update`): re-emit every cache frame. */
+    setCacheTtlLabel(label) {
+      cacheTtlLabel = typeof label === "string" && label.length > 0 ? label : null;
+      for (const [sid, st] of sessions) emitCache(sid, st);
+    },
+    /** A session's selected model changed (`model-prefs:set`): re-measure its context. */
+    reemitContext(sid) {
+      const st = sessions.get(sid);
+      if (st) emitContext(sid, st);
+    },
+    /** The default model changed (`config:update`): re-measure every known session. */
+    reemitAllContext() {
+      for (const [sid, st] of sessions) emitContext(sid, st);
     },
     sessions,
   };

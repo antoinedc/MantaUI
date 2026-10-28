@@ -35,12 +35,6 @@ import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
   selectActiveTodos,
-  selectCacheTtlMs,
-  selectLastAssistantCompletion,
-  computeStaleCache,
-  computeContextBreakdown,
-  resolveContextLimit,
-  STALE_CACHE_MIN_TOKENS,
   countRunningSubagents,
   computeTurnInfo,
   computeLiveTurn,
@@ -52,6 +46,7 @@ import {
   findSessionTitle,
   type EntryMotionState,
   type StaleCacheResult,
+  type ContextBreakdown,
   type PendingScrollWin,
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
@@ -224,6 +219,10 @@ const SENT_ROW_LINGER_MS = 1500;
 const IDLE_SEND_SETTLE_MS = 3000;
 const mintMessageId = () => `msg_${crypto.randomUUID().replaceAll("-", "")}`;
 
+const EMPTY_CONTEXT_BREAKDOWN: ContextBreakdown = {
+  freshInput: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, pct: null, hasLimit: false, segments: [],
+};
+
 export function ChatPanel({
   sessionId,
   tmuxSession,
@@ -290,7 +289,6 @@ export function ChatPanel({
   // save Nk tokens" pill when the session has been idle past this TTL.
   // manta doesn't set the real cache_control.ttl on requests; this is the
   // user's claim about what opencode is sending. See AppConfig comment.
-  const cacheTtl = useStore((s) => s.cacheTtl);
   // Server-owned resource cards (⏰ schedules, 🔑 secrets, 🪝 webhooks) —
   // state, refresh callbacks, poll effects, session resets, and the mobile
   // `manta-open-*` window-event bridges. Extracted to a self-contained hook
@@ -711,6 +709,8 @@ export function ChatPanel({
     questions,
     setQuestions,
     stepTokens,
+    contextPayload,
+    cachePayload,
     todosDismissed,
     setTodosDismissed,
     liveTodos,
@@ -2596,79 +2596,38 @@ export function ChatPanel({
     latestTokensRef.current = latestTokens;
   }, [latestTokens]);
 
-  // ===== Stale prompt-cache detection =====
+  // ===== Stale prompt-cache + context window (WS11 D2) =====
   //
-  // Drives the "/clear to save Nk tokens" pill in the footer. When the
-  // session has been idle long enough that Anthropic's prompt cache has
-  // expired (TTL = 5m default OR 1h opt-in, set in Settings to match
-  // opencode's cache_control.ttl), the next user turn will re-bill the
-  // entire cached prefix as cache_creation_input_tokens. For deep
-  // sessions that's often 100k+ tokens of avoidable spend; suggest /clear
-  // when the cached prefix is non-trivial AND the cache has expired.
-  //
-  // Three inputs to the predicate:
-  //   - lastCompleted: timestamp of the last fully-finished assistant
-  //     turn (cache TTL clock starts at the request that wrote it, but
-  //     time.completed is the closest proxy in the data we have)
-  //   - cachedTokens: cache.read + cache.write from the most recent step
-  //     (= every token currently in this session's cache entry)
-  //   - now: stale cache is time-driven, so we need to re-evaluate over
-  //     time without remounting. Tick at 10s — staleness is a 5-min /
-  //     1-hr scale so sub-10s precision is irrelevant.
-  //
-  // The tick ONLY runs while a turn isn't actively in flight; running
-  // turns can't go stale by definition.
-  const lastAssistantCompletion = useMemo(
-    () => selectLastAssistantCompletion(messages),
-    [messages],
-  );
-  // Cached prefix size = read + write from the last step. On a warm
-  // session most of the prefix is `cache.read`; on the first turn after
-  // /compact (or the first turn ever) it'll be mostly `cache.write`.
-  // Either way, this is what flips from "free" to "paid" when the TTL
-  // expires.
-  const cachedTokens = latestTokens
-    ? (latestTokens.cache?.read ?? 0) + (latestTokens.cache?.write ?? 0)
-    : 0;
-  const ttlMs = selectCacheTtlMs(cacheTtl);
-  // Tick state — re-render every 10s when we have a completed turn and
-  // we're not running. The interval is deliberately scope-gated to avoid
-  // burning a wakeup every 10s on idle apps with no completed turns.
-  const [staleTick, setStaleTick] = useState(0);
+  // Both come from the box ready to render: the `cache` payload carries the
+  // epoch-ms instant the prompt cache goes cold (`staleAt`); the `context` payload
+  // is measured against the session's SELECTED model. The client only compares the
+  // instant with its own clock — one timer at `staleAt`, no polling, no recompute.
+  const staleAt = cachePayload?.staleAt ?? null;
+  const [staleNow, setStaleNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!isActive) return; // BET-730: hidden panels don't need staleness ticks
-    if (running) return;
-    if (lastAssistantCompletion == null) return;
-    if (cachedTokens < STALE_CACHE_MIN_TOKENS) return;
-    const id = setInterval(() => setStaleTick((t) => t + 1), 10_000);
-    return () => clearInterval(id);
-  }, [running, lastAssistantCompletion, cachedTokens, isActive]);
-  const staleCache = useMemo<StaleCacheResult>(
-    () =>
-      computeStaleCache({
-        lastCompleted: lastAssistantCompletion,
-        now: Date.now(),
-        ttlMs,
-        cachedTokens,
-        running,
-      }),
-    // staleTick is intentionally in the deps so the memo recomputes on
-    // each tick even when other inputs haven't changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [lastAssistantCompletion, ttlMs, cachedTokens, running, staleTick],
-  );
-
-  // Context breakdown for the SessionHeader pill + popover (BET-415). The
-  // denominator is the active model's real context window so the pill
-  // reflects what the provider will actually accept on the next request.
-  const ctxLimit = useMemo(
-    () => resolveContextLimit(activeModel),
-    [activeModel],
-  );
-  const ctxBreakdown = useMemo(
-    () => computeContextBreakdown(latestTokens, ctxLimit),
-    [latestTokens, ctxLimit],
-  );
+    if (staleAt == null) return;
+    const wait = staleAt - Date.now();
+    if (wait <= 0) {
+      setStaleNow(Date.now());
+      return;
+    }
+    // setTimeout caps at ~24.8 days; a TTL is minutes/hours.
+    const id = setTimeout(() => setStaleNow(Date.now()), wait + 50);
+    return () => clearTimeout(id);
+  }, [staleAt]);
+  const staleCache = useMemo<StaleCacheResult>(() => {
+    const lastCompleted = cachePayload?.lastCompleted ?? null;
+    return {
+      isStale: staleAt != null && staleNow >= staleAt,
+      idleMs: lastCompleted != null ? Math.max(0, staleNow - lastCompleted) : 0,
+      staleTokens: cachePayload?.staleTokens ?? 0,
+      ttlMs: cachePayload?.ttlMs ?? 0,
+      lastCompleted,
+      staleAt,
+    };
+  }, [cachePayload, staleAt, staleNow]);
+  const ctxBreakdown: ContextBreakdown = contextPayload ?? EMPTY_CONTEXT_BREAKDOWN;
+  const ctxLimit = contextPayload?.limit ?? null;
 
   // Most recent TodoWrite call from anywhere in the session — pinned under
   // either the running indicator (while a turn is live) or the final turn's

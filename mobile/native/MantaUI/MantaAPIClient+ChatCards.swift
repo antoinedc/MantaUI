@@ -75,5 +75,14 @@ extension MantaAPIClient {
     }
 }
 
+extension MantaAPIClient {
+    /// `opencode:cache` — the box's cache-staleness payload for an idle session
+    /// (WS11 D2); nil before any completed turn, and on a box that predates it
+    /// (`cache-stale-at-1` missing → the warning never shows).
+    func opencodeCache(sessionId: String) async throws -> StreamCachePayload? {
+        try await call("opencode:cache", args: [sessionId], as: StreamCachePayload.self)
+    }
+}
+
 extension MantaAPIClient: ChatCardApprovalAPI {}
 extension MantaAPIClient: ChatCardJobAPI {}

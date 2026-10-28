@@ -218,8 +218,8 @@ struct ContextSheet: View {
     /// warning, so it is kept; the font is the platform's footnote.
     @ViewBuilder
     private var staleLine: some View {
-        if let cache, cache.isStale {
-            Text("Idle \(idleText(cache.idleMs)) — the cache has gone cold. Clearing now saves re-billing \(UsageMeters.formatTokens(cache.staleTokens)) tokens.")
+        if let cache, UsageMeters.isCold(cache, now: Date()) {
+            Text("Idle \(idleText(UsageMeters.idleMs(cache, now: Date()))) — the cache has gone cold. Clearing now saves re-billing \(UsageMeters.formatTokens(cache.staleTokens)) tokens.")
                 .font(.footnote)
                 .foregroundColor(tokens.warn)
         }

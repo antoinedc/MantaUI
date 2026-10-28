@@ -1153,6 +1153,8 @@ export const httpApi: Api = {
   // no-op instead of a red console 500 on every ChatPanel mount/unmount.
   opencodeMessage: (sessionId, messageId) =>
     rpc(IPC.opencodeMessage, sessionId, messageId),
+  opencodeContext: (sessionId) => rpc(IPC.opencodeContext, sessionId),
+  opencodeCache: (sessionId) => rpc(IPC.opencodeCache, sessionId),
   opencodeOpenStream: (sessionId) =>
     rpcOptional(IPC.opencodeOpenStream, undefined, sessionId),
   opencodeCloseStream: (sessionId) =>

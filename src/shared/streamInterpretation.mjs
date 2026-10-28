@@ -347,23 +347,44 @@ export function computeStaleCache(input) {
       ? Math.max(0, input.now - input.lastCompleted)
       : 0;
   const tokens = Math.max(0, Math.round(input.cachedTokens));
+  const lastCompleted = input.lastCompleted ?? null;
+  const staleAt = computeStaleAt({
+    lastCompleted,
+    ttlMs: input.ttlMs,
+    cachedTokens: tokens,
+    running: input.running,
+    minCacheTokens: min,
+  });
   // Never report stale while a turn is running — the cache is being actively
   // touched (writes count as touches) and a "/clear to save" suggestion is
   // meaningless until the turn ends.
   if (input.running) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs, lastCompleted, staleAt };
   }
   // Need a completed turn to know when staleness started; need real cached
   // tokens to make the warning actionable.
   if (input.lastCompleted == null || tokens < min) {
-    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs };
+    return { isStale: false, idleMs, staleTokens: tokens, ttlMs: input.ttlMs, lastCompleted, staleAt };
   }
   return {
     isStale: idleMs >= input.ttlMs,
     idleMs,
     staleTokens: tokens,
     ttlMs: input.ttlMs,
+    lastCompleted,
+    staleAt,
   };
+}
+
+// The epoch-ms instant the prompt cache goes cold, or null when there is nothing
+// to warn about (a turn is running, no turn has finished, or too few cached
+// tokens). The box computes the INSTANT; a client compares it to its own clock so
+// the warning flips at the right time without a new frame (WS11 D2 / audit T21).
+export function computeStaleAt({ lastCompleted, ttlMs, cachedTokens, running, minCacheTokens }) {
+  const min = minCacheTokens ?? STALE_CACHE_MIN_TOKENS;
+  const tokens = Math.max(0, Math.round(cachedTokens ?? 0));
+  if (running || lastCompleted == null || tokens < min) return null;
+  return lastCompleted + ttlMs;
 }
 
 // ===== Context window breakdown =====

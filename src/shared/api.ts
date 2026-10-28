@@ -1,5 +1,7 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
+  StreamCachePayload,
+  StreamContextPayload,
   AgentFileReady,
   ModelsTableResult,
   ModelsWriteReply,
@@ -1212,6 +1214,10 @@ export interface Api {
   opencodeMessages(sessionId: string, opts?: { limit?: number }): Promise<OpencodeMessage[]>;
   // Single-message fetch — returns null on miss so callers can fall back.
   opencodeMessage(sessionId: string, messageId: string): Promise<OpencodeMessage | null>;
+  /** The box's context breakdown for an idle session (null before a billed turn). */
+  opencodeContext(sessionId: string): Promise<StreamContextPayload | null>;
+  /** The box's cache-staleness payload for an idle session (null before a completed turn). */
+  opencodeCache(sessionId: string): Promise<StreamCachePayload | null>;
   // Open/close the scoped SSE stream for a session. ChatPanel calls open on
   // mount and close on unmount so the main process only streams open
   // sessions.

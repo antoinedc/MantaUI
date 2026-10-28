@@ -29,6 +29,9 @@ export const DELETED = [
   { scopes: ["swift", "swiftTests"], regex: /\bArtifactsCapability\b/, why: "D1: the wave-B artifacts classifier is folded into BoxCapabilities.isUnknownChannel" },
   { scopes: ["swift", "swiftTests"], regex: /\bModelsCapability\.isUnsupported\b|static func isUnsupported\(/, why: "D1: the wave-B models classifier is folded into BoxCapabilities.isUnknownChannel" },
   { scopes: ["renderer"], regex: /src\/renderer\/boxCapabilities|from ["']\.\.?\/boxCapabilities["']/, why: "D1: useBoxCapability (hooks/useBoxCapabilities.ts) is THE desktop accessor — no second module" },
+  // D2 — the stale-cache instant and the context percentage come from the box.
+  { scopes: ["renderer"], regex: /\b(computeStaleCache|computeContextBreakdown|resolveContextLimit|selectLastAssistantCompletion)\(/, why: "D2: the box sends `cache.staleAt` and a `context` measured against the selected model — no client recompute" },
+  { scopes: ["swift", "swiftTests"], regex: /static func recompute\(_ ctx: StreamContextPayload|UsageMeters\.recompute\(/, why: "D2: iOS shows the box's context payload as sent (UsageMeters.recompute is deleted)" },
 ];
 
 function* walk(dir, recursive) {

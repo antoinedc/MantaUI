@@ -309,6 +309,17 @@ struct StreamContextPayload: Codable, Equatable, Sendable {
     var pct: Double
     var hasLimit: Bool
     var segments: [StreamContextSegment]
+    // WS11 D2: the box measures against the session's SELECTED model. Absent on an
+    // older box (decode-if-present).
+    var limit: Double? = nil
+    var model: StreamContextModel? = nil
+    var basis: String? = nil
+}
+
+/// `context.model` — the model the percentage is measured against.
+struct StreamContextModel: Codable, Equatable, Sendable {
+    var providerID: String
+    var modelID: String
 }
 
 /// `sub: "cache"` — computeStaleCache output.
@@ -317,6 +328,10 @@ struct StreamCachePayload: Codable, Equatable, Sendable {
     var idleMs: Double
     var staleTokens: Double
     var ttlMs: Double
+    // WS11 D2: `staleAt` is the epoch-ms instant the cache goes cold (nil = nothing
+    // to warn about, or an older box); the client compares it with its own clock.
+    var lastCompleted: Double? = nil
+    var staleAt: Double? = nil
 }
 
 /// `sub: "todos"` — selectActiveTodos + selectVisibleTodos output.

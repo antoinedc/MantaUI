@@ -28,6 +28,9 @@ export const BOX_CAPABILITIES = Object.freeze([
   "forge-diff-view-1",
   "forge-inbox-view-1",
   "forge-messages-1",
+  // WS11 D2 (stale-cache instant, context against the selected model)
+  "cache-stale-at-1",
+  "context-selected-model-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;
