@@ -181,7 +181,11 @@ final class GitForgeStoreTests: XCTestCase {
         // the new branch's preview is fetched while the sheet is open.
         await store.refreshNow()
         XCTAssertEqual(store.state.branch, "feat/b")
-        try await waitUntil { store.shipPreview.key?.branch == "feat/b" }
+        // Wait for the new branch's preview to LAND, not just start loading: the
+        // loading state is set before the fetch reaches the box.
+        try await waitUntil {
+            store.shipPreview.key?.branch == "feat/b" && store.shipPreview.canCreate(current: store.currentShipKey)
+        }
         let previews = await box.previewCwds
         XCTAssertEqual(previews.count, 2)
     }
