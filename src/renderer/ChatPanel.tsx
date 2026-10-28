@@ -150,7 +150,8 @@ function buildHelpText(): string {
     "  shift+⏎         newline",
     "  esc             interrupt while running",
     "  ctrl+o          toggle reasoning / verbose tool output",
-    "  @               file or agent mention typeahead",
+    "  @               file / reference mention typeahead",
+    "  @@              agent mention typeahead",
     "  drag-drop       attach files",
   ];
   return lines.join("\n");

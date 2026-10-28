@@ -603,6 +603,49 @@ export function filterCommands<T extends TypeaheadCommandRow>(
   return commands.filter((c) => c.name.toLowerCase().includes(q));
 }
 
+/** What the composer's typeahead popup should open for, before UI state is added. */
+export type TypeaheadTrigger = {
+  mode: "file" | "agent" | "command";
+  query: string;
+  anchorStart: number;
+  anchorEnd: number;
+};
+
+/**
+ * Decide which typeahead (if any) the text/caret should open.
+ *
+ *   /<word>   at byte 0, caret inside that first word  → command (query = the
+ *             whole first word, not just the text before the caret)
+ *   @<token>  token starts at BOF or after whitespace   → file / reference
+ *   @@<token> same position                             → agent mention
+ *
+ * The decision keys off the token's LEADING characters (the run of
+ * non-whitespace ending at the caret), not the last `@` before the caret — in
+ * `@@x` the last `@` follows another `@`, which used to make the agent popup
+ * unreachable. A further `@` inside the query (`@foo@bar`, `@@@`) or a token
+ * that does not start with `@` (`a@b`) opens nothing. The anchor slice runs to
+ * the end of the token so selecting replaces the whole word.
+ */
+export function detectTypeaheadTrigger(text: string, caretPos: number): TypeaheadTrigger | null {
+  const caret = Math.max(0, Math.min(caretPos, text.length));
+  if (text.startsWith("/")) {
+    const m = /^\/([\w-]*)/.exec(text);
+    if (m && caret <= m[0].length) {
+      return { mode: "command", query: m[1], anchorStart: 0, anchorEnd: m[0].length };
+    }
+  }
+  let start = caret;
+  while (start > 0 && !/\s/.test(text[start - 1])) start--;
+  const typed = text.slice(start, caret);
+  if (!typed.startsWith("@")) return null;
+  const agent = typed.startsWith("@@");
+  const query = typed.slice(agent ? 2 : 1);
+  if (query.includes("@")) return null;
+  let end = caret;
+  while (end < text.length && !/\s/.test(text[end])) end++;
+  return { mode: agent ? "agent" : "file", query, anchorStart: start, anchorEnd: end };
+}
+
 /**
  * Deduplicate opencode commands against a set of builtin names so we never
  * show two entries for the same command name.
