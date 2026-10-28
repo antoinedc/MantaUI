@@ -1,6 +1,8 @@
 # WS10 — Settings, extensions, box, updates, upgrade actions, pairing
 
-Status: draft · Date: 2026-10-28 · Parent: `00-master.md` · Wave: **A**
+Status: revised (round 1) · Date: 2026-10-28 · Parent: `00-master.md` · Wave: **A**
+(F11 references screen and F12 launch-options screen start after WS03/WS04's
+provider members have merged inside wave A — see "Client members").
 
 Scope: settings the desktop has and iOS does not, the Extensions section, the
 Box section (add a device, linked devices, remove server, restart opencode),
@@ -78,6 +80,41 @@ and 187 that use `serverUrlMobile` switch to `themeMobile`; add a case that
 both platforms. (`scripts/gen-swift-settings.test.mjs` uses its own sample
 schema — untouched.)
 
+### 0.2 Commit path for box-config settings (applies to EVERY config-driven row)
+
+Today `MantaSettingsStore.commit` (`MantaSettingsStore.swift:113-127`) writes
+the new value into `values` BEFORE the request and only sets `lastError` on
+failure, so a rejected save leaves the screen showing a value the box never
+stored. WS10 fixes `commit` itself (owned file), so F1, F5 and every existing
+toggle / segmented / text row become failure-safe:
+
+- `values` holds only **confirmed** values (loaded or saved).
+- New `@Published private(set) var pending: [String: SettingValue]` holds the
+  value being saved; `current(_:)` returns `pending[id] ?? values[id] ?? default`
+  (so the control moves immediately).
+- New `@Published private(set) var saving: Set<String>`.
+- `@discardableResult func commit(_ entry: SettingEntry, _ value: SettingValue) async -> Bool`:
+  - device-local entry → persist to UserDefaults, set `values`, return `true`
+    (unchanged behaviour);
+  - config entry already in `saving` → return `false` (rows are disabled while
+    saving, so this is a guard, not a UX path);
+  - otherwise insert into `saving`, set `pending`, `await configuration.update`;
+    success → `values[id] = coerced`, `lastError = nil`; failure → keep the old
+    confirmed value, `lastError = "Couldn't save \(entry.label)."`; always
+    remove `pending[id]` and `saving`.
+  Writes are therefore serialized per entry; there is no stale-response race.
+- `SettingsScreen` rows call it inside `Task { await store.commit(...) }`,
+  render `.disabled(store.saving.contains(entry.id))`, and show a small
+  `ProgressView` trailing the label while saving. `lastError` is published today
+  but **never rendered** (`SettingsScreen.swift` has no reference to it — a
+  silent failure); WS10 adds a danger-toned banner under the search field that
+  shows `store.lastError` (also covers load/reset/restore failures), with a ×
+  that calls new `store.clearError()`. It clears on the next successful save.
+- `setBool` (chat trust toggle, BET-748) is unchanged.
+- Reset / undo keep their current optimistic batch write (out of scope).
+
+Tests: §T1 (injected failing/succeeding `SettingsConfigurationStore`).
+
 ---
 
 ## Features
@@ -99,8 +136,8 @@ defaults `false`, `src/server/local.mjs` `DEFAULT_CONFIG`). Write:
 
 **iOS.** Flip both entries to `platform: "both"`; they render automatically in
 the Sessions section through the existing generic toggle row
-(`SettingsScreen.toggleRow`) and persist through `MantaSettingsStore.commit` →
-`config:update`. No new Swift view.
+(`SettingsScreen.toggleRow`) and persist through the awaited, serialized
+`MantaSettingsStore.commit` of §0.2 → `config:update`. No new Swift view.
 
 **Contract to WS04 (consumed there):** WS04's create flow pre-selects "own
 worktree" from `config["worktreePerSession"] == true`, and its close flow runs
@@ -112,8 +149,9 @@ already change desktop behaviour (shared config) — not dead.
 **Acceptance**
 - Both toggles appear under Sessions on iOS, reflect the box value on open, and
   a change is visible on the desktop's Settings after its next config read.
-- A failed save shows the existing `lastError` text; the toggle does not stay
-  in a state the box rejected (see §F5 note on `commit`).
+- While saving the toggle is disabled with a spinner; a failed save returns the
+  toggle to the last confirmed value and shows "Couldn't save <label>." in the
+  error banner (§0.2). Proven by §T1 tests with an injected failing store.
 
 ### F2. "Auto-save files the AI sends" — **excluded** (see Deferred D1)
 
@@ -135,18 +173,22 @@ Stored by `MantaSettingsStore` in UserDefaults under its existing device-local
 key format `manta.settings.local.themeMobile` (`MantaSettingsStore.deviceStorageKey`).
 
 **iOS design.**
-- New pure type in `SettingsAppearance.swift`:
+- New pure, Foundation-only type in `SettingsAppearance.swift` (goes in
+  `Package.swift` per D19):
   ```swift
+  enum ThemePreference: String, Sendable { case system, light, dark }
   enum SettingsAppearance {
     static let storageKey = "manta.settings.local.themeMobile"   // must equal MantaSettingsStore's key for entry "themeMobile"
     static let systemValue = "system"
-    static func colorScheme(for stored: String?) -> ColorScheme?  // "light"→.light, "dark"→.dark, anything else→nil (follow system)
+    static func preference(for stored: String?) -> ThemePreference  // "light"/"dark" → that; anything else → .system
   }
   ```
-- `SettingsScreen` applies `.preferredColorScheme(SettingsAppearance.colorScheme(for: themePref))`
+  and, in the SwiftUI file `SettingsAppearanceView.swift`:
+  `extension ThemePreference { var colorScheme: ColorScheme? }` (.system → nil).
+- `SettingsScreen` applies `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)`
   on its own `NavigationStack` (via `@AppStorage(SettingsAppearance.storageKey)`)
   so the change is visible the instant the user taps it.
-- App-wide application is a **mount request** in `MantaAppRoot.swift` (M1).
+- App-wide application is mount **M-10-1** in `MantaAppRoot.swift`.
 - Renders through the generic segmented row; no custom view.
 
 **Acceptance**
@@ -170,11 +212,11 @@ merges any key, `local.mjs configUpdate`).
 **iOS design.** New schema entry `hapticsEnabled` (§0.1) renders as the generic
 toggle in General. To keep ONE writer per key and keep the session list's
 in-memory copy fresh:
-- The toggle row for `hapticsEnabled` uses `try await store.setBool(entry, v)`
-  (the awaiting path, `MantaSettingsStore.swift` `setBool`) instead of
-  `commit`; on success it calls `sessionStore.loadConfig()`
-  (`@EnvironmentObject SessionListStore` — available inside the full-screen
-  cover); on failure it reverts the switch and shows "Couldn't save Haptics."
+- The toggle row for `hapticsEnabled` uses the awaited `commit` of §0.2 like
+  every other row; when it returns `true` the screen calls
+  `sessionStore.loadConfig()` (`@EnvironmentObject SessionListStore` —
+  available inside the full-screen cover); a `false` return leaves the
+  confirmed value and the "Couldn't save Haptics." banner.
 - `SettingsScreen` also calls `sessionStore.loadConfig()` in `.onDisappear`, so
   a reset/undo of `hapticsEnabled` or `cacheTtl` reaches the session list.
 - When turned on, play one `UISelectionFeedbackGenerator` tick as confirmation.
@@ -205,21 +247,32 @@ and are never affected." Restore → toast with server `message` (default
   (`src/shared/api.ts:253-283`, handler `rpc.mjs:1177`). Read-only.
 - `tmux:restore-topology` (no args) → `{ok, error?, created, failed, skipped?, windows?, failures?, message?}`
   (`api.ts:290`, handler `rpc.mjs:1202`).
-- A failed preview → render no status line (desktop rule: never assert "No
-  backup yet" from an error).
+- A successful `{available:false}` answer is "No backup yet"; a FAILED request
+  is a different state (the desktop swallows it into null,
+  `Settings.tsx:632-640` — iOS does not copy that silence).
 
 **iOS design.** Anchor `backupMobile` → NavigationLink row "Restore windows" →
-`SettingsBackupScreen.swift`. Screen: intro copy; status line; primary button
-"Restore windows" (disabled + footnote "Every saved window is already open."
-when `restorable == 0`; hidden when `available == false`); after restore an
-inline result banner with the server `message` (ok tone) or the error (danger
-tone), then re-preview and `await sessionStore.refresh()` so the list shows
-the restored windows. Loading: `MantaLoader` inline while previewing.
+`SettingsBackupScreen.swift`, driven by a pure state
+`BackupPreviewState = .loading | .loaded(TopologyRestorePreview) | .failed(String)`:
+- `.loading` → inline `MantaLoader`, no button.
+- `.loaded` → intro copy; status line; primary "Restore windows" (disabled +
+  footnote "Every saved window is already open." when `restorable == 0`;
+  hidden when `available == false`).
+- `.failed(msg)` → "Couldn't load the saved window layout. <msg>" (danger tone)
+  + "Try again" (re-runs the preview). Restore is **hidden** — never offered
+  without a successful preview. This applies equally to a refresh that fails
+  after an earlier success (the old preview is discarded, not shown stale).
+- After a restore: inline result banner with the server `message` (ok tone) or
+  "Couldn't restore your windows. <error>" (danger), then re-preview and
+  `await sessionStore.refresh()` so the list shows the restored windows.
+  The button shows a spinner and is disabled while restoring.
 
-**Pure logic** (`SettingsBackupModels.swift`, `enum BackupSummary`):
+**Pure logic** (`SettingsBackupModels.swift`, Foundation-only, `enum BackupSummary`):
 `windows(preview) = ops.count + skipped.count`,
 `projects(preview) = Set((ops+skipped).map(\.tmuxSession)).count`,
-`statusLine(preview, now:)` → the exact strings above.
+`statusLine(preview)` → the exact strings above (date via an injected
+formatter), `showsRestore(state) -> Bool` (true only for `.loaded` with
+`available`), `restoreEnabled(state) -> Bool`.
 
 **Acceptance:** matches desktop strings; restore outcome always shown; button
 disabled while restoring (spinner).
@@ -265,7 +318,23 @@ toast: "Disconnected GitHub. Your gh CLI is untouched — Manta will ignore it
 until you reconnect." / "Couldn't disconnect GitHub. <error>".
 
 **Wire.**
-- `forge:status` args `[{"validate": true}]` → `{connected: true, login: String|null, kind: "github", source: "cli"|"env"|"stored"|null, valid: Bool|null}` or `{connected: false}` (`types.ts:622`, `rpc.mjs:952`).
+- `forge:status` → `{connected: true, login: String|null, kind: "github", source: "cli"|"env"|"stored"|null, valid: Bool|null}` or `{connected: false}` (`types.ts:622`, `rpc.mjs:952`). The handler validates against GitHub only when `input.validate === true`.
+  **Single owner (D16): WS10** defines, in `MantaAPIClient+Settings.swift`,
+  `func forgeStatus(validate: Bool) async throws -> ForgeConnectionStatus`
+  (args `[["validate": validate]]`) and the wire type in `SettingsWireModels.swift`:
+  ```swift
+  struct ForgeConnectionStatus: Decodable, Equatable, Sendable {
+    var connected: Bool
+    var login: String?        // only when connected
+    var kind: String?         // "github"
+    var source: String?       // "cli" | "env" | "stored" | nil
+    var valid: Bool?          // nil = not probed
+  }
+  ```
+  Settings calls `forgeStatus(validate: true)` (desktop parity,
+  `Settings.tsx:853`). WS05 consumes this exact member/type (its chat-side
+  refresh uses `validate: false`, matching desktop `ChatPanel.tsx:1055` which passes
+  no input) and declares no `forgeStatus` / `GitForgeStatus` of its own.
 - `forge:rules-list` (no args) → `[{repoKey, valid, error?, ruleCount?}]` (`rpc.mjs:965`).
 - `forge:disconnect` (no args) → `{ok: true}` (`rpc.mjs:981`).
 - `config:get` `forgeRulesEnabled` (Bool, absent = false); `config:update` `[{"forgeRulesEnabled": Bool}]`.
@@ -328,6 +397,13 @@ repository — e.g. ../docs or owner/repo" / "optional description"; "Add"
 - `opencode:references` (no args) → `[{name, path?, repository?, branch?, description?, hidden?}]` (`opencode.mjs:2931`, `rpc.mjs:1992`).
 - `opencode:set-references` args `[{"upsert": [{alias, path | repository, description?}]}]` → `{ok: true}` or `{ok: false, error}` (`providers.mjs:705`, `rpc.mjs:1998`). Hot-applies (config edit + reload, no restart).
 
+**Client members (D16).** The read is **WS03's** member
+`references() async throws -> [OpencodeReferenceInfo]` (`03-composer.md` F4,
+`MantaAPIClient+Composer.swift`) — WS10 does not add a second
+reader. The write `opencodeSetReferences(upsert:)` is WS10's (no other spec
+writes references). Prerequisite: WS03's commit defining `references()` /
+`OpencodeReferenceInfo` has merged before this screen is built.
+
 **iOS design.** Anchor `referencesMobile` → `ExtensionsReferencesScreen.swift`:
 list + a Form section "Add a reference" with the three fields, inline field
 errors (desktop strings), "Add" button with spinner; success clears the form,
@@ -338,7 +414,8 @@ refetches, shows "Reference added"; failure shows "Couldn't add reference:
 `ExtensionsReferences.validateAlias(_:) -> String?`,
 `ExtensionsReferences.classifyTarget(_:) -> Kind (.path | .repository)`,
 `ExtensionsReferences.upsertPayload(alias:target:description:) -> [String: Any]`,
-`ExtensionsReferences.displayTarget(_ ref) -> String`.
+`ExtensionsReferences.displayTarget(name:path:repository:branch:) -> String`
+(takes plain fields so the helper stays independent of WS03's type).
 
 ### F12. CLI launch options
 
@@ -355,13 +432,25 @@ flag." on failure.
 (`launchers.mjs:37`, `rpc.mjs:2645`). Config key `launcherFlags`:
 `{[launcherId]: {[flagKey]: Bool}}`; `config:update [{"launcherFlags": {...}}]`.
 
+**Client members (D16).** The read is **WS04's** member `launchers()` returning
+`[SessionLauncher]` (with `[SessionLauncherFlag]`), and the value rule is
+WS04's `SessionLauncherFlags.resolve(schema:saved:)` (`04-sessions.md` §2,
+`SessionForgeModels.swift`). WS10 adds neither a `launchers:list` reader nor a
+second resolver. Prerequisite: WS04's commit defining those has merged.
+WS04 also reads `launcherFlags` in `SessionListStore.loadConfig`; Settings
+calls `sessionStore.loadConfig()` on disappear (F5) so a change reaches it.
+
 **iOS design.** Anchor `launcherFlagsMobile` → `ExtensionsLaunchersScreen.swift`:
 one `Section` per launcher with flags, a `Toggle` per flag. Empty: "No AI CLI
-with launch options is installed on your box." Errors as desktop.
+with launch options is installed on your box." Each flag write is awaited and
+serialized (all toggles disabled while one save runs); failure reverts and
+shows "Couldn't save launcher flag." Load failure: "Couldn't load the AI CLIs on
+your box. <error>" + "Try again".
 
-**Pure:** `ExtensionsLaunchers.resolve(schema:saved:)`,
-`ExtensionsLaunchers.update(launchers:launcherID:flagKey:checked:prev:)` — exact
-ports.
+**Pure:** `ExtensionsLaunchers.update(flags:launcherID:flagKey:checked:prev:)`
+— port of `updateLauncherFlag`; takes the launcher's flag schema as
+`[(key: String, default: Bool)]` and calls the same resolution rule (saved ??
+default) so it is testable without WS04's types.
 
 ### F13. Box status card (replaces the dead "Server URL" field)
 
@@ -406,13 +495,26 @@ is loopback-only and must NOT be used).
 - QR rendered natively with CoreImage (`CIFilter.qrCodeGenerator()`, correction
   level "M", nearest-neighbour scaled, white quiet zone) in a new
   `BoxPairingQR.swift`.
-- Below: "Code" + six digits (monospace, large), "Server ID" + boxId
-  (monospace, selectable), countdown pill (`TimelineView(.periodic(every: 1))`),
-  "Refresh code" button (spinner "Refreshing…").
+- Below: "Code" + six digits (monospace, large), **"Server address"** + the
+  value from `BoxPairing.manualAddress(boxId:connectedServerUrl:)` (monospace,
+  selectable, with a "Copy" button → `UIPasteboard`, then "Copied"), "Server
+  ID" + boxId (monospace, selectable), countdown pill
+  (`TimelineView(.periodic(every: 1))`), "Refresh code" button (spinner
+  "Refreshing…").
+  `manualAddress` returns the phone's own normalized connected URL
+  (`KeychainCredentialStore.shared.serverUrl` through
+  `MantaPairing.normalizeServerURL`) — the address this phone actually reaches
+  the box at. So on a Tailscale/private box (where the Server ID's derived
+  `https://<id>.boxes.mantaui.com` does not exist, `pairPanel.ts:46-74`) the
+  visible address is the private one, and it is exactly what F21's "Server
+  address" field accepts. When the connected URL is missing it falls back to
+  `MantaPairing.boxDirectURL(boxId)`.
 - Auto-rotate: when `now >= expiresAt` while visible, mint again (guarded so
   only one mint is in flight).
-- Footer: "Prefer to type it? On the other device choose Enter a code and type
-  the six digits and this server's address."
+- Footer: "Prefer to type it? On the other device open Manual Setup and type
+  the six digits and the server address above."
+- Acceptance case: on a Tailscale box, a second phone pairs via Manual Setup
+  using only the Code and Server address visible on this screen.
 - `UIApplication.shared.isIdleTimerDisabled = true` while the screen is up (so
   the code stays on screen while someone scans), restored on disappear.
 - Error: "Couldn't create a pairing code. <error>" + "Try again".
@@ -421,6 +523,7 @@ is loopback-only and must NOT be used).
 `universalLink(boxId:code:serverUrl:) -> String` (exact port of
 `buildUniversalPairLink`, encoding with `.urlQueryAllowed` minus `&=+/:`— must
 round-trip through `MantaPairing.parsePairPayload`),
+`manualAddress(boxId:connectedServerUrl:) -> String?`,
 `qrServerOverride(boxId:configured:) -> String?` (port of
 `resolveQrServerOverride`, using `MantaPairing.boxDirectURL`,
 `normalizeServerURL`, `isPrivateServerURL`), `shouldRefresh(expiresAt:now:)`,
@@ -438,36 +541,48 @@ with NO `device_id` (`src/main/unpair.ts`) — which on the server is the
 **whole-box reset** (`auth.mjs:578` revoke: mints a new identity, drops EVERY
 device). That is Electron-local and far too destructive for a phone.
 
-**iOS design — revoke only this phone.**
-1. Confirmation dialog "Remove this server?" / "This phone forgets the box and
-   signs itself out of it. Your desktop and other devices stay connected. To
-   use this box again you'll need a new pairing code." Destructive button
-   "Remove".
-2. `GET /auth/devices` (with the **new** `current` flag, §S1) → find the row
-   with `current == true`.
-3. If found and `primary == false` → `DELETE /auth/revoke?device_id=<id>` with
-   the phone's bearer.
-4. Always (even if 2/3 failed): `UIApplication.shared.unregisterForRemoteNotifications()`
-   (the box's push fan-out prunes the dead APNs token on its next send),
-   `KeychainCredentialStore.shared.delete()`, `PendingPromptStore` untouched,
-   then post `Notification.Name.mantaBoxRemoved` (new, declared in
-   `BoxRemoval.swift`) — `MantaAppRoot` returns to onboarding (mount M2).
-5. Outcome copy (shown on the onboarding entry screen is not possible, so shown
-   BEFORE leaving, as the dialog's follow-up alert only when remote revoke did
-   not happen): "Removed from this phone. The box couldn't be reached, so it
-   still lists this phone — revoke it from Linked devices on another device."
-   (unreachable / 5xx), or "Removed from this phone. This phone shared the
-   desktop's pairing, so the box keeps it — remove it from the desktop if you
-   want it revoked." (`primary == true`), or the same "couldn't be reached"
-   text when no `current` row was returned (old box). Success path: no alert,
-   straight to onboarding.
+**iOS design — revoke only this phone, as a state machine.**
+
+The flow is a pure reducer `BoxRemovalFlow` (`BoxDevicesModels.swift`,
+Foundation-only) driven by `SettingsBoxRemovalStore` (`@MainActor final class`,
+in `BoxRemovalStore.swift`, which performs the I/O):
+
+| state | entered when | UI | next |
+|---|---|---|---|
+| `.confirming` | "Remove server" tapped | confirmation dialog "Remove this server?" / "This phone forgets the box and signs itself out of it. Your desktop and other devices stay connected. To use this box again you'll need a new pairing code." / destructive "Remove" | Remove → `.revoking`; Cancel → `.idle` |
+| `.revoking` | Remove | row spinner "Removing…", all Box rows disabled | `GET /auth/devices` → `BoxRemoval.plan(devices:)`; `.revoke(id)` → `DELETE /auth/revoke?device_id=<id>`; result recorded as `remote: RemoteRevokeResult` (`.revoked`, `.alreadySignedOut` (401 on either call, or 404 on DELETE), `.sharedPairing` (current row is primary — no DELETE), `.unknownDevice` (no `current` row — old box — no DELETE), `.unreachable(String)` (transport / 5xx / 429)) → `.deletingLocal` |
+| `.deletingLocal` | remote step finished (whatever its result) | same spinner | `KeychainCredentialStore.shared.delete()` succeeds → `.warning(msg)` if `BoxRemoval.message(remote)` is non-nil, else `.leaving`; throws → `.localDeleteFailed(remote, error)` |
+| `.localDeleteFailed` | Keychain delete threw (`KeychainCredentialStore.swift:66-70`) | alert "Couldn't remove this box from this phone" / "The box sign-in is still saved on this phone (<error>). Nothing else changed on this phone." buttons "Try again" (→ `.deletingLocal`, **re-runs only the local delete; never repeats the remote revoke**) and "Cancel" (→ `.idle`; the app stays paired — if the remote revoke already happened, the next request 401s and the existing sign-in-again handling applies) | |
+| `.warning(msg)` | local delete succeeded and the remote step did not revoke | alert with `msg`, single "OK" | OK → `.leaving` |
+| `.leaving` | — | — | post `Notification.Name.mantaBoxRemoved` (declared in `BoxDevicesModels.swift`); `MantaAppRoot` returns to onboarding (mount **M-10-2**). Terminal. |
+
+Ordering guarantee: the root transition happens **only** after the Keychain
+delete succeeded **and** any warning was acknowledged — so a relaunch never
+resurrects a "removed" pairing, and the warning is never lost.
+
+Warning texts (`BoxRemoval.message(remote)`; `.revoked` and
+`.alreadySignedOut` → nil):
+- `.unreachable` / `.unknownDevice`: "Removed from this phone. The box couldn't confirm it signed this phone out, so it may still list it — revoke it from Linked devices on another device."
+- `.sharedPairing`: "Removed from this phone. This phone shared the desktop's pairing, so the box keeps it — remove it from the desktop if you want it revoked."
+
+The push limitation (D9 below) is stated, not hidden:
+the phone does NOT promise that notifications from this box stop. The confirm
+dialog's message gets a second paragraph: "Notifications this box already
+sends to this phone may keep arriving. To stop them now, turn off
+notifications for Manta in iOS Settings." No `unregisterForRemoteNotifications`
+call is made (it does not stop the box's sends — see D9 — and would interfere
+with the next pairing's registration).
 
 **Wire.**
 - `GET /auth/devices` → `{box_id, devices: [{device_id, name, last_seen (epoch ms), created_at (epoch ms), primary: Bool, current: Bool /*NEW*/}]}` (`index.mjs:4130`). 401 → token already dead → treat as "already signed out", proceed locally.
 - `DELETE /auth/revoke?device_id=<id>` (Bearer) → 200 `{ok: true, box_id, device_id, reset: false}`; 404 `{error:"device not found"}`; 401; 429 (rate limited, `/auth/*` limiter) (`index.mjs:3955`). **Never** call it without `device_id` from iOS.
 
-**Pure** (`BoxDevicesModels.swift`): `BoxRemoval.plan(devices:) -> .revoke(deviceID) | .localOnlyShared | .localOnlyUnknown`,
-`BoxRemoval.message(plan:, remoteResult:) -> String?`.
+**Pure** (`BoxDevicesModels.swift`): `BoxRemoval.plan(devices:) -> .revoke(deviceID) | .sharedPairing | .unknownDevice`,
+`BoxRemoval.classify(status:Int?, transportError:Bool) -> RemoteRevokeResult`,
+`BoxRemoval.message(_ remote: RemoteRevokeResult) -> String?`,
+`BoxRemovalFlow.reduce(state, event) -> state` (events: `remove`, `cancel`,
+`remoteFinished(RemoteRevokeResult)`, `localDeleted`, `localDeleteFailed(String)`,
+`retryLocal`, `acknowledge`).
 
 ### F16. Restart opencode
 
@@ -488,6 +603,11 @@ under the row — "opencode restarted." (ok tone) or "Restart failed: <error>"
 (danger). The same action (shared `SettingsOpencodeRestart` helper) backs the
 registries banner (F10).
 
+Client member: `opencodeRestart() async throws -> OkResult` is **owned by
+WS10** (D16) and **consumed by WS08** (`08-accounts.md:534,988,1026`; WS08
+dropped its own `providerRestartOpencode()`). Wave-A order: WS10 → WS08. The
+signature and `OkResult { ok: Bool; error: String? }` are frozen by this spec.
+
 ### F17. Linked devices + revoke
 
 **Desktop today.** No UI (the route exists for "the desktop (Stage 5) and any
@@ -502,7 +622,11 @@ List sorted: this phone first, then by `last_seen` desc. Row: name, badges
 <relative>" (`RelativeDateTimeFormatter`, "just now" under 60 s) · "Linked
 <date>". Swipe action + context menu "Revoke" on rows that are neither current
 nor primary → confirmation "Revoke <name>?" / "It's signed out right away and
-needs a new pairing code to come back." → `DELETE`. Success: row removed +
+needs a new pairing code to come back. It may still receive notifications from
+this box until notifications are turned off on that device." → `DELETE`.
+(Revocation removes the device's bearer only; APNs tokens are stored without a
+device association and every stored token receives every push —
+`push.mjs:96-130,769-798` — see D9.) Success: row removed +
 "Revoked <name>." footer; 404: refetch + "That device was already removed.";
 other failure: "Couldn't revoke <name>. <error>". Current row: no revoke, footer
 hint "To sign this phone out, use Remove server." Primary row: no revoke, hint
@@ -538,6 +662,40 @@ without a confirm (`App.tsx` `runCliUpdate`), then re-check.
 - `server:cli-update` args `[{"cliId": "<id>"}]` → `{ok, before?, after?, changed?, error?}`, never throws (`rpc.mjs:1937`).
 - `server:version` (F13) for the landed check.
 
+**Status-preserving transport for the apply call (fixes the lost-status
+problem).** `MantaAPIClient`'s private RPC transport keeps only 401 and the
+503-upgrade signal and then JSON-parses the body (`MantaAPIClient.swift:923-937,
+984-1000`), so an HTML 502 from Caddy/Cloudflare during the box restart becomes
+a decode error, indistinguishable from a real failure. WS10 therefore does NOT
+use `call` for `server:update-apply`; `BoxRESTClient.rpcRaw(channel:args:)`
+(WS10 file, see Client members) POSTs `/rpc/server:update-apply` with body
+`{"args": []}` and the bearer, 30 s timeout, and returns
+`RawRPCResponse { status: Int?, body: Data, transportError: URLError? }`
+without interpreting it. No edit to `MantaAPIClient.swift` is needed (so no
+C1 foundation mount).
+
+`UpdateApplyClassifier.classify(_ r: RawRPCResponse) -> ApplyOutcome`
+(pure, `SettingsUpdatesModels.swift`), the port of
+`isTransientUpdateNetworkError` (`chatUtils.ts:1384-1410`) plus the RPC envelope
+(`rpc.mjs:2700-2712`: 200 `{result}` / 500 `{error}`):
+
+| input | outcome |
+|---|---|
+| `transportError` code ∈ {`.networkConnectionLost`, `.cannotConnectToHost`, `.timedOut`, `.notConnectedToInternet`, `.cannotFindHost`, `.dnsLookupFailed`, `.cancelled`} | `.restartLikely` |
+| any other `transportError` | `.failed(localizedDescription)` |
+| status 401 | `.authRequired` |
+| status 503 and `UpgradePresentation.isUpgradeRefusal(503, body)` | `.upgrading` |
+| status ∈ {502, 503, 504, 521, 522, 524} (any body: HTML, text, JSON) | `.restartLikely` |
+| status 200, body `{"result": {"ok": true}}` | `.started` |
+| status 200, body `{"result": {"ok": false, "error": E}}` | `.failed(E ?? "Server update failed")` — includes `self-update: …` messages, never transient |
+| status 200, `result` missing/null or body not JSON | `.failed("The box sent an answer this app couldn't read.")` |
+| any other status with JSON `{"error": E}` | `.failed(E)` (e.g. ordinary 500 — box is up, genuine failure) |
+| any other status, non-JSON body | `.failed("HTTP <status>")` |
+
+`.restartLikely` and `.started` both enter the restarting wait; only a version
+change after reconnect ends it as success (`UpdateTargets.landed`), else the
+600 s cap.
+
 **iOS design.** Anchor `updatesMobile` → `SettingsUpdatesScreen.swift`, state in
 `SettingsUpdatesStore.swift` (`@MainActor final class`, created by the screen).
 - Top: "This app" `<CFBundleShortVersionString>` (informational — App Store /
@@ -552,9 +710,13 @@ without a confirm (`App.tsx` `runCliUpdate`), then re-check.
   Then: row spinner "Updating…"; while the event stream is not connected the
   row reads "Restarting the box…". On reconnect (`eventStore.connectionState`
   → connected) call `server:version`; if it differs from the version captured
-  at start → row "Updated to v<new>" (ok) and re-run the check. `{ok:false,
-  error}` → row error "<error>" + Update re-enabled. A thrown
-  `MantaError.transport` / `URLError` → treated as the restart (keep waiting).
+  at start → row "Updated to v<new>" (ok) and re-run the check. The apply
+  call's outcome is classified by `UpdateApplyClassifier` (below):
+  `.started` / `.restartLikely` → keep waiting; `.failed(msg)` → row error
+  "<msg>" + Update re-enabled; `.authRequired` → row error "Sign in again —
+  this phone's pairing was revoked."; `.upgrading` → row error "The box is
+  upgrading right now." (the upgrade overlay takes over via the existing
+  `.mantaBoxUpgrading` notification).
   600 s cap → "Couldn't confirm the update finished. Check again." and the row
   re-enables. Only one update in flight; every other Update button disabled.
 - CLI "Update" → no confirm (parity), row spinner, `{ok:false}` → row error,
@@ -564,10 +726,9 @@ without a confirm (`App.tsx` `runCliUpdate`), then re-check.
 
 **Pure** (`SettingsUpdatesModels.swift`): `UpdateTargets.build(check:serverVersion:)`,
 `UpdateTargets.describe(_:) -> (tone, text)`, `UpdateTargets.hasUpdate(_:)`,
-`UpdateTargets.landed(from:current:)`, `UpdateTargets.isTransient(_ error: Error) -> Bool`
-(URLError / `MantaError.transport` → true; `MantaError.server` containing
-"self-update:" → false), `UpdateFlow` reducer (idle → confirming → applying →
-restarting → done/failed/timedOut) driven by events (`applyResult`,
+`UpdateTargets.landed(from:current:)`, `UpdateApplyClassifier.classify(_:)`
+(table above), `UpdateFlow` reducer (idle → confirming → applying →
+restarting → done/failed/timedOut) driven by events (`applyOutcome(ApplyOutcome)`,
 `connection(Bool)`, `version(String)`, `tick(now)`).
 
 ### F19. Upgrade screen actions: Retry / Check again, Roll back, Copy details
@@ -657,25 +818,63 @@ URL.
 
 **Constraint.** A six-digit code alone cannot address a box: `/auth/claim`
 lives on each box's own host and no code→box resolver exists (gateway has no
-such route — `src/gateway/index.mjs`). §5.2.9's "the server resolves it" is
-unbuilt (Open question Q1).
+such route — `src/gateway/index.mjs`). Accepted deferral D8 (master): manual
+pairing becomes one "Server address" field + code.
 
 **iOS design.** Replace the Box ID field and the hidden URL field with ONE
-always-visible field **"Server address"** (placeholder "Server ID or URL from
-Add a phone"), help "Find it on your desktop under Settings → Box → Add a phone,
-or run `manta pair` on the box." It accepts: a bare 32-hex Server ID, a host
-(`<id>.boxes.mantaui.com`, a tailnet name, `100.x.y.z:8787`) or a full
-`http(s)://` URL. Prefilled from the Keychain's `serverUrl` on re-pair (today it
-prefills `boxId`). Order: six-digit code first, then Server address, then
-"Continue". Error: "Enter your server address — the Server ID or URL shown under
-Add a phone." `MantaOnboardingFlow.boxId`, `showAdvanced` are removed;
-`serverURL` stays.
+always-visible field **"Server address"** (placeholder "Server ID or address"),
+help "On your desktop: Settings → Box → Add a phone shows the Server ID. On
+another phone: Settings → Box → Add a device shows the server address. Or run
+`manta pair` on the box." Prefilled from the Keychain's `serverUrl` on re-pair
+(today it prefills `boxId`). Order: six-digit code first, then Server address,
+then "Continue" (enabled only when the code is six digits AND
+`resolveManualTarget` returns `.ok`). Errors are shown under the field from the
+`.invalid(reason)` result (texts below). `MantaOnboardingFlow.boxId` and
+`showAdvanced` are removed; `serverURL` stays.
 
-**Pure:** `MantaPairing.resolveManualTarget(_ raw: String) -> (serverUrl: String, boxId: String)?`:
-32-hex → `boxDirectURL`; scheme-less host → `https://` + host (then
-`normalizeServerURL`); URL → `normalizeServerURL`; boxId = the first DNS label
-when the host is `<32hex>.boxes.mantaui.com`, else "" (as today's disclosure
-path). Blank/garbage → nil.
+**Pure:** `MantaPairing.resolveManualTarget(_ raw: String) -> ManualTargetResult`
+where `enum ManualTargetResult: Equatable { case ok(serverUrl: String, boxId: String); case invalid(String) }`.
+Rules, in order:
+1. Trim surrounding whitespace. Empty → `.invalid("Enter your server address — the Server ID or address shown under Add a phone.")`.
+2. Any remaining whitespace → `.invalid("A server address can't contain spaces.")`.
+3. Exactly 32 hex chars (any case) → lowercase → `.ok("https://<id>.boxes.mantaui.com", boxId: id)`.
+4. No `://` present → prepend `https://`.
+5. Parse with `URLComponents`; failure → `.invalid("That isn't a valid server address.")`.
+6. Scheme (lowercased) must be `https` or `http`, else `.invalid("Use an https:// address.")`.
+7. `user`/`password` present, or `query` / `fragment` non-nil → `.invalid("That isn't a valid server address.")`.
+8. Host: lowercased, non-empty, only `[a-z0-9.-]`, no leading/trailing `.`, no
+   empty label (`..`). (Bracketed IPv6 is not accepted — not used by boxes.)
+   Else `.invalid("That isn't a valid server address.")`.
+9. Port: absent, or 1…65535; else `.invalid("The port must be between 1 and 65535.")`.
+10. `http` is allowed only when `MantaPairing.isPrivateServerURL` is true for the
+    result (loopback / RFC1918 / 100.64/10 / `.ts.net`), preserving explicit
+    HTTP for private listeners; a public `http` host →
+    `.invalid("Use https:// for an address reachable from the internet.")`.
+11. Path kept, trailing `/` stripped (reverse-proxy sub-paths keep working as
+    they do today).
+12. Output `serverUrl` = `<scheme>://<host>[:<port>]<path>`; `boxId` = the first
+    label when host matches `^[0-9a-f]{32}\.boxes\.mantaui\.com$`, else `""`
+    (as today's disclosure path).
+
+Exact test table (T10):
+
+| input | result |
+|---|---|
+| `""`, `"   "` | invalid (empty) |
+| `"0123ABCD0123abcd0123abcd0123abcd"` | ok `https://0123abcd0123abcd0123abcd0123abcd.boxes.mantaui.com`, box `0123abcd0123abcd0123abcd0123abcd` |
+| `"0123abcd0123abcd0123abcd0123abcd.boxes.mantaui.com"` | ok same URL, same box |
+| `"100.64.0.9:8787"` | ok `https://100.64.0.9:8787`, box `""` |
+| `"http://100.64.0.9:8787/"` | ok `http://100.64.0.9:8787`, box `""` |
+| `"http://box.tail1234.ts.net:8787"` | ok `http://box.tail1234.ts.net:8787` |
+| `"https://Box.Example.com/manta/"` | ok `https://box.example.com/manta` |
+| `"http://example.com"` | invalid (public http) |
+| `"ftp://example.com"` | invalid (scheme) |
+| `"https://user:pw@example.com"` | invalid |
+| `"https://example.com?x=1"`, `"https://example.com#f"` | invalid |
+| `"https://"`, `"https://.example.com"`, `"https://a..b"` | invalid (host) |
+| `"https://example.com:0"`, `"https://example.com:70000"` | invalid (rule 5 or 9 — test asserts `.invalid`, not the text) |
+| `"my box"` | invalid (spaces) |
+| `"https://exa_mple.com"` | invalid (host chars) |
 
 ### F22. Notification-denied reminder in Settings
 
@@ -695,9 +894,12 @@ automatically if the status later becomes authorized (so a future denial shows
 it again). Re-evaluated on appear and on `scenePhase == .active` (returning from
 iOS Settings). No reminder for `.authorized/.provisional/.ephemeral`.
 
-**Pure:** `NotificationReminder.shouldShow(status:dismissed:) -> Bool`,
-`NotificationReminder.action(status:) -> .openSettings | .request | nil`
-(status passed as a small local enum so tests need no UserNotifications).
+**Pure** (`SettingsNotificationModels.swift`, Foundation-only):
+`NotificationReminder.shouldShow(status:dismissed:) -> Bool`,
+`NotificationReminder.action(status:) -> .openSettings | .request | nil`,
+`NotificationReminder.dismissalAfter(status:dismissed:) -> Bool` (clears on
+authorized). Status is a local `enum ReminderAuthStatus` so tests need no
+UserNotifications.
 
 ---
 
@@ -715,53 +917,61 @@ without the whole-box reset. Additive; never exposes tokens.
   false for revoked/other/absent token, no `token` field in any row;
   `auth.test.mjs` — engine passes the token through.
 
-Wave note: this edits `index.mjs`. Per master "Server-file conflicts", WS10 must
-serialise behind any other wave-A workstream editing `index.mjs`.
+Wave note: accepted by master D7 (wave A: WS10 edits `devices.mjs`, `auth.mjs`,
+`index.mjs`; WS08's wave-A server edit is `ptyWs.mjs` only, so no conflict).
 
 No other server change. Every other feature uses existing channels/routes.
 
 ---
 
-## API layer (C1)
+## Client members (C1 / D16)
 
-`MantaUI/MantaAPIClient+Settings.swift` (new; uses only the `internal`
-`call`/`callRequired`/`callVoid`/`jsonAny`/`jsonObject` from C1). Wire types live
-next to it in `SettingsWireModels.swift`:
+All new `MantaAPIClient` members live in `MantaUI/MantaAPIClient+Settings.swift`
+(uses only the `internal` `call`/`callRequired`/`callVoid`/`jsonAny`/`jsonObject`,
+`MantaAPIClient.swift:944-977`); wire types in `SettingsWireModels.swift`
+(Foundation-only, `Decodable, Equatable, Sendable`). Owned by WS10 — no other
+spec declares these names:
 
-| method | channel | args | returns |
-|---|---|---|---|
-| `serverVersion()` | `server:version` | `[]` | `ServerVersionInfo {version, minClient?, opencodeVersion?}` |
-| `serverUpdateCheck()` | `server:update-check` | `[]` | `ServerUpdateCheck` |
-| `serverUpdateApply()` | `server:update-apply` | `[]` | `UpdateApplyResult {ok, error?}` |
-| `serverCliUpdate(_ id)` | `server:cli-update` | `[["cliId": id]]` | `CliUpdateResult {ok, before?, after?, changed?, error?}` |
-| `restorePreview()` | `tmux:restore-preview` | `[]` | `TopologyRestorePreview` |
-| `restoreTopology()` | `tmux:restore-topology` | `[]` | `TopologyRestoreResult` |
-| `authPair()` | `auth:pair` | `[]` | `AuthPairResult {ok, pairingCode?, boxId?, expiresAt?, error?}` |
-| `opencodeRestart()` | `opencode:restart` | `[]` | `OkResult {ok, error?}` |
-| `pluginsRegistry()` | `plugins:registry` | `[]` | `[PluginRegistryRow]` |
-| `forgeStatus()` | `forge:status` | `[["validate": true]]` | `ForgeStatus` |
-| `forgeRulesList()` | `forge:rules-list` | `[]` | `[ForgeRuleRow]` |
-| `forgeDisconnect()` | `forge:disconnect` | `[]` | `OkResult` |
-| `opencodeReferences()` | `opencode:references` | `[]` | `[OpencodeReference]` |
-| `opencodeSetReferences(upsert:)` | `opencode:set-references` | `[["upsert": [...]]]` | `OkResult` |
-| `launchersList()` | `launchers:list` | `[]` | `[AvailableLauncher]` |
+| member (signature) | channel | args |
+|---|---|---|
+| `func serverVersion() async throws -> ServerVersionInfo` — `{version: String, minClient: String?, opencodeVersion: String?}` | `server:version` | `[]` |
+| `func serverUpdateCheck() async throws -> ServerUpdateCheck` — `{available: Bool, version: String?, notesUrl: String?, ok: Bool?, targets: [UpdateTarget]?}`; `UpdateTarget {id, label, current: String?, latest: String?, available, ok, manual, manualUrl: String?, disruption: String}` | `server:update-check` | `[]` |
+| `func serverCliUpdate(cliID: String) async throws -> CliUpdateResult` — `{ok, before?, after?, changed?, error?}` | `server:cli-update` | `[["cliId": cliID]]` |
+| `func restorePreview() async throws -> TopologyRestorePreview` | `tmux:restore-preview` | `[]` |
+| `func restoreTopology() async throws -> TopologyRestoreResult` | `tmux:restore-topology` | `[]` |
+| `func authPair() async throws -> AuthPairResult` — `{ok, pairingCode?, boxId?, expiresAt?, error?}` | `auth:pair` | `[]` |
+| `func opencodeRestart() async throws -> OkResult` — `{ok: Bool, error: String?}` (**also consumed by WS08**) | `opencode:restart` | `[]` |
+| `func pluginsRegistry() async throws -> [PluginRegistryRow]` (`inputs[].default` as `JSONValue?`) | `plugins:registry` | `[]` |
+| `func forgeStatus(validate: Bool) async throws -> ForgeConnectionStatus` (**also consumed by WS05**, D16) | `forge:status` | `[["validate": validate]]` |
+| `func forgeRulesList() async throws -> [ForgeRuleRow]` | `forge:rules-list` | `[]` |
+| `func forgeDisconnect() async throws -> OkResult` | `forge:disconnect` | `[]` |
+| `func opencodeSetReferences(upsert: [[String: String]]) async throws -> OkResult` | `opencode:set-references` | `[["upsert": upsert]]` |
 
-Config reads/writes reuse the existing `configGet()` / `configUpdate(_:)`.
-`PluginRegistryRow.inputs[].default` decodes as `JSONValue?`.
+`server:update-apply` is deliberately **not** a `MantaAPIClient` member — it
+goes through `BoxRESTClient.rpcRaw` (F18) to keep the HTTP status.
 
-REST (not `/rpc`) lives in `BoxRESTClient.swift` (new; `struct`, Sendable;
-base URL + bearer from `KeychainCredentialStore.shared`, `URLSession.shared`,
-15 s timeout; 401 → `MantaError.authRequired`; posts `.mantaBoxUpgrading` on a
-503 upgrade refusal like the RPC transport):
-`devices() -> BoxDevicesResponse`, `revokeDevice(id:) -> RevokeOutcome
-(.ok | .notFound | .unauthorized | .rateLimited | .failed(String))`,
-`upgradeAction(_: UpgradeAction) -> UpgradeActionResult {ok, error?}`.
+**Consumed, owned elsewhere (not redeclared):**
+`configGet()` / `configUpdate(_:)` (existing, `MantaAPIClient.swift:752-760`);
+`references() -> [OpencodeReferenceInfo]` (WS03, F11);
+`launchers() -> [SessionLauncher]` + `SessionLauncherFlags.resolve` (WS04, F12);
+`SessionListStore.loadConfig()` / `refresh()` (existing/WS04).
+
+**Non-`MantaAPIClient` HTTP helper** — `BoxRESTClient.swift` (WS10; `struct`,
+`Sendable`; base URL + bearer from `KeychainCredentialStore.shared`;
+`URLSession` injectable, default `.shared`; posts `.mantaBoxUpgrading` on a 503
+upgrade refusal exactly like the RPC transport):
+- `func devices() async throws -> BoxDevicesResponse` — `GET /auth/devices`, 15 s; 401 → `MantaError.authRequired`.
+- `func revokeDevice(id: String) async -> (status: Int?, transportError: Bool)` — `DELETE /auth/revoke?device_id=<id>`, 15 s; classified by `BoxRemoval.classify`.
+- `func upgradeAction(_ action: UpgradeAction) async -> UpgradeActionResult` — `POST /api/upgrade/{retry|rollback}`, 15 s; 200 JSON `{ok, error?}`; non-2xx → `{ok:false, error:"HTTP <status>"}`; 401 → `{ok:false, error:"Sign in again — this phone's pairing was revoked."}`; transport → `{ok:false, error: localizedDescription}`. (`UpgradeAction` = `.retry | .rollback`, `UpgradeActionResult {ok, error?}` declared in `UpgradeModels.swift`.)
+- `func rpcRaw(channel: String, args: [Any], timeout: TimeInterval) async -> RawRPCResponse` — status-preserving `/rpc` POST used only for `server:update-apply`.
 
 ---
 
 ## Tests (C7)
 
-Swift (XCTest, `MantaUITests/`):
+Swift (XCTest, `MantaUITests/`). Files marked **[pkg]** contain only
+Foundation-only logic and must also run under `mobile/native/verify.sh` (D19)
+— see the Package manifest under Files.
 
 - **T1 `MantaSettingsTests.swift` (edit):** replace `serverUrlMobile` cases with
   `themeMobile` (device-local default "system", modified on "dark");
@@ -770,45 +980,77 @@ Swift (XCTest, `MantaUITests/`):
   `true`, configKey `hapticsEnabled`; `worktreePerSession` present (both);
   `SettingsSchema.sections` contains `general` and `extensions`; search
   "linked" finds `linkedDevicesMobile`.
-- **T2 `SettingsAppearanceTests.swift`:** system/light/dark/garbage/nil mapping;
-  `storageKey` equals `"manta.settings.local." + "themeMobile"`.
-- **T3 `SettingsBoxTests.swift`:** `BoxPairing.universalLink` (with/without
+  **Commit path (§0.2)** with an injected `SettingsConfigurationStore` and an
+  isolated `UserDefaults(suiteName:)`:
+  failing store → `commit` returns false, `current(worktreePerSession)` is the
+  previously confirmed value, `lastError == "Couldn't save Create git worktree
+  for new sessions."`, `pending`/`saving` empty; succeeding store → returns
+  true, value confirmed, `lastError` nil; a second `commit` for the same entry
+  while the first is suspended (gated store) returns false and does not issue a
+  second update; while suspended `current` shows the pending value and
+  `saving` contains the id; `clearError()` clears; device-local commit never
+  touches the store.
+- **T2 `SettingsAppearanceTests.swift` [pkg]:** system/light/dark/garbage/nil →
+  `ThemePreference`; `storageKey == "manta.settings.local.themeMobile"`.
+- **T3 `SettingsBoxTests.swift` [pkg]:** `BoxPairing.universalLink` (with/without
   server; output parses back via `MantaPairing.parsePairPayload` to the same
-  payload), `qrServerOverride` (nil when equal to the direct URL, nil for public
-  custom domain, value for 100.64.x / .ts.net), `shouldRefresh` inclusive edge,
-  `countdown` ("4:41", low under 60 s, expired), `parseExpiresAt` with/without
-  fractional seconds; `BoxDevicesModels` sort, `canRevoke` (current/primary →
-  false), `lastActiveText`, decode with and without `current`;
+  payload); `qrServerOverride` (nil when equal to the direct URL, nil for public
+  custom domain, value for 100.64.x / .ts.net); `manualAddress` (connected
+  tailnet URL returned verbatim-normalized; missing → direct URL; trailing `/`
+  stripped); `shouldRefresh` inclusive edge; `countdown` ("4:41", low under
+  60 s, expired); `parseExpiresAt` with/without fractional seconds;
+  `BoxDevicesModels` sort, `canRevoke` (current/primary → false),
+  `lastActiveText`, decode with and without `current`;
   `BoxRemoval.plan` (current non-primary → revoke; current primary →
-  localOnlyShared; none → localOnlyUnknown) and messages.
-- **T4 `SettingsExtensionsTests.swift`:** `validateAlias` / `classifyTarget`
+  sharedPairing; none → unknownDevice); `BoxRemoval.classify` (200 → revoked,
+  401/404 → alreadySignedOut, 429/5xx/transport → unreachable); `message`
+  for each; **`BoxRemovalFlow.reduce`**: remove → revoking; remoteFinished →
+  deletingLocal; localDeleteFailed → localDeleteFailed; retryLocal →
+  deletingLocal **without** a new revoking state (remote not repeated);
+  localDeleted with `.unreachable` → warning; acknowledge → leaving;
+  localDeleted with `.revoked` → leaving directly; remote 401 → no warning;
+  `.sharedPairing` (offline/shared) → warning; leaving is unreachable until
+  the local delete succeeded.
+- **T4 `SettingsExtensionsTests.swift` [pkg]:** `validateAlias` / `classifyTarget`
   mirroring every case in `settingsSchema.test.ts` for
   `validateReferenceAlias`/`classifyReferenceTarget`; `upsertPayload` (path vs
-  repository, description omitted when blank); `ExtensionsRegistries.add`
-  (trim, blank, duplicate); `ExtensionsLaunchers.resolve/update` (saved wins,
-  default fallback, full map written); `ExtensionsForge.secondary` (all source ×
-  valid combos, exact strings); `ExtensionsFormat.timeout`.
-- **T5 `SettingsUpdatesTests.swift`:** `UpdateTargets.build` order (server,
-  opencode, rest alphabetical; desktop never present; `ok:false` server when
-  `check.ok == false`); `describe` tones; `isTransient`; `UpdateFlow` reducer:
-  applyResult ok:false → failed; transport error → restarting; reconnect +
-  same version → still restarting; new version → done; tick past 600 s → timedOut.
-- **T6 `SettingsBackupTests.swift`:** windows/projects census and every status string.
-- **T7 `UpgradeModelsTests.swift` (edit):** retryLabel/canRetry/canRollback per
-  step id; `retryable:false`; outcomes reset on state change; `details` text
-  equals the desktop format for running/failed/rolled_back; failed hint nil.
+  repository, description omitted when blank); `displayTarget`;
+  `ExtensionsRegistries.add` (trim, blank, duplicate) / `remove`;
+  `ExtensionsLaunchers.update` (saved wins, default fallback, full map
+  written, unknown launcher → prev unchanged); `ExtensionsForge.secondary`
+  (all source × valid combos, exact strings); `ExtensionsFormat.timeout`.
+- **T5 `SettingsUpdatesTests.swift` [pkg]:** `UpdateTargets.build` order (server,
+  opencode, rest alphabetical; desktop never present; server `ok:false` when
+  `check.ok == false`); `describe` tones; **`UpdateApplyClassifier`**, one case
+  per table row: HTML body + 502, text body + 504, Cloudflare 521/522/524 →
+  restartLikely; 503 `{"upgrade":true}` → upgrading; `URLError(.networkConnectionLost)`
+  / `.timedOut` → restartLikely; `URLError(.badURL)` → failed; ordinary 500
+  `{"error":"boom"}` → failed("boom"); 500 non-JSON → failed("HTTP 500");
+  200 `{"result":{"ok":true}}` → started; 200 `{"result":{"ok":false,"error":"self-update: manifest fetch failed"}}`
+  → failed (not transient); 200 malformed / `{"result":null}` → failed(unreadable);
+  401 → authRequired. `UpdateFlow` reducer: failed outcome → failed;
+  restartLikely → restarting; reconnect + same version → still restarting;
+  new version → done; tick past 600 s → timedOut; only one in flight.
+- **T6 `SettingsBackupTests.swift` [pkg]:** windows/projects census, every
+  status string, `showsRestore`/`restoreEnabled` for loading / loaded(available,
+  0 restorable) / loaded(unavailable) / failed; a failed refresh after a loaded
+  state yields `.failed` (Restore hidden).
+- **T7 `UpgradeModelsTests.swift` [pkg] (edit):** retryLabel/canRetry/canRollback
+  per step id; `retryable:false` → disabled + reason; outcomes reset on state
+  change; `details` text equals the desktop format for running/failed/rolled_back;
+  failed hint nil; `nothingChanged` only for preflight.
 - **T8 `UpgradeStoreTests.swift` (edit):** `retry()` pending → ok → re-read;
-  error result surfaces message; outcome cleared when a frame moves
-  failed → running.
+  error result surfaces message; rollback same; outcome cleared when a frame
+  moves failed → running.
 - **T9 `MantaOnboardingFlowTests.swift` (edit):** `receive` → `.confirm`
   (not linking); duplicate `receive` while confirming ignored; `confirmLink` →
   linking; `isSwitching` skips confirm; not-mine → cancel clears payload;
-  manual continue with code + Server address skips confirm.
-- **T10 `MantaPairingTests.swift` (edit):** `resolveManualTarget` (32-hex,
-  `id.boxes.mantaui.com`, `100.64.0.9:8787`, `https://x/`, blank, garbage);
-  `confirmSummary`.
-- **T11 `SettingsNotificationReminderTests.swift`:** `shouldShow` / `action`
-  truth table.
+  manual continue with code + Server address skips confirm; invalid address
+  shows the `.invalid` reason and does not link.
+- **T10 `MantaPairingTests.swift` (edit):** `resolveManualTarget` — every row of
+  the F21 table; `confirmSummary`.
+- **T11 `SettingsNotificationReminderTests.swift` [pkg]:** `shouldShow` /
+  `action` / `dismissalAfter` truth table.
 
 Node: `src/server/devices.test.mjs`, `src/server/auth.test.mjs` (S1);
 `src/shared/settingsSchema.test.ts` (schema). `npm run typecheck`, `npm test`,
@@ -828,12 +1070,25 @@ Node: `src/server/devices.test.mjs`, `src/server/auth.test.mjs` (S1);
 - [ ] Theme override applies app-wide and does not change the desktop.
 - [ ] Haptics toggle silences/restores all session-list and turn-complete haptics.
 - [ ] Add a device shows a scannable QR that another iPhone's camera opens and
-      pairs from; code rotates on expiry while the screen is open.
+      pairs from; code rotates on expiry while the screen is open; on a
+      Tailscale box a second phone pairs via Manual Setup using only the Code
+      and Server address shown there.
+- [ ] Every config toggle/segment (incl. worktree toggles) is disabled while
+      saving and returns to the confirmed value on a failed save, with a
+      visible error.
+- [ ] Restore windows shows an error + Try again when the preview fails and
+      never offers Restore without a successful preview.
+- [ ] A box update whose apply call ends in a proxy 5xx / connection drop
+      waits for the restart; an ordinary 500 or `{ok:false}` shows the error.
 - [ ] Linked devices lists devices with "This phone"; revoking another device
       signs it out (its next request 401s); primary and current rows can't be
       revoked from the list.
 - [ ] Remove server revokes only this phone (other devices keep working),
-      deletes the Keychain credentials, and lands on onboarding.
+      deletes the Keychain credentials, shows any warning BEFORE leaving, and
+      lands on onboarding; a Keychain delete failure keeps the app paired and
+      offers "Try again" without re-revoking.
+- [ ] The phone never claims that notifications stop after Remove server or
+      a revoke (D9 limitation stated in the confirm copy).
 - [ ] Restart opencode and server/CLI updates ask before ending running turns
       where the desktop does, and report success/failure.
 - [ ] A failed box upgrade can be retried / rolled back / its details copied
@@ -844,94 +1099,124 @@ Node: `src/server/devices.test.mjs`, `src/server/auth.test.mjs` (S1);
       public box (Server ID or host) and a tailnet box (URL).
 - [ ] With notifications denied, Settings shows a dismissible reminder that
       opens iOS Settings; nothing else is gated.
-- [ ] `npm run typecheck`, `npm test`, gen `--check`, and `ios-mantaui`
-      `test-unit` green.
+- [ ] `npm run typecheck`, `npm test`, gen `--check`, `mobile/native/verify.sh`
+      (D19, [pkg] tests) and `ios-mantaui` `test-unit` green.
 
 ---
 
 ## Files
 
 **Edit (owned):** `src/shared/settingsSchema.ts`, `src/shared/settingsSchema.test.ts`,
-`generated/swift/SettingsSchema.swift` (regenerated only),
+`generated/swift/SettingsSchema.swift` (regenerated only, `npm run gen:swift-settings`),
 `mobile/native/MantaUI/SettingsScreen.swift`, `MantaSettingsStore.swift`,
 `MantaSettingsModels.swift`, `UpgradeScreen.swift`, `UpgradeStore.swift`,
 `UpgradeModels.swift`, `MantaOnboarding.swift`, `MantaPairingModels.swift`;
 tests `MantaSettingsTests.swift`, `UpgradeModelsTests.swift`,
 `UpgradeStoreTests.swift`, `MantaOnboardingFlowTests.swift`, `MantaPairingTests.swift`.
 
-**Edit (server, S1):** `src/server/devices.mjs`, `src/server/auth.mjs`,
+**Edit (server, S1 — master D7):** `src/server/devices.mjs`, `src/server/auth.mjs`,
 `src/server/index.mjs` (one line at `/auth/devices`), `src/server/devices.test.mjs`,
 `src/server/auth.test.mjs`.
 
-**Create (`mobile/native/MantaUI/`):** `MantaAPIClient+Settings.swift`,
-`SettingsWireModels.swift`, `SettingsCustomRows.swift`, `SettingsAppearance.swift`,
-`SettingsBackupScreen.swift`, `SettingsBackupModels.swift`,
-`SettingsUpdatesScreen.swift`, `SettingsUpdatesStore.swift`,
-`SettingsUpdatesModels.swift`, `SettingsOpencodeRestart.swift`,
-`SettingsNotificationReminder.swift`, `BoxRESTClient.swift`, `BoxRemoval.swift`,
-`BoxStatusCard.swift`, `BoxAddDeviceScreen.swift`, `BoxPairingQR.swift`,
-`BoxPairingModels.swift`, `BoxDevicesScreen.swift`, `BoxDevicesModels.swift`,
-`ExtensionsPluginsScreen.swift`, `ExtensionsForgeScreen.swift`,
-`ExtensionsRegistriesScreen.swift`, `ExtensionsReferencesScreen.swift`,
-`ExtensionsLaunchersScreen.swift`, `ExtensionsModels.swift`
-(Format/Forge/Registries/References/Launchers pure helpers).
-`MantaLinkConfirmView` / not-mine view live inside `MantaOnboarding.swift`.
+**Create (`mobile/native/MantaUI/`):**
+- Foundation-only (pure; **[pkg]**): `SettingsWireModels.swift`,
+  `SettingsAppearance.swift`, `SettingsBackupModels.swift`,
+  `SettingsUpdatesModels.swift`, `SettingsNotificationModels.swift`,
+  `BoxPairingModels.swift`, `BoxDevicesModels.swift` (incl. `BoxRemoval`,
+  `BoxRemovalFlow`, `Notification.Name.mantaBoxRemoved`), `ExtensionsModels.swift`
+  (Format/Forge/Registries/References/Launchers helpers).
+- App-only: `MantaAPIClient+Settings.swift`, `BoxRESTClient.swift`,
+  `SettingsAppearanceView.swift`, `SettingsCustomRows.swift`,
+  `SettingsBackupScreen.swift`, `SettingsUpdatesScreen.swift`,
+  `SettingsUpdatesStore.swift`, `SettingsOpencodeRestart.swift`,
+  `SettingsNotificationReminder.swift`, `BoxStatusCard.swift`,
+  `BoxAddDeviceScreen.swift`, `BoxPairingQR.swift`, `BoxDevicesScreen.swift`,
+  `BoxRemovalStore.swift`, `ExtensionsPluginsScreen.swift`,
+  `ExtensionsForgeScreen.swift`, `ExtensionsRegistriesScreen.swift`,
+  `ExtensionsReferencesScreen.swift`, `ExtensionsLaunchersScreen.swift`.
+- `MantaLinkConfirmView` / not-mine view live inside `MantaOnboarding.swift`.
 
 **Create (`mobile/native/MantaUITests/`):** `SettingsAppearanceTests.swift`,
 `SettingsBoxTests.swift`, `SettingsExtensionsTests.swift`,
 `SettingsUpdatesTests.swift`, `SettingsBackupTests.swift`,
-`SettingsNotificationReminderTests.swift`.
+`SettingsNotificationReminderTests.swift` (all [pkg]).
 
-`project.yml` needs no change (folder sources); regenerate `.pbxproj` via the
-`ios-regen-pbxproj` plugin.
+**Package manifest (for the integration agent, D18/D19 — WS10 does not edit
+`Package.swift` or `project.yml`):**
+- add to `MantaUI` target `sources`: `MantaPairingModels.swift` (existing,
+  Foundation-only — needed by `BoxPairingModels`), `SettingsWireModels.swift`,
+  `SettingsAppearance.swift`, `SettingsBackupModels.swift`,
+  `SettingsUpdatesModels.swift`, `SettingsNotificationModels.swift`,
+  `BoxPairingModels.swift`, `BoxDevicesModels.swift`, `ExtensionsModels.swift`.
+  (`UpgradeModels.swift` already listed; its new action types stay Foundation-only.)
+- add to `MantaUITests` `sources`: `SettingsAppearanceTests.swift`,
+  `SettingsBoxTests.swift`, `SettingsExtensionsTests.swift`,
+  `SettingsUpdatesTests.swift`, `SettingsBackupTests.swift`,
+  `SettingsNotificationReminderTests.swift`. (`UpgradeModelsTests.swift`
+  already listed.)
+- `project.yml`: no change (folder source). `project.pbxproj` is regenerated
+  once by the orchestrator (D18); WS10 never edits it.
+
+Verification for the worker: `npm run typecheck`, `npm test`,
+`node scripts/gen-swift-settings.mjs --check`; Swift pure logic via
+`mobile/native/verify.sh` after applying the manifest locally in its worktree
+only for the run (or let the integration agent run it); final gate
+`ios-mantaui` `test-unit` (orchestrator).
 
 ---
 
-## Mount requests (files owned by WS04 — wave A)
+## Mount requests (D18)
 
-- **M1 `MantaAppRoot.swift`** — app-wide theme. Add
-  `@AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue`
-  and on the root `Group`:
-  `.preferredColorScheme(SettingsAppearance.colorScheme(for: themePref))`.
-- **M2 `MantaAppRoot.swift`** — leave the box after Remove server. Add
-  ```swift
-  .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
-      store.stop()
-      sessionStore.resetForBoxChange()
-      flow.isSwitching = false
-      flow.backToEntry()
-      paired = false
-  }
-  ```
-- **M3 `SessionListView.swift:158`** — C2 `.settings(section:)`: present
-  `SettingsScreen(eventStore: eventStore, initialSection: section)`. WS10 adds
-  the `initialSection: String? = nil` init parameter; the screen scrolls to that
-  section id with `ScrollViewReader` on appear. Default nil keeps today's call
-  compiling, so M3 can land any time.
+| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
+|---|---|---|---|---|---|
+| M-10-1 | `MantaAppRoot.swift` (WS04) | WS04 (wave A — owner running in the same wave); if WS04 has already merged when WS10 merges, integration agent A | `SettingsAppearance.storageKey`, `.systemValue`, `.preference(for:)` (`SettingsAppearance.swift`), `ThemePreference.colorScheme` (`SettingsAppearanceView.swift`) | Add `@AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue`; on the root `Group` (after the existing `.overlay { … UpgradeScreen … }`): `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | WS10 commit with the two files merged |
+| M-10-2 | `MantaAppRoot.swift` (WS04) | same as M-10-1 | `Notification.Name.mantaBoxRemoved` (`BoxDevicesModels.swift`) | On the root `Group`: `.onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in store.stop(); sessionStore.resetForBoxChange(); flow.isSwitching = false; flow.backToEntry(); paired = false }` | WS10 commit merged |
+| M-10-3 | `Package.swift` (WS07 per D1) | integration agent A | the [pkg] files above | Add the source/test lists in "Package manifest" | WS10 merged |
+
+Not a request (already in WS04's own plan, `04-sessions.md:909-910,1053`):
+WS04 presents `SettingsScreen(eventStore:initialSection:)` for C2
+`.settings(section:)`; WS10 provides that init (default `nil`, so WS04's
+existing call keeps compiling until it switches).
+
+## Mounts applied by this workstream
+
+None. Cross-check of the other specs' tables for mounts into WS10-owned files:
+
+| Requested by | ID | Receiving file (WS10) | Applier per D18 | Note |
+|---|---|---|---|---|
+| WS09 | M1 (`09-models-usage.md:937`) | `SettingsScreen.swift` | integration agent B (wave B, D18 bullet 1) | "Models" row above the schema sections, styled like `accountsEntry`. WS10 keeps `accountsEntry` and the section list in `sectionList` so the row has an obvious insertion point (directly after `accountsEntry`). |
+
+No other spec requests a mount in `MantaSettingsStore.swift`,
+`MantaSettingsModels.swift`, `UpgradeScreen.swift`, `UpgradeStore.swift`,
+`UpgradeModels.swift`, `MantaOnboarding.swift`, `MantaPairingModels.swift` or
+the schema (grep of 01–09 on 2026-10-28; WS07 only places its notice beside the
+existing `UpgradeScreen` overlay in `MantaAppRoot`, not inside it).
 
 ---
 
 ## Contracts provided / consumed
 
-- **C1 (consumed):** uses `call/callRequired/callVoid/jsonAny/jsonObject`; adds
-  only `MantaAPIClient+Settings.swift`.
+- **C1 / D16:** see "Client members". Provided to others: `opencodeRestart()`
+  (WS08), `forgeStatus(validate:)` + `ForgeConnectionStatus` (WS05).
+  Consumed: WS03 `references()`, WS04 `launchers()` + `SessionLauncherFlags.resolve`.
 - **C2 (provided to WS04):** `SettingsScreen(eventStore:initialSection:)`;
   section ids are `SettingsSchema.sections[].id` (`general`, `box`, `accounts`,
   `models`, `sessions`, `files`, `extensions`, `voice`). WS10 never calls
   `MantaNavigator.open`.
-- **C6 (owner):** this spec is the only schema editor; WS04 must not add schema
-  entries — it reads `worktreePerSession` / `worktreeCleanOnClose` from box
-  config (F1).
-- **C7:** tests as listed.
-- **New, provided:** `Notification.Name.mantaBoxRemoved` (`BoxRemoval.swift`);
-  `SettingsAppearance` (M1); `SettingsOpencodeRestart.run(api:) async -> OkResult`
-  — WS08/WS09 may reuse it if their own flows need a user-confirmed restart
-  (they keep their own confirm copy).
+- **C6 (owner):** this spec is the only schema editor; WS04 reads
+  `worktreePerSession` / `worktreeCleanOnClose` from box config at action time (F1).
+- **C7:** tests as listed; Foundation-only tests also under `verify.sh` (D19).
+- **New, provided:** `Notification.Name.mantaBoxRemoved`;
+  `SettingsAppearance` / `ThemePreference` (M-10-1);
+  `SettingsOpencodeRestart.run(api:) async -> OkResult` (optional reuse; callers
+  keep their own confirm copy).
 - C3, C4, C5: not used.
 
 ---
 
 ## Deferred / excluded
+
+All of D1–D3 and the shared-pairing revoke are accepted deferrals (master D8).
 
 - **D1 "Auto-save files the AI sends" (`allowAgentPush`) — excluded.** On desktop
   it means "write each agent-sent file into the Mac's Downloads folder without
@@ -941,36 +1226,60 @@ tests `MantaSettingsTests.swift`, `UpgradeModelsTests.swift`,
   phone toggle would silently change the desktop's behaviour.
 - **D2 Downloads directory — excluded.** A Mac path; meaningless on the phone.
 - **D3 opencode port — excluded.** `opencodePort` is read by nothing (grep:
-  only `settingsSchema.ts`, `types.ts`, `Settings.tsx`) — it is a leftover of the
+  only `settingsSchema.ts`, `types.ts`, `Settings.tsx`) — a leftover of the
   SSH-tunnel transport. Shipping it on iOS would be a dead control.
 - **D4 Plugins on/off toggle and "Open plugins folder" — excluded.** The switch
   lives in the Mac app's local storage (preload bridge, `configKey: null`); the
-  box never sees it, so the phone can neither read nor write it. The folder is
-  on the Mac. Master spec out-of-scope already covers execution.
+  box never sees it. The folder is on the Mac.
 - **D5 Box-update step progress ("Step n of N") — deferred.** It needs a
-  subscription to `serverUpdateProgress` frames, and `MantaEventStore`'s raw
-  frame handlers cannot be removed, so a per-screen subscription would leak one
-  closure per Settings visit. Indeterminate "Updating… / Restarting the box…"
-  ships instead. Revisit if WS02 adds handler removal.
-- **D6 Removing a reference — deferred (parity).** The server supports
-  `remove: [alias]` but the desktop says "Removing a reference isn't available
-  yet"; keep both clients aligned. Easy follow-up for both.
-- **D7 "Download previous version" on the rolled-back screen — excluded.** It
-  downloads the macOS DMG; nothing to do on a phone.
+  `serverUpdateProgress` subscription and `MantaEventStore`'s raw frame
+  handlers cannot be removed, so a per-screen subscription would leak one
+  closure per visit. Indeterminate "Updating… / Restarting the box…" ships.
+- **D6 Removing a reference — deferred (parity).** Server supports
+  `remove: [alias]`; desktop says "Removing a reference isn't available yet".
+- **D7 "Download previous version" on the rolled-back screen — excluded** (macOS DMG).
 - **D8 Push to existing devices on a new pairing (BET-492)** — server-side,
-  already deferred by the owner (DECISIONS §6.4a).
+  already deferred (DECISIONS §6.4a).
+- **D9 Stopping notifications on sign-out / revoke — deferred, limitation
+  documented in the UI.** Revoking a device removes only its bearer
+  (`auth.mjs:592-599`); APNs tokens are stored without any device association
+  and every stored token receives every push (`push.mjs:96-130,769-798`), and
+  the app re-registers on launch/after pairing (`MantaAppDelegate.swift:155-175`).
+  So neither Remove server nor revoking another phone can guarantee
+  notifications stop, and calling `unregisterForRemoteNotifications` would not
+  fix it (the same device token comes back on the next registration). Reliable
+  remote sign-out needs device-associated push tokens and filtering on the box —
+  a server change outside D7, so it needs a master amendment. Until then the
+  copy states the limitation (F15/F17) and WS10 makes no stop-notifications claim.
 
 ---
 
 ## Open questions (each has a default)
 
-- **Q1 Six-digit-only manual pairing.** DECISIONS §5.2.9 wants the code alone,
-  "the server resolves it", but no resolver exists and adding one is a gateway +
-  security decision. *Default:* ship F21's single "Server address" field now;
-  file a follow-up for a gateway code→box lookup.
-- **Q2 Accept the additive `current` field on `GET /auth/devices` (S1)?** Without
-  it the phone cannot revoke only itself. *Default:* yes.
-- **Q3 Revoking the primary (desktop-shared) device from a phone.** The server
-  allows it, and it would lock the desktop out. *Default:* not offered on iOS.
-- **Q4 The desktop's own opencode-port field is equally dead.** Out of WS10's
+- **Q1 (for the master owner) Device-associated push tokens (D9).** Amend D7 to
+  let a later change associate each APNs token with a device id at
+  `push:register-apns` and drop it on revoke (tests: remove A → pair B; revoke
+  another phone)? *Default:* not in this effort; the UI states the limitation.
+- **Q2 The desktop's own opencode-port field is equally dead.** Out of WS10's
   iOS scope. *Default:* leave desktop unchanged; note for a desktop cleanup.
+
+(Round-0 Q1–Q3 are settled by master D7/D8: S1 accepted, manual pairing = code +
+Server address, shared-pairing revoke not offered.)
+
+---
+
+## Review responses (round 1)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | BLOCKING — `forgeStatus` ownership/validation | Per master D16, WS10 (wave A) owns `forgeStatus(validate: Bool) -> ForgeConnectionStatus` (F9 + Client members); Settings passes `true` (`Settings.tsx:853`), WS05 passes `false` (desktop `ChatPanel.tsx:1055` sends no input). WS05 consumes it and declares no copy. |
+| 2 | BLOCKING — worktree toggles not failure-safe | New §0.2: `MantaSettingsStore.commit` becomes awaited and serialized per entry, with `pending`/`saving`; confirmed `values` change only on success; rows disabled while saving; `lastError` is now actually rendered (it never was). F1/F5 use it. T1 adds injected-store tests (failure keeps the confirmed value, success, in-flight second commit refused, pending shown). |
+| 3 | BLOCKING — transient update classification / lost HTTP status | `server:update-apply` no longer goes through `MantaAPIClient` (whose private transport discards the status). `BoxRESTClient.rpcRaw` returns status + body + URLError; pure `UpdateApplyClassifier` ports `isTransientUpdateNetworkError` incl. 502/503/504/521/522/524 with any body, excludes structured `self-update:` errors, and treats ordinary 500, malformed 200 and `{ok:false}` as failures. No C1 foundation edit needed. T5 covers each case. |
+| 4 | BLOCKING — APNs pruning claim | Removed the claim and the `unregisterForRemoteNotifications` call. New D9 documents the limitation with code evidence; F15/F17 copy states it; Q1 asks the master owner for a D7 amendment (device-associated tokens) rather than promising sign-out. |
+| 5 | SHOULD — removal ordering / failures | F15 rewritten as `BoxRemovalFlow` state machine: remote result → Keychain delete → optional warning acknowledgment → root notification. Keychain failure → alert + "Try again" that repeats only the local delete. T3 tests deletion failure, remote 401, shared/offline, warning ordering. |
+| 6 | SHOULD — backup preview failure | F7: `BackupPreviewState` with a `.failed` state ("Couldn't load the saved window layout." + Try again); Restore hidden unless a successful preview; a failed refresh discards the old preview. T6 covers initial and refresh failure. |
+| 7 | SHOULD — manual fallback on private boxes | F14 shows and copies "Server address" = this phone's normalized connected URL (`BoxPairing.manualAddress`), so a Tailscale box shows its private address. Acceptance case added. |
+| 8 | SHOULD — manual address validation | F21 defines 12 explicit rules (whitespace, scheme, userinfo, query/fragment, host charset/labels, port range, http only for private hosts, path kept) returning `.ok/.invalid(reason)`, plus an exact input → output table used verbatim by T10. |
+| X6 | Cross-cutting #6 (duplicate client members) | Same as #1. Also: `opencodeRestart()` stays WS10's and is consumed by WS08 (its revision dropped `providerRestartOpencode`); WS10 dropped its own `opencodeReferences()` and `launchersList()` and consumes WS03 `references()` and WS04 `launchers()`/`SessionLauncherFlags.resolve`. |
+| X7 | Cross-cutting #7 (integration ownership) | WS09's mount into `SettingsScreen.swift` is listed under "Mounts applied by this workstream" as applied by integration agent B, not WS10. |
+| X10 | Cross-cutting #10 (package/pbxproj) | Removed "regenerate .pbxproj"; WS10 supplies a Package manifest (M-10-3) for the integration agent; pure files are Foundation-only so `verify.sh` runs them (D19). |

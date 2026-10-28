@@ -1,822 +1,860 @@
 # WS02 — Chat cards, queue, and chat-screen hotspot
 
-Status: draft · Date: 2026-10-28 · Wave: **B** · Master: `00-master.md`
+Status: revised (round 1) · Date: 2026-10-28 · Wave: **B** · Master: `00-master.md`
 
-WS02 owns the chat screen hotspot (C4) and the stream decoding (C5). This spec
-covers eleven features:
+WS02 owns the chat screen hotspot (C4), stream decoding (C5), and — per D1 —
+`InboxModels.swift`, `PendingMessagesCard.swift`, `HandoffStore.swift`. It
+also applies, in wave B, every ChatScreen / ChatSessionStore / MantaEventStore /
+MantaStreamModels mount other workstreams request (D18; see "Mounts applied by
+this workstream").
 
 | # | Feature | Verdict |
 |---|---|---|
 | F1 | Retry card (`retry` frame) | build |
 | F2 | Compaction card + "Compacted while you were away" line | build (+ fix: iOS ignores `transcriptStale`) |
 | F3 | "Blocked — needs a decision" card | build |
-| F4 | Send-error line: **Reconnect** (expired sign-in) / **Reset health** (no endpoint) | Reconnect: build · Reset health: **deferred** (see §Deferred) |
+| F4 | Send-error line: **Reconnect** (expired sign-in) / **Reset health** | Reconnect: build · Reset health: **deferred** (D8) |
 | F5 | Background-job approval card (Start job / Edit access / Not now) | build |
 | F6 | Read-only bar for background-job sessions (Go to parent / Stop) | build |
-| F7 | Queued-message drain at the next step boundary | **already at parity** — verify only, no code |
+| F7 | Queued-message drain at the next step boundary | **already at parity** — verify only |
 | F8 | Remove a queued message; pull the newest one back to edit | remove exists; build "Edit last" |
-| F9 | "Seat: …" row in the context sheet | build |
-| F10 | C2 `.message` route: open chat, scroll to message, highlight | build |
-| F11 | C5 frame decoding for other workstreams | build |
+| F9 | Seat row in the context sheet (D17) | build |
+| F10 | C2 `.message` route: open chat, show the message, highlight | build |
+| F11 | C5 frame decoding (`commandExecuted` per D15) | build |
 
-No new server routes. No server edits at all: every channel and frame below
-already exists on the box.
+No server edits and no new server routes.
 
 ---
 
 ## 0. Read first (iOS state today)
 
-- `ChatSessionStore` (`mobile/native/MantaUI/ChatSessionStore.swift`) publishes
-  stream state at lines 161–247; `applyStreamState()` (556–720) copies the
-  per-session snapshot from `MantaEventStore.sessionStates`; `trailingBlocks`
-  (932–970) appends the session-error and truncation **notices** into the
-  transcript tail (BET-1214 moved them there).
+- `ChatSessionStore` (`MantaUI/ChatSessionStore.swift`) publishes stream state
+  (161–247); `applyStreamState()` (556–720) copies the per-session snapshot
+  from `MantaEventStore.sessionStates`; `trailingBlocks` (932–970) appends the
+  session-error and truncation notices to the transcript tail (BET-1214).
+  `isReadOnly` is an immutable `let` set at construction (261, 383–389) and
+  guards inbox mutations (1430, 1447). The transcript is mapped in three places
+  (`fetchTranscript` ~1065, `refreshVoiceNotes` ~1111, `refreshWidgets` ~1137).
+  `fetchTranscript` returns immediately while another fetch is in flight
+  (998–1001, sets `fetchPending`).
 - `MantaStreamRouter.applying` (`MantaEventStore.swift` ~160–276) decodes
-  `stream` subs. It does **not** decode `retry`, `compaction`,
-  `transcriptStale`, `stepEnded`, `commandExecuted`, `toolBoundary`,
-  `aborted`, `optimizer.compacted`. `truncation` is kept as a single
-  "latest" value only.
-- `MantaEventStore.handleFrame` (~556–575) fans non-stream frames out to
-  subjects (`delegateUpdates`, `accountsUpdates`, `handoffUpdates`) and raw
-  handlers.
-- The pinned stack above the composer is `ChatScreen.bottomCards`
-  (`ChatScreen.swift` ~1356–1400): handoff cards, weekly banner, seat-move
-  banner, `PendingMessagesCard`.
-- The composer is mounted in `loadedLayout` (`ChatScreen.swift` ~517–577)
-  with `text: $composerText`, `inputFocused: $composerFocused`.
-- Pending (inbox) messages already work on iOS: `PendingMessagesCard.swift`,
-  `InboxModels.swift` (`InboxTracker`, `InboxActionReport` 249,
-  `PendingCardLogic` 355), store methods `setInboxDelivery` / `cancelInboxItem`
-  (`ChatSessionStore.swift` ~1426–1460), busy send `sendOrSteer` →
-  `sendWhileRunning` with `delivery: steer|queue` (~1272–1380).
-
-**Ownership note.** `InboxModels.swift` and `PendingMessagesCard.swift` are not
-listed in the master ownership table; their only consumers are the chat screen
-and store. WS02 claims them (see Open questions, Q1).
+  `stream` subs; it does NOT decode `retry`, `compaction`, `transcriptStale`,
+  `commandExecuted`, `optimizer.compacted`. Per-session state
+  (`MantaSessionStreamState`, 64–107) persists for the app's lifetime.
+- `MantaEventStore.handleFrame` (~556–575) fans non-stream frames to subjects
+  (`delegateUpdates`, `accountsUpdates`, `handoffUpdates`) and raw handlers.
+- Pinned stack above the composer: `ChatScreen.bottomCards` (~1356–1400).
+  Composer overlay: `loadedLayout` (~517–577). Blocking-card arrival scrolls to
+  bottom (`ChatScreen.swift:424–429`).
+- Composer: after D13, WS03 has replaced `@State composerText` with
+  `@StateObject composer: ComposerTextController` in wave A. WS02 uses
+  `composer.insert(text:mode:) -> Bool` (C3); no legacy-binding fallback.
+- Pending (inbox) messages already work: `PendingMessagesCard.swift`,
+  `InboxModels.swift` (`InboxActionReport` 249, `PendingCardLogic` 355), store
+  `setInboxDelivery` / `cancelInboxItem` (1426–1460), busy send
+  `sendOrSteer` → `sendWhileRunning` with `delivery: steer|queue` (1272–1380).
+- Linux inner loop (D19): `mobile/native/Package.swift` compiles only
+  Foundation files (`MantaStreamModels.swift`, `InboxModels.swift`,
+  `AccountsModels.swift`, `PendingPrompt.swift`, … are in it;
+  `MantaEventStore.swift` (Combine) and `ChatModels.swift` are not). WS02's
+  pure logic therefore lives in Foundation-only files (see Files).
 
 ---
 
 ## F1. Retry card
 
 ### Desktop today
-- `useSseBus.ts:593–615` stores `retryInfo {attempt, message, next, action?}`
-  from the `retry` frame; `null` payload clears it.
-- `ChatPanel.tsx:3166–3167` pins `<RetryCard>` in the ambient tier.
-- `Cards.tsx:86–129` `RetryCard`: accent-bordered card, `↻` glyph, headline
-  `action.title || "Retrying… (attempt N)"`, then `· attempt N` when
-  `attempt > 0`, body `action.message || message`, and an "Open"-style link
-  button (`action.label || "Open"`) when `action.link` is present.
-- No controls; it disappears on its own.
+- `useSseBus.ts:593–615` stores `retryInfo {attempt, message, next, action?}`;
+  a `null` payload clears it. `ChatPanel.tsx:3166–3167` pins `<RetryCard>`.
+- `Cards.tsx:86–129`: `↻`, headline `action.title || "Retrying… (attempt N)"`
+  then `· attempt N` when `attempt > 0`; body `action.message || message`;
+  link button (`action.label || "Open"`) when `action.link`. No controls.
 
 ### Wire
-- Frame `kind:"stream", sub:"retry"` (`streamInterp.mjs:771–783`), payload
-  `{attempt: number, message: string, next?: number /*epoch ms*/}`; cleared by
-  `retry` with payload `null` (`clearRetry`, `streamInterp.mjs:308–312`) on the
-  next step start / turn edge. `action` is in the TS type
-  (`src/shared/types.ts:2932–2937`) but the interpreter never sets it today —
-  decode it optionally.
+`kind:"stream", sub:"retry"` (`streamInterp.mjs:771–783`):
+`{attempt: number, message: string, next?: number}`; cleared by a `retry`
+frame with payload `null` (`clearRetry`, 308–312). `action` exists in the TS
+type (`types.ts:2932–2937`) but is never set by the interpreter — decode it
+optionally.
 
 ### iOS design
-- `MantaStreamModels.swift`: add
-  ```swift
-  struct StreamRetryAction: Codable, Equatable, Sendable { var title: String?; var message: String?; var label: String?; var link: String? }
-  struct StreamRetryPayload: Codable, Equatable, Sendable { var attempt: Double; var message: String; var next: Double?; var action: StreamRetryAction? }
-  ```
-- `MantaSessionStreamState.retry: StreamRetryPayload?`. Router case `"retry"`:
-  `s.retry = try? frame.decodedPayload(StreamRetryPayload.self)` (a JSON
-  `null` payload decodes to nil → cleared). Also clear `retry` on a
-  `running` frame with `running:false`, on `turnComplete` with
-  `complete:true`, and in `applyingRunningSet` for every session absent from
-  the set (the box does not replay `retry` on reconnect).
-- `ChatSessionStore.retry` published (copied in `applyStreamState`).
-- New view `ChatCardRetry` in `ChatCardViews.swift`, mounted in
-  `bottomCards` when `store.retry != nil` and not read-only.
-  - Row 1: `arrow.clockwise` symbol (accent) + headline + caption.
-  - Headline: `action.title` if non-empty, else **"Retrying…"**. Caption:
-    "attempt N" when `attempt > 0`. (Desktop prints the attempt twice —
-    "Retrying… (attempt 2) · attempt 2"; iOS prints it once. Intentional.)
-  - Body: `action.message` if non-empty, else `message`; 3 lines max.
-  - When `action.link` is a valid URL: a `Link(action.label ?? "Open", destination:)`.
-  - No dismiss control (desktop has none; it clears itself).
+- `MantaStreamModels.swift`: `StreamRetryAction {title, message, label, link: String?}`,
+  `StreamRetryPayload {attempt: Double; message: String; next: Double?; action: StreamRetryAction?}`.
+- `MantaSessionStreamState.retry: StreamRetryPayload?`. Router `"retry"`:
+  `s.retry = try? frame.decodedPayload(...)` (JSON `null` → nil). Also cleared
+  by `ChatCardStreamRules.clearsRetry(sub:running:complete:)` on `running`
+  `false` and `turnComplete` `complete:true`, and in `applyingRunningSet` for
+  sessions absent from the set (the box does not replay `retry`).
+- `ChatSessionStore.retry` (published, copied in `applyStreamState`).
+- View `ChatCardRetry` (`ChatCardViews.swift`) in `bottomCards` when non-nil:
+  `arrow.clockwise` + headline + caption; body ≤ 3 lines; `Link` when the
+  action link is a valid URL. Headline = `action.title` if non-empty else
+  **"Retrying…"**; caption "attempt N" when `attempt > 0` (desktop prints the
+  attempt twice; iOS once — intentional).
 
-### Pure logic
-`ChatCardRetryCopy.headline(_:) -> String`, `.caption(_:) -> String?`,
-`.body(_:) -> String?`, `.link(_:) -> (label: String, url: URL)?`.
+### Pure logic (`ChatCardLogic.swift`)
+`ChatCardRetryCopy.headline/caption/body/link`, `ChatCardStreamRules.clearsRetry`.
 
 ### Acceptance
-- A `retry` frame shows the card within one render; the `null` frame removes it.
-- After a reconnect whose running set no longer lists the session, the card is gone.
-- No control on the card does nothing; the link opens Safari.
+- A `retry` frame shows the card; the `null` frame removes it; a reconnect whose
+  running set omits the session removes it. The link opens Safari.
 
 ---
 
 ## F2. Compaction card + "compacted while you were away"
 
 ### Desktop today
-- `useSseBus.ts:653–671`: `compaction` frames drive
-  `compactionState {reason, text, phase: running|done}`:
-  `started` → running with `reason ?? "context"`; `delta` → append text;
-  `ended` → `done`, cleared 3000 ms later. `transcriptStale` (672–676) clears
-  it and refetches the transcript.
-- `Cards.tsx:131–171` `CompactionCard`: `✻` (pulsing while running),
-  "Compacting…" / "Compacted", `· <reason>`; body = streamed text (3 lines,
-  mono) while running, the first non-empty line once done.
-- Background compaction notice: `useSseBus.ts:756–764` handles
-  `sub:"optimizer.compacted"` → `compactionNotice {beforeTokens, afterTokens,
-  away}`, shown 10 s. `ChatPanel.tsx:3170–3180` renders one line:
-  `"⟳ Compacted while you were away"` when `away`, else
+- `useSseBus.ts:653–671`: `started` → running (`reason ?? "context"`),
+  `delta` appends, `ended` → done, cleared after 3000 ms; `transcriptStale`
+  (672–676) clears and refetches.
+- `Cards.tsx:131–171`: `✻` (pulsing while running), "Compacting…" /
+  "Compacted", `· <reason>`; body = streamed text (3 lines, mono) while
+  running, first non-empty line when done.
+- `useSseBus.ts:756–764` + `ChatPanel.tsx:3170–3180`: `optimizer.compacted` →
+  10 s line `"⟳ Compacted while you were away"` (away) or
   `"⟳ Compacted in the background"`, plus `" · 128k → 31k"` from
-  `formatCompactionSaving` (`chatUtils.ts:305–310`, built on `formatTokens`
-  219–223) when the saving is non-zero.
+  `formatCompactionSaving` (`chatUtils.ts:305–310`, `formatTokens` 219–223).
 
 ### Wire
 - `sub:"compaction"` (`streamInterp.mjs:973–985`):
-  `{phase:"started", text:"", reason?: string}` · `{phase:"delta", text}` ·
-  `{phase:"ended"}`.
-- `sub:"transcriptStale"` payload `{}` (`streamInterp.mjs:738`, `986–990`,
-  `1021`) — the transcript changed wholesale; refetch.
-- `sub:"optimizer.compacted"` (`src/server/index.mjs:1925–1937`), payload
+  `{phase:"started", text:"", reason?}` · `{phase:"delta", text}` · `{phase:"ended"}`.
+- `sub:"transcriptStale"` `{}` (`:738`, `:986–990`, `:1021`).
+- `sub:"optimizer.compacted"` (`index.mjs:1925–1937`):
   `{beforeTokens: number|null, afterTokens: number|null, away: boolean}`.
 
-### iOS gap found
-iOS does not decode `transcriptStale` at all. After a manual or automatic
-compaction the canonical refetch only happens if a `turnComplete` edge
-happens to land after the rewrite. Fix it here.
+### iOS gap
+iOS never decodes `transcriptStale`; after a compaction the refetch only
+happens if a `turnComplete` edge lands later. Fixed here.
 
-### iOS design
-- `MantaStreamModels.swift`: `StreamCompactionPayload {phase: String, text: String?, reason: String?}`,
-  `StreamOptimizerCompactedPayload {beforeTokens: Double?, afterTokens: Double?, away: Bool?}`.
-- `MantaSessionStreamState` adds:
-  - `compaction: ChatCardCompactionState?` folded by the pure reducer below;
-  - `transcriptStaleSeq: Int` (bumped per `transcriptStale` frame);
-  - `compactionNotice: StreamOptimizerCompactedPayload?` and
-    `compactionNoticeSeq: Int` (bumped per `optimizer.compacted`).
-  Counters, not the `lastStreamFrame` stamp: the store's comment at
-  `ChatSessionStore.swift` ~330 explains why a stamp can be overwritten
-  before the deferred sink runs.
-- `ChatSessionStore`:
-  - `@Published private(set) var compaction: ChatCardCompactionState?`
-  - `@Published private(set) var compactionNotice: ChatCardCompactionNotice?`
-  - In `applyStreamState`: when `transcriptStaleSeq` advanced → set
-    `compaction = nil` and `scheduleRefetch()`. When `compaction.phase` is
-    `.done` → start (or restart) a 3 s `Task` that clears it (cancel the task on
-    a new `started`). When `compactionNoticeSeq` advanced → set the notice,
-    start a 10 s clear `Task`. Both tasks are cancelled in `stop()`.
-  - First snapshot rule: like `lastRunning`, seed the last-seen seqs on the
-    first snapshot without acting, so opening a chat does not refetch or show a
-    stale notice.
-- Views (`ChatCardViews.swift`):
-  - `ChatCardCompaction`: `sparkle` symbol (pulsing with
-    `.symbolEffect(.pulse)` while running), "Compacting…" / "Compacted",
-    caption `reason`; body as desktop (running: text, 3 lines, monospaced;
-    done: first non-empty line).
-  - `ChatCardCompactionNotice`: one quiet line, the exact desktop copy.
-- `ChatSessionStore.compact()` keeps its "Compacted — context freed" /
-  failure hints (`ChatSessionStore.swift` ~1604–1626); they confirm the
-  request, the card shows the work.
+### Lifetime model (resolves review #3)
+State that persists in the event store must never be "cleared" by a timer in
+the chat store, or the next snapshot resurrects it. So:
+
+- **Router (event store, persistent):**
+  - `compactionGeneration: Int` — incremented on every `started`.
+  - `compaction: ChatCardCompactionState?` where
+    `ChatCardCompactionState { generation: Int; reason: String; text: String; phase: .running | .done }`,
+    folded by `ChatCardCompactionReducer.apply(_:to:generation:)`:
+    `started` → new state with the new generation; `delta` appends (no prior
+    state → stays nil); `ended` → `.done` (no prior → nil).
+  - `transcriptStale` → `compaction = nil` **in the router** and
+    `transcriptStaleSeq += 1`.
+  - `optimizer.compacted` → `compactionNotice` payload and
+    `compactionNoticeSeq += 1`.
+- **Chat store (visibility, consumed once):** a pure latch
+  `ChatCardExpiryLatch` (in `ChatCardLogic.swift`) used twice — once keyed by
+  compaction generation, once by notice seq:
+  ```swift
+  struct ChatCardExpiryLatch: Equatable, Sendable {
+      private(set) var expiredThrough: Int      // keys ≤ this are never shown again
+      private(set) var scheduled: Int?          // key whose expiry timer is running
+      init(seed: Int)                           // first snapshot: seed with the current key
+      /// Returns whether `key` is visible, and a key to start an expiry timer for (at most once per key).
+      mutating func observe(key: Int, expiring: Bool) -> (visible: Bool, schedule: Int?)
+      mutating func expire(_ key: Int)          // expiredThrough = max(expiredThrough, key); clears `scheduled` if equal
+  }
+  ```
+  - Compaction: `observe(key: generation, expiring: phase == .done)`. A timer
+    (3 s) is started only when `schedule` is non-nil — i.e. on the first
+    snapshot where that generation is `.done` — never per snapshot. When it
+    fires it calls `expire(generation)`; the published `compaction` becomes
+    nil and later snapshots carrying the same generation stay hidden. A new
+    `started` has a higher generation, so an old timer can only expire the old
+    one.
+  - Notice: `observe(key: compactionNoticeSeq, expiring: true)`, 10 s timer.
+  - Seeding: on the first snapshot after `start()`, both latches are created
+    with `seed` = the current generation/seq **if** that compaction is already
+    `.done` (or for any existing notice), so opening a chat never shows a stale
+    card; a compaction still `.running` at open is shown.
+  - `transcriptStaleSeq` advance (vs. last seen, seeded the same way) →
+    `scheduleRefetch()` once.
+  - Timer `Task`s are cancelled in `stop()`.
+- Published: `compaction: ChatCardCompactionState?`,
+  `compactionNotice: ChatCardCompactionNotice?` (`{text: String}` built by
+  `ChatCardCompactionNotice.text(before:after:away:)`).
+- Views: `ChatCardCompaction` (`sparkle`, `.symbolEffect(.pulse)` while
+  running; copy as desktop), `ChatCardCompactionNotice` (one quiet line).
+- `ChatSessionStore.compact()` keeps its existing request hints.
 
 ### Pure logic
-- `ChatCardCompactionState { reason: String; text: String; phase: .running|.done }`
-  and `ChatCardCompactionReducer.apply(_ payload: StreamCompactionPayload, to: ChatCardCompactionState?) -> ChatCardCompactionState?`
-  (delta/ended with no prior state → unchanged nil, as desktop).
-- `ChatCardCompactionState.firstLine`.
-- `ChatCardCompactionNotice.text(before:after:away:) -> String` and
-  `ChatCardTokens.desktopCompact(_ n: Double) -> String` — a port of
-  `formatTokens` without the " tokens" suffix (`<1000` → whole number,
-  `<100k` → one decimal with trailing `.0` dropped + "k", else rounded "k").
-  Do not reuse `UsageMeters.formatTokens`: its rounding differs from desktop.
+`ChatCardCompactionReducer`, `ChatCardCompactionState.firstLine`,
+`ChatCardExpiryLatch`, `ChatCardCompactionNotice.text`, and
+`ChatCardTokens.desktopCompact(_:)` (port of `formatTokens` minus " tokens":
+`<1000` whole; `<100k` one decimal, trailing `.0` dropped, "k"; else rounded
+"k"). Not `UsageMeters.formatTokens` (different rounding).
 
 ### Acceptance
-- started → delta → ended shows "Compacting…" with growing text, then
-  "Compacted" + first line, gone ≤ 3.5 s later.
-- A `transcriptStale` frame triggers exactly one transcript refetch and removes
-  the card.
-- `optimizer.compacted {away:true, 128000, 31000}` shows
-  "⟳ Compacted while you were away · 128k → 31k" for 10 s; `{away:false,null,null}`
-  shows "⟳ Compacted in the background".
-- Opening a chat never refetches or shows a notice because of an old seq.
+- started → delta → ended shows growing text, then "Compacted" + first line,
+  gone ≤ 3.5 s later, and does not come back on later frames.
+- A `transcriptStale` frame triggers exactly one refetch and the card is gone
+  for good.
+- `optimizer.compacted {away:true, 128000, 31000}` → "⟳ Compacted while you
+  were away · 128k → 31k" for 10 s; `{away:false, null, null}` →
+  "⟳ Compacted in the background".
+- Opening a chat with an old compaction/notice in the event store shows neither.
 
 ---
 
 ## F3. "Blocked — needs a decision" card
 
 ### Desktop today
-- `ChatPanel.tsx:2648–2678`: `liveProgress` from `progress:get` on mount and
-  on every `progress.updated` bus event for this session.
-- `ChatPanel.tsx:3150–3159`: when `liveProgress.state === "blocked"`, a card
-  in the **blocking** tier: `Cards.tsx:713–729` `BlockedProgressCard` — warn
-  card, warn dot, title **"Blocked — needs a decision"**, body = `detail`
-  rendered as markdown. Not dismissible; it clears when the model reports a
-  different state.
+`ChatPanel.tsx:2648–2678` loads `progress:get` on mount and on each
+`progress.updated` for the session; `ChatPanel.tsx:3150–3159` pins
+`BlockedProgressCard` (`Cards.tsx:713–729`) in the blocking tier when
+`state === "blocked"`: warn card, dot, **"Blocked — needs a decision"**,
+markdown `detail`. Not dismissible.
 
 ### Wire
-- RPC `progress:get` (`src/server/rpc.mjs:2466–2467`), arg `sessionID` →
-  `ProgressRecord | null` (`src/shared/types.ts:2537–2545`:
-  `{sessionID, label, step, total, state, detail, updatedAt}`).
-  iOS already has `MantaAPIClient.progressGet(sessionID:)`
-  (`MantaAPIClient.swift:30–33`) and `MantaProgress` (`SessionModels.swift:284`).
-- Bus frame `kind:"progress.updated"`, payload `{sessionID}`
-  (`src/server/progress.mjs:155`, `198`). `MantaStreamFrame.parse` lifts
-  `payload.sessionID` into `frame.sessionId`.
+`progress:get` (`rpc.mjs:2466–2467`) → `ProgressRecord | null`
+(`types.ts:2537–2545`). iOS has `api.progressGet(sessionID:)`
+(`MantaAPIClient.swift:30–33`) and `MantaProgress` (`SessionModels.swift:284`).
+Bus `kind:"progress.updated"`, payload `{sessionID}` (`progress.mjs:155`, `198`).
 
 ### iOS design
-- `MantaEventStore`: new `let progressUpdates = PassthroughSubject<String, Never>()`;
-  in `handleFrame`, `if frame.kind == "progress.updated", let sid = frame.sessionId { progressUpdates.send(sid) }`
-  (raw handlers still receive the frame — `SessionListStore` relies on that).
+- `MantaEventStore`: `let progressUpdates = PassthroughSubject<String, Never>()`,
+  sent in `handleFrame` for `progress.updated` with a session id (raw handlers
+  still get the frame — `SessionListStore` relies on that).
 - `ChatSessionStore`: `@Published private(set) var progress: MantaProgress?`;
-  `func refreshProgress()` on `start()` (first run), on `progressUpdates`
-  filtered to `sessionId`, and on reconnect (`handleConnection`). Failure: keep
-  the last value, `NSLog` it (progress is ambient; no user banner, same as
-  desktop). Skip for read-only stores.
-  `var blockedProgress: MantaProgress? { progress?.state == "blocked" ? progress : nil }`.
-- View `ChatCardBlocked`: warn-tinted card (`tokens.warn` border/tint), dot +
-  "Blocked — needs a decision" (semibold), body =
-  `Text(ChatCardMarkdown.inline(detail))` where `inline` builds an
-  `AttributedString(markdown:options:.inlineOnlyPreservingWhitespace)` and
-  falls back to the plain string on parse failure. No controls.
-- Mounted first in `bottomCards` (blocking tier).
+  `refreshProgress()` on first `start()`, on `progressUpdates` for this
+  session, on reconnect. Failure keeps the last value and logs (ambient, as
+  desktop). Skipped when `isReadOnly`.
+  `blockedProgress` = `progress` when `ChatCardProgressRule.isBlocked(state:)`.
+- View `ChatCardBlocked`: warn-tinted card, dot + title, body
+  `Text(ChatCardMarkdown.inline(detail))` (`AttributedString(markdown:,
+  options: .inlineOnlyPreservingWhitespace)`, plain-text fallback). No controls.
+  First in `bottomCards`, after F5's card.
 
 ### Acceptance
-- `progress_report state:"blocked"` from an agent shows the card within one
-  `progress.updated` round-trip; a later `working`/`done` hides it.
-- Inline `code` renders monospaced.
+A `blocked` progress report shows the card within one `progress.updated`
+round-trip; a later state hides it; inline `code` renders monospaced.
 
 ---
 
 ## F4. Send-error line: Reconnect / Reset health
 
 ### Desktop today
-- `useSseBus.ts:628–637`: `sessionError` → `describeSessionError`
-  (`chatUtils.ts:800–826`). If `authErrorAdvice` (`1817–1853`) matches —
-  error name `ProviderAuthError`, or `ApiError` with a credential-shaped
-  message (regex at 1850), checked against `rawMessage ?? message` — and the
-  session's provider has a label in `AUTH_PROVIDER_LABELS` (`1777–1781`:
-  `anthropic→Claude`, `openai→Codex`, `kimi-for-coding→Kimi`), the banner text
-  is **"<Label> needs to be reconnected."** and `authReconnect = label`.
-  Otherwise the text gets a typed prefix (`Context full — try /compact: …`,
+- `useSseBus.ts:628–637` → `describeSessionError` (`chatUtils.ts:800–826`) /
+  `authErrorAdvice` (1817–1853): `ProviderAuthError`, or `ApiError` whose
+  `rawMessage ?? message` matches the credential regex (1850), for a provider
+  in `AUTH_PROVIDER_LABELS` (1777–1781: anthropic→Claude, openai→Codex,
+  kimi-for-coding→Kimi) → **"<Label> needs to be reconnected."** + Reconnect.
+  Otherwise typed prefixes (`Context full — try /compact: …`,
   `Response truncated (hit output limit)`, `Structured output failed: …`,
   `API error: …`).
-- `ChatPanel.tsx:3182–3207` renders `⚠ <sendError>` with **Reconnect** (when
-  `authReconnect`), **Reset health** (when the verdict below matches) and ×.
-- Reconnect calls `openAuthReconnect` (`useSseBus.ts:386–392`), which
-  dispatches a `manta-open-subscriptions` window event. **Nothing in
-  `src/renderer` listens to it** (grep) — on desktop the button only clears the
-  banner. iOS must do better: it opens Accounts.
-- Reset health: only set by the Auto-routing verdict
-  `routing:choose → {kind:"no-healthy-endpoint"}` (`ChatPanel.tsx:1837–1849`,
-  server `rpc.mjs:1627–1646`); the button calls `accounts:retry {providerID}`
-  per affected provider (`ChatPanel.tsx:740–756`).
+- `ChatPanel.tsx:3182–3207` renders the line with Reconnect / Reset health / ×.
+  Desktop Reconnect dispatches `manta-open-subscriptions`, which nothing listens
+  to (D10 — renderer-only bug, reported, not fixed here).
 
 ### Wire
-- `sub:"sessionError"` payload `{name: string|null, message: string, rawMessage?: string}`
-  (`streamInterp.mjs:751–757`, type `types.ts` StreamSessionErrorPayload).
-- No RPC for Reconnect: it is navigation to the Accounts screen (WS08,
-  `AccountsScreen(store:focusProvider:ownsLifecycle:)`, `AccountsScreen.swift:92`).
+`sub:"sessionError"` `{name: string|null, message: string, rawMessage?: string}`
+(`streamInterp.mjs:751–757`). No error id exists (resolves review #7 below).
+Reconnect is navigation to WS08's `AccountsScreen(store:focusProvider:ownsLifecycle:)`.
 
 ### iOS design
-- `StreamSessionErrorPayload` gains `var rawMessage: String?`.
-- Pure `ChatCardSendError.describe(name:message:rawMessage:providerID:) -> ChatCardSendErrorDescription { text: String; reconnect: (label: String, accountsProvider: String)? }`
-  — a line-for-line port of `describeSessionError` + `authErrorAdvice` +
-  `isAuthErrorName` (same regex, case-insensitive). `accountsProvider` maps the
-  opencode provider to the Accounts provider id: `anthropic→claude`,
-  `openai→codex`, `kimi-for-coding→kimi` (the ids `AccountsSelectors.ordered`
-  matches on; an unknown focus is harmless).
+- `StreamSessionErrorPayload` gains `rawMessage: String?`.
+- Router: `sessionErrorSeq: Int` bumped on every `sessionError` frame
+  (identical payloads are distinct occurrences).
+- `ChatCardSendError.describe(name:message:rawMessage:providerID:) -> ChatCardSendErrorDescription {text; reconnect: (label, accountsProvider)?}`
+  — port of `describeSessionError` + `authErrorAdvice` + `isAuthErrorName`
+  (same regex, case-insensitive); `accountsProvider` maps
+  anthropic→`claude`, openai→`codex`, kimi-for-coding→`kimi` (the ids
+  `AccountsSelectors.ordered` matches).
 - `ChatSessionStore`:
-  - stores `sessionErrorDismissed: StreamSessionErrorPayload?`; `func dismissSessionError()` records the current payload; the published
-    `sessionError` is nil while it equals the dismissed one (a new error, or
-    the next turn, shows again).
-  - `trailingBlocks` uses `ChatCardSendError.describe(...).text` for the
-    transcript notice (typed prefixes now match desktop), and **omits** the
-    notice when `reconnect != nil` — that error is shown pinned instead (one
-    copy, actionable). `trailingBlocks` gains a parameter
-    `sessionErrorText: String?` replacing its use of `sessionError.message`;
-    update `ChatTranscriptTests`/existing callers accordingly.
-  - The provider id is passed in by the screen (it owns `modelStore`):
-    `store.sessionErrorProviderID = activeProviderID` on change, where
-    `activeProviderID = ChatModel.activeModel(modelStore.models, override:…, configuration:…, provider:…)?.providerID ?? modelStore.override?.providerID`.
-- View `ChatCardSendErrorLine` (pinned in `bottomCards` only for the
-  reconnect case): danger-tinted row, `exclamationmark.triangle.fill`, text,
-  **Reconnect** button, × (accessibility "Dismiss error").
-  - Reconnect → `reconnectTarget = ReconnectTarget(provider:)`; ChatScreen
-    presents `.sheet(item: $reconnectTarget) { NavigationStack { AccountsScreen(store: accountsStore, focusProvider: $0.provider, ownsLifecycle: false).toolbar { Done } } }`
-    and calls `store.dismissSessionError()`. The Accounts screen is the place
-    the user re-signs (WS08).
-- **Reset health: deferred** (see §Deferred).
+  - `dismissedSessionErrorSeq: Int?`; `dismissSessionError()` records the
+    current `sessionErrorSeq`. The published `sessionError` is nil while
+    `sessionErrorSeq == dismissedSessionErrorSeq`; a new frame (even an
+    identical payload) has a higher seq and shows; a `running:true` edge resets
+    the dismissal (the router already clears the error on a new turn,
+    `MantaEventStore.swift` `running` case).
+  - `sessionErrorProviderID: String?` set by ChatScreen from
+    `ChatModel.activeModel(modelStore.models, override:…, configuration:…, provider:…)?.providerID ?? modelStore.override?.providerID`.
+  - `trailingBlocks` takes `sessionErrorText: String?` (from `describe(...).text`)
+    instead of reading `sessionError.message`, and gets `nil` when `reconnect`
+    is non-nil — that error is shown pinned (one copy, actionable). Existing
+    `trailingBlocks` tests updated.
+- View `ChatCardSendErrorLine` (pinned, reconnect case only): danger-tinted,
+  text, **Reconnect**, × ("Dismiss error"). Reconnect →
+  `reconnectTarget = ReconnectTarget(provider:)`; ChatScreen presents
+  `.sheet(item:) { NavigationStack { AccountsScreen(store: accountsStore, focusProvider: $0.provider, ownsLifecycle: false).toolbar { Done } } }`
+  and calls `dismissSessionError()`.
+- **Reset health: deferred** (D8).
 
 ### Acceptance
-- A `sessionError {name:"ProviderAuthError"}` on an `anthropic` session shows
-  "Claude needs to be reconnected." pinned with Reconnect; no duplicate notice in
-  the transcript; Reconnect opens Accounts with Claude first.
-- `ApiError` "rate limit exceeded" is NOT treated as auth (plain notice,
-  "API error: …").
-- × hides the line until the next distinct error.
+- `ProviderAuthError` on an anthropic session → pinned "Claude needs to be
+  reconnected." with Reconnect, no duplicate transcript notice; Reconnect opens
+  Accounts with Claude first.
+- `ApiError` "rate limit window expired" → plain notice "API error: …".
+- × hides the line; a second identical error frame shows it again.
 
 ---
 
 ## F5. Background-job approval card
 
 ### Desktop today
-- `ChatPanel.tsx:946–968`: while the panel is active and trust mode is off,
-  poll `delegate:pending-approvals(sessionId)` every 3 s; show the first. If
-  the parent's pending permissions' `always[]` already cover every requested
-  tool (`isApprovalCoveredByAlways`, `chatUtils.ts:2261–2280`, `globCovers`
-  2245–2254) it approves silently.
-- `PanelCards.tsx:585–707` `DelegateApprovalCard`: header bot icon +
-  **"Background job approval"** + `· <name>` + × (Not now); prompt (2 lines);
-  **"Will be allowed to:"**; one chip per tool `permission: pattern` (or
-  **"No tools declared."**); in edit mode each row becomes two text fields
-  (permission, pattern) + remove, plus **"+ Add rule"** (adds `bash`, empty
-  pattern); footnote **"Anything not listed is denied (the job will not ask
-  again)."**; buttons **Start job** (primary), **Edit access** / **Done
-  editing**, **Not now**.
-- `ChatPanel.tsx:3133–3147`: approve/decline are fire-and-forget with an empty
-  catch (a root-AGENTS.md violation on desktop; iOS reports outcomes).
+- `ChatPanel.tsx:946–968`: poll `delegate:pending-approvals(sessionId)` every
+  3 s while active (trust off); show the first. It also auto-approves when the
+  parent's pending permissions' `always[]` cover every tool
+  (`isApprovalCoveredByAlways`, `chatUtils.ts:2261–2280`). **That is a desktop
+  bug:** `PermissionRequest.always` on a *pending* ask is what *would* be
+  saved if approved (`opencodeV2.mjs:470–490`; pending list maintained by
+  `streamInterp.mjs:957–971`), not a grant. iOS does NOT port it (D10:
+  renderer-only, reported).
+- `PanelCards.tsx:585–707` `DelegateApprovalCard`: bot icon,
+  **"Background job approval"** `· <name>`, × (Not now); prompt (2 lines);
+  **"Will be allowed to:"**; chips `permission: pattern` or
+  **"No tools declared."**; edit mode = two text fields + remove per row,
+  **"+ Add rule"** (`bash`, empty pattern); footnote **"Anything not listed is
+  denied (the job will not ask again)."**; **Start job**, **Edit access** /
+  **Done editing**, **Not now**. Approve/decline swallow errors (D10, reported).
 
 ### Wire
-- `delegate:pending-approvals` (`rpc.mjs:2473–2474`), arg `sessionId` →
+- `delegate:pending-approvals` (`rpc.mjs:2473–2474`) arg `sessionId` →
   `DelegateApproval[]` (desktop also tolerates `{approvals: []}`,
-  `httpApi.ts:1310–1313`). `DelegateApproval` = `{id, parentSessionID, name,
-  prompt, tools:[{permission, pattern, action?}], createdAt}`
-  (`types.ts:2623–2635`).
-- `delegate:approve` (`rpc.mjs:2475–2478`), arg `{id, tools?}` → `{ok: boolean}`.
-  `ok:false` = no such pending approval (expired after 2 min —
-  `APPROVAL_TIMEOUT_MS`, `delegate.mjs:125`, `2485–2501` — or already
-  resolved). Server uses edited tools only when non-empty (`delegate.mjs:4783–4787`).
-- `delegate:decline` (`rpc.mjs:2479–2480`), arg `id` → `{ok: boolean}`.
-- Bus frame `kind:"delegate.approval.requested"`, payload = the approval
-  (`delegate.mjs:4782`). Not session-enveloped; filter on
-  `payload.parentSessionID`.
-- Trust mode: the server never creates an approval when trust is on
-  (`delegate.mjs:4769–4775`), so iOS needs no trust check.
+  `httpApi.ts:1310–1313`); `DelegateApproval = {id, parentSessionID, name,
+  prompt, tools:[{permission, pattern, action?}], createdAt}` (`types.ts:2623–2635`).
+- `delegate:approve` (`rpc.mjs:2475–2478`) `{id, tools?}` → `{ok}`;
+  `delegate:decline` (`2479–2480`) `id` → `{ok}`. `ok:false` only means the
+  entry is no longer pending (`delegate.mjs:2501–2505`) — expired (2 min,
+  `:125`) **or already resolved elsewhere**.
+- **Empty edited list is NOT deny-all:** the server uses edited tools only when
+  non-empty, otherwise the original request (`delegate.mjs:4783–4787`).
+- Bus `kind:"delegate.approval.requested"`, payload = approval (`:4782`), not
+  session-enveloped. Trust on → no approval is ever created (`:4769–4775`).
 
 ### iOS design
-- `MantaAPIClient+ChatCards.swift` (new, C1):
-  ```swift
-  func delegatePendingApprovals(sessionId: String) async throws -> [ChatCardApproval]   // accepts bare array or {approvals:[]}
-  func delegateApprove(id: String, tools: [ChatCardApprovalTool]) async throws -> Bool  // returns `ok`
-  func delegateDecline(id: String) async throws -> Bool
-  ```
-  Wire types `ChatCardApproval`, `ChatCardApprovalTool {permission, pattern, action?}`
-  in `ChatCardModels.swift`.
-- `MantaEventStore`: `let delegateApprovalRequests = PassthroughSubject<ChatCardApproval, Never>()`,
-  fed in `handleFrame` when `frame.kind == "delegate.approval.requested"` and
-  the payload decodes.
-- New store `ChatCardApprovalStore` (`@MainActor final class`, in
-  `ChatCardApprovalStore.swift`) owned by ChatScreen (`@StateObject`), not
-  created for read-only sessions:
-  - `@Published private(set) var pending: ChatCardApproval?`, `busy: Bool`,
-    `error: String?`.
-  - Refresh on screen appear, on app foreground (ChatScreen already observes
-    scene phase), on reconnect, on a `delegateApprovalRequests` value for this
-    session, and every 3 s while the screen is visible **and** `store.running`
-    (approvals only arise mid-turn). Fetch errors keep the current card and are
-    logged (ambient, like desktop).
-  - Auto-approve when `ChatCardApprovalLogic.isCoveredByAlways(approval, permissions: store.permissions)`.
-  - `approve(tools:)` / `decline()`: set `busy`, call RPC, then
-    `ok:true` → `pending = nil`, `store.actionHint = "Background job approved"` /
-    `"Background job declined"`; `ok:false` → `pending = nil`,
-    `actionHint = "That request had already expired — the agent was told no"`;
-    thrown error → keep the card, `error = "Couldn't reach your box — try again"`.
-- View `ChatCardApprovalCard` (`ChatCardViews.swift`): native card with the
-  desktop copy above. Edit mode: a `ForEach` of rows with two `TextField`s
-  (monospaced, no autocorrect/autocapitalisation) and a trash button; "Add
-  rule" appends `{bash, ""}`. **Start job** is disabled (with the footnote
-  "Fill in or remove empty rules") while any row has an empty permission or
-  pattern — desktop would send them; iOS refuses garbage rules. Local edit
-  state resets when `approval.id` changes. Buttons disabled while `busy`.
-  Mounted first in `bottomCards` (blocking tier, before F3).
+- Client members in `MantaAPIClient+ChatCards.swift` (see "Client members");
+  the store depends on a protocol `ChatCardApprovalAPI` (the three approval
+  methods) so it is testable with a fake; `MantaAPIClient` conforms there.
+- `MantaEventStore`: `let delegateApprovalRequests = PassthroughSubject<ChatCardApproval, Never>()`
+  fed from `handleFrame`.
+- `ChatCardApprovalStore` (`@MainActor final class`, own file), owned by
+  ChatScreen, only when the session's mutation policy is `.allowed` (F6):
+  - `@Published private(set) var pending: ChatCardApproval?`, `busy`, `error`.
+  - Refresh on appear, foreground, reconnect, a matching
+    `delegateApprovalRequests` value, and every 3 s while visible **and**
+    `store.running`. Fetch errors keep the current card and log.
+  - **No auto-approval of any kind** (resolves review #2).
+  - `resolvedIDs: Set<String>` — an id decided locally (either outcome) is
+    tombstoned; every fetch result drops tombstoned ids, so an in-flight poll
+    that returns after a local decision cannot restore the card.
+  - `approve(tools:)` / `decline()`: guarded by
+    `ChatCardApprovalLogic.canStart(tools:)` for approve; `busy` while in flight;
+    `ok:true` → tombstone, `pending = nil`, hint "Background job approved" /
+    "Background job declined"; `ok:false` → tombstone, `pending = nil`, hint
+    **"That request is no longer pending"**, then refresh; thrown error → keep
+    the card, `error = "Couldn't reach your box — try again"`.
+- View `ChatCardApprovalCard`: desktop copy; edit mode rows with two
+  `TextField`s (monospaced, no autocorrect/autocapitalisation) and a trash
+  button; "Add rule" appends `{bash, ""}`. **Start job** disabled when
+  `canStart` is false, with one footnote:
+  - list empty → **"A job needs at least one rule. To give it no access, tap
+    Not now."** (resolves review #1);
+  - any empty field → **"Fill in or remove empty rules."**
+  Edit state resets when `approval.id` changes. First in `bottomCards`.
 
 ### Pure logic
-`ChatCardApprovalLogic.globCovers(_:_:)`, `.isCoveredByAlways(_:permissions:)`
-(ports), `.canStart(tools:) -> Bool`, `.outcomeHint(ok:approved:) -> String`,
-`ChatCardApprovalsDecoding.decode(_ data:)` (both shapes).
+`ChatCardApprovalLogic.canStart(tools:)` (non-empty AND every field
+non-blank), `.footnote(tools:)`, `.outcomeHint(ok:approved:)`,
+`.filterResolved(_:resolved:)`; `ChatCardApprovalsDecoding.decode(_:)`
+(both shapes).
 
 ### Acceptance
-- With trust off, a `delegate` call with tools shows the card on the phone
-  within 3 s (or immediately on the bus frame).
-- Start job with edits sends the edited list; the job starts with that access.
-- Not now (× or button) declines; the agent's `delegate` returns declined.
-- Approving after the 2-minute timeout says it had expired; never silent.
-- No card at all in trust mode.
+- Trust off: a `delegate` call with tools shows the card within 3 s (or on the
+  bus frame). Edited access is what the job starts with.
+- Removing every rule disables Start with the explanation; no approve RPC is sent.
+- A pending parent permission whose patterns match never approves anything.
+- Approving on the desktop first → the phone's Start says "That request is no
+  longer pending"; a poll finishing after a local approve does not bring the
+  card back. No card in trust mode.
 
 ---
 
 ## F6. Read-only bar for background-job sessions
 
 ### Desktop today
-- `ChatPanel.tsx:360–373`: the session is a job when the jobs map has a record
-  keyed by this session as `childSessionID`, and `isReadOnlyJob`
-  (`chatUtils.ts:1869–1873`) — every job except a CTO work worker
-  (`correlation.kind === "work"`).
+- `ChatPanel.tsx:360–373`: a job session = jobs map has this session as
+  `childSessionID` and `isReadOnlyJob` (`chatUtils.ts:1869–1873`: everything
+  except `correlation.kind === "work"`).
 - `ChatPanel.tsx:3509–3550` replaces the composer with `ReadOnlyJobBar`
-  (`PanelCards.tsx:715–774`); blocking cards and management panels are not
-  mounted (`viewOnly`, `ChatPanel.tsx:780`).
-- Bar copy: **"Read-only — this is a background job running <model>."** (or
-  **"Read-only — this is a background job."** when the model is unknown),
-  **"It reports to <parent name>."** when the parent window is found. Second
-  line: running → `activity || "running…"`; terminal → `formatJobSummary`
-  (`chatUtils.ts:1901–1911`: `"<branch> · N files changed"` or
-  `"N file(s) changed"`) + `" · <error ?? status>"` for failed/stopped.
-  Buttons: **Go to parent**, **Stop** (only while running).
-- Model name: `parseModelRef(job.model)` (`chatUtils.ts:1892`) → catalog name.
+  (`PanelCards.tsx:715–774`); blocking cards/panels hidden (`viewOnly`, 780).
+- Copy: **"Read-only — this is a background job running <model>."** /
+  **"Read-only — this is a background job."**; **"It reports to <parent>."**;
+  second line running → `activity || "running…"`, terminal →
+  `formatJobSummary` (`chatUtils.ts:1901–1911`) + `" · <error ?? status>"` for
+  failed/stopped. **Go to parent**, **Stop** (running only).
 
 ### Wire
-- `delegate:list` (`rpc.mjs:2434–2435`), no arg → all jobs (`DelegateJob`,
-  `types.ts:2557–…`; relevant fields `id, parentSessionID, childSessionID,
-  status, model, branch, worktree, activity, error, filesChanged,
-  correlation{kind}`).
-- `delegate:stop` (`rpc.mjs:2437`), arg `id` → `{ok, error?}`; iOS already has
-  `delegateStop(id:)` which throws on refusal (`MantaAPIClient.swift` ~211–222).
-- `tmux:list` via `api.projects()` (`MantaAPIClient.swift:192`) to resolve the
-  parent's window (`opencodeSessionId == parentSessionID`).
-- Freshness: `delegate.updated` → `eventStore.delegateUpdates` (exists).
+`delegate:list` no arg → all jobs (`rpc.mjs:2434–2435`; fields `id,
+parentSessionID, childSessionID, status, model, branch, worktree, activity,
+error, filesChanged, correlation{kind}`); `delegate:stop` (`:2437`) via the
+existing `api.delegateStop(id:)` (throws on refusal); `api.projects()` to find
+the parent window; freshness via `eventStore.delegateUpdates`.
 
-### iOS design
-- iOS's `DelegateJob` (`SessionModels.swift:88`, WS04) lacks `model`,
-  `worktree`, `error`, `filesChanged`, `correlation`. Do NOT edit it: decode a
-  WS02 type `ChatCardJob` (`ChatCardModels.swift`) with exactly those fields
-  plus `id, parentSessionID, childSessionID, status, branch, activity`, all
-  lenient (`decodeIfPresent`), list decoded per element like
-  `LenientDelegateJobs` (skip a bad record).
-  `MantaAPIClient+ChatCards.swift`: `func chatCardJobs() async throws -> [ChatCardJob]`.
-- `ChatCardJobOwnershipStore` (`@MainActor final class`, own file) owned by
-  ChatScreen: `@Published private(set) var job: ChatCardJob?` (only when
-  read-only per `ChatCardJobLogic.isReadOnly`), `parent: SessionOpenTarget?`,
-  `parentName: String?`, `stopping: Bool`. Loads on appear; refreshes on
-  `delegateUpdates`. A failed load leaves the screen writable (desktop
-  behaviour when the job map is empty) and logs.
-- ChatScreen when `jobOwnership.job != nil`:
-  - Replace `ComposerView` with `ChatCardReadOnlyJobBar` in the same overlay
-    slot (it must report its height through the same `onGeometryChange` that
-    feeds `bottomBarHeight`).
-  - `.environment(\.transcriptCardActions, nil)` → permission/question cards
-    render inert (the read-only path already supported by
-    `TranscriptRow.swift:233–241`).
-  - Do not mount F5's approval store or F4's pending line; `bottomCards`
-    shows only retry/compaction/notice/blocked.
-  - Context sheet: hide Compact / Clear / Hand off (`ContextSheet` gains
-    `allowsActions: Bool = true`).
-  - Overflow sheet: see Mount requests (M3). Until applied, hide the overflow
-    nav-bar button for read-only job sessions.
-- Bar content per desktop copy; model name via `ChatCardJobLogic.parseModelRef`
-  then `modelStore.models.first { providerID/id match }?.name`.
-- **Stop** (shown when `ChatCardJobLogic.isStoppable(status)` — running or
-  paused, matching `stopJob`): confirm with the existing
-  `confirmActionSheet` pattern ("Stop this job?" / "The job stops and its
-  window stays open.") → `api.delegateStop` → success: `actionHint = "Job stopped"`
-  and refresh; failure: `actionHint = "Couldn't stop the job: <reason>"`.
-- **Go to parent**: when `parent` resolved → navigate (see Q2): use
-  `MantaNavigator.open(.session(windowKey:))` with WS04's key for that window;
-  if WS04 provides no way to build the key from `(project, windowIndex)`,
-  reset `path` and append the parent `SessionOpenTarget`. When the parent window
-  is not found the button is not rendered and the line reads
-  "It reports to a session that's closed."
+### Ownership states (resolves review #8)
+`enum ChatCardMutationPolicy: Equatable, Sendable { case resolving, allowed, readOnlyJob }`
+(in `ChatCardModels.swift`).
+
+- `ChatSessionStore` gains `@Published private(set) var mutationPolicy: ChatCardMutationPolicy`
+  (initial `.resolving`; read-only subagent stores never leave it and stay
+  read-only through `isReadOnly` as today) and `func applyMutationPolicy(_:)`. `var canMutate: Bool { !isReadOnly && mutationPolicy == .allowed }`.
+- **Every mutation entry point guards on it**, not only composer visibility:
+  `send`, `sendOrSteer`, `sendWhileRunning`, `retry(promptID:)`,
+  `setInboxDelivery`, `cancelInboxItem`, `editLastInboxItem`,
+  `replyPermission`, `replyQuestion`, `rejectQuestion`, `keepPlanning`,
+  `compact`, `abort`. Behaviour per policy:
+  - `.resolving`: `send`/`sendOrSteer` put the prompt in the durable outbox as
+    `.waiting` (exactly as when a turn runs) and do not deliver;
+    `drainPendingPromptIfIdle` also requires `.allowed`. Other mutations are
+    refused with hint "One moment — checking this session". Blocking cards
+    render inert (`transcriptCardActions` nil). The composer stays usable, so
+    the degraded-mode promise (typing while the box is unreachable) holds.
+  - `.allowed`: today's behaviour; held `.waiting` prompts drain.
+  - `.readOnlyJob`: the composer is replaced by the bar; any held `.waiting`
+    prompt becomes `.failed` with reason "This is a background job — it can't
+    take messages"; every other mutation is refused (and no control for it is
+    rendered, so the refusal is never user-visible).
+- `ChatCardJobOwnershipStore` (`@MainActor final class`, own file, owned by
+  ChatScreen) resolves the policy with the pure
+  `ChatCardOwnershipResolver.next(current:result:sessionID:)`:
+  - success with a read-only record for this `childSessionID` → `.readOnlyJob(job)`;
+  - success with none (or a `work` record) → `.allowed`;
+  - `MantaError.server` (the box answered with an error) while `.resolving` →
+    `.allowed` (a box that cannot list jobs cannot have made this a job);
+  - any other failure → **keep the current state** (a known job stays
+    read-only; `.resolving` stays resolving).
+  Re-resolves on appear, `delegateUpdates`, reconnect, app foreground, and every
+  30 s while `.resolving` or while the bar shows a running job (recovers a
+  missed `delegate.updated`). Pushes the result into
+  `store.applyMutationPolicy`. Publishes `job: ChatCardJob?`,
+  `parentWindowKey: String?`, `parentName: String?`, `stopping`.
+- iOS's `DelegateJob` (WS04's `SessionModels.swift`) lacks the needed fields;
+  WS02 decodes its own lenient `ChatCardJob` (skip-bad-element list decoding
+  like `LenientDelegateJobs`).
+- ChatScreen when `.readOnlyJob`:
+  - `ChatCardReadOnlyJobBar` replaces `ComposerView` in the overlay slot and
+    reports its height through the same measurement that feeds
+    `bottomBarHeight`.
+  - `.environment(\.transcriptCardActions, nil)` (read-only path,
+    `TranscriptRow.swift:233–241`); no approval store; `bottomCards` shows only
+    retry / compaction / notice / blocked.
+  - `ContextSheet(allowsActions: false)` hides Compact / Clear / Hand off.
+  - Overflow sheet gets `isReadOnlyJob: true` (M-02-2, applied by WS07).
+  - Exposes `store.isBackgroundJobReadOnly` (`mutationPolicy == .readOnlyJob`)
+    for WS05's `GitSessionHeaderRow(readOnly:)` (wave C).
+- Bar copy per desktop; model name via `ChatCardJobLogic.parseModelRef` then
+  `modelStore.models` name lookup.
+- **Stop** when `ChatCardJobLogic.isStoppable(status)` (running or paused,
+  matching `stopJob`): confirm ("Stop this job?" / "The job stops and its window
+  stays open.") → `api.delegateStop` → hint "Job stopped" + re-resolve; failure
+  → "Couldn't stop the job: <reason>".
+- **Go to parent** (D9): `navigator.open(.session(windowKey: navigator.windowKey(project:windowIndex:)))`
+  using WS04's builder for the parent window (`opencodeSessionId ==
+  parentSessionID` from `api.projects()`). Parent window not found → no button;
+  line reads "It reports to a session that's closed."
 
 ### Pure logic
-`ChatCardJobLogic.isReadOnly(_:)`, `.job(forSession:in:)`,
-`.parseModelRef(_:)`, `.summary(_:)` (formatJobSummary port incl. 0-file and
-no-worktree cases), `.headline(modelName:)`, `.statusLine(_:)`,
-`.isStoppable(_:)`.
+`ChatCardJobLogic.isReadOnly`, `.job(forSession:in:)`, `.parseModelRef`,
+`.summary` (formatJobSummary port), `.headline(modelName:)`, `.statusLine`,
+`.isStoppable`; `ChatCardOwnershipResolver.next`; `ChatCardMutationGate.decide(policy:action:) -> .run | .hold | .refuse(String)`.
 
 ### Acceptance
-- Opening a job's session from Background jobs shows the bar, not the
-  composer; permission cards in it are inert.
+- A job session opened from Background jobs shows the bar; permission cards are
+  inert; no store mutation runs even if called.
 - A CTO work worker opens writable.
-- Stop asks first, then reports success or the box's reason.
-- After the job finishes (delegate.updated), the bar switches to the summary
-  and Stop disappears.
+- Initial `delegate:list` failure → composer usable, sends held as waiting; after
+  reconnect resolves `.allowed` they go out; resolved `.readOnlyJob` they fail
+  with the reason.
+- Missed `delegate.updated`: the 30 s re-resolve updates the bar.
+- Stop confirms, then reports success or the box's reason.
 
 ---
 
 ## F7. Queued-message drain at the next step boundary — already at parity
 
-The brief names `maybeDrainQueuedPrompt` / `shouldAbortForQueuedDrain` /
-drain-abort. **Those no longer exist on desktop** (grep of `src/renderer`:
-zero hits). Desktop now uses OpenCode V2's native inbox: a send while running
-goes to the box with `delivery:"steer"` (joins the turn at its next step) or
-`"queue"` (after the turn) — `inboxState.ts:115–140` `planBusySend`,
-`PendingMessagesCard.tsx`. The box interprets `session.inbox.*` into the
-`inbox` frame (`streamInterp.mjs:20–31`, 517–528).
-
-iOS already does exactly this: `ComposerView` calls `store.sendOrSteer(...,
-delivery:)` (`ComposerView.swift:1412`), which posts
-`opencode:prompt {messageID, delivery}` while running
-(`ChatSessionStore.swift` ~1302–1380), and shows the box's pending list
-(`PendingMessagesCard`). `toolBoundary` / `aborted` need no iOS decoding (no
-consumer; an interrupt is not an error on iOS by design, `streamInterp.mjs:761–764`).
-
-**Work:** none beyond F8. Acceptance: a message sent mid-turn with "Now"
-reaches the agent at its next tool step without interrupting the turn (manual
-check on the simulator against the box).
+The brief's `maybeDrainQueuedPrompt` / `shouldAbortForQueuedDrain` /
+drain-abort no longer exist on desktop (grep of `src/renderer`: zero hits).
+Desktop uses V2's inbox: a busy send goes with `delivery:"steer"` (next step)
+or `"queue"` (after the turn) — `inboxState.ts:115–140`,
+`PendingMessagesCard.tsx`; the box frames `inbox` (`streamInterp.mjs:20–31`,
+517–528). iOS already does the same (`ComposerView.swift:1412` →
+`sendOrSteer` → `opencode:prompt {messageID, delivery}`,
+`ChatSessionStore.swift:1302–1380`). `toolBoundary` / `aborted` need no iOS
+decoding. **Work:** none. Acceptance: a "Now" message reaches the agent at its
+next tool step without interrupting the turn (manual simulator check).
 
 ---
 
 ## F8. Remove a queued message; pull the newest one back to edit
 
 ### Desktop today
-- × on a row: `cancelInboxItem(item, restore:false)` (`ChatPanel.tsx:858–906`).
-  iOS has this (`PendingMessagesCard` × → `store.cancelInboxItem`).
-- **↑ edit last** (card header button, and ↑ on an empty composer):
-  `editLastInboxItem` (`ChatPanel.tsx:918–923`) picks the newest item not busy
-  and cancels it with `restore:true`. `describeInboxCancel`
-  (`inboxState.ts:216–…`): only `cancelled` restores text (into the composer,
-  focused, caret at end); with attachments it also shows
-  **"Attachments weren't restored — re-attach them"**; `delivered` →
-  "Already sent to the agent"; anything else → error
-  "Couldn't confirm it was cancelled — it may still be sent".
+× = `cancelInboxItem(item, restore:false)` (`ChatPanel.tsx:858–906`) — iOS
+has it. **↑ edit last** (`editLastInboxItem`, 918–923) cancels the newest
+non-busy item with `restore:true`; `describeInboxCancel`
+(`inboxState.ts:216–…`): only `cancelled` restores; with attachments also
+**"Attachments weren't restored — re-attach them"**; `delivered` → "Already
+sent to the agent"; else "Couldn't confirm it was cancelled — it may still be sent".
 
 ### Wire
-`opencode:inbox-cancel` `{sessionId, id}` → `{outcome, item?}` — iOS
-`api.inboxCancel` + `InboxCancelResult` (`InboxModels.swift:201`) exist.
+`opencode:inbox-cancel {sessionId, id}` → `{outcome, item?}` — existing
+`api.inboxCancel`, `InboxCancelResult` (`InboxModels.swift:201`).
 
 ### iOS design
-- `PendingMessagesCard`: header becomes an `HStack` with the existing header
-  text and a trailing **"Edit last"** button (`arrow.up` + text,
-  accessibility id `pending-edit-last`), disabled when no non-busy item
-  exists; new closure `onEditLast: () -> Void`.
-- `ChatSessionStore.editLastInboxItem() async -> String?`: picks via
-  `ChatCardEditLast.pick(items:busy:)`; runs the same cancel call as
-  `cancelInboxItem` (shared private helper, same busy handling); returns the
-  text to restore only for `cancelled`; sets `actionHint` for every other
-  outcome via `ChatCardEditLast.report(result:item:)`
-  (attachments-lost notice / already sent / unconfirmed / connection failure).
-- ChatScreen wires `onEditLast` → `Task { if let t = await store.editLastInboxItem() { composerText = t; composerFocused = true } }`.
-  If the composer already holds text, the restored text **replaces** it only
-  after a confirmation ("Replace your draft with the pending message?") —
-  desktop overwrites silently; on a phone the draft is harder to retype.
-  Alternatively, use WS03's C3 `insert(text:mode:.replace)` if the composer
-  controller is reachable; the binding is equivalent.
-- The ↑-key gesture is not ported (keyboard shortcuts are out of scope).
+- `PendingMessagesCard`: header `HStack` adds trailing **"Edit last"**
+  (`arrow.up`, id `pending-edit-last`), disabled when no non-busy item; new
+  closure `onEditLast`.
+- `InboxModels.swift` is not edited: `ChatCardEditLast` lives in
+  `ChatCardLogic.swift` (it only reads `InboxItem` / `InboxCancelResult`).
+- `ChatSessionStore.editLastInboxItem() async -> String?` (guarded by
+  `canMutate`): pick via `ChatCardEditLast.pick(items:busy:)`, cancel through
+  the shared private cancel helper, return text only for `cancelled`, hint for
+  every other outcome via `ChatCardEditLast.report(result:item:)`.
+- ChatScreen: if `composer.text` is non-blank, confirm first ("Replace your
+  draft with the pending message?", D9) — before any cancel RPC. Then
+  `if let t = await store.editLastInboxItem() { if !composer.insert(text: t, mode: .replace) { UIPasteboard.general.string = t; store.actionHint = "Removed from the queue — it couldn't go back in the composer, so it's on your clipboard" } }`
+  (C3: the Bool is never ignored; `insert` focuses the field on success via
+  `focusRequest`).
+- The ↑-key gesture is not ported (keyboard shortcuts out of scope).
 
 ### Acceptance
-- Edit last on a two-item list removes the newer item and puts its text in the
-  composer, focused.
-- `delivered` / `unknown` never restore text and always say why.
-- Attachment-bearing item restores text and says attachments were not restored.
+Edit last removes the newer of two items and puts its text in the composer,
+focused; `delivered`/`unknown` never restore and always say why; an
+attachment-bearing item restores text and says attachments weren't restored;
+a non-empty draft is never overwritten without confirmation.
 
 ---
 
-## F9. "Seat: …" row in the context sheet
+## F9. Seat row in the context sheet (D17)
 
 ### Desktop today
-`SessionHeader.tsx:641–643`, `792–800`: the context popover shows
-`describeSeatLine` (`chatUtils.ts:3812–3822`): **"Seat: <account>"** for a
-single-seat account, **"Seat: <account> · <seat>"** otherwise; absent when the
-conversation has no seat.
-
-### Data
-Already on iOS: `accountsStore.conversationSeat` (`ConversationSeat`,
-`AccountsModels.swift:745–763`) with `displayName` implementing the same rule.
-`AccountsStore` is created by ChatScreen (`ChatScreen.swift:321`). WS09 does
-not need to provide anything; this consumes WS08's existing model read-only.
+`SessionHeader.tsx:641–643`, `792–800`: **"Seat: <account>"** /
+**"Seat: <account> · <seat>"** (`describeSeatLine`, `chatUtils.ts:3812–3822`);
+absent without a seat.
 
 ### iOS design
-- `ContextSheet` (`UsageSheets.swift:63`) gains `var seatLine: String? = nil`;
-  rendered as a secondary `Text` row in the first section under the header
-  (accessibility id `ctx-seat-line`), single line, truncating.
-- ChatScreen passes `ChatCardSeatLine.text(accountsStore.conversationSeat)`
-  → `"Seat: \(displayName)"` or nil (also nil when `displayName` is empty).
+- Data: `accountsStore.conversationSeat` (`AccountsStore.swift:98–99`,
+  `ConversationSeat.displayName`, `AccountsModels.swift:745–763`, same rule).
+  No WS09 provider (F8 there removed by D17).
+- `ChatCardSeatLine.value(_ seat: ConversationSeat?) -> String?` (trimmed
+  `displayName`, nil when empty) — the single helper and test suite for this
+  formatting.
+- `ContextSheet` gains `var seat: String? = nil`, rendered as
+  `LabeledContent("Seat", value: seat)` (id `ctx-seat-line`) in the first
+  section, single line, truncating; ChatScreen passes
+  `ChatCardSeatLine.value(accountsStore.conversationSeat)`.
 
 ### Acceptance
-Multi-seat Claude conversation shows "Seat: Work · Seat 2"; no seat → no row.
+Multi-seat Claude conversation → "Seat  Work · Seat 2"; no seat → no row.
 
 ---
 
-## F10. C2 `.message` route (scroll to + highlight)
+## F10. C2 `.message` route
 
-### Constraint discovered
-The pinned MessagingUI revision (`project.yml:19–28`, rev `1ec611ad`) has **no
-scroll-to-item API**: `TiledScrollPosition` exposes only `scrollTo(edge:)`
-(`Sources/MessagingUI/Tiled/TiledScrollPosition.swift:95`). Transcript blocks
-carry no message id either.
+### Constraints
+- The pinned MessagingUI (`project.yml:19–28`, rev `1ec611ad`) only scrolls to
+  an edge: `TiledScrollPosition.scrollTo(edge:)`
+  (`Sources/MessagingUI/Tiled/TiledScrollPosition.swift:95`). No scroll-to-item.
+- The transcript is fetched as a tail window by count (`fetchTranscript`,
+  996–1026) and refetched at turn boundaries (689–692); a fetch requested
+  while one is in flight returns immediately (998–1001).
 
-### Design: window the transcript so the target is the first row, then scroll to top
-1. **Receiving the route.** ChatScreen observes `MantaNavigator.pending`
-   (C2, WS04 provides the `@EnvironmentObject`). For
-   `.message(sessionID, messageID)` with `sessionID == store.sessionId`, it
-   consumes the route (`pending = nil`) and calls `store.focus(messageID:)`.
-   For another session: the route is WS04's to open (Mount request M2); the
-   newly pushed ChatScreen consumes it on appear.
-2. **Finding the message** — `ChatSessionStore.focus(messageID:)`:
-   - If `messages` (the raw window, `ChatSessionStore.swift:178`) lacks it and
-     `hasEarlier`, widen `messageLimit` by `earlierMessageStep` and refetch,
-     repeating up to `ChatCardMessageFocus.maxSearchMessages` (500). Not found
-     → `actionHint = "Couldn't find that message — it may have been compacted away"`.
-   - Found at index `i` of `n` → set `messageLimit = n - i` and refetch, so the
-     target message is the oldest one loaded (`hasEarlier` stays true; "Load
-     earlier" keeps working).
-   - Compute `focusedRowID` with `ChatCardMessageFocus.rowID(messageID:messages:voiceNotes:widgets:rows:)`:
-     map the target message alone through
-     `ChatTranscriptMapper.blocks(from:[msg], voiceNotes:, widgets:)`, take the
-     first block's `stableScrollID`, return the first row in `rows` whose id is
-     that id (or that id + `#dup…`). Publish `@Published private(set) var focusedRowID: String?`
-     and bump `@Published private(set) var focusSeq: Int`.
-3. **Scrolling.** On `focusSeq` change ChatScreen sets
-   `scrollPosition.autoScrollsToBottomOnAppend = false`,
-   `scrollPosition.scrollsToBottomOnReplace = false`, then
-   `scrollPosition.scrollTo(edge: .top, animated: true)` on the next run loop
-   (after the rows apply). A pinned chip "Showing an earlier message · Jump to
-   latest" appears in `bottomCards`.
-4. **Leaving focus.** "Jump to latest", the existing scroll-to-bottom button,
-   or a send → `store.clearFocus()` (restores `messageLimit` to
-   `initialMessageLimit`, refetches, clears `focusedRowID`), and ChatScreen
-   restores both auto-scroll flags and scrolls to bottom. The highlight alone
-   fades after 2.5 s (focus window stays).
-5. **Highlight.** `focusedRowID` is published to cells through a new
-   environment key `\.transcriptHighlightedRowID` declared in
-   `ChatCardMessageFocus.swift`; the cell draws it (Mount request M1).
+### Design: anchor by message id; present a slice that starts at it (resolves review #4)
+1. **Routing.** WS04's `SessionListView` handler (`04-sessions.md` §11) opens
+   the chat for `.message(sid, _)` and leaves `pending` set. `ChatScreen`
+   observes `navigator.pending` on appear and on change; for its own
+   `store.sessionId` it clears `pending` and calls `store.focus(messageID:)`.
+   Other sessions' routes are ignored here.
+2. **State.** `ChatSessionStore`:
+   ```swift
+   enum ChatCardFocusPhase: Equatable { case none, locating(id: String, token: Int), presented(id: String, token: Int), failed(String) }
+   @Published private(set) var focusPhase: ChatCardFocusPhase = .none
+   @Published private(set) var focusedRowID: String?
+   ```
+   `focus(messageID:)` cancels any previous focus (latest wins: new `token`),
+   sets `.locating` **synchronously** (the screen disables bottom-follow on this
+   change, before any row changes), then `scheduleRefetch()`.
+3. **Anchoring on every fetch.** After every successful fetch (inside the
+   `MainActor.run` block, before mapping), while focus is `.locating` or
+   `.presented`, run the pure planner
+   `ChatCardFocusPlanner.next(target:messageIDs:limit:hasEarlier:cap:) -> .present(index) | .widen(newLimit) | .notFound`
+   (cap 500, step `earlierMessageStep`):
+   - target found at `index` → `.present(index)`; `presentedMessages =
+     Array(messages[index...])`, phase `.presented` (same token).
+   - not found and `hasEarlier && limit < cap` → `.widen`: set `messageLimit`
+     and `scheduleRefetch()`. The widen survives the in-flight early return
+     because `fetchPending` re-runs the loop with the new limit.
+   - else `.notFound` → phase `.failed("Couldn't find that message — it may
+     have been compacted away")`, hint, focus cleared.
+   Because the target is found **by id** on each fetch, messages appended
+   between lookup and focus — or turn-boundary refetches while focused — never
+   shift it; if new turns push it out of the tail, the planner widens.
+   A failed fetch while `.locating` → `.failed("Couldn't load that message —
+   check the connection")`.
+4. **Mapping with the same options (review #5).** The three mapper call sites
+   become one `remap()` that maps `presentedMessages` (the focus slice, or all
+   `messages` when unfocused) through `ChatTranscriptMapper.blocks(from:voiceNotes:widgets:options: mapOptions)`
+   (M-01-M3a). `focusedRowID` = the first row id of that mapping (the target's
+   first block). `hasEarlier` is published as `true` while presenting a slice
+   with `index > 0`.
+5. **Scrolling (ChatScreen).**
+   - On `.locating`: `scrollPosition.autoScrollsToBottomOnAppend = false`,
+     `scrollsToBottomOnReplace = false`, show chip "Finding message…".
+   - On `.presented` (token change): next run loop
+     `scrollPosition.scrollTo(edge: .top, animated: true)`; chip "Showing an
+     earlier message · Jump to latest".
+   - While focus is not `.none`, the blocking-card arrival bottom-jump
+     (`ChatScreen.swift:424–429`) is suppressed
+     (`ChatCardFocusPolicy.allowsBottomJump(phase:) == false`).
+   - Leaving focus: "Jump to latest", the existing scroll-to-bottom button, or
+     any send → `store.clearFocus()` (restore `initialMessageLimit`, clear
+     slice/row/phase, refetch) and the screen restores both auto-scroll flags
+     and scrolls to bottom. The prepend loader ("Load earlier") while focused
+     calls `store.clearFocus(keepPosition: true)`: the slice expands to the
+     full window — a prepend, which TiledView handles without a jump — and
+     the flags are restored without scrolling. `.failed` → hint, flags restored.
+   - `stop()` clears focus.
+6. **Highlight.** `focusedRowID` reaches cells through
+   `EnvironmentValues.transcriptHighlightedRowID` (declared in
+   `ChatCardMessageFocus.swift`); the cell draws it (M-02-1). The highlight
+   value is cleared after 2.5 s; the slice stays until focus ends.
 
-Risk: TiledView's diff for a head-trim could fall back to `.replace`; that is
-why `scrollsToBottomOnReplace` is turned off for the duration. Verify on the
-simulator (acceptance below).
+Risk: a head-trim may diff as `.replace`; both scroll flags are off for the
+whole focus, so it cannot jump to the bottom. Verify on the simulator.
 
 ### Pure logic
-`ChatCardMessageFocus.locate(messageID:in:) -> Int?`, `.windowLimit(index:count:) -> Int`,
-`.rowID(...)`, `.shouldWiden(found:hasEarlier:loaded:)`.
+`ChatCardFocusPlanner.next`, `ChatCardFocusPolicy.allowsBottomJump`,
+`ChatCardFocusPhase` transitions (`ChatCardFocusMachine.reduce(_:event:)`:
+focus/presented/notFound/fetchFailed/clear, stale-token events ignored).
 
 ### Acceptance
-- `navigator.open(.message(sid, mid))` for a message 120 messages back opens
-  the chat with that message at the top, highlighted, and streaming does not
-  yank the view down.
-- Jump to latest returns to the normal tail-follow behaviour.
-- An unknown id says so; it never leaves the screen blank.
+- `navigator.open(.message(sid, mid))` 120 messages back opens the chat with
+  that message at the top, highlighted.
+- A message appended between lookup and presentation, a completion refetch
+  while focused, and a new permission card all leave the target at the top
+  (no bottom jump).
+- A second `.message` while the first is locating wins; the first's late
+  result is ignored.
+- Jump to latest restores tail-follow; an unknown id says so.
 
 ---
 
-## F11. C5 — frames decoded for other workstreams
+## F11. C5 — frames decoded for other workstreams (D15)
 
-All decoded in `MantaStreamModels.swift` + `MantaStreamRouter.applying`,
-stored on `MantaSessionStreamState`, copied in `applyStreamState`, published on
-`ChatSessionStore` (read-only `private(set)`). Per-message maps are bounded to
-the newest **200** entries (pure `ChatCardBoundedLog` keeps insertion order and
-evicts oldest) because stream state lives for the app's lifetime.
-
-| Frame (`sub`) | Server source | Payload | `ChatSessionStore` property (contract) |
+| Frame (`sub`) | Server source | Payload | `ChatSessionStore` property |
 |---|---|---|---|
-| `retry` | `streamInterp.mjs:771–783` | `{attempt, message, next?, action?}` or `null` | `retry: StreamRetryPayload?` |
-| `compaction` | `:973–985` | `{phase, text?, reason?}` | `compaction: ChatCardCompactionState?` |
-| `transcriptStale` | `:738, 986–990` | `{}` | (internal: refetch) |
-| `optimizer.compacted` | `index.mjs:1925–1937` | `{beforeTokens, afterTokens, away}` | `compactionNotice: ChatCardCompactionNotice?` |
-| `truncation` | `:885–893` | `{kind, label, messageID?}` | `truncation` (unchanged) **and** `truncationByMessageID: [String: StreamTruncationPayload]` |
-| `commandExecuted` | `:1038–1040` | `{messageID, name, arguments}` | `commandByMessageID: [String: StreamCommandExecutedPayload]` |
-| `stepEnded` | `:874–883` | `{messageID, tokens:{input,output,reasoning,cache:{read,write}}, cost?, finish?}` | `lastStepEnded: StreamStepEndedPayload?` **and** `stepEndedByMessageID: [String: StreamStepEndedPayload]` (last step per message wins) |
+| `commandExecuted` | `streamInterp.mjs:1038–1040` | `{messageID, name, arguments}` (`arguments` always a string, `""` when absent) | `@Published private(set) var commandByMessageID: [String: StreamCommandExecutedPayload]` |
+| `retry` | `:771–783` | see F1 | `retry` |
+| `compaction` | `:973–985` | see F2 | `compaction` |
+| `optimizer.compacted` | `index.mjs:1925–1937` | see F2 | `compactionNotice` |
+| `truncation` | `:885–893` | `{kind, label, messageID?}` | `truncation` (unchanged) |
 
-New Codable types (all `Equatable, Sendable`):
-`StreamCommandExecutedPayload {messageID: String, name: String, arguments: String}`,
-`StreamStepTokens {input, output, reasoning: Double; cache: StreamStepCache {read, write: Double}}`,
-`StreamStepEndedPayload {messageID: String, tokens: StreamStepTokens, cost: Double?, finish: String?}`.
+`StreamCommandExecutedPayload { messageID: String; name: String; arguments: String }`
+(`Codable, Equatable, Sendable`) in `MantaStreamModels.swift`. The router keeps
+the map in `MantaSessionStreamState.commandByMessageID`, bounded to the newest
+200 entries by `ChatCardBoundedLog` (insertion-ordered; state lives for the
+app's lifetime; the canonical command origin also arrives on the transcript via
+WS01 M1, so eviction loses nothing durable).
 
-Not decoded on purpose: `toolBoundary`, `aborted`, `messageChanged`,
-`childSession`, `attention` (no iOS consumer in this effort).
+Conversion for WS01's mapper (D15): in `mapOptions`,
+`liveCommands: commandByMessageID.mapValues { OpencodeCommandOrigin(name: $0.name, arguments: $0.arguments.isEmpty ? nil : $0.arguments) }`.
 
-Equality cost: these maps make `MantaSessionStreamState` comparisons larger;
-`removeDuplicates()` still short-circuits on the first differing field. Keep
-the maps out of any per-frame hot path besides the router.
+Dropped from round 0: `stepEnded`, `truncationByMessageID`,
+`stepEndedByMessageID` — no consumer (D15: WS01's footer is transcript-derived).
+Not decoded: `toolBoundary`, `aborted`, `messageChanged`, `childSession`,
+`attention`.
 
 ---
 
 ## Files
 
 **Edit (owned):**
-- `MantaUI/MantaStreamModels.swift` — F1, F2, F4 (`rawMessage`), F11 types.
-- `MantaUI/MantaEventStore.swift` — router cases, state fields,
-  `applyingRunningSet` retry clear, subjects `progressUpdates`,
+- `MantaUI/MantaStreamModels.swift` — retry/compaction/notice/command payloads,
+  `rawMessage`.
+- `MantaUI/MantaEventStore.swift` — router cases + state fields
+  (`retry`, `compactionGeneration`, `compaction`, `transcriptStaleSeq`,
+  `compactionNotice`, `compactionNoticeSeq`, `sessionErrorSeq`,
+  `commandByMessageID`), running-set retry clear, subjects `progressUpdates`,
   `delegateApprovalRequests`.
-- `MantaUI/ChatSessionStore.swift` — published properties (F1, F2, F3, F4,
-  F10, F11), timers, `trailingBlocks` text param, `editLastInboxItem`,
-  `focus(messageID:)`/`clearFocus()`, `refreshProgress()`,
-  `dismissSessionError()`.
-- `MantaUI/ChatScreen.swift` — `bottomCards` mounts, read-only job branch,
-  reconnect sheet, navigator observation, scroll handling, context-sheet args.
-- `MantaUI/UsageSheets.swift` — `ContextSheet.seatLine`, `allowsActions`.
-- `MantaUI/PendingMessagesCard.swift`, `MantaUI/InboxModels.swift` — Edit last
-  (pending Q1 confirmation of ownership).
+- `MantaUI/ChatSessionStore.swift` — F1–F4, F6 policy + guards, F8, F10,
+  F11, `remap()`/`mapOptions`, and the received WS01 mounts.
+- `MantaUI/ChatScreen.swift` — `bottomCards`, read-only branch, reconnect
+  sheet, navigator observation, focus scrolling, context-sheet args, and the
+  received mounts.
+- `MantaUI/UsageSheets.swift` (context sheet only) — `seat`, `allowsActions`.
+- `MantaUI/PendingMessagesCard.swift` — Edit last.
 
 **Create:**
-- `MantaUI/MantaAPIClient+ChatCards.swift` — approvals, job list.
-- `MantaUI/ChatCardModels.swift` — `ChatCardApproval*`, `ChatCardJob`,
-  `ChatCardCompactionState`, `ChatCardCompactionNotice`, `ChatCardBoundedLog`.
-- `MantaUI/ChatCardLogic.swift` — all pure enums listed per feature
-  (`ChatCardRetryCopy`, `ChatCardCompactionReducer`, `ChatCardTokens`,
-  `ChatCardSendError`, `ChatCardApprovalLogic`, `ChatCardJobLogic`,
-  `ChatCardEditLast`, `ChatCardSeatLine`, `ChatCardMarkdown`).
-- `MantaUI/ChatCardViews.swift` — `ChatCardRetry`, `ChatCardCompaction`,
-  `ChatCardCompactionNotice`, `ChatCardBlocked`, `ChatCardSendErrorLine`,
-  `ChatCardApprovalCard`, `ChatCardReadOnlyJobBar`, `ChatCardFocusChip`.
-- `MantaUI/ChatCardApprovalStore.swift`, `MantaUI/ChatCardJobOwnershipStore.swift`.
-- `MantaUI/ChatCardMessageFocus.swift` — locator + environment key.
-- `MantaUITests/ChatCardsTests.swift`.
-- `project.yml` needs no change (the `MantaUI` folder entry picks up new
-  files); regenerate `.pbxproj` on the Mac per `mobile/native/AGENTS.md` §3.
+- `MantaUI/MantaAPIClient+ChatCards.swift` — client members + `ChatCardApprovalAPI` conformance.
+- `MantaUI/ChatCardModels.swift` — **Foundation only**: `ChatCardApproval`,
+  `ChatCardApprovalTool`, `ChatCardJob`, `ChatCardCompactionState`,
+  `ChatCardCompactionNotice`, `ChatCardMutationPolicy`, `ChatCardFocusPhase`,
+  `ChatCardBoundedLog`.
+- `MantaUI/ChatCardLogic.swift` — **Foundation only**: every pure enum/struct
+  named above (retry copy, stream rules, compaction reducer, expiry latch,
+  tokens, send-error, approval logic/decoding, job logic, ownership resolver,
+  mutation gate, edit-last, seat line, progress rule, focus planner/policy/
+  machine, `ChatCardMarkdown` (Foundation `AttributedString`)). Depends only
+  on package files (`MantaStreamModels`, `InboxModels`, `AccountsModels`,
+  `MantaError`, `MantaModels`); never on `SessionModels` / `ChatModels`.
+- `MantaUI/ChatCardViews.swift`, `MantaUI/ChatCardApprovalStore.swift`,
+  `MantaUI/ChatCardJobOwnershipStore.swift`, `MantaUI/ChatCardMessageFocus.swift`
+  (environment key; SwiftUI).
+- `MantaUITests/ChatCardsTests.swift` (pure; Linux + Mac) and
+  `MantaUITests/ChatCardsStoreTests.swift` (router, stores; Mac only — needs
+  Combine/SwiftUI).
+- Manifest for the integration step (D18/D19): add `ChatCardModels.swift`,
+  `ChatCardLogic.swift` to `Package.swift` sources and `ChatCardsTests.swift`
+  to the test target (M-02-3). No `project.yml` edit; workers never touch the
+  `.pbxproj`.
 
-## Tests (`MantaUITests/ChatCardsTests.swift`)
+## Client members
 
-Router (through `MantaStreamRouter.applying` with hand-built frames):
-1. `retry` payload decodes; `null` payload clears; `running:false` clears;
-   `applyingRunningSet` without the session clears.
-2. Compaction started→delta→ended folds to running text then `.done`;
-   delta with no prior state stays nil.
-3. `transcriptStale` and `optimizer.compacted` bump their seqs once per frame.
-4. `truncation` with messageID lands in the map and in `truncation`;
-   without messageID only in `truncation`.
-5. `commandExecuted` and `stepEnded` maps; second `stepEnded` for the same
-   message replaces; `lastStepEnded` tracks the newest.
-6. `ChatCardBoundedLog` evicts the oldest past 200.
+All in `MantaUI/MantaAPIClient+ChatCards.swift`; no other spec declares these
+names (grep of all specs and `MantaAPIClient*.swift`, 2026-10-28):
 
-Copy / logic:
-7. `ChatCardRetryCopy`: title override, attempt 0 → no caption, empty
-   action.message falls back, invalid link → nil.
-8. `ChatCardTokens.desktopCompact`: 999, 1000→"1k", 12_340→"12.3k",
-   128_000→"128k"; `ChatCardCompactionNotice.text` for away/background,
-   saving zero, after ≥ before, nils.
-9. `ChatCardSendError.describe`: ProviderAuthError+anthropic → Claude/claude;
-   ApiError "invalid api key"+openai → Codex/codex; ApiError "rate limit window
-   expired" → not auth, "API error: …"; ProviderAuthError + unknown provider →
-   no reconnect; rawMessage used for classification; ContextOverflowError,
-   MessageOutputLengthError, StructuredOutputError prefixes.
-10. `ChatCardApprovalLogic`: globCovers exact / `*` / prefix-star / mismatch;
-    isCoveredByAlways empty tools → false, all covered → true, one uncovered →
-    false; `canStart` rejects empty fields; approvals decoding both shapes.
-11. `ChatCardJobLogic`: work worker not read-only; job lookup by
-    childSessionID; parseModelRef (`a/b/c` → `a`,`b/c`; `/x`, `x/`, "" → nil);
-    summary 0/1/2 files, with/without worktree; status line for failed with
-    and without error; isStoppable running/paused only.
-12. `ChatCardEditLast.pick`: newest non-busy; all busy → nil; `report` for
-    cancelled (with/without attachments), delivered, unknown.
-13. `ChatCardSeatLine`: nil seat, empty name, normal.
-14. `ChatCardMessageFocus`: locate, windowLimit, rowID with a `#dup` suffix,
-    widen decision at the 500 cap.
-15. `ChatSessionStore.trailingBlocks` (existing tests updated): auth error
-    omitted, other errors carry the typed text.
+```swift
+func delegatePendingApprovals(sessionId: String) async throws -> [ChatCardApproval]   // delegate:pending-approvals
+func delegateApprove(id: String, tools: [ChatCardApprovalTool]) async throws -> Bool  // delegate:approve → ok
+func delegateDecline(id: String) async throws -> Bool                                 // delegate:decline → ok
+func chatCardJobs() async throws -> [ChatCardJob]                                     // delegate:list (no arg)
+```
+Existing members used, not redeclared: `progressGet(sessionID:)`,
+`delegateStop(id:)`, `projects()`, `inboxCancel(sessionId:id:)`.
 
-Checks before reporting done: `ios-mantaui` `action: test-unit` on the branch
-(app + both bundles compile, `MantaUITests` green); `npm run typecheck` and
-`npm test` stay green (no TS change expected).
+## Tests
+
+`MantaUITests/ChatCardsTests.swift` (Foundation; runs under `verify.sh` and Mac):
+1. `ChatCardRetryCopy` (title override, attempt 0, fallback body, invalid link);
+   `ChatCardStreamRules.clearsRetry`.
+2. `ChatCardCompactionReducer`: started→delta→ended; delta/ended without prior → nil; generation carried.
+3. `ChatCardExpiryLatch`: unrelated observations during the window don't
+   reschedule; after `expire` the same key stays hidden; a new key while an old
+   timer is pending is visible and the old `expire` doesn't hide it; seed hides
+   an existing `.done`; stale (nil state) followed by an unrelated observation
+   stays nil.
+4. `ChatCardTokens.desktopCompact` (999, 1000→"1k", 12_340→"12.3k", 128_000→"128k");
+   `ChatCardCompactionNotice.text` (away, background, zero saving, after ≥ before, nils).
+5. `ChatCardSendError.describe` (auth/anthropic, ApiError api-key/openai,
+   "rate limit window expired" not auth, unknown provider, rawMessage used,
+   typed prefixes).
+6. `ChatCardApprovalLogic`: `canStart` false for empty list and blank fields;
+   footnotes; `outcomeHint(ok:false)` = "That request is no longer pending";
+   `filterResolved`; decoding both shapes.
+7. `ChatCardJobLogic` (work worker not read-only, lookup, parseModelRef edge
+   cases, summary 0/1/2 files ± worktree, status line, isStoppable).
+8. `ChatCardOwnershipResolver`: resolving+success-none → allowed;
+   resolving+transport failure → resolving; readOnlyJob+failure → readOnlyJob;
+   resolving+server error → allowed; work record → allowed.
+9. `ChatCardMutationGate`: resolving send → hold, resolving reply → refuse,
+   readOnlyJob → refuse, allowed → run.
+10. `ChatCardEditLast` pick/report.
+11. `ChatCardSeatLine.value` (nil, empty, normal).
+12. `ChatCardFocusPlanner` (found → present; target shifted by appended ids →
+    same id found; missing+hasEarlier → widen; cap reached → notFound);
+    `ChatCardFocusMachine` (stale token ignored; second focus wins);
+    `ChatCardFocusPolicy`.
+13. `ChatCardBoundedLog` evicts the oldest past 200.
+
+`MantaUITests/ChatCardsStoreTests.swift` (Mac `test-unit`):
+14. Router: `retry` decode/null/turn-end/running-set clear; compaction
+    generation increments; `transcriptStale` nils compaction and bumps seq;
+    `sessionErrorSeq` bumps on identical payloads; `commandExecuted` map.
+15. `ChatCardApprovalStore` with a fake `ChatCardApprovalAPI`: a matching
+    pending permission never triggers approve; a fetch completing after a local
+    approve does not restore the card; `ok:false` → hint + refresh; empty list
+    → no approve call.
+16. `ChatSessionStore.trailingBlocks`: auth error omitted, typed text used,
+    M3d truncation suppression; dismissal by seq (two identical errors).
+17. Mutation policy: resolving send held as `.waiting`; allowed drains it;
+    readOnlyJob fails it with the reason.
+
+Checks before reporting done: `mobile/native/verify.sh` (pure suite) green,
+`ios-mantaui action: test-unit` green on the branch, `npm run typecheck` and
+`npm test` unchanged-green.
 
 ## Mount requests
 
-- **M1 → WS01 (`TranscriptRow.swift`)**, applied by the WS02 implementer in
-  wave B (WS01 has landed): in `TranscriptCellReveal` add
-  `@Environment(\.transcriptHighlightedRowID) private var highlightedRowID`
-  and, on `cellContent`, `.background(item.id == highlightedRowID ? tokens.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: Metrics.radius.md))`
-  with `.animation(.easeOut, value: highlightedRowID)`. ChatScreen sets the
-  environment on `transcript`. Nothing else in WS01 files changes.
-- **M2 → WS04 (C2 root handler in `MantaNavigation.swift` / `RootView.swift`)**:
-  when `.message(sessionID, _)` is opened and no chat screen for `sessionID`
-  is on top, open that session exactly as `.session` would, **without**
-  clearing `pending`; the opened `ChatScreen` consumes it on appear. Also: a
-  way to build `.session(windowKey:)` from `(project, windowIndex)` (used by F6
-  Go to parent).
-- **M3 → WS07 (`ChatOverflowSheet.swift`)**: add
-  `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork,
-  Delete and the trust toggle. ChatScreen passes it.
-- C4 mounts other workstreams request in ChatScreen (WS05 branch/checks chip,
-  WS06 search button) are applied by their owners in later waves per the
-  master; WS02 keeps the nav-bar trailing `HStack` and the branch chip `onTap`
-  closure stable so they can attach.
+| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
+|---|---|---|---|---|---|
+| M-02-1 | `TranscriptRow.swift` (WS01) | Integration agent B | `EnvironmentValues.transcriptHighlightedRowID` (`ChatCardMessageFocus.swift`) | In `TranscriptCellReveal` add `@Environment(\.transcriptHighlightedRowID) private var highlightedRowID`; on `cellContent` add `.background(item.id == highlightedRowID ? tokens.accentSoft : Color.clear, in: RoundedRectangle(cornerRadius: Metrics.radius.md))` and `.animation(.easeOut, value: highlightedRowID)`. Nothing else. | WS02 commit with `ChatCardMessageFocus.swift` |
+| M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 (wave B) | — (plain param) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete and the trust toggle. ChatScreen passes `store.isBackgroundJobReadOnly`. Default keeps either landing order compiling. | none |
+| M-02-3 | `mobile/native/Package.swift` | Integration agent B | `ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift` | Append the two files to the `MantaUI` target `sources`, the test file to `MantaUITests` `sources`. | WS02 commit |
+
+WS04's `.message` push-to-chat (formerly requested here as M2) is already
+specified by WS04 §11 — consumed, not requested.
+
+## Mounts applied by this workstream (wave B)
+
+Cross-checked against the current tables in `01`, `03`, `04`, `05`, `06`, `07`,
+`08`, `09`, `10`. All are applied by WS02 in wave B per D18 (receiving files
+owned by WS02).
+
+| Request | From | Receiving file | Change | Prerequisite |
+|---|---|---|---|---|
+| M3a | WS01 | `ChatSessionStore.swift` | One `remap()` / `mapOptions` replacing the three mapper calls: `TranscriptMapOptions(showReasoning: TranscriptDisplayOptions.showDetails, running: running, liveCommands: <F11 conversion of commandByMessageID>, liveMedia: TranscriptMediaStore.shared.entries[sessionId] ?? [:])`, applied to `presentedMessages` (F10). | WS01 landed (A) |
+| M3b | WS01 | `ChatSessionStore.swift` | `ChatTranscriptMapper.liveMediaTail(...)` rows after `liveTranscript`, before the live prose tail, via `uniqueTranscriptRows`. | WS01 landed |
+| M3c | WS01 | `ChatSessionStore.swift` | Subscribe to `TranscriptMediaStore.shared.$entries` (this session) and `TranscriptDisplayOptions.didChange`; on each `remap()` with the no-blank-clobber guard, then `rebuildBlocks()`. | WS01 landed |
+| M3d | WS01 | `ChatSessionStore.swift` `trailingBlocks` | Skip the truncation notice when `truncation.messageID` is non-nil and in `messages`. | WS01 landed |
+| M3e | WS01 | `MantaStreamModels.swift`, `MantaEventStore.swift`, `ChatSessionStore.swift` | **Per D15, not as WS01 wrote it:** decode `commandExecuted` as `StreamCommandExecutedPayload` (`arguments: String`) and publish `commandByMessageID`; WS01's mapper input is the conversion in F11. No `liveCommandsByMessageID` property. | none |
+| (a)–(f) | WS04 | `ChatScreen.swift` | (a) nav title `sessionStore.window(forSessionID:)?.window.name ?? title`; (b) `onRename` → `SessionRenameSheet` → `sessionStore.renameSession`; (c) `onSelectMode` → `navigator.switchMode(...)`, pass `SessionModeStore.read` + `sessionStore.launchers`; (d) "Switch session" toolbar button → `navigator.presentSwitcher()`; (e) `seedAttachments` → `composer.attach(...)` once on first appear, each `false` reported via `actionHint`; (f) `.message` consumption = F10. | WS04 + WS03 landed (A); (b)/(c) closures need WS07's overflow params (same wave, defaulted) |
+| 1 | WS06 | `ChatScreen.swift` | Search `ToolbarItem` before the ellipsis + `@State showSearch` + `.sheet { SearchScreen(scope: SearchScope.build(projects: sessionStore.projects, primarySessionId: sessionId)) }`; not rendered on the read-only subagent screen. | `SearchScreen` symbol (WS06, same wave — pinned in 06) |
+| 1, 2 | WS07 | `ChatScreen.swift` | Artifacts card params (`projectName`, `cwd`, `onAttach` → `composer.attach`, `false` → hint "Already attached"; `onJumpToMessage` → `pendingArtifactJump`, flushed on sheet dismiss into `navigator.open(.message(...))` → F10); `OverflowDestination.webhooks` + `WebhooksCard`; `onWebhooks`. | WS07 symbols (same wave, defaulted params) |
+| M4 | WS09 | `ChatScreen.swift` | `UsageAlertsStore.shared.activeSessionId = store.sessionId` beside the `reportFocus(visible: true)` calls; clear only if still equal beside `visible: false`. | WS09 symbol (same wave) |
+| M6 | WS09 | — | **Void (D17).** F9 renders the seat row itself. | — |
+| (optional) | WS08 | `UsageSheets.swift` usage-sheet seat "Fix" | **Declined:** WS02 owns only the context sheet in that file; the existing Fix already opens Accounts. | — |
+| 1 | WS05 | `ChatScreen.swift` `sessionHeaderBlock` | Applied by WS05 itself in wave C (D18); WS02 provides `store.isBackgroundJobReadOnly` and the adopted `composer`. | WS02 landed |
+
+WS03's composer adoption in `ChatScreen.swift` is done by WS03 in wave A (D13);
+WS02 consumes it. WS10 requests nothing here.
 
 ## Contracts provided / consumed
 
-- **C1 provided:** `MantaAPIClient+ChatCards.swift` (`delegatePendingApprovals`,
-  `delegateApprove`, `delegateDecline`, `chatCardJobs`).
-- **C2:** implements `.message` inside the chat screen; consumes `.session`
-  (WS04) for Go to parent; requests M2.
-- **C3 consumed (optional):** `insert(text:mode:.replace)` for Edit last; the
-  `composerText` binding is the fallback.
-- **C4 owner:** ChatScreen / ChatSessionStore / MantaEventStore /
-  MantaStreamModels; accepts the master's allowed mounts.
-- **C5 provided:** the property table in F11 — names are the contract
-  (`retry`, `compaction`, `compactionNotice`, `truncation`,
-  `truncationByMessageID`, `commandByMessageID`, `lastStepEnded`,
-  `stepEndedByMessageID`).
-- **C7:** `MantaUITests/ChatCardsTests.swift`; no node tests (no server change).
-- Consumes WS08 `AccountsStore.conversationSeat`, `AccountsScreen`; WS04
-  `MantaProgress`, `SessionOpenTarget`; existing `BackgroundJobsStore` untouched.
+- **C1 provided:** see Client members.
+- **C2:** implements `.message` in the chat screen (F10); consumes WS04's
+  `.session`, `windowKey(project:windowIndex:)`, `presentSwitcher()`,
+  `switchMode(...)`.
+- **C3 consumed:** `composer.insert(text:mode:)` / `attach(...)` (WS03), every
+  `false` surfaced.
+- **C4 owner;** received mounts above.
+- **C5 provided:** `commandByMessageID` (D15), `retry`, `compaction`,
+  `compactionNotice`, `truncation` (unchanged).
+- **Provided to WS05:** `ChatSessionStore.isBackgroundJobReadOnly`.
+- **Consumed:** WS08 `AccountsStore.conversationSeat`, `AccountsScreen`;
+  WS04 `MantaProgress`, `SessionListStore`; WS01 `TranscriptMapOptions`,
+  `TranscriptMediaStore`, `TranscriptDisplayOptions`, `OpencodeCommandOrigin`.
+- **C7:** the two test files; no node tests.
 
 ## Deferred
 
-- **Reset health (F4).** The only producer of the "no healthy endpoint"
-  verdict is the desktop's Auto-routing call `routing:choose`
-  (`ChatPanel.tsx:1837–1849`; server `rpc.mjs:1627–1646`). iOS never calls
-  `routing:choose` (grep: zero hits) and the Auto-routing indicator is out of
-  scope, so an iOS send can never receive that verdict — a Reset health button
-  would never appear. Revisit when iOS adopts Auto routing; the action is then
-  `accounts:retry {providerID}` per provider (`rpc.mjs:1718–…`).
-- **↑ on an empty composer to edit the last pending message** — keyboard
-  shortcut; out of scope by the master.
-- **Approval expiry countdown** — desktop has none.
-- **Desktop finding (not WS02 work):** desktop's Reconnect button dispatches
-  `manta-open-subscriptions`, which nothing listens to, and its approval
-  approve/decline/stop calls swallow errors. Report to the desktop owner.
+- **Reset health (F4)** — D8: the only producer is desktop Auto routing
+  (`routing:choose`, `ChatPanel.tsx:1837–1849`; `rpc.mjs:1627–1646`), which iOS
+  never calls.
+- ↑ on an empty composer for Edit last — keyboard shortcut, out of scope.
+- Approval expiry countdown — desktop has none.
+- **Desktop bugs reported (D10, renderer-only, not fixed):** Reconnect
+  dispatches an unheard event; approve/decline/stop swallow errors; approval
+  auto-approve trusts *pending* permissions' `always[]` patterns
+  (`ChatPanel.tsx:956–960`).
 
 ## Open questions
 
-- **Q1 — ownership of `InboxModels.swift` and `PendingMessagesCard.swift`.**
-  Unlisted in the master table. Default: WS02 owns both (sole consumers are the
-  chat screen and store).
-- **Q2 — Go to parent navigation shape.** Default: `MantaNavigator.open(.session(windowKey:))`
-  via WS04's key builder (M2); fallback: reset `path` and push the parent's
-  `SessionOpenTarget` (the back button then returns to the session list, not to
-  the job).
-- **Q3 — Edit last overwriting a non-empty draft.** Default: ask first
-  ("Replace your draft with the pending message?"); desktop overwrites silently.
+None open. Former Q1 (ownership) settled by D1, Q2 (Go to parent) by D9,
+Q3 (Edit last over a draft) by D9.
+
+## Review responses (round 1)
+
+| Finding | Resolution |
+|---|---|
+| WS02 #1 (empty edited list) | F5: `canStart` false for an empty list with the "tap Not now" footnote; test that no approve RPC is sent; spec states the server reverts an empty list to the original tools. |
+| WS02 #2 (auto-approve from pending permissions) | Removed; F5 forbids any auto-approval; desktop behaviour reported under D10; store test with a matching pending permission. |
+| WS02 #3 (compaction lifetime) | F2 rewritten: router owns generation + clears on `transcriptStale`; chat store uses `ChatCardExpiryLatch` (schedule once per generation, tombstone via `expiredThrough`, seeded on open); tests for unrelated frames, stale+unrelated, new compaction during old timer. |
+| WS02 #4 (tail-count anchor) | F10 rewritten: id anchor re-located on every fetch by a pure planner, slice presentation, widen on drift, follow disabled at `.locating` before rows change, blocking-card jump suppressed, tokenised latest-wins focus, explicit failure paths, in-flight fetch handled by `fetchPending` + planner; tests listed. |
+| WS02 #5 / cross #5 (command contract) | D15 adopted: `commandByMessageID: [String: StreamCommandExecutedPayload]`, `arguments: String`; F11 gives the conversion into `TranscriptMapOptions`; WS01 M3a–M3e listed as WS02 wave-B deliverables with M3e corrected; focus maps with the same `mapOptions`. Unused `stepEnded`/per-message truncation maps dropped. |
+| WS02 #6 (approval copy/races) | "That request is no longer pending" + refresh; `resolvedIDs` tombstones drop stale fetch results; two store tests. |
+| WS02 #7 (identical errors) | `sessionErrorSeq` in the router; dismissal by seq; reset on a new turn; test with two identical payloads. |
+| WS02 #8 (ownership across gaps) | `ChatCardMutationPolicy` (resolving/allowed/readOnlyJob) pushed into `ChatSessionStore`; every mutation entry point gated; sends held in the outbox while resolving; known state kept on failure; re-resolve on reconnect/foreground/30 s; tests. |
+| WS02 #9 (settled questions / mounts) | Open questions removed (D1, D9); Go to parent uses the navigator only; WS04's handler is in `SessionListView`/`MantaAppRoot` injection (D1), no RootView reference; WS06's same-wave search mount applied by WS02. |
+| Cross #3 (composer adoption) | §0 and F8 consume WS03's wave-A adoption (D13); no legacy binding fallback. |
+| Cross #8 (mount receipt) | New "Mounts applied by this workstream" table covering WS01, WS04, WS06, WS07, WS09 (and WS05/WS08/WS10 status); outgoing table per D18. |
+| Cross #11 (seat row) | D17: F9 renders from `AccountsStore.conversationSeat` with one helper `ChatCardSeatLine` and one test; WS09 M6 marked void. |
+| Cross #12 (C3 Bool) | Every `insert`/`attach` call in F8 and the received mounts handles `false` with a hint (Edit last also copies to the clipboard). |
+| Cross #10 (package/pbxproj) | Package additions moved to M-02-3 for integration agent B; no worker pbxproj regeneration. |

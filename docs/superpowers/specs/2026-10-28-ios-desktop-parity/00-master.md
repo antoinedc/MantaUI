@@ -337,6 +337,24 @@ files that import only Foundation must be added to `Package.swift` (by the
 integration step) and their XCTests must pass under `verify.sh`. The merge gate
 remains `ios-mantaui` `test-unit` on the Mac.
 
+D20. **Wave A is two sub-waves.** A1: WS10, WS01, WS03 (parallel). A2: WS04 and
+WS08 (parallel), after A1 is committed — WS04 consumes WS10's launcher
+symbols and applies WS10's `MantaAppRoot`/`SessionListView` mounts; WS08 calls
+WS10's `opencodeRestart()`. `TerminalSocket.swift` → WS04 (additive only).
+Integration agent A runs after A2 (`Package.swift` manifests from all wave-A
+workstreams). Wave C also gets an integration step for WS05's `Package.swift`
+manifest.
+
+D21. **Launcher discovery is owned by WS10** (`launchersList()`,
+`AvailableLauncher`, `ExtensionsLaunchers.resolve`, in WS10 files). WS04
+consumes them; WS04 declares no `launchers()` member and WS10 does not consume
+anything launcher-related from WS04. `references()` / `OpencodeReferenceInfo` are
+owned by WS03; WS10 consumes. `forgeStatus(validate:)` / `ForgeConnectionStatus`
+are owned by WS10; WS05 consumes. Same-wave consumers code against the pinned
+signatures; the UI compile happens on the Mac after the wave is integrated.
+WS10's `MantaAppRoot.swift` mounts (M-10-1 theme, M-10-2 return to onboarding)
+are applied by WS04 in A2.
+
 D10. Desktop bugs found while speccing (Reconnect button only clears the banner;
 job approve/decline/stop swallow errors; `@@` agent typeahead never opens) are
 fixed by the workstream that touches the matching iOS feature ONLY if the fix is

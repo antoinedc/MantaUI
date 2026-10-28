@@ -1,21 +1,32 @@
 # WS06 — Conversation search (iOS)
 
-Status: draft · Date: 2026-10-28 · Wave: B (after WS04 has landed; the
-`.message` route from C2 must be live before any jump is wired — see
-"Contracts consumed").
+Status: revised after round 1 · Date: 2026-10-28 · Wave: B.
 
 Scope: one feature, three parts.
 
 1. **F1 — Search screen**: search the full history of every chat window on the
-   box with one server query; results grouped "This conversation" vs other
-   conversations; snippet with the matched text highlighted; role and age.
-2. **F2 — Jump to a hit**: tapping a hit closes search and opens that message —
-   scrolled to and highlighted — in the same or another conversation.
+   box with one server query. Results are grouped "This conversation" vs other
+   conversations, and each hit shows a snippet with the matched text
+   highlighted, its role and its age.
+2. **F2 — Jump to a hit**: tapping a hit closes search and opens that message,
+   scrolled to and highlighted, in the same conversation or another one.
 3. **F3 — Entry points**: from the chat nav bar (scoped to the open chat) and
-   from the session list (no "current" conversation).
+   from the session list (no current conversation).
 
-No server change is needed: the existing `opencode:search-messages` channel
-already does everything. **No new server routes.**
+No server change is needed. The existing `opencode:search-messages` channel
+already does everything (D7 lists no WS06 server change). **No new server
+routes.**
+
+Wave B timing (D18):
+- WS06 writes only its own new files.
+- WS02 (wave B) applies the chat nav-bar mount.
+- Integration agent B applies the session-list mount and the `Package.swift`
+  additions after the wave-B workers finish.
+- Jumps call the C2 `.message` route. The route is handled by WS02 (same
+  session, wave B) and by WS04's root handler (other session, wave A, WS02
+  M2). Both are live by the end of wave B. Nothing in WS06 is reachable from
+  the UI until its mounts are applied, so it is never usable before the route
+  works.
 
 ---
 
@@ -23,65 +34,77 @@ already does everything. **No new server routes.**
 
 ### Desktop behaviour today
 
-`src/renderer/SearchPalette.tsx` (⌘F, opened from `src/renderer/App.tsx:1449-1462`,
-only when a chat pane is active; mounted at `App.tsx:2307-2314`). It is a dumb
-renderer of one server query:
+The desktop search is `src/renderer/SearchPalette.tsx` (⌘F). It opens from
+`src/renderer/App.tsx:1449-1462`, only when a chat pane is active, and is
+mounted at `App.tsx:2307-2314`. It is a dumb renderer of one server query.
 
-- **Scope** (`SearchPalette.tsx:74-86`): the active session id first, then every
-  OTHER window in sidebar order that has an `opencodeSessionId`, de-duplicated,
-  no cap. `flatSessions` (`src/renderer/store.ts:1774-1781`) walks every
-  project's every window — job windows included.
-- **Query gating**: trimmed query must be ≥ 2 characters
-  (`MIN_QUERY_CHARS = 2`, line 27); 120 ms debounce (`SEARCH_DEBOUNCE_MS`,
-  line 28); a sequence counter drops stale responses (lines 100-125).
-- **Grouping** (`groupHits`, lines 39-54): the server returns a flat list
-  already ordered primary-first, then by scope order; hits are grouped by
-  `sessionId` in first-appearance order. The group whose id is the active
-  session is "This conversation"; the rest sit under an "other conversations"
-  divider.
-- **Section headers** (`SectionHeader`, lines 270-293): "This conversation" with
-  count `N match` / `N matches`; other groups show `workspace › session-name`
-  (tmux session name › window name; falls back to the raw session id) with a
-  bare numeric count.
-- **Hit row** (`HitRow`, lines 295-355): glyph `›` for user / `✳` for assistant;
-  `pre` + highlighted `match` + `post`, clamped to 2 lines; a "you" /
-  "assistant" caption; right-aligned age via `formatAge`
-  (`src/renderer/chatUtils.ts:542-550`: `now` / `Nm` / `Nh` / `Nd`), omitted
-  when `timeCreated` is null.
-- **Footer**: `"{total} result(s) · {n} conversation(s)"` when there are hits
-  (lines 170-173).
-- **States / copy** (exact strings):
-  - idle (< 2 chars): "Search this conversation — and all others. Type at least 2 characters."
+- **Scope** (`SearchPalette.tsx:74-86`):
+  - The active session id goes first.
+  - Then every OTHER window, in sidebar order, that has an
+    `opencodeSessionId`, de-duplicated, with no cap.
+  - `flatSessions` (`src/renderer/store.ts:1774-1781`) walks every window of
+    every project, job windows included.
+- **Query gating**:
+  - `q = query.trim()` (line 70) must be at least 2 characters
+    (`MIN_QUERY_CHARS`, line 27).
+  - The trimmed `q` is what is sent (line 113).
+  - Debounce is 120 ms (`SEARCH_DEBOUNCE_MS`, line 28).
+  - A sequence counter guards the success path, the `catch` path and the
+    `finally` path (lines 100-125).
+  - A query under 2 characters bumps the sequence, clears results and stops
+    loading (lines 101-106).
+- **Grouping** (`groupHits`, lines 39-54):
+  - The server returns a flat list, ordered primary first, then in scope order.
+  - Hits are grouped by `sessionId` in first-appearance order.
+  - The active session's group is "This conversation"; the rest sit under an
+    "other conversations" divider.
+- **Section headers** (`SectionHeader`, lines 270-293):
+  - "This conversation" carries the count `N match` / `N matches`.
+  - Other groups show `workspace › session-name` with a bare count, falling
+    back to the raw session id.
+- **Hit row** (`HitRow`, lines 295-355):
+  - Glyph `›` for user, `✳` for assistant.
+  - `pre`, then a highlighted `match`, then `post`, clamped to 2 lines.
+  - A caption: "you" / "assistant".
+  - A right-aligned age via `formatAge` (`src/renderer/chatUtils.ts:542-550`),
+    omitted when `timeCreated` is null.
+- **Footer** (lines 170-173): `"{total} result(s) · {n} conversation(s)"` when
+  there are hits.
+- **Copy** (exact strings):
+  - Idle: "Search this conversation — and all others. Type at least 2 characters."
   - `supported:false`: "Search needs a newer server runtime — update the server."
-  - loading (below any results): "Searching other conversations…"
-  - empty: `No matches for “{q}”`
-  - placeholder: "Search in conversations…"; label "Search conversations".
-- **Errors**: a transport failure is swallowed into "no results"
-  (lines 116-119). iOS must NOT copy this (no-dead-controls rule) — see iOS
-  design.
-- `truncated: true` from the server is ignored by the desktop.
+  - Loading: "Searching other conversations…"
+  - Empty: `No matches for “{q}”`
+  - Placeholder: "Search in conversations…"
+  - Label: "Search conversations"
+- **Transport errors** are swallowed into "no results" (lines 116-119). iOS
+  shows these instead.
+- **`truncated: true`** is ignored by the desktop.
 
 ### Wire contract (verified)
 
 Channel: **`opencode:search-messages`** (`src/shared/types.ts:1554`,
-`IPC.opencodeSearchMessages`). Desktop call: `src/renderer/api/httpApi.ts:1439`
-→ `rpc(IPC.opencodeSearchMessages, input)`. Server: `src/server/rpc.mjs:2017`
-`"opencode:search-messages": (input) => searchMessages(input ?? {})` →
-`src/server/messageSearch.mjs:52`.
+`IPC.opencodeSearchMessages`).
+- Desktop call: `src/renderer/api/httpApi.ts:1439`.
+- Server: `src/server/rpc.mjs:2017`, which passes the whole input object to
+  `searchMessages` (`src/server/messageSearch.mjs:52`).
 
-Request: `POST /rpc/opencode:search-messages`, `Authorization: Bearer <boxToken>`,
-body `{"args":[{ "query": string, "sessionIds": string[], "maxPrimary"?: number }]}`.
+Request: `POST /rpc/opencode:search-messages` with
+`Authorization: Bearer <boxToken>` and body
+`{"args":[{ "query": string, "sessionIds": string[], "maxPrimary"?: number }]}`.
 
-- `query` — raw user text (server matches case-insensitively, LIKE-escaped).
-- `sessionIds` — scope in priority order; `sessionIds[0]` is the "primary"
-  (current) conversation. Falsy entries are dropped server-side.
-- `maxPrimary` — OPTIONAL, an existing parameter of `searchMessages`
-  (default 50; per-other-session cap `maxPerSession` default 3, overall
-  `maxTotal` default 200). The handler passes the whole input object through,
-  so it is honoured today. iOS sends `maxPrimary: 3` ONLY from the session-list
-  entry point (no current conversation, so the first session must not get 50
-  hits while the others get 3). The chat entry point omits it, exactly like
-  desktop.
+- `query`: the trimmed user text, as desktop sends it. The server trims only to
+  detect an empty query (`messageSearch.mjs:60-63`). It matches the untrimmed
+  value (`likePattern` line 103, `indexOf` line 143), so the client must trim.
+  Trimming covers whitespace and newlines.
+- `sessionIds`: the scope in priority order. `sessionIds[0]` is the primary
+  conversation. Falsy entries are dropped.
+- `maxPrimary`: optional, and an existing parameter.
+  - Defaults: 50 for the primary, `maxPerSession` 3 for each other session,
+    `maxTotal` 200 overall.
+  - The session-list entry sends `maxPrimary: 3` (D9), so no conversation is
+    favoured when there is no current one.
+  - The chat entry omits it.
 
 Response (`src/shared/api.ts:1621-1629`):
 
@@ -93,141 +116,175 @@ Response (`src/shared/api.ts:1621-1629`):
 ```
 
 Semantics (`messageSearch.mjs`):
-- empty/whitespace query or empty scope → `{supported:true, hits:[]}`.
-- no `node:sqlite` / no opencode.db → `{supported:false, hits:[]}` (lines 16-20, 66, 93).
-- DB/worker error → logged server-side, `{supported:true, hits:[]}` (never throws).
-- 8 s scan budget exceeded on a huge history → newest matches + `truncated:true`.
-- One hit per message; `pre` may start with "…"; whitespace collapsed.
-- Order: by index in `sessionIds`, then newest first within a session.
-- `messageId` is the V2 `session_message.id` — the same id the transcript's
-  `opencode:messages` returns as `info.id` (`mapTimeline` in
-  `src/shared/opencodeV2.mjs` keeps `m.id`), so it is valid for the C2
-  `.message` route.
 
-Transport-level errors use the normal RPC envelope (`{error:"…"}` →
-`MantaError.server`, 401 → `MantaError.authRequired`, 503 upgrade handled by the
-client transport) — `MantaAPIClient.decode` already maps these.
+| Case | Response |
+|---|---|
+| Empty query or empty scope | `{supported:true, hits:[]}` |
+| No `node:sqlite`, or no opencode.db | `{supported:false, hits:[]}` (lines 16-20, 66, 93) |
+| DB or worker error | `{supported:true, hits:[]}` after a server log (lines 94-97). **The client cannot tell this from a genuine empty result.** This is an inherited server limitation, out of scope under D7. |
+| Scan exceeds the 8 s budget | Newest matches plus `truncated:true` |
+
+- There is one hit per message. `pre` may start with "…". Whitespace is
+  collapsed.
+- Results are ordered by index in `sessionIds`, then newest first within a
+  session.
+- `messageId` is the V2 `session_message.id`. That is the same id the
+  transcript's `opencode:messages` returns as `info.id` (`mapTimeline` in
+  `src/shared/opencodeV2.mjs` keeps `m.id`), so it is valid for C2
+  `.message`.
+
+Transport and envelope failures:
+- An `{error}` envelope becomes `MantaError.server`.
+- A 401 becomes `MantaError.authRequired`.
+- A non-JSON body becomes `MantaError.transport`.
+- `MantaAPIClient.decode` / `transport` (`MantaAPIClient.swift:920-1000`)
+  already produce these.
 
 No `/events` frames are involved.
 
 ### iOS today
 
-Nothing. `SessionListView.swift:28,370-380,700-712` has a *session-name* filter
-("Search sessions" capsule) only; it never looks at message text. There is no
-call to `opencode:search-messages` anywhere in `mobile/native/`.
+There is nothing for message search yet.
+- `SessionListView.swift:28,370-380,700-712` filters sessions by NAME only.
+- Nothing in `mobile/native/` calls `opencode:search-messages`.
+- The names `TranscriptHit` / `SearchScope` / `SearchSection` / `SearchStore`
+  are unused (grepped), so there are no collisions.
 
 Reusable pieces:
-- `MantaAPIClient.call` / `callRequired` (`MantaAPIClient.swift:944-959`),
-  internal after the C1 foundation commit.
-- `SessionTimerFormat.age(_:)` (`SessionModels.swift:550-555`) is already a 1:1
-  port of desktop `formatAge` — reuse it for the hit age; do not re-implement.
-- `MantaProject` / `MantaWindow` (`SessionModels.swift:33-64`; `opencodeSessionId`,
-  `name`, `tmuxSession`) and `SessionListStore.projects` (published) for scope
-  and labels. `SessionListStore` is already an `@EnvironmentObject` inside the
-  chat screen (`ChatScreen.swift:197`).
-- `MantaAPIClient.live()` (`MantaAPIClient.swift:20`) for the default client.
+- `MantaAPIClient.callRequired` / `jsonObject` (`MantaAPIClient.swift:954-982`;
+  internal per C1).
+- `SessionTimerFormat.age(_:)` (`SessionModels.swift:506,550-555`): a 1:1 port
+  of desktop `formatAge`. Use it for the hit age in the view.
+- `SessionListStore.projects` (published, every window including jobs).
+  `SessionListStore` is already an `@EnvironmentObject` in the chat screen
+  (`ChatScreen.swift:197`).
+- `SessionListStore.window(forSessionID:)` (WS04, wave A, `04-sessions.md:96`).
+- `MantaAPIClient.live()` (`MantaAPIClient.swift:20`).
 
 ### iOS design
 
-New files (all WS06-owned):
+New files, all owned by WS06:
 
-- `MantaUI/MantaAPIClient+Search.swift` — the RPC method + wire types.
-- `MantaUI/SearchModels.swift` — pure logic (scope, grouping, copy, gating).
-- `MantaUI/SearchStore.swift` — `@MainActor final class SearchStore: ObservableObject`.
-- `MantaUI/SearchScreen.swift` — the SwiftUI screen.
-
-**Presentation**: `SearchScreen` is a sheet (`.presentationDetents([.large])`)
-with its own `NavigationStack` for a title bar: title "Search conversations",
-leading "Done" button (dismisses). Search field uses `.searchable(text:,
-placement: .navigationBarDrawer(displayMode: .always), prompt: "Search in conversations…")`
-and is focused on appear (`.searchFocused` / `@FocusState`) so the keyboard is
-up immediately. (DECISIONS §3.2.14 puts *list* search at the bottom; this is a
-dedicated search screen where the field is the whole point, and the system
-search-drawer idiom is the native one — the keyboard sits in thumb reach.)
-Seeded text (from the session list) is placed in the field and searched
-immediately.
-
-**List**: a plain `List` (`.listStyle(.plain)`), sections in the order produced
-by `SearchGrouping`:
-
-- Section "This conversation" (only when opened from a chat and it has hits),
-  header trailing count "N match" / "N matches".
-- If there are other groups (or a search is still loading), a quiet divider
-  header "Other conversations" (sentence case; desktop's lowercase divider is a
-  visual choice).
-- One section per other conversation: header "`workspace › name`" (one line,
-  middle-truncated, `tx3`), trailing bare count.
-
-**Hit row** (button, min height 44): leading glyph (`›` accent for user, `✳`
-`tx4` for assistant — the desktop glyphs), then a 2-line text built as an
-`AttributedString`: `pre` + `match` (accent-tinted background, semibold) +
-`post`; caption "you" / "assistant" below; trailing age
-(`SessionTimerFormat.age(now - timeCreated/1000)`, mono, `tx4`) — omitted when
-`timeCreated` is nil. Accessibility label: "`{you|assistant}`: `{pre}{match}{post}`, `{age}`",
-hint "Opens this message".
-
-**Footer** (last row, `tx4`, small): "`{total} result(s) · {n} conversation(s)`"
-when there are hits; when the response had `truncated: true`, append on its own
-line "Showing the newest matches — this history is very large." (the desktop
-ignores `truncated`; showing it is the honest outcome, not a new feature).
-
-**States** (exactly one renders, all from `SearchStore.phase`):
-
-| State | Render | Copy |
+| File | Imports | Contents |
 |---|---|---|
-| idle (trimmed < 2 chars) | `ContentUnavailableView` (magnifyingglass) | Chat entry: "Search this conversation — and all others." List entry: "Search every conversation." Both + description "Type at least 2 characters." |
-| loading, no results yet | `ProgressView` + caption | "Searching conversations…" |
-| loading with results shown (re-query) | keep previous results, small inline row at the end | "Searching other conversations…" |
-| results | list above | — |
-| empty | `ContentUnavailableView.search(text: q)` | (system copy "No Results for “q”") |
-| unsupported | `ContentUnavailableView` (exclamationmark.triangle) | "Search needs a newer server runtime — update the server." |
-| failed | `ContentUnavailableView` + "Try again" button (re-runs current query) | "Couldn't search — {error message}." |
+| `MantaUI/SearchModels.swift` | **Foundation only** | Wire types, scope, grouping, copy and the query state machine. Added to `Package.swift` (D19). |
+| `MantaUI/MantaAPIClient+Search.swift` | | The one RPC method. |
+| `MantaUI/SearchStore.swift` | | A thin `@MainActor final class` that drives the state machine. |
+| `MantaUI/SearchScreen.swift` | | The SwiftUI screen. |
 
-The "failed" state replaces desktop's silent swallow: on a phone a dropped
-connection must not look like "no matches".
+**Presentation**
+- `SearchScreen` is a sheet (`.presentationDetents([.large])`) with its own
+  `NavigationStack`.
+- Title "Search conversations", with a leading "Done" button that dismisses.
+- The field is `.searchable(text:, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search in conversations…")`,
+  focused on appear so the keyboard is up.
+- A seeded query (from the session list) is placed in the field and searched
+  immediately.
 
-**Store** (`SearchStore`):
+**List** (`.listStyle(.plain)`), in the order produced by
+`SearchGrouping.sections`:
+- "This conversation" comes first, only when opened from a chat and it has
+  hits. Its trailing count is "N match" / "N matches".
+- An "Other conversations" divider header appears when there are other groups
+  or a search is in flight.
+- Then one section per other conversation. The header is "`workspace › name`"
+  on one line (middle-truncated, `tx3`), with a bare trailing count.
+
+**Hit row** (a button, minimum height 44)
+- Glyph `›` (accent) for user, `✳` (`tx4`) for assistant.
+- A 2-line `AttributedString`: `pre` + `match` (accent-tinted background,
+  semibold) + `post`.
+- A caption: "you" / "assistant".
+- A trailing age, `SessionTimerFormat.age(now - timeCreated/1000)` (mono,
+  `tx4`), omitted when `timeCreated` is nil.
+- Accessibility label "`{you|assistant}`: `{pre}{match}{post}`, `{age}`",
+  hint "Opens this message".
+
+**Footer row** (`tx4`, small)
+- `SearchCopy.footer(...)` when there are hits.
+- When `truncated`, a second line: "Showing the newest matches — this history
+  is very large."
+
+**States**: exactly one renders, from `SearchStore.state.phase`.
+
+| Phase | Render | Copy |
+|---|---|---|
+| `.idle` (trimmed < 2) | `ContentUnavailableView` (magnifyingglass) | Title from `SearchCopy.idleTitle(hasPrimary:)`: chat entry "Search this conversation — and all others.", list entry "Search every conversation." Description: "Type at least 2 characters." |
+| `.loading`, no results yet | `ProgressView` + caption | "Searching conversations…" |
+| `.loading`, previous results kept | The results, plus an inline last row | "Searching other conversations…" |
+| `.results` | The list above | — |
+| `.empty` | `ContentUnavailableView.search(text: q)` | System copy |
+| `.unsupported` | `ContentUnavailableView` (exclamationmark.triangle) | "Search needs a newer server runtime — update the server." |
+| `.failed(msg)` | `ContentUnavailableView` + "Try again" (re-runs the current query) | "Couldn't search — {msg}." |
+
+`.failed` covers transport and RPC-envelope failures only. A server-side DB or
+worker failure arrives as an ordinary empty response and renders `.empty`; see
+the wire table.
+
+**Query state machine (pure, `SearchModels.swift`).** All sequencing lives in
+a value type, so cancellation and stale-result rules are testable under
+`verify.sh`.
+
+```swift
+struct SearchQueryState: Equatable, Sendable {
+  enum Phase: Equatable, Sendable { case idle, loading, results, empty, unsupported, failed(String) }
+  private(set) var phase: Phase = .idle
+  private(set) var sections: [SearchSection] = []
+  private(set) var truncated = false
+  private(set) var seq = 0                       // current request generation
+  let primarySessionId: String?
+
+  /// Text changed. Always bumps `seq` (invalidating anything in flight).
+  /// Below min chars → phase .idle, sections cleared, returns nil.
+  /// Otherwise → phase .loading (sections KEPT), returns the token to run.
+  mutating func queryChanged(_ raw: String) -> SearchTicket?
+  /// Re-run the last active query (Try again). Same rules as queryChanged.
+  mutating func retry() -> SearchTicket?
+  /// Apply a response; ignored unless ticket.seq == seq.
+  mutating func receive(_ response: SearchResponse, for ticket: SearchTicket)
+  /// Apply a failure; ignored unless ticket.seq == seq. CancellationError
+  /// (or an NSError with code NSURLErrorCancelled — avoids URLError, which lives in
+  /// FoundationNetworking on Linux) is ignored ALWAYS — an expected exit, never .failed.
+  mutating func fail(_ error: Error, for ticket: SearchTicket)
+  /// Sheet dismissed: bump seq so any late completion is dropped.
+  mutating func invalidate()
+}
+struct SearchTicket: Equatable, Sendable { let seq: Int; let query: String }  // query = trimmed
+```
+
+Rules:
+- `SearchStore` is the only caller. Every mutation after an `await` (success,
+  failure, cleanup) goes through `receive` / `fail`, which check the ticket.
+  Nothing writes state directly after suspension.
+- Cancellation never produces `.failed`.
+- Clearing the field mid-request bumps `seq`, so the late response is dropped
+  and the phase stays `.idle`.
+
+**Store** (`SearchStore.swift`)
 
 ```swift
 @MainActor final class SearchStore: ObservableObject {
-  enum Phase: Equatable { case idle, loading, results, empty, unsupported, failed(String) }
-  @Published private(set) var phase: Phase = .idle
-  @Published private(set) var sections: [SearchSection] = []
-  @Published private(set) var truncated = false
-  @Published var query = ""                  // bound to .searchable
-  init(scope: SearchScope, search: @escaping SearchFunction)   // injectable
-  func queryChanged()                        // debounced 120 ms, seq-guarded
+  @Published private(set) var state: SearchQueryState
+  @Published var query = "" { didSet { queryDidChange() } }
+  init(scope: SearchScope, search: @escaping SearchFunction)
   func retry()
+  func dismissed()          // cancels the task + state.invalidate()
 }
-typealias SearchFunction = @MainActor (SearchRequest) async throws -> SearchResponse
+typealias SearchFunction = @MainActor @Sendable (SearchRequest) async throws -> SearchResponse
 ```
 
-- Debounce: one `Task` per change, `Task.sleep(120 ms)`, cancelled by the next
-  change; a monotonically increasing `seq` drops stale responses (mirrors
-  `SearchPalette.tsx:100-125` and the existing `ComposerView` file-search
-  pattern at `ComposerView.swift:1542-1560`).
-- While loading, previous `sections` stay visible (no flash to empty).
-- `catch` maps the error to `.failed(message)` — no `catch {}`.
-- Scope is captured at open (`SearchScope.build`), not live-updated; a session
-  closed meanwhile is handled at tap time (F2).
+- `queryDidChange` cancels the previous `Task`, then calls
+  `state.queryChanged(query)`.
+- If that returns a ticket, it starts a new `Task`:
+  1. Sleep 120 ms. If the sleep throws, return.
+  2. `try await search(scope.request(query: ticket.query))`.
+  3. Call `state.receive(_:for:)`, or `state.fail(_:for:)` in the `catch`.
+- There is no other state write and no `catch {}`.
+- `SearchScreen` calls `dismissed()` from `.onDisappear`.
 
-**API extension** (`MantaAPIClient+Search.swift`):
+**API extension** (`MantaAPIClient+Search.swift`)
 
 ```swift
-struct SearchRequest: Encodable, Equatable {
-  let query: String
-  let sessionIds: [String]
-  let maxPrimary: Int?          // nil → omitted from JSON
-}
-struct TranscriptHit: Decodable, Equatable, Hashable {
-  let sessionId: String; let messageId: String
-  let role: String              // "user" | anything else → assistant
-  let pre: String; let match: String; let post: String
-  let timeCreated: Double?      // ms epoch
-}
-struct SearchResponse: Decodable, Equatable {
-  let supported: Bool; let hits: [TranscriptHit]; let truncated: Bool?
-}
 extension MantaAPIClient {
   /// `opencode:search-messages` — server-side search over every given
   /// session's full history (BET-698).
@@ -238,21 +295,34 @@ extension MantaAPIClient {
 }
 ```
 
-(Name the hit type `SearchHit` instead if `TranscriptHit` collides with any
-existing Swift symbol at implementation time; grep first.)
-
-### Pure logic (`SearchModels.swift`)
+### Pure logic (`SearchModels.swift`, Foundation only)
 
 ```swift
-struct SearchScope: Equatable {
-  let primarySessionId: String?        // nil when opened from the session list
-  let sessionIds: [String]             // request order
-  let labels: [String: SearchLabel]    // sessionId → (workspace, name)
-  static func build(projects: [MantaProject], primarySessionId: String?) -> SearchScope
-  func request(query: String) -> SearchRequest   // maxPrimary = primary == nil ? 3 : nil
+struct SearchRequest: Encodable, Equatable, Sendable {
+  let query: String; let sessionIds: [String]; let maxPrimary: Int?   // nil → key omitted
 }
-struct SearchLabel: Equatable { let workspace: String; let name: String }
-struct SearchSection: Identifiable, Equatable {
+struct TranscriptHit: Decodable, Equatable, Hashable, Sendable {
+  let sessionId: String; let messageId: String
+  let role: String                    // "user"; anything else renders as assistant
+  let pre: String; let match: String; let post: String
+  let timeCreated: Double?            // ms epoch
+  var isUser: Bool { role == "user" }
+}
+struct SearchResponse: Decodable, Equatable, Sendable {
+  let supported: Bool; let hits: [TranscriptHit]; let truncated: Bool?
+}
+/// One chat window, as the scope builder sees it — decoupled from MantaProject
+/// (SessionModels.swift is not in Package.swift) so this file stays Foundation-only.
+struct SearchScopeWindow: Equatable, Sendable { let workspace: String; let name: String; let sessionId: String? }
+struct SearchLabel: Equatable, Sendable { let workspace: String; let name: String }
+struct SearchScope: Equatable, Sendable {
+  let primarySessionId: String?
+  let sessionIds: [String]
+  let labels: [String: SearchLabel]
+  static func build(windows: [SearchScopeWindow], primarySessionId: String?) -> SearchScope
+  func request(query: String) -> SearchRequest   // query trimmed (whitespacesAndNewlines); maxPrimary = primary == nil ? 3 : nil
+}
+struct SearchSection: Identifiable, Equatable, Sendable {
   let sessionId: String; let isCurrent: Bool; let hits: [TranscriptHit]
   var id: String { sessionId }
 }
@@ -261,49 +331,97 @@ enum SearchGrouping {
 }
 enum SearchCopy {
   static let minQueryChars = 2
-  static func isActive(_ query: String) -> Bool           // trimmed count >= 2
+  static func normalized(_ raw: String) -> String          // trimmingCharacters(in: .whitespacesAndNewlines)
+  static func isActive(_ raw: String) -> Bool              // normalized count >= 2
   static func currentCount(_ n: Int) -> String             // "1 match" / "N matches"
   static func footer(total: Int, conversations: Int) -> String
   static func header(label: SearchLabel?, sessionId: String) -> String  // "ws › name" or raw id
   static func idleTitle(hasPrimary: Bool) -> String
 }
+enum SearchJump {
+  /// `owner` is SessionListStore.window(forSessionID:) bridged to a Bool.
+  static func isReachable(sessionId: String, owner: (String) -> Bool) -> Bool
+}
 ```
 
-`SearchScope.build`: primary first (if non-nil), then every window of every
-project in `projects` order whose `opencodeSessionId` is non-empty, de-duped —
-job windows included (desktop parity; use `SessionListStore.projects`, not
-`visibleProjects`). `SearchGrouping.sections`: group in first-appearance order;
-the primary's group (if any) is moved first and marked `isCurrent`.
+`SearchScope.build`:
+- The primary goes first, if non-nil.
+- Then every window, in order, whose `sessionId` is non-empty, de-duplicated.
+- Job windows are included, for desktop parity.
+
+The screen maps `sessionStore.projects` (not `visibleProjects`) to
+`[SearchScopeWindow]` (`workspace = project.tmuxSession`, `name = window.name`,
+`sessionId = window.opencodeSessionId`).
+
+`SearchGrouping.sections`:
+- Groups are in first-appearance order.
+- The primary's group, if any, is moved first and marked `isCurrent`.
 
 ### XCTest — `MantaUITests/SearchTests.swift`
 
-1. `scopeBuild_primaryFirstThenProjectOrder_dedupes` — primary also appears as a window → appears once, first.
-2. `scopeBuild_skipsWindowsWithoutChatSession` (nil and "" ids).
-3. `scopeBuild_includesJobWindows`.
-4. `scopeBuild_noPrimary_requestSendsMaxPrimary3`; with primary → `maxPrimary` nil and absent from encoded JSON.
-5. `request_encodesQueryUntrimmed` (server matches what the user typed; gating uses trimmed).
-6. `grouping_firstAppearanceOrder` and `grouping_currentSectionFirstAndFlagged`.
-7. `grouping_noPrimary_noCurrentSection`.
-8. `isActive_trimsAndRequiresTwoChars` ("a", " a ", "ab").
-9. `copy_pluralisation` (1 match / 2 matches; 1 result · 1 conversation / 3 results · 2 conversations).
-10. `header_fallsBackToSessionId` when label missing.
-11. `decode_response_supportedFalse`, `decode_response_truncated`, `decode_hit_nullTimeCreated`.
-12. `store_staleResponseDropped` — two queries, first resolves last → only the second's results land (inject a controllable `SearchFunction`).
-13. `store_errorBecomesFailedNotEmpty`, `store_unsupported`, `store_emptyHits_isEmpty`, `store_belowMinChars_isIdle_noCall`.
+Foundation only. Added to `Package.swift` and runs under `verify.sh`.
 
-No server tests: no server change. (Existing `src/server/messageSearch.test.mjs`
-already covers the channel; add a case there only if the implementer touches it.)
+1. `scopeBuild_primaryFirstThenWindowOrder_dedupes`: the primary also appears
+   as a window and ends up listed once, first.
+2. `scopeBuild_skipsWindowsWithoutChatSession`: nil and `""` ids.
+3. `scopeBuild_includesJobWindows`: windows are passed through as given.
+4. `request_noPrimary_sendsMaxPrimary3`; `request_withPrimary_omitsMaxPrimaryKey`
+   (encode to JSON and assert the key is absent).
+5. `request_trimsWhitespaceAndNewlines`: `"  foo \n"` → `"foo"`. This replaces
+   the old untrimmed test.
+6. `grouping_firstAppearanceOrder`; `grouping_currentSectionFirstAndFlagged`;
+   `grouping_noPrimary_noCurrentSection`.
+7. `isActive_trimsAndRequiresTwoChars`: `"a"`, `" a "`, `"ab"`, `"a\n"`.
+8. `copy_pluralisation`: "1 match" / "2 matches"; "1 result · 1 conversation" /
+   "3 results · 2 conversations".
+9. `header_fallsBackToSessionId`.
+10. `decode_supportedFalse`, `decode_truncated`, `decode_nullTimeCreated`,
+    `decode_unknownRoleIsAssistant`.
+11. State machine:
+    - `state_belowMin_isIdle_noTicket`
+    - `state_staleResponseDropped`: ticket 1 is issued, then ticket 2; ticket
+      1's response is ignored.
+    - `state_staleFailureDropped`: ticket 1 fails after ticket 2 was issued;
+      the phase stays `.loading`.
+    - `state_cancellationNeverFails`: a `CancellationError` for the CURRENT
+      ticket leaves the phase unchanged.
+    - `state_clearWhileInFlight_staysIdle`: ticket issued, query set to `""`,
+      then the response arrives; the phase stays `.idle` with no sections.
+    - `state_invalidateDropsLateResult`
+    - `state_errorBecomesFailed`, `state_unsupported`, `state_emptyHits_isEmpty`
+    - `state_loadingKeepsPreviousSections`
+    - `state_retryReissuesLastQuery`
+12. `jump_reachable` / `jump_unreachable`.
+
+There are no Mac-only test files. `SearchStore` is a thin driver, and its
+behaviour is covered by the state-machine tests. There are no server tests,
+because there is no server change.
 
 ### Acceptance criteria
 
-- [ ] Typing ≥ 2 characters sends exactly one `opencode:search-messages` call per settled query (120 ms debounce); fewer than 2 shows the idle hint and sends nothing.
-- [ ] Opened from a chat, results for that chat appear first under "This conversation" with "N match(es)"; other chats follow under "Other conversations", each headed "workspace › name".
-- [ ] Every chat window on the box is in scope, including ones with no recent activity and background-job windows.
-- [ ] Matched text is visibly highlighted in each row; user vs assistant is distinguishable by glyph and caption; age shows except when the box returned none.
-- [ ] A box without the search runtime shows "Search needs a newer server runtime — update the server."
-- [ ] A network/server failure shows an error with a working "Try again" — never "no results".
-- [ ] A late response for an old query never replaces newer results.
+- [ ] Typing at least 2 non-whitespace characters sends exactly one
+  `opencode:search-messages` call per settled query (120 ms debounce), with the
+  query trimmed of surrounding whitespace and newlines. Fewer than 2 shows the
+  idle hint and sends nothing.
+- [ ] Opened from a chat, that chat's results come first under "This
+  conversation" with "N match(es)". Other chats follow under "Other
+  conversations", each headed "workspace › name".
+- [ ] Every chat window on the box is in scope, including background-job
+  windows.
+- [ ] Matched text is visibly highlighted. User and assistant rows are
+  distinguishable by glyph and caption. Age shows unless the box returned none.
+- [ ] A box without the search runtime shows "Search needs a newer server
+  runtime — update the server."
+- [ ] A transport or RPC-envelope failure (no connection, timeout, auth, `{error}`
+  envelope) shows "Couldn't search — …" with a working "Try again", never "no
+  results". A server-side DB/worker failure shows as no results (inherited
+  limitation, documented above).
+- [ ] Typing fast never shows an error, and a late response or failure for an
+  old query never replaces newer state. Clearing the field mid-search leaves the
+  idle hint. Closing the sheet mid-search does nothing afterwards.
 - [ ] `truncated:true` shows the "newest matches" note.
+- [ ] `SearchTests` passes under `mobile/native/verify.sh` and under the Mac
+  `test-unit` gate.
 
 ---
 
@@ -311,52 +429,59 @@ already covers the channel; add a case there only if the implementer touches it.
 
 ### Desktop behaviour today
 
-`SearchPalette.tsx:139-156`; picking a row also closes the palette
-(`PaletteShell.tsx:13`, pick = onPick then close).
-- Same session → `manta-scroll-to-message` event → `ChatPanel.tsx:1243-1272`
-  scrolls to the row that draws the message and flashes it ~1.2 s, highlighting
-  the query text inside the row.
-- Other session → a pending-scroll latch, then the window is activated;
-  `ChatPanel.tsx:1274-1288` consumes it once the row is in the loaded
-  transcript (retries on each transcript commit).
-- If the session no longer owns a window (`resolveSessionOwner` null), the
-  desktop silently does nothing (line 150) — a dead click; iOS must not copy it.
+Jump is handled at `SearchPalette.tsx:139-156`. Picking a row also closes the
+palette (`PaletteShell.tsx:13`).
+- **Same session**: the `manta-scroll-to-message` event goes to
+  `ChatPanel.tsx:1243-1272`, which scrolls to the row and flashes it, with the
+  query highlighted inside the row.
+- **Other session**: a pending-scroll latch is set and the window is activated.
+  `ChatPanel.tsx:1274-1288` consumes the latch once the row has loaded.
+- **Session no longer has a window**: the click silently does nothing
+  (line 150). iOS does not copy this.
 
 ### Wire contract
 
-None of WS06's own. Navigation goes through C2:
-`MantaNavigator.open(.message(sessionID:messageID:))`. WS02 owns scroll +
-highlight (and fetching earlier history when the message is outside the loaded
-window); WS04 owns resolving a session id to its window and pushing the chat.
+WS06 has no wire contract of its own here; it only calls C2
+`MantaNavigator.open(.message(sessionID:messageID:))`.
+- WS02 F10 consumes it for its own session. It widens the loaded window if
+  needed, scrolls and highlights. If the message is missing it shows "Couldn't
+  find that message — it may have been compacted away"
+  (`02-chat-cards-queue.md:590-610`).
+- For another session, WS04's root handler (WS02 mount M2) opens the chat
+  without clearing `pending`, and the new chat consumes it.
 
 ### iOS design
 
-`SearchScreen` gets `@EnvironmentObject var navigator: MantaNavigator` and
-`@EnvironmentObject var sessionStore: SessionListStore`. On tap:
+`SearchScreen` reads `@EnvironmentObject MantaNavigator` (injected in
+`MantaAppRoot.swift`, D1) and `@EnvironmentObject SessionListStore`. On tap:
 
-1. Check the hit's `sessionId` is still owned by a window in
-   `sessionStore.projects` (pure helper `SearchJump.isReachable(sessionId:projects:)`).
-   If not: keep the sheet open and show an inline banner at the top of the list
-   "That conversation is no longer open." (auto-dismiss 4 s) — no navigation.
-2. Otherwise: light selection haptic (respect `sessionStore.hapticsEnabled`),
-   dismiss the sheet, and in the dismiss completion (or next main-actor turn)
-   call `navigator.open(.message(sessionID: hit.sessionId, messageID: hit.messageId))`.
-   This is the same call for same-session and cross-session hits; WS02's route
-   handler treats "already on that chat" as scroll-only.
+1. If `SearchJump.isReachable(sessionId:owner: { sessionStore.window(forSessionID: $0) != nil })`
+   is false:
+   - Keep the sheet open.
+   - Show an inline banner at the top of the list: "That conversation is no
+     longer open." It auto-dismisses after 4 s.
+   - Do not navigate.
+2. Otherwise:
+   - Fire the selection haptic (respect `sessionStore.hapticsEnabled`).
+   - Store the hit in `@State pendingJump`, then call `dismiss()`.
+   - In `.onDisappear`, after `store.dismissed()`, if `pendingJump` is set, call
+     `navigator.open(.message(sessionID:, messageID:))`.
+   - Opening after the sheet has fully gone avoids a navigation push being
+     dropped mid-dismiss.
 
-The query is NOT carried in the route (C2 has no field for it); the target row
-is highlighted as a whole by WS02. See Open questions.
+The call is the same for same-session and cross-session hits.
 
-### Pure logic + tests (in `SearchTests.swift`)
-
-- `jump_reachable_whenWindowOwnsSession`, `jump_unreachable_whenSessionGone`.
+The query is not carried in the route. Matched-text highlight after the jump is
+deferred (D8); the whole row is highlighted by WS02.
 
 ### Acceptance criteria
 
-- [ ] Tapping a hit in the current conversation closes search and scrolls to + highlights that message, even if it is older than what was loaded.
-- [ ] Tapping a hit in another conversation closes search, opens that chat, and scrolls to + highlights the message.
-- [ ] Tapping a hit whose conversation was closed meanwhile shows "That conversation is no longer open." and does not navigate.
-- [ ] No jump is wired until the `.message` route owner (WS02) has landed (C2 rule).
+- [ ] Tapping a hit in the current conversation closes search and scrolls to
+  and highlights that message, even when it is older than what was loaded.
+- [ ] Tapping a hit in another conversation closes search, opens that chat,
+  and scrolls to and highlights the message.
+- [ ] Tapping a hit whose conversation was closed meanwhile shows "That
+  conversation is no longer open." and does not navigate.
 
 ---
 
@@ -364,103 +489,184 @@ is highlighted as a whole by WS02. See Open questions.
 
 ### Desktop behaviour today
 
-⌘F only, and only while a chat pane is active (`App.tsx:1449-1462`). The
-desktop has no list-level entry; on iOS the session list is the home screen, so
-an entry there is the phone equivalent of "search from anywhere".
+The desktop has ⌘F only, and only while a chat is active
+(`App.tsx:1449-1462`). There is no list-level entry. On iOS the session list is
+the home screen, so an entry there is the phone equivalent of "search from
+anywhere".
 
 ### iOS design
 
-1. **Chat nav bar** (WS02-owned `ChatScreen.swift`): a `ToolbarItem(placement:
-   .primaryAction)` with `Image(systemName: "magnifyingglass")`,
-   `accessibilityLabel("Search conversations")`, placed before the existing
-   "Session actions" ellipsis (`ChatScreen.swift:345-351`). Tap presents
-   `SearchScreen(scope: SearchScope.build(projects: sessionStore.projects, primarySessionId: sessionId))`.
-   Only rendered when the screen has a non-empty chat `sessionId` (never on the
-   read-only subagent screen).
-2. **Session list** (WS04-owned `SessionListView.swift`): when the name filter
-   ("Search sessions" capsule) holds ≥ 2 trimmed characters, show a final row
-   in the list — and a button in `noMatchState` (`SessionListView.swift:818+`) —
-   reading "Search messages for “{text}”" with a `text.magnifyingglass` icon.
-   Tap presents `SearchScreen(scope: SearchScope.build(projects: store.projects, primarySessionId: nil), seed: searchText)`.
-   This reuses the existing thumb-reach capsule (DECISIONS §3.2.14, §7.1)
-   instead of adding a fourth toolbar button.
+`SearchScreen.init(scope: SearchScope, seed: String = "", search: SearchFunction? = nil)`.
+When `search` is nil it uses `MantaAPIClient.live().searchMessages`. A
+convenience builder keeps the call sites one-liners:
 
-`SearchScreen` init: `init(scope: SearchScope, seed: String = "", api: MantaAPIClient = .live())`.
+```swift
+extension SearchScope {   // in SearchScreen.swift (needs MantaProject)
+  static func fromProjects(_ projects: [MantaProject], primarySessionId: String?) -> SearchScope
+}
+```
+
+1. **Chat nav bar** (mount M-06-1, applied by WS02):
+   - A magnifyingglass toolbar button labelled "Search conversations".
+   - It presents
+     `SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId))`.
+   - It appears only on the main chat screen, never on the read-only subagent
+     screen.
+2. **Session list** (mount M-06-2, applied by integration agent B):
+   - When the "Search sessions" capsule holds at least 2 trimmed characters,
+     show a final row in the list reading "Search messages for “{text}”"
+     (`text.magnifyingglass`). Show the same as a button in `noMatchState`.
+   - It presents
+     `SearchScreen(scope: .fromProjects(store.projects, primarySessionId: nil), seed: trimmed)`.
+   - This reuses the thumb-reach capsule (DECISIONS §3.2.14, §7.1) instead of
+     adding a toolbar button.
 
 ### Acceptance criteria
 
-- [ ] A search button is in the chat nav bar of every chat session and opens search scoped to that chat.
-- [ ] Typing ≥ 2 characters in the session list's search capsule offers "Search messages for “…”", including when no session name matches; it opens search pre-filled and already searching.
-- [ ] From the session list there is no "This conversation" section and no single conversation is favoured.
+- [ ] Every chat session has a search button in its nav bar, and it opens
+  search scoped to that chat.
+- [ ] Typing at least 2 characters in the session list's search capsule offers
+  "Search messages for “…”", including when no session name matches. It opens
+  search pre-filled and already searching.
+- [ ] From the session list there is no "This conversation" section and no
+  conversation is favoured.
 
 ---
 
 ## Files
 
-Create (WS06-owned):
+Create (all owned by WS06):
+- `mobile/native/MantaUI/SearchModels.swift` (Foundation only)
 - `mobile/native/MantaUI/MantaAPIClient+Search.swift`
-- `mobile/native/MantaUI/SearchModels.swift`
 - `mobile/native/MantaUI/SearchStore.swift`
 - `mobile/native/MantaUI/SearchScreen.swift`
-- `mobile/native/MantaUITests/SearchTests.swift`
+- `mobile/native/MantaUITests/SearchTests.swift` (Foundation only)
 
-Regenerate `MantaUI.xcodeproj` via xcodegen (new files are picked up by the
-directory source entries in `project.yml`; no `project.yml` edit expected).
+Edit: none. Mounts and `Package.swift` are applied by others (below). WS06
+never edits `project.pbxproj`; the orchestrator regenerates it at the end
+(D18).
 
-Edit: none outside the above (mounts below are applied by their owners).
+Manifest for the integration step:
+- App sources: the four files above.
+- `Package.swift` sources: `SearchModels.swift`.
+- `Package.swift` test sources: `SearchTests.swift`.
 
 ## Mount requests
 
-1. **WS02 — `ChatScreen.swift`** (allowed by C4): in the `.toolbar` at
-   `ChatScreen.swift:345-351`, add before the ellipsis item:
-   ```swift
-   ToolbarItem(placement: .primaryAction) {
-     Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }
-       .accessibilityLabel("Search conversations")
-   }
-   ```
-   plus `@State private var showSearch = false` and
-   `.sheet(isPresented: $showSearch) { SearchScreen(scope: SearchScope.build(projects: sessionStore.projects, primarySessionId: sessionId)) }`
-   (or as a case of the screen's existing sheet mechanism if it has a single
-   sheet enum). `SearchScreen` needs `MantaNavigator` and `SessionListStore` in
-   the environment — both are already injected app-wide.
-2. **WS04 — `SessionListView.swift`**: add `case conversationSearch(seed: String)`
-   to `SheetRoute` (`SessionListView.swift:1029-1041`, id
-   `"search:\(seed)"`) rendering `SearchScreen(scope: SearchScope.build(projects: store.projects, primarySessionId: nil), seed: seed)`;
-   add the "Search messages for “{searchText}”" row at the end of `list` and a
-   button in `noMatchState`, both shown only when
-   `SearchCopy.isActive(searchText)`, both setting
-   `sheetRoute = .conversationSearch(seed: searchText.trimmingCharacters(in: .whitespaces))`.
-   Per the master Waves note, WS06 applies this itself in wave B after WS04 has
-   landed (WS04 is not editing the file in wave B).
+| ID | Receiving file | Applier (D18) | Provider symbol(s) | Exact change | Prerequisite |
+|---|---|---|---|---|---|
+| M-06-1 | `MantaUI/ChatScreen.swift` | **WS02**, wave B | `SearchScreen`, `SearchScope.fromProjects(_:primarySessionId:)` | See the M-06-1 notes below the table. | WS06's files exist in wave B (symbols are pinned here, so WS02 can write the call before they land). C2 `.message` handling (WS02 F10 + WS04 M2) is in the same wave. |
+| M-06-2 | `MantaUI/SessionListView.swift` | **Integration agent B** | `SearchScreen`, `SearchScope.fromProjects`, `SearchCopy.isActive`, `SearchCopy.normalized` | See the M-06-2 notes below the table. | WS04 landed (wave A) and the WS06 files landed (wave B). Apply in ledger order alongside WS09's mount on this file. |
+| M-06-3 | `mobile/native/Package.swift` | **Integration agent B** | none | Add `"SearchModels.swift"` to `MantaUI` target `sources` and `"SearchTests.swift"` to `MantaUITests` `sources` (alphabetical). | WS06's files landed. |
+
+**M-06-1 exact change** (`ChatScreen.swift`):
+- In `.toolbar` (`ChatScreen.swift:345-351`), before the "Session actions"
+  ellipsis, add
+  `ToolbarItem(placement: .primaryAction) { Button { showSearch = true } label: { Image(systemName: "magnifyingglass") }.accessibilityLabel("Search conversations") }`.
+- Add `@State private var showSearch = false`.
+- Add
+  `.sheet(isPresented: $showSearch) { SearchScreen(scope: .fromProjects(sessionStore.projects, primarySessionId: sessionId)) }`,
+  or a case in the screen's sheet enum if WS02 has one.
+- Only on the main chat screen (non-empty `sessionId`), not the subagent
+  screen.
+- `MantaNavigator` and `SessionListStore` are already in the environment.
+
+**M-06-2 exact change** (`SessionListView.swift`):
+- Add `case conversationSearch(seed: String)` to `SheetRoute`
+  (`:1029-1041`), with id `"search:\(seed)"`. It renders
+  `SearchScreen(scope: .fromProjects(store.projects, primarySessionId: nil), seed: seed)`.
+- When `SearchCopy.isActive(searchText)`, append a final row to `list` reading
+  "Search messages for “\(SearchCopy.normalized(searchText))”" with the
+  `text.magnifyingglass` icon.
+- Add a same-labelled button in `noMatchState` (`:818+`).
+- Both set
+  `sheetRoute = .conversationSearch(seed: SearchCopy.normalized(searchText))`.
+
+## Mounts applied by this workstream
+
+None. WS06 owns no existing file. I cross-checked the other specs' mount
+tables in this folder: none targets a `Search*` file or `MantaAPIClient+Search.swift`.
+
+## Client members
+
+New `MantaAPIClient` members (in `MantaAPIClient+Search.swift`):
+- `func searchMessages(_ request: SearchRequest) async throws -> SearchResponse`.
+  This is the `opencode:search-messages` channel, and no other spec declares
+  it (grepped: the channel appears only in this spec).
+
+Consumed, owned elsewhere:
+- `SessionListStore.window(forSessionID:)` (WS04).
+- `SessionListStore.projects` and `hapticsEnabled` (existing).
+- `MantaNavigator.open(_:)` (C2, WS04).
 
 ## Contracts provided / consumed
 
-- **C1 consumed**: uses internal `callRequired` / `jsonObject`; adds
-  `MantaAPIClient+Search.swift` (provided: `searchMessages(_:)`).
-- **C2 consumed**: calls `MantaNavigator.open(.message(sessionID:messageID:))`
-  only; requires WS02's `.message` handler (incl. load-earlier) and WS04's
-  session resolution. Does not implement any route.
-- **C4 consumed**: one chat nav-bar mount (listed in C4 for WS06).
-- C3, C5, C6: not used. **C7**: `MantaUITests/SearchTests.swift`; no server
-  module added.
-- Provided to others: `SearchScreen` / `SearchScope` (no other workstream needs them).
+- **C1**: adds `MantaAPIClient+Search.swift`, with one member (see Client
+  members). It uses the internal `callRequired` / `jsonObject`.
+- **C2 consumed**: calls `open(.message(sessionID:messageID:))` only. This needs
+  WS02 F10 (same session) and WS04's root handler from WS02 M2 (other session).
+- **C4 consumed**: the chat nav-bar search mount (M-06-1), applied by WS02 per
+  D18.
+- **C7**: `MantaUITests/SearchTests.swift`. No server module.
+- **D9**: `maxPrimary: 3` from the list entry. **D19**: `SearchModels.swift` and
+  its tests are Foundation-only and go into `Package.swift`.
+- C3, C5, C6: not used.
 
 ## Deferred
 
-- **Highlighting the query inside the target row after a jump** (desktop flashes
-  the matched text, `ChatPanel.tsx:1252-1254`): C2's `.message` route carries no
-  query, and adding one changes a shared contract owned by WS02. The row-level
-  highlight is delivered; text-level highlight deferred until C2 grows an
-  optional `query`.
-- **Keyboard navigation of results** (↑/↓/Enter in the palette): hardware
-  keyboard shortcuts are out of scope (master "Desktop-only by nature").
+- **Matched-text highlight inside the target row after a jump** (D8). C2
+  `.message` carries no query. WS02 highlights the whole row.
+- **Keyboard navigation of results** (↑/↓/Enter). Hardware-keyboard shortcuts
+  are out of scope (master, "Desktop-only by nature").
+- **Telling a server DB/worker failure apart from "no matches"**. The server
+  returns `{supported:true, hits:[]}` for both (`messageSearch.mjs:94-97`).
+  Fixing that is a server change, which D7 does not allow.
 
 ## Open questions
 
-1. Should C2's `.message` carry an optional `query` so WS02 can highlight the
-   matched text? **Default: no** (deferred above); revisit if WS02 finds it cheap.
-2. Is sending `maxPrimary: 3` from the session-list entry acceptable, given the
-   server comment says "the renderer never overrides" the caps? **Default: yes**
-   — it is an existing, already-honoured parameter, used only so no single
-   conversation is favoured when there is no current one; no server change.
+None. The two round-0 questions were settled by D8 (no query in the route) and
+D9 (`maxPrimary: 3`).
+
+## Review responses (round 1)
+
+**06-search.md**
+
+1. **BLOCKING, chat mount owner/timing.** Fixed per D18: M-06-1 is applied by
+   WS02 in wave B, with provider symbols pinned so WS02 can write the call in
+   the same wave.
+   - The session-list mount moved to integration agent B (M-06-2). Previously
+     WS06 was to edit it itself, which conflicted with WS09 on the same file.
+   - The stale line in `02-chat-cards-queue.md:773-776` ("applied by their
+     owners in later waves") is overridden by D18. It is WS02's to update; I
+     did not edit it (I may edit only this file).
+2. **SHOULD, untrimmed query.** Fixed.
+   - `SearchScope.request` trims whitespace and newlines, matching desktop
+     `SearchPalette.tsx:70,113`.
+   - The field keeps the raw text.
+   - Test 5 is now `request_trimsWhitespaceAndNewlines`.
+3. **SHOULD, cancellation/stale rules.** Fixed with the pure
+   `SearchQueryState`.
+   - Every post-suspension mutation is ticket-checked, including failures.
+   - Cancellation is never `.failed`.
+   - A below-minimum query bumps `seq` (mirrors `SearchPalette.tsx:101-106`).
+   - Dismissal invalidates and cancels.
+   - Added the tests for stale failure, cancellation, clear-while-in-flight and
+     invalidate.
+4. **SHOULD, failure criterion overreach.** Fixed. The criterion is now limited
+   to transport and RPC-envelope failures. The DB/worker degradation is
+   recorded as an inherited limitation (wire table and Deferred), with no
+   server change (D7).
+
+**00-cross-cutting.md**
+
+- **#7 (wave-B SessionListView edits).** Resolved by M-06-2 → integration
+  agent B. WS06 no longer edits `SessionListView.swift`.
+- **#8 (conflicting ChatScreen mount owner).** Resolved by M-06-1 → WS02
+  (D18).
+- **#10 (Package/pbxproj).** WS06 no longer regenerates the project.
+  - Package additions are mount M-06-3 for integration agent B.
+  - `SearchModels.swift` was made Foundation-only by replacing `MantaProject`
+    with `SearchScopeWindow` and moving the wire types into it, so it and its
+    tests run under `verify.sh` (D19).
+
+No rebuttals.

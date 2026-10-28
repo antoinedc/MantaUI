@@ -1,8 +1,9 @@
 # WS09 — Models, spend and usage (iOS)
 
-Status: draft · Wave B · Owner files: `UsageMeters.swift`, `ModelPickerSheet.swift`,
-`ChatModelCatalog.swift`, new `Models*` / `Usage*` / `Optimizer*` files,
-`MantaAPIClient+Models.swift`, server module `src/server/modelsUnidentified.mjs`.
+Status: revised (round 1) · Wave B · Owner files: `UsageMeters.swift`,
+`ModelPickerSheet.swift`, `ChatModelCatalog.swift`, `ChatModelStore.swift` (D1),
+new `Models*` / `Usage*` / `Optimizer*` files, `MantaAPIClient+Models.swift`,
+server module `src/server/modelsUnidentified.mjs` (D7).
 
 ## Scope
 
@@ -15,7 +16,7 @@ Status: draft · Wave B · Owner files: `UsageMeters.swift`, `ModelPickerSheet.s
 | F5 | Per-model price form (unpriced models) | `src/renderer/ModelPriceForm.tsx` |
 | F6 | Resume-after-limit screen + session-list entry point | `src/renderer/UsageResumeModal.tsx`, `usageResume.ts`, `Sidebar.tsx:701-712` |
 | F7 | Usage alerts at 90% / at the limit with "Remind me at reset" / "Keep going at reset" | `src/renderer/usageEscalation.ts`, `App.tsx:511-560, 794-917` |
-| F8 | Seat data for the context sheet's "Seat" row (WS02 renders it) | `chatUtils.ts:3812 describeSeatLine`, `SessionHeader.tsx:641-798` |
+| ~~F8~~ | ~~Seat data for the context sheet~~ — **removed by D17**: WS02 renders the seat row from the existing `AccountsStore.conversationSeat` projection. WS09 provides nothing for it. | — |
 
 Out of scope (master): optimizer savings pill, Auto-routing indicator. The
 editable "Manta optimized token usage" switch is already a schema setting
@@ -38,10 +39,42 @@ ModelsScreen (List, insetGrouped)
      └─ NavigationLink "Token optimizer"       → OptimizerScreen       (F3)
 ```
 
-Resume-after-limit (F6) and usage alerts (F7) are app-level: two `static let
-shared` `@MainActor` stores bound to the app's `MantaEventStore` (same pattern
-as `WidgetLiveStore.shared.bind(eventStore:)`, `MantaUIApp.swift:38`), a top
-banner overlay and one sheet, both mounted in `MantaAppRoot` (WS04 mount).
+Resume-after-limit (F6) and usage alerts (F7) are app-level. There is ONE new
+app-wide store, `UsageAlertsStore.shared` (`@MainActor`, bound to the app's
+`MantaEventStore` like `WidgetLiveStore.shared.bind(eventStore:)`,
+`MantaUIApp.swift:38`). It holds the usage snapshots, the alert baseline and
+queue, the visible chat id and the "resume sheet presented" flag. Stopped
+records are NOT stored by WS09: per D16 they come from WS04's
+`SessionListStore.stoppedRecords`. The banner overlay and the resume sheet
+are mounted in `MantaAppRoot` by integration agent B (D18).
+
+### Box lifecycle (applies to every WS09 app-wide state)
+
+The app can switch boxes without relaunching (`MantaAppRoot.swift:185-201`
+`commitPairing` with `flow.isSwitching`; `:235-240` `beginSwitch`), and WS10
+posts `Notification.Name.mantaBoxRemoved` on "Remove server". WS09 has two
+process-wide singletons, `UsageAlertsStore.shared` and
+`ChatModelCatalog.shared`. Both:
+
+- keep `private var generation = 0` and `private(set) var boxKey: String?`
+  (`KeychainCredentialStore.shared.boxId ?? serverURL?.absoluteString`,
+  captured when a seed starts);
+- expose `func resetForBoxChange()`: `generation += 1`, cancel in-flight
+  tasks, clear all published state (snapshots, baseline, queue,
+  `activeSessionId`, `resumeSheetPresented`; for the catalogue: models,
+  defaults, `deactivatedMain`, `configOptIns`, `loaded = false`,
+  `didStart = false`). Nothing is fetched until the new box's stream connects;
+- drop any response whose captured `generation` differs from the current one
+  (a late old-box answer can never land on the new box);
+- call `resetForBoxChange()` themselves on `mantaBoxRemoved`, and are called by
+  mount M-09-4 in `commitPairing`'s `isSwitching` branch, right after
+  `sessionStore.resetForBoxChange()`;
+- refuse actions (Remind, Keep going) whose alert was raised under an older
+  generation.
+
+The pure part — "is this response still current?" and the baseline ordering
+in F7 — lives in `UsageBaseline` (Foundation-only, F7) so it is tested under
+`verify.sh` (D19).
 
 ---
 
@@ -110,6 +143,18 @@ No `/events` frame is involved.
   model hidden from Main on desktop still appears on iOS, and a desktop opt-in
   is invisible on iOS. `ChatModel.contextSize` (`ChatModel.swift:268`) already
   formats context.
+- There are THREE ways to select a model in the picker today, and each must
+  apply the same policy:
+  1. a catalogue row → `ModelCatalogueView.select` (`ModelPickerSheet.swift:318-322`),
+     guarded only by the local opt-in set;
+  2. a recent chip → `modelStore.apply(choice)` (`ModelPickerSheet.swift:217-229`),
+     rendered straight from `modelStore.recents` with no filter at all;
+  3. the fast toggle → `ChatModelStore.setFast` (`ChatModelStore.swift:259-267`)
+     through `ChatModel.fastToggle(models:…)` (`ChatModel.swift:59-80`), which
+     only excludes disabled/deprecated twins.
+  "Server default" (`:230-238`) is always allowed.
+- `ChatModelStore.optIn` (`ChatModelStore.swift:276-281`) is synchronous and
+  writes only UserDefaults.
 
 ### iOS design
 
@@ -120,14 +165,26 @@ New files:
   `config: ModelsConfig` (the five keys above, decoded from `config:get`'s
   `[String: JSONValue]`), `busyKey: String?`, `feedback: ModelsFeedback?`
   (`.saved(String)` auto-clears after 3 s, `.failed(String)` stays until
-  dismissed). On `load()`: `models()` + `configGet()` concurrently, then
-  `syncSubagents` with the loaded sets (desktop runs it on every load,
-  `ModelsCard.tsx:200-205`; failure here is logged into `feedback` only if the
-  call throws). Actions: `setDefault`, `toggleMain`, `toggleSub`,
-  `enableDeprecated`, `saveOverride` — each sets `busyKey`, awaits, updates
-  local state from the RETURNED config, calls
-  `ChatModelCatalog.shared.reload()`, and sets `feedback`. Every failure keeps
-  the previous state and says "Couldn't save — <reason>. Nothing was changed."
+  dismissed; `.partial(String, retry: ModelsRetry)` stays until dismissed or
+  retried). It also keeps `agents: [ModelsSubagentDef]` — the last
+  `opencode:sync-subagents` answer — as the baseline for verifying Sub changes.
+  On `load()`: `models()` + `configGet()` concurrently, then `syncSubagents`
+  with the loaded sets (desktop runs it on every load,
+  `ModelsCard.tsx:200-205`); its answer seeds `agents`.
+  Actions: `setDefault`, `toggleMain`, `toggleSub`, `enableDeprecated`,
+  `saveOverride`. Each sets `busyKey`, awaits, takes local state from the
+  RETURNED config, calls `ChatModelCatalog.shared.reload()`, and sets
+  `feedback`. The outcomes are explicit, because some actions are TWO box
+  calls and the first one persists before the second runs (`config:update`
+  writes the preference, `rpc.mjs:848-861`; `syncSubagents` then returns the
+  OLD agent list instead of throwing when its own write fails,
+  `providers.mjs:808-823`):
+
+  | Action | Calls | Outcome rules |
+  |---|---|---|
+  | `setDefault`, `toggleMain`, `saveOverride` | one `config:update` | throw → `.failed("Couldn't save — <reason>. Nothing was changed.")`, local state untouched. Resolved → `.saved`. |
+  | `toggleSub`, `enableDeprecated` | `config:update`, then `syncSubagents` | (a) `config:update` throws → `.failed("… Nothing was changed.")`. (b) config OK, sync throws OR `ModelsTable.subOutcome(...)` says `.notApplied` / `.unverified` → `.partial("Preference saved, but the subagent list on the box wasn't updated. Try again to apply it.", retry: .sync)` — local toggle reflects the SAVED preference; NO "nothing was changed". Retry re-runs only `syncSubagents` with the current sets. (c) both OK and `.applied` → `.saved`. |
+  | catalogue reload after any success | `ChatModelCatalog.shared.reload()` | a reload failure never turns the action into a failure; the catalogue keeps its previous lists and the picker shows them (the save itself is confirmed). |
 - `ModelsScreen.swift` — the screen above. F1 parts:
   - Footer of the "Models" section: the desktop explainer, reworded to the
     iOS controls: "Default is the model new and cleared sessions start on.
@@ -164,22 +221,58 @@ New files:
     map (read-modify-write from a fresh `config:get`, like desktop).
   - Busy: the row/sheet shows a `ProgressView` in place of the changed
     control; controls disabled while `busyKey == key`.
-- Picker honours Main + config opt-ins (owned edits):
+- Picker honours Main + box opt-ins (owned edits, `ChatModelCatalog.swift`,
+  `ChatModelStore.swift` (D1), `ModelPickerSheet.swift`):
   - `ChatModelCatalog`: add `@Published private(set) var deactivatedMain:
     Set<String>`, `@Published private(set) var configOptIns: Set<String>`
-    (both parsed from the same `config:get` it already makes), and
-    `func reload()` (clears `didStart`/`loaded` guard semantics: refetch the
-    three reads and republish; safe to call while a load is in flight —
-    coalesce with a single in-flight `Task`).
-  - `ModelPickerSheet`: before grouping, filter with
-    `ModelsTable.pickerVisible(models, deactivatedMain:)` (drops keys in
-    `deactivatedMain`; the currently-active model is kept so the cockpit never
-    shows an empty selection); the disabled-row decision uses
-    `modelStore.deprecatedOptIns ∪ catalog.configOptIns`.
-  - When the user opts in to a deprecated model from the picker, ALSO write
-    `config:update {optInModels: …}` (desktop `store.optInModel`,
-    `store.ts:1186`). The opt-in action lives in `ChatModelStore.swift:~280`,
-    which no workstream owns — see Mount requests (M5).
+    (both parsed from the same `config:get` it already makes),
+    `func reload()` (refetch the three reads and republish; coalesces into one
+    in-flight `Task`; a failed read keeps the previous value),
+    `func applyConfig(_ cfg: [String: JSONValue])` (re-derive
+    `configDefault`/`deactivatedMain`/`configOptIns` from a config the caller
+    already holds), and the box lifecycle above. It observes
+    `Notification.Name.mantaProvidersChanged` (WS08, posted after a provider
+    connect/disconnect/endpoint change) and calls `reload()`.
+  - **One selection policy** in `ChatModelStore`:
+    `var effectiveOptIns: Set<String> { deprecatedOptIns ∪ catalog.configOptIns }`
+    and `func isSelectable(_ m: OpencodeModel) -> Bool` =
+    `ModelsPicker.isSelectable(m, deactivatedMain: catalog.deactivatedMain, optIns: effectiveOptIns)`
+    (enabled != false, key not in `deactivatedMain`, and not
+    deprecated-without-opt-in — desktop `mainPickerGroups`,
+    `chatUtils.ts:2452-2470`). `selectableModels` = `models.filter(isSelectable)`.
+    Every selection path uses it:
+    1. catalogue: `ModelCatalogueView.groups` drops `deactivatedMain` keys
+       (`ModelsPicker.catalogueVisible`); the disabled-row look AND
+       `select(_:)`'s guard both use `effectiveOptIns` (a model opted in on
+       desktop renders enabled and its tap selects);
+    2. recents: the chip list is `ModelsPicker.visibleRecents(recents, models:,
+       deactivatedMain:, optIns:)` — a recent whose model is hidden or
+       deprecated-not-opted-in is not rendered; `ChatModelStore.apply(_:)`
+       also returns early (no state change) for such a choice;
+    3. fast toggle: `setFast` and the sheet's `fast` computation call
+       `ChatModel.fastToggle(models: selectableModels, …)`, so a hidden or
+       locked twin reads "No fast mode for this model" (desktop passes the
+       selectable list to `resolveFastToggle`, `chatUtils.ts:2389-2395`).
+    The ACTIVE model is still shown in the identity card even if it has since
+    been hidden (`ChatModel.activeModel` over the unfiltered list) — that is
+    display only; it does not make any hidden model a selectable alternative.
+  - **Opt-in becomes a box write** (desktop `store.optInModel`,
+    `store.ts:1186-1193`): `ChatModelStore.optIn(_:) async` with
+    `@Published private(set) var optInPending: Set<String>` and
+    `@Published var optInError: (key: String, message: String)?`. Steps:
+    insert key into `optInPending` (row's Enable button becomes a spinner) →
+    fresh `config:get` → `ModelsPicker.mergedOptIns(fresh: cfg.optInModels,
+    adding: key)` (so another device's newer opt-ins are never dropped) →
+    `config:update {optInModels: merged}` → `catalog.applyConfig(returned)`
+    (the CONFIRMED box value becomes `configOptIns`) → also insert into the
+    local `DeprecatedModelOptIns` (legacy mirror, kept so an older box still
+    works) → remove from pending. On any throw: no local change, row stays
+    disabled, `optInError` = "Couldn't enable <name> — <reason>." shown as an
+    inline row line with a "Try again" button that calls `optIn` again. An
+    older box that rejects the key cannot happen (`config:update` merges any
+    key, `local.mjs`).
+    The disabled row's `Button("Enable")` (`ModelPickerSheet.swift:438`)
+    becomes `Task { await modelStore.optIn(m) }`.
 
 ### Pure logic — `ModelsTable` (in `ModelsLogic.swift`)
 
@@ -194,10 +287,29 @@ enum ModelsTable {
   static func subList(key: String, turnOn: Bool, config: ModelsConfig) -> [String]
   static func optInList(adding key: String, config: ModelsConfig) -> [String]
   static func override(draft: ModelsEditDraft, model: OpencodeModel) -> ModelOverrideDraft  // only differing, non-blank fields; context must be finite > 0
-  static func pickerVisible(_ models: [OpencodeModel], deactivatedMain: Set<String>, keep active: String?) -> [OpencodeModel]
   static func syncPayload(_ models: [OpencodeModel]) -> [[String: Any]]   // {providerID,id,name,status?}
+  enum SubOutcome: Equatable { case applied, notApplied, unverified }
+  /// Mirrors reconcileSubagents (subagentSync.mjs:94-122): ON expects an agent
+  /// with model == key afterwards (unless the model is deprecated and not opted
+  /// in → .applied, nothing to register); OFF expects fewer agents with
+  /// model == key than `before` (or none before → .applied). An EMPTY `after`
+  /// while `before` was non-empty is `.unverified` — syncSubagents returns []
+  /// when it could not read opencode.jsonc (providers.mjs:808-813).
+  static func subOutcome(key: String, turnOn: Bool, deprecatedLocked: Bool,
+                         before: [ModelsSubagentDef], after: [ModelsSubagentDef]) -> SubOutcome
+}
+
+enum ModelsPicker {
+  static func isSelectable(_ m: OpencodeModel, deactivatedMain: Set<String>, optIns: Set<String>) -> Bool
+  static func catalogueVisible(_ models: [OpencodeModel], deactivatedMain: Set<String>) -> [OpencodeModel]
+  static func visibleRecents(_ recents: [ModelChoice], models: [OpencodeModel],
+                             deactivatedMain: Set<String>, optIns: Set<String>) -> [ModelChoice]
+  static func mergedOptIns(fresh: [String], adding key: String) -> [String]   // order-preserving union, no dupes
 }
 ```
+
+`ModelsSubagentDef { name: String; model: String; description: String }`
+decodes `SubagentDef` (`providers.mjs:392-401`).
 
 ### Tests — `MantaUITests/ModelsTests.swift`
 
@@ -210,9 +322,38 @@ enum ModelsTable {
   `"abc"` context ignored; all-unchanged → empty (caller deletes the key).
 - `matches`: name/provider/id/description, case-insensitive; empty query
   matches all.
-- `pickerVisible`: drops deactivated, keeps the active key even if deactivated.
 - `ModelsConfig` decode from a `[String: JSONValue]` with missing keys →
   empty sets / nil default; `defaultModel: null` → nil.
+- `subOutcome`: ON with the agent present → applied; ON still absent →
+  notApplied; ON for a locked deprecated model → applied; OFF removed →
+  applied; OFF still present (old list returned after a failed write) →
+  notApplied; OFF with empty `after` and non-empty `before` → unverified; OFF
+  with nothing before → applied.
+- `ModelsPicker.isSelectable`: deactivated → false; deprecated without opt-in
+  → false; deprecated opted in on the box only (`optIns` from config) → true;
+  `enabled:false` → false.
+- `visibleRecents`: a recent whose model is hidden from the picker is dropped;
+  a recent of a deprecated model opted in on desktop is kept; a recent whose
+  model no longer exists is dropped.
+- fast twin: `ChatModel.fastToggle(models: selectable…)` with the `-fast` twin
+  deactivated → `available == false`.
+- `mergedOptIns`: keeps keys added by another device; adding an existing key
+  is a no-op; order preserved.
+
+Store tests (Mac-only, `MantaUITests/ModelsStoreTests.swift`, injected
+`MantaAPIClient` via a `URLProtocol` stub — same seam as
+`MantaActionRPCWireTests`):
+- config OK + sync throws → `.partial`, toggle shows the saved preference,
+  Retry re-runs only sync.
+- config OK + sync returns the old list → `.partial`.
+- config throws → `.failed`, no state change.
+- action OK + catalogue reload throws → still `.saved`; picker keeps the old
+  list.
+- `ChatModelStore.optIn`: rejected write → row stays disabled, `optInError`
+  set, no UserDefaults change; concurrent addition (fresh `config:get` already
+  holds another key) → the written list holds both keys.
+- `ChatModelCatalog`: `resetForBoxChange()` then a late old-generation
+  response → ignored.
 
 ### Acceptance criteria
 
@@ -225,9 +366,20 @@ enum ModelsTable {
       (verified with `config:get`/opencode.jsonc); no restart prompt appears.
 - [ ] A deprecated model shows only "Enable deprecated model"; enabling it
       unlocks the row and the picker row, on iOS and desktop alike.
+- [ ] A model hidden from the picker cannot be chosen through ANY path: it is
+      absent from All models, its recent chip is not shown, and it is never the
+      fast-toggle target. The active model stays displayed but is not offered.
+- [ ] A deprecated model opted in on desktop is selectable on iOS (row enabled
+      and the tap selects it); opting in on iOS shows a spinner, then either
+      enables the model on both clients or shows "Couldn't enable … " with Try
+      again and leaves it disabled.
 - [ ] Edit saves only changed fields; clearing every field removes the override.
-- [ ] Every action shows a saved confirmation or an actionable error; nothing
-      changes on failure.
+- [ ] Every action ends in exactly one of: saved; failed with nothing changed;
+      or "Preference saved, but the subagent list on the box wasn't updated"
+      with Try again. "Nothing was changed" never appears after the preference
+      was written.
+- [ ] After switching boxes, the picker and Models screen show only the new
+      box's models.
 
 ---
 
@@ -542,10 +694,23 @@ Reused channels:
   fields for Custom; Section "Caching": [None, Custom] default None, toggles
   "Reads" / "Writes" (default on); toolbar Save disabled until
   `ModelsIdentify.canSave`. Footer: "Can't say? Leave it. …".
-- Save: `ModelsStore.declare(key:decl:)` → fresh `config:get`, merge, `config:update
-  {modelRouting}`, then reload the section; success → feedback "Saved — Auto
-  can now describe <modelID>" and the row disappears; failure → inline error,
-  nothing changed.
+- Save / Confirm / candidate pick: `ModelsStore.declare(key:decl:)` → fresh
+  `config:get`, merge, `config:update {modelRouting}`, then re-read
+  `models:unidentified`. The result is decided by the REFRESHED rows, not by
+  the action (`ModelsIdentify.declareOutcome(key:, refreshed:)`):
+  - key absent from the refreshed rows → feedback "Saved — Auto can now
+    describe <modelID>"; the row disappears;
+  - key still present (typical after Confirm or a candidate pick, which only
+    declare `{catalogId}` — price and caching are endpoint facts that identity
+    never supplies, `modelIdentity.mjs:78-88`, `autoEligibility.mjs:42-55`) →
+    the row stays, now in its refreshed state, with feedback "Identity saved —
+    Auto still needs: <missing phrase>." and its "Change" action opening the
+    editor PRE-SELECTED to the declared model so the user can add price and
+    caching. An editor Save for that row merges into the existing declaration
+    (`catalogId` kept unless changed);
+  - refresh fails after a successful write → "Saved. Couldn't refresh the
+    list — pull to refresh." (the write is not reported as failed);
+  - write fails → inline error "Couldn't save — <reason>. Nothing was changed."
 
 ### Pure logic — `ModelsIdentify` (in `ModelsIdentifyLogic.swift`)
 
@@ -555,7 +720,10 @@ when empty, else id/name/family substring, cap 50),
 `canSave(selected:, priceMode:, costIn:, costOut:) -> Bool`,
 `declaration(selected:, priceMode:, costIn:, costOut:, cacheMode:, reads:, writes:) -> [String: Any]`,
 `mergedRouting(config:, key:, decl:) -> [String: Any]` (preset default
-"balanced", preserves other keys and other declarations).
+"balanced", preserves other keys and other declarations; for the same key,
+fields of the new declaration overwrite, absent fields keep the existing
+value), `declareOutcome(key:, refreshed: [UnidentifiedRow]?) ->
+.resolved | .stillNeeds(String) | .refreshFailed`.
 
 ### Tests
 
@@ -564,23 +732,32 @@ when empty, else id/name/family substring, cap 50),
   "Auto still needs"; canSave matrix (no price / Free / Custom with one rate /
   Custom with none / no selection); declaration (free → `"free"`, custom with
   one blank rate → 0, caching none → `false`); mergedRouting keeps existing
-  declarations and preset.
+  declarations and preset; same-key merge keeps the earlier `catalogId` when
+  the new declaration only adds price; `declareOutcome` resolved /
+  stillNeeds (candidate with no price/cache metadata → "what it costs, and
+  whether it caches") / refreshFailed.
 - `src/server/modelsUnidentified.test.mjs` (node:test): eligible model skipped;
   exact certain/probable; ambiguous with candidates; none; declared catalogId
-  wins; empty catalogue → `{supported:false}`; a parity test that runs the
-  renderer's row logic (extract the row-building loop from
-  `ModelsWeCouldntIdentify.tsx` into an exported pure function in the same
-  file only if needed — otherwise replicate the fixture expectations) and
-  `buildUnidentifiedRows` over one fixture and asserts the same keys/states/
-  missing. Uses injected catalogue/models; no live opencode, no state files.
+  wins; a model with only `{catalogId}` declared and no cost stays listed with
+  `missing: ["price","caching"]`; empty catalogue → `{supported:false}`.
+  Desktop-parity test (D7): a fixture of models + declarations + catalogue
+  entries, run through `buildUnidentifiedRows` AND through the same shared
+  calls the renderer makes (`resolveIdentity` + `autoEligibility` with
+  `providerClass:"supported"`, `ModelsWeCouldntIdentify.tsx:328-390`), asserting
+  identical keys/states/missing. The renderer file is not edited. Injected
+  catalogue/models; no live opencode, no state files.
 
 ### Acceptance criteria
 
 - [ ] An endpoint the router can't describe appears with the same case and
       help text as on desktop; a fully described one does not.
-- [ ] Confirm / candidate pick / editor Save each write
-      `modelRouting.declaredModels[key]` and the row disappears; desktop shows
-      the same declaration.
+- [ ] Identity-only (Confirm / candidate pick on an endpoint with no price or
+      caching facts): the declaration is written, desktop shows it, and the row
+      STAYS with "Identity saved — Auto still needs: …" and an editor
+      pre-selected to that model.
+- [ ] Complete declaration (editor Save with a price answer, or identity for an
+      endpoint that already reports price + caching): the row disappears with
+      "Saved — Auto can now describe …".
 - [ ] Save is disabled until a model and a price answer are chosen.
 - [ ] `npm test` includes the new server test and stays green.
 
@@ -619,7 +796,7 @@ refresh the list — reopen Settings to update it)" when the refetch failed).
 ### iOS design
 
 `ModelsPriceSection` (`ModelsPriceForm.swift`) in `ModelsScreen` (Settings →
-Models, not Accounts — WS08 owns Accounts; see M6 for an optional link).
+Models, not Accounts — WS08 owns Accounts; see M-09-6 for an optional link).
 Section header "No prices", footer "The optimizer won't trim a model it can't
 price." One `DisclosureGroup` per provider ("<Provider> · N models",
 provider name via `UsageMeters.providerLabel`-style fallback to the id); each
@@ -677,8 +854,11 @@ dropped, provider and model sort order.
   the cache TTL — 5 min or 1 h from config `cacheTtl`). Warn callout when any
   selected row is cold (`:212-216`). Footer "<s> selected · ≈ <tokens> re-read"
   or " · no extra cost"; buttons Cancel/Close and "Resume <s> at reset" /
-  "Update" (disabled at 0 selected). Default selection on open = already
-  armed rows.
+  "Update" (disabled at 0 selected, `:229-230`). Default selection on open =
+  already armed rows. **Desktop defect (report only, D10):** that zero-selection
+  guard makes the disarm branch of Apply unreachable when the user unchecks
+  every armed row — e.g. the single-row case — so the last armed conversation
+  can never be un-armed from the modal. iOS does not copy the guard (see design).
 - Apply (`:97-109`): for each record, selected & not armed → arm; armed & not
   selected → disarm (which REMOVES the row). Close always stamps last-looked.
   Empty: "No conversations are stopped by a provider limit right now."
@@ -687,83 +867,111 @@ dropped, provider and model sort order.
 
 ### Wire contract
 
+Stopped records are READ through WS04 (D16) — WS09 makes no
+`usage-stopped:list` call and declares no stopped-record type:
+
+| Source | Owner | Used for |
+|---|---|---|
+| `SessionListStore.stoppedRecords: [SessionStoppedRecord]` (fetched from `usage-stopped:list`, `rpc.mjs:2394` → `stoppedStore.mjs:287-290`, refetched on `usage-stopped.updated`) | WS04 §9 | the rows; unarmed count |
+| `SessionListStore.stoppedLastLooked: Double?` (the `lastLooked` field of the same `SessionStoppedList` answer) | WS04 — **new dependency, see Cross-spec dependencies** | "new" badges, header text |
+
+Mutations are WS09's own client members:
+
 | Channel | Args | Result |
 |---|---|---|
-| `usage-stopped:list` (`rpc.mjs:2394`, `stoppedStore.mjs:287`) | `[]` | `{records: StoppedRecord[], lastLooked: number\|null}`; `StoppedRecord` = `{workspace, conversation, provider, model?, window: string\|null, stoppedAt, cachedTokens?, armed?, attempts?}` (`types.ts:2333`) |
-| `usage-stopped:arm` | `["<conversation>"]` (positional string) | `null` |
-| `usage-stopped:disarm` | `["<conversation>"]` | `null` (removes the row) |
-| `usage-stopped:stamp-last-looked` | `[]` | `null` |
-| `usage:list` (exists, `MantaAPIClient.usageList`) | `[]` | `UsageSnapshot[]` — reset instants |
-| `opencode:messages` (exists, `MantaAPIClient.messages(sessionId:limit:)`) | | snippet |
-| `config:get` | | `cacheTtl` ("5m" default) |
+| `usage-stopped:arm` (`rpc.mjs:2396`, `stoppedStore.mjs:162`) | `["<conversation>"]` (positional string) | `null`; publishes `usage-stopped.updated` |
+| `usage-stopped:disarm` (`stoppedStore.mjs:181`) | `["<conversation>"]` | `null`; REMOVES the row; publishes the event |
+| `usage-stopped:stamp-last-looked` (`stoppedStore.mjs:274`) | `[]` | `null`; publishes the event |
+| `usage:list` (existing `MantaAPIClient.usageList`, `:459`) | `[]` | `UsageSnapshot[]` — reset instants (held by `UsageAlertsStore`, F7) |
+| `opencode:messages` (existing `MantaAPIClient.messages(sessionId:limit:slim:)`, `:43`) | | snippet |
+| `config:get` (existing) | | `cacheTtl` ("5m" default) |
 
-Frame: raw bus frame `kind: "usage-stopped.updated"`, payload
-`{conversation?}` — a refetch hint (observed via
-`MantaEventStore.addRawFrameHandler`, `MantaEventStore.swift:464`; no change
-to WS02's event store).
+After a mutation the box publishes `usage-stopped.updated`; WS04's store
+refetches and the sheet re-renders from `stoppedRecords`. No new frame.
 
 ### iOS design
 
-- `UsageStoppedStore.swift` — `@MainActor final class UsageStoppedStore:
-  ObservableObject`, `static let shared`. `@Published records`, `lastLooked`,
-  `snapshots` (from `usage:list`, refreshed on open and on `usage.updated`),
-  `cacheTtl`, `isResumeSheetPresented: Bool`. `bind(eventStore:)` (idempotent)
-  registers a raw-frame handler: `usage-stopped.updated` → `refresh()`;
-  `usage.updated` → take `payload.snapshots`. `refresh()` on bind and on
-  `MantaEventStore` reconnect (desktop pulls on every api change). Derived:
-  `unarmedCount`, `isStopped(sessionId:)` (for WS04 row markers),
-  `presentResume()`.
-- `UsageResumeSheet.swift` — presented ONCE at app root (M3) from
-  `isResumeSheetPresented`. `NavigationStack` + `List`:
+- No stopped store in WS09. The presentation flag lives on
+  `UsageAlertsStore.shared` (F7): `@Published var resumeSheetPresented`,
+  `func presentResume()`.
+- `UsageResumeSheet.swift` — `struct UsageResumeSheet: View` with
+  `@ObservedObject var sessions: SessionListStore` and
+  `@ObservedObject var usage: UsageAlertsStore`; presented ONCE at app root
+  (M-09-3). It maps `sessions.stoppedRecords` → `[UsageStoppedEntry]`
+  (WS09's own Foundation value: `workspace, conversation, provider, model?,
+  window?, stoppedAt, cachedTokens?, armed`) through
+  `UsageStoppedEntry.init(_ record: SessionStoppedRecord)` in the sheet file —
+  the only place that touches WS04's type, so the pure logic stays
+  Package-buildable. `NavigationStack` + `List`:
   - Header text (desktop copy) as the first section's header.
-  - Toolbar: leading Cancel/Close; trailing primary "Resume N at reset" /
-    "Update" (disabled at 0); a bottom `safeAreaInset` bar with "Check all"
-    / "Uncheck all" and "s of t selected" + the batch-cost line.
-  - Sections per workspace; rows are tappable (toggle selection, checkmark
-    accessory `Image(systemName: selected ? "checkmark.circle.fill" : "circle")`),
-    with name, chips (armed / new), snippet, provider·model, window chip, cost
-    chip — desktop copy.
-  - Footer callout for cold selections (desktop copy).
-  - Apply: sequential awaits; on success dismiss + toast-style banner
-    "Updated — N conversation(s) will carry on at reset."; on the first
-    failure stop, keep the sheet open, show "Couldn't update <name> —
-    <reason>. Nothing after it was changed." (desktop fires-and-forgets;
-    iOS must report). Dismissal by any route calls `stamp-last-looked`
-    (failure logged, not surfaced — it only clears "new" badges).
-  - Snippets: fetched on open, best-effort, per row.
-  - Name: `UsageResume.name(for:projects:)` using `SessionListStore.projects`
-    (`MantaWindow.opencodeSessionId` → `MantaWindow.name`), fallback the id —
-    passed into the sheet by the mount.
-- Session-list entry point (M2): a toolbar capsule `"pause.circle" + N` (warn
-  tint) when `unarmedCount > 0`, accessibility label "N conversation(s)
-  stopped by a provider limit", tap → `UsageStoppedStore.shared.presentResume()`.
+  - Toolbar: leading "Cancel" (nothing armed) / "Close"; trailing primary
+    button titled by `UsageResume.applyTitle(plan:, hasArmed:, selectedCount:)`
+    — "Resume N at reset" when nothing is armed yet, else "Update". It is
+    ENABLED iff `UsageResume.applyPlan(entries, selected)` has at least one
+    arm OR disarm (so unchecking the only armed row and tapping Update works,
+    with zero selected); disabled for a no-change plan. A bottom
+    `safeAreaInset` bar: "Check all" / "Uncheck all", "s of t selected", and
+    the batch-cost line.
+  - Sections per workspace; tappable rows (toggle; accessory
+    `checkmark.circle.fill` / `circle`) with name, "armed" / "new" chips,
+    snippet, provider·model, window chip, cost chip — desktop copy. Footer
+    callout for cold selections (desktop copy).
+  - Apply: sequential awaits over the plan (arms first, then disarms). Success
+    → dismiss + banner (through `UsageAlertsStore`'s queue) "Updated — N
+    conversation(s) will carry on at reset." (or "Removed N conversation(s)
+    from resume." for a disarm-only plan). First failure → stop, keep the sheet
+    open, "Couldn't update <name> — <reason>. The ones after it weren't
+    changed." Desktop fires-and-forgets; iOS reports.
+  - Dismissal by any route calls `stamp-last-looked` (failure logged only — it
+    only clears "new" badges).
+  - Snippets: fetched on open, best-effort, per row; responses for a sheet that
+    has been dismissed are dropped.
+  - Name: `UsageResume.name(for:windows:)` over
+    `[(sessionId: String, name: String)]` built from `sessions.projects`
+    (`MantaWindow.opencodeSessionId` → `MantaWindow.name`); fallback the id.
+  - Empty list (all removed while open): "No conversations are stopped by a
+    provider limit right now." with a Close button.
+- Session-list entry point (M-09-2): `UsageStoppedCapsule(count:action:)`
+  (in `UsageResumeSheet.swift`) — `pause.circle` + N in warn tint, accessibility
+  label "N conversation(s) stopped by a provider limit". Shown only when
+  `UsageResume.unarmedCount(sessions.stoppedRecords mapped) > 0`; action
+  `UsageAlertsStore.shared.presentResume()`.
 
-### Pure logic — `UsageResume` (in `UsageResumeLogic.swift`)
+### Pure logic — `UsageResume` (in `UsageResumeLogic.swift`, Foundation-only)
 
-Ports of `usageResume.ts`: `unarmedCount`, `extractLastSnippet(messages)`,
-`resetAt(record, snapshots) -> Date?`, `resumeCost(record, resetsAt, now, ttl)`,
-`costs(records, snapshots, now, ttl)`, `selectionSummary(records, selected,
-costs)`, `isNew(record, lastLooked)`, `groupByWorkspace(records)` (empty
-workspace → "—"), plus `headerText(records, lastLooked)`,
-`windowChipLabel(record, snapshots)`, `windowChipText(record, snapshots, now)`,
-`applyPlan(records, selected) -> (arm: [String], disarm: [String])`,
-`name(for:projects:)`, `ttlMs(cacheTtl:)` ("1h" → 3 600 000 else 300 000).
+Ports of `usageResume.ts` over `UsageStoppedEntry`: `unarmedCount`,
+`extractLastSnippet(texts:)` (input = assistant text parts newest-last, so it
+does not depend on transcript types), `resetAt(entry, snapshots) -> Double?`,
+`resumeCost(entry, resetsAt, now, ttl)`, `costs(entries, snapshots, now, ttl)`,
+`selectionSummary(entries, selected, costs)`, `isNew(entry, lastLooked)`,
+`groupByWorkspace(entries)` (empty workspace → "—"),
+`showsStoppedMarker(isStopped:hasPendingAsk:)` (offered to WS04 if it wants
+it), plus `headerText(entries, lastLooked)`, `windowChipLabel(entry,
+snapshots)`, `windowChipText(entry, snapshots, now)`,
+`applyPlan(entries, selected) -> (arm: [String], disarm: [String])`,
+`applyTitle(plan:, hasArmed:, selectedCount:)`, `canApply(plan) -> Bool`,
+`name(for:windows:)`, `ttlMs(cacheTtl:)` ("1h" → 3 600 000 else 300 000).
 
-### Tests — `MantaUITests/UsageResumeTests.swift`
+### Tests — `MantaUITests/UsageResumeTests.swift` (Foundation-only)
 
 Port `src/renderer/usageResume.test.ts` cases + header singular/plural/armed
-variants; applyPlan (select unarmed → arm, unselect armed → disarm, unchanged
-→ nothing); windowChipLabel fallbacks (no window → "Limit", unknown kind →
+variants; `applyPlan` (select unarmed → arm, unselect armed → disarm,
+unchanged → nothing); **`canApply`: one armed row unchecked (zero selected) →
+true, title "Update"; all armed rows unchecked → true; zero selected and
+nothing armed → false; selection equal to armed set → false**;
+`windowChipLabel` fallbacks (no window → "Limit", unknown kind →
 capitalised); name lookup + fallback; warm/cold boundary exactly at TTL.
 
 ### Acceptance criteria
 
 - [ ] When a provider limit stops a conversation, the session list shows the
-      pause capsule with the unarmed count within one bus event.
+      pause capsule with the unarmed count (driven by WS04's records).
 - [ ] The sheet lists the same rows as desktop; arming/unarming here is
       reflected on desktop (and vice versa) without reopening.
-- [ ] Unchecking an armed row removes it after Update; failures are reported.
+- [ ] Unchecking the ONLY armed row enables "Update", and tapping it removes
+      the row; failures are reported with the row name.
 - [ ] Closing clears "new" badges on both clients.
+- [ ] WS09 adds no `usage-stopped:list` call (grep).
 
 ---
 
@@ -773,7 +981,7 @@ capitalised); name lookup + fallback; warm/cold boundary exactly at TTL.
 
 `usageEscalation.ts` + `App.tsx:794-917`:
 - Baseline seeded from `usage:list` on load/reconnect (`buildUsageLevels`,
-  stale windows included verbatim).
+  stale windows included verbatim, `App.tsx:521-531`).
 - On every `usage.updated` (`{snapshots}`): `shouldFireUsageAlert` fires only
   on an UPWARD transition per `provider:window.kind` (none→warn at ≥ 90,
   →limit at ≥ 100); stale windows never fire; then the level map is replaced
@@ -788,11 +996,22 @@ capitalised); name lookup + fallback; warm/cold boundary exactly at TTL.
     label: "Reminder: <Provider> <Window> reset", sessionID, kind:"notify"}` →
     toast "Reminder set for <resetAt>." or "Couldn't set a reminder: <error>".
   - "Keep going at reset" → opens the resume modal (F6).
+- Desktop never re-checks the reset instant at tap time: a limit toast left
+  open past its reset still sends a past `fireAt`, which `createJob` turns into
+  a yearless cron (`schedule.mjs:258-266`) whose next match is a year later
+  (`:277-284`). iOS must not copy that (design below).
 
 ### Wire contract
 
-- `usage:list` (exists), frame `kind:"usage.updated"` payload
-  `{snapshots: UsageSnapshot[]}` (full set, `httpApi.ts:1329`).
+- `usage:list` (existing), raw bus frame `kind:"usage.updated"`, payload
+  `{snapshots: UsageSnapshot[]}` (full set, `httpApi.ts:1329`), observed via
+  `MantaEventStore.addRawFrameHandler` (`MantaEventStore.swift:464`, a
+  multicast list — no change to WS02's store).
+- Connection transitions: `eventStore.$connectionState` (the published-state
+  pattern already used by `ChatSessionStore.swift:406`, `AccountsStore.swift:125`,
+  `UpgradeStore.swift:61`). WS09 never touches the single-owner
+  `resyncHandler` (`MantaEventStore.swift:421-424`), which belongs to the
+  session list.
 - `schedule:create` (`rpc.mjs:2371` → `schedule.mjs:244 createJob`), args
   `[{fireAt, prompt, recurring:false, label, sessionID, kind:"notify"}]` →
   `{ok:true, job:{id,…}} | {ok:false, error}`. When it fires, the box calls
@@ -805,96 +1024,130 @@ capitalised); name lookup + fallback; warm/cold boundary exactly at TTL.
 
 ### iOS design
 
-- `UsageAlertsStore.swift` — `@MainActor final class`, `static let shared`.
-  `bind(eventStore:)` (idempotent): seeds the level map from `usage:list`
-  (`UsageEscalation.levels`), re-seeds on reconnect, and on each
-  `usage.updated` raw frame runs `UsageEscalation.fired(prev:next:)`, appends
-  `UsageAlert`s to `@Published var queue`, then replaces the level map.
-  `@Published var activeSessionId: String?` — set by ChatScreen (M4) to the
-  visible chat. Actions `remindAtReset(_:)` (calls `schedule:create`, then
-  queues a confirmation or error banner) and `keepGoing(_:)`
-  (`UsageStoppedStore.shared.presentResume()`).
-- `UsageAlertBanner.swift` — top overlay (M3) showing the head of the queue:
+- `UsageAlertsStore.swift` — `@MainActor final class UsageAlertsStore:
+  ObservableObject`, `static let shared`. Published: `snapshots`,
+  `queue: [UsageAlert]`, `activeSessionId: String?`, `resumeSheetPresented`,
+  plus the box lifecycle (above). Internal state is one
+  `UsageBaseline` value (pure, below).
+  - `bind(eventStore:)` — idempotent (a `bound` flag). Registers the raw-frame
+    handler and retains a Combine `AnyCancellable` on
+    `eventStore.$connectionState`. A `wasConnected` flag detects
+    disconnect→connect exactly like `ChatSessionStore.handleConnection`
+    (`ChatSessionStore.swift:710-727`): the replayed current value on subscribe
+    does not count as a reconnect, but if it is `.connected` and no baseline
+    exists for this generation, a first seed starts.
+  - Seed / reseed: `let ticket = baseline.beginSeed(generation:)`, then
+    `usage:list`; on success `baseline.completeSeed(ticket, snapshots, now)`.
+    `UsageBaseline` rejects the completion if the generation changed OR a
+    `usage.updated` frame was applied after the ticket was issued (the frame is
+    newer, so the seed would overwrite it). On failure the baseline stays as it
+    was (a first seed that fails leaves "no baseline": alerts stay suppressed
+    until a frame establishes one).
+  - Frame: `baseline.applyFrame(snapshots, generation:, now)` →
+    `[UsageAlert]` fired + the new level map. With NO baseline yet it records
+    the levels and fires NOTHING (no alert storm on a cold start or right after
+    a box switch).
+  - Reconnect: a reseed whose completion is accepted runs
+    `UsageEscalation.fired(prev: baseline.levels, next: seeded)` — so a window
+    that crossed 90/100 while the phone's stream was down still alerts once —
+    then replaces the levels. (Desktop's `pullUsage` silently overwrites; this
+    is a deliberate iOS addition, because a phone loses its stream far more
+    often.) A cold seed never fires.
+  - `snapshots` is updated from both the seed and every frame (F6 reads reset
+    instants from here).
+  - `activeSessionId` — set by ChatScreen (M-09-5) to the visible chat.
+  - Retiring limit alerts: a queued limit alert is removed when (a) an applied
+    frame or seed shows its key below `limit`, or (b) its `resetsAt` passes. For
+    (b) the store keeps ONE `Task` sleeping until the earliest `resetsAt` among
+    queued limit alerts (re-planned whenever the queue changes, cancelled on
+    reset); on wake it retires every alert with `resetsAt <= now`. Warn alerts
+    auto-dismiss after 6 s as before.
+  - Actions (all through `UsageEscalation.actionPolicy(alert:, sessionID:,
+    generation:, now:)`):
+    - `remindAtReset(_:)` — re-evaluates the policy AT TAP TIME. `.expired`
+      (`resetsAt <= now`) → no job, alert retired, banner "This window has
+      already reset — you can keep working." `.unavailable` (no session, older
+      generation) → no job, banner "Open a chat to set a reminder."
+      `.available(job)` → `schedule:create`; `ok` → banner "Reminder set for
+      <UsageMeters.resetAt(fireAt)>."; `ok:false`/throw → "Couldn't set a
+      reminder: <error>".
+    - `keepGoing(_:)` — same expiry check (an expired window just retires the
+      alert with the same "already reset" banner); otherwise `presentResume()`.
+- `UsageAlertBanner.swift` — top overlay (M-09-3) showing the head of the queue:
   glass capsule, icon `gauge.with.dots.needle.67percent` (warn) /
-  `exclamationmark.octagon` (limit, danger tint), message text (desktop
-  copy), close button. Warn auto-dismisses after 6 s; limit stays until closed.
-  Limit actions rendered only when `UsageEscalation.actionsAvailable(alert,
-  activeSessionId)` (desktop gate). Haptic `.warning` on a limit alert when
-  haptics are enabled. Confirmation banner "Reminder set for <resetAt>." (uses
-  `UsageMeters.resetAt`), error banner "Couldn't set a reminder: <error>".
+  `exclamationmark.octagon` (limit, danger tint), message text (desktop copy),
+  close button. The two limit buttons are RENDERED only when the policy is
+  `.available` for the current `now` (re-evaluated with
+  `TimelineView(.periodic(from: .now, by: 30))`), so an expired alert never
+  shows a button; the tap re-checks anyway. Haptic `.warning` on a limit alert
+  when haptics are enabled.
 - Interaction with the existing per-chat weekly banner
   (`ChatScreen.swift:1265-1300`): unchanged; the app-level warn is transient
   (6 s) so both may appear once — see Open questions.
 
-### Pure logic — `UsageEscalation` (in `UsageEscalation.swift`)
+### Pure logic (Foundation-only)
 
+`UsageEscalation.swift`:
 `level(pct)`, `levels(snapshots) -> [String: Level]`,
 `fired(prev:next:) -> [UsageAlert]`, `warnMessage(provider:window:now:)`,
 `limitMessage(provider:window:now:)` (window label fallback: `label ??
 kind.capitalized`; reset clause `"resets " + UsageMeters.formatReset(...)`
 except "resetting…" verbatim; omitted when no `resetsAt`),
-`reminderJob(alert:sessionID:) -> [String: Any]?` (nil without `resetsAt`;
-`fireAt = resetsAt + 60_000`), `actionsAvailable(alert, sessionID)`.
+`enum ActionPolicy { case available(job: ReminderJob), unavailable, expired }`,
+`actionPolicy(alert:, sessionID:, generation:, now:) -> ActionPolicy`
+(`resetsAt == nil` → unavailable; `resetsAt <= now` → expired; nil session or
+`alert.generation != generation` → unavailable; else available with
+`fireAt = resetsAt + 60_000`), `retire(queue:, levels:, now:) -> [UsageAlert]`,
+`nextRetireAt(queue:) -> Double?`.
+`UsageAlert` carries `key, level, provider, window, raisedAt, generation`.
 
-### Tests — `MantaUITests/UsageEscalationTests.swift`
+`UsageBaseline.swift` — `struct UsageBaseline`:
+`levels: [String: Level]?` (nil = no baseline), `frameSeq: Int`,
+`mutating func beginSeed(generation:) -> SeedTicket` (captures generation +
+`frameSeq`), `mutating func completeSeed(_:snapshots:generation:) -> [UsageAlert]?`
+(nil = rejected as stale; `[]` for a cold seed; fired list for a reseed),
+`mutating func applyFrame(_:generation:) -> [UsageAlert]` (bumps `frameSeq`;
+no baseline → records levels, returns `[]`), `mutating func reset()`.
+
+### Tests — `MantaUITests/UsageEscalationTests.swift` (Foundation-only)
 
 Port `src/renderer/usageEscalation.test.ts`: boundaries 89.9/90/99.9/100;
 fire-once while holding; re-arm after drop; warn→limit fires; none→limit fires
 once as limit; stale never fires but seeds baseline (cold start at 100 % stale
-then fresh 100 % → no fire); messages with and without reset; reminder job
-shape and nil without reset; actions gate.
+then fresh 100 % → no fire); messages with and without reset. Plus:
+- `actionPolicy`: available; no session → unavailable; older generation →
+  unavailable; **sticky alert acted on after its reset → expired, no job**;
+  `resetsAt == nil` → unavailable; `fireAt == resetsAt + 60 000`.
+- `retire`: a limit alert retired when its key drops below limit and when
+  `resetsAt <= now`; warn alerts untouched; `nextRetireAt` = earliest.
+- `UsageBaseline`: **delayed seed** — seed issued, frame applied, seed
+  completes → rejected, levels are the frame's; **frame before any baseline**
+  fires nothing; **reconnect with missed update** — baseline at 80 %, reseed
+  returns 100 % → one limit alert; reseed at the same level → none; **late
+  old-box seed** — `reset()` then completion with the old generation →
+  rejected.
+
+Store-level test (Mac-only, `MantaUITests/UsageAlertsStoreTests.swift`, with a
+fake `MantaEventStreamControl` as in `MantaEventStreamTests.swift`):
+disconnect→connect triggers exactly one reseed; the replayed `.connected` on
+subscribe does not count as a reconnect; `resetForBoxChange()` clears the
+queue and a late response is dropped.
 
 ### Acceptance criteria
 
 - [ ] Crossing 90 % shows one transient banner; crossing 100 % shows one
       sticky banner; neither repeats until the window resets and re-crosses.
+- [ ] A crossing that happened while the phone was disconnected is alerted
+      once after reconnect; opening the app cold never raises an alert for a
+      level that was already reached.
 - [ ] With a chat open, "Remind me at reset" creates a one-shot job (visible in
       the chat's schedules card) and a push arrives at reset; without a chat
       open the actions are not shown.
+- [ ] A limit banner left open past its reset loses its buttons and is retired;
+      no job is ever created for an elapsed reset.
 - [ ] "Keep going at reset" opens the resume sheet.
-
----
-
-## F8 — Seat data for the context sheet
-
-### Desktop behaviour today
-
-The context popover shows "Seat: <account>" or "Seat: <account> · <seat>"
-(`describeSeatLine`, `chatUtils.ts:3812-3822`; `SessionHeader.tsx:792-798`):
-account/seat labels from `accounts:list` when found, else from the
-`accounts:session-seat` answer; seat label omitted when the account has one
-seat or no seat label; absent seat → no line.
-
-### Wire contract
-
-`accounts:session-seat` (`accountsManager.mjs:1131`) `[{sessionId}]` →
-`SessionSeat | null`, and `accounts:list` — both already fetched by the
-`AccountsStore` that `ChatScreen` owns (`ChatScreen.swift:321`,
-`AccountsStore.swift:44, 190-199`). No new reads.
-
-### iOS design
-
-`UsageSeatLine.swift`:
-
-```swift
-enum UsageSeatLine {
-  /// "Seat: Work · Seat 2" / "Seat: Work"; nil when the conversation has no seat.
-  static func text(providers: [AccountsProvider], sessionSeat: SessionSeat?) -> String?
-}
-```
-
-Built on `AccountsSelectors.conversationSeat(...).displayName`
-(`AccountsModels.swift:752-763, 874`) with the "Seat: " prefix; returns nil
-for an empty display name. WS02 renders the row in `ContextSheet` from
-`accountsStore.providers` / `accountsStore.sessionSeat` (see C4 mount, owned by
-WS02). Tests in `ModelsTests.swift`: nil seat → nil; single-seat account →
-account label only; multi-seat → "account · seat"; seat not in list → labels
-from the session-seat answer.
-
-### Acceptance criteria
-
-- [ ] For a conversation on a known seat, the context sheet shows the same
-      "Seat: …" text as the desktop popover.
+- [ ] After switching or removing the box, no alert, baseline or chat id from
+      the old box survives, and no old-box reminder can be created.
 
 ---
 
@@ -902,87 +1155,205 @@ from the session-seat answer.
 
 Create (all `mobile/native/MantaUI/` unless noted):
 
-| File | Contents |
+| File | Contents | Foundation-only (Package.swift, D19) |
+|---|---|---|
+| `MantaAPIClient+Models.swift` | client members (see Client members) | no |
+| `ModelsWire.swift` | Decodable wire types (tolerant decoding, `supported` gate): ledger, optimizer summary/series/prices, `ModelsSubagentDef`, `ModelsCatalogEntry`, `UnidentifiedRow`/`UnidentifiedList`, `ScheduleCreateReply` | yes |
+| `ModelsLogic.swift` | `ModelsTable`, `ModelsPicker`, `ModelsConfig`, `ModelsFormat` | yes |
+| `ModelsStore.swift` | `ModelsStore` | no |
+| `ModelsScreen.swift` | screen + sections + `ModelsRow` | no |
+| `ModelsDetailSheet.swift` | detail sheet + `ModelsEditForm` | no |
+| `ModelsInsightsLogic.swift` / `ModelsLedgerScreen.swift` | F2 | yes / no |
+| `OptimizerLogic.swift` / `OptimizerScreen.swift` | F3 (`OptimizerGauge` inside the screen) | yes / no |
+| `ModelsIdentifyLogic.swift` / `ModelsUnidentifiedView.swift` | F4 (section + `ModelsIdentifyForm`) | yes / no |
+| `ModelsPriceLogic.swift` / `ModelsPriceForm.swift` | F5 | yes / no |
+| `UsageResumeLogic.swift` / `UsageResumeSheet.swift` | F6 (`UsageStoppedEntry`, `UsageStoppedCapsule` in the sheet file; the `SessionStoppedRecord` mapping lives in the sheet file) | yes / no |
+| `UsageEscalation.swift`, `UsageBaseline.swift` / `UsageAlertsStore.swift`, `UsageAlertBanner.swift` | F7 | yes / no |
+| `MantaUITests/ModelsTests.swift`, `OptimizerTests.swift`, `UsageResumeTests.swift`, `UsageEscalationTests.swift` | pure XCTests | yes |
+| `MantaUITests/ModelsStoreTests.swift`, `UsageAlertsStoreTests.swift` | store tests (Combine/URLProtocol) | no |
+| `src/server/modelsUnidentified.mjs`, `src/server/modelsUnidentified.test.mjs` | F4 server module + node test (D7) | — |
+
+(`UsageStoppedStore.swift` and `UsageSeatLine.swift` from the draft are
+dropped — D16, D17.)
+
+Edit (owned): `ChatModelCatalog.swift` (reload, applyConfig,
+deactivatedMain, configOptIns, provider-change observer, box lifecycle),
+`ChatModelStore.swift` (D1: `effectiveOptIns`, `isSelectable`,
+`selectableModels`, guarded `apply`/`setFast`, async `optIn` with
+pending/error), `ModelPickerSheet.swift` (catalogue/recents/fast filtering,
+async Enable with spinner + error line), `UsageMeters.swift` (only if a shared
+helper is needed; no behaviour change).
+
+Edit (additive, wave-B server slot, D7): `src/server/rpc.mjs` — import
+`modelsUnidentified.mjs` and register `"models:unidentified"`.
+
+Manifest for integration agent B (D18): add the "yes" rows above to
+`mobile/native/Package.swift` `sources` / test `sources`. WS09 edits neither
+`Package.swift`, `project.yml` nor the `.pbxproj`; `project.yml` needs no
+change (the `MantaUI` folder is a directory source).
+
+## Client members
+
+All in `MantaUI/MantaAPIClient+Models.swift`, via C1 `call` / `callRequired` /
+`callVoid` / `jsonObject`. None duplicates a member owned elsewhere: the
+stopped list is WS04's `usageStoppedList()` (D16); `configGet`, `configUpdate`,
+`models`, `defaultModel`, `usageList`, `messages` already exist in
+`MantaAPIClient.swift` and are reused.
+
+| Member | Channel |
 |---|---|
-| `MantaAPIClient+Models.swift` | `modelsSyncSubagents`, `ledgerSummary`, `optimizerSummary`, `optimizerSeries(range:)`, `optimizerPrices`, `setModelCost`, `modelCatalog`, `modelsUnidentified`, `usageStoppedList/Arm/Disarm/StampLastLooked`, `scheduleCreate(job:)` |
-| `ModelsWire.swift` | Decodable wire types for all of the above (tolerant decoding, `supported` gate) |
-| `ModelsLogic.swift` | `ModelsTable`, `ModelsConfig`, `ModelsFormat` |
-| `ModelsStore.swift` | `ModelsStore` |
-| `ModelsScreen.swift` | screen + sections + `ModelsRow` |
-| `ModelsDetailSheet.swift` | detail sheet + `ModelsEditForm` |
-| `ModelsInsightsLogic.swift`, `ModelsLedgerScreen.swift` | F2 |
-| `OptimizerLogic.swift`, `OptimizerScreen.swift` | F3 (`OptimizerGauge` inside) |
-| `ModelsIdentifyLogic.swift`, `ModelsUnidentifiedView.swift` | F4 (section + `ModelsIdentifyForm`) |
-| `ModelsPriceLogic.swift`, `ModelsPriceForm.swift` | F5 |
-| `UsageResumeLogic.swift`, `UsageStoppedStore.swift`, `UsageResumeSheet.swift` | F6 |
-| `UsageEscalation.swift`, `UsageAlertsStore.swift`, `UsageAlertBanner.swift` | F7 |
-| `UsageSeatLine.swift` | F8 |
-| `MantaUITests/ModelsTests.swift`, `OptimizerTests.swift`, `UsageResumeTests.swift`, `UsageEscalationTests.swift` | XCTest |
-| `src/server/modelsUnidentified.mjs`, `src/server/modelsUnidentified.test.mjs` | F4 server module + node test |
+| `func modelsSyncSubagents(models: [[String: Any]], deactivated: [String], optIn: [String]) async throws -> [ModelsSubagentDef]` | `opencode:sync-subagents` |
+| `func ledgerSummary() async throws -> LedgerSummaryWire` | `ledger:summary` |
+| `func optimizerSummary() async throws -> OptimizerSummaryWire` | `optimizer:summary` |
+| `func optimizerSeries(range: String) async throws -> OptimizerSeriesWire` | `optimizer:series` |
+| `func optimizerPrices() async throws -> OptimizerPricesWire` | `optimizer:prices` |
+| `func setModelCost(providerID: String, modelID: String, cost: [String: Double]) async throws -> ModelCostReply` | `opencode:set-model-cost` |
+| `func modelCatalog() async throws -> ModelsCatalogWire` | `opencode:model-catalog` |
+| `func modelsUnidentified() async throws -> UnidentifiedList` | `models:unidentified` (new, D7) |
+| `func usageStoppedArm(conversation: String) async throws` | `usage-stopped:arm` |
+| `func usageStoppedDisarm(conversation: String) async throws` | `usage-stopped:disarm` |
+| `func usageStoppedStampLastLooked() async throws` | `usage-stopped:stamp-last-looked` |
+| `func scheduleCreate(_ job: [String: Any]) async throws -> ScheduleCreateReply` | `schedule:create` |
 
-Edit (owned): `ChatModelCatalog.swift` (reload, deactivatedMain,
-configOptIns), `ModelPickerSheet.swift` (Main filter + opt-in union),
-`UsageMeters.swift` (only if a shared helper is needed; no behaviour change).
-
-Edit (additive, wave-B server slot): `src/server/rpc.mjs` — import
-`modelsUnidentified.mjs` and register `"models:unidentified"`. If another
-wave-B workstream also edits `rpc.mjs`, serialise behind it. `project.yml`
-needs no change (the `MantaUI` folder is a directory source; new files are
-picked up), but the `.pbxproj` must be regenerated on the Mac.
+Before dispatch, grep: no other `MantaAPIClient+*.swift` declares any of
+these names (checked against specs 01–08, 10 at revision time: none do).
 
 ## Mount requests
 
-| # | File (owner) | Mount |
-|---|---|---|
-| M1 | `SettingsScreen.swift` (WS10) | A fixed "Models" row above the schema sections, styled like `accountsEntry` (`:174-200`): title "Models", subtitle "Default, picker, subagents, spend and optimizer" → `NavigationLink { ModelsScreen() }`; search words "models default subagent picker spend cost optimizer prices identify". |
-| M2 | `SessionListView.swift` (WS04) | `@ObservedObject var stopped = UsageStoppedStore.shared`; a `ToolbarItem(placement: .topBarTrailing)` before `orderMenu` (`:116`), rendered only when `stopped.unarmedCount > 0`: `UsageStoppedCapsule(count:)` (WS09 ships it in `UsageResumeSheet.swift`), action `stopped.presentResume()`. |
-| M3 | `MantaAppRoot.swift` (WS04) | In the paired branch's `.onAppear` (next to `startModelPrefs()`, `:104`): `UsageStoppedStore.shared.bind(eventStore: store)` and `UsageAlertsStore.shared.bind(eventStore: store)`. On the root `Group`, only when `paired && scene == nil`: `.overlay(alignment: .top) { UsageAlertBanner(store: .shared) }` and `.sheet(isPresented: $stopped.isResumeSheetPresented) { UsageResumeSheet(store: .shared, nameFor: { UsageResume.name(for: $0, projects: sessionStore.projects) }) }`. |
-| M4 | `ChatScreen.swift` (WS02) | Beside the two `reportFocus(... visible: true)` calls (`:371`, `:472`): `UsageAlertsStore.shared.activeSessionId = store.sessionId`; beside the `visible: false` calls (`:381`, `:475`): clear it only if it still equals this session. |
-| M5 | `ChatModelStore.swift` (unowned — orchestrator to assign to WS09) | Where the picker opt-in is saved (`DeprecatedModelOptIns.save`, `:280`): also `config:update {optInModels: catalog.configOptIns ∪ key}` and `ChatModelCatalog.shared.reload()`; failure keeps the local opt-in and logs. |
-| M6 | `ContextSheet` in `UsageSheets.swift` (WS02, C4) | A "Seat" row (`LabeledContent`, value `UsageSeatLine.text(providers: accounts.providers, sessionSeat: accounts.sessionSeat)`) rendered only when non-nil; ChatScreen passes its `accountsStore`. |
-| M7 (optional) | `AccountsScreen.swift` (WS08) | A footer link "Set prices for unpriced models" → `ModelsScreen()` scrolled to the "No prices" section, mirroring where desktop mounts the panel. Default: skip unless WS08 wants it. |
+Per D18. "Integration B" = the single wave-B integration agent.
+
+| ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
+|---|---|---|---|---|---|
+| M-09-1 | `SettingsScreen.swift` (WS10) | Integration B | `ModelsScreen()` (WS09, `ModelsScreen.swift`) | A fixed "Models" row styled like `accountsEntry` (`SettingsScreen.swift:174-200`), placed directly under it: title "Models", subtitle "Default, picker, subagents, spend and optimizer", `NavigationLink { ModelsScreen() }`; matched by search for "models default subagent picker spend cost optimizer prices identify" (same mechanism as `accountsMatchesQuery`, `:167-171`). | WS10 wave A landed; WS09 `ModelsScreen.swift` landed. |
+| M-09-2 | `SessionListView.swift` (WS04) | Integration B | `UsageStoppedCapsule(count:action:)`, `UsageResume.unarmedCount(_:)`, `UsageStoppedEntry.init(_:)` (WS09); `store.stoppedRecords` (WS04) | A `ToolbarItem(placement: .topBarTrailing)` before the `orderMenu` item (`SessionListView.swift:116`), rendered only when the unarmed count > 0: `UsageStoppedCapsule(count: n) { UsageAlertsStore.shared.presentResume() }`. | WS04 §9 (`stoppedRecords`) landed; WS09 landed; applied in ledger order with WS06's search entry in the same file. |
+| M-09-3 | `MantaAppRoot.swift` (WS04) | Integration B | `UsageAlertsStore.shared.bind(eventStore:)`, `UsageAlertBanner(store:)`, `UsageResumeSheet(sessions:usage:)` | (a) in the paired branch's `.onAppear`, next to `startModelPrefs()` (`MantaAppRoot.swift:104`), AND in `commitPairing` after `startModelPrefs()` (`:197`): `UsageAlertsStore.shared.bind(eventStore: store)`; (b) on the root `Group`, only when `paired && scene == nil`: `.overlay(alignment: .top) { UsageAlertBanner(store: .shared) }` and `.sheet(isPresented: $usageAlerts.resumeSheetPresented) { UsageResumeSheet(sessions: sessionStore, usage: .shared) }` with `@ObservedObject private var usageAlerts = UsageAlertsStore.shared`. | WS04 + WS09 landed; applied in ledger order with WS07's agent-file notice in the same file. |
+| M-09-4 | `MantaAppRoot.swift` (WS04) | Integration B | `UsageAlertsStore.resetForBoxChange()`, `ChatModelCatalog.resetForBoxChange()` (WS09) | In `commitPairing`'s `if flow.isSwitching { … }` block (`MantaAppRoot.swift:187-190`), after `sessionStore.resetForBoxChange()`: `UsageAlertsStore.shared.resetForBoxChange(); ChatModelCatalog.shared.resetForBoxChange()`. | as M-09-3 |
+| M-09-5 | `ChatScreen.swift` (WS02) | WS02 (wave B, per D18) | `UsageAlertsStore.shared.activeSessionId` (WS09) | Beside the two `reportFocus(sessionId: store.sessionId, visible: true)` calls (`ChatScreen.swift:371`, `:472`): `UsageAlertsStore.shared.activeSessionId = store.sessionId`. Beside the two `visible: false` calls (`:381`, `:475`): `if UsageAlertsStore.shared.activeSessionId == store.sessionId { UsageAlertsStore.shared.activeSessionId = nil }`. | WS09's `UsageAlertsStore.swift` (provider symbol pinned here, so WS02 may write it in the same wave). |
+| M-09-6 (optional) | `AccountsScreen.swift` (WS08) | Integration B, only if WS08 accepts | `ModelsScreen()` | A footer link "Set prices for unpriced models" → `ModelsScreen()`, mirroring where desktop mounts the panel. Default: not applied. | WS08 landed. |
+
+The draft's M5 (ChatModelStore) is no longer a mount — D1 gives the file to
+WS09. The draft's M6 (seat row) is void — D17.
+
+## Mounts applied by this workstream
+
+None. Cross-checked the mount tables of specs 01–08 and 10 in this folder: no
+request targets a WS09-owned file (`UsageMeters.swift`, `ModelPickerSheet.swift`,
+`ChatModelCatalog.swift`, `ChatModelStore.swift`). WS03 reads
+`ChatModelStore.agents` (`03-composer.md:44,601`); WS09 does not change that
+member. WS08's `Notification.Name.mantaProvidersChanged` (`08-accounts.md:741-744`)
+is a provided contract WS09 consumes inside its own file (`ChatModelCatalog`),
+not a mount.
 
 ## Contracts provided / consumed
 
-- **C1 provided**: `MantaAPIClient+Models.swift` (methods above). Consumed:
-  the internal `call/callRequired/callVoid/jsonObject` helpers.
-- **C4**: the "Seat" row data for WS02's context sheet (`UsageSeatLine`, M6).
-- **Provided to WS04**: `UsageStoppedStore.shared` — `records`,
-  `unarmedCount`, `isStopped(sessionId:) -> Bool`, `presentResume()`. WS04's
-  "stopped by limit" row marker must read `isStopped` (and apply desktop
-  precedence: a pending question/permission outranks it,
-  `usageResume.ts shouldShowStoppedMarker`, exported as
-  `UsageResume.showsStoppedMarker(isStopped:hasPendingAsk:)`).
-- **Consumed**: `MantaEventStore.addRawFrameHandler` (no edit to WS02's
-  store), `AccountsStore`/`AccountsSelectors` (WS08, read-only),
-  `SessionListStore.projects` (WS04, read-only), C6 untouched (no schema
-  change: `optimizerEnabled`, `cacheTtl`, `alwaysShowUsage` already exist).
-- C2/C3/C5/C7: C7 only (tests as listed). No new stream frames.
+- **C1 provided**: `MantaAPIClient+Models.swift` (Client members above).
+  Consumed: the internal `call/callRequired/callVoid/jsonObject` helpers.
+- **C4**: no ChatScreen mount other than M-09-5. The seat row is WS02's (D17).
+- **D16 consumed from WS04**: `SessionStoppedRecord`, `SessionListStore.stoppedRecords`,
+  `SessionListStore.stoppedLastLooked` (new — see below), `SessionListStore.projects`.
+  WS04's row marker keeps reading its own `stoppedConversations`; WS09 offers
+  `UsageResume.showsStoppedMarker` but WS04 is free to keep its own.
+- **Consumed**: `MantaEventStore.addRawFrameHandler` and `$connectionState`
+  (no edit to WS02's store); WS08 `Notification.Name.mantaProvidersChanged`;
+  WS10 `Notification.Name.mantaBoxRemoved`; C6 untouched (`optimizerEnabled`,
+  `cacheTtl`, `alwaysShowUsage` already exist).
+- C2/C3/C5: none. C7: tests as listed.
+
+## Cross-spec dependencies
+
+- **WS04 (wave A)** must publish `SessionListStore.stoppedLastLooked: Double?`
+  from the `lastLooked` field of the `usage-stopped:list` answer it already
+  decodes (`04-sessions.md:766`). Without it the "new" badges and the armed
+  header fall back to "never looked" (every row "new") — degraded, not broken.
+  If WS04 names its `SessionStoppedRecord` properties differently from the wire
+  keys, only `UsageStoppedEntry.init(_:)` adapts.
 
 ## Deferred
 
-- **Model tier tag + guide blurb** in the models list and its search
-  ("fast/balanced/deep", "good for"): they come from `src/shared/modelGuide.mjs`,
-  a JS data table with no wire channel. Porting it forks curated data; F4's new
-  channel carries `tier` for matched rows only. iOS shows the provider's own
-  `description` (override) where present. Revisit with a `models:guide` read if
-  wanted.
+- **Model tier tag + guide blurb** (D8): from `src/shared/modelGuide.mjs`, a JS
+  data table with no wire channel. F4's channel carries `tier` for matched rows
+  only. iOS shows the provider's own `description` (override) where present.
 - **Push notification at 90 % / limit**: the box sends none today; adding one
-  is a server routing decision (notification tiers) outside this parity
-  effort. "Remind me at reset" already produces a real push via the schedule
-  `notify` job.
-- **Optimizer per-session savings list** (`bySession` detail beyond the count):
-  desktop shows only the count too.
+  is a server routing decision outside this effort (D7 lists the only accepted
+  server changes). "Remind me at reset" already produces a real push.
+- **Optimizer per-session savings list**: desktop shows only the count too.
 - **Desktop's "restart opencode" banner** after subagent changes: obsolete on
   V2 (writes hot-apply); iOS deliberately does not reproduce it.
+- **Desktop defects found (report only, D10)**: the resume modal's
+  zero-selection guard blocks disarming the last armed row
+  (`UsageResumeModal.tsx:97-106,229-230`); the limit toast can schedule an
+  elapsed reset a year out (`App.tsx:846-880` + `schedule.mjs:258-284`); the
+  resume modal's Apply is fire-and-forget (`UsageResumeModal.tsx:97-109`).
 
 ## Open questions
 
 1. Weekly ≥ 90 %: the per-chat weekly banner (existing) and the new app-level
    warn banner can both show once. Default: keep both (the app-level one is
    transient; the chat one is the persistent reminder).
-2. Who owns `ChatModelStore.swift` for M5? Default: assign to WS09 (no other
-   workstream lists it).
-3. Should the `models:unidentified` row derivation also replace the desktop's
-   client-side derivation? Default: no — desktop unchanged in this effort; the
-   parity test keeps them aligned.
+2. Should the `models:unidentified` row derivation also replace the desktop's
+   client-side derivation? Default: no — desktop unchanged; the parity test
+   keeps them aligned.
+
+## Review responses (round 1)
+
+WS09 review (`reviews/round1/09-models-usage.md`):
+
+1. **BLOCKING, Sub mutation contract** — F1: explicit outcome table
+   (failed / partial "Preference saved, but the subagent list on the box
+   wasn't updated" with Retry of sync only / saved); `ModelsTable.subOutcome`
+   checks the returned `SubagentDef[]` against the reconcile rules, including
+   the `[]`-on-read-failure case as `.unverified`; "Nothing was changed" only
+   when the first call failed; catalogue reload failure never downgrades a
+   save. Store tests for config-OK+sync-throws, config-OK+old-list,
+   reload-failure-after-success.
+2. **BLOCKING, Apply enabled state** — F6: enabled iff `applyPlan` has any arm
+   or disarm (`canApply`), title "Update" for a disarm-only plan; tests for one
+   armed row unchecked, all unchecked, no-change. Desktop defect recorded under
+   Deferred (report only, D10).
+3. **BLOCKING, picker paths** — F1: all three selection paths enumerated with
+   code refs; one `ChatModelStore.isSelectable` policy over `deactivatedMain`
+   and `effectiveOptIns` used by catalogue render + `select` guard, recents
+   (render filter + `apply` guard) and fast toggle (`selectableModels`); active
+   model kept for display only. Tests: hidden recent, hidden fast twin,
+   desktop-opted-in deprecated model selectable.
+4. **BLOCKING, silent opt-in failure** — F1: `ChatModelStore.optIn` is async
+   with `optInPending` spinner and a visible `optInError` + Try again; fresh
+   `config:get` merge before writing; confirmed box value mirrored via
+   `catalog.applyConfig`; local mirror updated only on success. Tests for a
+   rejected write and a concurrent addition. Unresolved-owner wording removed
+   (D1).
+5. **SHOULD, F4 row disappearance** — F4: outcome decided from the refreshed
+   rows (`declareOutcome`): resolved → row disappears; still listed → "Identity
+   saved — Auto still needs: …" with the editor pre-selected; separate
+   acceptance criteria; server + Swift tests for an identity-only candidate.
+6. **SHOULD, box-switch lifecycle** — new "Box lifecycle" section: generation
+   counter + `resetForBoxChange()` on `UsageAlertsStore` and `ChatModelCatalog`,
+   late responses dropped, actions refused for older generations, triggered by
+   M-09-4 (`commitPairing` switch branch) and WS10's `mantaBoxRemoved`. Tests
+   for a late old-box response (pure `UsageBaseline` + store tests).
+7. **SHOULD, reconnect/seed ordering** — F7: Combine subscription to
+   `$connectionState` with drop→connect detection (never the single-owner
+   `resyncHandler`); `UsageBaseline` rejects a seed overtaken by a newer frame
+   and suppresses alerts until a baseline exists; reconnect reseed diffs
+   against the old baseline. Tests for delayed seed, frame-before-baseline,
+   reconnect with missed update.
+8. **SHOULD, expired sticky alert** — F7: `actionPolicy(…, now:)` returns
+   `.expired` after `resetsAt`; re-checked at tap with "This window has already
+   reset" feedback and no job; alerts retired on level drop or reset time;
+   buttons hidden once expired. Test for a sticky alert acted on after expiry.
+   No server change.
+
+Cross-cutting review (`reviews/round1/00-cross-cutting.md`):
+
+- **#6 duplicate client members** — `usageStoppedList` removed from WS09; full
+  member inventory under "Client members".
+- **#7 wave-B shared-file edits** — every SessionListView / MantaAppRoot /
+  SettingsScreen mount is assigned to Integration B (D18); WS09 edits none of
+  those files.
+- **#9 stopped-state ownership** — WS09's `UsageStoppedStore` deleted; F6 reads
+  WS04's `stoppedRecords` (D16); WS04's row marker is not asked to change.
+  New dependency: `stoppedLastLooked` (Cross-spec dependencies).
+- **#10 package / pbxproj** — Foundation-only files listed as a manifest for
+  Integration B; WS09 does not touch `Package.swift`, `project.yml` or the
+  `.pbxproj`.
+- **#11 seat row** — F8 and `UsageSeatLine` removed (D17).
