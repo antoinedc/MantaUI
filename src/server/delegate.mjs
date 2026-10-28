@@ -118,6 +118,8 @@ const ACTIVITY_INTERVAL_MS = 10_000;
 const SWEEP_INTERVAL_MS = 60_000;
 // Active-session reconciler cadence (adopts busy sessions nothing tracks).
 const ACTIVE_RECONCILE_INTERVAL_MS = 15_000;
+// The display-parent DB lookup (driver rule) re-runs for one record at most this often.
+const DRIVER_LOOKUP_MIN_INTERVAL_MS = 60_000;
 // BET-418 §A: a `delegate` call requesting approval blocks this long for the
 // user's decision before being treated as declined.
 const APPROVAL_TIMEOUT_MS = 2 * 60_000;
@@ -585,6 +587,21 @@ export function newestRecordFor(jobs, childSessionID) {
  * @returns {Promise<{ok:true, job:object}|{ok:true, alreadyAdopted:true}|{ok:false, error:string}>}
  */
 export async function adoptExistingSession(input, deps = {}) {
+  const out = await adoptExistingSessionLocked(input, deps);
+  if (out?.ok && out.job) {
+    // The row's DISPLAY parent (rules + rationale: resolveDisplayParents). Outside the locks: it reads sessions and
+    // may query opencode's DB; a failure leaves the row nesting by its real parent, exactly as before.
+    try {
+      const updated = (await refreshDisplayParents(deps, { onlyId: out.job.id })).get(out.job.id);
+      if (updated) return { ...out, job: updated };
+    } catch (e) {
+      console.warn(`[delegate] resolving the display parent of ${out.job.childSessionID} failed:`, e?.message ?? e);
+    }
+  }
+  return out;
+}
+
+async function adoptExistingSessionLocked(input, deps = {}) {
   const { load = loadJobs, save = saveJobs, publish, newWindow, stampOwner, listProjects, oc, now = () => Date.now() } = deps;
   const { childSessionID, owner, displayParentID = null, sessionParentID = null, name, prompt = "", model = null, origin, runStartedAt } = input ?? {};
   if (!childSessionID || !owner?.tmuxSession) return { ok: false, error: "childSessionID and an owning workspace are required" };
@@ -703,6 +720,239 @@ export async function adoptExistingSession(input, deps = {}) {
       return { ok: true, job };
     }),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Display parent — which session's row an adopted (opencode-owned) row nests under.
+//
+// `parentSessionID` keeps its meaning (result routing, listJobs, delegate_send ownership) and is NEVER
+// touched here. `displayParentID` is a separate, display-only field: when the real parent has no window
+// (an old orchestrator the user moved on from), the row would render top-level even though a live,
+// windowed session is the one actually running the work. The renderer nests by
+// `displayParentID ?? parentSessionID`.
+// ---------------------------------------------------------------------------
+
+// A driver is a session that named the child session's id within this long.
+export const DRIVER_WINDOW_MS = 24 * 60 * 60_000;
+const MAX_SUCCESSOR_HOPS = 8;
+
+/**
+ * The display parent of each of `targets` (opencode-owned records only; manta-owned ones are ignored).
+ * First match wins; every candidate must have a window, in the SAME tmux workspace as the row (the sidebar
+ * cannot nest across workspaces), and must not make the nesting a cycle:
+ *   1. the nearest windowed ancestor of the child session (the existing walk);
+ *   2. the replacement successor (handoff `replacedBy`, transitive, cycle-safe, max 8 hops) of the
+ *      session's parent or of any ancestor — the live end of the chain that has a window;
+ *   3. the driver: the windowed session whose own transcript most recently named the child session's id
+ *      (tool-call input or output, any message type) within DRIVER_WINDOW_MS. One read-only DB task for
+ *      the whole batch (`deps.findSessionReferences`); no DB / budget hit → this rule is skipped;
+ *   4. none → null.
+ *
+ * `opts.projects` skips a second listProjects; `opts.driverFor(job)` (default: always) gates the DB rule per
+ * record (the reconciler throttles it). A job whose rule-3 lookup was gated out or failed, and which rules
+ * 1-2 did not settle, is ABSENT from the result (unknown — leave it alone), never reported as `null`.
+ *
+ * @returns {Promise<Map<string, {displayParentID: string|null, rule: 1|2|3|null}>>} keyed by job id
+ */
+export async function resolveDisplayParents(targets, deps = {}, opts = {}) {
+  const out = new Map();
+  const list = (Array.isArray(targets) ? targets : []).filter((j) => j?.childSessionID && completionOwnerOf(j) === "opencode");
+  if (list.length === 0) return out;
+  const now = deps.now ?? (() => Date.now());
+  let projects = opts.projects;
+  if (!projects) {
+    if (typeof deps.listProjects !== "function") return out;
+    try {
+      projects = await deps.listProjects();
+    } catch {
+      return out;
+    }
+  }
+  const workspaceOf = new Map(); // windowed session id -> tmux session
+  for (const p of Array.isArray(projects) ? projects : []) {
+    for (const w of p.windows || []) if (w?.opencodeSessionId && !workspaceOf.has(w.opencodeSessionId)) workspaceOf.set(w.opencodeSessionId, p.tmuxSession);
+  }
+  let allJobs = [];
+  try {
+    allJobs = (await (deps.load ?? loadJobs)()) ?? [];
+  } catch {
+    /* no cycle guard from the store; the walk below still can't loop */
+  }
+  const recordOf = new Map();
+  for (const j of allJobs) if (j?.childSessionID && !j.supersededBy) recordOf.set(j.childSessionID, j);
+
+  const readParent = async (sid) => {
+    let rs;
+    try {
+      rs = await deps.readSession?.(sid);
+    } catch {
+      return { known: false, parent: null };
+    }
+    if (rs?.state !== "found") return { known: false, parent: null };
+    const parent = rs.session?.parentID;
+    return { known: true, parent: typeof parent === "string" && parent ? parent : null };
+  };
+  const ancestorsOf = async (job) => {
+    const chain = [];
+    const seen = new Set([job.childSessionID]);
+    let cur = job.childSessionID;
+    const first = await readParent(cur);
+    let parent = first.known ? first.parent : (job.sessionParentID ?? null);
+    for (let depth = 0; parent && !seen.has(parent) && depth < MAX_ANCESTOR_DEPTH; depth++) {
+      seen.add(parent);
+      chain.push(parent);
+      cur = parent;
+      parent = (await readParent(cur)).parent;
+    }
+    return chain;
+  };
+  // Would nesting `job` under `sid` close a loop through the display parents of other rows?
+  const loops = (job, sid) => {
+    let cur = sid;
+    for (let hops = 0; cur && hops <= MAX_ANCESTOR_DEPTH; hops++) {
+      if (cur === job.childSessionID) return true;
+      const rec = recordOf.get(cur);
+      if (!rec) return false;
+      cur = rec.displayParentID ?? rec.parentSessionID;
+    }
+    return false;
+  };
+  const acceptable = (job, sid) =>
+    !!sid && sid !== job.childSessionID && workspaceOf.has(sid) && (!job.tmuxSession || workspaceOf.get(sid) === job.tmuxSession) && !loops(job, sid);
+  const successorsOf = (sid) => {
+    const chain = [];
+    const seen = new Set([sid]);
+    let cur = sid;
+    for (let hops = 0; hops < MAX_SUCCESSOR_HOPS; hops++) {
+      const next = deps.successorOf?.(cur);
+      if (typeof next !== "string" || !next || seen.has(next)) break;
+      seen.add(next);
+      chain.push(next);
+      cur = next;
+    }
+    return chain;
+  };
+
+  const pending = []; // rules 1-2 found nothing; rule 3 may
+  for (const job of list) {
+    const ancestors = await ancestorsOf(job);
+    const own = ancestors.find((a) => acceptable(job, a));
+    if (own) {
+      out.set(job.id, { displayParentID: own, rule: 1 });
+      continue;
+    }
+    let successor = null;
+    for (const a of ancestors) {
+      const live = successorsOf(a).filter((s) => acceptable(job, s));
+      if (live.length > 0) {
+        successor = live[live.length - 1];
+        break;
+      }
+    }
+    if (successor) {
+      out.set(job.id, { displayParentID: successor, rule: 2 });
+      continue;
+    }
+    pending.push(job);
+  }
+
+  const wanted = pending.filter((j) => (opts.driverFor ? opts.driverFor(j) : true));
+  let found = null;
+  if (wanted.length > 0 && workspaceOf.size === 0) {
+    found = { hits: [], complete: true }; // no windowed session can be a driver
+  } else if (wanted.length > 0 && typeof deps.findSessionReferences === "function") {
+    try {
+      found = await deps.findSessionReferences({
+        sessionIds: [...workspaceOf.keys()],
+        targets: wanted.map((j) => j.childSessionID),
+        sinceMs: now() - DRIVER_WINDOW_MS,
+      });
+    } catch {
+      found = null; // no DB / budget hit: this rule is skipped, never an error
+    }
+  }
+  if (!found || !Array.isArray(found.hits)) return out;
+  const descendsFrom = async (sid, ancestorID) => {
+    const seen = new Set([sid]);
+    let cur = sid;
+    for (let depth = 0; depth < MAX_ANCESTOR_DEPTH; depth++) {
+      const { parent } = await readParent(cur);
+      if (!parent || seen.has(parent)) return false;
+      if (parent === ancestorID) return true;
+      seen.add(parent);
+      cur = parent;
+    }
+    return false;
+  };
+  const jobRowSessions = new Set(
+    ((await (deps.load ?? loadJobs)()) ?? []).filter((j) => !isTerminal(j) && j.childSessionID).map((j) => j.childSessionID),
+  );
+  for (const job of wanted) {
+    const hits = found.hits
+      .filter((h) => h?.target === job.childSessionID && typeof h.sessionId === "string")
+      .sort((a, b) => (b.t ?? 0) - (a.t ?? 0) || (a.sessionId < b.sessionId ? -1 : 1));
+    let driver = null;
+    for (const h of hits) {
+      if (!acceptable(job, h.sessionId)) continue;
+      // Another background row is never a driver: its own row is nested, so a child under it would not render,
+      // and a builder that merely mentions a sibling's id is not running it.
+      if (jobRowSessions.has(h.sessionId)) continue;
+      if (await descendsFrom(h.sessionId, job.childSessionID)) continue;
+      driver = h.sessionId;
+      break;
+    }
+    if (driver) out.set(job.id, { displayParentID: driver, rule: 3 });
+    else if (found.complete !== false) out.set(job.id, { displayParentID: null, rule: null });
+  }
+  return out;
+}
+
+/** The display parent of one record (see resolveDisplayParents). */
+export async function resolveDisplayParent(job, deps = {}, opts = {}) {
+  return (await resolveDisplayParents([job], deps, opts)).get(job?.id) ?? null;
+}
+
+/**
+ * Recompute the display parent of every live opencode-owned record whose CURRENT display parent
+ * (`displayParentID ?? parentSessionID`) has no window, and patch the ones that changed (a record whose
+ * display parent has a window is left alone: stable rows, no flapping). Never touches `parentSessionID` or a
+ * manta-owned record. `onlyId` limits it to one record (adoption); `driverFor` gates the DB rule per record.
+ * @returns {Promise<Map<string, object>>} the patched records by id
+ */
+export async function refreshDisplayParents(deps = {}, { onlyId = null, driverFor } = {}) {
+  const patched = new Map();
+  if (typeof deps.listProjects !== "function") return patched;
+  const jobs = (await (deps.load ?? loadJobs)()) ?? [];
+  let projects;
+  try {
+    projects = await deps.listProjects();
+  } catch {
+    return patched;
+  }
+  const windowed = new Set();
+  for (const p of Array.isArray(projects) ? projects : []) for (const w of p.windows || []) if (w?.opencodeSessionId) windowed.add(w.opencodeSessionId);
+  const targets = jobs.filter(
+    (j) =>
+      !isTerminal(j) &&
+      !j.supersededBy &&
+      j.childSessionID &&
+      completionOwnerOf(j) === "opencode" &&
+      (onlyId == null || j.id === onlyId) &&
+      !windowed.has(j.displayParentID ?? j.parentSessionID),
+  );
+  if (targets.length === 0) return patched;
+  const resolved = await resolveDisplayParents(targets, deps, { projects, driverFor });
+  for (const job of targets) {
+    const r = resolved.get(job.id);
+    if (!r) continue;
+    const before = job.displayParentID ?? null;
+    if (r.displayParentID === before) continue;
+    const next = await patchJob(job.id, { displayParentID: r.displayParentID }, deps, {
+      onlyIf: (live) => !isTerminal(live) && completionOwnerOf(live) === "opencode" && (live.displayParentID ?? null) === before,
+    });
+    if (next) patched.set(job.id, next);
+  }
+  return patched;
 }
 
 /**
@@ -4191,6 +4441,7 @@ const modelStringOf = (m) => (m?.providerID && (m.id ?? m.modelID) ? `${m.provid
 export function createActiveSessionReconciler(deps = {}) {
   const { now = () => Date.now() } = deps;
   const seen = new Map(); // sid -> { ticks, since }: consecutive ticks seen busy + the first one
+  const driverLookedUpAt = new Map(); // job id -> when its DB driver lookup last ran
 
   // Is `session` somewhere below a job that is still live? → "inside" | "outside" | "unknown"
   async function insideLiveJobTree(session, jobs) {
@@ -4340,6 +4591,23 @@ export function createActiveSessionReconciler(deps = {}) {
       } catch (e) {
         console.warn(`[delegate] reconciling the busy session ${sid} failed:`, e?.message ?? e);
       }
+    }
+    // A row whose display parent lost its window (or never had one) may now have a better one. The DB rule is
+    // throttled per record so a row nothing drives doesn't re-scan the transcripts every tick.
+    try {
+      const t = now();
+      const minGap = deps.driverLookupMinIntervalMs ?? DRIVER_LOOKUP_MIN_INTERVAL_MS;
+      await refreshDisplayParents(deps, {
+        driverFor: (job) => {
+          const last = driverLookedUpAt.get(job.id);
+          if (last != null && t - last < minGap) return false;
+          driverLookedUpAt.set(job.id, t);
+          while (driverLookedUpAt.size > 500) driverLookedUpAt.delete(driverLookedUpAt.keys().next().value);
+          return true;
+        },
+      });
+    } catch (e) {
+      console.warn("[delegate] refreshing background row parents failed:", e?.message ?? e);
     }
     return { adopted };
   }

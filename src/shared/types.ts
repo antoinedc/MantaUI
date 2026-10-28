@@ -2608,6 +2608,10 @@ export type DelegateJob = {
   // The id the result is posted under (minted once); retrying a post is harmless.
   completionMessageId?: string | null;
   completionDelivery?: DelegateCompletionDelivery | null;
+  // Display-only parent of an opencode-owned (adopted) row whose real `parentSessionID` has no window: the
+  // windowed session that actually drives it. The sidebar nests by `displayParentID ?? parentSessionID`;
+  // `parentSessionID` itself never changes.
+  displayParentID?: string | null;
   // The agent the job's session runs (shown in its result).
   agent?: string | null;
 };
