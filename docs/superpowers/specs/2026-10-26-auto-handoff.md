@@ -110,7 +110,7 @@ Rendered for any record whose `fromSessionId` is the displayed session:
 
 | Entry | auto | suggest | off |
 |---|---|---|---|
-| Automatic (turn end, over budget, §4.2) | replacement, `armed` | `ready` card | — |
+| Automatic (turn end, over budget, §4.2) | replacement, `send` | `ready` card | — |
 | Agent tool `action: handoff` | replacement, `send`, at turn end | `ready` card | `ready` card |
 | Agent tool `action: suggest` | `ready` card | `ready` card | `ready` card |
 | `/handoff [goal]`, "Hand off" button | `ready` card | `ready` card | `ready` card |
@@ -124,8 +124,10 @@ below budget). The budget note (§4.4) is injected only when mode ≠ off.
 At the end of a turn that **completed successfully** (not aborted, not errored,
 not a drain-abort) while context > budget and outside cooldown (30 min after a
 session's creation by a handoff): generate, then run the start (§5) as
-replacement + `armed`. Nothing runs in the successor until a message is
-admitted (§5.4).
+replacement + `send`: the handoff is the successor's first message, so the
+work continues without the user typing anything. (Revised 2026-10-28: this was
+`armed` — held until the next message — and users in auto mode found they had
+to nudge the new session. `armed` (§5.4) is kept only for records made before.)
 
 Agent `action: handoff`: tool records `requested` and returns at once; when the
 turn completes successfully → (regenerate if needed) → start as replacement +

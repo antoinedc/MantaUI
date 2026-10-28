@@ -111,9 +111,16 @@ export function loadRecord(id: string): Promise<void> {
   return run;
 }
 
+const staleSessions = new Set<string>();
+
 export function loadSession(sessionId: string): Promise<HandoffSessionInfo | null> {
   const pending = inflightSessions.get(sessionId);
-  if (pending) return pending;
+  if (pending) {
+    // The in-flight read may predate whatever prompted this call (e.g. the
+    // carried-over context being sent): read again once it lands.
+    staleSessions.add(sessionId);
+    return pending.then(() => (staleSessions.delete(sessionId) ? loadSession(sessionId) : useHandoffStore.getState().sessions[sessionId]?.info ?? null));
+  }
   const prev = useHandoffStore.getState().sessions[sessionId];
   if (!prev) {
     useHandoffStore.setState((s) => ({ sessions: { ...s.sessions, [sessionId]: { status: "loading" } } }));
@@ -129,6 +136,7 @@ export function loadSession(sessionId: string): Promise<HandoffSessionInfo | nul
         ...(typeof res?.dismissed === "boolean" ? { dismissed: res.dismissed } : {}),
         ...(res?.mode ? { mode: res.mode } : {}),
         ...(typeof res?.modeIsDefault === "boolean" ? { modeIsDefault: res.modeIsDefault } : {}),
+        ...(Array.isArray(res?.chain?.predecessors) ? { chain: { predecessors: res.chain.predecessors } } : {}),
       };
       for (const r of info.records) applyRecord(r);
       useHandoffStore.setState((s) => ({ sessions: { ...s.sessions, [sessionId]: { status: "ready", info } } }));

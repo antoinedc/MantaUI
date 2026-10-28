@@ -7,7 +7,7 @@ import { COOLDOWN_MS, decideAutoTrigger, entryPlan, handoffBudget, modelClass, n
 const CARD = { produce: "card", kind: "suggest" };
 const TABLE = [
   // [trigger, action, mode, expected]
-  ["auto", undefined, "auto", { produce: "start", kind: "auto", how: "clear", disposition: "armed" }],
+  ["auto", undefined, "auto", { produce: "start", kind: "auto", how: "clear", disposition: "send" }],
   ["auto", undefined, "suggest", CARD],
   ["auto", undefined, "off", { produce: "none", kind: "suggest" }],
   ["agent", "handoff", "auto", { produce: "start", kind: "auto", how: "clear", disposition: "send" }],

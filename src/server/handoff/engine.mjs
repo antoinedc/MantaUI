@@ -297,6 +297,9 @@ export function createHandoffEngine(deps = {}) {
       if (res.outcome === "accepted") {
         delete cont.preamble;
         delete cont.claim;
+        // Clients show the carried-over context until it is sent: tell them it was.
+        const rec = state.records[cont.recordId];
+        if (rec) touch(rec);
       } else if (res.outcome === "refused") {
         delete cont.claim;
       }

@@ -245,11 +245,15 @@ export function useHandoffPanel(args: {
     };
   }, [enabled, sessionId, replaces, branchedFrom, createdAt]);
 
+  const chainTitles = info?.chain?.predecessors;
   const previous = useMemo(() => {
     const t: Record<string, string | undefined> = { ...titles };
+    // The box's own lookup covers every predecessor; the directory listing above
+    // misses sessions outside its page, which then read "Untitled session".
+    for (const p of chainTitles ?? []) if (p.title) t[p.id] ??= p.title;
     for (const r of records) if (r.fromTitle) t[r.fromSessionId] ??= r.fromTitle;
     return buildPreviousEntries(chain, t);
-  }, [chain, titles, records]);
+  }, [chain, titles, chainTitles, records]);
 
   // ----- previous-session view (read-only, same pane) -----
   const [previousView, setPreviousView] = useState<PreviousView | null>(null);
