@@ -37,6 +37,17 @@ import { detectForgeWithHosts } from "./selfhost.mjs";
 import { resolveToken as authResolveToken, readVerdict, writeVerdict, clearStoredToken } from "./auth.mjs";
 import { startDeviceGrant as authStartDeviceGrant, pollDeviceGrant as authPollDeviceGrant, cancelDeviceGrant as authCancelDeviceGrant, ExpiredCodeError, DeviceFlowNotConfiguredError } from "./auth.mjs";
 import { getCloneStore } from "./clone.mjs";
+import {
+  tonedChecks,
+  pullRequestView,
+  createLastPrCache,
+  canMerge as viewCanMerge,
+  mergeFailureMessage,
+  shipErrorMessage,
+  reviewErrorMessage,
+  inboxRowView,
+} from "./view.mjs";
+import { buildDiffView } from "./diffView.mjs";
 import { createGithubAdapter, GithubRequestError, buildInboxQueries, mergeInboxSources } from "./github.mjs";
 import { createGitlabAdapter } from "./gitlab.mjs";
 import { getDraft as storeGetDraft, putComment as storePutComment, deleteComment as storeDeleteComment, setVerdict as storeSetVerdict, markDraftStale as storeMarkDraftStale, clearDraft as storeClearDraft } from "./draft.mjs";
@@ -323,6 +334,11 @@ export function getAdapter(kind, token, apiBase) {
 
 const GH_HOST = "github.com";
 const EMPTY = Object.freeze({ pr: null, checks: [], rollup: "none", stale: false, error: null });
+
+// The last good PR read per (cwd, branch) — served (flagged stale) when the
+// forge rate-limits or is unreachable, instead of flipping to "no PR" (G5).
+// Memory only, bounded; tests inject their own through `deps.lastPr`.
+const defaultLastPr = createLastPrCache({ max: 64 });
 
 // The forge kinds the box-facing reads/writes route through the seam. Adding a
 // kind here (with its adapter registered above) is what makes a forge render in
@@ -721,9 +737,25 @@ async function listOpenPrs(adapter, repo) {
  *          getAdapter?: (kind: string, token: string) => any }} [deps]
  */
 export async function pullRequestForCwd(cwd, deps = {}) {
+  return withPullRequestView(await readPullRequestForCwd(cwd, deps));
+}
+
+// Compose the box's render-ready fields onto a raw PR read (G1, G2, G6, G7):
+// `checks` become ordered + toned, and `view` carries the panel / ship / merge /
+// checks state. Additive — every raw field is unchanged.
+function withPullRequestView(raw) {
+  return {
+    ...raw,
+    checks: tonedChecks(raw.checks),
+    view: pullRequestView(raw),
+  };
+}
+
+async function readPullRequestForCwd(cwd, deps) {
   const currentBranch = deps.currentBranch ?? defaultCurrentBranch;
   const getDefaultBranch = deps.getDefaultBranch ?? defaultGetDefaultBranch;
   const runGit = deps.run ?? run;
+  const lastPr = deps.lastPr ?? defaultLastPr;
 
   const ctx = await resolveForgeContext(cwd, deps);
 
@@ -755,16 +787,38 @@ export async function pullRequestForCwd(cwd, deps = {}) {
   if (ctx.error) return { ...EMPTY, ...shipState, error: ctx.error };
   const { adapter, repo } = ctx;
 
-  const { prs: prArr, stale, rateLimited } = await listOpenPrs(adapter, repo);
-  if (rateLimited) return { ...EMPTY, ...shipState, stale: true };
+  // A read the forge could not answer serves the last good PR for this branch,
+  // flagged stale, rather than claiming there is none.
+  const servedFromCache = () => {
+    const cached = branch ? lastPr.get(cwd, branch) : undefined;
+    if (!cached) return null;
+    return { pr: cached.pr, checks: cached.checks, rollup: cached.rollup, stale: true, error: null, ...shipState };
+  };
 
-  if (prArr.length === 0) return { ...EMPTY, ...shipState, stale };
+  let listed;
+  try {
+    listed = await listOpenPrs(adapter, repo);
+  } catch (err) {
+    const cached = servedFromCache();
+    if (cached) return cached;
+    throw err;
+  }
+  const { prs: prArr, stale, rateLimited } = listed;
+  if (rateLimited) return servedFromCache() ?? { ...EMPTY, ...shipState, stale: true };
+
+  if (prArr.length === 0) {
+    if (branch && !stale) lastPr.drop(cwd, branch);
+    return { ...EMPTY, ...shipState, stale };
+  }
 
   const branchName = await currentBranch(cwd);
   if (!branchName) return { ...EMPTY, ...shipState, stale };
 
   const candidate = prArr.find((p) => p.headRef === branchName);
-  if (!candidate) return { ...EMPTY, ...shipState, stale };
+  if (!candidate) {
+    if (!stale) lastPr.drop(cwd, branchName);
+    return { ...EMPTY, ...shipState, stale };
+  }
 
   // Full normalised representation — getPullRequest populates reviewers + the
   // unresolved-thread count that the list endpoint cannot. Falls back to the
@@ -791,7 +845,9 @@ export async function pullRequestForCwd(cwd, deps = {}) {
     staleChecks = true;
   }
 
-  return { pr, checks, rollup: rollupChecks(checks), stale: staleChecks, error: null, ...shipState };
+  const rollup = rollupChecks(checks);
+  if (!staleChecks) lastPr.set(cwd, branchName, { pr, checks, rollup });
+  return { pr, checks, rollup, stale: staleChecks, error: null, ...shipState };
 }
 
 // ---- Inbox seed prompt (BET-795) ----------------------------------------
@@ -856,9 +912,24 @@ async function defaultForgeInbox(deps) {
     }
   }
 
+  // repoKey → local checkout, joined box-side (the 60s-cached probe). A probe
+  // failure leaves every `localPath` null — it never fails the inbox.
+  let localPaths = {};
+  if (typeof deps.probeRepos === "function") {
+    try {
+      const probe = await deps.probeRepos();
+      localPaths = Object.fromEntries(
+        (Array.isArray(probe?.repos) ? probe.repos : []).filter((r) => r?.repoKey && r?.path).map((r) => [r.repoKey, r.path]),
+      );
+    } catch {
+      localPaths = {};
+    }
+  }
+
   const items = mergeInboxSources(populations)
     .map((it) => ({ ...it, rollup: it.reason === "checks failing" ? "red" : "none" }))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((it) => ({ ...it, ...inboxRowView(it, localPaths) }));
   return { items, stale, error: null };
 }
 
@@ -885,10 +956,14 @@ async function keepRedPrs(hits, adapter) {
 /**
  * forge:inbox — the aggregated work inbox. Box-side read; a forge token never
  * leaves the box. Returns `{ items, stale, error }` where `error` is
- * "not_connected" when no GitHub token resolves (empty items) or null.
+ * "not_connected" when no GitHub token resolves (empty items) or null. Every
+ * item carries its render-ready row fields (`label`, `identifier`, `secondary`,
+ * `repoName`, `tone`, `branchName`) and `localPath` (the checkout of its repo on
+ * this box, from `deps.probeRepos`, or null).
  *
  * @param {{ resolveToken?: typeof authResolveToken,
- *          getAdapter?: (kind: string, token: string) => any }} [deps]
+ *          getAdapter?: (kind: string, token: string) => any,
+ *          probeRepos?: () => Promise<{ repos: Array<{ repoKey: string, path: string }> }> }} [deps]
  */
 export async function forgeInbox(deps = {}) {
   return defaultForgeInbox(deps);
@@ -900,6 +975,11 @@ export async function forgeInbox(deps = {}) {
 // reach the Electron renderer or the iOS app (§Hygiene). Both resolve
 // `cwd → origin → repo → token → adapter` box-side and return well-formed
 // results / typed errors. All git/forge deps injectable for tests.
+
+// A ship / ship-preview failure with its plain-language `message` (G4).
+function shipFailure(error) {
+  return { ok: false, error, message: shipErrorMessage(error) };
+}
 
 // Shared context resolution for the write ops. Returns `{ forge, repo, adapter,
 // token, head }` or a `{ error }` result. `head` is the current branch (the
@@ -941,8 +1021,8 @@ async function resolveWriteContext(cwd, deps, wantBranch = true) {
  */
 export async function shipPreview(cwd, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
-  if (ctx.error) return { ok: false, error: ctx.error };
-  if (!ctx.base) return { ok: false, error: "unknown_base" };
+  if (ctx.error) return shipFailure(ctx.error);
+  if (!ctx.base) return shipFailure("unknown_base");
   const base = ctx.base;
   const runGit = deps.run ?? run;
 
@@ -1177,14 +1257,14 @@ async function defaultReadPrTemplate(cwd, deps = {}) {
  */
 export async function shipPullRequest(cwd, { title, body = "" } = {}, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps);
-  if (ctx.error) return { ok: false, error: ctx.error };
-  if (!ctx.base) return { ok: false, error: "unknown_base" };
+  if (ctx.error) return shipFailure(ctx.error);
+  if (!ctx.base) return shipFailure("unknown_base");
   const gitPush = deps.gitPush ?? localGitPush;
 
   try {
     await gitPush({ cwd, branch: ctx.head, setUpstream: true });
   } catch (e) {
-    return { ok: false, error: `push failed: ${String(e?.message ?? e)}` };
+    return shipFailure(`push failed: ${String(e?.message ?? e)}`);
   }
 
   let pr;
@@ -1197,7 +1277,7 @@ export async function shipPullRequest(cwd, { title, body = "" } = {}, deps = {})
     });
     pr = res.data;
   } catch (e) {
-    return { ok: false, error: `create pull request failed: ${String(e?.message ?? e)}` };
+    return shipFailure(`create pull request failed: ${String(e?.message ?? e)}`);
   }
 
   return { ok: true, pr, url: pr?.url ?? "" };
@@ -1217,13 +1297,41 @@ export async function shipPullRequest(cwd, { title, body = "" } = {}, deps = {})
  */
 export async function mergePullRequest(cwd, { number, method = "merge", sha } = {}, deps = {}) {
   const ctx = await resolveWriteContext(cwd, deps, false);
-  if (ctx.error) return { ok: false, error: ctx.error };
+  if (ctx.error) return { ok: false, error: ctx.error, kind: null, message: shipErrorMessage(ctx.error) };
+
+  // The box re-checks the gate itself (G2): a stale client view can never merge.
+  // Fail closed — a PR whose state cannot be read is not mergeable.
+  let pr;
+  let checks = [];
+  try {
+    pr = (await ctx.adapter.getPullRequest(ctx.repo, number)).data;
+    checks = (await ctx.adapter.getChecks(ctx.repo, pr.headSha)).data;
+  } catch {
+    return {
+      ok: false,
+      error: "blocked",
+      kind: "blocked",
+      message: mergeFailureMessage("blocked", "couldn't confirm the pull request's state"),
+    };
+  }
+  if (sha && pr?.headSha && pr.headSha !== sha) {
+    return { ok: false, error: "head sha moved", kind: "sha_mismatch", message: mergeFailureMessage("sha_mismatch") };
+  }
+  const gate = viewCanMerge({
+    rollup: rollupChecks(Array.isArray(checks) ? checks : []),
+    unresolvedThreads: pr?.unresolvedThreads,
+    mergeable: pr?.mergeable,
+  });
+  if (!gate.can) {
+    return { ok: false, error: "blocked", kind: "blocked", message: mergeFailureMessage("blocked", gate.reason) };
+  }
+
   try {
     const { data } = await ctx.adapter.merge(ctx.repo, number, { method, sha });
     return { ok: true, data };
   } catch (e) {
     const kind = e?.kind ?? (e?.name === "GithubRequestError" ? `http_${e.status}` : null);
-    return { ok: false, error: String(e?.message ?? e), kind };
+    return { ok: false, error: String(e?.message ?? e), kind, message: mergeFailureMessage(kind) };
   }
 }
 
@@ -1246,29 +1354,56 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
  *          getAdapter?: (kind: string, token: string) => any }} [deps]
  */
 export async function forgeDiffForCwd(ref, deps = {}) {
+  const empty = (error, extra = {}) => ({
+    diff: "",
+    threads: [],
+    headSha: "",
+    files: [],
+    draft: null,
+    parseFailed: false,
+    error,
+    message: error ? reviewErrorMessage("diff", error) : null,
+    ...extra,
+  });
   const ctx = await resolveRefContext(ref, deps);
-  if (ctx.error) return { diff: "", threads: [], headSha: "", error: ctx.error };
+  if (ctx.error) return empty(ctx.error);
   const { adapter, repo } = ctx;
 
   const target = await resolveRefNumber(ref, ctx, deps);
-  if (target.rateLimited) return { diff: "", threads: [], headSha: "", error: null, stale: true };
-  if (target.error) return { diff: "", threads: [], headSha: "", error: target.error };
+  if (target.rateLimited) return empty(null, { stale: true });
+  if (target.error) return empty(target.error);
 
+  let res;
   try {
-    const res = await adapter.getDiff(repo, target.number);
-    return {
-      diff: res.data.diff ?? "",
-      threads: Array.isArray(res.data.threads) ? res.data.threads : [],
-      headSha: res.data.headSha ?? "",
-      stale: target.stale || Boolean(res.stale),
-      error: null,
-    };
+    res = await adapter.getDiff(repo, target.number);
   } catch (err) {
-    if (err instanceof ForgeRateLimitedError) {
-      return { diff: "", threads: [], headSha: "", error: null, stale: true };
-    }
+    if (err instanceof ForgeRateLimitedError) return empty(null, { stale: true });
     throw err;
   }
+  const diff = res.data.diff ?? "";
+  const threads = Array.isArray(res.data.threads) ? res.data.threads : [];
+  const headSha = res.data.headSha ?? "";
+
+  // The box draft rides along (reconciled like forge:draft-get — marked stale
+  // when the head moved) so ONE call returns diff, threads, draft and where
+  // each note belongs.
+  let draft = await storeGetDraft(ctx.repoKey, target.number, deps);
+  if (draft && draft.headSha && headSha && draft.headSha !== headSha) {
+    draft = (await storeMarkDraftStale(ctx.repoKey, target.number, deps)) ?? draft;
+  }
+
+  const view = buildDiffView(diff, threads, draft?.comments ?? [], { maxRowsPerFile: deps.maxRowsPerFile });
+  return {
+    diff,
+    threads: view.threads,
+    headSha,
+    stale: target.stale || Boolean(res.stale),
+    error: null,
+    files: view.files,
+    draft: draft ? { ...draft, comments: view.draftComments } : null,
+    parseFailed: view.parseFailed,
+    message: view.message,
+  };
 }
 
 // ---- Box-facing draft review (BET-793) -------------------------------------
@@ -1331,12 +1466,12 @@ async function resolveDraftContext(ref, deps) {
  */
 export async function draftGetForCwd(ref, deps = {}) {
   const ctx = await resolveDraftContext(ref, deps);
-  if (ctx.error) return { draft: null, error: ctx.error };
+  if (ctx.error) return { draft: null, error: ctx.error, message: reviewErrorMessage("draft-get", ctx.error) };
   let draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
   if (draft && draft.headSha && ctx.headSha && draft.headSha !== ctx.headSha) {
     draft = (await storeMarkDraftStale(ctx.repoKey, ctx.number, deps)) ?? draft;
   }
-  return { draft, error: null };
+  return { draft, error: null, message: null };
 }
 
 /**
@@ -1350,25 +1485,26 @@ export async function draftGetForCwd(ref, deps = {}) {
  * @returns {Promise<{ ok: true, draft: object } | { ok: false, error: string }>}
  */
 export async function draftCommentForCwd(ref, input = {}, deps = {}) {
+  const fail = (r) => ({ ...r, message: reviewErrorMessage("draft-comment", r.error, r.kind) });
   const ctx = await resolveDraftContext(ref, deps);
-  if (ctx.error) return { ok: false, error: ctx.error };
+  if (ctx.error) return fail({ ok: false, error: ctx.error });
   const { op, comment, verdict, body } = input;
   switch (op) {
     case "add":
     case "edit": {
       const r = await storePutComment(ctx.repoKey, ctx.number, ctx.headSha, comment, deps);
-      return r.ok ? { ok: true, draft: r.draft } : r;
+      return r.ok ? { ok: true, draft: r.draft, message: null } : fail(r);
     }
     case "delete": {
       const r = await storeDeleteComment(ctx.repoKey, ctx.number, comment?.id, deps);
-      return { ok: true, draft: r.draft };
+      return { ok: true, draft: r.draft, message: null };
     }
     case "set-verdict": {
       const r = await storeSetVerdict(ctx.repoKey, ctx.number, ctx.headSha, { verdict, body }, deps);
-      return r.ok ? { ok: true, draft: r.draft } : r;
+      return r.ok ? { ok: true, draft: r.draft, message: null } : fail(r);
     }
     default:
-      return { ok: false, error: `unknown op "${op}"` };
+      return fail({ ok: false, error: `unknown op "${op}"` });
   }
 }
 
@@ -1383,12 +1519,13 @@ export async function draftCommentForCwd(ref, input = {}, deps = {}) {
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
 export async function replyThreadForCwd(ref, input = {}, deps = {}) {
+  const fail = (error) => ({ ok: false, error, message: reviewErrorMessage("thread-reply", error) });
   const ctx = await resolveDraftContext(ref, deps);
-  if (ctx.error) return { ok: false, error: ctx.error };
+  if (ctx.error) return fail(ctx.error);
   const threadId = String(input.threadId ?? "").trim();
   const body = String(input.body ?? "").trim();
-  if (!threadId) return { ok: false, error: "missing threadId" };
-  if (!body) return { ok: false, error: "empty reply" };
+  if (!threadId) return fail("missing threadId");
+  if (!body) return fail("empty reply");
   try {
     await ctx.adapter.replyToThread(ctx.repo, ctx.number, {
       threadId,
@@ -1396,9 +1533,9 @@ export async function replyThreadForCwd(ref, input = {}, deps = {}) {
       headSha: ctx.headSha,
     });
   } catch (e) {
-    return { ok: false, error: String(e?.message ?? e) };
+    return fail(String(e?.message ?? e));
   }
-  return { ok: true };
+  return { ok: true, message: null };
 }
 
 /**
@@ -1412,10 +1549,11 @@ export async function replyThreadForCwd(ref, input = {}, deps = {}) {
  * @returns {Promise<{ ok: true } | { ok: false, error: string, kind?: string }>}
  */
 export async function draftSubmitForCwd(ref, input = {}, deps = {}) {
+  const fail = (error, kind) => ({ ok: false, error, ...(kind !== undefined ? { kind } : {}), message: reviewErrorMessage("draft-submit", error, kind) });
   const ctx = await resolveDraftContext(ref, deps);
-  if (ctx.error) return { ok: false, error: ctx.error };
+  if (ctx.error) return fail(ctx.error);
   const draft = await storeGetDraft(ctx.repoKey, ctx.number, deps);
-  if (!draft || draft.comments.length === 0) return { ok: false, error: "nothing to submit" };
+  if (!draft || draft.comments.length === 0) return fail("nothing to submit");
   try {
     await ctx.adapter.submitReview(ctx.repo, ctx.number, {
       verdict: input.verdict ?? draft.verdict,
@@ -1425,10 +1563,10 @@ export async function draftSubmitForCwd(ref, input = {}, deps = {}) {
     });
   } catch (e) {
     const kind = e?.kind ?? (e?.name === "GithubRequestError" ? `http_${e.status}` : null);
-    return { ok: false, error: String(e?.message ?? e), kind };
+    return fail(String(e?.message ?? e), kind);
   }
   await storeClearDraft(ctx.repoKey, ctx.number, deps);
-  return { ok: true };
+  return { ok: true, message: null };
 }
 
 // ---- Adapter interface (the seam a second adapter implements) ------------------

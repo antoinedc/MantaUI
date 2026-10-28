@@ -133,3 +133,12 @@ test("without the interpreter wired the inbox channels fail clearly (never an em
   await assert.rejects(dispatch(handlers, "opencode:inbox-cancel", [{ sessionId: "ses_a", id: "x" }]), /not available on this box/);
   await assert.rejects(dispatch(handlers, "opencode:inbox-set-delivery", [{ sessionId: "ses_a", id: "x", delivery: "steer" }]), /not available on this box/);
 });
+
+// WS05 (M-05-srv-1): forge:inbox joins each repo to its local checkout on the box,
+// so the registration must hand forgeInbox the (60s-cached) repo probe. Pinned at
+// the source because a live call would resolve a real forge token.
+test("forge:inbox is registered with probeRepos wired to local.forgeProbe", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./rpc.mjs", import.meta.url), "utf8");
+  assert.match(src, /"forge:inbox":\s*\(\)\s*=>\s*forgeInbox\(\{\s*probeRepos:\s*\(\)\s*=>\s*local\.forgeProbe\(\)\s*\}\)/);
+});

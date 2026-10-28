@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, DelegateApprovalTool, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, DelegateApprovalTool, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, PermissionRequest, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -3562,85 +3562,6 @@ export function selectStatusItems(
 // per-state descriptor, the PR-suffixed branch label, and the connect-offer
 // decision. All computed from props alone — no DOM, no channels, no network.
 
-/** One check's traffic-light state — THE single classifier. A check with no
- * conclusion yet (queued / in progress / pending) is "running". Everything that
- * finished on something other than success is "error".
- *
- * `countsForChecks`, `failuresToAgentPrompt` and the checks popover all read
- * this, so the three can never drift on what "failed" means (they were three
- * hand-written copies before). The return values are deliberately StatusDot's
- * tone names, so the popover row needs no mapping table. */
-export function checkTone(c: ForgeCheckRun): "ok" | "running" | "error" {
-  const done = c.conclusion;
-  if (!done || c.status === "queued" || c.status === "in_progress") return "running";
-  return done === "success" ? "ok" : "error";
-}
-
-/** Every check in display order: failed, then running, then passed. The popover
- * lists ALL of them — the dot carries the state and this order carries the
- * grouping, so there are no headings and no per-row status label. `sort` is
- * stable, so within a bucket the forge's own order survives. */
-export function orderChecks(checks: ForgeCheckRun[]): ForgeCheckRun[] {
-  const rank = { error: 0, running: 1, ok: 2 } as const;
-  return [...checks].sort((a, b) => rank[checkTone(a)] - rank[checkTone(b)]);
-}
-
-/** Count a check list into the three traffic-light buckets. A check with no
- * conclusion yet (still queued / in progress / pending) is "running". */
-export function countsForChecks(checks: ForgeCheckRun[]): {
-  passed: number;
-  failed: number;
-  running: number;
-} {
-  let passed = 0;
-  let failed = 0;
-  let running = 0;
-  for (const c of checks) {
-    const tone = checkTone(c);
-    if (tone === "running") running++;
-    else if (tone === "ok") passed++;
-    else failed++;
-  }
-  return { passed, failed, running };
-}
-
-export type ChecksChipTone = "ok" | "warn" | "danger";
-
-/** The checks chip's label + tone + registry priority for a given rollup.
- * `none` yields null — no chip at all. The caller additionally gates on "no
- * PR" and "forge not connected" before calling, so absence of a chip is the
- * "there is nothing to say" state (§4.3 [C2]). Priority is a function of
- * state (§4.3): red outranks the menu+artifacts pin (survives the narrow
- * layout), green/yellow sit low so they are the first thing to overflow. */
-export function checksChipDescriptor(
-  rollup: CheckRollup,
-  counts: { passed: number; failed: number; running: number },
-): { label: string; tone: ChecksChipTone; priority: number } | null {
-  switch (rollup) {
-    case "green":
-      return { label: `✓ ${counts.passed}`, tone: "ok", priority: 40 };
-    case "red":
-      return { label: `✗ ${counts.failed} failed`, tone: "danger", priority: 90 };
-    case "yellow":
-      return { label: `◐ ${counts.running} running`, tone: "warn", priority: 40 };
-    case "none":
-    default:
-      return null;
-  }
-}
-
-/** Branch chip label: plain `⎇ branch`, or `⎇ branch · #412` when a PR
- * rides the chip. Null when there is no branch (chip not rendered at all).
- * The `⎇` stands in for the GitBranch icon the chip actually renders — the
- * label is the string form for tests/titles. */
-export function branchChipLabel(
-  branch: string | null,
-  pr: { number: number } | null,
-): string | null {
-  if (!branch) return null;
-  return pr ? `⎇ ${branch} · #${pr.number}` : `⎇ ${branch}`;
-}
-
 /** Whether to surface the one-line "Connect GitHub" offer under the header
  * (§4.5 [S10]). Only when the forge is NOT connected AND the session origin
  * is a recognised forge AND the offer has not been permanently dismissed. */
@@ -3656,16 +3577,6 @@ export function shouldOfferForgeConnect({
   if (connected) return false;
   if (dismissed) return false;
   return forgeKind != null;
-}
-
-/** The "send failures to the agent" composer fill — names each failing check
- * (plus its log URL) so the agent can act without the user transcribing. This
- * FILLS the composer; it does not submit. */
-export function failuresToAgentPrompt(checks: ForgeCheckRun[]): string {
-  const failed = checks.filter((c) => checkTone(c) === "error");
-  if (failed.length === 0) return "";
-  const lines = failed.map((c) => `- ${c.name}${c.url ? ` (${c.url})` : ""}`);
-  return `Checks are failing on this pull request:\n${lines.join("\n")}\n\nPlease investigate and fix them.`;
 }
 
 // ===== Pinned card stack arbiter (BET-783) =====
@@ -3873,186 +3784,6 @@ export function forgeCredentialSecondary(status: {
     : status.source === "stored" ? "signed in on this server"
     : "connected";
   return status.login ? `@${status.login} · ${where}` : where;
-}
-
-// ===== Forge merge gate (BET-794) =====
-
-/**
- * Whether the merge affordance is enabled for a pull request, plus a
- * user-visible reason when it is not. Merge is enabled ONLY when ALL hold:
- * the checks rollup is `green`, there are no unresolved review threads, and
- * the forge reports `mergeable === true`. Every blocking combination yields a
- * distinct reason so the UI can explain "why can't I merge" instead of a bare
- * disabled button.
- *
- * `mergeable: null` means the forge is still computing mergeability — NOT
- * mergeable, reason "still computing" (the caller may retry).
- *
- * @param {{ rollup: CheckRollup, unresolvedThreads: number, mergeable: true | false | null }} input
- * @returns {{ can: boolean, reason: string | null }}
- */
-export function canMerge({
-  rollup,
-  unresolvedThreads,
-  mergeable,
-}: {
-  rollup: CheckRollup;
-  unresolvedThreads: number;
-  mergeable: true | false | null;
-}): { can: boolean; reason: string | null } {
-  if (mergeable === null) return { can: false, reason: "still computing" };
-  if (mergeable !== true) return { can: false, reason: "not mergeable" };
-  if (rollup !== "green") {
-    const reason = rollup === "yellow" ? "checks still running" : rollup === "red" ? "checks failing" : "no checks";
-    return { can: false, reason };
-  }
-  if (unresolvedThreads > 0) {
-    return { can: false, reason: `${unresolvedThreads} unresolved thread${unresolvedThreads === 1 ? "" : "s"}` };
-  }
-  return { can: true, reason: null };
-}
-
-/**
- * The user-facing message for a merge failure, keyed by its distinguished kind
- * (status code, not a generic error): `sha_mismatch` (409), `cannot_merge`
- * (405), `permission` (403). Each has a different next action, so each must be
- * surfaced distinctly rather than as a bare "Merge failed".
- */
-export function describeMergeFailure(kind: string | null | undefined): string {
-  switch (kind) {
-    case "sha_mismatch":
-      return "Merge failed — the head SHA moved. This PR changed after you reviewed it; re-review before merging.";
-    case "cannot_merge":
-      return "Cannot merge — the PR is blocked (branch protection, draft, or a conflict).";
-    case "permission":
-      return "No permission to merge this pull request.";
-    default:
-      return kind ? `Merge failed (${kind}).` : "Merge failed.";
-  }
-}
-
-/**
- * The single decision for how the session-header branch chip renders and
- * whether it opens a popover (the ONE git surface, BET-867). `"none"` means the
- * plain, non-interactive `Tag` — either there is no branch, or the forge is not
- * connected for this cwd (a scratch dir with no forge must stay byte-identical
- * to a non-forge session). `"no-pr"` opens the popover in its Draft PR / Create
- * PR state; `"pr"` opens it in the merge surface state.
- */
-export function branchPanelState({
-  pr,
-  forgeConnected,
-  branch,
-}: {
-  pr: PullRequest | null;
-  forgeConnected: boolean;
-  branch: string | null;
-}): "none" | "no-pr" | "pr" {
-  if (!branch || !forgeConnected) return "none";
-  return pr ? "pr" : "no-pr";
-}
-
-/**
- * The ship gate for the forge surface (BET-892): whether a "Create pull
- * request" action even makes sense for the current branch, evaluated in this
- * order — first match wins.
- *
- *  1. `has-pr`    — a PR is already open on this branch.
- *  2. `detached`  — no branch (detached HEAD / non-git cwd).
- *  3. `unknown`   — base branch unknown (cannot tell if on the default branch).
- *  4. `on-base`   — sitting on the repo default branch (no PR to open).
- *  5. `no-commits`— no commits ahead of origin/<base> (nothing to ship).
- *  6. `ready`     — ship away.
- *
- * One deliberate asymmetry — do not "fix" it:
- * - `base === null` → `"unknown"`. The base is a *safety* fact: without it we
- *   cannot tell whether the current branch is the default branch, and a PR
- *   from a branch onto itself cannot exist. No base means no PR action.
- * - `aheadCount === null` still falls through to `"ready"`. The commit count is
- *   an *optimisation*, not a safety fact. It is legitimately unknown whenever
- *   `origin/<base>` is not fetched locally (shallow clone, fresh worktree), and
- *   hiding the action there would break a normal case for no safety gain — an
- *   empty PR is refused by the forge with a clear message.
- */
-export type ShipState = "on-base" | "detached" | "unknown" | "no-commits" | "ready" | "has-pr";
-
-export function resolveShipState(input: {
-  branch: string | null;
-  base: string | null;
-  aheadCount: number | null;
-  hasPr: boolean;
-}): ShipState {
-  if (input.hasPr) return "has-pr";
-  if (!input.branch) return "detached";
-  if (!input.base) return "unknown";
-  if (input.branch === input.base) return "on-base";
-  if (input.aheadCount === 0) return "no-commits";
-  return "ready";
-}
-
-// ---- Forge review pane (BET-792) -------------------------------------------
-
-// The line anchor a comment may attach to, in the forge-neutral shape the spec
-// (§3.4③) normalises on: `path` names the FILE, `side` is "new" (added lines —
-// GitHub's RIGHT), "old" (removed lines — GitHub's LEFT) or "both" (unchanged
-// context lines, present in both versions — GitLab positions them with both
-// `new_line` and `old_line`, BET-856), and `line` is the corresponding line
-// number. `path` is load-bearing — a PR diff is a single merged stream of many
-// files, so an anchor that drops it misplaces a thread whenever two files share
-// a line number. The renderer maps these onto the rows UnifiedDiff draws, keyed
-// per-file.
-export type CommentableLine = { path: string; line: number; side: "new" | "old" | "both" };
-
-// Derive the set of commentable line anchors from a unified-diff text, walking
-// the `@@ -A,B +C,D @@` hunk headers so numbers are exact per hunk. Added lines
-// anchor on the NEW side (new line number); removed lines on the OLD side (old
-// line number); unchanged context lines on BOTH (present in both versions, so
-// GitLab positions them with both `new_line` and `old_line` — BET-856). The
-// active file path is tracked from the `+++ b/` marker (falling back to `--- a/`
-// when a file is deleted to `/dev/null`), so every anchor is keyed to its file.
-// File markers / hunk headers are not commentable. An empty diff yields `[]`.
-// This is the SINGLE anchor producer (BET-859): `UnifiedDiff` (ToolBodies.tsx)
-// consumes its output rather than re-deriving `(path, side, line)` inline, so
-// the line-classification rule can't diverge from a second implementation.
-export function commentableLines(diffText: string): CommentableLine[] {
-  const result: CommentableLine[] = [];
-  let oldLine = 0;
-  let newLine = 0;
-  let path = "";
-  let aPath = "";
-  for (const line of diffText.split("\n")) {
-    if (line.startsWith("--- ")) {
-      const m = /^--- a\/(.+)$/.exec(line);
-      if (m) aPath = m[1].trim();
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      const m = /^\+\+\+ b\/(.+)$/.exec(line);
-      if (m) path = m[1].trim();
-      else if (/^\+\+\+ \/dev\/null$/.test(line.trim())) path = aPath;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      const m = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (m) {
-        oldLine = parseInt(m[1], 10);
-        newLine = parseInt(m[2], 10);
-      }
-      continue;
-    }
-    if (line.startsWith("+") && !line.startsWith("+++")) {
-      if (path) result.push({ path, line: newLine, side: "new" });
-      newLine++;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
-      if (path) result.push({ path, line: oldLine, side: "old" });
-      oldLine++;
-    } else if (line.startsWith(" ")) {
-      if (path) result.push({ path, line: newLine, side: "both" });
-      oldLine++;
-      newLine++;
-    }
-  }
-  return result;
 }
 
 // The plain text of a USER message — its non-synthetic text parts concatenated
@@ -4474,59 +4205,6 @@ export function dispatchWidget(payload: unknown, handlers: WidgetHandlers): void
     handlers.fail?.(p);
     return;
   }
-}
-
-// ---- Work inbox (BET-795) --------------------------------------------------
-
-// How urgent each inbox reason is — the merge tiebreak. A checks-failing PR is
-// the most urgent (bad dot), a requested review next (warn dot), a plain
-// assignment least (mute dot) — the dot-tone order of the mockup. Mirrors the
-// server's precedence so a renderer that ever receives a duplicated key settles
-// it the same way, independently of the box.
-const INBOX_REASON_PRIORITY: Record<InboxReason, number> = {
-  "checks failing": 3,
-  "review requested": 2,
-  assigned: 1,
-};
-
-/**
- * The human phrase for an inbox reason — what the row's secondary column shows,
- * with the mockup's copy verbatim ("checks red", "review requested",
- * "issue · assigned to you"). Pure + tested.
- */
-export function inboxReasonLabel(reason: InboxReason): string {
-  switch (reason) {
-    case "checks failing":
-      return "checks red";
-    case "review requested":
-      return "review requested";
-    case "assigned":
-      return "issue · assigned to you";
-  }
-}
-
-/**
- * Sort inbox rows by `updatedAt` descending (most recent first), AND dedupe by
- * `repoKey#number` with the more urgent reason winning when the same object
- * appears twice (a PR matching two inbox populations). The server already
- * merges + dedupes, but the renderer guarantees the invariant it renders by —
- * nothing displays a duplicated row or a stale lower-priority reason. Pure +
- * tested, including the dedupe-precedence case.
- */
-export function sortInbox(items: ForgeInboxItem[]): ForgeInboxItem[] {
-  const byKey = new Map<string, ForgeInboxItem>();
-  for (const item of items) {
-    const key = `${item.repoKey}#${item.number}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, item);
-      continue;
-    }
-    if (INBOX_REASON_PRIORITY[item.reason] > INBOX_REASON_PRIORITY[existing.reason]) {
-      byKey.set(key, item);
-    }
-  }
-  return [...byKey.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /**

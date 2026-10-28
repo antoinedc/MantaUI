@@ -161,7 +161,7 @@ function defaultApiImpl(): Record<string, unknown> {
     progressGet: () => Promise.resolve(null),
     // A current box: it advertises the server-first capabilities (WS02) and no session is a background job.
     getServerVersion: () =>
-      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1"] }),
+      Promise.resolve({ version: "0.0.0", minClient: "0.0.0", opencodeVersion: "0.0.0", capabilities: ["chat-cards-1", "forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"] }),
     delegateJobForSession: () => Promise.resolve({ readOnly: false }),
     // Per-session model prefs (BET-1281): ChatPanel reads the box mirror through
     // the shared modelPrefs module. Empty by default unless a test overrides it.

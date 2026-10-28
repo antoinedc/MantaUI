@@ -25,23 +25,15 @@ import {
   describeSeatLine,
   moveMenuHighlight,
   selectStatusItems,
-  checksChipDescriptor,
-  countsForChecks,
-  checkTone,
-  orderChecks,
   shouldOfferForgeConnect,
-  failuresToAgentPrompt,
-  branchPanelState,
-  resolveShipState,
-  ShipState,
-  canMerge,
-  type ChecksChipTone,
   type ContextBreakdown,
   type StaleCacheResult,
   type StatusItem,
 } from "./chatUtils";
 import type { SessionMode } from "./chatShared";
-import type { AvailableLauncher, CheckRollup, ForgeCheckRun, PullRequest } from "../shared/types";
+import type { AvailableLauncher, ForgeCheckRun, ForgePullRequestView, PullRequest } from "../shared/types";
+
+type ChecksChipTone = "ok" | "warn" | "danger";
 import { Button } from "./Button";
 import { IconButton } from "./IconButton";
 import { Pill } from "./Pill";
@@ -105,7 +97,8 @@ export function SessionHeader({
   hiddenStatusItems,
   pr,
   checks,
-  checksRollup,
+  view,
+  forgeViewOutdated,
   forgeConnected,
   forgeKind,
   forgeConnectOfferDismissed,
@@ -173,14 +166,18 @@ export function SessionHeader({
   hiddenStatusItems?: string[];
   // BET-789: forge read path, consumed from ChatPanel (which owns the fetch)
   // and threaded down so this component stays presentational. `pr` + `checks`
-  // + `checksRollup` drive the PR-on-branch suffix and the checks chip;
+  // + the box's `view` drive the PR-on-branch suffix and the checks chip;
   // `forgeConnected` + the session origin's `forgeKind` + the permanently-
   // dismissed flag drive the one-line connect offer. All optional with
   // forge-absent defaults so non-forge callers (tests, mobile) stay
   // byte-identical to today.
   pr?: PullRequest | null;
   checks?: ForgeCheckRun[];
-  checksRollup?: CheckRollup;
+  // WS05: the box's render-ready view of the PR read (panel, ship gate, merge
+  // gate, checks chip / prompt / log URL). The header renders it; it derives
+  // nothing. Absent = an older box (`forgeViewOutdated` then adds the note).
+  view?: ForgePullRequestView | null;
+  forgeViewOutdated?: boolean;
   forgeConnected?: boolean;
   forgeKind?: string | null;
   forgeConnectOfferDismissed?: boolean;
@@ -253,11 +250,12 @@ export function SessionHeader({
   // there is a PR with checks and a non-empty rollup. No PR / no checks / forge
   // not connected → the descriptor is null → nothing is registered (§4.3 [C2]):
   // connecting GitHub adds no chrome by itself.
-  const checksCounts = countsForChecks(checks ?? []);
-  const checksDesc =
-    pr && checks && checks.length > 0
-      ? checksChipDescriptor(checksRollup ?? "none", checksCounts)
-      : null;
+  // The chip itself is the box's (`view.checks.chip`); only its registry
+  // priority — layout — lives here (red is pinned, green/yellow overflow first).
+  const boxChip = view?.checks.chip ?? null;
+  const checksDesc = boxChip
+    ? { label: boxChip.label, tone: boxChip.tone as ChecksChipTone, priority: boxChip.tone === "danger" ? 90 : 40 }
+    : null;
   // The one-line connect offer — only in a forge-origin session while the
   // forge is disconnected and the offer has not been permanently dismissed.
   const offerConnect = shouldOfferForgeConnect({
@@ -269,11 +267,7 @@ export function SessionHeader({
   // BET-867: the one decision driving the branch chip — plain non-interactive
   // Tag (no branch / no forge) vs. the interactive branch popover in its
   // no-PR or PR state.
-  const branchState = branchPanelState({
-    pr: pr ?? null,
-    forgeConnected: forgeConnected ?? false,
-    branch,
-  });
+  const branchState = view?.panel ?? "none";
 
   // ===== Status-item registry (BET-782) =====
   // The right group is a REGISTRY, not hand-ordered JSX. Each entry is a
@@ -323,6 +317,7 @@ export function SessionHeader({
         <ChecksChip
           descriptor={checksDesc}
           checks={checks ?? []}
+          view={view ?? null}
           pr={pr ?? null}
           forgeKind={forgeKind ?? null}
           onOpenExternal={onOpenExternal}
@@ -431,7 +426,7 @@ export function SessionHeader({
         <BranchChip
           branch={branch ?? ""}
           pr={pr ?? null}
-          checksRollup={checksRollup ?? "none"}
+          view={view ?? null}
           mergeBusy={mergeBusy ?? false}
           mergeError={mergeError ?? null}
           onMerge={onMerge}
@@ -458,6 +453,14 @@ export function SessionHeader({
             <span className="shrink-0 truncate max-w-[200px]">{branch}</span>
           </Tag>
         ) : null}
+
+      {/* An older box sends no `view`: the branch stays a plain tag and this
+            says why, only when GitHub is connected (nothing else to explain). */}
+      {forgeViewOutdated && forgeConnected && (
+        <span className="shrink-0 text-[11px] text-text-quiet" data-testid="forge-view-outdated">
+          Update your box to see pull requests and checks here.
+        </span>
+      )}
 
       {/* Right group — the registry's visible items + the overflow trigger.
             Order preserves today's wide-width visual (context, artifacts,
@@ -1158,14 +1161,14 @@ function SessionMenu({
 // commits-ahead). BET-867 is an
 // owner-approved departure from BET-789's [C2]: the no-PR branch now opens a
 // popover where it previously stayed a plain non-interactive Tag; a scratch dir
-// with no forge keeps the Tag unchanged (branchPanelState == "none").
+// with no forge keeps the Tag unchanged (view.panel == "none").
 //
 // The panel props are shared by BranchChip and BranchPanel (the chip passes
 // them straight through) — one type, no parallel re-declaration.
 type BranchPanelProps = {
   branch: string;
   pr: PullRequest | null;
-  checksRollup: CheckRollup;
+  view: ForgePullRequestView | null;
   mergeBusy: boolean;
   mergeError: string | null;
   onMerge?: () => void;
@@ -1274,18 +1277,13 @@ function PanelRow({
 // surface at all "on" the base branch, a detached HEAD, or an unknown base.
 // PanelRow is reused verbatim for both states' rows.
 
-// The three states where a pull request cannot exist for this branch: the
-// popover shows the branch and why, and offers no action.
-const NO_SHIP_COPY: Partial<Record<ShipState, string>> = {
-  "on-base": "On the base branch — nothing to ship.",
-  detached: "Detached HEAD — nothing to ship.",
-  unknown: "Base branch unknown — nothing to ship.",
-};
+// The ship gate and the merge gate (state, copy, reason, tone) are the box's
+// (`view.ship`, `view.merge`) — this panel only lays them out.
 
 function BranchPanel({
   branch,
   pr,
-  checksRollup,
+  view,
   mergeBusy,
   mergeError,
   onMerge,
@@ -1297,7 +1295,6 @@ function BranchPanel({
   justShipped,
   forgeKind,
   base,
-  aheadCount,
   onCreatePr,
   onOpenExternal,
   onReviewChanges,
@@ -1306,8 +1303,11 @@ function BranchPanel({
     // No pull request on this branch — the ship gate. On the base branch, a
     // detached HEAD, or an unknown base there is no PR to open, so no PR
     // surface renders at all.
-    const shipState = resolveShipState({ branch, base, aheadCount, hasPr: false });
-    const noShip = NO_SHIP_COPY[shipState];
+    const shipState = view?.ship.state ?? "unknown";
+    const noShip =
+      shipState === "on-base" || shipState === "detached" || shipState === "unknown"
+        ? view?.ship.copy ?? null
+        : null;
     if (noShip) {
       return (
         <div className="p-3">
@@ -1326,9 +1326,7 @@ function BranchPanel({
         {shipError ? (
           <div className="mb-2 break-words text-xs text-danger">{shipError}</div>
         ) : shipState === "no-commits" ? (
-          <div className="mb-2 text-xs text-text-faint">
-            Nothing to ship — no commits ahead of {base}
-          </div>
+          <div className="mb-2 text-xs text-text-faint">{view?.ship.copy}</div>
         ) : shipState === "ready" ? (
           <>
             <div className="mb-2 text-xs text-text-faint">
@@ -1371,22 +1369,19 @@ function BranchPanel({
       </div>
     );
   }
-  // PR present — the merge surface [F1]. The merge gate is the existing
-  // canMerge: green rollup + no unresolved threads + mergeable true are ALL
-  // required (BET-867, do not re-derive).
-  const merge = canMerge({
-    rollup: checksRollup,
-    unresolvedThreads: pr.unresolvedThreads,
-    mergeable: pr.mergeable,
-  });
-  // mergeBlockedReason is the payload — "checks failing", "conflicts",
-  // "review required", "draft" — displayed in danger. Only when there is no
-  // reason does it fall back to a status the forge itself reports.
-  const mergeable = pr.mergeBlockedReason
-    ? { text: pr.mergeBlockedReason, className: "text-danger" }
-    : pr.mergeable === true
-      ? { text: "mergeable", className: "text-ok" }
-      : { text: "computing…", className: "text-text-faint" };
+  // PR present — the merge surface [F1]. The merge gate and the "Mergeable"
+  // row (text + tone) are the box's: `view.merge` (the box re-checks the gate
+  // when the merge arrives, so a stale view can never merge).
+  const merge = { can: view?.merge?.can ?? false, reason: view?.merge?.reason ?? null };
+  const mergeable = {
+    text: view?.merge?.mergeable.text ?? "computing…",
+    className:
+      view?.merge?.mergeable.tone === "danger"
+        ? "text-danger"
+        : view?.merge?.mergeable.tone === "ok"
+          ? "text-ok"
+          : "text-text-faint",
+  };
   return (
     <div className="p-3">
       {justShipped && (
@@ -1435,9 +1430,9 @@ function BranchPanel({
 //
 // The checks chip is the ONE new status item (§4.3): colour AND glyph, never
 // colour alone — `✓ 7`, `✗ 2 failed`, `◐ 3 running`. Its tone + priority are
-// a function of state (see checksChipDescriptor). It opens on CLICK (never
+// a function of state (the box sends the chip; see `view.checks.chip`). It opens on CLICK (never
 // hover — it carries a link + an action), and its popover lists EVERY check in
-// one flat list — the dot carries the state and `orderChecks` carries the
+// one flat list — the dot carries the state and the box's check order carries the
 // failed → running → passed grouping, each name a link to its own log (BET-926).
 const CHECK_TONE_CLASS: Record<ChecksChipTone, string> = {
   ok: "border-ok/40 bg-ok-bg text-ok",
@@ -1448,6 +1443,7 @@ const CHECK_TONE_CLASS: Record<ChecksChipTone, string> = {
 function ChecksChip({
   descriptor,
   checks,
+  view,
   pr,
   forgeKind,
   onOpenExternal,
@@ -1455,6 +1451,7 @@ function ChecksChip({
 }: {
   descriptor: { label: string; tone: ChecksChipTone; priority: number };
   checks: ForgeCheckRun[];
+  view: ForgePullRequestView | null;
   pr: PullRequest | null;
   forgeKind?: string | null;
   onOpenExternal?: (url: string) => void;
@@ -1493,6 +1490,7 @@ function ChecksChip({
       >
         <ChecksPanel
           checks={checks}
+          view={view}
           pr={pr}
           forgeKind={forgeKind}
           onOpenExternal={onOpenExternal}
@@ -1515,7 +1513,7 @@ function CheckRow({
   const detail = check.conclusion ?? check.status ?? "";
   return (
     <div className="flex items-center gap-2 rounded-md px-2 py-2 text-label text-text-muted hover:bg-fill-hover">
-      <StatusDot tone={checkTone(check)} />
+      <StatusDot tone={check.tone ?? "running"} />
       {check.url && onOpenExternal ? (
         <button
           type="button"
@@ -1536,23 +1534,22 @@ function CheckRow({
 
 function ChecksPanel({
   checks,
-  pr,
+  view,
   forgeKind,
   onOpenExternal,
   onFillComposer,
 }: {
   checks: ForgeCheckRun[];
+  view: ForgePullRequestView | null;
   pr: PullRequest | null;
   forgeKind?: string | null;
   onOpenExternal?: (url: string) => void;
   onFillComposer?: (text: string) => void;
 }) {
-  const ordered = orderChecks(checks);
-  const prompt = failuresToAgentPrompt(checks);
-  const logUrl =
-    ordered.find((c) => checkTone(c) === "error" && c.url)?.url ??
-    checks.find((c) => c.url)?.url ??
-    pr?.url;
+  // Checks arrive ordered failed → running → passed, each with its tone; the
+  // prompt and the log URL are the box's too.
+  const prompt = view?.checks.failuresPrompt ?? null;
+  const logUrl = view?.checks.logsUrl ?? null;
   return (
     <div className="p-2">
       <div className="mb-1 flex items-center gap-2 border-b border-border-subtle px-2 pb-2">
@@ -1568,7 +1565,7 @@ function ChecksPanel({
         </span>
       </div>
       <div className="max-h-[260px] overflow-y-auto">
-        {ordered.map((c) => (
+        {checks.map((c) => (
           <CheckRow key={c.name} check={c} onOpenExternal={onOpenExternal} />
         ))}
       </div>

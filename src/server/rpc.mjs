@@ -1053,7 +1053,7 @@ export function buildHandlers({
     // BET-795: forge:inbox — the aggregated work inbox. Box-side read; three
     // cross-repo SEARCH queries (assigned, review-requested, my red PRs),
     // cached a full 60s on the search bucket. No per-repo iteration.
-    "forge:inbox": () => forgeInbox(),
+    "forge:inbox": () => forgeInbox({ probeRepos: () => local.forgeProbe() }),
 
     // BET-794: forge write path. Both box-side — a forge token never reaches
     // the renderer; the server resolves it. forge:ship previews/creates a PR

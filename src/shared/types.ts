@@ -611,6 +611,33 @@ export type ForgeCheckRun = {
   status?: string;
   conclusion?: string;
   url?: string;
+  // The box's classification (WS05 S.1): ok | running | error. Absent from an
+  // older box (capability `forge-pr-view-1`).
+  tone?: "ok" | "running" | "error";
+};
+
+// The box's render-ready view of a PR read (WS05 S.1, capability
+// `forge-pr-view-1`): which panel the branch chip opens, the ship gate with its
+// copy, the merge gate with its reason, and the checks chip / prompt / log URL.
+// Clients render it; none re-derives any of it.
+export type ForgePullRequestView = {
+  panel: "none" | "no-pr" | "pr";
+  chipLabel: string | null;
+  ship: {
+    state: "has-pr" | "detached" | "unknown" | "on-base" | "no-commits" | "ready";
+    copy: string | null;
+  };
+  merge: null | {
+    can: boolean;
+    reason: string | null;
+    mergeable: { text: string; tone: "ok" | "muted" | "danger" };
+  };
+  checks: {
+    counts: { passed: number; failed: number; running: number };
+    chip: null | { glyph: string; label: string; tone: "ok" | "warn" | "danger" };
+    failuresPrompt: string | null;
+    logsUrl: string | null;
+  };
 };
 
 // forge:status result — presence + identity ONLY, never a token. `connected`
@@ -665,6 +692,8 @@ export type ForgePullRequestResult = {
   branch: string | null;
   base: string | null;
   aheadCount: number | null;
+  // WS05: the box's view. Absent from a box without `forge-pr-view-1`.
+  view?: ForgePullRequestView;
 };
 
 // A normalised forge review thread (the review pane's "incoming thread").
@@ -681,6 +710,34 @@ export type ForgeThread = {
   startLine?: number | null;
   resolved: boolean;
   comments: { author: string; body: string; createdAt: string | null }[];
+  // WS05 S.2: where the box put this thread (`forge:diff` only).
+  placement?: ForgePlacement;
+};
+
+// Where the box placed a thread / draft comment: under row `row` of file `file`
+// (indices into `ForgeDiffResult.files`), at the top of a file, or unplaced.
+export type ForgePlacement =
+  | { at: "row"; file: number; row: number }
+  | { at: "file"; file: number }
+  | { at: "unplaced" };
+
+// One row of the box's structured review diff (WS05 S.2).
+export type ForgeDiffRow = {
+  kind: "hunk" | "added" | "removed" | "context";
+  text: string;
+  oldLine: number | null;
+  newLine: number | null;
+  // The anchor a comment on this row carries; null for hunk headers.
+  anchor: { path: string; line: number; side: "new" | "old" | "both" } | null;
+};
+
+export type ForgeDiffFile = {
+  path: string;
+  added: number;
+  removed: number;
+  rowCount: number;
+  truncated: boolean;
+  rows: ForgeDiffRow[];
 };
 
 // The target of a forge read/write. Either the session's `cwd` (resolved
@@ -704,12 +761,20 @@ export type ForgeDiffResult = {
   headSha: string;
   stale?: boolean;
   error: "no_forge" | "not_connected" | "no_pr" | null;
+  // WS05 S.2 (capability `forge-diff-view-1`): the box's parsed diff, with every
+  // thread (in `threads[].placement`) and draft comment placed. `files` absent =
+  // an older box. `parseFailed`: the fetch worked but the diff text could not be
+  // read (`error` stays null). `message`: plain-word sentence beside `error`.
+  files?: ForgeDiffFile[];
+  draft?: ForgePlacedDraft | null;
+  parseFailed?: boolean;
+  message?: string | null;
 };
 
 // ----- Work inbox (BET-795) -----
 
 // Why an item is in the inbox. This is the value the row's secondary column
-// largely spells out (the label mapping lives in chatUtils.inboxReasonLabel),
+// largely spells out (the box sends the row label: `forge-inbox-view-1`),
 // and it is what the row ultimately displays.
 export type InboxReason = "assigned" | "review requested" | "checks failing";
 
@@ -733,6 +798,15 @@ export type ForgeInboxItem = {
   // single INBOX_SEED_PROMPT constant so the renderer never constructs its own
   // "Complete {{url}}" copy (one default, not two).
   seed: string;
+  // WS05 S.1 row fields (capability `forge-inbox-view-1`). Absent from an older box.
+  label?: string;
+  identifier?: string;
+  secondary?: string;
+  repoName?: string;
+  tone?: "danger" | "warn" | "muted";
+  branchName?: string;
+  // The checkout of `repoKey` on the box, joined box-side; null when none.
+  localPath?: string | null;
 };
 
 // forge:inbox result. `items` are sorted by updatedAt desc. `error` is
@@ -758,7 +832,7 @@ export type ForgeShipInput = {
 
 export type ForgeShipResult =
   | { ok: true; pr: PullRequest; url: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; message?: string };
 
 // forge:ship-preview — the facts the confirm card needs BEFORE anything is
 // pushed: the head branch, the base branch (PR target), a best-effort count
@@ -780,7 +854,7 @@ export type ForgeShipPreviewInput = {
 
 export type ForgeShipPreviewResult =
   | { ok: true; head: string; base: string; fileCount: number; title: string; body: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; message?: string };
 // forge:merge input — ALWAYS passes the head SHA the user approved so the API
 // cannot merge a commit that landed after the reviewed diff (issue §4).
 export type ForgeMergeInput = {
@@ -801,7 +875,7 @@ export type ForgeMergeFailureKind =
 
 export type ForgeMergeResult =
   | { ok: true; data: Record<string, unknown> }
-  | { ok: false; error: string; kind: ForgeMergeFailureKind | null };
+  | { ok: false; error: string; kind: ForgeMergeFailureKind | null; message?: string };
 
 // ----- Forge draft review (BET-793) -----
 
@@ -838,10 +912,15 @@ export type ForgeDraft = {
   updatedAt: number;
 };
 
+// A draft comment as `forge:diff` returns it, with the box's placement.
+export type ForgePlacedDraftComment = ForgeDraftComment & { placement?: ForgePlacement };
+export type ForgePlacedDraft = Omit<ForgeDraft, "comments"> & { comments: ForgePlacedDraftComment[] };
+
 // forge:draft-get result — the current draft for a session's PR (null when none).
 export type ForgeDraftGetResult = {
   draft: ForgeDraft | null;
   error: "no_forge" | "not_connected" | "no_pr" | null;
+  message?: string | null;
 };
 
 // forge:draft-comment input — `op` selects add / edit / delete of one comment
@@ -864,8 +943,8 @@ export type ForgeDraftCommentInput = {
 } & ForgeRefTarget;
 
 export type ForgeDraftCommentResult =
-  | { ok: true; draft: ForgeDraft }
-  | { ok: false; error: string };
+  | { ok: true; draft: ForgeDraft | null; message?: null }
+  | { ok: false; error: string; message?: string };
 
 // forge:draft-submit input + result. Submitting flushes the WHOLE draft as one
 // review; the draft is cleared only on success. A failed submit returns a typed
@@ -876,8 +955,8 @@ export type ForgeDraftSubmitInput = {
 } & ForgeRefTarget;
 
 export type ForgeDraftSubmitResult =
-  | { ok: true }
-  | { ok: false; error: string; kind?: string | null };
+  | { ok: true; message?: null }
+  | { ok: false; error: string; kind?: string | null; message?: string };
 
 // forge:thread-reply input + result. A reply targets ONE existing incoming
 // thread and posts immediately — it is never buffered in the draft, which
@@ -888,8 +967,8 @@ export type ForgeThreadReplyInput = {
 } & ForgeRefTarget;
 
 export type ForgeThreadReplyResult =
-  | { ok: true }
-  | { ok: false; error: string };
+  | { ok: true; message?: null }
+  | { ok: false; error: string; message?: string };
 
 
 // ----- IPC inputs -----

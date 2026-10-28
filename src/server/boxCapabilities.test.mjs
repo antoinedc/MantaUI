@@ -32,3 +32,9 @@ test("WS09 ids are advertised", () => {
 test("WS06 search id is advertised", () => {
   assert.ok(BOX_CAPABILITIES.includes("search-scope-all-1"));
 });
+
+test("WS05 forge ids are advertised", () => {
+  for (const id of ["forge-pr-view-1", "forge-diff-view-1", "forge-inbox-view-1", "forge-messages-1"]) {
+    assert.ok(BOX_CAPABILITIES.includes(id), id);
+  }
+});

@@ -19,11 +19,11 @@ import type { VirtuosoHandle } from "react-virtuoso";
 import { ArrowDown, X } from "lucide-react";
 import type {
   AvailableLauncher,
-  CheckRollup,
   DelegateApproval,
   DelegateApprovalTool,
   DelegateJobView,
   ForgeCheckRun,
+  ForgePullRequestView,
   OptimizerSummary,
   ProgressRecord,
   PullRequest,
@@ -57,7 +57,6 @@ import {
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
-  describeMergeFailure,
   progressAttentionKind,
   isPlanExitQuestion,
   extractPlanData,
@@ -1077,11 +1076,15 @@ export function ChatPanel({
     kind: string | null;
     pr: PullRequest | null;
     checks: ForgeCheckRun[];
-    rollup: CheckRollup;
     branch: string | null;
     base: string | null;
     aheadCount: number | null;
-  }>({ connected: false, kind: null, pr: null, checks: [], rollup: "none", branch: null, base: null, aheadCount: null });
+    // The box's render-ready view of the PR read (WS05); null until the first
+    // read, and for a box that doesn't send one (`viewMissing`).
+    view: ForgePullRequestView | null;
+    viewMissing: boolean;
+  }>({ connected: false, kind: null, pr: null, checks: [], branch: null, base: null, aheadCount: null, view: null, viewMissing: false });
+  const prViewCapability = useBoxCapability("forge-pr-view-1");
   const refreshForge = useCallback(async (cwdArg: string) => {
     try {
       const [status, prResult] = await Promise.all([
@@ -1098,10 +1101,11 @@ export function ChatPanel({
         kind: prResult.error !== "no_forge" ? "github" : null,
         pr: prResult.pr,
         checks: prResult.checks ?? [],
-        rollup: prResult.rollup ?? "none",
         branch: prResult.branch ?? null,
         base: prResult.base ?? null,
         aheadCount: prResult.aheadCount ?? null,
+        view: prResult.view ?? null,
+        viewMissing: prResult.view === undefined,
       });
     } catch {
       // non-fatal — the forge read path is best-effort; keep last-known.
@@ -1129,7 +1133,7 @@ export function ChatPanel({
         setShipProposal({ head: prev.head, base: prev.base, fileCount: prev.fileCount, title: prev.title || prev.head, body: prev.body ?? "" });
       } else {
         setShipProposal(null);
-        setShipError(prev.error);
+        setShipError(prev.message ?? prev.error);
       }
     } catch (e) {
       setShipProposal(null);
@@ -1160,7 +1164,7 @@ export function ChatPanel({
         if (res.url) void window.api.openExternal(res.url);
         void refreshForge(cwd);
       } else {
-        setShipError(res.error);
+        setShipError(res.message ?? res.error);
       }
     } catch (e) {
       setShipError(e instanceof Error ? e.message : "ship failed");
@@ -1180,7 +1184,9 @@ export function ChatPanel({
       if (res.ok) {
         void refreshForge(cwd);
       } else {
-        setMergeError(describeMergeFailure(res.kind));
+        // The box's sentence (it also covers `blocked`); an older box sends only
+        // the raw error.
+        setMergeError(res.message ?? res.error);
       }
     } catch (e) {
       setMergeError(e instanceof Error ? e.message : "merge failed");
@@ -3444,7 +3450,8 @@ export function ChatPanel({
         hiddenStatusItems={hiddenStatusItems}
         pr={forge.pr}
         checks={forge.checks}
-        checksRollup={forge.rollup}
+        view={forge.view}
+        forgeViewOutdated={forge.viewMissing || prViewCapability === false}
         forgeConnected={forge.connected}
         forgeKind={forge.kind}
         forgeConnectOfferDismissed={forgeConnectOfferDismissed}

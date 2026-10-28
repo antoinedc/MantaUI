@@ -23,6 +23,11 @@ export const BOX_CAPABILITIES = Object.freeze([
   "usage-window-tone-1",
   // WS06 (search)
   "search-scope-all-1",
+  // WS05 (git / PR / review / inbox)
+  "forge-pr-view-1",
+  "forge-diff-view-1",
+  "forge-inbox-view-1",
+  "forge-messages-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

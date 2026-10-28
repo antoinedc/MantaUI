@@ -28,55 +28,30 @@ import { Button } from "./Button";
 import { Pill } from "./Pill";
 import { ReviewPane } from "./ReviewPane";
 import { useStore } from "./store";
-import { formatAge, inboxReasonLabel, sortInbox } from "./chatUtils";
+import { formatAge } from "./chatUtils";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import { deriveProjectName, uniqueSessionName } from "../shared/projectName.mjs";
 import type { ForgeInboxItem } from "../shared/types";
 
-// The status-dot tone for each inbox reason — the mockup's deliberate mix:
-// a red-checks PR is `bad`, a review request is `warn`, an assigned issue is
-// `mute` (nothing is wrong, it is just waiting). Four tones, four meanings.
-function dotTone(reason: ForgeInboxItem["reason"]): Parameters<typeof StatusDot>[0]["tone"] {
-  switch (reason) {
-    case "checks failing":
+// The box's semantic row tone mapped onto StatusDot's vocabulary — presentation
+// only: danger → error, warn → warn, muted / unknown → idle. (Which tone a row
+// has, its label, identifier, secondary line, branch name and local checkout
+// are all the box's: `forge:inbox` row fields, WS05 G13.)
+function inboxDotTone(tone: ForgeInboxItem["tone"]): Parameters<typeof StatusDot>[0]["tone"] {
+  switch (tone) {
+    case "danger":
       return "error";
-    case "review requested":
+    case "warn":
       return "warn";
     default:
       return "idle";
   }
 }
 
-// The inline identifier prefix — `#` for an issue, `!` for a PR (GitLab's MR
-// sigil is preserved too, so a future GitLab MR shows `!88` not `#88`).
-function identifier(item: ForgeInboxItem): string {
-  return `${item.kind === "pr" ? "!" : "#"}${item.number}`;
-}
-
-// The short repo name (host/owner/repo → repo) for the row's source column.
-function repoName(item: ForgeInboxItem): string {
-  const parts = item.repoKey.split("/");
-  return parts[parts.length - 1] ?? item.repoKey;
-}
-
-// The secondary column: `reason · repo` for a PR (the row shows its repo), and
-// the bare reason phrase for an assigned issue (already "issue · assigned to
-// you" — the mockup shows no repo on that row). GitHub/GitLab stay visually
-// indistinguishable except for this text.
-function secondary(item: ForgeInboxItem): string {
-  const label = inboxReasonLabel(item.reason);
-  return item.kind === "pr" ? `${label} · ${repoName(item)}` : label;
-}
-
-// A readable branch name from an inbox item — the worktree branch that a
-// "Start a session" creates. Kept inside the component (display-slab concern),
-// so pure sort/label logic stays in chatUtils where the required tests live.
-function inboxBranchName(item: ForgeInboxItem): string {
-  const slug = (item.title ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
-  return `manta/${item.kind}-${item.number}${slug ? `-${slug}` : ""}`;
+// The short repo name for messages; the box sends it, a row without it (older
+// box) is not rendered at all (see `outdated`).
+function repoNameOf(item: ForgeInboxItem): string {
+  return item.repoName ?? item.repoKey.split("/").pop() ?? item.repoKey;
 }
 
 export function InboxPalette({ onClose }: { onClose: () => void }) {
@@ -91,7 +66,6 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   const [items, setItems] = useState<ForgeInboxItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [repos, setRepos] = useState<Record<string, string>>({}); // repoKey -> local path
   const [error, setError] = useState<string | null>(null);
 
   // BET-850: the inbox PR currently open in the in-app review pane (null =
@@ -104,22 +78,12 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
     let cancelled = false;
     setLoaded(false);
     setLoadError(null);
-    // Resolve repoKey → local path so "Start a session" can create a worktree
-    // (the cached repo probe; box-side, 60s).
-    (window.api.forgeProbe?.() ?? Promise.resolve({ repos: [] }))
-      .then((probe) => {
-        if (cancelled) return;
-        const m: Record<string, string> = {};
-        for (const r of probe?.repos ?? []) if (r.repoKey) m[r.repoKey] = r.path;
-        setRepos(m);
-      })
-      .catch(() => { /* probe is optional — degrade to no-path rows */ });
     if (typeof window.api.forgeInbox === "function") {
       window.api
         .forgeInbox()
         .then((res) => {
           if (cancelled) return;
-          setItems(sortInbox(res?.items ?? []));
+          setItems(res?.items ?? []);
           if (res?.error === "not_connected") setLoadError("GitHub isn't connected on this server.");
         })
         .catch(() => {
@@ -139,8 +103,8 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
-  // The rows after query filtering, in display order (already sorted server-side
-  // AND by sortInbox — the renderer re-asserts the invariant it renders by).
+  // The rows after query filtering, in display order (the box sorts and
+  // de-duplicates them).
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = q
@@ -148,8 +112,12 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
           (i) => i.title.toLowerCase().includes(q) || String(i.number).includes(q),
         )
       : items;
-    return sortInbox(filtered);
+    return filtered;
   }, [items, query]);
+  // An older box sends rows without the row fields — say so instead of drawing
+  // half-empty rows.
+  const rowFieldsCapability = useBoxCapability("forge-inbox-view-1");
+  const outdated = loaded && (rowFieldsCapability === false || items.some((i) => i.label === undefined));
 
   useEffect(() => {
     if (sel >= rows.length) setSel(0);
@@ -159,16 +127,16 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   // prompt is seeded into the composer (setSeedPrompt) but NOT submitted —
   // the user reviews + hits Enter ("start a session").
   const createSessionFromItem = async (item: ForgeInboxItem) => {
-    const path = repos[item.repoKey];
+    const path = item.localPath;
     if (!path) {
-      setError(`No local checkout of ${repoName(item)} on this server to start a session in.`);
+      setError(`No local checkout of ${repoNameOf(item)} on this server to start a session in.`);
       return;
     }
     setError(null);
     const existing = useStore.getState().projects.map((p) => p.tmuxSession);
     const name = uniqueSessionName(deriveProjectName(path), new Set(existing));
     try {
-      const wt = await window.api.gitAddWorktree({ cwd: path, name: inboxBranchName(item) });
+      const wt = await window.api.gitAddWorktree({ cwd: path, name: item.branchName ?? `manta/${item.kind}-${item.number}` });
       const dir = wt.path ?? path;
       const created = await window.api.tmuxNewSession({
         name,
@@ -207,9 +175,9 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
   // worktree + branch + nested rail row and runs the seeded prompt without the
   // user watching. The parent is the active chat session the job nests under.
   const delegateInBackground = async (item: ForgeInboxItem) => {
-    const path = repos[item.repoKey];
+    const path = item.localPath;
     if (!path) {
-      setError(`No local checkout of ${repoName(item)} on this server to delegate in.`);
+      setError(`No local checkout of ${repoNameOf(item)} on this server to delegate in.`);
       return;
     }
     const active = useStore.getState().activeSession();
@@ -295,7 +263,11 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        <ReviewPane target={reviewTarget ?? undefined} />
+        <ReviewPane
+          target={reviewTarget ?? undefined}
+          prUrl={reviewItem.url}
+          onOpenExternal={(url) => void window.api.openExternal(url)}
+        />
       </div>
     </div>
   ) : null;
@@ -352,6 +324,14 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
             </>
           );
         }
+        if (outdated) {
+          return (
+            <>
+              {header}
+              <div className="px-3 py-3 text-label text-text-faint">Update your box to use the inbox here.</div>
+            </>
+          );
+        }
         if (rows.length === 0) {
           return (
             <>
@@ -371,14 +351,14 @@ export function InboxPalette({ onClose }: { onClose: () => void }) {
             {rows.map((item, i) => (
               <ListRow
                 key={`${item.repoKey}#${item.number}`}
-                leading={<StatusDot tone={dotTone(item.reason)} />}
+                leading={<StatusDot tone={inboxDotTone(item.tone)} />}
                 name={
                   <span className="truncate">
-                    <span className="text-text-faint">{identifier(item)} </span>
+                    <span className="text-text-faint">{item.identifier} </span>
                     {item.title}
                   </span>
                 }
-                secondary={<span className="truncate">{secondary(item)}</span>}
+                secondary={<span className="truncate">{item.secondary}</span>}
                 trailing={formatAge(Date.now() - item.updatedAt)}
                 onClick={() => setSel(i)}
                 title={item.url}

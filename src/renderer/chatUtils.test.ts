@@ -115,21 +115,11 @@ import {
   usageStale,
   pruneVisitedSessions,
   selectStatusItems,
-  checksChipDescriptor,
-  countsForChecks,
-  checkTone,
-  orderChecks,
-  branchChipLabel,
   shouldOfferForgeConnect,
-  failuresToAgentPrompt,
   zeroStateMode,
   describeRepoRow,
   homeRelativePath,
   planHighlightRanges,
-  canMerge,
-  resolveShipState,
-  describeMergeFailure,
-  commentableLines,
   cloneErrorKind,
   repoListErrorMessage,
   forgeCredentialSecondary,
@@ -139,10 +129,7 @@ import {
   progressAttentionKind,
   concatUserMessageText,
   buildVoiceNoteMap,
-  branchPanelState,
   dispatchAppControl,
-  sortInbox,
-  inboxReasonLabel,
   scrollElementToTail,
   classifyFollowOnScroll,
   isUpwardScrollGesture,
@@ -159,7 +146,7 @@ import {
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest, UpdateTarget } from "../shared/types";
 
 
 
@@ -4104,138 +4091,7 @@ describe("planHighlightRanges", () => {
   });
 });
 
-// ===== checksChipDescriptor / branchChipLabel / shouldOfferForgeConnect (BET-789) =====
-
-describe("checkTone", () => {
-  const run = (over: Partial<{ status: string; conclusion: string }>) => ({
-    name: "c",
-    ...over,
-  });
-
-  it("no conclusion → running (still pending)", () => {
-    expect(checkTone(run({}))).toBe("running");
-  });
-
-  it("status queued → running", () => {
-    expect(checkTone(run({ status: "queued" }))).toBe("running");
-  });
-
-  it("status in_progress → running", () => {
-    expect(checkTone(run({ status: "in_progress" }))).toBe("running");
-  });
-
-  it("conclusion success → ok", () => {
-    expect(checkTone(run({ conclusion: "success" }))).toBe("ok");
-  });
-
-  it("conclusion failure / cancelled / timed_out → error", () => {
-    expect(checkTone(run({ conclusion: "failure" }))).toBe("error");
-    expect(checkTone(run({ conclusion: "cancelled" }))).toBe("error");
-    expect(checkTone(run({ conclusion: "timed_out" }))).toBe("error");
-  });
-});
-
-describe("orderChecks", () => {
-  it("mixed list comes back failed → running → passed", () => {
-    const checks = [
-      { name: "p1", conclusion: "success" },
-      { name: "f1", conclusion: "failure" },
-      { name: "r1", status: "in_progress" },
-      { name: "p2", conclusion: "success" },
-      { name: "f2", conclusion: "cancelled" },
-    ];
-    expect(orderChecks(checks).map((c) => c.name)).toEqual([
-      "f1",
-      "f2",
-      "r1",
-      "p1",
-      "p2",
-    ]);
-  });
-
-  it("two checks in the same bucket keep their input order (stable)", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "success" },
-    ];
-    expect(orderChecks(checks).map((c) => c.name)).toEqual(["a", "b"]);
-  });
-
-  it("empty list → empty, and does not mutate its input", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "failure" },
-    ];
-    const before = [...checks];
-    expect(orderChecks([])).toEqual([]);
-    expect(checks).toEqual(before);
-  });
-});
-
-describe("countsForChecks", () => {
-  it("buckets success / other-conclusion / pending into passed / failed / running", () => {
-    const checks = [
-      { name: "a", conclusion: "success" },
-      { name: "b", conclusion: "failure" },
-      { name: "c", conclusion: "timed_out" },
-      { name: "d" },
-      { name: "e", status: "in_progress" },
-      { name: "f", status: "queued" },
-    ];
-    expect(countsForChecks(checks)).toEqual({ passed: 1, failed: 2, running: 3 });
-  });
-
-  it("empty list → all zero", () => {
-    expect(countsForChecks([])).toEqual({ passed: 0, failed: 0, running: 0 });
-  });
-});
-
-describe("checksChipDescriptor", () => {
-  it("green → ✓ N, ok tone, priority 40 (first to overflow)", () => {
-    expect(checksChipDescriptor("green", { passed: 7, failed: 0, running: 0 })).toEqual({
-      label: "✓ 7",
-      tone: "ok",
-      priority: 40,
-    });
-  });
-
-  it("red → ✗ N failed, danger tone, priority 90 (survives the narrow layout)", () => {
-    expect(checksChipDescriptor("red", { passed: 0, failed: 2, running: 0 })).toEqual({
-      label: "✗ 2 failed",
-      tone: "danger",
-      priority: 90,
-    });
-  });
-
-  it("yellow → ◐ N running, warn tone, priority 40", () => {
-    expect(checksChipDescriptor("yellow", { passed: 0, failed: 0, running: 3 })).toEqual({
-      label: "◐ 3 running",
-      tone: "warn",
-      priority: 40,
-    });
-  });
-
-  it("none → null (no chip — nothing to say)", () => {
-    expect(checksChipDescriptor("none", { passed: 0, failed: 0, running: 0 })).toBeNull();
-  });
-});
-
-describe("branchChipLabel", () => {
-  it("branch only → ⎇ branch", () => {
-    expect(branchChipLabel("feat/forge-seam", null)).toBe("⎇ feat/forge-seam");
-  });
-
-  it("branch + pr → ⎇ branch · #412", () => {
-    expect(branchChipLabel("feat/forge-seam", { number: 412 })).toBe(
-      "⎇ feat/forge-seam · #412",
-    );
-  });
-
-  it("no branch → null (chip not rendered), whatever the PR state", () => {
-    expect(branchChipLabel(null, null)).toBeNull();
-    expect(branchChipLabel(null, { number: 412 })).toBeNull();
-  });
-});
+// ===== shouldOfferForgeConnect (BET-789) =====
 
 describe("shouldOfferForgeConnect", () => {
   const cases: [boolean, string | null, boolean, boolean][] = [
@@ -4254,252 +4110,6 @@ describe("shouldOfferForgeConnect", () => {
       expect(shouldOfferForgeConnect({ connected, forgeKind, dismissed })).toBe(expected);
     });
   }
-});
-
-describe("failuresToAgentPrompt", () => {
-  it("names failing checks with their log URLs", () => {
-    const prompt = failuresToAgentPrompt([
-      { name: "typecheck-test", conclusion: "failure", url: "https://x/logs/1" },
-      { name: "duplication-gate", conclusion: "failure" },
-      { name: "lint", conclusion: "success" },
-    ]);
-    expect(prompt).toContain("typecheck-test");
-    expect(prompt).toContain("https://x/logs/1");
-    expect(prompt).toContain("duplication-gate");
-    expect(prompt).not.toContain("lint");
-  });
-
-  it("no failing checks → empty body", () => {
-    expect(failuresToAgentPrompt([])).toBe("");
-  });
-});
-
-describe("resolveShipState", () => {
-  const base = { branch: "feat/x", base: "main", aheadCount: 3, hasPr: false };
-
-  it("has-pr wins even when branch === base", () => {
-    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 0, hasPr: true })).toBe(
-      "has-pr",
-    );
-  });
-
-  it("detached when no branch", () => {
-    expect(resolveShipState({ branch: null, base: "main", aheadCount: 3, hasPr: false })).toBe(
-      "detached",
-    );
-  });
-
-  it("on-base when the branch is the default branch", () => {
-    expect(resolveShipState({ branch: "main", base: "main", aheadCount: 3, hasPr: false })).toBe(
-      "on-base",
-    );
-  });
-
-  it("no-commits when aheadCount is 0", () => {
-    expect(resolveShipState({ ...base, aheadCount: 0 })).toBe("no-commits");
-  });
-
-  it("ready by default", () => {
-    expect(resolveShipState(base)).toBe("ready");
-  });
-
-  it("aheadCount null (unknown) falls through to ready", () => {
-    // Pins the deliberate asymmetry (BET-915): the commit count is an
-    // optimisation, not a safety fact — leaving it unknown must NOT hide the
-    // action, unlike a null base.
-    expect(resolveShipState({ ...base, aheadCount: null })).toBe("ready");
-  });
-
-  it("base null → unknown", () => {
-    expect(resolveShipState({ branch: "main", base: null, aheadCount: 3, hasPr: false })).toBe(
-      "unknown",
-    );
-  });
-
-  it("has-pr wins over unknown", () => {
-    expect(resolveShipState({ branch: "x", base: null, aheadCount: 3, hasPr: true })).toBe("has-pr");
-  });
-
-  it("detached wins over unknown", () => {
-    expect(resolveShipState({ branch: null, base: null, aheadCount: 3, hasPr: false })).toBe(
-      "detached",
-    );
-  });
-});
-
-describe("canMerge", () => {
-  it("enables merge only when green + no threads + mergeable true", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: true,
-      reason: null,
-    });
-  });
-
-  it("blocks when mergeable is null (still computing)", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: null })).toEqual({
-      can: false,
-      reason: "still computing",
-    });
-  });
-
-  it("blocks when mergeable is false", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 0, mergeable: false })).toEqual({
-      can: false,
-      reason: "not mergeable",
-    });
-  });
-
-  it("blocks on red checks with a failing reason", () => {
-    expect(canMerge({ rollup: "red", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "checks failing",
-    });
-  });
-
-  it("blocks on yellow checks as still running, never green-only", () => {
-    expect(canMerge({ rollup: "yellow", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "checks still running",
-    });
-  });
-
-  it("blocks when there are no checks at all", () => {
-    expect(canMerge({ rollup: "none", unresolvedThreads: 0, mergeable: true })).toEqual({
-      can: false,
-      reason: "no checks",
-    });
-  });
-
-  it("blocks on unresolved review threads", () => {
-    expect(canMerge({ rollup: "green", unresolvedThreads: 1, mergeable: true })).toEqual({
-      can: false,
-      reason: "1 unresolved thread",
-    });
-    expect(canMerge({ rollup: "green", unresolvedThreads: 3, mergeable: true })).toEqual({
-      can: false,
-      reason: "3 unresolved threads",
-    });
-  });
-
-  it("blocks on EVERY blocking combination at once", () => {
-    expect(canMerge({ rollup: "red", unresolvedThreads: 2, mergeable: null })).toEqual({
-      can: false,
-      reason: "still computing",
-    });
-  });
-});
-
-describe("describeMergeFailure", () => {
-  it("surfaces the distinguished SHA-mismatch reason", () => {
-    expect(describeMergeFailure("sha_mismatch")).toMatch(/head SHA moved/i);
-  });
-  it("surfaces cannot-merge and permission distinctly", () => {
-    expect(describeMergeFailure("cannot_merge")).toMatch(/blocked/i);
-    expect(describeMergeFailure("permission")).toMatch(/No permission/i);
-  });
-  it("degrades gracefully for unknown / absent kinds", () => {
-    expect(describeMergeFailure("http_422")).toContain("http_422");
-    expect(describeMergeFailure(null)).toBe("Merge failed.");
-  });
-});
-
-describe("commentableLines", () => {
-  it("returns [] for an empty diff", () => {
-    expect(commentableLines("")).toEqual([]);
-    expect(commentableLines("\n\n")).toEqual([]);
-  });
-
-  it("anchors an added line on the new side", () => {
-    const diff = [
-      "--- a/file.ts",
-      "+++ b/file.ts",
-      "@@ -10,3 +10,3 @@",
-      "  a",
-      "- old",
-      "+ new",
-      "  c",
-    ].join("\n");
-    // a=10 (context→both), old=11 (removed), new=11 (added), c=12 (context→both)
-    expect(commentableLines(diff)).toEqual([
-      { path: "file.ts", line: 10, side: "both" },
-      { path: "file.ts", line: 11, side: "old" },
-      { path: "file.ts", line: 11, side: "new" },
-      { path: "file.ts", line: 12, side: "both" },
-    ]);
-  });
-
-  it("anchors a removed line on the old side and an unchanged context line on both sides", () => {
-    const diff = ["--- a/x.ts", "+++ b/x.ts", "@@ -5 +5 @@", "- gone", "  kept"].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "x.ts", line: 5, side: "old" },
-      { path: "x.ts", line: 5, side: "both" },
-    ]);
-  });
-
-  it("handles a file with multiple hunks, resetting line counters per hunk", () => {
-    const diff = [
-      "--- a/file.ts",
-      "+++ b/file.ts",
-      "@@ -1,2 +1,2 @@",
-      "  a",
-      "- b",
-      "+ c",
-      "@@ -20,1 +20,1 @@",
-      "  z",
-      "+ w",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      // first hunk: a=1 (context→both), b=2 (removed), c=2 (added)
-      { path: "file.ts", line: 1, side: "both" },
-      { path: "file.ts", line: 2, side: "old" },
-      { path: "file.ts", line: 2, side: "new" },
-      // second hunk: z=20 (context→both), w=21 (added)
-      { path: "file.ts", line: 20, side: "both" },
-      { path: "file.ts", line: 21, side: "new" },
-    ]);
-  });
-
-  it("keys anchors per-file so two files with the same line number do not collide", () => {
-    const diff = [
-      "--- a/a.ts",
-      "+++ b/a.ts",
-      "@@ -1,1 +1,1 @@",
-      "+ a1",
-      "--- a/b.ts",
-      "+++ b/b.ts",
-      "@@ -1,1 +1,1 @@",
-      "+ b1",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "a.ts", line: 1, side: "new" },
-      { path: "b.ts", line: 1, side: "new" },
-    ]);
-  });
-
-  it("uses the +++ b/ path, falling back to --- a/ for a file deleted to /dev/null", () => {
-    const diff = [
-      "--- a/old.ts",
-      "+++ /dev/null",
-      "@@ -1,1 +0,0 @@",
-      "- gone",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([
-      { path: "old.ts", line: 1, side: "old" },
-    ]);
-  });
-
-  it("skips hunk headers and file markers / new-file boilerplate", () => {
-    const diff = [
-      "diff --git a/x b/x",
-      "new file mode 100644",
-      "index 0000000..e69de29",
-      "--- /dev/null",
-      "+++ b/x",
-      "@@ -0,0 +1 @@",
-      "+ hi",
-    ].join("\n");
-    expect(commentableLines(diff)).toEqual([{ path: "x", line: 1, side: "new" }]);
-  });
 });
 
 
@@ -4820,42 +4430,6 @@ describe("forgeCredentialSecondary (BET-1059)", () => {
   });
 });
 
-describe("branchPanelState (BET-867)", () => {
-  const pr = {
-    number: 412,
-    title: "T",
-    body: "",
-    url: "",
-    state: "open" as const,
-    draft: false,
-    headRef: "h",
-    baseRef: "b",
-    headSha: "s",
-    author: "a",
-    reviewers: [],
-    mergeable: null,
-    mergeBlockedReason: null,
-    unresolvedThreads: 0,
-  };
-
-  it("no branch → none (plain non-interactive Tag)", () => {
-    expect(branchPanelState({ pr, forgeConnected: true, branch: null })).toBe("none");
-    expect(branchPanelState({ pr, forgeConnected: true, branch: "" })).toBe("none");
-  });
-
-  it("branch but forge not connected → none", () => {
-    expect(branchPanelState({ pr, forgeConnected: false, branch: "feat/x" })).toBe("none");
-  });
-
-  it("branch + connected + no PR → no-pr", () => {
-    expect(branchPanelState({ pr: null, forgeConnected: true, branch: "feat/x" })).toBe("no-pr");
-  });
-
-  it("branch + connected + PR → pr", () => {
-    expect(branchPanelState({ pr, forgeConnected: true, branch: "feat/x" })).toBe("pr");
-  });
-});
-
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {
     const switchModel = vi.fn();
@@ -4916,72 +4490,6 @@ describe("dispatchAppControl (BET-841)", () => {
     dispatchAppControl(undefined, { switchModel, renameSession });
     expect(switchModel).not.toHaveBeenCalled();
     expect(renameSession).not.toHaveBeenCalled();
-  });
-});
-
-// ---- Work inbox (BET-795) -------------------------------------------------
-
-const inboxItem = (over: Partial<ForgeInboxItem>): ForgeInboxItem => ({
-  kind: "issue",
-  repoKey: "github.com/acme/widget",
-  number: 1,
-  title: "thing",
-  url: "https://github.com/acme/widget/issues/1",
-  state: "open",
-  rollup: "none",
-  updatedAt: 0,
-  reason: "assigned",
-  seed: "Complete https://github.com/acme/widget/issues/1",
-  ...over,
-});
-
-describe("inboxReasonLabel", () => {
-  it("maps the three inbox reasons to their verbatim mockup copy", () => {
-    expect(inboxReasonLabel("assigned")).toBe("issue · assigned to you");
-    expect(inboxReasonLabel("review requested")).toBe("review requested");
-    expect(inboxReasonLabel("checks failing")).toBe("checks red");
-  });
-});
-
-describe("sortInbox", () => {
-  it("sorts by updatedAt descending", () => {
-    const rows = [
-      inboxItem({ number: 1, updatedAt: 100 }),
-      inboxItem({ number: 2, updatedAt: 900 }),
-      inboxItem({ number: 3, updatedAt: 500 }),
-    ];
-    expect(sortInbox(rows).map((r) => r.number)).toEqual([2, 3, 1]);
-  });
-
-  it("dedupes the same object at two keys to one row, more urgent reason wins (dedupe-precedence case)", () => {
-    const rows = [
-      inboxItem({
-        number: 9,
-        kind: "pr",
-        reason: "review requested",
-        updatedAt: 500,
-        rollup: "red",
-        url: "https://github.com/acme/widget/pull/9",
-      }),
-      inboxItem({
-        number: 9,
-        kind: "pr",
-        reason: "checks failing",
-        updatedAt: 500,
-        rollup: "red",
-        url: "https://github.com/acme/widget/pull/9",
-      }),
-    ];
-    const result = sortInbox(rows);
-    expect(result).toHaveLength(1);
-    expect(result[0].reason).toBe("checks failing");
-  });
-
-  it("does not mutate the caller's array", () => {
-    const rows = [inboxItem({ number: 2, updatedAt: 900 }), inboxItem({ number: 1, updatedAt: 100 })];
-    const before = [...rows];
-    sortInbox(rows);
-    expect(rows.map((r) => r.number)).toEqual(before.map((r) => r.number));
   });
 });
 
