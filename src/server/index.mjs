@@ -169,7 +169,8 @@ import {
 } from "./widgets.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
-import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from "./stoppedStore.mjs";
+import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped, removeStopped } from "./stoppedStore.mjs";
+import { createStoppedReconciler } from "./stoppedReconcile.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import { createProviderHealth } from "./providerHealth.mjs";
@@ -841,6 +842,28 @@ const stopUsageResume = bus.subscribe((evt) => {
 void resumeEngine.deliverSnapshots(listSnapshots()).catch((e) =>
   console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e),
 );
+
+// Stale-entry sweep for the usage-stopped record: drops conversations whose
+// session was deleted or no longer has a sidebar window, and unarmed ones whose
+// provider has recovered since the stop. Runs every minute and on every usage
+// poll (after the resume engine has had its chance at armed entries).
+const stoppedReconciler = createStoppedReconciler({
+  remove: (input) => removeStopped(input, { publish: (evt) => bus.publish(evt) }),
+  sessionExists: (sid) => oc.sessionExists(sid),
+  visibleSessionIds: async () => {
+    const ids = new Set();
+    for (const p of await tmux.listProjects()) {
+      for (const w of p.windows ?? []) if (w.opencodeSessionId) ids.add(w.opencodeSessionId);
+    }
+    return ids;
+  },
+  snapshots: () => listSnapshots(),
+});
+stoppedReconciler.start();
+// eslint-disable-next-line no-unused-vars
+const stopStoppedReconcileOnUsage = bus.subscribe((evt) => {
+  if (evt?.kind === "usage.updated") void stoppedReconciler.run();
+});
 
 // Usage-stop enrolment (BET-1047 stage 1): derives durable "stopped
 // conversation" records from the opencode stream (see usageStopEnroll.mjs).

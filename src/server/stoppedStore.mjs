@@ -192,6 +192,27 @@ export async function markStoppedRan({ conversation }, { load = loadStoppedState
 }
 
 /**
+ * Remove several entries in one write (the reconciler's stale sweep — see
+ * stoppedReconcile.mjs). Reads the store fresh so a concurrent enrolment of a
+ * different conversation is never clobbered. Publishes once, only on a change.
+ * @param {object} input
+ * @param {string[]} input.conversations
+ * @param {object} [deps]
+ * @returns {Promise<string[]>} the conversations actually removed
+ */
+export async function removeStopped({ conversations }, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+  const drop = new Set((conversations ?? []).filter((c) => typeof c === "string" && c));
+  if (drop.size === 0) return [];
+  const state = load();
+  const removed = state.records.filter((r) => drop.has(r?.conversation)).map((r) => r.conversation);
+  if (removed.length === 0) return [];
+  state.records = state.records.filter((r) => !drop.has(r?.conversation));
+  await save(state);
+  publish?.({ kind: "usage-stopped.updated", payload: { removed } });
+  return removed;
+}
+
+/**
  * Record that a resumed conversation came back refused, incrementing its
  * `attempts` in place so a permanently-refused conversation stops looping
  * (spec §8 + §5: "A conversation that ... still refused stays in the list and
@@ -216,10 +237,10 @@ export async function bumpStoppedAttempts({ conversation }, { load = loadStopped
 /**
  * Stamp the list-level "last looked" timestamp (set when the modal closes).
  * @param {object} [input]
- * @param {number} [input.now]
+ * @param {() => number} [input.now]
  * @param {object} [deps]
  */
-export async function stampStoppedLastLooked({ now = Date.now() } = {}, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
+export async function stampStoppedLastLooked({ now = Date.now } = {}, { load = loadStoppedState, save = saveStoppedState, publish } = {}) {
   const state = load();
   state.lastLooked = now();
   await save(state);
