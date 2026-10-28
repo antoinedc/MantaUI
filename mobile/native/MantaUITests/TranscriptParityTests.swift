@@ -729,6 +729,7 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertFalse(TranscriptDisplayOptions.showDetails, "off by default")
 
         let posted = expectation(description: "didChange")
+        posted.assertForOverFulfill = false  // the later setShowDetails(false) posts again
         let token = NotificationCenter.default.addObserver(forName: TranscriptDisplayOptions.didChange, object: nil, queue: nil) { _ in
             posted.fulfill()
         }

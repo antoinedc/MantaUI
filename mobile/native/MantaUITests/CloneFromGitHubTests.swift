@@ -92,12 +92,14 @@ final class CloneFromGitHubTests: XCTestCase {
     func testBytesUseTheFileCountStyle() {
         // Pinned: ByteCountFormatter `.file` (decimal units), what Files shows.
         XCTAssertEqual(CloneProgressCopy.bytes(0), "Zero KB")
-        XCTAssertEqual(CloneProgressCopy.bytes(1_500_000), "1.5 MB")
+        // The decimal separator follows the device region ("1.5" / "1,5").
+        XCTAssertTrue(["1.5 MB", "1,5 MB"].contains(CloneProgressCopy.bytes(1_500_000)))
         XCTAssertEqual(CloneProgressCopy.bytes(-5), "Zero KB")
     }
 
     func testHeadline() {
-        XCTAssertEqual(CloneProgressCopy.headline(name: "api", percent: 42.4, bytes: 1_500_000), "Cloning api · 42% · 1.5 MB")
+        XCTAssertEqual(CloneProgressCopy.headline(name: "api", percent: 42.4, bytes: 1_500_000),
+                       "Cloning api · 42% · \(CloneProgressCopy.bytes(1_500_000))")
         XCTAssertEqual(CloneProgressCopy.headline(name: "api", percent: 250, bytes: 0), "Cloning api · 100% · Zero KB")
     }
 
