@@ -308,11 +308,11 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
           await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big" }));
           expect(bus.authReconnect).toBeNull();
           await emit(authErr());
+          expect(bus.authReconnect).toBe("Claude");
+          // Same hook instance (no remount): switch the active provider, force one
+          // re-render so the hook's provider ref updates, then a second classified error.
           providerID = "openai";
-          await act(async () => {
-            h!.unmount();
-            h = mount(<Probe />);
-          });
+          await emit(frame("running", { running: true }));
           await emit(authErr());
           expect(bus.authReconnect).toBe("Codex");
           await press();
@@ -320,6 +320,14 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
         } finally {
           o.off();
         }
+      });
+
+      it("no press: an unrelated failure right after an auth error drops the Reconnect (red on main)", async () => {
+        await mountProbe();
+        await emit(authErr());
+        expect(bus.authReconnect).toBe("Claude");
+        act(() => bus.setSendError("Couldn't send the message: network down"));
+        expect(bus.authReconnect).toBeNull();
       });
 
       it("pressing with no auth banner does nothing", async () => {
@@ -332,6 +340,15 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
           o.off();
         }
       });
+    });
+
+    it("an aborted frame after a sign-in error replaces it and drops the Reconnect", async () => {
+      await mountProbe();
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x" }));
+      expect(bus.authReconnect).toBe("Claude");
+      await emit(frame("aborted", {}));
+      expect(bus.sendError).toBe("Aborted");
+      expect(bus.authReconnect).toBeNull();
     });
 
     it("a user Stop (aborted frame) shows the Aborted banner and ends the turn", async () => {

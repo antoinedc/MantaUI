@@ -19,6 +19,7 @@ import type { AccountView, ProviderView, SeatView } from "../shared/types";
 import {
   LAST_SEAT_REMOVE_REASON,
   hasSeatChoice,
+  liveSeatNoteParts,
   isSameOrgMove,
   liveSeatReplacement,
   providerViewOrError,
@@ -36,14 +37,6 @@ import { useStore } from "./store";
 // The sign-back-in modal drags in the Claude terminal; load it on first press
 // (same split as UsageDial, which mounts the same flow from the usage popover).
 const ResignSeatFlow = lazy(() => import("./ResignSeatFlow").then((m) => ({ default: m.ResignSeatFlow })));
-
-/** What a seat that is the box's own login can be told: the server refuses to
- *  re-sign it (`live-seat`), so say what actually works instead of a button. */
-export function liveSeatNote(provider: ProviderView["provider"]): string {
-  return provider === "claude"
-    ? "This is the login this box itself uses (the Claude CLI owns it). To sign in again, run `claude auth login` on the box."
-    : "This is the login this box itself uses; it can't be re-signed from here yet.";
-}
 
 const BTN =
   "px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40";
@@ -234,7 +227,16 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
             </div>
             {seat.live && (
               <div className="text-meta text-text-muted break-words" data-testid={`seat-live-note-${seat.id}`}>
-                {liveSeatNote(view.provider)}
+                {(() => {
+                  const n = liveSeatNoteParts(view.provider);
+                  return (
+                    <>
+                      {n.before}
+                      {n.command && <code>{n.command}</code>}
+                      {n.after}
+                    </>
+                  );
+                })()}
               </div>
             )}
           </div>

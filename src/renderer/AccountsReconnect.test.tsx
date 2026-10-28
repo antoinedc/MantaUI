@@ -73,6 +73,18 @@ describe("Accounts → Kimi recovery (Disconnect, then Connect with a replacemen
     expect(buttonByText(h!, "Connect")).toBeTruthy();
   });
 
+  it("says on the row that Disconnect then Connect with a new key is the way back", async () => {
+    await mountCard(() => [kimi(true)]);
+    expect(h!.container.querySelector('[data-testid="key-reconnect-hint-kimi-for-coding"]')?.textContent).toContain(
+      "Disconnect and Connect again with a new key",
+    );
+  });
+
+  it("the key hint is Kimi-only (not on a plain connected Claude row) and not shown once disconnected", async () => {
+    await mountCard(() => [{ ...kimi(false) }, { id: "anthropic", label: "Claude", plan: "", console: null, docs: "", connected: true }]);
+    expect(h!.container.querySelector('[data-testid^="key-reconnect-hint-"]')).toBeNull();
+  });
+
   it("Connect opens the API-key form and Save sends the replacement key", async () => {
     const auth = await mountCard(
       () => [kimi(false)],
@@ -109,6 +121,8 @@ describe("Accounts → externally managed Claude row without a seat view", () =>
     const hint = h!.container.querySelector('[data-testid="external-signin-hint-anthropic"]');
     expect(hint?.textContent).toContain("Signed in with the Claude CLI on this box");
     expect(hint?.textContent).toContain("claude auth login");
+    expect(hint?.textContent).toContain("same account");
+    expect(hint?.textContent).not.toContain("`");
     expect(buttonByText(h!, "Connect")).toBeNull();
   });
 

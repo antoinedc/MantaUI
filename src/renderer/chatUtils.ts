@@ -1834,6 +1834,11 @@ export function authProviderSeatId(providerID: string | null | undefined): SeatP
   return undefined;
 }
 
+/** A banner provider that signs in with an API key and has no seat panel (Kimi). */
+export function isKeyOnlyAuthProvider(providerID: string | null | undefined): boolean {
+  return typeof providerID === "string" && providerID in AUTH_PROVIDER_LABELS && authProviderSeatId(providerID) === undefined;
+}
+
 /**
  * Decide whether to surface a "needs to be reconnected" banner for a
  * `session.error` event. Returns the provider id + label when ALL of:
@@ -3878,6 +3883,29 @@ export function accountsErrorMessage(code: AccountsError | string | undefined): 
     default:
       return "That didn't work. Try again.";
   }
+}
+
+/**
+ * What a seat that is the box's own login can be told: the server refuses to
+ * re-sign it (`live-seat`), so say what actually works instead of a button.
+ * `command` is shown as code by the caller (no backticks in the copy).
+ */
+export function liveSeatNoteParts(
+  provider: SeatProviderId,
+): { before: string; command: string | null; after: string } {
+  return provider === "claude"
+    ? {
+        before: "This is the login this box itself uses (the Claude CLI owns it). To sign in again, run ",
+        command: "claude auth login",
+        after: " on the box and sign in with the same account.",
+      }
+    : { before: "This is the login this box itself uses; it can't be re-signed from here yet.", command: null, after: "" };
+}
+
+/** The same note as one plain string (for places that render text only). */
+export function liveSeatNoteText(provider: SeatProviderId): string {
+  const n = liveSeatNoteParts(provider);
+  return `${n.before}${n.command ?? ""}${n.after}`;
 }
 
 /** A seat that cannot serve requests says why, in two words; a healthy one

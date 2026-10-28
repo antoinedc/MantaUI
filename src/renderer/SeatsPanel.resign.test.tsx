@@ -9,11 +9,12 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act } from "react";
 import { installCanvasStub, mount, installMockApi, resetStore, type Harness } from "./testHarness";
 import { clearAccountsFocus } from "./accountsData";
+import { liveSeatNoteText } from "./chatUtils";
 import { NOW, oneSeatView, seat, threeSeatView } from "./seatFixtures";
 import type { ProviderView } from "../shared/types";
 
 installCanvasStub();
-const { SeatsPanel, liveSeatNote } = await import("./SeatsPanel");
+const { SeatsPanel } = await import("./SeatsPanel");
 await import("./ResignSeatFlow");
 
 const DEVICE = { shape: "oauth-auto", url: "https://login.example", instructions: "code ABCD-1234" };
@@ -128,8 +129,10 @@ describe("SeatsPanel — Sign back in", () => {
   it("a LIVE Claude seat gets no button, only the true instruction", async () => {
     await openPanel(oneSeatView());
     expect(bodyButton("Sign back in")).toBeUndefined();
-    expect(h!.container.querySelector('[data-testid="seat-live-note-s1"]')?.textContent).toBe(liveSeatNote("claude"));
-    expect(h!.text()).toContain("run `claude auth login` on the box");
+    expect(h!.container.querySelector('[data-testid="seat-live-note-s1"]')?.textContent).toBe(liveSeatNoteText("claude"));
+    expect(h!.text()).toContain("run claude auth login on the box and sign in with the same account");
+    expect(h!.text()).not.toContain("`");
+    expect(h!.container.querySelector('[data-testid="seat-live-note-s1"] code')?.textContent).toBe("claude auth login");
   });
 
   it("a LIVE Codex seat gets no button and says it can't be re-signed from here yet", async () => {
@@ -140,5 +143,15 @@ describe("SeatsPanel — Sign back in", () => {
     expect(h!.container.querySelector('[data-testid="seat-live-note-s1"]')?.textContent).toBe(
       "This is the login this box itself uses; it can't be re-signed from here yet.",
     );
+  });
+
+  it("live-seat refusal (the seat became live since the list was read) is not worded as a removal", async () => {
+    const m = await openPanel(loneNonLiveView(), { accountsResignSeat: () => Promise.resolve({ error: "live-seat" }) });
+    await press(bodyButton("Sign back in"));
+    const t = document.body.textContent ?? "";
+    expect(t).toContain("Seat 1 is now the login this box itself uses, so it can't be re-signed here.");
+    expect(t).toContain("Run claude auth login on the box and sign in with the same account.");
+    expect(t).not.toContain("removed");
+    expect(m.api.calls.accountsList?.length ?? 0).toBeGreaterThan(0); // the list was refreshed
   });
 });

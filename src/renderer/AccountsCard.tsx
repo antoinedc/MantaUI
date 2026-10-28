@@ -32,7 +32,7 @@ import { X } from "lucide-react";
 import type { DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
 import { autoEligibility, MISSING } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
-import { formatEndpointStateLine, selectProviderView } from "./chatUtils";
+import { formatEndpointStateLine, isKeyOnlyAuthProvider, selectProviderView } from "./chatUtils";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
 import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConfirmInline } from "./ConfirmInline";
@@ -495,7 +495,14 @@ function AccountRow({
       {row.className !== "Custom" && !seatView && row.connected && row.managedExternally && (
         <div className="pl-4 text-meta text-text-muted break-words" data-testid={`external-signin-hint-${row.id}`}>
           Signed in with {row.managedBy ?? "an external tool"}. If Manta says it needs to reconnect, run{" "}
-          <code>claude auth login</code> on the box.
+          <code>claude auth login</code> on the box and sign in with the same account.
+        </div>
+      )}
+      {/* Kimi signs in with an API key and has no seats: Disconnect + Connect with
+          a new key is its whole recovery path, so say so next to those buttons. */}
+      {row.className !== "Custom" && !seatView && row.connected && !row.managedExternally && isKeyOnlyAuthProvider(row.id) && (
+        <div className="pl-4 text-meta text-text-muted break-words" data-testid={`key-reconnect-hint-${row.id}`}>
+          If Manta says this needs to reconnect, Disconnect and Connect again with a new key.
         </div>
       )}
 
