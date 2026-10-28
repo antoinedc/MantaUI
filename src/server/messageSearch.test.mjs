@@ -294,3 +294,308 @@ test("searchMessages: a spent time budget returns what it has with truncated:tru
     fixture.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Server-first (D23/D24, WS06): scope, groups, degraded — pure
+// ---------------------------------------------------------------------------
+
+import {
+  resolveSearchScope,
+  groupHits,
+  projectsFromSyncState,
+} from "./messageSearch.mjs";
+import { createSyncState } from "./syncState.mjs";
+
+const win = (name, sid, extra = {}) => ({ index: 0, name, opencodeSessionId: sid, ...extra });
+const PROJECTS = [
+  { tmuxSession: "manta", windows: [win("fix login", "s1"), win("terminal", null), win("docs", "s2")] },
+  { tmuxSession: "ronda", windows: [win("job-1", "s3", { owner: "job" }), win("dup", "s1"), win("blank", "")] },
+];
+
+test("resolveSearchScope: primary first, then project/window order, deduped", () => {
+  const { sessionIds } = resolveSearchScope(PROJECTS, "s2");
+  assert.deepEqual(sessionIds, ["s2", "s1", "s3"]);
+  assert.deepEqual(resolveSearchScope(PROJECTS, null).sessionIds, ["s1", "s2", "s3"]);
+});
+
+test("resolveSearchScope: skips null/empty session ids, includes job windows", () => {
+  const { sessionIds } = resolveSearchScope(PROJECTS, undefined);
+  assert.ok(sessionIds.includes("s3"));
+  assert.ok(!sessionIds.includes(""));
+  assert.ok(!sessionIds.includes(null));
+  assert.equal(sessionIds.length, 3);
+});
+
+test("resolveSearchScope: a primary no window carries is still first, unlabelled", () => {
+  const { sessionIds, labels } = resolveSearchScope(PROJECTS, "ghost");
+  assert.equal(sessionIds[0], "ghost");
+  assert.equal(labels.has("ghost"), false);
+});
+
+test("resolveSearchScope: labels map tmux session + window name (first carrier wins)", () => {
+  const { labels } = resolveSearchScope(PROJECTS, null);
+  assert.deepEqual(labels.get("s1"), { workspace: "manta", name: "fix login" });
+  assert.deepEqual(labels.get("s3"), { workspace: "ronda", name: "job-1" });
+});
+
+test("resolveSearchScope: tolerates malformed topology", () => {
+  assert.deepEqual(resolveSearchScope(null, "p").sessionIds, ["p"]);
+  assert.deepEqual(resolveSearchScope([{ tmuxSession: "x" }, null], null).sessionIds, []);
+});
+
+const H = (sid, mid) => ({ sessionId: sid, messageId: mid, role: "user", pre: "", match: "m", post: "", timeCreated: 1 });
+
+test("groupHits: first-appearance order; the current group first with isCurrent", () => {
+  const hits = [H("a", "1"), H("b", "2"), H("a", "3"), H("c", "4")];
+  const g = groupHits(hits, { primarySessionId: "c" });
+  assert.deepEqual(g.map((x) => x.sessionId), ["c", "a", "b"]);
+  assert.deepEqual(g.map((x) => x.isCurrent), [true, false, false]);
+  assert.deepEqual(g[1].hits.map((h) => h.messageId), ["1", "3"]);
+});
+
+test("groupHits: no primary → no isCurrent; scope order preserved", () => {
+  const g = groupHits([H("b", "1"), H("a", "2")], {});
+  assert.deepEqual(g.map((x) => x.sessionId), ["b", "a"]);
+  assert.ok(g.every((x) => x.isCurrent === false));
+});
+
+test("groupHits: label is 'ws › name' or the sessionId; unknown parts are null", () => {
+  const labels = new Map([
+    ["a", { workspace: "ws", name: "win" }],
+    ["b", { workspace: null, name: "win" }],
+    ["c", { workspace: "ws", name: "" }],
+  ]);
+  const g = groupHits([H("a", "1"), H("b", "2"), H("c", "3"), H("d", "4")], { labels });
+  assert.equal(g[0].label, "ws › win");
+  assert.deepEqual([g[0].workspace, g[0].name], ["ws", "win"]);
+  assert.equal(g[1].label, "b");
+  assert.deepEqual([g[1].workspace, g[1].name], [null, "win"]);
+  assert.equal(g[2].label, "c");
+  assert.equal(g[3].label, "d");
+  assert.deepEqual([g[3].workspace, g[3].name], [null, null]);
+});
+
+test("searchMessages: empty / malformed queries answer with groups:[] and never throw", async () => {
+  for (const input of [{}, null, { query: "  " }, { query: 7, sessionIds: ["a"] }, { query: "x", sessionIds: "a" }, { query: "x", sessionIds: [] }]) {
+    assert.deepEqual(await searchMessages(input), { supported: true, hits: [], groups: [] });
+  }
+});
+
+test("searchMessages: scope:all without a session-list source (or a throwing one) is degraded, with or without a primary", async () => {
+  const spy = { calls: 0 };
+  const runDbTask = async () => { spy.calls++; return { rows: [], complete: true }; };
+  for (const primarySessionId of [undefined, "s1"]) {
+    const none = await searchMessages({ query: "needle", scope: "all", primarySessionId }, { runDbTask });
+    assert.deepEqual(none, { supported: true, hits: [], groups: [], degraded: true });
+    const thrown = await searchMessages(
+      { query: "needle", scope: "all", primarySessionId },
+      { listProjects: async () => { throw new Error("boom"); }, runDbTask },
+    );
+    assert.deepEqual(thrown, { supported: true, hits: [], groups: [], degraded: true });
+  }
+  assert.equal(spy.calls, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Server-first — with the V2 fixture DB
+// ---------------------------------------------------------------------------
+
+async function withSeed(seedFn, fn) {
+  const fixture = await createFixtureDb(seedFn());
+  try {
+    await withFixtureDb(fixture, fn);
+  } finally {
+    fixture.close();
+  }
+}
+
+// n matching user messages in `sid`, ids `${sid}-m1..n`, times base+1..base+n.
+function seedSession(sid, n, base = 0) {
+  const messages = [];
+  const parts = [];
+  for (let i = 1; i <= n; i++) {
+    const id = `${sid}-m${i}`;
+    messages.push({ id, sessionId: sid, timeCreated: base + i, data: { role: "user" } });
+    parts.push({ id: `${id}-p`, messageId: id, sessionId: sid, timeCreated: base + i, data: { type: "text", text: `needle number ${i} in ${sid}` } });
+  }
+  return { sessions: [{ id: sid, directory: "/a" }], messages, parts };
+}
+function mergeSeeds(...seeds) {
+  return {
+    sessions: seeds.flatMap((s) => s.sessions),
+    messages: seeds.flatMap((s) => s.messages),
+    parts: seeds.flatMap((s) => s.parts),
+  };
+}
+const DB_TEST = (name, fn) =>
+  test(name, async (t) => {
+    if (!(await sqliteAvailable())) return t.skip("node:sqlite unavailable on this runtime");
+    await fn(t);
+  });
+const countBy = (hits) => hits.reduce((m, h) => m.set(h.sessionId, (m.get(h.sessionId) ?? 0) + 1), new Map());
+
+DB_TEST("searchMessages scope:all finds hits in every window (incl. job windows), groups labelled by the box", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 1), seedSession("s2", 1), seedSession("s3", 1)), async () => {
+    const res = await searchMessages(
+      { query: "needle", scope: "all", primarySessionId: "s2" },
+      { listProjects: async () => PROJECTS },
+    );
+    assert.equal(res.supported, true);
+    assert.equal(res.degraded, undefined);
+    assert.deepEqual(res.groups.map((g) => g.sessionId), ["s2", "s1", "s3"]);
+    assert.deepEqual(res.groups.map((g) => g.isCurrent), [true, false, false]);
+    assert.deepEqual(res.groups.map((g) => g.label), ["manta › docs", "manta › fix login", "ronda › job-1"]);
+    assert.deepEqual(res.hits.map((h) => h.sessionId), ["s2", "s1", "s3"]);
+  });
+});
+
+DB_TEST("searchMessages scope:all: no primary caps every session at 3; a primary gets up to 50", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 5), seedSession("s2", 5), seedSession("s3", 5)), async () => {
+    const list = async () => PROJECTS;
+    const noPrimary = await searchMessages({ query: "needle", scope: "all" }, { listProjects: list });
+    assert.deepEqual([...countBy(noPrimary.hits)], [["s1", 3], ["s2", 3], ["s3", 3]]);
+    assert.ok(noPrimary.groups.every((g) => g.isCurrent === false));
+    const withPrimary = await searchMessages({ query: "needle", scope: "all", primarySessionId: "s1" }, { listProjects: list });
+    assert.deepEqual([...countBy(withPrimary.hits)], [["s1", 5], ["s2", 3], ["s3", 3]]);
+    const explicit = await searchMessages({ query: "needle", scope: "all", maxPrimary: 1 }, { listProjects: list });
+    assert.equal(countBy(explicit.hits).get("s1"), 1);
+  });
+});
+
+DB_TEST("searchMessages legacy sessionIds: same hits as before, sessionIds[0] capped at 50, labels = session ids", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 5), seedSession("s2", 5), seedSession("s3", 5)), async () => {
+    const res = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"] });
+    assert.deepEqual([...countBy(res.hits)], [["s1", 5], ["s2", 3], ["s3", 3]]);
+    assert.deepEqual(res.groups.map((g) => g.label), ["s1", "s2", "s3"]);
+    assert.ok(res.groups.every((g) => g.isCurrent === false && g.workspace === null && g.name === null));
+    assert.equal(res.degraded, undefined);
+    // newest first within a session
+    assert.deepEqual(res.hits.filter((h) => h.sessionId === "s2").map((h) => h.messageId), ["s2-m5", "s2-m4", "s2-m3"]);
+    // ground truth: groups flatten back to hits
+    assert.deepEqual(res.groups.flatMap((g) => g.hits), res.hits);
+  });
+});
+
+DB_TEST("searchMessages legacy: a throwing listProjects keeps identical hits, labels fall back, no degraded", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 5), seedSession("s2", 5), seedSession("s3", 5)), async () => {
+    const base = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"] });
+    const res = await searchMessages(
+      { query: "needle", sessionIds: ["s1", "s2", "s3"] },
+      { listProjects: async () => { throw new Error("tmux down"); } },
+    );
+    assert.deepEqual(res.hits, base.hits);
+    assert.deepEqual(res.groups.map((g) => g.label), ["s1", "s2", "s3"]);
+    assert.equal(res.degraded, undefined);
+  });
+});
+
+DB_TEST("searchMessages legacy: explicit maxPrimary/maxPerSession/maxTotal are honoured exactly as buildHits does", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 5), seedSession("s2", 5), seedSession("s3", 5)), async () => {
+    const res = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"], maxPrimary: 2, maxPerSession: 1, maxTotal: 4 });
+    assert.deepEqual([...countBy(res.hits)], [["s1", 2], ["s2", 1], ["s3", 1]]);
+    const capped = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"], maxPrimary: 2, maxPerSession: 1, maxTotal: 3 });
+    assert.equal(capped.hits.length, 3);
+  });
+});
+
+DB_TEST("searchMessages legacy: a working listProjects fills labels, hits identical", async () => {
+  await withSeed(() => mergeSeeds(seedSession("s1", 5), seedSession("s2", 5), seedSession("s3", 5)), async () => {
+    const base = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"] });
+    const res = await searchMessages({ query: "needle", sessionIds: ["s1", "s2", "s3"] }, { listProjects: async () => PROJECTS });
+    assert.deepEqual(res.hits, base.hits);
+    assert.deepEqual(res.groups.map((g) => g.label), ["manta › fix login", "manta › docs", "ronda › job-1"]);
+  });
+});
+
+DB_TEST("searchMessages: a db task error is degraded; a no_db error is unsupported", async () => {
+  await withSeed(() => seedSession("s1", 1), async () => {
+    const plain = await searchMessages(
+      { query: "needle", sessionIds: ["s1"] },
+      { runDbTask: async () => { throw new Error("worker trouble"); } },
+    );
+    assert.deepEqual(plain, { supported: true, hits: [], groups: [], degraded: true });
+    const noDb = await searchMessages(
+      { query: "needle", sessionIds: ["s1"] },
+      { runDbTask: async () => { throw Object.assign(new Error("none"), { code: "no_db" }); } },
+    );
+    assert.deepEqual(noDb, { supported: false, hits: [], groups: [] });
+    assert.equal("degraded" in noDb, false);
+  });
+});
+
+DB_TEST("searchMessages: a spent budget carries groups and truncated:true", async () => {
+  await withSeed(() => seedSession("s1", 1), async () => {
+    const res = await searchMessages(
+      { query: "needle", sessionIds: ["s1"] },
+      { runDbTask: async () => ({ rows: [], complete: false }) },
+    );
+    assert.deepEqual(res, { supported: true, hits: [], groups: [], truncated: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Topology adapter over a REAL createSyncState (the exact rpc wiring)
+// ---------------------------------------------------------------------------
+
+function realState(listProjects) {
+  return createSyncState({ listProjects, publish: () => {} });
+}
+
+DB_TEST("projectsFromSyncState: a never-succeeded topology is degraded, and the DB task never runs", async () => {
+  let dbCalls = 0;
+  const state = realState(async () => { throw new Error("tmux down"); });
+  const res = await searchMessages(
+    { query: "needle", scope: "all", primarySessionId: "s1" },
+    { listProjects: projectsFromSyncState(state), runDbTask: async () => { dbCalls++; return { rows: [], complete: true }; } },
+  );
+  assert.deepEqual(res, { supported: true, hits: [], groups: [], degraded: true });
+  assert.equal(dbCalls, 0);
+});
+
+DB_TEST("projectsFromSyncState: a genuinely empty listing is not a failure (primary alone, or nothing)", async () => {
+  await withSeed(() => seedSession("s1", 1), async () => {
+    const scopes = [];
+    const runDbTask = async (_n, args) => { scopes.push(args.scope); return { rows: [], complete: true }; };
+    const state = realState(async () => []);
+    const none = await searchMessages({ query: "needle", scope: "all" }, { listProjects: projectsFromSyncState(state), runDbTask });
+    assert.deepEqual(none, { supported: true, hits: [], groups: [] });
+    assert.deepEqual(scopes, []);
+    const alone = await searchMessages({ query: "needle", scope: "all", primarySessionId: "s1" }, { listProjects: projectsFromSyncState(state), runDbTask });
+    assert.equal(alone.degraded, undefined);
+    assert.deepEqual(scopes, [["s1"]]);
+  });
+});
+
+DB_TEST("projectsFromSyncState: a stale state keeps serving the last-known-good windows", async () => {
+  await withSeed(() => seedSession("s1", 1), async () => {
+    let fail = false;
+    const state = realState(async () => {
+      if (fail) throw new Error("tmux fault");
+      return [{ tmuxSession: "manta", windows: [win("a", "s1"), win("b", "s2")] }];
+    });
+    await state.refreshNow();
+    fail = true;
+    await state.refreshNow();
+    assert.equal(state.snapshot().stale, true);
+    const scopes = [];
+    const res = await searchMessages(
+      { query: "needle", scope: "all" },
+      { listProjects: projectsFromSyncState(state), runDbTask: async (_n, a) => { scopes.push(a.scope); return { rows: [], complete: true }; } },
+    );
+    assert.equal(res.degraded, undefined);
+    assert.deepEqual(scopes, [["s1", "s2"]]);
+  });
+});
+
+test("projectsFromSyncState: refreshNow runs at most once per search while never-succeeded", async () => {
+  let refreshes = 0;
+  const state = realState(async () => { refreshes++; throw new Error("down"); });
+  await assert.rejects(projectsFromSyncState(state)(), (e) => e.code === "scope_unavailable");
+  assert.equal(refreshes, 1);
+  const ok = realState(async () => { refreshes++; return []; });
+  const before = refreshes;
+  const list = projectsFromSyncState(ok);
+  await list();
+  await list();
+  assert.equal(refreshes - before, 1);
+});

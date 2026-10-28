@@ -10,7 +10,9 @@
 //     100ms `closing` phase before onClose unmounts us
 //   - Esc / overlay click / ESC chip → requestClose
 //   - ArrowUp/ArrowDown with wraparound; Enter → pick(sel)
-//   - pick(i) = onPick(i) then requestClose. Rows receive the SAME pick via
+//   - pick(i) = onPick(i), then requestClose unless onPick returned `false`
+//     (a veto: the pick was refused and the palette must stay open so the
+//     consumer's own feedback can be read). Rows receive the SAME pick via
 //     the children render-prop, so mouse click and keyboard Enter share one
 //     activation path. Consumers must NOT call onClose themselves.
 
@@ -39,7 +41,7 @@ export function PaletteShell({
   itemCount: number;
   sel: number;
   setSel: (n: number) => void;
-  onPick: (index: number) => void;
+  onPick: (index: number) => void | false;
   onClose: () => void;
   footerExtra?: ReactNode;
   children: (pick: (index: number) => void) => ReactNode;
@@ -55,8 +57,8 @@ export function PaletteShell({
     window.setTimeout(onClose, CLOSE_MS);
   };
   const pick = (i: number) => {
-    onPick(i);
-    requestClose();
+    const r = onPick(i);
+    if (r !== false) requestClose();
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
