@@ -633,16 +633,25 @@ reaches either screen.
 - **External collision (a session created outside Manta between the read and
   the create)** — `tmux.newSession` is changed so a failing
   `newSessionGetIndex` whose stderr matches `duplicate session` throws a
-  `DuplicateSessionNameError` carrying the already-created chat
-  `sessionId` (today the opencode session made by `maybeCreateChatSession`
-  before the tmux call, `tmux.mjs:527-534`, would be stranded). The handler
-  retries up to 3 times with the next free suffix, passing
-  `existingSessionId` so no second opencode session is created; after the 3rd
-  failure it deletes that opencode session (`oc.deleteSessionRaw`, `opencode.mjs:1130`, best-effort,
-  logged) and throws the class-1 sentence "Couldn't pick a free name for this
-  project — try again." An explicit `name` is NOT retried under another name (it
-  throws "A project named “<name>” already exists.", deleting the stranded chat
-  session the same way).
+  `DuplicateSessionNameError` carrying `{sessionId, createdHere: boolean}`:
+  `createdHere` is `true` only when THIS call made the session via
+  `maybeCreateChatSession` (`tmux.mjs:527-534`), `false` when it came from the
+  caller's `existingSessionId` (`tmux.mjs:521-526`, exposed at
+  `src/shared/api.ts:983`, tested at `tmux.test.mjs:300-320`). The handler
+  keeps an attempt-local `ownedSessionId` = the id iff `createdHere` was ever
+  true (sticky across retries — a retry passes the id back as
+  `existingSessionId`, which would otherwise report `createdHere:false`).
+  Policy:
+  - hinted create: retry up to 3 times with the next free suffix, passing the
+    id as `existingSessionId` so no second opencode session is created;
+  - explicit `name`: NO retry under another name;
+  - on final failure (retries exhausted, or explicit-name collision): delete
+    the opencode session ONLY if it is `ownedSessionId`
+    (`oc.deleteSessionRaw`, `opencode.mjs:1130`, best-effort, logged); a
+    caller-supplied `existingSessionId` is NEVER deleted and keeps its
+    history. Then throw the class-1 sentence ("Couldn't pick a free name for
+    this project — try again." / "A project named “<name>” already
+    exists.").
 - NEW `sessions:propose-name` — `args: [{kind: "project" | "scratch", hint?: string, cwd?: string, root?: string}]` →
   `{ name: string, hint: string | null }`. `project`: as above, against live tmux
   names. `scratch`: slug of `hint`, uniquified against directories under `root`
@@ -692,14 +701,24 @@ name would be silently rewritten by tmux); rename sends the trimmed name.
 
 node: `sessionNaming.test.mjs` (slug, tmux-safe-then-unique, `next.js` →
 `next_js`, scratch hint both texts, rename validation each branch, proposed
-root incl. `code`/`codex`), `sessionNaming.alloc.test.mjs` — two concurrent
-`tmux:new-session` handler calls with `nameHint:"next.js"` against fake
-tmux/oc where the fake `listSessionNames` resolves only after a BARRIER both
-calls reached (proves the mutex, not just the pure rule): results `next_js` and
-`next_js-2`, metadata written for both final names, no stranded fake opencode
-session; a fake external creator taking `next_js` between read and create →
-retry lands `next_js-2` reusing the same `sessionId`; three collisions → error
-sentence + the opencode session deleted; explicit-name collision → no retry.
+root incl. `code`/`codex`), `sessionNaming.alloc.test.mjs`:
+- **serialization** — fake tmux whose `listSessionNames` for the FIRST caller
+  blocks on a test-controlled latch; start call 1 (`nameHint:"next.js"`), wait
+  until it is inside the fake read; start call 2; assert call 2 has NOT entered
+  the critical section (a counter incremented on entry to the fake read /
+  create stays at 1, max-concurrent-inside = 1); release the latch; await both:
+  `next_js` and `next_js-2`, metadata written for both final names, the
+  critical sections never overlapped. (No barrier that both calls must reach
+  inside the lock — that would deadlock a correct mutex.)
+- **external collision (separate tests)** — a fake external creator takes
+  `next_js` between read and create → retry lands `next_js-2` reusing the same
+  `sessionId`; three collisions with a session created HERE → sentence + that
+  session deleted; explicit-name collision with a session created here → no
+  retry + deleted; **explicit-name collision and retry exhaustion WITH a
+  caller-supplied `existingSessionId` → no `deleteSessionRaw` call, the id
+  survives**; a retry chain that started from a created-here id keeps
+  ownership after passing it back as `existingSessionId` (deleted at
+  exhaustion).
 `forgeCloneView.test.mjs` (every kind regex incl.
 destination-before-permission order; repo list codes). XCTest: decode tests in
 `SessionsTests` / `CloneFromGitHubTests` (the deleted logic tests are removed).
@@ -707,8 +726,8 @@ destination-before-permission order; repo list codes). XCTest: decode tests in
 ### Acceptance
 
 Creating `next.js` from desktop and iOS concurrently yields `next_js` and
-`next_js-2` (the allocator serializes them), never a failed create and never a
-stranded chat session; rename errors read as sentences.
+`next_js-2` (the allocator serializes them), never a failed create, never a
+stranded chat session, and never a deleted caller-supplied conversation; rename errors read as sentences.
 
 ---
 
@@ -848,14 +867,31 @@ assembly in `SessionListStore.swift:476`.
   **Relationships are never inferred from tool status**, so a completed
   background-launch tool leaves `subagents`/`busy` up while its child runs.
   **Hydration** (startup and every opencode stream reconnect, next to
-  `resyncAfterReconnect`, `index.mjs:3463`): `running` ← `oc.listActiveSessionIds()`
-  (replace, not merge); `parentOf` ← the `parentID` of each session from
-  `oc.listSessions(directory)` for every live tmux workspace directory (V2
-  `Session.Info.parentID`, the same field `session.created` carries) ∪ delegate
-  records; then every session whose payload changed is re-emitted.
-  **Removal:** a session absent from a hydration's session lists is dropped
-  from `parentOf`; a delegate record's removal (`delegate.updated`) drops its
-  edge.
+  `resyncAfterReconnect`, `index.mjs:3463`):
+  - `running` ← `oc.listActiveSessionIds()` (`opencode.mjs:773`, a complete
+    set — replaced, not merged; on failure the previous set is kept and the
+    hydration is marked incomplete).
+  - `parentOf` ← the **ancestry closure of every active session and every
+    running delegate job's child**: for each such id, resolve its parent with
+    NEW exported `oc.getSessionParent(id) → {status:"ok", parentID: string |
+    null} | {status:"not-found"} | {status:"error"}` (wraps the private
+    `getSessionInfo`, `opencode.mjs:873`, which today returns `null` for both
+    404 and failures — the wrapper keeps them apart), then recurse on the
+    parent until `parentID` is null or already known (cycle-safe, depth cap
+    32). This is directory-independent and unbounded by listing pages (it does
+    NOT use `listSessions(directory)`, whose 5-page / 500-session cap,
+    `opencode.mjs:850-873`, and directory filter would miss ancestors). Edges
+    from `childSession` frames and delegate records are merged in.
+  - **Removal is only on authoritative evidence:** a session's parent never
+    changes, so an edge is replaced only by an `ok` answer for that child and
+    removed only on `not-found` for the child (the session was deleted) or a
+    delegate record's removal (`delegate.updated`). `error` keeps the existing
+    edge and marks hydration incomplete; an incomplete hydration retries with
+    the D1 backoff (1/2/5/10 s) and never clears state. Absence from any
+    listing is not evidence. To bound memory, edges whose child is neither
+    running, windowed, nor an ancestor of a running session are evicted
+    beyond 5 000 entries (LRU) — eviction can only hide an idle relationship.
+  - Then every session whose payload changed is re-emitted.
   **Emission:** one `windowStatus` frame per session whose derived payload
   CHANGED (ancestors included — a child starting flips its parent's `busy`),
   coalesced per tick. **Snapshot:** the connect snapshot (`index.mjs` appends
@@ -915,7 +951,11 @@ completes after launching background work while its child session keeps
 `turnComplete`**; nested windowless children (grandchild running → windowed
 grandparent busy); parent idle before child completion; `busy` through a
 running delegate job; reconnect hydration with NO open chat (maps rebuilt from
-fake `listActiveSessionIds` + `listSessions` parentIDs, stale edges dropped);
+fake `listActiveSessionIds` + `getSessionParent` ancestry walks); **an active
+grandchild whose parent is older than the newest 500 sessions and a windowless
+child in ANOTHER directory → after reconnect the windowed ancestor stays
+`busy`**; `getSessionParent` `error` during hydration → edges kept, retry
+scheduled, no state cleared; `not-found` → that edge removed;
 snapshot replay is a full replacement. iOS/desktop: a session absent from the
 replay is reset to defaults.
 
@@ -982,7 +1022,8 @@ decides between them before D11 merges.
   reasoning part ids and footer ids are equal, so rows keep identity.
 - **Desktop** splices one message per `messageChanged` (`useTranscriptState.ts:189`)
   AND consumes `toolRuns`. All run state lands in ONE desktop run map keyed by
-  run id and merged by `rev` (D11 "Run revisions"): message annotations
+  run id and merged by `rev` under the current connection's epoch and
+  `connGen` (D11 "Run revisions"): message annotations
   (canonical or spliced) and frames only seed/upsert it; a lower `rev` never
   overwrites a higher one, whichever RPC or frame arrives last. Turn footers
   need the whole turn, so they arrive with the canonical refetch the desktop now
@@ -1388,13 +1429,30 @@ Every `RunView` carries `rev: {epoch, seq}`:
   emitted with the LEDGER's current view and rev (so a full fetch can never
   regress live state); a run the ledger does not know (settled history) gets
   `rev: {epoch, seq: 0}` and the canonical summary.
-- Client merge rule (one pure reducer per client — desktop
-  `mergeRunViews(map, incoming)` in `toolActivity.ts`, iOS
-  `TranscriptRunStore.merging(_:)` in `TranscriptViewModels.swift`): incoming
-  wins iff `epoch` differs from the stored one (a restarted box: replace) or
-  `seq >= stored.seq` within the same epoch. Message annotations (canonical or
-  spliced), and `toolRuns` frames all go through it, in arrival order; an
-  older RPC response arriving after a newer frame is ignored for that run.
+- **Authoritative epoch (no "epoch differs → wins").** The interpreter's
+  epoch is announced on every `/events` connection: the connect snapshot's
+  first frame, `runningSet` (always sent, index 0, `streamInterp.mjs:1062`),
+  gains `epoch` (additive). Each client keeps `currentEpoch` = the epoch of
+  the LATEST connection's `runningSet`, and a `connGen` counter incremented on
+  every `/events` (re)connect.
+- **Client merge rule** (one pure reducer per client — desktop
+  `mergeRunViews(state, incoming, ctx)` in `toolActivity.ts`, iOS
+  `TranscriptRunStore.merging(_:context:)` in `TranscriptViewModels.swift`):
+  1. an incoming value whose `rev.epoch != currentEpoch` is REJECTED (a
+     retired process's answer is never state); while `currentEpoch` is unknown
+     (before the first `runningSet` of a connection) run writes are queued and
+     applied after it arrives, through the same rule;
+  2. an RPC response (canonical fetch or splice) carries the `connGen` it was
+     ISSUED under; a response from an older `connGen` is discarded for the run
+     map (it may still render text — the message content path is unchanged);
+  3. within the current epoch, incoming wins iff `seq >= stored.seq`;
+  4. when `currentEpoch` changes (a new connection reports a different
+     epoch), every stored run of another epoch is dropped, and the new
+     connection's snapshot (`toolRuns` `full:true`) plus the next canonical
+     refetch (clients refetch on reconnect today) repopulate it.
+  The same rules apply to full snapshots and incremental frames: a `full:true`
+  frame of the current epoch replaces the live layout/parts and merges runs by
+  rule 3; a frame of another epoch is rejected like any value.
 - A canonical refetch after `turnComplete` does NOT clear the map; it merges
   (equal or newer revs). Runs no longer referenced by any loaded message and
   not in the current turn are pruned on refetch.
@@ -1443,25 +1501,67 @@ functions as the canonical walk:
   canonical part, joined by part id / call id.
   `task` parts carry `childSessionId`; todo-write and handoff excluded as
   above.
-- **Boundaries:** `session.inbox.delivered` → look up the delivered item in the
-  interpreter's inbox state (`text`, `attachmentCount`, from the `enqueued`
-  event) and apply `runBoundaryOf`; if the item is unknown (inbox not
-  hydrated), the interpreter calls the injected async
-  `classifyDelivered({sessionId, messageID})` (production: `oc.getMessage` +
-  `runBoundaryOf`) and applies the result when it resolves, holding the run
-  open meanwhile. Text: a `session.text.delta` chunk containing non-whitespace
-  closes the open run (rule 6). Reasoning: a non-whitespace
+- **Boundaries — classification data.** At `session.inbox.enqueued` time the
+  interpreter records `deliveryClass.set(inboxID, runBoundaryOf(raw))` for
+  EVERY enqueued item (not only the user items it lists): `raw.type !==
+  "user"` → `"transparent"`; a user item with `synthetic: true` or `ignored:
+  true` → `"transparent"`; else non-blank `payload.text` not starting with
+  `[background job "` or `payload.files.length > 0` → `"draws"`, otherwise
+  `"transparent"` (same predicate as the canonical walk over the delivered
+  message's parts).
+- **Boundaries — ordering.** `session.inbox.delivered` with a known class is
+  applied synchronously (a `"draws"` closes the open run and resets the ledger
+  per "Lifetime"). With an UNKNOWN class (enqueued before this process
+  started, or missed), the ledger enters `pendingBoundary {inboxID,
+  messageID}` and BUFFERS every later run-affecting event for that session
+  (tool started/input/progress/success/failed, text and reasoning deltas,
+  further deliveries) in arrival order — the same buffer-and-replay pattern
+  the inbox hydration uses (`streamInterp.mjs:520-568`). Non-run frames
+  (`toolStarted`, `toolOutput`, `flush`, …) are still emitted immediately; only
+  ledger mutation and `toolRuns` frames wait. The injected async
+  `classifyDelivered({sessionId, messageID})` (production: `oc.getMessage` →
+  the canonical predicate over its parts, incl. `synthetic`/`ignored`)
+  resolves the class; the boundary is applied FIRST, then the buffer is
+  replayed in order, then ONE `toolRuns` frame is emitted. So a tool B that
+  arrived during the lookup is assigned exactly as the canonical walk assigns
+  it.
+- **Failure / reconnect.** `classifyDelivered` failing, or not resolving within
+  3 s, resolves the boundary as `"draws"` (logged) and replays; the turn-end
+  canonical refetch is then authoritative for any membership difference (ids
+  differ only in that degraded case, which the identity rules tolerate: a
+  delete+insert of one run row). An opencode-stream reconnect (`resync`)
+  cancels a pending lookup and resolves it the same way before the resync's
+  own frames. Buffer cap: 2 000 events, beyond which the boundary resolves as
+  `"draws"` immediately.
+- **Text / reasoning boundaries:** a `session.text.delta` chunk containing
+  non-whitespace closes the open run (rule 6); a non-whitespace
   `session.reasoning.delta` starts a segment (rule 5).
 - **Ordered layout:** the ledger also records the turn's draw order as it
   happens — `layout: LiveBlock[]`:
   ```ts
   type LiveBlock =
-    | { kind: "run", id: string }                       // a run id (segments inside the RunView)
+    | { kind: "run", id: string, segmentId: string }    // ONE entry per SEGMENT of a run (segmentId of the
+                                                        // first segment === run id; a run without segments
+                                                        // has exactly one entry with segmentId === id)
     | { kind: "text", partID: string, messageID: string }     // the `flush` partID, e.g. "<msg>:text:0"
     | { kind: "reasoning", partID: string, messageID: string }
   ```
   A text/reasoning block is appended when its partID's FIRST non-whitespace
-  chunk arrives; a run block when the run opens. `partID`s are exactly the
+  chunk arrives; a run entry when the run opens AND when a new segment of it
+  starts (the first part after a non-blank reasoning). Tool A → reasoning R →
+  tool B yields `[run(A, seg A), reasoning R, run(A, seg B)]`.
+  **Placement rule (both clients, canonical and live — one rule, KC layout):**
+  - reasoning SHOWN: every run entry draws its own block — the segment's
+    `SegmentView` summary, row id `"run-" + segmentId` — and reasoning entries
+    draw between them: segment A, R, segment B;
+  - reasoning HIDDEN: reasoning entries draw nothing, and consecutive run
+    entries with the SAME run id (nothing drawn between them) collapse into ONE
+    block at the FIRST entry, drawing the whole `RunView`, row id `"run-" + id`.
+    Since the first segment id equals the run id, toggling keeps the first
+    row's id; segment rows appear/disappear after it.
+  The canonical layout uses the same rule: parts carry `segmentId`, so the
+  canonical walk emits one entry per (run, segment) in part order, with
+  reasoning parts between them. `partID`s are exactly the
   `flush` frame ids (`streamInterp.mjs:818`) and the canonical part ids
   (`opencodeV2.mjs:254-270`).
 
@@ -1492,8 +1592,11 @@ alone with `seq: 0`.
   `StreamToolRunsPayload` (+ `LiveBlock`); `MantaSessionStreamState` gains
   `liveRuns: TranscriptLiveRunsState`; `MantaStreamRouter.applying`
   (`MantaEventStore.swift:174`) gets `case "toolRuns"` applying the pure
-  reducer (`full` replaces layout/runs/parts/closed; otherwise layout replaced,
-  runs merged by rev, parts upserted by id, closed unioned). Unknown subs are
+  reducer (`full` replaces layout/parts/closed; otherwise layout replaced,
+  parts upserted by id, closed unioned; runs ALWAYS through
+  `TranscriptRunStore.merging` with the epoch/`connGen` rules of "Run
+  revisions" — `applyRunningSet` (`MantaEventStore.swift:584`) records the
+  connection's `epoch`; a frame of another epoch is rejected). Unknown subs are
   discarded there today (`MantaEventStore.swift:174-275`), so decoding only in
   `ChatSessionStore` would never fire. The state is reset where the router
   resets turn state today (`running:true` edge of a new turn keeps it — rule 8
@@ -1501,16 +1604,38 @@ alone with `seq: 0`.
   once every layout block is covered by a settled canonical message).
 - **Tail builder:** NEW pure `ChatTranscriptMapper.liveTail(layout:runs:parts:
   textByPart:reasoningByPart:showReasoning:canonical:running:) ->
-  LiveTailResult {blocks, trailing}` replaces `mergingLive` and the single
-  `inProgressText` prose block (`ChatSessionStore.swift:850-925`). It walks
-  `layout` in order and skips any block whose id the canonical blocks already
-  contain (run id, `"p"+partID`, `"r"+partID`): `run` → `.activity(ToolRun(id,
-  parts: ledger parts as synthetic tool parts, view: RunView))`; `text` →
-  `.prose(textByPart[partID], at: nil, partID: partID)` (the existing
-  `MantaSessionStreamState.textByPart`, `MantaEventStore.swift:120-123`);
-  `reasoning` → `.reasoning` only when `showReasoning`. `trailing` = the last
-  block iff it is a run, NOT in `closed`, and `running` (replaces the old
-  `hasTailContent` guess). Queued sends stay in `trailingBlocks` as today.
+  LiveTailResult {canonical, blocks, trailing}` replaces `mergingLive` and the
+  single `inProgressText` prose block (`ChatSessionStore.swift:850-925`). It
+  applies the placement rule above to `layout` and then, per block:
+  - **run / segment block whose row id is NOT in the canonical blocks** →
+    appended to the live tail as `.activity(ToolRun(id, parts, view))`, with
+    `parts` = ledger parts as synthetic tool parts.
+  - **run / segment block whose row id IS in the canonical blocks (a partly or
+    wholly canonical run — e.g. tool A settled, then a transparent background
+    completion, then tool B streaming in a later execution, rules 3/8)** →
+    UPSERT into that canonical row in place (same id, same position, no second
+    row): `parts` = canonical parts ∪ ledger parts not already present, matched
+    by part id, then by call id (the canonical part wins for its content, the
+    ledger only adds missing parts — the same dedupe `ToolRun.appending` did,
+    `ToolActivity.swift:612-634`, kept as the pure helper
+    `ToolRun.upserting(_ parts:)`); `view` = the rev-merged value from
+    `TranscriptRunStore` (never the older of the two). The live block is
+    dropped from the tail only after it has been merged; it is omitted without
+    merging ONLY when every ledger part id is already in the canonical row AND
+    the stored rev for the run is ≥ the frame's.
+  - **text block** → `.prose(textByPart[partID], at: nil, partID: partID)`
+    (the existing `MantaSessionStreamState.textByPart`,
+    `MantaEventStore.swift:120-123`), unless `"p"+partID` is canonical (iOS
+    canonical blocks come only from SETTLED messages, whose text is complete).
+  - **reasoning block** → `.reasoning` only when `showReasoning`, unless
+    `"r"+partID` is canonical.
+  `canonical` in the result is the canonical block list with upserts applied;
+  `ChatSessionStore` renders `canonical + blocks`. `trailing` = the last drawn
+  block iff it is a run/segment, its run id is NOT in `closed`, and `running`
+  — including an upserted canonical row at the very end, which is then
+  withheld from `canonical` for the working line exactly as `mergingLive` did
+  (replaces the old `hasTailContent` guess). Queued sends stay in
+  `trailingBlocks` as today.
 - `liveText` / `inProgressText` stay only as the "is anything streaming" flag
   for the running indicator; the `liveTailRowID` swap
   (`ChatSessionStore.swift:895-925`) is deleted (ids now match, see identity).
@@ -1608,7 +1733,13 @@ your box to see tool details"; the working line shows the turn verb only.
   execution → tool B: ONE run, id A, in both paths; (4) tool → hidden
   synthetic-only user message across two executions: one run; (5) tool → a
   drawing user message: two runs; (6) unknown inbox item → `classifyDelivered`
-  resolves later: run held open, then closed/continued correctly; (7) a
+  resolves AFTER tool B's events arrived: B is buffered and replayed behind
+  the boundary — with a `"draws"` result B starts a new run (id B, owner =
+  B's message), with `"transparent"` B joins run A — exactly the canonical
+  walk's ids/owners, no lost part; classification failure / 3 s timeout →
+  `"draws"` + replay; reconnect while pending → resolved before resync
+  frames; enqueue-time class for a synthetic/ignored user item and a non-user
+  item → transparent; (7) a
   **delegate** call whose output names job `"nightly-sync"` while its input
   prompt starts "Run the sync…": live activity label "Started background job
   nightly-sync" equals the canonical one; (8) coalescing — five tool events in
@@ -1616,10 +1747,16 @@ your box to see tool details"; the working line shows the turn verb only.
   → `full:true` with the whole layout; (10) **revisions** — an earlier tool in
   a run completes (or fails) AFTER a later message already added to it: the
   ledger rev for that run increases, and `getMessage` of the EARLIER message
-  carries the higher rev.
+  carries the higher rev; (11) **segment layout** — A → R → B produces layout
+  `[run(A,A), reasoning R, run(A,B)]` and the canonical walk over the same
+  messages yields the same (run, segment) order; (12) the connect snapshot's
+  `runningSet` carries the interpreter `epoch`.
 - vitest `toolActivity.test.ts`: `mergeRunViews` — higher seq wins, equal seq
-  wins (idempotent), lower seq ignored, new epoch replaces, `RunRef` never
-  overwrites; an out-of-order `opencodeMessage` response (older rev) after a
+  wins (idempotent), lower seq ignored, a value from a non-current epoch is
+  rejected, a response from an older `connGen` is discarded, a change of
+  `currentEpoch` drops other-epoch runs, writes before the first `runningSet`
+  are queued, `RunRef` never overwrites; the E1-fetch / E2-reconnect / E1
+  -resolves sequence keeps E2; an out-of-order `opencodeMessage` response (older rev) after a
   newer `toolRuns` frame leaves the newer summary; layout by `runId` incl.
   owner-outside-window placement; `stabilizeLayout` keeps identity across equal
   revs.
@@ -1629,7 +1766,17 @@ your box to see tool details"; the working line shows the turn verb only.
   layout order with ids `run-<A>`, `p<msg>:text:0`, `run-<B>`; the canonical
   mapper over the same turn yields the SAME ids in the same order (handover);
   `trailing` only when the last run is open; reconnect `full` frame rebuilds
-  the same rows; **identity regression** — over a recorded transcript every
+  the same rows; **reasoning segments** — A → R → B with reasoning ON gives
+  rows `run-A`, `rR…`, `run-B` (B's segment id) in that order, OFF gives one
+  `run-A` row with the whole summary, and toggling while streaming keeps
+  `run-A`'s identity; **partial canonical runs** — settled A (canonical) →
+  transparent delivery → streaming B (ledger only, before any refetch): one
+  `run-A` row containing A and B with the frame's summary, no duplicate row;
+  mixed settled/unsettled messages within one run likewise; a run already
+  fully canonical with an equal rev is not duplicated; **epoch** — E1 fetch
+  issued → reconnect with `runningSet` epoch E2 + `full` snapshot → E1
+  response resolves: the E2 values remain (rejected by epoch and by `connGen`);
+  **identity regression** — over a recorded transcript every
   row id equals the pre-D11 id except prose rows, which equal `"p" + partID`.
 - XCTest `MantaEventStreamTests.swift`: a `toolRuns` frame through
   `MantaStreamRouter.applying` updates `liveRuns` (it would be dropped today).

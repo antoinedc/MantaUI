@@ -259,17 +259,32 @@ A probe failure leaves `localPath: null` (never fails the inbox).
   `--- a/old`, an empty context line, `\ No newline`, and `+++ /dev/null`).
   `diffView.mjs` keeps only a thin mapper:
   - **Call:** `parsePatch(diffText)` inside `try/catch`. A throw (malformed
-    input) becomes `message: "Couldn't read this diff."` (plus the parser's
-    text in a server `console.warn`) with `files: []`; the raw `diff`,
-    `threads` and `draft` are still returned. Empty input → `files: []`,
+    input) becomes the additive flag **`parseFailed: true`** plus `message:
+    "Couldn't read this diff."` (the parser's text goes to a server
+    `console.warn`) with `files: []`; `error` stays `null` (the forge fetch
+    itself succeeded) and the raw `diff`, `threads` and `draft` are still
+    returned, **every** thread and draft comment placed `{at:"unplaced"}` so no
+    comment is lost. Empty input → `files: []`, `parseFailed: false`,
     `message: null`.
+  - **Client precedence (both clients, first match wins):** `error != null` →
+    the error state (`message` + Try again); `parseFailed == true` → "Couldn't
+    read this diff." with **Try again** and **Open on GitHub**, and below it the
+    "Other comments" section listing every thread and draft comment (replies,
+    Send to agent, Remove and the pending bar still work); `files` empty →
+    "No diff."; else the diff. "No diff." is never shown when
+    `parseFailed` is true.
   - **Path:** `newFileName` with a leading `b/` stripped; when `newFileName` is
     `/dev/null` (deleted file), `oldFileName` with a leading `a/` stripped. One
     `files[]` entry per structured patch, in input order.
-  - **Rows:** each hunk first emits a `hunk` row (text = the `@@ -A[,B] +C[,D]
-    @@` header rebuilt from `oldStart/oldLines/newStart/newLines`, plus any
-    section heading `parsePatch` keeps), then walks `hunks[].lines` with
-    counters starting at `oldLine = oldStart`, `newLine = newStart`. The first
+  - **Rows:** each hunk first emits a `hunk` row whose text is the `@@ -A,B
+    +C,D @@` header rebuilt from `oldStart/oldLines/newStart/newLines`
+    **denormalised for display**: `parsePatch` adds 1 to a start whose count is
+    0 (`parseHunk`, diff@9.0.0), so the header uses `A = oldLines == 0 ?
+    oldStart - 1 : oldStart` and likewise `C` for the new side (`@@ -0,0 +1
+    @@` displays `@@ -0,0 +1,1 @@`, not `-1,0`). `parsePatch` does not keep the
+    section heading after the second `@@`, so none is shown. The walk then
+    goes through `hunks[].lines` with counters starting at the **normalised**
+    `oldLine = oldStart`, `newLine = newStart`. The first
     character alone decides: `+` → `added` (anchor `new:newLine`; `newLine++`),
     `-` → `removed` (anchor `old:oldLine`; `oldLine++`), `' '` or an empty line
     `''` → `context` (anchor `both:newLine`; both advance), `\` (`\ No newline
@@ -300,6 +315,7 @@ unchanged — the raw `diff` stays for compatibility):
   "threads": [ { …ForgeThread…, "placement": { "at": "row", "file": 0, "row": 7 }
                                             | { "at": "file", "file": 0 } | { "at": "unplaced" } } ],
   "draft": null | { …ForgeDraft…, "comments": [ { …ForgeDraftComment…, "placement": … } ] },
+  "parseFailed": false | true,          // true: the forge fetch worked but the diff text couldn't be parsed
   "message": string|null
 }
 ```
@@ -325,12 +341,18 @@ placement from an anchor:
    comment; or the response's `headSha` / `stale` differs from the snapshot's)
    → keep the raw draft's verdict/body, show the known comments, and refetch
    `forge:diff` once to get server placements.
+5. a successful mutation whose `draft` is `null` (the draft was already
+   submitted or cleared, e.g. by another client — `deleteComment` returns the
+   absent draft as `null`, draft.mjs:177-196, forwarded by
+   forge/index.mjs:1363-1366) → the placed draft becomes `nil`/`null`: all
+   draft cards and the pending bar disappear, no error, no refetch.
 The draft's non-comment fields (`verdict`, `body`, `stale`, `updatedAt`) are
 always taken from the response. Pure helper on each client: iOS
-`ReviewDraftMerge.merge(previous: GitPlacedDraft?, response: GitDraft,
-tapped: GitPlacement?) -> (draft: GitPlacedDraft, needsRefetch: Bool)` (in
-`GitForgeModels.swift`); desktop `mergeDraftPlacements(previous, response,
-tapped)` exported from `src/renderer/ReviewPane.tsx`.
+`ReviewDraftMerge.merge(previous: GitPlacedDraft?, response: GitDraft?,
+tapped: GitPlacement?) -> (draft: GitPlacedDraft?, needsRefetch: Bool)` (in
+`GitForgeModels.swift`); desktop `mergeDraftPlacements(previous, response:
+ForgeDraft | null, tapped) → { draft: PlacedDraft | null, needsRefetch }`
+exported from `src/renderer/ReviewPane.tsx`.
 
 ### S.3 Registrations (sole worker, wave C)
 
@@ -356,8 +378,13 @@ tapped)` exported from `src/renderer/ReviewPane.tsx`.
   belongs to `lru-cache`).
 - `src/server/forge/diffView.test.mjs` (new) — every case below exercises the
   combined `parsePatch` + mapper (no mocking of `diff`); also a malformed
-  input that makes `parsePatch` throw → `files: []` with `message` set and the
-  raw `diff` still returned; two-file parse with counts;
+  input that makes `parsePatch` throw (`@@ -1,2 +1,3 @@` followed only by
+  ` first`, `+new`) → `files: []`, `parseFailed: true`, `message: "Couldn't
+  read this diff."`, the raw `diff` returned, and every given thread / draft
+  comment placed `unplaced`; **zero-length ranges** — an insertion-only hunk
+  `@@ -0,0 +1,2 @@` shows header text `@@ -0,0 +1,2 @@` and rows `new:1`,
+  `new:2`; a deletion-only hunk `@@ -3,2 +2,0 @@` shows `@@ -3,2 +2,0 @@` and
+  rows `old:3`, `old:4`; two-file parse with counts;
   deleted file uses the `a/` path; hunk resets counters; preamble dropped;
   **header-like content** — `@@ -1,2 +1,3 @@`, ` first`, `+++ heading`,
   ` last` yields rows context/added/context with anchors `both:1`, `new:2`,
@@ -370,7 +397,9 @@ tapped)` exported from `src/renderer/ReviewPane.tsx`.
   lands on the old-line row; RIGHT on context; draft `both` uses the new line;
   unmatched → file top; unknown path → unplaced; truncation over
   `maxRowsPerFile`.
-- `src/server/forge/index.test.mjs` (extend): `pullRequestForCwd` returns
+- `src/server/forge/index.test.mjs` (extend): `forgeDiffForCwd` with a
+  successful adapter `getDiff` whose text is malformed → `error: null`,
+  `parseFailed: true`, `message` set; `pullRequestForCwd` returns
   `view` and ordered toned checks; a rate-limited read returns the cached PR
   with `stale:true` (G5) and a fresh no-PR read drops it; `mergePullRequest`
   refuses `blocked` and `sha_mismatch` without calling `adapter.merge` and
@@ -386,17 +415,17 @@ tapped)` exported from `src/renderer/ReviewPane.tsx`.
 
 | Desktop file | Change |
 |---|---|
-| `src/shared/types.ts` | Add `ForgePullRequestView`; `checks[].tone`; optional `view` on `ForgePullRequestResult`; optional `files` / `placement` / `draft` / `message` on `ForgeDiffResult`; optional `message` on ship / merge / draft / reply results; optional row fields on `ForgeInboxItem`. All optional (old box). |
+| `src/shared/types.ts` | Add `ForgePullRequestView`; `checks[].tone`; optional `view` on `ForgePullRequestResult`; optional `files` / `placement` / `draft` / `parseFailed` / `message` on `ForgeDiffResult`; optional `message` on ship / merge / draft / reply results; optional row fields on `ForgeInboxItem`. All optional (old box). |
 | `src/renderer/chatUtils.ts` | **Delete** `checkTone`, `orderChecks`, `countsForChecks`, `checksChipDescriptor`, `branchChipLabel` (unused in production), `failuresToAgentPrompt`, `canMerge`, `describeMergeFailure`, `branchPanelState`, `resolveShipState`, `ShipState`, `commentableLines`, `CommentableLine`, `inboxReasonLabel`, `sortInbox`, `INBOX_REASON_PRIORITY`. Keep `shouldOfferForgeConnect` (G8) and `formatAge` (clock). |
 | `src/renderer/chatUtils.test.ts` | Delete the `describe` blocks of the removed functions (`checkTone` :4452 … `describeMergeFailure` :4735, `commentableLines` :4749, `branchPanelState` :5166, `inboxReasonLabel` :5281, `sortInbox` :5289); their cases move to `view.test.mjs` / `diffView.test.mjs`. |
 | `src/renderer/SessionHeader.tsx` | Takes `view?: ForgePullRequestView` instead of deriving: the branch chip from `view.panel` / `view.chipLabel`; `BranchPanel` from `view.ship` and `view.merge` (deletes `NO_SHIP_COPY`, the mergeable ternary and the `canMerge` call); `ChecksChip` from `view.checks.chip` (registry priority 90 for `danger`, else 40 — layout); `ChecksPanel` lists `checks` as received (pre-ordered; `tone` drives `StatusDot`), "Send failures" fills `view.checks.failuresPrompt`, "Open logs" uses `view.checks.logsUrl`. |
 | `src/renderer/ChatPanel.tsx` | `refreshForge` stores `prResult.view`; `doMerge` shows `res.message` (drops the `describeMergeFailure` import); ship / preview errors show `message ?? error`. A box without `view` keeps the plain tag and the header shows "Update your box to see pull requests and checks here." (only when GitHub is connected). |
-| `src/renderer/ReviewPane.tsx` | Renders `files[].rows` with the comment gutter and places notes by `placement` (new local `ReviewDiffRows` component in this file); deletes `threadAnchor`, `diffHeader`, the per-anchor note map and the separate `forgeDraftGet` call on load (the draft comes from `forge:diff`). Errors and failed add / reply / submit / remove show `message` (the desktop stops swallowing them). A box without `files` → "Update your box to review pull requests here." |
+| `src/renderer/ReviewPane.tsx` | Renders `files[].rows` with the comment gutter and places notes by `placement` (new local `ReviewDiffRows` component in this file); follows the S.2 state precedence (`error` → `parseFailed` → "Couldn't read this diff." with Try again / Open on GitHub and the "Other comments" list → empty → "No diff."); a `draft: null` mutation result clears the drafts and pending bar; deletes `threadAnchor`, `diffHeader`, the per-anchor note map and the separate `forgeDraftGet` call on load (the draft comes from `forge:diff`). Errors and failed add / reply / submit / remove show `message` (the desktop stops swallowing them). A box without `files` → "Update your box to review pull requests here." |
 | `src/renderer/ToolBodies.tsx` | `UnifiedDiff` loses the `gutter` / `notes` props and the `UnifiedDiffGutter` / `UnifiedDiffNote` types and stops importing `commentableLines`. It keeps showing line numbers for tool-output diffs through a local, desktop-only presentational helper `diffLineNumbers(text): (number \| null)[]` in the same file (one entry per input line: old number for a removed line, new number for an added/context line, `null` otherwise), using the S.2 hunk-aware counting so it also stops mis-numbering `+++ …` content. It produces no paths, anchors or placements — it only numbers rows of a tool's raw output text, which iOS renders without numbers (`ActivityDiff`, `ActivitySheet.swift:417-460`), so there is no cross-client rule to centralise; review diffs never use it (they render the box's `files`). **Implementation (libraries review):** `diffLineNumbers` calls the same `parsePatch` from `diff` that `diffView.mjs` uses (one parser for desktop and box) and walks `hunks[].lines` with the S.2 counting, instead of re-implementing it. Tool output that is bare hunks without file headers is accepted by `parsePatch`; if it throws or returns no hunks, the helper returns all-`null` (no numbers shown), never an error. |
 | `src/renderer/UnifiedDiff.test.tsx` | Add a regression fixture spanning two hunks (second hunk offset, a removal, an addition, context, and an added `+++ heading` line): assert the rendered numbers — old numbers on removals, new numbers on additions/context — match today's output for the ordinary lines and are correct after the header-like line. Also: bare hunks with no file headers get numbers; text `parsePatch` rejects (or with no hunks) renders with no numbers and no error. |
 | `src/renderer/InboxPalette.tsx` | Renders `item.label` / `identifier` / `secondary`; maps the box's semantic `tone` to `StatusDot`'s vocabulary at the row with a local `inboxDotTone(tone)`: `danger → "error"`, `warn → "warn"`, `muted` / unknown `→ "idle"` (presentation only; `StatusDot` accepts `ok\|running\|error\|warn\|idle`, StatusDot.tsx:15-33); uses `item.branchName`, `item.repoName` and `item.localPath`; **deletes** the `forgeProbe` call, `dotTone`, `identifier`, `repoName`, `secondary`, `inboxBranchName` and the `sortInbox` use. Items without `label` → "Update your box to use the inbox here." |
 | `src/renderer/SessionHeader.branch.test.tsx`, `SessionHeader.checks.test.tsx` | Pass a `view` fixture instead of raw state; assert the rendered copy comes from the fixture; add an old-box case (no `view`). |
-| `src/renderer/ReviewPane.test.tsx` (new) | Renders rows and placed notes from a `forge:diff` fixture (incl. a LEFT context-line thread); shows `message` on a failed add; `mergeDraftPlacements` with two placed comments followed by add, delete and set-verdict (no surviving comment disappears or moves; new one at the tapped row; unknown ids / changed head → refetch flag); the component calls `forgeDiff` again only when the merge asks. |
+| `src/renderer/ReviewPane.test.tsx` (new) | Renders rows and placed notes from a `forge:diff` fixture (incl. a LEFT context-line thread); shows `message` on a failed add; a fixture with `error: null, parseFailed: true, files: []` and one thread shows "Couldn't read this diff.", lists the thread, and does NOT show "No diff."; `mergeDraftPlacements` with two placed comments followed by add, delete and set-verdict (no surviving comment disappears or moves; new one at the tapped row; unknown ids / changed head → refetch flag); a draft loaded here then cleared elsewhere, followed by a successful Remove returning `draft: null` → no draft cards, no pending bar, no error; the component calls `forgeDiff` again only when the merge asks. |
 | `src/renderer/InboxPalette.test.tsx` (new) | Renders the box's row fields; a `tone: "danger"` row renders a `bg-danger` status dot, `warn` → `bg-warn`, `muted` → `bg-text-quiet`; "Start a session" uses `localPath` + `branchName`; asserts `forgeProbe` is never called. |
 
 ### S.6 Compatibility (D24)
@@ -1013,8 +1042,12 @@ returns C3's Bool; `false` is surfaced as "Couldn't add it to your message."
   **Open on GitHub** (if `prURL`), **Refresh**.
 - **Load**: ONE call, `forge:diff(ref)`, returns rows, placed threads and the
   reconciled draft with placed comments (S.2) — no separate `draft-get` on load.
-- **States**: loading → `ProgressView("Loading diff…")`; `error` → the box's
-  `message` + **Try again**; `files` empty → "No diff."; `stale` diff result →
+- **States** (S.2 precedence, first match wins): loading →
+  `ProgressView("Loading diff…")`; `error` → the box's `message` + **Try
+  again**; `parseFailed` → "Couldn't read this diff." + **Try again** + **Open
+  on GitHub**, with the "Other comments" section below (all threads and draft
+  comments, still actionable; the pending bar still shows); `files` empty →
+  "No diff."; `stale` diff result →
   footnote banner "Showing last known diff — GitHub didn't answer."; response
   without `files` (old box, capability `forge-diff-view-1`) → "Update your box to
   review pull requests here." + **Open on GitHub**. `.refreshable` reloads.
@@ -1089,8 +1122,15 @@ Tests — `MantaUITests/GitForgeTests.swift` (pure, `verify.sh`):
 `testDraftMergeAddKeepsExistingAndPlacesNewAtTap` (two placed comments + add →
 both keep placements, new one at the tapped row),
 `testDraftMergeDeleteRemovesOnlyThatId`, `testDraftMergeVerdictKeepsAllPlacements`,
-`testDraftMergeUnknownIdsOrHeadChangeRequestsRefetch`.
-Store test (`GitForgeStoreTests.swift`, Xcode): `testReviewStoreRefetchesDiffOnlyWhenMergeAsks`.
+`testDraftMergeUnknownIdsOrHeadChangeRequestsRefetch`,
+`testDraftMergeNullResponseClearsDraftWithoutRefetch`,
+`testDecodeParseFailedFlag`.
+Store tests (`GitForgeStoreTests.swift`, Xcode): `testReviewStoreRefetchesDiffOnlyWhenMergeAsks`,
+`testReviewStateParseFailedBeatsEmpty` (`error: nil, parseFailed: true,
+files: []` → state `.parseFailed` with the thread in "Other comments", never
+`.empty`), `testRemoveAfterRemoteClearReturnsNullClearsPendingBar` (draft
+loaded, cleared by another client, Remove succeeds with `draft: null` → no
+cards, no bar, no error banner).
 
 ### D.4 Acceptance
 
@@ -1597,3 +1637,28 @@ Review `reviews/server-first/05-git-pr-review.md`:
    longer lists `forgeProbe()` as consumed.
 
 No master-table change was needed.
+
+## Review responses (server-first-2)
+
+Review `reviews/server-first-2/05-git-pr-review.md` (no
+`00-cross-cutting.md` in that round):
+
+1. **BLOCKING — parser failure looked like an empty diff.** Fixed (S.2, D.2,
+   S.5): additive `parseFailed: true` with `message`, `error` left `null`;
+   every thread/draft comment placed `unplaced` so nothing is lost; a pinned
+   state precedence for both clients (`error` → `parseFailed` → empty → diff)
+   so "No diff." can never show for a parse failure; Try again + Open on
+   GitHub. Node fixtures (diffView + `forgeDiffForCwd` with a successful fetch
+   and malformed text), vitest and iOS store tests assert the message is shown
+   and "No diff." is absent.
+2. **SHOULD — zero-length range headers.** Fixed (S.2): the hunk header text
+   subtracts 1 from a start whose count is 0 (undoing `parseHunk`'s
+   normalisation); row counters keep the normalised starts. Insertion-only and
+   deletion-only fixtures assert header text and row numbers.
+3. **SHOULD — `draft: null` after a mutation.** Fixed (S.2 rule 5, D.3, S.5):
+   both helpers accept a nullable response and return a nullable draft; null
+   clears draft cards and the pending bar without error or refetch. Tests on
+   iOS and desktop for "loaded here, cleared elsewhere, Remove returns null".
+
+No master-table change was needed; no new library (the `diff@9.0.0` choice in
+"Libraries considered" is unchanged).

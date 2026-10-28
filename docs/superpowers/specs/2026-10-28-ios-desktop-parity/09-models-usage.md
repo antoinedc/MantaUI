@@ -329,6 +329,26 @@ interleaved calls → final list has both keys); `opt-in` ignores unknown keys;
 `overrideFor` blank/unchanged/invalid context/all-unchanged → delete;
 `models.updated` published once per successful write.
 
+**Downstream refresh after any `models:*` write (both clients).** A write
+changes three things clients hold: the Models table, box config mirrors
+(`defaultModel`, `optInModels`, `deactivatedMainModels`, `modelOverrides`) and
+the raw model list (`opencode:models` — overrides change names / descriptions /
+context). The box therefore (a) pushes the saved config through
+`syncState.applyConfig` (registration, M-09-srv-1) — the desktop's existing
+`sync` handling (`store.ts:1063-1075` → `applyConfig`) updates
+`store.defaultModel` everywhere, which `createDraft` (`store.ts:982-996`) and
+`ChatPanel.tsx:244` read for new sessions; and (b) publishes `models.updated`.
+Every client, on `models.updated` (its own write or another device's), refreshes
+the RAW catalogue, the defaults and the picker — desktop
+`refreshModelCatalog()` (`modelCatalog.ts:120-123`, called from the App-level
+`onModelsUpdated` subscription; `modelCatalog.ts` itself is not edited) plus
+the picker hook and an open Models card; iOS `ChatModelCatalog.reload()`
+(models + `opencode:default-model` + config default + picker). The writer
+additionally applies the reply locally at once (desktop: the table cache,
+`useStore.setState({ defaultModel })` from the reply's `table.defaultKey`, and
+`refreshModelCatalog()` after `set-override`; iOS: the table and
+`ChatModelCatalog.shared.reload()`), so its own UI does not wait for the frame.
+
 ### SF-M2 — picker → same module, channel `models:picker`
 
 Ports `chatUtils.ts:2356-2470` (`hideFastSiblingGroups`, `selectableModelList`,
@@ -351,8 +371,10 @@ Ports `chatUtils.ts:2356-2470` (`hideFastSiblingGroups`, `selectableModelList`,
 Inputs: `oc.listModels(overrides)`, config `deactivatedMainModels` /
 `optInModels`, `getModelPrefs().recents` (`modelPrefs.mjs:146`). Clients look
 the model OBJECTS up by key in the `opencode:models` list they already hold
-(names, variants, capability badges stay presentational). Freshness: clients
-refetch on `models.updated` and on `model-prefs.updated` (recents).
+(names, variants, capability badges stay presentational). Freshness: on
+`models.updated` clients refresh the RAW model list AND the picker together
+(see "Downstream refresh" above — a picker key whose object is stale would show
+an old name); on `model-prefs.updated` only the picker (recents).
 
 Node tests (same file): hidden key absent from `groups`/`selectable`/
 `delegateGroups`/`recents`; locked deprecated present in `groups` + `locked`,
@@ -726,23 +748,49 @@ export function createUsageAlerts({ now, publish, bootId = randomUUID() })
   the alerts still ACTIVE (level holds and `expiresAt` not passed) as of
   `revision`. An alert is retired from the active set when its key drops below
   its level or `expiresAt` passes; a retirement publishes the `retired` frame.
-- **Client reconciliation contract (both clients, identical):** the client
-  keeps `lastBootId`, `lastRevision`, the displayed queue and a per-box
-  `seenIDs` set (ids ever shown OR dismissed — dismissal never removes from
-  `seenIDs`).
-  - *Snapshot* (`usage:alerts`, on connect and every disconnect→connect): if
-    `bootId != lastBootId`, reset `lastRevision = -1`. If `revision <
-    lastRevision`, DROP the snapshot (a newer frame was already applied while
-    it was in flight). Else it is authoritative: remove from the queue every
-    id NOT in `alerts` (retirements missed while disconnected), then enqueue
-    each active id not in `seenIDs` (and add it), set `lastRevision =
-    revision`, `lastBootId = bootId`.
-  - *Frame*: if `bootId != lastBootId` → treat as a gap: apply it and trigger
-    a snapshot read. Else ignore when `revision <= lastRevision`; otherwise
-    apply (`alert` → enqueue if unseen; `retired` → remove those ids) and set
-    `lastRevision = revision`.
-  This removes a banner whose retirement was missed, and a snapshot that
-  raced a newer retirement can never resurrect it.
+- **Client hydration contract (both clients, identical — the ONLY place this
+  rule is defined; iOS `UsageAlertQueue`, desktop `usageAlertsQueue.ts`).**
+  A frame is a DELTA, never a complete active set, so a snapshot is never
+  discarded in favour of a frame; frames that arrive while a snapshot is
+  pending are buffered and replayed on top of it. Server guarantee (pinned by
+  `usageAlerts.test.mjs`): every change to the active set bumps `revision` by
+  exactly 1 and publishes exactly one frame carrying that revision; a snapshot
+  reports the active set as of its `revision`.
+
+  Client state: `phase ∈ {hydrating, live}`, `epoch: Int` (incremented on every
+  connect, reconnect and re-hydration request), `lastBootId: String?`,
+  `lastRevision: Int`, `buffer: [frame]` (cap 200 — overflow just restarts
+  hydration), the visible queue, and `seenIDs` (ids ever shown OR dismissed;
+  dismissal never removes from `seenIDs`).
+
+  1. **Start hydration** (on first connect, every disconnect→connect, and on
+     any trigger in 4): `epoch += 1`, `phase = hydrating`, clear `buffer`,
+     request `usage:alerts` tagged with this `epoch`. A failed request stays
+     `hydrating` and retries after 1 s, 2 s, 5 s, then every 30 s (each retry
+     is a new `epoch`).
+  2. **Frame while hydrating:** append to `buffer` (nothing applied yet).
+  3. **Snapshot response:** ignore it unless its `epoch` is the current one (a
+     late answer from an earlier request — including one served by a box
+     process that has since restarted — can never switch `lastBootId` back).
+     If `buffer` holds a frame whose `bootId` differs from the snapshot's, the
+     box restarted mid-request → start hydration again (step 1). Otherwise
+     apply the snapshot authoritatively: drop from the queue every id not in
+     `alerts` (retirements missed while disconnected), enqueue each active id
+     not in `seenIDs` (and add it), set `lastBootId = bootId`,
+     `lastRevision = revision`. Then replay `buffer` in revision order through
+     rule 4 (frames with `revision <= lastRevision` are already contained in
+     the snapshot and are skipped). `phase = live`.
+  4. **Frame while live:** `bootId != lastBootId` (box restarted) → start
+     hydration and buffer this frame. `revision <= lastRevision` → ignore
+     (already applied). `revision == lastRevision + 1` → apply (`alert` →
+     enqueue if unseen; `retired` → remove those ids) and set `lastRevision`.
+     `revision > lastRevision + 1` (a frame was missed) → start hydration and
+     buffer this frame.
+
+  Outcomes: an alert raised while disconnected is always delivered (the
+  snapshot carries it and is never dropped); a retirement racing hydration is
+  replayed after the snapshot so it cannot be undone; a box restart during a
+  request re-hydrates against the new process.
 - **M17 — `usage:remind-at-reset`** — `args: [{key, sessionID}]`. The box uses
   the CURRENT snapshot's `resetsAt` for that key (not a client copy):
   `resetsAt == null` → `{ok:false, code:"no-reset", message:"This window has no reset time."}`;
@@ -760,8 +808,9 @@ cases (boundaries 89.9/90/99.9/100, fire-once while holding, re-arm after
 drop, warn→limit, none→limit once, stale never fires but seeds baseline,
 cold start at 100% stale then fresh 100% → no fire), first observation seeds
 silently, ids stable, retirement on drop and on `expiresAt`, `revision`
-increases by one per raise and per retirement and `list()` reports the current
-value, `bootId` constant per instance, `remind` refuses
+increases by exactly one per raise and per retirement, each change publishes
+exactly one frame with that revision, `list()` reports the current value,
+`bootId` constant per instance, `remind` refuses
 expired / no-reset / no-session and passes `fireAt = resetsAt + 60 000` to an
 injected `createJob`, no `fireNotify` dependency exists.
 
@@ -816,7 +865,7 @@ Deleted functions must not come back (WS11 U5 adds the grep guard).
 
 | SF | Desktop file | Change | Deleted from the desktop |
 |---|---|---|---|
-| M1 | `src/renderer/ModelsCard.tsx` | `useCachedResource("models", …)` now loads `window.api.modelsTable()`; rows/banner render the row fields; Default radio / Main / Sub / Enable deprecated / Edit call `modelsSetDefault` / `modelsSetMain` / `modelsSetSub` / `modelsOptIn` / `modelsSetOverride` and replace the cache with the reply `table`; `outcome != "applied"` (set-sub, opt-in, retry) shows the reply `message`, with a "Try again" button (`modelsRetrySubSync`) only when `retry` is true; `ok:false` shows `message` (under the context field when `field:"context"`). The `opencodeRestartNeeded` raise is removed (V2 hot-applies; the box answers the outcome). Refetch on `onModelsUpdated`. Unknown channel → "Update your box to use this." | `toggleMain`/`toggleSub`/`enableDeprecated`/`setDefault`/`saveOverride` bodies (`:244-380`), the client override diff in `EditModelModal.save` (`:79-90`), the `filtered` search over guide fields (now `searchText`), `describeModel`/`isDeprecated`/`formatModelContextSize` imports |
+| M1 | `src/renderer/ModelsCard.tsx` | `useCachedResource("models", …)` now loads `window.api.modelsTable()`; rows/banner render the row fields; Default radio / Main / Sub / Enable deprecated / Edit call `modelsSetDefault` / `modelsSetMain` / `modelsSetSub` / `modelsOptIn` / `modelsSetOverride` and replace the cache with the reply `table`; `outcome != "applied"` (set-sub, opt-in, retry) shows the reply `message`, with a "Try again" button (`modelsRetrySubSync`) only when `retry` is true; `ok:false` shows `message` (under the context field when `field:"context"`). The `opencodeRestartNeeded` raise is removed (V2 hot-applies; the box answers the outcome). After an `ok:true` reply it applies the downstream refresh of SF-M1 locally: `useStore.setState({ defaultModel: <from reply.table.defaultKey, null when none> })` (set-default, and set-main when it cleared the default — replaces today's `setStoreDefaultModel` / explicit `defaultModel: null`, `ModelsCard.tsx:273-276,337-350`) and `refreshModelCatalog()` (every write; replaces the call at `:357-377`). Refetch on `onModelsUpdated`. Unknown channel → "Update your box to use this." | `toggleMain`/`toggleSub`/`enableDeprecated`/`setDefault`/`saveOverride` bodies (`:244-380`), the client override diff in `EditModelModal.save` (`:79-90`), the `filtered` search over guide fields (now `searchText`), `describeModel`/`isDeprecated`/`formatModelContextSize` imports |
 | M2 | `src/renderer/ModelPicker.tsx` | `picker`/`selectableModels` come from `useModelsPicker()` (new hook in `src/renderer/modelsPicker.ts`: loads `window.api.modelsPicker()`, refetches on `onModelsUpdated` / `onModelPrefsUpdated`, maps keys → `OpencodeModel` objects from the existing catalogue). `resolveFastToggle(selectableModels, …)` unchanged (M3 later). "Enable" → `modelsOptIn({keys:[key]})`. Unknown channel → raw list + footer "Update your box to hide models and manage deprecated ones." | `selectableModelList`, `mainPickerGroups` calls (`:137,148`) |
 | M2 | `src/renderer/ChatPanel.tsx` | `delegateSelectable` = `useModelsPicker().delegateGroups` mapped to objects (`:2933-2936`). | `selectableModelGroups` call |
 | M2 | `src/renderer/chatUtils.ts` + `chatUtils.test.ts` | Delete `hideFastSiblingGroups`, `selectableModelList`, `selectableModelGroups`, `mainPickerGroups`, `MainPickerGroups` (`:2356-2470`) and their describe blocks (cases moved to `modelsTable.test.mjs`). | as listed |
@@ -827,13 +876,14 @@ Deleted functions must not come back (WS11 U5 adds the grep guard).
 | M9/M10/M11 | `src/renderer/ModelsWeCouldntIdentify.tsx` | Loads `window.api.modelsUnidentified()`; renders `intro`/`footer`/`unavailableText`, row `label`/`help`/`actions`/`chips`; Confirm/chip → `modelsDeclare({key, catalogId})`; `IdentifyEditor` Save → `modelsDeclare({key, form})`, shows the reply `message`/field error and replaces the list with `list`. Typeahead keeps `useRoutingCatalog().entries` (M12). | the `rows` derivation (`:315-390`) incl. `resolveIdentity`/`autoEligibility` imports, `declare`'s config read-modify-write (`:290-313`), `IdentifyEditor.save` declaration build (`:157-174`), the `exact`-row `bits`/`help` composition (`:476-500`), `describeMissing` import |
 | M10 | `src/shared/autoEligibility.mjs` (+ `.d.mts`) | Gains `export function describeMissing(missing)` (moved verbatim from `AccountsCard.tsx:170-187`, with `MISSING_PHRASE`). | — |
 | M10 | `src/renderer/AccountsCard.tsx` | The existing import line (`:33`) becomes `import { autoEligibility, MISSING, describeMissing } from "../shared/autoEligibility.mjs";` and, where the local function stood, `export { describeMissing };` — the import gives the retained `helpText` (`:189-195`) its local binding; the re-export keeps `AccountsCard.test.ts:16` (and its `describeMissing` describe block, `:127-157`) compiling unchanged. `MISSING` stays imported (still used at `:88,169`). WS11 D4 later moves the custom-row text to the box. Verification: `npm run typecheck`, `AccountsCard.test.ts` (custom-row help + `describeMissing` cases) green. | local `describeMissing` + `MISSING_PHRASE` (`:169-187`) |
-| M9 | `src/renderer/routingCatalog.ts` | **Unchanged in wave B.** The `matcher` stays: `AccountsCard.tsx` still uses it for custom-endpoint identity/eligibility (`:278-306`, reads at `:577,684,702`) until WS11 D4 (wave D) moves those derivations to the box. WS09 only stops using it in `ModelsWeCouldntIdentify.tsx` (which keeps `entries` for the typeahead). Final deletion of `matcher`/`createModelIndex` belongs to WS11 D4 after its last Accounts consumer migrates (Cross-spec dependencies). | nothing |
+| M9 | `src/renderer/routingCatalog.ts` | **Unchanged in wave B.** The `matcher` stays: `AccountsCard.tsx` still uses it for custom-endpoint identity/eligibility (`:275-306`, reads at `:577,684,702`) — WS11 D4 does not move that derivation. WS09 only stops using it in `ModelsWeCouldntIdentify.tsx` (which keeps `entries` for the typeahead). Its deletion waits for the follow-up ticket under Deferred. | nothing |
 | M13 | `src/renderer/ModelPriceForm.tsx` + test | `UnpricedModelsPanel` groups from `optimizerPrices().unpricedByProvider`; Save sends the draft strings to `modelsSetPrice`; field/form errors and the success notice are the reply's `message`; a `warning` (written but opencode didn't reload) is shown as a muted line under the notice. Test file keeps only render/interaction cases (pure cases moved to `modelsPricing.test.mjs`). | `parseCostDraft`, `groupUnpriced`, `DECIMAL`, `parseField`, `SAVED_MESSAGE` (`:31-94`) |
 | M14/M15 | `src/renderer/UsageResumeModal.tsx` + test | Loads `window.api.usageStoppedView()` on open, on `onUsageStoppedUpdated` and on the `resync` stream frame (`onStreamEvent`, `httpApi.ts:513-517,1158`) while open; every load carries a request seq and only the newest response is applied. On each applied view the selection is reconciled by the shared rule in F6 ("Selection reconciliation"); then the dry-run plan is invalidated and recomputed (debounced, seq-guarded). Renders the box rows/header/chips; the footer sums `cost.reReadTokens` over the selection; button title/enabled from the latest `usageStoppedApply({selected, dryRun:true})`; Apply awaits `usageStoppedApply({selected})` and shows `message`/`failed` (no more fire-and-forget). Fixes the zero-selection defect. Test: a second-device arm/removal (mock `onUsageStoppedUpdated` + changed view) while open updates the rows, drops the vanished id from the selection, keeps the user's other choices, and re-runs the dry run; a stale (older-seq) view response is ignored. | the `resumeCosts`/`selectionSummary`/`groupStoppedByWorkspace`/`isNewStopped`/snippet effect/`windowChipLabel`/header logic (`:31-128`) |
 | M14 | `src/renderer/usageResume.ts` + `usageResume.test.ts` | Keep only `unarmedStoppedCount` and `shouldShowStoppedMarker` (row markers, Sidebar), and add `reconcileResumeSelection({selected, pristine, viewIds, armedIds})` — the view-state rule F6 pins (same as iOS `UsageResumeSelection.reconcile`), with tests. | `extractLastSnippet`, `resetAtFor`, `resumeCost`, `resumeCosts`, `selectionSummary`, `isNewStopped`, `groupStoppedByWorkspace` and their tests |
-| M16/M17 | `src/renderer/App.tsx` | Replace the escalation effect (`:511-531` baseline seeding in `pullUsage`, `:794-917`) with: `usageAlerts()` on mount, on `apiGeneration` change and on every `resync` stream frame (`onStreamEvent`, the client's reconnect signal, `httpApi.ts:513-517`); `onUsageAlert` subscription; refs `seenAlertIds`, `lastBootId`, `lastRevision`, applied with the SF-M16 "Client reconciliation contract" (snapshot prunes toasts whose id is absent, older-revision snapshots dropped, older-revision frames ignored, bootId change resets); toasts from `alert.text` + `formatWindowReset` (M19); limit actions shown when `canRemind`/`canKeepGoing` and an active chat; "Remind me at reset" → `usageRemindAtReset({key, sessionID})` → "Reminder set for <formatResetAt(fireAt)>." / the reply `message`; "Keep going at reset" → resume modal. `retired` frames dismiss the matching sticky toast. | `usageLevelsRef`, `buildUsageLevels` seeding, `fireAtFor`, `scheduleAtReset`, `shouldFireUsageAlert` use |
+| M1/M2 | `src/renderer/App.tsx` | One App-level `onModelsUpdated` subscription (registered with the other bus subscriptions, re-registered on `apiGeneration`) that calls `refreshModelCatalog()` (`modelCatalog.ts:120-123`) — so another device's write (or this device's, when the card is closed) refreshes the composer's raw model list. Config mirrors arrive through the existing `sync` path (box side, M-09-srv-1). | — |
+| M16/M17 | `src/renderer/App.tsx` | Replace the escalation effect (`:511-531` baseline seeding in `pullUsage`, `:794-917`) with: `usageAlerts()` on mount, on `apiGeneration` change and on every `resync` stream frame (`onStreamEvent`, the client's reconnect signal, `httpApi.ts:513-517`); `onUsageAlert` subscription; one `createAlertQueue()` instance in a ref driving the SF-M16 "Client hydration contract" (each reconnect/`"hydrate"` → `startHydration()` + `usageAlerts()` tagged with the epoch; retries 1/2/5/30 s; toasts mirror `visible()`); toasts from `alert.text` + `formatWindowReset` (M19); limit actions shown when `canRemind`/`canKeepGoing` and an active chat; "Remind me at reset" → `usageRemindAtReset({key, sessionID})` → "Reminder set for <formatResetAt(fireAt)>." / the reply `message`; "Keep going at reset" → resume modal. `retired` frames dismiss the matching sticky toast. | `usageLevelsRef`, `buildUsageLevels` seeding, `fireAtFor`, `scheduleAtReset`, `shouldFireUsageAlert` use |
 | M16 | `src/renderer/usageEscalation.ts` + `usageEscalation.test.ts` | **Deleted** (cases moved to `usageAlerts.test.mjs`). | whole file |
-| M16 | `src/renderer/usageAlertsQueue.ts` + `usageAlertsQueue.test.ts` (NEW, WS09) | Pure client bookkeeping of the SF-M16 reconciliation contract (`createAlertQueue()` → `applySnapshot(list)`, `applyFrame(frame)` → `"applied" \| "ignored-stale" \| "needs-snapshot"`, `dismiss(id)`, `visible()`), used by `App.tsx`. Tests: disconnect → missed retirement → reconnect prunes the toast; a retirement frame applied during an in-flight snapshot is not undone by the older snapshot; seen/dismissed ids never re-show; new `bootId` resets. | — |
+| M16 | `src/renderer/usageAlertsQueue.ts` + `usageAlertsQueue.test.ts` (NEW, WS09) | Pure implementation of the SF-M16 "Client hydration contract" (`createAlertQueue()` → `startHydration(): number`, `applySnapshot(list, epoch): "none" \| "hydrate"`, `applyFrame(frame): "none" \| "hydrate"`, `dismiss(id)`, `visible()`), used by `App.tsx`. Tests (same cases as iOS `UsageAlertQueue`): missed retirement pruned on reconnect; raise during hydration (A/B) keeps both; retirement racing hydration stays retired; older-epoch snapshot ignored; restart during a request re-hydrates and never reverts `bootId`; revision gap re-hydrates; seen/dismissed ids never re-show. | — |
 | M18 | `src/renderer/UsageDial.tsx`, `src/renderer/chatUtils.ts` | Rings and popover rows use `window.tone` (`:601,627`); `usageDialState` returns `primary.tone ?? null` (null → neutral track + "Update your box to see usage colours." in the popover). | `usageTone` (`chatUtils.ts:3372-3377`) and its tests |
 | all | `src/shared/api.ts`, `src/shared/types.ts` (`IPC`), `src/renderer/api/httpApi.ts`, `src/renderer/api/demoApi.ts` | Additive: the methods below + `onModelsUpdated` / `onUsageAlert` bus subscriptions (`on("models.updated")`, `on("usage.alert")`, like `onUsageUpdated` at `httpApi.ts:1329`), wire types next to `LedgerSummary`/`OptimizerSummary` (`types.ts:1953-2123`, `view?` optional), demo fixtures. | — |
 
@@ -852,7 +902,15 @@ Vitest updates: `ModelsCard.test.tsx`, `ModelLedgerCard.test.tsx`,
 methods via `installMockApi` and assert rendering of box fields, the write
 calls, the unknown-channel "Update your box to use this." state, and (resume)
 that unchecking the only armed row enables Update and that a second-device
-change while open reconciles the selection. New
+change while open reconciles the selection. **Models refresh (new
+`ModelsCard.refresh.test.tsx`)**, with a `ChatPanel` composer mounted beside the
+card: (1) set-default → `store.defaultModel` equals the new key and
+`createDraft()` seeds it, without remounting; (2) hiding Main on the default →
+`store.defaultModel` is null and a new draft seeds null; (3) editing name /
+context → after the mock `opencodeModels` returns the overridden model,
+`refreshModelCatalog()` has run and the composer's picker shows the new name
+and context; (4) a `models.updated` event alone (another device) triggers
+`refreshModelCatalog()` and a `sync` payload alone updates `store.defaultModel`. New
 `src/renderer/modelsPicker.test.ts` (key → object mapping, unsupported
 fallback) and `src/renderer/usageAlertsQueue.test.ts`. `AccountsCard.test.ts`
 (custom-row help, `describeMissing`) stays green unchanged. `npm run typecheck` and `npm test` green.
@@ -991,9 +1049,14 @@ iOS keeps view state only; every rule above is the box's (SF-M1, SF-M2).
   `ModelPickerSheet.swift`):
   - `ChatModelCatalog` adds `@Published private(set) var picker: ModelsPickerWire?`
     and `@Published private(set) var pickerUnsupported = false`, loaded with the
-    model list in `loadIfNeeded()` / `reload()` (`models:picker`), refetched on
-    the raw frames `models.updated` and `model-prefs.updated`, and the box
-    lifecycle above. The round-2 plan to parse `deactivatedMainModels` /
+    model list in `loadIfNeeded()` / `reload()` (`models:picker`). On the raw
+    frame `models.updated` it runs a FULL `reload()` (models,
+    `opencode:default-model`, config `defaultModel` → `configDefault`, picker),
+    so a default set or cleared, or an override edited, on any device reaches
+    every `ChatModelStore` through its existing `mirrorCatalog()`
+    (`ChatModelStore.swift:111-116`) — new chats pick the new default and the
+    composer shows the new name/context without reopening. On
+    `model-prefs.updated` it refetches only the picker. Box lifecycle above. The round-2 plan to parse `deactivatedMainModels` /
     `optInModels` and `applyConfig(_:)` is **deleted**.
   - `ChatModelStore` reads `catalog.picker`: `func isSelectable(_ key: String) -> Bool`
     = `true` when `catalog.pickerUnsupported` (older box: nothing is derived
@@ -1048,6 +1111,11 @@ plan; their rules are pinned by `src/server/modelsTable.test.mjs` instead.
   disabled and Enable calls `models:opt-in`; one-time copy sends the local set
   once, then clears it, and is not re-sent after a relaunch; box binding and
   M-08-1 / M-03-5 tests from round 2 stay.
+  **`testModelsUpdatedRefreshesCatalogAndDefault`**: with a `ChatModelStore`
+  alive, a `models.updated` frame (no local write) triggers one full catalog
+  reload; the store's `configDefault` and the renamed model's `name` /
+  `limit.context` update; a cleared default becomes nil; the effective
+  selection for a session with no override is the new default.
 
 ### Acceptance criteria
 
@@ -1681,11 +1749,13 @@ arriving after a newer one is ignored; a reconnect triggers one reload.
 
 ### Wire contract (server-first)
 
-- Raw bus frame `{kind:"usage.alert", payload:{alert}}` / `{payload:{retired:[id]}}`
-  (SF-M16), observed via `MantaEventStore.addRawFrameHandler`
+- Raw bus frame `usage.alert` — shapes defined ONLY in SF-M16
+  (`{bootId, revision, alert}` / `{bootId, revision, retired:[id]}`), observed
+  via `MantaEventStore.addRawFrameHandler`
   (`MantaEventStore.swift:464`, multicast; no change to WS02's store).
-- `usage:alerts` → `{supported, alerts:[…]}` — read on connect and on every
-  disconnect→connect, detected from `eventStore.$connectionState` (pattern of
+- `usage:alerts` → `{supported, bootId, revision, alerts:[…]}` (SF-M16 is the
+  sole wire definition) — read per the SF-M16 hydration contract on connect and
+  on every disconnect→connect, detected from `eventStore.$connectionState` (pattern of
   `ChatSessionStore.swift:406,710-727`; never the single-owner
   `resyncHandler`).
 - `usage:remind-at-reset {key, sessionID}` → `{ok, job?, fireAt?, code?, message?}`
@@ -1700,18 +1770,22 @@ arriving after a newer one is ignored; a reconnect triggers one reload.
 - `UsageAlertsStore.swift` — `@MainActor final class UsageAlertsStore:
   ObservableObject`, `static let shared`. Published: `queue: [UsageAlertWire]`,
   `activeSessionId: String?`, `resumeSheetPresented`, `unsupported: Bool`.
-  Private: `state: UsageAlertQueue` (pure value: queue ids, `seenIDs`,
-  `lastBootId`, `lastRevision` — per binding), the box lifecycle (above). Also
+  Private: `state: UsageAlertQueue` (pure value implementing the SF-M16
+  "Client hydration contract": phase, epoch, buffer, `lastBootId`,
+  `lastRevision`, queue, `seenIDs` — per binding), the box lifecycle (above). Also
   exposes `let stoppedUpdates = PassthroughSubject<Void, Never>()` and
   `let reconnects = PassthroughSubject<Void, Never>()` for the resume sheet (F6).
   - `bind(eventStore:)` — idempotent. Registers ONE raw-frame handler
     (`usage.alert` → `state.applyFrame`; `usage-stopped.updated` →
     `stoppedUpdates.send()`) and a retained `$connectionState` subscription.
     On first `.connected` and every disconnect→connect it sends `reconnects`
-    and reads `usage:alerts` → `state.applySnapshot` (the SF-M16 "Client
-    reconciliation contract": prune ids absent from the active set, drop a
-    snapshot older than the last applied revision, enqueue unseen ids, reset on
-    a new `bootId`; a frame with a new `bootId` triggers a snapshot read).
+    and runs `state.startHydration()` → the returned epoch tags a
+    `usage:alerts` request; the response goes to
+    `state.applySnapshot(list, epoch:)`. Any `.hydrate` request returned by
+    `applyFrame` / `applySnapshot` (restart, gap, buffer overflow) starts a new
+    request the same way; a failed request is retried on the contract's
+    1 s / 2 s / 5 s / 30 s schedule (one `Task`, cancelled by
+    `resetForBoxChange()` and by a newer epoch).
     Closing a banner removes it from the queue but keeps its id in `seenIDs`.
     Unknown channel → `unsupported = true` (no alerts; Insights shows "Update
     your box to get usage alerts."). No baseline, no levels — the box owns
@@ -1742,12 +1816,15 @@ arriving after a newer one is ignored; a reconnect triggers one reload.
 
 `UsageAlertText.line(alert:now:)` in `UsageAlertsLogic.swift` (Foundation-only)
 — appends the reset clause to the box text via `UsageMeters.formatReset` — and
-`struct UsageAlertQueue` with `mutating func applySnapshot(_ list: UsageAlertsList) -> Bool`
-(returns false when dropped as stale), `mutating func applyFrame(_ f: UsageAlertFrame) -> FrameResult`
-(`.applied` / `.ignoredStale` / `.needsSnapshot` for a new `bootId`),
-`mutating func dismiss(_ id: String)`, and `var visible: [UsageAlertWire]` — the
-client bookkeeping of the SF-M16 contract (same rule as the desktop's
-`src/renderer/usageAlertsQueue.ts`). The round-2
+`struct UsageAlertQueue` implementing the SF-M16 "Client hydration contract"
+step for step: `mutating func startHydration() -> Int` (new epoch; phase
+hydrating; buffer cleared), `mutating func applySnapshot(_ list: UsageAlertsList, epoch: Int) -> Action`
+and `mutating func applyFrame(_ f: UsageAlertFrame) -> Action`, where
+`enum Action { case none, hydrate }` (`.hydrate` = caller must call
+`startHydration()` and request a snapshot: wrong-boot buffer, restart, gap,
+buffer overflow), `mutating func dismiss(_ id: String)`, and
+`var visible: [UsageAlertWire]` — same rule and same test cases as the
+desktop's `src/renderer/usageAlertsQueue.ts`. The round-2
 `UsageEscalation`/`UsageBaseline` types (levels, transitions, baseline, seed
 ordering, action policy, retirement) are **deleted** — SF-M16/M17 own them.
 
@@ -1756,10 +1833,16 @@ ordering, action policy, retirement) are **deleted** — SF-M16/M17 own them.
 Decode alert / retired frames and `usage:alerts`; `UsageAlertQueue`: unseen
 ids enqueue in order, a seen id never re-enqueues, a dismissed id stays seen;
 **disconnect → retirement missed → reconnect**: snapshot without the id
-removes it from `visible`; **retirement during an in-flight snapshot**: frame
-(revision 5, retired X) applied, then snapshot (revision 4, contains X) →
-dropped, X stays gone; frame with `revision <= lastRevision` ignored; new
-`bootId` → `.needsSnapshot` and the next snapshot (revision 1) is accepted; `line` with/without `resetsAt` and with an elapsed reset
+removes it from `visible`; **raise during hydration (A/B)**: start hydration,
+frame rev 5 raises B (buffered), snapshot rev 4 with A arrives → both A and B
+visible, `lastRevision == 5`; **retirement racing hydration**: frame rev 5
+retires X (buffered), snapshot rev 4 contains X → X shown then removed by the
+replay, not visible after; **late answer**: a snapshot carrying an older epoch
+is ignored; **restart during a request**: buffered frame from boot B2, snapshot
+from boot B1 → `.hydrate`, then a B2 snapshot is accepted and `lastBootId`
+never returns to B1; **gap while live**: rev 5 then rev 7 → `.hydrate` and rev 7
+buffered; frame with `revision <= lastRevision` ignored; buffer overflow →
+`.hydrate`; `line` with/without `resetsAt` and with an elapsed reset
 ("resetting…"). Store test (Mac, `UsageAlertsStoreTests.swift`): reconnect
 re-reads `usage:alerts` exactly once and does not re-show a seen id; a
 `retired` frame closes the banner; `ok:false, code:"expired"` removes the alert
@@ -1954,7 +2037,7 @@ order 02 → 07 → **09** → 06.
 
 | ID | Receiving file | Applier | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-09-srv-1 | `src/server/rpc.mjs` | IB (after 02, 07 server rows; before 06) | Exactly the exports pinned in SF-M1/M2/M6/M7/M9–11/M13/M14–15/M16–17: `createModelsTable` (`modelsTable.mjs`), `createModelsUnidentified` (`modelsUnidentified.mjs`), `withLedgerView` (`ledgerView.mjs`), `withSummaryView`, `withSeriesView` (`optimizer/view.mjs`), `withUnpricedGroups`, `createModelsPricing` (`modelsPricing.mjs`), `createUsageResumeView` (`usageResumeView.mjs`), `getUsageAlerts` (`usage.mjs` — add to the existing usage import, `:18`); `syncSubagentsDetailed`, `setModelCostDetailed` (`providers.mjs`, already imported as `providers`); `getModelPrefs` (already imported as `modelPrefsGetStore`, `:26`); `lookupModel`, `matchModel` (add to the existing `./modelCatalog.mjs` import, `:68`); `usageStoppedList`, `usageStoppedArm`, `usageStoppedDisarm` (existing aliases of `listStopped`/`armStopped`/`disarmStopped`, `:19-25`) | See the exact code block "M-09-srv-1 registration" below. `npm run test:server` green after, plus the integration smoke test `src/server/rpc.models.test.mjs` (WS09 provides it; IB runs it): builds `buildHandlers` with injected fakes and calls every new channel once — incl. `models:retry-sub-sync`, `models:set-price` and both `models:declare` forms — asserting each resolves to its pinned shape. | WS09 server modules landed |
+| M-09-srv-1 | `src/server/rpc.mjs` | IB (after 02, 07 server rows; before 06) | Exactly the exports pinned in SF-M1/M2/M6/M7/M9–11/M13/M14–15/M16–17: `createModelsTable` (`modelsTable.mjs`), `createModelsUnidentified` (`modelsUnidentified.mjs`), `withLedgerView` (`ledgerView.mjs`), `withSummaryView`, `withSeriesView` (`optimizer/view.mjs`), `withUnpricedGroups`, `createModelsPricing` (`modelsPricing.mjs`), `createUsageResumeView` (`usageResumeView.mjs`), `getUsageAlerts` (`usage.mjs` — add to the existing usage import, `:18`); `syncSubagentsDetailed`, `setModelCostDetailed` (`providers.mjs`, already imported as `providers`); `getModelPrefs` (already imported as `modelPrefsGetStore`, `:26`); `lookupModel`, `matchModel` (add to the existing `./modelCatalog.mjs` import, `:68`); `usageStoppedList`, `usageStoppedArm`, `usageStoppedDisarm` (existing aliases of `listStopped`/`armStopped`/`disarmStopped`, `:19-25`) | See the exact code block "M-09-srv-1 registration" below. `npm run test:server` green after, plus the integration smoke test `src/server/rpc.models.test.mjs` (WS09 provides it; IB runs it): builds `buildHandlers` with injected fakes and calls every new channel once — incl. `models:retry-sub-sync`, `models:set-price` and both `models:declare` forms — asserting each resolves to its pinned shape, and that `models:set-default`, `models:set-main`, `models:opt-in`, `models:set-override` and `models:declare` each call the injected `syncState.applyConfig` with the saved config and publish `models.updated`. | WS09 server modules landed |
 | M-09-srv-2 | `src/server/boxCapabilities.mjs` (WS02, wave B) + `boxCapabilities.test.mjs` | IB (right after M-09-srv-1) | `BOX_CAPABILITIES` (WS02) | Append the nine ids of the capability table (`models-table-1` … `usage-window-tone-1`); extend the test's expected ids. | WS02 SF-0 landed; M-07-S2 applied first |
 | M-09-dsk-1 | `src/shared/api.ts`, `src/shared/types.ts` (WS02 owns in B, master D27) | IB, desktop order 02 → 07 → **09** → 06 | the `window.api` methods + wire types under "Desktop migration" | additive members / `IPC` constants / types | WS02 desktop commit; M-07-D2/D3 |
 | M-09-dsk-2 | `src/renderer/api/httpApi.ts`, `src/renderer/api/demoApi.ts`, `src/renderer/api/demoCoverage.test.ts` (WS02 owns in B) | IB | same | `rpc(IPC.x, arg)` methods; `onModelsUpdated` = `on("models.updated")`, `onUsageAlert` = `on("usage.alert")`; demo fixtures; each new key either stubbed or listed in `DEMO_UNIMPLEMENTED` | M-09-dsk-1; M-07-D4/D5 |
@@ -1977,10 +2060,19 @@ order 02 → 07 → **09** → 06.
 
 ```js
 const publish = (evt) => bus.publish(evt);
+// Same post-write step as the "config:update" handler (rpc.mjs:903): push the
+// saved config into syncState so every client's config mirror (desktop
+// store.defaultModel / optInModels / deactivatedMainModels via the `sync`
+// frame, syncState.mjs:48-51,98-102) updates — not only the Models table.
+const configUpdateSynced = async (patch) => {
+  const next = await local.configUpdate(patch);
+  syncState.applyConfig(next);
+  return next;
+};
 const modelsTable = createModelsTable({
   listModels: (overrides) => oc.listModels(overrides, { strict: true }),
   configGet: () => local.configGet(),
-  configUpdate: (patch) => local.configUpdate(patch),
+  configUpdate: configUpdateSynced,
   syncSubagentsDetailed: (input) => providers.syncSubagentsDetailed(input),
   getModelPrefs: () => modelPrefsGetStore(),
   publish,
@@ -1988,7 +2080,7 @@ const modelsTable = createModelsTable({
 const modelsUnidentified = createModelsUnidentified({
   listModels: (overrides) => oc.listModels(overrides, { strict: true }),
   configGet: () => local.configGet(),
-  configUpdate: (patch) => local.configUpdate(patch),
+  configUpdate: configUpdateSynced,
   catalog: { lookupModel, matchModel, allModels: catalogAllModels },
   publish,
 });
@@ -2076,10 +2168,18 @@ created by SF-M18.
 
 ## Cross-spec dependencies
 
-- **WS11 D4 (wave D)** must add to its deletion list: `routingCatalog.ts`'s
-  `matcher` + `createModelIndex` use, once `AccountsCard.tsx` (`:278-306,577,684,702`)
-  no longer reads it. WS09 keeps it intact in wave B (server-first review
-  finding 2).
+- **No matcher deletion is scheduled (corrects the previous round).** The
+  `routingCatalog.ts` `matcher` is NOT dead after WS11 D4: its remaining
+  consumer is `AccountsCard.tsx`'s `endpointEligibility`
+  (`:275-306`, fed at `:577,684,702`), which runs the SHARED gate
+  (`resolveIdentity` + `autoEligibility`) for custom-endpoint rows. WS11 D4
+  moves only Accounts copy (K2/K3/K5/K7 — `11-server-consolidation.md:499-564`:
+  `accountsErrorMessage`, state lines, `describeAccountState`, …), and no audit
+  row (`server-first-audit.md`) moves endpoint eligibility. So WS11 needs no
+  receipt; the matcher and its `entries` typeahead surface stay. Moving
+  endpoint eligibility to the box (and only then deleting the matcher, after a
+  grep for remaining `matcher` consumers) is recorded under Deferred as a
+  follow-up ticket.
 
 - **Stopped state — two channels, decided (master D29):** WS04's built
   `usageStoppedList()` + `SessionListStore.stoppedRecords` / `unarmedStoppedCount`
@@ -2106,6 +2206,11 @@ created by SF-M18.
 - **Desktop's "restart opencode" banner** after subagent changes: removed (V2
   hot-applies; the box returns the outcome).
 - **M3** effective-selection/fast/plan move: MOVE-LATER (WS11 follow-ups).
+- **Endpoint eligibility on Accounts rows** (`AccountsCard.endpointEligibility`,
+  `:275-306`): proposed follow-up ticket "accounts endpoint rows carry
+  `eligibilityMissing` from the box (reusing `modelsUnidentified.mjs`'s
+  resolver)". Only when that lands is `routingCatalog.ts`'s `matcher` deleted
+  (grep for consumers first); `entries` stays for the typeahead.
 - **Desktop defects found (D10)**: the zero-selection resume guard
   (`UsageResumeModal.tsx:229-230`), the year-out reminder (`App.tsx` +
   `schedule.mjs:258-284`) and the fire-and-forget Apply are now FIXED via the
@@ -2331,4 +2436,44 @@ Cross-cutting (`reviews/server-first/00-cross-cutting.md`):
 - **B2 AccountsCard binding** — as finding 3.
 - Also applied the new user rule (research libraries first): section
   "Libraries considered".
+
+## Review responses (server-first-2)
+
+WS09 review (`reviews/server-first-2/09-models-usage.md`); no
+`reviews/server-first-2/00-cross-cutting.md` exists.
+
+1. **BLOCKING, snapshot dropped in favour of a delta** — SF-M16's client rule is
+   replaced by a "Client hydration contract": snapshots are never dropped for a
+   frame; frames received while hydrating are buffered and replayed over the
+   snapshot; requests carry an `epoch` so a late answer (including from a
+   restarted box process) is ignored; revision gaps, a `bootId` change and
+   buffer overflow all re-hydrate; failed requests retry 1/2/5/30 s. The server
+   guarantees one frame per +1 revision (pinned test). iOS `UsageAlertQueue`
+   and desktop `usageAlertsQueue.ts` implement it with the A/B raise-during-
+   hydration, retirement-racing-hydration, late-epoch, restart-during-request
+   and gap tests.
+2. **BLOCKING, writes bypass default/catalogue refresh** — registration wraps
+   `local.configUpdate` with `syncState.applyConfig(next)` (same as
+   `config:update`, `rpc.mjs:903`), so desktop `store.defaultModel` (read by
+   `createDraft` and `ChatPanel`) updates through the existing `sync` frame on
+   every client; every client refreshes the RAW model list + defaults + picker
+   on `models.updated` (desktop App-level `onModelsUpdated → refreshModelCatalog()`,
+   no `modelCatalog.ts` edit; iOS full `ChatModelCatalog.reload()` feeding
+   `mirrorCatalog()`); the writer also applies the reply locally
+   (`defaultModel`, `refreshModelCatalog()`). New desktop test with a mounted
+   composer (set-default, clear-by-hiding-Main, override edit, cross-device
+   frame) and iOS `testModelsUpdatedRefreshesCatalogAndDefault`; the
+   integration smoke test asserts `applyConfig` + `models.updated` per write.
+3. **SHOULD, matcher deletion receipt** — rebutted with evidence and
+   re-homed: the matcher's last consumer is Accounts `endpointEligibility`
+   (`AccountsCard.tsx:275-306`), which WS11 D4 does not move (D4 = K2/K3/K5/K7
+   copy only, `11-server-consolidation.md:499-564`), so assigning the deletion
+   to D4 would break Accounts. No deletion is scheduled; a follow-up ticket
+   (box-side endpoint eligibility, then delete the matcher after a consumer
+   grep; `entries` kept) is recorded under Deferred. WS11 needs no receipt;
+   wave-B no-edit rule unchanged.
+4. **NIT, stale F7 envelopes** — F7 now carries `bootId`/`revision` and names
+   SF-M16 as the sole wire definition.
+
+No master edit this round.
 
