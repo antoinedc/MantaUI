@@ -46,6 +46,7 @@ let package = Package(
                 "InboxModels.swift",
                 "MantaError.swift",
                 "MantaModels.swift",
+                "MantaNavigationModels.swift",
                 "MantaStreamModels.swift",
                 "ModelRecents.swift",
                 "PendingPrompt.swift",
