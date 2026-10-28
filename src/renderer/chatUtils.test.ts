@@ -42,6 +42,7 @@ import {
   trimOutputEdges,
   reconcileOptimisticUser,
   shouldForceReconnect,
+  authProviderSeatId,
   shouldReconnectOnAppStateChange,
   runWithConcurrency,
   chooseUpdateSkewVariant,
@@ -6167,5 +6168,15 @@ describe("detectTypeaheadTrigger", () => {
     it("falls through to file mentions once the caret leaves the command token", () => {
       expect(t("/rev @file", 10)).toEqual({ mode: "file", query: "file", anchorStart: 5, anchorEnd: 10 });
     });
+  });
+});
+
+describe("authProviderSeatId", () => {
+  it("maps the seat-bearing providers", () => {
+    expect(authProviderSeatId("anthropic")).toBe("claude");
+    expect(authProviderSeatId("openai")).toBe("codex");
+  });
+  it("has no seat panel for Kimi or anything else", () => {
+    for (const v of ["kimi-for-coding", "", "foo", null, undefined]) expect(authProviderSeatId(v)).toBeUndefined();
   });
 });

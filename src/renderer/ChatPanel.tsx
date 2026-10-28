@@ -3227,7 +3227,7 @@ export function ChatPanel({
           </button>
         )}
         {authReconnect && (
-          <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Reconnect ${authReconnect}`}>
+          <button onClick={openAuthReconnect} className="text-danger hover:text-danger underline leading-none px-1" title={`Open Accounts to reconnect ${authReconnect}`}>
             Reconnect
           </button>
         )}

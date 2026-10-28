@@ -5,7 +5,7 @@
 // without DOM/Electron/network).
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, CheckRollup, ForgeCheckRun, ForgeInboxItem, InboxReason, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, PullRequest, QuestionRequest, RepoHit, TmuxWindow, UpdateTarget, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -1803,7 +1803,8 @@ export function terminalShortcut(
 // The banner this helper feeds into fixes both. When the error is recognisably
 // a credential/auth failure on one of the three providers in the subscription
 // registry, the banner shows `<Label> needs to be reconnected.` with a single
-// [Reconnect] button that dispatches `manta-open-subscriptions`. Claude's own
+// [Reconnect] button that opens Settings → Accounts on the failing provider
+// (openAccountsSettings). Claude's own
 // server-side auto-refresh (`maybeRecoverCredentials`, the 10-min pre-expiry
 // poller) still runs in parallel — it is additive, not a replacement.
 //
@@ -1822,6 +1823,16 @@ export const AUTH_PROVIDER_LABELS: Record<string, string> = {
   openai: "Codex",
   "kimi-for-coding": "Kimi",
 };
+
+/**
+ * The seat-provider id (Settings → Accounts seat panel) for an auth-banner
+ * provider id. Kimi (API key) has no seat panel → undefined.
+ */
+export function authProviderSeatId(providerID: string | null | undefined): SeatProviderId | undefined {
+  if (providerID === "anthropic") return "claude";
+  if (providerID === "openai") return "codex";
+  return undefined;
+}
 
 /**
  * Decide whether to surface a "needs to be reconnected" banner for a

@@ -75,7 +75,9 @@ import {
   describeSessionError,
   stepTokensFromFrame,
   fetchTranscriptWithRetry,
+  authProviderSeatId,
 } from "../chatUtils";
+import { openAccountsSettings } from "../accountsData";
 import { createInboxTracker, type InboxTracker } from "../inboxState";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
@@ -106,17 +108,14 @@ export type SseBus = {
   setSendError: React.Dispatch<React.SetStateAction<string | null>>;
   // Provider label when the current sendError is an auth-failure banner
   // (BET-316). When non-null, ChatPanel renders a single [Reconnect] button
-  // alongside the dismiss ×; clicking it dispatches `manta-open-subscriptions`
-  // and clears BOTH sendError and authReconnect. Always null for any
-  // non-auth error (context overflow, network blip, etc.) so the banner
-  // is unchanged.
+  // alongside the dismiss ×. Always null for any non-auth error (context
+  // overflow, network blip, etc.). Tied to `sendError`: any write to the error
+  // text clears it; only a classified `sessionError` frame sets it.
   authReconnect: string | null;
-  // Dispatch the `manta-open-subscriptions` window CustomEvent and clear
-  // the banner. Mirrors the `manta-open-schedules` / `-secrets` / `-webhooks`
-  // bridge precedent from useSessionResources.ts (BET-63) — the listener
-  // that reacts to the event lives on whichever component owns the
-  // Subscriptions card (BET-314). Until that ships the dispatch is a no-op
-  // visible to the user.
+  // Open Settings → Accounts on the failing provider (the `manta-open-settings`
+  // bridge, via openAccountsSettings). Navigation only: the banner stays on
+  // screen, so the press can be repeated and the error is still there when the
+  // user comes back.
   openAuthReconnect: () => void;
   // The session's pending user messages (V2 inbox), oldest first, from the
   // box's `inbox` frame under the K3 acceptance rule. Always [] for a surface
@@ -230,15 +229,21 @@ export function useSseBus(params: {
   // `session.status busy|retry` clears it. EVERY other write resets this, so a
   // different error is never swept away by the next busy.
   const abortedBannerRef = useRef(false);
+  // The failing provider when `sendError` is an auth-failure banner (BET-316):
+  // ChatPanel then renders a [Reconnect] button that opens Settings → Accounts
+  // on that provider. Tied to the error text: EVERY write through
+  // `setSendError` (the dismiss ×, a new send, an unrelated failure, an
+  // abort) invalidates it, and only the classified `sessionError` frame sets
+  // it again, after the text. Pressing Reconnect touches neither. (An auth
+  // banner is NOT cleared by a later busy/retry frame — only the Aborted
+  // banner is, see abortedBannerRef.)
+  const [authReconnectState, setAuthReconnectState] = useState<{ providerID: string; label: string } | null>(null);
   const setSendError = useCallback<React.Dispatch<React.SetStateAction<string | null>>>((v) => {
     abortedBannerRef.current = false;
+    setAuthReconnectState(null);
     setSendErrorState(v);
   }, []);
-  // Provider label when `sendError` is an auth-failure banner (BET-316). When
-  // non-null, ChatPanel renders a single [Reconnect] button that dispatches
-  // `manta-open-subscriptions`. Tied 1:1 with `sendError`: cleared together
-  // by openAuthReconnect and by the dismiss × button in ChatPanel.
-  const [authReconnect, setAuthReconnect] = useState<string | null>(null);
+  const authReconnect = authReconnectState?.label ?? null;
   const [inboxItems, setInboxItems] = useState<OpencodeInboxItem[]>([]);
   // The current session's inbox re-seed (set by the frame effect below, a
   // no-op when the surface has no inbox). `refreshInbox` calls through it.
@@ -377,19 +382,14 @@ export function useSseBus(params: {
       : { ok: false, error: `Couldn't dismiss the pending question: ${error}` };
   }, [sessionId]);
 
-  // Open the Settings → AI → Subscriptions card from outside ChatPanel's
-  // component tree (BET-316). Follows the `manta-open-schedules` /
-  // `-secrets` / `-webhooks` precedent from useSessionResources.ts: the
-  // listener lives on whichever component owns the Subscriptions card
-  // (BET-314). Until that ships the dispatch is a benign no-op. Clearing
-  // the banner pair here keeps state consistent with the dismiss × button.
+  // "Reconnect" on an auth-failure banner: open Settings → Accounts, expanded on
+  // the failing provider (Claude/Codex seat panel; Kimi has no seats and just
+  // lands on the list). The banner is left alone — see authReconnectState.
+  const reconnectProviderID = authReconnectState?.providerID;
   const openAuthReconnect = useCallback(() => {
-    window.dispatchEvent(
-      new CustomEvent("manta-open-subscriptions", { detail: { sessionId } }),
-    );
-    setSendError(null);
-    setAuthReconnect(null);
-  }, [sessionId]);
+    if (!reconnectProviderID) return;
+    openAccountsSettings(authProviderSeatId(reconnectProviderID));
+  }, [reconnectProviderID]);
 
   const refreshPermissions = useCallback(async () => {
     try {
@@ -620,7 +620,6 @@ export function useSseBus(params: {
           // "Aborted" banner; the next busy/retry clears it (abortedBannerRef).
           setSendError("Aborted");
           abortedBannerRef.current = true;
-          setAuthReconnect(null);
           cancelTurnSettle();
           setRunning(false);
           return;
@@ -631,7 +630,8 @@ export function useSseBus(params: {
           // never arrives here — see the `aborted` frame above.)
           const d = describeSessionError(p, providerIDRef.current);
           setSendError(d.message);
-          setAuthReconnect(d.auth ? d.auth.label : null);
+          // After the text: the wrapper just cleared any earlier target.
+          setAuthReconnectState(d.auth ? { providerID: d.auth.providerID, label: d.auth.label } : null);
           cancelTurnSettle();
           setRunning(false);
           return;

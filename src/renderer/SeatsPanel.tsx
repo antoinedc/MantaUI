@@ -13,7 +13,7 @@
 // names what was done or why it was not; an action that cannot apply is
 // disabled with its reason in the title.
 
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Pencil } from "lucide-react";
 import type { AccountView, ProviderView, SeatView } from "../shared/types";
 import {
@@ -33,6 +33,18 @@ import { consumeAccountsFocus, refreshAccounts } from "./accountsData";
 import { CROSS_ORG_CONFIRM_COPY, useSeatSwitch, type SeatActionReport } from "./hooks/useSeatSwitch";
 import { useStore } from "./store";
 
+// The sign-back-in modal drags in the Claude terminal; load it on first press
+// (same split as UsageDial, which mounts the same flow from the usage popover).
+const ResignSeatFlow = lazy(() => import("./ResignSeatFlow").then((m) => ({ default: m.ResignSeatFlow })));
+
+/** What a seat that is the box's own login can be told: the server refuses to
+ *  re-sign it (`live-seat`), so say what actually works instead of a button. */
+export function liveSeatNote(provider: ProviderView["provider"]): string {
+  return provider === "claude"
+    ? "This is the login this box itself uses (the Claude CLI owns it). To sign in again, run `claude auth login` on the box."
+    : "This is the login this box itself uses; it can't be re-signed from here yet.";
+}
+
 const BTN =
   "px-2 py-1 text-meta bg-bg-soft border border-border rounded-xs text-text-muted hover:text-text disabled:opacity-40";
 type Adding = { accountId?: string; accountLabel?: string } | null;
@@ -51,6 +63,8 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
   const [adding, setAdding] = useState<Adding>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [removeConfirm, setRemoveConfirm] = useState<string | null>(null);
+  // The seat being signed back in (ResignSeatFlow, same flow as the usage popover).
+  const [resigning, setResigning] = useState<{ seat: SeatView; accountLabel: string } | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "account" | "seat"; id: string; draft: string } | null>(null);
   const switcher = useSeatSwitch(view, setNotice);
   const multi = hasSeatChoice(view);
@@ -218,6 +232,11 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
                 .join(" · ")}
               {broken && <span className="text-warn"> · {broken}</span>}
             </div>
+            {seat.live && (
+              <div className="text-meta text-text-muted break-words" data-testid={`seat-live-note-${seat.id}`}>
+                {liveSeatNote(view.provider)}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {multi && view.mode === "manual" && (
@@ -235,6 +254,21 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
                 onClick={() => switcher.request(seat)}
               >
                 {switcher.busyId === seat.id ? "…" : isActive ? "In use" : "Use this seat"}
+              </button>
+            )}
+            {!seat.live && (
+              <button
+                type="button"
+                className={BTN}
+                disabled={resigning !== null || adding !== null}
+                title={
+                  resigning || adding
+                    ? "Finish or cancel the sign-in first"
+                    : `Sign ${seat.label} back in (same account only)`
+                }
+                onClick={() => setResigning({ seat, accountLabel: account.label })}
+              >
+                Sign back in
               </button>
             )}
             {removeConfirm === seat.id ? (
@@ -345,8 +379,8 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
                 <button
                   type="button"
                   className={BTN}
-                  disabled={adding !== null}
-                  title={adding ? "Finish or cancel the sign-in below first" : undefined}
+                  disabled={adding !== null || resigning !== null}
+                  title={adding || resigning ? "Finish or cancel the sign-in first" : undefined}
                   onClick={() => setAdding({ accountId: account.id, accountLabel: account.label })}
                 >
                   Add seat to {account.label}
@@ -360,12 +394,29 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
           <button
             type="button"
             className={BTN}
-            disabled={adding !== null}
-            title={adding ? "Finish or cancel the sign-in below first" : `Sign in another ${label} account`}
+            disabled={adding !== null || resigning !== null}
+            title={adding || resigning ? "Finish or cancel the sign-in first" : `Sign in another ${label} account`}
             onClick={() => setAdding({})}
           >
             Add {label} account
           </button>
+
+          {resigning && (
+            <Suspense fallback={null}>
+              <ResignSeatFlow
+                provider={view.provider}
+                seatId={resigning.seat.id}
+                seatLabel={resigning.seat.label}
+                accountLabel={resigning.accountLabel}
+                email={resigning.seat.email}
+                onDone={(text) => {
+                  setResigning(null);
+                  setNotice({ ok: true, text });
+                }}
+                onCancel={() => setResigning(null)}
+              />
+            </Suspense>
+          )}
 
           {adding && (
             <AddSeatGate

@@ -249,6 +249,91 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
       expect(bus.authReconnect).toBe("Claude");
     });
 
+    describe("Reconnect (opens Settings → Accounts)", () => {
+      const authErr = () => frame("sessionError", { name: "ProviderAuthError", message: "x" });
+      const opened = () => {
+        const seen: CustomEvent[] = [];
+        const fn = (e: Event) => seen.push(e as CustomEvent);
+        window.addEventListener("manta-open-settings", fn);
+        return { seen, off: () => window.removeEventListener("manta-open-settings", fn) };
+      };
+      const press = () => act(() => bus.openAuthReconnect());
+
+      it.each([
+        ["anthropic", "Claude", "claude"],
+        ["openai", "Codex", "codex"],
+        ["kimi-for-coding", "Kimi", undefined],
+      ])("%s → Accounts focused on %s, and the banner stays", async (prov, label, seatId) => {
+        providerID = prov;
+        const o = opened();
+        try {
+          await mountProbe();
+          await emit(authErr());
+          await press();
+          expect(o.seen).toHaveLength(1);
+          expect(o.seen[0].detail).toEqual({ section: "accounts", provider: seatId });
+          expect(bus.sendError).toBe(`${label} needs to be reconnected.`);
+          expect(bus.authReconnect).toBe(label);
+          await press(); // repeatable
+          expect(o.seen).toHaveLength(2);
+          expect(bus.authReconnect).toBe(label);
+        } finally {
+          o.off();
+        }
+      });
+
+      it("dismiss after pressing removes the Reconnect button", async () => {
+        await mountProbe();
+        await emit(authErr());
+        await press();
+        act(() => bus.setSendError(null));
+        expect(bus.sendError).toBeNull();
+        expect(bus.authReconnect).toBeNull();
+      });
+
+      it("a later unrelated failure does not inherit the old Reconnect", async () => {
+        await mountProbe();
+        await emit(authErr());
+        await press();
+        act(() => bus.setSendError("Couldn't send the message: network down"));
+        expect(bus.sendError).toBe("Couldn't send the message: network down");
+        expect(bus.authReconnect).toBeNull();
+      });
+
+      it("an unclassified session error clears it; a classified one for another provider replaces the target", async () => {
+        const o = opened();
+        try {
+          await mountProbe();
+          await emit(authErr());
+          await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big" }));
+          expect(bus.authReconnect).toBeNull();
+          await emit(authErr());
+          providerID = "openai";
+          await act(async () => {
+            h!.unmount();
+            h = mount(<Probe />);
+          });
+          await emit(authErr());
+          expect(bus.authReconnect).toBe("Codex");
+          await press();
+          expect(o.seen.at(-1)!.detail).toEqual({ section: "accounts", provider: "codex" });
+        } finally {
+          o.off();
+        }
+      });
+
+      it("pressing with no auth banner does nothing", async () => {
+        const o = opened();
+        try {
+          await mountProbe();
+          await press();
+          expect(o.seen).toHaveLength(0);
+        } finally {
+          o.off();
+        }
+      });
+    });
+
     it("a user Stop (aborted frame) shows the Aborted banner and ends the turn", async () => {
       await mountProbe();
       await emit(frame("running", { running: true }));

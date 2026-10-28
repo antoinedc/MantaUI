@@ -492,6 +492,13 @@ function AccountRow({
         {control}
       </SettingsRow>
 
+      {row.className !== "Custom" && !seatView && row.connected && row.managedExternally && (
+        <div className="pl-4 text-meta text-text-muted break-words" data-testid={`external-signin-hint-${row.id}`}>
+          Signed in with {row.managedBy ?? "an external tool"}. If Manta says it needs to reconnect, run{" "}
+          <code>claude auth login</code> on the box.
+        </div>
+      )}
+
       {connectingId === row.id && (
         <div className="pl-4">
           {seatView ? (
