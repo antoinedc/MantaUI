@@ -29,6 +29,8 @@ import { loadStoppedState } from "./stoppedStore.mjs";
 
 /** How often the sweep runs on its own (in addition to every usage poll). */
 export const RECONCILE_INTERVAL_MS = 60_000;
+/** Max session-existence checks in flight during one sweep. */
+const EXISTS_CONCURRENCY = 4;
 
 /**
  * Has the provider recovered since this entry was stopped? Only a real,
@@ -99,10 +101,19 @@ export function createStoppedReconciler({
     }
     const snaps = snapshots() ?? [];
     const live = records.filter((r) => r?.conversation);
-    // Few entries in practice; check them in parallel so a sweep is one round trip.
-    const existence = await Promise.all(
-      live.map((r) => Promise.resolve().then(() => sessionExists(r.conversation)).catch(() => true)),
-    );
+    // A few checks at a time: quick for the usual handful, gentle on opencode
+    // for a large stale backlog.
+    const existence = new Array(live.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < live.length) {
+        const i = next++;
+        existence[i] = await Promise.resolve()
+          .then(() => sessionExists(live[i].conversation))
+          .catch(() => true);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(EXISTS_CONCURRENCY, live.length) }, worker));
     const drop = [];
     const reasons = new Map();
     live.forEach((r, i) => {

@@ -189,3 +189,24 @@ test("a staggered resume is skipped if its entry left the record before the send
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(delivered, ["ses_1"]);
 });
+
+test("existence checks are capped at a few in flight", async () => {
+  const store = memStore(Array.from({ length: 12 }, (_, i) => ({ ...REC, conversation: `ses_${i}` })));
+  let inFlight = 0;
+  let peak = 0;
+  const rec = createStoppedReconciler({
+    load: store.load,
+    remove: (input) => removeStopped(input, { load: store.load, save: store.save }),
+    sessionExists: async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 2));
+      inFlight--;
+      return false;
+    },
+    visibleSessionIds: async () => null,
+    snapshots: () => [],
+  });
+  assert.equal((await rec.run()).length, 12);
+  assert.ok(peak <= 4, `peak ${peak}`);
+});

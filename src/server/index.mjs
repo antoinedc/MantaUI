@@ -863,9 +863,11 @@ const stopUsageResume = bus.subscribe((evt) => {
 // empty) the engine WAITS, so this warmup can never send "Keep going" before
 // the first real poll confirms quota returned. Recovery is then driven by the
 // first real `usage.updated`.
-void resumeEngine.deliverSnapshots(listSnapshots()).catch((e) =>
-  console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e),
-);
+// Chained after the startup sweep for the same reason as the usage path.
+void stoppedReconciler
+  .run()
+  .then(() => resumeEngine.deliverSnapshots(listSnapshots()))
+  .catch((e) => console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e));
 
 // Usage-stop enrolment (BET-1047 stage 1): derives durable "stopped
 // conversation" records from the opencode stream (see usageStopEnroll.mjs).
