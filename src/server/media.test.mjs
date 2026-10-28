@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import {
   readImageSize,
   guessMime,
+  mimeForName,
   resolvePathWithinHome,
   createPendingMediaStore,
   saveMedia,
@@ -111,6 +112,27 @@ test("guessMime maps known extensions and falls back to octet-stream", () => {
   assert.equal(guessMime("a.webm"), "video/webm");
   assert.equal(guessMime("unknown.xyz"), "application/octet-stream");
   assert.equal(guessMime(""), "application/octet-stream");
+});
+
+test("mimeForName: the shared allowlist covers the document rows, null when unlisted", () => {
+  assert.equal(mimeForName("a.CSV"), "text/csv");
+  assert.equal(mimeForName("a.tsv"), "text/tab-separated-values");
+  assert.equal(mimeForName("notes.txt"), "text/plain");
+  assert.equal(mimeForName("README.md"), "text/markdown");
+  assert.equal(mimeForName("data.json"), "application/json");
+  assert.equal(mimeForName("doc.pdf"), "application/pdf");
+  assert.equal(mimeForName("index.html"), "text/html");
+  assert.equal(mimeForName("index.htm"), "text/html");
+  // existing image/video rows are kept
+  assert.equal(mimeForName("shot.png"), "image/png");
+  assert.equal(mimeForName("clip.mp4"), "video/mp4");
+  assert.equal(mimeForName("pic.avif"), "image/avif");
+  // not on the allowlist → null (and guessMime keeps its octet-stream fallback)
+  for (const n of ["main.ts", "Makefile", ""]) {
+    assert.equal(mimeForName(n), null, n);
+    assert.equal(guessMime(n), "application/octet-stream", n);
+  }
+  assert.equal(mimeForName(undefined), null);
 });
 
 // ---------------------------------------------------------------------------

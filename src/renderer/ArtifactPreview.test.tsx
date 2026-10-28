@@ -14,7 +14,6 @@ const artifact: Artifact = {
   id: "id",
   kind: "file",
   origin: "agent",
-  key: "report.pdf",
   label: "report.pdf",
   href: "/home/dev/outbox/report.pdf",
   mime: "application/pdf",
@@ -22,7 +21,9 @@ const artifact: Artifact = {
   at: 0,
   messageId: null,
   context: null,
-  expiresAt: null,
+  isHosted: false,
+  expiry: null,
+  plan: null,
 };
 
 function preview(props: Partial<Parameters<typeof ArtifactPreview>[0]> = {}) {

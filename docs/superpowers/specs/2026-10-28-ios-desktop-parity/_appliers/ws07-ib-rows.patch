@@ -1,0 +1,223 @@
+diff -ruN a/src/renderer/api/demoApi.ts b/src/renderer/api/demoApi.ts
+--- a/src/renderer/api/demoApi.ts	2026-10-28 15:59:53.386124307 +0000
++++ b/src/renderer/api/demoApi.ts	2026-10-28 15:59:53.532123236 +0000
+@@ -36,6 +36,7 @@
+ import type { Api } from "../../shared/api.js";
+ import type { AvailableLauncher, OpencodeMessage, OutboxFile, ServedPageMeta, WorktreeInfo, DirListing } from "../../shared/types.js";
+ import { DEMO_T0, demoFsListDirs, demoGitListWorktrees, demoState } from "./demoFixture.js";
++import { demoArtifactsList } from "./demoArtifacts.js";
+ import { pickDemoState, type DemoState } from "../demoLayout.js";
+ import { useStore } from "../store.js";
+ import { lastMeasurement, onMeasurement } from "../firstTokenLatency.js";
+@@ -481,6 +482,9 @@
+ // have resolved a no-op; keep it explicit for parity with servePageList.
+ const outboxList = (): Promise<OutboxFile[]> => Promise.resolve([]);
+ 
++const artifactsList = ({ sessionId }: { sessionId: string }) =>
++  Promise.resolve(demoArtifactsList(DEMO_STATE, sessionId, demoState));
++
+ // Folder picker listing (BET-562). Without these the Proxy fallback resolves
+ // null and the picker's folder list renders a raw "Cannot read properties of
+ // null" error in the empty-state capture. The listing is fictional (see
+@@ -624,6 +628,7 @@
+   launchersList,
+   servePageList,
+   outboxList,
++  artifactsList,
+   fsListDirs,
+   gitListWorktrees,
+   projectCreateScratch,
+diff -ruN a/src/renderer/api/httpApi.ts b/src/renderer/api/httpApi.ts
+--- a/src/renderer/api/httpApi.ts	2026-10-28 15:59:53.359124506 +0000
++++ b/src/renderer/api/httpApi.ts	2026-10-28 15:59:53.527123272 +0000
+@@ -1289,6 +1289,7 @@
+   // Outbox mailbox listing, scoped to the active conversation — degrades to []
+   // on a box without the channel.
+   outboxList: (sessionId?: string) => rpcOptional(IPC.outboxList, [], sessionId),
++  artifactsList: (opts) => rpc(IPC.artifactsList, opts),
+ 
+   // -- background delegation jobs (manta-server owned; in-process on mobile) --
+   // list returns the full job records (the engine always returns an array;
+diff -ruN a/src/renderer/chatUtils.test.ts b/src/renderer/chatUtils.test.ts
+--- a/src/renderer/chatUtils.test.ts	2026-10-28 15:59:53.433123962 +0000
++++ b/src/renderer/chatUtils.test.ts	2026-10-28 15:59:53.541123170 +0000
+@@ -166,12 +166,11 @@
+   describeProjectClose,
+   isPlanExitQuestion,
+   extractPlanData,
+-  planRefsFromPart,
+   resolveDelegateModel,
+   deviceAuthErrorMessage,
+ } from "./chatUtils";
+ 
+-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, OpencodePart, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
++import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, ForgeInboxItem, QuestionRequest, UpdateTarget } from "../shared/types";
+ 
+ 
+ 
+@@ -5668,44 +5667,6 @@
+   });
+ });
+ 
+-describe("planRefsFromPart", () => {
+-  const part = (over: Record<string, unknown>): OpencodePart =>
+-    ({ type: "tool", id: "p", messageID: "m", ...over }) as OpencodePart;
+-
+-  it("collects .opencode/plans refs across text, tool input, and patch files", () => {
+-    expect(planRefsFromPart(part({ type: "text", text: "Plan: .opencode/plans/a.md" }))).toEqual([
+-      ".opencode/plans/a.md",
+-    ]);
+-    expect(
+-      planRefsFromPart(part({ tool: "write", state: { status: "completed", input: { filePath: ".opencode/plans/b.md" } } })),
+-    ).toEqual([".opencode/plans/b.md"]);
+-    expect(planRefsFromPart(part({ tool: "multiEdit", files: [".opencode/plans/c.md"] }))).toEqual([
+-      ".opencode/plans/c.md",
+-    ]);
+-    expect(
+-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/ignored.md" } } })),
+-    ).toEqual([]);
+-  });
+-
+-  it("does not treat a read reference as an authoring signal", () => {
+-    expect(
+-      planRefsFromPart(part({ tool: "read", state: { status: "completed", input: { filePath: ".opencode/plans/x.md" } } })),
+-    ).toEqual([]);
+-  });
+-
+-  it("deduplicates identical refs within a part", () => {
+-    expect(
+-      planRefsFromPart(
+-        part({
+-          tool: "plan",
+-          state: { status: "completed", input: { path: ".opencode/plans/same.md" } },
+-          text: ".opencode/plans/same.md",
+-        }),
+-      ),
+-    ).toEqual([".opencode/plans/same.md"]);
+-  });
+-});
+-
+ describe("resolveDelegateModel", () => {
+   const sel = (providerID: string, modelID: string): import("./chatShared").ModelSelection =>
+     ({ providerID, modelID });
+diff -ruN a/src/renderer/chatUtils.ts b/src/renderer/chatUtils.ts
+--- a/src/renderer/chatUtils.ts	2026-10-28 15:59:53.410124131 +0000
++++ b/src/renderer/chatUtils.ts	2026-10-28 15:59:53.537123199 +0000
+@@ -2625,55 +2625,6 @@
+   return false;
+ }
+ 
+-// ---- Plan-file discovery (tolerant of how the plan was authored) ----
+-//
+-// Plan paths live in different part shapes depending on how the plan was
+-// authored. The classic announcing message mentions the path in PROSE (a text
+-// part). But the plan-mode flow WRITES the plan with the `write`/`plan` tool —
+-// which records the path in `state.input.filePath` (and sometimes
+-// `planPath`/`path`) plus a `patch` part listing the file — so the path never
+-// reaches a text part, and `plan_exit` sometimes doesn't echo it either.
+-// Scanning only one surface (e.g. only the plan_exit input) misses plans
+-// authored via the plan tool. So we scan text, authoring-tool input, and
+-// patch-file lists for any `.opencode/plans/*.md` reference. Cheap by design:
+-// we never read tool output or file content, only path fields and prose.
+-
+-const PLAN_REF_RE = /\.opencode\/plans\/[\w.-]+\.md/g;
+-
+-// Tools that AUTHOR the plan file (or confirm it at plan_exit). A `read` tool
+-// pointed at a plan path is a reference, not an authoring signal, and must not
+-// resolve as the plan — the write/plan tool (or a prose mention) already does.
+-const PLAN_AUTHORING_TOOLS = new Set([
+-  "write", "edit", "multiEdit", "patch", "plan", "plan_exit",
+-]);
+-
+-/** Every distinct `.opencode/plans/*.md` reference a single part carries. */
+-export function planRefsFromPart(part: OpencodePart): string[] {
+-  const out: string[] = [];
+-  const candidates: string[] = [];
+-  if (typeof part.text === "string") candidates.push(part.text);
+-  const raw = part as Record<string, unknown>;
+-  const isTool = raw.type === "tool";
+-  if (isTool && PLAN_AUTHORING_TOOLS.has(String(raw.tool ?? ""))) {
+-    const input =
+-      (raw.state as { input?: Record<string, unknown> } | undefined)?.input ??
+-      (raw.input as Record<string, unknown> | undefined);
+-    if (input) {
+-      for (const key of ["filePath", "path", "planPath"]) {
+-        const v = input[key];
+-        if (typeof v === "string") candidates.push(v);
+-      }
+-    }
+-  }
+-  if (Array.isArray(raw.files)) candidates.push(...raw.files.map(String));
+-  for (const c of candidates) {
+-    for (const m of c.matchAll(PLAN_REF_RE)) {
+-      if (!out.includes(m[0])) out.push(m[0]);
+-    }
+-  }
+-  return out;
+-}
+-
+ /**
+  * The plan card's display data: the title (first markdown heading of the plan
+  * text, falling back to the question header) and the FULL plan text (what
+diff -ruN a/src/server/rpc.mjs b/src/server/rpc.mjs
+--- a/src/server/rpc.mjs	2026-10-28 15:59:53.474123661 +0000
++++ b/src/server/rpc.mjs	2026-10-28 15:59:53.543123155 +0000
+@@ -27,6 +27,7 @@
+ import { listHooks as webhookListHooks, deleteHook as webhookDeleteHook } from "./webhooks.mjs";
+ import { listPages as servePageListStore } from "./servePage.mjs";
+ import { listOutbox } from "./outbox.mjs";import { publicBaseUrl } from "./gatewayRegister.mjs";
++import { createArtifactsService } from "./artifacts.mjs";
+ import { ledgerStore } from "./ctoStores.mjs";
+ import { tierChangeLedgerEntry } from "./ctoTier.mjs";
+ import {
+@@ -774,6 +775,14 @@
+     loadCatalog: () => readJsonSync(PRICES_PATH, null),
+   });
+ 
++  const artifacts = createArtifactsService({
++    listMessages: (sid, o) => oc.listMessages(sid, o),
++    listPages: () => servePageListStore({ baseUrl: publicBaseUrl() }),
++    listOutbox: (sid) => listOutbox(undefined, { sessionID: sid }),
++    sessionDirectory: (sid) => oc.getSessionDirectory(sid),
++    baseUrl: () => publicBaseUrl(),
++  });
++
+   return {
+     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
+ 
+@@ -2534,6 +2543,8 @@
+     // uploads. No write counterpart here — files land via the `send_file` tool
+     // (POST /api/outbox/push — see index.mjs). Non-destructive: entries expire
+     // via the box's TTL sweep, not on download.
++    "artifacts:list": (opts) => artifacts.list(opts?.sessionId),
++
+     "outbox:list": async (sessionId) => {
+       const list = await listOutbox();
+       const sid = typeof sessionId === "string" && sessionId ? sessionId : null;
+diff -ruN a/src/shared/api.ts b/src/shared/api.ts
+--- a/src/shared/api.ts	2026-10-28 15:59:53.339124652 +0000
++++ b/src/shared/api.ts	2026-10-28 15:59:53.526123280 +0000
+@@ -1,3 +1,4 @@
++import type { ArtifactsListResult } from "./artifactsTypes.js";
+ import type {
+   AgentFileReady,
+   AppConfig,
+@@ -1528,6 +1529,7 @@
+   // workspace). Read-only; entries carry an `expiresAt` TTL and are only
+   // removed by the box's expiry sweep, never by a download.
+   outboxList(sessionId?: string): Promise<OutboxFile[]>;
++  artifactsList(opts: { sessionId: string }): Promise<ArtifactsListResult>;
+ 
+   // Background delegation jobs (manta-server owned). list returns the full
+   // job records (filtered by parent session when sessionId is passed; all
+diff -ruN a/src/shared/types.ts b/src/shared/types.ts
+--- a/src/shared/types.ts	2026-10-28 15:59:53.314124836 +0000
++++ b/src/shared/types.ts	2026-10-28 15:59:53.519123331 +0000
+@@ -1741,6 +1741,7 @@
+   // own. Mirrors src/shared/types.ts OutboxFile / src/server/outbox.mjs
+   // listOutbox rows.
+   outboxList: "outbox:list", // () → OutboxFile[]
++  artifactsList: "artifacts:list", // ({sessionId}) → ArtifactsListResult
+ 
+   // ---- background delegation jobs (manta-server owned) ----
+   // Background jobs are started by the AI's global `delegate` opencode tool

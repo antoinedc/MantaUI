@@ -139,6 +139,8 @@ struct SecretsCard: View {
     @State private var loaded = false
     @State private var failed = false
     @State private var showingAdd = false
+    /// "Couldn't delete <key>." — a failed delete is never silent.
+    @State private var deleteError: String?
     private let api = MantaAPIClient.live()
 
     var body: some View {
@@ -148,18 +150,27 @@ struct SecretsCard: View {
                     Text("Couldn't load secrets.")
                         .foregroundStyle(.secondary)
                 } else if loaded {
-                    if secrets.isEmpty {
+                    if secrets.isEmpty && deleteError == nil {
                         emptyState
                     } else {
-                        List(secrets) { secret in
-                            row(secret)
-                                .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) {
-                                        Task { await delete(secret) }
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
+                        List {
+                            if let deleteError {
+                                Section {
+                                    Text(deleteError)
+                                        .foregroundStyle(.red)
+                                        .accessibilityIdentifier("secrets-error")
                                 }
+                            }
+                            ForEach(secrets) { secret in
+                                row(secret)
+                                    .swipeActions(edge: .trailing) {
+                                        Button(role: .destructive) {
+                                            Task { await delete(secret) }
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    }
+                            }
                         }
                         .listStyle(.insetGrouped)
                     }
@@ -204,8 +215,12 @@ struct SecretsCard: View {
     }
 
     private func delete(_ secret: SecretMeta) async {
-        if (try? await api.deleteSecret(id: secret.id)) != nil {
+        deleteError = nil
+        do {
+            try await api.deleteSecret(id: secret.id)
             await load()
+        } catch {
+            deleteError = "Couldn't delete \(secret.key ?? secret.id)."
         }
     }
 
@@ -232,7 +247,7 @@ struct SecretsCard: View {
 
     private var emptyState: some View {
         ContentUnavailableView("No secrets", systemImage: "key",
-                               description: Text("Tap + to add a secret for this session."))
+                               description: Text("Tap + to add a secret. A shared secret is available to every session."))
     }
 
     private func row(_ secret: SecretMeta) -> some View {
@@ -249,8 +264,7 @@ struct SecretsCard: View {
     }
 
     private func detail(_ secret: SecretMeta) -> String {
-        var parts: [String] = []
-        if let scope = secret.scope, !scope.isEmpty { parts.append(scope) }
+        var parts: [String] = [SecretScopeOption.badge(secret)]
         if let hint = secret.hint, !hint.isEmpty { parts.append(hint) }
         return parts.joined(separator: " · ")
     }
@@ -266,7 +280,7 @@ private struct SecretAddForm: View {
 
     @State private var key = ""
     @State private var value = ""
-    @State private var scope = "session"
+    @State private var scope = SecretScopeOption.shared
     @State private var hint = ""
     @State private var saving = false
     @State private var errorMessage: String?
@@ -293,11 +307,14 @@ private struct SecretAddForm: View {
                 }
                 Section {
                     Picker("Scope", selection: $scope) {
-                        Text("This session").tag("session")
-                        Text("This project").tag("project")
+                        ForEach(SecretScopeOption.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
                     }
                     .pickerStyle(.automatic)
                     TextField("Hint (optional)", text: $hint)
+                } footer: {
+                    Text("Shared secrets are available to every session on this box. Project: every chat in this workspace. Session: only this chat.")
                 }
                 if let errorMessage {
                     Section {
@@ -329,16 +346,9 @@ private struct SecretAddForm: View {
         // set then sets `errorMessage` below and it is NOT cleared on return.
         errorMessage = nil
         defer { saving = false }
-        let input = SecretInput(
-            key: key,
-            value: value,
-            scope: scope,
-            // Send the card's sessionId for BOTH session and project scope: the
-            // card is always read from within a session, and the box resolves
-            // the project name from sessionID when it is not supplied directly.
-            sessionID: sessionId,
-            hint: hint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : hint
-        )
+        // The session id goes with SESSION and PROJECT scope (the box resolves the
+        // project name from it); a shared secret sends none.
+        let input = SecretScopeOption.input(key: key, value: value, scope: scope, sessionId: sessionId, hint: hint)
         if let error = await onSave(input) {
             errorMessage = error
         }
@@ -346,82 +356,132 @@ private struct SecretAddForm: View {
 }
 
 // ===========================================================================
-// BET-822 — artifacts palette: all four sources, QuickLook preview, no download.
+// Artifacts card — renders the box's `artifacts:list` (WS07).
 //
-// The reverse of the composer's paperclip. Unlike the BET-750 version (which
-// read ONLY the agent's `outbox:list`), this card derives its rows from the
-// same four feeds as the desktop panel — transcript file parts, URLs in user
-// messages, published serve-pages, and the outbox — via the pure
-// `ArtifactDerivation` (ArtifactDerivation.swift, unit-tested).
+// The box derives the list (links the user pasted, files and images, hosted pages
+// the agent published, files the agent pushed, plan files, expiry state, counts);
+// this card renders it and offers the gestures: tap → preview / open, search,
+// Jump to message, Attach to message, Share / Copy. No derivation lives here, so
+// a box that predates `artifacts:list` shows "Update your box to use this".
 //
-// Tapping a row PREVIEWS it (QuickLook), not downloads it: iOS has no
-// user-visible Downloads folder, and duplicating a share-sheet action is a
-// misstep. Sharing is reachable only through the long-press context menu. A
-// box artifact must be staged to the temp dir first — a genuine task of
-// unknown duration, so it gets a row spinner while staging, and the preview
-// only presents when the bytes land (a failure leaves the row untouched).
-// Same stock-SwiftUI treatment as SchedulesCard/SecretsCard.
+// Tapping a file or image PREVIEWS it (QuickLook), not downloads it: iOS has no
+// user-visible Downloads folder. A box artifact is staged to the temp dir first —
+// a task of unknown duration, so the row spins — and a failure is reported in the
+// card's inline banner, never swallowed. Same stock-SwiftUI treatment as
+// SchedulesCard/SecretsCard.
 // ===========================================================================
 
-/// List of everything THIS conversation produced: files the user attached,
-/// files the agent pushed, published preview pages, and links, grouped by day
-/// behind a Files · Images · Links segmented control. Tap → QuickLook;
-/// long-press → Share / Copy path.
+/// How an artifact's bytes are fetched, for preview, Share and Attach: a `data:` URI
+/// is decoded, an `http(s)` URL is fetched WITHOUT box credentials (it is not a box
+/// resource — the token must never reach another origin), and a box path is streamed
+/// through `/api/peek`.
+enum ArtifactBytes {
+    /// A plain GET with no `Authorization` header and no cookies, 30 s timeout.
+    static func remoteRequest(for url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.httpShouldHandleCookies = false
+        request.timeoutInterval = 30
+        return request
+    }
+
+    /// The remote fetch, on its OWN ephemeral session — never `MantaAPIClient`'s.
+    static func fetchRemote(_ url: URL) async -> Result<Data, ArtifactStagingError> {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.finishTasksAndInvalidate() }
+        let host = url.host ?? url.absoluteString
+        do {
+            let (data, response) = try await session.data(for: remoteRequest(for: url))
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                return .failure(.remote(host: host))
+            }
+            return .success(data)
+        } catch {
+            return .failure(.remote(host: host))
+        }
+    }
+
+    static func load(
+        _ source: ArtifactByteSource,
+        api: MantaAPIClient,
+        remote: (URL) async -> Result<Data, ArtifactStagingError> = ArtifactBytes.fetchRemote
+    ) async -> Result<Data, ArtifactStagingError> {
+        switch source {
+        case .dataURI(let href):
+            guard let data = ArtifactDataURI.decode(href) else { return .failure(.badDataURI) }
+            return .success(data)
+        case .remote(let url):
+            return await remote(url)
+        case .boxPath(let path):
+            do {
+                return .success(try await api.peekFile(path: path))
+            } catch {
+                return .failure(.missing)
+            }
+        case .unsupported:
+            return .failure(.missing)
+        }
+    }
+}
+
+/// Everything THIS conversation produced — files and images the user attached or the
+/// agent pushed, links, hosted pages and plans — behind a Files · Images · Links ·
+/// Plans segmented control, grouped by day. Tap → QuickLook / browser / plan page;
+/// long-press → Jump to message · Attach to message · Share · Copy.
 struct ArtifactsCard: View {
     let sessionId: String
     let onClose: () -> Void
+    /// The workspace the attach upload goes to (nil hides "Attach to message").
+    var projectName: String? = nil
+    /// The session's working folder. Pinned by the mount contract (M-07-1); the box
+    /// resolves plan file locations itself, so the card does not read it.
+    var cwd: String? = nil
+    /// The chat's composer (nil hides "Attach to message"). Passed explicitly rather
+    /// than read from the environment so the sheet does not depend on where the
+    /// `.environment(\.composerController, …)` sits relative to its `.sheet`.
+    var composer: ComposerTextController? = nil
+    /// Close the card and open the message in the chat (nil hides "Jump to message").
+    var onJumpToMessage: ((String) -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
-    @State private var artifacts: [Artifact] = []
+    @State private var result: ArtifactsListResult?
+    @State private var loadFailed = false
+    @State private var unsupported = false
     @State private var segment: ArtifactKind = .file
-    @State private var loaded = false
-    @State private var failed = false
-    /// Artifact ids currently having their bytes streamed to the temp dir
-    /// (row spinner while QuickLook staging runs).
+    @State private var query = ""
+    /// Inline, dismissible banner for any preview / attach / open failure.
+    @State private var errorMessage: String?
+    /// Artifact ids currently having their bytes fetched (row spinner).
     @State private var staging: Set<String> = []
-    /// Staged local file URLs, keyed by artifact id — the rows QuickLook can
-    /// already present without another fetch.
+    /// Staged local file URLs keyed by artifact id — what QuickLook can already present.
     @State private var stagedFiles: [String: URL] = [:]
     @State private var quickLookURLs: [URL] = []
     @State private var quickLookStartIndex = 0
     @State private var showingQuickLook = false
     private let api = MantaAPIClient.live()
-    /// Poll cadence while the card is presented, so a file the AI drops mid-chat
-    /// appears without needing to dismiss and reopen the card.
+    /// Poll cadence while presented, so a file the AI drops mid-chat appears without
+    /// reopening the card. The box memoizes the derivation, so this is cheap.
     private static let refreshIntervalNanoseconds: UInt64 = 3_000_000_000
 
     var body: some View {
         NavigationStack {
-            Group {
-                if failed {
-                    Text("Couldn't load artifacts.")
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("artifacts-failed")
-                } else if loaded {
-                    VStack(spacing: 0) {
-                        segmented
-                        if filtered.isEmpty {
-                            emptyState
-                        } else {
-                            list
-                        }
+            content
+                .navigationTitle("Artifacts")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done", action: onClose)
                     }
-                } else {
-                    ProgressView()
                 }
-            }
-            .navigationTitle("Artifacts")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: onClose)
-                }
-            }
+                .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic),
+                            prompt: "Search links & files")
         }
-        // Live update: refetch while presented (matches the other cards' `.task`
-        // load, extended to a light poll). Cancels when the card dismisses.
         .task {
             while !Task.isCancelled {
                 await load()
@@ -434,17 +494,61 @@ struct ArtifactsCard: View {
         }
     }
 
-    private var counts: (link: Int, image: Int, file: Int) { ArtifactCounts.of(artifacts) }
+    // MARK: States
 
-    private var filtered: [Artifact] {
-        artifacts.filter { $0.kind == segment }
+    @ViewBuilder
+    private var content: some View {
+        if unsupported {
+            ContentUnavailableView(
+                "Update your box to use this",
+                systemImage: "arrow.down.circle",
+                description: Text("Artifacts need a newer box version.")
+            )
+            .accessibilityIdentifier("artifacts-unsupported")
+        } else if let result {
+            VStack(spacing: 0) {
+                segmented(result)
+                if let errorMessage { errorBanner(errorMessage) }
+                if loadFailed { refreshFailedRow }
+                if filtered(result).isEmpty {
+                    emptyState(result)
+                } else {
+                    list(result)
+                }
+            }
+        } else if loadFailed {
+            VStack(spacing: Metrics.spacing.sp3) {
+                Text("Couldn't load artifacts.")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("artifacts-failed")
+                Button("Retry") { Task { await load() } }
+                    .buttonStyle(.bordered)
+            }
+        } else {
+            ProgressView()
+        }
     }
 
-    private var segmented: some View {
-        Picker("Segment", selection: $segment) {
+    // MARK: Derived (render-only)
+
+    private func items(_ result: ArtifactsListResult) -> [ArtifactItem] { result.renderable }
+
+    private func filtered(_ result: ArtifactsListResult) -> [ArtifactItem] {
+        ArtifactSearch.filter(items(result), query: query).filter { $0.kind == segment }
+    }
+
+    /// The box's totals; while searching, the live match counts.
+    private func counts(_ result: ArtifactsListResult) -> ArtifactCountsWire {
+        ArtifactSearch.isActive(query) ? ArtifactSearch.counts(items(result), query: query) : result.counts
+    }
+
+    private func segmented(_ result: ArtifactsListResult) -> some View {
+        let counts = counts(result)
+        return Picker("Segment", selection: $segment) {
             Text("Files \(counts.file)").tag(ArtifactKind.file)
             Text("Images \(counts.image)").tag(ArtifactKind.image)
             Text("Links \(counts.link)").tag(ArtifactKind.link)
+            Text("Plans \(counts.plan)").tag(ArtifactKind.plan)
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -452,191 +556,383 @@ struct ArtifactsCard: View {
         .accessibilityIdentifier("artifacts-segment")
     }
 
-    private var list: some View {
+    private func list(_ result: ArtifactsListResult) -> some View {
         List {
-            ForEach(ArtifactDayGrouping.grouped(filtered, now: Date()), id: \.label) { group in
+            ForEach(ArtifactDayGrouping.grouped(filtered(result), now: Date()), id: \.label) { group in
                 Section(header: Text(group.label)) {
-                    ForEach(group.items) { artifact in
-                        row(artifact)
+                    ForEach(group.items) { item in
+                        row(item)
                     }
+                }
+            }
+            if let footer = ArtifactDegradedCopy.footer(result.degraded) {
+                Section {
+                    EmptyView()
+                } footer: {
+                    Text(footer)
                 }
             }
         }
         .listStyle(.insetGrouped)
     }
 
+    @ViewBuilder
+    private func emptyState(_ result: ArtifactsListResult) -> some View {
+        if ArtifactSearch.isActive(query) {
+            ContentUnavailableView.search(text: query)
+        } else {
+            ContentUnavailableView(
+                ArtifactEmptyCopy.big(segment),
+                systemImage: Self.glyph(segment),
+                description: Text(ArtifactEmptyCopy.sub(segment, result.counts))
+            )
+            .accessibilityIdentifier("artifacts-empty")
+        }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
+            Text(message)
+                .font(.manta(size: Metrics.type.small))
+                .foregroundStyle(tokens.danger)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                errorMessage = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: Metrics.type.small, weight: .semibold))
+                    .foregroundStyle(tokens.tx3)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+        }
+        .padding(Metrics.spacing.sp3)
+        .background(tokens.danger.opacity(0.12))
+        .accessibilityIdentifier("artifacts-error")
+    }
+
+    /// A refresh failed while an older list is showing: say so, offer a retry.
+    private var refreshFailedRow: some View {
+        HStack {
+            Text("Couldn't refresh artifacts.")
+                .font(.manta(size: Metrics.type.xs))
+                .foregroundStyle(tokens.tx3)
+            Spacer(minLength: Metrics.spacing.sp2)
+            Button("Retry") { Task { await load() } }
+                .font(.manta(size: Metrics.type.xs, weight: .semibold))
+        }
+        .padding(.horizontal, Metrics.spacing.sp3)
+        .padding(.bottom, Metrics.spacing.sp1)
+    }
+
+    // MARK: Loading
+
     private func load() async {
         do {
-            // All four feeds arrive before deriving — the merged list is the
-            // only consistent snapshot for the counts and segments.
-            async let messages = api.messages(sessionId: sessionId)
-            async let pages = api.servePageList()
-            async let outbox = api.listOutbox(sessionId: sessionId)
-            let (msgs, pgs, rows) = try await (messages, pages, outbox)
-            artifacts = ArtifactDerivation.derive(messages: msgs, pages: pgs, sessionId: sessionId, outbox: rows)
-            failed = false
+            result = try await api.artifactsList(sessionId: sessionId)
+            loadFailed = false
+            unsupported = false
         } catch {
-            failed = true
-        }
-        loaded = true
-    }
-
-    private func onTap(_ artifact: Artifact) {
-        // A remote link opens in the browser — QuickLook has nothing to preview.
-        // Everything else (box path or data: URI) is staged then previewed.
-        let href = artifact.href.lowercased()
-        if href.hasPrefix("http://") || href.hasPrefix("https://") {
-            if let url = URL(string: artifact.href) {
-                UIApplication.shared.open(url)
-            }
-            return
-        }
-        Task { await presentPreview(artifact) }
-    }
-
-    /// Ensure the tapped artifact is staged, then present QuickLook over every
-    /// prepared file/image row (multi-item navigation comes free). Failure
-    /// leaves the row untouched — nothing is ever reported as previewed.
-    private func presentPreview(_ artifact: Artifact) async {
-        if stagedFiles[artifact.id] == nil {
-            guard !staging.contains(artifact.id) else { return }
-            staging.insert(artifact.id)
-            defer { staging.remove(artifact.id) }
-            guard let url = await stage(artifact) else { return }
-            stagedFiles[artifact.id] = url
-        }
-        let previewables = filtered.filter { $0.kind != .link && stagedFiles[$0.id] != nil }
-        let urls = previewables.compactMap { stagedFiles[$0.id] }
-        guard !urls.isEmpty else { return }
-        quickLookURLs = urls
-        quickLookStartIndex = max(0, previewables.firstIndex { $0.id == artifact.id } ?? 0)
-        showingQuickLook = true
-    }
-
-    /// Fetch the artifact's bytes into the app's temp directory. A `data:` URI
-    /// carries its own bytes — decode, never fetch; a box path is streamed via
-    /// `/api/peek`. Returns nil on any failure (row stays untouched).
-    private func stage(_ artifact: Artifact) async -> URL? {
-        do {
-            let data: Data
-            if artifact.href.lowercased().hasPrefix("data:") {
-                guard let decoded = Self.decodeDataURI(artifact.href) else { return nil }
-                data = decoded
+            if ArtifactsCapability.isUnsupported(error) {
+                unsupported = true
+                loadFailed = false
             } else {
-                data = try await api.peekFile(path: artifact.href)
-            }
-            let url = Self.tempURL(for: artifact)
-            try data.write(to: url)
-            return url
-        } catch {
-            return nil
-        }
-    }
-
-    private func contextMenu(for artifact: Artifact) -> some View {
-        Group {
-            if let url = shareURL(for: artifact) {
-                ShareLink(item: url)
-            }
-            Button {
-                UIPasteboard.general.string = artifact.href
-            } label: {
-                Label("Copy path", systemImage: "doc.on.doc")
+                loadFailed = true
             }
         }
     }
 
-    /// The shareable URL: the staged local file for a file/image, the href for
-    /// a link. A file with no staged bytes yet has nothing shareable — sharing
-    /// a raw box path would be a lie, so the menu omits ShareLink then.
-    private func shareURL(for artifact: Artifact) -> URL? {
-        if artifact.kind != .link {
-            return stagedFiles[artifact.id]
-        }
-        return URL(string: artifact.href)
-    }
+    // MARK: Row
 
-    private var emptyState: some View {
-        ContentUnavailableView(
-            "No artifacts",
-            systemImage: "doc",
-            description: Text("Files, images and links from this conversation will appear here.")
-        )
-        .accessibilityIdentifier("artifacts-empty")
-    }
-
-    private func row(_ artifact: Artifact) -> some View {
+    private func row(_ item: ArtifactItem) -> some View {
         HStack(spacing: Metrics.spacing.sp3) {
-            Image(systemName: Self.glyph(artifact.kind))
+            Image(systemName: Self.glyph(item.kind))
                 .font(.system(size: Metrics.type.small))
                 .foregroundStyle(tokens.tx4)
                 .frame(width: Metrics.spacing.sp4)
             VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
-                Text(artifact.label)
+                Text(item.label)
                     .font(.manta(size: Metrics.type.body))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(ArtifactFormat.secondaryLine(artifact, now: Date()))
+                Text(secondaryLine(item))
                     .font(.manta(size: Metrics.type.xs))
                     .foregroundStyle(tokens.tx3)
                     .lineLimit(1)
+                if item.kind == .link, let context = item.context, !context.isEmpty {
+                    Text(context)
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundStyle(tokens.tx3)
+                        .lineLimit(2)
+                }
             }
             Spacer(minLength: Metrics.spacing.sp2)
-            if staging.contains(artifact.id) {
+            if staging.contains(item.id) {
                 ProgressView()
             }
+            trailingCapsule(item)
         }
         .padding(.vertical, Metrics.spacing.sp1)
+        .opacity(item.expiry?.state == .expired ? 0.5 : 1)
         .contentShape(Rectangle())
-        .onTapGesture { onTap(artifact) }
-        .contextMenu { contextMenu(for: artifact) }
+        .onTapGesture { onTap(item) }
+        .contextMenu { contextMenu(for: item) }
+    }
+
+    private func secondaryLine(_ item: ArtifactItem) -> String {
+        if item.kind == .plan { return ArtifactFormat.planSubline(steps: item.plan?.steps ?? 0) }
+        return ArtifactFormat.secondaryLine(item, now: Date())
+    }
+
+    @ViewBuilder
+    private func trailingCapsule(_ item: ArtifactItem) -> some View {
+        if item.kind == .plan, let plan = item.plan {
+            capsule(plan.status.rawValue, color: Self.planColor(plan.status, tokens))
+        } else if let expiry = item.expiry {
+            let text = ArtifactExpiryLabel.text(expiry, now: Date())
+            if !text.isEmpty { capsule(text, color: Self.expiryColor(expiry.state, tokens)) }
+        }
+    }
+
+    private func capsule(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.manta(size: Metrics.type.twoXS, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(color.opacity(0.15)))
+            .lineLimit(1)
+    }
+
+    private static func expiryColor(_ state: ArtifactExpiryState, _ tokens: Tokens) -> Color {
+        switch state {
+        case .live, .never, .unknown: return tokens.ok
+        case .soon: return tokens.warn
+        case .expired: return tokens.danger
+        }
+    }
+
+    private static func planColor(_ status: ArtifactPlanStatus, _ tokens: Tokens) -> Color {
+        switch status {
+        case .draft, .unknown: return tokens.tx3
+        case .approved: return tokens.warn
+        case .building: return tokens.accent
+        case .done: return tokens.ok
+        }
     }
 
     private static func glyph(_ kind: ArtifactKind) -> String {
         switch kind {
-        case .file: return "doc"
+        case .file, .unknown: return "doc"
         case .image: return "photo"
         case .link: return "link"
+        case .plan: return "list.clipboard"
         }
     }
 
-    /// A writable temp URL QuickLook can hand to the OS. Keyed so re-staging
-    /// the same id overwrites in place.
-    private static func tempURL(for artifact: Artifact) -> URL {
-        let dir = FileManager.default.temporaryDirectory
-        let safe = artifact.id
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        return dir.appendingPathComponent("manta-qp-\(safe)\(Self.fileExtension(from: artifact.label))")
+    // MARK: Tap / preview
+
+    private func onTap(_ item: ArtifactItem) {
+        switch item.kind {
+        case .link:
+            openLink(item)
+        case .plan:
+            openPlanPage(item)
+        case .file, .image:
+            Task { await presentPreview(item) }
+        case .unknown:
+            break
+        }
     }
 
-    /// The last-dot extension of an artifact's name, so QuickLook detects the
-    /// right type; "" when the name has none or it isn't a clean extension.
-    private static func fileExtension(from label: String) -> String {
-        let name: Substring
-        if let slash = label.lastIndex(of: "/") {
-            name = label[label.index(after: slash)...]
+    /// A link opens in the browser (QuickLook has nothing to preview). A failure says so.
+    private func openLink(_ item: ArtifactItem) {
+        guard case .remote(let url) = ArtifactByteSource.classify(item.href) else {
+            errorMessage = "Couldn't open the link."
+            return
+        }
+        openExternally(url, failure: "Couldn't open the link.")
+    }
+
+    /// The box resolved the plan page URL; none → say so, never a dead tap.
+    private func openPlanPage(_ item: ArtifactItem) {
+        guard let raw = item.plan?.pageUrl, let url = URL(string: raw) else {
+            errorMessage = ArtifactPlanCopy.openFailure(item.plan)
+            return
+        }
+        openExternally(url, failure: ArtifactPlanCopy.openFailure(item.plan))
+    }
+
+    private func openExternally(_ url: URL, failure: String) {
+        Task {
+            let opened = await UIApplication.shared.open(url)
+            if !opened { errorMessage = failure }
+        }
+    }
+
+    /// Ensure the tapped artifact is staged, then present QuickLook over every
+    /// staged previewable row of the segment (multi-item navigation comes free).
+    /// A failure leaves the row untouched and reports in the banner.
+    private func presentPreview(_ item: ArtifactItem) async {
+        if stagedFiles[item.id] == nil {
+            guard !staging.contains(item.id) else { return }
+            staging.insert(item.id)
+            defer { staging.remove(item.id) }
+            switch await stage(item) {
+            case .success(let url): stagedFiles[item.id] = url
+            case .failure(let error):
+                errorMessage = ArtifactStagingError.message(error, name: item.label)
+                return
+            }
+        }
+        guard let result else { return }
+        let previewables = filtered(result).filter { $0.kind != .link && stagedFiles[$0.id] != nil }
+        let urls = previewables.compactMap { stagedFiles[$0.id] }
+        guard !urls.isEmpty else { return }
+        quickLookURLs = urls
+        quickLookStartIndex = max(0, previewables.firstIndex { $0.id == item.id } ?? 0)
+        showingQuickLook = true
+    }
+
+    /// Fetch the artifact's bytes into the app's temp directory.
+    private func stage(_ item: ArtifactItem) async -> Result<URL, ArtifactStagingError> {
+        switch await ArtifactBytes.load(ArtifactByteSource.classify(item.href), api: api) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let data):
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(ArtifactStaging.tempFileName(id: item.id, label: item.label, href: item.href))
+            do {
+                try data.write(to: url)
+                return .success(url)
+            } catch {
+                return .failure(.write)
+            }
+        }
+    }
+
+    // MARK: Attach
+
+    /// Upload a fresh copy of the artifact and attach it to the composer. The card
+    /// closes ONLY after the attach succeeded (the ready chip is the visible success);
+    /// every failure leaves it open with the reason in the banner.
+    private func attach(_ item: ArtifactItem) async {
+        guard let composer, let projectName else { return }
+        guard !staging.contains(item.id) else { return }
+        staging.insert(item.id)
+        defer { staging.remove(item.id) }
+        let name = item.label
+
+        guard composer.acceptsInput else {
+            errorMessage = ArtifactAttach.readOnlyMessage
+            return
+        }
+        let loaded: Result<Data, ArtifactStagingError>
+        if let staged = stagedFiles[item.id], let data = try? Data(contentsOf: staged) {
+            loaded = .success(data)
         } else {
-            name = Substring(label)
+            loaded = await ArtifactBytes.load(ArtifactByteSource.classify(item.href), api: api)
         }
-        guard let dot = name.lastIndex(of: ".") else { return "" }
-        let ext = name[name.index(after: dot)...]
-        guard !ext.isEmpty, ext.count <= 8, ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return "" }
-        return "." + ext
+        let bytes: Data
+        switch loaded {
+        case .failure(let error):
+            errorMessage = ArtifactAttach.stagingFailureMessage(error, name: name)
+            return
+        case .success(let data):
+            bytes = data
+        }
+
+        // A fresh copy is uploaded (as on desktop): the original may be an old upload,
+        // an outbox file the box sweeps before the message is sent, or a remote URL the
+        // box cannot read at all.
+        let remotePath: String
+        do {
+            remotePath = try await api.upload(project: projectName, filename: ArtifactAttach.filename(for: item), data: bytes)
+        } catch {
+            errorMessage = ArtifactAttach.uploadFailureMessage(name: name)
+            return
+        }
+        // The chat may have turned read-only while the bytes were in flight.
+        guard composer.acceptsInput else {
+            errorMessage = ArtifactAttach.readOnlyMessage
+            return
+        }
+        if composer.attach(remotePath: remotePath, displayName: name, mime: item.mime) {
+            onClose()
+        } else {
+            errorMessage = ArtifactAttach.rejectionMessage(composer.lastAttachRejection, name: name)
+        }
     }
 
-    /// Decode a `data:[mime][;base64],payload` URI. base64 when flagged,
-    /// otherwise percent-decoded UTF-8.
-    private static func decodeDataURI(_ href: String) -> Data? {
-        guard let comma = href.firstIndex(of: ",") else { return nil }
-        let metaStart = href.index(href.startIndex, offsetBy: 5) // skip "data:"
-        guard metaStart < comma else { return nil }
-        let meta = href[metaStart..<comma]
-        let payload = String(href[href.index(after: comma)...])
-        if meta.contains(";base64") {
-            return Data(base64Encoded: payload)
+    // MARK: Context menu
+
+    @ViewBuilder
+    private func contextMenu(for item: ArtifactItem) -> some View {
+        if ArtifactActions.canJump(hasHandler: onJumpToMessage != nil, messageId: item.messageId),
+           let messageId = item.messageId {
+            Button {
+                onJumpToMessage?(messageId)
+            } label: {
+                Label("Jump to message", systemImage: "arrow.turn.down.right")
+            }
         }
-        return payload.removingPercentEncoding?.data(using: .utf8)
+        if item.kind == .plan {
+            Button {
+                openPlanPage(item)
+            } label: {
+                Label("Open published page", systemImage: "safari")
+            }
+            if ArtifactActions.canOpenPlanFile(item) {
+                Button {
+                    Task { await presentPreview(item) }
+                } label: {
+                    Label("Open plan file", systemImage: "doc.text")
+                }
+            }
+        }
+        if let composer, let projectName {
+            ArtifactAttachMenuItem(composer: composer, item: item, hasProject: !projectName.isEmpty) {
+                Task { await attach(item) }
+            }
+        }
+        if let url = shareURL(for: item) {
+            ShareLink(item: url)
+        }
+        Button {
+            UIPasteboard.general.string = item.href
+        } label: {
+            Label(item.kind == .link ? "Copy link" : "Copy path", systemImage: "doc.on.doc")
+        }
+    }
+
+    /// The shareable URL: the staged local file for a file/image/plan, the href for a
+    /// link. A file with no staged bytes yet has nothing shareable — sharing a raw box
+    /// path would be a lie, so the menu omits ShareLink then.
+    private func shareURL(for item: ArtifactItem) -> URL? {
+        if item.kind == .link {
+            if case .remote(let url) = ArtifactByteSource.classify(item.href) { return url }
+            return nil
+        }
+        return stagedFiles[item.id]
+    }
+}
+
+/// "Attach to message" as its own view so it observes the composer: the item appears
+/// and disappears as the chat's `acceptsInput` flips (a read-only background-job chat
+/// takes no attachment).
+private struct ArtifactAttachMenuItem: View {
+    @ObservedObject var composer: ComposerTextController
+    let item: ArtifactItem
+    let hasProject: Bool
+    let action: () -> Void
+
+    var body: some View {
+        if ArtifactActions.canAttach(kind: item.kind, hasComposer: true,
+                                     acceptsInput: composer.acceptsInput, hasProject: hasProject) {
+            Button(action: action) {
+                Label("Attach to message", systemImage: "paperclip")
+            }
+        }
     }
 }
 
