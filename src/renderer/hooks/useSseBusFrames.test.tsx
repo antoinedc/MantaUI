@@ -38,7 +38,6 @@ type Stubs = {
 
 let bus!: SseBus;
 let stubs!: Stubs;
-let providerID: string | null = "anthropic";
 
 function Probe() {
   bus = useSseBus({
@@ -57,7 +56,6 @@ function Probe() {
     isActiveRef: { current: true },
     refetchOwedWhileInactive: { current: false },
     applyStreamFlush: stubs.applyStreamFlush as never,
-    providerID,
     setPlanOn: stubs.setPlanOn as never,
   });
   return null;
@@ -88,7 +86,6 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
 
   beforeEach(() => {
     resetRetiredInboxEpochs();
-    providerID = "anthropic";
     stubs = {
       setMessages: vi.fn(),
       setRefreshing: vi.fn(),
@@ -227,26 +224,27 @@ describe("useSseBus — interpreted frames (slice A2)", () => {
   });
 
   describe("sessionError", () => {
-    it("typed message + stops the turn", async () => {
+    it("shows the box's display text + stops the turn", async () => {
       await mountProbe();
       await emit(frame("running", { running: true }));
-      await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big" }));
-      expect(bus.sendError).toBe("Context full — try /compact: too big");
+      await emit(frame("sessionError", { name: "ContextOverflowError", message: "too big", display: { text: "BOX: context full — too big", reconnect: null } }));
+      expect(bus.sendError).toBe("BOX: context full — too big");
       expect(bus.running).toBe(false);
       expect(bus.authReconnect).toBeNull();
     });
 
-    it("a credential failure on the active provider becomes the reconnect banner", async () => {
+    it("a credential failure: the box's text and reconnect label become the banner", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x" }));
-      expect(bus.sendError).toBe("Claude needs to be reconnected.");
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "x", display: { text: "BOX: Claude needs a new sign-in.", reconnect: { providerID: "anthropic", label: "Claude", accountsId: "claude" } } }));
+      expect(bus.sendError).toBe("BOX: Claude needs a new sign-in.");
       expect(bus.authReconnect).toBe("Claude");
     });
 
-    it("keeps classifying against the raw provider message (rawMessage)", async () => {
+    it("an older box (no display) shows the raw message and no reconnect — never a client-side reclassification", async () => {
       await mountProbe();
-      await emit(frame("sessionError", { name: "ApiError", message: "Your session is no longer valid", rawMessage: 'Unauthorized: {"error":{"type":"authentication_error","message":"Your session is no longer valid"}}' }));
-      expect(bus.authReconnect).toBe("Claude");
+      await emit(frame("sessionError", { name: "ProviderAuthError", message: "raw provider words" }));
+      expect(bus.sendError).toBe("raw provider words");
+      expect(bus.authReconnect).toBeNull();
     });
 
     it("a user Stop (aborted frame) shows the Aborted banner and ends the turn", async () => {

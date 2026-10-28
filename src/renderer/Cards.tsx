@@ -90,11 +90,15 @@ export function RetryCard({
     attempt: number;
     message: string;
     next: number;
+    // The box's copy (absent on an older box, which gets the plain fallback below).
+    headline?: string;
+    caption?: string | null;
+    body?: string | null;
     action?: { title: string; message: string; label: string; link?: string };
   };
 }) {
-  const headline = info.action?.title || `Retrying… (attempt ${info.attempt})`;
-  const body = info.action?.message || info.message;
+  const headline = info.headline ?? "Retrying…";
+  const body = info.body ?? info.message;
   return (
     <div
       className="rounded-sm border bg-bg-elev px-4 py-3 text-meta"
@@ -103,9 +107,7 @@ export function RetryCard({
       <div className="flex items-center gap-2 mb-3">
         <span style={{ color: "var(--accent)" }}>↻</span>
         <span className="text-text">{headline}</span>
-        {info.attempt > 0 && (
-          <span className="text-text-faint">· attempt {info.attempt}</span>
-        )}
+        {info.caption && <span className="text-text-faint">· {info.caption}</span>}
       </div>
       {body && (
         <div className="text-text-muted break-words">{body}</div>
@@ -131,10 +133,11 @@ export function RetryCard({
 export function CompactionCard({
   state,
 }: {
-  state: { reason: string; text: string; phase: "running" | "done" };
+  state: { reason: string; text: string; phase: "running" | "done"; firstLine?: string | null };
 }) {
   const isRunning = state.phase === "running";
-  const firstLine = state.text.split("\n").find((s) => s.trim()) ?? "";
+  // The box takes the first line of what the compaction streamed (omitted on an older box).
+  const firstLine = state.firstLine ?? "";
   return (
     <div
       className="rounded-sm border bg-bg-elev px-4 py-3 text-meta"

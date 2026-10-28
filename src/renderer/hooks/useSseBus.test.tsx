@@ -92,71 +92,44 @@ describe("useSseBus via ChatPanel", () => {
     expect(h.container.querySelector("textarea")).not.toBeNull();
   });
 
-  it("renders the auth-error banner with [Reconnect] on Claude credential failure (BET-316)", async () => {
-    // Pin the active model's providerID to "anthropic" so authErrorAdvice
-    // has an authoritative provider to attribute to. The localStorage-backed
-    // per-session override would otherwise win — clear it so the store's
-    // defaultModel is what useSseBus sees.
-    localStorage.clear();
-    resetStore({
-      defaultModel: { providerID: "anthropic", modelID: "claude-opus-4-7" },
-    });
+  it("renders the auth-error banner with [Reconnect] from the box's sessionError display (BET-316)", async () => {
+    // The box classifies the failure against the session's model and sends the
+    // sentence + reconnect target in `display`; the panel only renders it.
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    // Emit the real upstream Claude credential-error payload (BET-280):
-    // opencode wraps the plugin's throw as ApiError with this message.
-    await emitAndFlush(bus, h, {
-      type: "session.error",
-      properties: {
-        sessionID: "ses_test",
-        error: {
-          name: "ApiError",
-          data: {
-            message:
-              "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
-          },
+    await emitStreamAndFlush(bus, h, {
+      sub: "sessionError",
+      sessionId: "ses_test",
+      payload: {
+        name: "ApiError",
+        message: "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
+        display: {
+          text: "Claude needs to be reconnected.",
+          reconnect: { providerID: "anthropic", label: "Claude", accountsId: "claude" },
         },
       },
     });
 
-    // Banner shows the new copy and renders the [Reconnect] button. Note we
-    // check `contains` rather than exact equality because the banner sits
-    // alongside the textarea (and other UI) in the rendered DOM.
     const text = h.text();
     expect(text).toContain("Claude needs to be reconnected.");
     expect(text).toContain("Reconnect");
   });
 
-  it("falls through to the raw-message path when providerID is unknown (BET-316)", async () => {
-    // No active model — useSseBus receives providerID: null. authErrorAdvice
-    // returns null and the existing switch/default branch surfaces the raw
-    // message verbatim (preceded by the "API error:" prefix the switch
-    // applies to ApiError). No [Reconnect] button should appear.
-    localStorage.clear();
-    resetStore({ defaultModel: null });
+  it("an older box (no display) shows the raw message with no Reconnect (BET-316)", async () => {
     h = mount(<ChatPanel {...PROPS} />);
     await h.flush();
 
-    await emitAndFlush(bus, h, {
-      type: "session.error",
-      properties: {
-        sessionID: "ses_test",
-        error: {
-          name: "ApiError",
-          data: {
-            message:
-              "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
-          },
-        },
+    await emitStreamAndFlush(bus, h, {
+      sub: "sessionError",
+      sessionId: "ses_test",
+      payload: {
+        name: "ApiError",
+        message: "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
       },
     });
 
     const text = h.text();
-    // Raw upstream text lands in the banner — the user sees the actionable
-    // "Run `claude`" message rather than a misattributed provider label.
-    // (The existing switch prefixes ApiError with "API error: "; the rest of
-    // the message is intact.)
     expect(text).toContain("Run `claude`");
     expect(text).not.toContain("Reconnect");
   });
@@ -486,7 +459,6 @@ describe("useSseBus running settle on turnComplete (BET-692)", () => {
       isActiveRef,
       refetchOwedWhileInactive,
       applyStreamFlush: () => 0,
-      providerID: null,
       setPlanOn: () => {},
     });
     probe = { running: sse.running };
@@ -663,7 +635,6 @@ describe("useSseBus plan-mode mirror (BET-973)", () => {
       isActiveRef,
       refetchOwedWhileInactive,
       applyStreamFlush: () => 0,
-      providerID: null,
       setPlanOn: (next: boolean) => { planCalls?.push(next); },
     });
     return <div />;

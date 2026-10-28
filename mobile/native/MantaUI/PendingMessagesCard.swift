@@ -25,19 +25,52 @@ struct PendingMessagesCard: View {
     let onSendNow: (String) -> Void
     let onWait: (String) -> Void
     let onCancel: (String) -> Void
+    /// Pull the newest pending message back into the composer to edit it.
+    var onEditLast: () -> Void = {}
+    /// False while the box can't be asked, or is too old to word the outcomes
+    /// (no `chat-cards-1`): ×, Send now, Wait and Edit last are disabled.
+    var actionsEnabled = true
+    /// The line explaining why they are disabled ("Update your box to use this");
+    /// nil while the capability is still unknown.
+    var gateNote: String? = nil
 
     var body: some View {
         let rows = PendingCardLogic.rows(items: items, running: running)
         VStack(alignment: .leading, spacing: 0) {
-            Text(PendingCardLogic.header(count: rows.count))
-                .font(.manta(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(tokens.tx3)
-                .padding(.horizontal, Metrics.spacing.sp3)
-                .padding(.vertical, Metrics.spacing.sp2)
-                .accessibilityIdentifier("pending-card-header")
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text(PendingCardLogic.header(count: rows.count))
+                    .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                    .foregroundColor(tokens.tx3)
+                    .accessibilityIdentifier("pending-card-header")
+                Spacer(minLength: 0)
+                // ↑ edit last: the newest message that has no action in flight.
+                Button(action: onEditLast) {
+                    Label("Edit last", systemImage: "arrow.up")
+                        .labelStyle(.titleAndIcon)
+                        .font(.manta(size: Metrics.type.xs, weight: .semibold))
+                        .foregroundColor(canEditLast ? tokens.accentTx : tokens.tx4)
+                        .padding(.vertical, Metrics.spacing.sp1)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canEditLast)
+                .accessibilityLabel("Edit last pending message")
+                .accessibilityIdentifier("pending-edit-last")
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp1)
             ForEach(rows) { row in
                 Rectangle().fill(tokens.borderSubtle).frame(height: Metrics.spacing.spPx)
                 rowView(row)
+            }
+            if let gateNote {
+                Rectangle().fill(tokens.borderSubtle).frame(height: Metrics.spacing.spPx)
+                Text(gateNote)
+                    .font(.manta(size: Metrics.type.twoXS))
+                    .foregroundColor(tokens.tx4)
+                    .padding(.horizontal, Metrics.spacing.sp3)
+                    .padding(.vertical, Metrics.spacing.sp2)
+                    .accessibilityIdentifier("pending-card-gate-note")
             }
             if PendingCardLogic.showsStoppedFooter(items: items, running: running) {
                 Rectangle().fill(tokens.borderSubtle).frame(height: Metrics.spacing.spPx)
@@ -60,8 +93,14 @@ struct PendingMessagesCard: View {
         .accessibilityIdentifier("pending-card")
     }
 
+    /// Edit last needs the actions enabled and at least one message with no action
+    /// in flight.
+    private var canEditLast: Bool {
+        actionsEnabled && ChatCardEditLast.pick(items: items, busy: busyIDs) != nil
+    }
+
     private func rowView(_ row: PendingRowModel) -> some View {
-        let busy = busyIDs.contains(row.id)
+        let busy = busyIDs.contains(row.id) || !actionsEnabled
         return VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             HStack(spacing: Metrics.spacing.sp2) {
                 badge(row.badge)

@@ -40,6 +40,8 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
   onWait,
   onCancel,
   onEditLast,
+  actionsEnabled = true,
+  gateNote = null,
 }: {
   items: ReadonlyArray<PendingCardItem>;
   running: boolean;
@@ -49,9 +51,13 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
   onWait: (item: OpencodeInboxItem) => void;
   onCancel: (item: OpencodeInboxItem) => void;
   onEditLast: () => void;
+  /** False while the box can't be asked (or is too old to word the outcomes): ×, Send now, Wait and edit last are disabled. */
+  actionsEnabled?: boolean;
+  /** The footer line explaining why they are disabled ("Update your box to use this"); null while still checking. */
+  gateNote?: string | null;
 }) {
   const [lead, rest] = pendingHeaderText(items.length).split(" · ");
-  const canEditLast = items.some((i) => !i.sending && !busyIds.has(i.id));
+  const canEditLast = actionsEnabled && items.some((i) => !i.sending && !busyIds.has(i.id));
   return (
     <div
       className="rounded-lg border border-border bg-bg-soft overflow-hidden text-meta"
@@ -77,7 +83,7 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
       <div>
         {items.map((item, idx) => {
           const sending = item.sending === true;
-          const busy = sending || busyIds.has(item.id);
+          const busy = sending || busyIds.has(item.id) || !actionsEnabled;
           const note = sending ? "sending…" : inboxRowNote(item, running);
           const now = item.delivery === "steer";
           return (
@@ -150,6 +156,11 @@ export const PendingMessagesCard = memo(function PendingMessagesCard({
           );
         })}
       </div>
+      {gateNote && (
+        <div className="px-3 py-1 border-t border-border-subtle text-micro tracking-normal text-text-faint" data-testid="inbox-gate-note">
+          {gateNote}
+        </div>
+      )}
       {showStoppedFooter(items, running) && (
         <div className="px-3 py-1 border-t border-border-subtle text-micro tracking-normal text-warn" data-testid="inbox-footer">
           {STOPPED_FOOTER_TEXT}

@@ -58,12 +58,9 @@ import {
   isPollExpired,
   arrangeCards,
   terminalShortcut,
-  authErrorAdvice,
-  AUTH_PROVIDER_LABELS,
   terminalMountKey,
   registerMountedTerminal,
   isJobRow,
-  formatJobSummary,
   isBackgroundJobCompletionTurn,
   visibleAssistantParts,
   isRenderableMessage,
@@ -79,7 +76,6 @@ import {
   isApprovalCoveredByAlways,
   shortModelName,
   isFastModelId,
-  parseModelRef,
   baseModelId,
   fastModelId,
   hideFastSiblingGroups,
@@ -111,7 +107,6 @@ import {
   selectUsageSnapshot,
   describePressure,
   describeActivityEntry,
-  formatCompactionSaving,
   formatRetryMinutes,
   formatAgeAt,
   formatEndpointStateLine,
@@ -2024,138 +2019,6 @@ describe("terminalShortcut", () => {
     });
   });
 });
-// ===== authErrorAdvice (BET-316) =====
-//
-// Maps a `session.error` event to the reconnect-banner copy. The contract
-// is: non-null only when the error is recognisably a credential failure on
-// one of the three providers in the subscription registry. Anything else
-// (context overflow, network blip, generic 5xx) returns null and falls
-// through to the existing raw-message path — a wrong attribution is worse
-// than no attribution.
-//
-// Tested cases (one assertion per scenario in the issue):
-//   - Claude credential error  → anthropic + "Claude"
-//   - Codex auth failure       → openai + "Codex"
-//   - Kimi auth failure        → kimi-for-coding + "Kimi"
-//   - Unrelated errors         → null (at least two negative cases — the
-//                                 false-positive cases are the ones that
-//                                 matter for this helper)
-
-describe("authErrorAdvice", () => {
-  it("attributes a Claude credential error to anthropic with label 'Claude'", () => {
-    // The real upstream message — verified against the deployed opencode
-    // build (see BET-280 / claudeAuth.mjs comment). `ApiError` is the typed
-    // name opencode normalizes to today; `ProviderAuthError` was the legacy
-    // name pre-BET-280. Both paths must work.
-    expect(
-      authErrorAdvice(
-        "ApiError",
-        "Claude Code credentials are unavailable or expired. Run `claude` to refresh them.",
-        "anthropic",
-      ),
-    ).toEqual({ providerID: "anthropic", label: "Claude" });
-    expect(
-      authErrorAdvice("ProviderAuthError", undefined, "anthropic"),
-    ).toEqual({ providerID: "anthropic", label: "Claude" });
-  });
-
-  it("attributes a Codex auth failure to openai with label 'Codex'", () => {
-    expect(
-      authErrorAdvice("ApiError", "Authentication failed: invalid token", "openai"),
-    ).toEqual({ providerID: "openai", label: "Codex" });
-    expect(
-      authErrorAdvice("ApiError", "Unauthorized: API key not valid", "openai"),
-    ).toEqual({ providerID: "openai", label: "Codex" });
-  });
-
-  it("attributes a Kimi auth failure to kimi-for-coding with label 'Kimi'", () => {
-    expect(
-      authErrorAdvice(
-        "ApiError",
-        "API key expired — please renew in the console",
-        "kimi-for-coding",
-      ),
-    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
-    expect(
-      authErrorAdvice("ApiError", "token expired", "kimi-for-coding"),
-    ).toEqual({ providerID: "kimi-for-coding", label: "Kimi" });
-  });
-
-  it("returns null for an unrelated context-overflow error", () => {
-    // ContextOverflowError / MessageOutputLengthError etc. are handled by
-    // the existing switch in useSseBus.ts; authErrorAdvice must not steal
-    // them. Both an explicit name + safe message and a default name +
-    // credential-shaped message that lacks a known provider are tested.
-    expect(
-      authErrorAdvice("ContextOverflowError", "context window exceeded", "anthropic"),
-    ).toBeNull();
-    // Same credentials-shaped message but for an unrelated provider — must
-    // NOT promote to a banner; the user is on something the registry does
-    // not own, so we cannot reliably attribute.
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", "some-other-provider"),
-    ).toBeNull();
-  });
-
-  it("returns null for an unrelated tool / network error", () => {
-    expect(
-      authErrorAdvice("ApiError", "rate limit exceeded", "anthropic"),
-    ).toBeNull();
-    expect(authErrorAdvice("ApiError", "internal server error", "openai")).toBeNull();
-    // Network-style errors carry no auth tokens and are not ApiError.
-    expect(authErrorAdvice(undefined, "Network request failed", "anthropic")).toBeNull();
-    expect(authErrorAdvice(undefined, "ECONNRESET", "anthropic")).toBeNull();
-  });
-
-  it("returns null when providerID is missing (no active model known)", () => {
-    // Without a providerID we cannot attribute with confidence — fall
-    // through to the raw-message path. Both null and undefined must be
-    // tolerated (defensive against malformed event payloads).
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", null),
-    ).toBeNull();
-    expect(
-      authErrorAdvice("ApiError", "credentials expired", undefined),
-    ).toBeNull();
-    expect(authErrorAdvice("ApiError", "credentials expired", "")).toBeNull();
-  });
-
-  it("returns null for non-string / nullish inputs (defensive parsing)", () => {
-    // Defensive: a malformed event from upstream must not crash the UI.
-    // Cast through `unknown` so the type system allows the bad inputs.
-    expect(
-      authErrorAdvice(
-        null as unknown as string,
-        null as unknown as string,
-        null as unknown as string,
-      ),
-    ).toBeNull();
-    expect(
-      authErrorAdvice(
-        undefined as unknown as string,
-        "credentials expired",
-        "anthropic",
-      ),
-    ).toBeNull();
-  });
-
-  it("exposes a tight label registry (exactly the three providers)", () => {
-    // Guards against a silent drift between this renderer-side table and
-    // SUBSCRIPTION_PROVIDERS in src/server/subscriptionProviders.mjs. Both
-    // files must agree on the three providers (anthropic / openai /
-    // kimi-for-coding). Adding a fourth here is intentional and rare;
-    // adding an unknown key (a typo) is the regression this catches.
-    expect(Object.keys(AUTH_PROVIDER_LABELS).sort()).toEqual([
-      "anthropic",
-      "kimi-for-coding",
-      "openai",
-    ]);
-    expect(AUTH_PROVIDER_LABELS.anthropic).toBe("Claude");
-    expect(AUTH_PROVIDER_LABELS.openai).toBe("Codex");
-    expect(AUTH_PROVIDER_LABELS["kimi-for-coding"]).toBe("Kimi");
-  });
-});
-
 describe("isJobRow", () => {
   const jobs = {
     ses_a: { name: "fix-login", status: "running", activity: "editing auth.ts" },
@@ -2184,74 +2047,6 @@ describe("isJobRow", () => {
   });
 });
 
-describe("formatJobSummary", () => {
-  it("formats branch + files-changed count for a finished job with a worktree", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: 3, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 3 files changed");
-  });
-
-  it("uses the singular 'file' for a single changed file", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: 1, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 1 file changed");
-  });
-
-  it("omits the branch when there is no worktree (ran in the parent cwd)", () => {
-    expect(formatJobSummary({ branch: null, filesChanged: 5, worktree: null })).toBe(
-      "5 files changed",
-    );
-  });
-
-  it("omits the branch when worktree is set but branch is null", () => {
-    expect(formatJobSummary({ branch: null, filesChanged: 2, worktree: "/tmp/wt" })).toBe(
-      "2 files changed",
-    );
-  });
-
-  it("treats null filesChanged as 0", () => {
-    expect(
-      formatJobSummary({ branch: "fix-login", filesChanged: null, worktree: "/tmp/wt" }),
-    ).toBe("fix-login · 0 files changed");
-  });
-});
-
-// ===== parseModelRef (BET-801) =====
-
-describe("parseModelRef", () => {
-  it("splits a canonical providerID/modelID ref", () => {
-    expect(parseModelRef("anthropic/claude-sonnet-4-6")).toEqual({
-      providerID: "anthropic",
-      modelID: "claude-sonnet-4-6",
-    });
-  });
-
-  it("splits on the FIRST slash only when the modelID contains a slash", () => {
-    expect(parseModelRef("openai/gpt-4o/mini")).toEqual({
-      providerID: "openai",
-      modelID: "gpt-4o/mini",
-    });
-  });
-
-  it("returns null for absent or empty refs", () => {
-    expect(parseModelRef(null)).toBeNull();
-    expect(parseModelRef(undefined)).toBeNull();
-    expect(parseModelRef("")).toBeNull();
-  });
-
-  it("returns null for a ref with no slash", () => {
-    expect(parseModelRef("anthropic")).toBeNull();
-  });
-
-  it("returns null when either side is empty", () => {
-    expect(parseModelRef("/claude")).toBeNull();
-    expect(parseModelRef("anthropic/")).toBeNull();
-  });
-
-  it("returns null for a non-string (the legacy object shape on disk)", () => {
-    expect(parseModelRef({ providerID: "anthropic", modelID: "claude" } as unknown as string)).toBeNull();
-  });
-});
 
 // ===== isBackgroundJobCompletionTurn (BET-418 §C) =====
 
@@ -6105,20 +5900,6 @@ describe("chartAxisTicks", () => {
   });
 });
 
-describe("formatCompactionSaving", () => {
-  it("renders the arrowed before -> after saving", () => {
-    expect(formatCompactionSaving(128_000, 31_000)).toBe("128k → 31k");
-    expect(formatCompactionSaving(10_000, 2000)).toBe("10k → 2k");
-  });
-  it("returns '0' when there is no saving (before == after, or after > before)", () => {
-    expect(formatCompactionSaving(128_000, 128_000)).toBe("0");
-    expect(formatCompactionSaving(10_000, 20_000)).toBe("0");
-  });
-  it("returns '0' for missing/non-finite inputs", () => {
-    expect(formatCompactionSaving(0, 0)).toBe("0");
-    expect(formatCompactionSaving(Number.NaN, 1000)).toBe("0");
-  });
-});
 
 
 // ===== Endpoint health formatting (BET-1537 S5 review Blocks 1+3) =====
@@ -6227,12 +6008,3 @@ describe("providersFromExcludedKeys / ENDPOINT_STATE_LABEL coverage", () => {
   });
 });
 
-import { isReadOnlyJob } from "./chatUtils";
-describe("isReadOnlyJob", () => {
-  it("plain delegate jobs are read-only; CTO work workers are writable sessions", () => {
-    expect(isReadOnlyJob({ correlation: null })).toBe(true);
-    expect(isReadOnlyJob({})).toBe(true);
-    expect(isReadOnlyJob({ correlation: { kind: "work" } })).toBe(false);
-    expect(isReadOnlyJob(null)).toBe(false);
-  });
-});

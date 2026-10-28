@@ -1759,7 +1759,8 @@ export const IPC = {
   delegateStop: "delegate:stop", // (id) → { ok: boolean, error?: string, reason?: string }
   delegateDelete: "delegate:delete", // (id) → { ok: boolean, error?: string, reason?: string }
   delegatePendingApprovals: "delegate:pending-approvals", // (sessionId?) → DelegateApproval[]
-  delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean }
+  delegateApprove: "delegate:approve", // ({id, tools?}) → { ok: boolean, error?: string } — error = the box refused the rules (the approval stays pending)
+  delegateJobForSession: "delegate:job-for-session", // ({ sessionId }) → DelegateJobForSession — is this session a read-only background job, and the bar's copy
   delegateDecline: "delegate:decline", // (id) → { ok: boolean }
 
   // ---- APNs native-push registration (BET-181) ----
@@ -1808,7 +1809,7 @@ export const IPC = {
   // detection; gating / banner / force-update logic lands in a later phase.
   // BET-428 added `opencodeVersion` (the pinned OpenCode version the release
   // ships) so Settings → About can render it without a new IPC channel.
-  getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string }
+  getServerVersion: "server:version",                 // () → { version: string, minClient: string, opencodeVersion: string, capabilities?: string[] }
 
   // ---- server self-update apply (BET-225 stage 3) ----
   // Trigger the server's `scripts/self-update.sh` (git fetch + reset --hard
@@ -2614,7 +2615,28 @@ export type DelegateJob = {
   displayParentID?: string | null;
   // The agent the job's session runs (shown in its result).
   agent?: string | null;
+  // The box's reading of the record (delegate:list decoration, WS02): the status
+  // word ("unknown" when empty) and the terminal summary line ("<branch> · N files changed").
+  statusLabel?: string;
+  summary?: string;
 };
+
+// delegate:job-for-session — the box decides whether a session is a read-only
+// background job (a CTO work worker is not) and writes the bar's copy.
+export type DelegateJobView = {
+  id: string;
+  status: string;
+  statusLabel: string;
+  /** "Read-only — this is a background job running <model>." */
+  headline: string;
+  /** Running → the live activity; terminal → "<branch> · N files changed" (+ the reason). */
+  statusLine: string;
+  /** "It reports to <window>." / "It reports to a session that's closed." */
+  parentLine: string;
+  stoppable: boolean;
+  parent: { sessionId: string; name: string; project: string; windowIndex: number } | null;
+};
+export type DelegateJobForSession = { readOnly: false } | { readOnly: true; job: DelegateJobView };
 
 // A pre-flight approval requested by a `delegate` call when trust mode is OFF
 // and the model declared `tools` (BET-418 §A). The renderer shows ONE card
@@ -2918,6 +2940,11 @@ export type StreamSessionErrorPayload = {
   message: string;
   /** The original provider message, present only when `message` was humanized (unwrapped) from it. */
   rawMessage?: string;
+  /** The box's sentence for the banner + the reconnect target when it is a credential failure (absent on an older box). */
+  display?: {
+    text: string;
+    reconnect: { providerID: string; label: string; accountsId: string } | null;
+  };
 };
 
 // ── Slice A frames (OpenCode V2 migration, phase 1) ──
@@ -2934,6 +2961,10 @@ export type StreamRetryPayload = {
   message: string;
   next?: number;
   action?: { title: string; message: string; label: string; link?: string };
+  /** The box's copy for the retry card (absent on an older box). */
+  headline?: string;
+  caption?: string | null;
+  body?: string | null;
 } | null;
 
 /** `stepEnded`: session.next.step.ended. `tokens` is all zeros when the event carried no usage. */
@@ -2958,6 +2989,8 @@ export type StreamCompactionPayload = {
   phase: "started" | "delta" | "ended";
   text?: string;
   reason?: string;
+  /** On `ended`: the first non-blank line of what the compaction streamed (written by the box). */
+  firstLine?: string | null;
 };
 
 /** `transcriptStale`: session.compacted — refetch the transcript. */
@@ -2988,10 +3021,26 @@ export type OpencodeInboxSnapshot = { epoch: string; rev: number; items: Opencod
 export type OpencodeInboxCancelResult = {
   outcome: "cancelled" | "delivered" | "unknown";
   item?: OpencodeInboxItem;
+  /** The box's sentences (absent on an older box): a neutral notice, an error to show, and the text that may go back into the composer. */
+  notice?: string | null;
+  error?: string | null;
+  restoreText?: string | null;
 };
 
 /** N1 — the result of `opencode:inbox-set-delivery`. `changed` only when the box observed V2 confirm the requested delivery; `delivered` when the item had already been sent. */
-export type OpencodeInboxSetDeliveryResult = { outcome: "changed" | "delivered" | "unknown" };
+export type OpencodeInboxSetDeliveryResult = {
+  outcome: "changed" | "delivered" | "unknown";
+  notice?: string | null;
+  error?: string | null;
+};
+
+/** `optimizer.compacted`: a background compaction of the open conversation. `text` is the box's full line, shown verbatim (absent on an older box). */
+export type StreamOptimizerCompactedPayload = {
+  beforeTokens: number | null;
+  afterTokens: number | null;
+  away: boolean;
+  text?: string;
+};
 
 /** `inbox`: the interpreter's full pending-user-message list for a session (K3). */
 export type StreamInboxPayload = OpencodeInboxSnapshot;

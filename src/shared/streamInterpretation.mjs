@@ -13,6 +13,8 @@
 // the same test suite that used to live in src/renderer/chatUtils.test.ts,
 // moved unmodified alongside the logic.
 
+import { formatTokenCount } from "./formatTokens.mjs";
+
 // Fallback context size used when the active model has no `limit.context`
 // (or no active model is known yet). 200k is the lowest common denominator
 // across Claude Sonnet 4.5 and older — generous enough that the bar
@@ -1020,4 +1022,124 @@ export function buildTitleInstruction(conversation) {
     "focus, weighting the most recent messages:\n\n" +
     conversation
   );
+}
+
+// ===== Chat cards (WS02 server-first, D23/D24) =====
+//
+// The box decides the copy of the chat-screen cards so desktop and iOS render
+// the same sentences: the retry card, the compaction card, the background
+// compaction line and the send-error line. Moved here from src/renderer/
+// chatUtils.ts (describeSessionError, authErrorAdvice, AUTH_PROVIDER_LABELS,
+// formatCompactionSaving).
+
+/** `{headline, caption, body}` for the retry card. `action` is optional (the
+ *  interpreter never sets it today; the type allows it). */
+export function describeRetry(input) {
+  const attempt = typeof input?.attempt === "number" && Number.isFinite(input.attempt) ? input.attempt : 0;
+  const action = input?.action ?? null;
+  const message = typeof input?.message === "string" ? input.message : "";
+  return {
+    headline: action?.title || "Retrying…",
+    caption: attempt > 0 ? `attempt ${attempt}` : null,
+    body: action?.message || message || null,
+  };
+}
+
+/** First non-blank line of a compaction's streamed text, trimmed; null when none. */
+export function compactionFirstLine(text) {
+  if (typeof text !== "string") return null;
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (t) return t;
+  }
+  return null;
+}
+
+/** The quiet "Compacted in the background" line (optimizer.compacted). The
+ *  "· 128k → 31k" saving is added only when the context actually shrank. */
+export function describeBackgroundCompaction({ beforeTokens, afterTokens, away }) {
+  const base = away ? "⟳ Compacted while you were away" : "⟳ Compacted in the background";
+  const isNum = (n) => typeof n === "number" && Number.isFinite(n) && n > 0;
+  if (!isNum(beforeTokens) || !isNum(afterTokens) || afterTokens >= beforeTokens) return base;
+  return `${base} · ${formatTokenCount(beforeTokens)} → ${formatTokenCount(afterTokens)}`;
+}
+
+// Human label per subscription provider. Mirrors SUBSCRIPTION_PROVIDERS in
+// src/server/subscriptionProviders.mjs. Three entries — the entire registry.
+export const AUTH_PROVIDER_LABELS = {
+  anthropic: "Claude",
+  openai: "Codex",
+  "kimi-for-coding": "Kimi",
+};
+
+// The id the accounts screen of each client accepts as its focus provider.
+const ACCOUNTS_IDS = {
+  anthropic: "claude",
+  openai: "codex",
+  "kimi-for-coding": "kimi",
+};
+
+/**
+ * Whether an error is recognisably a credential failure: `ProviderAuthError`
+ * (the legacy typed name), or an `ApiError` whose message carries a
+ * credential-shaped keyword. Standalone "expired" is excluded on purpose (it
+ * matches "rate limit window expired").
+ */
+export function isAuthErrorName(errorName, message) {
+  const name = typeof errorName === "string" ? errorName : "";
+  if (name === "ProviderAuthError") return true;
+  if (name !== "ApiError") return false;
+  const msg = typeof message === "string" ? message : "";
+  return /credential|authentication|unauthorized|api[-_ ]?key|auth(?:entication)?\s+(?:token|failed)|token\s+expired|key\s+expired/i.test(
+    msg,
+  );
+}
+
+/**
+ * `{providerID, label}` when the error is a credential failure on one of the
+ * subscription providers AND the session's active model belongs to it; else
+ * null. The active model is authoritative for attribution.
+ */
+export function authErrorAdvice(errorName, message, providerID) {
+  if (!isAuthErrorName(errorName, message)) return null;
+  if (typeof providerID !== "string" || providerID.length === 0) return null;
+  const label = AUTH_PROVIDER_LABELS[providerID];
+  if (!label) return null;
+  return { providerID, label };
+}
+
+/**
+ * A session failure → the sentence the clients show, plus the reconnect target
+ * when it is a credential problem. Classification uses the RAW provider message
+ * (`rawMessage`, present only when the box humanized the text) so the keyword
+ * match does not shift with the unwrapping (BET-1131).
+ */
+export function describeSessionError(p, providerID) {
+  const name = p?.name ?? undefined;
+  const human = typeof p?.message === "string" ? p.message : "";
+  const auth = authErrorAdvice(name, p?.rawMessage ?? human, providerID);
+  if (auth) {
+    return {
+      text: `${auth.label} needs to be reconnected.`,
+      reconnect: { providerID: auth.providerID, label: auth.label, accountsId: ACCOUNTS_IDS[auth.providerID] },
+    };
+  }
+  let text;
+  switch (name) {
+    case "ContextOverflowError":
+      text = `Context full — try /compact: ${human}`;
+      break;
+    case "MessageOutputLengthError":
+      text = "Response truncated (hit output limit)";
+      break;
+    case "StructuredOutputError":
+      text = `Structured output failed: ${human}`;
+      break;
+    case "ApiError":
+      text = `API error: ${human}`;
+      break;
+    default:
+      text = human;
+  }
+  return { text, reconnect: null };
 }

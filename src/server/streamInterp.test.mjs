@@ -74,7 +74,11 @@ test("execution.failed -> sessionError (V1 error names) + running false + turnCo
   interp.interpret(ev("session.execution.started"));
   interp.interpret(ev("session.execution.failed", { error: { type: "provider.no-route", message: "Model unavailable: anthropic/x" } }));
   const [err] = subs(events, "sessionError");
-  assert.deepEqual(err.payload, { name: "ApiError", message: "Model unavailable: anthropic/x" });
+  assert.deepEqual(err.payload, {
+    name: "ApiError",
+    message: "Model unavailable: anthropic/x",
+    display: { text: "API error: Model unavailable: anthropic/x", reconnect: null },
+  });
   assert.equal(subs(events, "running").at(-1).payload.running, false);
   assert.equal(subs(events, "turnComplete").at(-1).payload.complete, true);
 });
@@ -131,7 +135,14 @@ test("interpret ignores events with no session id and malformed input", () => {
 test("retry: session.retry.scheduled publishes the banner payload; the next step clears it with null", () => {
   const { interp, events } = make();
   interp.interpret(ev("session.retry.scheduled", { attempt: 2, at: 1792167156112, error: { type: "provider.internal", message: "Overloaded", status: 529 } }));
-  assert.deepEqual(subs(events, "retry")[0].payload, { attempt: 2, message: "Overloaded", next: 1792167156112 });
+  assert.deepEqual(subs(events, "retry")[0].payload, {
+    attempt: 2,
+    message: "Overloaded",
+    next: 1792167156112,
+    headline: "Retrying…",
+    caption: "attempt 2",
+    body: "Overloaded",
+  });
   interp.interpret(ev("session.step.started", { assistantMessageID: MID, model: { providerID: "p", id: "m" } }));
   assert.equal(subs(events, "retry").at(-1).payload, null);
   assert.equal(subs(events, "retry").length, 2);
@@ -477,7 +488,7 @@ test("compaction: started / delta / ended map to frames; the transcript goes sta
   assert.deepEqual(subs(events, "compaction").map((e) => e.payload), [
     { phase: "started", text: "", reason: "manual" },
     { phase: "delta", text: "## Objective" },
-    { phase: "ended" },
+    { phase: "ended", firstLine: "## Objective" },
   ]);
   assert.equal(subs(events, "transcriptStale").length, 0);
   interp.interpret(ev("session.execution.succeeded"));

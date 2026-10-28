@@ -94,6 +94,7 @@ export const DEMO_UNIMPLEMENTED = [
   "delegateApprove",
   "delegateDecline",
   "delegateDelete",
+  "delegateJobForSession",
   "delegateList",
   "delegateOpenSession",
   "delegatePendingApprovals",

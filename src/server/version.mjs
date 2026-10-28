@@ -10,6 +10,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OPENCODE_V2_VERSION } from "../../scripts/opencode-v2/version.mjs";
+import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
 
 // Returned when package.json is unreadable / malformed / missing the `version`
 // field. Lets the server boot in broken packaging scenarios (a tarball that
@@ -85,6 +86,9 @@ export function writeVersionResponse(res, { version, opencode = opencodeInfo(), 
       minClient: MIN_CLIENT,
       opencodeVersion,
       opencode,
+      // Server-first capability ids (master D25): a client on an older box finds
+      // an id missing and hides the dependent feature.
+      capabilities: [...BOX_CAPABILITIES],
     }),
   );
 }

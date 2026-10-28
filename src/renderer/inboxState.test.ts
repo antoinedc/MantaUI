@@ -1,15 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  ATTACHMENTS_NOT_RESTORED,
-  SET_DELIVERY_UNCONFIRMED,
   acceptInbox,
-  describeInboxSetDelivery,
   inboxBadgeLabel,
   inboxRowNote,
   pendingHeaderText,
   showStoppedFooter,
   createInboxTracker,
-  describeInboxCancel,
   parseInboxSnapshot,
   planBusySend,
   shouldClearDraft,
@@ -142,37 +138,6 @@ describe("shouldClearDraft", () => {
   });
 });
 
-describe("describeInboxCancel", () => {
-  const item = it_("m", "the text");
-  it("cancelled + restore → restores the text, no message", () => {
-    expect(describeInboxCancel({ outcome: "cancelled", item }, item, { restore: true })).toEqual({ restoreText: "the text", error: null, notice: null });
-  });
-  it("cancelled without restore (the × button) restores nothing", () => {
-    expect(describeInboxCancel({ outcome: "cancelled", item }, item, { restore: false }).restoreText).toBeNull();
-  });
-  it("cancelled with attachments adds the re-attach note (only when restoring)", () => {
-    const withFiles = it_("m", "t", 2);
-    expect(describeInboxCancel({ outcome: "cancelled", item: withFiles }, withFiles, { restore: true }).notice).toBe(ATTACHMENTS_NOT_RESTORED);
-    expect(describeInboxCancel({ outcome: "cancelled", item: withFiles }, withFiles, { restore: false }).notice).toBeNull();
-  });
-  it("prefers the server's pre-cancel copy of the text", () => {
-    expect(describeInboxCancel({ outcome: "cancelled", item: it_("m", "server copy") }, item, { restore: true }).restoreText).toBe("server copy");
-  });
-  it("delivered → 'Already sent to the agent', nothing restored", () => {
-    expect(describeInboxCancel({ outcome: "delivered" }, item, { restore: true })).toEqual({ restoreText: null, error: null, notice: "Already sent to the agent" });
-  });
-  it("unknown → may still be sent, nothing restored (it could go out twice)", () => {
-    expect(describeInboxCancel({ outcome: "unknown" }, item, { restore: true })).toEqual({
-      restoreText: null,
-      error: "Couldn't confirm it was cancelled — it may still be sent",
-      notice: null,
-    });
-  });
-  it("a missing/garbled result is treated as unknown, never as cancelled", () => {
-    expect(describeInboxCancel(null, item, { restore: true }).restoreText).toBeNull();
-    expect(describeInboxCancel(undefined, item, { restore: true }).error).toContain("may still be sent");
-  });
-});
 
 describe("pending card helpers", () => {
   it("pendingHeaderText: singular and plural", () => {
@@ -200,14 +165,3 @@ describe("pending card helpers", () => {
   });
 });
 
-describe("describeInboxSetDelivery (N1)", () => {
-  it("changed: nothing to show", () => {
-    expect(describeInboxSetDelivery({ outcome: "changed" })).toEqual({ error: null, notice: null });
-  });
-  it("delivered: a toast", () => {
-    expect(describeInboxSetDelivery({ outcome: "delivered" })).toEqual({ error: null, notice: "Already sent to the agent" });
-  });
-  it.each([{ outcome: "unknown" as const }, null, undefined, {} as never])("%j: an error, never silent", (r) => {
-    expect(describeInboxSetDelivery(r)).toEqual({ error: SET_DELIVERY_UNCONFIRMED, notice: null });
-  });
-});

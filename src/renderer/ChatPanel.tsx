@@ -22,6 +22,7 @@ import type {
   CheckRollup,
   DelegateApproval,
   DelegateApprovalTool,
+  DelegateJobView,
   ForgeCheckRun,
   OptimizerSummary,
   ProgressRecord,
@@ -55,14 +56,12 @@ import {
   scrollElementToTail,
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
-  parseModelRef,
   describeMergeFailure,
   progressAttentionKind,
   isPlanExitQuestion,
   extractPlanData,
   selectableModelGroups,
   titleCase,
-  formatCompactionSaving,
   formatNoHealthyEndpointCopy,
   providersFromExcludedKeys,
 } from "./chatUtils";
@@ -109,10 +108,11 @@ import { Composer } from "./Composer";
 import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
-import { buildVoiceNoteMap, concatUserMessageText, isReadOnlyJob } from "./chatUtils";
+import { buildVoiceNoteMap, concatUserMessageText } from "./chatUtils";
+import { UPDATE_BOX_NOTE, useBoxCapability } from "./hooks/useBoxCapabilities";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
-import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
+import { planBusySend, shouldClearDraft } from "./inboxState";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
 import {
@@ -322,6 +322,10 @@ export function ChatPanel({
   // change. Trust mode (chatAutoAllow) skips the card server-side, so none
   // arrive here.
   const [pendingApproval, setPendingApproval] = useState<DelegateApproval | null>(null);
+  // The box refused the edited rules (or couldn't be reached): shown on the approval card.
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const approvalErrorId = pendingApproval?.id ?? null;
+  useEffect(() => setApprovalError(null), [approvalErrorId]);
   const chatAutoAllowApproval = useStore((s) => s.chatAutoAllow);
 
   // BET-794/867: forge ship + merge for this session. The server resolves cwd →
@@ -357,22 +361,40 @@ export function ChatPanel({
     return () => clearTimeout(t);
   }, [shipJustCreated]);
 
-  // BET-418 §D: detect whether THIS session is a background job's child. A
-  // job session is read-only (no composer, no cards, no model picker/fork/
-  // compact/clear); the composer is replaced by ReadOnlyJobBar. Derived from
-  // the store's `jobs` slice (keyed by childSessionID, fed by App.tsx's single
-  // 30s delegateList poll + real-time `delegate.updated` refetch) — the panel
-  // no longer runs its own 10s delegateList poll.
+  // BET-418 §D: is THIS session a background job's child? A job session is
+  // read-only (no composer, no cards, no model picker/fork/compact/clear); the
+  // composer is replaced by ReadOnlyJobBar. The BOX decides (a CTO work worker
+  // is a normal, writable session) and writes the bar's copy — WS02 server-first,
+  // `delegate:job-for-session`. Re-read on mount and on every `delegate.updated`.
+  // A transient failure keeps the last answer. An older box (no `chat-cards-1`)
+  // has no bar to show: the session simply opens as an ordinary one.
+  const jobsCapability = useBoxCapability("chat-cards-1");
+  const [jobView, setJobView] = useState<DelegateJobView | null>(null);
+  const refreshJobView = useCallback(async () => {
+    if (jobsCapability !== true) {
+      setJobView(null);
+      return;
+    }
+    try {
+      const r = await window.api.delegateJobForSession(sessionId);
+      setJobView(r.readOnly ? r.job : null);
+    } catch {
+      /* keep the last answer: a hiccup must not flip a known job writable */
+    }
+  }, [sessionId, jobsCapability]);
+  useEffect(() => {
+    setJobView(null);
+    void refreshJobView();
+    const off = window.api.onDelegateUpdated?.(() => void refreshJobView());
+    return () => off?.();
+  }, [refreshJobView]);
+  const jobOwnership = jobView;
+  // The sidebar's jobs slice (keyed by child session) still feeds the pinned job-result cards below.
   const jobs = useStore((s) => s.jobs);
-  // A CTO work worker (correlation.kind === "work") is a normal, writable
-  // session — the user can steer it like any other; only plain delegate jobs
-  // are read-only.
-  const jobOwnership = useMemo(() => {
-    const job = jobs[sessionId] ?? null;
-    return isReadOnlyJob(job) ? job : null;
-  }, [jobs, sessionId]);
+  // The job's last user-visible error (a failed Stop), shown on the bar.
+  const [jobBarError, setJobBarError] = useState<string | null>(null);
+  useEffect(() => setJobBarError(null), [sessionId]);
 
-  const projects = useStore((s) => s.projects);
   const setActive = useStore((s) => s.setActive);
   const activateWindow = useStore((s) => s.activateWindow);
 
@@ -649,12 +671,6 @@ export function ChatPanel({
   // Ref mirror of latestTokens (set below) so submit reads the CURRENT context
   // size without re-creating the callback on every stream update.
   const latestTokensRef = useRef<TokenUsage | null>(null);
-  // Active-model providerID for the auth-error banner (BET-316) — derived from
-  // the controller's override. useSseBus needs it, hence it is computed here.
-  const providerID = useMemo(
-    () => modelOverride?.providerID ?? configDefaultModel?.providerID ?? null,
-    [modelOverride, configDefaultModel],
-  );
   // Honesty sync from useSseBus: opencode's OWN agent switches (plan_enter /
   // plan_exit / agent.switched) drive the controller's plan flag so the chip
   // never lies about the agent the next turn will run as. writePlanSaved persists
@@ -730,7 +746,6 @@ export function ChatPanel({
     isActiveRef,
     refetchOwedWhileInactive,
     applyStreamFlush,
-    providerID,
     setPlanOn: syncPlan,
   });
 
@@ -851,20 +866,33 @@ export function ChatPanel({
     setInboxBusyIds(new Set(rowBusyRef.current));
   }, []);
 
+  // The box words every inbox outcome (src/server/inboxCopy.mjs, WS02 server-first)
+  // and decides what may go back into the composer, so the renderer keeps no
+  // classification of its own. An older box (no `chat-cards-1`) can answer
+  // `unknown` with no sentence at all — silent — so every inbox action is gated
+  // on the capability instead: disabled, with "Update your box to use this" once
+  // the box has answered, and nothing at all while it has not (null).
+  const inboxCapability = useBoxCapability("chat-cards-1");
+  const inboxActionsEnabled = inboxCapability === true;
+  const inboxGateNote = inboxCapability === false ? UPDATE_BOX_NOTE : null;
+  const inboxActionsEnabledRef = useRef(inboxActionsEnabled);
+  inboxActionsEnabledRef.current = inboxActionsEnabled;
+
   // Cancel one pending message (K4) and report EVERY outcome. Never rejects.
-  // `restore` = the pop-last gesture: on `cancelled` the text goes back into
-  // the composer. The row × just removes the message (the row vanishing is its
-  // confirmation) but still reports `delivered` / `unknown`.
+  // `restore` = the pop-last gesture: on `cancelled` the box hands the text back
+  // (`restoreText`) and it goes into the composer. The row × just removes the
+  // message (the row vanishing is its confirmation) but still reports
+  // `delivered` / `unknown`.
   const cancelInboxItem = useCallback(async (item: OpencodeInboxItem, restore: boolean) => {
+    if (!inboxActionsEnabledRef.current) return;
     if (rowBusyRef.current.has(item.id)) return;
     markRowBusy(item.id, true);
     try {
-      const result = await window.api.opencodeInboxCancel({ sessionId, id: item.id });
-      const report = describeInboxCancel(result, item, { restore });
-      if (report.error) setSendError(report.error);
-      if (report.notice) useStore.getState().setSystemNotice(report.notice);
-      if (report.restoreText !== null) {
-        const text = report.restoreText;
+      const result = await window.api.opencodeInboxCancel({ sessionId, id: item.id, restore });
+      if (result?.error) setSendError(result.error);
+      if (result?.notice) useStore.getState().setSystemNotice(result.notice);
+      if (typeof result?.restoreText === "string") {
+        const text = result.restoreText;
         setInput(text);
         requestAnimationFrame(() => {
           const el = inputRef.current;
@@ -887,13 +915,13 @@ export function ChatPanel({
   // After this turn (queue). Reports EVERY outcome; never rejects. `changed`
   // needs nothing more — the next inbox frame flips the badge.
   const changeInboxDelivery = useCallback(async (item: OpencodeInboxItem, delivery: "steer" | "queue") => {
+    if (!inboxActionsEnabledRef.current) return;
     if (rowBusyRef.current.has(item.id)) return;
     markRowBusy(item.id, true);
     try {
       const result = await window.api.opencodeInboxSetDelivery({ sessionId, id: item.id, delivery });
-      const report = describeInboxSetDelivery(result);
-      if (report.error) setSendError(report.error);
-      if (report.notice) useStore.getState().setSystemNotice(report.notice);
+      if (result?.error) setSendError(result.error);
+      if (result?.notice) useStore.getState().setSystemNotice(result.notice);
       if (result?.outcome !== "changed") refreshInbox();
     } catch (e) {
       setSendError(`Couldn't change the pending message: ${String((e as Error)?.message ?? e)}`);
@@ -916,6 +944,8 @@ export function ChatPanel({
   // composer. Nothing pending → report the miss so the shared gesture falls
   // through to prompt history instead of silently eating the keypress.
   const editLastInboxItem = useCallback((): boolean => {
+    // Gated like every inbox action: false lets the ↑ key fall through to prompt history.
+    if (!inboxActionsEnabledRef.current) return false;
     const last = [...inboxItems].reverse().find((i) => !rowBusyRef.current.has(i.id));
     if (!last) return false;
     void cancelInboxItem(last, true); // reports every branch itself, never rejects
@@ -3137,10 +3167,19 @@ export function ChatPanel({
         `delegate-${pendingApproval.id}`, blockOrder(`delegate-${pendingApproval.id}`),
         <DelegateApprovalCard
           approval={pendingApproval}
+          error={approvalError}
           onApprove={(tools: DelegateApprovalTool[]) => {
             const id = pendingApproval.id;
-            setPendingApproval(null);
-            void window.api.delegateApprove(id, tools).catch(() => { /* best-effort */ });
+            setApprovalError(null);
+            // Keep the card until the box answers: a refusal of the rules (ok:false
+            // WITH an error) leaves the approval pending and says why.
+            window.api.delegateApprove(id, tools).then((r) => {
+              if (r && r.ok === false && r.error) {
+                setApprovalError(r.error);
+                return;
+              }
+              setPendingApproval(null);
+            }).catch(() => setApprovalError("Couldn't reach your box — try again"));
           }}
           onDecline={() => {
             const id = pendingApproval.id;
@@ -3170,16 +3209,12 @@ export function ChatPanel({
     if (compactionState) list.push(amb("compaction",
       <div className="shrink-0 px-4 pt-2"><CompactionCard state={compactionState} /></div>));
     // BET-1347: the box compacted this conversation in the background — one
-    // pass-by line, not a card. "while you were away" only when the box's
-    // presence said away at compaction time; otherwise the background wording.
+    // pass-by line, not a card. The box writes the whole line (wording, "while you
+    // were away", the saving); an older box sends none, so nothing is shown.
     if (compactionNotice) {
-      const saving = formatCompactionSaving(compactionNotice.beforeTokens ?? 0, compactionNotice.afterTokens ?? 0);
-      const base = compactionNotice.away
-        ? "⟳ Compacted while you were away"
-        : "⟳ Compacted in the background";
       list.push(amb("compaction-notice",
         <div className="shrink-0 px-4 pt-2">
-          <div className="opt-compact-line">{saving === "0" ? base : `${base} · ${saving}`}</div>
+          <div className="opt-compact-line">{compactionNotice.text}</div>
         </div>));
     }
     if (sendError) list.push(amb("send-error",
@@ -3218,6 +3253,8 @@ export function ChatPanel({
             onWait={waitInboxItem}
             onCancel={cancelInboxRow}
             onEditLast={() => void editLastInboxItem()}
+            actionsEnabled={inboxActionsEnabled}
+            gateNote={inboxGateNote}
           />
         </div>
       </MeasureColumn>));
@@ -3281,7 +3318,7 @@ export function ChatPanel({
         </div>));
     }
     return list;
-  }, [viewOnly, permissions, pendingApproval, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
+  }, [viewOnly, permissions, pendingApproval, approvalError, retryInfo, compactionState, compactionNotice, sendError, authReconnect, verdictReset, verdictResetBusy, resetVerdictHealth, running, cardItems, inboxBusyIds, inboxActionsEnabled, inboxGateNote, sendInboxNow, waitInboxItem, cancelInboxRow, editLastInboxItem, openPanel, schedules, scheduleError, secretError, secrets, webhooks, webhookError, closePanel, setSchedules, refreshSchedules, setScheduleError, setSendError, setPendingApproval, setSecrets, refreshSecrets, setSecretError, setWebhooks, refreshWebhooks, setWebhookError, sessionId, replyPermission, shipProposal, shipBusy, shipError, liveProgress]);
 
 
   // Previous sessions (spec §9): the chosen older session shown read-only in THIS
@@ -3508,45 +3545,25 @@ export function ChatPanel({
         <PreviousSessionBar label={readOnlyView.label} deleted={false} onBack={readOnlyView.onBack} />
       ) : jobOwnership ? (
         <ReadOnlyJobBar
-          job={jobOwnership}
-          modelName={
-            resolveActiveModel(models, parseModelRef(jobOwnership.model), null)?.name ?? null
-          }
-          parentName={(() => {
-            const pid = jobOwnership.parentSessionID;
-            for (const p of projects) {
-              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
-              if (w) return w.name ?? p.tmuxSession;
-            }
-            return null;
-          })()}
+          view={jobOwnership}
+          error={jobBarError}
           onGoToParent={() => {
-            const pid = jobOwnership.parentSessionID;
-            for (const p of projects) {
-              const w = (p.windows || []).find((x) => x.opencodeSessionId === pid);
-              if (w) {
-                setActive(p.tmuxSession, w.index);
-                return;
-              }
-            }
+            const parent = jobOwnership.parent;
+            if (parent) setActive(parent.project, parent.windowIndex);
           }}
           onStop={() => {
-            if (jobOwnership.status !== "running") return;
-            void window.api
+            if (!jobOwnership.stoppable) return;
+            setJobBarError(null);
+            window.api
               .delegateStop(jobOwnership.id)
-              .then(() => {
-                // Optimistically flip this job to stopped in the store's jobs
-                // slice (server `delegate.updated` refetch confirms shortly).
-                const st = useStore.getState();
-                const job = st.jobs[sessionId];
-                if (!job) return;
-                st.setJobs(
-                  Object.values(st.jobs).map((j) =>
-                    j.childSessionID === sessionId ? { ...j, status: "stopped" } : j,
-                  ),
-                );
+              .then((r) => {
+                if (r && r.ok === false) {
+                  setJobBarError(r.error ?? r.reason ?? "The job could not be stopped");
+                  return;
+                }
+                void refreshJobView();
               })
-              .catch(() => { /* best-effort */ });
+              .catch((e: unknown) => setJobBarError(`Couldn't stop the job: ${e instanceof Error ? e.message : String(e)}`));
           }}
         />
       ) : (

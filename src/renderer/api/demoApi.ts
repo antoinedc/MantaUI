@@ -513,7 +513,7 @@ const projectCreateScratch = (input: { root: string; name: string }): Promise<{ 
 const getClientVersion = (): Promise<{ version: string }> =>
   Promise.resolve({ version: "0.0.13" });
 
-const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string }> =>
+const getServerVersion = (): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }> =>
   Promise.resolve({
     version: DEMO_STATE === "incompatible" ? "1.0.0" : DEMO_STATE === "server-update" ? "0.0.10" : "0.0.13",
     minClient: DEMO_STATE === "version-skew" ? "0.1.0" : "0.0.0",

@@ -15,6 +15,7 @@ import { isBackgroundResultMessage } from "./backgroundRun";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
+import { formatTokens, formatTokenCount } from "../shared/formatTokens.mjs";
 // BET-1139: the deprecated-model predicate lives in the shared node-safe
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
@@ -216,18 +217,9 @@ export function moveMenuHighlight(
   return (index + dir + length) % length;
 }
 
-export function formatTokens(n: number): string {
-  if (n < 1000) return `${n} tokens`;
-  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k tokens`;
-  return `${Math.round(n / 1000)}k tokens`;
-}
-
-// Compact token figure for inline surfaces (the compaction saving pill / the
-// "128k → 31k" one-liner). Built on formatTokens — never a second formatter —
-// with the " tokens" suffix stripped.
-function formatTokensCompact(n: number): string {
-  return formatTokens(n).replace(/\s+tokens$/, "");
-}
+// One token formatter for the whole effort (master D26): the implementation lives
+// in src/shared/formatTokens.mjs; this re-export keeps every renderer import path.
+export { formatTokens };
 
 // ---- Optimizer P2.5 (BET-1347) pure formatters ------------------------------
 
@@ -294,19 +286,6 @@ export function describeActivityEntry(entry: ActivityEntry): { headline: string;
     headline: `${word} — ${subject}`,
     detail: evidenceLine(entry.evidence),
   };
-}
-
-/**
- * Format a compaction's before/after token sizes for the "⟳ Compacted ... ·
- * 128k → 31k" one-liner. Returns the arrowed savings when the compaction
- * actually shrank the context, or "0" when there was no reduction (before and
- * after equal or after > before) — never fabricates a saving.
- */
-export function formatCompactionSaving(before: number, after: number): string {
-  const isNum = (n: number): boolean => typeof n === "number" && Number.isFinite(n) && n > 0;
-  if (!isNum(before) || !isNum(after)) return "0";
-  if (after >= before) return "0";
-  return `${formatTokensCompact(before)} → ${formatTokensCompact(after)}`;
 }
 
 // Build an SVG path string for a CUMULATIVE series over `values` (oldest →
@@ -784,45 +763,6 @@ export function stepTokensFromFrame(p: {
   const write = t.cache?.write ?? 0;
   if (input + output + reasoning + read + write <= 0) return null;
   return { input, output, reasoning, cache: { read, write }, cost: p.cost ?? 0 };
-}
-
-/**
- * A `sessionError` frame -> the banner the panel shows.
- *
- * - `auth` is non-null when the failure is a credential problem on one of the
- *   subscription providers (`authErrorAdvice`); the banner is then the single
- *   reconnect nudge. It classifies against the RAW provider message
- *   (`rawMessage`, which the box adds only when humanizing changed the text),
- *   because its keyword match must not shift with the box's unwrapping (BET-1131).
- * - Otherwise `message` is the typed prefix + the humanized sentence. `message`
- *   on the frame is already humanized by the box.
- */
-export function describeSessionError(
-  p: { name: string | null; message: string; rawMessage?: string },
-  providerID: string | null | undefined,
-): { message: string; auth: { providerID: string; label: string } | null } {
-  const name = p.name ?? undefined;
-  const auth = authErrorAdvice(name, p.rawMessage ?? p.message, providerID);
-  if (auth) return { message: `${auth.label} needs to be reconnected.`, auth };
-  const human = p.message;
-  let message: string;
-  switch (name) {
-    case "ContextOverflowError":
-      message = `Context full — try /compact: ${human}`;
-      break;
-    case "MessageOutputLengthError":
-      message = "Response truncated (hit output limit)";
-      break;
-    case "StructuredOutputError":
-      message = `Structured output failed: ${human}`;
-      break;
-    case "ApiError":
-      message = `API error: ${human}`;
-      break;
-    default:
-      message = human;
-  }
-  return { message, auth: null };
 }
 
 /**
@@ -1748,166 +1688,27 @@ export function terminalShortcut(
   }
 }
 
-// ===== Auth-error banner (BET-316) =====
-//
-// Opencode emits `session.error` whenever a turn fails. The legacy path in
-// useSseBus falls through to `default:` and surfaces the raw error message
-// — fine for Claude, where the upstream message is already actionable, but
-// misleading for Codex and Kimi: their messages can land without context, and
-// for Claude specifically the message ends with "Run `claude` to refresh
-// them." regardless of which provider the user is on.
-//
-// The banner this helper feeds into fixes both. When the error is recognisably
-// a credential/auth failure on one of the three providers in the subscription
-// registry, the banner shows `<Label> needs to be reconnected.` with a single
-// [Reconnect] button that dispatches `manta-open-subscriptions`. Claude's own
-// server-side auto-refresh (`maybeRecoverCredentials`, the 10-min pre-expiry
-// poller) still runs in parallel — it is additive, not a replacement.
-//
-// Deliberately Claude-agnostic at the renderer level: only the active model's
-// providerID decides which label to render. We never reach into the message
-// text to "guess" the provider — a wrong attribution is worse than falling
-// through to the existing raw-message path, which still names the right CLI
-// for Claude specifically and surfaces opencode's own message for the others.
-
-// Human label per provider, for the banner text. Single source of truth at
-// the renderer layer; mirrors `SUBSCRIPTION_PROVIDERS` in
-// src/server/subscriptionProviders.mjs (server) and the demo fixture in
-// src/renderer/api/demoApi.ts. Three entries — the entire registry.
-export const AUTH_PROVIDER_LABELS: Record<string, string> = {
-  anthropic: "Claude",
-  openai: "Codex",
-  "kimi-for-coding": "Kimi",
-};
-
-/**
- * Decide whether to surface a "needs to be reconnected" banner for a
- * `session.error` event. Returns the provider id + label when ALL of:
- *
- *   1. The error is recognisably a credential/auth failure. We accept
- *      `ProviderAuthError` (the legacy typed name opencode emitted pre-BET-280)
- *      AND `ApiError` whose message carries credential-shaped keywords
- *      (`credential`, `authentication`, `unauthorized`, `api[-_ ]?key`,
- *      `auth token`/`auth failed`, `token expired`, `key expired`). The
- *      `ApiError` keyword gate is tight enough that an unrelated API failure
- *      (rate limit, 5xx, network blip) does NOT match — those messages
- *      contain none of the auth tokens above.
- *   2. `providerID` (the session's active model's provider) is a known
- *      registry entry — `anthropic` / `openai` / `kimi-for-coding`. Any
- *      other value, or null/undefined, returns null. The active model is
- *      authoritative: the user just tried to run a turn with that provider,
- *      so any auth failure on this turn belongs to it.
- *   3. A label exists for that provider (always true given condition 2,
- *      but asserted here so the registry and the helper stay in sync).
- *
- * Returns null otherwise — the caller falls back to the existing raw-
- * message path. Non-string / nullish inputs are tolerated (defensive against
- * malformed upstream payloads) and treated as "no match".
- *
- * @param errorName  the typed error name from `properties.error.name`
- *                   (`"ProviderAuthError"`, `"ApiError"`, etc.) — pass
- *                   `undefined` when the event has no name field.
- * @param message    the raw message from `properties.error.data.message`
- *                   (or `error.name` as the ultimate fallback the caller
- *                   already resolved). Pass `undefined` when neither exists.
- * @param providerID the session's active model's `providerID`. The single
- *                   authoritative source for "which provider's banner do we
- *                   show". `null`/`undefined` → no banner.
- */
-export function authErrorAdvice(
-  errorName: string | null | undefined,
-  message: string | null | undefined,
-  providerID: string | null | undefined,
-): { providerID: string; label: string } | null {
-  if (!isAuthErrorName(errorName, message)) return null;
-  if (typeof providerID !== "string" || providerID.length === 0) return null;
-  const label = AUTH_PROVIDER_LABELS[providerID];
-  if (!label) return null;
-  return { providerID, label };
-}
-
-/**
- * Inner predicate for authErrorAdvice. Exposed for tests so the keyword
- * matching can be asserted independently from the provider-label lookup.
- * Not exported on the renderer's public API — chatUtils re-exports the
- * surface-level `authErrorAdvice` only.
- */
-function isAuthErrorName(
-  errorName: string | null | undefined,
-  message: string | null | undefined,
-): boolean {
-  const name = typeof errorName === "string" ? errorName : "";
-  if (name === "ProviderAuthError") return true;
-  // `ApiError` is broad (rate limit, 5xx, network blip all land here too);
-  // require credential-shaped keywords in the message so we only catch the
-  // auth sub-type. Provider-agnostic — Claude/Codex/Kimi all phrase auth
-  // failures with one of these tokens. Standalone "expired" is intentionally
-  // excluded (too broad: matches "rate limit window expired", "context
-  // expired", etc.) — the combined keywords above always co-occur with the
-  // expired-word in the real failure messages.
-  if (name !== "ApiError") return false;
-  const msg = typeof message === "string" ? message : "";
-  return /credential|authentication|unauthorized|api[-_ ]?key|auth(?:entication)?\s+(?:token|failed)|token\s+expired|key\s+expired/i.test(
-    msg,
-  );
-}
+// The auth-error banner copy (describeSessionError / authErrorAdvice) moved to the
+// box (src/shared/streamInterpretation.mjs, run in streamInterp.mjs) — the
+// `sessionError` frame carries `display` and the renderer only shows it.
 
 // ===== Background delegation job rows (BET-381) =====
 //
 // Pure helpers for the sidebar / mobile session list second line and the jobs
 // management card. The renderer never computes the activity text itself — it
 // comes from the job record's `activity` field (server-computed on a 10s
-// poll, no model call). These helpers only decide WHETHER a window is a job
-// row and format a finished job's summary line.
+// poll, no model call). This helper only decides WHETHER a window is a job
+// row; the box writes every job sentence (delegate:list `statusLabel` / `summary`).
 
 // A window is a job row when the jobs map has an entry for its opencode
 // session id. False for ordinary chat/terminal windows and when the window
 // has no opencode session id (a claude-TUI window).
-// A background job's session is read-only (ReadOnlyJobBar replaces the
-// composer) — EXCEPT a CTO work worker (correlation.kind "work"), which opens
-// as an ordinary, writable session the user can steer.
-export function isReadOnlyJob(
-  job: { correlation?: { kind?: string } | null } | null | undefined,
-): boolean {
-  return !!job && job.correlation?.kind !== "work";
-}
-
 export function isJobRow(
   jobs: Record<string, { name: string; status: string; activity: string | null }>,
   opencodeSessionId: string | null | undefined,
 ): boolean {
   if (!opencodeSessionId) return false;
   return Object.prototype.hasOwnProperty.call(jobs, opencodeSessionId);
-}
-
-// Format a finished job's summary line from its branch + files-changed count.
-// Used by the jobs management card for terminal (done/failed/stopped) rows.
-// The no-worktree case (job ran in the parent cwd, worktree null) renders
-// without a branch. `filesChanged` null/undefined → "0 files".
-// A job record's `model` is the canonical "providerID/modelID" ref. This
-// splits it on the FIRST "/" only — model ids contain slashes, provider ids
-// do not. Returns null for absent/malformed input and for any non-string
-// (defends against a legacy object shape persisted on disk, so the job footer
-// renders plain rather than crashing).
-export function parseModelRef(
-  ref: string | null | undefined,
-): { providerID: string; modelID: string } | null {
-  if (typeof ref !== "string" || ref.length === 0) return null;
-  const idx = ref.indexOf("/");
-  if (idx < 1 || idx === ref.length - 1) return null;
-  return { providerID: ref.slice(0, idx), modelID: ref.slice(idx + 1) };
-}
-
-export function formatJobSummary(job: {
-  branch?: string | null;
-  filesChanged?: number | null;
-  worktree?: string | null;
-}): string {
-  const files =
-    job.filesChanged == null ? 0 : Math.max(0, Math.floor(job.filesChanged));
-  const filesLabel = `${files} file${files === 1 ? "" : "s"} changed`;
-  if (!job.worktree || !job.branch) return filesLabel;
-  return `${job.branch} · ${filesLabel}`;
 }
 
 // ===== Background-job completion turn suppression (BET-418 §C) =====
@@ -3800,7 +3601,7 @@ export function formatLastMove(
   const reason = move.reason ? ` · ${move.reason}` : "";
   const resent =
     move.crossOrg && typeof move.resentTokens === "number"
-      ? `history re-sent: ${formatTokensCompact(move.resentTokens)}`
+      ? `history re-sent: ${formatTokenCount(move.resentTokens)}`
       : null;
   return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
 }

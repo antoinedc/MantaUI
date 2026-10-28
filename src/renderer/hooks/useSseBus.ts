@@ -58,6 +58,7 @@ import type {
   StreamEnvelope,
   StreamFlushPayload,
   StreamMessageChangedPayload,
+  StreamOptimizerCompactedPayload,
   StreamPermissionsPayload,
   StreamPlanModePayload,
   StreamRetryPayload,
@@ -72,7 +73,6 @@ import type {
 import {
   collectChildSessionIds,
   hydrateQuestion,
-  describeSessionError,
   stepTokensFromFrame,
   fetchTranscriptWithRetry,
 } from "../chatUtils";
@@ -80,6 +80,20 @@ import { createInboxTracker, type InboxTracker } from "../inboxState";
 import type { TokenUsage } from "../chatShared";
 import { useStore } from "../store";
 import { markFirstToken, markRendered } from "../firstTokenLatency";
+
+/** The compaction card's state; `firstLine` is the box's summary line once it ended. */
+export type CompactionState = { reason: string; text: string; phase: "running" | "done"; firstLine?: string | null };
+
+/** The retry card's state: the box's copy (`headline` / `caption` / `body`) plus the raw message. */
+export type RetryInfo = {
+  attempt: number;
+  message: string;
+  next: number;
+  headline?: string;
+  caption?: string | null;
+  body?: string | null;
+  action?: { title: string; message: string; label: string; link?: string };
+};
 
 // Initial mount transcript fetch: a 15s ceiling (open-code is remote and a
 // hung box/network must not leave the panel spinning forever) with ONE retry
@@ -105,11 +119,11 @@ export type SseBus = {
   sendError: string | null;
   setSendError: React.Dispatch<React.SetStateAction<string | null>>;
   // Provider label when the current sendError is an auth-failure banner
-  // (BET-316). When non-null, ChatPanel renders a single [Reconnect] button
-  // alongside the dismiss ×; clicking it dispatches `manta-open-subscriptions`
-  // and clears BOTH sendError and authReconnect. Always null for any
-  // non-auth error (context overflow, network blip, etc.) so the banner
-  // is unchanged.
+  // (BET-316), taken from the box's `sessionError.display.reconnect` (the box
+  // classifies the failure against the session's current model). When
+  // non-null, ChatPanel renders a single [Reconnect] button alongside the
+  // dismiss ×; clicking it dispatches `manta-open-subscriptions` and clears
+  // BOTH sendError and authReconnect. Null for any non-auth error.
   authReconnect: string | null;
   // Dispatch the `manta-open-subscriptions` window CustomEvent and clear
   // the banner. Mirrors the `manta-open-schedules` / `-secrets` / `-webhooks`
@@ -130,17 +144,17 @@ export type SseBus = {
   setQuestions: React.Dispatch<React.SetStateAction<QuestionRequest[]>>;
   stepTokens: (TokenUsage & { cost: number }) | null;
   setStepTokens: React.Dispatch<React.SetStateAction<(TokenUsage & { cost: number }) | null>>;
-  compactionState: { reason: string; text: string; phase: "running" | "done" } | null;
-  setCompactionState: React.Dispatch<React.SetStateAction<{ reason: string; text: string; phase: "running" | "done" } | null>>;
+  compactionState: CompactionState | null;
+  setCompactionState: React.Dispatch<React.SetStateAction<CompactionState | null>>;
   // BET-1347: the box compacted this conversation in the background — a
-  // transient transcript one-liner (away + token sizes when known).
-  compactionNotice: { beforeTokens: number | null; afterTokens: number | null; away: boolean } | null;
+  // transient transcript one-liner. `text` is the box's full line, shown verbatim.
+  compactionNotice: { text: string } | null;
   liveTodos: Array<{ content: string; status: string; priority: string }> | null;
   setLiveTodos: React.Dispatch<React.SetStateAction<Array<{ content: string; status: string; priority: string }> | null>>;
   todosDismissed: boolean;
   setTodosDismissed: React.Dispatch<React.SetStateAction<boolean>>;
-  retryInfo: { attempt: number; message: string; next: number; action?: { title: string; message: string; label: string; link?: string } } | null;
-  setRetryInfo: React.Dispatch<React.SetStateAction<{ attempt: number; message: string; next: number; action?: { title: string; message: string; label: string; link?: string } } | null>>;
+  retryInfo: RetryInfo | null;
+  setRetryInfo: React.Dispatch<React.SetStateAction<RetryInfo | null>>;
   finishByMessageId: Map<string, import("../chatUtils").TruncationKind>;
   setFinishByMessageId: React.Dispatch<React.SetStateAction<Map<string, import("../chatUtils").TruncationKind>>>;
   commandByMessageId: Map<string, { name: string; arguments: string }>;
@@ -188,14 +202,6 @@ export function useSseBus(params: {
     field: string;
     text: string;
   }) => number;
-  // The session's active model's providerID (e.g. "anthropic", "openai",
-  // "kimi-for-coding"). Drives the auth-error banner copy (BET-316) — when
-  // a session.error is recognisably a credential failure on one of the
-  // three subscription providers, the banner shows "<Label> needs to be
-  // reconnected." with a single [Reconnect] button. Null when no model is
-  // active (initial load, no default chosen, etc.) — the banner then falls
-  // through to the raw-message path.
-  providerID: string | null;
   // Whether this surface has a V2 inbox to show. Default true; the CTO
   // conversation passes false (its opencode:inbox is refused by design).
   inbox?: boolean;
@@ -217,7 +223,6 @@ export function useSseBus(params: {
     isActiveRef,
     refetchOwedWhileInactive,
     applyStreamFlush,
-    providerID,
     inbox: inboxEnabled = true,
     setPlanOn,
   } = params;
@@ -249,35 +254,21 @@ export function useSseBus(params: {
   useEffect(() => {
     questionsRef.current = questions;
   }, [questions]);
-  // Ref mirror of `providerID` so the SSE handler (whose subscription effect
-  // deps are `[sessionId]`) classifies the auth-reconnect banner against the
-  // CURRENT provider, not the one captured at mount. Without this, switching
-  // provider/model mid-session leaves the banner keyed to the old provider.
-  const providerIDRef = useRef(providerID);
-  providerIDRef.current = providerID;
   // Ref mirror of setPlanOn so the SSE handler (deps [sessionId]) always syncs
   // against the CURRENT session's setter, not the one captured at mount.
   const setPlanOnRef = useRef(setPlanOn);
   setPlanOnRef.current = setPlanOn;
   const [stepTokens, setStepTokens] = useState<(TokenUsage & { cost: number }) | null>(null);
-  const [compactionState, setCompactionState] = useState<{
-    reason: string;
-    text: string;
-    phase: "running" | "done";
-  } | null>(null);
+  const [compactionState, setCompactionState] = useState<CompactionState | null>(null);
   const compactionClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // BET-1347: a background compaction the BOX did while this conversation was
   // open, surfaced as a transient transcript one-liner. Set server-side on
   // compaction; cleared after a short display window so it reads as a pass-by
   // note, not a permanent fixture. `away` is the server's presence verdict at
   // compaction time; before/after are token sizes when known.
-  const [compactionNotice, setCompactionNotice] = useState<{
-    beforeTokens: number | null;
-    afterTokens: number | null;
-    away: boolean;
-  } | null>(null);
+  const [compactionNotice, setCompactionNotice] = useState<{ text: string } | null>(null);
   const compactionNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const armCompactionNotice = (n: { beforeTokens: number | null; afterTokens: number | null; away: boolean }) => {
+  const armCompactionNotice = (n: { text: string }) => {
     setCompactionNotice(n);
     if (compactionNoticeTimer.current) clearTimeout(compactionNoticeTimer.current);
     compactionNoticeTimer.current = setTimeout(() => setCompactionNotice(null), 10_000);
@@ -297,12 +288,7 @@ export function useSseBus(params: {
     Array<{ content: string; status: string; priority: string }> | null
   >(null);
   const [todosDismissed, setTodosDismissed] = useState(false);
-  const [retryInfo, setRetryInfo] = useState<{
-    attempt: number;
-    message: string;
-    next: number;
-    action?: { title: string; message: string; label: string; link?: string };
-  } | null>(null);
+  const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
   const [finishByMessageId, setFinishByMessageId] = useState<
     Map<string, import("../chatUtils").TruncationKind>
   >(() => new Map());
@@ -601,6 +587,10 @@ export function useSseBus(params: {
                   attempt: r.attempt ?? 0,
                   message: r.message ?? "",
                   next: r.next ?? 0,
+                  // The box's copy for the card (absent on an older box).
+                  headline: r.headline,
+                  caption: r.caption,
+                  body: r.body,
                   action: r.action
                     ? {
                         title: r.action.title ?? "",
@@ -627,11 +617,11 @@ export function useSseBus(params: {
         }
         case "sessionError": {
           const p = ev.payload as StreamSessionErrorPayload;
-          // Auth-error banner (BET-316) or the typed-prefix message. (An abort
-          // never arrives here — see the `aborted` frame above.)
-          const d = describeSessionError(p, providerIDRef.current);
-          setSendError(d.message);
-          setAuthReconnect(d.auth ? d.auth.label : null);
+          // The box writes the sentence (auth-reconnect nudge or the typed-prefix
+          // message) in `display`; an older box sends none, so its raw message
+          // is shown. (An abort never arrives here — see the `aborted` frame above.)
+          setSendError(p.display?.text ?? p.message);
+          setAuthReconnect(p.display?.reconnect?.label ?? null);
           cancelTurnSettle();
           setRunning(false);
           return;
@@ -661,7 +651,7 @@ export function useSseBus(params: {
           } else if (c.phase === "delta") {
             setCompactionState((prev) => (prev ? { ...prev, text: prev.text + String(c.text ?? "") } : null));
           } else if (c.phase === "ended") {
-            setCompactionState((prev) => (prev ? { ...prev, phase: "done" } : null));
+            setCompactionState((prev) => (prev ? { ...prev, phase: "done", firstLine: c.firstLine ?? null } : null));
             if (compactionClearTimer.current) clearTimeout(compactionClearTimer.current);
             compactionClearTimer.current = setTimeout(() => {
               setCompactionState(null);
@@ -754,12 +744,9 @@ export function useSseBus(params: {
         // stream channel (scoped to the session, guarded by the early-return
         // above); we surface it as the transcript one-liner.
         case "optimizer.compacted": {
-          const p = ev.payload as { beforeTokens?: number; afterTokens?: number; away?: boolean };
-          armCompactionNotice({
-            beforeTokens: typeof p?.beforeTokens === "number" ? p.beforeTokens : null,
-            afterTokens: typeof p?.afterTokens === "number" ? p.afterTokens : null,
-            away: p?.away === true,
-          });
+          const p = ev.payload as StreamOptimizerCompactedPayload;
+          // The box writes the whole line; an older box sends no `text`, so nothing is shown.
+          if (typeof p?.text === "string" && p.text) armCompactionNotice({ text: p.text });
           return;
         }
         default:

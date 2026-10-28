@@ -5,6 +5,7 @@ import type {
   AuthPairResult,
   DelegateJob,
   DelegateApproval,
+  DelegateJobForSession,
   DelegateApprovalTool,
   DesktopNotifyPayload,
   OpencodeAgent,
@@ -1218,7 +1219,7 @@ export interface Api {
   opencodeInbox(sessionId: string): Promise<OpencodeInboxSnapshot>;
   // K4: cancel one pending message. Only `outcome: "cancelled"` proves it will
   // not be sent; `item` (the pre-cancel copy) comes back only with it.
-  opencodeInboxCancel(input: { sessionId: string; id: string }): Promise<OpencodeInboxCancelResult>;
+  opencodeInboxCancel(input: { sessionId: string; id: string; restore?: boolean }): Promise<OpencodeInboxCancelResult>;
   // N1: switch one pending message between steer ("Now") and queue ("After this
   // turn"). Only `changed` proves the switch; `delivered` = already sent.
   opencodeInboxSetDelivery(input: { sessionId: string; id: string; delivery: OpencodeDelivery }): Promise<OpencodeInboxSetDeliveryResult>;
@@ -1550,7 +1551,10 @@ export interface Api {
   // the viewed parent session and shows ONE approval card before the job is
   // created. approve carries optional edited tools; decline cancels.
   delegatePendingApprovals(sessionId?: string): Promise<DelegateApproval[]>;
-  delegateApprove(id: string, tools?: DelegateApprovalTool[]): Promise<{ ok: boolean }>;
+  // `error` (with ok:false) = the box refused the rules; the approval stays pending.
+  delegateApprove(id: string, tools?: DelegateApprovalTool[]): Promise<{ ok: boolean; error?: string }>;
+  // WS02: is this session a read-only background job, and the bar's copy (the box decides).
+  delegateJobForSession(sessionId: string): Promise<DelegateJobForSession>;
   delegateDecline(id: string): Promise<{ ok: boolean }>;
   // BET-414: the box publishes a `delegate.updated` bus event whenever a job's
   // status/activity changes (created, running, finished, stopped, deleted). The
@@ -1720,7 +1724,7 @@ export interface Api {
   // version the box's release ships (the same string as `/api/version`'s
   // `opencode.version`). Rendered alongside the desktop + server versions in
   // this single round-trip — no new IPC channel.
-  getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string }>;
+  getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's

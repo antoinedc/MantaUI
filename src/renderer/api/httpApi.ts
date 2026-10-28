@@ -1312,7 +1312,9 @@ export const httpApi: Api = {
       (r) => (Array.isArray(r) ? r : Array.isArray(r?.approvals) ? r.approvals : []),
     ),
   delegateApprove: (id, tools) =>
-    rpc<{ ok: boolean }>(IPC.delegateApprove, { id, tools }),
+    rpc<{ ok: boolean; error?: string }>(IPC.delegateApprove, { id, tools }),
+  // WS02: the box decides whether a session is a read-only background job and writes the bar's copy.
+  delegateJobForSession: (sessionId) => rpc(IPC.delegateJobForSession, { sessionId }),
   delegateDecline: (id) => rpc<{ ok: boolean }>(IPC.delegateDecline, id),
   // BET-414: the box publishes `delegate.updated` on the /events WS whenever a
   // job's status/activity changes. The sidebar subscribes so new jobs nest
@@ -1489,7 +1491,7 @@ export const httpApi: Api = {
   // BET-428: response also carries `opencodeVersion` — the pinned OpenCode
   // version the box's release ships. Settings → About may render it in this
   // same round-trip — no new IPC channel.
-  getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string }>(IPC.getServerVersion),
+  getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>(IPC.getServerVersion),
 
   // -- client version (BET-225 stage 3) --
   // Returns the running client's own version. On desktop the preload bridge

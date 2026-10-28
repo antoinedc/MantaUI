@@ -17,6 +17,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { formatTokenCount } from "../shared/formatTokens.mjs";
 import { GitBranch, MoreHorizontal, GitFork, Minimize2, Eraser, Trash2, Terminal, Bot, MessageSquare, Clock, PanelRight, Loader2, History, ArrowRightLeft } from "lucide-react";
 import {
   ctxStageColor,
@@ -71,13 +72,6 @@ export interface SessionHeaderHandoff {
 // source of truth for the read/write cache hues.
 const CACHE_WRITE_COLOR = cssVar("--cache-write");
 const CACHE_READ_COLOR = cssVar("--cache-read");
-
-function formatTokensCompact(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
-  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-}
 
 function formatIdleDuration(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
@@ -665,7 +659,7 @@ function ContextPill({
         aria-expanded={open}
         title={
           stale
-            ? `Cache cold — ${formatTokensCompact(staleCache.staleTokens)} tokens re-billed on your next message. Click for details`
+            ? `Cache cold — ${formatTokenCount(staleCache.staleTokens)} tokens re-billed on your next message. Click for details`
             : "Context usage — click for details"
         }
       >
@@ -696,7 +690,7 @@ function ContextPill({
           )}
           {stale && (
             <span className="tabular-nums font-mono font-semibold">
-              {formatTokensCompact(staleCache.staleTokens)} cold
+              {formatTokenCount(staleCache.staleTokens)} cold
             </span>
           )}
         </Pill>
@@ -721,7 +715,7 @@ function ContextPill({
                   {pct}%
                 </span>
                 <span className="font-mono text-meta font-medium text-text-faint">
-                  {formatTokensCompact(totalInput)} / {formatTokensCompact(ctxLimit ?? 0)} tokens
+                  {formatTokenCount(totalInput)} / {formatTokenCount(ctxLimit ?? 0)} tokens
                 </span>
               </div>
 
@@ -838,7 +832,7 @@ function ContextPill({
                   Cache went stale after {formatIdleDuration(staleCache.idleMs)}{" "}
                   idle — clearing saves{" "}
                   <strong className="font-semibold text-text">
-                    {formatTokensCompact(staleCache.staleTokens)}
+                    {formatTokenCount(staleCache.staleTokens)}
                   </strong>{" "}
                   tokens on your next message.
                 </span>
@@ -885,7 +879,7 @@ function LegendRow({
       />
       <span className="text-text-muted min-w-0 truncate">{label}</span>
       <span className="tabular-nums font-mono text-text-faint ml-auto shrink-0">
-        {formatTokensCompact(count)}
+        {formatTokenCount(count)}
       </span>
     </div>
   );
