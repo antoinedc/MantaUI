@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { statePath } from "../shared/paths.mjs";
+import { restartOpencode } from "./opencodeAdmin.mjs";
 import {
   apiUrl,
   _setApiBase,
@@ -1202,12 +1203,25 @@ test("getProviders: right after an opencode restart, a read that lost connected 
     h.state.connectionsEmpty = true;
     invalidateProvidersCache({ restarted: true });
     assert.equal(await getProviders(), good, "the mid-restart read is refused; last-good served");
-    assert.equal(warnings.filter((w) => w.includes(RESTART_WARN)).length, 1);
+    assert.equal(await getProviders(), good, "still refused, still not cached");
+    assert.equal(warnings.filter((w) => w.includes(RESTART_WARN)).length, 1, "logged once per restart window");
     h.state.connectionsEmpty = false;
     h.clock.t += 5_000;
     const healed = await getProviders(); // the refused read was not cached → re-reads
     assert.deepEqual(healed.connected, ["anthropic"]);
     assert.notEqual(healed, good, "healed from a fresh read");
+  }));
+});
+
+test("restartOpencode opens the grace window itself: a partial read before the event-stream reconnect serves last-good", async () => {
+  const h = restartHarness();
+  await warnSilently((warnings) => withV2(h.routes, async () => {
+    _resetProvidersCacheForTests({ now: () => h.clock.t });
+    const good = await getProviders();
+    h.state.connectionsEmpty = true;
+    assert.equal((await restartOpencode(async () => ({ stdout: "", stderr: "" }))).ok, true);
+    assert.equal(await getProviders(), good);
+    assert.equal(warnings.filter((w) => w.includes(RESTART_WARN)).length, 1);
   }));
 });
 

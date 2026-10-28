@@ -594,6 +594,17 @@ describe("getProviderEndpoints", () => {
 const VOSKA = { id: "voska", name: "Voska AI", baseURL: "https://api.voska.org/v1", apiKey: "sk", enabledModels: ["voska-1"] };
 
 describe("setProviders", () => {
+  it("a removal closes the post-reload grace window (so the removed provider drops out now); an upsert does not", async () => {
+    const seen = [];
+    const invalidateProviders = (opts) => seen.push(opts);
+    const { deps } = memConfig(JSON.stringify({ provider: { voska: { name: "Voska AI" } } }));
+    assert.equal((await setProviders({ remove: ["voska"] }, { ...deps, invalidateProviders })).ok, true);
+    assert.deepEqual(seen, [{ removed: true }]);
+    const fresh = memConfig("{}");
+    await setProviders({ upsert: [VOSKA] }, { ...fresh.deps, invalidateProviders });
+    assert.deepEqual(seen, [{ removed: true }], "upsert-only leaves the window alone");
+  });
+
   it("upserts a provider block in ONE write and ONE reload, comments kept", async () => {
     const { state, deps } = memConfig('{\n  // keep me\n  "model": "x/y"\n}');
     const result = await setProviders({ upsert: [VOSKA] }, deps);

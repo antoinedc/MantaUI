@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { parse, modify, applyEdits } from "jsonc-parser";
 import { reconcileSubagents } from "../shared/subagentSync.mjs";
 import { reloadOpencodeConfig, listOpencodeModels } from "./opencodeAdmin.mjs";
+import { invalidateProvidersCache } from "./opencode.mjs";
 import { statePath, uploadRoot } from "../shared/paths.mjs";
 import { composeCtoPrompt } from "./ctoDoctrine.mjs";
 
@@ -547,6 +548,9 @@ export async function setProviders(ops, deps = {}) {
     return edits;
   }, deps);
   if (!r.ok) return r;
+  // The reload above opened the post-restart grace window, in which a provider dropping out is
+  // distrusted. Here it dropped out on purpose: close the window so the removal shows now.
+  if (removes.length > 0) (deps.invalidateProviders ?? invalidateProvidersCache)({ removed: true });
 
   for (const input of upserts) {
     const sel = await applyModelSelection(input.id, input.enabledModels ?? [], deps);

@@ -1669,6 +1669,8 @@ let providersGen = 0;
 let providersNow = () => Date.now();
 /** When opencode last restarted/reloaded (opens the PROVIDERS_RESTART_GRACE_MS window). */
 let providersRestartAt = -Infinity;
+/** Whether the current grace window has already logged a refused read. */
+let providersRestartWarned = false;
 
 /**
  * Mark the cached catalogue stale WITHOUT discarding it: the next `getProviders()` re-reads
@@ -1684,7 +1686,10 @@ let providersRestartAt = -Infinity;
  */
 export function invalidateProvidersCache({ restarted = false, removed = false } = {}) {
   providersGen += 1;
-  if (restarted) providersRestartAt = providersNow();
+  if (restarted) {
+    providersRestartAt = providersNow();
+    providersRestartWarned = false;
+  }
   if (removed) providersRestartAt = -Infinity;
 }
 
@@ -1696,6 +1701,7 @@ export function _resetProvidersCacheForTests({ now } = {}) {
   providersGen += 1;
   providersNow = now ?? (() => Date.now());
   providersRestartAt = -Infinity;
+  providersRestartWarned = false;
 }
 
 /** @param {number} gen @returns {Promise<ProvidersResult>} */
@@ -1710,7 +1716,10 @@ async function refreshProviders(gen) {
     // grace window, so a provider genuinely gone across a restart still drops out shortly after.
     const lost = previous?.connected?.some((id) => !fresh.connected.includes(id));
     if (lost && providersNow() - providersRestartAt < PROVIDERS_RESTART_GRACE_MS) {
-      console.warn("[providers] read after an opencode restart is missing connected providers, serving last-good snapshot");
+      if (!providersRestartWarned) {
+        providersRestartWarned = true;
+        console.warn("[providers] read after an opencode restart is missing connected providers, serving last-good snapshot");
+      }
       return previous;
     }
     // Nothing connected is a legitimate answer (a fresh box, or the last provider removed) but

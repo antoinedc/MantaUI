@@ -113,7 +113,8 @@ export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000
 export async function restartOpencode(exec = execFileAsync) {
   try {
     await exec("systemctl", ["--user", "restart", "opencode-serve"]);
-    invalidateProvidersCache();
+    // Open the grace window now: a catalogue read can land before the event-stream reconnect does.
+    invalidateProvidersCache({ restarted: true });
     return { ok: true };
   } catch (e) {
     console.warn("[opencodeAdmin] restart failed:", e);
