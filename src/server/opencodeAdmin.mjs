@@ -86,7 +86,7 @@ export async function reloadOpencodeConfig({ fetchFn = fetch, timeoutMs = 15_000
     return { ok: true, reloaded: false, reason: `opencode unreachable: ${msg}` };
   }
   if (res.ok) {
-    invalidateProvidersCache();
+    invalidateProvidersCache({ restarted: true });
     return { ok: true, reloaded: true };
   }
   let detail = "";
