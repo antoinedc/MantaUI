@@ -169,7 +169,8 @@ import {
 } from "./widgets.mjs";
 import { publishPlanBundle } from "./planRender.mjs";
 import { listPeers, inspectPeer, sendPeerMessage, resolveWorkspace } from "./peers.mjs";
-import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped } from "./stoppedStore.mjs";
+import { upsertStopped, markStoppedRan, bumpStoppedAttempts, listStopped, removeStopped } from "./stoppedStore.mjs";
+import { createStoppedReconciler } from "./stoppedReconcile.mjs";
 import { createUsageStopEngine } from "./usageStopEnroll.mjs";
 import { createUsageResumeEngine } from "./usageResume.mjs";
 import { createProviderHealth } from "./providerHealth.mjs";
@@ -823,12 +824,36 @@ const resumeEngine = createUsageResumeEngine({
   forceRecheck: () => usagePollerTick(),
   publish: (evt) => bus.publish(evt),
 });
+// Stale-entry sweep for the usage-stopped record: drops conversations whose
+// session was deleted or no longer has a sidebar window, and unarmed ones whose
+// provider has recovered since the stop. Runs every minute and, on every usage
+// poll, just BEFORE the resume engine plans its batch (armed entries are never
+// cleared for recovery — resuming them is the engine's job).
+const stoppedReconciler = createStoppedReconciler({
+  remove: (input) => removeStopped(input, { publish: (evt) => bus.publish(evt) }),
+  sessionExists: (sid) => oc.sessionExists(sid),
+  visibleSessionIds: async () => {
+    const ids = new Set();
+    // Unfiltered (null install home): include the server's own project too, so
+    // a conversation there is never mistaken for one with no window.
+    for (const p of await tmux.listProjects(null)) {
+      for (const w of p.windows ?? []) if (w.opencodeSessionId) ids.add(w.opencodeSessionId);
+    }
+    return ids;
+  },
+  snapshots: () => listSnapshots(),
+});
+stoppedReconciler.start();
 // eslint-disable-next-line no-unused-vars
 const stopUsageResume = bus.subscribe((evt) => {
   if (evt?.kind === "usage.updated" && Array.isArray(evt.payload?.snapshots)) {
-    void resumeEngine.deliverSnapshots(evt.payload.snapshots).catch((e) =>
-      console.warn("[usage-resume] deliverSnapshots failed:", e?.message ?? e),
-    );
+    // Sweep stale entries FIRST so the resume batch never plans a "Keep going"
+    // for a conversation that is already gone or windowless.
+    const snapshots = evt.payload.snapshots;
+    void stoppedReconciler
+      .run()
+      .then(() => resumeEngine.deliverSnapshots(snapshots))
+      .catch((e) => console.warn("[usage-resume] deliverSnapshots failed:", e?.message ?? e));
   }
 });
 // Prime on startup: covers the poller's immediate first tick racing our
@@ -838,9 +863,11 @@ const stopUsageResume = bus.subscribe((evt) => {
 // empty) the engine WAITS, so this warmup can never send "Keep going" before
 // the first real poll confirms quota returned. Recovery is then driven by the
 // first real `usage.updated`.
-void resumeEngine.deliverSnapshots(listSnapshots()).catch((e) =>
-  console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e),
-);
+// Chained after the startup sweep for the same reason as the usage path.
+void stoppedReconciler
+  .run()
+  .then(() => resumeEngine.deliverSnapshots(listSnapshots()))
+  .catch((e) => console.warn("[usage-resume] initial deliverSnapshots failed:", e?.message ?? e));
 
 // Usage-stop enrolment (BET-1047 stage 1): derives durable "stopped
 // conversation" records from the opencode stream (see usageStopEnroll.mjs).
