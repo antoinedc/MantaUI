@@ -269,14 +269,11 @@ final class AccountsStore: ObservableObject {
         }
     }
 
-    /// Rename an account or a seat. An invalid or unchanged name is answered
-    /// here, without a round trip.
+    /// Rename an account or a seat. An unchanged name is answered here, without a round
+    /// trip; whether a name is valid is the box's call (it refuses with its sentence).
     func rename(provider: String, target: RenameTarget, id: String, to raw: String, current: String) async {
         let noun = target == .account ? "account" : "seat"
-        guard let label = AccountsSelectors.normalizedLabel(raw) else {
-            report(AccountsCopy.failure("rename the \(noun)", reason: AccountsCopy.reason(forCode: "invalid-label")), isError: true)
-            return
-        }
+        let label = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if label == current {
             report("The \(noun) is already named “\(label)”", isError: false)
             return

@@ -235,6 +235,9 @@ struct AccountsScreen: View {
             }
         }
         sourceFailures
+        if !connections.rowStatesSupported {
+            Section { UpdateBoxNote() }
+        }
         let sections = plan.subscriptions
         if sections.isEmpty {
             placeholder
@@ -318,9 +321,10 @@ struct AccountsScreen: View {
     // MARK: - Connection row
 
     private func connectionRow(_ status: SubscriptionStatus) -> some View {
-        let health = connections.health(for: status.id)
-        let state = AccountRowState.describe(status: status, health: health)
-        let control = AccountRowState.control(status: status, health: health)
+        // The words and the control are the box's; an older box sends none, so the row
+        // shows its name and no control (the screen carries the update note).
+        let state = connections.rowState(for: status.id)
+        let control = state?.control ?? .none
         let working = connections.busyProvider == status.id || deciding == status.id
         let help = ["Supported", "subscription", status.plan].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         return HStack(alignment: .center, spacing: Metrics.spacing.sp2) {
@@ -330,9 +334,11 @@ struct AccountsScreen: View {
                 Text(help)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Text(state.text)
-                    .font(.footnote)
-                    .foregroundColor(color(for: state.tone))
+                if let state {
+                    Text(state.text)
+                        .font(.footnote)
+                        .foregroundColor(color(for: state.tone))
+                }
             }
             Spacer(minLength: 0)
             if working {

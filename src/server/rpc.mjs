@@ -20,6 +20,8 @@ import {
 } from "../shared/streamInterpretation.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
 import { forgeCredentialSecondary, updateTargetsView } from "./settingsViews.mjs";
+import { formatEndpointStateLine, formatNoHealthyEndpointCopy, providerLinesFor } from "./accountsCopy.mjs";
+import { buildAccountRowStates } from "./accountsRowState.mjs";
 import { createLauncherFlagWriter, launchersView, resolveLauncherForSpawn } from "./launchersConfig.mjs";
 import { listJobs as scheduleListJobs, deleteJob as scheduleDeleteJob, createJob as scheduleCreateJob } from "./schedule.mjs";
 import { listSnapshots as usageListSnapshots, listSeatSnapshots as usageListSeatSnapshots, getUsageAlerts as getUsageAlertsImpl } from "./usage.mjs";
@@ -606,6 +608,8 @@ export function buildHandlers({
   // alert engine are injectable so tests never touch a live opencode.jsonc.
   setModelCostDetailed = providers.setModelCostDetailed,
   syncSubagentsDetailed = providers.syncSubagentsDetailed,
+  // WS11 D4: the custom endpoints behind `opencode:get-providers` (injectable for tests).
+  getProviderEndpoints = providers.getProviderEndpoints,
   getUsageAlerts = getUsageAlertsImpl,
   // BET-P3a3: the composed CTO conversation service (createCtoConversationService
   // over ONE ctoBinding + ONE ctoAdmission instance, wired in index.mjs).
@@ -852,7 +856,23 @@ export function buildHandlers({
     now: Date.now,
   });
 
-  return {
+  // WS11 D4 (K2): the subscription connection statuses — read here once so
+  // `opencode:provider-auth {action:"status"}` and `accounts:row-states` share it.
+  async function readSubscriptionStatuses() {
+    // BET-1319: read connected-state from opencode's OWN auth store, not from
+    // GET /provider (opencode keeps `connected[]` for the process lifetime).
+    const connected = await oc.readAuthedProviderIds();
+    // BET-1320: a provider whose detect path exists on disk has its credential
+    // owned outside Manta (e.g. the Claude CLI).
+    const externallyManaged = new Set(
+      subscriptionProviders.SUBSCRIPTION_PROVIDERS.filter((p) =>
+        (p.detect ?? []).some((d) => existsSync(expandTilde(d))),
+      ).map((p) => p.id),
+    );
+    return subscriptionProviders.subscriptionStatuses(connected, externallyManaged);
+  }
+
+  const handlers = {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
     // preload: ipcRenderer.invoke(IPC.configGet)  → no args
@@ -1768,6 +1788,9 @@ export function buildHandlers({
             model: null,
             reason: decision?.reason ?? "",
             excluded: Array.isArray(decision?.excluded) ? decision.excluded : [],
+            // WS11 D4 (K3): the banner copy, worded by the box from the router's
+            // structured per-key states.
+            copy: formatNoHealthyEndpointCopy(decision),
             alternatives: [],
             changed: false,
             incumbentHealthy,
@@ -1905,7 +1928,43 @@ export function buildHandlers({
       } catch {
         endpoints = {};
       }
-      return { providers: out, endpoints };
+      // WS11 D4 (K3): each endpoint's one-line state and the worst per provider,
+      // worded now (they are polled, so the age text is as fresh as the poll).
+      const nowMs = Date.now();
+      const withLines = {};
+      for (const [key, entry] of Object.entries(endpoints)) {
+        withLines[key] = { ...entry, stateLine: formatEndpointStateLine(entry, nowMs) };
+      }
+      let enabledCounts = {};
+      try {
+        for (const ep of (await getProviderEndpoints()) ?? []) {
+          enabledCounts[ep.id] = Array.isArray(ep.enabledModels) ? ep.enabledModels.length : 0;
+        }
+      } catch {
+        enabledCounts = {};
+      }
+      return { providers: out, endpoints: withLines, providerLines: providerLinesFor(endpoints, enabledCounts, nowMs) };
+    },
+
+    // WS11 D4 (K2): every Accounts row's text / tone / control / register line,
+    // built on the box from the reads the desktop used to make itself. Never
+    // throws: a failed source degrades that part (a row with no usage reads "No
+    // usage data", never a made-up number).
+    "accounts:row-states": async () => {
+      const safe = async (fn, fallback) => {
+        try {
+          return (await fn()) ?? fallback;
+        } catch {
+          return fallback;
+        }
+      };
+      const [statuses, endpoints, snapshots, health] = await Promise.all([
+        safe(() => readSubscriptionStatuses(), []),
+        safe(() => getProviderEndpoints(), []),
+        safe(() => usageListSnapshots(), []),
+        safe(() => handlers["accounts:health"](), null),
+      ]);
+      return buildAccountRowStates({ statuses, providers: endpoints, snapshots, health, nowMs: Date.now() });
     },
 
     // BET-1537 (S5, §W9): "Send probe" on a custom endpoint row — runs the
@@ -1963,7 +2022,7 @@ export function buildHandlers({
     // NOT return the raw /provider HTTP shape { all, connected, default } — that
     // object has no rows for the card to map over, so custom providers (e.g.
     // "Voska AI") would never be prefilled (BET-114).
-    "opencode:get-providers": () => providers.getProviderEndpoints(),
+    "opencode:get-providers": () => getProviderEndpoints(),
 
     // discover-models: query an OpenAI-compatible endpoint's /models.
     // POSITIONAL args (baseURL, apiKey) — httpApi/preload both send
@@ -2342,27 +2401,7 @@ export function buildHandlers({
     "opencode:provider-auth": async (req) => {
       const action = req?.action;
       if (action === "status") {
-        // BET-1319: read connected-state from opencode's OWN auth store, not
-        // from GET /provider. opencode keeps `connected[]` for the process
-        // lifetime, so a completed DELETE /auth/{id} did not show up until a
-        // restart — the disconnect reported success yet the row stayed
-        // "Connected" forever. The auth store is what both connect and
-        // disconnect write, so it reflects the truth immediately.
-        const connected = await oc.readAuthedProviderIds();
-        // BET-1320: a provider whose detect path exists on disk has its
-        // credential owned outside Manta (e.g. the Claude CLI) — flag it so
-        // the renderer shows the owner instead of a Disconnect it can't
-        // deliver. Expand a leading `~` via the shared expandTilde (the one
-        // place that knows how).
-        const externallyManaged = new Set(
-          subscriptionProviders.SUBSCRIPTION_PROVIDERS.filter((p) =>
-            (p.detect ?? []).some((d) => existsSync(expandTilde(d))),
-          ).map((p) => p.id),
-        );
-        return {
-          action: "status",
-          providers: subscriptionProviders.subscriptionStatuses(connected, externallyManaged),
-        };
+        return { action: "status", providers: await readSubscriptionStatuses() };
       }
       if (action === "start") {
         return providerAuthStart(oc, String(req?.id ?? ""));
@@ -2848,6 +2887,7 @@ export function buildHandlers({
         value: input?.value,
       }),
   };
+  return handlers;
 }
 
 // POST /rpc/<channel>  body: {"args":[...]}  ->  {"result":...} | {"error":"..."}

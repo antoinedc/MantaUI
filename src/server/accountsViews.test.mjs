@@ -26,6 +26,13 @@ const states = (over = {}) => ({
 });
 const win = (kind, pct, extra = {}) => ({ kind, label: kind, pct, ...extra });
 const snap = (n, windows, extra = {}) => ({ provider: "claude", seatId: `seat-${n}`, windows, fetchedAt: 1000 + n, ...extra });
+const MOVE_COPY_1 = {
+  text: "Moved to Work · Seat 2 (Seat 1 was at its limit).",
+  line: "Moved from Seat 1 · seat was at its limit",
+  resentText: null,
+};
+// The wording is pinned in accountsCopy.test.mjs; these tests pin the move fields.
+const bareMove = ({ text: _t, line: _l, resentText: _r, ...rest }) => rest;
 const asg = (seatId, extra = {}) => ({ seatId, assignedAt: 1, lastUsedAt: 1, ...extra });
 
 test("seatViewStatus: live is ok; stored expired/signed-out stay; an unreadable seat is signed-out; unknown stays unknown", () => {
@@ -148,7 +155,7 @@ test("buildSessionSeat (auto): the assigned seat with account + seat labels; las
     seatId: "seat-2",
     seatLabel: "Seat 2",
     accountLabel: "Work",
-    lastMove: { from: "seat-1", fromLabel: "Seat 1", at: 555, reason: "exhausted" },
+    lastMove: { from: "seat-1", fromLabel: "Seat 1", at: 555, reason: "exhausted", ...MOVE_COPY_1 },
   });
   const noMove = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-3") }, state: state(), states: states(), seatSnapshots: [] });
   assert.equal(noMove.lastMove, undefined);
@@ -167,7 +174,7 @@ test("buildSessionSeat (manual): answers with the seat the NEXT request will use
   assert.equal(r.seatId, "seat-3");
   assert.equal(r.lastMove, undefined);
   const settled = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-3", { movedFrom: "seat-2", movedAt: 12, reason: "manual" }) }, state: manual, states: states(), seatSnapshots: [] });
-  assert.deepEqual(settled.lastMove, { from: "seat-2", fromLabel: "Seat 2", at: 12, reason: "manual" });
+  assert.deepEqual(bareMove(settled.lastMove), { from: "seat-2", fromLabel: "Seat 2", at: 12, reason: "manual" });
 });
 
 // ---- phase 4: moveTargetSeatId + lastMove detail ------------------------------
@@ -217,7 +224,7 @@ test("buildProviderView: moveTargetSeatId rides along; nextSeatId is still rule 
 
 test("buildSessionSeat: lastMove carries trigger + crossOrg when recorded, and omits them otherwise", () => {
   const auto = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false }) }, state: state(), states: states(), seatSnapshots: [] });
-  assert.deepEqual(auto.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false });
+  assert.deepEqual(bareMove(auto.lastMove), { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "load", trigger: { kind: "session", pct: 96 }, crossOrg: false });
   const old = buildSessionSeat({ found: { provider: "claude", assignment: asg("seat-2", { movedFrom: "seat-1", movedAt: 9, reason: "exhausted" }) }, state: state(), states: states(), seatSnapshots: [] });
-  assert.deepEqual(old.lastMove, { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "exhausted" });
+  assert.deepEqual(bareMove(old.lastMove), { from: "seat-1", fromLabel: "Seat 1", at: 9, reason: "exhausted" });
 });

@@ -74,19 +74,21 @@ final class ProviderConnectTests: XCTestCase {
     func testHealthDecodes() throws {
         let health = try decode(AccountsHealth.self, #"""
         {"providers":{"anthropic":{"state":"rate-limited","retryInMs":125000},"openai":{"state":"out-of-credit"}},
-         "endpoints":{"voska/m1":{"state":"dead","reason":{"httpStatus":503}},
-                      "voska/m2":{"state":"rate-limited","retryInMs":30000,"reason":{"errorName":"RateLimit"},"lastSuccessAt":1750000000000,"attempts":4,"successes":3}}}
+         "endpoints":{"voska/m1":{"state":"dead","stateLine":"Dead · HTTP 503"},
+                      "voska/m2":{"state":"rate-limited","retryInMs":30000}},
+         "providerLines":{"voska":{"key":"voska/m1","stateLine":"Dead · HTTP 503"},"bare":{"key":null,"stateLine":"Unproven"}}}
         """#)
         XCTAssertEqual(health.providers["anthropic"], ProviderHealthEntry(state: "rate-limited", retryInMs: 125_000))
         XCTAssertEqual(health.providers["openai"]?.state, "out-of-credit")
-        XCTAssertEqual(health.endpoints["voska/m1"]?.httpStatus, 503)
-        XCTAssertEqual(health.endpoints["voska/m2"]?.errorName, "RateLimit")
-        XCTAssertEqual(health.endpoints["voska/m2"]?.attempts, 4)
-        XCTAssertEqual(health.endpoints["voska/m2"]?.successes, 3)
+        // The wording is the box's (WS11 D4 / K3); an older box sends no line.
+        XCTAssertEqual(health.endpoints["voska/m1"]?.stateLine, "Dead · HTTP 503")
+        XCTAssertNil(health.endpoints["voska/m2"]?.stateLine)
+        XCTAssertEqual(health.providerLines["voska"], ProviderHealthLine(key: "voska/m1", stateLine: "Dead · HTTP 503"))
+        XCTAssertEqual(health.providerLines["bare"], ProviderHealthLine(key: nil, stateLine: "Unproven"))
 
         let empty = try decode(AccountsHealth.self, #"{"providers":{},"endpoints":{}}"#)
         XCTAssertEqual(empty, AccountsHealth())
-        let junk = try decode(AccountsHealth.self, #"{"providers":{"a":{"state":5},"b":3},"endpoints":[]}"#)
+        let junk = try decode(AccountsHealth.self, #"{"providers":{"a":{"state":5},"b":3},"endpoints":[],"providerLines":{"x":{"stateLine":""}}}"#)
         XCTAssertEqual(junk, AccountsHealth(), "unreadable entries are dropped, never invented")
     }
 
@@ -102,36 +104,22 @@ final class ProviderConnectTests: XCTestCase {
         SubscriptionStatus(id: "anthropic", label: "Claude", plan: "Claude Pro / Max", connected: connected, managedExternally: external, managedBy: by)
     }
 
-    func testRowStateDescribesEachHealth() {
-        func describe(_ s: SubscriptionStatus, _ state: String?, retry: Double? = nil) -> AccountRowState {
-            AccountRowState.describe(status: s, health: state.map { ProviderHealthEntry(state: $0, retryInMs: retry) })
-        }
-        XCTAssertEqual(describe(status(connected: true), "out-of-credit"), AccountRowState(text: "Out of credit", tone: .danger))
-        XCTAssertEqual(describe(status(connected: true), "rate-limited", retry: 125_000), AccountRowState(text: "Rate limited · retry in 3m", tone: .warn))
-        XCTAssertEqual(describe(status(connected: true), "rate-limited", retry: 100), AccountRowState(text: "Rate limited · retry in 1m", tone: .warn), "at least a minute")
-        XCTAssertEqual(describe(status(connected: true), "rate-limited"), AccountRowState(text: "Rate limited", tone: .warn))
-        XCTAssertEqual(describe(status(connected: true), "failing"), AccountRowState(text: "Not responding", tone: .warn))
-        XCTAssertEqual(describe(status(connected: true, external: true, by: "the Claude CLI on this box"), nil),
-                       AccountRowState(text: "connected · signed in with the Claude CLI on this box", tone: .ok))
-        XCTAssertEqual(describe(status(connected: true), nil), AccountRowState(text: "Connected", tone: .ok))
-        XCTAssertEqual(describe(status(connected: true), "ok"), AccountRowState(text: "Connected", tone: .ok), "an unrecognised state is not a verdict")
-        XCTAssertEqual(describe(status(connected: false), nil), AccountRowState(text: "Not connected", tone: .quiet))
-        // Precedence: health outranks "managed externally".
-        XCTAssertEqual(describe(status(connected: true, external: true, by: "the Claude CLI on this box"), "out-of-credit").text, "Out of credit")
-        // External but no owner name → falls through to plain "Connected".
-        XCTAssertEqual(describe(status(connected: true, external: true, by: nil), nil).text, "Connected")
+    // The row's words and control are the box's (`accounts:row-states`; the precedence is pinned in
+    // accountsRowState.test.mjs). The phone decodes them and shows what it is given.
+    func testRowStatesDecodeAsGiven() throws {
+        let reply = try decode(AccountRowStatesReply.self, #"""
+        {"rows":{"anthropic":{"text":"Out of credit","tone":"danger","control":"retry","registerLine":null},
+                 "openai":{"text":"Not connected","tone":"quiet","control":"connect","registerLine":null},
+                 "acme":{"text":"No usage data","tone":"quiet","control":"none","registerLine":"Dead"}}}
+        """#)
+        XCTAssertEqual(reply.rows["anthropic"], AccountRowState(text: "Out of credit", tone: .danger, control: .tryAgain))
+        XCTAssertEqual(reply.rows["openai"]?.control, .connect)
+        XCTAssertEqual(reply.rows["acme"]?.registerLine, "Dead")
     }
 
-    func testRowControl() {
-        func control(_ s: SubscriptionStatus, _ state: String? = nil) -> AccountRowState.Control {
-            AccountRowState.control(status: s, health: state.map { ProviderHealthEntry(state: $0) })
-        }
-        XCTAssertEqual(control(status(connected: false)), .connect)
-        XCTAssertEqual(control(status(connected: true)), .disconnect)
-        XCTAssertEqual(control(status(connected: true, external: true, by: "x")), .none, "a credential owned elsewhere has no Disconnect")
-        XCTAssertEqual(control(status(connected: true), "out-of-credit"), .tryAgain)
-        XCTAssertEqual(control(status(connected: true, external: true, by: "x"), "out-of-credit"), .tryAgain)
-        XCTAssertEqual(control(status(connected: true), "rate-limited"), .disconnect)
+    func testAnUnreadableToneOrControlIsTheSafeOne() throws {
+        let reply = try decode(AccountRowStatesReply.self, #"{"rows":{"x":{"text":"t","tone":"purple","control":"explode"}}}"#)
+        XCTAssertEqual(reply.rows["x"], AccountRowState(text: "t", tone: .quiet, control: .none))
     }
 
     // MARK: - Section plan

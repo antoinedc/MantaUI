@@ -4,6 +4,7 @@
 // control must end in a reported success or a specific error.
 
 import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
+import { accountsErrorMessage } from "../server/accountsCopy.mjs";
 import { act } from "react";
 import { installCanvasStub, mount, installMockApi, resetStore, buttonByText, type Harness } from "./testHarness";
 import { useStore } from "./store";
@@ -87,7 +88,7 @@ describe("SeatsPanel", () => {
   });
 
   it("mode toggle failure shows the reason and changes nothing", async () => {
-    await openPanel(threeSeatView(), { accountsSetMode: () => Promise.resolve({ error: "unknown-provider" }) });
+    await openPanel(threeSeatView(), { accountsSetMode: () => Promise.resolve({ error: "unknown-provider", message: accountsErrorMessage("unknown-provider") }) });
     await click(buttonByText(h!, "Manual"));
     expect(h!.container.querySelector('[role="alert"]')?.textContent).toContain("doesn't support");
     expect(useStore.getState().accounts[0].mode).toBe("auto");
@@ -121,7 +122,7 @@ describe("SeatsPanel", () => {
     renamed.accounts[0].seats[1] = { ...renamed.accounts[0].seats[1], label: "Desk" };
     let n = 0;
     const m = await openPanel(threeSeatView(), {
-      accountsRename: () => Promise.resolve(n++ === 0 ? { error: "invalid-label" } : renamed),
+      accountsRename: () => Promise.resolve(n++ === 0 ? { error: "invalid-label", message: accountsErrorMessage("invalid-label") } : renamed),
     });
     await click(h!.container.querySelector('button[aria-label="Rename Seat 2"]'));
     const input = h!.container.querySelector('input[aria-label="Rename Seat 2"]') as HTMLInputElement;
@@ -174,7 +175,7 @@ describe("SeatsPanel", () => {
   });
 
   it("a refused removal reports the server's reason", async () => {
-    await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve({ error: "last-seat" }) });
+    await openPanel(threeSeatView(), { accountsRemoveSeat: () => Promise.resolve({ error: "last-seat", message: accountsErrorMessage("last-seat") }) });
     await click(rowButton("s2", "Remove"));
     await click(Array.from(h!.container.querySelectorAll("button")).find((b) => b.textContent === "Remove" && !b.disabled && b.className.includes("danger")));
     expect(h!.container.querySelector('[role="alert"]')?.textContent).toContain("only login on this box");
@@ -343,7 +344,7 @@ describe("AddSeatFlow", () => {
   });
 
   it("add-seat error → message; an unsupported connect shape → failure, seat handed back", async () => {
-    await flow({ accountsAddSeat: () => Promise.resolve({ error: "login-failed" }) });
+    await flow({ accountsAddSeat: () => Promise.resolve({ error: "login-failed", message: accountsErrorMessage("login-failed") }) });
     expect(h!.text()).toContain("Sign-in failed");
     h!.unmount();
     const cancelSeat = vi.fn(() => Promise.resolve({ ok: true }));

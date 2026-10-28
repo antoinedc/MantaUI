@@ -29,7 +29,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { ProviderView, SeatConnect, SeatProviderId } from "../shared/types";
 import {
-  accountsErrorMessage,
+  accountsFailureMessage,
   isPollExpired,
   needsSecondAccountNote,
   providerViewOrError,
@@ -137,7 +137,7 @@ export function AddSeatFlow({
       }
       if (cancelled) return;
       if (!res || "error" in res) {
-        set({ kind: "failed", message: accountsErrorMessage(res && "error" in res ? res.error : undefined) });
+        set({ kind: "failed", message: accountsFailureMessage(res && "error" in res ? res : undefined) });
         return;
       }
       openSeatRef.current = res.seatId;

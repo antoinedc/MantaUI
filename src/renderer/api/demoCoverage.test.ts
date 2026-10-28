@@ -45,6 +45,7 @@ export const DEMO_UNIMPLEMENTED = [
   "accountsResignSeat",
   "accountsResignStatus",
   "accountsRetry",
+  "accountsRowStates",
   "accountsSeatStatus",
   "accountsSessionSeat",
   "accountsSetActive",

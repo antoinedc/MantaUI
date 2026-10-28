@@ -18,6 +18,9 @@ import {
 } from "./testHarness";
 import { invalidateCachedResource } from "./useCachedResource";
 import { AccountsCard } from "./AccountsCard";
+import { formatEndpointStateLine } from "../server/accountsCopy.mjs";
+
+const withStateLine = <T extends { state: string }>(entry: T) => ({ ...entry, stateLine: formatEndpointStateLine(entry, Date.now()) });
 
 // BET-1537 (review cycle 2, duplication gate): the mock-api boilerplate the
 // endpoint/register tests share — one object, spread at each site.
@@ -336,25 +339,25 @@ describe("AccountsCard Try-again verdict clears on recovery (9c)", () => {
   it("drops the verdict once a refetch shows the row recovered", async () => {
     // Cold-start the "accounts" cache so the mount fetch actually reads health.
     invalidateCachedResource("accounts");
-    let calls = 0;
+    let recovered = false;
     installMockApi({
       opencodeProviderAuth: () => Promise.resolve(statusProvider()),
       opencodeGetProviders: () => Promise.resolve([]),
-      accountHealth: () => {
-        calls++;
-        // First read (mount) is out-of-credit; every later read (retry's own
-        // refetch) shows the flag cleared — so the verdict must not linger.
-        return Promise.resolve(calls <= 1 ? { providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} } : { providers: { anthropic: { state: "ok" } }, endpoints: {} });
-      },
+      accountHealth: () =>
+        // Out-of-credit until the retry runs; every read after it shows the flag
+        // cleared — so the verdict must not linger.
+        Promise.resolve(recovered ? { providers: { anthropic: { state: "ok" } }, endpoints: {} } : { providers: { anthropic: { state: "out-of-credit" } }, endpoints: {} }),
       configGet: () => Promise.resolve({}),
       opencodeSetProviders: () => Promise.resolve({ ok: true }),
       opencodeDiscoverModels: () => Promise.resolve({ ok: true, models: [] }),
-      accountsRetry: () =>
-        Promise.resolve({
+      accountsRetry: () => {
+        recovered = true;
+        return Promise.resolve({
           ok: false,
           state: "out-of-credit",
           message: "still reports out of credit — check the account.",
-        }),
+        });
+      },
     });
     const h = mount(<AccountsCard />);
     await h.flush();
@@ -387,11 +390,12 @@ describe("AccountsCard endpoint register (custom rows)", () => {
         Promise.resolve({
           providers: {},
           endpoints: {
-            "voska/alpha": {
+            // The box words each endpoint's line (K3); the harness runs the real wording.
+            "voska/alpha": withStateLine({
               state: "rate-limited",
               retryInMs: 4 * 60_000,
               reason: { httpStatus: 429, errorName: "APIError" },
-            },
+            }),
           },
         }),
     });

@@ -143,10 +143,10 @@ describe("UsageDial — three seats, automatic", () => {
   it("shows the last move (and the re-sent history for a cross-org move)", async () => {
     const { popover } = await open([threeSeatView()], {
       seatId: "s2",
-      lastMove: { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "was at 96%", crossOrg: true, resentTokens: 128_000 },
+      lastMove: { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "load", crossOrg: true, line: "Moved from Seat 1 · to balance load", resentText: "history re-sent: 128k" },
     });
     const lm = popover.querySelector('[data-testid="usage-last-move"]') as HTMLElement;
-    expect(lm.textContent).toContain("Moved from Seat 1 · was at 96% · 2h ago");
+    expect(lm.textContent).toContain("Moved from Seat 1 · to balance load · 2h ago");
     expect(lm.textContent).toContain("history re-sent: 128k");
   });
 
@@ -245,7 +245,7 @@ describe("UsageDial — manual mode", () => {
   });
 
   it("a failed Use reports the specific reason and leaves the list unchanged", async () => {
-    const setActive = vi.fn(() => Promise.resolve({ error: "unknown-seat" }));
+    const setActive = vi.fn(() => Promise.resolve({ error: "unknown-seat", message: "That seat no longer exists. The list has been refreshed." }));
     const { popover } = await open([manual()], { seatId: "s1", extraApi: { accountsSetActive: setActive } });
     await act(async () => {
       (popover.querySelector('[data-seat-id="s2"] button') as HTMLButtonElement).click();

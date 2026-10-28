@@ -15,15 +15,12 @@ import { isBackgroundResultMessage } from "./backgroundRun";
 // one source of truth; re-imported here so chooseUpdateSkewVariant is
 // testable in isolation (no DOM/network, just the compare).
 import { isClientTooOld } from "../shared/versionCompare.mjs";
-import { formatTokens, formatTokenCount } from "../shared/formatTokens.mjs";
+import { formatTokens } from "../shared/formatTokens.mjs";
 // BET-1139: the deprecated-model predicate lives in the shared node-safe
 // module (the ONE place the literal "deprecated" is compared) and is imported
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
 import { leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
-// BET-1537 (S5, §W9): the shared endpoint/provider state labels — the same
-// words the router's verdict copy and the Accounts/Models surfaces use.
-import { endpointStateLabel, providerStateLabel } from "../shared/providerHealthLabel.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
 // tmux window is identified by its session name + index, which EVERY window
@@ -3319,23 +3316,19 @@ export function isSameOrgMove(
   return from.account.id === to.account.id;
 }
 
-/** "Moved from Seat 1 · <reason> · 2h ago" (+ the re-sent history for a
- *  cross-org move), or null once the move is older than 5h. */
+/** The box's move line ("Moved from Seat 1 · seat was at its limit") plus the age — the
+ *  one thing the client adds, from its own clock — or null once the move is older than 5h
+ *  or the box (older) sent no wording. */
 export function formatLastMove(
   move: SessionSeat["lastMove"] | null | undefined,
   nowMs: number,
 ): { line: string; resent: string | null } | null {
-  if (!move || !Number.isFinite(move.at)) return null;
+  if (!move || !Number.isFinite(move.at) || !move.line) return null;
   const age = nowMs - move.at;
   if (age > SEAT_LAST_MOVE_WINDOW_MS) return null;
   const ago = formatAge(Math.max(0, age));
   const when = ago === "now" ? "just now" : `${ago} ago`;
-  const reason = move.reason ? ` · ${move.reason}` : "";
-  const resent =
-    move.crossOrg && typeof move.resentTokens === "number"
-      ? `history re-sent: ${formatTokenCount(move.resentTokens)}`
-      : null;
-  return { line: `Moved from ${move.fromLabel}${reason} · ${when}`, resent };
+  return { line: `${move.line} · ${when}`, resent: move.resentText ?? null };
 }
 
 /** "Seat: Work · Seat 2" — the session header's context-popover line. Names come
@@ -3380,26 +3373,13 @@ export function seatResetHint(seat: SeatView, nowMs: number): string | null {
   return formatWindowReset(driver?.resetsAt, nowMs);
 }
 
-/** The sentence for a class-1 `accounts:*` error code — never the raw code. */
-export function accountsErrorMessage(code: AccountsError | string | undefined): string {
-  switch (code) {
-    case "unknown-seat":
-      return "That seat no longer exists. The list has been refreshed.";
-    case "invalid-label":
-      return "Names must be 1–40 characters, with no control characters.";
-    case "live-seat":
-      return "This is the login the box is using right now, so it can't be removed.";
-    case "last-seat":
-      return "This is the only login on this box — use Disconnect instead.";
-    case "no-replacement":
-      return "No other login is signed in and ready to take over, so this one can't be removed yet.";
-    case "unknown-provider":
-      return "That provider doesn't support several accounts.";
-    case "login-failed":
-      return "Sign-in failed. Try again.";
-    default:
-      return "That didn't work. Try again.";
-  }
+/**
+ * The sentence for a failed `accounts:*` call: the BOX words every error code
+ * (`message`, WS11 D4 / K7). An older box sends none — the static fallback.
+ */
+export const ACCOUNTS_ERROR_FALLBACK = "That didn't work. Try again.";
+export function accountsFailureMessage(res: { message?: string } | null | undefined): string {
+  return typeof res?.message === "string" && res.message ? res.message : ACCOUNTS_ERROR_FALLBACK;
 }
 
 /**
@@ -3435,11 +3415,11 @@ export function seatStateText(status: SeatView["status"]): string | null {
 
 /** Narrow an `accounts:*` mutation answer: the refreshed view, or an error. */
 export function providerViewOrError(
-  res: ProviderView | { error: AccountsError } | null | undefined,
+  res: ProviderView | { error: AccountsError; message?: string } | null | undefined,
 ): { view: ProviderView } | { error: string } {
-  if (res && typeof res === "object" && "error" in res) return { error: accountsErrorMessage(res.error) };
+  if (res && typeof res === "object" && "error" in res) return { error: accountsFailureMessage(res) };
   if (res && typeof res === "object" && "provider" in res) return { view: res };
-  return { error: accountsErrorMessage(undefined) };
+  return { error: ACCOUNTS_ERROR_FALLBACK };
 }
 
 // The ToS note (§0) is shown ONCE, when a second ACCOUNT (not a second seat of
@@ -4402,102 +4382,6 @@ export function voiceUiEnabled(voiceFlag: string | undefined): boolean {
 /** The one read of the build-time flag. Off by default; a developer turns the
  *  voice UI on with `VITE_MANTA_VOICE=1 npm run dev`. */
 export const voiceUi: boolean = voiceUiEnabled(import.meta.env.VITE_MANTA_VOICE);
-
-// ===== Endpoint health formatting (BET-1537 S5, §W9) =====
-//
-// ONE pure home for every word and number the endpoint-health surfaces show —
-// the issue's test list: "chatUtils-style pure helpers for any formatting, do
-// not inline logic in the component". The labels come from the shared
-// providerHealthLabel module (also read server-side), so the UI's words are
-// the same words the router's verdict copy uses.
-
-/** The retry-cooldown minutes for a rate-limited endpoint entry, or null when
- *  there is no active deadline. Always ≥1 so the UI never shows "retry in 0m". */
-export function formatRetryMinutes(retryInMs: number | null | undefined): number | null {
-  return typeof retryInMs === "number" && retryInMs > 0 ? Math.max(1, Math.ceil(retryInMs / 60_000)) : null;
-}
-
-/** A compact human age for a timestamp ("just now", "5m ago", "3h ago",
- *  "6d ago"). Pure: the caller supplies now. Named formatAgeAt to stay clear
- *  of the pre-existing elapsed-ms formatAge above. */
-export function formatAgeAt(ts: number | null | undefined, nowMs: number): string | null {
-  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0) return null;
-  const delta = Math.max(0, nowMs - ts);
-  if (delta < 60_000) return "just now";
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-/** The one-line summary for an endpoint's register detail — the Accounts
- *  custom-row line and the per-model badges both render through this, so
- *  neither can drift from the other. Carries, when present: the state label,
- *  the rate-limit deadline, the exclusion reason (HTTP status / error name),
- *  and the §W9 window activity (last success, attempts + success rate). */
-export function formatEndpointStateLine(
-  detail: {
-    state: string;
-    retryInMs?: number | null;
-    reason?: { httpStatus?: number | null; errorName?: string | null } | null;
-    lastSuccessAt?: number | null;
-    attempts?: number | null;
-    successes?: number | null;
-  } | null | undefined,
-  nowMs: number,
-): string {
-  if (!detail || typeof detail.state !== "string") return "";
-  const parts: string[] = [];
-  const label = endpointStateLabel(detail.state) ?? detail.state;
-  parts.push(label);
-  const retryMin = formatRetryMinutes(detail.retryInMs);
-  if (retryMin != null) parts.push(`retry in ${retryMin}m`);
-  const status = detail.reason?.httpStatus;
-  const errorName = detail.reason?.errorName;
-  if (typeof status === "number" && Number.isFinite(status)) parts.push(`HTTP ${status}`);
-  else if (typeof errorName === "string" && errorName) parts.push(errorName);
-  const lastSuccess = formatAgeAt(detail.lastSuccessAt, nowMs);
-  if (lastSuccess) parts.push(`last success ${lastSuccess}`);
-  const attempts = typeof detail.attempts === "number" ? detail.attempts : null;
-  const successes = typeof detail.successes === "number" ? detail.successes : null;
-  if (attempts != null && attempts > 0) {
-    const pct = Math.round(((successes ?? 0) / attempts) * 100);
-    parts.push(`${attempts} attempt${attempts === 1 ? "" : "s"} · ${pct}% success in window`);
-  }
-  return parts.join(" · ");
-}
-
-/** The no-healthy-endpoint verdict's user-visible copy (§W9): names WHAT was
- *  excluded and WHY (the router's structured per-key states, worded through
- *  the shared labels), plus the way out. Falls back to the plain key list for
- *  an older box whose decision carries no `excludedWhy`. Pure — the banner
- *  renders it verbatim. */
-export function formatNoHealthyEndpointCopy(
-  decision: {
-    excluded?: string[];
-    excludedWhy?: Record<string, { endpoint: string | null; provider: string | null }>;
-  } | null | undefined,
-): string {
-  const excluded = Array.isArray(decision?.excluded) ? decision!.excluded! : [];
-  if (excluded.length === 0) {
-    return "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.";
-  }
-  const why = decision?.excludedWhy ?? {};
-  const named = excluded
-    .map((key) => {
-      const entry = why[key];
-      if (!entry) return key;
-      const bits: string[] = [];
-      const ep = typeof entry.endpoint === "string" ? endpointStateLabel(entry.endpoint) : null;
-      if (ep) bits.push(ep);
-      const pv = typeof entry.provider === "string" ? providerStateLabel(entry.provider) : null;
-      if (pv) bits.push(pv);
-      return bits.length > 0 ? `${key} (${bits.join(", ")})` : key;
-    })
-    .join(", ");
-  return `Auto couldn't pick a healthy model — ${named} excluded. The turn was not sent; switch off Auto, reset health below, or pick a model to send.`;
-}
 
 /** The distinct provider ids behind the verdict's excluded endpoint keys —
  *  the providers the banner's inline reset covers. */

@@ -27,6 +27,11 @@ final class ProviderConnectionsStore: ObservableObject {
     @Published private(set) var endpointPhase: ProviderSourcePhase = .idle
     /// nil until the first reading; missing health is unknown, never healthy.
     @Published private(set) var health: AccountsHealth?
+    /// The box's words and controls per row (`accounts:row-states`); empty until read.
+    @Published private(set) var rowStates: [String: AccountRowState] = [:]
+    /// false once the box answers "unknown rpc channel" — rows then carry no state or
+    /// control and the screen says to update the box.
+    @Published private(set) var rowStatesSupported = true
     /// Model ids from the last "Refresh model list", per endpoint id.
     @Published private(set) var discovered: [String: [String]] = [:]
     /// Models the user switched off on this screen visit, per endpoint id, so a
@@ -47,7 +52,6 @@ final class ProviderConnectionsStore: ObservableObject {
     private let say: @MainActor (String, Bool) -> Void
     private let refreshAccounts: @MainActor () async -> Void
     private let announceChange: @MainActor () -> Void
-    private let clock: () -> Date
     /// The endpoint as it stood before the last write — what "no change" means
     /// when an unconfirmed endpoint is refreshed.
     private var lastConfirmed: [String: EndpointState] = [:]
@@ -56,14 +60,12 @@ final class ProviderConnectionsStore: ObservableObject {
         api: MantaAPIClient,
         announce: @escaping @MainActor (String, Bool) -> Void,
         refreshAccounts: @escaping @MainActor () async -> Void = {},
-        announceChange: @escaping @MainActor () -> Void = { ProviderChange.announce() },
-        clock: @escaping () -> Date = { Date() }
+        announceChange: @escaping @MainActor () -> Void = { ProviderChange.announce() }
     ) {
         self.api = api
         self.say = announce
         self.refreshAccounts = refreshAccounts
         self.announceChange = announceChange
-        self.clock = clock
     }
 
     // MARK: - Reading
@@ -97,11 +99,34 @@ final class ProviderConnectionsStore: ObservableObject {
     }
 
     func loadHealth() async {
+        async let healthRead: Void = readHealth()
+        async let rowsRead: Void = readRowStates()
+        _ = await (healthRead, rowsRead)
+    }
+
+    private func readHealth() async {
         do {
             health = try await api.accountsHealth()
         } catch {
             // No reading is "unknown": keep the last one, never invent "healthy".
             NSLog("[accounts] health read failed: %@", String(describing: error))
+        }
+    }
+
+    /// The box's words and controls for every row (`accounts:row-states`). An older box
+    /// predates the channel: rows then show no state and no control, and the screen says
+    /// to update the box (`rowStatesSupported`).
+    private func readRowStates() async {
+        do {
+            rowStates = try await api.accountsRowStates().rows
+            rowStatesSupported = true
+        } catch {
+            if BoxCapabilities.isUnknownChannel(error) {
+                rowStates = [:]
+                rowStatesSupported = false
+            } else {
+                NSLog("[accounts] row states read failed: %@", String(describing: error))
+            }
         }
     }
 
@@ -136,8 +161,8 @@ final class ProviderConnectionsStore: ObservableObject {
 
     // MARK: - Subscriptions
 
-    func health(for providerID: String) -> ProviderHealthEntry? {
-        health?.providers[providerID]
+    func rowState(for providerID: String) -> AccountRowState? {
+        rowStates[providerID]
     }
 
     /// Disconnect a subscription: the box removes the credential and restarts
@@ -187,22 +212,13 @@ final class ProviderConnectionsStore: ObservableObject {
         )
     }
 
-    func healthRows(_ endpoint: ProviderEndpoint) -> [EndpointStateRow] {
-        EndpointHealth.statesFor(providerID: endpoint.id, endpoints: health?.endpoints ?? [:])
-    }
-
+    /// The line under an endpoint's name — the box's (`registerLine` of its row state).
     func registerLine(_ endpoint: ProviderEndpoint) -> String? {
-        EndpointHealth.registerLine(
-            rows: healthRows(endpoint),
-            enabledCount: endpoint.enabledModels.count,
-            nowMs: clock().timeIntervalSince1970 * 1000
-        )
+        rowStates[endpoint.id]?.registerLine
     }
 
     func modelStateLine(_ endpoint: ProviderEndpoint, model: String) -> String? {
-        guard let entry = health?.endpoints["\(endpoint.id)/\(model)"] else { return nil }
-        let line = EndpointHealth.stateLine(entry, nowMs: clock().timeIntervalSince1970 * 1000)
-        return line.isEmpty ? nil : line
+        health?.endpoints["\(endpoint.id)/\(model)"]?.stateLine
     }
 
     /// One switch: write at once, single-flight per endpoint, and ADOPT what the
@@ -292,7 +308,9 @@ final class ProviderConnectionsStore: ObservableObject {
 
     /// Whether "Send probe" has anything to probe.
     func probeKey(_ endpoint: ProviderEndpoint) -> String? {
-        EndpointHealth.probeKey(providerID: endpoint.id, rows: healthRows(endpoint), enabledModels: endpoint.enabledModels)
+        // The box names the worst register key; else the first enabled model.
+        if let key = health?.providerLines[endpoint.id]?.key { return key }
+        return endpoint.enabledModels.first.map { "\(endpoint.id)/\($0)" }
     }
 
     func sendProbe(_ endpoint: ProviderEndpoint) async {

@@ -477,10 +477,9 @@ enum AccountsSignInCopy {
     /// Why starting a sign-in failed. `resign` adds the live-seat race mapping
     /// (whose general text is about removal, so it is not in `AccountsCopy`).
     static func startFailure(_ error: Error, resign: Bool) -> String {
+        if resign, let refusal = error as? AccountsRefusal, refusal.code == "live-seat" { return liveSeatRace }
         if let manta = error as? MantaError {
             switch manta {
-            case .server(let code) where resign && code.trimmingCharacters(in: .whitespacesAndNewlines) == "live-seat":
-                return liveSeatRace
             case .transport:
                 return startUnreachable
             default:

@@ -5,6 +5,7 @@
 // error, and a cancel (which must say the seat was not changed).
 
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { accountsErrorMessage } from "../server/accountsCopy.mjs";
 import { act } from "react";
 import { installCanvasStub, installMockApi, mount, resetStore, type Harness } from "./testHarness";
 import { useStore } from "./store";
@@ -148,7 +149,7 @@ describe("ResignSeatFlow", () => {
   });
 
   it("a start error from the box is shown with the shared accounts message", async () => {
-    await start({ accountsResignSeat: () => Promise.resolve({ error: "unknown-seat" }) });
+    await start({ accountsResignSeat: () => Promise.resolve({ error: "unknown-seat", message: accountsErrorMessage("unknown-seat") }) });
     expect(text()).toContain("That seat no longer exists");
     expect(dialogButton("Try again")).toBeTruthy();
   });

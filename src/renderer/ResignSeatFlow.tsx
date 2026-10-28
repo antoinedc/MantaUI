@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import type { SeatProviderId } from "../shared/types";
-import { accountsErrorMessage, isPollExpired, liveSeatNoteParts } from "./chatUtils";
+import { accountsFailureMessage, isPollExpired, liveSeatNoteParts } from "./chatUtils";
 import { Callout } from "./Callout";
 import { Modal } from "./Modal";
 import { useStore } from "./store";
@@ -125,7 +125,7 @@ export function ResignSeatFlow({
         return;
       }
       if (!res || "error" in res) {
-        set({ kind: "failed", message: accountsErrorMessage(res && "error" in res ? res.error : undefined) });
+        set({ kind: "failed", message: accountsFailureMessage(res && "error" in res ? res : undefined) });
         return;
       }
       const signIn = signInFromConnect(res.connect);

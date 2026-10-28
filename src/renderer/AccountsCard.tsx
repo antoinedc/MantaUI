@@ -24,15 +24,15 @@
 //
 // Freshness is refetch-driven (no poll, no bus subscription) — the standing
 // desktop-renderer precedent (see the retired SubscriptionsCard). The pure
-// helpers here (describeAccountState, describeMissing, usagePace, helpText)
+// helpers here (describeMissing, helpText)
 // are unit-tested.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
-import type { DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus, UsageSnapshot, UsageWindow } from "../shared/types";
+import type { AccountsRowStates, DiscoverResult, ProviderEndpoint, ProviderView, SubscriptionStatus } from "../shared/types";
 import { autoEligibility, describeMissing } from "../shared/autoEligibility.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
-import { formatEndpointStateLine, isKeyOnlyAuthProvider, selectProviderView } from "./chatUtils";
+import { isKeyOnlyAuthProvider, selectProviderView } from "./chatUtils";
 import { resolveIdentity, type ModelDeclaration } from "../shared/modelIdentity.mjs";
 import { qualityScore } from "../shared/modelQuality.mjs";
 import { ConfirmInline } from "./ConfirmInline";
@@ -43,6 +43,8 @@ import { refreshAccounts } from "./accountsData";
 import { CustomProviderForm } from "./CustomProviderForm";
 import { UnpricedModelsPanel } from "./ModelPriceForm";
 import { ModelChecklist } from "./ModelChecklist";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import { SettingsRow } from "./SettingsRow";
 import { MantaLoader } from "./MantaLoader";
 import { useCachedResource } from "./useCachedResource";
@@ -76,67 +78,11 @@ export type AccountRowModel = {
   managedExternally?: boolean;
   /** Who owns the credential, e.g. "the Claude CLI on this box". */
   managedBy?: string | null;
-  /** A usage reading (window label / pct / pace) when one exists. `pace` is
-   *  null when the window carries no timing — never a fabricated pace. */
-  reading: { label: string; pct: number; pace: string | null } | null;
-  /** Credit balance in dollars, or null when unknown. */
-  balance: number | null;
-  /** `unknown` when no health engine/entry exists — rendered as no state, never as healthy. */
-  health: "ok" | "unknown" | "out-of-credit" | "rate-limited" | "failing";
-  /** Remaining rate-limit cooldown, whole minutes (health === "rate-limited"). */
-  retryInMinutes?: number;
   /** Machine keys (autoEligibility MISSING) Auto still needs for a custom row. */
   eligibilityMissing: string[];
   /** Declared price sentence for a custom row that is fully described. */
   declaredPrice?: string;
 };
-
-const LOW_BALANCE_DOLLARS = 5;
-
-const formatDollars = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : String(n));
-
-/**
- * The state column for an account row — one always-honest string. `No usage
- * data` is never a zero, never a full/empty bar: a reading is real or absent.
- * Precedence: on-fire health outranks a reading (a window pct is not the story
- * when the provider is refusing work); a reading outranks a balance; then
- * credential absence; then "no usage data".
- */
-export function describeAccountState(r: AccountRowModel): AccountState {
-  if (r.health === "out-of-credit") return { text: providerStateLabel("out-of-credit") ?? "Out of credit", tone: "danger" };
-  if (r.health === "rate-limited") {
-    const base = providerStateLabel("rate-limited") ?? "Rate limited";
-    return {
-      text: r.retryInMinutes ? `${base} · retry in ${r.retryInMinutes}m` : base,
-      tone: "warn",
-    };
-  }
-  if (r.health === "failing") return { text: providerStateLabel("failing") ?? "Not responding", tone: "warn" };
-  // BET-1320: a connected row whose credential Manta does not own (e.g. the
-  // Claude CLI) can't show a Disconnect — say who owns it instead of offering
-  // a button that can never succeed.
-  if (r.connected && r.managedExternally && r.managedBy) {
-    return { text: `connected · signed in with ${r.managedBy}`, tone: "ok" };
-  }
-  if (r.reading) {
-    const pct = r.reading.pct;
-    const tone: AccountStatus = pct >= 90 ? "danger" : pct >= 70 ? "warn" : "ok";
-    // No timing data ⇒ no pace clause: a pace is real or absent, never a guess
-    // (BET-1273 9e).
-    const text = r.reading.pace
-      ? `${r.reading.label} ${pct}% · ${r.reading.pace}`
-      : `${r.reading.label} ${pct}%`;
-    return { text, tone };
-  }
-  if (typeof r.balance === "number" && Number.isFinite(r.balance)) {
-    return {
-      text: `$${formatDollars(r.balance)} remaining`,
-      tone: r.balance < LOW_BALANCE_DOLLARS ? "danger" : "ok",
-    };
-  }
-  if (!r.connected) return { text: "Not connected", tone: "quiet" };
-  return { text: "No usage data", tone: "quiet" };
-}
 
 export const STATE_TONE_CLASS: Record<AccountStatus, string> = {
   ok: "text-ok",
@@ -144,25 +90,6 @@ export const STATE_TONE_CLASS: Record<AccountStatus, string> = {
   danger: "text-danger",
   quiet: "text-text-quiet",
 };
-
-/**
- * Classify a subscription window's pace ("under" / "on" / "over") from how fast
- * it is being consumed against how far through the window we are. Deterministic
- * on (nowMs, window). A window with NO timing carries no pace — a pace invented
- * from a percentage alone is a false claim (BET-1273 9e), so it returns null.
- */
-export function usagePace(w: UsageWindow, nowMs: number): string | null {
-  if (typeof w.startedAt === "number" && typeof w.resetsAt === "number" && w.resetsAt > w.startedAt) {
-    const elapsed = (nowMs - w.startedAt) / (w.resetsAt - w.startedAt);
-    if (elapsed > 0) {
-      const ratio = w.pct / 100 / elapsed;
-      if (ratio < 0.9) return "under pace";
-      if (ratio > 1.1) return "over pace";
-      return "on pace";
-    }
-  }
-  return null;
-}
 
 // The machine-key → phrase map (and `describeMissing`) now live in the shared
 // autoEligibility module, so the box's "models we couldn't identify" help
@@ -200,50 +127,16 @@ type EndpointHealthEntry = {
   attempts?: number;
   successes?: number;
   reason?: { httpStatus?: number | null; errorName?: string | null } | null;
+  /** The one-line state, worded by the box (WS11 D4 / K3). */
+  stateLine?: string;
 };
 
-type AccountsHealth = { providers?: HealthMap; endpoints?: Record<string, EndpointHealthEntry> } | null;
-
-// The §W9 worst-state order for a provider's endpoint entries — what the
-// custom row's register line summarizes. Dead is the worst (the endpoint
-// refuses everything), then the authoritative refusals, then rate-limited,
-// then degraded, then unproven.
-const ENDPOINT_STATE_BADNESS: Record<string, number> = {
-  dead: 5,
-  "not-found": 4,
-  forbidden: 4,
-  "rate-limited": 3,
-  degraded: 2,
-  unproven: 1,
-};
-
-function normalizeHealth(h: HealthMap | null | undefined, id: string): {
-  health: AccountRowModel["health"];
-  retryInMinutes?: number;
-} {
-  const entry = h?.[id];
-  const st =
-    entry?.state === "out-of-credit" || entry?.state === "rate-limited" || entry?.state === "failing"
-      ? entry.state
-      : undefined;
-  if (st) {
-    const retryInMinutes =
-      st === "rate-limited" && typeof entry?.retryInMs === "number"
-        ? Math.max(1, Math.ceil((entry.retryInMs ?? 0) / 60000))
-        : undefined;
-    return { health: st, retryInMinutes };
-  }
-  // No health entry / engine is UNKNOWN, not healthy — "we have no health data"
-  // must never render as "this provider is fine" (BET-1273 9f).
-  return { health: "unknown" };
-}
-
-function subscriptionReading(snap: UsageSnapshot | undefined, nowMs: number) {
-  if (!snap || !Array.isArray(snap.windows) || snap.windows.length === 0) return null;
-  const w = snap.windows[0];
-  if (typeof w?.pct !== "number") return null;
-  return { label: w.label ?? "", pct: w.pct, pace: usagePace(w, nowMs) };
-}
+type AccountsHealth = {
+  providers?: HealthMap;
+  endpoints?: Record<string, EndpointHealthEntry>;
+  /** The worst endpoint per provider, worded by the box. */
+  providerLines?: Record<string, { key: string | null; stateLine: string }>;
+} | null;
 
 const isSubscriptionId = (id: string, statuses: SubscriptionStatus[]) =>
   statuses.some((s) => s.id === id);
@@ -319,6 +212,8 @@ export function endpointEligibility(
 
 function AccountRow({
   row,
+  state: boxState,
+  rawHealth,
   seatView,
   busy,
   connectState,
@@ -331,6 +226,10 @@ function AccountRow({
   onRemove,
 }: {
   row: AccountRowModel;
+  /** What the box says this row reads and offers (`accounts:row-states`); null on an older box. */
+  state: { text: string; tone: "ok" | "warn" | "danger" | "quiet"; control: "retry" | "disconnect" | "connect" | "none" } | null;
+  /** The provider's raw health state — only the older-box fallback label reads it. */
+  rawHealth?: string;
   /** The provider's accounts/seats when multi-account is in use for it. Then the
    *  row's Connect adds an ACCOUNT through the seat flow; it must never start a
    *  live login (that would replace the box's own login and add no seat). */
@@ -352,7 +251,9 @@ function AccountRow({
   onDiscover: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
-  const state = describeAccountState(row);
+  // An older box sends no row states: show its raw health label (no controls — their
+  // precedence is the box's) and the page shows the update note.
+  const state = boxState ?? { text: providerStateLabel(rawHealth ?? "") ?? "", tone: "quiet" as const, control: "none" as const };
   const isBusy = busy === row.id;
   const {
     connectingId,
@@ -384,7 +285,7 @@ function AccountRow({
 
   let control: ReactNode;
 
-  if (row.health === "out-of-credit") {
+  if (state.control === "retry") {
     control = (
       <>
         <span className={STATE_TONE_CLASS[state.tone]}>{state.text}</span>
@@ -436,11 +337,12 @@ function AccountRow({
               </button>
             </>
           )
-        ) : row.connected && row.managedExternally ? (
+        ) : state.control === "none" ? (
           // Credential owned by the Claude CLI — no Disconnect Manta can
-          // deliver; the state text already says who owns it (BET-1320).
+          // deliver; the state text already says who owns it (BET-1320). On an
+          // older box (no row states) no control is offered at all.
           null
-        ) : row.connected ? (
+        ) : state.control === "disconnect" ? (
           disconnectConfirmId === row.id ? (
             confirmBlock(
               "Disconnect",
@@ -517,38 +419,26 @@ function AccountRow({
 
 /**
  * BET-1537 (S5, §W9): the custom-endpoint row's register line — the worst
- * endpoint state in the register, with its deadline, failure reason and
- * window activity (last success, attempts + success rate), plus the "Send
- * probe" control. One line, one truth: the text comes from the shared pure
- * helper (chatUtils.formatEndpointStateLine) reading the resolved state the
- * router itself reads — never a client-side guess.
+ * endpoint state in the register with its deadline, failure reason and window
+ * activity, plus the "Send probe" control. The words are the BOX's (`line` is
+ * `accounts:row-states` → `registerLine`; WS11 D4): never a client-side guess.
  */
 function EndpointRegisterLine({
   providerID,
-  states,
-  worst,
-  enabledCount,
+  line,
   onProbe,
   probeDisabled,
 }: {
   providerID: string;
-  states: Record<string, EndpointHealthEntry>;
-  worst: { key: string; modelId: string; entry: EndpointHealthEntry } | null;
-  enabledCount: number;
+  /** null = the register has nothing to say and no model is enabled → render nothing. */
+  line: string | null;
   onProbe: () => void;
   probeDisabled: boolean;
 }) {
-  const line = worst ? formatEndpointStateLine(worst.entry, Date.now()) : "";
-  if (!line && enabledCount === 0) return null;
+  if (line == null) return null;
   return (
     <div className="flex items-center gap-2 flex-wrap" data-testid={`endpoint-register-${providerID}`}>
-      {line ? (
-        <span className="text-meta text-text-faint">{line}</span>
-      ) : (
-        <span className="text-meta text-text-faint">
-          {Object.keys(states).length > 0 ? "" : "Unproven"}
-        </span>
-      )}
+      <span className="text-meta text-text-faint">{line}</span>
       <button
         type="button"
         className="text-meta underline text-text-faint hover:text-text-quiet"
@@ -565,13 +455,15 @@ type AccountsData = {
   statuses: SubscriptionStatus[];
   providers: ProviderEndpoint[];
   health: AccountsHealth;
+  /** `accounts:row-states` — null on an older box / a failed read. */
+  rowStates: AccountsRowStates["rows"] | null;
   declared: Record<string, DeclaredModel> | undefined;
 };
 
 export function AccountsCard() {
   const snapshots = useStore((s) => s.usage) ?? [];
   const seatViews = useStore((s) => s.accounts);
-  const [nowMs] = useState(() => Date.now());
+  const accountsCopyCap = useBoxCapability("accounts-copy-1");
   const routingCatalog = useRoutingCatalog();
 
   const [busy, setBusy] = useState<string | null>(null);
@@ -605,7 +497,8 @@ export function AccountsCard() {
     const cfg = await window.api.configGet().catch(() => null);
     const declared = (cfg as { modelRouting?: { declaredModels?: Record<string, DeclaredModel> } } | null)
       ?.modelRouting?.declaredModels;
-    return { statuses: res.providers, providers, health, declared };
+    const rowStates = await window.api.accountsRowStates().then((r) => r.rows).catch(() => null);
+    return { statuses: res.providers, providers, health, rowStates, declared };
   });
 
   // BET-1537 (§W9): this provider's endpoint-register entries, keyed by model
@@ -626,78 +519,42 @@ export function AccountsCard() {
     [data],
   );
 
-  // The worst endpoint entry for a provider — what the custom row's register
-  // line summarizes and what "Send probe" targets. `null` when the register
-  // has nothing to say about this provider (no line, no probe target beyond
-  // the first enabled model).
-  const worstEndpointFor = useCallback(
-    (providerID: string): { key: string; modelId: string; entry: EndpointHealthEntry } | null => {
-      const states = endpointStatesFor(providerID);
-      let worst: { key: string; modelId: string; entry: EndpointHealthEntry } | null = null;
-      for (const [modelId, entry] of Object.entries(states)) {
-        if (!worst || (ENDPOINT_STATE_BADNESS[entry.state] ?? 0) > (ENDPOINT_STATE_BADNESS[worst.entry.state] ?? 0)) {
-          worst = { key: `${providerID}/${modelId}`, modelId, entry };
-        }
-      }
-      return worst;
-    },
-    [endpointStatesFor],
-  );
-
   const rows = useMemo<AccountRowModel[]>(() => {
     if (!data) return [];
     const statuses = data.statuses ?? [];
     const providers = data.providers ?? [];
-    const health = data.health;
 
-    const supported: AccountRowModel[] = statuses.map((s) => {
-      const snap = snapshots.find((u) => u.providerIDs?.includes(s.id));
-      const reading = subscriptionReading(snap, nowMs);
-      const balance = typeof snap?.balance === "number" ? snap.balance : null;
-      const { health: h, retryInMinutes } = normalizeHealth(health?.providers, s.id);
-      // A reader reporting "exhausted" refuses work — surfaced as a health
-      // out-of-credit even before providerHealth sees a 402.
-      const effectiveHealth: AccountRowModel["health"] =
-        snap?.exhausted === true ? "out-of-credit" : h;
-      return {
-        id: s.id,
-        className: "Supported" as const,
-        kind: "subscription" as const,
-        name: s.label,
-        plan: s.plan,
-        connected: s.connected,
-        managedExternally: s.managedExternally,
-        managedBy: s.managedBy,
-        reading,
-        balance,
-        health: effectiveHealth,
-        retryInMinutes,
-        eligibilityMissing: [],
-      };
-    });
+    // The row's words, tone and control are the BOX's (`accounts:row-states`);
+    // what is assembled here is identity, the help line and eligibility.
+    const supported: AccountRowModel[] = statuses.map((s) => ({
+      id: s.id,
+      className: "Supported" as const,
+      kind: "subscription" as const,
+      name: s.label,
+      plan: s.plan,
+      connected: s.connected,
+      managedExternally: s.managedExternally,
+      managedBy: s.managedBy,
+      eligibilityMissing: [],
+    }));
 
     const custom: AccountRowModel[] = providers
       .filter((ep) => !isSubscriptionId(ep.id, statuses))
       .map((ep) => {
         const elig = endpointEligibility(ep, data.declared, routingCatalog.matcher);
-        const { health: h, retryInMinutes } = normalizeHealth(health?.providers, ep.id);
         return {
           id: ep.id,
           className: "Custom" as const,
           kind: "declared" as const,
           name: ep.name,
           connected: ep.hasApiKey,
-          reading: null,
-          balance: null,
-          health: h,
-          retryInMinutes,
           eligibilityMissing: elig.missing,
           declaredPrice: elig.declaredPrice,
         };
       });
 
     return [...supported, ...custom];
-  }, [data, snapshots, nowMs, routingCatalog.matcher]);
+  }, [data, routingCatalog.matcher]);
 
   const disconnect = useCallback(
     async (id: string) => {
@@ -776,7 +633,7 @@ export function AccountsCard() {
       let changed = false;
       const next: typeof prev = {};
       for (const [id, v] of Object.entries(prev)) {
-        if (rows.some((r) => r.id === id && r.health === "out-of-credit")) {
+        if (data?.rowStates?.[id]?.control === "retry") {
           next[id] = v;
         } else {
           changed = true;
@@ -784,7 +641,7 @@ export function AccountsCard() {
       }
       return changed ? next : prev;
     });
-  }, [rows]);
+  }, [data]);
 
   const toggleModel = useCallback(
     async (ep: ProviderEndpoint, modelId: string) => {
@@ -843,8 +700,8 @@ export function AccountsCard() {
   const probe = useCallback(
     async (ep: ProviderEndpoint) => {
       if (busy) return;
-      const worst = worstEndpointFor(ep.id);
-      const key = worst?.key ?? (ep.enabledModels.length > 0 ? `${ep.id}/${ep.enabledModels[0]}` : "");
+      // The box names the worst register key; else the first enabled model.
+      const key = data?.health?.providerLines?.[ep.id]?.key ?? (ep.enabledModels.length > 0 ? `${ep.id}/${ep.enabledModels[0]}` : "");
       if (!key) return;
       setBusy(ep.id);
       try {
@@ -864,7 +721,7 @@ export function AccountsCard() {
         setBusy(null);
       }
     },
-    [busy, worstEndpointFor, refresh],
+    [busy, data, refresh],
   );
 
   const removeEndpoint = useCallback(
@@ -903,6 +760,7 @@ export function AccountsCard() {
       </div>
 
       {error && <div className="text-meta text-danger break-words">{error}</div>}
+      {accountsCopyCap === false && <UpdateBoxNote />}
 
       {loading ? (
         <div className="py-2">
@@ -922,6 +780,8 @@ export function AccountsCard() {
               <div key={row.id}>
                 <AccountRow
                   row={row}
+                  state={data?.rowStates?.[row.id] ?? null}
+                  rawHealth={data?.health?.providers?.[row.id]?.state}
                   seatView={seatView}
                   onConnect={(id) => void startConnect(id)}
                   onSeatAdded={onSeatAdded}
@@ -959,9 +819,7 @@ export function AccountsCard() {
                     <code className="text-meta text-text-faint truncate block">{ep.baseURL}</code>
                     <EndpointRegisterLine
                       providerID={ep.id}
-                      states={endpointStatesFor(ep.id)}
-                      worst={worstEndpointFor(ep.id)}
-                      enabledCount={ep.enabledModels.length}
+                      line={data?.rowStates?.[ep.id]?.registerLine ?? null}
                       onProbe={() => void probe(ep)}
                       probeDisabled={busy === row.id}
                     />

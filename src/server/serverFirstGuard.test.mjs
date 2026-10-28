@@ -36,6 +36,9 @@ export const DELETED = [
   { scopes: ["renderer"], regex: /\b(forgeCredentialSecondary|resolveLauncherFlags|updateLauncherFlag|describeGateDetails|describeDiskShortfall|formatEtaSeconds)\b/, why: "D3: the box words these (forge:status.secondary, launchers:list value, /api/upgrade view) — no client copy" },
   { scopes: ["renderer"], regex: /export function describeUpdateTarget\b/, why: "D3: ONE describeUpdateTarget, in src/shared/updateTargets.mjs" },
   { scopes: ["swift", "swiftTests"], regex: /\bisRevocableID\(|static func (canRevoke|sorted)\(_ devices|enum ExtensionsLaunchers\b.*|UpdateTargets\.(build|describe|hasUpdate|versionText)\(/, why: "D3: iOS renders the box's devices view / update view / launcher values as sent" },
+  // D4 — Accounts words and row states are the box's.
+  { scopes: ["renderer"], regex: /export function (accountsErrorMessage|formatEndpointStateLine|formatNoHealthyEndpointCopy|formatRetryMinutes|formatAgeAt|describeAccountState|usagePace)\b|\bENDPOINT_STATE_BADNESS\b|\bworstEndpointFor\b/, why: "D4: the box words accounts errors, endpoint lines, the no-healthy banner and each row's state (accounts:row-states)" },
+  { scopes: ["swift", "swiftTests"], regex: /\benum EndpointHealth\b|\benum ProviderHealthFormat\b|static func (moveNoticeText|reasonText|normalizedLabel|reason\(forCode)|\bstruct SeatMoveNoticeInput\b|static func (describe|control)\(status:/, why: "D4: iOS shows the box's words (error message, endpoint stateLine, move text/line, row states)" },
 ];
 
 function* walk(dir, recursive) {

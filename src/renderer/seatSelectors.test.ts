@@ -175,17 +175,20 @@ describe("isSameOrgMove", () => {
 
 describe("formatLastMove", () => {
   it("names the origin, reason and age; hides after 5h", () => {
-    const m = { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "was at 96%" };
-    expect(formatLastMove(m, NOW)?.line).toBe("Moved from Seat 1 · was at 96% · 2h ago");
+    // The words are the box's (`line`, `resentText`); the client adds only the age + the 5h window.
+    const m = { from: "s1", fromLabel: "Seat 1", at: NOW - 2 * 3_600_000, reason: "load", line: "Moved from Seat 1 · to balance load" };
+    expect(formatLastMove(m, NOW)?.line).toBe("Moved from Seat 1 · to balance load · 2h ago");
     expect(formatLastMove({ ...m, at: NOW - 6 * 3_600_000 }, NOW)).toBeNull();
     expect(formatLastMove(null, NOW)).toBeNull();
   });
-  it("a cross-org move adds the re-sent history", () => {
+  it("shows the box's re-sent figure for a cross-org move, and nothing for an older box with no wording", () => {
     const r = formatLastMove(
-      { from: "s1", fromLabel: "Seat 1", at: NOW - 60_000, reason: "full", crossOrg: true, resentTokens: 128_000 },
+      { from: "s1", fromLabel: "Seat 1", at: NOW - 60_000, reason: "full", line: "Moved from Seat 1", resentText: "history re-sent: 128k" },
       NOW,
     );
     expect(r?.resent).toBe("history re-sent: 128k");
+    expect(r?.line).toBe("Moved from Seat 1 · 1m ago");
+    expect(formatLastMove({ from: "s1", fromLabel: "Seat 1", at: NOW - 60_000, reason: "full" }, NOW)).toBeNull();
   });
 });
 
@@ -220,9 +223,9 @@ describe("misc", () => {
     expect(describeSeatLine([oneSeatView()], { ...ss, seatId: "s1" })).toBe("Seat: Work");
   });
   it("providerViewOrError maps codes to sentences", () => {
-    expect(providerViewOrError({ error: "live-seat" })).toEqual({ error: expect.stringContaining("can't be removed") });
-    expect(providerViewOrError({ error: "last-seat" })).toEqual({ error: "This is the only login on this box — use Disconnect instead." });
-    expect(providerViewOrError({ error: "no-replacement" })).toEqual({ error: expect.stringContaining("ready to take over") });
+    // The sentence is the box's `message`; an older box sends none → the static fallback.
+    expect(providerViewOrError({ error: "live-seat", message: "Box sentence." })).toEqual({ error: "Box sentence." });
+    expect(providerViewOrError({ error: "last-seat" })).toEqual({ error: "That didn't work. Try again." });
     expect("view" in providerViewOrError(oneSeatView())).toBe(true);
     expect("error" in providerViewOrError(undefined)).toBe(true);
   });

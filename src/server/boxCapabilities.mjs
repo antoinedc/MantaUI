@@ -37,6 +37,8 @@ export const BOX_CAPABILITIES = Object.freeze([
   "update-targets-view-1",
   "upgrade-view-1",
   "launchers-flags-1",
+  // WS11 D4 (accounts copy, row states)
+  "accounts-copy-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

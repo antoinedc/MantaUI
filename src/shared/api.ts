@@ -1,5 +1,6 @@
 import type { ArtifactsListResult } from "./artifactsTypes.js";
 import type {
+  AccountsRowStates,
   StreamCachePayload,
   StreamContextPayload,
   AgentFileReady,
@@ -218,6 +219,9 @@ type RoutingChooseDecision = {
   // no-healthy-endpoint only: the endpoint keys ("providerID/modelID") the
   // router knows are excluded.
   excluded?: string[];
+  // WS11 D4 (K3): the banner copy for a no-healthy-endpoint verdict, worded by
+  // the box from the router's structured per-key states. Absent on an older box.
+  copy?: string;
   // BET-1537 (W9): WHY each excluded key is excluded — the raw endpoint
   // register state and provider facade state per key (structured; the
   // renderer's shared endpoint/provider labels do the words). A key missing
@@ -1345,9 +1349,19 @@ export interface Api {
         streak?: number;
         since?: number;
         reason?: { httpStatus?: number | null; errorName?: string | null } | null;
+        lastSuccessAt?: number;
+        attempts?: number;
+        successes?: number;
+        /** WS11 D4 (K3): the one-line state, worded by the box. Absent on an older box. */
+        stateLine?: string;
       }
     >;
+    /** WS11 D4 (K3): the worst endpoint per provider (`key` null = "Unproven"). */
+    providerLines?: Record<string, { key: string | null; stateLine: string }>;
   }>;
+  // WS11 D4 (K2): every Accounts row's state text / tone / control / register
+  // line, computed on the box.
+  accountsRowStates(): Promise<AccountsRowStates>;
   // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
   // probe against one endpoint key now. `message` is a factual row string and
   // is NEVER empty — the control reports both outcomes.

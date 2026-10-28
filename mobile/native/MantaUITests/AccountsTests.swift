@@ -211,36 +211,17 @@ final class AccountsTests: XCTestCase {
 
     // MARK: - Seat-move notice (phase 4)
 
-    func testMoveNoticeTextMatchesTheSpecSentences() {
-        func text(_ reason: String?, trigger: SeatMoveTrigger? = nil, crossOrg: Bool? = nil, to: String? = "Work · Seat 2", from: String? = "Seat 1") -> String {
-            AccountsSelectors.moveNoticeText(SeatMoveNoticeInput(reason: reason, fromLabel: from, toLabel: to, trigger: trigger, crossOrg: crossOrg))
-        }
-        XCTAssertEqual(text("load", trigger: SeatMoveTrigger(kind: "session", pct: 91)),
-                       "Moved to Work · Seat 2 (Seat 1 at 91% of 5h).")
-        XCTAssertEqual(text("exhausted", trigger: SeatMoveTrigger(kind: "weekly", pct: 90.6)),
-                       "Moved to Work · Seat 2 (Seat 1 at 91% of the weekly limit).")
-        XCTAssertEqual(text("load", trigger: SeatMoveTrigger(kind: "opus", pct: 92)),
-                       "Moved to Work · Seat 2 (Seat 1 at 92%).")
-        XCTAssertEqual(text("exhausted"), "Moved to Work · Seat 2 (Seat 1 was at its limit).")
-        XCTAssertEqual(text("load"), "Moved to Work · Seat 2 (Seat 1 was near its limit).")
-        XCTAssertEqual(text("unusable"), "Moved to Work · Seat 2 (Seat 1 needed sign-in).")
-        XCTAssertEqual(text("manual", to: "Personal"), "Switched to Personal.")
-    }
-
-    func testMoveNoticeAppendsHistoryResentForACrossOrgMoveAndDegradesGracefully() {
-        func text(_ input: SeatMoveNoticeInput) -> String { AccountsSelectors.moveNoticeText(input) }
-        XCTAssertEqual(
-            text(SeatMoveNoticeInput(reason: "load", fromLabel: "Seat 1", toLabel: "Personal",
-                                     trigger: SeatMoveTrigger(kind: "session", pct: 91), crossOrg: true)),
-            "Moved to Personal (Seat 1 at 91% of 5h). History re-sent.")
-        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "manual", toLabel: "Personal", crossOrg: true)),
-                       "Switched to Personal. History re-sent.")
-        // No labels / unknown reason / empty input: never a guess.
-        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "load", trigger: SeatMoveTrigger(kind: "session", pct: 91))),
-                       "Moved to another seat.")
-        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "weird", fromLabel: "A", toLabel: "B")), "Moved to B.")
-        XCTAssertEqual(text(SeatMoveNoticeInput()), "Moved to another seat.")
-        XCTAssertEqual(text(SeatMoveNoticeInput(reason: "load", fromLabel: "A", toLabel: "  ")), "Moved to another seat (A was near its limit).")
+    // The notice sentence, the dial line and the re-sent figure are the BOX's (WS11 D4 / K5,
+    // pinned in accountsCopy.test.mjs); the phone decodes and shows them.
+    func testSeatMoveDecodesTheBoxsWording() throws {
+        let json = #"{"provider":"claude","seatId":"s2","lastMove":{"from":"s1","fromLabel":"Seat 1","at":1,"reason":"load","text":"Moved to Work · Seat 2 (Seat 1 was near its limit).","line":"Moved from Seat 1 · to balance load","resentText":"history re-sent: 12k"}}"#
+        let seat = try JSONDecoder().decode(SessionSeat.self, from: Data(json.utf8))
+        XCTAssertEqual(seat.lastMove?.text, "Moved to Work · Seat 2 (Seat 1 was near its limit).")
+        XCTAssertEqual(seat.lastMove?.line, "Moved from Seat 1 · to balance load")
+        XCTAssertEqual(seat.lastMove?.resentText, "history re-sent: 12k")
+        let old = try JSONDecoder().decode(SessionSeat.self, from: Data(#"{"provider":"claude","seatId":"s","lastMove":{"from":"a","fromLabel":"A","at":1}}"#.utf8))
+        XCTAssertNil(old.lastMove?.text)
+        XCTAssertNil(old.lastMove?.line)
     }
 
     func testSeatMoveDecodesTheOptionalPhaseFourFields() throws {
@@ -273,23 +254,27 @@ final class AccountsTests: XCTestCase {
         XCTAssertEqual(detail.toLabel, "Work · Seat 2")
         XCTAssertEqual(detail.trigger, SeatMoveTrigger(kind: "weekly", pct: 90))
         XCTAssertEqual(detail.crossOrg, true)
+        XCTAssertNil(detail.text, "an older box words no notice")
     }
 
     private let moveNow = Date(timeIntervalSince1970: 1_750_000_000)
 
-    private func movedSeat(atAgo seconds: Double, trigger: SeatMoveTrigger? = nil, crossOrg: Bool? = nil) -> SessionSeat {
+    private func movedSeat(atAgo seconds: Double, trigger: SeatMoveTrigger? = nil, crossOrg: Bool? = nil, text: String? = nil) -> SessionSeat {
         let atMs = (moveNow.timeIntervalSince1970 - seconds) * 1000
         return SessionSeat(
             provider: "claude", seatId: "seat-2", seatLabel: "Seat 2", accountLabel: "Work",
-            lastMove: SeatMove(from: "seat-1", fromLabel: "Seat 1", at: atMs, reason: "load", trigger: trigger, crossOrg: crossOrg))
+            lastMove: SeatMove(from: "seat-1", fromLabel: "Seat 1", at: atMs, reason: "load", trigger: trigger, crossOrg: crossOrg, text: text))
     }
 
     func testTrackerShowsARecentRecordOnOpenButNotAnOldOne() throws {
         let providers = try decodeList(listJSON)
         let tracker = SeatMoveTracker(hidden: [:], now: moveNow)
-        let fresh = tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 10 * 60, trigger: SeatMoveTrigger(kind: "session", pct: 91)),
+        let fresh = tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 10 * 60, text: "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)."),
                                    providers: providers, now: moveNow)
         XCTAssertEqual(fresh?.text, "Moved to Work · Seat 2 (Seat 1 at 91% of 5h).")
+        // An older box words nothing: a static template, never built from the seat lists.
+        XCTAssertEqual(tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 10 * 60), providers: providers, now: moveNow)?.text,
+                       "Moved to another seat.")
         XCTAssertEqual(fresh?.key, "ses_1|seat-1|seat-2")
 
         XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: movedSeat(atAgo: 31 * 60), providers: providers, now: moveNow))
@@ -300,12 +285,13 @@ final class AccountsTests: XCTestCase {
     func testTrackerShowsABusEventForThisConversationOnly() throws {
         let providers = try decodeList(listJSON)
         var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
-        let event = SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-3", reason: "exhausted", crossOrg: true)
+        let event = SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-3", reason: "exhausted", crossOrg: true,
+                                  text: "Moved to Personal (Seat 1 was at its limit). History re-sent.")
         tracker.noteMoved(SeatMoveEvent(sessionId: "ses_other", from: "seat-1", to: "seat-3", reason: "load"), sessionId: "ses_1", now: moveNow)
         XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
 
         tracker.noteMoved(event, sessionId: "ses_1", now: moveNow)
-        // Names come from the live list: to = "Personal" (single-seat account), from = "Seat 1".
+        // The sentence is the box's.
         XCTAssertEqual(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow)?.text,
                        "Moved to Personal (Seat 1 was at its limit). History re-sent.")
     }
@@ -314,7 +300,7 @@ final class AccountsTests: XCTestCase {
         let providers = try decodeList(listJSON)
         var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
         tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2",
-                                        fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load"), sessionId: "ses_1", now: moveNow)
+                                        fromLabel: "Seat 1", toLabel: "Work · Seat 2", reason: "load", text: "Moved to Work · Seat 2."), sessionId: "ses_1", now: moveNow)
         let shown = try XCTUnwrap(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
         tracker.hide(shown.key, now: moveNow)
         XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow))
@@ -324,7 +310,7 @@ final class AccountsTests: XCTestCase {
         XCTAssertNil(tracker.notice(sessionId: "ses_1", sessionSeat: record, providers: providers, now: moveNow))
 
         // A DIFFERENT move (seat-2 → seat-3) is a new notice.
-        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-2", to: "seat-3", reason: "manual"),
+        tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-2", to: "seat-3", reason: "manual", text: "Switched to Personal."),
                           sessionId: "ses_1", now: moveNow)
         XCTAssertEqual(tracker.notice(sessionId: "ses_1", sessionSeat: nil, providers: providers, now: moveNow)?.text, "Switched to Personal.")
     }
@@ -332,12 +318,12 @@ final class AccountsTests: XCTestCase {
     func testBusEventAndBoxRecordForOneMoveMergeIntoOneLine() throws {
         let providers = try decodeList(listJSON)
         var tracker = SeatMoveTracker(hidden: [:], now: moveNow)
-        // The bus event had no trigger; the box's record (which arrives next) does.
+        // The bus event had no sentence yet; the box's record (which arrives next) does.
         tracker.noteMoved(SeatMoveEvent(sessionId: "ses_1", provider: "claude", from: "seat-1", to: "seat-2", reason: "load"),
                           sessionId: "ses_1", now: moveNow)
         let notice = tracker.notice(
             sessionId: "ses_1",
-            sessionSeat: movedSeat(atAgo: 0, trigger: SeatMoveTrigger(kind: "session", pct: 93)),
+            sessionSeat: movedSeat(atAgo: 0, trigger: SeatMoveTrigger(kind: "session", pct: 93), text: "Moved to Work · Seat 2 (Seat 1 at 93% of 5h)."),
             providers: providers, now: moveNow)
         XCTAssertEqual(notice?.text, "Moved to Work · Seat 2 (Seat 1 at 93% of 5h).")
     }
@@ -554,65 +540,45 @@ final class AccountsTests: XCTestCase {
 
     // MARK: - Last move
 
-    func testLastMoveLineIsShownOnlyWithinFiveHours() {
+    func testLastMoveLineIsTheBoxsLinePlusAgeWithinFiveHours() {
         let now = Date(timeIntervalSince1970: 1_750_000_000)
         let nowMs = 1_750_000_000_000.0
-        let recent = SeatMove(from: "s0", fromLabel: "Seat 1", at: nowMs - 2 * 3600 * 1000, reason: "exhausted")
+        let line = "Moved from Seat 1 · seat was at its limit"
+        let recent = SeatMove(from: "s0", fromLabel: "Seat 1", at: nowMs - 2 * 3600 * 1000, reason: "exhausted", line: line)
         XCTAssertEqual(AccountsSelectors.lastMoveLine(recent, now: now), "Moved from Seat 1 · seat was at its limit · 2h ago")
 
-        let justNow = SeatMove(from: nil, fromLabel: "Seat 1", at: nowMs - 10_000, reason: nil)
+        let justNow = SeatMove(from: nil, fromLabel: "Seat 1", at: nowMs - 10_000, reason: nil, line: "Moved from Seat 1")
         XCTAssertEqual(AccountsSelectors.lastMoveLine(justNow, now: now), "Moved from Seat 1 · just now")
 
-        let old = SeatMove(from: "s0", fromLabel: "Seat 1", at: nowMs - 5 * 3600 * 1000 - 1000, reason: "exhausted")
+        let old = SeatMove(from: "s0", fromLabel: "Seat 1", at: nowMs - 5 * 3600 * 1000 - 1000, reason: "exhausted", line: line)
         XCTAssertNil(AccountsSelectors.lastMoveLine(old, now: now))
 
-        // No timestamp → no claim of recency.
-        XCTAssertNil(AccountsSelectors.lastMoveLine(SeatMove(from: "s0", fromLabel: "Seat 1", at: nil, reason: nil), now: now))
+        // No timestamp → no claim of recency; an older box sends no line → hidden.
+        XCTAssertNil(AccountsSelectors.lastMoveLine(SeatMove(from: "s0", fromLabel: "Seat 1", at: nil, reason: nil, line: line), now: now))
+        XCTAssertNil(AccountsSelectors.lastMoveLine(SeatMove(from: "s0", fromLabel: "Seat 1", at: nowMs, reason: "load"), now: now))
         XCTAssertNil(AccountsSelectors.lastMoveLine(nil, now: now))
-    }
-
-    func testLastMoveFallsBackToTheSeatIdAndPrettifiesAnUnknownReason() {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let move = SeatMove(from: "seat-0", fromLabel: "", at: 1_750_000_000_000 - 90 * 60 * 1000, reason: "load-balance_x")
-        XCTAssertEqual(AccountsSelectors.lastMoveLine(move, now: now), "Moved from seat-0 · load balance x · 1h30m ago")
     }
 
     // MARK: - Labels + copy
 
-    func testNormalizedLabelRules() {
-        XCTAssertEqual(AccountsSelectors.normalizedLabel("  Work  "), "Work")
-        XCTAssertNil(AccountsSelectors.normalizedLabel(""))
-        XCTAssertNil(AccountsSelectors.normalizedLabel("   "))
-        XCTAssertEqual(AccountsSelectors.normalizedLabel(String(repeating: "a", count: 40))?.count, 40)
-        XCTAssertNil(AccountsSelectors.normalizedLabel(String(repeating: "a", count: 41)))
-        XCTAssertNil(AccountsSelectors.normalizedLabel("a\u{0007}b"))
-        XCTAssertNil(AccountsSelectors.normalizedLabel("two\nlines"))
-        // Counted the way the box counts (UTF-16 units): 21 emoji is 42 units.
-        XCTAssertNil(AccountsSelectors.normalizedLabel(String(repeating: "😀", count: 21)))
-        XCTAssertNotNil(AccountsSelectors.normalizedLabel(String(repeating: "😀", count: 20)))
-    }
-
     func testFailureCopyNamesTheActionAndTheReason() {
-        XCTAssertEqual(AccountsCopy.failure("remove the seat", MantaError.server("live-seat")),
-                       "Couldn't remove the seat — that is the box's live login — switch to another seat before removing it")
-        XCTAssertEqual(AccountsCopy.reason(forCode: "invalid-label"), "names must be 1–40 characters")
-        XCTAssertEqual(AccountsCopy.reason(forCode: "unknown-seat"), "that seat no longer exists — pull to refresh")
-        XCTAssertEqual(AccountsCopy.reason(forCode: "login-failed"), "sign-in failed — try again")
+        // The box words every refusal (WS11 D4 / K7): the phone shows its sentence as sent.
+        let live = "This is the login the box is using right now, so it can't be removed."
+        XCTAssertEqual(AccountsCopy.failure("remove the seat", MantaError.server(live)), "Couldn't remove the seat — \(live)")
         XCTAssertEqual(AccountsCopy.reason(for: MantaError.transport("x")), "check the connection and try again")
         XCTAssertEqual(AccountsCopy.reason(for: MantaError.authRequired), "the box rejected this device — pair it again")
         // A box that predates the feature answers with an unknown-channel error.
-        XCTAssertEqual(AccountsCopy.reason(forCode: "unknown rpc channel: accounts:list"), AccountsCopy.staleBox)
-        // Anything else is shown as the box sent it, never swallowed.
-        XCTAssertEqual(AccountsCopy.reason(forCode: "disk on fire"), "disk on fire")
-        XCTAssertEqual(AccountsCopy.reason(forCode: "  "), "something went wrong — try again")
+        XCTAssertEqual(AccountsCopy.reason(for: MantaError.server("unknown rpc channel: accounts:list")), AccountsCopy.staleBox)
+        // Anything else is shown as the box sent it, never swallowed; a blank one is the static line.
+        XCTAssertEqual(AccountsCopy.reason(for: MantaError.server("disk on fire")), "disk on fire")
+        XCTAssertEqual(AccountsCopy.reason(for: MantaError.server("  ")), AccountsCopy.fallback)
     }
 
     // MARK: - Removing the live seat
 
     func testLastSeatAndNoReplacementCopy() {
-        XCTAssertEqual(AccountsCopy.failure("remove the seat", MantaError.server("last-seat")),
-                       "Couldn't remove the seat — this is the only login on this box — use Disconnect instead")
-        XCTAssertEqual(AccountsCopy.reason(forCode: "no-replacement"), "no other login is signed in and ready to take over")
+        let only = "This is the only login on this box — use Disconnect instead."
+        XCTAssertEqual(AccountsCopy.failure("remove the seat", MantaError.server(only)), "Couldn't remove the seat — \(only)")
     }
 
     func testLiveSeatReplacementPrefersTheActiveSeatThenTheLeastLoaded() {

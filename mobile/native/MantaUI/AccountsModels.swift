@@ -216,10 +216,15 @@ struct SeatMove: Decodable, Equatable, Sendable {
     var trigger: SeatMoveTrigger? = nil
     /// Phase 4 (optional on the wire): the move crossed orgs, so the history was re-sent.
     var crossOrg: Bool? = nil
+    /// WS11 D4 (K5), worded by the box: the notice sentence, the line without its age and
+    /// the re-sent figure. nil on an older box.
+    var text: String? = nil
+    var line: String? = nil
+    var resentText: String? = nil
 }
 
 extension SeatMove {
-    private enum CodingKeys: String, CodingKey { case from, fromLabel, at, reason, trigger, crossOrg }
+    private enum CodingKeys: String, CodingKey { case from, fromLabel, at, reason, trigger, crossOrg, text, line, resentText }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -228,6 +233,9 @@ extension SeatMove {
         reason = try? c.decodeIfPresent(String.self, forKey: .reason)
         trigger = try? c.decodeIfPresent(SeatMoveTrigger.self, forKey: .trigger)
         crossOrg = try? c.decodeIfPresent(Bool.self, forKey: .crossOrg)
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil
+        line = (try? c.decodeIfPresent(String.self, forKey: .line)) ?? nil
+        resentText = (try? c.decodeIfPresent(String.self, forKey: .resentText)) ?? nil
         // `at` is an epoch-ms number; an ISO-8601 string is tolerated too.
         if let n = (try? c.decodeIfPresent(Double.self, forKey: .at)) ?? nil {
             at = n
@@ -267,6 +275,14 @@ extension SessionSeat {
 
 // MARK: - Action replies
 
+/// A refusal of an `accounts:*` call: the contract's `code` (so a flow can tell WHICH refusal
+/// it is) and the box's `message` — the sentence shown (WS11 D4 / K7). An older box words no
+/// error, so `message` is then the static fallback, never the raw code.
+struct AccountsRefusal: Error, Equatable, Sendable {
+    let code: String
+    let message: String
+}
+
 /// The reply of a channel that answers a `ProviderView` — OR `{error: code}`.
 /// The contract lists its class-1 error literals as a `{error}` body, which
 /// reaches the client either as the rpc envelope's `error` (thrown by the
@@ -274,12 +290,15 @@ extension SessionSeat {
 /// second form so the caller can throw the same error for both.
 struct AccountsActionReply: Decodable, Equatable, Sendable {
     var error: String? = nil
+    /// The box's sentence for `error` (WS11 D4 / K7); nil on an older box.
+    var message: String? = nil
     var provider: AccountsProvider? = nil
 
-    private enum CodingKeys: String, CodingKey { case error }
+    private enum CodingKeys: String, CodingKey { case error, message }
 
-    init(error: String? = nil, provider: AccountsProvider? = nil) {
+    init(error: String? = nil, message: String? = nil, provider: AccountsProvider? = nil) {
         self.error = error
+        self.message = message
         self.provider = provider
     }
 
@@ -288,6 +307,7 @@ struct AccountsActionReply: Decodable, Equatable, Sendable {
         let code = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
         if let code, !code.isEmpty {
             error = code
+            message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
             provider = nil
         } else {
             error = nil
@@ -419,6 +439,8 @@ struct SeatMoveEvent: Equatable, Sendable {
     var reason: String? = nil
     var trigger: SeatMoveTrigger? = nil
     var crossOrg: Bool? = nil
+    /// The notice sentence, worded by the box (nil on an older box).
+    var text: String? = nil
 
     static func parse(_ frame: MantaStreamFrame) -> SeatMoveEvent {
         let object: [String: JSONValue] = {
@@ -440,7 +462,8 @@ struct SeatMoveEvent: Equatable, Sendable {
             toLabel: string("toLabel"),
             reason: string("reason"),
             trigger: SeatMoveTrigger.from(object["trigger"]),
-            crossOrg: crossOrg
+            crossOrg: crossOrg,
+            text: string("text")
         )
     }
 }
@@ -481,15 +504,6 @@ struct SeatMoveNotice: Equatable, Identifiable, Sendable {
     var id: String { key }
 }
 
-/// What the notice's sentence is built from.
-struct SeatMoveNoticeInput: Equatable, Sendable {
-    var reason: String? = nil
-    var fromLabel: String? = nil
-    var toLabel: String? = nil
-    var trigger: SeatMoveTrigger? = nil
-    var crossOrg: Bool? = nil
-}
-
 /// One move as the tracker sees it — from the bus event or the box's record.
 struct SeatMoveCandidate: Equatable, Sendable {
     var key: String
@@ -502,6 +516,8 @@ struct SeatMoveCandidate: Equatable, Sendable {
     var reason: String?
     var trigger: SeatMoveTrigger?
     var crossOrg: Bool?
+    /// The notice sentence, from the box (nil on an older box).
+    var text: String?
 }
 
 extension AccountsSelectors {
@@ -517,77 +533,6 @@ extension AccountsSelectors {
     /// survive that handover.
     static func moveNoticeKey(sessionId: String, from: String?, to: String?) -> String {
         "\(sessionId)|\(from ?? "")|\(to ?? "")"
-    }
-
-    /// "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." — the parenthetical says
-    /// why; a cross-org move appends " History re-sent." (no token count: the box
-    /// does not send one). Unknown reasons and missing labels degrade to the
-    /// plain "Moved to X." instead of guessing.
-    static func moveNoticeText(_ input: SeatMoveNoticeInput) -> String {
-        let target = nonEmptyTrimmed(input.toLabel) ?? "another seat"
-        let origin = nonEmptyTrimmed(input.fromLabel)
-        var percentText: String?
-        var windowName: String?
-        if let trigger = input.trigger, trigger.pct.isFinite {
-            percentText = "\(Int(UsageMeters.clamp(trigger.pct).rounded()))%"
-            switch trigger.kind {
-            case "weekly": windowName = "the weekly limit"
-            case "session": windowName = "5h"
-            default: windowName = nil
-            }
-        }
-        let reasonKey = input.reason ?? ""
-        var why: String?
-        if let origin {
-            switch reasonKey {
-            case "unusable":
-                why = "\(origin) needed sign-in"
-            case "load", "exhausted":
-                if let percentText {
-                    let scope = windowName.map { " of \($0)" } ?? ""
-                    why = "\(origin) at \(percentText)\(scope)"
-                } else {
-                    why = reasonKey == "exhausted" ? "\(origin) was at its limit" : "\(origin) was near its limit"
-                }
-            default:
-                why = nil
-            }
-        }
-        let head = reasonKey == "manual" ? "Switched to \(target)" : "Moved to \(target)"
-        let sentence = why.map { "\(head) (\($0))." } ?? "\(head)."
-        return input.crossOrg == true ? "\(sentence) History re-sent." : sentence
-    }
-
-    fileprivate static func nonEmptyTrimmed(_ raw: String?) -> String? {
-        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
-    }
-
-    /// A seat's display name by id — "Work · Seat 2" — from the live list first
-    /// (a rename shows at once), else from what the box last said about the
-    /// conversation's own seat. Empty when nothing names it.
-    fileprivate static func moveSeatName(
-        _ seatId: String,
-        provider: String?,
-        sessionSeat: SessionSeat?,
-        providers: [AccountsProvider]
-    ) -> String {
-        let own: SessionSeat? = sessionSeat?.seatId == seatId ? sessionSeat : nil
-        let providerId = provider ?? own?.provider
-        let providerView: AccountsProvider? = providers.first { $0.provider == providerId }
-        let foundSeat: AccountsSeat? = providerView.flatMap { AccountsSelectors.seat(seatId, in: $0) }
-        let foundAccount: AccountsAccount? = providerView.flatMap { AccountsSelectors.account(containing: seatId, in: $0) }
-        let base = own ?? SessionSeat(provider: providerId ?? "", seatId: seatId)
-        return ConversationSeat(sessionSeat: base, provider: providerView, account: foundAccount, seat: foundSeat).displayName
-    }
-
-    /// The short seat label ("Seat 1") of the seat a conversation left, from the
-    /// live list; nil when the list no longer has it.
-    fileprivate static func moveOriginLabel(_ seatId: String?, provider: String?, providers: [AccountsProvider]) -> String? {
-        guard let seatId else { return nil }
-        let providerView: AccountsProvider? = providers.first { $0.provider == provider }
-        let label = providerView.flatMap { AccountsSelectors.seat(seatId, in: $0)?.label }
-        return nonEmptyTrimmed(label)
     }
 }
 
@@ -634,7 +579,8 @@ struct SeatMoveTracker: Equatable, Sendable {
             toLabel: event.toLabel,
             reason: event.reason,
             trigger: event.trigger,
-            crossOrg: event.crossOrg
+            crossOrg: event.crossOrg,
+            text: event.text
         )
     }
 
@@ -659,7 +605,8 @@ struct SeatMoveTracker: Equatable, Sendable {
                 toLabel: nil,
                 reason: move.reason,
                 trigger: move.trigger,
-                crossOrg: move.crossOrg
+                crossOrg: move.crossOrg,
+                text: move.text
             )
         }
         var liveFresh: SeatMoveCandidate?
@@ -678,21 +625,10 @@ struct SeatMoveTracker: Equatable, Sendable {
         }
         guard let chosen, hidden[chosen.key] == nil else { return nil }
 
-        var targetName = chosen.toLabel
-        if (targetName ?? "").isEmpty, let toId = chosen.to {
-            targetName = AccountsSelectors.moveSeatName(toId, provider: chosen.provider, sessionSeat: sessionSeat, providers: providers)
-        }
-        var originName = chosen.fromLabel
-        if (originName ?? "").isEmpty {
-            originName = AccountsSelectors.moveOriginLabel(chosen.from, provider: chosen.provider ?? sessionSeat?.provider, providers: providers)
-        }
-        let text = AccountsSelectors.moveNoticeText(SeatMoveNoticeInput(
-            reason: chosen.reason,
-            fromLabel: originName,
-            toLabel: targetName,
-            trigger: chosen.trigger,
-            crossOrg: chosen.crossOrg
-        ))
+        // The sentence is the box's. An older box words none: a static "Moved to <label>."
+        // from the payload's own label (never built from the seat lists).
+        let target = (chosen.toLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = chosen.text ?? "Moved to \(target.isEmpty ? "another seat" : target)."
         return SeatMoveNotice(key: chosen.key, text: text)
     }
 
@@ -706,6 +642,7 @@ struct SeatMoveTracker: Equatable, Sendable {
         out.reason = fromBox.reason ?? fromBus.reason
         out.trigger = fromBox.trigger ?? fromBus.trigger
         out.crossOrg = fromBox.crossOrg ?? fromBus.crossOrg
+        out.text = fromBox.text ?? fromBus.text
         return out
     }
 }
@@ -732,6 +669,8 @@ enum AccountsCopy {
     static let nothingConnected = "Nothing is connected yet. Connect a subscription or add an endpoint below."
     static let routingInactive = "Seat routing isn't active on this box yet, so conversations keep using the live login for now."
     static let staleBox = "This box doesn't support multiple accounts yet — update it to manage seats here."
+    /// An older box words no error; this is the static line (WS11 D4 / K7).
+    static let fallback = "That didn't work. Try again."
 
     /// Why Remove is unavailable for the only login of a provider (the box's
     /// `last-seat` literal, so the menu item and the refusal read the same).
@@ -766,6 +705,7 @@ enum AccountsCopy {
     /// class-1 literals; anything else is shown as the box sent it (it is
     /// already a safe literal), and transport/auth failures say what to check.
     static func reason(for error: Error) -> String {
+        if let refusal = error as? AccountsRefusal { return refusal.message }
         if let manta = error as? MantaError {
             switch manta {
             case .authRequired:
@@ -773,31 +713,17 @@ enum AccountsCopy {
             case .transport:
                 return "check the connection and try again"
             case .server(let message):
-                return reason(forCode: message)
+                // The box words every refusal (`message`, WS11 D4 / K7); only the
+                // "this box predates the channel" refusal is classified here.
+                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.lowercased().hasPrefix("unknown rpc channel") { return staleBox }
+                return trimmed.isEmpty ? fallback : trimmed
             case .storedButUntranscribed:
                 return "something went wrong — try again"
             }
         }
         let text = error.localizedDescription
         return text.isEmpty ? "something went wrong — try again" : text
-    }
-
-    static func reason(forCode code: String) -> String {
-        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        switch trimmed {
-        case "unknown-seat": return "that seat no longer exists — pull to refresh"
-        case "invalid-label": return "names must be 1–40 characters"
-        case "live-seat": return "that is the box's live login — switch to another seat before removing it"
-        case "last-seat": return "this is the only login on this box — use Disconnect instead"
-        case "no-replacement": return "no other login is signed in and ready to take over"
-        case "unknown-provider": return "that provider isn't set up on this box"
-        case "login-failed": return "sign-in failed — try again"
-        case "duplicate-login": return "that login is already added"
-        case "different-org": return "that login belongs to a different organisation"
-        default:
-            if trimmed.lowercased().hasPrefix("unknown rpc channel") { return staleBox }
-            return trimmed.isEmpty ? "something went wrong — try again" : trimmed
-        }
     }
 
     /// "Couldn't rename the seat — names must be 1–40 characters".
@@ -1125,27 +1051,15 @@ enum AccountsSelectors {
 
     // MARK: Last move
 
-    /// "Moved from Seat 1 · seat was at its limit · 2h ago", or nil when the
-    /// conversation has not moved in the last 5 hours (or the box gave no time).
+    /// The box's line ("Moved from Seat 1 · seat was at its limit") plus the age from this
+    /// phone's clock, or nil when the conversation has not moved in the last 5 hours, the
+    /// box gave no time, or an older box sent no wording (WS11 D4 / K5).
     static func lastMoveLine(_ move: SeatMove?, now: Date) -> String? {
-        guard let move, let at = move.at, at.isFinite else { return nil }
+        guard let move, let line = move.line, !line.isEmpty, let at = move.at, at.isFinite else { return nil }
         let ageSeconds = now.timeIntervalSince1970 - at / 1000
         // A little negative age is clock skew between box and phone, not the future.
         guard ageSeconds > -60, ageSeconds <= recentMoveSeconds else { return nil }
-        let from = !move.fromLabel.isEmpty ? move.fromLabel : (move.from ?? "")
-        var parts = [from.isEmpty ? "Moved from another seat" : "Moved from \(from)"]
-        if let reason = reasonText(move.reason) { parts.append(reason) }
-        parts.append(agoText(seconds: Int(max(0, ageSeconds))))
-        return parts.joined(separator: " · ")
-    }
-
-    static func reasonText(_ reason: String?) -> String? {
-        guard let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty else { return nil }
-        switch reason {
-        case "exhausted": return "seat was at its limit"
-        case "load", "balance": return "to balance load"
-        default: return reason.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
-        }
+        return "\(line) · \(agoText(seconds: Int(max(0, ageSeconds))))"
     }
 
     static func agoText(seconds: Int) -> String {
@@ -1153,15 +1067,6 @@ enum AccountsSelectors {
     }
 
     // MARK: Labels
-
-    /// A rename's text: trimmed, 1–40 UTF-16 units (the server counts the way
-    /// JavaScript does), no control characters. nil = invalid.
-    static func normalizedLabel(_ raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.utf16.count <= 40 else { return nil }
-        if trimmed.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) { return nil }
-        return trimmed
-    }
 
     // MARK: Small formatting
 

@@ -47,6 +47,7 @@
 //   out like add-seat flows. Cancel deletes only the temp directory / gives the
 //   borrowed live login back — it never removes or rewrites the seat.
 
+import { withErrorMessage } from "./accountsCopy.mjs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -1106,9 +1107,10 @@ export function createAccountsManager({
   function channel(name, fn) {
     return async (input) => {
       try {
-        return await fn(isObj(input) ? input : {});
+        // WS11 D4 (K7): a `{error: code}` result gains the sentence for that code.
+        return withErrorMessage(await fn(isObj(input) ? input : {}));
       } catch (e) {
-        if (e instanceof AccountsError) return { error: e.code };
+        if (e instanceof AccountsError) return withErrorMessage({ error: e.code });
         log.warn?.(`[accounts] ${name} failed:`, e?.message ?? e);
         throw new Error(ACCOUNTS_SAFE_ERROR_MESSAGE);
       }

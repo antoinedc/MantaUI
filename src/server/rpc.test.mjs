@@ -2048,9 +2048,14 @@ test("accounts:health returns the provider facade AND the per-endpoint detail fr
       }),
     },
   };
+  deps.getProviderEndpoints = async () => [{ id: "acme", enabledModels: ["m1"] }];
   const handlers = buildHandlers(deps);
   const out = await handlers["accounts:health"]();
   assert.deepEqual(out.providers, { anthropic: { state: "rate-limited", retryInMs: 4 * 60_000 } });
+  // WS11 D4 (K3): each endpoint carries its worded line; the worst per provider is named.
+  assert.match(out.endpoints["anthropic/claude-x"].stateLine, /^Rate limited · retry in 3m · HTTP 429 · APIError|^Rate limited · retry in 3m · HTTP 429/);
+  assert.deepEqual(out.providerLines.anthropic.key, "anthropic/claude-x");
+  assert.deepEqual(out.providerLines.acme, { key: null, stateLine: "Unproven" });
   assert.equal(out.endpoints["anthropic/claude-x"].state, "rate-limited");
   assert.equal(out.endpoints["anthropic/claude-x"].reason.httpStatus, 429);
   // Not wired → BOTH maps degrade, never throw.
@@ -2059,6 +2064,25 @@ test("accounts:health returns the provider facade AND the per-endpoint detail fr
   const handlers2 = buildHandlers(deps2.deps);
   const empty = await handlers2["accounts:health"]();
   assert.deepEqual(empty, { providers: {}, endpoints: {} });
+});
+
+test("accounts:row-states builds every row on the box and never throws when a source fails (WS11 D4 / K2)", async () => {
+  const { deps } = makeDeps([]);
+  deps.oc.readAuthedProviderIds = async () => ["anthropic"];
+  deps.getProviderEndpoints = async () => [{ id: "acme", name: "Acme", hasApiKey: true, enabledModels: ["m1"] }];
+  deps.providerHealth = { all: () => ({}), engine: { endpointDetail: () => ({ "acme/m1": { state: "dead" } }) } };
+  const handlers = buildHandlers(deps);
+  const out = await handlers["accounts:row-states"]();
+  assert.equal(out.rows.acme.registerLine, "Dead");
+  assert.ok(out.rows.anthropic, "the subscription statuses come from the box's own auth store");
+  // "none" when this box's own Claude CLI owns the credential (the detect path exists), else a Disconnect.
+  assert.ok(["disconnect", "none"].includes(out.rows.anthropic.control));
+  assert.equal(out.rows.openai.control, "connect");
+  const broken = makeDeps([]);
+  broken.deps.oc.readAuthedProviderIds = async () => { throw new Error("auth store gone"); };
+  broken.deps.getProviderEndpoints = async () => { throw new Error("config gone"); };
+  const rows = await buildHandlers(broken.deps)["accounts:row-states"]();
+  assert.deepEqual(rows, { rows: {} });
 });
 
 test("accounts:endpoint-probe reports BOTH branches and validates its input", async () => {

@@ -226,9 +226,10 @@ describe("ModelChecklist endpoint states", () => {
         onToggle={() => {}}
         disabled={false}
         states={{
-          a: { state: "unproven" },
-          b: { state: "rate-limited", retryInMs: 3.4 * 60_000 },
-          c: { state: "dead" },
+          // The words are the box's (`stateLine`, WS11 D4): the checklist renders them as given.
+          a: { state: "unproven", stateLine: "Unproven" },
+          b: { state: "rate-limited", stateLine: "Rate limited · retry in 4m" },
+          c: { state: "dead", stateLine: "Dead" },
         }}
       />,
     );

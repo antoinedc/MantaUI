@@ -1580,6 +1580,7 @@ export const IPC = {
   accountsRetry: "accounts:retry",
   // BET-1250: per-provider health snapshot for the merged Accounts list.
   accountsHealth: "accounts:health",
+  accountsRowStates: "accounts:row-states",
   // BET-1537 (S5): "Send probe" on a custom endpoint row — force a health
   // probe against one endpoint key now, report both branches.
   accountsEndpointProbe: "accounts:endpoint-probe",
@@ -2531,10 +2532,14 @@ export type AccountsError =
   | "unknown-provider"
   | "login-failed"
   | "last-seat"
-  | "no-replacement";
+  | "no-replacement"
+  | "duplicate-login"
+  | "different-org"
+  | "different-account"
+  | "unknown-flow";
 
 /** A mutation answers the refreshed provider, or a class-1 safe error code. */
-export type ProviderViewResult = ProviderView | { error: AccountsError };
+export type ProviderViewResult = ProviderView | { error: AccountsError; message?: string };
 
 /** `connect` of accounts:add-seat — the SAME shape the existing connect flow
  *  (`opencode:provider-auth` start) answers: `claude-login` carries a
@@ -2549,7 +2554,7 @@ export type SeatConnect = {
   cwd?: string;
 };
 
-export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: AccountsError };
+export type AddSeatResult = { seatId: string; connect: SeatConnect } | { error: AccountsError; message?: string };
 
 export type SeatStatusResult = {
   state: "pending" | "ok" | "failed";
@@ -2561,7 +2566,7 @@ export type SeatStatusResult = {
 
 /** accounts:resign-seat — a sign-in flow for an EXISTING seat. `flowId` keys
  *  resign-status / resign-cancel; the seat keeps its id, label and assignments. */
-export type ResignSeatResult = { flowId: string; connect: SeatConnect } | { error: AccountsError };
+export type ResignSeatResult = { flowId: string; connect: SeatConnect } | { error: AccountsError; message?: string };
 
 export type ResignStatusResult = {
   state: "pending" | "ok" | "failed";
@@ -2592,6 +2597,10 @@ export type SessionSeat = {
     resentTokens?: number;
     /** Phase 4: the reading that drove an automatic move ("5h at 91%"). */
     trigger?: SeatMoveTrigger | null;
+    /** WS11 D4 (K5), worded by the box: the notice sentence, the dial line (no age), the re-sent figure. */
+    text?: string;
+    line?: string;
+    resentText?: string | null;
   };
 };
 
@@ -2614,6 +2623,23 @@ export type AccountsMovedPayload = {
   trigger?: SeatMoveTrigger | null;
   /** The move crossed orgs, so the history was re-sent. */
   crossOrg?: boolean;
+  /** WS11 D4 (K5), worded by the box. Absent on an older box. */
+  text?: string;
+  line?: string;
+  resentText?: string | null;
+};
+
+/** `accounts:row-states` (WS11 D4 / K2): every Accounts row's words and control, built on the box. */
+export type AccountsRowStates = {
+  rows: Record<
+    string,
+    {
+      text: string;
+      tone: "ok" | "warn" | "danger" | "quiet";
+      control: "retry" | "disconnect" | "connect" | "none";
+      registerLine: string | null;
+    }
+  >;
 };
 
 // The list-level read of the stopped record: the records plus the modal's

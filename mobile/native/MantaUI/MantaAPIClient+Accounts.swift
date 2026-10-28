@@ -15,13 +15,20 @@ import Foundation
 
 extension MantaAPIClient {
 
+    /// The box's sentence for a refused `accounts:*` call; an older box words none, so the
+    /// static fallback (never the raw code).
+    static func accountsMessage(_ object: [String: JSONValue]) -> String {
+        if case .string(let message)? = object["message"], !message.isEmpty { return message }
+        return AccountsCopy.fallback
+    }
+
     // MARK: - Re-sign a seat
 
     /// `accounts:resign-seat` — start signing a logged-out seat back in. The box
     /// refuses the live seat (`live-seat`).
     func accountsResignSeat(provider: String, seatId: String) async throws -> ResignSeatReply {
         let object = try await callRequired("accounts:resign-seat", args: [["provider": provider, "seatId": seatId]], as: [String: JSONValue].self)
-        if case .string(let code)? = object["error"], !code.isEmpty { throw MantaError.server(code) }
+        if case .string(let code)? = object["error"], !code.isEmpty { throw AccountsRefusal(code: code, message: Self.accountsMessage(object)) }
         guard case .string(let flowId)? = object["flowId"], !flowId.isEmpty else {
             throw MantaError.transport("accounts:resign-seat returned no flow")
         }
@@ -44,6 +51,12 @@ extension MantaAPIClient {
     /// empty maps).
     func accountsHealth() async throws -> AccountsHealth {
         try await callRequired("accounts:health", args: [], as: AccountsHealth.self)
+    }
+
+    /// `accounts:row-states` (WS11 D4 / K2) — every row's words, tone, control and register
+    /// line, built by the box. An older box throws "unknown rpc channel".
+    func accountsRowStates() async throws -> AccountRowStatesReply {
+        try await callRequired("accounts:row-states", args: [], as: AccountRowStatesReply.self)
     }
 
     /// `accounts:retry` — the out-of-credit "Try again". The message is never empty.

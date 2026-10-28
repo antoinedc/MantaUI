@@ -2266,3 +2266,19 @@ Review: `reviews/server-first-3/11-server-consolidation.md`, plus
 | 4 (SHOULD) | Master rows edited minimally. Shared member registry: `apiVersion()` added for iOS (WS10 `+Settings` wave-D note) and desktop (`window.api` WS11 sentence); labeled `sessionsClosePreview(project:windowIndex:)` / `sessionsClose(project:windowIndex:dirtyWorktree:)`; WS01 types row now notes that `from(kind:messageID:)` is replaced by `from(payload:)` in D8 (the B contract is unchanged). M-09-4 now lists D22's `TranscriptMediaStore.shared.resetForBoxChange()` (same applier, IB). WS11 D6 prose uses the labeled signatures. |
 | X-S1 (sf-2 cross-cutting) | Same edits as finding 4. |
 | X-S2 (sf-2 cross-cutting) | Already resolved in server-first-2 finding 7 (latch outside the lock, no barrier inside the critical section); confirmed by the server-first-3 review. No further change. |
+
+## Implementation notes (D4)
+
+- **K2 moved cleanly — no dependency on the client-only routing catalog.** `accounts:row-states` needs only the
+  reads the Accounts card already made (subscription statuses, usage snapshots, provider health, the custom
+  endpoint list, the endpoint register). The routing-catalog code (`endpointEligibility`, `describeMissing`,
+  help text) feeds the row's help line and "Auto needs" gaps, which are NOT part of K2's words and stay on the
+  desktop; they will move with the models/eligibility work, not here.
+- `accounts:*` error results carry `message` (K7) next to `error`; the code stays so flows can branch on it
+  (iOS: `AccountsRefusal{code,message}`). Codes beyond the spec's list that the box can emit
+  (`duplicate-login`, `different-org`, `different-account`, `unknown-flow`) have sentences too.
+- `routing:choose` no-healthy verdict gains `copy`; `accounts:health` gains `endpoints[*].stateLine` and
+  `providerLines`; move payloads (`accounts.moved`, `accounts:session-seat.lastMove`) gain `text`/`line`/`resentText`.
+  The client adds only its own clock: the "· 2h ago" suffix and the 5h visibility window.
+- Older box: desktop and iOS show the static "That didn't work. Try again." for errors, no row state/control and
+  the "Update your box to use this" note on the Accounts screen; no client copy of the moved logic remains.

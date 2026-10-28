@@ -371,16 +371,17 @@ final class AccountsSignInTests: XCTestCase {
     }
 
     func testStartFailureMapsLiveSeatOnlyForResign() {
-        XCTAssertEqual(AccountsSignInCopy.startFailure(MantaError.server("live-seat"), resign: true), AccountsSignInCopy.liveSeatRace)
+        let live = AccountsRefusal(code: "live-seat", message: "This is the login the box is using right now, so it can't be removed.")
+        XCTAssertEqual(AccountsSignInCopy.startFailure(live, resign: true), AccountsSignInCopy.liveSeatRace)
         XCTAssertEqual(
-            AccountsSignInCopy.startFailure(MantaError.server("live-seat"), resign: false),
-            "Couldn't start the sign-in — that is the box's live login — switch to another seat before removing it",
-            "the general live-seat text is about removal"
+            AccountsSignInCopy.startFailure(live, resign: false),
+            "Couldn't start the sign-in — \(live.message)",
+            "the general live-seat text is the box's sentence"
         )
         XCTAssertEqual(AccountsSignInCopy.startFailure(MantaError.transport("x"), resign: true), AccountsSignInCopy.startUnreachable)
         XCTAssertEqual(
-            AccountsSignInCopy.startFailure(MantaError.server("unknown-provider"), resign: false),
-            "Couldn't start the sign-in — that provider isn't set up on this box"
+            AccountsSignInCopy.startFailure(AccountsRefusal(code: "unknown-provider", message: "That provider doesn't support several accounts."), resign: false),
+            "Couldn't start the sign-in — That provider doesn't support several accounts."
         )
     }
 

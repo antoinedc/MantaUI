@@ -2,6 +2,7 @@
 // service + seat assigner over a temp sandbox. Only the world is faked: the
 // Anthropic profile endpoint, the claude-login launcher, opencode's OAuth flow
 // and its auth store.
+import { accountsErrorMessage } from "./accountsCopy.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from "node:fs/promises";
@@ -152,11 +153,11 @@ test("set-mode / set-active: persisted, return the ProviderView; bad input → c
     const a = await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-1" });
     assert.equal(a.activeSeatId, "seat-1");
     assert.equal(a.nextSeatId, "seat-1", "manual: the next seat is the active seat");
-    assert.deepEqual(await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:set-active", { provider: "nope", seatId: "seat-1" }), { error: "unknown-provider" });
-    assert.deepEqual(await ch(r, "accounts:set-mode", { provider: "claude", mode: "turbo" }), { error: "unknown-provider" });
-    assert.deepEqual(await ch(r, "accounts:set-mode", { provider: "codex", mode: "auto" }), { error: "unknown-provider" }, "no seats for that provider");
-    assert.deepEqual(await ch(r, "accounts:set-mode", undefined), { error: "unknown-provider" });
+    assert.deepEqual(await ch(r, "accounts:set-active", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:set-active", { provider: "nope", seatId: "seat-1" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
+    assert.deepEqual(await ch(r, "accounts:set-mode", { provider: "claude", mode: "turbo" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
+    assert.deepEqual(await ch(r, "accounts:set-mode", { provider: "codex", mode: "auto" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") }, "no seats for that provider");
+    assert.deepEqual(await ch(r, "accounts:set-mode", undefined), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
   } finally {
     await r.cleanup();
   }
@@ -170,11 +171,11 @@ test("rename: seat and account; label is trimmed; 1–40 chars, no control chara
     const b = await ch(r, "accounts:rename", { provider: "claude", kind: "account", id: "acct-1", label: "Work" });
     assert.equal(b.accounts[0].label, "Work");
     for (const bad of ["", "   ", "x".repeat(41), "a\nb", 5, undefined]) {
-      assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "seat", id: "seat-1", label: bad }), { error: "invalid-label" }, JSON.stringify(bad));
+      assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "seat", id: "seat-1", label: bad }), { error: "invalid-label", message: accountsErrorMessage("invalid-label") }, JSON.stringify(bad));
     }
-    assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "seat", id: "nope", label: "x" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "weird", id: "seat-1", label: "x" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:rename", { provider: "x", kind: "seat", id: "seat-1", label: "x" }), { error: "unknown-provider" });
+    assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "seat", id: "nope", label: "x" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:rename", { provider: "claude", kind: "weird", id: "seat-1", label: "x" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:rename", { provider: "x", kind: "seat", id: "seat-1", label: "x" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
     const stored = (await r.accounts.getStore()).providers.claude;
     assert.equal(allSeats(stored).find((s) => s.id === "seat-1").label, "Boss");
   } finally {
@@ -241,8 +242,8 @@ test("auto mode view: nextSeatId is the least-loaded seat; conversations counted
 test("remove-seat: the seat, its directory and its conversations' assignments go", async () => {
   const r = await rig();
   try {
-    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider" });
+    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
     r.setSnaps([{ provider: "claude", seatId: "seat-1", windows: [{ kind: "session", pct: 1 }] }, { provider: "claude", seatId: "seat-2", windows: [{ kind: "session", pct: 50 }] }]);
     await r.seatAssigner.resolve("claude", "ses_x");
     assert.equal(r.seatAssigner.assignments("claude").ses_x.seatId, "seat-1");
@@ -365,7 +366,7 @@ test("remove-seat: the only seat is refused with last-seat; other seats with no 
   const r = await rig();
   try {
     await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-1" });
-    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "last-seat" });
+    assert.deepEqual(await ch(r, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "last-seat", message: accountsErrorMessage("last-seat") });
     assert.equal(await readFile(r.paths.claudeLivePath, "utf-8"), credsJson("tok-B"));
     assert.deepEqual(allSeats((await r.accounts.getStore()).providers.claude).map((s) => s.id), ["seat-2"]);
   } finally {
@@ -374,7 +375,7 @@ test("remove-seat: the only seat is refused with last-seat; other seats with no 
   const r2 = await rig();
   try {
     await rm(join(r2.paths.seatsRoot, "claude", "seat-1", ".credentials.json")); // seat-1 can no longer serve
-    assert.deepEqual(await ch(r2, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "no-replacement" });
+    assert.deepEqual(await ch(r2, "accounts:remove-seat", { provider: "claude", seatId: "seat-2" }), { error: "no-replacement", message: accountsErrorMessage("no-replacement") });
     assert.equal(await readFile(r2.paths.claudeLivePath, "utf-8"), credsJson("tok-B"));
   } finally {
     await r2.cleanup();
@@ -479,12 +480,12 @@ test("add-seat (claude): the same login again → failed/duplicate-login and the
     const { seatId } = await ch(r, "accounts:add-seat", { provider: "claude" });
     const dir = join(r.paths.seatsRoot, "claude", seatId);
     await writeFile(join(dir, ".credentials.json"), credsJson("tok-A2"));
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login", message: accountsErrorMessage("duplicate-login") });
     assert.equal(await r.exists(dir), false);
     assert.equal(allSeats((await r.accounts.getStore()).providers.claude).length, 2);
     assert.equal(r.calls.claudeCancel.length, 1, "the login process is stopped too");
     // The answer stays stable.
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login", message: accountsErrorMessage("duplicate-login") });
   } finally {
     await r.cleanup();
   }
@@ -497,7 +498,7 @@ test("add-seat (claude) with accountId + a DIFFERENT org: failed/different-org(o
     const { seatId } = await ch(r, "accounts:add-seat", { provider: "claude", accountId: "acct-1" });
     const dir = join(r.paths.seatsRoot, "claude", seatId);
     await writeFile(join(dir, ".credentials.json"), credsJson("tok-Z"));
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "different-org", orgName: "Zeta" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "different-org", message: accountsErrorMessage("different-org"), orgName: "Zeta" });
     assert.equal(await r.exists(dir), true, "kept, unplaced");
     assert.equal(allSeats((await r.accounts.getStore()).providers.claude).length, 2);
     await r.accounts.discover({ force: true });
@@ -523,8 +524,8 @@ test("add-seat-confirm {newAccount:false}: the seat goes into the account the us
     const v = await ch(r, "accounts:add-seat-confirm", { seatId, newAccount: false });
     assert.equal(v.accounts.length, 1);
     assert.equal(v.accounts[0].seats.length, 3);
-    assert.deepEqual(await ch(r, "accounts:add-seat-confirm", { seatId, newAccount: false }), { error: "unknown-seat" }, "already placed");
-    assert.deepEqual(await ch(r, "accounts:add-seat-confirm", { seatId: "ghost", newAccount: true }), { error: "unknown-seat" });
+    assert.deepEqual(await ch(r, "accounts:add-seat-confirm", { seatId, newAccount: false }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") }, "already placed");
+    assert.deepEqual(await ch(r, "accounts:add-seat-confirm", { seatId: "ghost", newAccount: true }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
   } finally {
     await r.cleanup();
   }
@@ -541,7 +542,7 @@ test("cancel-seat: stops the login, deletes the directory, forgets the flow; unk
     assert.deepEqual(r.calls.claudeCancel, [connect.sessionKey]);
     assert.deepEqual(await ch(r, "accounts:cancel-seat", { seatId }), { ok: true });
     assert.deepEqual(await ch(r, "accounts:cancel-seat", { seatId: "ghost" }), { ok: true });
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     // The id is free again and discovery would not resurrect it.
     assert.equal((await ch(r, "accounts:add-seat", { provider: "claude" })).seatId, "seat-3");
   } finally {
@@ -567,9 +568,9 @@ test("cancel of a PARKED different-org seat deletes it too", async () => {
 test("add-seat: validation (provider, label, accountId) and a launcher that fails to start leave nothing behind", async () => {
   const r = await rig();
   try {
-    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "nope" }), { error: "unknown-provider" });
-    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "claude", label: "x".repeat(50) }), { error: "invalid-label" });
-    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "claude", accountId: "acct-404" }), { error: "unknown-seat" });
+    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "nope" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
+    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "claude", label: "x".repeat(50) }), { error: "invalid-label", message: accountsErrorMessage("invalid-label") });
+    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "claude", accountId: "acct-404" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
     assert.equal((await readdirSafe(join(r.paths.seatsRoot, "claude"))).length, 2, "nothing created for refused requests");
 
     const broken = await rig();
@@ -582,7 +583,7 @@ test("add-seat: validation (provider, label, accountId) and a launcher that fail
         codex: {},
         log: quiet,
       });
-      assert.deepEqual(await mgr.channels["accounts:add-seat"]({ provider: "claude" }), { error: "login-failed" });
+      assert.deepEqual(await mgr.channels["accounts:add-seat"]({ provider: "claude" }), { error: "login-failed", message: accountsErrorMessage("login-failed") });
       assert.equal((await readdirSafe(join(broken.paths.seatsRoot, "claude"))).length, 2, "the new directory was removed");
       await broken.accounts.discover({ force: true });
       assert.equal(allSeats((await broken.accounts.getStore()).providers.claude).length, 2);
@@ -614,7 +615,7 @@ test("a sign-in that never produces credentials fails after the timeout, deletin
     const { seatId } = await mgr.channels["accounts:add-seat"]({ provider: "claude" });
     const dir = join(r.paths.seatsRoot, "claude", seatId);
     await new Promise((res) => setTimeout(res, 5));
-    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.equal(await r.exists(dir), false);
   } finally {
     await r.cleanup();
@@ -716,7 +717,7 @@ test("add-seat (codex): signing in as an account we already have → failed/dupl
     const { seatId } = await ch(r, "accounts:add-seat", { provider: "codex" });
     await writeFile(r.paths.codexAuthPath, JSON.stringify({ openai: oauth("cx-A2", "gpt-A") })); // same ChatGPT account
     await r.mgr.onProviderLoginLanded({ id: "openai", epoch: 7 });
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId }), { state: "failed", error: "duplicate-login", message: accountsErrorMessage("duplicate-login") });
     assert.equal(await r.exists(join(r.paths.seatsRoot, "codex", seatId)), false);
     assert.equal(allSeats((await r.accounts.getStore()).providers.codex).length, 1);
   } finally {
@@ -761,7 +762,7 @@ test("add-seat (codex): starting a second add supersedes the first (opencode has
     const a = await ch(r, "accounts:add-seat", { provider: "codex" });
     const b = await ch(r, "accounts:add-seat", { provider: "codex" });
     assert.notEqual(a.seatId, b.seatId);
-    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: a.seatId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: a.seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.deepEqual(await ch(r, "accounts:seat-status", { seatId: b.seatId }), { state: "pending" });
   } finally {
     await r.cleanup();
@@ -772,7 +773,7 @@ test("add-seat (codex): when opencode offers no OAuth (api-key shape) the add fa
   const r = await rig({ codex: true, claude: false });
   try {
     r.state.codexShape = "api-key";
-    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "codex" }), { error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:add-seat", { provider: "codex" }), { error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.equal((await readdirSafe(join(r.paths.seatsRoot, "codex"))).length, 1);
   } finally {
     await r.cleanup();
@@ -881,7 +882,7 @@ test("(c) no credentials at the timeout: the flow is dropped, its directory dele
     await mgr.tick();
     assert.equal(await r.exists(dir), false);
     assert.deepEqual(calls.cancel, [connect.sessionKey]);
-    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await mgr.channels["accounts:seat-status"]({ seatId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
   } finally {
     await r.cleanup();
   }
@@ -946,7 +947,7 @@ test("a different-org login finished while nobody watched waits for the user's a
     await mgr.tick();
     assert.equal(await r.exists(dir), true, "kept for the confirmation");
     const st = await mgr.channels["accounts:seat-status"]({ seatId });
-    assert.deepEqual(st, { state: "failed", error: "different-org", orgName: "Zeta" });
+    assert.deepEqual(st, { state: "failed", error: "different-org", message: accountsErrorMessage("different-org"), orgName: "Zeta" });
   } finally {
     await r.cleanup();
   }
@@ -1060,7 +1061,7 @@ test("resign-seat (claude): a DIFFERENT account → failed/different-account wit
 
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
       state: "failed",
-      error: "different-account",
+      error: "different-account", message: accountsErrorMessage("different-account"),
       expectedEmail: "a@example.com",
       gotEmail: "x@example.com",
     });
@@ -1111,7 +1112,7 @@ test("resign-seat (claude): a seat with no account uuid is matched by email; wit
     const keep = await readFile(seatCredsFile(r), "utf-8");
     const c = await startResign(r);
     await writeFile(join(c.tempDir, ".credentials.json"), credsJson("tok-Q"));
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: c.flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: c.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.equal(await readFile(seatCredsFile(r), "utf-8"), keep);
     assert.notEqual(before, keep);
   } finally {
@@ -1134,7 +1135,7 @@ test("resign-cancel: stops the login and deletes ONLY the temp directory — eve
     assert.equal(JSON.stringify(await claudeStored(r)), storeBefore);
     assert.deepEqual(r.calls.claudeCancel, ["claude-login-seat-1"]);
     assert.equal(r.calls.usage, 0);
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), { state: "failed", error: "unknown-flow" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), { state: "failed", error: "unknown-flow", message: accountsErrorMessage("unknown-flow") });
     // unknown / repeated / malformed cancel is still ok
     assert.deepEqual(await ch(r, "accounts:resign-cancel", { flowId }), { ok: true });
     assert.deepEqual(await ch(r, "accounts:resign-cancel", {}), { ok: true });
@@ -1157,7 +1158,7 @@ test("resign-seat: a second flow for the same seat ends the first one; another s
     const other = await startResign(r, "seat-3");
     const second = await startResign(r, "seat-1");
     assert.notEqual(first.flowId, second.flowId);
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.equal(await r.exists(first.tempDir), false, "the old temp directory is gone");
     assert.equal(r.calls.claudeCancel.filter((k) => k === "claude-login-seat-1").length, 1, "the old login is stopped");
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
@@ -1175,14 +1176,14 @@ test("resign-seat: a second flow for the same seat ends the first one; another s
 test("resign-seat: validation — unknown provider / seat, the live seat, a launcher that fails; nothing left behind", async () => {
   const r = await rig();
   try {
-    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider" });
-    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude" }), { error: "unknown-seat" });
-    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-2" }), { error: "live-seat" });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "zzz", seatId: "seat-1" }), { error: "unknown-provider", message: accountsErrorMessage("unknown-provider") });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-99" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude" }), { error: "unknown-seat", message: accountsErrorMessage("unknown-seat") });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "claude", seatId: "seat-2" }), { error: "live-seat", message: accountsErrorMessage("live-seat") });
     assert.equal(r.calls.claudeStart.length, 0);
     assert.deepEqual(await dirEntries(join(r.paths.seatsRoot, "claude")), ["seat-1", "seat-2"]);
-    assert.deepEqual(await ch(r, "accounts:resign-status", {}), { state: "failed", error: "unknown-flow" });
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: "nope" }), { state: "failed", error: "unknown-flow" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", {}), { state: "failed", error: "unknown-flow", message: accountsErrorMessage("unknown-flow") });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: "nope" }), { state: "failed", error: "unknown-flow", message: accountsErrorMessage("unknown-flow") });
 
     const broken = await rig();
     try {
@@ -1193,7 +1194,7 @@ test("resign-seat: validation — unknown provider / seat, the live seat, a laun
         codex: {},
         log: quiet,
       });
-      assert.deepEqual(await mgr.channels["accounts:resign-seat"]({ provider: "claude", seatId: "seat-1" }), { error: "login-failed" });
+      assert.deepEqual(await mgr.channels["accounts:resign-seat"]({ provider: "claude", seatId: "seat-1" }), { error: "login-failed", message: accountsErrorMessage("login-failed") });
       assert.deepEqual(await dirEntries(join(broken.paths.seatsRoot, "claude")), ["seat-1", "seat-2"], "the temp directory was removed");
     } finally {
       await broken.cleanup();
@@ -1215,7 +1216,7 @@ test("resign-seat: a login that never produces credentials times out — flow fa
     assert.equal(mgr._resigns().get(flowId).state, "pending");
     clock.t += 16 * 60_000;
     await mgr.tick();
-    assert.deepEqual(await mgr.channels["accounts:resign-status"]({ flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await mgr.channels["accounts:resign-status"]({ flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.equal(await r.exists(tempDir), false);
     assert.deepEqual(calls.cancel, ["k-seat-1"]);
     assert.equal(await readFile(seatCredsFile(r), "utf-8"), before);
@@ -1319,7 +1320,7 @@ test("resign-seat (codex): a DIFFERENT account → failed/different-account, the
 
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId }), {
       state: "failed",
-      error: "different-account",
+      error: "different-account", message: accountsErrorMessage("different-account"),
       expectedEmail: null,
       gotEmail: null,
     });
@@ -1368,13 +1369,13 @@ test("resign-seat (codex): one OAuth wait per provider — a second flow (or an 
     });
     const first = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
     const second = await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-2" });
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: first.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "pending" });
     const add = await ch(r, "accounts:add-seat", { provider: "codex" });
     assert.ok(add.seatId);
-    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "failed", error: "login-failed" });
+    assert.deepEqual(await ch(r, "accounts:resign-status", { flowId: second.flowId }), { state: "failed", error: "login-failed", message: accountsErrorMessage("login-failed") });
     // the live (borrowed) codex seat is refused
-    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-1" }), { error: "live-seat" });
+    assert.deepEqual(await ch(r, "accounts:resign-seat", { provider: "codex", seatId: "seat-1" }), { error: "live-seat", message: accountsErrorMessage("live-seat") });
   } finally {
     await r.cleanup();
   }

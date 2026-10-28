@@ -8,6 +8,7 @@
 // counts — never a credential, a credential path or a token. The seat's
 // `credentialDir` (a filesystem path) is deliberately not copied.
 
+import { moveCopy } from "./accountsCopy.mjs";
 import { seatLoad } from "../shared/seatChoice.mjs";
 import { chooseSeat, decideMove, MOVE_AT_PCT, isSeatFull } from "./seatAssignment.mjs";
 import { allSeats, findSeat } from "./accounts.mjs";
@@ -202,6 +203,18 @@ export function buildSessionSeat({ found, state, states, seatSnapshots }) {
     const trig = assignment.trigger;
     if (trig && typeof trig.kind === "string" && Number.isFinite(trig.pct)) out.lastMove.trigger = { kind: trig.kind, pct: trig.pct };
     if (typeof assignment.crossOrg === "boolean") out.lastMove.crossOrg = assignment.crossOrg;
+    // WS11 D4 (K5): worded by the box (the age suffix and visibility window stay client).
+    const single = (hit.account.seats ?? []).length <= 1;
+    const toLabel = single ? (hit.account.label || hit.seat.label) : hit.account.label ? `${hit.account.label} · ${hit.seat.label}` : hit.seat.label;
+    Object.assign(out.lastMove, moveCopy({
+      from: assignment.movedFrom,
+      fromLabel: out.lastMove.fromLabel,
+      toLabel,
+      reason: out.lastMove.reason,
+      trigger: out.lastMove.trigger,
+      crossOrg: out.lastMove.crossOrg,
+      resentTokens: assignment.resentTokens,
+    }));
   }
   return out;
 }

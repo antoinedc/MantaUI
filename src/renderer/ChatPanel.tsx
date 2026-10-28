@@ -55,7 +55,6 @@ import {
   isPlanExitQuestion,
   extractPlanData,
   titleCase,
-  formatNoHealthyEndpointCopy,
   providersFromExcludedKeys,
 } from "./chatUtils";
 import { planPageUrl } from "../shared/planMode.mjs";
@@ -1933,7 +1932,7 @@ export function ChatPanel({
             // and WHY (the router's structured per-key states, worded by the
             // shared labels), and the banner carries the W8 reset affordance
             // inline — the providers behind the excluded keys.
-            const copy = formatNoHealthyEndpointCopy(decision);
+            const copy = decision.copy ?? "Auto couldn't pick a healthy model. The turn was not sent; switch off Auto, reset health below, or pick a model to send.";
             setSendError(copy);
             setVerdictReset({ message: copy, providers: providersFromExcludedKeys(decision.excluded) });
             setRunning(false);

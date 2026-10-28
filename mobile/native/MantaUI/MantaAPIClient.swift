@@ -516,7 +516,7 @@ final class MantaAPIClient: Sendable {
         if let accountId { payload["accountId"] = accountId }
         if let label { payload["label"] = label }
         let object = try await callRequired("accounts:add-seat", args: [payload], as: [String: JSONValue].self)
-        if case .string(let code)? = object["error"], !code.isEmpty { throw MantaError.server(code) }
+        if case .string(let code)? = object["error"], !code.isEmpty { throw AccountsRefusal(code: code, message: Self.accountsMessage(object)) }
         guard case .string(let seatId)? = object["seatId"], !seatId.isEmpty else {
             throw MantaError.transport("accounts:add-seat returned no seat")
         }
@@ -542,7 +542,7 @@ final class MantaAPIClient: Sendable {
     /// One mutating channel that answers the changed `ProviderView`.
     private func accountsAction(_ channel: String, _ payload: [String: Any]) async throws -> AccountsProvider {
         let reply = try await callRequired(channel, args: [payload], as: AccountsActionReply.self)
-        if let code = reply.error { throw MantaError.server(code) }
+        if let code = reply.error { throw AccountsRefusal(code: code, message: reply.message ?? AccountsCopy.fallback) }
         guard let provider = reply.provider else {
             throw MantaError.transport("\(channel) returned no provider")
         }
