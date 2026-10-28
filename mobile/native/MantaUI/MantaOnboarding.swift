@@ -6,8 +6,10 @@ import UIKit
 //
 // Implements DECISIONS.md §5.3/§5.4/§5.6 as a SwiftUI flow:
 //
-//   Manual ("Enter the code" + Box ID)  →  Linking (progress)  →
+//   Scan / pairing link  →  "Link this phone?" confirm  →  Linking (progress)  →
 //   Notifications (iOS priming §5.6)  →  main destination.
+//   Manual ("Enter the code" + Server address) skips the confirm: the user typed
+//   the code themselves, so there is nothing to second-guess.
 //
 // Failure states (§5.4) are typed {cause, action} screens, never a generic
 // error: rejected, unreachable, rate-limited, server-error, save-failed.
@@ -25,6 +27,10 @@ final class MantaOnboardingFlow: ObservableObject {
 
     enum Phase: Equatable {
         case entry
+        /// A scanned / linked payload is staged and waits for "Link this phone".
+        case confirm
+        /// "This isn't my box" — the warning screen (DECISIONS §5.4, adapted).
+        case notMine
         case linking
         case failure(FailureKind)
         case notifications
@@ -42,11 +48,11 @@ final class MantaOnboardingFlow: ObservableObject {
 
     // Manual-entry inputs. `showManual` collapses the manual fields behind the
     // "Manual Setup" disclosure (BET-1308 — the entry screen is camera-first).
+    // `serverURL` is the one "Server address" field (WS10 F21): a Server ID, a
+    // host or a full URL — `MantaPairing.resolveManualTarget` decides which.
     @Published var code = ""
-    @Published var boxId = ""
     @Published var serverURL = ""
     @Published var showManual = false
-    @Published var showAdvanced = false
     @Published var manualError: String?
 
     /// In-flight claim guards (BET-1308). A successful QR decode delivers the
@@ -76,57 +82,87 @@ final class MantaOnboardingFlow: ObservableObject {
     init(auth: MantaAuthClient = MantaAuthClient(), onPaired: @escaping () -> Void) {
         self.auth = auth
         self.onPaired = onPaired
-        // Prefill the manual Box ID + server URL from a previously-paired box
-        // (the re-pair path), so a returning user can reconnect without
-        // re-typing the listener (§5.2.10 desktop-free path).
+        // Prefill the manual Server address from a previously-paired box (the
+        // re-pair path), so a returning user can reconnect without re-typing it
+        // (§5.2.10 desktop-free path).
         if let keychain = try? KeychainCredentialStore.shared.load() {
-            self._boxId = Published(initialValue: keychain.boxId)
             self._serverURL = Published(initialValue: keychain.serverUrl)
         }
     }
 
-    /// A payload arrived from a scanned QR / pasted pair link. Every staged
-    /// payload claims directly — the pairing code is the secret.
+    /// A payload arrived from a scanned QR / pasted pair link. It is STAGED, not
+    /// claimed: the user must confirm "Link this phone?" first (a link is a
+    /// stranger-controllable input — DECISIONS §5.2.2). The exception is a
+    /// switch the paired "Switch server?" sheet already confirmed. The camera
+    /// delivers the same payload on every frame, so anything arriving while a
+    /// payload is already staged or linking is ignored.
     func receive(payload: MantaPairing.PairPayload) {
+        if phase == .confirm || phase == .linking { return }
         pending = payload
+        if isSwitching {
+            startLinking(payload)
+        } else {
+            phase = .confirm
+        }
+    }
+
+    /// "Link this phone" on the confirm screen.
+    func confirmLink() {
+        guard phase == .confirm, let payload = pending else { return }
         startLinking(payload)
     }
 
-    /// "Continue" from the Manual screen: validate the six digits and resolve a
-    /// claim target. A filled disclosure server URL WINS over the Box-Id-derived
-    /// public hostname.
+    /// "This isn't my box" on the confirm screen. Nothing is claimed.
+    func rejectPending() {
+        guard phase == .confirm else { return }
+        phase = .notMine
+    }
+
+    /// "Let me look again" on the warning screen: back to the confirm.
+    func reviewAgain() {
+        guard phase == .notMine, pending != nil else {
+            backToEntry()
+            return
+        }
+        phase = .confirm
+    }
+
+    /// What the manual Server address field says is wrong, or nil (empty is not
+    /// an error — Continue is simply disabled).
+    var serverAddressError: String? {
+        guard !serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        if case .invalid(let reason) = MantaPairing.resolveManualTarget(serverURL) { return reason }
+        return nil
+    }
+
+    /// Continue needs the six digits AND a server address that resolves.
+    var canContinueManually: Bool {
+        guard MantaPairing.isSubmittableCode(MantaPairing.normalizeCode(code)) else { return false }
+        if case .ok = MantaPairing.resolveManualTarget(serverURL) { return true }
+        return false
+    }
+
+    /// "Continue" from the Manual screen: validate the six digits and resolve the
+    /// claim target from the one Server address field. The user typed the code
+    /// themselves, so this claims directly (no confirm).
     func manualContinue() {
         manualError = nil
         guard MantaPairing.isSubmittableCode(MantaPairing.normalizeCode(code)) else {
             manualError = "Enter the six-digit code."
             return
         }
-
-        // The six-digit code alone cannot address a box: /auth/claim lives on
-        // each box's own hostname, so a target (Box ID or an explicit server
-        // URL from the disclosure) is required.
-        let payload: MantaPairing.PairPayload
-        if let disclosure = MantaPairing.normalizeServerURL(serverURL) {
-            // Explicit listener wins over the derived public hostname.
-            payload = MantaPairing.PairPayload(
-                boxId: MantaPairing.isValidBoxId(boxId) ? boxId : "",
-                code: MantaPairing.normalizeCode(code),
-                serverUrl: disclosure
-            )
-        } else if let derived = MantaPairing.boxDirectURL(boxId) {
-            payload = MantaPairing.PairPayload(
+        switch MantaPairing.resolveManualTarget(serverURL) {
+        case .invalid(let reason):
+            manualError = reason
+        case .ok(let serverUrl, let boxId):
+            let payload = MantaPairing.PairPayload(
                 boxId: boxId,
                 code: MantaPairing.normalizeCode(code),
-                serverUrl: derived.absoluteString
+                serverUrl: serverUrl
             )
-        } else {
-            manualError = "Enter your Server ID (32 hex chars), or your server URL below."
-            showAdvanced = true
-            return
+            pending = payload
+            startLinking(payload)
         }
-
-        pending = payload
-        startLinking(payload)
     }
 
     /// Retry a claim (from any failure screen that recovered a payload).
@@ -379,7 +415,8 @@ struct MantaManualEntryView: View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
             // The embedded camera panel is always present. A decoded Manta
             // payload routes through the SAME `flow.receive` path as a deep
-            // link — straight to the loading screen, no confirmation step.
+            // link — it is staged for the "Link this phone?" confirm, never
+            // claimed straight away.
             MantaCameraPanel(tokens: tokens) { payload in
                 flow.receive(payload: payload)
             }
@@ -392,8 +429,8 @@ struct MantaManualEntryView: View {
 
     @ViewBuilder
     private var manualDisclosure: some View {
-        // "Manual Setup" — collapsed by default. Expands to: Box ID, Pairing
-        // code, the private-server-URL disclosure, then the submit button.
+        // "Manual Setup" — collapsed by default. Expands to: the pairing code,
+        // the one "Server address" field, then the submit button.
         Button(action: { withAnimation { flow.showManual.toggle() } }) {
             Text("Manual Setup")
                 .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
@@ -406,16 +443,6 @@ struct MantaManualEntryView: View {
 
         if flow.showManual {
             VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-                TextField("Box ID (32 hex)", text: $flow.boxId)
-                    .font(.manta(size: Metrics.type.body, design: .monospaced))
-                    .textFieldStyle(.plain)
-                    .padding(Metrics.spacing.sp3)
-                    .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-                    .keyboardType(.asciiCapable)
-                    .autocapitalization(.none)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("onboarding-box-id")
-
                 VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
                     Text("Pairing code")
                         .font(.manta(size: Metrics.type.small))
@@ -424,17 +451,14 @@ struct MantaManualEntryView: View {
                         .accessibilityIdentifier("onboarding-otp")
                 }
 
-                // The only way to pair a box that is not reachable from the
-                // internet — kept, nested inside Manual Setup.
-                Button(action: { withAnimation { flow.showAdvanced.toggle() } }) {
-                    Text(flow.showAdvanced ? "Hide server URL" : "My server isn't reachable from the internet")
-                        .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
-                        .foregroundColor(tokens.accentTx)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("onboarding-server-toggle")
-                if flow.showAdvanced {
-                    TextField("https://100.64.0.9:8787", text: $flow.serverURL)
+                // A six-digit code cannot address a box by itself, so the box is
+                // named by ONE field: its Server ID, host or URL. (There is no
+                // code→box lookup — see WS10 F21.)
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                    Text("Server address")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx4)
+                    TextField("Server ID or address", text: $flow.serverURL)
                         .font(.manta(size: Metrics.type.small, design: .monospaced))
                         .textFieldStyle(.plain)
                         .padding(Metrics.spacing.sp3)
@@ -443,7 +467,18 @@ struct MantaManualEntryView: View {
                         .autocapitalization(.none)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("onboarding-server-url")
+                    if let problem = flow.serverAddressError {
+                        Text(problem)
+                            .font(.manta(size: Metrics.type.small))
+                            .foregroundColor(tokens.danger)
+                            .accessibilityIdentifier("onboarding-server-address-error")
+                    }
+                    Text("On your desktop: Settings → Box → Add a phone shows the Server ID. On another phone: Settings → Box → Add a device shows the server address. Or run `manta pair` on the box.")
+                        .font(.manta(size: Metrics.type.xs))
+                        .foregroundColor(tokens.tx4)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+
                 if let error = flow.manualError {
                     Text(error)
                         .font(.manta(size: Metrics.type.small))
@@ -451,19 +486,117 @@ struct MantaManualEntryView: View {
                         .accessibilityIdentifier("onboarding-error")
                 }
                 MantaPrimaryButton(title: "Continue",
-                                   disabled: !canContinue,
+                                   disabled: !flow.canContinueManually,
                                    identifier: "onboarding-submit",
                                    action: { flow.manualContinue() },
                                    tokens: tokens)
             }
         }
     }
+}
 
-    /// Continue needs the six digits AND a way to address a box: either a
-    /// valid Box ID (32 hex) or a filled disclosure server URL.
-    private var canContinue: Bool {
-        MantaPairing.isSubmittableCode(MantaPairing.normalizeCode(flow.code))
-            && (MantaPairing.isValidBoxId(flow.boxId) || MantaPairing.normalizeServerURL(flow.serverURL) != nil)
+// MARK: - "Link this phone?" (scan / link confirm, WS10 F20)
+
+struct MantaLinkConfirmView: View {
+    @ObservedObject var flow: MantaOnboardingFlow
+    var tokens: Tokens
+
+    var body: some View {
+        let summary = flow.pending.map(MantaPairing.confirmSummary)
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("Link this phone?")
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx1)
+                    .accessibilityAddTraits(.isHeader)
+                Text("It'll be able to run commands on the machine below.")
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.tx3)
+            }
+            MantaCard(tokens: tokens) {
+                VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+                    HStack(spacing: Metrics.spacing.sp2) {
+                        Circle()
+                            .fill(tokens.ok)
+                            .frame(width: Metrics.spacing.sp2, height: Metrics.spacing.sp2)
+                        Text("Your box")
+                            .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.medium)))
+                            .foregroundColor(tokens.tx4)
+                    }
+                    Text(summary?.host ?? "")
+                        .font(.manta(size: Metrics.type.body, design: .monospaced))
+                        .foregroundColor(tokens.tx1)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("link-confirm-host")
+                    if let prefix = summary?.idPrefix {
+                        Rectangle()
+                            .fill(tokens.borderSubtle)
+                            .frame(height: Metrics.spacing.spPx)
+                        VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
+                            Text("Server ID starts with \(prefix)")
+                                .font(.manta(size: Metrics.type.small, design: .monospaced))
+                                .foregroundColor(tokens.tx1)
+                                .accessibilityIdentifier("link-confirm-id-prefix")
+                            Text("Check it matches Add a phone on your desktop.")
+                                .font(.manta(size: Metrics.type.small))
+                                .foregroundColor(tokens.tx3)
+                        }
+                    }
+                }
+            }
+            MantaPrimaryButton(title: "Link this phone", disabled: false,
+                               identifier: "link-confirm-link",
+                               action: { flow.confirmLink() }, tokens: tokens)
+            HStack {
+                Spacer()
+                MantaTextButton(title: "This isn't my box", tokens: tokens) { flow.rejectPending() }
+                Spacer()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.spacing.sp6)
+        .padding(.top, Metrics.spacing.sp8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("link-confirm")
+    }
+}
+
+/// "This isn't my box": nothing is claimed; the user is warned what such a code
+/// could mean.
+struct MantaNotMineView: View {
+    @ObservedObject var flow: MantaOnboardingFlow
+    var tokens: Tokens
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.spacing.sp6) {
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("Don't link this")
+                    .font(.manta(size: Metrics.type.display, weight: mantaFontWeight(Metrics.type.semibold)))
+                    .foregroundColor(tokens.tx1)
+                    .accessibilityAddTraits(.isHeader)
+                Text("If you didn't just open Add a phone on your own computer, this code didn't come from you.")
+                    .font(.manta(size: Metrics.type.body, weight: mantaFontWeight(Metrics.type.medium)))
+                    .foregroundColor(tokens.tx3)
+            }
+            MantaCard(tokens: tokens) {
+                Text("Someone may have sent you a code that links your phone to their machine — or theirs to yours. Only ever scan a code you can see on your own screen.")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.danger)
+            }
+            MantaPrimaryButton(title: "Cancel", disabled: false,
+                               identifier: "not-mine-cancel",
+                               action: { flow.backToEntry() }, tokens: tokens)
+            HStack {
+                Spacer()
+                MantaTextButton(title: "Let me look again", tokens: tokens) { flow.reviewAgain() }
+                Spacer()
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Metrics.spacing.sp6)
+        .padding(.top, Metrics.spacing.sp8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("not-mine")
     }
 }
 
@@ -652,6 +785,10 @@ struct MantaOnboardingRoot: View {
         switch flow.phase {
         case .entry:
             MantaManualEntryView(flow: flow, tokens: tokens)
+        case .confirm:
+            MantaLinkConfirmView(flow: flow, tokens: tokens)
+        case .notMine:
+            MantaNotMineView(flow: flow, tokens: tokens)
         case .linking:
             // Rendered outside the ScrollView above; kept here so the switch
             // stays exhaustive.

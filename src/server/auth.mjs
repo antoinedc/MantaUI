@@ -634,8 +634,8 @@ export function createAuthEngine({
   // Linked-device list for the desktop (Stage 5) + any paired device: public
   // metadata per live device (no tokens). The caller iid is already validated
   // by the auth gate when this is served behind /auth/devices.
-  function listDevices() {
-    return devices.listDevices();
+  function listDevices({ currentToken = null } = {}) {
+    return devices.listDevices(currentToken);
   }
 
   return {

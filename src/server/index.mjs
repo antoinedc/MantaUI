@@ -4122,13 +4122,17 @@ const handleRequest = async (req, res) => {
   }
 
   // ---------- Linked-device list (AUTHENTICATED) ----------
-  // GET /auth/devices → { box_id, devices: [{device_id, name, last_seen, created_at, primary}] }
+  // GET /auth/devices → { box_id, devices: [{device_id, name, last_seen, created_at, primary, current}] }
+  // `current` is true on the one row matching the caller's own bearer.
   // Reaching here means the gate passed, so the caller holds a live device
   // token. Serves §6.3's linked-device list (with last_seen) so the desktop
   // (Stage 5) and any paired device can render the alert + revoke one-tap.
   // NEVER exposes tokens — only per-device public metadata.
   if (req.method === "GET" && path === "/auth/devices") {
-    respondJson(res, 200, { box_id: authEngine.box_id, devices: authEngine.listDevices() });
+    respondJson(res, 200, {
+      box_id: authEngine.box_id,
+      devices: authEngine.listDevices({ currentToken: parseBearer(req.headers["authorization"]) }),
+    });
     return;
   }
 

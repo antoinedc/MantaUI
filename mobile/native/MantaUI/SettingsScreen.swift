@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // ===========================================================================
 // S7 — settings screen (BET-599).
@@ -11,8 +12,14 @@ import SwiftUI
 //   - search (label + help) across every entry;
 //   - "Modified" dot on a section containing a non-default value;
 //   - per-section reset and a reset-all danger zone, both undoable;
-//   - config-driven entries persist via the store's `config:update`; device-local
-//     entries (configKey nil) stay on-device.
+//   - config-driven entries persist via the store's `config:update` (awaited and
+//     serialized — a rejected save puts the old value back and says so);
+//     device-local entries (configKey nil) stay on-device;
+//   - `custom` entries are the phone-only anchors (WS10): software updates,
+//     restore windows, the Box section's status / add a device / linked devices /
+//     restart opencode / remove server, and the Extensions screens. They are
+//     drawn by `SettingsCustomRow`; an id it does not know (the Accounts list)
+//     falls back to a plain label row.
 //
 // Every colour, spacing, radius, size, weight and leading resolves through the
 // GENERATED design tokens (`Tokens.scheme(_:)` / `Metrics`) — no literals.
@@ -27,13 +34,30 @@ struct SettingsScreen: View {
     /// pushing and popping the screen; it only reads while that screen is up
     /// (`AccountsScreen(ownsLifecycle: true)`).
     @StateObject private var accountsStore: AccountsStore
+    /// Remove-server state, shared by every Box row so they all disable while a
+    /// removal is underway.
+    @StateObject private var removal = BoxRemovalStore()
+
+    /// The phone's own theme override (device-local). `.preferredColorScheme`
+    /// below applies it to this screen at once; `MantaAppRoot` applies it app-wide.
+    @AppStorage(SettingsAppearance.storageKey) private var themePref = SettingsAppearance.systemValue
+    @EnvironmentObject private var sessionStore: SessionListStore
 
     @State private var query = ""
     @State private var confirmReset = false
+    /// The one-shot scroll to `initialSection` has run.
+    @State private var didApplyInitialSection = false
+
+    private let eventStore: MantaEventStore?
+    private let initialSection: String?
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
-    init(eventStore: MantaEventStore? = nil) {
+    /// `initialSection` is a `SettingsSchema.sections` id (C2 deep link); nil or an
+    /// id the phone does not show leaves the screen at the top.
+    init(eventStore: MantaEventStore? = nil, initialSection: String? = nil) {
+        self.eventStore = eventStore
+        self.initialSection = initialSection
         _accountsStore = StateObject(wrappedValue: AccountsStore(api: MantaAPIClient.live(), eventStore: eventStore))
     }
 
@@ -45,21 +69,36 @@ struct SettingsScreen: View {
         NavigationStack {
             ZStack {
                 tokens.canvas.ignoresSafeArea()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        searchField
-                            .padding(.horizontal, Metrics.spacing.sp3)
-                            .padding(.top, Metrics.spacing.sp2)
-                            .padding(.bottom, Metrics.spacing.sp2)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            SettingsNotificationReminder()
+                                .padding(.top, Metrics.spacing.sp2)
 
-                        if inSearch {
-                            searchResults
-                        } else {
-                            sectionList
-                            resetAllFooter
+                            searchField
+                                .padding(.horizontal, Metrics.spacing.sp3)
+                                .padding(.top, Metrics.spacing.sp2)
+                                .padding(.bottom, Metrics.spacing.sp2)
+
+                            errorBanner
+
+                            Group {
+                                if inSearch {
+                                    searchResults
+                                } else {
+                                    sectionList
+                                    resetAllFooter
+                                }
+                            }
+                            // Every Box row is inert while a removal is underway.
+                            .disabled(removal.isBusy)
                         }
+                        .padding(.bottom, Metrics.spacing.sp6)
                     }
-                    .padding(.bottom, Metrics.spacing.sp6)
+                    .task {
+                        await store.load()
+                        applyInitialSection(proxy)
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -73,7 +112,54 @@ struct SettingsScreen: View {
             }
             .overlay(alignment: .bottom) { undoToast }
             .sheet(isPresented: $confirmReset) { resetAllSheet }
-            .task { await store.load() }
+        }
+        // Show the screen in the phone's own theme straight away.
+        .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
+        // A reset / undo of `hapticsEnabled` or `cacheTtl` must reach the list
+        // (on the whole stack, so pushing a sub-screen does not trigger it).
+        .onDisappear { sessionStore.loadConfig() }
+    }
+
+    /// C2 deep link: scroll once, after content exists, to the requested section.
+    private func applyInitialSection(_ proxy: ScrollViewProxy) {
+        guard !didApplyInitialSection else { return }
+        didApplyInitialSection = true
+        guard let target = SettingsDeepLink.target(initialSection, available: SettingsSchema.sections.map(\.id)) else { return }
+        withAnimation(nil) {
+            proxy.scrollTo("settings-section-\(target)", anchor: .top)
+        }
+    }
+
+    /// `store.lastError` was published but never rendered — a failed save,
+    /// load or reset was invisible. Shown under the search field; × dismisses it.
+    @ViewBuilder
+    private var errorBanner: some View {
+        if let message = store.lastError {
+            HStack(alignment: .top, spacing: Metrics.spacing.sp2) {
+                Text(message)
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("settings-error")
+                Spacer()
+                Button {
+                    store.clearError()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx3)
+                }
+                .accessibilityLabel("Dismiss")
+            }
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.vertical, Metrics.spacing.sp2)
+            .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.radius.md)
+                    .stroke(tokens.danger.opacity(0.6), lineWidth: 1)
+            )
+            .padding(.horizontal, Metrics.spacing.sp3)
+            .padding(.bottom, Metrics.spacing.sp2)
         }
     }
 
@@ -225,6 +311,7 @@ struct SettingsScreen: View {
                             .labelStyle(.titleAndIcon)
                             .foregroundColor(tokens.tx3)
                     }
+                    .disabled(store.isMutating)
                     .accessibilityLabel("Reset \(section.label) to defaults")
                 }
             }
@@ -240,7 +327,7 @@ struct SettingsScreen: View {
             } else {
                 ForEach(entries) { entry in
                     field(for: entry)
-                    if entry.help.isEmpty == false, entry.control != .toggle {
+                    if showsHelpBelow(entry) {
                         Text(entry.help)
                             .font(.manta(size: Metrics.type.small))
                             .foregroundColor(tokens.tx3)
@@ -250,6 +337,14 @@ struct SettingsScreen: View {
                 }
             }
         }
+        .id("settings-section-\(section.id)")
+    }
+
+    /// Toggles keep their help hidden (as before); a `custom` anchor that draws
+    /// its own surface already shows its help inside it.
+    private func showsHelpBelow(_ entry: SettingEntry) -> Bool {
+        guard !entry.help.isEmpty, entry.control != .toggle else { return false }
+        return !(entry.control == .custom && SettingsCustomRow.handles(entry.id))
     }
 
     private func hasResettableEntries(_ sectionID: String) -> Bool {
@@ -276,8 +371,31 @@ struct SettingsScreen: View {
         case .path:
             labelRow(entry)
         case .custom:
-            labelRow(entry)
+            if SettingsCustomRow.handles(entry.id) {
+                SettingsCustomRow(entry: entry, eventStore: eventStore, removal: removal)
+            } else {
+                labelRow(entry)
+            }
         }
+    }
+
+    /// Every config write goes through the store's awaited, serialized commit;
+    /// the rows below never fire-and-forget.
+    @discardableResult
+    private func commit(_ entry: SettingEntry, _ value: SettingValue) async -> Bool {
+        let confirmed = await store.commit(entry, value)
+        if confirmed, entry.id == "hapticsEnabled" {
+            // The session list caches this key; hand it the new value now.
+            sessionStore.loadConfig()
+            if value == .bool(true) { UISelectionFeedbackGenerator().selectionChanged() }
+        }
+        return confirmed
+    }
+
+    /// A config row is inert while its own write runs or a reset / undo write runs.
+    private func isRowDisabled(_ entry: SettingEntry) -> Bool {
+        guard entry.configKey != nil else { return false }
+        return store.batchWriting || store.saving.contains(entry.id)
     }
 
     @ViewBuilder
@@ -288,12 +406,15 @@ struct SettingsScreen: View {
                 .font(.manta(size: Metrics.type.body, weight: .medium))
                 .foregroundColor(tokens.tx1)
             Spacer()
+            if store.saving.contains(entry.id) { ProgressView().tint(tokens.accent) }
             Toggle("", isOn: Binding(
                 get: { current == .bool(true) },
-                set: { store.commit(entry, .bool($0)) }
+                set: { new in Task { await commit(entry, .bool(new)) } }
             ))
             .labelsHidden()
             .tint(tokens.accent)
+            .disabled(isRowDisabled(entry))
+            .accessibilityIdentifier("setting-\(entry.id)")
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
@@ -302,15 +423,18 @@ struct SettingsScreen: View {
     @ViewBuilder
     private func segmentedRow(_ entry: SettingEntry) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-            Text(entry.label)
-                .font(.manta(size: Metrics.type.body, weight: .medium))
-                .foregroundColor(tokens.tx1)
+            HStack(spacing: Metrics.spacing.sp2) {
+                Text(entry.label)
+                    .font(.manta(size: Metrics.type.body, weight: .medium))
+                    .foregroundColor(tokens.tx1)
+                if store.saving.contains(entry.id) { ProgressView().tint(tokens.accent) }
+            }
             let current = store.current(entry)
             HStack(spacing: Metrics.spacing.sp2) {
                 ForEach(entry.options ?? [], id: \.value) { option in
                     let selected = selected(option.value, current: current, entry: entry)
                     Button {
-                        store.commit(entry, .string(option.value))
+                        Task { await commit(entry, .string(option.value)) }
                     } label: {
                         Text(option.label)
                             .font(.manta(size: Metrics.type.small))
@@ -327,6 +451,7 @@ struct SettingsScreen: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .disabled(isRowDisabled(entry))
                     .accessibilityLabel(option.label)
                     .accessibilityAddTraits(selected ? .isSelected : [])
                 }
@@ -404,6 +529,8 @@ struct SettingsScreen: View {
                     )
             }
             .buttonStyle(.plain)
+            .disabled(store.isMutating)
+            .opacity(store.isMutating ? 0.4 : 1)
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.top, Metrics.spacing.sp6)
@@ -432,6 +559,7 @@ struct SettingsScreen: View {
                     .padding(.vertical, Metrics.spacing.sp3)
                     .background(tokens.danger, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             }
+            .disabled(store.isMutating)
             Button {
                 confirmReset = false
             } label: {
@@ -456,6 +584,7 @@ struct SettingsScreen: View {
                 Button("Undo") {
                     store.undoLastReset()
                 }
+                .disabled(store.isMutating)
                 .font(.manta(size: Metrics.type.small, weight: .semibold))
                 .foregroundColor(tokens.accent)
             }
@@ -543,9 +672,10 @@ private struct CommitField: View {
 
     private func commit() {
         let trimmed = draft
-        if trimmed != textValue(current) {
-            store.commit(entry, .string(trimmed))
-            if entry.commitOnBlur { savedAt = Date() }
+        guard trimmed != textValue(current), !store.saving.contains(entry.id), !store.batchWriting else { return }
+        Task {
+            let confirmed = await store.commit(entry, .string(trimmed))
+            if confirmed, entry.commitOnBlur { savedAt = Date() }
         }
     }
 }

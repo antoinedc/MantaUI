@@ -276,16 +276,21 @@ export function createDeviceRegistry({
   }
 
   // Non-revoked devices with their public metadata (NO tokens — a caller must
-  // never learn another device's credential).
-  function listDevices() {
+  // never learn another device's credential). `currentToken` is the caller's own
+  // bearer: the one row it matches is flagged `current: true` so a phone can find
+  // (and revoke) itself without a whole-box reset. The token is compared, never
+  // returned.
+  function listDevices(currentToken = null) {
+    const hasCurrent = typeof currentToken === "string" && currentToken !== "";
     return devices
       .filter((d) => !d.revoked)
-      .map(({ device_id, name, last_seen, created_at, primary }) => ({
+      .map(({ device_id, name, last_seen, created_at, primary, token }) => ({
         device_id,
         name,
         last_seen,
         created_at,
         primary,
+        current: hasCurrent && tokenMatches(token, currentToken),
       }));
   }
 

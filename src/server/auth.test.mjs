@@ -887,4 +887,8 @@ test("BET-493: a distinct-device claim leaves the primary (desktop) and existing
   const list = eng.listDevices();
   assert.equal(list.some((d) => d.primary), true);
   assert.equal(list.some((d) => d.device_id === c.device_id), true);
+  // the engine passes the caller's bearer through: only the joiner's row is current
+  const asJoiner = eng.listDevices({ currentToken: c.box_token });
+  assert.deepEqual(asJoiner.filter((d) => d.current).map((d) => d.device_id), [c.device_id]);
+  assert.equal(eng.listDevices().some((d) => d.current), false);
 });

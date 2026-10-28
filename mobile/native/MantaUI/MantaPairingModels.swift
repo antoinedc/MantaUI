@@ -191,4 +191,97 @@ enum MantaPairing {
         }
         return boxDirectURL(payload.boxId)
     }
+
+    // MARK: - "Link this phone?" summary (WS10 F20)
+
+    /// What the confirm screen shows for a staged payload: the host the claim
+    /// will go to, and the first eight characters of the Server ID so the user
+    /// can compare it with "Add a phone" on their own computer (nil when the
+    /// payload has no valid box id).
+    static func confirmSummary(_ payload: PairPayload) -> (host: String, idPrefix: String?) {
+        let host: String
+        if let url = claimBaseURL(payload) {
+            if let h = url.host {
+                host = url.port.map { "\(h):\($0)" } ?? h
+            } else {
+                host = url.absoluteString
+            }
+        } else {
+            host = ""
+        }
+        let prefix = isValidBoxId(payload.boxId) ? String(payload.boxId.prefix(8)) : nil
+        return (host, prefix)
+    }
+
+    // MARK: - Manual "Server address" (WS10 F21)
+
+    /// The six-digit code alone cannot address a box (`/auth/claim` lives on each
+    /// box's own host and no code→box lookup exists), so Manual Setup takes ONE
+    /// "Server address": a Server ID, a host, or a full URL.
+    enum ManualTargetResult: Equatable, Sendable {
+        case ok(serverUrl: String, boxId: String)
+        case invalid(String)
+    }
+
+    private static let invalidAddress = "That isn't a valid server address."
+
+    /// Resolve what the user typed. Rules, in order:
+    /// empty → invalid; interior whitespace → invalid; a 32-hex Server ID →
+    /// its public host; otherwise a URL (https:// assumed when no scheme) with an
+    /// http/https scheme, no credentials/query/fragment, a plain DNS/IP host, a
+    /// valid port, and `http` only for private (loopback / LAN / tailnet) hosts.
+    /// A trailing `/` is dropped; a sub-path is kept for reverse-proxy setups.
+    static func resolveManualTarget(_ raw: String) -> ManualTargetResult {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return .invalid("Enter your server address — the Server ID or address shown under Add a phone.")
+        }
+        if trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) != nil {
+            return .invalid("A server address can't contain spaces.")
+        }
+
+        let lowered = trimmed.lowercased()
+        if lowered.count == 32, isValidBoxId(lowered) {
+            return .ok(serverUrl: "https://\(lowered).boxes.mantaui.com", boxId: lowered)
+        }
+
+        let candidate = trimmed.contains("://") ? trimmed : "https://\(trimmed)"
+        guard let parts = URLComponents(string: candidate) else { return .invalid(invalidAddress) }
+
+        let scheme = (parts.scheme ?? "").lowercased()
+        guard scheme == "https" || scheme == "http" else { return .invalid("Use an https:// address.") }
+
+        if parts.user != nil || parts.password != nil || parts.query != nil || parts.fragment != nil {
+            return .invalid(invalidAddress)
+        }
+
+        guard let host = parts.host?.lowercased(), isPlainHost(host) else { return .invalid(invalidAddress) }
+
+        if let port = parts.port, !(1...65535).contains(port) {
+            return .invalid("The port must be between 1 and 65535.")
+        }
+
+        let authority = parts.port.map { "\(host):\($0)" } ?? host
+        if scheme == "http", !isPrivateServerURL("http://\(authority)") {
+            return .invalid("Use https:// for an address reachable from the internet.")
+        }
+
+        var path = parts.percentEncodedPath
+        while path.hasSuffix("/") { path.removeLast() }
+
+        let boxId = isPublicBoxHost(host) ? String(host.prefix(32)) : ""
+        return .ok(serverUrl: "\(scheme)://\(authority)\(path)", boxId: boxId)
+    }
+
+    /// `[a-z0-9.-]`, non-empty, no leading/trailing dot, no empty label.
+    private static func isPlainHost(_ host: String) -> Bool {
+        guard !host.isEmpty, !host.hasPrefix("."), !host.hasSuffix(".") else { return false }
+        guard host.unicodeScalars.allSatisfy({ ($0.value >= 0x61 && $0.value <= 0x7A)
+            || ($0.value >= 0x30 && $0.value <= 0x39) || $0 == "." || $0 == "-" }) else { return false }
+        return !host.contains("..")
+    }
+
+    private static func isPublicBoxHost(_ host: String) -> Bool {
+        host.range(of: #"^[0-9a-f]{32}\.boxes\.mantaui\.com$"#, options: .regularExpression) != nil
+    }
 }
