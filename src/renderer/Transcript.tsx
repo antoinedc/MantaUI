@@ -44,6 +44,8 @@ import { QuestionCard } from "./Cards";
 import { Button } from "./Button";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { PendingVoiceRow, type PendingVoiceNote } from "./VoiceNote";
+import { BackgroundRunCards } from "./BackgroundCards";
+import { anchorBackgroundCards, type BackgroundCard } from "./backgroundRun";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
 import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
 import {
@@ -92,10 +94,6 @@ export type TranscriptContext = {
   // tail the same way as question cards. Built by ChatPanel (closures over the
   // plan data + session); Transcript just mounts it.
   planCard?: React.ReactNode;
-  // The running / uncertain / failed background-run cards (v2-next N5), built
-  // by ChatPanel from the job store. Rendered first in the tail, right under
-  // the last message, so they read as transcript entries.
-  backgroundCards?: React.ReactNode;
   // The server-path handoff cards (ready / failed / preparing), rendered in the
   // tail right after the todo checklist. Built by ChatPanel over the session's
   // pinned handoff records.
@@ -397,11 +395,6 @@ export function TranscriptTail({ context }: { context: TranscriptContext }) {
         paddingBottom: "var(--sp-6)",
       }}
     >
-      {context.backgroundCards && (
-        <ErrorBoundary>
-          {context.backgroundCards}
-        </ErrorBoundary>
-      )}
       {(context.pendingVoiceNote != null) && (
         <PendingVoiceRow
           pending={context.pendingVoiceNote}
@@ -500,8 +493,11 @@ export type TranscriptProps = {
   onRejectQuestion: (q: QuestionRequest) => void;
   // The plan_exit card, mounted in the tail (see TranscriptContext.planCard).
   planCard?: React.ReactNode;
-  // Background-run cards, mounted first in the tail (see TranscriptContext.backgroundCards).
-  backgroundCards?: React.ReactNode;
+  // The running / uncertain / failed background-run cards (v2-next N5), built
+  // by ChatPanel from the job store. Each is anchored after the row that was
+  // current when its job started (anchorBackgroundCards), like a tool call — it
+  // does not follow the tail; the sidebar row is the live view of the job.
+  backgroundCards?: ReadonlyArray<BackgroundCard>;
   // Handoff cards, mounted in the tail after the todo checklist (see TranscriptContext.handoffCards).
   handoffCards?: React.ReactNode;
   // The Virtuoso scroll container, published upward so ChatPanel's
@@ -613,6 +609,13 @@ export function Transcript({
     [messages, layout, turnInfo, finishByMessageId, mediaByMessageId, widgetsByMessageId],
   );
 
+  const backgroundByRowRef = useRef<Map<string, BackgroundCard[]>>(new Map());
+  const backgroundByRow = useMemo(() => {
+    const next = anchorBackgroundCards(backgroundCards ?? [], visibleMessages, backgroundByRowRef.current);
+    backgroundByRowRef.current = next;
+    return next;
+  }, [backgroundCards, visibleMessages]);
+
   // Rows that open a new turn: the role changes from the row above (prompt →
   // reply, reply → next prompt). Consecutive assistant rows are steps of ONE
   // reply and sit at --block-gap, like blocks inside a single message.
@@ -713,7 +716,6 @@ export function Transcript({
     onReplyQuestion,
     onRejectQuestion,
     planCard,
-    backgroundCards,
     handoffCards,
     pendingVoiceNote,
     onRetryVoiceNote,
@@ -872,7 +874,9 @@ export function Transcript({
                 </div>
                 {/* A background run can be the very first thing a session does;
                     its card must not wait for a first message to exist. */}
-                {backgroundCards && <ErrorBoundary>{backgroundCards}</ErrorBoundary>}
+                {backgroundCards && backgroundCards.length > 0 && (
+                  <ErrorBoundary><BackgroundRunCards cards={backgroundCards} /></ErrorBoundary>
+                )}
                 {handoffCards && <ErrorBoundary>{handoffCards}</ErrorBoundary>}
               </div>
             </div>
@@ -941,9 +945,15 @@ export function Transcript({
                 );
                 // Always wrapped, so a row whose turn-start status flips (an
                 // earlier row loads or settles) restyles instead of remounting.
+                const bg = backgroundByRow.get(m.info.id);
                 return (
                   <div style={turnStartIds.has(m.info.id) ? TURN_START_PAD : undefined}>
                     {row}
+                    {bg && (
+                      <div style={{ marginTop: "var(--block-gap)" }}>
+                        <ErrorBoundary><BackgroundRunCards cards={bg} /></ErrorBoundary>
+                      </div>
+                    )}
                   </div>
                 );
               }}

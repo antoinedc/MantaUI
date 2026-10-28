@@ -114,7 +114,6 @@ import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { describeInboxCancel, describeInboxSetDelivery, planBusySend, shouldClearDraft } from "./inboxState";
 import { PendingMessagesCard, type PendingCardItem } from "./PendingMessagesCard";
-import { BackgroundRunCards } from "./BackgroundCards";
 import { useHandoffPanel } from "./hooks/useHandoffPanel";
 import {
   CarriedContextBlock,
@@ -3085,7 +3084,7 @@ export function ChatPanel({
     return null;
   }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
 
-  // Background-run cards under the transcript (v2-next N5), from the job store.
+  // Background-run cards in the transcript (v2-next N5), from the job store.
   // The transcript is only scanned for finished results when some job of this
   // session could still need a card, and the derived list keeps its identity
   // while it is unchanged, so streaming deltas never re-render the tail.
@@ -3097,10 +3096,6 @@ export function ChatPanel({
     backgroundCardsRef.current = next;
     return next;
   }, [jobs, sessionId, messages, jobOwnership]);
-  const backgroundCardsNode = useMemo(
-    () => (backgroundCards.length > 0 ? <BackgroundRunCards cards={backgroundCards} /> : undefined),
-    [backgroundCards],
-  );
 
   // Server-path handoff cards live in the transcript tail (after the todos), not
   // the pinned stack; memoized on the records so streaming never re-renders them.
@@ -3477,7 +3472,7 @@ export function ChatPanel({
             onReplyQuestion={replyQuestion}
             onRejectQuestion={rejectQuestion}
             planCard={planCard}
-            backgroundCards={backgroundCardsNode}
+            backgroundCards={backgroundCards}
             handoffCards={handoffCardsNode}
             scrollerElRef={scrollerElRef}
             followingRef={followingRef}
