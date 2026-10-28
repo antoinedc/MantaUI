@@ -65,6 +65,7 @@ final class ChatModelCatalog: ObservableObject {
     private var boundEvents = false
     private var loadTask: Task<Void, Never>?
     private var pickerTask: Task<Void, Never>?
+    // Only written in init and read in deinit; NSObjectProtocol tokens are not Sendable.
     nonisolated(unsafe) private var providersObserver: NSObjectProtocol?
     nonisolated(unsafe) private var removedObserver: NSObjectProtocol?
 
@@ -143,15 +144,20 @@ final class ChatModelCatalog: ObservableObject {
         let gen = generation
         loadTask?.cancel()
         loadTask = Task { [weak self] in
-            let modelsResult = try? await client.models()
-            let defaultResult = try? await client.defaultModel()
-            let config = (try? await client.configGet()) ?? nil
+            // `try?` flattens "failed" and "answered null" into one nil, so keep the
+            // two apart: only a call that SUCCEEDED may clear what is shown.
+            let modelsResult: [OpencodeModel]? = try? await client.models()
+            let defaultResult: Result<OpencodeModelID?, Error>
+            do { defaultResult = .success(try await client.defaultModel()) } catch { defaultResult = .failure(error) }
+            let configResult: Result<[String: JSONValue]?, Error>
+            do { configResult = .success(try await client.configGet()) } catch { configResult = .failure(error) }
             guard let self, gen == self.generation else { return }
-            // A reload that failed keeps the list already shown; the first load
-            // still flips `loaded` so the pill leaves its loading state.
+            // A reload that failed keeps what is already shown (the list AND both
+            // defaults); the first load still flips `loaded` so the pill leaves its
+            // loading state.
             if let modelsResult { self.models = modelsResult }
-            if let defaultResult { self.defaultModel = defaultResult } else if modelsResult != nil { self.defaultModel = nil }
-            self.configDefault = Self.configDefaultID(config)
+            if case .success(let value) = defaultResult { self.defaultModel = value }
+            if case .success(let value) = configResult { self.configDefault = Self.configDefaultID(value) }
             self.loaded = true
             await self.fetchPicker(client: client, generation: gen)
         }
@@ -262,7 +268,9 @@ final class ChatModelCatalog: ObservableObject {
             api = client
             return client
         case .rebind(let next, let boxChanged):
-            if boxChanged { resetForBoxChange() }
+            // The first bind (no previous binding) has nothing to drop; a switch or
+            // removal already ran `resetForBoxChange()` and cleared the binding.
+            if boxChanged && binding != nil { resetForBoxChange() }
             binding = next
             let client = makeClient(next)
             api = client

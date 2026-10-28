@@ -168,6 +168,8 @@ final class UsageResumeModel: ObservableObject {
                 await load()
                 return false
             }
+            // The sheet closes on success, so the box's sentence goes to the app banner.
+            usage.showNotice(reply.message ?? "Updated.")
             return true
         } catch {
             message = "Couldn't update — \(ModelsCapability.reason(error)). Nothing was confirmed; check the list and try again."

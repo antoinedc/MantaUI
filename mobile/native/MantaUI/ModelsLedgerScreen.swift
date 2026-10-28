@@ -82,11 +82,14 @@ struct ModelsLedgerScreen: View {
     private func billSplit(_ view: LedgerViewWire) -> some View {
         Section {
             GeometryReader { geo in
+                // The box rounds each share, so they can sum to 101: scale by the
+                // larger of 100 and the sum so the bar never outgrows its track.
+                let total = CGFloat(max(100, view.segments.reduce(0) { $0 + $1.pct }))
                 HStack(spacing: 0) {
                     ForEach(view.segments, id: \.kind) { segment in
                         Rectangle()
                             .fill(color(segment.kind))
-                            .frame(width: geo.size.width * CGFloat(segment.pct) / 100)
+                            .frame(width: geo.size.width * CGFloat(segment.pct) / total)
                             .overlay {
                                 if segment.inline {
                                     Text("\(segment.pct)%")

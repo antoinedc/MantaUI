@@ -51,6 +51,7 @@ final class UsageAlertsStore: ObservableObject {
     private var noticeTask: Task<Void, Never>?
     private var boundEventStore = false
     private var cancellables: Set<AnyCancellable> = []
+    // Only written in init and read in deinit; NSObjectProtocol tokens are not Sendable.
     nonisolated(unsafe) private var removedObserver: NSObjectProtocol?
 
     init(
@@ -228,6 +229,11 @@ final class UsageAlertsStore: ObservableObject {
         resumeSheetPresented = true
     }
 
+    /// A one-line result from another screen (the resume sheet), shown by the banner.
+    func showNotice(_ text: String) {
+        show(text)
+    }
+
     private func show(_ text: String) {
         notice = text
         noticeTask?.cancel()
@@ -273,7 +279,10 @@ final class UsageAlertsStore: ObservableObject {
             api = client
             return client
         case .rebind(let next, let boxChanged):
-            if boxChanged { resetForBoxChange() }
+            // The first bind (no previous binding) has nothing to drop — resetting
+            // there would erase `activeSessionId` / a raced `presentResume()`. A box
+            // switch or removal already ran `resetForBoxChange()` and cleared the binding.
+            if boxChanged && binding != nil { resetForBoxChange() }
             binding = next
             let client = makeClient(next)
             api = client

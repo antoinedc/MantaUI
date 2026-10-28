@@ -56,6 +56,8 @@ final class ChatModelStore: ObservableObject {
     /// last failure for it — the catalogue row shows a spinner / "Try again".
     @Published private(set) var optInPendingKey: String?
     @Published private(set) var optInError: String?
+    /// The key `optInError` belongs to, so only that row says "Try again".
+    @Published private(set) var optInErrorKey: String?
     /// Plan mode is ON for this session (the per-session `manta:chat:<sid>:plan`
     /// boolean — BET-952). A plain Bool, deliberately NOT folded into the model
     /// blob: plan mode changes the agent, never the model (one model per
@@ -322,9 +324,11 @@ final class ChatModelStore: ObservableObject {
     var visibleRecents: [ModelChoice] {
         if pickerUnsupported { return recents }
         guard let picker else { return [] }
-        return picker.recents.map {
-            ModelChoice(providerID: $0.providerID, modelID: $0.modelID, variant: $0.variant, fast: $0.fast ?? false)
-        }
+        // The box keeps a recent when its key OR its `-fast` twin is selectable; a
+        // chip must be applicable, so keep only those whose own target is.
+        return picker.recents
+            .map { ModelChoice(providerID: $0.providerID, modelID: $0.modelID, variant: $0.variant, fast: $0.fast ?? false) }
+            .filter { isSelectable("\($0.providerID)/\($0.fast ? ChatModel.fastModelID($0.modelID) : $0.modelID)") }
     }
 
     /// The catalogue groups the picker lists: the box's `groups` (provider + keys)
@@ -359,17 +363,20 @@ final class ChatModelStore: ObservableObject {
         guard optInPendingKey == nil else { return false }
         optInPendingKey = key
         optInError = nil
+        optInErrorKey = nil
         defer { optInPendingKey = nil }
         do {
             let reply = try await api.modelsOptIn(keys: [key])
             guard reply.ok else {
                 optInError = "Couldn't enable \(model.name) — \(reply.message)"
+                optInErrorKey = key
                 return false
             }
             catalog.reload()
             return true
         } catch {
             optInError = "Couldn't enable \(model.name) — \(Self.describe(error))"
+            optInErrorKey = key
             return false
         }
     }

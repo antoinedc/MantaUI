@@ -93,7 +93,7 @@ final class ModelsUnidentifiedStore: ObservableObject {
 
     /// Confirm / candidate pick: `models:declare {key, catalogId}`.
     func declare(key: String, catalogId: String) async {
-        _ = await run(key: key) { [api] in try await api.modelsDeclare(key: key, catalogId: catalogId) }
+        _ = await run(key: key, showFieldErrors: true) { [api] in try await api.modelsDeclare(key: key, catalogId: catalogId) }
     }
 
     /// The editor's Save. Returns the box's reply so the form can show a `field`
@@ -107,7 +107,10 @@ final class ModelsUnidentifiedStore: ObservableObject {
         feedback = nil
     }
 
-    private func run(key: String, _ call: @escaping () async throws -> ModelsDeclareReply) async -> ModelsDeclareReply? {
+    /// `showFieldErrors`: Confirm / pick have no form to put a `field` error under,
+    /// so their refusal goes to the feedback bar; the editor shows it under the field.
+    private func run(key: String, showFieldErrors: Bool = false,
+                     _ call: @escaping () async throws -> ModelsDeclareReply) async -> ModelsDeclareReply? {
         guard busyKey == nil else { return nil }
         busyKey = key
         dismissFeedback()
@@ -118,7 +121,7 @@ final class ModelsUnidentifiedStore: ObservableObject {
                 if let list = reply.list { phase = .loaded(list) } else { await refresh() }
                 catalog.reload()
                 show(.saved(reply.message))
-            } else if reply.field == nil {
+            } else if reply.field == nil || showFieldErrors {
                 show(.failed(reply.message))
             }
             return reply
@@ -248,6 +251,7 @@ struct ModelsIdentifyForm: View {
     @ObservedObject var store: ModelsUnidentifiedStore
     let target: ModelsIdentifyTarget
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var query = ""
     @State private var selected: ModelsCatalogEntryWire?
@@ -259,6 +263,7 @@ struct ModelsIdentifyForm: View {
     @State private var writes = true
     @State private var fieldError: (field: String, message: String)?
     @State private var preselected = false
+    @State private var saveError: String?
 
     private var entries: [ModelsCatalogEntryWire] {
         if case .loaded(let all) = store.catalogPhase { return all }
@@ -275,6 +280,16 @@ struct ModelsIdentifyForm: View {
                 modelSection
                 priceSection
                 cachingSection
+                if let saveError {
+                    Section { Text(saveError).font(.footnote).foregroundStyle(.red) }
+                }
+            }
+            // The editor covers the list, so the box's refusal / a thrown save is
+            // drawn here, where the user pressed Save.
+            .safeAreaInset(edge: .bottom) {
+                ModelsFeedbackBar(feedback: store.feedback, tokens: Tokens.scheme(colorScheme),
+                                  retry: { Task { await store.refresh() } },
+                                  dismiss: { store.dismissFeedback() })
             }
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search the catalogue…")
             .navigationTitle("Identify")
@@ -387,9 +402,15 @@ struct ModelsIdentifyForm: View {
     private func save() async {
         guard let selected else { return }
         fieldError = nil
+        saveError = nil
         let form = ModelsDeclareForm(catalogId: selected.id, price: priceMode, costIn: costIn, costOut: costOut,
                                      caching: caching, reads: reads, writes: writes)
-        guard let reply = await store.declare(key: target.key, form: form) else { return }
+        guard let reply = await store.declare(key: target.key, form: form) else {
+            // A thrown save already put its sentence in the bar; an older box or a
+            // refused call has none, so the form says it itself.
+            if store.feedback == nil { saveError = "Couldn't confirm the save — close this and pull to refresh." }
+            return
+        }
         if reply.ok {
             dismiss()
         } else if let field = reply.field {

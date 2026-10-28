@@ -182,7 +182,9 @@ final class ModelsStoreTests: XCTestCase {
         XCTAssertTrue(catalog.pickerUnsupported)
         let modelStore = ChatModelStore(sessionId: "s1", api: api, catalog: catalog, prefs: ChatModelPrefs(api: api))
         XCTAssertTrue(modelStore.isSelectable("anthropic/old"))
-        XCTAssertEqual(modelStore.pickerGroups.flatMap { $0.models }.count, 3)
+        // The raw enabled list, with the `-fast` twin folded into its base (a mode, not
+        // a model): opus + old, not three rows.
+        XCTAssertEqual(modelStore.pickerGroups.flatMap { $0.models }.map(\.id), ["opus", "old"])
     }
 
     // MARK: Frames / providers
@@ -202,6 +204,134 @@ final class ModelsStoreTests: XCTestCase {
         do { let ok = await eventually { ModelsStubProtocol.count("opencode:models") == 2 }; XCTAssertTrue(ok) }
         await catalog.waitForLoad()
         XCTAssertEqual(ModelsStubProtocol.count("models:picker"), 2, "the picker is refetched with the list")
+    }
+
+    func testModelsUpdatedFrameReloadsTheCatalogueAndClearsAVanishedDefault() async throws {
+        let renamed = #"[{"id":"opus","providerID":"anthropic","name":"Opus Renamed","limit":{"context":500000}}]"#
+        ModelsStubProtocol.responses = [
+            "opencode:models": reply(modelsJSON),
+            "opencode:default-model": reply("null"),
+            "config:get": reply(#"{"defaultModel":{"providerID":"anthropic","modelID":"opus"}}"#),
+            "models:picker": reply(pickerJSON),
+        ]
+        let api = ModelsStubProtocol.client()
+        let catalog = ChatModelCatalog(api: api, defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
+        let stream = ModelsTestStream()
+        let events = MantaEventStore(stream: stream, tokenProvider: { nil }, serverProvider: { nil })
+        catalog.subscribe(to: events)
+        catalog.loadIfNeeded()
+        await catalog.waitForLoad()
+        XCTAssertEqual(catalog.configDefault, OpencodeModelID(providerID: "anthropic", modelID: "opus"))
+        XCTAssertEqual(catalog.models.count, 3)
+
+        // The box renamed a model and dropped the saved default.
+        ModelsStubProtocol.responses["opencode:models"] = reply(renamed)
+        ModelsStubProtocol.responses["config:get"] = reply("{}")
+        stream.inject(#"{"kind":"models.updated"}"#)
+        do { let ok = await eventually { ModelsStubProtocol.count("opencode:models") == 2 && catalog.models.count == 1 }; XCTAssertTrue(ok) }
+        await catalog.waitForLoad()
+        XCTAssertEqual(catalog.models.first?.name, "Opus Renamed")
+        XCTAssertEqual(catalog.models.first?.limit?.context, 500000)
+        XCTAssertNil(catalog.configDefault, "a successful answer without a default clears it")
+        XCTAssertEqual(ModelsStubProtocol.count("opencode:models"), 2, "one full reload per frame")
+    }
+
+    func testAFailedReloadKeepsTheSavedDefaults() async {
+        ModelsStubProtocol.responses = [
+            "opencode:models": reply(modelsJSON),
+            "opencode:default-model": reply(#"{"providerID":"anthropic","modelID":"old"}"#),
+            "config:get": reply(#"{"defaultModel":{"providerID":"anthropic","modelID":"opus"}}"#),
+            "models:picker": reply(pickerJSON),
+        ]
+        let catalog = ChatModelCatalog(api: ModelsStubProtocol.client(), defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
+        catalog.loadIfNeeded()
+        await catalog.waitForLoad()
+        XCTAssertEqual(catalog.configDefault?.modelID, "opus")
+        XCTAssertEqual(catalog.defaultModel?.modelID, "old")
+
+        ModelsStubProtocol.responses["config:get"] = #"{"error":"boom"}"#
+        ModelsStubProtocol.responses["opencode:default-model"] = #"{"error":"boom"}"#
+        catalog.reload()
+        await catalog.waitForLoad()
+        XCTAssertEqual(catalog.configDefault?.modelID, "opus", "a failed config read keeps the default")
+        XCTAssertEqual(catalog.defaultModel?.modelID, "old", "a failed default read keeps the default")
+
+        ModelsStubProtocol.responses["config:get"] = reply("{}")
+        ModelsStubProtocol.responses["opencode:default-model"] = reply("null")
+        catalog.reload()
+        await catalog.waitForLoad()
+        XCTAssertNil(catalog.configDefault)
+        XCTAssertNil(catalog.defaultModel)
+    }
+
+    func testARecentWhoseFastTwinIsHiddenIsNotOffered() async {
+        // `opus-fast` is not selectable though `opus` is: the box keeps the recent via
+        // its base key, but a chip that cannot be applied must not be shown.
+        let picker = #"{"supported":true,"groups":[{"provider":"anthropic","keys":["anthropic/opus"]}],"locked":[],"selectable":["anthropic/opus"],"delegateGroups":[],"recents":[{"providerID":"anthropic","modelID":"opus","fast":true,"key":"anthropic/opus"},{"providerID":"anthropic","modelID":"opus","fast":false,"key":"anthropic/opus"}]}"#
+        ModelsStubProtocol.responses = [
+            "opencode:models": reply(modelsJSON), "opencode:default-model": reply("null"),
+            "config:get": reply("{}"), "models:picker": reply(picker),
+        ]
+        let api = ModelsStubProtocol.client()
+        let catalog = ChatModelCatalog(api: api, defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
+        catalog.loadIfNeeded()
+        await catalog.waitForLoad()
+        let modelStore = ChatModelStore(sessionId: "s1", api: api, catalog: catalog, prefs: ChatModelPrefs(api: api))
+        XCTAssertEqual(modelStore.visibleRecents.map(\.fast), [false])
+        XCTAssertFalse(modelStore.apply(ModelChoice(providerID: "anthropic", modelID: "opus", variant: nil, fast: true)))
+    }
+
+    // MARK: Failures drawn where the user acted (finding 1)
+
+    func testAnIdentifyConfirmRefusedForAFieldStillSaysSo() async {
+        ModelsStubProtocol.responses = [
+            "models:declare": reply(#"{"ok":false,"field":"catalogId","code":"unknown-catalog","message":"Pick the model this is."}"#),
+        ]
+        let api = ModelsStubProtocol.client()
+        let catalog = ChatModelCatalog(api: api, defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
+        let unidentified = ModelsUnidentifiedStore(api: api, catalog: catalog)
+        await unidentified.declare(key: "anthropic/mystery", catalogId: "nope")
+        XCTAssertEqual(unidentified.feedback, .failed("Pick the model this is."))
+    }
+
+    func testTheEditorKeepsAFieldRefusalForItsOwnField() async {
+        ModelsStubProtocol.responses = [
+            "models:declare": reply(#"{"ok":false,"field":"price","code":"bad-price","message":"Choose Free, or enter at least one price."}"#),
+        ]
+        let api = ModelsStubProtocol.client()
+        let catalog = ChatModelCatalog(api: api, defaults: UserDefaults(suiteName: "ModelsStoreTests-\(UUID().uuidString)")!)
+        let unidentified = ModelsUnidentifiedStore(api: api, catalog: catalog)
+        let form = ModelsDeclareForm(catalogId: "x", price: nil, costIn: "", costOut: "", caching: "none", reads: true, writes: true)
+        let result = await unidentified.declare(key: "anthropic/mystery", form: form)
+        XCTAssertEqual(result?.field, "price")
+        XCTAssertNil(unidentified.feedback, "the form shows a field error under that field")
+    }
+
+    func testAnOverrideRefusalWithoutAFieldIsShownAsAFailure() async {
+        ModelsStubProtocol.responses = [
+            "models:table": reply(table),
+            "models:set-override": reply(#"{"ok":false,"code":"unknown-model","message":"That model is no longer on this box."}"#),
+        ]
+        let (store, _) = store()
+        await store.refresh()
+        let saved = await store.saveOverride(key: "anthropic/opus", name: "X", description: "", context: "")
+        XCTAssertFalse(saved)
+        XCTAssertEqual(store.feedback, .failed("That model is no longer on this box."))
+        XCTAssertNil(store.fieldError)
+    }
+
+    func testAThrownPriceSaveDoesNotClaimNothingWasChanged() async {
+        ModelsStubProtocol.responses = [
+            "models:set-price": #"{"error":"socket hang up"}"#,
+            "optimizer:prices": reply(#"{"supported":true,"unpricedByProvider":[{"providerID":"anthropic","models":["old"]}]}"#),
+        ]
+        let priceStore = ModelsPriceStore(api: ModelsStubProtocol.client())
+        let result = await priceStore.save(providerID: "anthropic", modelID: "old", input: "1", output: "2", cacheRead: "0.1", cacheWrite: "")
+        XCTAssertNil(result.reply)
+        let text = result.error ?? ""
+        XCTAssertTrue(text.contains("Couldn't confirm the save"))
+        XCTAssertFalse(text.contains("Nothing was changed"))
+        XCTAssertEqual(ModelsStubProtocol.count("optimizer:prices"), 1, "what landed is re-read")
     }
 
     // MARK: M-03-5
@@ -281,7 +411,10 @@ final class ModelsStoreTests: XCTestCase {
         catalog.loadIfNeeded()
         await catalog.waitForLoad()
         XCTAssertEqual(ModelsStubProtocol.count("models:opt-in"), 1)
-        XCTAssertTrue(ModelsStubProtocol.recorded.first { $0.channel == "models:opt-in" }?.args.contains("anthropic/old") == true)
+        // Decoded, not substring-matched: the recorded body is JSONSerialization output,
+        // which escapes "/" ("anthropic\/old").
+        let sent = ModelsStubProtocol.args(of: "models:opt-in").first as? [String: Any]
+        XCTAssertEqual(sent?["keys"] as? [String], ["anthropic/old"])
         XCTAssertEqual(DeprecatedModelOptIns.load(defaults), [])
         catalog.reload()
         await catalog.waitForLoad()
@@ -304,4 +437,21 @@ final class ModelsStoreTests: XCTestCase {
         await catalog.waitForLoad()
         XCTAssertEqual(ModelsStubProtocol.count("models:opt-in"), 2)
     }
+}
+
+private final class ModelsTestStream: MantaEventStreamControl {
+    var onState: ((MantaConnectionState) -> Void)?
+    var onMessage: ((String) -> Void)?
+    var onReconnect: (() -> Void)?
+    var onConfigError: ((Error) -> Void)?
+    var hasConnectedOnce = false
+    var currentState: MantaConnectionState = .idle
+
+    func ensure() {}
+    func markReconnectAndEnsure() {}
+    func retryNow() {}
+    func forceReconnect() {}
+    func close(reason: String) {}
+
+    func inject(_ text: String) { onMessage?(text) }
 }

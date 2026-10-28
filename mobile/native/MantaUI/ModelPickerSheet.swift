@@ -413,7 +413,11 @@ struct ModelCatalogueView: View {
     @ViewBuilder
     private var providerSections: some View {
         if groups.isEmpty {
-            ContentUnavailableView.search(text: "No models match")
+            if modelStore.picker == nil, !modelStore.pickerUnsupported, modelStore.pickerError == nil {
+                ProgressView("Loading models…")
+            } else {
+                ContentUnavailableView.search(text: "No models match")
+            }
         } else {
             ForEach(groups, id: \.provider) { group in
                 Section {
@@ -477,7 +481,7 @@ struct ModelCatalogueView: View {
                 ProgressView()
                     .controlSize(.small)
             } else {
-                Button(modelStore.optInError != nil ? "Try again" : "Enable") {
+                Button(modelStore.optInErrorKey == "\(m.providerID)/\(m.id)" ? "Try again" : "Enable") {
                     Task { await modelStore.optIn(m) }
                 }
                 .font(.manta(size: Metrics.type.xs, weight: .semibold))

@@ -140,6 +140,7 @@ struct ModelsEditForm: View {
     @ObservedObject var store: ModelsStore
     let row: ModelsTableRowWire
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var name: String
     @State private var description: String
@@ -191,5 +192,12 @@ struct ModelsEditForm: View {
             }
         }
         .onAppear { store.clearFieldError() }
+        // The list's inset does not follow a pushed view: a refusal or a thrown
+        // save has to be visible HERE, where the user pressed Save.
+        .safeAreaInset(edge: .bottom) {
+            ModelsFeedbackBar(feedback: store.feedback, tokens: Tokens.scheme(colorScheme),
+                              retry: { Task { await store.retrySubSync() } },
+                              dismiss: { store.dismissFeedback() })
+        }
     }
 }

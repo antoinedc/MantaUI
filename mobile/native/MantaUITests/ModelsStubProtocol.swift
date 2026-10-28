@@ -28,6 +28,24 @@ final class ModelsStubProtocol: URLProtocol, @unchecked Sendable {
         return recorded.filter { $0.channel == channel }.count
     }
 
+    /// The decoded `args` array of the first recorded request on `channel`. Compare
+    /// decoded values, never substrings: `JSONSerialization` escapes "/" as "\/", so
+    /// a key like "anthropic/old" never appears verbatim in the recorded body.
+    static func args(of channel: String) -> [Any] {
+        lock.lock(); defer { lock.unlock() }
+        guard let body = recorded.first(where: { $0.channel == channel })?.args.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        else { return [] }
+        return object["args"] as? [Any] ?? []
+    }
+
+    /// Answer later requests on every channel immediately again, leaving the ones
+    /// already held pending (released by `releaseHeld()`).
+    static func stopHolding() {
+        lock.lock(); defer { lock.unlock() }
+        held = []
+    }
+
     static func releaseHeld() {
         lock.lock()
         let toFinish = pending

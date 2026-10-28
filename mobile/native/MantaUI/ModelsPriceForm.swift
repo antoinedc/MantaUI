@@ -70,7 +70,12 @@ final class ModelsPriceStore: ObservableObject {
             }
             return (reply, nil)
         } catch {
-            return (nil, "Couldn't save — \(ModelsCapability.reason(error)). Nothing was changed; try again.")
+            // The box may have written before the connection dropped: re-read what
+            // is unpriced (keeping the list on a failed re-read) and say so plainly.
+            if let prices = try? await api.optimizerPrices(), let groups = prices.unpricedByProvider {
+                phase = .loaded(groups)
+            }
+            return (nil, "Couldn't confirm the save — \(ModelsCapability.reason(error)). Pull to refresh to check.")
         }
     }
 }
