@@ -206,7 +206,6 @@ struct GitSessionHeaderRow: View {
             GitChecksSheet(
                 checks: store.state.checks,
                 view: store.state.view?.checks,
-                prURL: store.state.pr?.url,
                 bridge: GitComposerBridge.make(readOnly: readOnly, controller: composerController)
             )
         case .connect:

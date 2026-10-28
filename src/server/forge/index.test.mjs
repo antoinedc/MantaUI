@@ -1742,6 +1742,23 @@ test("mergePullRequest: a blocked gate and a moved head are refused WITHOUT call
   assert.equal(merged, 0, "the adapter's merge is never reached");
 });
 
+test("mergePullRequest: a missing or empty sha fails closed and never calls merge", async () => {
+  let merged = 0;
+  const adapter = { kind: "github", ...readyToMerge(), merge: async () => { merged++; return { data: {}, stale: false }; } };
+  for (const input of [{ number: 42 }, { number: 42, sha: "" }, { number: 42, sha: undefined }]) {
+    const r = await mergePullRequest("/repo", input, { ...SHIP_DEPS, getAdapter: () => adapter });
+    assert.equal(r.ok, false, JSON.stringify(input));
+    assert.equal(r.kind, "sha_mismatch");
+    assert.equal(r.error, "missing sha");
+  }
+  // The box's own read has no head SHA either: nothing to compare, so nothing merges.
+  const noHead = { kind: "github", ...readyToMerge({ headSha: "" }), merge: async () => { merged++; } };
+  const r = await mergePullRequest("/repo", { number: 42, sha: "abc123" }, { ...SHIP_DEPS, getAdapter: () => noHead });
+  assert.equal(r.ok, false);
+  assert.equal(r.kind, "sha_mismatch");
+  assert.equal(merged, 0, "the adapter's merge is never reached");
+});
+
 test("mergePullRequest: an unreadable PR fails closed; adapter failures carry a message", async () => {
   let merged = 0;
   const unreadable = { kind: "github", getPullRequest: async () => { throw new Error("down"); }, merge: async () => { merged++; } };
@@ -1794,6 +1811,33 @@ test("forgeDiffForCwd: returns structured files, placed threads and the reconcil
   assert.equal(r.draft.comments.length, 1);
   assert.deepEqual(r.draft.comments[0].placement, { at: "row", file: 0, row: 3 });
   assert.equal(r.diff, FILE_DIFF, "the raw diff stays for compatibility");
+});
+
+test("forgeDiffForCwd: a rate-limited read still returns the stored draft (unplaced)", async () => {
+  const kit = draftKit();
+  await draftCommentForCwd("/repo", { op: "add", comment: { path: "a.ts", line: 2, side: "new", body: "mine" } }, kit);
+  const limitedDiff = {
+    kind: "github",
+    listPullRequests: async () => ({ data: [OPEN_PR], stale: false }),
+    getDiff: async () => { throw new ForgeRateLimitedError("u"); },
+  };
+  const r = await forgeDiffForCwd("/repo", diffDeps(limitedDiff, kit));
+  assert.equal(r.error, null);
+  assert.equal(r.stale, true);
+  assert.deepEqual(r.files, []);
+  assert.equal(r.draft.comments.length, 1);
+  assert.deepEqual(r.draft.comments[0].placement, { at: "unplaced" });
+  // The PR LIST read is limited instead: the last PR seen on the branch finds the draft.
+  const lastPr = createLastPrCache({ max: 4 });
+  lastPr.set("/repo", "feature/x", { pr: OPEN_PR, checks: [], rollup: "none" });
+  const limitedList = { kind: "github", listPullRequests: async () => { throw new ForgeRateLimitedError("u"); } };
+  const viaCache = await forgeDiffForCwd("/repo", { ...diffDeps(limitedList, kit), lastPr });
+  assert.equal(viaCache.stale, true);
+  assert.equal(viaCache.draft?.comments.length, 1);
+  // Nothing cached: no number, so no draft — and the clients keep their snapshot.
+  const bare = await forgeDiffForCwd("/repo", { ...diffDeps(limitedList, kit), lastPr: createLastPrCache({ max: 4 }) });
+  assert.equal(bare.stale, true);
+  assert.equal(bare.draft, null);
 });
 
 test("forgeDiffForCwd: a draft anchored to an older head is returned stale", async () => {

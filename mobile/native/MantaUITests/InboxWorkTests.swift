@@ -144,4 +144,9 @@ final class InboxWorkTests: XCTestCase {
             ]
         )
     }
+
+    func testOneMalformedRowDoesNotDropTheInbox() throws {
+        let r = try decode(WorkInboxResult.self, #"{ "items": [ { "kind": "pr", "number": 1 }, { "kind": "pr", "repoKey": "h/o/r", "number": 2 } ] }"#)
+        XCTAssertEqual(r.items.map(\.number), [2])
+    }
 }

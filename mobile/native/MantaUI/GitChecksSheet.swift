@@ -10,7 +10,6 @@ import SwiftUI
 struct GitChecksSheet: View {
     let checks: [GitCheckRun]
     let view: GitChecksView?
-    let prURL: String?
     /// nil in a read-only chat: no "Send failures to the agent".
     let bridge: GitComposerBridge?
 

@@ -25,6 +25,29 @@ private enum WireKey: String, CodingKey {
     case pr, url, draft
 }
 
+/// One element of a list that decodes to nil instead of failing the whole list.
+private struct LossyElement<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws {
+        value = try? T(from: decoder)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// A list where one malformed element is skipped instead of dropping the
+    /// payload ("never drop a payload"). Missing / null / not-a-list → [].
+    func lossyList<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T] {
+        lossyListIfPresent(type, forKey: key) ?? []
+    }
+
+    /// nil only when the key is absent or not a list (so an older box is told
+    /// apart from an empty answer).
+    func lossyListIfPresent<T: Decodable>(_ type: T.Type, forKey key: Key) -> [T]? {
+        guard let elements = (try? decodeIfPresent([LossyElement<T>].self, forKey: key)) ?? nil else { return nil }
+        return elements.compactMap(\.value)
+    }
+}
+
 private extension KeyedDecodingContainer {
     func lenientString(_ key: Key) -> String? { (try? decodeIfPresent(String.self, forKey: key)) ?? nil }
     func lenientBool(_ key: Key) -> Bool? { (try? decodeIfPresent(Bool.self, forKey: key)) ?? nil }
@@ -397,7 +420,7 @@ struct GitPullRequestResult: Decodable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         pr = (try? c.decodeIfPresent(GitPullRequest.self, forKey: .pr)) ?? nil
-        checks = ((try? c.decodeIfPresent([GitCheckRun].self, forKey: .checks)) ?? nil) ?? []
+        checks = c.lossyList(GitCheckRun.self, forKey: .checks)
         rollup = GitRollup(wire: c.lenientString(.rollup))
         stale = c.lenientBool(.stale) ?? false
         error = c.lenientString(.error)
@@ -592,6 +615,34 @@ struct GitForgeState: Equatable, Sendable {
     /// The box answered this poll without a `view` while GitHub is connected: an
     /// older box. The header says so once (D24).
     var boxLacksPullRequestView: Bool { connected && view == nil }
+
+    /// This state with `pr` as the branch's pull request: the sheet goes straight
+    /// to the PR view (checks and merge gate arrive with the next poll).
+    func pinning(_ pr: GitPullRequest) -> GitForgeState {
+        var next = self
+        next.pr = pr
+        next.view = GitPullRequestView(
+            panel: .pr,
+            chipLabel: branch.map { "\($0) · #\(pr.number)" },
+            ship: GitShipView(state: .hasPR),
+            merge: nil,
+            checks: view?.checks ?? GitChecksView()
+        )
+        return next
+    }
+}
+
+/// A just-created pull request, held on screen until a poll returns it (GitHub's
+/// list often lags a new PR) or the branch changes.
+struct GitPinnedPR: Equatable, Sendable {
+    var pr: GitPullRequest
+    var branch: String
+
+    /// What `incoming` should become. nil `keep` = the pin is done.
+    func resolve(_ incoming: GitForgeState) -> (state: GitForgeState, keep: Bool) {
+        if incoming.pr?.number == pr.number || incoming.branch != branch { return (incoming, false) }
+        return (incoming.pinning(pr), true)
+    }
 }
 
 // MARK: - Merge snapshot (the user confirms exactly this)
@@ -864,7 +915,7 @@ struct GitDiffFile: Decodable, Equatable, Sendable {
         path = try c.decode(String.self, forKey: .path)
         added = c.lenientInt(.added) ?? 0
         removed = c.lenientInt(.removed) ?? 0
-        rows = ((try? c.decodeIfPresent([GitDiffRow].self, forKey: .rows)) ?? nil) ?? []
+        rows = c.lossyList(GitDiffRow.self, forKey: .rows)
         rowCount = c.lenientInt(.rowCount) ?? rows.count
         truncated = c.lenientBool(.truncated) ?? false
     }
@@ -921,7 +972,7 @@ struct GitThread: Decodable, Equatable, Sendable, Identifiable {
         line = c.lenientInt(.line)
         side = c.lenientString(.side)
         resolved = c.lenientBool(.resolved) ?? false
-        comments = ((try? c.decodeIfPresent([GitThreadComment].self, forKey: .comments)) ?? nil) ?? []
+        comments = c.lossyList(GitThreadComment.self, forKey: .comments)
         placement = ((try? c.decodeIfPresent(GitPlacement.self, forKey: .placement)) ?? nil) ?? .unplaced
     }
 
@@ -994,7 +1045,7 @@ struct GitDraft: Decodable, Equatable, Sendable {
         headSha = c.lenientString(.headSha) ?? ""
         verdict = c.lenientString(.verdict).flatMap(GitVerdict.init(rawValue:))
         body = c.lenientString(.body) ?? ""
-        comments = ((try? c.decodeIfPresent([GitDraftComment].self, forKey: .comments)) ?? nil) ?? []
+        comments = c.lossyList(GitDraftComment.self, forKey: .comments)
         stale = c.lenientBool(.stale) ?? false
         updatedAt = c.lenientDouble(.updatedAt)
     }
@@ -1021,6 +1072,13 @@ struct GitDiffResult: Decodable, Equatable, Sendable {
         case files, threads, draft, headSha, stale, error, message, parseFailed
     }
 
+    /// The forge was rate-limited: a stale answer with no files and no error. A
+    /// screen that already shows the diff keeps it (and the user's unpublished
+    /// comments) and only marks it stale.
+    var isRateLimitedEmpty: Bool {
+        error == nil && stale && !parseFailed && (files?.isEmpty ?? false)
+    }
+
     init(files: [GitDiffFile]?, threads: [GitThread] = [], draft: GitPlacedDraft? = nil, headSha: String = "",
          stale: Bool = false, error: String? = nil, message: String? = nil, parseFailed: Bool = false) {
         self.files = files
@@ -1035,8 +1093,8 @@ struct GitDiffResult: Decodable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        files = (try? c.decodeIfPresent([GitDiffFile].self, forKey: .files)) ?? nil
-        threads = ((try? c.decodeIfPresent([GitThread].self, forKey: .threads)) ?? nil) ?? []
+        files = c.lossyListIfPresent(GitDiffFile.self, forKey: .files)
+        threads = c.lossyList(GitThread.self, forKey: .threads)
         draft = (try? c.decodeIfPresent(GitDraft.self, forKey: .draft)) ?? nil
         headSha = c.lenientString(.headSha) ?? ""
         stale = c.lenientBool(.stale) ?? false

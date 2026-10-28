@@ -74,8 +74,8 @@ export function reviewLoadState(res: ForgeDiffResult, capability: boolean | null
 //      the tapped row;
 //   3. ids no longer present are gone;
 //   4. anything else (more unknown ids — another device added comments — or a
-//      moved head / flipped stale flag) keeps the known comments and asks for a
-//      refetch;
+//      moved head / flipped stale flag) keeps every comment (the unknown ones
+//      `unplaced`) and asks for a refetch;
 //   5. a null response (the draft was submitted or cleared elsewhere) clears it.
 // The draft's own fields (verdict, body, stale, headSha) always come from the
 // response.
@@ -85,24 +85,30 @@ export function mergeDraftPlacements(
   tapped: ForgePlacement | null,
 ): { draft: ForgePlacedDraft | null; needsRefetch: boolean } {
   if (!response) return { draft: null, needsRefetch: false };
-  if (!previous) {
-    return {
-      draft: { ...response, comments: response.comments.map((c) => ({ ...c, placement: { at: "unplaced" as const } })) },
-      needsRefetch: response.comments.length > 0,
-    };
-  }
-  const known = new Map(previous.comments.map((c) => [c.id, c.placement ?? ({ at: "unplaced" } as ForgePlacement)]));
+  // The same rule as iOS `ReviewDraftMerge`: unknown comments are KEPT (a
+  // single one from this user's tap sits at the tapped row, any other is
+  // `unplaced` until the refetch places it), so the pending count never runs short.
+  const known = new Map<string, ForgePlacement>(
+    (previous?.comments ?? []).map((c) => [c.id, c.placement ?? ({ at: "unplaced" } as ForgePlacement)]),
+  );
   const unknown = response.comments.filter((c) => !known.has(c.id));
-  let needsRefetch = response.headSha !== previous.headSha || response.stale !== previous.stale;
-  let tappedId: string | null = null;
-  if (unknown.length === 1 && tapped && !needsRefetch) tappedId = unknown[0].id;
-  else if (unknown.length > 0) needsRefetch = true;
-  const comments: ForgePlacedDraftComment[] = [];
-  for (const c of response.comments) {
-    const placement = known.get(c.id) ?? (c.id === tappedId ? tapped : null);
-    if (placement) comments.push({ ...c, placement });
-  }
+  let needsRefetch = false;
+  if (previous && (response.headSha !== previous.headSha || response.stale !== previous.stale)) needsRefetch = true;
+  if (unknown.length > 1 || (unknown.length === 1 && !tapped)) needsRefetch = true;
+  const comments: ForgePlacedDraftComment[] = response.comments.map((c) => ({
+    ...c,
+    placement:
+      known.get(c.id) ?? (unknown.length === 1 && tapped ? tapped : ({ at: "unplaced" } as ForgePlacement)),
+  }));
   return { draft: { ...response, comments }, needsRefetch };
+}
+
+// A rate-limited re-read returns the stored draft without placements: keep the
+// placements this pane already has and take the draft's own fields.
+function mergeStaleDraft(current: ForgePlacedDraft | null, fresh: ForgePlacedDraft | null): ForgePlacedDraft | null {
+  if (!fresh) return current;
+  const known = new Map((current?.comments ?? []).map((c) => [c.id, c.placement]));
+  return { ...fresh, comments: fresh.comments.map((c) => ({ ...c, placement: known.get(c.id) ?? c.placement })) };
 }
 
 // The note-inline block (a colleague's thread, a buffered draft note, or the
@@ -244,6 +250,8 @@ export function ReviewPane({
   const canSend = Boolean(sessionId);
   const diffCapability = useBoxCapability("forge-diff-view-1");
   const [result, setResult] = useState<ForgeDiffResult | null>(null);
+  const resultRef = useRef<ForgeDiffResult | null>(null);
+  resultRef.current = result;
   const [loadFailed, setLoadFailed] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -288,6 +296,15 @@ export function ReviewPane({
       if (!keepUi) setLoading(true);
       try {
         const res = await window.api.forgeDiff(ref);
+        // A rate-limited read answers no files at all (`stale`, no error): keep
+        // what is on screen — the snapshot and the user's unpublished comments —
+        // and only flag it stale.
+        if (res.error == null && res.stale && (res.files?.length ?? 0) === 0 && resultRef.current) {
+          setResult({ ...resultRef.current, stale: true });
+          if (res.draft) setDraft((d) => mergeStaleDraft(d, res.draft ?? null));
+          setLoadFailed(false);
+          return;
+        }
         setResult(res);
         setDraft(res.draft ?? null);
         setLoadFailed(false);

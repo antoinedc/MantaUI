@@ -38,6 +38,16 @@ enum ReviewPhase: Equatable, Sendable {
     case loaded
 }
 
+extension ReviewPhase {
+    /// A diff (or its empty / unreadable shell) is on screen and worth keeping.
+    var showsSnapshot: Bool {
+        switch self {
+        case .parseFailed, .empty, .loaded: return true
+        case .loading, .error, .boxTooOld: return false
+        }
+    }
+}
+
 @MainActor
 final class ReviewStore: ObservableObject {
     let target: GitRef
@@ -51,6 +61,8 @@ final class ReviewStore: ObservableObject {
     @Published private(set) var notes = ReviewNoteIndex(threads: [], draft: nil)
     @Published private(set) var submitting = false
     @Published private(set) var banner: GitBanner?
+    /// Remove failures, shown on the card they belong to (comment id → message).
+    @Published private(set) var noteErrors: [String: String] = [:]
     /// Draft comments the user already put into the chat composer.
     @Published private(set) var sentToAgent: Set<String> = []
 
@@ -109,6 +121,17 @@ final class ReviewStore: ObservableObject {
     }
 
     private func apply(_ result: GitDiffResult) {
+        // A rate-limited forge answers with no files: keep the snapshot on screen —
+        // the user's unpublished comments included — and only mark it stale. (The
+        // box still returns the stored draft; take its own fields, keep placements.)
+        if result.isRateLimitedEmpty, phase.showsSnapshot {
+            diffIsStale = true
+            if let fresh = result.draft {
+                draft = Self.keepingPlacements(of: draft, in: fresh)
+                rebuildNotes()
+            }
+            return
+        }
         if let error = result.error {
             files = []
             threads = []
@@ -133,6 +156,19 @@ final class ReviewStore: ObservableObject {
         } else {
             phase = .loaded
         }
+    }
+
+    /// The stored draft with the placements this screen already holds.
+    private static func keepingPlacements(of current: GitPlacedDraft?, in fresh: GitDraft) -> GitPlacedDraft {
+        var known: [String: GitPlacement] = [:]
+        for comment in current?.comments ?? [] { known[comment.id] = comment.placement ?? .unplaced }
+        var next = fresh
+        next.comments = fresh.comments.map { comment in
+            var placed = comment
+            placed.placement = known[comment.id] ?? comment.placement ?? .unplaced
+            return placed
+        }
+        return next
     }
 
     private func rebuildNotes() {
@@ -160,19 +196,19 @@ final class ReviewStore: ObservableObject {
         }
     }
 
-    /// Remove a draft comment. Failure → the box's message in the banner, the
-    /// card stays.
+    /// Remove a draft comment. Failure → the box's message on the card, which stays.
     func removeComment(id: String) async {
+        noteErrors[id] = nil
         do {
             switch try await client.draftComment(target, .delete(id: id)) {
             case .ok(let response):
                 sentToAgent.remove(id)
                 await reconcile(response, tapped: nil)
             case .failed(let failure):
-                banner = .error(failure.display)
+                noteErrors[id] = failure.display
             }
         } catch {
-            banner = .error(GitForgeText.describe(error))
+            noteErrors[id] = GitForgeText.describe(error)
         }
     }
 

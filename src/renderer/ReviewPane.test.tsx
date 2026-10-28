@@ -78,15 +78,30 @@ describe("mergeDraftPlacements", () => {
     expect(verdict.needsRefetch).toBe(false);
   });
 
-  it("unknown ids, a moved head or a flipped stale flag ask for a refetch and keep the known comments", () => {
+  it("unknown ids, a moved head or a flipped stale flag ask for a refetch and keep EVERY comment (unknown ones unplaced)", () => {
     const previous = placed([dc("c1")], [rowA]);
     const two = mergeDraftPlacements(previous, draftOf([dc("c1"), dc("x"), dc("y")], { body: "kept" }), fileB);
     expect(two.needsRefetch).toBe(true);
-    expect(two.draft?.comments.map((c) => c.id)).toEqual(["c1"]);
+    expect(two.draft?.comments.map((c) => [c.id, c.placement])).toEqual([
+      ["c1", rowA], ["x", { at: "unplaced" }], ["y", { at: "unplaced" }],
+    ]);
     expect(two.draft?.body).toBe("kept");
+    // One unknown id and nothing tapped (another device's comment): kept, unplaced, refetch.
+    const stranger = mergeDraftPlacements(previous, draftOf([dc("c1"), dc("x")]), null);
+    expect(stranger.draft?.comments.map((c) => c.placement)).toEqual([rowA, { at: "unplaced" }]);
     expect(mergeDraftPlacements(previous, draftOf([dc("c1"), dc("x")]), null).needsRefetch).toBe(true);
     expect(mergeDraftPlacements(previous, draftOf([dc("c1")], { headSha: "h2" }), null).needsRefetch).toBe(true);
     expect(mergeDraftPlacements(previous, draftOf([dc("c1")], { stale: true }), null).needsRefetch).toBe(true);
+  });
+
+  it("the very first comment (no previous draft) lands at the tapped row without a refetch, like iOS", () => {
+    const tapped: ForgePlacement = { at: "row", file: 0, row: 2 };
+    const r = mergeDraftPlacements(null, draftOf([dc("c1")]), tapped);
+    expect(r.needsRefetch).toBe(false);
+    expect(r.draft?.comments[0].placement).toEqual(tapped);
+    const noTap = mergeDraftPlacements(null, draftOf([dc("c1")]), null);
+    expect(noTap.needsRefetch).toBe(true);
+    expect(noTap.draft?.comments[0].placement).toEqual({ at: "unplaced" });
   });
 
   it("a null response clears the draft without a refetch", () => {
@@ -231,6 +246,30 @@ describe("ReviewPane", () => {
     await act(async () => { button("Approve")!.click(); });
     await h.flush();
     expect(forgeDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rate-limited refetch (stale, no files) keeps the diff and the unpublished comments on screen", async () => {
+    const first = result({ draft: placed([dc("c1")], [{ at: "row", file: 0, row: 3 }]) });
+    const limited = result({ files: [], stale: true, draft: placed([dc("c1")], [{ at: "unplaced" }], { headSha: "h2" }) });
+    const forgeDiff = vi.fn().mockResolvedValueOnce(first).mockResolvedValue(limited);
+    installMockApi({
+      forgeDiff,
+      // A moved head asks for a refetch, which the forge then rate-limits.
+      forgeDraftComment: () => Promise.resolve({ ok: true, draft: draftOf([dc("c1")], { headSha: "h2" }), message: null }),
+    });
+    h = mount(<ReviewPane sessionId="ses" cwd="/repo" />);
+    await h.flush();
+    await h.flush();
+    await act(async () => { button("Approve")!.click(); });
+    await h.flush();
+    await h.flush();
+    expect(forgeDiff).toHaveBeenCalledTimes(2);
+    const text = h.text();
+    expect(text).toContain("ctxline");
+    expect(text).toContain("You · draft");
+    expect(text).toContain("1 comment");
+    expect(text).toContain("Showing last known diff");
+    expect(text).not.toContain("No diff.");
   });
 
   it("without a session there is no Send to agent on a saved draft", async () => {

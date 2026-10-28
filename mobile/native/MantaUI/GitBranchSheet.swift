@@ -32,6 +32,9 @@ struct GitBranchSheet: View {
     var body: some View {
         NavigationStack {
             content
+                // The merge outcome shows over BOTH states: after a merge the PR is
+                // no longer open, so the sheet falls back to the ship view.
+                .safeAreaInset(edge: .top) { mergeBanner }
                 .navigationTitle(branchName)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
@@ -48,6 +51,7 @@ struct GitBranchSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .onAppear { wantPreview() }
+        .onDisappear { store.clearMergeMessage() }
         .onChange(of: store.state.branch) { _, _ in wantPreview() }
         .onChange(of: store.state.view?.ship.state) { _, _ in wantPreview() }
         .confirmationDialog(
@@ -60,6 +64,20 @@ struct GitBranchSheet: View {
             Button("Cancel", role: .cancel) { pendingMerge = nil }
         } message: { target in
             Text(target.title)
+        }
+    }
+
+    @ViewBuilder
+    private var mergeBanner: some View {
+        if let message = store.mergeMessage {
+            Label(message.text, systemImage: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.manta(size: Metrics.type.small, weight: .semibold))
+                .foregroundColor(message.isError ? tokens.danger : tokens.ok)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Metrics.spacing.sp4)
+                .padding(.vertical, Metrics.spacing.sp2)
+                .background(.bar)
+                .accessibilityAddTraits(.updatesFrequently)
         }
     }
 
@@ -215,12 +233,6 @@ struct GitBranchSheet: View {
                             .foregroundColor(tint(merge.mergeable.tone))
                             .multilineTextAlignment(.trailing)
                     }
-                }
-            }
-            if let message = store.mergeMessage {
-                Section {
-                    Label(message.text, systemImage: message.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundColor(message.isError ? tokens.danger : tokens.ok)
                 }
             }
             Section {

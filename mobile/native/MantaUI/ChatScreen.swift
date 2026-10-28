@@ -458,6 +458,7 @@ private struct ChatScreenContent: View {
             }
             // The composer takes no input while the session is a read-only job; while
             // it is still being checked typing stays possible (sends are held).
+            .onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }
             .onChange(of: store.isBackgroundJobReadOnly) { _, readOnly in
                 composer.acceptsInput = !readOnly
                 if readOnly { composerGlassHeight = 0 }

@@ -510,4 +510,65 @@ final class GitForgeTests: XCTestCase {
         XCTAssertTrue(index.hasUnplaced)
         XCTAssertFalse(ReviewNoteIndex(threads: [], draft: nil).hasUnplaced)
     }
+
+    // MARK: a just-created PR stays on screen
+
+    func testPinningShowsThePRViewImmediately() {
+        var s = GitForgeState.empty
+        s.branch = "feat/x"
+        s.view = GitPullRequestView(panel: .noPR, ship: GitShipView(state: .ready))
+        let pr = GitPullRequest(number: 5, title: "T", headRef: "feat/x", baseRef: "main", headSha: "s5")
+        let pinned = s.pinning(pr)
+        XCTAssertEqual(pinned.pr?.number, 5)
+        XCTAssertEqual(pinned.view?.panel, .pr)
+        XCTAssertEqual(pinned.view?.chipLabel, "feat/x · #5")
+        XCTAssertEqual(pinned.view?.ship.state, .hasPR)
+        XCTAssertNil(pinned.view?.merge, "the gate arrives with the next poll")
+    }
+
+    func testPinIsKeptUntilAPollReturnsThePROrTheBranchMoves() {
+        let pr = GitPullRequest(number: 5, headRef: "feat/x")
+        let pin = GitPinnedPR(pr: pr, branch: "feat/x")
+        var lagging = GitForgeState.empty
+        lagging.branch = "feat/x"
+        let kept = pin.resolve(lagging)
+        XCTAssertTrue(kept.keep)
+        XCTAssertEqual(kept.state.pr?.number, 5, "a poll that doesn't list the new PR yet does not remove it")
+
+        var arrived = lagging
+        arrived.pr = GitPullRequest(number: 5, title: "from the forge")
+        let done = pin.resolve(arrived)
+        XCTAssertFalse(done.keep)
+        XCTAssertEqual(done.state.pr?.title, "from the forge")
+
+        var moved = GitForgeState.empty
+        moved.branch = "feat/other"
+        let dropped = pin.resolve(moved)
+        XCTAssertFalse(dropped.keep)
+        XCTAssertNil(dropped.state.pr)
+    }
+
+    // MARK: rate-limited review read + lossy decode
+
+    func testRateLimitedEmptyIsOnlyStaleNoFilesNoError() throws {
+        XCTAssertTrue(try decode(GitDiffResult.self, #"{ "files": [], "stale": true, "error": null, "threads": [] }"#).isRateLimitedEmpty)
+        XCTAssertFalse(try decode(GitDiffResult.self, #"{ "files": [], "stale": false, "error": null }"#).isRateLimitedEmpty, "a real empty diff")
+        XCTAssertFalse(try decode(GitDiffResult.self, #"{ "files": [], "stale": true, "error": "no_pr" }"#).isRateLimitedEmpty)
+        XCTAssertFalse(try decode(GitDiffResult.self, #"{ "files": [], "stale": true, "parseFailed": true }"#).isRateLimitedEmpty)
+        XCTAssertFalse(try decode(GitDiffResult.self, #"{ "stale": true }"#).isRateLimitedEmpty, "no files key = an older box")
+    }
+
+    func testOneMalformedElementDoesNotDropTheList() throws {
+        let r = try decode(GitDiffResult.self, #"""
+        { "files": [ { "path": "a.ts", "rows": [ { "kind": "added", "text": "x" }, 7 ] }, { "nope": 1 } ],
+          "threads": [ { "id": "t1" }, { "path": "no-id" }, { "id": "t2" } ],
+          "draft": { "comments": [ { "id": "c1" }, { "body": "no id" } ] } }
+        """#)
+        XCTAssertEqual(r.files?.map(\.path), ["a.ts"])
+        XCTAssertEqual(r.files?.first?.rows.count, 1)
+        XCTAssertEqual(r.threads.map(\.id), ["t1", "t2"])
+        XCTAssertEqual(r.draft?.comments.map(\.id), ["c1"])
+        let pr = try decode(GitPullRequestResult.self, #"{ "checks": [ { "name": "ok" }, { "status": "x" } ] }"#)
+        XCTAssertEqual(pr.checks.map(\.name), ["ok"])
+    }
 }

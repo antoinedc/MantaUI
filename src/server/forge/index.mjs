@@ -1314,8 +1314,15 @@ export async function mergePullRequest(cwd, { number, method = "merge", sha } = 
       message: mergeFailureMessage("blocked", "couldn't confirm the pull request's state"),
     };
   }
-  if (sha && pr?.headSha && pr.headSha !== sha) {
-    return { ok: false, error: "head sha moved", kind: "sha_mismatch", message: mergeFailureMessage("sha_mismatch") };
+  // Fail closed on the head SHA: without BOTH the SHA the user confirmed and the
+  // PR's own head, the API would merge whatever landed after the reviewed diff.
+  if (!sha || !pr?.headSha || pr.headSha !== sha) {
+    return {
+      ok: false,
+      error: sha ? "head sha moved" : "missing sha",
+      kind: "sha_mismatch",
+      message: mergeFailureMessage("sha_mismatch"),
+    };
   }
   const gate = viewCanMerge({
     rollup: rollupChecks(Array.isArray(checks) ? checks : []),
@@ -1369,15 +1376,39 @@ export async function forgeDiffForCwd(ref, deps = {}) {
   if (ctx.error) return empty(ctx.error);
   const { adapter, repo } = ctx;
 
+  // A rate-limited forge must not hide the user's unpublished comments: the
+  // draft lives in the box's own store, so it is returned (every comment
+  // `unplaced` — placing needs the diff) with `stale: true` and no files. The
+  // clients keep what they already show and only mark it stale.
+  const staleResult = async (number) => {
+    let draft = null;
+    if (number != null) {
+      const stored = await storeGetDraft(ctx.repoKey, number, deps);
+      if (stored) {
+        draft = { ...stored, comments: stored.comments.map((c) => ({ ...c, placement: { at: "unplaced" } })) };
+      }
+    }
+    return empty(null, { stale: true, draft });
+  };
+
   const target = await resolveRefNumber(ref, ctx, deps);
-  if (target.rateLimited) return empty(null, { stale: true });
+  if (target.rateLimited) {
+    // The PR number is unknown (the list read was limited): fall back to the
+    // last PR this box saw on the session's branch.
+    let number = null;
+    if (ctx.cwd) {
+      const branch = await (deps.currentBranch ?? defaultCurrentBranch)(ctx.cwd);
+      number = branch ? ((deps.lastPr ?? defaultLastPr).get(ctx.cwd, branch)?.pr?.number ?? null) : null;
+    }
+    return staleResult(number);
+  }
   if (target.error) return empty(target.error);
 
   let res;
   try {
     res = await adapter.getDiff(repo, target.number);
   } catch (err) {
-    if (err instanceof ForgeRateLimitedError) return empty(null, { stale: true });
+    if (err instanceof ForgeRateLimitedError) return staleResult(target.number);
     throw err;
   }
   const diff = res.data.diff ?? "";

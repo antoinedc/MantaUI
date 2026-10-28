@@ -114,7 +114,7 @@ struct WorkInboxResult: Decodable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        items = ((try? c.decodeIfPresent([WorkInboxItem].self, forKey: .items)) ?? nil) ?? []
+        items = c.lossyList(WorkInboxItem.self, forKey: .items)
         stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
     }

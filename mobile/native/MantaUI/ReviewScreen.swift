@@ -22,6 +22,8 @@ struct ReviewCommentTarget: Identifiable, Equatable {
 
 struct ReviewScreen: View {
     let target: GitRef
+    /// The chat this review was opened from (nil for the inbox / standalone). Kept
+    /// for call-site clarity; "Send to agent" is gated by `onSendToAgent`, not this.
     let sessionId: String?
     let title: String?
     let prURL: String?
@@ -59,6 +61,7 @@ struct ReviewScreen: View {
     var body: some View {
         content
             .navigationTitle("Review")
+            .navigationSubtitle(title ?? "")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { menu }
@@ -123,6 +126,7 @@ struct ReviewScreen: View {
         case .parseFailed(let message):
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+                    staleNote
                     stateMessage(message, actions: {
                         retryButton
                         openOnGitHubButton
@@ -135,6 +139,7 @@ struct ReviewScreen: View {
         case .empty:
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
+                    staleNote
                     stateMessage("No diff.", actions: { EmptyView() })
                         .frame(maxWidth: .infinity)
                     otherComments
@@ -176,12 +181,7 @@ struct ReviewScreen: View {
     private var diffBody: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                if store.diffIsStale {
-                    Text("Showing last known diff — GitHub didn't answer.")
-                        .font(.manta(size: Metrics.type.xs))
-                        .foregroundColor(tokens.tx4)
-                        .padding(Metrics.spacing.sp3)
-                }
+                staleNote
                 otherComments
                 ForEach(Array(store.files.enumerated()), id: \.offset) { fileIndex, file in
                     Section {
@@ -193,6 +193,17 @@ struct ReviewScreen: View {
             }
         }
         .refreshable { await store.load() }
+    }
+
+    /// The forge didn't answer the last read: what is shown is the last known diff.
+    @ViewBuilder
+    private var staleNote: some View {
+        if store.diffIsStale {
+            Text("Showing last known diff — GitHub didn't answer.")
+                .font(.manta(size: Metrics.type.xs))
+                .foregroundColor(tokens.tx4)
+                .padding(Metrics.spacing.sp3)
+        }
     }
 
     /// Notes the box could not place on a line ("Other comments").
@@ -231,40 +242,40 @@ struct ReviewScreen: View {
         .accessibilityAddTraits(.isHeader)
     }
 
+    /// The Section's content, emitted flat (no wrapping stack) so the enclosing
+    /// `LazyVStack` builds rows lazily — a 3,000-line file is not built in one pass.
     @ViewBuilder
     private func fileBody(_ file: GitDiffFile, fileIndex: Int) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(store.notes.fileThreads[fileIndex] ?? []) { threadCard($0).padding(Metrics.spacing.sp3) }
-            ForEach(store.notes.fileDrafts[fileIndex] ?? []) { draftCard($0).padding(Metrics.spacing.sp3) }
-            if file.truncated {
-                VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
-                    Text("Too large to show here (\(file.rowCount) lines)")
-                        .font(.manta(size: Metrics.type.small))
-                        .foregroundColor(tokens.tx3)
-                    if let url = githubURL {
-                        Button { openURL(url) } label: { Label("Open on GitHub", systemImage: "arrow.up.right") }
-                            .buttonStyle(.bordered)
-                    }
+        ForEach(store.notes.fileThreads[fileIndex] ?? []) { threadCard($0).padding(Metrics.spacing.sp3) }
+        ForEach(store.notes.fileDrafts[fileIndex] ?? []) { draftCard($0).padding(Metrics.spacing.sp3) }
+        if file.truncated {
+            VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
+                Text("Too large to show here (\(file.rowCount) lines)")
+                    .font(.manta(size: Metrics.type.small))
+                    .foregroundColor(tokens.tx3)
+                if let url = githubURL {
+                    Button { openURL(url) } label: { Label("Open on GitHub", systemImage: "arrow.up.right") }
+                        .buttonStyle(.bordered)
                 }
-                .padding(Metrics.spacing.sp3)
-            } else if file.rows.count > Self.collapseThreshold && !expandedFiles.contains(fileIndex) {
-                Button {
-                    expandedFiles.insert(fileIndex)
-                } label: {
-                    Text("Show \(file.rows.count) lines")
-                        .font(.manta(size: Metrics.type.small, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, Metrics.spacing.sp3)
-                }
-                .buttonStyle(.bordered)
-                .padding(Metrics.spacing.sp3)
-            } else {
-                ForEach(Array(file.rows.enumerated()), id: \.offset) { rowIndex, row in
-                    let rowID = ReviewNoteIndex.rowID(file: fileIndex, row: rowIndex)
-                    rowView(row, rowID: rowID, placement: .row(file: fileIndex, row: rowIndex))
-                    ForEach(store.notes.rowThreads[rowID] ?? []) { threadCard($0).padding(Metrics.spacing.sp3) }
-                    ForEach(store.notes.rowDrafts[rowID] ?? []) { draftCard($0).padding(Metrics.spacing.sp3) }
-                }
+            }
+            .padding(Metrics.spacing.sp3)
+        } else if file.rows.count > Self.collapseThreshold && !expandedFiles.contains(fileIndex) {
+            Button {
+                expandedFiles.insert(fileIndex)
+            } label: {
+                Text("Show \(file.rows.count) lines")
+                    .font(.manta(size: Metrics.type.small, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, Metrics.spacing.sp3)
+            }
+            .buttonStyle(.bordered)
+            .padding(Metrics.spacing.sp3)
+        } else {
+            ForEach(Array(file.rows.enumerated()), id: \.offset) { rowIndex, row in
+                let rowID = ReviewNoteIndex.rowID(file: fileIndex, row: rowIndex)
+                rowView(row, rowID: rowID, placement: .row(file: fileIndex, row: rowIndex))
+                ForEach(store.notes.rowThreads[rowID] ?? []) { threadCard($0).padding(Metrics.spacing.sp3) }
+                ForEach(store.notes.rowDrafts[rowID] ?? []) { draftCard($0).padding(Metrics.spacing.sp3) }
             }
         }
     }
@@ -388,6 +399,11 @@ struct ReviewScreen: View {
                     .font(.manta(size: Metrics.type.xs))
                     .foregroundColor(tokens.tx4)
             }
+            if let failure = store.noteErrors[comment.id] {
+                Text(failure)
+                    .font(.manta(size: Metrics.type.xs))
+                    .foregroundColor(tokens.danger)
+            }
             HStack(spacing: Metrics.spacing.sp2) {
                 if let bridge = onSendToAgent, !store.sentToAgent.contains(comment.id) {
                     Button("Send to agent") { send(comment, via: bridge) }
@@ -421,9 +437,13 @@ struct ReviewScreen: View {
         }
     }
 
+    // Built once: a formatter per comment per render is wasted work on a long review.
+    private static let isoFormatter = ISO8601DateFormatter()
+    private static let relativeFormatter = RelativeDateTimeFormatter()
+
     private static func relativeTime(_ iso: String?) -> String? {
-        guard let iso, let date = ISO8601DateFormatter().date(from: iso) else { return nil }
-        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
+        guard let iso, let date = isoFormatter.date(from: iso) else { return nil }
+        return relativeFormatter.localizedString(for: date, relativeTo: Date())
     }
 
     // MARK: Pending bar

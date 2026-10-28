@@ -152,6 +152,24 @@ final class GitForgeStoreTests: XCTestCase {
         XCTAssertEqual(store.justShipped, 5)
     }
 
+    func testCreatedPRIsShownEvenWhenTheNextPollDoesNotListItYet() async throws {
+        // After the ship, GitHub's list still has no PR for the branch.
+        let box = FakeForgeBox([noPR(), noPR()])
+        let store = GitForgeStore(client: client(box))
+        store.attach(cwd: "/r")
+        await store.refreshNow()
+        store.ensureShipPreview(model: nil, sessionId: nil)
+        try await waitUntil { store.shipPreview.canCreate(current: store.currentShipKey) }
+        await store.createPullRequest()
+        XCTAssertEqual(store.state.pr?.number, 5, "the sheet swaps to the PR immediately")
+        XCTAssertEqual(store.justShipped, 5)
+        XCTAssertEqual(store.state.view?.panel, .pr)
+        // The lagging poll runs and must not take it away.
+        await store.refreshNow()
+        XCTAssertEqual(store.state.pr?.number, 5)
+        XCTAssertEqual(store.state.view?.panel, .pr)
+    }
+
     func testShipPreviewRefetchedAfterBranchChange() async throws {
         let box = FakeForgeBox([noPR(branch: "feat/a"), noPR(branch: "feat/b")])
         let store = GitForgeStore(client: client(box))
@@ -337,6 +355,33 @@ final class ReviewStoreTests: XCTestCase {
         XCTAssertNil(store.banner, "and no error")
         let calls = await box.diffCalls
         XCTAssertEqual(calls, 1, "no refetch")
+    }
+
+    func testRateLimitedReloadKeepsTheSnapshotAndTheDraft() async {
+        let loaded = GitDiffResult(files: [file()], draft: GitDraft(headSha: "h", comments: [GitDraftComment(id: "c1", path: "a.ts", line: 1, body: "one", placement: .row(file: 0, row: 1))]), headSha: "h")
+        // The forge is rate-limited: no files, stale, and the box still returns the stored draft (unplaced).
+        let limited = GitDiffResult(files: [], draft: GitDraft(headSha: "h", comments: [GitDraftComment(id: "c1", path: "a.ts", line: 1, body: "one", placement: .unplaced)]), stale: true)
+        let box = FakeReviewBox(diffs: [loaded, limited])
+        let store = ReviewStore(target: .cwd("/r"), client: client(box))
+        await store.load()
+        await store.load()
+        XCTAssertEqual(store.phase, .loaded, "never 'No diff.'")
+        XCTAssertEqual(store.files.count, 1)
+        XCTAssertTrue(store.diffIsStale, "the footnote shows")
+        XCTAssertTrue(store.showsPendingBar, "the pending bar stays")
+        XCTAssertEqual(store.pendingCount, 1)
+        XCTAssertEqual(store.draft?.comments.first?.placement, .row(file: 0, row: 1), "the placement it had is kept")
+    }
+
+    func testFailedRemoveShowsOnTheCardNotTheBanner() async {
+        let loaded = GitDiffResult(files: [file()], draft: GitDraft(headSha: "h", comments: [GitDraftComment(id: "c1", path: "a.ts", line: 1, body: "one", placement: .row(file: 0, row: 1))]), headSha: "h")
+        let box = FakeReviewBox(diffs: [loaded], commentResponses: [.failed(GitFailure(error: "comment not found", message: "That comment was already removed."))])
+        let store = ReviewStore(target: .cwd("/r"), client: client(box))
+        await store.load()
+        await store.removeComment(id: "c1")
+        XCTAssertEqual(store.noteErrors["c1"], "That comment was already removed.")
+        XCTAssertNil(store.banner)
+        XCTAssertEqual(store.pendingCount, 1, "the card stays")
     }
 
     func testFailedAddKeepsTheTextAndSurfacesTheBoxMessage() async {

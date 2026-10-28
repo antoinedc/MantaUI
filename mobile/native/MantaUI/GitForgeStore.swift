@@ -103,6 +103,8 @@ final class GitForgeStore: ObservableObject {
     private var previewRequest: PreviewRequest?
     private var previewTask: Task<Void, Never>?
     private var justShippedTask: Task<Void, Never>?
+    /// The PR just created, kept until a poll returns it (the forge's list lags).
+    private var pinned: GitPinnedPR?
     private var capabilitiesLoaded = false
     private var offerLoaded = false
 
@@ -165,6 +167,7 @@ final class GitForgeStore: ObservableObject {
         state = .empty
         loadedOnce = false
         shipPreview = .idle
+        pinned = nil
     }
 
     /// The app moved between foreground and background; the poll skips a tick
@@ -194,7 +197,13 @@ final class GitForgeStore: ObservableObject {
         }
     }
 
-    private func apply(_ next: GitForgeState, cwd: String) {
+    private func apply(_ incoming: GitForgeState, cwd: String) {
+        var next = incoming
+        if let pin = pinned {
+            let resolved = pin.resolve(incoming)
+            next = resolved.state
+            if !resolved.keep { pinned = nil }
+        }
         if state != next { state = next }
         loadedOnce = true
         // A terminal-side checkout can never leave the old branch's title on screen.
@@ -304,9 +313,15 @@ final class GitForgeStore: ObservableObject {
             switch try await client.ship(cwd, preview.effectiveTitle, preview.body) {
             case .ok(let pr, _):
                 shipPreview = .idle
-                if let number = pr?.number { noteShipped(number) }
-                // Swap to the PR view in the same moment: wait for the refreshed read.
-                await refreshNow()
+                if let pr {
+                    // The sheet swaps to the PR view in the same moment; the forge's
+                    // list may not carry the new PR yet, so it is pinned until a poll does.
+                    pinned = GitPinnedPR(pr: pr, branch: key.branch)
+                    state = state.pinning(pr)
+                    noteShipped(pr.number)
+                }
+                // Not awaited: a slow or failing refresh must not hold the sheet.
+                Task { [weak self] in await self?.refreshNow() }
             case .failed(let failure):
                 shipPreview = .failed(key, failure.display)
             }

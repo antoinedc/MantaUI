@@ -37,6 +37,8 @@ struct InboxWorkScreen: View {
     @State private var connecting = false
     /// Ticks so the age column keeps moving.
     @State private var now = Date()
+    /// Built once with the view (not in `body`, which would re-subscribe on every render).
+    private let ageTicker = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
     private var visible: [WorkInboxItem] { WorkInbox.filter(store.items, query: query) }
@@ -64,7 +66,7 @@ struct InboxWorkScreen: View {
                 }
         }
         .task { await store.load() }
-        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { now = $0 }
+        .onReceive(ageTicker) { now = $0 }
         .overlay(alignment: .bottom) { feedback }
         .confirmationDialog(
             actionItem.map { "\($0.identifier ?? "") \($0.title)" } ?? "",
@@ -231,7 +233,9 @@ struct InboxWorkScreen: View {
 
     private func start(_ item: WorkInboxItem) {
         guard let draft = store.startSessionDraft(for: item) else { return }
-        onClose()
+        // Don't close the inbox here: the session list dismisses it itself, waits for
+        // the dismissal to finish, then presents the create sheet. Closing it first
+        // makes it skip that wait and UIKit refuses the second presentation.
         navigator.startNewSession(draft)
     }
 
