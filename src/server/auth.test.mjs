@@ -608,6 +608,22 @@ test("revoke: 32-hex token that doesn't match → 401, no rotation", async () =>
   assert.equal(gate.ok, true);
 });
 
+test("revoke: a present-but-blank device_id → 400, never a whole-box reset", async () => {
+  for (const device_id of ["", "   ", 42]) {
+    const eng = engine({ auth: AUTH });
+    const r = await eng.revoke({ token: AUTH.box_token, device_id });
+    assert.equal(r.ok, false, `device_id=${JSON.stringify(device_id)}`);
+    assert.equal(r.status, 400);
+    // No rotation happened: the box token still authorizes.
+    const gate = eng.authorize({
+      method: "GET",
+      path: "/api/projects",
+      authorization: `Bearer ${AUTH.box_token}`,
+    });
+    assert.equal(gate.ok, true);
+  }
+});
+
 test("revoke: valid token deletes box_token from auth.json (BET-357 §2)", async () => {
   // Live FS round-trip: write a real auth.json, build the engine around it,
   // revoke, and assert the file no longer authenticates the OLD token. The

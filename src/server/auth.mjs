@@ -582,6 +582,13 @@ export function createAuthEngine({
     if (!isValidToken(token)) {
       return { ok: false, status: 400, error: "malformed token" };
     }
+    // A device_id that is PRESENT but blank must never fall through to the
+    // whole-box reset below: "revoke this one device" with a lost id would
+    // otherwise silently log out every device. Only an ABSENT id resets.
+    if (device_id !== null && device_id !== undefined &&
+        (typeof device_id !== "string" || device_id.trim() === "")) {
+      return { ok: false, status: 400, error: "device_id must not be empty" };
+    }
     // The presented token must itself belong to a live (non-revoked) device —
     // primary or per-device. authorize() bumps last_seen as a side effect.
     if (!devices.authorize(token)) {
