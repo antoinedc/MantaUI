@@ -1526,6 +1526,28 @@ export const httpApi: Api = {
   // version the box's release ships. Settings → About may render it in this
   // same round-trip — no new IPC channel.
   getServerVersion: () => rpc<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>(IPC.getServerVersion),
+  apiVersion: async () => {
+    const res = await fetchWithTimeout(
+      `${serverBase()}/api/version`,
+      { method: "GET", headers: authHeaders(clientToken()) },
+      5000,
+    );
+    if (res.status === 401) throw new AuthRequiredError();
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const b = (await res.json()) as {
+      version?: unknown; minClient?: unknown; opencode?: { version?: unknown }; opencodeVersion?: unknown; capabilities?: unknown;
+    } | null;
+    return {
+      version: typeof b?.version === "string" ? b.version : "",
+      minClient: typeof b?.minClient === "string" ? b.minClient : "",
+      opencodeVersion:
+        typeof b?.opencodeVersion === "string" ? b.opencodeVersion
+          : typeof b?.opencode?.version === "string" ? b.opencode.version : "",
+      ...(Array.isArray(b?.capabilities)
+        ? { capabilities: b.capabilities.filter((c): c is string => typeof c === "string") }
+        : {}),
+    };
+  },
 
   // -- client version (BET-225 stage 3) --
   // Returns the running client's own version. On desktop the preload bridge

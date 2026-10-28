@@ -115,14 +115,6 @@ final class ArtifactWireTests: XCTestCase {
         XCTAssertEqual(item.at, 0)
     }
 
-    func testCapabilityRecognisesOnlyTheUnknownChannelRefusal() {
-        XCTAssertTrue(ArtifactsCapability.isUnsupported(MantaError.server("unknown rpc channel: artifacts:list")))
-        XCTAssertFalse(ArtifactsCapability.isUnsupported(MantaError.server("unknown rpc channel: models:table")))
-        XCTAssertFalse(ArtifactsCapability.isUnsupported(MantaError.server("Couldn't read this conversation's artifacts")))
-        XCTAssertFalse(ArtifactsCapability.isUnsupported(MantaError.transport("unknown rpc channel: artifacts:list")))
-        XCTAssertFalse(ArtifactsCapability.isUnsupported(MantaError.authRequired))
-    }
-
     func testPlanPageReasonsAndDegradedDecode() throws {
         let result = try decode(#"""
         { "sessionId": "s", "generatedAt": 1, "counts": {}, "degraded": ["public-address"],

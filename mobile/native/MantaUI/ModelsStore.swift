@@ -74,7 +74,7 @@ final class ModelsStore: ObservableObject {
         do {
             phase = .loaded(try await api.modelsTable())
         } catch {
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .unsupported
             } else if case .loaded = phase {
                 // Keep what is on screen; a background refresh failing is not news.
@@ -166,7 +166,7 @@ final class ModelsStore: ObservableObject {
             }
             return true
         } catch {
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .unsupported
             } else {
                 show(.failed("Couldn't save — \(ModelsCapability.reason(error)). Pull to refresh to check what changed."))

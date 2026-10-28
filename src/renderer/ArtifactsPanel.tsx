@@ -57,6 +57,7 @@ import { ArtifactPreview } from "./ArtifactPreview";
 import { ReviewPane } from "./ReviewPane";
 import { authHeaders, clientToken, serverBase } from "./api/httpApi";
 import { getMantaPreload } from "./preloadAccess";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 
 // Resolve an artifact's bytes to a Blob. An artifact's `href` is not always a
 // box filesystem path: a self-contained image part carries a `data:` URI (its
@@ -1022,7 +1023,7 @@ export function ArtifactsPanel({
           )}
           {unsupported ? (
             <div className="manta-artifacts-unsupported px-4 py-8 text-center">
-              <div className="text-label text-text-muted">Update your box to use this.</div>
+              <UpdateBoxNote text="Update your box to use this." className="text-label text-text-muted" />
               <div className="mt-1 text-micro text-text-faint">Artifacts need a newer box version.</div>
             </div>
           ) : (

@@ -94,7 +94,7 @@ final class UsageResumeModel: ObservableObject {
             invalidatePlan()
         } catch {
             guard !closed, seq == viewSeq else { return }
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .updateYourBox
             } else if view == nil {
                 phase = .failed(ModelsCapability.reason(error))

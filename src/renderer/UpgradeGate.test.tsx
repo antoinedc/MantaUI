@@ -227,6 +227,17 @@ describe("UpgradeGate — driven by a fake K3 box", () => {
     expect(document.body.textContent).not.toContain("Checking again…");
   });
 
+  it("D1: a client connecting mid-failure with the capability list failed still gets Retry/Rollback from /api/upgrade alone", async () => {
+    installMockApi({ ...box.api, apiVersion: () => Promise.reject(new Error("HTTP 503")) });
+    setConnected(true);
+    await start();
+    box.emit(at("migrate", "failed", { error: { step: "migrate", message: "Migration failed.", retryable: true } }));
+    await h!.flush();
+    expect(button("Retry")).not.toBeNull();
+    expect(button("Roll back")).not.toBeNull();
+    expect(useStore.getState().boxCapabilities.loadedOnce).toBe(false);
+  });
+
   it("a refused Retry shows the box's reason next to the button (not a silent no-op)", async () => {
     box.retryResult = { ok: false, error: "still only 3 GB free" };
     await start();

@@ -73,14 +73,6 @@ extension MantaAPIClient {
             as: InboxCancelResult.self
         )
     }
-
-    /// `server:version` → `capabilities`. A box that predates the field answers
-    /// without it: an empty set ("has none"), distinct from a failed request.
-    func boxCapabilities() async throws -> Set<String> {
-        struct Reply: Decodable { let capabilities: [String]? }
-        let reply = try await callRequired("server:version", args: [], as: Reply.self)
-        return Set(reply.capabilities ?? [])
-    }
 }
 
 extension MantaAPIClient: ChatCardApprovalAPI {}

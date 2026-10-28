@@ -14,16 +14,11 @@ import Foundation
 // "Update your box to use this." (D24 wire compat), never into zeros.
 // ===========================================================================
 
-/// An unknown-channel rejection means the box predates the feature (D24).
+/// An unknown-channel rejection means the box predates the feature (D24) — classified
+/// by `BoxCapabilities.isUnknownChannel`.
 enum ModelsCapability {
     static let updateYourBox = "Update your box to use this."
 
-    static func isUnsupported(_ error: Error) -> Bool {
-        if case MantaError.server(let message) = error {
-            return message.hasPrefix("unknown rpc channel")
-        }
-        return false
-    }
 }
 
 extension ModelsCapability {

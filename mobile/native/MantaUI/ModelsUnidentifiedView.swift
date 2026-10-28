@@ -69,7 +69,7 @@ final class ModelsUnidentifiedStore: ObservableObject {
         do {
             phase = .loaded(try await api.modelsUnidentified())
         } catch {
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .updateYourBox
             } else if case .loaded = phase {
                 // Keep the rows already shown.
@@ -126,7 +126,7 @@ final class ModelsUnidentifiedStore: ObservableObject {
             }
             return reply
         } catch {
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 phase = .updateYourBox
             } else {
                 // The write may have landed: say so rather than "nothing changed".

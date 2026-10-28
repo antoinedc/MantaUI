@@ -238,8 +238,8 @@ final class ChatCardApprovalStoreTests: XCTestCase {
 @MainActor
 final class ChatCardJobOwnershipStoreTests: XCTestCase {
 
-    private func make(_ api: FakeJobAPI, caps: Set<String>?) -> (ChatCardJobOwnershipStore, ChatCardCapabilities) {
-        let capabilities = ChatCardCapabilities(load: { throw MantaError.transport("offline") })
+    private func make(_ api: FakeJobAPI, caps: Set<String>?) -> (ChatCardJobOwnershipStore, BoxCapabilitiesStore) {
+        let capabilities = BoxCapabilitiesStore(load: { throw MantaError.transport("offline") })
         if let caps { capabilities.apply(caps) }
         return (ChatCardJobOwnershipStore(sessionId: "ses", api: api, capabilities: capabilities), capabilities)
     }
@@ -247,7 +247,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
     func testReadOnlyAnswerPushesThePolicyAndPublishesTheJob() async {
         let api = FakeJobAPI()
         api.answer = .success(.readOnly(jobView()))
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         var policies: [ChatCardMutationPolicy] = []
         store.onPolicy = { policies.append($0) }
         await store.resolve()
@@ -258,7 +258,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
 
     func testWritableAnswerIsAllowed() async {
         let api = FakeJobAPI()
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         await store.resolve()
         XCTAssertEqual(store.policy, .allowed)
         XCTAssertNil(store.job)
@@ -275,7 +275,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
 
     func testAFailureOfEitherClassKeepsResolvingAndNeverReleasesHeldSends() async {
         let api = FakeJobAPI()
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         api.answer = .failure(MantaError.transport("offline"))
         await store.resolve()
         XCTAssertEqual(store.policy, .resolving)
@@ -288,7 +288,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
     func testAKnownJobStaysReadOnlyWhenALaterLookupFails() async {
         let api = FakeJobAPI()
         api.answer = .success(.readOnly(jobView()))
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         await store.resolve()
         api.answer = .failure(MantaError.transport("offline"))
         await store.resolve()
@@ -307,7 +307,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
     func testStopReportsSuccessAndFailure() async {
         let api = FakeJobAPI()
         api.answer = .success(.readOnly(jobView()))
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         var hints: [String] = []
         store.onHint = { hints.append($0) }
         await store.resolve()
@@ -324,9 +324,9 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
     // the session in "can't confirm" for up to 30 s.
     func testAResolveThatArrivesDuringTheCapabilityLoadWaitsForIt() async {
         let gate = LoadGate()
-        let capabilities = ChatCardCapabilities(load: {
+        let capabilities = BoxCapabilitiesStore(load: {
             await gate.wait()
-            return [ChatCardCapabilities.chatCards]
+            return ServerVersionInfo(version: "t", capabilities: ["chat-cards-1"])
         })
         let api = FakeJobAPI()
         let store = ChatCardJobOwnershipStore(sessionId: "ses", api: api, capabilities: capabilities)
@@ -348,9 +348,9 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
 
     func testFirstOpenDeliversAHeldSendOnceTheSharedLoadLands() async {
         let gate = LoadGate()
-        let capabilities = ChatCardCapabilities(load: {
+        let capabilities = BoxCapabilitiesStore(load: {
             await gate.wait()
-            return [ChatCardCapabilities.chatCards]
+            return ServerVersionInfo(version: "t", capabilities: ["chat-cards-1"])
         })
         PendingPromptStore.save([])
         defer { PendingPromptStore.save([]) }
@@ -362,7 +362,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
         let client = MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil },
                                     session: URLSession(configuration: config))
         let chat = ChatSessionStore(sessionId: "ses", eventStore: eventStore, api: client,
-                                    mutationPolicy: .resolving, chatCardCapabilities: capabilities)
+                                    mutationPolicy: .resolving, capabilities: capabilities)
         let ownership = ChatCardJobOwnershipStore(sessionId: "ses", api: FakeJobAPI(), capabilities: capabilities)
         ownership.onPolicy = { chat.applyMutationPolicy($0) }
 
@@ -383,13 +383,13 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
     }
 
     func testTheCapabilityListLandingLaterReResolvesAStuckSession() async {
-        let capabilities = ChatCardCapabilities(load: { throw MantaError.transport("offline") })
+        let capabilities = BoxCapabilitiesStore(load: { throw MantaError.transport("offline") })
         let api = FakeJobAPI()
         let store = ChatCardJobOwnershipStore(sessionId: "ses", api: api, capabilities: capabilities)
         await store.resolve()
         XCTAssertEqual(store.policy, .resolving)
         XCTAssertNotNil(store.lastFailure)
-        capabilities.apply([ChatCardCapabilities.chatCards])
+        capabilities.apply(["chat-cards-1"])
         for _ in 0..<100 where store.policy == .resolving { try? await Task.sleep(nanoseconds: 20_000_000) }
         XCTAssertEqual(store.policy, .allowed, "no 30 s wait: the list landing asks again at once")
         XCTAssertNil(store.lastFailure)
@@ -397,7 +397,7 @@ final class ChatCardJobOwnershipStoreTests: XCTestCase {
 
     func testNeedsPollingWhileResolvingOrWhileARunningJobShows() async {
         let api = FakeJobAPI()
-        let (store, _) = make(api, caps: [ChatCardCapabilities.chatCards])
+        let (store, _) = make(api, caps: ["chat-cards-1"])
         XCTAssertTrue(store.needsPolling)           // resolving
         await store.resolve()
         XCTAssertFalse(store.needsPolling)          // ordinary session
@@ -525,7 +525,7 @@ final class ChatCardsChatStoreTests: XCTestCase {
     func testCapabilityGateReportsUnknownThenAbsent() {
         let (store, _, _) = makeStore(policy: .allowed)
         XCTAssertNil(store.chatCardsAvailable)
-        store.chatCardCapabilities.apply([])
+        store.capabilities.apply([])
         let expectation = expectation(description: "published")
         let sub = store.$chatCardsAvailable.dropFirst().first(where: { $0 == false }).sink { _ in expectation.fulfill() }
         wait(for: [expectation], timeout: 2)
@@ -565,7 +565,7 @@ final class ChatCardsStubBoxTests: XCTestCase {
         let api = MantaAPIClient(serverURL: URL(string: "https://127.0.0.1")!, tokenProvider: { nil },
                                  session: URLSession(configuration: config))
         let store = ChatSessionStore(sessionId: "ses", eventStore: eventStore, api: api, mutationPolicy: policy)
-        store.chatCardCapabilities.apply([ChatCardCapabilities.chatCards])
+        store.capabilities.apply(["chat-cards-1"])
         return Harness(store: store, stream: stream)
     }
 

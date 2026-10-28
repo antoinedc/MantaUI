@@ -20,6 +20,7 @@ import { Checkbox } from "./Checkbox";
 import { useCachedResource } from "./useCachedResource";
 import { useRoutingCatalog } from "./routingCatalog";
 import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
+import { UpdateBoxNote } from "./components/UpdateBoxNote";
 import type { ModelsDeclareForm, UnidentifiedList, UnidentifiedRow } from "../shared/types";
 import type { ModelCatalogEntry } from "../shared/modelCatalog.mjs";
 
@@ -277,7 +278,7 @@ export function ModelsWeCouldntIdentify() {
       <div>
         <Eyebrow>Models we couldn't identify</Eyebrow>
         <Card>
-          <p className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</p>
+          <UpdateBoxNote text={UPDATE_YOUR_BOX} />
         </Card>
       </div>
     );

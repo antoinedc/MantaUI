@@ -634,7 +634,7 @@ struct ArtifactsCard: View {
             loadFailed = false
             unsupported = false
         } catch {
-            if ArtifactsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 unsupported = true
                 loadFailed = false
             } else {

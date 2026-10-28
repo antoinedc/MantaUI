@@ -28,6 +28,7 @@ import type { SyncPayload, CtoState } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
+import { refreshBoxCapabilities } from "./hooks/useBoxCapabilities";
 import { UpgradeGate } from "./UpgradeGate";
 import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
@@ -1089,6 +1090,13 @@ function Shell() {
   useEffect(() => {
     if (connectionState.state !== "connected") return;
     void refreshUpdateTargets().catch(() => {});
+  }, [connectionState.state, apiGeneration]);
+
+  // The box's capability list (WS11 D1): read on connect and on every reconnect
+  // so gated surfaces know what the box can do before they mount.
+  useEffect(() => {
+    if (connectionState.state !== "connected") return;
+    void refreshBoxCapabilities();
   }, [connectionState.state, apiGeneration]);
 
   // Server-update progress (this ticket): while the box runs

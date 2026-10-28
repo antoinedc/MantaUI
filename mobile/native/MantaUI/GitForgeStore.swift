@@ -31,7 +31,7 @@ struct GitForgeClient: Sendable {
             shipPreview: { try await api.forgeShipPreview(cwd: $0, model: $1, sessionId: $2) },
             ship: { try await api.forgeShip(cwd: $0, title: $1, body: $2) },
             merge: { try await api.forgeMerge(cwd: $0, number: $1, sha: $2) },
-            capabilities: { try await api.boxCapabilities() },
+            capabilities: { Set(try await api.apiVersion().capabilities ?? []) },
             offerDismissed: {
                 if case .bool(let dismissed)? = try await api.configGet()?[GitConnectOffer.configKey] { return dismissed }
                 return false

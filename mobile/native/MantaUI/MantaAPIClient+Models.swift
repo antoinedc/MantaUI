@@ -3,7 +3,7 @@ import Foundation
 // WS09 client members (09-models-usage.md "Client members"). Every one is a thin
 // `/rpc` call; the box computes the views and applies the rules. A box that
 // predates a channel rejects with `unknown rpc channel: …`, which the callers map
-// through `ModelsCapability.isUnsupported`.
+// through `BoxCapabilities.isUnknownChannel`.
 
 extension MantaAPIClient {
 

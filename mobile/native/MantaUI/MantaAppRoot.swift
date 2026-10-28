@@ -21,6 +21,9 @@ struct MantaAppRoot: View {
     /// C2: the app-wide router. Injected below on the root `Group`, so every
     /// screen — and every sheet or cover presented from one — can reach it.
     @StateObject private var navigator = MantaNavigator()
+    /// WS11 D1: the app's one capability reader (`GET /api/version`), injected below.
+    /// Refreshed on every (re)connect of the event stream, reset on a box change.
+    @StateObject private var capabilities = BoxCapabilitiesStore()
     /// M-09-3: WS09's app-wide usage alerts + resume-after-limit presentation.
     @ObservedObject private var usageAlerts = UsageAlertsStore.shared
     /// M-10-1: the phone's own theme override (device-local; System follows the
@@ -152,11 +155,17 @@ struct MantaAppRoot: View {
         }
         .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
         .environmentObject(navigator)
+        .environmentObject(capabilities)
+        .onReceive(store.$connectionState) { state in
+            guard paired, scene == nil, state == .connected else { return }
+            Task { await capabilities.refresh() }
+        }
         // M-10-2: "Remove server" finished on this phone (its credentials are
         // gone). Tear down the box's stream and state and return to onboarding —
         // never leave the old box's sessions on screen.
         .onReceive(NotificationCenter.default.publisher(for: .mantaBoxRemoved)) { _ in
             store.stop()
+            capabilities.resetForBoxChange()
             sessionStore.resetForBoxChange()
             UsageAlertsStore.shared.resetForBoxChange()
             ChatModelCatalog.shared.resetForBoxChange()
@@ -230,6 +239,7 @@ struct MantaAppRoot: View {
         {
             if flow.isSwitching {
                 store.stop()
+                capabilities.resetForBoxChange()
                 sessionStore.resetForBoxChange()
                 UsageAlertsStore.shared.resetForBoxChange()
                 ChatModelCatalog.shared.resetForBoxChange()

@@ -2,6 +2,7 @@
 // nine guarded channels, delegate:job-for-session, decorated delegate:list, the
 // approve rule check, and inbox outcome decoration. Dependency-injected — no live box.
 // Green once the M-02-srv-6…10 mounts are applied to rpc.mjs.
+import { BOX_CAPABILITIES } from "./boxCapabilities.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -209,4 +210,6 @@ test("server:version carries capabilities including chat-cards-1", async () => {
   const v = await dispatch(handlers, "server:version", []);
   assert.ok(Array.isArray(v.capabilities));
   assert.ok(v.capabilities.includes("chat-cards-1"));
+  // The RPC and GET /api/version carry the one list (WS11 D1).
+  assert.deepEqual(v.capabilities, [...BOX_CAPABILITIES]);
 });

@@ -51,7 +51,7 @@ final class ModelsPriceStore: ObservableObject {
                 phase = .updateYourBox
             }
         } catch {
-            phase = ModelsCapability.isUnsupported(error) ? .updateYourBox : .hidden
+            phase = BoxCapabilities.isUnknownChannel(error) ? .updateYourBox : .hidden
         }
     }
 

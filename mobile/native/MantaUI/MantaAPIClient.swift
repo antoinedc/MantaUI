@@ -905,6 +905,29 @@ final class MantaAPIClient: Sendable {
         return status
     }
 
+    /// `GET /api/version` — the capability read (WS11 D1). Unlike `serverVersion()`
+    /// (an RPC that answers 503 while the box migrates) this route is upgrade-exempt,
+    /// so it still answers mid-upgrade. 401 → `authRequired`; any other failure is
+    /// an error (never "an old box": a body without `capabilities` is that). Lives
+    /// here, not in `+Settings`, because it needs the private transport members.
+    func apiVersion() async throws -> ServerVersionInfo {
+        var request = URLRequest(url: serverURL.appendingPathComponent("api").appendingPathComponent("version"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 5
+        if let token = tokenProvider(), !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 { throw MantaError.authRequired }
+            if http.statusCode >= 400 { throw MantaError.server("version check failed (\(http.statusCode))") }
+        }
+        guard let info = try? JSONDecoder().decode(ServerVersionInfo.self, from: data) else {
+            throw MantaError.transport("unrecognised version response")
+        }
+        return info
+    }
+
     // MARK: - Transport + envelope
 
     static func makeRequest(serverURL: URL, channel: String, args: [Any], token: String?) throws -> URLRequest {

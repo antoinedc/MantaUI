@@ -156,6 +156,8 @@ struct ChatScreen: View {
     /// composer ONCE, when the screen first opens. A clear or handoff swap (which
     /// rebuilds the content below) never re-applies it.
     var draft: NewSessionDraft? = nil
+    /// The app's one capability reader (owned by `MantaAppRoot`).
+    @EnvironmentObject private var capabilities: BoxCapabilitiesStore
 
     var body: some View {
         let sid = currentSessionId ?? sessionId
@@ -164,6 +166,7 @@ struct ChatScreen: View {
             title: title,
             projectName: projectName,
             eventStore: eventStore,
+            capabilities: capabilities,
             path: $path,
             onCleared: { newId in
                 carryOver = nil
@@ -329,7 +332,7 @@ private struct ChatScreenContent: View {
     /// stores and used by the plan card to build the deterministic plan-page URL.
     private let api: MantaAPIClient
 
-    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
+    init(sessionId: String, title: String, projectName: String, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, path: Binding<NavigationPath>, onCleared: @escaping (String) -> Void, onHandedOff: @escaping (String, HandoffCarryOver) -> Void, seed: String = "", carryOver: HandoffCarryOver? = nil, draft: NewSessionDraft? = nil) {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
@@ -349,14 +352,13 @@ private struct ChatScreenContent: View {
         self.skippedUploads = carryOver?.skippedUploads ?? 0
         let api = MantaAPIClient.live()
         self.api = api
-        // One capability reader shared by the chat store and the job check.
-        let capabilities = ChatCardCapabilities(api: api)
+        // The app's one capability reader, shared by the chat store and the job check.
         _store = StateObject(wrappedValue: ChatSessionStore(
             sessionId: sessionId,
             eventStore: eventStore,
             api: api,
             widgetLiveStore: WidgetLiveStore.shared,
-            chatCardCapabilities: capabilities
+            capabilities: capabilities
         ))
         _approvalStore = StateObject(wrappedValue: ChatCardApprovalStore(
             sessionId: sessionId,

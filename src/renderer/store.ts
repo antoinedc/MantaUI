@@ -599,6 +599,11 @@ type State = {
   // show "reconnecting…" when the link is down. Updated by the httpApi
   // reconnect controller via setConnectionState; read by App.tsx.
   connectionState: ConnectionState;
+  // The box's server-first capability ids (master D25 / WS11 D1): `loading` until
+  // the first GET /api/version lands, `loaded` with the ids, `failed` when the
+  // box could not be asked (never read as "old box"; the last loaded ids are kept
+  // across a later failure). Read through `useBoxCapability`.
+  boxCapabilities: { state: "loading" | "loaded" | "failed"; ids: string[]; loadedOnce: boolean };
   // True while the startup opencode fan-out (`runBackgroundSync`) is running
   // — surfaced as a subtle "Syncing…" indicator in the sidebar so a momentary
   // slowdown from bounded-concurrency fetches reads as "syncing", not
@@ -830,6 +835,7 @@ type State = {
   setPendingPairLink: (url: string | null) => void;
   setPairLinkError: (message: string | null) => void;
   setConnectionState: (s: ConnectionState) => void;
+  setBoxCapabilities: (c: { state: "loading" | "loaded" | "failed"; ids: string[]; loadedOnce: boolean }) => void;
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -905,6 +911,7 @@ export const useStore = create<State>((set, get) => ({
   serverUpdatePrompt: null,
   serverUpdateProgress: null,
   connectionState: { state: "idle" },
+  boxCapabilities: { state: "loading", ids: [], loadedOnce: false },
   backgroundSyncing: false,
   videoRenderNow: null,
   opencodeRestartNeeded: false,
@@ -1263,6 +1270,7 @@ export const useStore = create<State>((set, get) => ({
   setServerUpdatePrompt: (p) => set({ serverUpdatePrompt: p }),
   setServerUpdateProgress: (p) => set({ serverUpdateProgress: p }),
   setConnectionState: (s) => set({ connectionState: s }),
+  setBoxCapabilities: (c) => set({ boxCapabilities: c }),
   setOpencodeRestartNeeded: (v) => set({ opencodeRestartNeeded: v }),
 
   applyStatusBatch: (batch) =>

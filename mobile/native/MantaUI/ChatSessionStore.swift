@@ -269,14 +269,14 @@ final class ChatSessionStore: ObservableObject {
     /// Jump-to-message state (C2 `.message`): the phase, and the row to highlight.
     @Published private(set) var focusPhase: ChatCardFocusPhase = .none
     @Published private(set) var focusedRowID: String?
-    /// The capability list the box last advertised (`chat-cards-1`).
-    let chatCardCapabilities: ChatCardCapabilities
+    /// The app's one capability reader (`chat-cards-1` and every later id).
+    let capabilities: BoxCapabilitiesStore
     /// Whether the box has the chat-cards capability: true / false (an older box) /
     /// nil (not known yet). Republished here so views observe one object; the store's
-    /// own guards read `chatCardCapabilities` directly (synchronous).
+    /// own guards read `capabilities` directly (synchronous).
     @Published private(set) var chatCardsAvailable: Bool?
     private var inboxActionsAvailable: Bool {
-        chatCardCapabilities.has(ChatCardCapabilities.chatCards) == true
+        capabilities.has(.chatCards) == true
     }
 
     /// The messages the transcript is mapped from: `messages`, or — while a message
@@ -443,7 +443,7 @@ final class ChatSessionStore: ObservableObject {
         widgetLiveStore: WidgetLiveStore? = nil,
         isReadOnly: Bool = false,
         mutationPolicy: ChatCardMutationPolicy = .resolving,
-        chatCardCapabilities: ChatCardCapabilities? = nil
+        capabilities: BoxCapabilitiesStore? = nil
     ) {
         self.sessionId = sessionId
         self.eventStore = eventStore
@@ -451,9 +451,9 @@ final class ChatSessionStore: ObservableObject {
         self.widgetLiveStore = widgetLiveStore
         self.isReadOnly = isReadOnly
         self.mutationPolicy = mutationPolicy
-        self.chatCardCapabilities = chatCardCapabilities ?? ChatCardCapabilities(api: api)
-        self.chatCardCapabilities.$ids
-            .map { $0.map { $0.contains(ChatCardCapabilities.chatCards) } }
+        self.capabilities = capabilities ?? BoxCapabilitiesStore(api: api)
+        self.capabilities.$state
+            .map { $0.known.map { $0.has(.chatCards) } }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] available in self?.chatCardsAvailable = available }
@@ -561,7 +561,7 @@ final class ChatSessionStore: ObservableObject {
             refreshContextFromTranscript()
             refreshInbox()
             refreshProgress()
-            Task { await chatCardCapabilities.refresh() }
+            Task { await capabilities.refresh() }
         }
         // Register as an observer so the event store knows a consumer is
         // attached (BET-672): a session it completes with NO observer has its
@@ -858,7 +858,7 @@ final class ChatSessionStore: ObservableObject {
             inboxTracker.markResync()
             refreshInbox()
             refreshProgress()
-            Task { await chatCardCapabilities.refresh() }
+            Task { await capabilities.refresh() }
         }
     }
 

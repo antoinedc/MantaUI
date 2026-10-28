@@ -1790,6 +1790,11 @@ export interface Api {
   // `opencode.version`). Rendered alongside the desktop + server versions in
   // this single round-trip — no new IPC channel.
   getServerVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
+  // GET /api/version — the capability read (master D25/D1). Unlike the
+  // `server:version` RPC it is upgrade-exempt, so it still answers while the box
+  // migrates. A body without `capabilities` is an older box (an empty set); a
+  // rejection means "could not ask", never "old box".
+  apiVersion(): Promise<{ version: string; minClient: string; opencodeVersion: string; capabilities?: string[] }>;
 
   // Client version (BET-225 stage 3): returns the desktop app's own version
   // via Electron's `app.getVersion()`. Combined with the server's

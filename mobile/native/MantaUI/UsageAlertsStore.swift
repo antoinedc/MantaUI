@@ -136,7 +136,7 @@ final class UsageAlertsStore: ObservableObject {
                 self?.receive(list, epoch: epoch, generation: gen)
             } catch {
                 guard let self, !Task.isCancelled, gen == self.generation else { return }
-                if ModelsCapability.isUnsupported(error) {
+                if BoxCapabilities.isUnknownChannel(error) {
                     self.unsupported = true
                     return
                 }

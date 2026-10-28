@@ -634,6 +634,7 @@ export const explicitMethods = {
   projectCreateScratch,
   getClientVersion,
   getServerVersion,
+  apiVersion: getServerVersion,
   onAutoUpdateError,
   opencodeProviderAuth,
   claudeLoginCancel,

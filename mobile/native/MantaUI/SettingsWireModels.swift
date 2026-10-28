@@ -22,16 +22,20 @@ struct OkResult: Decodable, Equatable, Sendable {
     }
 }
 
-/// `server:version` — `{ version, minClient, opencodeVersion }`.
+/// `server:version` / `GET /api/version` — `{ version, minClient, opencodeVersion,
+/// capabilities? }`. A box that predates `capabilities` answers without it (`nil`
+/// = an old box = the empty set — WS11 D1).
 struct ServerVersionInfo: Decodable, Equatable, Sendable {
     var version: String
     var minClient: String?
     var opencodeVersion: String?
+    var capabilities: [String]?
 
-    init(version: String, minClient: String? = nil, opencodeVersion: String? = nil) {
+    init(version: String, minClient: String? = nil, opencodeVersion: String? = nil, capabilities: [String]? = nil) {
         self.version = version
         self.minClient = minClient
         self.opencodeVersion = opencodeVersion
+        self.capabilities = capabilities
     }
 }
 

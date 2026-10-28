@@ -173,7 +173,7 @@ final class ChatModelCatalog: ObservableObject {
             await copyDeprecatedOptIns(client: client, generation: gen)
         } catch {
             guard gen == generation else { return }
-            if ModelsCapability.isUnsupported(error) {
+            if BoxCapabilities.isUnknownChannel(error) {
                 picker = nil
                 pickerUnsupported = true
                 pickerError = nil
