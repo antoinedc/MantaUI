@@ -103,7 +103,7 @@ final class ChatModelCatalog: ObservableObject {
         return ModelsBoxCredentials(serverUrl: stored.serverUrl, boxId: stored.boxId, boxToken: stored.boxToken)
     }
 
-    static func liveClient(_ binding: ModelsBoxBinding) -> MantaAPIClient {
+    nonisolated static func liveClient(_ binding: ModelsBoxBinding) -> MantaAPIClient {
         MantaAPIClient(serverURL: binding.serverURL, tokenProvider: { [token = binding.token] in token })
     }
 
