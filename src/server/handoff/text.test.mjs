@@ -9,6 +9,7 @@ import {
   composeHandoffText,
   estimateTokens,
   extractEditedFiles,
+  extractLastReply,
   extractTestRun,
   extractTodos,
   factLines,
@@ -111,4 +112,26 @@ test("extractors read edit/write/patch parts, the latest todo list, and only kno
   assert.deepEqual(extractTestRun(messages), { command: "cd x && npm run test -- --watch=false", exit: 2 }, "the later npm test has no exit status, so it is not the observed run");
   assert.equal(lastUserMessageAt(messages), 9);
   assert.equal(extractTestRun([]), null);
+});
+
+test("extractLastReply: the newest assistant text only while the user hasn't answered it; long replies keep their end", () => {
+  const a = (text, extra = {}) => ({ info: { role: "assistant" }, parts: [{ type: "text", text, ...extra }] });
+  const u = (text) => ({ info: { role: "user" }, parts: [{ type: "text", text }] });
+  assert.equal(extractLastReply([u("hi"), a("Should I deploy now?")]), "Should I deploy now?");
+  assert.equal(extractLastReply([a("Should I deploy now?"), u("yes")]), null, "already answered");
+  assert.equal(extractLastReply([u("hi"), a("x", { synthetic: true })]), null, "synthetic text is not a reply");
+  assert.equal(extractLastReply([]), null);
+  const long = extractLastReply([a(`${"a".repeat(3000)}\nWhich one?`)], 100);
+  assert.ok(long.startsWith("…"));
+  assert.ok(long.endsWith("Which one?"));
+  assert.ok(long.length <= 101);
+});
+
+test("factLines: an unanswered last reply is quoted right after the predecessor with an instruction to re-ask it", () => {
+  const lines = factLines({ predecessor: { id: "ses_p" }, lastReply: "Done.\nShould I also migrate prod?", todos: [{ content: "t" }] });
+  assert.match(lines[0], /previous session: ses_p/);
+  assert.match(lines[1], /ask it again as your first action and wait for the answer/);
+  assert.equal(lines[2], "  > Done.");
+  assert.equal(lines[3], "  > Should I also migrate prod?");
+  assert.deepEqual(factLines({ lastReply: "  " }), []);
 });
