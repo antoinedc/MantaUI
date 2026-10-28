@@ -426,15 +426,45 @@ export const SecretsCard = memo(function SecretsCard({
       ) : (
         <div className="flex items-center gap-2 mb-2">
           <button
-            onClick={() => setShowAdd(true)}
+            onClick={() => { setQuery(""); setShowAdd(true); }}
             className="shrink-0 px-2 py-1 rounded-xs border"
             style={{ borderColor: "rgb(var(--accent-rgb) / 0.53)", color: "var(--accent)" }}
           >
             + Add secret
           </button>
-          <span className="text-text-faint text-label">
-            Agents use these via secret_provide without seeing the value.
-          </span>
+          {secrets.length > 0 && (
+            <div className="min-w-0 flex-1 flex items-center gap-1 text-text-faint focus-within:text-text-muted">
+              <Search size={12} aria-hidden="true" className="shrink-0" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && query) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setQuery("");
+                  }
+                }}
+                placeholder="Search name or hint"
+                aria-label="Search secrets"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                className="min-w-0 flex-1 bg-transparent text-label text-text placeholder:text-text-faint outline-none"
+              />
+              {query && (
+                <button
+                  onClick={() => { setQuery(""); searchRef.current?.focus(); }}
+                  className="shrink-0 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  <X size={12} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -448,37 +478,6 @@ export const SecretsCard = memo(function SecretsCard({
         </div>
       ) : (
         <div className="border-t border-border pt-2">
-          <div className="flex items-center gap-1 mb-1 px-1 -mx-1 text-text-faint focus-within:text-text-muted">
-            <Search size={12} aria-hidden="true" className="shrink-0" />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape" && query) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setQuery("");
-                }
-              }}
-              placeholder="Search name or hint"
-              aria-label="Search secrets"
-              spellCheck={false}
-              autoCapitalize="off"
-              autoCorrect="off"
-              className="min-w-0 flex-1 bg-transparent text-label text-text placeholder:text-text-faint outline-none"
-            />
-            {query && (
-              <button
-                onClick={() => { setQuery(""); searchRef.current?.focus(); }}
-                className="shrink-0 rounded-xs text-text-faint hover:text-text-muted inline-flex items-center"
-                title="Clear search"
-                aria-label="Clear search"
-              >
-                <X size={12} aria-hidden="true" />
-              </button>
-            )}
-          </div>
           {visible.length === 0 ? (
             <div className="text-text-muted">No secrets match “{query.trim()}”.</div>
           ) : (
