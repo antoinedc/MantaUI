@@ -355,7 +355,11 @@ which is not in the package.
     - `TranscriptStagingKey.input(boxID:serverURL:source:) -> String` lives in
       the Foundation-only pure file and is tested on Linux. It returns
       `boxID + "\n" + serverURL + "\n" + <source tag>`, where the source tag is
-      `"path:" + path`, or `"data:" + mime + ":" + String(base64.count) + ":" + prefix(64)`.
+      `"path:" + path`, or `"data:" + mime + ":" + <ENTIRE base64 payload>` (round 3,
+      finding 1: a truncated prefix let two different equal-length attachments
+      collide and display/share the wrong file). Tests: two equal-length,
+      equal-64-char-prefix, different-suffix sources → different key inputs,
+      different staged bytes, no in-flight coalescing between them.
     - `TranscriptFileStager` (app-only) hashes that string with
       `CryptoKit.SHA256` to get the file name. Swift Foundation has no SHA-256,
       the Linux package has no crypto dependency (`Package.swift:31-65`), and
@@ -421,9 +425,19 @@ which is not in the package.
   It returns `.file(.media)` blocks, in `(seq, id)` order, for entries
   (canonical ∪ live-only) whose owner is one of these:
   - (a) a message in `messages` that is NOT settled;
-  - (b) only when `isLiveWindow`, a message ABSENT from `messages`. This is the
-    normal case for the running step, because the transcript is not refetched
-    mid-turn.
+  - (b) only when `isLiveWindow`, a message ABSENT from `messages` whose live
+    entry was recorded during the CURRENT turn (`TranscriptMediaEntry.turnStartedAt`
+    ≥ the session's current-turn start, i.e. created after the last user message
+    the store has seen). This is the normal case for the running step, because the
+    transcript is not refetched mid-turn.
+  - **Retirement (round 3, finding 2):** `TranscriptMediaStore` drops a session's
+    live-only entries for an owner as soon as a canonical snapshot contains that
+    owner message (absorbed), and drops all live entries for a session when a turn
+    settles and the post-turn refetch lands. So an old settled owner outside the
+    30-message window can never resurrect at the tail. Tests: (i) settled media
+    owner older than the loaded window + new turn → not in the tail; (ii) focus
+    suffix whose last id equals the full list's last id → only current-turn
+    entries in the tail.
 - **One message list, disjoint segments (round 2, finding 1).** The mapper
   emits only entries whose owner is a SETTLED message of the list it was given.
   `liveMediaTail` emits only cases (a) and (b). So **as long as both calls
@@ -877,10 +891,11 @@ Reasoning parts already arrive in `opencode:messages`:
     `ChatSessionStore.swift:203`). WS01 consumes exactly that property, which
     matches D15 ("no step/truncation property is required from WS02 … beyond
     what WS02 already decodes").
-  - Only the latest warning can lack a canonical record: the server emits it at
-    the end of a step, and the next refetch carries the `step-finish` part
-    whenever the message has usage. So one value is enough. Older messages rely
-    on the transcript.
+  - The single-value contract is a deliberate trade-off: an older warning whose
+    message has no canonical `step-finish` metadata (no usage) may disappear after
+    a newer warning arrives or after a reload. Acceptance is narrowed accordingly:
+    the latest live warning always shows; older ones show only when the transcript
+    carries the finish data.
   - The pure value lives in `TranscriptTurns.swift`:
     ```swift
     struct TranscriptLiveTruncation: Equatable, Sendable {

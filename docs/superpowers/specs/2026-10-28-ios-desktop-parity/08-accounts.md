@@ -1155,3 +1155,15 @@ None remaining. Round-0 questions are settled:
 | R2-2 SHOULD — reconcile needs pre-write state | `EndpointWriteReconcile.outcome(reply:before:readBack:expect:)` now takes `before: ProviderEndpoint?` and a typed `EndpointWriteReply` (`ok` / `refused` / `threw`); ordered rules given. F4 save (`before: nil`), F5 toggle and F6 removal pass `before`. F4's outcome text now maps the classifier only (a thrown write whose read-back matches is confirmed). Added the test with identical reply/read-back/expect and different `before` (rejected vs partial). Also: after `.unconfirmed`, Save's fresh recheck recognises the endpoint as already saved instead of reporting a collision. |
 | R2-3 SHOULD — ledgers out of sync | Tables rewritten against the consolidated ledger: M-08-1 (applier WS09 B, implemented in WS09's own ChatModelCatalog edits at `09:234–235`, with the requested test); M-08-2 marked **declined** (`02:803`) and its `resignSeatId` parameter removed; M-08-3 gives the Package.swift manifest an ID (integration A after A2); received M-09-6 (canonical ID, `ModelsScreen()`) **accepted** for integration B. WS02 Reconnect moved from "received mounts" to contracts. |
 | Master D20/D21 | WS10 (A1) precedes WS08 (A2), so `opencodeRestart() async throws -> OkResult` exists when WS08 starts; the rebase note was removed. WS04 launchers now cited via WS10's `launchersList()`. |
+
+## Round 3 SHOULDs — binding for the implementer
+
+1. **Lease cancellation feedback:** `ProviderOAuthLease.retire` returns a result
+   (`Result<Void, MantaError>`); the injected cancel transport uses explicit
+   `do/catch` (no `try?`). Explicit Cancel shows its failure in the F3 banner;
+   background cleanup logs it. Test: failed cancel → caller receives the failure.
+2. **F4 retry after an unconfirmed write:** keep the original write snapshot +
+   expected enabled-model set while unconfirmed; the retry's fresh read goes
+   through the shared classifier and reports *partial* (not confirmed) when the
+   selection differs. Editing the draft never rewrites the pending attempt's
+   expectation. Test: same id/URL, different model selection → partial.

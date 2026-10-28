@@ -293,10 +293,16 @@ text only if unchanged (`shouldClearDraft`, `inboxState.ts:144-146`), and guard 
      it was a running-turn send else `await store.refetch()`.
   6. Failure → nothing cleared; `surfaceHint("Couldn't run /<name> — \(message)")` using the
      `MantaError` server/transport text.
-  7. After M-03-9 (wave B): if `store.mutationPolicy == .resolving` at step 4 and the plan is
-     `.command` or a built-in → `surfaceHint("One moment — checking this session")`, draft
-     untouched (WS02's copy for refused mutations while resolving; a command cannot be parked
-     in WS02's prompt outbox). `.prompt` still goes to `sendOrSteer`, which WS02 parks.
+  7. After M-03-9 (wave B): an EXHAUSTIVE dispatch gate on `store.mutationPolicy`, evaluated
+     immediately before the direct `runCommand` / local built-in action (i.e. AFTER the
+     async command lookup), and re-evaluated inside a delayed Clear confirmation's callback:
+     `.allowed` → dispatch; `.resolving` → `surfaceHint("One moment — checking this session")`;
+     `.readOnlyJob` → `surfaceHint("This is a background job — it can't take messages")`.
+     In both refusal cases: no RPC, no cleanup, draft + chips untouched (a command cannot be
+     parked in WS02's prompt outbox). `.prompt` still goes to `sendOrSteer`, which WS02 guards.
+     Integration tests (M-03-9): (a) submit `/cmd` while `.resolving` with the command lookup
+     suspended, flip ownership to a job, release lookup → zero command RPCs, draft/chips kept;
+     (b) same but resolve to `.allowed` → exactly one command RPC.
   Plain (non-`/`) text keeps today's synchronous path untouched.
 - No optimistic transcript row (that pipeline is WS02's store); the spinner covers the gap.
 
@@ -668,7 +674,7 @@ IDs, appliers and provider symbols match the master's canonical mount ledger (`0
 | M-03-6 | `ComposerView.swift` | IB (WS03 not in B) | `ComposerTypeahead.agentRows(agents:loadError:query:limit:)`, M-03-5 members | Replace the wave-A argument `loadError: nil` with `modelStore.agentsLoadError`; the tappable status row's action calls `modelStore.retryAgents()` | M-03-5 committed |
 | M-03-7 | `ChatScreen.swift` | WS02, B (owns file) | `ComposerTextController.acceptsInput` (WS03); `ChatSessionStore.isBackgroundJobReadOnly` (WS02, canonical read-only signal) | In `ChatScreenContent`: `.onAppear { composer.acceptsInput = !store.isBackgroundJobReadOnly }` and `.onChange(of: store.isBackgroundJobReadOnly) { _, ro in composer.acceptsInput = !ro }` — covers a job screen opened directly, reclassified after opening, and transitions back to `.allowed`. `.resolving` keeps `true` (typing allowed; sends are parked by WS02). | M-03-1; WS02 F6 (`isBackgroundJobReadOnly`) |
 | M-03-8 | `mobile/native/Package.swift` | IA | WS03 manifest (Files) | Add `ComposerModels.swift`, `ComposerInsertion.swift` to `MantaUI` sources; `ComposerModelsTests.swift`, `ComposerInsertionTests.swift` to test sources | WS03 files committed |
-| M-03-9 | `ComposerView.swift` | IB (WS03 not in B) | WS02's `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`) | In the F2 task, step 4: read `store.mutationPolicy`; when `.resolving` and the plan is `.command` / `.builtin` → `surfaceHint("One moment — checking this session")`, draft untouched (F2 step 7) | WS02 `mutationPolicy` committed |
+| M-03-9 | `ComposerView.swift` | IB (WS03 not in B) | WS02's `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`) | Exhaustive gate on `store.mutationPolicy` immediately before command/built-in dispatch (after lookup) and inside delayed Clear confirmation: `.allowed` dispatch; `.resolving` and `.readOnlyJob` refuse with hint, no RPC, draft kept (F2 step 7, incl. its two integration tests) | WS02 `mutationPolicy` committed |
 
 Integration acceptance (checked by IB after M-03-5/6/7/9): agents request fails → "Couldn't
 load agents — tap to retry" → tap after the box recovers → agents listed; a background-job chat

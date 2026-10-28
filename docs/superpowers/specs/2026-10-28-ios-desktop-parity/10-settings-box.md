@@ -1301,8 +1301,10 @@ in `MantaAppRoot`, not inside a WS10 file).
   `SettingsScreen(eventStore: MantaEventStore? = nil, initialSection: String? = nil)`.
   Behaviour (WS10 implements; today's screen has neither the parameter nor any
   scrolling, `SettingsScreen.swift:35-76,156-164`):
-  - `sectionList` is wrapped in `ScrollViewReader`; each `sectionView` gets
-    `.id("settings-section-\(section.id)")`.
+  - The screen's existing outer `ScrollView` (the one that contains `sectionList`,
+    `SettingsScreen.swift:44-64`) is wrapped as `ScrollViewReader { proxy in ScrollView { … } }`,
+    and the one-shot load/scroll task lives inside the proxy's scope; each `sectionView` gets
+    `.id("settings-section-\(section.id)")`. Landing on a non-first section is verified on the Mac.
   - Target = `SettingsDeepLink.target(initialSection, available: SettingsSchema.sections.map(\.id))`
     (pure, `SettingsAppearance.swift`, [pkg]): returns the id when it is one of
     the available ids; `nil` for nil, empty or unknown ids (e.g. a desktop-only
