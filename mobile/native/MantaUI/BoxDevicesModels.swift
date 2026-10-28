@@ -109,7 +109,14 @@ enum BoxDevices {
     /// revoked. (An older box has no `current`: revoke stays offered on every
     /// non-primary row and the user tells by name.)
     static func canRevoke(_ device: BoxDevice) -> Bool {
-        !device.current && !device.primary
+        !device.current && !device.primary && isRevocableID(device.deviceID)
+    }
+
+    /// An id the box can be asked to revoke. An empty or blank id must never
+    /// reach `DELETE /auth/revoke`: with no `device_id` the box resets the WHOLE
+    /// identity and signs every device out.
+    static func isRevocableID(_ id: String) -> Bool {
+        !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     enum RevokeOutcome: Equatable, Sendable {
@@ -171,7 +178,9 @@ enum BoxRemoval {
 
     static func plan(devices: [BoxDevice]) -> RemovalPlan {
         guard let me = devices.first(where: \.current) else { return .unknownDevice }
-        return me.primary ? .sharedPairing : .revoke(deviceID: me.deviceID)
+        if me.primary { return .sharedPairing }
+        // A blank own id has no safe target (see `isRevocableID`).
+        return BoxDevices.isRevocableID(me.deviceID) ? .revoke(deviceID: me.deviceID) : .unknownDevice
     }
 
     /// What the `DELETE /auth/revoke?device_id=` answer means.

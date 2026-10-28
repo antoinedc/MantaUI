@@ -32,6 +32,9 @@ struct BoxPairingQR: View {
         .accessibilityIdentifier("box-pairing-qr")
     }
 
+    /// One context for every render (creating one is expensive).
+    private static let context = CIContext()
+
     /// The QR for `text`, or nil when CoreImage cannot produce one.
     static func render(_ text: String, scale: CGFloat = 10) -> UIImage? {
         let filter = CIFilter.qrCodeGenerator()
@@ -39,7 +42,7 @@ struct BoxPairingQR: View {
         filter.correctionLevel = "M"
         guard let output = filter.outputImage else { return nil }
         let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        guard let cgImage = CIContext().createCGImage(scaled, from: scaled.extent) else { return nil }
+        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else { return nil }
         return UIImage(cgImage: cgImage)
     }
 }

@@ -200,6 +200,8 @@ struct UpdateFlow: Equatable, Sendable {
         case requestConfirm
         case cancelConfirm
         case confirm(fromVersion: String?, now: Date)
+        /// End the confirm without applying (e.g. the starting version is unknown).
+        case abort(String)
         case applyOutcome(ApplyOutcome)
         case connection(Bool)
         case version(String)
@@ -240,6 +242,9 @@ struct UpdateFlow: Equatable, Sendable {
 
         case (.confirming, .cancelConfirm):
             phase = .idle
+
+        case (.confirming, .abort(let message)):
+            phase = .failed(message)
 
         case (.confirming, .confirm(let from, let now)):
             fromVersion = from

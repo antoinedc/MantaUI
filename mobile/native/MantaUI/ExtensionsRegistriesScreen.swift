@@ -78,7 +78,12 @@ final class ExtensionsRegistriesModel: ObservableObject {
 
     private static func urls(from config: [String: JSONValue]) -> [String] {
         guard case .array(let items)? = config["skillRegistryUrls"] else { return [] }
-        return items.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
+        // De-duplicated (order kept): the list is keyed by URL.
+        var seen = Set<String>()
+        return items.compactMap { item -> String? in
+            guard case .string(let s) = item, seen.insert(s).inserted else { return nil }
+            return s
+        }
     }
 }
 
@@ -161,6 +166,7 @@ struct ExtensionsRegistriesScreen: View {
             }
             .contextMenu {
                 Button("Remove", role: .destructive) { Task { await model.remove(url) } }
+                    .disabled(model.saving)
             }
         }
     }

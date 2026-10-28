@@ -216,17 +216,30 @@ struct BoxRemoveServerRow: View {
         }
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.vertical, Metrics.spacing.sp2)
-        .confirmationDialog("Remove this server?", isPresented: confirmBinding, titleVisibility: .visible) {
-            Button("Remove", role: .destructive) { removal.confirm() }
-            Button("Cancel", role: .cancel) { removal.cancel() }
-        } message: {
-            Text("This phone forgets the box and signs itself out of it. Your desktop and other devices stay connected. To use this box again you'll need a new pairing code.\n\nNotifications this box already sends to this phone may keep arriving. To stop them now, turn off notifications for Manta in iOS Settings.")
-        }
-        .alert(alertTitle, isPresented: alertBinding) {
-            alertActions
-        } message: {
-            Text(alertMessage)
-        }
+    }
+}
+
+/// The Remove-server confirmation and both of its alerts (Keychain failure with
+/// "Try again", and the warning that must be acknowledged before the app
+/// leaves). Applied to the Settings screen ITSELF — which is always mounted —
+/// rather than to the Box row, which unmounts when the user searches; an alert
+/// attached to an unmounted row can never appear, and the warning would be lost.
+struct BoxRemovalPresentation: ViewModifier {
+    @ObservedObject var removal: BoxRemovalStore
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog("Remove this server?", isPresented: confirmBinding, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) { removal.confirm() }
+                Button("Cancel", role: .cancel) { removal.cancel() }
+            } message: {
+                Text("This phone forgets the box and signs itself out of it. Your desktop and other devices stay connected. To use this box again you'll need a new pairing code.\n\nNotifications this box already sends to this phone may keep arriving. To stop them now, turn off notifications for Manta in iOS Settings.")
+            }
+            .alert(alertTitle, isPresented: alertBinding) {
+                alertActions
+            } message: {
+                Text(alertMessage)
+            }
     }
 
     private var confirmBinding: Binding<Bool> {

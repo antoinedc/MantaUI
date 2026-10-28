@@ -36,6 +36,13 @@ final class ExtensionsLaunchersModel: ObservableObject {
         async let config = api.configGet()
         do {
             let (found, current) = try await (list, config)
+            // A missing config is a failed read, NOT "nothing saved": `config:update`
+            // replaces the whole `launcherFlags` key, so writing from an empty guess
+            // would wipe every other launcher's saved flags.
+            guard let current else {
+                load = .failed("The box sent no settings.")
+                return
+            }
             launchers = found
             saved = ExtensionsLaunchers.savedFlags(from: current)
             load = .loaded

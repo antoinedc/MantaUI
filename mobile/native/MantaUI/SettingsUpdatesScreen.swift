@@ -64,12 +64,14 @@ struct SettingsUpdatesScreen: View {
                 row(target)
             }
         }
-        .task { await store.check() }
-        .onReceive(connectionPublisher) { store.connectionChanged(connected: $0) }
+        .task {
+            store.bind(connection: connectionPublisher)
+            await store.check()
+        }
         .confirmationDialog(
             "Update Manta Server?",
             isPresented: Binding(
-                get: { store.flow.phase == .confirming },
+                get: { store.flow.phase == .confirming && !store.startingUpdate },
                 set: { if !$0, store.flow.phase == .confirming { store.cancelServerUpdate() } }
             ),
             titleVisibility: .visible
@@ -82,6 +84,7 @@ struct SettingsUpdatesScreen: View {
     }
 
     /// The event stream's up/down edge; with no stream the box is assumed up.
+    /// Handed to the store ONCE (`bind`) — never subscribed from `body`.
     private var connectionPublisher: AnyPublisher<Bool, Never> {
         guard let eventStore else { return Empty<Bool, Never>().eraseToAnyPublisher() }
         return eventStore.$connectionState
@@ -174,7 +177,9 @@ struct SettingsUpdatesScreen: View {
 
     private var serverNarration: (text: String, busy: Bool, isError: Bool)? {
         switch store.flow.phase {
-        case .idle, .confirming:
+        case .confirming:
+            return store.startingUpdate ? ("Updating…", true, false) : nil
+        case .idle:
             return nil
         case .applying:
             return (store.flow.isWaitingForBox ? "Restarting the box…" : "Updating…", true, false)

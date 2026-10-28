@@ -127,6 +127,8 @@ struct BoxAddDeviceScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = BoxAddDeviceStore()
     @State private var copied = false
+    /// The idle-timer setting before this screen, restored on the way out.
+    @State private var previousIdleTimerDisabled = false
 
     private var tokens: Tokens { Tokens.scheme(colorScheme) }
 
@@ -152,9 +154,12 @@ struct BoxAddDeviceScreen: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .task { await store.start() }
-        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onAppear {
+            previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
+        }
         .onDisappear {
-            UIApplication.shared.isIdleTimerDisabled = false
+            UIApplication.shared.isIdleTimerDisabled = previousIdleTimerDisabled
             store.stop()
         }
         .onChange(of: scenePhase) { _, phase in

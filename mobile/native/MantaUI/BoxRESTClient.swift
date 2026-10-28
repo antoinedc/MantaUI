@@ -60,7 +60,13 @@ struct BoxRESTClient: Sendable {
     /// `DELETE /auth/revoke?device_id=<id>` — sign exactly one device out.
     /// Returns the HTTP status (nil when no answer arrived) and whether the
     /// request failed at the transport level; `BoxRemoval.classify` reads both.
+    ///
+    /// An empty / blank id is NEVER sent: the box reads a missing OR empty
+    /// `device_id` as "no target" and runs the whole-box reset that drops every
+    /// device. Refusing here protects every caller; it reports as a transport
+    /// failure (nothing was revoked).
     func revokeDevice(id: String) async -> (status: Int?, transportError: Bool) {
+        guard BoxDevices.isRevocableID(id) else { return (nil, true) }
         guard var parts = URLComponents(url: serverURL.appendingPathComponent("auth").appendingPathComponent("revoke"),
                                         resolvingAgainstBaseURL: false) else {
             return (nil, true)

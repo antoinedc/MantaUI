@@ -23,6 +23,8 @@ final class ExtensionsForgeModel: ObservableObject {
 
     @Published private(set) var status: StatusState = .loading
     @Published private(set) var rulesEnabled = false
+    /// The config was read, so `rulesEnabled` is the box's value, not a guess.
+    @Published private(set) var rulesLoaded = false
     @Published private(set) var savingToggle = false
     @Published private(set) var rules: [ForgeRuleRow]?
     @Published private(set) var rulesError: String?
@@ -42,8 +44,13 @@ final class ExtensionsForgeModel: ObservableObject {
         } catch {
             status = .failed(SettingsError.message(error))
         }
+        // Only a successful read confirms the toggle: a failed one leaves it
+        // disabled (see `rulesLoaded`) instead of showing an unconfirmed "off".
         if let loaded = await config {
             if case .bool(let on)? = loaded["forgeRulesEnabled"] { rulesEnabled = on } else { rulesEnabled = false }
+            rulesLoaded = true
+        } else {
+            rulesLoaded = false
         }
     }
 
@@ -58,7 +65,7 @@ final class ExtensionsForgeModel: ObservableObject {
 
     /// Optimistic; reverted with a visible error when the box refuses.
     func setRulesEnabled(_ on: Bool) async {
-        guard !savingToggle else { return }
+        guard !savingToggle, rulesLoaded else { return }
         let previous = rulesEnabled
         rulesEnabled = on
         savingToggle = true
@@ -114,8 +121,14 @@ struct ExtensionsForgeScreen: View {
                         .foregroundColor(tokens.tx1)
                 }
                 .tint(tokens.accent)
-                .disabled(model.savingToggle)
+                .disabled(model.savingToggle || !model.rulesLoaded)
                 .accessibilityIdentifier("forge-rules-enabled")
+            }
+
+            if !model.rulesLoaded, model.status != .loading {
+                SettingsLoadFailure(message: "Couldn't read this setting.") {
+                    Task { await model.loadStatus() }
+                }
             }
 
             if let notice = model.notice {

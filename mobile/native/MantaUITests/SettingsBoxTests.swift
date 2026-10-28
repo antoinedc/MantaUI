@@ -144,6 +144,23 @@ final class SettingsBoxTests: XCTestCase {
         BoxDevice(deviceID: id, name: name, lastSeen: lastSeen, createdAt: createdAt, primary: primary, current: current)
     }
 
+    func testABlankDeviceIdIsNeverRevocable() {
+        // `DELETE /auth/revoke?device_id=` (empty) is the box's WHOLE-BOX RESET.
+        for id in ["", " ", "\t\n  "] {
+            XCTAssertFalse(BoxDevices.isRevocableID(id), "[\(id)]")
+            XCTAssertFalse(BoxDevices.canRevoke(BoxDevice(deviceID: id)), "[\(id)]")
+        }
+        XCTAssertTrue(BoxDevices.isRevocableID("d1"))
+        XCTAssertTrue(BoxDevices.canRevoke(BoxDevice(deviceID: "d1")))
+    }
+
+    func testPlanWithABlankOwnIdHasNoSafeTarget() {
+        for id in ["", "   "] {
+            let list = [device("desktop", primary: true), device(id, current: true)]
+            XCTAssertEqual(BoxRemoval.plan(devices: list), .unknownDevice, "[\(id)]")
+        }
+    }
+
     func testSortPutsThisPhoneFirstThenMostRecentlyActive() {
         let list = [
             device("old", lastSeen: 1_000),

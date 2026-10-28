@@ -42,6 +42,8 @@ final class SettingsUpdatesStore: ObservableObject {
     @Published private(set) var checkedAt: Date?
     @Published private(set) var serverVersion: String?
     @Published private(set) var flow = UpdateFlow()
+    /// `confirmServerUpdate` is between its tap and its first state change.
+    @Published private(set) var startingUpdate = false
     /// The CLI row being updated, if any.
     @Published private(set) var cliUpdatingID: String?
     /// Per-row error text (a failed CLI update).
@@ -56,6 +58,11 @@ final class SettingsUpdatesStore: ObservableObject {
     private let tickInterval: Duration
     private let now: @Sendable () -> Date
     private var tickTask: Task<Void, Never>?
+    /// The check in flight, so a second caller awaits it instead of returning early.
+    private var checkTask: Task<Void, Never>?
+    /// `confirmServerUpdate` is between its tap and its first state change.
+    private var startTask: Task<Void, Never>?
+    private var connectionSubscription: AnyCancellable?
 
     init(dependencies: Dependencies = .live(),
          checkTimeout: Double = 15,
@@ -71,9 +78,23 @@ final class SettingsUpdatesStore: ObservableObject {
 
     /// Read the box version and the update verdict. A check that fails or times
     /// out is a server row reading "Couldn't check" — never "Up to date".
+    ///
+    /// A call made while a check is already running AWAITS that check (rather
+    /// than returning at once), so a caller that re-checks before clearing its
+    /// spinner never reads stale rows.
     func check() async {
-        guard !checking else { return }
+        if let running = checkTask {
+            await running.value
+            return
+        }
+        let task = Task { await performCheck() }
+        checkTask = task
+        await task.value
+    }
+
+    private func performCheck() async {
         checking = true
+        defer { checkTask = nil }
         if let info = try? await deps.version() { serverVersion = info.version }
         let verdict: ServerUpdateCheck?
         do {
@@ -96,16 +117,46 @@ final class SettingsUpdatesStore: ObservableObject {
     }
 
     func cancelServerUpdate() {
+        guard !startingUpdate else { return }
         flow.reduce(.cancelConfirm)
     }
 
     /// "Update & restart" in the confirm. Starts the apply call and the watch loop.
+    ///
+    /// Success is decided by the version CHANGING, so the starting version must be
+    /// known: with none, a perfectly good update could only ever end as "Couldn't
+    /// confirm" after ten minutes. If the current version is unknown it is read
+    /// first; if it still can't be read, the flow ends without applying anything.
+    ///
+    /// Synchronous on purpose: `startingUpdate` is set before this returns, so the
+    /// confirmation dialog's own dismissal (which calls `cancelServerUpdate`
+    /// right after the button action) can't cancel an update that is starting.
     func confirmServerUpdate() {
+        guard flow.phase == .confirming, !startingUpdate else { return }
+        startingUpdate = true
+        startTask = Task { await beginServerUpdate() }
+    }
+
+    /// Resolves once the update has started (or been refused) — the apply call
+    /// itself is not awaited. For tests.
+    func settledStart() async {
+        await startTask?.value
+    }
+
+    private func beginServerUpdate() async {
+        defer { startingUpdate = false }
+        if serverVersion == nil, let info = try? await deps.version() { serverVersion = info.version }
         guard flow.phase == .confirming else { return }
-        flow.reduce(.confirm(fromVersion: serverVersion, now: now()))
+        guard let from = serverVersion else {
+            flow.reduce(.abort(Self.unknownVersionMessage))
+            return
+        }
+        flow.reduce(.confirm(fromVersion: from, now: now()))
         startTicking()
         Task { await runApply() }
     }
+
+    static let unknownVersionMessage = "Couldn't read the box's current version. Check again."
 
     private func runApply() async {
         let raw = await deps.apply()
@@ -113,8 +164,23 @@ final class SettingsUpdatesStore: ObservableObject {
         finishIfSettled()
     }
 
-    /// The event stream's connection state (fed by the screen).
+    /// Subscribe ONCE to the event stream's up/down edge. Idempotent: a second
+    /// call (the screen's task re-running) keeps the first subscription, so a
+    /// `@Published` replay can never be delivered twice.
+    func bind(connection: AnyPublisher<Bool, Never>) {
+        guard connectionSubscription == nil else { return }
+        connectionSubscription = connection
+            .removeDuplicates()
+            .sink { [weak self] connected in
+                Task { @MainActor in self?.connectionChanged(connected: connected) }
+            }
+    }
+
+    /// The event stream's connection state. Idempotent: a repeated value changes
+    /// nothing and publishes nothing (a replayed value must not re-render the
+    /// screen, which would re-subscribe and loop).
     func connectionChanged(connected: Bool) {
+        guard connected != flow.connected else { return }
         flow.reduce(.connection(connected))
         if connected, flow.isBusy { Task { await readVersionAfterRestart() } }
     }

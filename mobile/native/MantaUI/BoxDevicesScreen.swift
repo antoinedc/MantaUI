@@ -142,6 +142,8 @@ struct BoxDevicesScreen: View {
                     hint("To sign this phone out, use Remove server.")
                 } else if device.primary {
                     hint("The main pairing is shared with your desktop — manage it from the desktop.")
+                } else if !BoxDevices.canRevoke(device) {
+                    hint("This device has no ID the box can revoke it by. Remove it from the device itself.")
                 } else {
                     Button(role: .destructive) {
                         pendingRevoke = device

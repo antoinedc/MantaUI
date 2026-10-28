@@ -79,6 +79,7 @@ struct SettingsScreen: View {
                                 .padding(.horizontal, Metrics.spacing.sp3)
                                 .padding(.top, Metrics.spacing.sp2)
                                 .padding(.bottom, Metrics.spacing.sp2)
+                                .disabled(removal.state != .idle)
 
                             errorBanner
 
@@ -106,6 +107,8 @@ struct SettingsScreen: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
+                        // A removal in progress must finish (and be acknowledged) here.
+                        .disabled(removal.state != .idle)
                         .foregroundColor(tokens.accent)
                         .font(.manta(size: Metrics.type.body, weight: .semibold))
                 }
@@ -113,6 +116,9 @@ struct SettingsScreen: View {
             .overlay(alignment: .bottom) { undoToast }
             .sheet(isPresented: $confirmReset) { resetAllSheet }
         }
+        // Remove-server's dialog and alerts live here, on the always-mounted screen.
+        .modifier(BoxRemovalPresentation(removal: removal))
+        .interactiveDismissDisabled(removal.state != .idle)
         // Show the screen in the phone's own theme straight away.
         .preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)
         // A reset / undo of `hapticsEnabled` or `cacheTtl` must reach the list

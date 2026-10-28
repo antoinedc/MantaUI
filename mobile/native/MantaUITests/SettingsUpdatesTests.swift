@@ -187,6 +187,18 @@ final class SettingsUpdatesTests: XCTestCase {
         XCTAssertFalse(flow.isBusy)
     }
 
+    func testAbortFromTheConfirmFailsWithoutApplying() {
+        var flow = UpdateFlow()
+        flow.reduce(.requestConfirm)
+        flow.reduce(.abort("no version"))
+        XCTAssertEqual(flow.phase, .failed("no version"))
+        XCTAssertFalse(flow.isBusy)
+        // Only meaningful from the confirm.
+        var applying = startedFlow()
+        applying.reduce(.abort("late"))
+        XCTAssertEqual(applying.phase, .applying)
+    }
+
     func testCancelFromTheConfirmGoesBackToIdle() {
         var flow = UpdateFlow()
         flow.reduce(.requestConfirm)

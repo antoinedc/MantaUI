@@ -205,6 +205,12 @@ final class MantaOnboardingFlow: ObservableObject {
         case "linking":
             pending = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
             phase = .linking
+        case "confirm":
+            pending = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
+            phase = .confirm
+        case "not-mine":
+            pending = MantaPairing.PairPayload(boxId: box, code: "123456", serverUrl: nil)
+            phase = .notMine
         case "notifications":
             phase = .notifications
         case "failure-rejected":
