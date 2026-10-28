@@ -585,9 +585,16 @@ decides whether text may be restored (only `cancelled` with `restore:true`).
   `editLastInboxItem() async -> String?` (guarded by `canMutate`) picks via
   `ChatCardEditLast.pick(items:busy:)` (KEEP-CLIENT, audit C12), calls
   `api.inboxCancelReported(sessionId:id:restore: true)` and returns
-  `restoreText`. **Old box** (capability absent): the "Edit last" button is
-  disabled with the caption "Update your box to use this"; × still works and
-  shows only what the box returns (no notice) plus the inbox refresh.
+  `restoreText`. **Old box (capability `chat-cards-1` absent or still
+  unknown):** every inbox action is gated, not only Edit last —
+  `PendingMessagesCard` gets `actionsEnabled: Bool` and renders ×, Send now,
+  Wait and Edit last disabled, with the footer "Update your box to use this"
+  when the capability is known-absent (no footer while unknown);
+  `ChatSessionStore.cancelInboxItem`, `setInboxDelivery` and
+  `editLastInboxItem` return early with no RPC when the capability is not
+  `true` (defence for any other entry point). An old box can answer
+  `unknown` with HTTP 200 and no sentence; gating is what keeps that verdict
+  from being lost silently. No local classification is restored.
 - ChatScreen: if `composer.text` is non-blank, confirm first ("Replace your
   draft with the pending message?", D9) — before any cancel RPC. Then
   `if let t = await store.editLastInboxItem() { if !composer.insert(text: t, mode: .replace) { UIPasteboard.general.string = t; store.actionHint = "Removed from the queue — it couldn't go back in the composer, so it's on your clipboard" } }`
@@ -921,7 +928,7 @@ isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName)
 - `validateApprovalTools(tools)`: `undefined` → null (use original request);
   an array that is empty, or has a rule with blank `permission`/`pattern` →
   `"A job needs at least one rule with a permission and a pattern."`.
-- RPC (mounts M-02-srv-6…9, `rpc.mjs`):
+- RPC (mounts M-02-srv-6, 7, 8, `rpc.mjs`; registration is M-02-srv-10 in `index.mjs`):
   - NEW `"delegate:job-for-session": (input) => delegateView.jobForSession(input?.sessionId)`;
     missing `sessionId` → `throw new Error("sessionId is required")`.
   - `"delegate:list"` returns `delegateView.decorateList(...)` (array shape
@@ -944,41 +951,78 @@ isReadOnlyJob(job), jobStatusLabel(job), jobSummary(job), jobHeadline(modelName)
   running/paused/done; `assertWritable` throws for a read-only job, not for a
   work job or a non-job; `validateApprovalTools` undefined/empty/blank/ok;
   `decorateList` adds both fields; models fetched once within the memo window.
-  `src/server/rpc.delegateView.test.mjs` (integration, after the mounts):
-  `delegate:job-for-session` round trip; `opencode:prompt` to a job → 409 body.
+  `src/server/rpc.delegateView.test.mjs` (integration, after the mounts;
+  dependency-injected `buildHandlers` with fake `oc`, `streamInterp`,
+  `handoff`, `ctoConversation`, `delegateView` over an in-memory job list —
+  no live box, sandboxed state per `scripts/testSandbox.mjs`):
+  - `delegate:job-for-session` round trip.
+  - **Table-driven over all five guarded channels** (`opencode:prompt`,
+    `opencode:inbox-cancel`, `opencode:inbox-set-delivery`,
+    `opencode:compact-session`, `opencode:run-command`), each through
+    `handleRpcRequest` with a fake request/response: for a read-only job
+    session → HTTP 409, body exactly
+    `{error:"This is a background job — it can't take messages", code:"read_only_job"}`,
+    and **zero** calls on the downstream fakes (`oc.sendPrompt`,
+    `streamInterp.cancelInbox`, `streamInterp.setInboxDelivery`,
+    `oc.compactSession`, the command runner, `handoff.admitPrompt`,
+    `ctoConversation.admitDirect`).
+  - The same five for an ordinary session and for a `correlation.kind:"work"`
+    job session → the existing route is reached (downstream fake called once,
+    200).
+  - `opencode:compact-session` (today a synchronous arrow, `rpc.mjs:1968`)
+    becomes `async` in M-02-srv-7; a test asserts it still returns the fake's
+    value.
+  - A handler that throws a `HandoffError` with a mapped code still answers
+    with its `HANDOFF_ERROR_STATUS` and `{error, message}` body (the new
+    `rpcStatus` branch does not shadow it).
+  - Inbox decoration (M-02-srv-9) incl. the no-item cancellation.
 
 ### SF-5 Inbox outcome copy (C11) — `src/server/inboxCopy.mjs` (NEW)
 - Moved from `src/renderer/inboxState.ts` (175–230):
   `describeInboxCancel(result, {restore}) -> {notice, error, restoreText}`,
   `describeInboxSetDelivery(result) -> {notice, error}`, constants
   `ATTACHMENTS_NOT_RESTORED`, `SET_DELIVERY_UNCONFIRMED`, `ALREADY_SENT`,
-  `CANCEL_UNCONFIRMED`. `restoreText` = `result.item.text` only for
-  `outcome:"cancelled"` with `restore:true`; attachments notice only then and
-  when `item.attachmentCount > 0`.
-- RPC (mount M-02-srv-11): `opencode:inbox-cancel` accepts optional
+  `CANCEL_UNCONFIRMED`, `CANCELLED_TEXT_LOST`. `restoreText` =
+  `result.item.text` only for `outcome:"cancelled"` with `restore:true` and an
+  `item` present; attachments notice only then and when
+  `item.attachmentCount > 0`. **Cancelled without `item`** (possible:
+  `streamInterp.cancelInbox` captures `before` from the snapshot and omits
+  `item` when the id was not in it, `streamInterp.mjs:619–625`;
+  `types.ts:2988–2991` makes it optional): `restore:true` →
+  `{restoreText: null, error: null, notice: CANCELLED_TEXT_LOST}` with
+  `CANCELLED_TEXT_LOST = "Removed from the queue, but its text couldn't be recovered"`;
+  `restore:false` → `{restoreText: null, error: null, notice: null}` (the row
+  vanishing is the confirmation, as today). The helper never dereferences an
+  absent item and never reports a cancelled result as a failure.
+- RPC (mount M-02-srv-9): `opencode:inbox-cancel` accepts optional
   `input.restore` (boolean) and returns `{...r, ...describeInboxCancel(r, {restore: input?.restore === true})}`;
   `opencode:inbox-set-delivery` returns `{...r, ...describeInboxSetDelivery(r)}`.
 - Node tests `src/server/inboxCopy.test.mjs`: the existing `inboxState.test.ts`
-  cases (145–211) ported 1:1, plus `restore:false` never returns text.
+  cases (145–211) ported 1:1, plus `restore:false` never returns text, plus
+  `cancelled` **without** `item` for `restore:true` (→ `CANCELLED_TEXT_LOST`,
+  no throw) and `restore:false` (→ all null). `rpc.delegateView.test.mjs`
+  (renamed in scope: covers all M-02-srv-6…9 mounts) adds an RPC case where the
+  injected `cancelInbox` returns `{outcome:"cancelled"}` with no item.
 
 ### Desktop migration (same workstream, no parallel implementation)
 | File | Change |
 |---|---|
 | `src/renderer/chatUtils.ts` | **Delete** `describeSessionError`, `authErrorAdvice`, `AUTH_PROVIDER_LABELS`, `isAuthErrorName`, `formatCompactionSaving`, `formatTokensCompact`, `isReadOnlyJob`, `parseModelRef`, `formatJobSummary`. `formatTokens` becomes `export { formatTokens } from "../shared/formatTokens.mjs"` (one implementation, D26). `formatLastMove` (`:3803`, still live until WS11 D4) switches from the deleted `formatTokensCompact` to `formatTokenCount`. WS02 is the wave-B OWNER of this file (D27); WS07/WS09 hunks are ledger rows IB applies after WS02's commit. |
 | `src/shared/formatTokens.mjs` / `.d.mts` / `formatTokens.test.ts` (NEW) | D26 formatter (see SF-2). |
-| `src/renderer/SessionHeader.tsx` | Its private `formatTokensCompact` (`:75`) is deleted; the two call sites (`:668`, `:699`) use `formatTokenCount` (no other wave-B worker edits this file; WS05 edits it in wave C). |
+| `src/renderer/SessionHeader.tsx` | Its private `formatTokensCompact` (`:75`) is deleted; **all five** call sites (`:668`, `:699`, `:724` (two uses in one line), `:841`, `:888`) use `formatTokenCount` imported from `src/shared/formatTokens.mjs`. `npm run typecheck` proves no reference to the deleted function remains (no other wave-B worker edits this file; WS05 edits it in wave C). |
 | `src/renderer/api/demoApi.ts`, `src/renderer/api/demoCoverage.test.ts` | WS02 owns both in wave B (D27): add `delegateJobForSession` to `DEMO_UNIMPLEMENTED` (or a stub); WS07/WS09 entries are ledger rows. |
 | `src/renderer/chatUtils.test.ts`, `chatUtils.frames.test.ts` | Remove the moved cases (they now live in `streamInterpretation.test.ts`); keep a `formatTokens` case. |
 | `src/renderer/inboxState.ts` (+ test) | **Delete** `describeInboxCancel`, `describeInboxSetDelivery`, `ATTACHMENTS_NOT_RESTORED`, `SET_DELIVERY_UNCONFIRMED` and their tests. |
-| `src/renderer/hooks/useSseBus.ts` | `sessionError`: `setSendError(p.display?.text ?? p.message)`, `setAuthReconnect(p.display?.reconnect?.label ?? null)`; remove the `describeSessionError` import and `providerIDRef` if no other use remains. `compaction` `ended`: store `firstLine` from the frame. |
+| `src/renderer/hooks/useSseBus.ts` | **Every projection and its types, end to end:** (a) `retry` handler (`:593–615`) copies `headline`, `caption`, `body` from the frame into `retryInfo` (besides `attempt/message/next/action`); (b) the `retryInfo` state type (`:300`) and the `SseBus.retryInfo`/`setRetryInfo` types (`:142–143`) gain `headline?: string; caption?: string \| null; body?: string \| null`; (c) `compactionState` state + `SseBus` types (`:133–134`, `:263`) gain `firstLine?: string \| null`, set from the `ended` frame; (d) `compactionNotice` state + type (`:137`, `:274`, `armCompactionNotice`) become `{ text: string }`, set from `optimizer.compacted.text` and NOT armed when `text` is absent (old box); (e) `sessionError`: `setSendError(p.display?.text ?? p.message)`, `setAuthReconnect(p.display?.reconnect?.label ?? null)`; remove the `describeSessionError` import and `providerIDRef` if no other use remains. |
 | `src/renderer/Cards.tsx` | `RetryCard` renders `info.headline ?? "Retrying…"`, `info.caption`, `info.body ?? info.message`, link unchanged. `CompactionCard` shows `state.firstLine` when done (no client split). |
-| `src/renderer/ChatPanel.tsx` | Compaction notice line = `compactionNotice.text` (omit when absent; `useSseBus` stores `text` from `optimizer.compacted`). Read-only job: replace `jobs[sessionId]`/`isReadOnlyJob` (360–373) with `window.api.delegateJobForSession(sessionId)` on mount and on `onDelegateUpdated`, gated by `useBoxCapability("chat-cards-1")`; `ReadOnlyJobBar` (3509–3550) gets the view. Inbox cancel/set-delivery (858–906): send `restore`, show `result.error ?? result.notice` (`setSendError` for `error`, system notice for `notice`), restore `result.restoreText`; Edit last disabled with "Update your box to use this" when the capability is missing. Approve: show the box's `error` instead of swallowing it. |
+| `src/renderer/ChatPanel.tsx` | Compaction notice line = `compactionNotice.text` (omit when absent; `useSseBus` stores `text` from `optimizer.compacted`). Read-only job: replace `jobs[sessionId]`/`isReadOnlyJob` (360–373) with `window.api.delegateJobForSession(sessionId)` on mount and on `onDelegateUpdated`, gated by `useBoxCapability("chat-cards-1")`; `ReadOnlyJobBar` (3509–3550) gets the view. Inbox cancel/set-delivery (858–906): send `restore`, show `result.error ?? result.notice` (`setSendError` for `error`, system notice for `notice`), restore `result.restoreText`; **Capability gate for every inbox action (D24/D25):** when `useBoxCapability("chat-cards-1") !== true`, `PendingMessagesCard` renders × / Send now / Wait / ↑ edit last **disabled** with the card-footer line "Update your box to use this" (`null` = still checking → disabled, no footer), and the action callbacks themselves early-return: `cancelInboxRow`, `sendInboxNow`, `waitInboxItem`, `editLastInboxItem` (so the keyboard pop-last path via `queuePopRef` → `onQueuePop` also does nothing and returns `false`, letting the ↑ key fall through to prompt history as it does when nothing is pending). No local outcome classification is restored. Approve: show the box's `error` instead of swallowing it. |
+| `src/renderer/PendingMessagesCard.tsx` | New prop `actionsEnabled: boolean` and `gateNote: string \| null`: when false, ×, Send now, Wait and ↑ edit last are `disabled`; `gateNote` ("Update your box to use this") renders as the footer line. |
 | `src/renderer/PanelCards.tsx` | `ReadOnlyJobBar` props → `{view: DelegateJobView, onGoToParent, onStop}`; renders `headline`, `parentLine`, `statusLine`; Stop when `view.stoppable`; drop `formatJobSummary` import. |
 | `src/renderer/hooks/useBoxCapabilities.ts` (NEW) | SF-0 hook. |
 | `src/shared/types.ts` | `StreamRetryPayload` + `headline?`, `caption?`, `body?`; `StreamSessionErrorPayload` + `display?`; `StreamCompactionPayload` + `firstLine?`; `OpencodeInboxCancelResult` + `notice?`, `error?`, `restoreText?`; `OpencodeInboxSetDeliveryResult` + `notice?`, `error?`; `DelegateJob` + `statusLabel?`, `summary?`; NEW `DelegateJobView`, `DelegateJobForSession`; IPC `delegateJobForSession: "delegate:job-for-session"`. |
-| `src/shared/api.ts`, `src/renderer/api/httpApi.ts` | `delegateJobForSession(sessionId): Promise<DelegateJobForSession>`; `opencodeInboxCancel` input gains `restore?`; `getServerVersion` type + `capabilities?: string[]`. |
+| `src/shared/api.ts`, `src/renderer/api/httpApi.ts` | `delegateJobForSession(sessionId): Promise<DelegateJobForSession>`; `delegateApprove(id, tools)` result type `{ ok: boolean; error?: string }` in BOTH `api.ts:1553` and the `rpc<…>` generic at `httpApi.ts:1315`; `opencodeInboxCancel` input gains `restore?`; `opencodeInboxCancel` / `opencodeInboxSetDelivery` result types gain `notice?`, `error?`, `restoreText?` (via `types.ts`); `getServerVersion` type + `capabilities?: string[]`. |
 | `src/shared/streamInterpretation.mjs` / `.d.mts` / `.test.ts` | SF-1…SF-3 functions + types + tests. |
-| vitest | `src/renderer/hooks/useSseBusFrames.test.tsx`: frames with the new fields render the box's text; `PanelCards` ReadOnlyJobBar snapshot from a view; `ChatPanel.harness.test.tsx` inbox cancel uses result fields. |
+| vitest | (1) **hook-to-card**: `src/renderer/hooks/useSseBusFrames.test.tsx` feeds a `retry` frame with distinctive server values (`headline:"HL-x"`, `caption:"CAP-y"`, `body:"BODY-z"`) through `useSseBus` and asserts `RetryCard` renders exactly those strings (not a hand-built `info`); same for a compaction `ended` `firstLine` and an `optimizer.compacted` `text`; a frame without the fields renders "Retrying…" + `message` and no notice line. (2) `ChatPanel.harness.test.tsx`: approve answered `{ok:false, error:"E-box"}` shows "E-box" and keeps the card; inbox cancel / set-delivery render `result.error`/`notice`; Edit last restores `restoreText`. (3) Capability gating (finding-2 cases below). (4) `PanelCards` ReadOnlyJobBar from a view. `npm run typecheck` covers every deleted export (no import of a removed name survives). |
 
 **Same-wave desktop file ledger (D24, D27).** WS02 is the wave-B OWNER of
 `chatUtils.ts` (+ tests), `ChatPanel.tsx`, `src/shared/types.ts`,
@@ -997,6 +1041,17 @@ setDelivery`, `ChatCardJob` (raw record decoding). Their XCTests become decode
 tests of the server shapes.
 
 ---
+
+## Libraries considered (user rule: research before building)
+
+None adopted (`libraries.md` §02). No `package.json` / `package-lock.json`
+or Swift package change by WS02.
+
+| Item | Candidates | Decision |
+|---|---|---|
+| Inline markdown in card bodies (retry `detail`, approval copy) | Foundation `AttributedString(markdown:)`; MarkdownView 3.0.0 (already in `project.yml`) | **Already provided** — Foundation for inline text, MarkdownView for blocks. |
+| Compaction "Compacted" hold / generation latch (F2) | swift-async-algorithms 1.1.7 (Apache-2.0) | **Keep hand-written** — a 3 s one-shot keyed by generation is domain logic; a library timer adds nothing. |
+| Queue drain / steer (F7) | — | **Keep** — box `delivery: steer|queue`, already at parity. |
 
 ## Files
 
@@ -1189,7 +1244,7 @@ IDs match the master's canonical mount ledger (`00-master.md`).
 | M-02-srv-4 | `src/server/index.mjs` (`optimizer.compacted` publish, :1925–1937) | Integration agent B | `describeBackgroundCompaction` | Add `text: describeBackgroundCompaction({ beforeTokens: before ?? null, afterTokens: after ?? null, away })` to the payload + import. | WS02 commit |
 | M-02-srv-5 | `src/server/streamInterp.mjs` (`session.execution.failed`, :742–760) | Integration agent B | `describeSessionError` | Add `display: describeSessionError({ name: err?.name ?? null, message: human, rawMessage: message }, st.model?.providerID ?? null)` to the `sessionError` payload + import. | WS02 commit |
 | M-02-srv-6 | `src/server/rpc.mjs` (`buildHandlers` deps + delegate channels, :2434–2480) | Integration agent B | `createDelegateView` instance `delegateView` | Destructure `delegateView` from deps; `"delegate:list"` → `delegateView ? delegateView.decorateList(list) : list` (array case only); NEW `"delegate:job-for-session"`; `"delegate:approve"` → `validateApprovalTools` check first (SF-4). | M-02-srv-10 |
-| M-02-srv-7 | `src/server/rpc.mjs` (`opencode:prompt` :1344, `opencode:inbox-cancel` :1388, `opencode:inbox-set-delivery` :1402, `opencode:compact-session` :1968, `opencode:run-command` :2055) | Integration agent B | `delegateView.assertWritable` | First statement of each handler: `await delegateView?.assertWritable(<sessionId>)` (`input?.sessionId`, or the arg for compact). | M-02-srv-6 |
+| M-02-srv-7 | `src/server/rpc.mjs` (`opencode:prompt` :1344, `opencode:inbox-cancel` :1388, `opencode:inbox-set-delivery` :1402, `opencode:compact-session` :1968, `opencode:run-command` :2055) | Integration agent B | `delegateView.assertWritable` | First statement of each handler: `await delegateView?.assertWritable(<sessionId>)` (`input?.sessionId`, or the arg for compact). `opencode:compact-session` becomes `async (sessionId) => { await delegateView?.assertWritable(sessionId); return oc.compactSession(sessionId); }`. The CTO/handoff branches stay after the guard, unchanged. | M-02-srv-6 |
 | M-02-srv-8 | `src/server/rpc.mjs` (`handleRpcRequest` catch, :2705) | Integration agent B | `ReadOnlyJobError.rpcStatus/code` | Before the HandoffError branch: `if (typeof e?.rpcStatus === "number") { sendJson(e.rpcStatus, { error: String(e.message), code: e.code }); return; }`. | M-02-srv-7 |
 | M-02-srv-9 | `src/server/rpc.mjs` (inbox handlers :1388–1419) | Integration agent B | `describeInboxCancel`, `describeInboxSetDelivery` (`inboxCopy.mjs`) | Wrap results: `{...r, ...describeInboxCancel(r, { restore: input?.restore === true })}` / `{...r, ...describeInboxSetDelivery(r)}`. | WS02 commit |
 | M-02-srv-10 | `src/server/index.mjs` (after `delegateEngine`, :1105; `buildHandlers` call) | Integration agent B | `createDelegateView` | `const delegateView = createDelegateView({ listJobs: (f) => delegateEngine.listJobs(f ?? {}), listProjects: () => tmux.listProjects(), listModels: () => oc.listModels() });` and pass `delegateView` into `buildHandlers({...})`. | WS02 commit |
@@ -1352,3 +1407,13 @@ Q3 (Edit last over a draft) by D9.
 | Client members | `chatCardJobs()` replaced by `delegateJobForSession(sessionId:)`; `delegateApprove` returns `ChatCardApproveResult`; NEW `inboxCancelReported(sessionId:id:restore:)`, `boxCapabilities()`. Master registry row for WS02 must be updated accordingly. |
 | Rejected audit items | None. |
 | Reconciliation (master "Reconciliation log (server-first)") | `formatTokenCount` moved to the ONE module `src/shared/formatTokens.mjs` (D26, also exports `formatTokens`); `formatLastMove` + `SessionHeader.tsx` stop using deleted/duplicate compact formatters; WS02 is the wave-B owner of the shared desktop files (D27) incl. `demoApi.ts`/`demoCoverage.test.ts`; `BackgroundJobsSheet.swift` is WS02's (D28) so M-02-5 is WS02's own edit; M-06-1 receipt now `SearchScreen(primarySessionId:)`; M-09-9 receipt (UsageSheets band) added; `boxCapabilities.mjs` / `boxCapabilities()` / `useBoxCapability` confirmed as the single module/accessors (D25). |
+
+## Review responses (server-first review)
+
+| Finding | Resolution |
+|---|---|
+| #1 desktop consumer chain | `useSseBus.ts` row now migrates the retry projection (`:593–615`) and every state/`SseBus` type (`retryInfo`, `compactionState`, `compactionNotice`) through to the cards; `SessionHeader.tsx` replaces all five `formatTokensCompact` uses (`:668`, `:699`, `:724`, `:841`, `:888`); `delegateApprove` result is `{ok, error?}` in both `api.ts:1553` and the `httpApi.ts:1315` generic. Tests: hook-to-card with distinctive server strings, approval refusal, typecheck over deleted exports. |
+| #2 old-box inbox actions | Every inbox action (×, Send now, Wait, Edit last, and the desktop ↑ `onQueuePop` path) is gated on `chat-cards-1` on both clients — disabled with "Update your box to use this" (none while unknown), store/callback entry points return early with no RPC. No local classification restored. New desktop row for `PendingMessagesCard.tsx` (`actionsEnabled`, `gateNote`); iOS `PendingMessagesCard(actionsEnabled:)`. |
+| #3 cancelled without item | SF-5 pins the branch: `restore:true` → `restoreText:null` + notice "Removed from the queue, but its text couldn't be recovered"; `restore:false` → all null; never dereferences the absent item, never reports failure. Pure and RPC tests added. |
+| #4 guarded-mutation coverage | `rpc.delegateView.test.mjs` is table-driven over all five channels: 409 + exact body + zero downstream calls for a job; ordinary and `work` sessions reach the existing route; async `compact-session` still returns; `HandoffError` branch preserved. Dependency-injected and sandboxed. |
+| #5 mount refs | SF-4 now cites M-02-srv-6/7/8 (+10 registration); SF-5 cites M-02-srv-9. The mount table and master ledger rows 572–581 were already consistent; no master edit was needed. |

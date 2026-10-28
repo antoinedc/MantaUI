@@ -176,23 +176,61 @@ engine):
   replaces the client's `maxPrimary: 3` (D9 is now implemented server-side).
   With a primary, the default stays 50. An explicit `maxPrimary` is still
   honoured.
-- `scope:"all"` with no `deps.listProjects`, or a `listProjects` that throws →
+- `scope:"all"` with no `deps.listProjects`, or a `listProjects` that throws
+  (including the `scope_unavailable` error below) →
   `{supported:true, hits:[], groups:[], degraded:true}`, with one server log.
-- Legacy `sessionIds` input (no `scope`): behaviour is unchanged, and labels
-  come from `deps.listProjects` when present.
+  This holds **with or without** a `primarySessionId`: the box never answers
+  a partial, primary-only search while claiming full scope.
+- A `listProjects` that succeeds with `[]` (a box with genuinely no windows)
+  is NOT a failure. The scope is then the primary alone, or empty, and the
+  answer is `{supported:true, hits, groups}` with no `degraded`.
+- **Legacy `sessionIds` input (no `scope`).** Scope and caps come ONLY from
+  the legacy arguments, exactly as today:
+  - `sessionIds` order is the scope.
+  - `sessionIds[0]` is the primary, with the default `maxPrimary` 50; every
+    other session gets `maxPerSession` 3. Explicit `maxPrimary` /
+    `maxPerSession` / `maxTotal` are honoured.
+  - `deps.listProjects` is used only to label the groups. If it is absent or
+    throws, every label is unknown (`workspace`/`name` null,
+    `label = sessionId`), the hits are kept, and there is no `degraded`.
+  - Label lookup never changes the hits.
 
-**rpc wiring (mount M-06-srv-1):** the handler passes the same snapshot
-`tmux:list` reads (`rpc.mjs:1143-1148`):
+**Topology adapter** (new export in `messageSearch.mjs`, so the exact rpc
+wiring is node-testable with a real `createSyncState`):
+
+```js
+// The scope source for scope:"all". Uses the same materialized list tmux:list
+// serves. syncState.refreshNow() never rejects: a failed listing only flips
+// `stale` (syncState.mjs:58-95), so success is re-checked explicitly.
+export function projectsFromSyncState(syncState) {
+  return async () => {
+    if (!syncState.everSucceeded()) await syncState.refreshNow();
+    if (!syncState.everSucceeded()) {
+      const e = new Error("session list unavailable");
+      e.code = "scope_unavailable";
+      throw e;                       // → degraded:true (rule above)
+    }
+    return syncState.snapshot().projects;   // last-known-good, even when stale
+  };
+}
+```
+
+Staleness policy: once a listing has ever succeeded, a later tmux fault keeps
+the last-known-good list (`stale:true`), and search uses it. This is the
+same contract `tmux:list` gives both sidebars (`rpc.mjs:1136-1148`), so search
+and the visible session list never disagree. Only "never listed since boot"
+is a failure.
+
+**rpc wiring (mount M-06-srv-1):** the handler passes the topology adapter
+above, over the same `syncState` that `tmux:list` reads (`rpc.mjs:1143-1148`):
 
 ```js
 "opencode:search-messages": (input) =>
-  searchMessages(input ?? {}, {
-    listProjects: async () => {
-      if (!syncState.everSucceeded()) await syncState.refreshNow();
-      return syncState.snapshot().projects;
-    },
-  }),
+  searchMessages(input ?? {}, { listProjects: projectsFromSyncState(syncState) }),
 ```
+
+The rpc edit also adds `projectsFromSyncState` to the existing
+`import { searchMessages } from "./messageSearch.mjs";` line (`rpc.mjs:58`).
 
 ### Q2 — Groups and labels computed by the box
 
@@ -201,8 +239,11 @@ engine):
 - Hits are grouped by `sessionId` in first-appearance order (the hits are
   already scope-ordered).
 - The `primarySessionId` group, if any, comes first with `isCurrent: true`.
-- `label` is `"<workspace> › <name>"` when both are known, else the raw
-  `sessionId`.
+- `label` is `"<workspace> › <name>"` when BOTH are known (non-empty);
+  otherwise (one or both unknown) it is the raw `sessionId`. `label` is the
+  ONLY title policy: both clients display it verbatim and never compose a title
+  from `workspace`/`name`. Those two fields are informational, for
+  accessibility and the future.
 
 **Response** (additive — the flat `hits` stays, for old clients and CTO):
 
@@ -263,7 +304,8 @@ is the capability signal below.)
 | Empty or whitespace query | `{supported:true, hits:[], groups:[]}` |
 | Scope resolves to no sessions | `{supported:true, hits:[], groups:[]}` |
 | No `node:sqlite` / no DB | `{supported:false, hits:[], groups:[]}` |
-| DB/worker error, or `listProjects` failure / missing for `scope:"all"` | `{supported:true, hits:[], groups:[], degraded:true}` |
+| DB/worker error; or, for `scope:"all"`, `listProjects` missing / throwing / never-succeeded topology (`scope_unavailable`) | `{supported:true, hits:[], groups:[], degraded:true}` |
+| Legacy `sessionIds` input with a failing label lookup | normal hits; labels = session ids; no `degraded` |
 | Budget exceeded | hits + groups for what was found, `truncated:true` |
 | Malformed input (non-string query, non-array sessionIds) | treated as empty → first row (never throws, as today) |
 
@@ -312,16 +354,42 @@ current budget test at line 277):
 8. `scope:"all"` without a primary: each session is capped at 3 (seed 5
    matching messages in the first session); with a primary, the primary gets up
    to 50.
-9. Legacy `{query, sessionIds}` input still returns the same `hits` as before,
-   plus `groups` (labels null without a `listProjects` dep).
+9. Legacy `{query, sessionIds:[s1,s2,s3]}`, with no deps: the same `hits` as
+   the pre-change implementation (same order, `s1` capped at 50 and the others
+   at 3, with 5 matches seeded in each), plus `groups` whose labels are the
+   session ids.
+9a. Legacy input with a `listProjects` that throws: identical `hits` to test
+    9, labels fall back to session ids, `degraded` absent.
+9b. Legacy input with explicit `maxPrimary: 2, maxPerSession: 1, maxTotal: 4`:
+    caps honoured exactly as `buildHits` does today.
+9c. Legacy input with a working `listProjects`: labels filled; hits identical
+    to test 9.
 10. Empty query → `groups: []` present.
 11. `deps.runDbTask` that throws a plain Error → `degraded:true`, `hits:[]`,
     `groups:[]`; one that throws `{code:"no_db"}` → `supported:false`, with no
     `degraded`.
-12. `scope:"all"` with `listProjects` throwing, or absent → `degraded:true`.
+12. `scope:"all"` with `listProjects` throwing, or absent → `degraded:true`,
+    with and without a `primarySessionId` (no primary-only partial result).
+
+Topology adapter, with a REAL `createSyncState` (`src/server/syncState.mjs`,
+injected `publish: () => {}`):
+13. Its injected `listProjects` rejects, and it has never succeeded →
+    `searchMessages({query, scope:"all", primarySessionId:"s1"}, {listProjects: projectsFromSyncState(state)})`
+    returns `degraded:true`, `hits:[]`, `groups:[]`. The DB task is never
+    called (spy `deps.runDbTask`).
+14. Its `listProjects` resolves `[]` → `supported:true`, no `degraded`. With
+    no primary → `groups:[]`; with `primarySessionId` → the primary alone is
+    searched (spy sees scope `["s1"]`).
+15. First listing succeeds with two windows, then `refreshNow()` with a
+    rejecting listing (state now `stale`) → the search still uses the
+    last-known-good two windows, with no `degraded`.
+16. The adapter calls `refreshNow()` at most once per search when the state
+    has never succeeded (spy count).
 
 `npm run test:server` must pass. The existing `buildHits`/`likePattern` tests
-stay untouched.
+stay untouched. Tests 13-16 are the RPC-path integration tests: M-06-srv-1
+wires exactly `projectsFromSyncState(syncState)`, so they exercise the real
+adapter over a real sync state.
 
 ### Desktop migration (same change, no parallel implementation)
 
@@ -346,18 +414,40 @@ stay untouched.
     stays client).
 - **Rendering:**
   - `currentGroup = groups.find(g => g.isCurrent)`; other groups are the rest.
-  - `SectionHeader` gets `workspace={g.workspace ?? undefined}` and
-    `session={g.name ?? g.label}`.
+  - A non-current group's header title is the server's `g.label`, verbatim.
+    `SectionHeader` loses its `workspace` prop and the local `workspace ›`
+    breadcrumb (`SearchPalette.tsx:282-305`): its props become
+    `{ title: string; count: string }`. The current group's title stays the
+    fixed label "This conversation".
   - Flat keyboard rows are built from the groups in order.
   - The footer counts `groups.length`.
   - New copy:
     - `failed`: "Couldn't search — edit the query to try again."
     - `boxTooOld`: "Search needs a newer box — update your box to use this."
     - `truncated`: "Showing the newest matches — this history is very large."
-- **Jump (Q6, KEEP-CLIENT):** unchanged. It still uses `resolveSessionOwner`
-  with the `projects` prop. If the owner is gone, it now shows "That
-  conversation is no longer open." in the palette's message row instead of
-  doing nothing (fixes the dead click at line 150).
+- **Jump (Q6, KEEP-CLIENT):** it still uses `resolveSessionOwner` with the
+  `projects` prop. It now returns a result: `jump(row): void | false`.
+  - If the owner is gone, it sets `jumpNotice = "That conversation is no
+    longer open."` (rendered as the palette's top message row) and returns
+    `false`.
+  - Otherwise it behaves as today and returns nothing.
+  - The palette's `onPick={(i) => { const row = flatRows[i]; return row ? jump(row) : false; }}`
+    passes the result to `PaletteShell`.
+  - `jumpNotice` clears on the next query change.
+
+`src/renderer/PaletteShell.tsx` (shared chrome; WS06-owned in wave B, see the
+master D27 table): a backward-compatible pick veto.
+- The prop type becomes `onPick: (index: number) => void | false`.
+- `pick(i)` becomes
+  `const r = onPick(i); if (r !== false) requestClose();`.
+  Mouse (rows' `pick`) and Enter (`onKeyDown` → `pick(sel)`) share this one
+  path, so both honour the veto.
+- The header comment's line "pick(i) = onPick(i) then requestClose" is updated
+  to describe the veto.
+- Other consumers are unaffected: `Sidebar.tsx:1605` and
+  `InboxPalette.tsx:316` return `void`, which still closes. No other wave-B
+  spec touches `PaletteShell.tsx`, and the only wave-C consumer
+  (`InboxPalette`, WS05) needs no change.
 
 `src/shared/types.ts`: add `TranscriptHitGroup`.
 `src/shared/api.ts`: the input/response types above.
@@ -369,14 +459,25 @@ already lists `opencodeSearchMessages`).
 pattern of the existing component tests such as `ActiveTodos.test.tsx`):
 1. Sends `{query, scope:"all", primarySessionId}` after the debounce; never
    `sessionIds`.
-2. Renders "This conversation" from the `isCurrent` group and the
-   `workspace › name` header from a non-current group.
+2. Renders "This conversation" from the `isCurrent` group. A non-current
+   group whose `label` ("box-label") differs from its `workspace`/`name`
+   ("ws"/"win") shows "box-label" and never "ws › win". A group with
+   `workspace:null, name:"win", label:"ses_x"` shows "ses_x".
 3. `degraded:true` → the failed copy, not "No matches".
 4. A reply without `groups` → the box-too-old copy.
 5. A transport rejection → the failed copy.
 6. `classifySearchReply` table test (all six kinds).
-7. Picking a hit whose session has no owner shows "That conversation is no
-   longer open." and does not call `onJumpToWindow`.
+7. Picking a hit whose session has no owner, by mouse click and separately by
+   Enter: after `vi.advanceTimersByTime(200)` (past `CLOSE_MS` 100) the palette
+   and "That conversation is no longer open." are still rendered, `onClose`
+   was NOT called, and `onJumpToWindow` was not called.
+8. Picking a hit whose owner exists (mouse and Enter) calls `onJumpToWindow`
+   and then `onClose` after the close timer.
+
+**Vitest — `src/renderer/PaletteShell.test.tsx` (existing file, extended):**
+9. `onPick` returning `false`: neither click-pick nor Enter closes (no
+   `onClose` after advancing timers past 100 ms).
+10. `onPick` returning `undefined`: both close, as today.
 
 `npm run typecheck` and `npm test` must pass.
 
@@ -429,8 +530,10 @@ server order:
   (`SearchCopy.currentCount`).
 - An "Other conversations" divider header appears when there are non-current
   groups or a search is in flight.
-- Each other group is headed by the server's `label`, on one line
-  (middle-truncated, `tx3`), with a bare trailing count.
+- Each other group is headed by the server's `label`, verbatim, on one line
+  (middle-truncated, `tx3`), with a bare trailing count. The title comes from
+  `SearchCopy.sectionTitle(_:)`; iOS never composes a title from
+  `workspace`/`name`.
 
 **Hit row** (a button, minimum height 44)
 - Glyph `›` (accent) for user, `✳` (`tx4`) for assistant.
@@ -580,6 +683,8 @@ enum SearchCopy {                     // fixed labels and plurals only (Q5)
   static func currentCount(_ n: Int) -> String             // "1 match" / "N matches"
   static func footer(total: Int, conversations: Int) -> String
   static func idleTitle(hasPrimary: Bool) -> String
+  /// "This conversation" when group.isCurrent, else group.label verbatim.
+  static func sectionTitle(_ group: TranscriptHitGroup) -> String
 }
 enum SearchJump {                     // Q6, KEEP-CLIENT
   /// `owner` is SessionListStore.window(forSessionID:) bridged to a Bool.
@@ -622,6 +727,10 @@ decode tests of the server shape, plus KEEP-CLIENT logic.
    - `state_loadingKeepsPreviousGroups`
    - `state_retryReissuesLastQuery`
 8. `jump_reachable` / `jump_unreachable`.
+9. `sectionTitle_currentIsFixedLabel`; `sectionTitle_usesServerLabelVerbatim`
+   (label "box-label" with workspace "ws" / name "win" → "box-label");
+   `sectionTitle_missingComponent_usesLabel` (`workspace:null`,
+   label "ses_x" → "ses_x").
 
 There are no Mac-only test files. `SearchStore` is a thin driver, and its
 behaviour is covered by the state-machine tests.
@@ -761,15 +870,26 @@ needs no project list; the box resolves the scope.
 
 ---
 
+## Libraries considered (user rule: research before building)
+
+None adopted (`libraries.md` §06). No `package.json` / `package-lock.json`
+or Swift package change by WS06.
+
+| Item | Candidates | Decision |
+|---|---|---|
+| Full-history search + `pre`/`match`/`post` snippet | SQLite FTS5 (needs an index), Fuse.js 7.5.0, fuzzysort 4.0.2 | **Keep** the existing server SQLite substring query: opencode's DB is opened read-only and belongs to opencode, so no FTS index can be created; substring + snippet is the agreed behaviour and fuzzy ranking would change results. |
+| Query debounce (120 ms) | swift-async-algorithms `debounce` | **Keep** — one debounce point (desktop `setTimeout`; iOS ticket state machine + `Task.sleep`), already tested through the ticket model; a package isn't a clear win. |
+
 ## Files
 
 **Server (WS06-owned edits):**
 - `src/server/messageSearch.mjs`:
   - `searchMessages(input, deps)` gains `scope:"all"`, `primarySessionId`,
     `groups` and `degraded`.
-  - New pure exports `resolveSearchScope` and `groupHits`.
+  - New pure exports `resolveSearchScope` and `groupHits`, and the topology
+    adapter `projectsFromSyncState`.
   - New test seam `deps.runDbTask`.
-- `src/server/messageSearch.test.mjs`: node tests 1-12.
+- `src/server/messageSearch.test.mjs`: node tests 1-16 (incl. 9a-9c).
 - `src/server/rpc.mjs`: NOT edited by WS06. The handler change is mount
   M-06-srv-1.
 
@@ -778,6 +898,8 @@ needs no project list; the box resolves the scope.
   scope and owner memos and the `flatSessions` import; adds
   `classifySearchReply`.
 - `src/renderer/SearchPalette.test.tsx` (new).
+- `src/renderer/PaletteShell.tsx` + `PaletteShell.test.tsx`: the pick veto
+  (WS06-owned in wave B; master D27 table row amended).
 - `src/shared/types.ts` (add `TranscriptHitGroup`) and `src/shared/api.ts`
   (the `opencodeSearchMessages` input/response types): owned by WS02 in wave B
   (master D27), so these two hunks are ledger rows M-06-dsk-1 / M-06-dsk-2,
@@ -805,7 +927,7 @@ Manifest for the integration step:
 
 | ID | Receiving file | Applier (D18/D24) | Provider symbol(s) | Exact change | Prerequisite |
 |---|---|---|---|---|---|
-| M-06-srv-1 | `src/server/rpc.mjs` | **Integration agent B**, server order 02 → 07 → 09 → **06** (last) | `searchMessages(input, deps)` (extended, `messageSearch.mjs`) | Replace the `"opencode:search-messages"` handler (`rpc.mjs:2016-2017`) with the version under "Q1 — rpc wiring" (passes `listProjects` reading `syncState`, as `tmux:list` does at `:1143-1148`). No import change: `searchMessages` is already imported (`:58`) and `syncState` is already a `buildHandlers` parameter (`:511`). | WS06's `messageSearch.mjs` change landed; the 02/07/09 server mounts applied first. |
+| M-06-srv-1 | `src/server/rpc.mjs` | **Integration agent B**, server order 02 → 07 → 09 → **06** (last) | `searchMessages(input, deps)`, `projectsFromSyncState(syncState)` (both `messageSearch.mjs`) | Replace the `"opencode:search-messages"` handler (`rpc.mjs:2016-2017`) with `searchMessages(input ?? {}, { listProjects: projectsFromSyncState(syncState) })` (see "Q1 — rpc wiring"), and extend the `rpc.mjs:58` import to `{ searchMessages, projectsFromSyncState }`. `syncState` is already a `buildHandlers` parameter (`:511`). | WS06's `messageSearch.mjs` change landed; the 02/07/09 server mounts applied first. |
 | M-06-srv-2 | `src/server/boxCapabilities.mjs` (WS02) | **Integration agent B**, after M-06-srv-1 | `BOX_CAPABILITIES` (WS02) | Append `"search-scope-all-1"`; extend `boxCapabilities.test.mjs`'s expected ids. | WS02 SF-0 landed; M-09-srv-2 applied first |
 | M-06-dsk-1 | `src/shared/types.ts` (WS02 owns in B, D27) | **Integration agent B** (desktop order 02 → 07 → 09 → 06) | `TranscriptHitGroup` (WS06) | Add the `TranscriptHitGroup` type (Q2) right after `TranscriptHit`. | WS02 desktop commit |
 | M-06-dsk-2 | `src/shared/api.ts` (WS02 owns in B, D27) | **Integration agent B** | — | Replace the `opencodeSearchMessages` input/response types with the Q2 version. | M-06-dsk-1 |
@@ -1034,3 +1156,61 @@ remain KEEP-CLIENT per the audit.
   - Node tests 1-12 added to `messageSearch.test.mjs`.
   - XCTest scope/grouping cases replaced by decode tests of the server shape.
   - The state machine gains the `boxTooOld` and `degraded` phases.
+
+## Review responses (server-first review)
+
+Review `reviews/server-first/06-search.md`:
+
+1. **BLOCKING — a failed initial topology read became a successful empty
+   search.** Fixed.
+   - The rpc adapter is now the exported, node-tested `projectsFromSyncState`.
+     It re-checks `everSucceeded()` after `refreshNow()`, because
+     `refreshNow()` never rejects (`syncState.mjs:58-95`); while it is still
+     false, it throws `scope_unavailable`, which becomes `degraded:true`. The
+     answer is degraded with or without a primary, so there is no primary-only
+     partial search.
+   - Staleness policy: a previously successful but stale snapshot is
+     last-known-good and is used, matching `tmux:list`.
+   - Tests 13-16 use a real `createSyncState`: a failing listing, a genuinely
+     empty listing, stale last-known-good, and refresh called once.
+   - M-06-srv-1 now wires `projectsFromSyncState(syncState)` and extends the
+     `rpc.mjs:58` import.
+   - **Master edit:** in the server-mount ledger, row 15 (M-06-srv-1) now reads
+     "pass `listProjects: projectsFromSyncState(syncState)`" plus the import.
+2. **BLOCKING — the palette closed before its closed-session feedback could be
+   read.** Fixed with a backward-compatible veto: `PaletteShell.onPick` returns
+   `void | false`, and `pick` closes unless the result is `false`. One path
+   serves mouse and Enter.
+   - SearchPalette's `jump` returns `false` when the owner is gone, after
+     setting the notice.
+   - The Sidebar and InboxPalette consumers return `void` and are unchanged.
+   - Vitest: SearchPalette tests 7-8 (mouse and Enter, timers advanced past
+     100 ms, `onClose` not called; success still closes) and PaletteShell
+     tests 9-10.
+   - **Master edit:** in the D27 "Wave-B shared desktop / server file
+     ownership" table, the existing row `SearchPalette.tsx (+ NEW test) | WS06`
+     now also lists `PaletteShell.tsx (+ test)`. Checked first: no other
+     wave-B spec names `PaletteShell`.
+3. **SHOULD — desktop rebuilt the label.** Fixed.
+   - Non-current headers show `g.label` verbatim, and `SectionHeader` loses
+     its `workspace` prop and its breadcrumb composition.
+   - The label rule now states that `label` is the only title policy, and
+     that a single unknown component falls back to the session id.
+   - Fixtures (label differs from its components; missing component) are in
+     vitest test 2 and the new iOS `SearchCopy.sectionTitle` tests (XCTest 9).
+4. **SHOULD — legacy compatibility.** Pinned.
+   - Legacy scope and caps come only from the legacy arguments
+     (`sessionIds[0]` keeps the 50 cap).
+   - The `listProjects` label lookup is optional: if it fails, labels are
+     unknown, hits are kept, and there is no `degraded`.
+   - Tests 9, 9a-9c cover: no dependency, a failing label dependency, explicit
+     cap overrides, multiple sessions.
+   - The `scope:"all"` path still degrades when discovery is unavailable
+     (tests 12-13).
+
+Cross-cutting (`reviews/server-first/00-cross-cutting.md`): the WS06 rows
+(M-06-1…3, M-06-srv-1/2, M-06-dsk-1/2) were already consistent. The only
+change is M-06-srv-1's exact content (the adapter name and the import),
+updated in the mount table below.
+
+No rebuttals.

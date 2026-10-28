@@ -40,9 +40,24 @@ end (D18), never by the worker.
 5. **Time-relative text keeps a box instant** and the client compares it to its
    own clock (T21 `staleAt`). Exception, accepted by the audit: K3 health lines
    are worded at response time (they are polled).
-6. **Sub-steps are independent.** Each D-n is implemented, reviewed and merged
-   into the branch on its own, in order. A later step never edits a module an
-   earlier step finished except to register its capability id.
+6. **Sub-steps are reviewed one at a time, in order.** Each D-n (or each
+   release-atomic group below) is implemented, reviewed and committed on the
+   branch on its own. A later step MAY extend shared modules an earlier step
+   created or touched — `transcriptView.mjs`, `streamInterp.mjs`, `rpc.mjs`,
+   `index.mjs`, `boxCapabilities.mjs` (+ test), `TranscriptViewModels.swift`,
+   `ChatSessionStore.swift`, `MantaStreamModels.swift`/`MantaEventStore.swift`,
+   `httpApi.ts`, `types.ts`/`api.ts`, `serverFirstGuard.test.mjs` — additively,
+   and never changes a contract an earlier step shipped without updating its
+   consumers in the same step.
+   **Release-atomic groups:** D8+D9 (one capability, `transcript-view-1`,
+   appended at the END of D9 — never advertised with only the D8 fields).
+   Every other step is atomic by itself.
+   **Per-step gate** (before the step's review): `npm run typecheck`,
+   `npm run test:server`, the vitest files the step touched
+   (`npx vitest run <files>`), and `mobile/native/verify.sh` (Foundation
+   package, D19). For a step that changes app-only Swift (views/stores), also
+   `ios-mantaui` `compile-only`. **Combined gate** (after D11): full
+   `npm test`, `npm run typecheck`, and `ios-mantaui` `test-unit` (merge gate).
 
 ## Sub-steps (ordered, smallest risk first)
 
@@ -55,15 +70,17 @@ end (D18), never by the worker.
 | D5 | S1, S2, S3, S8 | `sessionNaming.mjs`, `forgeCloneView.mjs` | `sessions-naming-1`, `forge-clone-view-1` |
 | D6 | S10 | `sessionClose.mjs` | `sessions-close-1` |
 | D7 | S13, S14 | `sessionStatus.mjs` | `sessions-window-status-1` |
-| D8 | T4, T5 | `transcriptView.mjs` (turns) | `transcript-view-1` (introduced here) |
-| D9 | T8 | `transcriptView.mjs` (media) | `transcript-view-1` |
+| D8 | T4, T5 | `transcriptView.mjs` (turns) | — (shares D9's id; group D8+D9) |
+| D9 | T8 | `transcriptView.mjs` (media) | `transcript-view-1` (appended at the end of D9) |
 | D10 | T16 | `transcriptView.mjs` (plan) + `questionsDecorator.mjs` | `questions-plan-1` |
 | D11 | T1, T2 | `transcriptView.mjs` (activity, runs), `streamInterp.mjs` ledger | `transcript-runs-1` |
 
 `transcript-view-1` covers the `view:true` opt-in and its `turn`/`truncation`/
-`media` fields (D8, D9; the id is added to the list in D8 and the D9 fields
-ship before the next release cut, so one id is honest). `transcript-runs-1`
-covers `part.view`, `msg.view.runs` and the `toolRuns` frame (D11).
+`media` fields. D8 and D9 are ONE release-atomic group: D8 builds the turn
+fields behind no id (clients already gate on `transcript-view-1`, which no box
+advertises yet, so D8's client code is dormant), D9 adds media and appends the
+id. `transcript-runs-1` covers `part.view`, `msg.view.runs` and the `toolRuns`
+frame (D11).
 
 ---
 
@@ -89,30 +106,54 @@ signal; their ids are registered but not all read.
   capability-job queue). Each later sub-step appends its id(s) to
   `BOX_CAPABILITIES`. `version.mjs` / `rpc.mjs` already return the list — no
   edit needed beyond what each sub-step registers.
-- Both paths are upgrade-exempt already (`/api/version`), so the list is
-  readable while the box upgrades.
+- **Only `GET /api/version` is upgrade-exempt** (`isUpgradeExemptPath`,
+  `src/server/upgradeV2.mjs:82-90`); `/rpc/server:version` answers
+  `503 {"error":"box upgrading","upgrade":true}` while the box migrates. So in
+  wave D BOTH clients read capabilities from `GET /api/version` (authenticated,
+  same bearer), never from the `server:version` RPC (which keeps returning the
+  list for old callers, unchanged). No server change is needed: WS02 already
+  returns `capabilities` from `writeVersionResponse` (M-02-srv-1 / D25).
 - Ids are lowercase `kebab-name-N` (`/^[a-z0-9-]+-\d+$/`, the master registry
   format); an id is never reused for a different shape. A shape change ships a
   new id (`…-2`) and keeps the old one until clients drop it.
 
 ### Client behaviour (both clients)
 
-- The list is fetched once per connection (on connect and on every reconnect),
-  alongside the existing version read. Unknown ids are ignored.
+- The list is fetched with `GET /api/version` on connect, on every reconnect of
+  the event stream, and on box switch. Unknown ids are ignored.
+- **Three states, never conflated:**
+  | State | When | Gated surfaces show |
+  |---|---|---|
+  | `loading` | first fetch in flight | their loading state |
+  | `loaded(ids)` | 200 with a body; a body WITHOUT `capabilities` = old box = empty set | the feature, or the "update" note when its id is absent |
+  | `failed` | transport error, timeout (5 s), non-2xx other than 401 | their "Couldn't reach your box" / retry state — **never** the "update" note (a failure is not evidence of an old box) |
+  A 401 follows the existing sign-in path. `failed` retries with backoff
+  1 s → 2 s → 5 s → 10 s (cap), and immediately on the next stream reconnect;
+  the last `loaded` value is KEPT across a later failed refresh (a reconnect
+  blip does not hide features).
 - **Missing capability → the dependent surface is hidden, or rendered disabled
   with the static note "Update your box to use this"** (and, on iOS, a "Box
   updates" link to `MantaRoute.settings(section: "updates")`). The table per
   sub-step lists which. A surface is never left as a control that does nothing.
-- While the list is unknown (first connect in flight) surfaces render their
-  loading state, not the "update" note.
+- **The upgrade gate never waits on the list.** It is self-describing: it uses
+  `GET /api/upgrade`'s `view` when present (D3 X5) and the old rendering when
+  absent, so a client that connects mid-migration (list still `loading`, or
+  `failed`) still gets Retry/Rollback when the box allows them.
 
 ### Desktop
 
 - KEEP `src/renderer/hooks/useBoxCapabilities.ts` / `useBoxCapability(id):
-  boolean | null` (WS02) as THE desktop accessor. D1 may move its state into a
-  `store.ts` slice loaded by the existing `server:version` connect path in
-  `App.tsx`; the hook keeps its name and module, and no second hook or module
-  (no `src/renderer/boxCapabilities.ts`) is created.
+  boolean | null` (WS02) as THE desktop accessor (`null` = `loading` or
+  `failed`). Its source switches to NEW `window.api.apiVersion()` in
+  `api/httpApi.ts`: `GET ${serverBase()}/api/version` via `fetchWithTimeout`
+  (5 s, same shape as `upgradeStatus`, `httpApi.ts:1567`) →
+  `{version, minClient, opencodeVersion, capabilities?}`; 401 →
+  `AuthRequiredError`, other failures reject. D1 moves the hook's state into a
+  `store.ts` slice `boxCapabilities: {state:"loading"|"loaded"|"failed", ids:
+  string[]}` loaded from `App.tsx`'s connect/reconnect path; the hook keeps its
+  name and module, and no second hook or module (no
+  `src/renderer/boxCapabilities.ts`) is created. Add `apiVersion` to
+  `src/shared/api.ts`, `api/demoApi.ts` and `demoCoverage.test.ts`.
 - NEW `src/renderer/components/UpdateBoxNote.tsx`: the one-line note; the
   wave-B/C inline "Update your box to use this" strings in WS02/05/06/07/09
   surfaces switch to it (copy unchanged).
@@ -123,14 +164,29 @@ signal; their ids are registered but not all read.
   `enum BoxCapability: String, CaseIterable, Sendable` (every id in the master
   registry) and `struct BoxCapabilities: Equatable, Sendable { let ids: Set<String>;
   func has(_ c: BoxCapability) -> Bool; static func decode(version: ServerVersionInfo) -> BoxCapabilities }`.
-- `ServerVersionInfo` (WS10, `MantaAPIClient+Settings.swift`) gains
-  `capabilities: [String]?` (decode-if-present; `nil` = old box = empty set).
+- `ServerVersionInfo` — declared in the Foundation-only
+  `MantaUI/SettingsWireModels.swift` (already in `Package.swift`; NOT in
+  `MantaAPIClient+Settings.swift`) — gains `capabilities: [String]?`
+  (decode-if-present; `nil` = old box = empty set). The type is not moved or
+  duplicated.
+- NEW client member `apiVersion() async throws -> ServerVersionInfo` in
+  `MantaAPIClient+Settings.swift`: `GET <serverURL>/api/version` with the
+  bearer, timeout 5 s, 401 → `MantaError.authRequired`, other non-2xx →
+  `MantaError.server("version check failed (<status>)")`, transport →
+  `MantaError.transport`. Same request shape as `upgradeStatus()`
+  (`MantaAPIClient.swift:887`). WS10's `serverVersion()` (RPC) is unchanged.
 - NEW `MantaUI/BoxCapabilitiesStore.swift`: `@MainActor final class
-  BoxCapabilitiesStore: ObservableObject { @Published private(set) var current:
-  BoxCapabilities?; func refresh() async; func resetForBoxChange() }`, owned by
-  `MantaAppRoot.swift`, injected as `@EnvironmentObject`, refreshed on the event
-  stream's (re)connect, reset in the `.mantaBoxRemoved` handler and on a box
-  switch (next to `SessionListStore.resetForBoxChange()`).
+  BoxCapabilitiesStore: ObservableObject { @Published private(set) var state:
+  BoxCapabilitiesState; var current: BoxCapabilities? { … }; func refresh() async;
+  func resetForBoxChange() }` with `enum BoxCapabilitiesState: Equatable,
+  Sendable { case loading, loaded(BoxCapabilities), failed(lastLoaded:
+  BoxCapabilities?) }` (the enum lives in the Foundation file
+  `BoxCapabilities.swift`). `refresh()` calls `apiVersion()`; the retry
+  schedule is a pure `BoxCapabilitiesRetry.delay(attempt:) -> TimeInterval`
+  (1, 2, 5, 10, 10, …). Owned by `MantaAppRoot.swift`, injected as
+  `@EnvironmentObject`, refreshed on the event stream's (re)connect, reset in
+  the `.mantaBoxRemoved` handler and on a box switch (next to
+  `SessionListStore.resetForBoxChange()`).
 - **Unification (decided, master D25):** DELETE WS02's
   `MantaAPIClient.boxCapabilities()` (`MantaAPIClient+ChatCards.swift`) and
   `ChatCardCapabilities` (`ChatCardCapabilities.swift`); migrate every caller
@@ -157,12 +213,27 @@ is `{file glob, regex, why}` so a failure names the rule.
 
 ### Tests
 
-- `boxCapabilities.test.mjs` (WS02's, extended): ids unique, every id matches
-  `/^[a-z0-9-]+-\d+$/`, the list equals the master registry; `/api/version`
-  and `server:version` both carry the same list (call the handler and
-  `writeVersionResponse` with a fake `res`).
+- `boxCapabilities.test.mjs` (WS02's, extended) — **stage-aware**: ids unique,
+  every id matches `/^[a-z0-9-]+-\d+$/`, every id is in the master registry
+  (a set literal copied from it), and the list equals an `EXPECTED_AFTER_STEP`
+  array that each sub-step appends its own ids to (D1 appends none). The
+  "equals the whole master registry" assertion is added by D11 (combined
+  gate). `/api/version` and `server:version` both carry the same list (call the
+  handler and `writeVersionResponse` with a fake `res`); `isUpgradeExemptPath(
+  "/api/version")` is true and `/rpc/server:version` is not (pins the reason
+  for the REST read).
 - `BoxCapabilitiesTests.swift`: decode with/without `capabilities`; unknown ids
-  ignored; `has` per case.
+  ignored; `has` per case; `BoxCapabilitiesState` transitions (loading →
+  loaded; loaded → failed keeps `lastLoaded`; failed is never "old box");
+  `BoxCapabilitiesRetry.delay`.
+- vitest (`useBoxCapabilities.test.ts`): `apiVersion` 200 without the field →
+  loaded empty; reject → failed (hook returns `null`, no note); 503 body from
+  an old route never reaches the store (the REST path is exempt).
+- Upgrade-mode client tests (desktop `UpgradeGate.test.tsx`, iOS
+  `UpgradeStoreTests.swift`): a fresh client connects while the box is
+  `running` and while `failed`, capability list `loading`/`failed`: the gate
+  renders from `/api/upgrade` alone, and Retry/Rollback are reachable exactly
+  when `view.canRetry` / `view.canRollback` say so.
 
 ### Acceptance
 
@@ -404,7 +475,7 @@ desktop, K2).
 | `devices-view-1` | — | list shown, Revoke hidden, note shown |
 | `forge-status-secondary-1` | row shows login only | same |
 | `update-targets-view-1` | box/CLI rows: disabled "Update your box to use this"; Electron leg works | box rows replaced by the note |
-| `upgrade-view-1` | gate shows steps + raw `error.message`, Retry/Rollback hidden, note | same |
+| `upgrade-view-1` | detected by the ABSENCE of `view` in `/api/upgrade` (not by the list, D1): gate shows steps + raw `error.message`, Retry/Rollback hidden, note | same |
 | `launchers-flags-1` | Settings launcher options disabled with note; spawn sends `{id}` (old box uses defaults) | same |
 
 ### Tests
@@ -546,6 +617,32 @@ reaches either screen.
   `uniqueSessionName(tmuxSafe(slugifyOrDerive(nameHint, cwd)), liveSessionNames)`
   (tmux-safe FIRST, then unique — the iOS order). Result gains `name` (the final
   name). An explicit `name` keeps today's behaviour (K2).
+- **Name allocation is serialized (the uniqueness guarantee).** NEW
+  `createNameAllocator()` in `sessionNaming.mjs` — one per-process `Mutex`
+  from `async-mutex` (see "Libraries considered"); `run(fn)` =
+  `mutex.runExclusive(fn)` (released on throw). The
+  `tmux:new-session` handler (`rpc.mjs:1244`) runs, for EVERY create (hinted or
+  explicit), inside `allocator.run(...)`: read live names
+  (`tmux.listSessionNames()`, a thin `tmux list-sessions -F '#S'` read added to
+  `tmux.mjs`), choose the name, call `tmux.newSession`, and only then release.
+  `projectMetaUpsert` and `syncState.refreshNow()` run after the release and use
+  the FINAL name; the returned `{name, sessionId, windowIndex, projects}` all
+  refer to it. The scratch flow (`project:create-scratch` makes only the
+  folder, then the client calls `tmux:new-session`) and the worktree fan-out
+  (one `tmux:new-session` then `tmux:new-window`s) therefore serialize too.
+- **External collision (a session created outside Manta between the read and
+  the create)** — `tmux.newSession` is changed so a failing
+  `newSessionGetIndex` whose stderr matches `duplicate session` throws a
+  `DuplicateSessionNameError` carrying the already-created chat
+  `sessionId` (today the opencode session made by `maybeCreateChatSession`
+  before the tmux call, `tmux.mjs:527-534`, would be stranded). The handler
+  retries up to 3 times with the next free suffix, passing
+  `existingSessionId` so no second opencode session is created; after the 3rd
+  failure it deletes that opencode session (`oc.deleteSessionRaw`, `opencode.mjs:1130`, best-effort,
+  logged) and throws the class-1 sentence "Couldn't pick a free name for this
+  project — try again." An explicit `name` is NOT retried under another name (it
+  throws "A project named “<name>” already exists.", deleting the stranded chat
+  session the same way).
 - NEW `sessions:propose-name` — `args: [{kind: "project" | "scratch", hint?: string, cwd?: string, root?: string}]` →
   `{ name: string, hint: string | null }`. `project`: as above, against live tmux
   names. `scratch`: slug of `hint`, uniquified against directories under `root`
@@ -595,14 +692,23 @@ name would be silently rewritten by tmux); rename sends the trimmed name.
 
 node: `sessionNaming.test.mjs` (slug, tmux-safe-then-unique, `next.js` →
 `next_js`, scratch hint both texts, rename validation each branch, proposed
-root incl. `code`/`codex`), `forgeCloneView.test.mjs` (every kind regex incl.
+root incl. `code`/`codex`), `sessionNaming.alloc.test.mjs` — two concurrent
+`tmux:new-session` handler calls with `nameHint:"next.js"` against fake
+tmux/oc where the fake `listSessionNames` resolves only after a BARRIER both
+calls reached (proves the mutex, not just the pure rule): results `next_js` and
+`next_js-2`, metadata written for both final names, no stranded fake opencode
+session; a fake external creator taking `next_js` between read and create →
+retry lands `next_js-2` reusing the same `sessionId`; three collisions → error
+sentence + the opencode session deleted; explicit-name collision → no retry.
+`forgeCloneView.test.mjs` (every kind regex incl.
 destination-before-permission order; repo list codes). XCTest: decode tests in
 `SessionsTests` / `CloneFromGitHubTests` (the deleted logic tests are removed).
 
 ### Acceptance
 
 Creating `next.js` from desktop and iOS concurrently yields `next_js` and
-`next_js-2`, never a failed create; rename errors read as sentences.
+`next_js-2` (the allocator serializes them), never a failed create and never a
+stranded chat session; rename errors read as sentences.
 
 ---
 
@@ -624,9 +730,29 @@ orchestrate `git:remove-worktree` → `tmux:kill-window|kill-session` →
   `status.mjs` for terminal windows; `willRemove` from config
   `worktreeCleanOnClose`).
 - `sessions:close` — `args: [{project, windowIndex?, dirtyWorktree?: "remove" | "keep"}]` →
-  - `{ ok: true, removed: string[], kept: string[], notice: string | null }`
-    (`notice` = "Kept worktree at <p> — it has uncommitted changes." /
-    "Kept N worktrees with uncommitted changes." / "Kept worktree at <p>");
+  - `{ ok: true, removed: string[], kept: string[], failed: {path: string, message: string}[], warnings: string[], notice: string | null }`
+    - Worktree paths are de-duplicated first (two windows sharing one
+      worktree → one removal attempt; a path appears in exactly ONE of
+      `removed` / `kept` / `failed`).
+    - `removed` = `git:remove-worktree` reported `removed:true`; `kept` = it
+      reported `removed:false, reason:"dirty"` (project close) or the user chose
+      `"keep"`; `failed` = it threw or reported any other reason —
+      `message` is a class-1 sentence ("Couldn't remove the worktree at <p> — it
+      was left in place."), the raw error goes to `console.warn`.
+    - `warnings` carries safe sentences for non-fatal steps that failed after a
+      successful kill: one per `failed` entry, plus "The project was closed, but
+      its saved folder setting couldn't be cleared." when `projectMetaDelete`
+      throws (project close). The kill still happened; `ok` stays `true`.
+    - `notice` = "Kept worktree at <p> — it has uncommitted changes." /
+      "Kept N worktrees with uncommitted changes." / "Kept worktree at <p>"
+      (unchanged desktop wording; `null` when nothing was kept).
+    - Both clients show `notice` as today's info notice and each `warnings`
+      entry after the close: desktop `Sidebar.tsx` `showError(new
+      Error(warning))` (`:160` area — the same surface today's per-step
+      catches use, `:260-261,284-285,319-320,331-332`); iOS adds a case
+      `SessionCloseFeedbackKind.closedWithWarnings([String])`
+      (`SessionCloseLogic.swift:180`) rendered as a warning toast. The row
+      disappears either way.
   - `{ ok: false, needsConfirm: { kind: "worktree-dirty", path, title, body, removeLabel, keepLabel } }`
     for a **single-window** close whose worktree is dirty and no
     `dirtyWorktree` was given (nothing was killed). A project close never asks
@@ -655,7 +781,12 @@ Missing → Close is disabled with the note (no client orchestration remains).
 
 node: preview copy (0/1/N sessions, running counts, worktrees), dirty
 single-window confirm, project close keeps dirty, `dirtyWorktree:"remove"`
-forces, tmux failure sentence, order of calls (injected fakes).
+forces, tmux failure sentence, order of calls (injected fakes); worktree
+removal THROWS + kill succeeds → `ok:true`, path in `failed` (not `removed`),
+one warning; `projectMetaDelete` throws → `ok:true` + the metadata warning;
+two windows sharing one worktree path → one removal call, path listed once.
+XCTest/vitest: decode of `failed`/`warnings` and that a successful close with
+warnings shows them.
 
 ### Acceptance
 
@@ -690,14 +821,52 @@ assembly in `SessionListStore.swift:476`.
     busy: boolean,           // own turn OR any running child / background job beneath (sessionsWithActiveWork)
     startedAt: number | null,
     attention: "question" | "permission" | null,
-    subagents: number,       // running children (interpreter liveChildStatus)
+    subagents: number,       // direct children whose OWN session is running (see below)
     stopped: boolean }       // usage-stopped store
   ```
 
-  Emitted on change by an aggregator subscribed to the interpreter's
-  `running`/`attention`/`subagent` frames, `delegate.updated` and usage-stopped
-  changes; replayed in the connect snapshot. NEW channel `sessions:window-status`
-  → `{ [sessionId]: payload }` for the initial list.
+  **Sources (authoritative only).** `liveChildStatus` is NOT used: it is set
+  idle when a task tool completes (`streamInterp.mjs:489-503`), including a task
+  that merely launched background work whose child keeps running. Instead the
+  aggregator (`createSessionStatus` in `sessionStatus.mjs`, dependency-injected)
+  keeps three maps and derives everything from them:
+  - `running: Set<sessionId>` — every session's OWN execution state: the
+    interpreter's `running` / `turnComplete` frames for ANY session id
+    (children publish under their own id, `streamInterp.mjs:337-345`) and the
+    connect-time `runningSet` replay;
+  - `parentOf: Map<child, parent>` — `childSession` frames (`streamInterp.mjs:909-915`,
+    `childParent`) plus delegate records (`childSessionID →
+    displayParentID ?? parentSessionID`, from WS02's `delegateView.mjs`);
+  - `jobs` — delegate records (`running`/`paused` count as work).
+  Derivation (pure, `deriveWindowStatus(maps, sessionId)`):
+  `busy` = `sessionsWithActiveWork(running, parentOf, jobs).has(sessionId)`
+  (moved verbatim from `chatUtils.ts:2150`, any depth, cycle-safe, windowless
+  descendants included); `subagents` = number of DIRECT children `c` with
+  `parentOf.get(c) === sessionId` and `running.has(c)`; `startedAt` /
+  `attention` from the interpreter state; `stopped` from the usage-stopped
+  store.
+  **Relationships are never inferred from tool status**, so a completed
+  background-launch tool leaves `subagents`/`busy` up while its child runs.
+  **Hydration** (startup and every opencode stream reconnect, next to
+  `resyncAfterReconnect`, `index.mjs:3463`): `running` ← `oc.listActiveSessionIds()`
+  (replace, not merge); `parentOf` ← the `parentID` of each session from
+  `oc.listSessions(directory)` for every live tmux workspace directory (V2
+  `Session.Info.parentID`, the same field `session.created` carries) ∪ delegate
+  records; then every session whose payload changed is re-emitted.
+  **Removal:** a session absent from a hydration's session lists is dropped
+  from `parentOf`; a delegate record's removal (`delegate.updated`) drops its
+  edge.
+  **Emission:** one `windowStatus` frame per session whose derived payload
+  CHANGED (ancestors included — a child starting flips its parent's `busy`),
+  coalesced per tick. **Snapshot:** the connect snapshot (`index.mjs` appends
+  `sessionStatus.snapshotFrames()` after the frames it already replays from
+  `streamInterp.snapshotState()`) replays the CURRENT
+  payload for every session with a tmux window (a full replacement — a client
+  clears what it held for sessions not in the replay to defaults:
+  `running:false, busy:false, subagents:0, attention:null, stopped:false`).
+  NEW channel `sessions:window-status` → `{ [sessionId]: payload }` for every
+  windowed session (same full-replacement semantics) for the initial list and
+  for clients without a live stream.
 
 ### Desktop switch
 
@@ -710,6 +879,11 @@ panel→store subagent count push (`setChatSubagents` from `ChatPanel`).
 Delete `SessionJobNesting`, `SessionJobWindows.hiddenIndices`,
 `SessionSubagentCount`; `MantaWindow` gains `job`; `SessionListStore` builds
 `SessionRowStatus` from `windowStatus` frames + `sessionsWindowStatus()`.
+The frame is wired explicitly: `MantaStreamModels.swift` gains
+`StreamWindowStatusPayload`, `MantaSessionStreamState` gains `windowStatus:
+StreamWindowStatusPayload?`, and `MantaStreamRouter.applying`
+(`MantaEventStore.swift:174`) gets a `case "windowStatus"` — unknown subs are
+dropped there today, so a decoder only in a store would never see the frame.
 
 **Interplay with wave-B code (checked):**
 - `DelegateJob.statusLabel` / `.summary` (M-02-4, `SessionModels.swift`) and
@@ -734,8 +908,16 @@ list footer.
 
 ### Tests
 
-node: nesting cases ported from `chatUtils.test.ts`; aggregator emits on each
-input change only; `busy` through a background job; snapshot replay.
+node: nesting cases ported from `chatUtils.test.ts`; `sessionsWithActiveWork`
+cases ported; aggregator emits on each input change only; **a task tool that
+completes after launching background work while its child session keeps
+`running` → parent `subagents:1`, `busy:true` until the child's own
+`turnComplete`**; nested windowless children (grandchild running → windowed
+grandparent busy); parent idle before child completion; `busy` through a
+running delegate job; reconnect hydration with NO open chat (maps rebuilt from
+fake `listActiveSessionIds` + `listSessions` parentIDs, stale edges dropped);
+snapshot replay is a full replacement. iOS/desktop: a session absent from the
+replay is reset to defaults.
 
 ### Acceptance
 
@@ -757,7 +939,7 @@ call sites:
 | Call site | When | What it annotates |
 |---|---|---|
 | `listMessages` (`opencode.mjs:511`) with `opts.view === true` | canonical fetch (open, refetch, load earlier) | the whole returned window |
-| `getMessage` (`opencode.mjs:527`) with a third arg `{view: true}` | the desktop's live splice | one message (+ the interpreter's turn ledger, D11) |
+| `getMessage` (`opencode.mjs:527`) with a third arg `{view: true}` | the desktop's live splice | one message (+ the interpreter's run ledger, D11) |
 | `streamInterp.mjs` | live events | `toolRuns` frame (D11), `questions` (D10 via decorator) |
 
 `opencode:messages` passes `opts` through already (`rpc.mjs:1314`);
@@ -784,25 +966,25 @@ type MessageView = {
 }
 ```
 
-Payload impact (measured target, verified in review on a real session): turn +
-truncation ≈ 80 B per turn; media ≈ 150 B per entry; runs/activity ≈ 150 B per
-tool part + ≈ 250 B per run per message it touches. For the iOS tail fetch
-(slim, 100 messages) this is expected to add 10–25% back, about what slim
-removed. If review measures more than +30%, `RunView` repeats on absorbed
-messages are dropped to `{id}` references (open question 3).
+Payload impact and the RunView repetition rule (D30) are pinned in D11
+"Payload contract and guard": full `RunView` repeated on every message a run
+touches by default, an exact `RunRef` fallback, and a pass/fail byte test that
+decides between them before D11 merges.
 
 ### Correctness while streaming
 
 - **iOS** does not refetch mid-turn (it refetches on `running` start and on
   `turnComplete`, `ChatSessionStore.swift:689-690`), so its live turn comes from
-  frames only: `toolRuns` (D11), `media` (existing), `truncation` (existing).
-  At `turnComplete` the canonical refetch replaces live data; ids are equal, so
-  rows keep identity.
-- **Desktop** splices one message per `messageChanged` (`useTranscriptState.ts:189`).
-  Spliced messages carry part `view.activity` and `view.runs` from the
-  interpreter's **turn ledger** (D11), so the summary of a run that started in an
-  earlier message is updated by the newest message that touches it (rule: for a
-  run id, the copy on the LATEST message in transcript order wins). Turn footers
+  frames only: `toolRuns` (D11, which also carries the ORDERED live layout of
+  the turn — runs, text parts, reasoning parts), `flush` (existing, text by
+  part id), `media` (existing), `truncation` (existing, gains `hint`). At
+  `turnComplete` the canonical refetch replaces live data; run ids, text/
+  reasoning part ids and footer ids are equal, so rows keep identity.
+- **Desktop** splices one message per `messageChanged` (`useTranscriptState.ts:189`)
+  AND consumes `toolRuns`. All run state lands in ONE desktop run map keyed by
+  run id and merged by `rev` (D11 "Run revisions"): message annotations
+  (canonical or spliced) and frames only seed/upsert it; a lower `rev` never
+  overwrites a higher one, whichever RPC or frame arrives last. Turn footers
   need the whole turn, so they arrive with the canonical refetch the desktop now
   schedules when `running` settles to false (NEW `scheduleRefetch()` in the
   `turnComplete` settle timer, `useSseBus.ts:575-593`).
@@ -817,10 +999,25 @@ messages are dropped to `{id}` references (open question 3).
 - Media rows keep `TranscriptMediaIdentity` ids (`media:h:<handle>` /
   `media:s:<messageID>:<path>`); the box emits exactly these strings.
 - Footer rows keep `messageID`.
-- Nothing about row ORDER changes: the client still places blocks by walking
-  messages in order; the box only says what each block contains.
+- Reasoning rows keep `"r" + partID` (`<msg>:reasoning:<n>`), which the live
+  `flush` frames already use (`streamInterp.mjs:818`, same ids `mapTimeline`
+  gives the canonical parts, `opencodeV2.mjs:254-270`).
+- **One deliberate identity change (D11):** a prose row from a text PART uses
+  `"p" + partID` (`<msg>:text:<n>`) instead of `"p" + text.hashValue + @time`,
+  so a live text segment and its canonical twin share an id and the
+  `liveTailRowID` swap hack is retired. User bands (`.user`) keep their hash id.
+  The change is one-shot and deterministic (reproduced by every refetch);
+  `uniqueTranscriptRows` still guards duplicates. Pinned by an identity test.
+- Canonical row ORDER does not change: the client still places blocks by
+  walking messages in order; the box only says what each block contains. The
+  LIVE tail changes from "all live runs, then all live text" to the turn's real
+  order (D11 "Live placement").
 - Toggling "show reasoning" swaps a run row for its segment rows; ids remain
   deterministic. That toggle already re-renders the list (D22 refetch).
+- A run whose owner message is outside the loaded window keeps its true id and
+  is drawn at the first in-window message that has one of its parts (D11
+  "Window edges"); widening the window ("Load earlier") moves the same row id
+  up to its owner — a move, not a delete+insert of a new id.
 
 ### Wave-B call sites that consume WS01 mapper entry points (checked)
 
@@ -833,7 +1030,11 @@ WS02 wired M-01-1…M-01-4 / M-01-7 into `ChatSessionStore.swift`:
 D8–D11 keep these signatures (only their internals switch to `view` data); a
 sub-step that must change one updates the `ChatSessionStore.swift` call site in
 the same step (WS11 runs alone) and its `ChatCardsStoreTests` cases #16/#20.
-`TranscriptLiveTruncation` and `TranscriptFooterRule` are explicitly kept (D8).
+Known in-step signature changes (each updates its `ChatSessionStore.swift`
+call site and tests in the same step): D8 `TranscriptLiveTruncation.from(kind:messageID:)`
+→ `from(payload:)` (gains label/hint); D11 `ChatTranscriptMapper.mergingLive(...)`
+→ the ordered live-tail builder (D11 "Live placement"). `TranscriptFooterRule`
+is kept.
 
 ---
 
@@ -863,6 +1064,10 @@ type TruncationView = { kind: "output-cap" | "context-wall" | "tool-cutoff", lab
   info.finish === "tool-calls"})` + `describeTruncation` (shared,
   `streamInterpretation.mjs`). `getMessage` annotates `truncation` (per message)
   but never `turn`.
+- **Live `truncation` frame** (`streamInterp.mjs:887-894`, today
+  `{kind, label, messageID}`) gains `hint` (`describeTruncation(kind).hint`) —
+  the live path then carries the same `{kind, label, hint}` as the canonical
+  `TruncationView`, so no client keeps `describe`.
 - Verb choice from `verbSeedId` and the "Pondered for 1m44s · 12.4k tokens"
   formatting stay client (presentational, audit T6).
 
@@ -884,7 +1089,30 @@ passes `view: true` when `transcript-view-1` is present. NEW
 `OpencodeMessage.view: TranscriptMessageView?` (decode-if-present in
 `MantaModels.swift`). `ChatTranscriptMapper.appendFooter` reads them; delete
 `TranscriptTurns.info`, `TranscriptTruncation.classify/describe/kind(of:)`
-(keep `TranscriptLiveTruncation`, `TranscriptFooterRule`, formatting, verbs).
+(keep `TranscriptFooterRule`, formatting, verbs).
+
+The live path is migrated in the same step, since the footer view calls
+`describe` today (`TranscriptTurnFooterView.swift:72-97`) and the live adapter
+keeps only the kind (`TranscriptTurns.swift:75-89`):
+- `StreamTruncationPayload` (`MantaStreamModels.swift:221`) gains `hint: String?`.
+- `TranscriptLiveTruncation` becomes `{messageID, kind, label, hint: String?}`;
+  its factory becomes `from(payload: StreamTruncationPayload) ->
+  TranscriptLiveTruncation?` (same nil rules). The `from(kind:messageID:)`
+  call site in `ChatSessionStore.swift` (M-01-1 receipt) is updated in this
+  step.
+- `TranscriptTurnFooter.truncation` becomes `TranscriptTruncationView?`
+  (`{kind, label, hint: String?}`); the mapper fills it from the canonical view
+  first, else the live adapter.
+- `TranscriptTurnFooterView.truncationPill(_:)` takes that value: the pill
+  text is `label`; the explaining popover/button exists ONLY when `hint` is
+  non-nil. **Old-box fallback** (no `transcript-view-1`, live frame without
+  `hint`): the pill shows the box's `label` as plain text with no button (no
+  control without an action), no client copy.
+- `footerTruncationMessageIDs(_:)` keeps its signature (reads `.truncation !=
+  nil`).
+- Desktop: `finishByMessageId` entries store the frame's `{kind, label, hint}`;
+  the badge popover reads `hint` and hides the explanation when absent;
+  `describeTruncation` is no longer imported by the renderer.
 
 ### Capability fallback (`transcript-view-1`)
 
@@ -896,8 +1124,14 @@ shows); no note (the transcript works).
 node `transcriptView.test.mjs` (turns): every `computeTurnInfo` case from
 `chatUtils.test.ts` + `TranscriptParityTests` (background-result boundaries,
 running gate, uncompleted last message, zero tokens → null); truncation per
-finish incl. step-finish precedence. XCTest `TranscriptViewTests.swift`: decode
-+ mapper places footer by view only.
+finish incl. step-finish precedence; the live `truncation` frame carries
+`hint` equal to the canonical view's for the same finish. XCTest
+`TranscriptViewTests.swift`: decode + mapper places footer by view only;
+**live-before-refetch** — a message with no `view` and a live truncation
+payload with label+hint yields a footer whose pill shows the label and has the
+hint; the canonical view replaces it after refetch with the same footer row id
+(`tf-<messageID>`); **old box** — live payload without `hint` → pill label from
+the payload, `hint == nil` (no explain action), no other copy.
 
 ### Acceptance
 
@@ -1074,17 +1308,31 @@ clients differed (each a [behaviour change](#behaviour-changes-to-call-out-in-th
 1. Tool kinds and wording = desktop table, **plus** iOS's `delegate` kind
    ("Running background job <name>" / "Started background job <name>" /
    "Failed to start background job <name>", plural "started a background job" /
-   "started {n} background jobs"; name rules from `ToolActivity.swift:903-945`).
+   "started {n} background jobs"). The job NAME rule moves to the box
+   verbatim from `TaskStatusResolver.delegateJobName` (`ToolActivity.swift:919-939`):
+   the quoted name in the output (`job "(.+?)" \(id [0-9a-f]+\)`), else the
+   first non-blank line of input `description` / `prompt`, clipped to 60
+   UTF-16 units. It therefore needs the tool OUTPUT — see the ledger part shape.
 2. A whitespace-only text part is **transparent** to a run (iOS rule).
-3. A user message ends the open run iff it draws (`isRenderableMessage`:
-   non-blank text or a file part, background-job completion turns excluded —
-   desktop rule).
+3. **Run boundaries — ONE classifier for canonical and live**
+   (`runBoundaryOf(item)` in `transcriptView.mjs`, used by the canonical walk
+   AND the ledger): a user message ends the open run iff it DRAWS
+   (`isRenderableMessage`: non-blank non-synthetic non-ignored text or a file
+   part, and NOT a background-job completion turn — text starting
+   `[background job "`; desktop rule). A hidden user message (completion turn,
+   synthetic-only) is transparent, so tool A → background completion → tool B
+   is ONE run with id A in both paths. An assistant message's
+   `background-result` part draws (it is not filtered by
+   `visibleAssistantParts`), so it ends the run in both paths.
 4. A `handoff` tool part ends the run and stands alone (both).
 5. A non-blank reasoning part is transparent to the run but starts a new
    **segment** (what a "show reasoning" client draws as separate runs).
 6. Parts are filtered as `visibleAssistantParts`; everything else that draws
    ends the run.
 7. `clip` counts UTF-16 units (JS native).
+8. **Execution boundaries do not end runs.** `session.execution.started` /
+   `succeeded` are not boundaries in either path (the canonical walk never saw
+   them); only rule 3–6 items are.
 
 ### Wire contract — canonical
 
@@ -1095,58 +1343,194 @@ type ActivityView = { kind: ActivityKind, status: "pending" | "running" | "compl
   counted: boolean }      // false for patch parts
 type PartView = { activity?: ActivityView, runId?: string, segmentId?: string,
   media?: { kind: "image" | "video", path: string } }        // D9
+type RunRev = { epoch: string, seq: number }                 // see "Run revisions"
 type RunSummary = { label: string, calls: number, failed: number,
   tone: "ok" | "warn" | "running",
   live: { kind: ActivityKind, label: string } | null }      // latest unfinished tool, present tense
-type RunView = RunSummary & { id: string, ownerMessageId: string,
+type RunView = RunSummary & { id: string, ownerMessageId: string, rev: RunRev,
   segments?: (RunSummary & { id: string })[] }             // only when rule 5 split it
+type RunRef = { id: string, rev: RunRev, ref: true }       // fallback only, see "Payload contract"
 ```
 
 - Every tool/patch part in a run gets `part.view.activity` + `runId` (+
   `segmentId` when the run has segments). A handoff or todo-write part gets no
   `runId`.
-- Every message with at least one run part carries `view.runs` = the runs those
-  parts belong to (full summary of the run as of this response). A run is drawn
-  once, at `ownerMessageId`.
+- Every message with at least one run part carries `view.runs` (default: the
+  full `RunView` of each run it touches; see "Payload contract"). A run is
+  drawn once (see "Window edges").
 - Payload: `partIds` are deliberately absent (parts carry `runId`).
+
+### Window edges (tail fetch, load earlier)
+
+`listMessages` slices the window BEFORE today's annotation point
+(`opencode.mjs:512-515`). With `view:true` the box instead reads up to
+`RUN_LOOKBACK = 40` extra conversation records before the window (one more
+`readTimeline` page at most), computes runs over the extended list, then slices
+and annotates only the window. Consequences:
+- a run that starts before the window keeps its TRUE id (its first part's id)
+  and true `ownerMessageId` (outside the window), equal to the ledger's;
+- clients draw such a run at the **first in-window message that has a part of
+  it** ("placement message"); when "Load earlier" brings the owner in, the same
+  row id moves up to the owner;
+- a run that started more than `RUN_LOOKBACK` records before the window is
+  annotated as if it started at the window (id = first in-window part) — logged
+  once per fetch; accepted (requires >40 consecutive tool-only steps before a
+  100-message tail).
+
+### Run revisions
+
+Every `RunView` carries `rev: {epoch, seq}`:
+- `epoch` = the interpreter's process epoch (the `randomUUID()` minted at
+  `createStreamInterpreter`, already used by the inbox K3 snapshot);
+- `seq` = a per-session counter in the ledger, incremented on every change to
+  ANY run of that session, stamped on the changed run.
+- Canonical annotation: a run the ledger knows (same session, same id) is
+  emitted with the LEDGER's current view and rev (so a full fetch can never
+  regress live state); a run the ledger does not know (settled history) gets
+  `rev: {epoch, seq: 0}` and the canonical summary.
+- Client merge rule (one pure reducer per client — desktop
+  `mergeRunViews(map, incoming)` in `toolActivity.ts`, iOS
+  `TranscriptRunStore.merging(_:)` in `TranscriptViewModels.swift`): incoming
+  wins iff `epoch` differs from the stored one (a restarted box: replace) or
+  `seq >= stored.seq` within the same epoch. Message annotations (canonical or
+  spliced), and `toolRuns` frames all go through it, in arrival order; an
+  older RPC response arriving after a newer frame is ignored for that run.
+- A canonical refetch after `turnComplete` does NOT clear the map; it merges
+  (equal or newer revs). Runs no longer referenced by any loaded message and
+  not in the current turn are pruned on refetch.
+
+### Payload contract and guard
+
+Default (D30): every message touching a run carries the FULL `RunView`; with
+the rev rule, duplicates are harmless. Fallback, chosen by the guard below:
+- the full `RunView` appears ONLY on the run's placement message in the
+  response (owner if in window, else the first in-window message touching it);
+  every other message touching it carries a `RunRef` `{id, rev, ref:true}`;
+- a `RunRef` never overwrites a stored value (the reducer skips refs); a ref
+  whose id has no stored value is an error case the box never produces within
+  one response;
+- `getMessage({view:true})` always returns FULL views for every run touching
+  that one message (a splice must be self-contained).
+**Guard** (`transcriptView.payload.test.mjs`, pass/fail, decides before D11
+merges): serialize `listMessages({limit:100, slim:true, view:true})` vs
+`{limit:100, slim:true}` over three synthetic fixtures — (a) a typical session
+(the recorded fixture used by `opencode.test.mjs` for slim), (b) one 60-step
+tool run with a reasoning segment every 2 tools, (c) the same widened to the
+full history. If the default exceeds +30 % on (a) or (b), the implementation
+switches to the `RunRef` fallback (same step) and the test then asserts the
+fallback's bytes. Segment arrays are emitted only on the full view, never on a
+ref.
 
 ### Wire contract — live (`toolRuns` frame)
 
-The interpreter keeps a per-session **turn ledger** (reset on
-`session.execution.started`), built with the same pure functions:
-- parts from tool events (`ensureTool` / `finishTool`), each a synthetic part
+The interpreter keeps a per-session **run ledger**, built with the same pure
+functions as the canonical walk:
+- **Lifetime:** the ledger is NOT reset at `session.execution.started` (rule
+  8). It is reset when a DRAWING user message is delivered (rule 3) — the same
+  point the canonical walk starts a new run — and on manta-server restart
+  (new `epoch`). Closed runs older than the last drawing user message are
+  dropped.
+- **Parts** come from tool events (`ensureTool` / `finishTool`). Each ledger
+  part keeps the descriptor-relevant canonical state INTERNALLY:
   `{type:"tool", id: tool.idx, callID, messageID, tool: name, state:{status,
-  input: normalizeToolInput(v2Name, input), title: toolTitle(...)}}` — the same
-  inputs `mapToolBlock` gives the canonical part, so wording matches;
-  `task` parts carry `childSessionId`; todo-write and handoff excluded as above;
-- run closers: a `session.text.delta` chunk containing non-whitespace,
-  `session.inbox.delivered` (a steered user message), a `file` part;
-- segment breaks: a `session.reasoning.delta` chunk containing non-whitespace.
+  input: normalizeToolInput(v2Name, input), title: toolTitle(...),
+  output: toolOutputText(v2Name, content) /* on success */, error /* on
+  failure, errorFromV2 */}}` — the same fields `mapToolBlock` puts on the
+  canonical part (`opencodeV2.mjs:199-216`), so wording (incl. the delegate
+  name from output, rule 1) is computed identically. The output is held only
+  while the run is in the ledger and is NEVER sent in the frame; raw disclosure
+  data (output tail, diff) stays on the existing `toolOutput` frames / the
+  canonical part, joined by part id / call id.
+  `task` parts carry `childSessionId`; todo-write and handoff excluded as
+  above.
+- **Boundaries:** `session.inbox.delivered` → look up the delivered item in the
+  interpreter's inbox state (`text`, `attachmentCount`, from the `enqueued`
+  event) and apply `runBoundaryOf`; if the item is unknown (inbox not
+  hydrated), the interpreter calls the injected async
+  `classifyDelivered({sessionId, messageID})` (production: `oc.getMessage` +
+  `runBoundaryOf`) and applies the result when it resolves, holding the run
+  open meanwhile. Text: a `session.text.delta` chunk containing non-whitespace
+  closes the open run (rule 6). Reasoning: a non-whitespace
+  `session.reasoning.delta` starts a segment (rule 5).
+- **Ordered layout:** the ledger also records the turn's draw order as it
+  happens — `layout: LiveBlock[]`:
+  ```ts
+  type LiveBlock =
+    | { kind: "run", id: string }                       // a run id (segments inside the RunView)
+    | { kind: "text", partID: string, messageID: string }     // the `flush` partID, e.g. "<msg>:text:0"
+    | { kind: "reasoning", partID: string, messageID: string }
+  ```
+  A text/reasoning block is appended when its partID's FIRST non-whitespace
+  chunk arrives; a run block when the run opens. `partID`s are exactly the
+  `flush` frame ids (`streamInterp.mjs:818`) and the canonical part ids
+  (`opencodeV2.mjs:254-270`).
 
 Frame (`{kind:"stream", sub:"toolRuns", sessionId, payload}`):
 
 ```ts
-{ turnStartedAt: number | null, full: boolean,
+{ epoch: string, full: boolean,
+  layout: LiveBlock[],                     // the whole ordered layout of the ledger (small: one entry per block)
   runs: RunView[],                         // runs that changed since the last frame (all when full)
+  closed: string[],                        // run ids that closed since the last frame (all closed when full)
   parts: { id: string, callID: string, messageID: string, runId: string, segmentId?: string,
            tool: string, status: string, childSessionId?: string, activity: ActivityView }[] }
 ```
 
-Emitted coalesced (≤ 1 per 100 ms per session, reusing the `messageChanged`
-timer seam) on tool start / input known / end, run close, segment break, and a
-final frame at execution end; `full:true` in the connect snapshot for running
-sessions. `getMessage({view:true})` stamps `runId`/`segmentId` from the ledger
-for parts the ledger knows and attaches the ledger's `RunView`s; parts it does
-not know (history) are annotated within the message alone.
+`closed` makes "is the last run still open?" explicit even when a close does
+not change the summary. Emitted coalesced (≤ 1 per 100 ms per session, reusing
+the `messageChanged` timer seam) on tool start / input known / end, run close,
+segment break, text/reasoning block start, and a final frame at execution end;
+`full:true` in the connect snapshot for every session with a non-empty ledger
+(`snapshotState()`). `getMessage({view:true})` stamps `runId`/`segmentId` from
+the ledger for parts the ledger knows and attaches the ledger's `RunView`s
+(with revs); parts it does not know (history) are annotated within the message
+alone with `seq: 0`.
+
+### Live placement (iOS)
+
+- **Router wiring (required):** `MantaStreamModels.swift` adds
+  `StreamToolRunsPayload` (+ `LiveBlock`); `MantaSessionStreamState` gains
+  `liveRuns: TranscriptLiveRunsState`; `MantaStreamRouter.applying`
+  (`MantaEventStore.swift:174`) gets `case "toolRuns"` applying the pure
+  reducer (`full` replaces layout/runs/parts/closed; otherwise layout replaced,
+  runs merged by rev, parts upserted by id, closed unioned). Unknown subs are
+  discarded there today (`MantaEventStore.swift:174-275`), so decoding only in
+  `ChatSessionStore` would never fire. The state is reset where the router
+  resets turn state today (`running:true` edge of a new turn keeps it — rule 8
+  — and the post-`turnComplete` canonical refetch merges, then clears `layout`
+  once every layout block is covered by a settled canonical message).
+- **Tail builder:** NEW pure `ChatTranscriptMapper.liveTail(layout:runs:parts:
+  textByPart:reasoningByPart:showReasoning:canonical:running:) ->
+  LiveTailResult {blocks, trailing}` replaces `mergingLive` and the single
+  `inProgressText` prose block (`ChatSessionStore.swift:850-925`). It walks
+  `layout` in order and skips any block whose id the canonical blocks already
+  contain (run id, `"p"+partID`, `"r"+partID`): `run` → `.activity(ToolRun(id,
+  parts: ledger parts as synthetic tool parts, view: RunView))`; `text` →
+  `.prose(textByPart[partID], at: nil, partID: partID)` (the existing
+  `MantaSessionStreamState.textByPart`, `MantaEventStore.swift:120-123`);
+  `reasoning` → `.reasoning` only when `showReasoning`. `trailing` = the last
+  block iff it is a run, NOT in `closed`, and `running` (replaces the old
+  `hasTailContent` guess). Queued sends stay in `trailingBlocks` as today.
+- `liveText` / `inProgressText` stay only as the "is anything streaming" flag
+  for the running indicator; the `liveTailRowID` swap
+  (`ChatSessionStore.swift:895-925`) is deleted (ids now match, see identity).
+- `TranscriptBlock.prose` gains `partID: String? = nil`; `stableScrollID`
+  returns `"p" + partID` when present, else today's hash id. Every
+  `case .prose(let text, let at)` pattern is updated (grep `case .prose`).
+  `ChatTranscriptMapper.process(_:)` passes `part.id`.
+
+Desktop already renders live text in place (it splices real messages), so it
+uses the frame's `runs`/`closed` through the rev map and ignores `layout`.
 
 ### Desktop switch
 
 - `toolActivity.ts` keeps only layout: `layoutTranscript` walks visible parts and
-  places a run block at the first part of each `runId` (segments when
-  `showThinking`), drawing `RunView` from the latest message that carries it;
-  a tool part with no `runId` (old box impossible — gated) draws as a part.
-  `stabilizeLayout` compares run views by value. `isRenderableRow`,
-  `locateVisibleRow` unchanged.
+  places a run block at the run's placement message (owner, or first in-window
+  message touching it), drawing the `RunView` from the rev-merged run map
+  (`mergeRunViews`, fed by every message's `view.runs` and by `toolRuns`
+  frames in `useSseBus.ts`); a tool part with no `runId` (old box — gated)
+  draws as a part. `stabilizeLayout` compares run views by `rev`.
+  `isRenderableRow`, `locateVisibleRow` unchanged.
 - Delete `describeActivity`, `describeToolPart`, `describePatchPart`,
   `summarizeToolGroup`, `groupTone`, `normalizeToolStatus`, `humanizeToolName`,
   `basename`, `hostOf`, `clip`, `Activity`, `ActivityKind`, `GroupSummary` types.
@@ -1160,32 +1544,42 @@ not know (history) are annotated within the message alone.
 ### iOS switch
 
 - `TranscriptViewModels.swift` adds `TranscriptPartView`, `TranscriptActivityView`,
-  `TranscriptRunView`, `TranscriptRunSummary`, `StreamToolRunsPayload` and
+  `TranscriptRunView`, `TranscriptRunSummary`, `TranscriptRunRev`, `TranscriptRunRef`,
+  `StreamToolRunsPayload`, `LiveBlock`, `TranscriptLiveRunsState` (reducer),
+  `TranscriptRunStore.merging(_:)` and
   `TranscriptPartView.of(_ part: OpencodePart) -> TranscriptPartView?` (reads
   `part.extra["view"]`).
 - `ToolActivity.swift` keeps: `ChatDuration`, `ToolRun` (now
   `{id, parts, view: TranscriptRunSummary}`), `GroupTone` (decoded),
   `ToolActivity.toolName/state/detail/resolvedOutput/copyText/outputForDisplay/
-  durationSeconds/startMs/makeToolPart`, `TaskStatusResolver` (T13 is ML),
-  `ActivityDisclosure`, todo logic. `ToolActivity.layout` is rewritten to the
-  same runId placement as desktop. Delete `ActivityKind.plural`, `Activity`
+  durationSeconds/startMs/makeToolPart`, `ActivityDisclosure`, todo logic, and
+  the STATUS half of `TaskStatusResolver` (T13 is ML): `childSessionID(of:)`,
+  `childSessionIDs(in:)`, `isBackgroundTaskOutput`, `resolve(...)`,
+  `applying(_:to:)`, `isDelegateToolName`, `isDelegateTool`,
+  `delegateJobID(fromOutput:)`, `applyingDelegate(_:to:)`, `firstCapture`.
+  `ToolActivity.layout` is rewritten to the runId placement rule.
+- **Delete (and add to the guard):** `ActivityKind.plural`, `Activity`
   computation, `describe/describeTool/describePatch`, `summarize`, `target`,
-  `basename`, `hostOf`, `clip`, `humanizeToolName`, `userMessageDraws`.
-  `copyText` reads `view.activity.kind == .task`.
-- `ChatTranscriptMapper.mergingLive` becomes `mergingLive(runs:
-  TranscriptLiveRunsState, …)`: live parts come from the ledger frame (no more
-  `livePart(from: LiveTool)` / `livePart(from: StreamSubagentPayload)` for run
-  membership; `LiveTool` keeps its output tail for the activity sheet), deduped
-  against canonical by part id / call id (T19 KC), summary from the frame's
-  `RunView`. Task row status inside the sheet still uses `TaskStatusResolver`.
-- `ChatSessionStore.swift` decodes `toolRuns` into `liveRuns:
-  TranscriptLiveRunsState` (pure reducer in `TranscriptViewModels.swift`:
-  `full` replaces, otherwise upsert by id; cleared when the post-`turnComplete`
-  canonical refetch lands).
+  `basename`, `hostOf`, `clip`, `humanizeToolName`, `userMessageDraws`,
+  **`TaskStatusResolver.delegateJobName(of:)` and `delegateNameMax`** (wording,
+  now box rule 1 — its only callers were `describeTool` and itself, which
+  called `ToolActivity.clip` at `ToolActivity.swift:928,936`). Grep after
+  deletion: `clip(`, `delegateJobName`, `humanizeToolName`, `hostOf(` must
+  have no caller in `MantaUI/` or `MantaUITests/` (the `clip` cases in
+  `ToolActivityTests.swift:161-166` and `isDelegateToolName` test stay only if
+  their subject stays — `clip` cases are deleted). `copyText` reads
+  `view.activity.kind == .task`.
+- `ChatSessionStore.swift`: the tail is built by `liveTail(...)` (above);
+  `ChatTranscriptMapper.mergingLive`, `livePart(from: LiveTool)` and
+  `livePart(from: StreamSubagentPayload)` are deleted (task row status inside
+  the sheet still uses `TaskStatusResolver` over the ledger/canonical part).
+  `LiveTool` keeps its output tail for the activity sheet, joined by part id.
 - `ActivitySheet.swift` / `RunningIndicator.swift` read `ToolRun.view` and
   `TranscriptPartView.of(part)?.activity`.
 - Delete the fixture half of `ToolActivityTests.swift` and the
   `tool-activity-cases.json` resource entry in `project.yml`.
+- Both the app unit-test build (`ios-mantaui test-unit`, combined gate) and the
+  Foundation package (`verify.sh`, per step) must compile after the deletion.
 
 ### Capability fallback (`transcript-runs-1`)
 
@@ -1200,22 +1594,56 @@ your box to see tool details"; the working line shows the turn verb only.
   runs spanning messages, handoff split, todo-write hidden, whitespace text
   transparent, reasoning segments, user message ending runs incl. completion
   turns); `listMessages({view:true})` vs without (byte-identical);
-  slim with view keeps segment ids.
-- node `streamInterp.test.mjs`: ledger built from a V2 event script produces the
-  same `RunView`s as `transcriptView` over the equivalent canonical messages
-  (the drift guard that replaces the fixture); coalescing; full snapshot;
-  `getMessage` stamps ledger run ids.
+  slim with view keeps segment ids; **window edges** — a run starting 5
+  records before a 100-message tail keeps its true id/owner, and the same run
+  over the widened window has the same id; >40 records → window-start id.
+- node `transcriptView.payload.test.mjs`: the byte guard above (fixtures a/b/c).
+- node `streamInterp.test.mjs` — **event/canonical parity** (the drift guard that
+  replaces the fixture): for each V2 event script, the ledger's `RunView`s
+  (ids, summaries, segments, closed set, layout order) equal `transcriptView`
+  over the equivalent canonical messages. Scripts: (1) tool → text → tool →
+  reasoning → tool (layout `run,text,run` with a segment; ids = first parts);
+  (2) two text parts and a tool in ONE message (same-message boundaries);
+  (3) tool A → background-job completion user message delivered → new
+  execution → tool B: ONE run, id A, in both paths; (4) tool → hidden
+  synthetic-only user message across two executions: one run; (5) tool → a
+  drawing user message: two runs; (6) unknown inbox item → `classifyDelivered`
+  resolves later: run held open, then closed/continued correctly; (7) a
+  **delegate** call whose output names job `"nightly-sync"` while its input
+  prompt starts "Run the sync…": live activity label "Started background job
+  nightly-sync" equals the canonical one; (8) coalescing — five tool events in
+  100 ms → one frame whose `runs`/`closed` cover all; (9) reconnect snapshot
+  → `full:true` with the whole layout; (10) **revisions** — an earlier tool in
+  a run completes (or fails) AFTER a later message already added to it: the
+  ledger rev for that run increases, and `getMessage` of the EARLIER message
+  carries the higher rev.
+- vitest `toolActivity.test.ts`: `mergeRunViews` — higher seq wins, equal seq
+  wins (idempotent), lower seq ignored, new epoch replaces, `RunRef` never
+  overwrites; an out-of-order `opencodeMessage` response (older rev) after a
+  newer `toolRuns` frame leaves the newer summary; layout by `runId` incl.
+  owner-outside-window placement; `stabilizeLayout` keeps identity across equal
+  revs.
 - XCTest `TranscriptViewTests.swift`: decode; layout places runs by `runId`;
-  segment rows with show-reasoning; live reducer (full/upsert/clear); mapper row
-  ids equal the old ids for a recorded transcript (identity regression).
-- vitest: layout by `runId`; `stabilizeLayout` keeps identity across equal views.
+  segment rows with show-reasoning; `TranscriptLiveRunsState` reducer
+  (full/merge/closed/clear); `liveTail` over scripts (1)–(3) yields blocks in
+  layout order with ids `run-<A>`, `p<msg>:text:0`, `run-<B>`; the canonical
+  mapper over the same turn yields the SAME ids in the same order (handover);
+  `trailing` only when the last run is open; reconnect `full` frame rebuilds
+  the same rows; **identity regression** — over a recorded transcript every
+  row id equals the pre-D11 id except prose rows, which equal `"p" + partID`.
+- XCTest `MantaEventStreamTests.swift`: a `toolRuns` frame through
+  `MantaStreamRouter.applying` updates `liveRuns` (it would be dropped today).
 
 ### Acceptance
 
 - A run spanning four step messages reads "Read 3 files, edited 2" identically
-  on both clients, live and after reload.
+  on both clients, live and after reload, and its summary never moves
+  backwards while streaming.
+- Live iOS tail shows tool A, the prose, then tool B in that order, and the
+  turn-end refetch replaces them without a row delete/insert.
 - The fixture files are gone; the guard test forbids the deleted functions.
-- iOS `test-unit` green; no row-identity change in `TranscriptMapperTests`.
+- iOS `test-unit` green; `TranscriptMapperTests` row ids unchanged except the
+  documented prose-id change.
 
 ---
 
@@ -1227,7 +1655,11 @@ your box to see tool details"; the working line shows the turn verb only.
 `sessionNaming.mjs`, `forgeCloneView.mjs`, `sessionClose.mjs`,
 `sessionStatus.mjs`, `transcriptView.mjs`, `questionsDecorator.mjs` — each with
 `*.test.mjs`. (No `boxFeatures.mjs`: D1 extends WS02's `boxCapabilities.mjs`.)
+**Root (EDIT):** `package.json` / `package-lock.json` (`async-mutex`, D5) —
+`npm install async-mutex@0.5.0`, applied by WS11 itself (sole worker of wave D,
+so no ledger row).
 **Server (EDIT):** `boxCapabilities.mjs` + `.test.mjs` (WS02, append ids),
+`tmux.mjs` (D5),
 `rpc.mjs`, `index.mjs`, `streamInterp.mjs`, `opencode.mjs`, `push.mjs` (D10
 plan predicate), `devices.mjs`/`auth.mjs` (blank `device_id`), `local.mjs`
 (`forgeProbe`), `ptyWs.mjs`/`pty.mjs`, `accountsEvents.mjs`,
@@ -1256,8 +1688,10 @@ marker); NEW `components/UpdateBoxNote.tsx`; their vitest files. DELETE
 - D1: `MantaAPIClient+ChatCards.swift` (delete `boxCapabilities()`),
   `ChatCardCapabilities.swift` (delete), `ChatScreen.swift`,
   `ChatSessionStore.swift`, `PendingMessagesCard.swift`, wave-C `Git*`/`Inbox*`/
-  `Review*` stores that read capabilities, `MantaAPIClient+Settings.swift`
-  (`ServerVersionInfo.capabilities`), `MantaAppRoot.swift`.
+  `Review*` stores that read capabilities, `SettingsWireModels.swift`
+  (`ServerVersionInfo.capabilities` — the type's real file, already in
+  `Package.swift`), `MantaAPIClient+Settings.swift` (`apiVersion()`),
+  `UpgradeStore.swift` (gate from `/api/upgrade` only), `MantaAppRoot.swift`.
 - D2: `UsageMeters.swift`, `MantaStreamModels.swift`, `ChatScreen.swift`,
   `ChatSessionStore.swift`, `MantaAPIClient+ChatCards.swift` (`opencodeCache`).
 - D3: `BoxDevicesModels.swift`, `BoxDevicesScreen.swift`, `BoxRESTClient.swift`,
@@ -1285,7 +1719,14 @@ marker); NEW `components/UpdateBoxNote.tsx`; their vitest files. DELETE
   `TranscriptMediaModel.swift`, `TranscriptMediaStore.swift`,
   `PlanDerivation.swift`, `ToolActivity.swift`, `ActivitySheet.swift`,
   `RunningIndicator.swift`, `ChatSessionStore.swift`, `ChatScreen.swift`,
-  `MantaStreamModels.swift`.
+  `MantaStreamModels.swift`, `MantaEventStore.swift` (`MantaStreamRouter`
+  `toolRuns` case), `TranscriptRow.swift` (prose `partID` id),
+  `TranscriptComponents.swift`, `RootView.swift`, `ChatModels.swift` (every
+  `.prose` pattern/construction; tests `TranscriptMapperTests`,
+  `MantaEventStreamTests`, `ChatStreamMergeTests`, `ChatTranscriptTests`,
+  `MantaTransportTests`).
+- D5 also edits server `tmux.mjs` (`listSessionNames`,
+  `DuplicateSessionNameError`); D7 edits `index.mjs` snapshot assembly.
 - Matching tests under `MantaUITests/`, `mobile/native/Package.swift`
   (add `BoxCapabilities.swift`, `TranscriptViewModels.swift`,
   `ToolActivity.swift` if it becomes Foundation-clean, the two test files),
@@ -1322,6 +1763,80 @@ sorted + `revocable`; `forge:status.secondary`; `server:update-check.view`;
 `forge:clone-start {root}`; windows `job`; `opencode:messages`/`opencode:message`
 `{view:true}` → `view`/`part.view`; question `plan`.
 
+## Libraries considered (user rule 0)
+
+| Need | Considered | Choice |
+|---|---|---|
+| D5 name-allocation mutex (serialize read-names → create) | `async-mutex` 0.5.0 (MIT, ~11 M weekly downloads, one dep `tslib` already in the lockfile, stable API `Mutex.runExclusive`); `p-queue` (MIT, ~34 M weekly, ESM, concurrency 1 queue); hand-rolled promise chain | **Adopt `async-mutex`** — `new Mutex().runExclusive(fn)` is exactly the critical section, with release on throw handled by the library. `p-queue` is a heavier queue abstraction for the same job. Added to `package.json` dependencies (it reaches boxes only via the next release tarball — root AGENTS "A clean install runs the RELEASE's source"; WS11 ships in one release with its server code). |
+| D11 rev-merged run map, live reducer | `immer` (desktop) | Not adopted: the reducer is ~15 lines over a `Map`, desktop state already uses plain immutable updates; no change in readability. |
+| D8–D11 transcript annotation / diffing | none applicable (the rules are Manta's own wording) | Box module `transcriptView.mjs`. |
+| D7 graph roll-up | none needed (moved verbatim from `sessionsWithActiveWork`) | — |
+| iOS | no new Swift package | — |
+| D1 capability-probe retry backoff (`BoxCapabilitiesRetry.delay(attempt:)`) | swift-async-algorithms 1.1.7 (Apache-2.0), generic retry libraries | **Keep hand-written** — one pure, unit-tested function (`libraries.md` §11). |
+| Model-prefs in-memory cache, invalidated on write | `lru-cache` 11.5.3 (a direct dependency from wave B) | **Keep hand-written** — a single value with explicit invalidation, not a cache with eviction. |
+| D2 stale-cache instant (`staleAt`) | — | **Keep** — Manta's domain rule; the box computes the instant, clients compare. |
+
+Implementer subagents get this rule verbatim ("research before building; prefer
+a well-maintained popular library") in their brief.
+
+## Mount requests (D18)
+
+WS11 runs alone in wave D (master Waves, D27), so every cross-owner edit is
+applied by WS11 itself after C-int. Listed for dispatch traceability:
+
+| ID | Receiving file (owner) | Applier | Sub-wave | Provider symbol(s) (WS11) | Exact change | Prerequisite |
+|---|---|---|---|---|---|---|
+| M-11-1 | `MantaAppRoot.swift` (WS04) | WS11 | D (D1) | `BoxCapabilitiesStore`, `UpdateBoxNote` | own the store as `@StateObject`, inject `.environmentObject`, `refresh()` on stream (re)connect, `resetForBoxChange()` in the `.mantaBoxRemoved` handler and the box-switch branch | C-int |
+| M-11-2 | `ChatScreen.swift`, `ChatSessionStore.swift`, `PendingMessagesCard.swift` (WS02) | WS11 | D (D1) | `BoxCapabilitiesStore.state`, `BoxCapability` | replace every `boxCapabilities()` / `ChatCardCapabilities` read | M-11-1 |
+| M-11-3 | `ChatSessionStore.swift` (WS02) | WS11 | D (D2, D8, D11) | `opencodeCache(sessionId:)`, `TranscriptLiveTruncation.from(payload:)`, `ChatTranscriptMapper.liveTail(...)` | open-time cache fetch; truncation adapter call; tail builder replaces `mergingLive` + single live prose block + `liveTailRowID` swap | M-11-2 |
+| M-11-4 | `MantaEventStore.swift`, `MantaStreamModels.swift` (WS02) | WS11 | D (D2, D7, D8, D11) | `StreamCachePayload`/`StreamContextPayload` fields, `StreamWindowStatusPayload`, `StreamTruncationPayload.hint`, `StreamToolRunsPayload` | new fields; `MantaStreamRouter.applying` cases `windowStatus`, `toolRuns` | C-int |
+| M-11-5 | `SessionListStore.swift`, `SessionModels.swift`, `SessionCloseLogic.swift` (WS04) | WS11 | D (D5–D7) | `sessionsProposeName`, `sessionsClosePreview`, `sessionsClose`, `sessionsWindowStatus`, `MantaWindow.job` | per D5–D7 iOS switch | C-int |
+| M-11-6 | `SessionListView.swift` (WS04) | WS11 | D (D7) | `windowStatus`-driven rows; M-09-2 only if D29 retirement is chosen | per D7 | M-11-5 |
+| M-11-7 | `TranscriptRow.swift`, `TranscriptComponents.swift`, `ChatModels.swift`, `ToolActivity.swift` (WS01) | WS11 | D (D8–D11) | `TranscriptBlock.prose(partID:)`, `TranscriptViewModels` | identity + mapper changes per D8–D11 | C-int |
+| M-11-8 | `mobile/native/Package.swift` (WS07) | WS11 | D (each step) | WS11 manifest: `BoxCapabilities.swift`, `TranscriptViewModels.swift` (+ `ToolActivity.swift` if Foundation-clean); tests `BoxCapabilitiesTests.swift`, `TranscriptViewTests.swift` | add sources/tests | C-int |
+| M-11-9 | `mobile/native/project.yml` (WS07) | WS11 | D (D11) | — | remove the `tool-activity-cases.json` resource entry (`project.yml:177`) | M-11-7 |
+| M-11-10 | `src/server/rpc.mjs`, `index.mjs`, `streamInterp.mjs`, `boxCapabilities.mjs` (IB/WS02) | WS11 | D (each step) | every new channel/frame/field in "Contracts" | direct edits (master: "by WS11 itself in wave D") | C-int |
+| M-11-11 | `src/shared/types.ts`, `src/shared/api.ts`, `api/httpApi.ts`, `api/demoApi.ts`, `demoCoverage.test.ts` (WS02) | WS11 | D (each step) | desktop members below | IPC ids + methods | C-int |
+
+## Mounts applied by this workstream (received)
+
+No other spec's mount table names WS11 as applier (grep of `01`–`10` mount
+tables). Obligations received from master decisions, applied by WS11:
+
+| From | Obligation | Where in this spec |
+|---|---|---|
+| D25 (master) | delete `boxCapabilities()` + `ChatCardCapabilities` after migrating every caller; fold the two "unknown rpc channel" classifiers into `BoxCapabilities.isUnknownChannel` | D1 iOS |
+| D29 (master) | if `windowStatus.stopped` retires WS04's stopped API, migrate M-09-2 and the desktop Sidebar marker in the same step | D7 "Interplay" |
+| WS07 `07-artifacts-cards.md:1282` | import `planRefsFromPart` from `src/server/artifacts.mjs` (do not re-create) | D10 |
+| WS02 `02-chat-cards-queue.md` (D26) | reuse `formatTokenCount` for `resentText` | D4 |
+| D22 / M-01-7 | keep `TranscriptDisplayOptions.fetchSlim` + refetch on change when `ChatSessionStore.refetch` gains `view:` | D8 iOS |
+
+## Client members
+
+**iOS `MantaAPIClient`** (new unless marked; no member owned by another spec is
+redeclared, D16):
+
+| Member | File |
+|---|---|
+| `apiVersion() async throws -> ServerVersionInfo` | `MantaAPIClient+Settings.swift` |
+| `messages(sessionId: String, limit: Int? = nil, slim: Bool = false, view: Bool = false) async throws -> [OpencodeMessage]` — CHANGED (new defaulted param) | `MantaAPIClient.swift` |
+| `opencodeCache(sessionId: String) async throws -> StreamCachePayload?` | `MantaAPIClient+ChatCards.swift` |
+| `launchersSetFlag(id: String, key: String, value: Bool) async throws -> AvailableLauncher` | `MantaAPIClient+Settings.swift` |
+| `accountsRowStates() async throws -> AccountsRowStates` | `MantaAPIClient+Accounts.swift` |
+| `sessionsProposeName(_ input: SessionNameProposalInput) async throws -> SessionNameProposal` | `MantaAPIClient+Sessions.swift` |
+| `sessionsClosePreview(project: String, windowIndex: Int?) async throws -> SessionClosePreview` | `MantaAPIClient+Sessions.swift` |
+| `sessionsClose(project: String, windowIndex: Int?, dirtyWorktree: SessionDirtyWorktreeChoice?) async throws -> SessionCloseResult` | `MantaAPIClient+Sessions.swift` |
+| `sessionsWindowStatus() async throws -> [String: StreamWindowStatusPayload]` | `MantaAPIClient+Sessions.swift` |
+| DELETED: `boxCapabilities()` (WS02) | `MantaAPIClient+ChatCards.swift` |
+
+**Desktop `window.api`** (added to `src/shared/api.ts`, `httpApi.ts`,
+`demoApi.ts`): `apiVersion()`, `opencodeCache(sessionId)`,
+`launchersSetFlag({id, key, value})`, `accountsRowStates()`,
+`sessionsProposeName(input)`, `sessionsClosePreview(input)`,
+`sessionsClose(input)`, `sessionsWindowStatus()`; CHANGED
+`opencodeMessages(sessionId, {limit?, view?})`, `opencodeMessage(sessionId,
+messageId, {view?})`.
+
 ## Behaviour changes to call out in the PR
 
 - T21: the stale-cache warning now appears on iOS; on desktop it flips from a box
@@ -1336,9 +1851,21 @@ sorted + `revocable`; `forge:status.secondary`; `server:update-check.view`;
   desktop; on iOS a background-job completion message no longer ends a run, and
   a background task's run tone follows the tool status (desktop rule) rather
   than the job's status.
+- D11: iOS shows the live turn in its real order (tool, prose, tool) instead
+  of all tools then all prose; iOS prose row ids become `"p" + partID` (one-time
+  identity change, deterministic). Run summaries can no longer step backwards
+  while streaming (revision merge) on either client.
+- D8: the truncation explanation reaches the live badge from the box (iOS and
+  desktop); on an old box the badge shows its label without an explain action.
+- D7: "N subagents" counts child sessions that are actually running (own
+  execution state), so a background task keeps its parent busy after its tool
+  call completed; previously iOS dropped to 0 when the tool completed.
+- D6: a worktree that failed to delete is reported as a warning after a
+  successful close (was a desktop-only error toast; iOS showed nothing).
 - S3: desktop's proposed workspace root no longer treats `…/code` as the parent
   of `…/codex`.
-- S1: concurrent creates from two devices can't collide on a name.
+- S1: concurrent creates from two devices can't collide on a name (creates are
+  serialized on the box; an external collision retries with the next suffix).
 - K2: iOS connection rows show the usage reading/balance text the desktop shows.
 - X6: a blank `device_id` on revoke is refused instead of resetting the box.
 
@@ -1397,7 +1924,9 @@ One ticket each (grouped where the audit groups them):
 3. **RunView repetition — repeat the full summary on every message a run
    touches (latest-wins)**, with a size guard: if review measures the iOS slim
    tail payload (100 messages) growing by more than 30 %, `RunView` repeats on
-   absorbed messages are dropped to `{id}` references in the same step.
+   absorbed messages are dropped to `{id}` references in the same step. The
+   exact `RunRef` contract, resolution rules and the byte guard are in D11
+   "Payload contract and guard"; revisions make repetition order-safe.
 4. **Context basis with no explicit selection — last reply's model, labelled.**
    With no model-prefs record and no `defaultModel`, the box uses the last-used
    model and sends `basis:"last-used"`; both clients label the context sheet
@@ -1423,3 +1952,25 @@ One ticket each (grouped where the audit groups them):
   spec calls `SessionNaming`, `SessionCloseCopy`, `SessionJobNesting`,
   `UpdateTargets`, `ExtensionsForge`, `AccountRowState`, `ToolActivity.describe`
   or `TranscriptTurns.info` from a new file.
+
+## Review responses (server-first)
+
+Review: `reviews/server-first/11-server-consolidation.md` (+ cross-cutting S1/S2).
+Master D25–D30 edits by the reconciler are kept unchanged.
+
+| # | Severity | Change |
+|---|---|---|
+| 1 | BLOCKING | D1: capabilities are read ONLY from `GET /api/version` (upgrade-exempt, `upgradeV2.mjs:82-90`) via NEW `apiVersion()` on both clients; `/rpc/server:version` is not used for discovery. Three-state store (`loading` / `loaded` / `failed`, failure never read as "old box", last value kept across a failed refresh, backoff retry). The upgrade gate is self-describing from `/api/upgrade.view` and never waits on the list. Tests: fresh client mid-migration (`running`, `failed`) with list loading/failed → Retry/Rollback per `view`. |
+| 2 | BLOCKING | D5: `createNameAllocator()` (`async-mutex` `runExclusive`) serializes read-names → choose → `tmux.newSession` for every create; metadata/result use the final name. External duplicate → `DuplicateSessionNameError` carrying the created chat `sessionId`, ≤3 retries reusing it via `existingSessionId`, then the session is deleted (`deleteSessionRaw`) and a sentence thrown. Barrier-based concurrent handler test added. |
+| 3 | BLOCKING | D7: `liveChildStatus` dropped. Aggregator derives from own-session `running` (any session id, incl. children) + `parentOf` (`childSession` frames ∪ delegate records) + jobs; `busy` = moved `sessionsWithActiveWork`; `subagents` = direct running children. Hydration on startup/reconnect from `listActiveSessionIds()` + `listSessions(dir)` `parentID`; edge removal; full-replacement snapshot and channel semantics; tests for completed background-launch tool with running child, nested windowless children, parent idle first, reconnect without open chat. |
+| 4 | BLOCKING | D8: live `truncation` frame gains `hint`; `StreamTruncationPayload.hint`, `TranscriptLiveTruncation {kind,label,hint?}` via `from(payload:)`, `TranscriptTurnFooter.truncation: TranscriptTruncationView?`, footer view migrated (explain action only when `hint` present); old-box fallback pinned (label, no action); desktop badge reads the frame hint. Live-before-refetch and old-box XCTests added. |
+| 5 | BLOCKING | D11: `toolRuns` now carries the ordered `layout` (run / text partID / reasoning partID, ids = `flush` ids = canonical part ids) and `closed`; iOS `liveTail(...)` walks it and replaces `mergingLive` + the single combined prose block; prose rows get `"p"+partID` ids so live→canonical handover keeps identity (documented one-time id change). `toolRuns` (and `windowStatus`) explicitly wired through `MantaStreamRouter.applying` / `MantaSessionStreamState`. Tests for tool→text→tool→reasoning→tool, same-message boundaries, coalescing, reconnect, canonical-vs-live ids. |
+| 6 | BLOCKING | D11: one boundary classifier `runBoundaryOf` for canonical and ledger (rule 3); execution start/end are not boundaries (rule 8); the ledger resets only on a DRAWING user message; delivered inbox items are classified (async `classifyDelivered` when unknown). Window-edge lookback (`RUN_LOOKBACK = 40`) keeps true run ids across tail/load-earlier. Parity scripts (3)/(4) for background completion and hidden user messages across executions. |
+| 7 | BLOCKING | D11: `RunView.rev {epoch, seq}` (ledger per-session counter, interpreter epoch); canonical stamps ledger state/rev for live runs; ONE rev-merged run map per client (`mergeRunViews` / `TranscriptRunStore.merging`) fed by annotations and frames; ordering/epoch-reset rules pinned; tests for an earlier tool finishing after a later message joined and for out-of-order RPC responses. |
+| 8 | BLOCKING | D11: ledger parts retain `state.output` (`toolOutputText`) and `error` internally — the same fields `mapToolBlock` sets — so the output-first delegate name is identical live and canonical; output is never sent in the frame (disclosure stays on `toolOutput` / canonical part). Fixture (7) with a generated name differing from the prompt. |
+| 9 | BLOCKING | D11: `TaskStatusResolver.delegateJobName(of:)` + `delegateNameMax` move to the box with the delegate descriptor and are deleted; the kept status half of `TaskStatusResolver` is listed member by member (none calls `clip`); grep checks for `clip(`, `delegateJobName`, `humanizeToolName`, `hostOf(`; guard rows added; per-step `verify.sh` + combined `test-unit`. |
+| 10 | SHOULD | D6: `sessions:close` returns `failed[]` and `warnings[]`; dedupe of shared worktree paths; each path in exactly one of `removed`/`kept`/`failed`; metadata failure → warning with `ok:true`; both clients show warnings after a successful close (iOS new `closedWithWarnings`). Tests added. |
+| 11 | SHOULD | D11 "Payload contract and guard": `RunView | RunRef` pinned (full view on the placement message only in fallback; refs never overwrite; splices always self-contained); owner-outside-window behaviour ("Window edges"); pass/fail byte guard over a typical session, a 60-step run with frequent reasoning segments and the widened window, against the slim baseline. Default stays D30's repeat. |
+| 12 | SHOULD | Ground rule 6 rewritten: shared integration/view modules may be extended additively by later steps; D8+D9 are one release-atomic group with `transcript-view-1` appended at the end of D9; capability test is stage-aware (`EXPECTED_AFTER_STEP`, full-registry equality at D11); per-step gate (typecheck, test:server, touched vitest, `verify.sh`, `compile-only` for app Swift) and combined gate (full `npm test`, `test-unit`). |
+| X-S1 | SHOULD (cross-cutting) | `ServerVersionInfo.capabilities` is placed in `SettingsWireModels.swift` (the type's real file, already in `Package.swift`); D1 text and Files fixed. |
+| X-S2 | SHOULD (cross-cutting) | Master edited minimally: O-final prerequisite → "D complete"; D22's binding M-01-7 row added to the canonical ledger after M-01-6. |

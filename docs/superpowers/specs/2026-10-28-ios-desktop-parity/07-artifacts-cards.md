@@ -1,13 +1,18 @@
 # WS07 — Artifacts, agent-sent files, webhooks, shared secrets
 
-Status: draft (revised, round 1) · Wave B · Owner files:
+Status: draft (revised, server-first round) · Wave B · Owner files:
 `SessionResourceCards.swift`, `ArtifactDerivation.swift` (deleted, server-first),
 `ChatOverflowSheet.swift`, `mobile/native/Package.swift` + `project.yml` (D1;
 edits routed through the wave-B integration step per D18), new `Artifact*` /
-`Webhook*` files. Binding rules: `00-master.md` (C1–C7, D1–D19).
+`Webhook*` files, plus the server module `src/server/artifacts.mjs` and the
+desktop files listed under "Desktop migration". Binding rules: `00-master.md`
+(C1–C7, D1–D30).
 
-**No new server routes.** Every feature reuses a channel, route or bus event the
-desktop already uses. No server file is edited.
+**One new server channel, `artifacts:list`** (module `src/server/artifacts.mjs`,
+see "Server-first (D23/D24)"), capability id `artifacts-list-1`. Every other
+feature (attach, agent-file notice, webhooks, secrets) reuses a channel, route
+or bus event the desktop already uses. WS07 never edits `rpc.mjs`, `index.mjs`
+or `streamInterp.mjs`; its registrations are IB ledger rows (M-07-S1/S2).
 
 Features in scope (7):
 
@@ -100,19 +105,57 @@ links with 160-char context and `.N` id suffixes, plan refs from any
 non-synthetic part with step count from prose → tool `content` → message
 text, hosted pages with newest-announcing-assistant `messageId`/`context`,
 plan-subdomain page excluded from links, outbox rows with sidecar
-`messageID`, `EXT_MIME` incl. video types, dedupe on `key` keeping the
+`messageID`, extension → MIME incl. video types, dedupe on `key` keeping the
 greatest `at`, sort newest first). Two server-side refinements, both pinned by
 tests:
+- **Extension → MIME uses ONE shared table — no new `EXT_MIME` copy on the box.**
+  `src/server/media.mjs` already has the box's allowlist (`MIME_BY_EXT`,
+  `guessMime`). WS07 exports that table and extends it with the rows the
+  desktop's `EXT_MIME` has and media lacks — `.csv text/csv`,
+  `.tsv text/tab-separated-values`, `.txt text/plain`, `.md text/markdown`,
+  `.json application/json`, `.pdf application/pdf`, `.html text/html`,
+  `.htm text/html` — and adds `export function mimeForName(name) → string |
+  null` (null when the extension is not listed). `artifacts.mjs` uses
+  `mimeForName` (an unknown type stays `mime: null` → download path, exactly as
+  today); `guessMime` keeps its `application/octet-stream` fallback and now
+  reads the same table. The list stays a **deliberate allowlist** (no
+  `mime-types` / `mime` database): a full database labels `.ts` as
+  `video/mp2t` and would widen what gets previewed; "unknown types land on the
+  download path" is the intended behaviour. Side effects, both intended:
+  `media_save`/`media_show` now report the real type for those eight
+  extensions instead of `application/octet-stream` (neither image nor video, so
+  measuring and the media `kind` are unchanged); an outbox `.avif` now reads
+  `image/avif` (media's row) and lists as an image.
 - **Plan `href`** = `getSessionDirectory(sessionId)` + `/` + rel. (The desktop
   joined the pane cwd, which can differ from the opencode session directory
   where `.opencode/plans/` is actually written.) Unknown directory → `href`
   is the rel path and `plan.fileAvailable = false`.
-- **Plan `pageUrl`** = the registry page whose `subdomain === planSubdomain(sessionId)`
-  AND `sessionID === sessionId` (`src/shared/planMode.mjs:49`); else
-  `planPageUrl(sessionId, baseUrl)` (`planMode.mjs:65`) when `baseUrl` is
-  non-empty; else `null`. The desktop's client fallback to its own
-  `serverBase()` and iOS's `PlanDerivation.planPageURL(…, api.serverURL)` are
-  removed — the box knows its public base (`publicBaseUrl()`).
+- **Plan `pageUrl`** — `planPageResolution({ sessionId, pages, baseUrl })`
+  (pure, exported), evaluated against the registry rows whose
+  `subdomain === planSubdomain(sessionId)` (`src/shared/planMode.mjs:49`; the
+  slug truncates the session id to 20 chars, so two sessions can share it —
+  the collision `artifacts.ts:240-243` warns about):
+  1. **Owned registration** (a row with `sessionID === sessionId`): its `url`
+     if it is a usable absolute `http(s)` URL, else `null`
+     (`listPages` returns `url: ""` when the box has no public base,
+     `servePage.mjs:212-219`) → `plan.pageUrlReason: "no-public-address"`.
+  2. **Collision** (a row exists for that subdomain but `sessionID` is another
+     session or null): `pageUrl: null`, `pageUrlReason: "other-session"`. The
+     deterministic fallback is NEVER used here — it would build the same URL
+     and open the other session's page.
+  3. **No registration**: `planPageUrl(sessionId, baseUrl)` (`planMode.mjs:65`)
+     when `baseUrl` is a usable `http(s)` base, else `null` with
+     `pageUrlReason: "no-public-address"`.
+  `pageUrlReason` is `null` whenever `pageUrl` is non-null. The desktop's
+  client fallback to its own `serverBase()` and iOS's
+  `PlanDerivation.planPageURL(…, api.serverURL)` are removed — the box knows
+  its public base (`publicBaseUrl()`).
+- **Hosted pages without a usable URL** (`url` empty / not `http(s)` — box has
+  no public address): the item is **omitted** (never a link with an empty
+  href) and `"public-address"` is added to `degraded`. Both clients show the
+  footnote **"Published pages are hidden — this box has no public address."**
+  for that entry (other `degraded` entries keep "Some items couldn't be
+  loaded.").
 
 **Wire — `POST /rpc/artifacts:list`**, `args: [{ "sessionId": "ses_…" }]`
 (single object, room for additive options):
@@ -139,11 +182,14 @@ tests:
                                            // null = no expiry concept (plain files, links, plans);
                                            // hosted page with no TTL → { "state": "never", "expiresAt": null }
         "plan": null                       // kind "plan" only:
-                                           // { "status": "draft", "steps": 3, "pageUrl": "https://…/pages/plan-ses1", "fileAvailable": true }
+                                           // { "status": "draft", "steps": 3, "pageUrl": "https://…/pages/plan-ses1",
+                                           //   "pageUrlReason": null, "fileAvailable": true }
+                                           // pageUrlReason ∈ null | "other-session" | "no-public-address" (non-null iff pageUrl is null)
       }
     ],
     "counts": { "link": 2, "image": 1, "file": 4, "plan": 1 },
-    "degraded": []                         // subset of ["pages","outbox","directory"] whose read failed; those sources are omitted
+    "degraded": []                         // subset of ["pages","outbox","directory","public-address"]:
+                                           // a read failed (source omitted), or hosted pages were omitted for lack of a public URL
   }
 }
 ```
@@ -161,15 +207,40 @@ tests:
   Pages / outbox / directory failures do NOT fail the call: the source is
   omitted and named in `degraded` (the desktop today swallows those per
   source, `ArtifactsPanel.tsx:640-652`).
-- **Memoization** (audit risk note — iOS polls every 3 s): per session, key =
-  last message `id` + its `parts.length` + `time.completed ?? ""` (read with
-  `listMessages(sessionId, { limit: 1 })`), outbox signature (sorted
-  `path:mtime` of this session's rows), pages signature (sorted
-  `subdomain:expiresAt:sessionID`) and the directory. Same key and younger
-  than `ttlMs` (30 s) → reuse the derived core; expiry + counts are always
-  recomputed. LRU of 32 sessions. A changed key or an older entry →
-  full `listMessages(sessionId)` + derive. Concurrent calls for one session
-  share one in-flight promise.
+- **Memoization** (audit risk note — iOS polls every 3 s). Every `list()` call
+  reads the CHEAP sources fresh: `listPages()`, `listOutbox()`,
+  `sessionDirectory(sid)`, `baseUrl()`, and `listMessages(sid, { limit: 1 })`.
+  From those it builds the **derivation key**:
+  - `baseUrl()` string;
+  - pages: sorted `subdomain|url|createdAt|expiresAt|sessionID` of every row
+    with `sessionID === sid` OR `subdomain === planSubdomain(sid)`;
+  - outbox: sorted `path|mtime|size|expiresAt|messageID` of this session's rows
+    (sidecar `expiresAt`/`messageID` are read separately from `mtime`,
+    `outbox.mjs:113-129`, so they are part of the key);
+  - directory string (or `"?"`);
+  - transcript revision: last message `id` + `parts.length` +
+    `time.completed ?? ""` + a SHA-1 of `JSON.stringify(lastMessage.parts)`
+    (covers text growing inside the same final part);
+  - which optional reads failed (so a failure → recovery transition changes
+    the key).
+  Same key AND the cached core was **derived** less than `ttlMs` (30 s) ago →
+  reuse the core (age is measured from derivation, never refreshed by a hit).
+  Otherwise full `listMessages(sid)` + derive. Deliberate maximum staleness:
+  an in-place edit to an EARLIER message (not the last one) can be up to 30 s
+  late; everything else invalidates immediately. `degraded` is computed from
+  THIS request's reads, never taken from the cache; expiry state and counts are
+  recomputed on every response. LRU of 32 sessions; concurrent calls for one
+  session share one in-flight derivation.
+  **Storage (libraries review):** the cores live in `lru-cache` 11.5.3 —
+  `import { LRUCache } from "lru-cache"`, `new LRUCache({ max: maxSessions,
+  ttl: ttlMs, ttlAutopurge: false })` with **no `updateAgeOnGet`** (the
+  default, so a hit never refreshes the age — matching "measured from
+  derivation"). Value `{ key, core }`; on read compare the stored derivation
+  key with this request's and treat a mismatch as a miss. `ttl`/age use the
+  injected `now` via the cache's `perf` option (`perf: { now }`) so the
+  fake-clock tests drive expiry. In-flight sharing stays a small separate
+  `Map<sessionId, Promise>` (deleted in `finally`) — `fetchMethod` dedupes
+  but keys on `sessionId` only, which fits the derivation-key compare worse.
 
 **Capability (D24 wire compat).** Id **`artifacts-list-1`**, appended to WS02's
 `src/server/boxCapabilities.mjs` by integration agent B in wave B (M-07-S2,
@@ -198,16 +269,40 @@ case in `src/renderer/artifacts.test.ts` and the `planRefsFromPart` cases in
 5. plan: from text, from `write` input `filePath`, from patch `files`; `read`
    ignored; newest wins; title "ship it"; `steps` 2 for `## A\n### B\n#### C`;
    `href` joins the session directory; unknown directory → rel href +
-   `fileAvailable:false`; `pageUrl` registry match only for the same
-   `sessionID`, else deterministic from `baseUrl`, else `null`.
+   `fileAvailable:false`; `pageUrl` per `planPageResolution` (case 10).
 6. dedupe on key keeps the greatest `at`; output newest first; `counts`.
 7. `expiryState` at `now`: null, past → expired, exactly 6 h → soon, 7 h →
    live; hosted no-TTL → `{state:"never"}`; plain file → `expiry:null`.
-8. service: same key within TTL calls `listMessages` (full) once across two
-   `list()` calls but recomputes expiry with an advanced `now`; a new last
-   message invalidates; concurrent calls share one read; failing `listPages`
-   → `degraded:["pages"]` and no hosted items; failing transcript read →
-   throws the safe literal; blank sessionId throws.
+8. service (fake clock, injected sources): same key within TTL calls
+   `listMessages` (full) once across two `list()` calls but recomputes expiry
+   with an advanced `now`; a new last message invalidates; **text appended to
+   the last part with unchanged id/part count invalidates**; a `baseUrl()`
+   change invalidates (plan `pageUrl` and hosted links update); a page
+   republished with the same `expiresAt` but new `createdAt`/`url`
+   invalidates; an outbox sidecar `expiresAt` / `messageID` change with the
+   same `mtime` invalidates; cache age is from derivation (hits at t=10 s and
+   t=25 s, re-derive at t=31 s); concurrent calls share one read; failing
+   `listPages` → `degraded:["pages"]` and no hosted items, then recovery on
+   the next call → `degraded:[]` and the items return (never a cached
+   `degraded`); failing transcript read → throws the safe literal; blank
+   sessionId throws; with `maxSessions: 2`, three sessions listed then the
+   cache holds at most two cores (assert the bound — a re-list of SOME session
+   re-derives — not which one `lru-cache` evicted); the fake clock reaches the
+   cache through `perf.now` (the t=31 s re-derive above proves it).
+12. shared MIME table (`src/server/media.test.mjs`, extended): `mimeForName`
+    returns the eight new rows (`a.CSV` → `text/csv`, `.tsv`, `.txt`, `.md`,
+    `.json`, `.pdf`, `.html`, `.htm`), keeps the existing image/video rows,
+    returns `null` for `main.ts` / `Makefile` / `""`; `guessMime` still falls
+    back to `application/octet-stream` for those; `artifacts.mjs` outbox row
+    `x.ts` → `mime: null`, `kind: "file"`.
+10. `planPageResolution`: owned registration with URL → that URL; owned
+    registration with `url:""` → `null` + `"no-public-address"` (not the
+    fallback); **collision** (same subdomain, other `sessionID` or null) →
+    `null` + `"other-session"` even with a usable `baseUrl`; no registration +
+    usable base → deterministic URL; no registration + empty base → `null` +
+    `"no-public-address"`.
+11. hosted (non-plan) page with `url:""` → omitted from `items`, `counts.link`
+    excludes it, `degraded` contains `"public-address"`.
 9. rpc wiring test (in `artifacts.test.mjs`, building the handler the way the
    M-07-S1 row does with injected deps): `dispatch(handlers, "artifacts:list",
    [{sessionId:"ses_1"}])` returns the shape above.
@@ -218,13 +313,14 @@ case in `src/renderer/artifacts.test.ts` and the `planRefsFromPart` cases in
 |---|---|
 | `src/renderer/artifacts.ts` | **Delete** `deriveArtifacts`, `deriveFileArtifact`/`LinkArtifact`/`OutboxArtifact`/`PlanArtifact`/`PageArtifact`, `newestAnnouncingMessage`, `dedupeByKey`, `EXT_MIME`, `planTitleFromPath`, `planStepCount`, `planStatus`, `planSubdomain` (duplicate of `planMode.mjs`), `pageState`, `countByKind`. **Keep** `groupByDay` (A4, device timezone). `Artifact` becomes `export type Artifact = ArtifactItem` re-exported from the new `src/shared/artifactsTypes.ts`; `ArtifactKind`, `PlanStatus` re-exported likewise. |
 | `src/shared/artifactsTypes.ts` (new, WS07) | `ArtifactItem`, `ArtifactExpiry`, `ArtifactPlanInfo`, `ArtifactsListResult`, `ArtifactKind`, `ArtifactOrigin`, `PlanStatus` — the wire shape above. |
-| `src/renderer/ArtifactsPanel.tsx` | Replace the `servePageList` + `outboxList` effect (`:637-660`) and the `deriveArtifacts`/`countByKind` memos (`:683-687`) with one fetch of `window.api.artifactsList({ sessionId })`: on open, every 30 s while open (`POLL_MS`, unchanged), and 400 ms after the lifted transcript's last message id / part count changes (so a new attachment appears without waiting for the poll). State: `loading` / `ready(result)` / `error(message)` (inline banner + **Retry**) / `unsupported` ("Update your box to use this."). Tab badges use `result.counts` (search keeps its client counts, A6). `LinkCard` / `FileRow` read `artifact.expiry?.state` (pill tone) and `expiryLabel(artifact.expiry.expiresAt, now)` for the text; `state === "never"` → "no expiry". `PlanRow` reads `artifact.plan.status/steps`; `openPlanPage` opens `artifact.plan.pageUrl` and, when null, sets `planError("Couldn't open the plan page.")` (the `planPageUrl(sessionId, serverBase())` fallback and the `planPageUrl` import are removed). "Open plan file" is hidden when `plan.fileAvailable` is false. `cwd` stays a prop only for `ReviewPane`. `degraded` non-empty → a muted footnote "Some items couldn't be loaded." |
+| `src/renderer/ArtifactsPanel.tsx` | Replace the `servePageList` + `outboxList` effect (`:637-660`) and the `deriveArtifacts`/`countByKind` memos (`:683-687`) with one fetch of `window.api.artifactsList({ sessionId })`: on open, every 30 s while open (`POLL_MS`, unchanged), and 400 ms after the lifted transcript's last message id / part count changes (so a new attachment appears without waiting for the poll). State: `loading` / `ready(result)` / `error(message)` (inline banner + **Retry**) / `unsupported` ("Update your box to use this."). Tab badges use `result.counts` (search keeps its client counts, A6). `LinkCard` / `FileRow` read `artifact.expiry?.state` (pill tone) and `expiryLabel(artifact.expiry.expiresAt, now)` for the text; `state === "never"` → "no expiry". `PlanRow` reads `artifact.plan.status/steps`; `openPlanPage` opens `artifact.plan.pageUrl` and, when null, sets `planError("Couldn't open the plan page.")` (the `planPageUrl(sessionId, serverBase())` fallback and the `planPageUrl` import are removed). "Open plan file" is hidden when `plan.fileAvailable` is false. `cwd` stays a prop only for `ReviewPane`. `degraded` non-empty → a muted footnote: `"public-address"` → "Published pages are hidden — this box has no public address."; any other entry → "Some items couldn't be loaded." `plan.pageUrlReason === "other-session"` adds "Another conversation's page uses this address." to the plan error. |
 | `src/renderer/MediaBody.tsx` (`:145-163`) | The inline-media `Artifact` literal adopts the wire shape: drop `key`/`expiresAt`, add `isHosted: false`, `expiry: null`, `plan: null`. |
-| `src/renderer/ArtifactPreview.tsx` | Type-only: uses `Artifact` fields that still exist (`id/label/href/mime/kind`); no logic change. Verify compile. |
+| `src/renderer/ArtifactPreview.tsx` | Type-only: uses `Artifact` fields that still exist (`id/label/href/mime/kind/origin`); no logic change. Verify compile. |
+| `src/renderer/ArtifactPreview.test.tsx` (`:13-26`) | The typed `Artifact` fixture migrates to the wire shape (drop `key`/`expiresAt`; add `isHosted: false`, `expiry: null`, `plan: null`). All existing preview action tests (BET-1156 Attach affordance) are kept unchanged and stay under `npm run typecheck` (`tsconfig.web.json` includes renderer tests). |
 | `src/renderer/chatUtils.ts` (`:2638-2678`) | **Delete** `PLAN_REF_RE`, `PLAN_AUTHORING_TOOLS`, `planRefsFromPart` (its only renderer caller was `artifacts.ts:373`; now in `src/server/artifacts.mjs`). Ledgered (M-07-D1) because WS02 also edits this file in wave B. |
 | `src/renderer/api/demoArtifacts.ts` (new, WS07) | Static `ArtifactsListResult` fixtures for the demo states (the `artifacts` image tile + the hosted pages with literal `live`/`soon`/`expired` states the visual baselines show). Literal data, no derivation. |
 | `src/shared/api.ts`, `src/shared/types.ts` (IPC), `src/renderer/api/httpApi.ts`, `src/renderer/api/demoApi.ts` | One-line registrations — ledgered (M-07-D2…D5). |
-| Tests | `src/renderer/artifacts.test.ts`: delete every case except `groupByDay`. `chatUtils.test.ts`: delete the `describe("planRefsFromPart")` block (starts `:5671`) and its import (`:169`) (ledgered with M-07-D1). New `src/renderer/ArtifactsPanel.server.test.tsx` (vitest, `installMockApi`): renders server items per tab; badges from `counts`; expiry pill tone per `expiry.state` + "no expiry" for `never`; plan row opens `plan.pageUrl`, shows "Couldn't open the plan page." when null; transcript change triggers a debounced refetch; `unknown rpc channel: artifacts:list` → "Update your box to use this."; other error → banner + Retry refetches. `ArtifactsPanel.review.test.tsx` keeps passing (mock `artifactsList` → empty result). Visual baselines (`tests/visual/screens.visual.ts` artifacts states) must be unchanged — the demo fixture reproduces them. |
+| Tests | `src/renderer/artifacts.test.ts`: delete every derivation case; **keep** the `groupByDay` cases and migrate their shared builders `fileArtifact`/`img` (`:49-67`) to the wire shape (no `key`/`expiresAt`; `isHosted: false`, `expiry: null`, `plan: null`); drop the now-unused `page`/`toolPart`/message helpers. The plan desktop test additionally asserts: `plan.pageUrl == null` with `pageUrlReason "other-session"` → "Couldn't open the plan page." and no navigation; `degraded: ["public-address"]` → "Published pages are hidden — this box has no public address.". `chatUtils.test.ts`: delete the `describe("planRefsFromPart")` block (starts `:5671`) and its import (`:169`) (ledgered with M-07-D1). New `src/renderer/ArtifactsPanel.server.test.tsx` (vitest, `installMockApi`): renders server items per tab; badges from `counts`; expiry pill tone per `expiry.state` + "no expiry" for `never`; plan row opens `plan.pageUrl`, shows "Couldn't open the plan page." when null; transcript change triggers a debounced refetch; `unknown rpc channel: artifacts:list` → "Update your box to use this."; other error → banner + Retry refetches. `ArtifactsPanel.review.test.tsx` keeps passing (mock `artifactsList` → empty result). Visual baselines (`tests/visual/screens.visual.ts` artifacts states) must be unchanged — the demo fixture reproduces them. |
 
 `servePageList` / `outboxList` stay on the `Api` (other consumers: the iOS
 download path, CTO tooling); only the artifacts panel stops calling them.
@@ -241,7 +337,7 @@ download path, CTO tooling); only the artifacts panel stops calling them.
   `ArtifactEmptyCopy`, `ArtifactExpiryLabel.text(_ expiry:, now:)` (label only).
 - **Wire types** in `ArtifactModels.swift` (pure): `ArtifactItem`,
   `ArtifactExpiry { state: ArtifactExpiryState (.live/.soon/.expired/.never), expiresAt: Double? }`,
-  `ArtifactPlanInfo { status: ArtifactPlanStatus, steps: Int, pageUrl: String?, fileAvailable: Bool }`,
+  `ArtifactPlanInfo { status: ArtifactPlanStatus, steps: Int, pageUrl: String?, pageUrlReason: String?, fileAvailable: Bool }`,
   `ArtifactsListResult { sessionId, generatedAt, items, counts: ArtifactCountsWire, degraded: [String] }`,
   `ArtifactsCapability.isUnsupported(_ error: Error) -> Bool` (true for
   `MantaError.server` whose message starts with `"unknown rpc channel: artifacts:list"`).
@@ -257,8 +353,14 @@ download path, CTO tooling); only the artifacts panel stops calling them.
   formatter. States: loading (`ProgressView`), error ("Couldn't load
   artifacts." + **Retry**), unsupported (`ContentUnavailableView("Update your
   box to use this", systemImage: "arrow.down.circle", description: Text("Artifacts
-  need a newer box version."))`), `degraded` non-empty → section footer
-  "Some items couldn't be loaded." The 3 s poll is kept (server-memoized).
+  need a newer box version."))`), `degraded` non-empty → section footer from
+  `ArtifactDegradedCopy.footer(_ degraded: [String]) -> String?`
+  (`"public-address"` → "Published pages are hidden — this box has no public
+  address."; any other entry → "Some items couldn't be loaded."; both when
+  both apply; nil for `[]`). A plan with `pageUrl == nil` never opens a URL —
+  it shows "Couldn't open the plan page." (and, for `pageUrlReason ==
+  "other-session"`, the secondary "Another conversation's page uses this
+  address."). The 3 s poll is kept (server-memoized).
 - `PlanDerivation.swift` is untouched by WS07 (its plan-card half is WS11 U1);
   WS07 no longer calls `planRefsFromPart` / `planPageURL` from it.
 
@@ -886,6 +988,11 @@ or any SwiftUI/UIKit/Combine file. So:
    `context`, `messageId`, `size`, `mime` → nil; `degraded` → `[]`.
 4. `ArtifactsCapability.isUnsupported`: `MantaError.server("unknown rpc channel: artifacts:list")`
    → true; any other server/transport error → false.
+5. Plan `pageUrl: null` + `pageUrlReason: "other-session"` and
+   `"no-public-address"` decode; an unknown reason decodes as a non-nil
+   string (treated as generic). `degraded: ["public-address"]` decodes.
+   `ArtifactDegradedCopy.footer` for `[]`, `["public-address"]`,
+   `["outbox"]`, `["public-address","outbox"]`.
 
 `MantaUITests/ArtifactPresentationTests.swift` (new):
 - `ArtifactExpiryLabel.text` (state is server-provided; label only):
@@ -973,6 +1080,9 @@ single-object args `artifactsList` sends). A remote-fetch request built
 by `ArtifactBytes.remoteRequest(for:)` carries **no `Authorization` header**
 and `httpShouldHandleCookies == false`.
 
+`MantaUITests/ChatOverflowGateTests.swift` (new): the M-04-2 mount gate
+(see "Mounts applied").
+
 `MantaUITests/ArtifactAgentFileStoreTests.swift` (new, `@MainActor`): the
 real store with an injected `download` closure that suspends on a
 continuation the test controls, injected `sleep` that returns immediately on
@@ -989,8 +1099,10 @@ demand, and a temp dir:
 - `bind(eventStore:)` called twice registers one handler (a second frame
   produces one arrival).
 
-No server changes → no node tests. `npm run typecheck` / `npm test`
-unaffected.
+Server: `src/server/artifacts.test.mjs` (Server-first section, cases 1–11).
+Desktop: `ArtifactsPanel.server.test.tsx`, the migrated `artifacts.test.ts` /
+`ArtifactPreview.test.tsx`. Both `npm run typecheck` and `npm test` (vitest +
+node) must be green with M-07-S1 and M-07-D1…D5 applied.
 
 ---
 
@@ -1070,6 +1182,26 @@ unaffected.
 
 ---
 
+## Libraries considered (user rule: research before building)
+
+Source: `libraries.md` §07 (npm figures for the week 2026-10-20…26).
+
+**Adopted**
+
+| Library | Version · license | Adoption | Plugs in at |
+|---|---|---|---|
+| `lru-cache` — `LRUCache` | 11.5.3 · BlueOak-1.0.0 (permissive, OSI-approved) | ~519M/wk, 2026-09; already transitive | Core storage of `createArtifactsService` (`src/server/artifacts.mjs`, "Memoization"): `new LRUCache({ max: 32, ttl: 30_000 })`, no `updateAgeOnGet`, `perf: { now }` for the injected clock. In-flight sharing stays a hand-written `Map<sessionId, Promise>` (`fetchMethod` keys on `sessionId` only). New direct dependency, installed by WS07 (§Files). |
+
+**Kept hand-written / already provided**
+
+| Item | Candidates | Decision |
+|---|---|---|
+| Extension → MIME | `mime-types` 3.0.2 (MIT, ~254M/wk), `mime` 4.1.2 (MIT, ~141M/wk) | **KEEP an allowlist, but ONE table**: extend and export `src/server/media.mjs`'s `MIME_BY_EXT` (+ `mimeForName`) instead of a fourth copy. A full database would label `.ts` as `video/mp2t` and widen what gets previewed. |
+| Hash of the last message's parts | `node:crypto` SHA-1 | Built-in — already the plan. |
+| iOS file/image preview | `QLPreviewController` | System framework — already the plan. |
+| Byte sizes | `ByteCountFormatter` | System — already used (`ArtifactDerivation.swift:265` today; kept in `ArtifactPresentation`). |
+| Relative age / expiry label ("4m ago", "5h") | `Date.RelativeFormatStyle`, `RelativeDateTimeFormatter`, `Intl.RelativeTimeFormat` | **KEEP hand-written** on both clients: exact copy parity with the desktop and deterministic tests; system formatters print "4 min. ago" and vary by locale. |
+
 ## Files
 
 Edit (owned):
@@ -1111,12 +1243,33 @@ Create:
 Server (WS07-owned, new):
 - `src/server/artifacts.mjs`, `src/server/artifacts.test.mjs`.
 
+Server (WS07-owned edits in wave B — master D27 row):
+- `src/server/media.mjs` — export the extended `MIME_BY_EXT` + new
+  `mimeForName(name)`; `guessMime` reads the same table (see "Derivation
+  rules"). `src/server/media.test.mjs` — case 12.
+
+Root dependencies (`package.json` / `package-lock.json` — WS07 is the ONLY
+wave-B worker that adds a dependency, so it edits them directly; master D27
+row + ledger row M-07-pkg-1 record the ownership):
+- `npm install lru-cache@11.5.3` — BlueOak-1.0.0, already in `node_modules`
+  as a transitive dependency (an older major, 5.x, today; npm nests that copy
+  under its dependents once 11.x is hoisted as a direct dependency). Used by
+  `src/server/artifacts.mjs`; WS05 reuses it in wave C. Run `npm test` after
+  the install to confirm the transitive consumers still resolve their own copy.
+- A new dependency reaches boxes only through the next server release tarball
+  (root AGENTS.md "A clean install runs the RELEASE's source") — it ships with
+  this workstream's server code in one release.
+- No other wave-B workstream (02, 06, 09) adds a dependency. If one ever needs
+  to, it must NOT edit `package.json`: it files an IB ledger row and
+  integration agent B runs the install after B.
+
 Desktop (WS07-owned edits — see "Desktop migration"):
 - `src/shared/artifactsTypes.ts` (new), `src/renderer/api/demoArtifacts.ts`
   (new), `src/renderer/artifacts.ts`, `src/renderer/artifacts.test.ts`,
   `src/renderer/ArtifactsPanel.tsx`, `src/renderer/ArtifactsPanel.server.test.tsx`
   (new), `src/renderer/MediaBody.tsx`, `src/renderer/ArtifactPreview.tsx`
-  (type check only).
+  (type check only), `src/renderer/ArtifactPreview.test.tsx` (fixture
+  migration).
 
 Shared server/desktop files edited only through ledger rows (M-07-S1, M-07-S2,
 M-07-D1…D5; the desktop ones are WS02-owned in wave B, master D27):
@@ -1191,7 +1344,7 @@ Fork `:110`, Open terminal `:111`, Trust/handoff `:116-135`, Clear/Delete `:142-
 | M-01-5 | `01-transcript.md` M-01-5 | `TranscriptDisplayOptions.defaultsKey`, `TranscriptDisplayOptions.setShowDetails(_:)` (WS01, A1) | In the Trust-mode `Section`, after the trust toggle: `Toggle` "Show reasoning & full output", subtitle "Thinking steps and complete tool output", bound with `@AppStorage(TranscriptDisplayOptions.defaultsKey) private var showDetails = false` and `Binding(get: { showDetails }, set: { TranscriptDisplayOptions.setShowDetails($0) })`. No new parameter. Shown also when `isReadOnlyJob` (display-only). | WS01 merged (A1) |
 | M-02-2 | `02-chat-cards-queue.md` M-02-2 | — (plain param; ChatScreen passes `store.isBackgroundJobReadOnly`) | Add `var isReadOnlyJob: Bool = false`; when true hide Compact, Clear, Fork, Delete and the Trust-mode toggle; also hide Rename (M-04-1) and the Mode rows (M-04-2, falling back to nothing — a read-only job cannot switch mode). Scheduled / Secrets / Artifacts / Webhooks / Background jobs rows and the M-01-5 toggle stay. | none |
 | M-04-1 | `04-sessions.md` M-04-1 | — (ChatScreen wires it, M-04-4) | Add `var onRename: (() -> Void)? = nil`; row "Rename session" (`pencil`) in the second section, **before "Compact session"** (WS04's current text), via the existing `row(...)` helper; shown only when `onRename != nil && !isReadOnlyJob`. Optional by agreement with WS04 (its §14 preamble adopts this capture-safe default). | none |
-| M-04-2 | `04-sessions.md` M-04-2 | `SessionModeRows(current:launchers:catalog:onSelect:onRetry:)`, `SessionMode`, `SessionLauncherCatalog` (WS04, `SessionModeMenu.swift` / `SessionModeLogic.swift`, A2); `AvailableLauncher` (WS10, D21, A1) | Add `var mode: SessionMode? = nil`, `var launchers: [AvailableLauncher] = []`, `var launcherCatalog: SessionLauncherCatalog = .loading`, `var onSelectMode: ((SessionMode) -> Void)? = nil`, `var onRetryLaunchers: (() -> Void)? = nil`. When `!isReadOnlyJob`, `let mode`, `let onSelectMode` are all present: replace the "Open terminal" row (`:111`) with `SessionModeRows(current: mode, launchers: launchers, catalog: launcherCatalog, onSelect: { m in dismiss(); onSelectMode(m) }, onRetry: { onRetryLaunchers?() })`. Otherwise keep the existing "Open terminal" row (non-read-only) — legacy callers and the capture scene are unchanged. | WS04 (A2) + WS10 (A1) merged |
+| M-04-2 | `04-sessions.md` M-04-2 / master ledger row M-04-2 | `SessionModeRows(current:launchers:catalog:onSelect:onRetry:)` (WS04, `SessionModeMenu.swift:31-71` — emits TWO top-level Sections, "Mode" and conditionally "AI CLI", whose failed state shows a "Couldn't load AI CLIs — Try again" button calling `onRetry()`), `SessionMode`, `SessionLauncherCatalog` (WS04, A2); `AvailableLauncher` (WS10, D21, A1) | Add `var mode: SessionMode? = nil`, `var launchers: [AvailableLauncher] = []`, `var launcherCatalog: SessionLauncherCatalog = .loading`, `var onSelectMode: ((SessionMode) -> Void)? = nil`, `var onRetryLaunchers: (() -> Void)? = nil`. Placement per master M-04-2 / `reviews/code/04-sessions.md` finding 11 — a **sibling** of the Compact/Fork section and the Trust section, never nested in a `Section {}`; the mode rows are mounted only when ALL THREE of `mode`, `onSelectMode`, `onRetryLaunchers` are present (so the failed-catalog "Try again" is never a dead button). Exact code (rename row from M-04-1, read-only gates from M-02-2 included): `Section { if !isReadOnlyJob, let onRename { row("Rename session", systemImage: "pencil", action: onRename) }; if !isReadOnlyJob { compactButton; row("Fork session", systemImage: "arrow.triangle.branch", action: onFork) }; if !isReadOnlyJob, !modeRowsMounted { row("Open terminal", systemImage: "terminal", action: onOpenTerminal) } }` then `if !isReadOnlyJob, let mode, let onSelectMode, let onRetryLaunchers { SessionModeRows(current: mode, launchers: launchers, catalog: launcherCatalog, onSelect: { m in dismiss(); onSelectMode(m) }, onRetry: onRetryLaunchers) }` then the existing Trust section, with `private var modeRowsMounted: Bool { OverflowModeRowsGate.mount(hasMode: mode != nil, hasSelect: onSelectMode != nil, hasRetry: onRetryLaunchers != nil, readOnly: isReadOnlyJob) }` — `OverflowModeRowsGate` is a file-scope enum next to `CompactConfirmGate` (`ChatOverflowSheet.swift:382-387`), with `showsOpenTerminal(…)` as its complement. Behaviour: legacy callers / the capture scene (no new params) keep "Open terminal" exactly as today; a read-only job shows neither (M-02-2); WS02's M-04-5 passes all three, so the wired chat always gets the mode rows. Verification: Xcode-only `MantaUITests/ChatOverflowGateTests.swift` — `OverflowModeRowsGate.mount` is true only for (mode, select, retry, !readOnly); `showsOpenTerminal` true for every legacy combination (any of the three missing, not read-only) and false when read-only; plus a Mac check that the failed-catalog row's "Try again" invokes the passed closure (counter in a `#Preview` with `launcherCatalog: .failed(message: "x", lastGood: nil)`). | WS04 (A2) + WS10 (A1) merged |
 | (own) | WS07 F7 | `WebhooksCard` | Add `var onWebhooks: (() -> Void)? = nil` and the "Webhooks" row (first section, after Secrets) when non-nil. | — |
 
 Cross-check (`grep -n ChatOverflowSheet` over `01`–`10` at round 2): the only
@@ -1200,6 +1353,10 @@ with the provider's current symbols and defaults. WS03/05/06/08/09/10 request
 none. Package.swift requests from other workstreams are applied by the
 integration agent of THEIR wave (M-01-6, M-03-8, M-04-8, M-08-3, M-10-3 → IA;
 M-02-3, M-06-3, M-07-4, M-09-7 → IB; M-05-4 → IC), not by WS07.
+
+**Also applied by WS07 in wave B (master ledger M-07-pkg-1, D27):** root
+`package.json` / `package-lock.json` — `npm install lru-cache@11.5.3` (see
+Files); and `src/server/media.mjs` + `media.test.mjs` (shared MIME table).
 
 ## Contracts provided / consumed
 
@@ -1391,12 +1548,14 @@ and master D23/D24.
   `MediaBody.tsx` literal adapted; new `src/shared/artifactsTypes.ts`,
   `src/renderer/api/demoArtifacts.ts`, `ArtifactsPanel.server.test.tsx`;
   derivation vitests removed (now node tests).
-- **Wire compat (D24)**: additive new channel only; capability id
-  `artifacts.list`; until WS11 U5 ships `capabilities`, both clients gate on
-  the box's `unknown rpc channel: artifacts:list` error and show "Update your
-  box to use this." — no fallback derivation.
+- *(Historical — superseded by the Reconciliation bullet below and by D25:
+  the id is `artifacts-list-1`, appended in wave B by IB.)* **Wire compat
+  (D24)**: additive new channel only; both clients gate on the box's
+  `unknown rpc channel: artifacts:list` error and show "Update your box to use
+  this." — no fallback derivation.
 - **Ledger**: new rows M-07-S1 (`rpc.mjs`, IB, order 02 → 07 → 09 → 06),
-  M-07-S2 (capability id → WS11 U5), M-07-D1…D5 (`chatUtils.ts`/test,
+  M-07-S2 (*historical text "capability id → WS11 U5" is superseded: M-07-S2
+  appends `artifacts-list-1` to `boxCapabilities.mjs`, IB, wave B*), M-07-D1…D5 (`chatUtils.ts`/test,
   `types.ts`, `api.ts`, `httpApi.ts`, `demoApi.ts`, IB). M-07-4 now removes
   the deleted Swift files from `Package.swift` and adds the new ones.
   `index.mjs` and `streamInterp.mjs` are not touched.
@@ -1410,3 +1569,41 @@ and master D23/D24.
   A12 stay client as the audit recommends; A11b is MOVE-LATER (WS11).
 - Everything else (F4 attach, F6 agent-file notice, F7 webhooks, F7b secrets,
   overflow mounts) is unchanged.
+
+## Review responses (server-first review)
+
+Round: `reviews/server-first/07-artifacts-cards.md`.
+
+1. **BLOCKING published-page resolution — resolved.** New pure
+   `planPageResolution` distinguishes owned registration / collision / no
+   registration: a collision yields `pageUrl:null` +
+   `pageUrlReason:"other-session"` and never the deterministic fallback; an
+   owned row with an empty or non-http URL yields `null` +
+   `"no-public-address"`; the fallback is used only with no registration and a
+   usable base. Hosted pages with no usable URL are omitted and reported via
+   `degraded: ["public-address"]` with explicit footnote copy on both clients.
+   Node tests 10–11, iOS wire test 5, desktop plan/footnote assertions added.
+2. **BLOCKING omitted typed consumer — resolved.** `ArtifactPreview.test.tsx`
+   added to the migration table and Files; its fixture and the retained
+   `groupByDay` builders in `artifacts.test.ts` migrate to the wire shape; the
+   preview action tests and day-grouping tests are kept under typecheck.
+3. **BLOCKING M-04-2 receipt — resolved.** Receipt rewritten with the sibling-
+   Section placement and exact code from code-review finding 11, and the mode
+   rows now mount only when `onRetryLaunchers` is also present (otherwise
+   "Open terminal" stays), so the failed-catalog "Try again" can never be dead.
+   Read-only and legacy behaviour preserved; gate extracted as
+   `OverflowModeRowsGate` with `ChatOverflowGateTests`. **Master edited**
+   (minimal): `00-master.md` ledger row M-04-2 — mount condition and
+   Open-terminal condition now include `onRetryLaunchers`. WS02's M-04-5 already
+   passes it, so no other row changes.
+4. **SHOULD memoization key — resolved.** Key now includes `baseUrl()`, full
+   page fields (`url`, `createdAt`, `expiresAt`, `sessionID`) for the session's
+   and the plan subdomain's rows, outbox `size`/`expiresAt`/`messageID`, a hash
+   of the last message's parts, and which optional reads failed. `degraded` is
+   computed per request; cache age is since derivation; the only deliberate
+   staleness (≤ 30 s) is an edit to a non-final message. Fake-clock tests added
+   (case 8).
+5. **NIT superseded statements — resolved.** Header now states the one new
+   channel and capability id `artifacts-list-1`; the "no node tests" line is
+   replaced by the real verification requirements; the earlier server-first
+   bullets naming `artifacts.list` / WS11 are marked historical.

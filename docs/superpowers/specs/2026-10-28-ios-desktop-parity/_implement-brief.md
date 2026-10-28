@@ -15,6 +15,17 @@ implementers are working in this SAME worktree at the same time on OTHER files.
 3. `mobile/native/AGENTS.md` (Swift 6 rules, transcript row-identity risk, tests).
 4. The root `AGENTS.md` section "NEVER STUB A CONTROL TO DO NOTHING".
 
+## Research before building (user rule)
+Before writing code for a piece, check whether a well-maintained, popular
+open-source library already does it well (maintenance, adoption, license,
+security, fit with the stack — SwiftPM for iOS, npm for server/desktop). Prefer
+adopting it over hand-rolling, unless there is a concrete reason not to. Your
+spec's "Libraries considered" section (and `libraries.md` in the spec folder)
+records the decisions already made — follow them; if you find a better option
+or a gap, report it rather than silently deviating. Adding an iOS package means
+a `project.yml` / `Package.swift` change: list it as a mount for the integration
+step, never edit those files yourself.
+
 ## What to do
 Implement every feature in your spec, plus every mount the ledger assigns to
 YOUR workstream as applier in YOUR (sub)wave. Edit ONLY the files your spec's

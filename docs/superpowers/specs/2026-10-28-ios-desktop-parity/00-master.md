@@ -502,6 +502,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-01-4 | `ChatSessionStore.swift` (WS02) | WS02 | B | `ChatTranscriptMapper.footerTruncationMessageIDs(_ blocks: [TranscriptBlock]) -> Set<String>` (WS01); new `trailingBlocks(…, footerTruncationIDs: Set<String> = [])` (WS02) | M-01-1 |
 | M-01-5 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `TranscriptDisplayOptions.defaultsKey: String`, `TranscriptDisplayOptions.setShowDetails(_: Bool)` (WS01, `TranscriptDisplayOptions.swift`) | WS01 (A1) |
 | M-01-6 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS01 package manifest | WS01 (A1) |
+| M-01-7 | `ChatSessionStore.swift` (WS02) | WS02 | B | `TranscriptDisplayOptions.fetchSlim: Bool` (pass as `slim:`), `TranscriptDisplayOptions.didChange: Notification.Name` (refetch on it) (WS01) — per D22 | WS01 (A1) |
 | M-02-1 | `TranscriptRow.swift` (WS01) | IB | B-int | `EnvironmentValues.transcriptHighlightedRowID: String?` (WS02, `ChatCardMessageFocus.swift`) | WS02 (B) |
 | M-02-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.isReadOnlyJob: Bool = false` (param, WS07); caller passes `ChatSessionStore.isBackgroundJobReadOnly: Bool` (WS02) — hides Compact, Clear, Fork, Delete, Trust toggle, Rename, Mode rows | — |
 | M-02-3 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS02 manifest (`ChatCardModels.swift`, `ChatCardLogic.swift`, `ChatCardsTests.swift`) | WS02 (B) |
@@ -517,7 +518,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-03-8 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS03 manifest (`ComposerModels.swift`, `ComposerInsertion.swift` + 2 tests) | WS03 (A1) |
 | M-03-9 | `ComposerView.swift` (WS03) | IB | B-int | `ChatSessionStore.mutationPolicy: ChatCardMutationPolicy` (`.resolving`, `.allowed`, `.readOnlyJob`) (WS02) | WS02 (B); after M-03-6 |
 | M-04-1 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | `ChatOverflowSheet.onRename: (() -> Void)? = nil` (param) | — |
-| M-04-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | params `mode: SessionMode? = nil`, `launchers: [AvailableLauncher] = []`, `launcherCatalog: SessionLauncherCatalog = .loading`, `onSelectMode: ((SessionMode) -> Void)? = nil`, `onRetryLaunchers: (() -> Void)? = nil`; `SessionModeRows(current: SessionMode, launchers: [AvailableLauncher], catalog: SessionLauncherCatalog, onSelect: (SessionMode) -> Void, onRetry: () -> Void)` (WS04); `AvailableLauncher` (WS10) | WS04 (A2), WS10 (A1). **Placement (code review):** `SessionModeRows` renders TWO top-level Sections — mount it as a SIBLING Section between the Compact/Fork section and the Trust-mode section (never inside a `Section {}`), wrapping `onSelect` as `{ m in dismiss(); onSelectMode(m) }`; keep "Open terminal" only when `mode == nil || onSelectMode == nil`. Exact code: `reviews/code/04-sessions.md` finding 11. |
+| M-04-2 | `ChatOverflowSheet.swift` (WS07) | WS07 | B | params `mode: SessionMode? = nil`, `launchers: [AvailableLauncher] = []`, `launcherCatalog: SessionLauncherCatalog = .loading`, `onSelectMode: ((SessionMode) -> Void)? = nil`, `onRetryLaunchers: (() -> Void)? = nil`; `SessionModeRows(current: SessionMode, launchers: [AvailableLauncher], catalog: SessionLauncherCatalog, onSelect: (SessionMode) -> Void, onRetry: () -> Void)` (WS04); `AvailableLauncher` (WS10) | WS04 (A2), WS10 (A1). **Placement (code review):** `SessionModeRows` renders TWO top-level Sections — mount it as a SIBLING Section between the Compact/Fork section and the Trust-mode section (never inside a `Section {}`), wrapping `onSelect` as `{ m in dismiss(); onSelectMode(m) }`; mount it only when `mode`, `onSelectMode` AND `onRetryLaunchers` are all non-nil (no dead "Try again"), passing `onRetry: onRetryLaunchers`; keep "Open terminal" only when `mode == nil || onSelectMode == nil || onRetryLaunchers == nil`. Exact code: `reviews/code/04-sessions.md` finding 11 + the retry condition (WS07 spec M-04-2 receipt). |
 | M-04-3 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionListStore.window(forSessionID: String) -> (project: String, window: MantaWindow)?` (WS04) | WS04 (A2) |
 | M-04-4 | `ChatScreen.swift` (WS02) | WS02 | B | `SessionRenameSheet(title:initialName:onSave:)`, `SessionListStore.renameSession(project: String, index: Int, newName: String) async -> String?` (WS04) | M-04-1 |
 | M-04-5 | `ChatScreen.swift` (WS02) | WS02 | B | `MantaNavigator.switchMode(windowKey: String, sessionID: String, to: SessionMode)`, `static MantaNavigator.windowKey(project: String, windowIndex: Int) -> String`, `SessionModeStore.read(sessionID:defaults:) -> SessionMode`, `SessionListStore.launchers: [AvailableLauncher]`, `.launcherCatalog: SessionLauncherCatalog`, `.refreshLaunchers() async` (WS04) | M-04-2 |
@@ -535,6 +536,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-07-2 | `ChatScreen.swift` (WS02) | WS02 | B | `WebhooksCard(sessionId:onClose:)`, `ChatOverflowSheet.onWebhooks: (() -> Void)? = nil` (WS07) | WS07 (B, pinned) |
 | M-07-3 | `MantaAppRoot.swift` (WS04) | IB | B-int | `ArtifactAgentFileNotice()` (WS07) | WS07 (B) |
 | M-07-4 | `mobile/native/Package.swift` (WS07) | IB | B-int | WS07 manifest: REMOVE `ArtifactDerivation.swift` + `ArtifactDerivationTests.swift` (deleted server-first); ADD `ArtifactModels`, `ArtifactPresentation`, `ArtifactAgentFileModel`, `WebhookModels` + 5 tests | WS07 (B); M-03-8 |
+| M-07-pkg-1 | `package.json` + `package-lock.json` (root; unowned — wave-B owner WS07, D27) | WS07 | B | `npm install lru-cache@11.5.3` (BlueOak-1.0.0; consumed by WS07 `src/server/artifacts.mjs`, later by WS05 `src/server/forge/view.mjs`). WS07 is wave B's ONLY dependency change; any other wave-B dependency need becomes an IB row here and integration agent B runs the install after B (never a second wave-B worker editing these files). Wave C: WS05 (sole worker) runs `npm install diff@9.0.0` itself; wave D: WS11 runs `npm install async-mutex@0.5.0` itself — no rows needed (one worker per wave) | — (libraries review, `libraries.md`) |
 | M-08-1 | `ChatModelCatalog.swift` (WS09) | WS09 | B | `Notification.Name.mantaProvidersChanged` (WS08, `ProviderConnectionModels.swift`); `ChatModelCatalog.reload()` (WS09) | WS08 (A2) |
 | ~~M-08-2~~ | `UsageSheets.swift` (WS02) | — | — | **Declined** by WS02; no edit, no WS08 API kept. | — |
 | M-08-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS08 manifest (4 sources, 3 tests) | WS08 (A2) |
@@ -550,7 +552,7 @@ rows on the same file are applied top-to-bottom in this table's order.
 | M-10-1 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `SettingsAppearance.storageKey`, `.systemValue`, `static func preference(for stored: String?) -> ThemePreference` (`SettingsAppearance.swift`), `ThemePreference.colorScheme: ColorScheme?` (`SettingsAppearanceView.swift`) (WS10). Call: `.preferredColorScheme(SettingsAppearance.preference(for: themePref).colorScheme)` | WS10 (A1) |
 | M-10-2 | `MantaAppRoot.swift` (WS04) | WS04 | A2 | `Notification.Name.mantaBoxRemoved` (WS10, `BoxDevicesModels.swift`); `MantaOnboardingFlow.backToEntry()` (WS10); `SessionListStore.resetForBoxChange()` (WS04) | WS10 (A1); after M-10-1 |
 | M-10-3 | `mobile/native/Package.swift` (WS07) | IA | A-int | WS10 [pkg] manifest | WS10 (A1) |
-| O-final | `MantaUI.xcodeproj/project.pbxproj` | orchestrator | final | xcodegen from `project.yml` (no worker edits it; no workstream needs a `project.yml` change) | C-int |
+| O-final | `MantaUI.xcodeproj/project.pbxproj` | orchestrator | final | xcodegen from `project.yml` (no worker edits it; WS11 D11 removes the fixture resource from `project.yml`) | D complete (WS11) |
 
 Same-file / same-sub-wave audit: A1 — WS03 alone edits `ChatScreen.swift`;
 A2 — WS04 alone edits `MantaAppRoot.swift`/`SessionListView.swift`; B — WS02
@@ -583,7 +585,7 @@ Exact text of each row lives in the owning spec's mount table.
 | 12 | M-07-S2 | `boxCapabilities.mjs` (+ test) | append `artifacts-list-1` | 07 |
 | 13 | M-09-srv-1 | `rpc.mjs` | NEW `models:table`, `models:picker`, `models:set-default`, `models:set-main`, `models:set-sub`, `models:retry-sub-sync`, `models:opt-in`, `models:set-override`, `models:unidentified`, `models:declare`, `models:set-price`, `usage-stopped:view`, `usage-stopped:apply`, `usage:alerts`, `usage:remind-at-reset`; wrap `ledger:summary` (:2024), `optimizer:summary` (:2030), `optimizer:series` (:2037), `optimizer:prices` (:2045) | 09 |
 | 14 | M-09-srv-2 | `boxCapabilities.mjs` (+ test) | append the nine WS09 ids | 09 |
-| 15 | M-06-srv-1 | `rpc.mjs` `"opencode:search-messages"` (:2017) | pass `listProjects` from `syncState` | 06 |
+| 15 | M-06-srv-1 | `rpc.mjs` `"opencode:search-messages"` (:2017) + import (:58) | pass `listProjects: projectsFromSyncState(syncState)` | 06 |
 | 16 | M-06-srv-2 | `boxCapabilities.mjs` (+ test) | append `search-scope-all-1` | 06 |
 | C1 | M-05-srv-1 | `rpc.mjs` `"forge:inbox"` (:990) | `forgeInbox({ probeRepos })` (WS05 itself, wave C) | 05 |
 | C2 | M-05-srv-2 | `boxCapabilities.mjs` (+ test) | append the four WS05 ids (WS05 itself, wave C) | 05 |
@@ -622,20 +624,24 @@ fields to `forge:probe`, `forge:clone-*`, `forge:repos`, `forge:status`);
 | `src/shared/formatTokens.mjs` (+ `.d.mts`, test) — NEW | WS02 (D26) | — (WS09 consumes) |
 | `src/shared/streamInterpretation.mjs` (+ `.d.mts`, test), `hooks/useSseBus.ts`, `hooks/useBoxCapabilities.ts` (NEW), `Cards.tsx`, `PanelCards.tsx`, `inboxState.ts`, `SessionHeader.tsx` | WS02 | — |
 | `src/renderer/App.tsx`, `src/renderer/store.ts` | WS09 (M-09-dsk-3, store half of M-09-dsk-5 applied by WS09 itself) | — |
-| `ModelsCard.tsx`, `ModelPicker.tsx`, `modelsPicker.ts` (NEW), `ModelLedgerCard.tsx`, `OptimizerCard.tsx`, `ModelsWeCouldntIdentify.tsx`, `ModelPriceForm.tsx`, `UsageResumeModal.tsx`, `usageResume.ts`, `usageEscalation.ts` (delete), `UsageDial.tsx`, `routingCatalog.ts`, `AccountsCard.tsx`, `src/shared/autoEligibility.mjs` | WS09 | — |
+| `ModelsCard.tsx`, `ModelPicker.tsx`, `modelsPicker.ts` (NEW), `ModelLedgerCard.tsx`, `OptimizerCard.tsx`, `ModelsWeCouldntIdentify.tsx`, `ModelPriceForm.tsx`, `UsageResumeModal.tsx`, `usageResume.ts`, `usageEscalation.ts` (delete), `usageAlertsQueue.ts` (NEW), `UsageDial.tsx`, `routingCatalog.ts` (not edited in B — matcher kept for Accounts), `AccountsCard.tsx`, `src/shared/autoEligibility.mjs` | WS09 | — |
 | `artifacts.ts`, `ArtifactsPanel.tsx`, `MediaBody.tsx`, `ArtifactPreview.tsx`, `src/shared/artifactsTypes.ts` (NEW), `api/demoArtifacts.ts` (NEW) | WS07 | — |
-| `SearchPalette.tsx` (+ NEW test) | WS06 | — |
+| `SearchPalette.tsx` (+ NEW test), `PaletteShell.tsx` (+ test) | WS06 | — |
 | `src/server/boxCapabilities.mjs` (+ test) — NEW | WS02 | M-07-S2, M-09-srv-2, M-06-srv-2 |
 | `src/server/version.mjs` (+ test) | WS02 | — |
 | `src/server/delegateView.mjs`, `inboxCopy.mjs` (NEW) | WS02 | — |
 | `src/server/artifacts.mjs` (NEW) | WS07 | — |
-| `src/server/usage.mjs`, `modelsTable.mjs`, `modelsUnidentified.mjs`, `ledgerView.mjs`, `optimizer/view.mjs`, `modelsPricing.mjs`, `usageResumeView.mjs`, `usageAlerts.mjs`, `usageWindowView.mjs` | WS09 | — |
+| `src/server/media.mjs` + `media.test.mjs` (export the one extension → MIME allowlist + `mimeForName`, libraries review) | WS07 | — |
+| `package.json` + `package-lock.json` (root) | WS07 (`lru-cache@11.5.3`, M-07-pkg-1) | — (no other wave-B worker adds a dependency; a future need → IB row, installed by integration agent B) |
+| `src/server/usage.mjs`, `providers.mjs` (+ test; additive `syncSubagentsDetailed` / `setModelCostDetailed`), `modelsTable.mjs`, `modelsUnidentified.mjs`, `ledgerView.mjs`, `optimizer/view.mjs`, `modelsPricing.mjs`, `usageResumeView.mjs`, `usageAlerts.mjs`, `usageWindowView.mjs`, `rpc.models.test.mjs` (NEW) | WS09 | — |
 | `src/server/messageSearch.mjs` | WS06 | — |
 | `src/server/rpc.mjs`, `index.mjs`, `streamInterp.mjs` | IB only (table above) | — |
 
 Wave C: WS05 alone edits `SessionHeader.tsx`, `ChatPanel.tsx`, `chatUtils.ts`,
 `ReviewPane.tsx`, `ToolBodies.tsx`, `InboxPalette.tsx`, `src/shared/types.ts`,
-`forge/*.mjs`, `rpc.mjs`, `boxCapabilities.mjs`. Wave D: WS11 alone.
+`forge/*.mjs`, `rpc.mjs`, `boxCapabilities.mjs`, and `package.json` /
+`package-lock.json` (`diff@9.0.0`). Wave D: WS11 alone (incl. `package.json`
+for `async-mutex@0.5.0`).
 
 ### Capability id registry (D25)
 
