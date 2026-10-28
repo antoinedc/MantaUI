@@ -155,6 +155,25 @@ describe("SearchPalette", () => {
     });
     await type("needles");
     expect(text()).toContain("Showing the newest matches — this history is very large.");
+    // A spent budget with nothing found: both the answer and the caveat.
+    search.mockResolvedValue({ supported: true, hits: [], groups: [], truncated: true });
+    await type("needlesx");
+    expect(text()).toContain("No matches for “needlesx”");
+    expect(text()).toContain("Showing the newest matches — this history is very large.");
+  });
+
+  it("editing the query after a failure replaces the failure with progress", async () => {
+    search.mockResolvedValueOnce({ supported: true, hits: [], groups: [], degraded: true });
+    render();
+    await type("needle");
+    expect(text()).toContain("Couldn't search");
+    let release: (r: Reply) => void = () => {};
+    search.mockReturnValueOnce(new Promise<Reply>((r) => (release = r)));
+    await type("needles");
+    expect(text()).not.toContain("Couldn't search");
+    expect(text()).toContain("Searching other conversations…");
+    await act(async () => release({ supported: true, hits: [], groups: [] }));
+    expect(text()).toContain("No matches for “needles”");
   });
 
   it("classifySearchReply covers every kind and its precedence", () => {

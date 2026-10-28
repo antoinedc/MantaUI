@@ -13,7 +13,12 @@ final class SearchStore: ObservableObject {
 
     @Published private(set) var state: SearchQueryState
     @Published var query = "" {
-        didSet { queryDidChange() }
+        // Keyed on the TRIMMED text, like the desktop: a trailing space or an
+        // identical write is the same settled query and must not search twice.
+        didSet {
+            guard SearchCopy.normalized(oldValue) != SearchCopy.normalized(query) else { return }
+            queryDidChange()
+        }
     }
 
     private let search: SearchFunction

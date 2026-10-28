@@ -111,8 +111,14 @@ struct SearchScreen: View {
         case .results:
             resultsList(state, searching: false)
         case .empty:
-            ContentUnavailableView.search(text: SearchCopy.normalized(store.query))
-                .accessibilityIdentifier("search-empty")
+            ContentUnavailableView {
+                Label("No matches for “\(SearchCopy.normalized(store.query))”", systemImage: "magnifyingglass")
+            } description: {
+                if state.truncated {
+                    Text(SearchCopy.truncatedNote)
+                }
+            }
+            .accessibilityIdentifier("search-empty")
         case .unsupported:
             ContentUnavailableView {
                 Label(SearchCopy.unsupportedMessage, systemImage: "exclamationmark.triangle")

@@ -197,13 +197,13 @@ export function SearchPalette({
             "Search this conversation — and all others. Type at least 2 characters.",
           );
         }
-        if (reply?.kind === "unsupported") {
+        if (!loading && reply?.kind === "unsupported") {
           return message("Search needs a newer server runtime — update the server.");
         }
-        if (reply?.kind === "boxTooOld") {
+        if (!loading && reply?.kind === "boxTooOld") {
           return message("Search needs a newer box — update your box to use this.");
         }
-        if (reply?.kind === "failed") {
+        if (!loading && reply?.kind === "failed") {
           return message("Couldn't search — edit the query to try again.");
         }
         const nodes: ReactNode[] = [];
@@ -270,17 +270,19 @@ export function SearchPalette({
             </div>,
           );
         }
+        // "No matches" even when the budget ran out (truncated) — the note
+        // below says how far the search got.
+        if (reply?.kind === "empty" && !searching) {
+          nodes.push(
+            <div key="none" className="px-3 py-3 text-label text-text-faint">
+              No matches for “{q}”
+            </div>,
+          );
+        }
         if (reply?.truncated) {
           nodes.push(
             <div key="truncated" className="px-3 py-2 text-meta text-text-faint">
               Showing the newest matches — this history is very large.
-            </div>,
-          );
-        }
-        if (nodes.length === 0) {
-          nodes.push(
-            <div key="none" className="px-3 py-3 text-label text-text-faint">
-              No matches for “{q}”
             </div>,
           );
         }

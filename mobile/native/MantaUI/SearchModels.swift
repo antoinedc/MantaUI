@@ -127,15 +127,18 @@ enum SearchCopy {
     }
 
     /// Why a search request failed, in words a person can act on. Only a
-    /// message the box wrote for a human passes through.
+    /// message the box wrote for a human (`MantaError.server`) passes through.
     static func failureReason(_ error: Error) -> String {
         switch error {
         case MantaError.authRequired:
             return "this device isn't signed in to the box"
         case MantaError.server(let text) where !text.isEmpty:
             return text
-        case MantaError.transport(let text) where !text.isEmpty:
-            return text
+        case MantaError.transport(_), is DecodingError:
+            // Internal strings ("invalid rpc envelope", "… returned no result")
+            // mean nothing to a person; the box answered but not in a way this
+            // app can read.
+            return "the box sent an answer this app can't read"
         default:
             return "check the connection"
         }
@@ -222,7 +225,9 @@ struct SearchQueryState: Equatable, Sendable {
             return
         }
         if groups.isEmpty {
-            settle(.empty, [], false)
+            // A spent time budget makes "no matches" the least trustworthy
+            // answer — keep the truncation note.
+            settle(.empty, [], response.truncated == true)
             return
         }
         settle(.results, groups, response.truncated == true)

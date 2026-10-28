@@ -173,6 +173,13 @@ final class SearchTests: XCTestCase {
         XCTAssertEqual(SearchCopy.failureReason(MantaError.server("db busy")), "db busy")
         XCTAssertEqual(SearchCopy.failureReason(MantaError.authRequired), "this device isn't signed in to the box")
         XCTAssertEqual(SearchCopy.failureReason(Boom()), "check the connection")
+        // Internal transport / decoding strings never reach the person.
+        XCTAssertEqual(SearchCopy.failureReason(MantaError.transport("invalid rpc envelope")),
+                       "the box sent an answer this app can't read")
+        XCTAssertEqual(SearchCopy.failureReason(MantaError.transport("opencode:search-messages returned no result")),
+                       "the box sent an answer this app can't read")
+        XCTAssertEqual(SearchCopy.failureReason(DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "x"))),
+                       "the box sent an answer this app can't read")
         XCTAssertEqual(SearchCopy.failedMessage("db busy"), "Couldn't search — db busy.")
     }
 
@@ -297,6 +304,14 @@ final class SearchTests: XCTestCase {
         XCTAssertEqual(state.phase, .empty)
     }
 
+    func test_state_emptyTruncated_keepsTruncatedNote() throws {
+        var state = SearchQueryState(primarySessionId: nil)
+        let t = try XCTUnwrap(state.queryChanged("needle"))
+        state.receive(response(groups: [], truncated: true), for: t)
+        XCTAssertEqual(state.phase, .empty)
+        XCTAssertTrue(state.truncated)
+    }
+
     func test_state_rendersServerGroupOrderVerbatim() throws {
         var state = SearchQueryState(primarySessionId: "cur")
         let t = try XCTUnwrap(state.queryChanged("needle"))
@@ -330,7 +345,7 @@ final class SearchTests: XCTestCase {
         var state = SearchQueryState(primarySessionId: nil)
         let t1 = try XCTUnwrap(state.queryChanged(" needle "))
         state.fail(MantaError.transport("offline"), for: t1)
-        XCTAssertEqual(state.phase, .failed("offline"))
+        XCTAssertEqual(state.phase, .failed("the box sent an answer this app can't read"))
         let t2 = try XCTUnwrap(state.retry())
         XCTAssertEqual(t2.query, "needle")
         XCTAssertGreaterThan(t2.seq, t1.seq)
