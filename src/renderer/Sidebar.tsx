@@ -7,7 +7,7 @@ import {
   useState,
 } from "react";
 import type { ReactElement } from "react";
-import { ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause } from "lucide-react";
+import { ChevronRight, ChevronDown, Plus, X, Pin, Search, CirclePause, Radar } from "lucide-react";
 import { useStore, flatSessions, type WindowStatusUI, type NewSessionDraft } from "./store";
 import { nowMs, useAgeTick } from "./clock";
 import { PaletteShell, useSelectedIntoView } from "./PaletteShell";
@@ -29,6 +29,21 @@ import {
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { OBSERVED_JOB_LABEL, OBSERVED_JOB_TITLE, isObservedJob } from "./backgroundRun";
+
+// A session Manta only watches (started by a script or another tool): a small mark, explained on hover.
+function ObservedMark() {
+  return (
+    <span
+      className="shrink-0 inline-flex items-center text-text-quiet"
+      title={OBSERVED_JOB_TITLE}
+      aria-label={OBSERVED_JOB_LABEL}
+      role="img"
+      data-testid="job-observed-label"
+    >
+      <Radar size={12} aria-hidden="true" />
+    </span>
+  );
+}
 import { SessionRow as RailSessionRow, type SessionStatus } from "./SessionRow";
 import { StatusDot } from "./StatusDot";
 import { dotTone, badgeLabel } from "./ctoView";
@@ -1323,15 +1338,7 @@ function WindowRow({
           ageStale={age.stale}
           trailing={
             <>
-              {observed ? (
-                <span
-                  className="shrink-0 text-micro text-text-quiet"
-                  title={OBSERVED_JOB_TITLE}
-                  data-testid="job-observed-label"
-                >
-                  {OBSERVED_JOB_LABEL}
-                </span>
-              ) : null}
+              {observed ? <ObservedMark /> : null}
               <PinSlot pinned={pinned} onToggle={onTogglePin} />
             </>
           }
@@ -1387,15 +1394,7 @@ function JobChildRow({
           ageStale={age.stale}
           title={title}
           trailing={
-            observed ? (
-              <span
-                className="shrink-0 text-micro text-text-quiet"
-                title={OBSERVED_JOB_TITLE}
-                data-testid="job-observed-label"
-              >
-                {OBSERVED_JOB_LABEL}
-              </span>
-            ) : undefined
+            observed ? <ObservedMark /> : undefined
           }
           ariaLevel={2}
           tabIndex={focused ? 0 : -1}
