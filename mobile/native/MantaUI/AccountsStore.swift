@@ -160,9 +160,6 @@ final class AccountsStore: ObservableObject {
         subscriptions.removeAll()
         feedbackClear?.cancel()
         feedbackClear = nil
-        moveAutoHide?.cancel()
-        moveAutoHide = nil
-        moveAutoHideKey = nil
         started = false
     }
 
