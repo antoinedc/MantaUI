@@ -74,4 +74,31 @@ final class TranscriptViewTests: XCTestCase {
     func testAMessageViewWithoutMediaHasAnEmptyList() throws {
         XCTAssertEqual(try decode(#"[{\#(info),"parts":[],"view":{}}]"#)[0].view?.media, [])
     }
+
+    // MARK: - D10 plan question decode
+
+    private func decodeQuestion(_ json: String) throws -> QuestionRequest {
+        try JSONDecoder().decode(QuestionRequest.self, from: Data(json.utf8))
+    }
+
+    func testAQuestionWithAPlanDecodesIt() throws {
+        let json = ##"{"id":"q1","sessionID":"s","questions":[],"tool":{"messageID":"m","callID":"c"},"plan":{"title":"Ship login","text":"# Ship login","steps":3,"files":2,"path":".opencode/plans/x.md","pageUrl":"https://b.example/pages/plan-s"}}"##
+        let plan = try XCTUnwrap(try decodeQuestion(json).plan)
+        XCTAssertEqual(plan, PlanQuestionView(title: "Ship login", text: "# Ship login", steps: 3, files: 2, path: ".opencode/plans/x.md", pageUrl: "https://b.example/pages/plan-s"))
+    }
+
+    func testAnOrdinaryQuestionAndAMalformedPlanBothDecodeWithNoPlan() throws {
+        XCTAssertNil(try decodeQuestion(#"{"id":"q1","sessionID":"s","questions":[]}"#).plan)
+        for bad in [#""plan":"junk""#, #""plan":{"text":"no title"}"#, #""plan":null"#] {
+            let q = try decodeQuestion(#"{"id":"q1","sessionID":"s","questions":[],\#(bad)}"#)
+            XCTAssertEqual(q.id, "q1", "the question stays answerable: \(bad)")
+            XCTAssertNil(q.plan, bad)
+        }
+    }
+
+    func testAPlanWithNoPathOrPageDecodesThoseAsNil() throws {
+        let plan = try XCTUnwrap(try decodeQuestion(#"{"id":"q1","sessionID":"s","questions":[],"plan":{"title":"T","text":"","steps":0,"files":0,"path":null,"pageUrl":null}}"#).plan)
+        XCTAssertNil(plan.path)
+        XCTAssertNil(plan.pageUrl)
+    }
 }

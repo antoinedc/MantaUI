@@ -1862,9 +1862,7 @@ private struct ChatScreenContent: View {
     /// changed (BET-1214).
     private var cardActions: TranscriptCardActions {
         TranscriptCardActions(
-            messages: store.messages,
             buildModelName: buildModelName,
-            planURL: planURL,
             onPermissionReply: { permission, reply in
                 store.replyPermission(permission, reply: reply)
             },
@@ -1880,7 +1878,7 @@ private struct ChatScreenContent: View {
             onKeepPlanning: { question, feedback in
                 store.keepPlanning(question: question, feedback: feedback)
             },
-            onOpenPage: { openPlanPage() },
+            onOpenPage: { question in openPlanPage(question.plan?.pageUrl) },
             onQuote: { selection, destination in
                 Task { await quote(selection, into: destination) }
             },
@@ -1893,16 +1891,6 @@ private struct ChatScreenContent: View {
     /// its arrival (BET-1214).
     private var isBlockingCardPresent: Bool {
         store.hasBlockingCard
-    }
-
-    /// The deterministic plan-page URL for this session (`<base>/pages/plan-…`,
-    /// auto-published by the plan agent's plan_render tool), or nil when no
-    /// usable subdomain slug can be formed. There is no on-device publish call
-    /// — the URL is derived, mirroring the current desktop
-    /// (`ChatPanel.tsx:2544-2552`) which standardized on the single-HTML plan
-    /// page auto-published under the per-session subdomain.
-    private var planURL: String? {
-        PlanDerivation.planPageURL(sessionID: store.sessionId, baseURL: api.serverURL)
     }
 
     /// The session's BUILD-model name for the card's "Ready to build · …"
@@ -1925,7 +1913,7 @@ private struct ChatScreenContent: View {
         // then re-send the plan text ourselves (feedback appended) with that
         // build model — opencode's own "yes" would otherwise stamp the injected
         // build turn with the planning model.
-        var prompt = PlanDerivation.extractPlanData(question, in: store.messages).text
+        var prompt = question.plan?.text ?? ""
         let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             prompt = prompt.isEmpty ? trimmed : "\(prompt)\n\n\(trimmed)"
@@ -1935,8 +1923,8 @@ private struct ChatScreenContent: View {
         store.buildHere(question: question, planText: prompt, buildModel: buildModel)
     }
 
-    private func openPlanPage() {
-        if let planURL, let url = URL(string: planURL) {
+    private func openPlanPage(_ pageUrl: String?) {
+        if let pageUrl, let url = URL(string: pageUrl) {
             UIApplication.shared.open(url)
         }
     }
@@ -2381,9 +2369,8 @@ struct QuestionCard: View {
 
 // MARK: - Plan card (BET-1026)
 
-/// The plan_exit question upgraded into a dedicated card. Detection is EXACT
-/// (`PlanDerivation.isPlanExitQuestion`, a matching `plan_exit` tool callID —
-/// never the question text), so this card REPLACES the generic QuestionCard for
+/// The plan_exit question upgraded into a dedicated card. Detection is the BOX's and EXACT (`question.plan`, set
+/// when a `plan_exit` tool call matched the question's callID — never the question text), so this card REPLACES the generic QuestionCard for
 /// that question and never coexists with it.
 ///
 /// Recipes are reused, not invented: the container matches `PermissionCard`
@@ -2396,11 +2383,8 @@ struct QuestionCard: View {
 /// generated tokens — no new token.
 struct PlanCard: View {
     let question: QuestionRequest
-    let messages: [OpencodeMessage]
     /// The session's BUILD-model name for "Ready to build · <model>".
     let buildModelName: String
-    /// The deterministic plan-page URL (nil when no usable slug can be formed).
-    let planURL: String?
     let tokens: Tokens
     let onBuildHere: (String) -> Void
     let onKeepPlanning: (String) -> Void
@@ -2408,8 +2392,10 @@ struct PlanCard: View {
 
     @State private var feedback = ""
 
-    private var data: PlanData { PlanDerivation.extractPlanData(question, in: messages) }
-    private var metrics: (steps: Int, files: Int) { PlanDerivation.planMetrics(data.text) }
+    /// The box's plan data. A question without one is never given this card (the split is `plan != nil`).
+    private var data: PlanQuestionView { question.plan ?? PlanQuestionView(title: "Plan complete", text: "") }
+    /// The box's shareable page (nil when the box has no public base URL).
+    private var planURL: String? { data.pageUrl }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp2) {
@@ -2428,7 +2414,7 @@ struct PlanCard: View {
             // (a plan authored via `write`/`plan` without a discoverable path) —
             // never an empty bullet, never a crash (BET-1026 decision 6).
             if let path = data.path {
-                Text("\(metrics.steps) steps · \(metrics.files) files · \(path)")
+                Text("\(data.steps) steps · \(data.files) files · \(path)")
                     .font(.manta(size: Metrics.type.twoXS, design: .monospaced))
                     .foregroundColor(tokens.tx3)
                     .lineLimit(1)
@@ -2457,7 +2443,7 @@ struct PlanCard: View {
                 .background(tokens.inset, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
             HStack(spacing: Metrics.spacing.sp2) {
                 buildButton
-                openPageButton
+                if planURL != nil { openPageButton }
                 Spacer(minLength: 0)
                 keepPlanningButton
             }

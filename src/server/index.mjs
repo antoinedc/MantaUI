@@ -104,6 +104,7 @@ import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
 import { createSessionStatus } from "./sessionStatus.mjs";
+import { createQuestionsDecorator } from "./questionsDecorator.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -344,8 +345,16 @@ void (async () => {
     /* non-fatal: no default until the next config:update */
   }
 })();
-const streamInterp = createStreamInterpreter({
+// WS11 D10: a question that belongs to a plan_exit tool call carries the plan (title, text, counts, path, page URL),
+// decided here from the session's transcript — on the `questions` frame, in the connect snapshot and from
+// `opencode:questions`.
+const questionsDecorator = createQuestionsDecorator({
   publish: (evt) => bus.publish(evt),
+  listMessages: (sid) => oc.listMessages(sid, { slim: true }),
+  baseUrl: () => publicBaseUrl(),
+});
+const streamInterp = createStreamInterpreter({
+  publish: (evt) => questionsDecorator.publish(evt),
   contextLimitFor,
   resolveContextModel: (a) => contextModels.resolve(a),
   // The device stream predicts cache staleness against the SAME TTL opencode
@@ -386,7 +395,7 @@ oc.setCommandCorrelator(commandCorrelator);
 // interactive card reappear and stay answerable on a thin client).
 // `snapshotState()` returns these events; the bus replays them to each new
 // subscriber.
-bus.setSnapshot(() => [...streamInterp.snapshotState(), ...(sessionStatusRef.current?.snapshotFrames() ?? [])]);
+bus.setSnapshot(() => [...questionsDecorator.decorateSnapshot(streamInterp.snapshotState()), ...(sessionStatusRef.current?.snapshotFrames() ?? [])]);
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
@@ -2103,6 +2112,7 @@ rpcHandlers = buildHandlers({
   pty,
   bus,
   streamInterp,
+  questionsDecorator,
   terminalRunning: (session, index) => terminalRunning.get(`${session}:${index}`) === true,
   contextModels,
   accountsManager,

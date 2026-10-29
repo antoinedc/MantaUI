@@ -128,13 +128,11 @@ import {
   releaseUserScrollIntent,
   USER_SCROLL_INTENT_WINDOW_MS,
   FOLLOW_THRESHOLD_PX,
-  isPlanExitQuestion,
-  extractPlanData,
   resolveDelegateModel,
   deviceAuthErrorMessage,
 } from "./chatUtils";
 
-import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord, QuestionRequest } from "../shared/types";
+import type { OpencodeModel, OpencodeAgent, UsageSnapshot, OpencodeMessage, VoiceNoteRecord } from "../shared/types";
 
 
 
@@ -3976,91 +3974,6 @@ describe("user scroll intent", () => {
     releaseUserScrollIntent(intent, 5_000);
     expect(intent.pointerDown).toBe(false);
     expect(hasUserScrollIntent(intent, 5_001)).toBe(false);
-  });
-});
-
-describe("isPlanExitQuestion", () => {
-  const planq = (callID?: string): QuestionRequest =>
-    ({
-      id: "q1",
-      sessionID: "s1",
-      questions: [],
-      tool: callID ? { messageID: "m1", callID } : undefined,
-    }) as QuestionRequest;
-
-  const part = (tool: string, callID: string) =>
-    ({ type: "tool", id: "p", messageID: "m1", tool, callID });
-
-  it("true when a transcript tool part named plan_exit carries the question's callID", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        part("read", "call-read"),
-        part("plan_exit", "call-exit"),
-      ],
-    };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
-  });
-
-  it("false when the matching callID belongs to a DIFFERENT tool", () => {
-    const msg: OpencodeMessage = { info: {} as never, parts: [part("edit", "call-exit")] };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
-  });
-
-  it("false for an ordinary question with no tool call", () => {
-    expect(isPlanExitQuestion(planq(undefined), null)).toBe(false);
-  });
-
-  it("false when no part matches the callID even if a plan_exit part exists", () => {
-    const msg: OpencodeMessage = { info: {} as never, parts: [part("plan_exit", "other")] };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(false);
-  });
-
-  it("matches a nested state.input.tool shape (reconciled transcript part)", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        {
-          type: "tool",
-          id: "p",
-          messageID: "m1",
-          callID: "call-exit",
-          state: { status: "completed", input: { tool: "plan_exit", planPath: "/x/plan.md" } },
-        },
-      ],
-    };
-    expect(isPlanExitQuestion(planq("call-exit"), [msg])).toBe(true);
-  });
-});
-
-describe("extractPlanData", () => {
-  const planq = (callID: string): QuestionRequest =>
-    ({ id: "q1", sessionID: "s1", questions: [], tool: { messageID: "m1", callID } }) as QuestionRequest;
-
-  it("title from first heading + the plan text from the tool input", () => {
-    const msg: OpencodeMessage = {
-      info: {} as never,
-      parts: [
-        {
-          type: "tool",
-          id: "p",
-          messageID: "m1",
-          callID: "call-exit",
-          state: { status: "completed", input: { tool: "plan_exit", plan: "# Add login\n## Step 1\n- `src/a.ts`" } },
-        },
-      ],
-    };
-    const d = extractPlanData(planq("call-exit"), [msg]);
-    expect(d.title).toBe("Add login");
-    expect(d.text).toContain("## Step 1");
-  });
-
-  it("falls back to the question header when no plan text is present", () => {
-    const q = planq("call-exit");
-    q.questions = [{ question: "Plan at /p is complete. Would you like to switch?", header: "Build Agent", options: [] }];
-    const d = extractPlanData(q, []);
-    expect(d.title).toBe("Build Agent");
-    expect(d.text).toBe("");
   });
 });
 

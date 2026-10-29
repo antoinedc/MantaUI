@@ -64,6 +64,10 @@ export const DELETED = [
   // D9 — canonical inline media are the box's (`message.view.media`, `part.view.media`).
   { scopes: ["renderer"], regex: /\b(filePartToMediaEntry|isMediaMime)\b/, why: "D9: part.view.media marks an image/video file part; the renderer does not sniff mimes" },
   { scopes: ["swift", "swiftTests"], regex: /\bTranscriptMediaParse\b|TranscriptMediaMime\.forPath|\bcanonicalEntries\b/, why: "D9: iOS maps message.view.media; it never parses media_begin / media_show tool output" },
+  // D10 — the plan card's data is the box's (`question.plan`).
+  { scopes: ["renderer"], regex: /\b(isPlanExitQuestion|extractPlanData|planRefsFromPart)\b/, why: "D10: question.plan carries the plan card's data; the renderer matches no tool part and parses no plan" },
+  { scopes: ["swift", "swiftTests"], regex: /\benum PlanDerivation\b|\bstruct PlanData\b|PlanDerivation\./, why: "D10: iOS shows question.plan; it never derives a plan from the transcript" },
+  { scopes: ["server"], regex: /function isPlanExitQuestion\b/, except: /questionsDecorator\.mjs$/, why: "D10: ONE plan-question predicate, exported from questionsDecorator.mjs (push imports it)" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },

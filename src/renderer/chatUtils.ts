@@ -6,7 +6,7 @@
 import { formatBytes } from "../shared/formatBytes.mjs";
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, WindowStatusPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, WindowStatusPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -1989,86 +1989,10 @@ export function resolvePlanToggle(
   };
 }
 
-// ===== Plan card data (BET-951) =====
+// ===== Plan card data (BET-951 → WS11 D10) =====
 //
-// The plan_exit question is upgraded into a plan card in the pinned card
-// stack. Its title ("the plan's title/first heading") and the FULL plan text
-// are derived from the `plan_exit` tool call's carried plan. Detection is
-// EXACT, never heuristic: the question's `tool.callID` links back to the
-// `plan_exit` tool part in the transcript — match on that, never on the
-// question text.
-
-// A tool part may surface its name/callID directly (the live `message.part.*`
-// event shape used by useSseBus) or nested under `state.input` (the reconciled
-// transcript shape Toolkit parts carry). Read both tolerantly.
-function toolPartName(part: OpencodePart): string {
-  const direct = part.tool;
-  if (typeof direct === "string" && direct) return direct;
-  const state = part.state as { input?: { tool?: unknown } } | undefined;
-  const nested = state?.input?.tool;
-  return typeof nested === "string" ? nested : "";
-}
-
-/**
- * Is `question` the plan_exit ask? True iff a transcript tool part named
- * `plan_exit` carries the SAME `callID` as `question.tool.callID`. A callID is
- * required (an orphaned/recovered question without one can never be matched)
- * and the match must be exact — the question text is never consulted.
- */
-export function isPlanExitQuestion(
-  question: QuestionRequest,
-  messages: OpencodeMessage[] | null,
-): boolean {
-  const qCallID = question.tool?.callID;
-  if (!qCallID) return false;
-  for (const msg of messages ?? []) {
-    for (const part of msg.parts) {
-      if (part.type !== "tool") continue;
-      if (part.callID !== qCallID) continue;
-      if (toolPartName(part) === "plan_exit") return true;
-    }
-  }
-  return false;
-}
-
-/**
- * The plan card's display data: the title (first markdown heading of the plan
- * text, falling back to the question header) and the FULL plan text (what
- * "Build here" resubmits as the next prompt with the build model). Everything
- * is tolerant — when the `plan_exit` part's input carries no plan text the
- * card still renders, just with the question's header as the title.
- */
-export function extractPlanData(
-  question: QuestionRequest,
-  messages: OpencodeMessage[] | null,
-): {
-  title: string;
-  text: string;
-} {
-  let text = "";
-  for (const msg of messages ?? []) {
-    for (const part of msg.parts) {
-      if (part.type !== "tool") continue;
-      if (part.callID !== question.tool?.callID) continue;
-      if (toolPartName(part) !== "plan_exit") continue;
-      const state = part.state as { input?: Record<string, unknown> } | undefined;
-      const input = (state?.input ?? part.input) as
-        | Record<string, unknown>
-        | undefined;
-      const t = input?.plan ?? input?.content ?? input?.text;
-      if (typeof t === "string") text = t;
-      break;
-    }
-  }
-  const firstHeading = text.match(/^#{1,6}[ \t]+(.+)$/m)?.[1]?.trim();
-  const firstLine = text.split("\n").find((l) => l.trim())?.trim();
-  const title =
-    firstHeading ??
-    firstLine ??
-    question.questions[0]?.header ??
-    "Plan complete";
-  return { title, text };
-}
+// The plan_exit question carries its plan card data from the BOX (`question.plan`: title, text, step/file counts,
+// the plan file, the page URL — decided from the matching `plan_exit` tool part). Nothing here derives it.
 
 // ===== resolveDelegateModel (BET-951) =====
 //

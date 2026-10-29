@@ -1700,3 +1700,48 @@ describe("ChatPanel attachment auto-submit (BET-1124)", () => {
     );
   });
 });
+
+// WS11 D10: the plan card is the BOX's call (`question.plan`). A plan_exit question carries it; the same shape without it
+// (an older box, or an ordinary question) is an ordinary question card whose options still answer it.
+describe("ChatPanel plan question (box-decided)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+
+  const transcript = [
+    {
+      info: { id: "msg_a1", sessionID: "ses_test", role: "assistant" as const, time: { created: 1, completed: 2 } },
+      parts: [{ type: "text", id: "prt_a1", messageID: "msg_a1", text: "plan done" }],
+    },
+  ];
+  const question = (plan?: Record<string, unknown>) => ({
+    id: "que_p", sessionID: "ses_test", requestId: "que_p", tool: { messageID: "msg_a1", callID: "call_exit" },
+    questions: [{ header: "Build Agent", question: "Plan at x ready. Switch?", options: [{ label: "Yes" }, { label: "No" }] }],
+    ...(plan ? { plan } : {}),
+  });
+
+  async function open(q: ReturnType<typeof question>) {
+    const { bus } = installMockApi({ opencodeMessages: () => Promise.resolve(transcript) });
+    resetStore();
+    h = mount(<ChatPanel {...PROPS} />);
+    await h.flush();
+    await emitStreamAndFlush(bus, h, { sub: "questions", sessionId: "ses_test", payload: { questions: [q] } });
+  }
+
+  it("a question with `plan` renders the plan card (title, counts, page link) and not the ordinary card", async () => {
+    await open(question({ title: "Ship login", text: "# Ship login", steps: 3, files: 2, path: null, pageUrl: "https://b.example/pages/plan-x" }));
+    expect(h!.text()).toContain("Ship login");
+    expect(h!.text()).toContain("3 steps");
+    expect(h!.text()).toContain("2 files");
+    expect(h!.text()).toContain("Build here");
+    expect(h!.text()).not.toContain("Switch?");
+  });
+
+  it("the same question WITHOUT `plan` is an ordinary question card (its options still answer it)", async () => {
+    await open(question());
+    expect(h!.text()).toContain("Plan at x ready. Switch?");
+    expect(h!.text()).not.toContain("Build here");
+  });
+});

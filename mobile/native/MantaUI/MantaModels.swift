@@ -283,6 +283,32 @@ struct QuestionRequest: Codable, Equatable, Sendable {
     var questions: [QuestionInfo]
     var tool: PermissionTool?
     var requestId: String?
+    /// Set by the box (`questions-plan-1`) on a plan_exit question: the plan card's data. nil on an ordinary question
+    /// and on an older box — the question then renders as an ordinary card.
+    var plan: PlanQuestionView? = nil
+
+    init(id: String, sessionID: String, questions: [QuestionInfo], tool: PermissionTool? = nil,
+         requestId: String? = nil, plan: PlanQuestionView? = nil) {
+        self.id = id
+        self.sessionID = sessionID
+        self.questions = questions
+        self.tool = tool
+        self.requestId = requestId
+        self.plan = plan
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, sessionID, questions, tool, requestId, plan }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        sessionID = try c.decode(String.self, forKey: .sessionID)
+        questions = try c.decode([QuestionInfo].self, forKey: .questions)
+        tool = try c.decodeIfPresent(PermissionTool.self, forKey: .tool)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        // A malformed plan never costs the question (it is still answerable): it just stays an ordinary card.
+        plan = (try? c.decodeIfPresent(PlanQuestionView.self, forKey: .plan)) ?? nil
+    }
 }
 
 struct SendPromptInput: Sendable {

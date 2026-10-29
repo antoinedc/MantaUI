@@ -204,3 +204,39 @@ enum TranscriptViewMedia {
         return n
     }
 }
+
+
+// MARK: - Plan question (D10)
+
+/// The plan card's data for a plan_exit question, decided on the box (`question.plan`).
+struct PlanQuestionView: Codable, Equatable, Sendable {
+    var title: String
+    var text: String
+    var steps: Int
+    var files: Int
+    /// The `.opencode/plans/*.md` file, nil when none was found.
+    var path: String?
+    /// The shareable plan page, nil when the box has no public base URL.
+    var pageUrl: String?
+
+    init(title: String, text: String, steps: Int = 0, files: Int = 0, path: String? = nil, pageUrl: String? = nil) {
+        self.title = title
+        self.text = text
+        self.steps = steps
+        self.files = files
+        self.path = path
+        self.pageUrl = pageUrl
+    }
+
+    private enum CodingKeys: String, CodingKey { case title, text, steps, files, path, pageUrl }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decode(String.self, forKey: .title)
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? ""
+        steps = ((try? c.decodeIfPresent(Int.self, forKey: .steps)) ?? nil) ?? 0
+        files = ((try? c.decodeIfPresent(Int.self, forKey: .files)) ?? nil) ?? 0
+        path = (try? c.decodeIfPresent(String.self, forKey: .path)) ?? nil
+        pageUrl = (try? c.decodeIfPresent(String.self, forKey: .pageUrl)) ?? nil
+    }
+}

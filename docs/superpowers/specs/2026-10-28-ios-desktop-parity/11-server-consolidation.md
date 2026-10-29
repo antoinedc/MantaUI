@@ -2459,3 +2459,21 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
 - iOS: `TranscriptViewMedia.entries(messages)` (seq = transcript-order index, `.ready`) replaces `TranscriptMediaParse` (deleted with
   `TranscriptMediaMime.forPath`); `TranscriptMediaReconcile.liveOnly`, the live reducer and geometry are untouched. Lossy decode: a
   malformed media entry is skipped, never the list or the message.
+
+## Implementation notes (D10, `questions-plan-1`)
+
+- Box: `questionsDecorator.mjs` — `planForQuestion` (exact callID match against a `plan_exit` part; title = first heading →
+  first non-blank line → the question header → "Plan complete"; `path` = the part's own plan ref else the first authoring-tool/text
+  ref in the transcript via WS07's `planRefsFromPart`; `pageUrl` = `planPageUrl(sessionId, publicBaseUrl())`; steps/files =
+  the phone's `planMetrics` rules) and `createQuestionsDecorator`: wraps the interpreter's publish for `questions` frames (a
+  transcript read per (session, callID), cached; negatives cached for 10 s), drops an overtaken async publish with a per-session
+  sequence, decorates the connect snapshot and `opencode:questions`. A failed transcript read publishes the question undecorated
+  (still answerable). `push.mjs` imports the ONE `isPlanExitQuestion` (decorated `plan`, else opencode's own literal) — its
+  private copy is deleted and the guard forbids another under `src/server/`.
+- Behaviour notes: a heading must start its line (the desktop rule; the phone also accepted an indented one); an empty question
+  header falls through to "Plan complete" (the phone's rule).
+- Desktop: `q.plan` replaces `isPlanExitQuestion`/`extractPlanData` (and the client-built page URL); the card subtitle shows the
+  box's step/file counts; "Open page" uses `plan.pageUrl` (null → the existing no-op guard in the handler stays).
+- iOS: `QuestionRequest.plan: PlanQuestionView?` (lossy: a malformed plan keeps the question, as an ordinary card);
+  `PlanDerivation.swift` and its tests deleted; `splitQuestions` is `plan != nil`; `TranscriptCardActions` lost `messages`/`planURL`
+  (the open-page action takes the question); the "Open page" button is only drawn when the box gave a URL (no dead control).

@@ -171,8 +171,7 @@ final class ChatSessionStore: ObservableObject {
     @Published private(set) var widgets: [WidgetRef] = []
     /// The LAST fetched raw transcript (`opencode:messages`), kept alongside the
     /// rendered `transcript` blocks so the plan card can run its exact
-    /// derivation (`isPlanExitQuestion` / `extractPlanData` need the raw tool
-    /// parts — callID, state.input, patch files — which the blocks discard).
+    /// derivation (the plan card's data itself is the box's `question.plan`).
     /// Replaced wholesale on each fetch (loadEarlier refetches a larger tail,
     /// so `messages` is always a superset of prior values, never a stale mix).
     @Published private(set) var messages: [OpencodeMessage] = []
@@ -1940,31 +1939,24 @@ final class ChatSessionStore: ObservableObject {
     /// The newest pending permission, if any (rendered as a tail card).
     var newestPermission: PermissionRequest? { permissions.last }
 
-    /// Partition the pending questions into the plan-exit one and the generic
-    /// remaining one. Pure and unit-tested so the plan card and the generic
-    /// question card can never render for the same question — the split is by
-    /// the exact tool callID (`PlanDerivation.isPlanExitQuestion`), never by
-    /// wording.
-    /// `nonisolated`: pure (value-in, value-out), so it is directly
-    /// unit-testable from a nonisolated XCTest body.
-    nonisolated static func splitQuestions(
-        _ questions: [QuestionRequest],
-        messages: [OpencodeMessage]
-    ) -> (planExit: QuestionRequest?, generic: QuestionRequest?) {
-        let planExit = questions.last(where: { PlanDerivation.isPlanExitQuestion($0, in: messages) })
-        let generic = questions.last(where: { !PlanDerivation.isPlanExitQuestion($0, in: messages) })
-        return (planExit, generic)
+    /// Partition the pending questions into the plan-exit one and the generic remaining one. The split is the BOX's
+    /// call (`question.plan`, set when a `plan_exit` tool call matched the question's callID), so the plan card and
+    /// the generic question card can never render for the same question. An older box sets none: every question is
+    /// generic and its options still answer it.
+    /// `nonisolated`: pure (value-in, value-out), so it is directly unit-testable from a nonisolated XCTest body.
+    nonisolated static func splitQuestions(_ questions: [QuestionRequest]) -> (planExit: QuestionRequest?, generic: QuestionRequest?) {
+        (questions.last(where: { $0.plan != nil }), questions.last(where: { $0.plan == nil }))
     }
 
     /// The newest pending question EXCLUDING the plan_exit question (which is
     /// rendered by the dedicated plan card).
     var newestQuestion: QuestionRequest? {
-        Self.splitQuestions(questions, messages: messages).generic
+        Self.splitQuestions(questions).generic
     }
 
     /// The newest plan_exit question, when one is pending.
     var newestPlanQuestion: QuestionRequest? {
-        Self.splitQuestions(questions, messages: messages).planExit
+        Self.splitQuestions(questions).planExit
     }
 
     /// True when at least one blocking card (permission / plan / question) is

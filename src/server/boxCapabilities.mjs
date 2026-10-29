@@ -48,6 +48,8 @@ export const BOX_CAPABILITIES = Object.freeze([
   "sessions-window-status-1",
   // WS11 D8–D9 (message.view: turn footer, truncation, canonical media)
   "transcript-view-1",
+  // WS11 D10 (plan question data)
+  "questions-plan-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

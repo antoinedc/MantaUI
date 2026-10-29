@@ -636,6 +636,8 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // WS11 D10: adds `plan` to a plan_exit question (null in a bare test harness).
+  questionsDecorator = null,
   // WS11 D7: the per-window status aggregator (null in a bare test harness).
   sessionStatus = null,
   // WS11 D6: (session, windowIndex) → is a terminal window mid-turn (the status poller's latest batch).
@@ -1661,7 +1663,10 @@ export function buildHandlers({
     // preload: ipcRenderer.invoke(IPC.opencodeQuestions, sessionId?)  → args[0] = sessionId
     // Background-job children no longer surface here (BET-418 §A) — see
     // opencode:permissions above.
-    "opencode:questions": async (sessionId) => oc.listQuestions(sessionId),
+    "opencode:questions": async (sessionId) => {
+      const questions = await oc.listQuestions(sessionId);
+      return questionsDecorator && sessionId ? questionsDecorator.decorate(sessionId, questions) : questions;
+    },
 
     // preload: ipcRenderer.invoke(IPC.opencodeQuestionReply, { requestId, answers, sessionId })
     // → opencode.mjs replyQuestion expects { requestId, answers, sessionId }

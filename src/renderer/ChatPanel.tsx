@@ -51,15 +51,11 @@ import {
   MANTA_BUILTIN_COMMANDS,
   MANTA_BUILTIN_NAMES,
   progressAttentionKind,
-  isPlanExitQuestion,
-  extractPlanData,
   titleCase,
   providersFromExcludedKeys,
   contextModelLabel,
   isUnknownChannelError,
 } from "./chatUtils";
-import { planPageUrl } from "../shared/planMode.mjs";
-import { serverBase } from "./api/httpApi";
 import {
   appendPromptHistory,
   makePermissionReplyHandler,
@@ -2957,18 +2953,14 @@ export function ChatPanel({
 
   // ===== Plan card (BET-951) =====
   // The plan_exit question is upgraded into a blocking plan card in the pinned
-  // card stack. Detection is EXACT — `isPlanExitQuestion` matches the question's
-  // `tool.callID` against a `plan_exit` tool part in the transcript, never the
-  // question text. These are also EXCLUDED from the inline transcript question
+  // card stack. Detection is the BOX's and EXACT (`question.plan`: its `tool.callID` matched a `plan_exit` tool
+  // part, never the question text); an older box sends none and the question stays an ordinary card. These are also EXCLUDED from the inline transcript question
   // rendering below so they never appear twice (once inline as a generic
   // QuestionCard, once in the stack).
-  const planQuestions = useMemo(
-    () => questions.filter((q) => isPlanExitQuestion(q, messages)),
-    [questions, messages],
-  );
+  const planQuestions = useMemo(() => questions.filter((q) => q.plan != null), [questions]);
   const planDataByQuestion = useMemo(
-    () => new Map(planQuestions.map((q) => [q.id, extractPlanData(q, messages)])),
-    [planQuestions, messages],
+    () => new Map(planQuestions.map((q) => [q.id, q.plan as NonNullable<QuestionRequest["plan"]>])),
+    [planQuestions],
   );
 
   // Delegate split control (BET-951).
@@ -3007,11 +2999,11 @@ export function ChatPanel({
 
   const buildPlanPrompt = useCallback(
     (q: QuestionRequest, feedback: string) => {
-      const text = extractPlanData(q, messages).text;
+      const text = q.plan?.text ?? "";
       const trimmed = feedback.trim();
       return trimmed ? `${text}\n\n${trimmed}` : text;
     },
-    [messages],
+    [],
   );
 
   const buildHere = useCallback(
@@ -3074,19 +3066,6 @@ export function ChatPanel({
     [buildPlanPrompt, sessionId, cwd],
   );
 
-  // The PlanCard's "Open page" URL. Single-HTML plans are published by the
-  // model's plan_render tool under the DETERMINISTIC per-session subdomain
-  // (`<base>/pages/plan-<shortSessionId>`); there is no eager-publish state and
-  // no `.md` publish path. serverBase may be unavailable (no server
-  // configured); then there is simply no URL.
-  const planCardUrl = useMemo(() => {
-    try {
-      return planPageUrl(sessionId, serverBase());
-    } catch {
-      return "";
-    }
-  }, [sessionId]);
-
   // The plan_exit card, built here and mounted in the transcript tail the SAME
   // way the questions are (it used to be pinned in the CardStack). Building the
   // element here keeps the closures over the plan data + the deterministic
@@ -3101,6 +3080,8 @@ export function ChatPanel({
     for (const q of planQuestions) {
       const data = planDataByQuestion.get(q.id);
       if (!data) continue;
+      // The "Open page" link is the box's (`plan.pageUrl`, null when the box has no public base URL).
+      const planCardUrl = data.pageUrl ?? "";
       return (
         <PlanCard
           key={q.id}
@@ -3132,7 +3113,7 @@ export function ChatPanel({
       );
     }
     return null;
-  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel, planCardUrl]);
+  }, [planQuestions, planDataByQuestion, delegateSelectable, rememberedDelegateModel, sessionModel, activeModel, atDelegateCap, pendingAction, buildHere, keepPlanning, startPlanDelegate, rememberDelegateModel]);
 
   // Background-run cards in the transcript (v2-next N5), from the job store.
   // The transcript is only scanned for finished results when some job of this
@@ -3515,7 +3496,7 @@ export function ChatPanel({
             // BET-418 §D: a job session is read-only — never show its (anyway
             // impossible) question cards. Defensive: a job's pre-flight ruleset
             // means it never generates asks.
-            questions={viewOnly ? [] : questions.filter((q) => !isPlanExitQuestion(q, messages))}
+            questions={viewOnly ? [] : questions.filter((q) => q.plan == null)}
             turnInfo={turnInfo}
             finishByMessageId={finishByMessageId}
             userCommandInfo={userCommandInfo}

@@ -31,6 +31,7 @@ const EXPECTED_AFTER_STEP = [
   "sessions-close-1", // D6
   "sessions-window-status-1", // D7
   "transcript-view-1", // D8–D9
+  "questions-plan-1", // D10
 ];
 
 test("the capability list is frozen and carries chat-cards-1", () => {

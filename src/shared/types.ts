@@ -3600,6 +3600,19 @@ export type QuestionRequest = {
   // the id opencode's form reply/reject routes accept. Absent
   // for transcript-only recovered questions (which are thus unanswerable).
   requestId?: string;
+  /** Set by the box (`questions-plan-1`) on a plan_exit question: the plan card's data. Absent on an ordinary
+   *  question and on an older box (the question then renders as an ordinary card). */
+  plan?: PlanQuestionView;
+};
+
+/** The plan card's data for a plan_exit question, decided on the box (WS11 D10). */
+export type PlanQuestionView = {
+  title: string;
+  text: string;
+  steps: number;
+  files: number;
+  path: string | null;
+  pageUrl: string | null;
 };
 
 // ----- Voice / speech-to-text (Groq) -----

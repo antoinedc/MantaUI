@@ -162,18 +162,15 @@ extension StepGroupContent {
 /// closures on the main actor only.
 @MainActor
 final class TranscriptCardActions {
-    /// The raw transcript the plan card's exact derivation reads.
-    let messages: [OpencodeMessage]
     /// The session's BUILD-model name for the plan card's subtitle.
     let buildModelName: String
-    /// The deterministic plan-page URL (nil when no usable slug can be formed).
-    let planURL: String?
     let onPermissionReply: (PermissionRequest, PermissionReply) -> Void
     let onQuestionSubmit: (QuestionRequest, [[String]]) -> Void
     let onQuestionReject: (QuestionRequest) -> Void
     let onBuildHere: (QuestionRequest, String) -> Void
     let onKeepPlanning: (QuestionRequest, String) -> Void
-    let onOpenPage: () -> Void
+    /// Open the plan page of this plan question (its `plan.pageUrl`).
+    let onOpenPage: (QuestionRequest) -> Void
     /// Quote text into this session's composer, or into a forked session. nil on
     /// a surface that cannot quote (the read-only subagent drill-in): the quote
     /// controls are then not offered at all (see `TranscriptQuoteCapability`).
@@ -186,22 +183,18 @@ final class TranscriptCardActions {
     let onToggleTodos: (() -> Void)?
 
     init(
-        messages: [OpencodeMessage],
         buildModelName: String,
-        planURL: String?,
         onPermissionReply: @escaping (PermissionRequest, PermissionReply) -> Void,
         onQuestionSubmit: @escaping (QuestionRequest, [[String]]) -> Void,
         onQuestionReject: @escaping (QuestionRequest) -> Void,
         onBuildHere: @escaping (QuestionRequest, String) -> Void,
         onKeepPlanning: @escaping (QuestionRequest, String) -> Void,
-        onOpenPage: @escaping () -> Void,
+        onOpenPage: @escaping (QuestionRequest) -> Void,
         onQuote: ((String, QuoteDestination) -> Void)? = nil,
         onOpenActivity: ((String) -> Void)? = nil,
         onToggleTodos: (() -> Void)? = nil
     ) {
-        self.messages = messages
         self.buildModelName = buildModelName
-        self.planURL = planURL
         self.onPermissionReply = onPermissionReply
         self.onQuestionSubmit = onQuestionSubmit
         self.onQuestionReject = onQuestionReject
@@ -226,15 +219,13 @@ extension TranscriptCardActions {
         onToggleTodos: (() -> Void)? = nil
     ) -> TranscriptCardActions {
         TranscriptCardActions(
-            messages: [],
             buildModelName: "",
-            planURL: nil,
             onPermissionReply: { _, _ in },
             onQuestionSubmit: { _, _ in },
             onQuestionReject: { _ in },
             onBuildHere: { _, _ in },
             onKeepPlanning: { _, _ in },
-            onOpenPage: {},
+            onOpenPage: { _ in },
             onQuote: nil,
             onOpenActivity: onOpenActivity,
             onToggleTodos: onToggleTodos
@@ -506,13 +497,11 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
     case .planExit(let question):
         PlanCard(
             question: question,
-            messages: actions.messages,
             buildModelName: actions.buildModelName,
-            planURL: actions.planURL,
             tokens: tokens,
             onBuildHere: { feedback in actions.onBuildHere(question, feedback) },
             onKeepPlanning: { feedback in actions.onKeepPlanning(question, feedback) },
-            onOpenPage: actions.onOpenPage
+            onOpenPage: { actions.onOpenPage(question) }
         )
         .padding(.horizontal, Metrics.spacing.sp3)
         .padding(.bottom, Metrics.spacing.sp3)

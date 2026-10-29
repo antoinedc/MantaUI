@@ -596,9 +596,9 @@ final class TranscriptMapperTests: XCTestCase {
 
     private func actions(onQuote: ((String, QuoteDestination) -> Void)?) -> TranscriptCardActions {
         TranscriptCardActions(
-            messages: [], buildModelName: "", planURL: nil,
+            buildModelName: "",
             onPermissionReply: { _, _ in }, onQuestionSubmit: { _, _ in }, onQuestionReject: { _ in },
-            onBuildHere: { _, _ in }, onKeepPlanning: { _, _ in }, onOpenPage: {},
+            onBuildHere: { _, _ in }, onKeepPlanning: { _, _ in }, onOpenPage: { _ in },
             onQuote: onQuote
         )
     }

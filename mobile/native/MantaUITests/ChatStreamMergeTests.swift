@@ -1077,22 +1077,14 @@ final class TrailingCardsTests: XCTestCase {
 
     private func planExitQuestion(_ id: String, callID: String) -> QuestionRequest {
         QuestionRequest(id: id, sessionID: "ses", questions: [],
-                        tool: PermissionTool(messageID: "m1", callID: callID), requestId: nil)
-    }
-
-    private func planMessage(callID: String) -> OpencodeMessage {
-        OpencodeMessage(
-            info: OpencodeMessageInfo(id: "m1", sessionID: "ses", role: .assistant,
-                                      time: OpencodeTime(created: 0)),
-            parts: [OpencodePart(type: "tool", id: "p1", messageID: "m1",
-                                 extra: ["tool": .string("plan_exit"), "callID": .string(callID)])]
-        )
+                        tool: PermissionTool(messageID: "m1", callID: callID), requestId: nil,
+                        plan: PlanQuestionView(title: "Plan", text: "# Plan"))
     }
 
     func testSplitQuestionsPutsPlanExitApartFromGeneric() {
         let pe = planExitQuestion("pe", callID: "call-exit")
         let plain = cardQuestion("plain")
-        let split = ChatSessionStore.splitQuestions([pe, plain], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([pe, plain])
         XCTAssertEqual(split.planExit?.id, "pe")
         XCTAssertEqual(split.generic?.id, "plain",
                        "the plan-exit and the generic question card must render different questions")
@@ -1100,15 +1092,23 @@ final class TrailingCardsTests: XCTestCase {
 
     func testSplitQuestionsNeverReturnsTheSameQuestionAsBoth() {
         let pe = planExitQuestion("pe", callID: "call-exit")
-        let split = ChatSessionStore.splitQuestions([pe], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([pe])
         XCTAssertEqual(split.planExit?.id, "pe")
         XCTAssertNil(split.generic,
                      "a plan-exit question must never also surface as a generic question card")
     }
 
+    func testAnOlderBoxSendsNoPlanSoAPlanExitQuestionIsAnOrdinaryQuestion() {
+        // Same shape and callID, but the box (no `questions-plan-1`) never decorated it.
+        let undecorated = QuestionRequest(id: "pe", sessionID: "ses", questions: [], tool: PermissionTool(messageID: "m1", callID: "call-exit"))
+        let split = ChatSessionStore.splitQuestions([undecorated])
+        XCTAssertNil(split.planExit)
+        XCTAssertEqual(split.generic?.id, "pe", "its options still answer it")
+    }
+
     func testSplitQuestionsOfAPlainQuestionHasNoPlanExit() {
         let plain = cardQuestion("plain")
-        let split = ChatSessionStore.splitQuestions([plain], messages: [planMessage(callID: "call-exit")])
+        let split = ChatSessionStore.splitQuestions([plain])
         XCTAssertNil(split.planExit)
         XCTAssertEqual(split.generic?.id, "plain")
     }
