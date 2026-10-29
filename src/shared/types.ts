@@ -338,6 +338,10 @@ export type AppConfig = {
   // Free-text house rules appended verbatim, last, on top of the preset
   // above — refine the doctrine but can never remove a guardrail. Default "".
   ctoHouseRules?: string;
+  // The desktop's IANA timezone as last reported on the presence heartbeat; the
+  // box adopts it (src/server/boxTimeZone.mjs). Server-owned — never written by
+  // the client. null/absent until a desktop has reported one.
+  boxTimeZone?: string | null;
   // TRANSIENT, server-computed projection — never persisted by the client
   // and never written via config:update. True while a deferred doctrine
   // restart is queued (box was busy at save time); the config:get /

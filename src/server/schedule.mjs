@@ -185,6 +185,11 @@ export function firstCronMatchAtOrAfter(cron, from, { maxDays = 400 } = {}) {
 
 // Stable minute key in LOCAL time: "YYYY-MM-DDTHH:mm". Used as the dedup guard
 // so a job fires at most once per minute even though the poller ticks twice.
+//
+// WALL-CLOCK on purpose: the box's TZ now follows the desktop (boxTimeZone.mjs), so the
+// zone can change mid-run, and a DST fall-back repeats a wall hour. Keying on the wall
+// minute means neither can fire a job twice for the same wall minute. The price is that a
+// forward jump skips a minute — accepted; do not "fix" it with epoch minutes.
 export function minuteKey(date) {
   const p = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(
