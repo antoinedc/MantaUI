@@ -6,6 +6,8 @@
 //   - idleSeconds:  system-wide input idle time (any keyboard/mouse input on
 //                    the machine, in any application)
 //   - lockedSeconds: how long the screen has been locked (or null when unlocked)
+//   - timeZone:     the OS's IANA timezone, which the box adopts so the AI
+//                    speaks local time (src/server/boxTimeZone.mjs)
 //
 // and it does so EVERY 30s while the app runs, unconditionally. Reporting
 // forever is the point: "app open but user idle" must never be
@@ -41,16 +43,41 @@ let started = false;
 // unlock edges, and cleared so an unlocked state reports lockedSeconds: null.
 let lockedAt: number | null = null;
 
+export interface PresenceBody {
+  idleSeconds: number;
+  lockedSeconds: number | null;
+  timeZone?: string;
+}
+
+// The heartbeat payload. `timeZone` (the OS's IANA zone) lets the box state
+// times in the user's local time; it is left out when unknown so an empty
+// value never reaches the box.
+export function buildPresenceBody(input: {
+  idleSeconds: number;
+  lockedSeconds: number | null;
+  timeZone?: string | null;
+}): PresenceBody {
+  const { idleSeconds, lockedSeconds, timeZone } = input;
+  return timeZone ? { idleSeconds, lockedSeconds, timeZone } : { idleSeconds, lockedSeconds };
+}
+
+// Read on every beat, never cached: Electron picks up an OS zone change on its
+// own schedule, and a cached value would pin the old one until relaunch.
+function currentTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function postPresence(idleSeconds: number, lockedSeconds: number | null): void {
   const cfg = getConfig?.();
   if (!cfg) return;
-  sendHeartbeatHttp(cfg, { idleSeconds, lockedSeconds });
+  sendHeartbeatHttp(cfg, buildPresenceBody({ idleSeconds, lockedSeconds, timeZone: currentTimeZone() }));
 }
 
-function sendHeartbeatHttp(
-  cfg: AppConfig,
-  body: { idleSeconds: number; lockedSeconds: number | null },
-): void {
+function sendHeartbeatHttp(cfg: AppConfig, body: PresenceBody): void {
   const serverUrl = (cfg.serverUrl || "").replace(/\/+$/, "");
   if (!serverUrl) return;
   const payload = JSON.stringify(body);

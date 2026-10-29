@@ -127,6 +127,9 @@ const DEFAULT_CONFIG = {
   // never remove a guardrail (see ctoDoctrine.mjs's composeCtoPrompt). Empty
   // by default.
   ctoHouseRules: "",
+  // The desktop's IANA timezone, adopted by the box (src/server/boxTimeZone.mjs).
+  // null until a desktop has reported one.
+  boxTimeZone: null,
 };
 
 let _config = null;

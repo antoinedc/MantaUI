@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   validateCron,
   cronMatches,
@@ -735,4 +736,54 @@ test("tick stamps a legacy one-shot with a FUTURE cron date and lets it survive"
   assert.equal(h.sent.length, 0, "not due yet, must not fire");
   assert.equal(h.jobs.length, 1, "future legacy one-shot survives");
   assert.equal(h.jobs[0].dueAt, localDate(2026, 8, 18, 9, 0).getTime());
+});
+
+// ----------------------------------------------------------------------------
+// Timezone switch (boxTimeZone.mjs sets process.env.TZ at runtime)
+// ----------------------------------------------------------------------------
+
+test("a TZ switch between two instants in the SAME wall minute fires a recurring job once (dedupe key is wall-clock)", () => {
+  // TZ is process-wide and sticky, so this runs in a child process: nothing can leak into the suite.
+  const script = `
+    import { createScheduler } from "./src/server/schedule.mjs";
+    let jobs = [{ id: "j", kind: "prompt", sessionID: "ses_x", prompt: "p", cron: "0 9 * * *", recurring: true, lastFiredMinute: null, directory: "" }];
+    let at = new Date("2026-10-29T09:00:00Z"); // 09:00 under TZ=UTC
+    let fired = 0;
+    const { tick } = createScheduler({
+      load: async () => jobs.map((j) => ({ ...j })),
+      save: async (next) => { jobs = next.map((j) => ({ ...j })); },
+      sendPrompt: async () => { fired++; },
+      now: () => at,
+      publish: () => {},
+    });
+    await tick();
+    const afterFirst = fired;
+    process.env.TZ = "Europe/Paris"; // what boxTimeZone does when the desktop reports Paris
+    at = new Date("2026-10-29T08:00:00Z"); // a DIFFERENT instant, but 09:00 on the Paris wall clock
+    await tick();
+    console.log(JSON.stringify({ afterFirst, total: fired }));
+  `;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, TZ: "UTC" },
+    cwd: new URL("../..", import.meta.url).pathname,
+    encoding: "utf8",
+  });
+  assert.deepEqual(JSON.parse(out.trim().split("\n").pop()), { afterFirst: 1, total: 1 });
+});
+
+test("cron is evaluated in the process TZ: the same instant matches 09:00 only in the zone where it is 09:00", () => {
+  const script = `
+    import { cronMatches } from "./src/server/schedule.mjs";
+    const at = new Date("2026-10-29T08:00:00Z");
+    const utc = cronMatches("0 9 * * *", at);
+    process.env.TZ = "Europe/Paris";
+    const paris = cronMatches("0 9 * * *", at);
+    console.log(JSON.stringify({ utc, paris }));
+  `;
+  const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+    env: { ...process.env, TZ: "UTC" },
+    cwd: new URL("../..", import.meta.url).pathname,
+    encoding: "utf8",
+  });
+  assert.deepEqual(JSON.parse(out.trim().split("\n").pop()), { utc: false, paris: true });
 });

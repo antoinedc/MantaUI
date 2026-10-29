@@ -44,6 +44,14 @@ describe("patchUnitText", () => {
     assert.match(out, /^Environment="OPENCODE_DB=\/my data\/x\.db"$/m);
     assert.equal(unitEnvValue(out, "OPENCODE_DB"), "/my data/x.db");
   });
+  test("TZ is added / replaced on its own line and nothing else moves", () => {
+    const added = patchUnitText(UNIT, { env: { TZ: "Europe/Paris" } });
+    assert.equal(unitEnvValue(added, "TZ"), "Europe/Paris");
+    assert.equal(added.replace(/^Environment=TZ=.*\n/m, ""), UNIT);
+    const replaced = patchUnitText(added, { env: { TZ: "Asia/Tokyo" } });
+    assert.equal(unitEnvValue(replaced, "TZ"), "Asia/Tokyo");
+    assert.equal(replaced.match(/TZ=/g).length, 1);
+  });
   test("text with no [Service] section is returned unchanged", () => {
     assert.equal(patchUnitText("nothing here", { bin: "/b" }), "nothing here");
   });
@@ -124,6 +132,87 @@ describe("systemd controller", () => {
     await svc.stop();
     await svc.start();
     assert.deepEqual(io.execs, [["systemctl", "--user", "stop", "opencode-serve"], ["systemctl", "--user", "restart", "opencode-serve"]]);
+  });
+});
+
+describe("readEnv / setEnv (touch only the given keys)", () => {
+  test("systemd: adds then replaces ONLY TZ, keeps 0600, reloads only when the text changed", async () => {
+    const io = fakeIO();
+    const svc = createOpencodeService({ platform: "linux", ...io.opts });
+    assert.equal(await svc.readEnv("TZ"), null);
+    assert.equal(await svc.setEnv({ TZ: "Europe/Paris" }), true);
+    const text = io.files.get("UNIT");
+    assert.equal(unitEnvValue(text, "TZ"), "Europe/Paris");
+    assert.equal(text.replace(/^Environment=TZ=.*\n/m, ""), UNIT, "nothing else changed");
+    assert.equal(io.writes[0][1], 0o600);
+    assert.deepEqual(io.execs.at(-1), ["systemctl", "--user", "daemon-reload"]);
+    assert.equal(await svc.readEnv("TZ"), "Europe/Paris");
+    io.execs.length = 0;
+    assert.equal(await svc.setEnv({ TZ: "Europe/Paris" }), false);
+    assert.deepEqual(io.execs, [], "unchanged → no reload");
+    assert.equal(await svc.setEnv({ TZ: "Asia/Tokyo" }), true);
+    assert.equal(unitEnvValue(io.files.get("UNIT"), "TZ"), "Asia/Tokyo");
+    assert.equal(io.files.get("UNIT").match(/Environment=TZ=/g).length, 1);
+  });
+  test("setEnv REJECTS null / empty / multi-line values (patchUnitText would read them as delete)", async () => {
+    const io = fakeIO();
+    const svc = createOpencodeService({ platform: "linux", ...io.opts });
+    await svc.setEnv({ TZ: "UTC" });
+    for (const bad of [null, undefined, "", "a\nb", 5]) await assert.rejects(svc.setEnv({ TZ: bad }), /TZ/);
+    assert.equal(unitEnvValue(io.files.get("UNIT"), "TZ"), "UTC", "still there");
+  });
+  test("a unit with no [Service] section fails loudly instead of claiming it wrote", async () => {
+    const io = fakeIO({ unit: "nothing here" });
+    const svc = createOpencodeService({ platform: "linux", ...io.opts });
+    await assert.rejects(svc.setEnv({ TZ: "UTC" }), /could not write/);
+  });
+  test("configure() preserves an existing TZ line (v2 and v1)", async () => {
+    const io = fakeIO();
+    const svc = createOpencodeService({ platform: "linux", ...io.opts });
+    await svc.setEnv({ TZ: "Europe/Paris" });
+    await svc.configure("v2", { db: "/d/x.db" });
+    assert.equal(unitEnvValue(io.files.get("UNIT"), "TZ"), "Europe/Paris");
+    await svc.configure("v1");
+    assert.equal(unitEnvValue(io.files.get("UNIT"), "TZ"), "Europe/Paris");
+  });
+  test("launchd: Set-else-Add under :EnvironmentVariables; unchanged → no write; missing dict → loud failure", async () => {
+    const plist = new Map([[":EnvironmentVariables", "Dict {\n}"], [":ProgramArguments:0", "/Users/u/.opencode/bin/opencode"]]);
+    const execs = [];
+    const exec = async (c, a) => {
+      const cmd = a[1];
+      execs.push(cmd);
+      const [verb, key, ...rest] = cmd.split(" ");
+      if (verb === "Print") {
+        if (!plist.has(key)) throw new Error("Does Not Exist");
+        return { stdout: `${plist.get(key)}\n` };
+      }
+      if (verb === "Set") {
+        if (!plist.has(key)) throw new Error("Does Not Exist");
+        plist.set(key, rest.join(" "));
+      }
+      if (verb === "Add") plist.set(key, rest.slice(1).join(" "));
+      return { stdout: "" };
+    };
+    const svc = createOpencodeService({ platform: "darwin", home: "/Users/u", exec, exists: (p) => p.endsWith(".plist") });
+    assert.equal(await svc.readEnv("TZ"), null);
+    assert.equal(await svc.setEnv({ TZ: "Europe/Paris" }), true);
+    assert.ok(execs.includes("Add :EnvironmentVariables:TZ string Europe/Paris"));
+    assert.equal(await svc.readEnv("TZ"), "Europe/Paris");
+    execs.length = 0;
+    assert.equal(await svc.setEnv({ TZ: "Europe/Paris" }), false);
+    assert.ok(!execs.some((e) => /^(Set|Add|Delete)/.test(e)));
+    assert.equal(await svc.setEnv({ TZ: "Asia/Tokyo" }), true);
+    assert.equal(plist.get(":EnvironmentVariables:TZ"), "Asia/Tokyo");
+    // configure() leaves it alone
+    await svc.configure("v1");
+    assert.equal(plist.get(":EnvironmentVariables:TZ"), "Asia/Tokyo");
+    plist.delete(":EnvironmentVariables");
+    await assert.rejects(svc.setEnv({ TZ: "UTC" }), /no :EnvironmentVariables/);
+  });
+  test("nohup has no definition: readEnv → null, setEnv → false", async () => {
+    const svc = createOpencodeService({ platform: "linux", home: "/h", exists: () => false, exec: async () => assert.fail("must not exec") });
+    assert.equal(await svc.readEnv("TZ"), null);
+    assert.equal(await svc.setEnv({ TZ: "UTC" }), false);
   });
 });
 

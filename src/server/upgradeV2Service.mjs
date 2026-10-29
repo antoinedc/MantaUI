@@ -278,10 +278,73 @@ export function createOpencodeService({
     return changed;
   }
 
+  // Narrow env access for callers that must change ONE variable (e.g. TZ) without touching the
+  // binary or the V1/V2 env configure() owns.
+  function assertSettableEnv(env) {
+    for (const [key, value] of Object.entries(env ?? {})) {
+      // patchUnitText reads null/"" as "delete the line"; a caller asking to SET must never get that.
+      if (typeof value !== "string" || value === "") throw new Error(`setEnv ${key}: a non-empty string value is required`);
+      if (/[\r\n\0]/.test(value)) throw new Error(`setEnv ${key}: value must be a single line`);
+    }
+  }
+
+  async function setEnvSystemd(env) {
+    const current = await read(unitPath);
+    const patched = patchUnitText(current, { env });
+    for (const [key, value] of Object.entries(env)) {
+      // No [Service] section leaves the text untouched; that is a failure here, not "already set".
+      if (unitEnvValue(patched, key) !== value) throw new Error(`setEnv ${key}: could not write it into ${unitPath}`);
+    }
+    if (patched === current) return false;
+    // 0600: the unit carries OPENCODE_PASSWORD.
+    await write(unitPath, patched, 0o600);
+    await chmod(unitPath, 0o600).catch(() => {});
+    await exec("systemctl", ["--user", "daemon-reload"]);
+    return true;
+  }
+
+  async function setEnvLaunchd(env) {
+    const get = async (k) => (await pb(`Print ${k}`).then((r) => String(r.stdout ?? "").trim(), () => null));
+    if ((await get(":EnvironmentVariables")) === null) {
+      throw new Error(`setEnv: ${plistPath} has no :EnvironmentVariables dictionary`);
+    }
+    let changed = false;
+    for (const [key, value] of Object.entries(env)) {
+      const k = `:EnvironmentVariables:${key}`;
+      if ((await get(k)) === value) continue;
+      if (!(await pb(`Set ${k} ${value}`).then(() => true, () => false))) await pb(`Add ${k} string ${value}`);
+      changed = true;
+    }
+    await chmod(plistPath, 0o600).catch(() => {});
+    return changed;
+  }
+
   return {
     supervisor,
     unitPath,
     plistPath,
+
+    /** The value of one env var in the service DEFINITION (not the running process), or null. */
+    async readEnv(key) {
+      if (supervisor === "systemd") return unitEnvValue(await read(unitPath), key);
+      if (supervisor === "launchd") {
+        const r = await pb(`Print :EnvironmentVariables:${key}`).then((x) => String(x.stdout ?? "").trim(), () => null);
+        return r || null;
+      }
+      return null;
+    },
+
+    /**
+     * Set env vars in the definition, touching ONLY the given keys, WITHOUT restarting. Values must
+     * be non-empty strings (this never deletes). Returns whether the definition changed. nohup has
+     * no definition: returns false.
+     */
+    async setEnv(env) {
+      assertSettableEnv(env);
+      if (supervisor === "systemd") return setEnvSystemd(env);
+      if (supervisor === "launchd") return setEnvLaunchd(env);
+      return false;
+    },
 
     /**
      * Point the service at V1 or V2 (and set/drop its env) WITHOUT restarting it. Returns whether

@@ -118,7 +118,9 @@ import {
 } from "./voiceNotes.mjs";
 import { startServerUpdatePoller, createOpencodeUpdateForwarder } from "./serverUpdate.mjs";
 import { createCliDetector, upgradeCli } from "./cliUpdates.mjs";
-import { runServerSelfUpdate } from "./opencodeAdmin.mjs";
+import { runServerSelfUpdate, restartOpencode } from "./opencodeAdmin.mjs";
+import { createBoxTimeZone, readRunningOpencodeTz, restartOpencodeService } from "./boxTimeZone.mjs";
+import { createOpencodeService } from "./upgradeV2Service.mjs";
 // `loadJobs` backs the tool-scan schedules surface (toolsGetSurfaces, W10/
 // BET-1542). It was referenced there but never imported: the only other
 // `loadJobs` in this file is delegate's, aliased away as `loadDelegateJobs`,
@@ -681,6 +683,26 @@ const { stop: stopCtoAdmissionTick } = startPoller(() => ctoAdmissionEngine.tick
   intervalMs: 30_000,
   label: "cto-admission",
 });
+
+// Box timezone (spec 2026-10-29-desktop-timezone): the desktop reports its OS zone on the
+// presence heartbeat; this sets TZ for manta-server at once and for opencode via its service
+// definition, restarting opencode only while no session is running. Started BEFORE the
+// schedule poller so cron is evaluated in the stored zone from its very first tick.
+const opencodeService = createOpencodeService();
+const boxTimeZone = createBoxTimeZone({
+  loadStored: async () => (await local.configGet())?.boxTimeZone ?? null,
+  saveStored: async (tz) => void (await local.configUpdate({ boxTimeZone: tz })),
+  service: opencodeService,
+  readRunningTz: () => readRunningOpencodeTz({ supervisor: opencodeService.supervisor }),
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  restart: () =>
+    restartOpencodeService({
+      service: opencodeService,
+      restartSystemd: () => restartOpencode(),
+      invalidate: (opts) => oc.invalidateProvidersCache(opts),
+    }),
+});
+await boxTimeZone.start();
 
 // Scheduled-prompt engine: durable jobs in ~/.manta/schedule.json, fired
 // by re-submitting the stored prompt into its opencode session — the
@@ -3592,7 +3614,10 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
   delegateEngine.observeRaw(raw).catch((e) => console.warn("[delegate] observeRaw failed:", e?.message ?? e));
   for (const evt of lifecycleAdapter.adapt(raw)) {
     // "Idle" proves every earlier submission has been enqueued (command correlation).
-    if (evt.type === "session.idle" && evt.properties?.sessionID) commandCorrelator.noteIdle(evt.properties.sessionID);
+    if (evt.type === "session.idle" && evt.properties?.sessionID) {
+      commandCorrelator.noteIdle(evt.properties.sessionID);
+      boxTimeZone.poke(); // a timezone restart may be owed; this is the moment to re-check
+    }
     if (evt.type === "session.deleted" && evt.properties?.sessionID) commandCorrelator.forgetSession(evt.properties.sessionID);
     try {
       observeLifecycleEvent(evt, raw);
@@ -6279,9 +6304,10 @@ const handleRequest = async (req, res) => {
   // ---------- Native push (APNs) ----------
   // POST /push/focus       body = { sessionId, visible }  (suppress "done" for
   //                        the session the user is actively viewing)
-  // POST /push/desktop-presence body = { idleSeconds, lockedSeconds }  (desktop
+  // POST /push/desktop-presence body = { idleSeconds, lockedSeconds, timeZone? }  (desktop
   //                        Electron heartbeat — raw system-idle + screen-lock;
-  //                        server decides away/present/gone)
+  //                        server decides away/present/gone; timeZone = the OS's
+  //                        IANA zone, adopted by the box via boxTimeZone.mjs)
   // POST /push/register-apns body = { token }  (BET-181: iOS app registers its
   //                        APNs device token. Same Bearer gate as every other
   //                        /push/* route. Server-side mirror of the
@@ -6315,6 +6341,9 @@ const handleRequest = async (req, res) => {
           idleSeconds: body?.idleSeconds,
           lockedSeconds: body?.lockedSeconds,
         });
+        // Fire-and-forget: the heartbeat has a 4s client timeout and must never wait on a unit
+        // write or restart.
+        boxTimeZone.noteReported(body?.timeZone);
         console.log(
           `[push] desktop-presence idle=${body?.idleSeconds}s locked=${body?.lockedSeconds ?? "-"}`,
         );
