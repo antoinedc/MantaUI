@@ -526,25 +526,6 @@ enum GitMergeResult: Decodable, Equatable, Sendable {
     }
 }
 
-/// `delegate:start` → `{ok, error?}`.
-struct GitDelegateStartResult: Decodable, Equatable, Sendable {
-    var ok: Bool
-    var error: String?
-
-    private enum CodingKeys: String, CodingKey { case ok, error }
-
-    init(ok: Bool, error: String? = nil) {
-        self.ok = ok
-        self.error = error
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        ok = c.lenientBool(.ok) ?? false
-        error = c.lenientString(.error)
-    }
-}
-
 // MARK: - Connect offer (G8, KEEP-CLIENT — reads a device-local dismissed flag)
 
 enum GitConnectOffer {

@@ -18,6 +18,9 @@ final class MantaNavigator: ObservableObject {
     /// A "start a new session with this" request waiting for the create sheet.
     @Published var pendingDraft: NewSessionDraft?
     @Published var switcherPresented = false
+    /// The project the switcher is limited to (opened from inside one of its chats),
+    /// or nil to list every project's sessions.
+    @Published var switcherProject: String?
 
     func open(_ route: MantaRoute) {
         pending = route
@@ -29,7 +32,8 @@ final class MantaNavigator: ObservableObject {
         pendingDraft = draft
     }
 
-    func presentSwitcher() {
+    func presentSwitcher(project: String? = nil) {
+        switcherProject = project
         switcherPresented = true
     }
 
@@ -46,6 +50,7 @@ final class MantaNavigator: ObservableObject {
         pending = nil
         pendingDraft = nil
         switcherPresented = false
+        switcherProject = nil
     }
 
     static func windowKey(project: String, windowIndex: Int) -> String {

@@ -43,19 +43,30 @@ final class MantaNavigationTests: XCTestCase {
         XCTAssertFalse(nav.switcherPresented)
         nav.presentSwitcher()
         XCTAssertTrue(nav.switcherPresented)
+        XCTAssertNil(nav.switcherProject)
+    }
+
+    func testPresentSwitcherFromAChatIsLimitedToItsProjectAndTheNextOpenForgetsIt() {
+        let nav = MantaNavigator()
+        nav.presentSwitcher(project: "better-ui")
+        XCTAssertEqual(nav.switcherProject, "better-ui")
+        nav.switcherPresented = false
+        nav.presentSwitcher()
+        XCTAssertNil(nav.switcherProject)
     }
 
     func testResetForgetsEverythingAddressedToTheOldBox() {
         let nav = MantaNavigator()
         nav.open(.review(sessionID: "s"))
         nav.startNewSession(NewSessionDraft(text: "x"))
-        nav.presentSwitcher()
+        nav.presentSwitcher(project: "p")
 
         nav.reset()
 
         XCTAssertNil(nav.pending)
         XCTAssertNil(nav.pendingDraft)
         XCTAssertFalse(nav.switcherPresented)
+        XCTAssertNil(nav.switcherProject)
     }
 
     func testModeSwitchProducesADifferentNavigationValue() throws {

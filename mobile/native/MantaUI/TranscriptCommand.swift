@@ -80,7 +80,7 @@ struct TranscriptCommandSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                Text(turn.expandedText)
+                Text(TranscriptLinkify.attributed(turn.expandedText, linkColor: tokens.accent))
                     .textSelection(.enabled)
                     .font(.manta(size: Metrics.type.small, design: .monospaced))
                     .foregroundColor(tokens.tx2)

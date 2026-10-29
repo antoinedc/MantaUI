@@ -91,6 +91,12 @@ final class HandoffStore: ObservableObject {
     private var lastWalkedLinks: HandoffLinks?
     private var walkGeneration = 0
     private var titlesLoaded = false
+    /// True once a `handoff:list` has been answered. Until then a failed read is
+    /// retried on a short backoff: nothing else would, so a single dropped request
+    /// at open left the screen without links (and so without "Previous sessions")
+    /// until the next bus frame or reconnect.
+    private var loadedOnce = false
+    private var loadRetries = 0
 
     init(sessionId: String, api: MantaAPIClient, eventStore: MantaEventStore,
          defaults: HandoffKeyValueStore = DefaultsHandoffStore()) {
@@ -146,7 +152,20 @@ final class HandoffStore: ObservableObject {
     }
 
     func title(for sessionId: String) -> String {
-        titles[sessionId] ?? "Previous session"
+        if let known = titles[sessionId] { return known }
+        if let named = previous.first(where: { $0.sessionId == sessionId })?.title { return named }
+        return "Previous session"
+    }
+
+    /// The row text for a "Previous sessions" entry (desktop's wording: the
+    /// session's name, "Untitled session" when it has none, "Branched from …").
+    func label(for entry: HandoffPreviousEntry) -> String {
+        HandoffPrevious.label(entry, fallbackTitle: titles[entry.sessionId])
+    }
+
+    /// The title a previous session opens under.
+    func openTitle(for entry: HandoffPreviousEntry) -> String {
+        HandoffPrevious.displayTitle(entry, fallbackTitle: titles[entry.sessionId])
     }
 
     func isExpanded(_ id: String) -> Bool { expandedIDs.contains(id) }
@@ -165,9 +184,26 @@ final class HandoffStore: ObservableObject {
                 refreshAgain = false
                 // A background re-read: a failure keeps what is on screen and the
                 // next frame or reconnect tries again.
-                if let result = try? await api.handoffList(sessionId: sessionId) { apply(result) }
+                if let result = try? await api.handoffList(sessionId: sessionId) {
+                    loadedOnce = true
+                    loadRetries = 0
+                    apply(result)
+                }
             } while refreshAgain
             refreshing = false
+            retryUnloadedRead()
+        }
+    }
+
+    /// A read that never succeeded is tried again (2s, 4s, 8s, then it is left to
+    /// the next frame / reconnect / opening the actions sheet).
+    private func retryUnloadedRead() {
+        guard !loadedOnce, loadRetries < 3 else { return }
+        loadRetries += 1
+        let delay = UInt64(1_000_000_000) << UInt64(loadRetries)
+        Task {
+            try? await Task.sleep(nanoseconds: delay)
+            refresh()
         }
     }
 
@@ -186,7 +222,7 @@ final class HandoffStore: ObservableObject {
         for record in result.records { reconcile(record.commit) }
         consumeDraftIfNeeded(records: result.records, continuation: result.continuation)
         retryUnackedDrafts()
-        walkPreviousIfNeeded(result.links)
+        buildPrevious(from: result)
     }
 
     private func handle(_ event: HandoffBusEvent) {
@@ -409,9 +445,26 @@ final class HandoffStore: ObservableObject {
 
     // MARK: - Previous sessions (§9)
 
+    /// The "Previous sessions" list. A box that sends `chain.predecessors` (nearest
+    /// first, branch origin last, titles and deletions included) is read as is —
+    /// one request, rebuilt on every refresh. An older box without it falls back to
+    /// the one-request-per-hop walk of the replacement links.
+    private func buildPrevious(from result: HandoffListResult) {
+        if let chain = result.chain {
+            walkGeneration += 1 // a walk still in flight must not overwrite this
+            lastWalkedLinks = result.links
+            let entries = HandoffPrevious.entries(chain: chain)
+            if entries != previous { previous = entries }
+            if entries.contains(where: { $0.title == nil }) { Task { await loadTitlesIfNeeded() } }
+            return
+        }
+        walkPreviousIfNeeded(result.links)
+    }
+
     /// Walk the replacement chain backwards (one `handoff:list` per hop, bounded
-    /// and cycle-safe) and build the "Previous sessions" list. Only when this
-    /// session's own links changed — not on every frame.
+    /// and cycle-safe). Only when this session's own links changed — not on every
+    /// frame — and a hop that failed is not remembered as walked, so the next
+    /// refresh tries it again instead of keeping a short list for good.
     private func walkPreviousIfNeeded(_ newLinks: HandoffLinks?) {
         guard newLinks != lastWalkedLinks else { return }
         lastWalkedLinks = newLinks
@@ -425,20 +478,23 @@ final class HandoffStore: ObservableObject {
             var lineage: [(sessionId: String, links: HandoffLinks?)] = [(sessionId, newLinks)]
             var visited: Set<String> = [sessionId]
             var cursor = newLinks.replaces
+            var complete = true
             while let id = cursor, !id.isEmpty, !visited.contains(id), lineage.count < 25 {
                 visited.insert(id)
                 let hop = (try? await api.handoffList(sessionId: id))?.links
+                if hop == nil { complete = false }
                 lineage.append((id, hop))
                 cursor = hop?.replaces
             }
             guard generation == walkGeneration else { return }
+            if !complete { lastWalkedLinks = nil }
             previous = HandoffPrevious.entries(lineage: lineage)
             await loadTitlesIfNeeded()
         }
     }
 
-    /// Titles for the previous sessions' names, fetched once. Best effort: an
-    /// unknown title reads "Previous session".
+    /// Titles for sessions the box sent no title for, fetched once from the
+    /// session list. Best effort: an unknown title reads "Untitled session".
     func loadTitlesIfNeeded() async {
         guard !titlesLoaded, links?.replaces != nil || links?.branchedFrom != nil || !previous.isEmpty else { return }
         titlesLoaded = true

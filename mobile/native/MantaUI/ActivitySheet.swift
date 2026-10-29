@@ -500,7 +500,7 @@ private struct ActivityOutputWell: View {
     }
 
     private func plainWell(_ text: String) -> some View {
-        Text(text)
+        Text(TranscriptLinkify.attributed(text, linkColor: tokens.accent))
             .textSelection(.enabled)
             .font(.manta(size: Metrics.type.xs, design: .monospaced))
             .foregroundColor(tokens.tx3)
@@ -512,7 +512,7 @@ private struct ActivityOutputWell: View {
     private func verboseWell(_ shown: (text: String, trimmed: Bool)) -> some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             ScrollView(.vertical) {
-                Text(shown.text)
+                Text(TranscriptLinkify.attributed(shown.text, linkColor: tokens.accent))
                     .textSelection(.enabled)
                     .font(.manta(size: Metrics.type.xs, design: .monospaced))
                     .foregroundColor(tokens.tx3)

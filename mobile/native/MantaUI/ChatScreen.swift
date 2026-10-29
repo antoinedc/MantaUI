@@ -410,7 +410,7 @@ private struct ChatScreenContent: View {
             .toolbar {
                 // Quick session switcher (WS04 M-04-6).
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { navigator.presentSwitcher() } label: {
+                    Button { navigator.presentSwitcher(project: projectName) } label: {
                         Image(systemName: "rectangle.stack")
                     }
                     .accessibilityLabel("Switch session")
@@ -859,7 +859,7 @@ private struct ChatScreenContent: View {
             onOpenPrevious: { entry in
                 pendingPush = .previous(PreviousSessionRoute(
                     sessionId: entry.sessionId,
-                    title: handoffStore.title(for: entry.sessionId)
+                    title: handoffStore.openTitle(for: entry)
                 ))
             },
             // A background job's own session is read-only: Compact / Clear / Fork /
@@ -884,6 +884,9 @@ private struct ChatScreenContent: View {
             await refreshScheduleCount()
             await jobsStore.refresh()
         }
+        // Re-read the handoff links when the sheet opens, so "Previous sessions" is
+        // current even if the read at chat open was missed.
+        .onAppear { handoffStore.refresh() }
     }
 
     // MARK: - Auto-handoff
@@ -1575,41 +1578,6 @@ private struct ChatScreenContent: View {
         .accessibilityIdentifier("weekly-banner")
     }
 
-    /// The one-line "Moved to Work · Seat 2 (Seat 1 at 91% of 5h)." notice. The
-    /// × dismisses that move for good (remembered across reopening the chat).
-    private func seatMoveBanner(_ notice: SeatMoveNotice) -> some View {
-        HStack(spacing: Metrics.spacing.sp2) {
-            Image(systemName: "arrow.right")
-                .font(.system(size: Metrics.type.xs, weight: .semibold))
-                .foregroundColor(tokens.tx4)
-            Text(notice.text)
-                .font(.manta(size: Metrics.type.xs))
-                .foregroundColor(tokens.tx3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            Button { accountsStore.dismissMoveNotice() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: Metrics.type.xs, weight: .semibold))
-                    .foregroundColor(tokens.tx4)
-                    .frame(width: Metrics.type.chatHeaderBtn, height: Metrics.type.chatHeaderBtn)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss")
-            .accessibilityIdentifier("seat-move-banner-dismiss")
-        }
-        .padding(.leading, Metrics.spacing.sp3)
-        .padding(.trailing, Metrics.spacing.sp2)
-        .padding(.vertical, Metrics.spacing.sp2)
-        .background(tokens.panel, in: RoundedRectangle(cornerRadius: Metrics.radius.md))
-        .overlay(
-            RoundedRectangle(cornerRadius: Metrics.radius.md)
-                .stroke(tokens.borderSubtle, lineWidth: Metrics.spacing.spPx)
-        )
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("seat-move-banner")
-    }
-
     // MARK: - Live cards (todos / permission / question)
 
     @ViewBuilder
@@ -1657,11 +1625,6 @@ private struct ChatScreenContent: View {
                 // dot and a multi-day lockout the user did not see coming.
                 if weeklyBannerVisible {
                     weeklyBanner
-                }
-                // Multi-account (spec §5.3): this conversation moved to another
-                // seat — one slim dismissible line; hides itself after 5 minutes.
-                if let notice = accountsStore.moveNotice {
-                    seatMoveBanner(notice)
                 }
                 // A credential failure: ONE actionable line, pinned (the transcript
                 // does not repeat it). Reconnect opens Accounts on that provider.

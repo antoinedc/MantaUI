@@ -387,7 +387,7 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
     let actions = cards ?? TranscriptCardActions.readOnly()
     switch block {
     case .user(let text, _):
-        UserBand(text: text, tokens: tokens)
+        UserBand(text: text, tokens: tokens, expansionID: block.stableScrollID)
             .padding(.bottom, Metrics.spacing.sp4)
     case .prose(let text, _, _):
         MantaProse(text: text, tokens: tokens)
@@ -445,12 +445,12 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
         // bubble with a tap-to-retry beneath once the send has failed.
         switch prompt.state {
         case .waiting, .sending:
-            UserBand(text: prompt.text, tokens: tokens)
+            UserBand(text: prompt.text, tokens: tokens, expansionID: block.stableScrollID)
                 .opacity(0.45)
                 .padding(.bottom, Metrics.spacing.sp4)
         case .failed:
             VStack(alignment: .leading, spacing: 0) {
-                UserBand(text: prompt.text, tokens: tokens)
+                UserBand(text: prompt.text, tokens: tokens, expansionID: block.stableScrollID)
                 Button {
                     onRetry(prompt.id)
                 } label: {
@@ -473,7 +473,7 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
             // or the transcript; the tap resends under the SAME message id, so a
             // message that did land is not delivered twice.
             VStack(alignment: .leading, spacing: 0) {
-                UserBand(text: prompt.text, tokens: tokens)
+                UserBand(text: prompt.text, tokens: tokens, expansionID: block.stableScrollID)
                     .opacity(0.7)
                 Button {
                     onRetry(prompt.id)
