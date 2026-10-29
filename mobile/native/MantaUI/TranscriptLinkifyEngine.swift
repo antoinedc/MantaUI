@@ -242,7 +242,7 @@ final class LinkifyEngine: Sendable {
         while true {
             let scanFrom = max(pos - 1, 0)
 
-            if !fuzzyDone, fuzzyCandidate == nil || fuzzyCandidate!.index < pos {
+            if !fuzzyDone, (fuzzyCandidate?.index ?? -1) < pos {
                 if fuzzyLastIndex < scanFrom { fuzzyLastIndex = scanFrom }
                 while true {
                     guard let found = exec(fuzzyRe, text, from: fuzzyLastIndex, count: n) else {
