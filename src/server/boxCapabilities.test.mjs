@@ -27,6 +27,7 @@ const EXPECTED_AFTER_STEP = [
   "devices-view-1", "forge-status-secondary-1", "update-targets-view-1", "upgrade-view-1", "launchers-flags-1", // D3
   "accounts-copy-1", // D4
   "sessions-naming-1", // D5 (naming)
+  "forge-clone-view-1", // D5 (clone)
 ];
 
 test("the capability list is frozen and carries chat-cards-1", () => {

@@ -2297,3 +2297,11 @@ Review: `reviews/server-first-3/11-server-consolidation.md`, plus
 - iOS: `SessionNaming` keeps only `deriveProjectName` (a display basename for the batch rows); the batch rows are
   labelled by folder and the box names each session. A typed name field is sent as the explicit name only once
   edited; otherwise the box names the session from the folder.
+
+## Implementation notes (D5, clone half — `forge-clone-view-1`)
+
+- `forge:clone-start` accepts `{url, root, name}`; the box joins `<root>/<name>` and the finished status carries
+  `dest` (already did), so neither client builds a destination. The old `{url, dest, name}` form still works.
+- A failed status's `message` is the sentence per kind; the raw git output stays in `error` and is only ever copied
+  as diagnostics, never rendered (desktop used to render it for the `unknown` kind).
+- Old box: desktop "Clone from GitHub…" and iOS's clone action are disabled with "Update your box to use this".

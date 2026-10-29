@@ -174,6 +174,8 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
   // silently rewritten by tmux), so creating one is disabled with the note.
   const namingCapability = useBoxCapability("sessions-naming-1");
   const namingBlocked = isNewProject && namingCapability === false;
+  // WS11 D5 (S8): clone errors, kinds and the destination are the box's; an older box can't clone from here.
+  const cloneBlocked = useBoxCapability("forge-clone-view-1") === false;
 
   // ---- local (non-persisted) UI state ----
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -1200,7 +1202,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                 <ZeroStateActions
                   className="justify-center mt-4"
                   actions={[
-                    { label: "Clone from GitHub…", tone: "primary", onClick: () => setCloneOpen(true) },
+                    { label: "Clone from GitHub…", tone: "primary", onClick: () => setCloneOpen(true), disabled: cloneBlocked },
                     { label: "Browse for a folder…", tone: "ghost", onClick: () => setPickerOpen(true) },
                     { label: "Start from scratch", tone: "default", onClick: startScratch },
                   ]}
@@ -1256,7 +1258,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
                           disabled: checked.size === 0 || namingBlocked,
                         },
                         { label: "Browse for a folder…", tone: "default", onClick: () => setPickerOpen(true) },
-                        { label: "Clone from GitHub…", tone: "default", onClick: () => setCloneOpen(true) },
+                        { label: "Clone from GitHub…", tone: "default", onClick: () => setCloneOpen(true), disabled: cloneBlocked },
                         { label: "Start from scratch", tone: "default", onClick: startScratch },
                       ]}
                     />
@@ -1331,7 +1333,7 @@ export function NewSessionScreen({ draftId, onDone }: Props) {
         </>
         )}
 
-        {namingBlocked && <UpdateBoxNote />}
+        {(namingBlocked || (cloneBlocked && isNewProject && !showComposer)) && <UpdateBoxNote />}
         {error && (
           <Card danger>
             <span className="text-meta text-danger break-words">{error}</span>

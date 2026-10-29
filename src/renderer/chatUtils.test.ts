@@ -115,8 +115,6 @@ import {
   describeRepoRow,
   homeRelativePath,
   planHighlightRanges,
-  cloneErrorKind,
-  repoListErrorMessage,
   type StatusItem,
   type RepoRow,
   workingIndicatorLabel,
@@ -4135,75 +4133,6 @@ describe("buildVoiceNoteMap (BET-837)", () => {
     const map = buildVoiceNoteMap([msg], [vnote("n1", "line one\nline two")]);
     expect(map.get("m1")?.id).toBe("n1");  });
 });
-
-describe("cloneErrorKind", () => {
-  it("classifies destination failures (never blame the token)", () => {
-    expect(cloneErrorKind("fatal: could not create leading directories of '/root/projects/x': Permission denied")).toBe("destination");
-    expect(cloneErrorKind("fatal: destination path 'x' already exists and is not an empty directory.")).toBe("destination");
-    expect(cloneErrorKind("fatal: destination path 'x' already exists")).toBe("destination");
-    expect(cloneErrorKind("fatal: reference repository is not an empty directory")).toBe("destination");
-  });
-
-  it("classifies permission failures (the actionable one)", () => {
-    expect(cloneErrorKind("remote: Permission to acme/widget denied to octocat\nfatal: unable to access ...")).toBe("permission");
-    expect(cloneErrorKind("fatal: could not read Username for 'https://github.com': terminal prompts disabled")).toBe("permission");
-    expect(cloneErrorKind("remote: Repository not found.")).toBe("permission");
-  });
-
-  it("classifies disk failures", () => {
-    expect(cloneErrorKind("fatal: write error: No space left on device")).toBe("disk");
-    expect(cloneErrorKind("error: insufficient disk space")).toBe("disk");
-  });
-
-  it("classifies network failures", () => {
-    expect(cloneErrorKind("fatal: unable to access 'https://github.com/...': Could not resolve host: github.com")).toBe("network");
-    expect(cloneErrorKind("fatal: unable to access '...': Failed to connect to github.com port 443: Connection refused")).toBe("network");
-  });
-
-  it("returns unknown for anything else", () => {
-    expect(cloneErrorKind("fatal: some other git error")).toBe("unknown");
-    expect(cloneErrorKind("")).toBe("unknown");
-    expect(cloneErrorKind(undefined as unknown as string)).toBe("unknown");
-  });
-});
-
-describe("repoListErrorMessage (BET-1011)", () => {
-  it("maps the server's not_connected and rejected codes to sign-in guidance", () => {
-    expect(repoListErrorMessage("not_connected")).toBe(
-      "GitHub isn't connected. Go back and sign in again.",
-    );
-    expect(repoListErrorMessage("rejected")).toBe(
-      "GitHub isn't connected. Go back and sign in again.",
-    );
-  });
-
-  it("explains a rate-limited listing", () => {
-    expect(repoListErrorMessage("rate_limited")).toBe(
-      "GitHub's rate limit is used up. Try again in a few minutes.",
-    );
-  });
-
-  it("explains a forbidden listing with an SSO hint", () => {
-    expect(repoListErrorMessage("forbidden")).toBe(
-      "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.",
-    );
-  });
-
-  it("explains a network failure", () => {
-    expect(repoListErrorMessage("network")).toBe(
-      "Couldn't reach GitHub from your server. Check its connection and try again.",
-    );
-  });
-
-  it("falls back to a generic message for any other code or absence", () => {
-    const generic = "Couldn't list your repositories from GitHub.";
-    expect(repoListErrorMessage("bogus")).toBe(generic);
-    expect(repoListErrorMessage("")).toBe(generic);
-    expect(repoListErrorMessage(null)).toBe(generic);
-    expect(repoListErrorMessage(undefined)).toBe(generic);
-  });
-});
-
 
 describe("dispatchAppControl (BET-841)", () => {
   it("routes switch-model to the handler with the resolved model", () => {

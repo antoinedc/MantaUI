@@ -11,60 +11,28 @@ final class CloneFromGitHubTests: XCTestCase {
         GitHubRepo(name: name, fullName: "\(owner)/\(name)", owner: owner, description: desc)
     }
 
-    // MARK: error kind
+    // The error kind, the failure sentence, the list-error sentences and the destination join are the BOX's
+    // (WS11 D5 / S8; pinned in forge/cloneView.test.mjs). The phone decodes and shows them.
 
-    func testDestinationBeatsPermission() {
-        // A destination problem must never be blamed on the token, even when the
-        // text also says "permission denied".
-        XCTAssertEqual(CloneErrorKind.classify("fatal: destination path 'x' already exists and is not an empty directory. permission denied"), .destination)
-        XCTAssertEqual(CloneErrorKind.classify("could not create leading directories of '/a/b'"), .destination)
+    func testFailedStatusDecodesTheBoxsSentence() throws {
+        let failed = try JSONDecoder().decode(CloneJobStatus.self, from: Data(
+            #"{"id":"c1","done":true,"ok":false,"error":"fatal: could not read Username","errorKind":"permission","message":"permission denied. The token may not have access to this repository."}"#.utf8))
+        XCTAssertEqual(failed.message, "permission denied. The token may not have access to this repository.")
+        XCTAssertEqual(failed.error, "fatal: could not read Username", "the raw output stays for diagnostics only")
+        let old = try JSONDecoder().decode(CloneJobStatus.self, from: Data(#"{"id":"c1","done":true,"ok":false,"error":"boom"}"#.utf8))
+        XCTAssertNil(old.message)
     }
 
-    func testRepositoryNotFoundIsPermission() {
-        XCTAssertEqual(CloneErrorKind.classify("remote: Repository not found."), .permission)
-        XCTAssertEqual(CloneErrorKind.classify("fatal: could not read Username for 'https://github.com'"), .permission)
-        XCTAssertEqual(CloneErrorKind.classify("error: 403"), .permission)
-    }
-
-    func testNoSpaceIsDisk() {
-        XCTAssertEqual(CloneErrorKind.classify("write error: No space left on device"), .disk)
-    }
-
-    func testResolveHostIsNetwork() {
-        XCTAssertEqual(CloneErrorKind.classify("fatal: unable to access: Could not resolve host: github.com"), .network)
-    }
-
-    func testGarbageIsUnknown() {
-        XCTAssertEqual(CloneErrorKind.classify("¯\\_(ツ)_/¯"), .unknown)
-        XCTAssertEqual(CloneErrorKind.classify(""), .unknown)
-    }
-
-    // MARK: copy
-
-    func testFailureCopy() {
-        XCTAssertEqual(CloneFailureCopy.message(kind: .permission, raw: "x"), "permission denied. The token may not have access to this repository.")
-        XCTAssertEqual(CloneFailureCopy.message(kind: .disk, raw: "x"), "not enough disk space in the clone location.")
-        XCTAssertEqual(CloneFailureCopy.message(kind: .network, raw: "x"), "a network error prevented the clone.")
-        // The destination text is the server's, shown verbatim.
-        XCTAssertEqual(CloneFailureCopy.message(kind: .destination, raw: "/a already exists and isn't empty."), "/a already exists and isn't empty.")
-        XCTAssertEqual(CloneFailureCopy.message(kind: .unknown, raw: "boom"), "boom")
-    }
-
-    func testRepoListErrorMessages() {
-        XCTAssertEqual(RepoListError.message(code: "not_connected"), "GitHub isn't connected. Go back and sign in again.")
-        XCTAssertEqual(RepoListError.message(code: "rejected"), "GitHub isn't connected. Go back and sign in again.")
-        XCTAssertEqual(RepoListError.message(code: "rate_limited"), "GitHub's rate limit is used up. Try again in a few minutes.")
-        XCTAssertTrue(RepoListError.message(code: "forbidden").contains("SSO"))
-        XCTAssertEqual(RepoListError.message(code: "network"), "Couldn't reach GitHub from your server. Check its connection and try again.")
-        XCTAssertEqual(RepoListError.message(code: "some raw exception"), "Couldn't list your repositories from GitHub.")
-        XCTAssertEqual(RepoListError.message(code: nil), "Couldn't list your repositories from GitHub.")
-    }
-
-    func testOnlyRejectedAndNotConnectedNeedSignIn() {
-        XCTAssertTrue(RepoListError.needsSignIn(code: "rejected"))
-        XCTAssertTrue(RepoListError.needsSignIn(code: "not_connected"))
-        XCTAssertFalse(RepoListError.needsSignIn(code: "network"))
-        XCTAssertFalse(RepoListError.needsSignIn(code: nil))
+    func testRepoListDecodesTheBoxsSentenceAndSignInFlag() throws {
+        let dead = try JSONDecoder().decode(GitHubRepoList.self, from: Data(
+            #"{"repos":[],"stale":false,"error":"rejected","message":"GitHub isn't connected. Go back and sign in again.","needsSignIn":true}"#.utf8))
+        XCTAssertEqual(dead.needsSignIn, true)
+        XCTAssertEqual(dead.message, "GitHub isn't connected. Go back and sign in again.")
+        let net = try JSONDecoder().decode(GitHubRepoList.self, from: Data(#"{"repos":[],"stale":false,"error":"network","message":"Couldn't reach GitHub…","needsSignIn":false}"#.utf8))
+        XCTAssertEqual(net.needsSignIn, false)
+        let old = try JSONDecoder().decode(GitHubRepoList.self, from: Data(#"{"repos":[],"stale":false,"error":"network"}"#.utf8))
+        XCTAssertNil(old.message)
+        XCTAssertNil(old.needsSignIn)
     }
 
     // MARK: picker
@@ -81,12 +49,6 @@ final class CloneFromGitHubTests: XCTestCase {
     func testOwnersAreSortedAndUnique() {
         let repos = [repo("a", owner: "zed"), repo("b", owner: "acme"), repo("c", owner: "zed"), repo("d", owner: "")]
         XCTAssertEqual(ClonePicker.owners(repos), ["acme", "zed"])
-    }
-
-    func testDestStripsTrailingSlashes() {
-        XCTAssertEqual(ClonePicker.dest(root: "/home/u/projects/", name: "api"), "/home/u/projects/api")
-        XCTAssertEqual(ClonePicker.dest(root: "/home/u/projects///", name: "api"), "/home/u/projects/api")
-        XCTAssertEqual(ClonePicker.dest(root: "/r", name: "api"), "/r/api")
     }
 
     func testBytesUseTheFileCountStyle() {

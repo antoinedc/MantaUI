@@ -123,8 +123,9 @@ extension MantaAPIClient {
 
     /// `forge:clone-start` — start a clone on the box. The destination is
     /// preflighted server-side; a refusal comes back as `{error, message}`.
-    func forgeCloneStart(url: String, dest: String, name: String) async throws -> CloneStartResult {
-        try await callRequired("forge:clone-start", args: [["url": url, "dest": dest, "name": name]], as: CloneStartResult.self)
+    func forgeCloneStart(url: String, root: String, name: String) async throws -> CloneStartResult {
+        // The box joins `<root>/<name>` itself and reports it as the status's `dest` (WS11 D5 / S8).
+        try await callRequired("forge:clone-start", args: [["url": url, "root": root, "name": name]], as: CloneStartResult.self)
     }
 
     /// `forge:clone-status` — the job snapshot, or nil once the box forgot it.

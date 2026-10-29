@@ -353,14 +353,19 @@ struct GitHubRepoList: Decodable, Equatable, Sendable {
     var repos: [GitHubRepo]
     var stale: Bool
     var error: String?
+    /// The box's sentence for `error`, and whether the credential is missing or dead (WS11 D5 / S8).
+    var message: String?
+    var needsSignIn: Bool?
 
-    init(repos: [GitHubRepo], stale: Bool = false, error: String? = nil) {
+    init(repos: [GitHubRepo], stale: Bool = false, error: String? = nil, message: String? = nil, needsSignIn: Bool? = nil) {
         self.repos = repos
         self.stale = stale
         self.error = error
+        self.message = message
+        self.needsSignIn = needsSignIn
     }
 
-    private enum CodingKeys: String, CodingKey { case repos, stale, error }
+    private enum CodingKeys: String, CodingKey { case repos, stale, error, message, needsSignIn }
 
     private struct LossyRepo: Decodable {
         let repo: GitHubRepo?
@@ -372,6 +377,8 @@ struct GitHubRepoList: Decodable, Equatable, Sendable {
         repos = (((try? c.decodeIfPresent([LossyRepo].self, forKey: .repos)) ?? nil) ?? []).compactMap(\.repo)
         stale = ((try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? nil) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
+        needsSignIn = (try? c.decodeIfPresent(Bool.self, forKey: .needsSignIn)) ?? nil
     }
 }
 
@@ -411,9 +418,13 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
     var ok: Bool
     var error: String?
     var cancelled: Bool
+    /// A failed clone's sentence, worded by the box (WS11 D5 / S8). `error` stays the raw git output, which is
+    /// only ever copied as diagnostics, never shown.
+    var message: String? = nil
 
     init(id: String, name: String = "", url: String = "", dest: String = "", percent: Double = 0, bytes: Double = 0,
-         done: Bool = false, ok: Bool = false, error: String? = nil, cancelled: Bool = false) {
+         done: Bool = false, ok: Bool = false, error: String? = nil, cancelled: Bool = false, message: String? = nil) {
+        self.message = message
         self.id = id
         self.name = name
         self.url = url
@@ -427,7 +438,7 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, url, dest, percent, bytes, done, ok, error, cancelled
+        case id, name, url, dest, percent, bytes, done, ok, error, cancelled, message
     }
 
     init(from decoder: Decoder) throws {
@@ -442,6 +453,7 @@ struct CloneJobStatus: Decodable, Equatable, Sendable {
         ok = ((try? c.decodeIfPresent(Bool.self, forKey: .ok)) ?? nil) ?? false
         error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
         cancelled = ((try? c.decodeIfPresent(Bool.self, forKey: .cancelled)) ?? nil) ?? false
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
     }
 }
 

@@ -180,7 +180,7 @@ struct SessionCreateSheet: View {
                 carriedOverSection
 
                 if namingBlocked {
-                    Section { UpdateBoxNote() }
+                    Section { UpdateBoxNote(showsLink: false) }
                 }
 
                 Section {
@@ -326,7 +326,8 @@ struct SessionCreateSheet: View {
                 setup: setup,
                 onBrowse: { pickerTarget = .folder },
                 onClone: { cloneOpen = true },
-                onScratch: startScratch
+                onScratch: startScratch,
+                cloneEnabled: capabilities.has(.forgeCloneView) != false
             )
         case .folder:
             Section("New project") {

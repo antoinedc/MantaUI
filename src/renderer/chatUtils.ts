@@ -3676,65 +3676,6 @@ export function describeRepoRow(repo: RepoHit, homeDir?: string | null): string 
   return branch;
 }
 
-// ===== Forge clone flow (BET-796) =====
-
-// The distinguished cause of a failed clone ([E3]). Only `permission` is
-// actionable by the user (token scope, or an org that hasn't approved the
-// token), so it must be named specifically; `disk` and `network` are
-// distinguished so the failure text can say which one occurred rather than a
-// generic "clone failed".
-export type CloneErrorKind = "permission" | "disk" | "network" | "destination" | "unknown";
-
-/**
- * Classify a `git clone` failure's stderr into an actionable kind. Order
- * matters: the destination regex runs first (a destination path problem must
- * never be attributed to the GitHub token), then permission (GitHub's "could
- * not read Username" / "Repository not found" for a private repo reads like a
- * generic error but is really an auth (scope) problem). Pure.
- */
-export function cloneErrorKind(stderr: string): CloneErrorKind {
-  const s = String(stderr ?? "").toLowerCase();
-  if (
-    /could not create leading directories|destination path .* already exists|not an empty directory/.test(s)
-  ) {
-    return "destination";
-  }
-  if (
-    /permission to .* denied|permission denied|could not read (username|password)|authentication failed|not authorized|repository not found|\b403\b|check that you have the correct access rights/.test(s)
-  ) {
-    return "permission";
-  }
-  if (/no space left on device|disk (is )?full|insufficient|write error: no space|enosPC/.test(s)) {
-    return "disk";
-  }
-  if (
-    /could not resolve host|connection (timed out|refused|reset)|network is unreachable|failed to connect|unable to access|temporary failure in name resolution|ssl|tls/.test(s)
-  ) {
-    return "network";
-  }
-  return "unknown";
-}
-
-// The box returns machine codes (`not_connected`, `rejected`, `rate_limited`,
-// `forbidden`, `network`) or a raw exception string for a failed repo listing;
-// neither is something to show a person. One mapping, so the picker never
-// renders a server code verbatim.
-export function repoListErrorMessage(code: string | null | undefined): string {
-  if (code === "not_connected" || code === "rejected") {
-    return "GitHub isn't connected. Go back and sign in again.";
-  }
-  if (code === "rate_limited") {
-    return "GitHub's rate limit is used up. Try again in a few minutes.";
-  }
-  if (code === "forbidden") {
-    return "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in.";
-  }
-  if (code === "network") {
-    return "Couldn't reach GitHub from your server. Check its connection and try again.";
-  }
-  return "Couldn't list your repositories from GitHub.";
-}
-
 // The plain text of a USER message — its non-synthetic text parts concatenated
 // with newlines, trailing whitespace stripped. This is the single source for
 // "what text did the user send" and is shared by MessageRow (rendering) and

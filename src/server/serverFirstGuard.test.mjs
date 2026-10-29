@@ -42,6 +42,9 @@ export const DELETED = [
   // D5 (naming) — session names, scratch hints and the proposed root are the box's.
   { scopes: ["renderer"], regex: /\b(uniqueSessionName|deriveProjectName|slugifyProjectName)\(|const proposedWorkspaceRoot = useMemo/, why: "D5: the box names sessions (nameHint → tmux-safe, unique, allocated under a lock), previews them (sessions:propose-name) and proposes the root (forge:probe.proposedRoot)" },
   { scopes: ["swift", "swiftTests"], regex: /static func (slugify|uniqueProjectName|tmuxSafe|unique)\(|\benum SessionScratchHint\b|\benum SessionWorkspaceRoot\b|static func validated\(/, why: "D5: iOS sends a hint and shows the box's name/preview/root; rename validity is the box's" },
+  // D5 (clone) — clone errors, list errors and the destination are the box's.
+  { scopes: ["renderer"], regex: /export function (cloneErrorKind|repoListErrorMessage)\b|const destFor = /, why: "D5: forge:clone-status words a failed clone, forge:repos words a failed listing, forge:clone-start joins the destination" },
+  { scopes: ["swift", "swiftTests"], regex: /\benum CloneErrorKind\b|\benum RepoListError\b|static func dest\(root:/, why: "D5: iOS shows the box's clone/list wording and never joins the clone destination" },
 ];
 
 function* walk(dir, recursive) {

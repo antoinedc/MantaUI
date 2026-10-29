@@ -563,6 +563,9 @@ export type ForgeRepoListResult = {
   repos: ForgeRepo[];
   stale: boolean;
   error: string | null;
+  /** WS11 D5 (S8): the box's sentence for `error` and whether the credential is missing/dead. Absent on an older box. */
+  message?: string;
+  needsSignIn?: boolean;
 };
 
 export type ForgeCloneStatus = {
@@ -576,6 +579,9 @@ export type ForgeCloneStatus = {
   ok: boolean;
   error: string | null;
   cancelled: boolean;
+  /** A failed clone's cause and sentence, worded by the box (WS11 D5 / S8); `error` stays the raw git output. */
+  errorKind?: "permission" | "disk" | "network" | "destination" | "unknown";
+  message?: string;
 };
 
 // ----- Forge read path (BET-788) -----

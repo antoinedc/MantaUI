@@ -26,6 +26,7 @@ import {
   seedPromptFor,
   INBOX_SEED_PROMPT,
   forgeCloneStart,
+  forgeCloneStatus,
   ForgeRateLimitedError,
   classifyForgeError,
 } from "./index.mjs";
@@ -301,7 +302,7 @@ test("forgeListRepos: 401 with source stored → error rejected and credential c
     clearStored: async () => { cleared++; },
   });
   assert.equal(cleared, 1, "a rejected stored credential is cleared");
-  assert.deepEqual(r, { repos: [], stale: false, error: "rejected" });
+  assert.deepEqual(r, { repos: [], stale: false, error: "rejected", message: "GitHub isn't connected. Go back and sign in again.", needsSignIn: true });
 });
 
 test("forgeListRepos: 401 with source env → error rejected, NOT cleared", async () => {
@@ -312,7 +313,7 @@ test("forgeListRepos: 401 with source env → error rejected, NOT cleared", asyn
     clearStored: async () => { cleared++; },
   });
   assert.equal(cleared, 0, "an env credential is never deleted");
-  assert.deepEqual(r, { repos: [], stale: false, error: "rejected" });
+  assert.deepEqual(r, { repos: [], stale: false, error: "rejected", message: "GitHub isn't connected. Go back and sign in again.", needsSignIn: true });
 });
 
 test("forgeListRepos: network failure → error network, NOT cleared", async () => {
@@ -323,7 +324,7 @@ test("forgeListRepos: network failure → error network, NOT cleared", async () 
     clearStored: async () => { cleared++; },
   });
   assert.equal(cleared, 0, "a network failure never clears a credential");
-  assert.deepEqual(r, { repos: [], stale: false, error: "network" });
+  assert.deepEqual(r, { repos: [], stale: false, error: "network", message: "Couldn't reach GitHub from your server. Check its connection and try again.", needsSignIn: false });
 });
 
 test("forgeListRepos: no credential → not_connected, no adapter call", async () => {
@@ -336,7 +337,7 @@ test("forgeListRepos: no credential → not_connected, no adapter call", async (
     },
   });
   assert.equal(adapterCalls, 0, "no credential means no adapter call");
-  assert.deepEqual(r, { repos: [], stale: false, error: "not_connected" });
+  assert.deepEqual(r, { repos: [], stale: false, error: "not_connected", message: "GitHub isn't connected. Go back and sign in again.", needsSignIn: true });
 });
 
 // ---- pullRequestForCwd -----------------------------------------------------
@@ -1915,4 +1916,29 @@ test("forgeInbox: every item carries its row fields and the box-joined localPath
   assert.equal(failing.items[0].localPath, null, "a probe failure never fails the inbox");
   const noProbe = await forgeInbox(base);
   assert.equal(noProbe.items[0].localPath, null);
+});
+
+test("forgeCloneStart accepts {url, root, name} and joins the destination on the box (WS11 D5 / S8)", async () => {
+  const started = [];
+  const store = { start: (j) => { started.push(j); return "job1"; }, status: () => null };
+  const deps = {
+    resolveToken: async () => null, store,
+    stat: async () => { const e = new Error("nope"); e.code = "ENOENT"; throw e; },
+    readdir: async () => [], mkdir: async () => {},
+  };
+  const out = await forgeCloneStart({ url: "https://x/r.git", root: "/srv/code/", name: "r" }, deps);
+  assert.deepEqual(out, { id: "job1" });
+  assert.equal(started[0].dest, "/srv/code/r");
+  // the older form still works, and neither form is a bad request
+  assert.equal((await forgeCloneStart({ url: "u", dest: "/a/b", name: "b" }, deps)).id, "job1");
+  assert.deepEqual(await forgeCloneStart({ url: "u", name: "b" }, deps), { error: "bad_request" });
+  assert.deepEqual(await forgeCloneStart({ url: "u", root: "  ", name: "b" }, deps), { error: "bad_request" });
+});
+
+test("forgeCloneStatus: a failed job carries errorKind + message; raw stderr stays in `error`", () => {
+  const store = { status: () => ({ id: "1", done: true, ok: false, cancelled: false, error: "fatal: could not read Username" }) };
+  const out = forgeCloneStatus("1", { store });
+  assert.equal(out.errorKind, "permission");
+  assert.equal(out.error, "fatal: could not read Username");
+  assert.equal(forgeCloneStatus("x", { store: { status: () => null } }), null);
 });

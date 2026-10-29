@@ -1,76 +1,15 @@
 import Foundation
 
 // ===========================================================================
-// WS04 §6 — the clone flow's pure logic, ported from `chatUtils.ts:4198-4289`
-// and `CloneFromGitHub.tsx`. Foundation-only (D19).
+// WS04 §6 — the clone flow's pure logic. Foundation-only (D19). Error words and the destination join are the box's.
 // ===========================================================================
 
-/// The distinguished cause of a failed clone. Only `permission` is actionable by
-/// the user (token scope, or an organisation that hasn't approved the token).
-enum CloneErrorKind: Equatable, Sendable {
-    case permission, disk, network, destination, unknown
-
-    /// Classifies `git clone` stderr. Order matters (port of `cloneErrorKind`):
-    /// a destination problem must never be blamed on the GitHub token, so it is
-    /// checked first; GitHub's "could not read Username" / "Repository not
-    /// found" for a private repo is really an authorisation problem.
-    static func classify(_ stderr: String) -> CloneErrorKind {
-        let s = stderr.lowercased()
-        func matches(_ pattern: String) -> Bool {
-            s.range(of: pattern, options: .regularExpression) != nil
-        }
-        if matches("could not create leading directories|destination path .* already exists|not an empty directory") {
-            return .destination
-        }
-        if matches("permission to .* denied|permission denied|could not read (username|password)|authentication failed|not authorized|repository not found|\\b403\\b|check that you have the correct access rights") {
-            return .permission
-        }
-        if matches("no space left on device|disk (is )?full|insufficient|write error: no space|enospc") {
-            return .disk
-        }
-        if matches("could not resolve host|connection (timed out|refused|reset)|network is unreachable|failed to connect|unable to access|temporary failure in name resolution|ssl|tls") {
-            return .network
-        }
-        return .unknown
-    }
-}
-
+/// The words of a clone failure or a failed repository listing are the box's (WS11 D5 / S8): `forge:clone-status`
+/// carries `errorKind` + `message`, `forge:repos` carries `message` + `needsSignIn`. Only the static fallbacks for an
+/// older reply live here.
 enum CloneFailureCopy {
-    /// The sentence under "Clone failed". `destination` shows the server's own
-    /// text verbatim (it names the folder, never the token).
-    static func message(kind: CloneErrorKind, raw: String) -> String {
-        switch kind {
-        case .permission: return "permission denied. The token may not have access to this repository."
-        case .disk: return "not enough disk space in the clone location."
-        case .network: return "a network error prevented the clone."
-        case .destination: return raw.isEmpty ? "the destination folder can't be used." : raw
-        case .unknown: return raw.isEmpty ? "the clone failed." : raw
-        }
-    }
-}
-
-enum RepoListError {
-    /// One mapping for a failed repository listing, so the picker never renders
-    /// a server code verbatim (port of `repoListErrorMessage`).
-    static func message(code: String?) -> String {
-        switch code {
-        case "not_connected", "rejected":
-            return "GitHub isn't connected. Go back and sign in again."
-        case "rate_limited":
-            return "GitHub's rate limit is used up. Try again in a few minutes."
-        case "forbidden":
-            return "GitHub refused this request. If the repositories belong to an organisation, it may require SSO authorisation for your sign-in."
-        case "network":
-            return "Couldn't reach GitHub from your server. Check its connection and try again."
-        default:
-            return "Couldn't list your repositories from GitHub."
-        }
-    }
-
-    /// The box cleared (or never had) the credential: go back to sign-in.
-    static func needsSignIn(code: String?) -> Bool {
-        code == "rejected" || code == "not_connected"
-    }
+    static let listFallback = "Couldn't list your repositories from GitHub."
+    static let cloneFallback = "the clone failed."
 }
 
 enum ClonePicker {
@@ -88,13 +27,6 @@ enum ClonePicker {
             if q.isEmpty { return true }
             return repo.fullName.lowercased().contains(q) || repo.name.lowercased().contains(q)
         }
-    }
-
-    /// `<root>/<name>` with trailing slashes on the root dropped.
-    static func dest(root: String, name: String) -> String {
-        var trimmed = root
-        while trimmed.hasSuffix("/") { trimmed.removeLast() }
-        return "\(trimmed)/\(name)"
     }
 }
 

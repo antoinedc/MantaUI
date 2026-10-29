@@ -41,6 +41,7 @@ export const BOX_CAPABILITIES = Object.freeze([
   "accounts-copy-1",
   // WS11 D5 (naming, rename, proposed root)
   "sessions-naming-1",
+  "forge-clone-view-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

@@ -61,7 +61,7 @@ function mountDraft(overrides: Partial<NewSessionDraft> = {}): Harness {
 }
 
 // WS11 D5: a box that names sessions itself advertises sessions-naming-1; without it creating a project is disabled.
-const BOX_NAMES = { apiVersion: () => Promise.resolve({ capabilities: ["sessions-naming-1"] } as never) };
+const BOX_NAMES = { apiVersion: () => Promise.resolve({ capabilities: ["sessions-naming-1", "forge-clone-view-1"] } as never) };
 
 describe("NewSessionScreen mount against an unpaired window.api", () => {
   let h: Harness | null = null;
