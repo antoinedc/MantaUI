@@ -46,7 +46,7 @@ const records = (w, sid = "ses_p") => Object.values(w.engine._state.records).fil
 test("resolveMode: a manta-owned running job is auto whatever the box default is", async () => {
   for (const box of ["suggest", "off", "auto"]) {
     const w = jobWorld({ mode: box });
-    assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "auto", isDefault: true, source: "job" }, `box ${box}`);
+    assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "auto", isDefault: true, source: "job", unattended: true }, `box ${box}`);
     assert.equal(await w.engine.modeFor("ses_p"), "auto");
   }
 });
@@ -54,15 +54,17 @@ test("resolveMode: a manta-owned running job is auto whatever the box default is
 test("resolveMode: the session's own mode wins and the job lookup is not even made", async () => {
   const w = jobWorld({ mode: "suggest" });
   await w.engine.setMode("ses_p", "off");
-  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "off", isDefault: false, source: "own" });
-  assert.deepEqual(w.lookups, []);
+  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "off", isDefault: false, source: "own", unattended: false });
+  await w.engine.setMode("ses_p", "suggest");
+  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "suggest", isDefault: false, source: "own", unattended: false });
+  assert.deepEqual(w.lookups, [], "an own suggest/off is an explicit choice: no job lookup");
 });
 
 test("resolveMode: an opencode-owned, non-job, paused or finished session gets the box default", async () => {
   const adopted = jobWorld({ mode: "suggest", owner: "opencode" });
-  assert.deepEqual(await adopted.engine.resolveMode("ses_p"), { mode: "suggest", isDefault: true, source: "box" });
+  assert.deepEqual(await adopted.engine.resolveMode("ses_p"), { mode: "suggest", isDefault: true, source: "box", unattended: false });
   const plain = jobWorld({ mode: "off", owner: null });
-  assert.deepEqual(await plain.engine.resolveMode("ses_p"), { mode: "off", isDefault: true, source: "box" });
+  assert.deepEqual(await plain.engine.resolveMode("ses_p"), { mode: "off", isDefault: true, source: "box", unattended: false });
   // a paused or finished job is no longer a running record: the delegate lookup answers null
   const finished = jobWorld({ mode: "suggest" });
   finished.jobs.delete("ses_p");
@@ -76,7 +78,7 @@ test("resolveMode: a failed lookup is 'not a job' — the box default, never an 
       throw new Error("store unreadable");
     },
   });
-  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "suggest", isDefault: true, source: "box" });
+  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "suggest", isDefault: true, source: "box", unattended: false });
   const list = await w.engine.list({ sessionId: "ses_p" });
   assert.equal(list.mode, "suggest");
 });
@@ -276,4 +278,211 @@ test("a handoff NOT planned under the job rule is not cancelled by the start's j
   const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "handoff", body: FULL_BODY });
   await w.engine.onTurnEnd("ses_p", { success: true });
   assert.equal(w.engine.get(rec.id).state, "committed");
+});
+
+// ---- stop / pause at EVERY window of a start (before creation, during, before the send, ready-with-plan) ----
+
+/**
+ * A job world whose engine runs `act` at the hook step `at`. `how` is what the user did: a stop ends the job record,
+ * a pause leaves it `running` (it only parks at its next tool boundary) — the cancel itself is the same call.
+ */
+function windowWorld(at, how) {
+  const w = jobWorld({ mode: "suggest" });
+  const act = async () => {
+    await w.engine.cancelPendingSends("ses_p");
+    if (how === "stop") w.jobs.delete("ses_p");
+  };
+  w.engine = w.build({
+    runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+    ownership: { repoint: async (pred, succ) => void w.repointed.push([pred, succ]) },
+    hooks: { step: async (name) => name === at && (await act()) },
+  });
+  return w;
+}
+const expectUndone = (w, rec, { created }) => {
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "cancelled");
+  assert.equal(w.repointed.length, 0, "the job is NOT re-pointed");
+  assert.equal(w.windows[0].sid, "ses_p", "the window keeps the original session");
+  assert.deepEqual(w.posts, [], "no handoff prompt was sent");
+  assert.equal(w.engine._state.fences.ses_p, undefined, "fence released");
+  assert.equal(w.engine._runtime.ops.has("ses_p"), false, "operation released");
+  assert.deepEqual(w.engine._state.continuations, {});
+  assert.equal(w.engine.hasPendingSend("ses_p"), false);
+  assert.ok(w.cleared.includes("ses_p"), "the settler is told");
+  assert.equal(w.engine._state.links.ses_p?.replacedBy, undefined);
+  if (created) assert.deepEqual(w.deleted, w.created.map((c) => c.id), "the successor session that was made was deleted");
+  else assert.deepEqual(w.created, [], "nothing was created");
+};
+
+for (const how of ["stop", "pause"]) {
+  for (const [at, created] of [["fence", false], ["create", true], ["prepare", true]]) {
+    test(`${how} at "${at}" (${created ? "after" : "before"} the successor exists${at === "prepare" ? ", before the send" : ""}): the start is undone`, async () => {
+      const w = windowWorld(at, how);
+      const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+      await w.engine.onTurnEnd("ses_p", { success: true });
+      expectUndone(w, rec, { created });
+    });
+  }
+
+  test(`${how} while the record is ready with a planned send (between ready and starting): it never takes the fence`, async () => {
+    const w = jobWorld({ mode: "suggest" });
+    let fired = false;
+    w.engine = w.build({
+      runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+      // the save right after the record became `ready` (inside produceText) is the ready→starting gap
+      save: async (snap) => {
+        w.disk.json = JSON.stringify(snap);
+        if (!fired && Object.values(snap.records).some((r) => r.state === "ready" && r.internal.plan?.disposition === "send")) {
+          fired = true;
+          void w.engine.cancelPendingSends("ses_p"); // the flag is set synchronously
+          if (how === "stop") w.jobs.delete("ses_p");
+        }
+      },
+    });
+    const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+    await w.engine.onTurnEnd("ses_p", { success: true });
+    await settle();
+    assert.equal(fired, true);
+    assert.equal(w.engine.get(rec.id).state, "cancelled");
+    assert.deepEqual(w.created, []);
+    assert.equal(w.repointed.length, 0);
+    assert.equal(w.engine._state.fences.ses_p, undefined);
+    assert.equal(w.engine.hasPendingSend("ses_p"), false);
+  });
+}
+
+test("a start that is past its first message is not undone by a late stop (the successor already has the work)", async () => {
+  const w = windowWorld("send", "stop");
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.engine.get(rec.id).state, "committed");
+  assert.equal(w.accepted(w.engine.get(rec.id).successorId).length, 1);
+});
+
+test("recovery: a persisted start that was flagged cancelled after its successor was created is undone — successor deleted, nothing sent", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.crashAt = "prepare";
+  const e1 = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null, hooks: { step: async (n) => { if (w.crashAt === n) throw new (await import("./testWorld.mjs")).Crash(n); } } });
+  const rec = await e1.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await e1.onTurnEnd("ses_p", { success: true }).catch(() => {});
+  await settle();
+  const disk = JSON.parse(w.disk.json);
+  const persisted = disk.records[rec.id];
+  assert.equal(persisted.state, "starting");
+  assert.equal(persisted.internal.created, true);
+  persisted.internal.cancelled = true; // the stop that landed in the dying process
+  w.disk.json = JSON.stringify(disk);
+  w.crashAt = null;
+  w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null });
+  await w.engine.recover();
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "cancelled");
+  assert.deepEqual(w.deleted, [persisted.successorId]);
+  assert.deepEqual(w.posts, []);
+  assert.equal(w.engine._state.fences.ses_p, undefined);
+  assert.equal(w.repointed.length, 0);
+});
+
+test("a flagged ready record is refused by an automatic start but an explicit user press clears the flag", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  w.engine._state.records[rec.id].state = "ready";
+  await w.engine.cancelPendingSends("ses_p");
+  assert.equal(w.engine._state.records[rec.id].internal.cancelled, true);
+  const auto = await w.engine.start(rec.id, { how: "clear", disposition: "send", origin: "auto" });
+  assert.equal(auto.state, "cancelled");
+  const w2 = jobWorld({ mode: "suggest" });
+  const r2 = await w2.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  w2.engine._state.records[r2.id].state = "ready";
+  await w2.engine.cancelPendingSends("ses_p");
+  const user = await w2.engine.start(r2.id, { how: "clear", disposition: "send" });
+  assert.equal(user.state, "committed", "the user's own press is a new decision");
+});
+
+// ---- item 2: the record's own flag, not a fresh lookup ---------------------------------------------------
+
+test("a failed turn after the job was paused (lookup now null) still cancels a handoff planned under the job rule — no card, no generation", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: "## Goal\nthin" });
+  w.jobs.delete("ses_p"); // the pause interrupt parked the job before the turn-end handling ran
+  await w.engine.onTurnEnd("ses_p", { success: false });
+  assert.equal(w.engine.get(rec.id).state, "cancelled");
+  assert.equal(w.generateCalls.length, 0);
+  assert.equal(w.created.length, 0);
+});
+
+test("commit: a lookup that answers null cannot make the job successor store the box default", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.engine = w.build({
+    runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+    hooks: { step: async (name) => name === "send" && w.jobs.delete("ses_p") }, // after the first message: past the point of no return
+  });
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "committed");
+  assert.equal(w.engine._state.sessionModes[done.successorId], undefined, "nothing stored for the successor");
+});
+
+// ---- own `auto` on a manta job is unattended too ------------------------------------------------------------
+
+test("own auto on a manta job: agent suggest starts, a failed turn cancels, the start re-checks the job, the successor inherits the explicit auto", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  await w.engine.setMode("ses_p", "auto");
+  assert.deepEqual(await w.engine.resolveMode("ses_p"), { mode: "auto", isDefault: false, source: "own", unattended: true });
+  const start = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.equal(start.kind, "auto");
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  const done = w.engine.get(start.id);
+  assert.equal(done.state, "committed");
+  assert.equal(w.engine._state.sessionModes[done.successorId], "auto", "an explicit own mode is inherited as before");
+
+  const failed = jobWorld({ mode: "suggest" });
+  await failed.engine.setMode("ses_p", "auto");
+  const f = await failed.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: "## Goal\nthin" });
+  await failed.engine.onTurnEnd("ses_p", { success: false });
+  assert.equal(failed.engine.get(f.id).state, "cancelled");
+  assert.equal(failed.generateCalls.length, 0);
+
+  const fin = jobWorld({ mode: "suggest" });
+  await fin.engine.setMode("ses_p", "auto");
+  fin.engine = fin.build({ runningJobOwner: async (sid) => fin.jobs.get(sid) ?? null, hooks: { step: async (n) => n === "fence" && fin.jobs.delete("ses_p") } });
+  await fin.engine.setMode("ses_p", "auto");
+  const r = await fin.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await fin.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(fin.engine.get(r.id).state, "cancelled", "the start re-check applies");
+  assert.equal(fin.created.length, 0);
+});
+
+test("own auto on a session that is NOT a running job: an agent suggest is still a card; the lookup is made only for own auto / no own mode", async () => {
+  const w = jobWorld({ mode: "suggest", owner: null });
+  await w.engine.setMode("ses_p", "auto");
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.equal(rec.kind, "suggest");
+  assert.deepEqual(w.lookups, ["ses_p"]);
+  const off = jobWorld({ mode: "auto" });
+  await off.engine.setMode("ses_p", "off");
+  await off.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.deepEqual(off.lookups, []);
+});
+
+test("a pre-release job chain: a successor that inherited a stored auto is unattended while it runs (agent suggest starts)", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.addSession("ses_old_succ");
+  w.jobs.set("ses_old_succ", "manta");
+  w.engine._state.sessionModes.ses_old_succ = "auto"; // written by the previous release's commit
+  w.addWindow("proj", 7, "chain", "ses_old_succ");
+  const rec = await w.engine.create({ sessionId: "ses_old_succ", trigger: "agent", action: "suggest", body: FULL_BODY });
+  assert.equal(rec.kind, "auto");
+  await w.engine.onTurnEnd("ses_old_succ", { success: true });
+  assert.equal(w.engine.get(rec.id).state, "committed");
+});
+
+test("maybeAuto returns early for an own-auto manta job as well, before measuring", async () => {
+  let measured = 0;
+  const w = jobWorld({ mode: "suggest", extra: { gather: { facts: async () => null, measureContext: async () => (measured++, null) } } });
+  await w.engine.setMode("ses_p", "auto");
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(measured, 0);
 });

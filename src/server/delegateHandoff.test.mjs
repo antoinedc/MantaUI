@@ -4,7 +4,10 @@
 // replacement chain. In-memory store; nothing live.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { completionOwnerOf, createDelegateEngine, listJobs, pauseJob, repointJobSessions, settleV2Job, stopJob, sweepDelegateJobs } from "./delegate.mjs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { completionOwnerOf, createDelegateEngine, listJobs, pauseJob, repointJobSessions, runningJobOwner as ownerOf, saveJobs, settleV2Job, stopJob, sweepDelegateJobs } from "./delegate.mjs";
 
 const job = (over) => ({ id: "aaaa1111", status: "running", launchState: "running", completionOwner: "opencode", submittedAt: 1, parentSessionID: "ses_parent", childSessionID: "ses_child", ...over });
 function store(seed) {
@@ -100,11 +103,11 @@ test("runningJobOwner: manta / opencode for a running record on the session, nul
 });
 
 function stopDeps(s, extra = {}) {
-  return { load: s.load, save: s.save, publish: () => {}, abortSession: async () => {}, ...extra };
+  return { load: s.load, save: s.save, publish: () => {}, abortSession: async () => {}, postSynthetic: async () => {}, ...extra };
 }
 
 test("stopJob cancels the handoff pending on the job's session, and does it BEFORE aborting the turn", async () => {
-  const s = store([job({ id: "j1", childSessionID: "ses_child" })]);
+  const s = store([job({ id: "j1", childSessionID: "ses_child", completionOwner: "manta" })]);
   const order = [];
   const res = await stopJob("j1", stopDeps(s, { cancelPendingHandoff: async (sid) => void order.push(["cancel", sid]), abortSession: async (sid) => void order.push(["abort", sid]) }));
   assert.equal(res.ok, true);
@@ -113,7 +116,7 @@ test("stopJob cancels the handoff pending on the job's session, and does it BEFO
 });
 
 test("a failing handoff cancel never blocks a stop; a stop on a missing / finished job cancels nothing", async () => {
-  const s = store([job({ id: "j1" }), job({ id: "j2", status: "done" })]);
+  const s = store([job({ id: "j1", completionOwner: "manta" }), job({ id: "j2", status: "done", completionOwner: "manta" })]);
   const calls = [];
   const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => (calls.push(sid), Promise.reject(new Error("boom"))) });
   assert.equal((await stopJob("j1", deps)).ok, true);
@@ -149,4 +152,48 @@ test("the sweeper does not time out a job that has a send handoff pending — an
   };
   assert.equal(await run(mk(), true), "running", "deferred while a handoff is pending");
   assert.equal(await run(mk(), false), "failed", "timed out as before once nothing is pending");
+});
+
+test("stop cancels a pending handoff only for a job Manta completes — an adopted (opencode-owned) session's handoff behaves as before", async () => {
+  const s = store([job({ id: "adopted", childSessionID: "ses_o", completionOwner: "opencode" }), job({ id: "mine", childSessionID: "ses_m", completionOwner: "manta" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => void calls.push(sid) });
+  assert.equal((await stopJob("adopted", deps)).ok, true);
+  assert.deepEqual(calls, []);
+  assert.equal((await stopJob("mine", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_m"]);
+});
+
+// ---- the running-job index: one parse per store change, not per call ----
+
+test("runningJobOwner reads the default store once per change: cached by the file's stamp, dropped by any write, a failed read is never cached", async () => {
+  const dir = mkdtempSync(join(process.env.MANTA_STATE_HOME ?? tmpdir(), "job-index-"));
+  try {
+    const path = join(dir, "delegate-jobs.json");
+    let reads = 0;
+    const deps = { storePath: path, readFile: (...a) => (reads++, readFileSync(...a)) };
+    assert.equal(await ownerOf("ses_child", deps), null, "no store, no jobs");
+    assert.equal(reads, 0);
+    await saveJobs([job({ completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    assert.equal(await ownerOf("ses_other", deps), null);
+    assert.equal(reads, 1, "three lookups, one read");
+    await saveJobs([job({ status: "done", completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", deps), null, "a write invalidates the index");
+    assert.equal(reads, 2);
+    await saveJobs([job({ completionOwner: "opencode" })], path);
+    assert.equal(await ownerOf("ses_child", deps), "opencode");
+    // a failed read answers "not a job" and is not cached: the next call reads again and recovers
+    const flaky = { storePath: path, readFile: () => { reads++; throw new Error("EIO"); } };
+    await saveJobs([job({ completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", flaky), null);
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    // an external edit (not through saveJobs) is picked up through the file's stamp
+    writeFileSync(path, JSON.stringify({ jobs: [job({ id: "ext", childSessionID: "ses_ext", completionOwner: "manta", filler: "x".repeat(50) })] }));
+    assert.equal(await ownerOf("ses_ext", deps), "manta");
+    assert.equal(await ownerOf("ses_child", deps), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

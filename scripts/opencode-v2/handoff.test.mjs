@@ -102,6 +102,7 @@ describe("handoff tool", () => {
 
   test("the description tells the agent a background job's handoff starts on both actions and to end its turn", () => {
     assert.match(handoffTool.description, /In a background job the mode defaults to auto: both actions start the handoff/);
+    assert.match(handoffTool.description, /if the turn fails there, the handoff is dropped \(not made a card\) and the job finishes/);
   });
 
   test("server error: returns (not throws) an actionable string with the code and message", async () => {

@@ -38,23 +38,31 @@ unreadable) is treated as `null` and is not cached.
 
 ## Decision
 
-1. **One resolver.** `resolveMode(sid) → { mode, isDefault, source }` where
-   `source` is `"own" | "job" | "box"`:
+1. **One resolver.** `resolveMode(sid) → { mode, isDefault, source, unattended }`
+   where `source` is `"own" | "job" | "box"` and `unattended` means "a manta-owned
+   running job":
    - the session's own stored mode if it has one (`source: "own"`,
-     `isDefault: false`) — the box job lookup is NOT made in this case;
+     `isDefault: false`). The job lookup is made only when that mode is `auto`
+     (`unattended` = the session is a manta-owned running job: an explicit `auto`
+     on a job is as unattended as the default one); an own `suggest`/`off` is an
+     explicit choice and no lookup is made (`unattended: false`);
    - else, if `runningJobOwner(sid) === "manta"`, `auto` (`source: "job"`,
-     `isDefault: true`);
+     `isDefault: true`, `unattended: true`);
    - else the box default (`source: "box"`, `isDefault: true`).
    `modeFor` becomes `resolveMode(sid).mode`; `list()` reports `mode` and
    `modeIsDefault` from it. Every existing caller of `modeFor` therefore sees
-   the job rule — see "Other callers" below.
+   the job rule — see "Other callers" below. The lookup reads a cached index of
+   running jobs keyed on the job store file (rebuilt on any write or file change,
+   never on a failed read), not the whole store per call.
 2. **Agent `suggest` starts the handoff in an unattended session.**
    `entryPlan({ mode, trigger, action, unattended })` gains a boolean
    `unattended`. When `unattended && mode === "auto"`, an agent `suggest` is
    planned exactly like `action: "handoff"` (`produce: "start"`, `kind: "auto"`,
    `how: "clear"`, `disposition: "send"`). `create` passes
-   `unattended: source === "job"`. With an explicit own `suggest`/`off` mode on
-   the job, both actions stay cards as today (`source` is then `"own"`).
+   `unattended` from the resolver, so it covers a job on the job rule AND a job
+   with an explicit own `auto` (including a successor of a pre-release job chain
+   that inherited a stored `auto`). With an explicit own `suggest`/`off` mode on
+   the job, both actions stay cards as today.
 3. **Successor inheritance.** At commit, the successor inherits the
    predecessor's mode explicitly ONLY when it was not from the job rule
    (`source !== "job"`). A job successor is re-pointed by the commit and so is
@@ -63,22 +71,31 @@ unreadable) is treated as `null` and is not cached.
    stored `auto` outliving the job). An explicit own mode on a job is still
    inherited as today.
 4. **A failed turn does not make a card in a job.** In `processRequested`, when
-   the turn failed and the record's session resolves with `source === "job"`,
-   the record is **cancelled** (no text generation, no card) and the job
+   the turn failed and the record was planned for an unattended job (the plan
+   carries that fact; the store is not asked again, so a job that has since
+   paused still counts), the record is **cancelled** (no text generation, no card) and the job
    settles normally — the pending-send deferral clears exactly as for any
    failed handoff. Everywhere else a failed turn still drops the plan to a card.
-5. **Stop / pause during a pending handoff.** Stopping or pausing a job cancels
-   every pending `send` handoff record on its session (`requested`,
-   `generating`, `starting` before the successor is created). In addition,
-   the start re-checks `runningJobOwner(pred) === "manta"` immediately before
-   creating the successor when the record was planned under the job rule, and
-   cancels if not. A stopped/paused job is never moved onto a fresh successor.
+5. **Stop / pause during a pending handoff.** Stopping or pausing a job Manta
+   completes cancels every pending `send` handoff record on its session
+   (`requested`, `generating`; a `ready` record with a planned send and a
+   `starting` one that has not sent its first message are flagged, and every step
+   of the start observes the flag). A start observes it, and re-checks
+   `runningJobOwner(pred) === "manta"` when the record was planned for an
+   unattended job, before creating the successor, after creating it (and on
+   recovery), and before the first message. If cancelled, the start is undone:
+   the successor session is deleted, nothing is sent, the job is NOT re-pointed,
+   the record ends `cancelled`. The point of no return is the first send
+   attempt: after it the successor has the work and a late stop does not undo it.
+   A stopped/paused job is never moved onto a successor by a start that had not
+   sent its first message. An adopted (opencode-owned) session's pending handoff
+   behaves as before.
 6. **Running-time limit.** The delegate sweeper's 30-minute "timed out" rule
    does not time out a job while it has a pending `send` handoff
    (`hasPendingSend`); it re-evaluates after the handoff commits or fails.
    The limit itself is unchanged: a job re-pointed to a successor keeps its
    original start time.
-7. **`maybeAuto` returns early** when `source === "job"` (the armed trigger
+7. **`maybeAuto` returns early** when the session is `unattended` (the armed trigger
    never applies to a manta-owned job, §6.3) before doing any context
    measurement. The existing `mode === "auto" && isJobSession` skip stays for
    the other cases.
@@ -170,3 +187,9 @@ tarball). No client release needed.
 
 - CTO evidence links only the last successor's transcript of a job chain
   (existing behaviour, follow-up).
+- A manta-server restart replays a running job's still-queued handoff as a failed
+  turn, which cancels it (before this change it became a card): the job's turn then
+  ends with nothing pending and the job finishes. A follow-up could keep the record
+  `requested` for the real turn end.
+- A stop that lands after the handoff's first message was sent does not undo the
+  handoff (the successor has the work); the job record is re-pointed as usual.

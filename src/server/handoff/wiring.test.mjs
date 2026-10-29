@@ -119,7 +119,7 @@ test("the mode comes from config handoffMode (garbage → the suggest default); 
 test("a manta-owned running job resolves to auto through the delegate adapter; an adopted one and a plain session follow the box default", async () => {
   const f = fakes({ configGet: async () => ({ handoffMode: "off" }) });
   const engine = createProductionHandoff(f.p);
-  assert.deepEqual(await engine.resolveMode("ses_job"), { mode: "auto", isDefault: true, source: "job" });
+  assert.deepEqual(await engine.resolveMode("ses_job"), { mode: "auto", isDefault: true, source: "job", unattended: true });
   assert.equal((await engine.resolveMode("ses_adopted")).mode, "off");
   assert.equal((await engine.resolveMode("ses_p")).mode, "off");
 });

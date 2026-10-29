@@ -31,7 +31,7 @@
 // reconciler) are track-only: they never count toward the cap and never get a result posted.
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { statePath } from "../shared/paths.mjs";
 import { readJsonSync, writeJsonAtomic, createMutex } from "./jsonStore.mjs";
@@ -135,6 +135,7 @@ export async function loadJobs(path = STORE_PATH) {
 
 export async function saveJobs(jobs, path = STORE_PATH) {
   await writeJsonAtomic(path, JSON.stringify({ jobs }, null, 2));
+  ownerIndexCache.delete(path); // every in-process write drops the index (an mtime can repeat within one clock tick)
 }
 
 function genId() {
@@ -2055,10 +2056,7 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
   } = deps;
   // Cancel a handoff pending on the job's session BEFORE the abort below ends its turn: the
   // turn end would otherwise find the handoff and carry on with it.
-  if (deps.cancelPendingHandoff) {
-    const peek = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === id);
-    if (peek && (peek.status === "running" || peek.status === "paused")) await cancelPendingHandoff(peek, deps);
-  }
+  await cancelPendingHandoffOf(id, ["running", "paused"], deps);
   // Under the jobs-store lock: the read-check-mutate is atomic, so a stop cannot
   // race another writer into a half-state. The N7 / admission delivery happens
   // after the lock is released.
@@ -2220,6 +2218,7 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
  */
 export async function pauseJob(id, deps = {}) {
   const { save = saveJobs, publish } = deps;
+  await cancelPendingHandoffOf(id, ["running"], deps); // before the flag: a handoff still starting must see the pause
   const res = await withRunningJob(id, deps, async (jobs, idx, job) => {
     // V2 owns a background command's / subagent's lifecycle: there is nothing
     // to park, so the control is refused rather than half-working.
@@ -2237,17 +2236,21 @@ export async function pauseJob(id, deps = {}) {
     });
     return { ok: true, job: updated };
   });
-  if (res?.ok && res.job) await cancelPendingHandoff(res.job, deps);
   return res;
 }
 
-/** A stopped / paused job must not be moved onto a handoff successor: cancel any handoff pending on its session. Never throws. */
-async function cancelPendingHandoff(job, deps = {}) {
-  if (!job?.childSessionID || typeof deps.cancelPendingHandoff !== "function") return;
+/**
+ * A stopped / paused job must not be moved onto a handoff successor: cancel any handoff pending on its session. Only for
+ * a job Manta completes — an adopted (opencode-owned) session's pending handoff behaves as before. Never throws.
+ */
+async function cancelPendingHandoffOf(id, statuses, deps = {}) {
+  if (typeof deps.cancelPendingHandoff !== "function") return;
   try {
+    const job = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === id);
+    if (!job?.childSessionID || !statuses.includes(job.status) || completionOwnerOf(job) !== "manta") return;
     await deps.cancelPendingHandoff(job.childSessionID);
   } catch (e) {
-    console.warn(`[delegate] cancelling the pending handoff of ${job.id} failed:`, e?.message ?? e);
+    console.warn(`[delegate] cancelling the pending handoff of ${id} failed:`, e?.message ?? e);
   }
 }
 
@@ -2570,12 +2573,53 @@ export function completionOwnerOf(job) {
   return job?.completionOwner ?? (job?.origin === "subagent" ? "opencode" : "manta");
 }
 
-/** The completion owner of the RUNNING job record whose own session is `sessionId`; null when there is none (a paused or finished job is not running). */
+// The running-job index behind `runningJobOwner`: childSessionID → "manta" | "opencode", rebuilt only when the job store
+// file changed (its mtime/size, or any in-process saveJobs) instead of re-reading and parsing the whole store per call —
+// the lookup runs per handoff list, per model request (optimizer policy) and per turn end.
+const ownerIndexCache = new Map(); // store path -> { key, owners }
+const fileKey = (path) => {
+  const st = statSync(path, { bigint: true });
+  return `${st.mtimeNs}:${st.size}:${st.ino}`;
+};
+function readOwnerIndex(path, read) {
+  let key;
+  try {
+    key = fileKey(path);
+  } catch (e) {
+    if (e?.code === "ENOENT") return new Map(); // no store, no jobs
+    return null; // unreadable: not a job, and nothing is cached
+  }
+  const hit = ownerIndexCache.get(path);
+  if (hit?.key === key) return hit.owners;
+  let jobs;
+  try {
+    jobs = JSON.parse(read(path, "utf-8"))?.jobs;
+    if (fileKey(path) !== key) return null; // changed while reading: answer "not a job" this time, never cache a torn read
+  } catch {
+    return null; // a failed read is not cached
+  }
+  const owners = new Map();
+  for (const j of Array.isArray(jobs) ? jobs : []) {
+    if (j?.status !== "running" || !j.childSessionID) continue;
+    const owner = completionOwnerOf(j);
+    if (owners.get(j.childSessionID) !== "manta") owners.set(j.childSessionID, owner);
+  }
+  ownerIndexCache.set(path, { key, owners });
+  return owners;
+}
+
+/**
+ * The completion owner of the RUNNING job record whose own session is `sessionId`; null when there is none (a paused or
+ * finished job is not running). Reads the default store through the cached index; an injected `load` (tests) is read as is.
+ */
 export async function runningJobOwner(sessionId, deps = {}) {
-  const jobs = (await (deps.load ?? loadJobs)()) ?? [];
-  const running = jobs.filter((j) => j.childSessionID === sessionId && j.status === "running");
-  if (running.length === 0) return null;
-  return running.some((j) => completionOwnerOf(j) === "manta") ? "manta" : "opencode";
+  if (typeof deps.load === "function") {
+    const jobs = (await deps.load()) ?? [];
+    const running = jobs.filter((j) => j.childSessionID === sessionId && j.status === "running");
+    if (running.length === 0) return null;
+    return running.some((j) => completionOwnerOf(j) === "manta") ? "manta" : "opencode";
+  }
+  return readOwnerIndex(deps.storePath ?? STORE_PATH, deps.readFile ?? readFileSync)?.get(sessionId) ?? null;
 }
 
 /** V2 session ids are `ses…`, message ids `msg…`; both are minted here so a lost response stays reconcilable by id. */
