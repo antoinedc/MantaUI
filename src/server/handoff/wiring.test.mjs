@@ -29,6 +29,7 @@ function fakes(over = {}) {
       { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", tokens: { input: 10, cache: { read: 200, write: 30 } } }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { filePath: "/proj/a.ts" } } }, { type: "text", text: "Patched. Should I also run the migration?" }] },
     ],
     getVcsBranch: async () => "feat/x",
+    abortSession: async (sid) => void calls.push(["abortSession", sid]),
   };
   const tmux = {
     findWindowBySessionId: async (sid) => (sid === "ses_p" ? { sessionName: "proj", windowIndex: 3, name: "work", cwd: "/proj" } : null),
@@ -43,7 +44,8 @@ function fakes(over = {}) {
   const delegate = {
     repointSessions: async (a) => void calls.push(["repoint", a]),
     reconcileV2: async () => void calls.push(["reconcileV2"]),
-    isRunningJobSession: async (sid) => sid === "ses_job",
+    isRunningJobSession: async (sid) => sid === "ses_job" || sid === "ses_adopted",
+    runningJobOwner: async (sid) => (sid === "ses_job" ? "manta" : sid === "ses_adopted" ? "opencode" : null),
   };
   const p = {
     oc,
@@ -115,6 +117,32 @@ test("the mode comes from config handoffMode (garbage → the suggest default); 
   assert.equal((await engine.policyFor("ses_p")).mode, "suggest");
 });
 
+test("a manta-owned running job resolves to auto through the delegate adapter; an adopted one and a plain session follow the box default", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "off" }) });
+  const engine = createProductionHandoff(f.p);
+  assert.deepEqual(await engine.resolveMode("ses_job"), { mode: "auto", isDefault: true, source: "job", unattended: true });
+  assert.equal((await engine.resolveMode("ses_adopted")).mode, "off");
+  assert.equal((await engine.resolveMode("ses_p")).mode, "off");
+});
+
+test("a handoff of a job stopped after its first message interrupts the successor through the opencode abort (the existing interrupt, resume=false)", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "suggest" }) });
+  let stopped = false;
+  const base = f.p.delegate();
+  f.p.delegate = () => ({ ...base, runningJobOwner: async (sid) => (sid === "ses_p" && !stopped ? "manta" : null), jobStatusOf: async () => (stopped ? "stopped" : "running") }); // the re-point moved the record onto the successor
+  const send = f.p.oc.sendPrompt;
+  f.p.oc.sendPrompt = async (a) => {
+    await send(a);
+    stopped = true; // stopJob wrote `stopped` right after the handoff's first message went out
+  };
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await engine.onTurnEnd("ses_p", { success: true });
+  const out = engine.get(rec.id);
+  assert.equal(out.state, "committed");
+  assert.deepEqual(f.calls.filter((c) => c[0] === "abortSession"), [["abortSession", out.successorId]]);
+});
+
 test("index.mjs: the engine is wired into every seam the spec names", () => {
   const index = readFileSync(join(SERVER, "index.mjs"), "utf8");
   // REST routes behind the same gate as every /api route
@@ -129,6 +157,7 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
   // §6.3 ownership
   assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
+  assert.match(index, /cancelPendingHandoff: \(sid\) => handoffEngine\.cancelPendingSends\(sid\)/);
   assert.match(index, /isHandoffSuccessor: \(sid\) => handoffEngine\.isSuccessor\(sid\)/);
   assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
   // display parent of an adopted row (delegate.resolveDisplayParents)

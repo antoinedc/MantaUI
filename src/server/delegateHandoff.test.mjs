@@ -4,7 +4,10 @@
 // replacement chain. In-memory store; nothing live.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createDelegateEngine, listJobs, repointJobSessions, settleV2Job } from "./delegate.mjs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { completionOwnerOf, createDelegateEngine, jobStatusOf, listJobs, pauseJob, repointJobSessions, runningJobOwner as ownerOf, saveJobs, settleV2Job, stopJob, sweepDelegateJobs } from "./delegate.mjs";
 
 const job = (over) => ({ id: "aaaa1111", status: "running", launchState: "running", completionOwner: "opencode", submittedAt: 1, parentSessionID: "ses_parent", childSessionID: "ses_child", ...over });
 function store(seed) {
@@ -76,4 +79,146 @@ test("the engine's listJobs expands a session to its replacement chain", async (
   assert.deepEqual((await lean.loadRecords()).map((j) => j.id), ["j1", "j2", "j3"]);
   assert.equal(progressReads, 0);
   assert.equal(await engine.repointSessions({ fromSessionId: "a", toSessionId: "a2" }), 1);
+});
+
+// ---- background jobs hand off on their own (spec 2026-10-29-handoff-jobs-auto) ----
+
+test("runningJobOwner: manta / opencode for a running record on the session, null for none, paused or finished; isRunningJobSession derives from it", async () => {
+  const s = store([
+    job({ id: "m", childSessionID: "ses_m", completionOwner: "manta" }),
+    job({ id: "o", childSessionID: "ses_o", completionOwner: "opencode" }),
+    job({ id: "p", childSessionID: "ses_p", completionOwner: "manta", status: "paused" }),
+    job({ id: "d", childSessionID: "ses_d", completionOwner: "manta", status: "done" }),
+    job({ id: "a", childSessionID: "ses_a", completionOwner: undefined, origin: "subagent" }),
+  ]);
+  const engine = createDelegateEngine({ load: s.load, save: s.save, readProgress: async () => null });
+  assert.equal(completionOwnerOf(s.get()[4]), "opencode");
+  assert.equal(await engine.runningJobOwner("ses_m"), "manta");
+  assert.equal(await engine.runningJobOwner("ses_o"), "opencode");
+  assert.equal(await engine.runningJobOwner("ses_a"), "opencode", "a record from before the field existed: an adopted subagent is opencode's");
+  for (const sid of ["ses_p", "ses_d", "ses_none"]) assert.equal(await engine.runningJobOwner(sid), null, sid);
+  assert.equal(await engine.isRunningJobSession("ses_m"), true);
+  assert.equal(await engine.isRunningJobSession("ses_o"), true, "the armed-trigger skip still covers every running record");
+  assert.equal(await engine.isRunningJobSession("ses_p"), false);
+});
+
+function stopDeps(s, extra = {}) {
+  return { load: s.load, save: s.save, publish: () => {}, abortSession: async () => {}, postSynthetic: async () => {}, ...extra };
+}
+
+test("stopJob cancels the handoff pending on the job's session, and does it BEFORE aborting the turn", async () => {
+  const s = store([job({ id: "j1", childSessionID: "ses_child", completionOwner: "manta" })]);
+  const order = [];
+  const res = await stopJob("j1", stopDeps(s, { cancelPendingHandoff: async (sid) => void order.push(["cancel", sid]), abortSession: async (sid) => void order.push(["abort", sid]) }));
+  assert.equal(res.ok, true);
+  assert.deepEqual(order, [["cancel", "ses_child"], ["abort", "ses_child"]]);
+  assert.equal(s.get()[0].status, "stopped");
+});
+
+test("a failing handoff cancel never blocks a stop; a stop on a missing / finished job cancels nothing", async () => {
+  const s = store([job({ id: "j1", completionOwner: "manta" }), job({ id: "j2", status: "done", completionOwner: "manta" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => (calls.push(sid), Promise.reject(new Error("boom"))) });
+  assert.equal((await stopJob("j1", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_child"]);
+  assert.equal((await stopJob("j2", deps)).ok, false);
+  assert.equal((await stopJob("nope", deps)).ok, false);
+  assert.deepEqual(calls, ["ses_child"]);
+});
+
+test("pauseJob cancels the handoff pending on the job's session; a refused pause cancels nothing", async () => {
+  const s = store([job({ id: "j1", childSessionID: "ses_m", completionOwner: "manta" }), job({ id: "j2", childSessionID: "ses_o", completionOwner: "opencode" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => void calls.push(sid) });
+  assert.equal((await pauseJob("j1", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_m"]);
+  assert.equal((await pauseJob("j2", deps)).ok, false, "pause isn't available for an opencode-owned job");
+  assert.deepEqual(calls, ["ses_m"]);
+});
+
+test("the sweeper does not time out a job that has a send handoff pending — and does once it is gone; the limit itself is unchanged", async () => {
+  const started = 1_700_000_000_000;
+  const mk = () => store([job({ id: "old", completionOwner: "manta", engine: "v2", startedAt: started, worktree: null, completionMessageId: "msg_x" })]);
+  const run = async (s, pending) => {
+    await sweepDelegateJobs({
+      load: s.load,
+      save: s.save,
+      now: () => started + 31 * 60_000,
+      publish: () => {},
+      postSynthetic: async () => {},
+      deferSettlement: (sid) => pending && sid === "ses_child",
+    });
+    return s.get()[0].status;
+  };
+  assert.equal(await run(mk(), true), "running", "deferred while a handoff is pending");
+  assert.equal(await run(mk(), false), "failed", "timed out as before once nothing is pending");
+});
+
+test("stop cancels a pending handoff only for a job Manta completes — an adopted (opencode-owned) session's handoff behaves as before", async () => {
+  const s = store([job({ id: "adopted", childSessionID: "ses_o", completionOwner: "opencode" }), job({ id: "mine", childSessionID: "ses_m", completionOwner: "manta" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => void calls.push(sid) });
+  assert.equal((await stopJob("adopted", deps)).ok, true);
+  assert.deepEqual(calls, []);
+  assert.equal((await stopJob("mine", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_m"]);
+});
+
+// ---- the running-job index: one parse per store change, not per call ----
+
+test("runningJobOwner reads the default store once per change: cached by the file's stamp, dropped by any write, a failed read is never cached", async () => {
+  const dir = mkdtempSync(join(process.env.MANTA_STATE_HOME ?? tmpdir(), "job-index-"));
+  try {
+    const path = join(dir, "delegate-jobs.json");
+    let reads = 0;
+    const deps = { storePath: path, readFile: (...a) => (reads++, readFileSync(...a)) };
+    assert.equal(await ownerOf("ses_child", deps), null, "no store, no jobs");
+    assert.equal(reads, 0);
+    await saveJobs([job({ completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    assert.equal(await ownerOf("ses_other", deps), null);
+    assert.equal(reads, 1, "three lookups, one read");
+    await saveJobs([job({ status: "done", completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", deps), null, "a write invalidates the index");
+    assert.equal(reads, 2);
+    await saveJobs([job({ completionOwner: "opencode" })], path);
+    assert.equal(await ownerOf("ses_child", deps), "opencode");
+    // a failed read answers "not a job" and is not cached: the next call reads again and recovers
+    const flaky = { storePath: path, readFile: () => { reads++; throw new Error("EIO"); } };
+    await saveJobs([job({ completionOwner: "manta" })], path);
+    assert.equal(await ownerOf("ses_child", flaky), null);
+    assert.equal(await ownerOf("ses_child", deps), "manta");
+    // an external edit (not through saveJobs) is picked up through the file's stamp
+    writeFileSync(path, JSON.stringify({ jobs: [job({ id: "ext", childSessionID: "ses_ext", completionOwner: "manta", filler: "x".repeat(50) })] }));
+    assert.equal(await ownerOf("ses_ext", deps), "manta");
+    assert.equal(await ownerOf("ses_child", deps), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stop that ends the job while its handoff is already past the first message: the stopped record follows the successor and stays stopped there", async () => {
+  const s = store([job({ id: "j1", childSessionID: "ses_old", completionOwner: "manta" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => void calls.push(sid) });
+  assert.equal((await stopJob("j1", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_old"], "the stop's cancel step ran (the handoff past its send is flagged to interrupt after commit)");
+  assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new" }, { load: s.load, save: s.save, publish: () => {} }), 1, "the commit re-points the terminal record too");
+  assert.equal(s.get()[0].childSessionID, "ses_new");
+  assert.equal(s.get()[0].status, "stopped", "stopped on the successor — the successor's turn is then interrupted, nothing re-opens the job");
+});
+
+test("jobStatusOf: the status of the manta-completed record on the session (any status); null for none, an opencode-owned one, or an unreadable store", async () => {
+  const s = store([
+    job({ id: "a", childSessionID: "ses_a", completionOwner: "manta", status: "paused" }),
+    job({ id: "b", childSessionID: "ses_b", completionOwner: "manta", status: "stopped" }),
+    job({ id: "b2", childSessionID: "ses_b", completionOwner: "manta", status: "running" }),
+    job({ id: "o", childSessionID: "ses_o", completionOwner: "opencode", status: "stopped" }),
+  ]);
+  const engine = createDelegateEngine({ load: s.load, save: s.save, readProgress: async () => null });
+  assert.equal(await engine.jobStatusOf("ses_a"), "paused");
+  assert.equal(await engine.jobStatusOf("ses_b"), "running", "a running record wins over an older terminal one");
+  for (const sid of ["ses_o", "ses_none"]) assert.equal(await engine.jobStatusOf(sid), null, sid);
+  assert.equal(await jobStatusOf("ses_a", { load: async () => { throw new Error("EIO"); } }), null);
 });

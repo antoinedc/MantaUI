@@ -29,6 +29,19 @@ for (const [trigger, action, mode, want] of TABLE) {
   });
 }
 
+test("entry × mode: an unattended session (a manta job) in auto starts on an agent suggest too; nothing else changes", () => {
+  const START = { produce: "start", kind: "auto", how: "clear", disposition: "send" };
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "agent", action: "suggest", unattended: true }), START);
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "agent", action: "handoff", unattended: true }), START);
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "agent", action: "suggest", unattended: false }), CARD, "attended: unchanged");
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "agent", action: "suggest" }), CARD);
+  // an own suggest/off mode keeps cards for both actions
+  for (const mode of ["suggest", "off"]) for (const action of ["suggest", "handoff"]) assert.deepEqual(entryPlan({ mode, trigger: "agent", action, unattended: true }), CARD, `${mode}/${action}`);
+  // user entry points are cards even when unattended
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "user", unattended: true }), CARD);
+  assert.deepEqual(entryPlan({ mode: "auto", trigger: "button", unattended: true }), CARD);
+});
+
 test("entryPlan rejects unknown triggers/actions and treats a garbage mode as the box default (suggest)", () => {
   assert.throws(() => entryPlan({ mode: "auto", trigger: "cron" }), /unknown trigger/);
   assert.throws(() => entryPlan({ mode: "auto", trigger: "agent", action: "nuke" }), /unknown action/);

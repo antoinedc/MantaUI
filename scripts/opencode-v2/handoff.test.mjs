@@ -66,7 +66,7 @@ describe("handoff tool", () => {
   });
 
   test("suggest: POSTs the §11 payload with bearer auth, returns status line + marker", async () => {
-    const calls = fakeServer(200, { handoff: { id: "hof_0123456789abcdefghij", state: "ready" } });
+    const calls = fakeServer(200, { handoff: { id: "hof_0123456789abcdefghij", state: "ready", kind: "suggest" } });
     const out = await handoffTool.execute({ action: "suggest", body: BODY, goal: "ship it" }, CTX);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].method, "POST");
@@ -78,11 +78,31 @@ describe("handoff tool", () => {
   });
 
   test("handoff: queued status line + marker; goal omitted from the payload when not given", async () => {
-    const calls = fakeServer(200, { handoff: { id: "hof_zzzzzzzzzzzzzzzzzzzz" } });
+    const calls = fakeServer(200, { handoff: { id: "hof_zzzzzzzzzzzzzzzzzzzz", kind: "auto" } });
     const out = await handoffTool.execute({ action: "handoff", body: BODY }, CTX);
     assert.equal(calls[0].body.action, "handoff");
     assert.equal("goal" in calls[0].body, false);
     assert.equal(out, "Handoff queued — it happens when this turn ends. End your turn now.\n<!-- manta-handoff:hof_zzzzzzzzzzzzzzzzzzzz -->");
+  });
+
+  test("the status line follows the record's kind, not the requested action", async () => {
+    const queued = "Handoff queued — it happens when this turn ends. End your turn now.\n<!-- manta-handoff:hof_kkkkkkkkkkkkkkkkkkkk -->";
+    const ready = "Handoff prompt ready below.\n<!-- manta-handoff:hof_kkkkkkkkkkkkkkkkkkkk -->";
+    for (const [action, kind, want] of [
+      ["suggest", "auto", queued], // a background job: the agent's suggest starts the handoff
+      ["handoff", "auto", queued],
+      ["handoff", "suggest", ready], // a suggest/off session: only a card was made
+      ["suggest", "suggest", ready],
+      ["handoff", undefined, ready], // an unknown kind is the safe default
+    ]) {
+      fakeServer(200, { handoff: { id: "hof_kkkkkkkkkkkkkkkkkkkk", ...(kind ? { kind } : {}) } });
+      assert.equal(await handoffTool.execute({ action, body: BODY }, CTX), want, `${action}/${kind}`);
+    }
+  });
+
+  test("the description tells the agent a background job's handoff starts on both actions and to end its turn", () => {
+    assert.match(handoffTool.description, /In a background job the mode defaults to auto: both actions start the handoff/);
+    assert.match(handoffTool.description, /if the turn fails there, the handoff is dropped \(not made a card\) and the job finishes/);
   });
 
   test("server error: returns (not throws) an actionable string with the code and message", async () => {

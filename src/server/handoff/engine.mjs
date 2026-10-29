@@ -94,7 +94,11 @@ export function createHandoffEngine(deps = {}) {
     gather = {},
     contextLimitFor = () => null,
     isExcluded = () => false,
-    isJobSession = () => false,
+    runningJobOwner = async () => null, // sid -> "manta" | "opencode" | null (null = not a running job)
+    // sid -> the status of the manta-owned job record that points at it ("running" | "paused" | "stopped" | "failed" | "done"),
+    // or null / undefined when there is none or it can't be read (unknown: never a reason to interrupt).
+    jobStatusOf = async () => null,
+    interruptConfirmDelayMs = 300,
     hooks = {},
     timers = { setTimeout: (fn, ms) => setTimeout(fn, ms) },
     sleep = sleepReal,
@@ -106,6 +110,7 @@ export function createHandoffEngine(deps = {}) {
     lookupTimeoutMs = 2000,
   } = deps;
 
+  const isJobSession = deps.isJobSession ?? (async (sid) => (await runningJobOwner(sid)) !== null);
   const mintSessionId = deps.mintSessionId ?? (() => `ses_${randomUUID().replaceAll("-", "")}`);
   const mintMessageId = deps.mintMessageId ?? (() => `msg_${randomUUID().replaceAll("-", "")}`);
   const mintId = deps.mintRecordId ?? mintRecordId;
@@ -421,10 +426,30 @@ export function createHandoffEngine(deps = {}) {
   const recordsFor = (sid) => Object.values(state.records).filter((r) => r.fromSessionId === sid);
   const isDismissed = (sid) => typeof state.dismissedSessions[sid] === "number";
   const hasOwnMode = (sid) => HANDOFF_MODES.includes(state.sessionModes[sid]);
-  /** A session's own mode, else the box default (`getMode`). */
-  async function modeFor(sid) {
-    return hasOwnMode(sid) ? state.sessionModes[sid] : normalizeMode(await getMode());
+  /**
+   * The effective mode, where it came from, and whether the session is UNATTENDED
+   * (a manta-owned running job: nobody is looking at its window, so a card would
+   * never be answered). Without an own mode a job is `auto` (source "job"); an own
+   * `auto` on a job is unattended too; an own `suggest`/`off` is an explicit choice
+   * and is never looked up. The job lookup is made only when the own mode is `auto`
+   * or absent; a failed lookup means "not a job".
+   * @returns {Promise<{ mode: string, isDefault: boolean, source: "own"|"job"|"box", unattended: boolean }>}
+   */
+  async function resolveMode(sid) {
+    const own = hasOwnMode(sid) ? state.sessionModes[sid] : null;
+    if (own !== null && own !== "auto") return { mode: own, isDefault: false, source: "own", unattended: false };
+    let owner = null;
+    try {
+      owner = await runningJobOwner(sid);
+    } catch (e) {
+      warn("[handoff] the job lookup failed; treating the session as not a job:", e?.message ?? e);
+    }
+    const unattended = owner === "manta";
+    if (own !== null) return { mode: own, isDefault: false, source: "own", unattended };
+    if (unattended) return { mode: "auto", isDefault: true, source: "job", unattended: true };
+    return { mode: normalizeMode(await getMode()), isDefault: true, source: "box", unattended: false };
   }
+  const modeFor = async (sid) => (await resolveMode(sid)).mode;
   // Only these block a new automatic attempt: a `ready` card has no dismiss action, so it must never wedge auto mode.
   const IN_FLIGHT_STATES = ["requested", "generating", "starting"];
 
@@ -529,6 +554,7 @@ export function createHandoffEngine(deps = {}) {
     const j = rec.internal;
     const sid = rec.fromSessionId;
     const fail = async (reason) => {
+      if (rec.state === "cancelled") return false; // stopped / paused meanwhile: nothing to report
       rec.state = "failed";
       rec.reason = reason;
       touch(rec);
@@ -540,6 +566,7 @@ export function createHandoffEngine(deps = {}) {
     if (!body) {
       if (!acquireOperation(sid, OP_GENERATE)) return fail("Another operation is running on this conversation. Try again in a moment.");
       try {
+        if (rec.state === "cancelled") return false;
         rec.state = "generating";
         rec.reason = undefined;
         j.baselineRevision ??= userRev.get(followReplacement(sid)) ?? 0;
@@ -557,6 +584,7 @@ export function createHandoffEngine(deps = {}) {
       }
     }
     const lines = await gatherFactLines(sid);
+    if (rec.state === "cancelled") return false;
     rec.text = composeHandoffText({ body, facts: lines }).text;
     j.textReady = true;
     rec.state = "ready";
@@ -580,13 +608,16 @@ export function createHandoffEngine(deps = {}) {
     if (trigger === "agent" && isDismissed(sid)) {
       throw new HandoffError("dismissed", "The user dismissed handoff suggestions in this conversation. Do not suggest a handoff again unless the user asks.");
     }
-    const plan = entryPlan({ mode: await modeFor(sid), trigger, action });
+    const resolved = await resolveMode(sid);
+    const plan = entryPlan({ mode: resolved.mode, trigger, action, unattended: resolved.unattended });
     const rec = newRecord({
       contextTokens: await measuredTokens(sid),
       fromSessionId: sid,
       kind: plan.kind,
       trigger,
-      plan: plan.produce === "start" ? { how: plan.how, disposition: plan.disposition } : null,
+      // `job`: planned for an unattended job (the start re-checks it still runs, a failed turn cancels it);
+      // `modeFromJob`: its `auto` came from the job rule, so the successor stores no mode.
+      plan: plan.produce === "start" ? { how: plan.how, disposition: plan.disposition, ...(resolved.unattended ? { job: true } : {}), ...(resolved.source === "job" ? { modeFromJob: true } : {}) } : null,
       body,
       goal,
     });
@@ -633,7 +664,19 @@ export function createHandoffEngine(deps = {}) {
     const j = rec.internal;
     const sid = rec.fromSessionId;
     const planned = j.plan;
-    if (planned && !success) j.plan = null; // the turn failed / was aborted: a card instead
+    if (planned && !success) {
+      // The turn failed / was aborted. In a job that failure is the job's real result and nobody
+      // would see a card: cancel (the deferred settlement then runs). Elsewhere: a card instead.
+      if (planned.job) {
+        rec.state = "cancelled";
+        rec.reason = "the turn failed";
+        touch(rec);
+        await persist();
+        if (planned.disposition === "send") onPendingSendCleared(sid);
+        return;
+      }
+      j.plan = null;
+    }
     const ok = await produceText(rec);
     if (!ok) return;
     if (j.plan && success) {
@@ -647,7 +690,9 @@ export function createHandoffEngine(deps = {}) {
 
   async function maybeAuto(sid, success) {
     if (isDismissed(sid)) return;
-    const mode = await modeFor(sid);
+    const resolved = await resolveMode(sid);
+    if (resolved.unattended) return; // the armed trigger never applies to a manta-owned job (§6.3)
+    const mode = resolved.mode;
     if (mode === "off") return;
     if (recordsFor(sid).some((r) => IN_FLIGHT_STATES.includes(r.state))) return;
     // Suggest mode: an unanswered automatic card already says "hand off" — don't
@@ -790,6 +835,17 @@ export function createHandoffEngine(deps = {}) {
       // replacement from a stale conversation would fork the chain.
       throw new HandoffError("already_started", "This conversation was already handed off.", { handoff: publicRecord(rec) });
     }
+    // A stop / pause flagged this planned start while it was waiting: it never takes the fence. An explicit press
+    // by the user is a new decision and clears the flag.
+    if (origin === "user") rec.internal.cancelled = undefined;
+    else if (rec.internal.cancelled) {
+      rec.state = "cancelled";
+      rec.reason = "the job was stopped, paused or finished";
+      touch(rec);
+      await persist();
+      if (isSendRecord(rec)) onPendingSendCleared(pred);
+      return publicRecord(rec);
+    }
     let branchWindow = null;
     if (how === "new-session") {
       // A branch needs a project to put its window in.
@@ -858,6 +914,7 @@ export function createHandoffEngine(deps = {}) {
   }
 
   async function abortToReady(rec, reason) {
+    if (rec.internal.cancelled) return await cancelStart(rec); // a stop/pause flagged this start: it ends cancelled, not as a card on a stopped job
     const sid = rec.fromSessionId;
     if (state.fences[sid]?.recordId === rec.id) delete state.fences[sid];
     rec.state = "ready";
@@ -875,7 +932,7 @@ export function createHandoffEngine(deps = {}) {
     return rec;
   }
 
-  async function rollback(rec, reason) {
+  async function rollback(rec, reason, { cancelled = false } = {}) {
     const pred = rec.fromSessionId;
     const succ = rec.successorId;
     if (succ) {
@@ -888,7 +945,7 @@ export function createHandoffEngine(deps = {}) {
       releasing.delete(succ);
     }
     if (state.fences[pred]?.recordId === rec.id) delete state.fences[pred];
-    rec.state = "failed";
+    rec.state = cancelled ? "cancelled" : "failed";
     rec.reason = reason;
     rec.step = undefined;
     rec.successorId = undefined;
@@ -901,6 +958,62 @@ export function createHandoffEngine(deps = {}) {
     if (rec.internal.plan?.disposition === "send" || rec.disposition === "send") onPendingSendCleared(pred);
     if (queueLen(pred) > 0) detach(`drain:${pred}`, () => drainHeld(pred)); // held while fenced: back to the predecessor, in order
     return rec;
+  }
+
+  const isSendRecord = (r) => r.internal.plan?.disposition === "send" || r.disposition === "send";
+
+  /**
+   * True when a start that has not sent its first message must stop: it was flagged by a stop / pause, or it was
+   * planned for an unattended job and that job no longer runs. Past the point of no return nothing can be undone.
+   */
+  async function mustCancelStart(rec) {
+    const j = rec.internal;
+    if (pointOfNoReturn(rec)) return false;
+    if (j.cancelled) return true;
+    if (!j.plan?.job) return false;
+    try {
+      return (await runningJobOwner(rec.fromSessionId)) !== "manta";
+    } catch {
+      return true; // can't tell it still runs: never move a possibly stopped job onto a fresh session
+    }
+  }
+
+  /** Undo an uncommitted start: the successor (if one was made) is deleted, nothing was sent, the predecessor is left as it was. */
+  // The delete is always attempted (the id is pre-minted, a 404 is fine): a crash between the create and its persist leaves `created` false for a session that exists.
+  const cancelStart = (rec) => rollback(rec, "the job was stopped, paused or finished", { cancelled: true });
+
+  /**
+   * Stop / pause of a job: cancel every pending `send` handoff on its session so the job is never moved onto a
+   * successor nobody controls. A record not yet started is cancelled; a `ready` one with a planned send and a start
+   * still short of its first message is flagged, and every step of the start observes the flag.
+   */
+  async function cancelPendingSends(sessionId) {
+    let changed = false;
+    for (const r of recordsFor(followReplacement(sessionId))) {
+      if (!isSendRecord(r)) continue;
+      if (r.state === "requested" || r.state === "generating") {
+        r.state = "cancelled";
+        r.reason = "the job was stopped or paused";
+        touch(r);
+        changed = true;
+      } else if (r.state === "starting" && pointOfNoReturn(r)) {
+        // The first message is (maybe) out: the handoff commits, and the successor's turn is interrupted once it has.
+        // Only a replacement (the job record follows it): a branch is a user-made windowed session no stop reaches.
+        if (r.how === "clear" && !r.internal.stopAfterCommit) {
+          r.internal.stopAfterCommit = true;
+          changed = true;
+        }
+      } else if (r.state === "starting" || (r.state === "ready" && r.internal.plan?.disposition === "send")) {
+        if (!r.internal.cancelled) {
+          r.internal.cancelled = true;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return false;
+    await persist();
+    onPendingSendCleared(followReplacement(sessionId));
+    return true;
   }
 
   const pointOfNoReturn = (rec) => Boolean(rec.internal.commit) || Boolean(state.continuations[rec.successorId]?.send?.attempted);
@@ -920,8 +1033,13 @@ export function createHandoffEngine(deps = {}) {
         await persist();
         if (!(await sessionQuiet(pred))) return await abortToReady(rec, "couldn't confirm the conversation is idle");
       }
-      // 2. create
-      if (!j.created) await stepCreate(rec);
+      // 2. create — not for a job that was stopped / paused / finished while this start was under way
+      if (!j.created) {
+        if (await mustCancelStart(rec)) return await cancelStart(rec);
+        await stepCreate(rec);
+      }
+      // …and again now: a stop that landed during creation (or before this recovery) undoes the start.
+      if (await mustCancelStart(rec)) return await cancelStart(rec);
       // 3. prepare delivery
       if (!state.continuations[succ]) {
         const payload = j.textOverride ?? rec.text;
@@ -938,7 +1056,9 @@ export function createHandoffEngine(deps = {}) {
         await persist();
       }
       if (rec.disposition === "send") {
+        if (await mustCancelStart(rec)) return await cancelStart(rec); // before the first message
         const r = await deliverSend(rec, { recovering });
+        if (r === "cancelled") return await cancelStart(rec);
         if (r === "pending") {
           scheduleRetry(`start:${rec.id}`, () => resumeStart(rec.id));
           touch(rec);
@@ -1004,6 +1124,8 @@ export function createHandoffEngine(deps = {}) {
     if (s.confirmed) return "confirmed";
     const wasAttempted = s.attempted === true;
     if (!wasAttempted) {
+      // Synchronous with the `attempted` mark below: a stop/pause flag set before this point wins, after it nothing can undo the send.
+      if (rec.internal.cancelled) return "cancelled";
       s.attempted = true;
       rec.step = "send";
       await hook("send-attempt");
@@ -1071,6 +1193,57 @@ export function createHandoffEngine(deps = {}) {
     }
   }
 
+  /**
+   * The handoff's first message is out, so the start can't be undone: if the job was stopped or paused meanwhile (the
+   * flag a stop left on the record, or the job no longer runs — which also catches a handoff created after the stop's
+   * cancel step ran), the successor's turn is interrupted. The job record stays on the successor, stopped or parked
+   * there. This runs while the successor is still `releasing`, so the adoption reconciler sees a handoff successor and
+   * skips it, and the interrupted turn ends before the next tick.
+   */
+  async function interruptIfJobStopped(rec) {
+    const j = rec.internal;
+    const succ = rec.successorId;
+    if (rec.how !== "clear" || !succ) return;
+    // Only a POSITIVE signal interrupts: the flag a stop/pause left on the record, or a job record on the successor that
+    // exists and is not running. A lookup that fails or finds nothing is "can't tell" — a healthy job must never be
+    // killed by a store-read race (the interrupted turn would settle the job as failed).
+    let stopped = j.stopAfterCommit === true;
+    if (!stopped && j.plan?.job) {
+      try {
+        const status = await jobStatusOf(succ);
+        if (typeof status === "string") stopped = status !== "running";
+        else warn(`[handoff] couldn't tell whether the job of ${succ} was stopped; not interrupting it`);
+      } catch (e) {
+        warn("[handoff] couldn't read the job of the successor; not interrupting it:", e?.message ?? e);
+      }
+    }
+    if (!stopped) return;
+    await interruptSuccessor(succ);
+  }
+
+  /** The prompt POST enqueues and the turn starts asynchronously (interrupting an idle session is a no-op): interrupt, confirm once, interrupt once more. Never loops further. */
+  async function interruptSuccessor(succ) {
+    const busy = async () => {
+      try {
+        if (((await oc.listActive?.()) ?? []).includes(succ)) return true;
+        const inbox = await oc.listInbox?.(succ);
+        return Array.isArray(inbox) && inbox.length > 0;
+      } catch {
+        return false; // can't tell: the second attempt is only for a turn we can see
+      }
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await oc.interrupt?.(succ);
+      } catch (e) {
+        warn("[handoff] interrupting the successor of a stopped job failed:", e?.message ?? e);
+      }
+      await sleep(interruptConfirmDelayMs);
+      if (!(await busy())) return;
+    }
+    warn(`[handoff] the successor ${succ} of a stopped job is still active after two interrupts`);
+  }
+
   async function commit(rec) {
     const pred = rec.fromSessionId;
     const succ = rec.successorId;
@@ -1085,9 +1258,13 @@ export function createHandoffEngine(deps = {}) {
     rec.step = "commit";
     if (!c.modeInherited) {
       // The successor keeps the predecessor's effective mode, stored explicitly (a later change to the box default doesn't move it).
-      if (!hasOwnMode(succ)) {
+      // Not when the predecessor's `auto` came from the job rule (the record says so — no fresh lookup that could
+      // answer "not a job" and store the box default): the re-pointed successor is itself a running job and gets it
+      // from the rule, and nothing stored may outlive the job.
+      if (!hasOwnMode(succ) && !j.plan?.modeFromJob) {
         try {
-          state.sessionModes[succ] = await modeFor(pred);
+          const rm = await resolveMode(pred);
+          if (rm.source !== "job") state.sessionModes[succ] = rm.mode;
         } catch (e) {
           warn("[handoff] the successor couldn't inherit the handoff mode:", e?.message ?? e);
         }
@@ -1111,6 +1288,11 @@ export function createHandoffEngine(deps = {}) {
       if (rec.how === "clear") await ownership.repoint(pred, succ);
       await hook("ownership");
       c.ownership = true;
+      await persist();
+    }
+    if (!c.stopChecked) {
+      await interruptIfJobStopped(rec);
+      c.stopChecked = true;
       await persist();
     }
     rec.state = "committed";
@@ -1260,13 +1442,14 @@ export function createHandoffEngine(deps = {}) {
     const looked = await Promise.all(preds.map((p) => lookupSession(p.id)));
     const predecessors = preds.map((p, i) => ({ ...p, ...looked[i] }));
     const c = state.continuations[sessionId];
+    const rm = await resolveMode(sessionId);
     const out = {
       records,
       links: publicLink(state.links[sessionId] ?? {}),
       chain: { predecessors },
       dismissed: isDismissed(sessionId),
-      mode: await modeFor(sessionId),
-      modeIsDefault: !hasOwnMode(sessionId),
+      mode: rm.mode,
+      modeIsDefault: rm.isDefault,
     };
     if (c && (c.preamble || c.draft !== undefined || c.send)) {
       out.continuation = {
@@ -1344,6 +1527,8 @@ export function createHandoffEngine(deps = {}) {
     dismiss,
     setMode,
     modeFor,
+    resolveMode,
+    cancelPendingSends,
     draftConsumed,
     list,
     get,

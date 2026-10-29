@@ -1217,6 +1217,8 @@ const delegateEngine = createDelegateEngine({
   // §6.3: a job whose own session has a pending `send` handoff does not settle
   // yet; a parent's job list spans its whole replacement chain.
   deferSettlement: (sid) => handoffEngine.hasPendingSend(sid),
+  // A stopped / paused job is never moved onto a handoff successor.
+  cancelPendingHandoff: (sid) => handoffEngine.cancelPendingSends(sid),
   isHandoffSuccessor: (sid) => handoffEngine.isSuccessor(sid),
   replacementChain: (sid) => handoffEngine.chainOf(sid),
   // Display parent of an adopted row (delegate.resolveDisplayParents): the replacement successor of a

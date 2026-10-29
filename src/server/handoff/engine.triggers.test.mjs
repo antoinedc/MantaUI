@@ -81,15 +81,20 @@ test("a window is required to take over in auto mode; a CTO conversation is neve
   assert.equal(records(x).length, 0);
 });
 
-test("a running background job's own session: auto never replaces it (its turn end is its completion); suggest still offers a card", async () => {
+test("a running background job's own session: the armed trigger never applies to a manta-owned job (even with box default suggest); an opencode-owned one keeps today's rules", async () => {
   const a = standardWorld();
   a.engine = a.build({ isJobSession: async () => true });
   await turn(a.engine, "ses_p");
-  assert.equal(records(a).length, 0);
+  assert.equal(records(a).length, 0, "auto: skipped for any running job");
   const s = standardWorld({ mode: "suggest" });
-  s.engine = s.build({ isJobSession: async () => true });
+  s.engine = s.build({ runningJobOwner: async () => "manta" });
   await turn(s.engine, "ses_p");
-  assert.equal(records(s)[0]?.state, "ready");
+  assert.equal(records(s).length, 0, "the job rule makes it auto, and the armed trigger never applies to a manta job");
+  assert.equal(s.generateCalls.length, 0);
+  const adopted = standardWorld({ mode: "suggest" });
+  adopted.engine = adopted.build({ runningJobOwner: async () => "opencode" });
+  await turn(adopted.engine, "ses_p");
+  assert.equal(records(adopted)[0]?.state, "ready", "an adopted (opencode-owned) session: suggest still offers a card");
 });
 
 test("cooldown: a session created by a handoff is not handed off again for 30 minutes", async () => {

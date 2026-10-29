@@ -29,6 +29,8 @@ export function createWorld({ mode = "auto" } = {}) {
     posts: [], // every sendPrompt/postSynthetic call, accepted or not
     created: [],
     deleted: [],
+    interrupted: [],
+    statuses: new Map(), // session -> job status, for the engines that are given jobStatusOf by the world
     repointed: [],
     cleared: [],
     published: [],
@@ -105,6 +107,10 @@ export function createWorld({ mode = "auto" } = {}) {
     listInbox: async (id) => w.inbox.get(id) ?? [],
     getMessage: async (sid, mid) => msgs(sid).get(mid) ?? null,
     listActive: async () => [...w.active],
+    interrupt: async (id) => {
+      w.interrupted.push(id);
+      await w.onInterrupt?.(id);
+    },
   };
 
   const tmux = {
@@ -137,6 +143,7 @@ export function createWorld({ mode = "auto" } = {}) {
       oc,
       tmux,
       ownership: { repoint: async (pred, succ) => void w.repointed.push([pred, succ]) },
+      jobStatusOf: async (sid) => w.statuses.get(sid) ?? null,
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
       gather: { facts: async () => null, measureContext: async () => null },

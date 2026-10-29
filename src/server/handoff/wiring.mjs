@@ -41,6 +41,7 @@ export function createProductionHandoff(p) {
       listInbox: (sid) => oc.listInbox(sid),
       getMessage: (sid, mid) => oc.getMessage(sid, mid),
       listActive: () => oc.listActiveSessionIds(),
+      interrupt: (sid) => oc.abortSession(sid),
     },
     tmux: {
       findWindow: (sid) => tmux.findWindowBySessionId(sid),
@@ -64,6 +65,8 @@ export function createProductionHandoff(p) {
       p.publish({ kind: "handoff", payload: { heldFailure: { sessionId: target, messageId: item.id, message: "A message sent during a handoff couldn't be delivered." } } });
     },
     isExcluded: (sid) => p.isCtoConversationSession(sid),
+    runningJobOwner: (sid) => p.delegate().runningJobOwner(sid),
+    jobStatusOf: (sid) => p.delegate().jobStatusOf(sid),
     isJobSession: (sid) => p.delegate().isRunningJobSession(sid),
     gather: {
       measureContext: async (sid) => {
