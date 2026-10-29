@@ -1880,6 +1880,9 @@ export async function sweepDelegateJobs(deps = {}) {
       // command) has no running timeout: opencode runs its lifecycle and
       // settleV2Job finishes it from the real outcome.
       if (completionOwnerOf(job) === "opencode") continue;
+      // A job with a handoff pending is not timed out under it: the limit is re-evaluated once the
+      // handoff commits (the job keeps its start time) or fails.
+      if (job.status === "running" && deps.deferSettlement?.(job.childSessionID)) continue;
       if (job.status === "running" && job.startedAt != null && job.launchState !== "uncertain") {
         // Per-job running-sweep allowance: default 30 min, or the caller's
         // sweepAllowanceMs (spec §11.6-4 — CTO overnight jobs pass
@@ -2050,6 +2053,12 @@ export async function stopJob(id, deps = {}, { error: stopError } = {}) {
     abortSession,
     now = () => Date.now(),
   } = deps;
+  // Cancel a handoff pending on the job's session BEFORE the abort below ends its turn: the
+  // turn end would otherwise find the handoff and carry on with it.
+  if (deps.cancelPendingHandoff) {
+    const peek = ((await (deps.load ?? loadJobs)()) ?? []).find((j) => j.id === id);
+    if (peek && (peek.status === "running" || peek.status === "paused")) await cancelPendingHandoff(peek, deps);
+  }
   // Under the jobs-store lock: the read-check-mutate is atomic, so a stop cannot
   // race another writer into a half-state. The N7 / admission delivery happens
   // after the lock is released.
@@ -2211,7 +2220,7 @@ async function deleteJobLocked(id, lockedChild, deps, opts) {
  */
 export async function pauseJob(id, deps = {}) {
   const { save = saveJobs, publish } = deps;
-  return withRunningJob(id, deps, async (jobs, idx, job) => {
+  const res = await withRunningJob(id, deps, async (jobs, idx, job) => {
     // V2 owns a background command's / subagent's lifecycle: there is nothing
     // to park, so the control is refused rather than half-working.
     if (job.origin === "command" || completionOwnerOf(job) === "opencode") {
@@ -2228,6 +2237,18 @@ export async function pauseJob(id, deps = {}) {
     });
     return { ok: true, job: updated };
   });
+  if (res?.ok && res.job) await cancelPendingHandoff(res.job, deps);
+  return res;
+}
+
+/** A stopped / paused job must not be moved onto a handoff successor: cancel any handoff pending on its session. Never throws. */
+async function cancelPendingHandoff(job, deps = {}) {
+  if (!job?.childSessionID || typeof deps.cancelPendingHandoff !== "function") return;
+  try {
+    await deps.cancelPendingHandoff(job.childSessionID);
+  } catch (e) {
+    console.warn(`[delegate] cancelling the pending handoff of ${job.id} failed:`, e?.message ?? e);
+  }
 }
 
 /**
@@ -2547,6 +2568,14 @@ export function countsTowardCap(job) {
 /** Who reports this job's result to its parent. Records from before the field existed: adopted subagents were always opencode's. */
 export function completionOwnerOf(job) {
   return job?.completionOwner ?? (job?.origin === "subagent" ? "opencode" : "manta");
+}
+
+/** The completion owner of the RUNNING job record whose own session is `sessionId`; null when there is none (a paused or finished job is not running). */
+export async function runningJobOwner(sessionId, deps = {}) {
+  const jobs = (await (deps.load ?? loadJobs)()) ?? [];
+  const running = jobs.filter((j) => j.childSessionID === sessionId && j.status === "running");
+  if (running.length === 0) return null;
+  return running.some((j) => completionOwnerOf(j) === "manta") ? "manta" : "opencode";
 }
 
 /** V2 session ids are `ses…`, message ids `msg…`; both are minted here so a lost response stays reconcilable by id. */
@@ -4831,8 +4860,10 @@ export function createDelegateEngine(baseDeps) {
       return listJobs(Array.isArray(chain) && chain.length > 1 ? { sessionIDs: chain } : filter, deps);
     },
     repointSessions: (a) => repointJobSessions(a, deps),
-    /** Is `sessionId` the own session of a job that is still running? */
-    isRunningJobSession: async (sessionId) => ((await (deps.load ?? loadJobs)()).some((j) => j.childSessionID === sessionId && j.status === "running")),
+    /** Who completes the running job whose OWN session is `sessionId`: "manta", "opencode", or null (not a running job). */
+    runningJobOwner: (sessionId) => runningJobOwner(sessionId, deps),
+    /** Is `sessionId` the own session of a job that is still running (whoever completes it)? */
+    isRunningJobSession: async (sessionId) => (await runningJobOwner(sessionId, deps)) !== null,
     getJob: (id) => getJob(id, deps),
     /** The raw job records (no progress reads) — the cheap read behind the read-only-job guard. */
     loadRecords: async () => (await (deps.load ?? loadJobs)()) ?? [],

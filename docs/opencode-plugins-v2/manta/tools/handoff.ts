@@ -13,10 +13,10 @@ import type { ToolDef } from "../lib/types.ts";
 const RECORD_ID_RE = /^[A-Za-z0-9_-]+$/;
 const TIMEOUT_MS = 30_000;
 
-const STATUS_LINE = {
-  suggest: "Handoff prompt ready below.",
-  handoff: "Handoff queued — it happens when this turn ends. End your turn now.",
-} as const;
+// The line follows what the server DID (the record's kind), not what was asked: `auto` is a start planned
+// for the end of this turn; anything else is a card for the user.
+const QUEUED_LINE = "Handoff queued — it happens when this turn ends. End your turn now.";
+const READY_LINE = "Handoff prompt ready below.";
 
 function failure(detail: string): string {
   return (
@@ -40,6 +40,8 @@ export const tools: ToolDef[] = [
       "After `action: handoff` END YOUR TURN IMMEDIATELY (no more tool calls, no further",
       "work): the handoff happens when the turn completes. If the user's mode is `suggest` or",
       "`off`, or the turn fails, it becomes a card for the user instead.",
+      "In a background job the mode defaults to auto: both actions start the handoff when this",
+      "turn ends, so end your turn right after calling it.",
       "NEVER call it mid-task or while work is half-done; if you are simply finished, just",
       "finish — do not hand off.",
       "`body` is the handoff text and MUST use exactly these six headings, in order:",
@@ -102,7 +104,8 @@ export const tools: ToolDef[] = [
       if (typeof id !== "string" || !RECORD_ID_RE.test(id)) {
         return failure("manta-server returned no handoff id.");
       }
-      return `${STATUS_LINE[action]}\n<!-- manta-handoff:${id} -->`;
+      const line = json?.handoff?.kind === "auto" ? QUEUED_LINE : READY_LINE;
+      return `${line}\n<!-- manta-handoff:${id} -->`;
     },
   },
 ];

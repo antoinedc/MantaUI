@@ -43,7 +43,8 @@ function fakes(over = {}) {
   const delegate = {
     repointSessions: async (a) => void calls.push(["repoint", a]),
     reconcileV2: async () => void calls.push(["reconcileV2"]),
-    isRunningJobSession: async (sid) => sid === "ses_job",
+    isRunningJobSession: async (sid) => sid === "ses_job" || sid === "ses_adopted",
+    runningJobOwner: async (sid) => (sid === "ses_job" ? "manta" : sid === "ses_adopted" ? "opencode" : null),
   };
   const p = {
     oc,
@@ -115,6 +116,14 @@ test("the mode comes from config handoffMode (garbage → the suggest default); 
   assert.equal((await engine.policyFor("ses_p")).mode, "suggest");
 });
 
+test("a manta-owned running job resolves to auto through the delegate adapter; an adopted one and a plain session follow the box default", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "off" }) });
+  const engine = createProductionHandoff(f.p);
+  assert.deepEqual(await engine.resolveMode("ses_job"), { mode: "auto", isDefault: true, source: "job" });
+  assert.equal((await engine.resolveMode("ses_adopted")).mode, "off");
+  assert.equal((await engine.resolveMode("ses_p")).mode, "off");
+});
+
 test("index.mjs: the engine is wired into every seam the spec names", () => {
   const index = readFileSync(join(SERVER, "index.mjs"), "utf8");
   // REST routes behind the same gate as every /api route
@@ -129,6 +138,7 @@ test("index.mjs: the engine is wired into every seam the spec names", () => {
   assert.match(index, /release: \(sid\) => handoffEngine\.releaseOperation\(sid, "compaction"\)/);
   // §6.3 ownership
   assert.match(index, /deferSettlement: \(sid\) => handoffEngine\.hasPendingSend\(sid\)/);
+  assert.match(index, /cancelPendingHandoff: \(sid\) => handoffEngine\.cancelPendingSends\(sid\)/);
   assert.match(index, /isHandoffSuccessor: \(sid\) => handoffEngine\.isSuccessor\(sid\)/);
   assert.match(index, /replacementChain: \(sid\) => handoffEngine\.chainOf\(sid\)/);
   // display parent of an adopted row (delegate.resolveDisplayParents)

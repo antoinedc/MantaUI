@@ -28,10 +28,13 @@ export const ACTIONS = Object.freeze(["suggest", "handoff"]);
  *                     longer planned; the engine still honours old armed records.
  * `kind` is the record kind: "auto" when the server starts it, else "suggest".
  *
- * @param {{ mode: string, trigger: string, action?: string }} a
+ * `unattended` (a manta-owned running job): nobody can click a card, so in auto
+ * mode an agent `suggest` starts the handoff exactly like `handoff` does.
+ *
+ * @param {{ mode: string, trigger: string, action?: string, unattended?: boolean }} a
  * @returns {{ produce: "none"|"card"|"start", kind: "suggest"|"auto", how?: "clear", disposition?: "armed"|"send" }}
  */
-export function entryPlan({ mode, trigger, action } = {}) {
+export function entryPlan({ mode, trigger, action, unattended = false } = {}) {
   if (!TRIGGERS.includes(trigger)) throw new Error(`unknown trigger "${String(trigger)}"`);
   const m = normalizeMode(mode);
   if (trigger === "auto") {
@@ -41,7 +44,7 @@ export function entryPlan({ mode, trigger, action } = {}) {
   }
   if (trigger === "agent") {
     if (!ACTIONS.includes(action)) throw new Error(`unknown action "${String(action)}"`);
-    if (action === "handoff" && m === "auto") return { produce: "start", kind: "auto", how: "clear", disposition: "send" };
+    if (m === "auto" && (action === "handoff" || unattended === true)) return { produce: "start", kind: "auto", how: "clear", disposition: "send" };
     return { produce: "card", kind: "suggest" };
   }
   // `/handoff` and the "Hand off" button: always a card, whatever the mode.
