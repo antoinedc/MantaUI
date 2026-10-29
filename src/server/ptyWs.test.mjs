@@ -338,3 +338,49 @@ test("attachPtyWs: ws 'error' does NOT crash; cleanup runs on 'close'", async ()
   await new Promise((r) => setImmediate(r));
   assert.equal(pty.calls.kill.length, 1, "kill runs on the subsequent close");
 });
+
+// WS11 D3 review #11: the spawn can wait on the saved-options read; closing meanwhile must not leak a process,
+// and input that arrives meanwhile is delivered once the process exists.
+test("attachPtyWs: closing while the launcher is still being resolved spawns nothing", async () => {
+  const ws = fakeWs();
+  const pty = makeFakePty();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const launcher = encodeURIComponent(JSON.stringify({ id: "claude" }));
+  attachPtyWs(ws, new URL(`ws://x/pty?session=abc&launcher=${launcher}`), {
+    pty,
+    resolveLauncher: async (l) => { await gate; return { ...l, flags: {} }; },
+  });
+  await new Promise((r) => setImmediate(r));
+  ws._emit("close");
+  release();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(pty.calls.spawn.length, 0, "no orphan process for a socket that is already gone");
+});
+
+test("attachPtyWs: a data frame that arrives during launcher resolution is written after the spawn", async () => {
+  const ws = fakeWs();
+  const pty = makeFakePty();
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const order = [];
+  const spawn = pty.spawn.bind(pty);
+  pty.spawn = (o, e) => { order.push("spawn"); spawn(o, e); };
+  const write = pty.write.bind(pty);
+  pty.write = (k, d) => { order.push("write"); write(k, d); };
+  const launcher = encodeURIComponent(JSON.stringify({ id: "claude" }));
+  attachPtyWs(ws, new URL(`ws://x/pty?session=abc&launcher=${launcher}`), {
+    pty,
+    resolveLauncher: async (l) => { await gate; return { ...l, flags: { skipPermissions: true } }; },
+  });
+  await new Promise((r) => setImmediate(r));
+  ws._emit("message", JSON.stringify({ type: "data", data: "hi" }));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(pty.calls.write.length, 0, "not written to a process that does not exist yet");
+  release();
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(order, ["spawn", "write"]);
+  assert.deepEqual(pty.calls.spawn[0].launcher.flags, { skipPermissions: true });
+});

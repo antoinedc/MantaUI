@@ -1162,6 +1162,9 @@ export function createStreamInterpreter({
     reemitContext(sid) {
       const st = sessions.get(sid);
       if (st) emitContext(sid, st);
+      // false = the interpreter has nothing to measure for this session (not seen since boot, or no step yet):
+      // the caller measures it from the transcript instead.
+      return Boolean(st?.lastStepTokens);
     },
     /** The default model changed (`config:update`): re-measure every known session. */
     reemitAllContext() {

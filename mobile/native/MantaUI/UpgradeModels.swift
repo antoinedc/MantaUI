@@ -406,7 +406,8 @@ struct UpgradeScreenModel: Equatable, Sendable {
                     hint: nil,
                     failedStep: failedStep,
                     retryLabel: v?.retryLabel ?? "Retry",
-                    canRetry: v?.canRetry ?? false,
+                    // No view = an older box: offer Retry anyway (it refuses with its own sentence).
+                    canRetry: v?.canRetry ?? true,
                     retryDisabledReason: v?.retryDisabledReason,
                     canRollback: v?.canRollback ?? false,
                     nothingChanged: failedStep == "preflight",

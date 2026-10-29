@@ -23,7 +23,7 @@ struct MantaAppRoot: View {
     @StateObject private var navigator = MantaNavigator()
     /// WS11 D1: the app's one capability reader (`GET /api/version`), injected below.
     /// Refreshed on every (re)connect of the event stream, reset on a box change.
-    @StateObject private var capabilities = BoxCapabilitiesStore()
+    @StateObject private var capabilities = BoxCapabilitiesStore.shared
     /// M-09-3: WS09's app-wide usage alerts + resume-after-limit presentation.
     @ObservedObject private var usageAlerts = UsageAlertsStore.shared
     /// M-10-1: the phone's own theme override (device-local; System follows the

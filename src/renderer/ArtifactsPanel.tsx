@@ -1023,7 +1023,7 @@ export function ArtifactsPanel({
           )}
           {unsupported ? (
             <div className="manta-artifacts-unsupported px-4 py-8 text-center">
-              <UpdateBoxNote text="Update your box to use this." className="text-label text-text-muted" />
+              <UpdateBoxNote className="text-label text-text-muted" />
               <div className="mt-1 text-micro text-text-faint">Artifacts need a newer box version.</div>
             </div>
           ) : (

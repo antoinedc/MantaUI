@@ -27,7 +27,8 @@ import { Button } from "./Button";
 import { refreshModelCatalog } from "./modelCatalog";
 import { useCachedResource } from "./useCachedResource";
 import { MantaLoader } from "./MantaLoader";
-import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
+import { isUnknownChannel } from "./modelsPicker";
+import { UpdateBoxNote, UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 
 const UNSUPPORTED = "unsupported" as const;
 type TableData = ModelsTableResult | typeof UNSUPPORTED;
@@ -215,7 +216,7 @@ export function ModelsCard() {
         if (surfaceErrors) {
           setFeedback({
             kind: "error",
-            message: isUnknownChannel(e) ? UPDATE_YOUR_BOX : `Couldn't save — ${e instanceof Error ? e.message : String(e)}`,
+            message: isUnknownChannel(e) ? UPDATE_BOX_NOTE_TEXT : `Couldn't save — ${e instanceof Error ? e.message : String(e)}`,
           });
         }
         return null;
@@ -245,7 +246,7 @@ export function ModelsCard() {
       </div>
 
       {unsupported ? (
-        <div className="text-meta text-text-faint">{UPDATE_YOUR_BOX}</div>
+        <UpdateBoxNote />
       ) : (
         <>
           {/* The saved default, as the box reports it. */}

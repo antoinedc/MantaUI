@@ -114,6 +114,18 @@ struct SessionPtyLauncher: Equatable, Sendable {
         self.flags = flags
     }
 
+    /// The launcher a spawn carries. A current box resolves the saved launch options itself, so `{id}` is
+    /// enough. An older box (a flag row without `value`) runs only the flags it is GIVEN — a bare `{id}` would
+    /// drop every option, including skip-permissions whose default is on — so for it the row's own defaults are
+    /// sent (the old box's data; no rule is copied here).
+    static func make(id: String, launchers: [AvailableLauncher]) -> SessionPtyLauncher {
+        guard let row = launchers.first(where: { $0.id == id }),
+              !row.flags.isEmpty, row.flags.contains(where: { $0.value == nil }) else {
+            return SessionPtyLauncher(id: id)
+        }
+        return SessionPtyLauncher(id: id, flags: Dictionary(uniqueKeysWithValues: row.flags.map { ($0.key, $0.default) }))
+    }
+
     /// Compact JSON with sorted keys, so the same launcher always produces the
     /// same URL: `{"id":"…"}` or `{"flags":{…},"id":"…"}`.
     var queryJSON: String {

@@ -3,6 +3,7 @@
 // Type-only import — erased at compile time, keeps this module dependency-
 // free at runtime (the whole point of chatUtils.ts: pure functions testable
 // without DOM/Electron/network).
+import { formatBytes } from "../shared/formatBytes.mjs";
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
 import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
@@ -282,7 +283,6 @@ function tickLabel(t: number, bucket: "hour" | "day"): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-import { formatBytes } from "../shared/formatBytes.mjs";
 export { formatBytes };
 
 // ===== Download confirmation (BET-1198) =====
@@ -3377,6 +3377,22 @@ export function seatResetHint(seat: SeatView, nowMs: number): string | null {
  * The sentence for a failed `accounts:*` call: the BOX words every error code
  * (`message`, WS11 D4 / K7). An older box sends none — the static fallback.
  */
+/**
+ * The model line of the context popover: the model the BOX measured against (`context.model`), named from
+ * the catalog, with "(last reply's model)" when the box fell back to the last reply's model (`basis`
+ * "last-used"). An older box sends no `context.model`: the client's own active-model name stands in.
+ */
+export function contextModelLabel(
+  models: ReadonlyArray<{ id: string; providerID: string; name: string }>,
+  measured: { providerID: string; modelID: string } | null | undefined,
+  basis: string | null | undefined,
+  fallbackName: string | null,
+): string | null {
+  if (!measured) return fallbackName;
+  const name = models.find((m) => m.providerID === measured.providerID && m.id === measured.modelID)?.name ?? measured.modelID;
+  return basis === "last-used" ? `${name} (last reply's model)` : name;
+}
+
 export const ACCOUNTS_ERROR_FALLBACK = "That didn't work. Try again.";
 export function accountsFailureMessage(res: { message?: string } | null | undefined): string {
   return typeof res?.message === "string" && res.message ? res.message : ACCOUNTS_ERROR_FALLBACK;

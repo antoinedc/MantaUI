@@ -6,6 +6,7 @@ import {
   isOptimisticUserId,
   computeTurnInfo,
   computeLiveTurn,
+  contextModelLabel,
   formatTokens,
   buildCumulativePath,
   chartAxisTicks,
@@ -4990,5 +4991,20 @@ describe("authProviderSeatId", () => {
   });
   it("has no seat panel for Kimi or anything else", () => {
     for (const v of ["kimi-for-coding", "", "foo", null, undefined]) expect(authProviderSeatId(v)).toBeUndefined();
+  });
+});
+
+describe("contextModelLabel (WS11 D2 decision 4)", () => {
+  const models = [{ id: "opus", providerID: "anthropic", name: "Claude Opus" }];
+  it("names the model the box measured against, from the catalog", () => {
+    expect(contextModelLabel(models, { providerID: "anthropic", modelID: "opus" }, "selected", "Other")).toBe("Claude Opus");
+  });
+  it("marks a last-reply fallback so the label cannot name a model that was not measured", () => {
+    expect(contextModelLabel(models, { providerID: "anthropic", modelID: "opus" }, "last-used", "Other")).toBe("Claude Opus (last reply's model)");
+  });
+  it("falls back to the raw model id when the catalog lacks it, and to the client's name on an older box", () => {
+    expect(contextModelLabel(models, { providerID: "x", modelID: "mystery" }, "selected", "Other")).toBe("mystery");
+    expect(contextModelLabel(models, null, undefined, "Other")).toBe("Other");
+    expect(contextModelLabel(models, undefined, null, null)).toBeNull();
   });
 });

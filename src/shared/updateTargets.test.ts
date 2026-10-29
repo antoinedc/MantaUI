@@ -109,6 +109,11 @@ describe("buildUpdateTargets", () => {
     expect(result[1].ok).toBe(true);
   });
 
+  it("no server answer at all (a rejected or timed-out check) is ok:false — never evidence of a healthy box", () => {
+    const result = buildUpdateTargets({ desktopCheck: { supported: true, available: false, version: "0.0.36" }, serverCheck: null });
+    expect(result[1].ok).toBe(false);
+  });
+
   it("explicit server ok:false is propagated (check could not complete)", () => {
     const result = buildUpdateTargets({
       desktopCheck: { supported: true, available: false, version: "0.0.36" },

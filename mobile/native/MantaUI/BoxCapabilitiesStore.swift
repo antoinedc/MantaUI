@@ -14,6 +14,11 @@ import Foundation
 
 @MainActor
 final class BoxCapabilitiesStore: ObservableObject {
+    /// The app's one store (the app root owns THIS instance). A screen that is not handed the environment
+    /// store falls back to it — never to a private store of its own, which would run its own request and its
+    /// own retry loop.
+    static let shared = BoxCapabilitiesStore()
+
     @Published private(set) var state: BoxCapabilitiesState = .loading
 
     private let load: @Sendable () async throws -> ServerVersionInfo
@@ -68,13 +73,18 @@ final class BoxCapabilitiesStore: ObservableObject {
                 guard let self, self.generation == startedIn else { return }
                 NSLog("[capabilities] couldn't read the box capabilities: %@", String(describing: error))
                 self.state = .failed(lastLoaded: self.state.known)
-                self.scheduleRetry()
+                // A refused token is the sign-in path's to handle (the app re-opens pairing): retrying
+                // here would only hammer the box with a token it has already refused.
+                if case MantaError.authRequired = error {} else { self.scheduleRetry() }
             }
             self?.loadTask = nil
         }
         loadTask = task
         await task.value
     }
+
+    /// Whether a retry of a failed read is pending (observable for tests; false after an auth refusal).
+    var isRetryScheduled: Bool { retryTask != nil }
 
     /// A different box (or none): forget everything the last one said.
     func resetForBoxChange() {

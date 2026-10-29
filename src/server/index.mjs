@@ -81,7 +81,7 @@ import { blendedPrice } from "../shared/blendedPrice.mjs";
 import { createBus, handleEventsRequest, attachEventsWs } from "./events.mjs";
 import { attachPtyWs } from "./ptyWs.mjs";
 import { resolveLauncherForSpawn } from "./launchersConfig.mjs";
-import { devicesView, hasBlankDeviceId } from "./settingsViews.mjs";
+import { devicesView } from "./settingsViews.mjs";
 import { attachCallWs, createCallRegistry } from "./callWs.mjs";
 import {
   buildHandlers,
@@ -284,6 +284,7 @@ import {
 import * as push from "./push.mjs";
 import { registerWithGateway, publicBaseUrl, loadAuthFile, DEFAULT_AUTH_PATH } from "./gatewayRegister.mjs";
 import { readServerVersion, opencodeInfo, writeVersionResponse } from "./version.mjs";
+import { handleAuthRevoke } from "./authRevokeRoute.mjs";
 import { createUpgradeV2, createDefaultDeps as createUpgradeDeps, createUpgradeRoutes } from "./upgradeV2.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -3982,34 +3983,7 @@ const handleRequest = async (req, res) => {
         return;
       }
       if (req.method === "DELETE" && path === "/auth/revoke") {
-        // Manual auth check (this route is exempt from the standard gate so
-        // we can distinguish malformed-token → 400 from missing-token → 401;
-        // the gate collapses both into 401). The shape of the response is
-        // whatever authEngine.revoke returns: { ok, status?, error? }.
-        // BET-490: `device_id` targets ONE device for per-device revoke;
-        // absent → legacy whole-box reset.
-        const token = parseBearer(req.headers["authorization"]);
-        const q = Object.fromEntries(url.searchParams);
-        // WS11 D3 (X6): a `device_id` that is PRESENT but blank must never fall
-        // through to the whole-identity reset (an ABSENT one keeps that meaning).
-        if (hasBlankDeviceId(q)) {
-          respondJson(res, 400, { error: "device_id_required" });
-          return;
-        }
-        const result = await authEngine.revoke({
-          token,
-          device_id: q.device_id ?? q.deviceId ?? null,
-        });
-        if (!result.ok) {
-          respondJson(res, result.status ?? 401, { error: result.error });
-          return;
-        }
-        respondJson(res, 200, {
-          ok: true,
-          box_id: result.box_id,
-          device_id: result.device_id ?? null,
-          reset: !!result.reset,
-        });
+        await handleAuthRevoke({ req, url, res, authEngine, respondJson, parseBearer });
         return;
       }
       respondJson(res, 405, { error: "method not allowed" });

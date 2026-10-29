@@ -729,6 +729,7 @@ private struct ChatScreenContent: View {
             PreviousSessionScreen(
                 route: route,
                 eventStore: eventStore,
+                capabilities: capabilities,
                 api: MantaAPIClient.live(),
                 tokens: tokens,
                 path: $path
@@ -741,6 +742,7 @@ private struct ChatScreenContent: View {
                 title: agent.taskName,
                 subtitle: agent.subtitle,
                 eventStore: eventStore,
+                capabilities: capabilities,
                 api: MantaAPIClient.live(),
                 tokens: tokens,
                 path: $path
@@ -1275,8 +1277,8 @@ private struct ChatScreenContent: View {
     /// a session, and again after a compaction). A missing value renders
     /// nothing — never a confident 0%.
     private var contextPct: Double? {
-        guard let ctx = contextBreakdown, ctx.pct.isFinite else { return nil }
-        return ctx.pct
+        guard let pct = contextBreakdown?.pct, pct.isFinite else { return nil }
+        return pct
     }
 
     /// Whether the prompt cache has gone cold. One read, so the tint, the label
@@ -1449,8 +1451,10 @@ private struct ChatScreenContent: View {
             ContextSheet(
                 context: ctx,
                 cache: store.cache,
+                isCold: cacheIsStale,
                 limit: ctx.limit,
-                modelName: activeModelName,
+                // The model the BOX measured against (decision 4), not the client's own selection.
+                modelName: ChatModel.contextModelLabel(modelStore.models, measured: ctx.model, basis: ctx.basis, fallback: activeModelName),
                 bandColor: contextBandColor,
                 tokens: tokens,
                 onCompact: { store.compact() },
@@ -1941,7 +1945,7 @@ struct ChatSubagentScreen: View {
     /// dismissing (flushed from the sheet's `onDismiss:`).
     @State private var pendingPush: PendingPush?
 
-    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
+    init(childSessionId: String?, title: String, subtitle: String, eventStore: MantaEventStore, capabilities: BoxCapabilitiesStore, api: MantaAPIClient, tokens: Tokens, path: Binding<NavigationPath>) {
         self.childSessionId = childSessionId
         self.title = title
         self.subtitle = subtitle
@@ -1951,7 +1955,8 @@ struct ChatSubagentScreen: View {
             sessionId: childSessionId ?? "",
             eventStore: eventStore,
             api: api,
-            isReadOnly: true
+            isReadOnly: true,
+            capabilities: capabilities
         ))
     }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPickerView, isUnknownChannel, UPDATE_YOUR_BOX } from "./modelsPicker";
+import { buildPickerView, isUnknownChannel } from "./modelsPicker";
 import type { ModelsPickerResult, OpencodeModel } from "../shared/types";
 
 const M = (providerID: string, id: string, extra: Partial<OpencodeModel> = {}): OpencodeModel =>
@@ -61,6 +61,5 @@ describe("isUnknownChannel", () => {
   it("recognises the box's unknown-channel rejection only", () => {
     expect(isUnknownChannel(new Error("unknown rpc channel: models:table"))).toBe(true);
     expect(isUnknownChannel(new Error("model list unavailable"))).toBe(false);
-    expect(UPDATE_YOUR_BOX).toBe("Update your box to use this.");
   });
 });

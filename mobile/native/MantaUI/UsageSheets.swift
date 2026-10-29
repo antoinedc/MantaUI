@@ -63,6 +63,8 @@ struct MeterRing: View {
 struct ContextSheet: View {
     let context: StreamContextPayload
     let cache: StreamCachePayload?
+    /// Whether the cache is cold — the PARENT's one read (it flips at the box's `staleAt`), so an open sheet and the strip never disagree.
+    let isCold: Bool
     let limit: Double?
     let modelName: String
     let bandColor: Color
@@ -141,7 +143,7 @@ struct ContextSheet: View {
         if context.hasLimit {
             HStack(alignment: .firstTextBaseline, spacing: Metrics.spacing.sp2) {
                 Group {
-                    Text("\(Int(context.pct.rounded()))")
+                    Text("\(Int((context.pct ?? 0).rounded()))")
                         .font(.system(size: Metrics.type.display, weight: .bold))
                     Text("%")
                         .font(.manta(size: Metrics.type.body, weight: .bold))
@@ -218,7 +220,7 @@ struct ContextSheet: View {
     /// warning, so it is kept; the font is the platform's footnote.
     @ViewBuilder
     private var staleLine: some View {
-        if let cache, UsageMeters.isCold(cache, now: Date()) {
+        if let cache, isCold {
             Text("Idle \(idleText(UsageMeters.idleMs(cache, now: Date()))) — the cache has gone cold. Clearing now saves re-billing \(UsageMeters.formatTokens(cache.staleTokens)) tokens.")
                 .font(.footnote)
                 .foregroundColor(tokens.warn)

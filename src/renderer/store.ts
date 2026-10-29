@@ -403,11 +403,6 @@ type State = {
   // cache_control.ttl on requests — opencode does); must match opencode's
   // setting. Defaults to "1h".
   cacheTtl: "5m" | "1h";
-  // Per-launcher CLI flag overrides for AI CLI TUI launch modes (BET-138
-  // refinement). Keyed by launcher id, then flag key; missing keys fall back
-  // to the launcher's registry default (the box resolves them — launchers:list `value`). Empty
-  // object = no user overrides for any launcher.
-  launcherFlags: Record<string, Record<string, boolean>>;
   // Voice / Groq STT. `groqApiKey` is the gating signal — empty string
   // means voice features are unavailable and the mic button stays hidden.
   // The transcription model defaults to "" so the main/server picks the
@@ -867,7 +862,6 @@ export const useStore = create<State>((set, get) => ({
   optInModels: [],
   skillRegistryUrls: [],
   cacheTtl: "5m",
-  launcherFlags: {},
   groqApiKey: "",
   voiceTranscriptionModel: "",
   openaiApiKey: "",
@@ -1157,7 +1151,6 @@ export const useStore = create<State>((set, get) => ({
       // Absent/unknown → "5m": opencode always requests Anthropic's default
       // 5-minute TTL (see AppConfig.cacheTtl), so 5m is the honest fallback.
       cacheTtl: c.cacheTtl === "1h" ? "1h" : "5m",
-      launcherFlags: c.launcherFlags ?? {},
       groqApiKey: c.groqApiKey ?? "",
       voiceTranscriptionModel: c.voiceTranscriptionModel ?? "",
       openaiApiKey: c.openaiApiKey ?? "",

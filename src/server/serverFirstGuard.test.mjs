@@ -45,6 +45,10 @@ export const DELETED = [
   // D5 (clone) — clone errors, list errors and the destination are the box's.
   { scopes: ["renderer"], regex: /export function (cloneErrorKind|repoListErrorMessage)\b|const destFor = /, why: "D5: forge:clone-status words a failed clone, forge:repos words a failed listing, forge:clone-start joins the destination" },
   { scopes: ["swift", "swiftTests"], regex: /\benum CloneErrorKind\b|\benum RepoListError\b|static func dest\(root:/, why: "D5: iOS shows the box's clone/list wording and never joins the clone destination" },
+  // D1–D3 review additions.
+  { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
+  { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },
+  { scopes: ["renderer"], regex: /\b(NO_ROLLBACK_STEPS|CHECK_AGAIN_STEPS)\b|export function (currentStep|stepFraction|diskSentence)\b/, why: "D3: the upgrade gate's current step, fraction, disk sentence and Retry/Roll back rules are the box's" },
 ];
 
 function* walk(dir, recursive) {
@@ -67,6 +71,7 @@ export function findViolations(rules, files, scopeOf) {
   for (const { path, text } of files) {
     for (const rule of rules) {
       if (!rule.scopes.includes(scopeOf(path))) continue;
+      if (rule.except?.test(path)) continue;
       const lines = text.split("\n");
       lines.forEach((line, i) => {
         if (rule.regex.test(line)) out.push({ path, line: i + 1, why: rule.why });

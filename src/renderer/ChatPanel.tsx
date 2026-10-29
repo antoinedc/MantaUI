@@ -56,6 +56,7 @@ import {
   extractPlanData,
   titleCase,
   providersFromExcludedKeys,
+  contextModelLabel,
 } from "./chatUtils";
 import { planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
@@ -108,7 +109,8 @@ import { SessionHeader } from "./SessionHeader";
 import { Modal } from "./Modal";
 import { ConnectGithubPanel } from "./ConnectGithub";
 import { buildVoiceNoteMap, concatUserMessageText } from "./chatUtils";
-import { UPDATE_BOX_NOTE, useBoxCapability } from "./hooks/useBoxCapabilities";
+import { useBoxCapability } from "./hooks/useBoxCapabilities";
+import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import type { RowLocation } from "./toolActivity";
 import type { OpencodeInboxItem, VoiceNoteRecord } from "../shared/types";
 import { planBusySend, shouldClearDraft } from "./inboxState";
@@ -889,7 +891,7 @@ export function ChatPanel({
   // the box has answered, and nothing at all while it has not (null).
   const inboxCapability = useBoxCapability("chat-cards-1");
   const inboxActionsEnabled = inboxCapability === true;
-  const inboxGateNote = inboxCapability === false ? UPDATE_BOX_NOTE : null;
+  const inboxGateNote = inboxCapability === false ? UPDATE_BOX_NOTE_TEXT : null;
   const inboxActionsEnabledRef = useRef(inboxActionsEnabled);
   inboxActionsEnabledRef.current = inboxActionsEnabled;
 
@@ -3419,11 +3421,7 @@ export function ChatPanel({
         ctxBreakdown={ctxBreakdown}
         ctxLimit={ctxLimit}
         staleCache={staleCache}
-        modelName={
-          activeModel
-            ? activeModel.name
-            : null
-        }
+        modelName={contextModelLabel(models ?? [], contextPayload?.model, contextPayload?.basis, activeModel ? activeModel.name : null)}
         hasSession={!!tmuxSession && windowIndex != null}
         readOnly={viewOnly}
         handoff={{

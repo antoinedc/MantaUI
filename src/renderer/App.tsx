@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { launcherSpawnPayload } from "./launcherSpawn";
 import { MotionConfig } from "framer-motion";
 import { Bell, PhoneCall, Terminal as TerminalIcon, type LucideIcon } from "lucide-react";
 import { Sidebar, type SidebarHandle } from "./Sidebar";
@@ -27,7 +28,7 @@ import type { SyncPayload, CtoState } from "../shared/api";
 import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
-import { refreshBoxCapabilities } from "./hooks/useBoxCapabilities";
+import { refreshBoxCapabilities, resetBoxCapabilities } from "./hooks/useBoxCapabilities";
 import { UpgradeGate } from "./UpgradeGate";
 import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
@@ -1089,6 +1090,12 @@ function Shell() {
     if (connectionState.state !== "connected") return;
     void refreshUpdateTargets().catch(() => {});
   }, [connectionState.state, apiGeneration]);
+
+  // A transport swap is a (possibly different) box: forget what the last one said BEFORE the read below, so a
+  // failed first read can never leave the old box's capabilities gating the new one (WS11 D1 review #5).
+  useEffect(() => {
+    resetBoxCapabilities();
+  }, [apiGeneration]);
 
   // The box's capability list (WS11 D1): read on connect and on every reconnect
   // so gated surfaces know what the box can do before they mount.
@@ -2172,8 +2179,9 @@ function Shell() {
                 const launcherDef = m.modeId === "terminal"
                   ? undefined
                   : availableLaunchers.find((l) => l.id === m.modeId);
-                // The box resolves the saved launch options at spawn (WS11 D3).
-                const launcher = launcherDef ? { id: launcherDef.id } : undefined;
+                // The box resolves the saved launch options at spawn (WS11 D3); an older box is sent its own
+                // flag defaults so no option is silently dropped.
+                const launcher = launcherDef ? launcherSpawnPayload(launcherDef) : undefined;
                 return (
                   <PanelShell key={`term:${key}`} active={isActiveThisMode}>
                     <Terminal

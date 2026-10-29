@@ -2386,3 +2386,54 @@ test("launchers:set-flag writes the option through config and returns the update
   const list = await handlers["launchers:list"]();
   for (const l of list) for (const f of l.flags) assert.equal(typeof f.value, "boolean");
 });
+
+// WS11 D2 review #9 / #13: a model switch changes the context frame even for a session the interpreter has not
+// seen since boot (an idle session after a manta-server restart).
+test("model-prefs:set re-measures a known session via the interpreter, and an unknown one from the transcript", async () => {
+  const tokens = { input: 100_000, cache: { read: 0, write: 0 } };
+  const makeBus = () => {
+    const events = [];
+    return { events, publish: (e) => events.push(e) };
+  };
+  const base = () => {
+    const deps = makeDeps([]).deps;
+    deps.oc.listMessages = async () => [{ info: { role: "assistant", tokens, providerID: "anthropic", modelID: "small" } }];
+    return deps;
+  };
+  const contextModels = { resolve: () => ({ providerID: "anthropic", modelID: "big", basis: "selected" }), invalidatePrefs: () => {} };
+  const contextLimitFor = (_p, m) => (m === "big" ? 1_000_000 : 200_000);
+  const selection = { providerID: "anthropic", modelID: "big" };
+
+  // Known to the interpreter: it re-emits; the handler adds nothing.
+  const knownBus = makeBus();
+  const reemitted = [];
+  const known = buildHandlers({ ...base(), bus: knownBus, contextModels, contextLimitFor, streamInterp: { reemitContext: (sid) => (reemitted.push(sid), true) } });
+  await known["model-prefs:set"]({ sessionId: "ses_known", selection });
+  assert.deepEqual(reemitted, ["ses_known"]);
+  assert.equal(knownBus.events.filter((e) => e.kind === "stream" && e.sub === "context").length, 0);
+
+  // Unknown to the interpreter: the handler measures from the transcript and publishes the frame itself.
+  const unknownBus = makeBus();
+  const unknown = buildHandlers({ ...base(), bus: unknownBus, contextModels, contextLimitFor, streamInterp: { reemitContext: () => false } });
+  await unknown["model-prefs:set"]({ sessionId: "ses_idle", selection });
+  const frames = unknownBus.events.filter((e) => e.kind === "stream" && e.sub === "context");
+  assert.equal(frames.length, 1);
+  assert.equal(frames[0].sessionId, "ses_idle");
+  assert.equal(frames[0].payload.limit, 1_000_000);
+  assert.equal(frames[0].payload.model.modelID, "big");
+
+  // No transcript tokens yet: nothing to publish, and no throw.
+  const emptyBus = makeBus();
+  const emptyDeps = base();
+  emptyDeps.oc.listMessages = async () => [{ info: { role: "user" } }];
+  const empty = buildHandlers({ ...emptyDeps, bus: emptyBus, contextModels, contextLimitFor, streamInterp: { reemitContext: () => false } });
+  await empty["model-prefs:set"]({ sessionId: "ses_new", selection });
+  assert.equal(emptyBus.events.filter((e) => e.sub === "context").length, 0);
+});
+
+test("launchers:list still lists every launcher, at the registry defaults, when the config cannot be read (WS11 D3 review #18)", async () => {
+  const { deps } = makeDeps([]);
+  deps.local.configGet = async () => { throw new Error("config unreadable"); };
+  const list = await buildHandlers(deps)["launchers:list"]();
+  for (const l of list) for (const f of l.flags) assert.equal(f.value, f.default);
+});

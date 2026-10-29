@@ -304,7 +304,8 @@ export function selectGateView(state: GateState, inputs: GateInputs): GateView {
         diskSentence: v?.diskSentence ?? null,
         failedStep: v?.failedStep ?? s.error?.step ?? "preflight",
         retryLabel: v?.retryLabel ?? "Retry",
-        canRetry: v?.canRetry ?? false,
+        // No view = an older box: Retry is still offered (the box refuses a retry it cannot do with its own sentence).
+        canRetry: v?.canRetry ?? true,
         retryDisabledReason: v?.retryDisabledReason ?? null,
         canRollback: v?.canRollback ?? false,
         hasView: v !== null,

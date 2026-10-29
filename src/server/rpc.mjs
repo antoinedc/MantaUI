@@ -875,6 +875,19 @@ export function buildHandlers({
     return subscriptionProviders.subscriptionStatuses(connected, externallyManaged);
   }
 
+  // The context payload measured from the persisted transcript against the session's selected model (WS11 D2).
+  async function measureContext(sessionId) {
+    const messages = await oc.listMessages(sessionId, { slim: true });
+    const found = selectLatestTokenUsage(messages);
+    if (!found) return null;
+    const lastUsed = found.providerID && found.modelID ? { providerID: found.providerID, modelID: found.modelID } : null;
+    const resolved = contextModels
+      ? contextModels.resolve({ sessionId, lastUsed })
+      : lastUsed && { ...lastUsed, basis: "last-used" };
+    const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
+    return buildContextPayload(found.tokens, resolved ?? null, limit);
+  }
+
   const handlers = {
     // ---- local channels (config/git/fs/clipboard/transport/tmux-config) ----
 
@@ -1460,17 +1473,7 @@ export function buildHandlers({
     // turn. This derives the same payload from the persisted transcript, using
     // the same shared breakdown function, so an idle session is correct on
     // open. Returns null when the transcript has no billed assistant turn yet.
-    "opencode:context": async (sessionId) => {
-      const messages = await oc.listMessages(sessionId, { slim: true });
-      const found = selectLatestTokenUsage(messages);
-      if (!found) return null;
-      const lastUsed = found.providerID && found.modelID ? { providerID: found.providerID, modelID: found.modelID } : null;
-      const resolved = contextModels
-        ? contextModels.resolve({ sessionId, lastUsed })
-        : lastUsed && { ...lastUsed, basis: "last-used" };
-      const limit = resolved ? contextLimitFor(resolved.providerID, resolved.modelID) : null;
-      return buildContextPayload(found.tokens, resolved ?? null, limit);
-    },
+    "opencode:context": (sessionId) => measureContext(sessionId),
 
     // WS11 D2 (T21): the same `cache` payload the stream emits, computed from the
     // persisted transcript so an idle session is right on open. null when no
@@ -2656,7 +2659,20 @@ export function buildHandlers({
       const out = await modelPrefsSetStore(input ?? {}, { publish: (evt) => bus.publish(evt) });
       // The session's selected model decides its context percentage (WS11 D2).
       contextModels?.invalidatePrefs();
-      if (typeof input?.sessionId === "string") streamInterp?.reemitContext(input.sessionId);
+      if (typeof input?.sessionId === "string") {
+        const sid = input.sessionId;
+        // A session the interpreter has not seen since boot has nothing to re-emit; measure it from the
+        // persisted transcript (as `opencode:context` does) and publish the same frame, so a switch changes
+        // both clients without waiting for the next turn.
+        if (!streamInterp?.reemitContext(sid)) {
+          try {
+            const payload = await measureContext(sid);
+            if (payload) bus.publish({ kind: "stream", sub: "context", sessionId: sid, payload });
+          } catch {
+            /* non-fatal: the next turn's frame carries it */
+          }
+        }
+      }
       return out;
     },
     // preload: ipcRenderer.invoke(IPC.modelPrefsSeed, { sessions?, recents? })
@@ -2910,8 +2926,16 @@ export function buildHandlers({
     // src/server/launcherRegistry.mjs) are available on this box right now:
     // binary on PATH. Cheap; the renderer fetches on active-session change,
     // no polling.
-    "launchers:list": async () =>
-      launchersView(await launchers.listAvailableLaunchers(), await local.configGet()),
+    "launchers:list": async () => {
+      // An unreadable config must not hide every launcher: fall back to the registry defaults.
+      let config = null;
+      try {
+        config = await local.configGet();
+      } catch {
+        config = null;
+      }
+      return launchersView(await launchers.listAvailableLaunchers(), config);
+    },
     // WS11 D3 (X1): flip ONE launch option; returns the updated launcher row.
     "launchers:set-flag": (input) =>
       setLauncherFlag({

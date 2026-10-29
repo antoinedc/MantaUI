@@ -18,7 +18,6 @@ struct GitForgeClient: Sendable {
     var shipPreview: @Sendable (_ cwd: String, _ model: OpencodeModelID?, _ sessionId: String?) async throws -> GitShipPreviewResult
     var ship: @Sendable (_ cwd: String, _ title: String, _ body: String) async throws -> GitShipResult
     var merge: @Sendable (_ cwd: String, _ number: Int, _ sha: String) async throws -> GitMergeResult
-    var capabilities: @Sendable () async throws -> Set<String>
     /// `config:get().forgeConnectOfferDismissed`.
     var offerDismissed: @Sendable () async throws -> Bool
     /// `config:update({forgeConnectOfferDismissed: true})`.
@@ -31,7 +30,6 @@ struct GitForgeClient: Sendable {
             shipPreview: { try await api.forgeShipPreview(cwd: $0, model: $1, sessionId: $2) },
             ship: { try await api.forgeShip(cwd: $0, title: $1, body: $2) },
             merge: { try await api.forgeMerge(cwd: $0, number: $1, sha: $2) },
-            capabilities: { Set(try await api.apiVersion().capabilities ?? []) },
             offerDismissed: {
                 if case .bool(let dismissed)? = try await api.configGet()?[GitConnectOffer.configKey] { return dismissed }
                 return false
@@ -76,14 +74,12 @@ enum GitForgeText {
 
 @MainActor
 final class GitForgeStore: ObservableObject {
-    /// The capability behind the PR view / checks chip / ship + merge copy.
-    nonisolated static let pullRequestViewCapability = "forge-pr-view-1"
-
     @Published private(set) var state: GitForgeState = .empty
     /// True once a poll has answered.
     @Published private(set) var loadedOnce = false
-    /// What the box says it can do; nil until asked.
-    @Published private(set) var capabilities: Set<String>?
+    /// The app's ONE capability reader (WS11 D1); set by the view that owns this store. nil until set — and
+    /// "unknown" (not "old box") while the reader is loading or failed.
+    private weak var boxCapabilities: BoxCapabilitiesStore?
     @Published private(set) var offerDismissed = false
     @Published private(set) var shipPreview: GitShipPreviewState = .idle
     @Published private(set) var shipBusy = false
@@ -105,7 +101,6 @@ final class GitForgeStore: ObservableObject {
     private var justShippedTask: Task<Void, Never>?
     /// The PR just created, kept until a poll returns it (the forge's list lags).
     private var pinned: GitPinnedPR?
-    private var capabilitiesLoaded = false
     private var offerLoaded = false
 
     private struct PreviewRequest {
@@ -123,7 +118,7 @@ final class GitForgeStore: ObservableObject {
     /// capability list lacks `forge-pr-view-1`.
     var boxNeedsUpdate: Bool {
         guard state.connected, loadedOnce else { return false }
-        if capabilities?.contains(Self.pullRequestViewCapability) == false { return true }
+        if boxCapabilities?.has(.forgePrView) == false { return true }
         return state.view == nil
     }
 
@@ -147,7 +142,6 @@ final class GitForgeStore: ObservableObject {
     /// it, so it stops when the chat disappears and restarts on a cwd change).
     func run(cwd: String) async {
         attach(cwd: cwd)
-        await loadCapabilitiesOnce()
         await loadOfferOnce()
         while !Task.isCancelled {
             if sceneActive { await tick(cwd: cwd) }
@@ -216,14 +210,11 @@ final class GitForgeStore: ObservableObject {
         }
     }
 
-    private func loadCapabilitiesOnce() async {
-        guard !capabilitiesLoaded else { return }
-        do {
-            capabilities = try await client.capabilities()
-            capabilitiesLoaded = true
-        } catch {
-            Self.log.debug("capabilities read failed: \(error.localizedDescription, privacy: .public)")
-        }
+    /// Read capabilities from the app's single store (never a request of this store's own).
+    func useCapabilities(_ store: BoxCapabilitiesStore) {
+        guard boxCapabilities !== store else { return }
+        boxCapabilities = store
+        objectWillChange.send()
     }
 
     private func loadOfferOnce() async {

@@ -302,10 +302,10 @@ final class UpgradeModelsTests: XCTestCase {
         XCTAssertFalse(m.nothingChanged)
     }
 
-    func testFailedOnAnOlderBoxOffersNoRetryOrRollbackAndSaysWhy() throws {
+    func testFailedOnAnOlderBoxStillOffersRetryButNotRollbackAndSaysWhy() throws {
         let m = try failedModel(step: "migrate")
         XCTAssertEqual(m.message, "It broke")
-        XCTAssertFalse(m.canRetry)
+        XCTAssertTrue(m.canRetry, "never a dead end: the box refuses a retry it cannot do with its own sentence")
         XCTAssertFalse(m.canRollback)
         XCTAssertTrue(m.needsBoxUpdate)
         XCTAssertEqual(m.failedStep, "migrate")

@@ -300,7 +300,7 @@ function GroupCard({ title, danger = false, children }: {
  * is disabled. `error` is this target's transient result error → the row flips
  * to the shared error tone and the button is re-enabled for retry.
  */
-function UpdateTargetRow({
+export function UpdateTargetRow({
   target,
   desktopBusy,
   installReady,
@@ -318,11 +318,18 @@ function UpdateTargetRow({
   rowState: { kind: "updating" } | { kind: "busy" } | { kind: "idle" };
   error: string | null;
 }) {
-  // The box words the box/CLI rows; the shared describe function words the Electron
-  // leg. A box row with no `view` is an older box: the static note, no button.
-  const oldBox = target.id !== "desktop" && !target.view;
-  const row = target.id === "desktop" ? describeUpdateTarget(target) : (target.view ?? { tone: "muted" as const, text: "" });
-  const hasUpdate = target.latest != null && target.latest !== target.current;
+  // The box words the box/CLI rows (tone, text, version text, whether there is an update); the shared
+  // describe function words only the Electron leg. A box row with no `view` is an older box — unless the
+  // check itself failed, which is "Couldn't check", never evidence of an old box.
+  const isDesktop = target.id === "desktop";
+  const oldBox = !isDesktop && !target.view && target.ok;
+  const row = isDesktop || !target.view ? describeUpdateTarget(target) : target.view;
+  const hasUpdate = isDesktop ? target.latest != null && target.latest !== target.current : target.view?.hasUpdate === true;
+  const versionText = isDesktop
+    ? hasUpdate
+      ? `${target.current ?? ""} → ${target.latest}`
+      : (target.current ?? "")
+    : (target.view?.versionText ?? target.current ?? "");
   const updating = rowState.kind === "updating";
   const busy = rowState.kind === "busy";
 
@@ -395,10 +402,8 @@ function UpdateTargetRow({
         </a>
       );
     }
-  } else if (row.tone === "ok") {
-    action = <span className="shrink-0 text-text-quiet">Up to date</span>;
-  } else if (row.tone === "error") {
-    action = <span className="shrink-0 text-danger">Couldn't check</span>;
+  } else if (row.tone === "ok" || row.tone === "error") {
+    action = <span className={`shrink-0 ${row.tone === "error" ? "text-danger" : "text-text-quiet"}`}>{row.text}</span>;
   }
 
   return (
@@ -408,13 +413,8 @@ function UpdateTargetRow({
       <span className={`flex-1 min-w-0 truncate font-mono ${error != null ? "text-danger" : "text-text-quiet"}`}>
         {error != null ? (
           error
-        ) : hasUpdate ? (
-          <>
-            {target.current ?? ""} →{" "}
-            <span className="text-text-muted font-medium">{target.latest}</span>
-          </>
         ) : (
-          target.current ?? ""
+          versionText
         )}
       </span>
       {action}

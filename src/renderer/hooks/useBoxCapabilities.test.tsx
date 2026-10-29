@@ -102,4 +102,70 @@ describe("useBoxCapability", () => {
     act(() => resetBoxCapabilities());
     expect(value()).toBe("null");
   });
+
+  // WS11 D1 review #5: a box change forgets the old box's list, so a failed first read of the NEW box answers null.
+  it("switching box with the first read failing answers null, not the old box's ids", async () => {
+    let newBox = false;
+    installMockApi({
+      apiVersion: () => (newBox ? Promise.reject(new Error("offline")) : Promise.resolve({ version: "1", minClient: "0", opencodeVersion: "1", capabilities: ["chat-cards-1"] })),
+    });
+    h = mount(<Probe id="chat-cards-1" />);
+    await h.flush();
+    expect(value()).toBe("true");
+    newBox = true;
+    act(() => resetBoxCapabilities()); // what App does on a transport swap
+    await act(async () => {
+      await refreshBoxCapabilities();
+    });
+    expect(useStore.getState().boxCapabilities.state).toBe("failed");
+    expect(value()).toBe("null");
+  });
+
+  // WS11 D1 review #6: a 401 is the sign-in path's — no retry schedule.
+  it("an auth error is not retried", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      installMockApi({
+        apiVersion: () => {
+          calls++;
+          return Promise.reject(Object.assign(new Error("401"), { name: "AuthRequiredError" }));
+        },
+      });
+      await act(async () => {
+        await refreshBoxCapabilities();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(calls).toBe(1);
+      expect(useStore.getState().boxCapabilities.state).toBe("failed");
+    } finally {
+      vi.useRealTimers();
+      resetBoxCapabilities();
+    }
+  });
+
+  it("an ordinary failure IS retried on the backoff schedule", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      installMockApi({
+        apiVersion: () => {
+          calls++;
+          return Promise.reject(new Error("blip"));
+        },
+      });
+      await act(async () => {
+        await refreshBoxCapabilities();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_100);
+      });
+      expect(calls).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+      resetBoxCapabilities();
+    }
+  });
 });

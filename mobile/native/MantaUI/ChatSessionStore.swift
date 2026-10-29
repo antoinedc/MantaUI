@@ -453,7 +453,7 @@ final class ChatSessionStore: ObservableObject {
         self.widgetLiveStore = widgetLiveStore
         self.isReadOnly = isReadOnly
         self.mutationPolicy = mutationPolicy
-        self.capabilities = capabilities ?? BoxCapabilitiesStore(api: api)
+        self.capabilities = capabilities ?? BoxCapabilitiesStore.shared
         self.capabilities.$state
             .map { $0.known.map { $0.has(.chatCards) } }
             .removeDuplicates()

@@ -19,7 +19,7 @@ struct UpdateBoxNote: View {
                 .foregroundStyle(.secondary)
             if showsLink {
                 Button("Box updates") {
-                    navigator.open(.settings(section: "updates"))
+                    navigator.open(.settings(section: "general"))
                 }
                 .font(.footnote)
             }

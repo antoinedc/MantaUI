@@ -19,8 +19,8 @@ import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { useCachedResource } from "./useCachedResource";
 import { useRoutingCatalog } from "./routingCatalog";
-import { UPDATE_YOUR_BOX, isUnknownChannel } from "./modelsPicker";
-import { UpdateBoxNote } from "./components/UpdateBoxNote";
+import { isUnknownChannel } from "./modelsPicker";
+import { UpdateBoxNote, UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import type { ModelsDeclareForm, UnidentifiedList, UnidentifiedRow } from "../shared/types";
 import type { ModelCatalogEntry } from "../shared/modelCatalog.mjs";
 
@@ -262,7 +262,7 @@ export function ModelsWeCouldntIdentify() {
           setSaveError({ key, field: reply.field, message: reply.message });
         }
       } catch (e) {
-        setSaveError({ key: null, message: isUnknownChannel(e) ? UPDATE_YOUR_BOX : `Couldn't confirm the save — ${e instanceof Error ? e.message : String(e)}` });
+        setSaveError({ key: null, message: isUnknownChannel(e) ? UPDATE_BOX_NOTE_TEXT : `Couldn't confirm the save — ${e instanceof Error ? e.message : String(e)}` });
       } finally {
         setBusy(null);
       }
@@ -278,7 +278,7 @@ export function ModelsWeCouldntIdentify() {
       <div>
         <Eyebrow>Models we couldn't identify</Eyebrow>
         <Card>
-          <UpdateBoxNote text={UPDATE_YOUR_BOX} />
+          <UpdateBoxNote />
         </Card>
       </div>
     );

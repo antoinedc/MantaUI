@@ -3,10 +3,10 @@ import SwiftUI
 // ===========================================================================
 // WS10 F12 — CLI launch options. Flags used when a session starts an AI CLI
 // (e.g. Claude Code) directly in its terminal; only CLIs installed on the box are
-// listed, and only ones that have flags. Each toggle writes the launcher's FULL
-// resolved flag map (`ExtensionsLaunchers.update`), awaited and serialized — all
-// toggles are disabled while one saves, a failure puts the value back and says
-// so, and a success adopts the map the box returns.
+// listed, and only ones that have flags. Each toggle flips ONE option on the box
+// (`launchers:set-flag`), awaited and serialized — all toggles are disabled while
+// one saves, a failure puts the value back and says so, and a success adopts the
+// launcher row the box returns.
 // ===========================================================================
 
 @MainActor

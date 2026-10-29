@@ -27,7 +27,7 @@ const SERVER_FIXED = { label: "Manta Server", disruption: "reconnect" };
  *    `manual` = `desktopCheck.supported === false`. A dev build (no updater) is
  *    `ok:true, available:false, manual:true` — rendered as "not applicable",
  *    never "up to date".
- *  - server: `available` = `serverCheck.available`; `ok` = `serverCheck.ok !== false`.
+ *  - server: `available` = `serverCheck.available`; `ok` = `serverCheck != null && serverCheck.ok !== false`.
  *  - CLIs: passed straight through from `serverCheck.targets`.
  *
  * @param {object} args
@@ -76,7 +76,8 @@ export function buildUpdateTargets({
     current: serverVersion ?? null,
     latest: serverCheck?.version ?? null,
     available: serverCheck?.available === true,
-    ok: serverCheck?.ok !== false,
+    // No answer (a rejected or timed-out check) is "couldn't check", never "fine".
+    ok: serverCheck != null && serverCheck.ok !== false,
     manual: false,
     disruption: SERVER_FIXED.disruption,
   };

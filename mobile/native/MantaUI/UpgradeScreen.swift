@@ -125,13 +125,13 @@ struct UpgradeScreen: View {
 
     private var failureActions: some View {
         VStack(alignment: .leading, spacing: Metrics.spacing.sp3) {
-            // An older box sends no `view`: the Retry / Roll back rules are the box's,
-            // so neither control is offered — the update note says why.
+            // An older box sends no `view`: Retry is still offered (the box refuses a retry it cannot do with
+            // its own sentence, shown below); Roll back needs the box's rules, so it stays hidden — the
+            // update note says why. A failed upgrade must never be a dead end.
             if model.needsBoxUpdate {
                 UpdateBoxNote(showsLink: false)
             }
             HStack(spacing: Metrics.spacing.sp3) {
-              if !model.needsBoxUpdate {
                 Button {
                     Task { await upgradeStore.retry() }
                 } label: {
@@ -172,7 +172,6 @@ struct UpgradeScreen: View {
                     .opacity(busy ? 0.4 : 1)
                     .accessibilityIdentifier("upgrade-rollback")
                 }
-              }
             }
 
             outcomeLine(model.retry, okText: model.retryOkText)

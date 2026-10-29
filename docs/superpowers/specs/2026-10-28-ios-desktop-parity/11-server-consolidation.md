@@ -133,7 +133,7 @@ signal; their ids are registered but not all read.
   blip does not hide features).
 - **Missing capability → the dependent surface is hidden, or rendered disabled
   with the static note "Update your box to use this"** (and, on iOS, a "Box
-  updates" link to `MantaRoute.settings(section: "updates")`). The table per
+  updates" link to `MantaRoute.settings(section: "general")`). The table per
   sub-step lists which. A surface is never left as a control that does nothing.
 - **The upgrade gate never waits on the list.** It is self-describing: it uses
   `GET /api/upgrade`'s `view` when present (D3 X5) and the old rendering when
@@ -200,7 +200,7 @@ signal; their ids are registered but not all read.
   in `BoxCapabilities.swift`; their callers migrate and both are added to the
   guard table.
 - NEW `MantaUI/UpdateBoxNote.swift`: `struct UpdateBoxNote: View` — the note +
-  "Box updates" button (`MantaNavigator.open(.settings(section: "updates"))`).
+  "Box updates" button (`MantaNavigator.open(.settings(section: "general"))`).
 
 ### Guardrail
 
@@ -475,8 +475,8 @@ desktop, K2).
 | `devices-view-1` | — | list shown, Revoke hidden, note shown |
 | `forge-status-secondary-1` | row shows login only | same |
 | `update-targets-view-1` | box/CLI rows: disabled "Update your box to use this"; Electron leg works | box rows replaced by the note |
-| `upgrade-view-1` | detected by the ABSENCE of `view` in `/api/upgrade` (not by the list, D1): gate shows steps + raw `error.message`, Retry/Rollback hidden, note | same |
-| `launchers-flags-1` | Settings launcher options disabled with note; spawn sends `{id}` (old box uses defaults) | same |
+| `upgrade-view-1` | detected by the ABSENCE of `view` in `/api/upgrade` (not by the list, D1): gate shows steps + raw `error.message`, **Retry still offered** (the box refuses a retry it cannot do with its own sentence — a box stuck mid-failed-upgrade is by definition on a pre-D3 release, so hiding Retry would be a dead end), Rollback hidden, note | same |
+| `launchers-flags-1` | Settings launcher options disabled with note; spawn sends `{id}` to a current box, and `{id, flags}` built from the old box's own `launchers:list` row defaults (an old box runs only the flags it is given — a bare `{id}` would drop `--dangerously-skip-permissions`) | same |
 
 ### Tests
 
@@ -2305,3 +2305,19 @@ Review: `reviews/server-first-3/11-server-consolidation.md`, plus
 - A failed status's `message` is the sentence per kind; the raw git output stays in `error` and is only ever copied
   as diagnostics, never rendered (desktop used to render it for the `unknown` kind).
 - Old box: desktop "Clone from GitHub…" and iOS's clone action are disabled with "Update your box to use this".
+
+## Review fixes (D1–D3 review, `reviews/code/11-server-consolidation-D1-D3.md`)
+
+Findings 1–13 applied; NITs 14–21 applied except #22 (fake timers in `ChatPanel.cacheContext.test.tsx`: the panel's
+effect, the harness `flush` and the test's own clock all use real timers, so converting it risks a hang for a
+0.7 s test). Notes where the fix differs in shape from the suggestion:
+- #1: the server row's `ok` is `serverCheck != null && ok !== false` in the shared builder, so the BOX-side view
+  also reads "Couldn't check" when its own check is missing (before: "Up to date").
+- #3/#4: `BoxCapabilitiesStore.shared` is the app root's instance; a screen not handed the environment store
+  falls back to it, never to a private one. `GitForgeStore` reads it through `useCapabilities(_:)`.
+- #6: a 401 stops the retry loop on both clients. Pausing retries while the stream is down is done on desktop
+  (it has the connection state); iOS keeps its schedule (the store has no connection input).
+- #9: `reemitContext` now returns whether the interpreter had something to measure; `model-prefs:set` measures
+  from the transcript itself otherwise.
+- `DELETE /auth/revoke` moved to `authRevokeRoute.mjs` so the blank-vs-absent `device_id` rule is tested at route level.
+- Launcher defaults for an older box are sent from the box's own `launchers:list` row (the review's fix).

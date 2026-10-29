@@ -123,7 +123,7 @@ describe("ModelLedgerCard", () => {
     installMockApi({ ledgerSummary: () => Promise.resolve(fixture()) });
     h = mount(<ModelLedgerCard />);
     await h.flush();
-    expect(h.text()).toContain("Update your box to use this.");
+    expect(h.text()).toContain("Update your box to use this");
     expect(h.text()).not.toContain("$");
   });
 

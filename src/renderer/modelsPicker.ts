@@ -8,8 +8,6 @@ import { useEffect, useMemo, useState } from "react";
 import type { ModelsPickerResult, OpencodeModel } from "../shared/types";
 import { isUnknownChannelError } from "./chatUtils";
 
-/** Shown wherever a box feature the client depends on is missing (D24 wire compat). */
-export const UPDATE_YOUR_BOX = "Update your box to use this.";
 
 /** True when an RPC failed because the box has no such channel (an older box). */
 export function isUnknownChannel(e: unknown): boolean {

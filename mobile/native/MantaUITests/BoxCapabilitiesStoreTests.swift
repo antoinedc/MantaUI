@@ -44,6 +44,19 @@ final class BoxCapabilitiesStoreTests: XCTestCase {
         store.resetForBoxChange()
     }
 
+    // WS11 D1 review #6: a refused token is the sign-in path's; an ordinary failure is retried.
+    func testAnAuthRefusalIsNotRetriedButAnOrdinaryFailureIs() async {
+        let auth = BoxCapabilitiesStore(load: { throw MantaError.authRequired })
+        await auth.refresh()
+        XCTAssertEqual(auth.state, .failed(lastLoaded: nil))
+        XCTAssertFalse(auth.isRetryScheduled)
+        let blip = BoxCapabilitiesStore(load: { throw MantaError.transport("offline") })
+        await blip.refresh()
+        XCTAssertTrue(blip.isRetryScheduled)
+        blip.resetForBoxChange()
+        XCTAssertFalse(blip.isRetryScheduled)
+    }
+
     func testAFailedRefreshKeepsTheLastLoadedList() async {
         let script = Script([.success(info(["chat-cards-1"])), .failure(MantaError.transport("blip"))])
         let store = BoxCapabilitiesStore(load: { try await script.next() })

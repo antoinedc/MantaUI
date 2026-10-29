@@ -282,12 +282,12 @@ describe("selectGateView", () => {
     });
   });
 
-  it("an older box (no view): steps and the raw message only — no Retry / Roll back, and the view says so", () => {
+  it("an older box (no view): steps and the raw message; Retry is still offered (never a dead end), Roll back is not", () => {
     const v = selectGateView(
       withStatus(oldBoxStatus({ state: "failed", steps: [step("migrate", "failed")], error: { step: "migrate", message: "raw box message", retryable: true } })),
       inputs(),
     );
-    expect(v).toMatchObject({ kind: "failed", message: "raw box message", canRetry: false, canRollback: false, hasView: false, details: "" });
+    expect(v).toMatchObject({ kind: "failed", message: "raw box message", canRetry: true, canRollback: false, hasView: false, details: "" });
     const run = selectGateView(withStatus(oldBoxStatus()), inputs());
     expect(run).toMatchObject({ kind: "running", etaText: null, currentFraction: null, current: null });
   });

@@ -232,6 +232,26 @@ final class UsageMetersTests: XCTestCase {
         XCTAssertNil(old.basis)
     }
 
+    // WS11 D2 review #7: the box sends `pct: null` when the selected model's limit is unknown; it must decode (a
+    // failed decode blanked the meter and made the unknown-limit UI unreachable).
+    func testContextPayloadDecodesAnUnknownLimit() throws {
+        let json = #"{"freshInput":1,"cacheRead":2,"cacheWrite":3,"totalInput":6,"pct":null,"hasLimit":false,"segments":[],"model":{"providerID":"x","modelID":"y"},"basis":"selected"}"#
+        let ctx = try JSONDecoder().decode(StreamContextPayload.self, from: Data(json.utf8))
+        XCTAssertNil(ctx.pct)
+        XCTAssertFalse(ctx.hasLimit)
+        XCTAssertFalse(UsageMeters.shouldShowContext(pct: ctx.pct))
+    }
+
+    // Decision 4: the sheet names the model the BOX measured, and says so when it was the last reply's.
+    func testContextSheetNamesTheMeasuredModel() {
+        let models = [OpencodeModel(id: "opus", providerID: "anthropic", name: "Claude Opus")]
+        let opus = StreamContextModel(providerID: "anthropic", modelID: "opus")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: opus, basis: "selected", fallback: "Other"), "Claude Opus")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: opus, basis: "last-used", fallback: "Other"), "Claude Opus (last reply's model)")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: StreamContextModel(providerID: "x", modelID: "mystery"), basis: nil, fallback: "Other"), "mystery")
+        XCTAssertEqual(ChatModel.contextModelLabel(models, measured: nil, basis: nil, fallback: "Other"), "Other", "an older box sends no model")
+    }
+
     func testIdleMsReadsTheInstantAgainstTheClock() {
         let c = cache(staleAt: 301_000, staleTokens: 1)
         XCTAssertEqual(UsageMeters.idleMs(c, now: at(61_000)), 60_000)

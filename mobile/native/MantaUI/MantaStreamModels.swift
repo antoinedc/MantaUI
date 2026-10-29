@@ -306,7 +306,8 @@ struct StreamContextPayload: Codable, Equatable, Sendable {
     var cacheRead: Double
     var cacheWrite: Double
     var totalInput: Double
-    var pct: Double
+    /// nil when the selected model's limit is unknown (`hasLimit` false) — the box sends `pct: null` then.
+    var pct: Double?
     var hasLimit: Bool
     var segments: [StreamContextSegment]
     // WS11 D2: the box measures against the session's SELECTED model. Absent on an

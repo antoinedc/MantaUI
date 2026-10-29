@@ -73,7 +73,6 @@ final class GitForgeStoreTests: XCTestCase {
                 await box.recordMerge(cwd, number, sha)
                 return mergeResult
             },
-            capabilities: { [GitForgeStore.pullRequestViewCapability] },
             offerDismissed: { false },
             dismissOffer: {}
         )
@@ -200,6 +199,22 @@ final class GitForgeStoreTests: XCTestCase {
         XCTAssertFalse(store.branchIsInteractive)
     }
 
+    // WS11 D1 review #3: the capability list comes from the app's ONE store; unknown is not "old box".
+    func testCapabilityStoreDrivesTheOldBoxFlag() async {
+        let withView = noPR()
+        let box = FakeForgeBox([withView, withView, withView])
+        let store = GitForgeStore(client: client(box))
+        let capabilities = BoxCapabilitiesStore(load: { throw MantaError.transport("down") })
+        store.useCapabilities(capabilities)
+        store.attach(cwd: "/r")
+        await store.refreshNow()
+        XCTAssertFalse(store.boxNeedsUpdate, "a capability list that could not be read is unknown, not an old box")
+        capabilities.apply([])
+        XCTAssertTrue(store.boxNeedsUpdate, "the box answered and lacks forge-pr-view-1")
+        capabilities.apply(["forge-pr-view-1"])
+        XCTAssertFalse(store.boxNeedsUpdate)
+    }
+
     func testAFailedPollKeepsTheLastState() async {
         let box = FakeForgeBox([pr(3, sha: "c")])
         let outage = Outage()
@@ -211,7 +226,7 @@ final class GitForgeStoreTests: XCTestCase {
                 return try await base.pullRequest(cwd)
             },
             shipPreview: base.shipPreview, ship: base.ship, merge: base.merge,
-            capabilities: base.capabilities, offerDismissed: base.offerDismissed, dismissOffer: base.dismissOffer
+            offerDismissed: base.offerDismissed, dismissOffer: base.dismissOffer
         )
         let store = GitForgeStore(client: flaky)
         store.attach(cwd: "/r")

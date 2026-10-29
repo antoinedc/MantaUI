@@ -147,6 +147,16 @@ final class SessionModeLogicTests: XCTestCase {
         // WS11 D3: with no flags the box applies the saved launch options.
         XCTAssertEqual(SessionPtyLauncher(id: "claude").queryJSON, "{\"id\":\"claude\"}")
     }
+
+    // WS11 D3 review #2: an older box runs only the flags it is given, so it gets the row's own defaults.
+    func testLauncherSendsJustTheIdToACurrentBoxAndTheDefaultsToAnOlderOne() {
+        let current = AvailableLauncher(id: "claude", label: "Claude", flags: [AvailableLauncherFlag(key: "skipPermissions", label: "Skip", default: true, value: false)])
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: [current]).queryJSON, "{\"id\":\"claude\"}")
+        let old = AvailableLauncher(id: "claude", label: "Claude", flags: [AvailableLauncherFlag(key: "skipPermissions", label: "Skip", default: true)])
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: [old]).queryJSON, "{\"flags\":{\"skipPermissions\":true},\"id\":\"claude\"}")
+        XCTAssertEqual(SessionPtyLauncher.make(id: "claude", launchers: []).queryJSON, "{\"id\":\"claude\"}")
+        XCTAssertEqual(SessionPtyLauncher.make(id: "codex", launchers: [AvailableLauncher(id: "codex", label: "Codex")]).queryJSON, "{\"id\":\"codex\"}")
+    }
 }
 
 // MARK: - Create: naming, hints, roots

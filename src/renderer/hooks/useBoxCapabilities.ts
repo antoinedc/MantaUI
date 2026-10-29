@@ -13,7 +13,9 @@
 import { useEffect } from "react";
 import { useStore } from "../store";
 
-export const UPDATE_BOX_NOTE = "Update your box to use this";
+function isAuthError(e: unknown): boolean {
+  return (e as { name?: string })?.name === "AuthRequiredError" || (e as { status?: number })?.status === 401;
+}
 
 /** Retry schedule after a failed read: 1 s → 2 s → 5 s → 10 s (cap). */
 export const CAPABILITY_RETRY_MS = [1000, 2000, 5000, 10000] as const;
@@ -45,14 +47,19 @@ export function refreshBoxCapabilities(): Promise<void> {
         ids: Array.isArray(v?.capabilities) ? v.capabilities : [],
         loadedOnce: true,
       });
-    } catch {
+    } catch (e) {
       const prev = useStore.getState().boxCapabilities;
       useStore.getState().setBoxCapabilities({ state: "failed", ids: prev.ids, loadedOnce: prev.loadedOnce });
+      // A 401 is the existing sign-in path's to handle (App re-opens pairing): retrying here would only
+      // hammer the box with a token it has already refused.
+      if (isAuthError(e)) return;
       const delay = CAPABILITY_RETRY_MS[Math.min(attempt, CAPABILITY_RETRY_MS.length - 1)];
       attempt += 1;
       retryTimer = setTimeout(() => {
         retryTimer = null;
-        void refreshBoxCapabilities();
+        // While the stream is down the reconnect refresh covers it; retrying into a dead link is noise.
+        const c = useStore.getState().connectionState.state;
+        if (c === "connected" || c === "idle") void refreshBoxCapabilities();
       }, delay);
     } finally {
       inflight = null;
