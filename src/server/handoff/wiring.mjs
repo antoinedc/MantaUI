@@ -41,6 +41,7 @@ export function createProductionHandoff(p) {
       listInbox: (sid) => oc.listInbox(sid),
       getMessage: (sid, mid) => oc.getMessage(sid, mid),
       listActive: () => oc.listActiveSessionIds(),
+      interrupt: (sid) => oc.abortSession(sid),
     },
     tmux: {
       findWindow: (sid) => tmux.findWindowBySessionId(sid),

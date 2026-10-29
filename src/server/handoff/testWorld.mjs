@@ -29,6 +29,7 @@ export function createWorld({ mode = "auto" } = {}) {
     posts: [], // every sendPrompt/postSynthetic call, accepted or not
     created: [],
     deleted: [],
+    interrupted: [],
     repointed: [],
     cleared: [],
     published: [],
@@ -105,6 +106,10 @@ export function createWorld({ mode = "auto" } = {}) {
     listInbox: async (id) => w.inbox.get(id) ?? [],
     getMessage: async (sid, mid) => msgs(sid).get(mid) ?? null,
     listActive: async () => [...w.active],
+    interrupt: async (id) => {
+      w.interrupted.push(id);
+      await w.onInterrupt?.(id);
+    },
   };
 
   const tmux = {

@@ -311,6 +311,7 @@ const expectUndone = (w, rec, { created }) => {
   assert.equal(w.engine.hasPendingSend("ses_p"), false);
   assert.ok(w.cleared.includes("ses_p"), "the settler is told");
   assert.equal(w.engine._state.links.ses_p?.replacedBy, undefined);
+  assert.equal(w.deleted.length, 1, "the delete of the pre-minted successor is always attempted");
   if (created) assert.deepEqual(w.deleted, w.created.map((c) => c.id), "the successor session that was made was deleted");
   else assert.deepEqual(w.created, [], "nothing was created");
 };
@@ -352,12 +353,120 @@ for (const how of ["stop", "pause"]) {
   });
 }
 
-test("a start that is past its first message is not undone by a late stop (the successor already has the work)", async () => {
-  const w = windowWorld("send", "stop");
+// ---- after the first message: the handoff commits, the successor's turn is interrupted --------------------
+
+/** Stop (the job record ends) or pause (it keeps running with its pause flag) at the hook step `at`, with the cancel step run or not. */
+function afterSendWorld(how, { cancelStep = true, at = "send" } = {}) {
+  const w = jobWorld({ mode: "suggest" });
+  w.engine = w.build({
+    runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+    ownership: {
+      repoint: async (pred, succ) => {
+        w.repointed.push([pred, succ]);
+        if (w.jobs.has(pred)) {
+          w.jobs.set(succ, w.jobs.get(pred));
+          w.jobs.delete(pred);
+        }
+      },
+    },
+    hooks: {
+      step: async (name) => {
+        if (name !== at) return;
+        if (cancelStep) await w.engine.cancelPendingSends("ses_p");
+        if (how === "stop") w.jobs.delete("ses_p");
+      },
+    },
+  });
+  return w;
+}
+
+for (const how of ["stop", "pause"]) {
+  test(`${how} after the first message was sent: the handoff commits, the job stays on the successor, and the successor's turn is interrupted once`, async () => {
+    const w = afterSendWorld(how);
+    // the interrupt runs while the successor is still a handoff successor, so the adoption reconciler skips it (no rail row)
+    const seen = [];
+    w.onInterrupt = (id) => void seen.push({ id, isSuccessor: w.engine.isSuccessor(id) });
+    const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+    await w.engine.onTurnEnd("ses_p", { success: true });
+    const done = w.engine.get(rec.id);
+    assert.equal(done.state, "committed");
+    assert.deepEqual(w.repointed, [["ses_p", done.successorId]], "the job record follows the successor");
+    assert.deepEqual(w.interrupted, [done.successorId]);
+    assert.deepEqual(seen, [{ id: done.successorId, isSuccessor: true }], "interrupted while still a handoff successor");
+    assert.equal(w.accepted(done.successorId).length, 1, "the handoff was sent; the commit was not undone");
+    assert.equal(w.engine._state.records[rec.id].internal.stopAfterCommit, true);
+  });
+}
+
+test("a stop whose cancel step ran BEFORE the handoff record existed is caught at commit by the 'job no longer runs' check", async () => {
+  const w = afterSendWorld("stop", { cancelStep: false });
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "committed");
+  assert.equal(w.engine._state.records[rec.id].internal.stopAfterCommit, undefined, "no flag: nobody cancelled it");
+  assert.deepEqual(w.interrupted, [done.successorId]);
+});
+
+test("an uncertain first POST: a stop landing before the retry confirms still interrupts after the eventual commit", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null });
+  w.failures.send.push({}, { status: 409 }, { status: 409 }, { status: 409 }); // first POST uncertain, every re-post refused → pending
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.engine.get(rec.id).state, "starting");
+  assert.deepEqual(w.interrupted, []);
+  assert.equal(await w.engine.cancelPendingSends("ses_p"), true, "past the point of no return: flagged, not cancelled");
+  w.jobs.delete("ses_p"); // stopJob wrote `stopped`
+  await w.runTimers();
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "committed");
+  assert.deepEqual(w.interrupted, [done.successorId]);
+});
+
+test("recovery: a persisted start flagged stopAfterCommit finishes its commit and then interrupts the successor", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  const { Crash } = await import("./testWorld.mjs");
+  w.crashAt = "link";
+  const e1 = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null, hooks: { step: async (n) => { if (w.crashAt === n) throw new Crash(n); } } });
+  const rec = await e1.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await e1.onTurnEnd("ses_p", { success: true }).catch(() => {});
+  await settle();
+  const disk = JSON.parse(w.disk.json);
+  assert.equal(disk.records[rec.id].state, "starting");
+  assert.ok(disk.records[rec.id].internal.commit, "mid-commit");
+  disk.records[rec.id].internal.stopAfterCommit = true;
+  w.disk.json = JSON.stringify(disk);
+  w.crashAt = null;
+  w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null });
+  await w.engine.recover();
+  const done = w.engine.get(rec.id);
+  assert.equal(done.state, "committed");
+  assert.deepEqual(w.interrupted, [done.successorId]);
+});
+
+test("control: a normal handoff of a running job (no stop) interrupts nothing; neither does an attended one", async () => {
+  const w = afterSendWorld("pause", { at: "never" });
   const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
   await w.engine.onTurnEnd("ses_p", { success: true });
   assert.equal(w.engine.get(rec.id).state, "committed");
-  assert.equal(w.accepted(w.engine.get(rec.id).successorId).length, 1);
+  assert.deepEqual(w.interrupted, []);
+  const plain = standardWorld({ mode: "auto" });
+  const r = await plain.engine.create({ sessionId: "ses_p", trigger: "agent", action: "handoff", body: FULL_BODY });
+  await plain.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(plain.engine.get(r.id).state, "committed");
+  assert.deepEqual(plain.interrupted, []);
+});
+
+test("a failing interrupt never fails the commit", async () => {
+  const w = afterSendWorld("stop");
+  w.onInterrupt = () => {
+    throw new Error("opencode down");
+  };
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.engine.get(rec.id).state, "committed");
+  assert.deepEqual(w.interrupted.length, 1);
 });
 
 test("recovery: a persisted start that was flagged cancelled after its successor was created is undone — successor deleted, nothing sent", async () => {
@@ -384,7 +493,7 @@ test("recovery: a persisted start that was flagged cancelled after its successor
   assert.equal(w.repointed.length, 0);
 });
 
-test("a flagged ready record is refused by an automatic start but an explicit user press clears the flag", async () => {
+test("a flagged ready record is refused by an automatic start; a user press clears the flag but the job re-check still refuses it while the job is stopped or parked", async () => {
   const w = jobWorld({ mode: "suggest" });
   const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
   w.engine._state.records[rec.id].state = "ready";
@@ -392,12 +501,65 @@ test("a flagged ready record is refused by an automatic start but an explicit us
   assert.equal(w.engine._state.records[rec.id].internal.cancelled, true);
   const auto = await w.engine.start(rec.id, { how: "clear", disposition: "send", origin: "auto" });
   assert.equal(auto.state, "cancelled");
+  // the job still runs (a pause flagged it): the user's own press is a new decision and wins
   const w2 = jobWorld({ mode: "suggest" });
   const r2 = await w2.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
   w2.engine._state.records[r2.id].state = "ready";
   await w2.engine.cancelPendingSends("ses_p");
   const user = await w2.engine.start(r2.id, { how: "clear", disposition: "send" });
-  assert.equal(user.state, "committed", "the user's own press is a new decision");
+  assert.equal(user.state, "committed");
+  // the job is stopped / parked: the press clears the flag, but the job re-check refuses it (Decision 5)
+  const w3 = jobWorld({ mode: "suggest" });
+  const r3 = await w3.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  w3.engine._state.records[r3.id].state = "ready";
+  await w3.engine.cancelPendingSends("ses_p");
+  w3.jobs.delete("ses_p");
+  const refused = await w3.engine.start(r3.id, { how: "clear", disposition: "send" });
+  assert.equal(refused.state, "cancelled");
+  assert.deepEqual(w3.created, []);
+  assert.equal(w3.repointed.length, 0);
+});
+
+test("a flagged start whose fence step fails ends cancelled, not as a ready card on the stopped job's session", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.engine = w.build({
+    runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+    hooks: {
+      step: async (name) => {
+        if (name !== "fence") return;
+        await w.engine.cancelPendingSends("ses_p");
+        w.active.add("ses_p"); // the conversation is not idle: the fence step gives the start up
+      },
+    },
+  });
+  const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.engine.get(rec.id).state, "cancelled");
+  assert.equal(w.engine._state.fences.ses_p, undefined);
+  assert.equal(w.engine._runtime.ops.has("ses_p"), false);
+  assert.equal(w.created.length, 0);
+});
+
+test("a flagged start cancelled before it recorded its creation still deletes the successor (a crash between the create and its persist)", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  const { Crash } = await import("./testWorld.mjs");
+  w.crashAt = "create"; // after createSession landed, before `created` is persisted
+  const e1 = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null, hooks: { step: async (n) => { if (w.crashAt === n) throw new Crash(n); } } });
+  const rec = await e1.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await e1.onTurnEnd("ses_p", { success: true }).catch(() => {});
+  await settle();
+  const disk = JSON.parse(w.disk.json);
+  const persisted = disk.records[rec.id];
+  assert.equal(persisted.internal.created, false, "the creation was never recorded");
+  assert.ok(w.sessions.has(persisted.successorId), "…but the session exists");
+  persisted.internal.cancelled = true;
+  w.disk.json = JSON.stringify(disk);
+  w.crashAt = null;
+  w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null });
+  await w.engine.recover();
+  assert.equal(w.engine.get(rec.id).state, "cancelled");
+  assert.deepEqual(w.deleted, [persisted.successorId]);
+  assert.equal(w.sessions.has(persisted.successorId), false, "no empty successor is left behind");
 });
 
 // ---- item 2: the record's own flag, not a fresh lookup ---------------------------------------------------

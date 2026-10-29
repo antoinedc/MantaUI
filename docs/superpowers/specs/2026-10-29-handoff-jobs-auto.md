@@ -78,18 +78,29 @@ unreadable) is treated as `null` and is not cached.
    failed handoff. Everywhere else a failed turn still drops the plan to a card.
 5. **Stop / pause during a pending handoff.** Stopping or pausing a job Manta
    completes cancels every pending `send` handoff record on its session
-   (`requested`, `generating`; a `ready` record with a planned send and a
-   `starting` one that has not sent its first message are flagged, and every step
-   of the start observes the flag). A start observes it, and re-checks
-   `runningJobOwner(pred) === "manta"` when the record was planned for an
-   unattended job, before creating the successor, after creating it (and on
-   recovery), and before the first message. If cancelled, the start is undone:
-   the successor session is deleted, nothing is sent, the job is NOT re-pointed,
-   the record ends `cancelled`. The point of no return is the first send
-   attempt: after it the successor has the work and a late stop does not undo it.
-   A stopped/paused job is never moved onto a successor by a start that had not
-   sent its first message. An adopted (opencode-owned) session's pending handoff
-   behaves as before.
+   (`requested`, `generating`). A `ready` record with a planned send and a
+   `starting` one that has not sent its first message are flagged, and every
+   step of the start observes the flag: before creating the successor, after
+   creating it (and on recovery), and before the first message. The start also
+   re-checks `runningJobOwner(pred) === "manta"` at those points when the record
+   was planned for an unattended job. If cancelled, the start is undone: the
+   successor session is deleted (the delete is always attempted — the id is
+   pre-minted and a 404 is fine, so a crash between the create and its persist
+   leaks nothing), nothing is sent, the job is NOT re-pointed, the record ends
+   `cancelled` (also when the flagged start fails its fence step, never a ready
+   card). An explicit user press on a flagged ready card clears the flag, but the
+   job re-check still refuses it while the job is stopped or parked; it succeeds
+   only while the job still runs.
+   **After the first message** (the point of no return: the first send attempt)
+   the start can't be undone and commits; a stop/pause then flags the record
+   `stopAfterCommit`, and at commit the engine interrupts the successor's turn
+   (the opencode interrupt, `resume=false`) if that flag is set OR the job no
+   longer runs (which also catches a handoff created after the stop's cancel
+   step ran). The job record stays on the successor, stopped (or parked, for a
+   pause) there. The interrupt happens while the successor is still a handoff
+   successor, so the adoption reconciler skips it and the turn ends before it
+   could be adopted as a new row. A failed interrupt is logged, never fails the
+   commit. An adopted (opencode-owned) session's pending handoff behaves as before.
 6. **Running-time limit.** The delegate sweeper's 30-minute "timed out" rule
    does not time out a job while it has a pending `send` handoff
    (`hasPendingSend`); it re-evaluates after the handoff commits or fails.
@@ -191,5 +202,5 @@ tarball). No client release needed.
   turn, which cancels it (before this change it became a card): the job's turn then
   ends with nothing pending and the job finishes. A follow-up could keep the record
   `requested` for the real turn end.
-- A stop that lands after the handoff's first message was sent does not undo the
-  handoff (the successor has the work); the job record is re-pointed as usual.
+- A message a user typed into the job's window during the handoff is delivered to
+  the successor after the interrupt of a stopped job, and starts a turn there.

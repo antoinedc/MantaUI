@@ -910,6 +910,7 @@ export function createHandoffEngine(deps = {}) {
   }
 
   async function abortToReady(rec, reason) {
+    if (rec.internal.cancelled) return await cancelStart(rec); // a stop/pause flagged this start: it ends cancelled, not as a card on a stopped job
     const sid = rec.fromSessionId;
     if (state.fences[sid]?.recordId === rec.id) delete state.fences[sid];
     rec.state = "ready";
@@ -927,16 +928,14 @@ export function createHandoffEngine(deps = {}) {
     return rec;
   }
 
-  async function rollback(rec, reason, { cancelled = false, deleteSuccessor = true } = {}) {
+  async function rollback(rec, reason, { cancelled = false } = {}) {
     const pred = rec.fromSessionId;
     const succ = rec.successorId;
     if (succ) {
-      if (deleteSuccessor) {
-        try {
-          await oc.deleteSession(succ);
-        } catch (e) {
-          if (e?.status !== 404) warn("[handoff] deleting the unused successor failed:", e?.message ?? e);
-        }
+      try {
+        await oc.deleteSession(succ);
+      } catch (e) {
+        if (e?.status !== 404) warn("[handoff] deleting the unused successor failed:", e?.message ?? e);
       }
       delete state.continuations[succ];
       releasing.delete(succ);
@@ -976,7 +975,8 @@ export function createHandoffEngine(deps = {}) {
   }
 
   /** Undo an uncommitted start: the successor (if one was made) is deleted, nothing was sent, the predecessor is left as it was. */
-  const cancelStart = (rec) => rollback(rec, "the job was stopped, paused or finished", { cancelled: true, deleteSuccessor: Boolean(rec.internal.created) });
+  // The delete is always attempted (the id is pre-minted, a 404 is fine): a crash between the create and its persist leaves `created` false for a session that exists.
+  const cancelStart = (rec) => rollback(rec, "the job was stopped, paused or finished", { cancelled: true });
 
   /**
    * Stop / pause of a job: cancel every pending `send` handoff on its session so the job is never moved onto a
@@ -992,7 +992,13 @@ export function createHandoffEngine(deps = {}) {
         r.reason = "the job was stopped or paused";
         touch(r);
         changed = true;
-      } else if ((r.state === "starting" && !pointOfNoReturn(r)) || (r.state === "ready" && r.internal.plan?.disposition === "send")) {
+      } else if (r.state === "starting" && pointOfNoReturn(r)) {
+        // The first message is (maybe) out: the handoff commits, and the successor's turn is interrupted once it has.
+        if (!r.internal.stopAfterCommit) {
+          r.internal.stopAfterCommit = true;
+          changed = true;
+        }
+      } else if (r.state === "starting" || (r.state === "ready" && r.internal.plan?.disposition === "send")) {
         if (!r.internal.cancelled) {
           r.internal.cancelled = true;
           changed = true;
@@ -1182,6 +1188,33 @@ export function createHandoffEngine(deps = {}) {
     }
   }
 
+  /**
+   * The handoff's first message is out, so the start can't be undone: if the job was stopped or paused meanwhile (the
+   * flag a stop left on the record, or the job no longer runs — which also catches a handoff created after the stop's
+   * cancel step ran), the successor's turn is interrupted. The job record stays on the successor, stopped or parked
+   * there. This runs while the successor is still `releasing`, so the adoption reconciler sees a handoff successor and
+   * skips it, and the interrupted turn ends before the next tick.
+   */
+  async function interruptIfJobStopped(rec) {
+    const j = rec.internal;
+    const succ = rec.successorId;
+    if (rec.how !== "clear" || !succ) return;
+    let stopped = j.stopAfterCommit === true;
+    if (!stopped && j.plan?.job) {
+      try {
+        stopped = (await runningJobOwner(succ)) !== "manta";
+      } catch {
+        stopped = true;
+      }
+    }
+    if (!stopped) return;
+    try {
+      await oc.interrupt?.(succ);
+    } catch (e) {
+      warn("[handoff] interrupting the successor of a stopped job failed:", e?.message ?? e);
+    }
+  }
+
   async function commit(rec) {
     const pred = rec.fromSessionId;
     const succ = rec.successorId;
@@ -1226,6 +1259,11 @@ export function createHandoffEngine(deps = {}) {
       if (rec.how === "clear") await ownership.repoint(pred, succ);
       await hook("ownership");
       c.ownership = true;
+      await persist();
+    }
+    if (!c.stopChecked) {
+      await interruptIfJobStopped(rec);
+      c.stopChecked = true;
       await persist();
     }
     rec.state = "committed";

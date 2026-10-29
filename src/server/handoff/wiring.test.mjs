@@ -29,6 +29,7 @@ function fakes(over = {}) {
       { info: { role: "assistant", providerID: "anthropic", modelID: "claude-opus-4-8", tokens: { input: 10, cache: { read: 200, write: 30 } } }, parts: [{ type: "tool", tool: "edit", state: { status: "completed", input: { filePath: "/proj/a.ts" } } }, { type: "text", text: "Patched. Should I also run the migration?" }] },
     ],
     getVcsBranch: async () => "feat/x",
+    abortSession: async (sid) => void calls.push(["abortSession", sid]),
   };
   const tmux = {
     findWindowBySessionId: async (sid) => (sid === "ses_p" ? { sessionName: "proj", windowIndex: 3, name: "work", cwd: "/proj" } : null),
@@ -122,6 +123,24 @@ test("a manta-owned running job resolves to auto through the delegate adapter; a
   assert.deepEqual(await engine.resolveMode("ses_job"), { mode: "auto", isDefault: true, source: "job", unattended: true });
   assert.equal((await engine.resolveMode("ses_adopted")).mode, "off");
   assert.equal((await engine.resolveMode("ses_p")).mode, "off");
+});
+
+test("a handoff of a job stopped after its first message interrupts the successor through the opencode abort (the existing interrupt, resume=false)", async () => {
+  const f = fakes({ configGet: async () => ({ handoffMode: "suggest" }) });
+  let stopped = false;
+  const base = f.p.delegate();
+  f.p.delegate = () => ({ ...base, runningJobOwner: async (sid) => (sid === "ses_p" && !stopped ? "manta" : null) });
+  const send = f.p.oc.sendPrompt;
+  f.p.oc.sendPrompt = async (a) => {
+    await send(a);
+    stopped = true; // stopJob wrote `stopped` right after the handoff's first message went out
+  };
+  const engine = createProductionHandoff(f.p);
+  const rec = await engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await engine.onTurnEnd("ses_p", { success: true });
+  const out = engine.get(rec.id);
+  assert.equal(out.state, "committed");
+  assert.deepEqual(f.calls.filter((c) => c[0] === "abortSession"), [["abortSession", out.successorId]]);
 });
 
 test("index.mjs: the engine is wired into every seam the spec names", () => {

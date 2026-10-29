@@ -197,3 +197,14 @@ test("runningJobOwner reads the default store once per change: cached by the fil
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a stop that ends the job while its handoff is already past the first message: the stopped record follows the successor and stays stopped there", async () => {
+  const s = store([job({ id: "j1", childSessionID: "ses_old", completionOwner: "manta" })]);
+  const calls = [];
+  const deps = stopDeps(s, { cancelPendingHandoff: async (sid) => void calls.push(sid) });
+  assert.equal((await stopJob("j1", deps)).ok, true);
+  assert.deepEqual(calls, ["ses_old"], "the stop's cancel step ran (the handoff past its send is flagged to interrupt after commit)");
+  assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new" }, { load: s.load, save: s.save, publish: () => {} }), 1, "the commit re-points the terminal record too");
+  assert.equal(s.get()[0].childSessionID, "ses_new");
+  assert.equal(s.get()[0].status, "stopped", "stopped on the successor — the successor's turn is then interrupted, nothing re-opens the job");
+});
