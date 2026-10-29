@@ -1,6 +1,6 @@
 {
   "name": "manta-ui",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Desktop client for remote Claude Code sessions",
   "main": "out/main/index.js",
   "type": "module",
