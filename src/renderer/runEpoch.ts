@@ -12,6 +12,8 @@ import {
   emptyRunMap,
   hasStaleMembership,
   mergeRunViews,
+  pruneRunMap,
+  runIdsOfMessages,
   runViewsOf,
   setRunEpoch,
   type RunMap,
@@ -21,10 +23,10 @@ import type { OpencodeMessage, StreamToolRunsPayload } from "../shared/types";
 const maps = new Map<string, RunMap>();
 const listeners = new Set<() => void>();
 const EMPTY = emptyRunMap();
-let version = 0;
+/** Run ids of the turn in progress, from the latest `toolRuns` frames: a prune after a full fetch never drops them. */
+const liveIds = new Map<string, Set<string>>();
 
 const notify = () => {
-  version++;
   for (const l of listeners) l();
 };
 const subscribe = (l: () => void) => {
@@ -36,10 +38,12 @@ const conn = () => useStore.getState().runEpoch;
 /** The run map of a session (a stable empty one when it has none). */
 export const getRunMap = (sessionId: string): RunMap => maps.get(sessionId) ?? EMPTY;
 
-/** React binding: re-renders when ANY session's runs change (cheap: the layout memo keys on the map identity). */
+/**
+ * React binding: re-renders only when THIS session's map changes (the identity is stable for an untouched session, so a
+ * `toolRuns` frame of another session bails out; the layout memo keys on the map identity).
+ */
 export function useRunMap(sessionId: string): RunMap {
-  useSyncExternalStore(subscribe, () => version);
-  return getRunMap(sessionId);
+  return useSyncExternalStore(subscribe, () => getRunMap(sessionId));
 }
 
 function put(sessionId: string, next: RunMap): void {
@@ -52,8 +56,18 @@ function put(sessionId: string, next: RunMap): void {
 export function onRunEpoch(epoch: string | null | undefined): void {
   useStore.getState().setRunEpoch(epoch ?? null);
   const { connGen } = conn();
-  for (const [sid, state] of maps) maps.set(sid, setRunEpoch(state, epoch ?? null, connGen));
-  notify();
+  let changed = false;
+  for (const [sid, state] of maps) {
+    const next = setRunEpoch(state, epoch ?? null, connGen);
+    if (next === state) continue;
+    maps.set(sid, next);
+    changed = true;
+  }
+  if (liveIds.size > 0) {
+    liveIds.clear(); // the new connection's snapshot names the live runs again
+    changed = true;
+  }
+  if (changed) notify();
 }
 
 /** The events connection (re)opened: its epoch is unknown until the new `runningSet`. */
@@ -76,9 +90,28 @@ export function ingestRunMessages(sessionId: string, messages: readonly Opencode
   return issuedConnGen >= connGen && hasStaleMembership(messages, getRunMap(sessionId).minGen);
 }
 
+/**
+ * A FULL transcript answer replaced the loaded messages: runs no message references and the turn in progress does not
+ * hold are no longer drawn — drop them (spec "Run revisions": pruned on refetch). Never for a splice, a stale-connection
+ * answer, or while the connection's epoch is unknown.
+ */
+function pruneAfterFullFetch(sessionId: string, messages: readonly OpencodeMessage[], issuedConnGen: number): void {
+  const { epoch, connGen } = conn();
+  if (epoch == null || issuedConnGen < connGen) return;
+  const keep = runIdsOfMessages(messages);
+  for (const id of liveIds.get(sessionId) ?? []) keep.add(id);
+  put(sessionId, pruneRunMap(getRunMap(sessionId), keep));
+}
+
 /** A live `toolRuns` frame. Returns true when it was a canonical rebuild (the caller refetches once). */
 export function ingestRunFrame(sessionId: string, frame: StreamToolRunsPayload): boolean {
   const { epoch, connGen } = conn();
+  if (epoch == null || frame.epoch === epoch) {
+    const ids = [...(frame.runs ?? []).map((r) => r.id), ...(frame.layout as { kind?: string; id?: string }[] | undefined ?? []).flatMap((b) => (b.kind === "run" && b.id ? [b.id] : []))];
+    const held = frame.full ? new Set<string>() : (liveIds.get(sessionId) ?? new Set<string>());
+    for (const id of ids) held.add(id);
+    liveIds.set(sessionId, held);
+  }
   let state = mergeRunViews(getRunMap(sessionId), frame.runs ?? [], { currentEpoch: epoch, connGen });
   if (frame.rebuilt && frame.epoch === epoch) state = applyRunRebuild(state, frame.retired ?? [], frame.gen);
   put(sessionId, state);
@@ -86,13 +119,14 @@ export function ingestRunFrame(sessionId: string, frame: StreamToolRunsPayload):
 }
 
 export function forgetRunSession(sessionId: string): void {
+  liveIds.delete(sessionId);
   if (maps.delete(sessionId)) notify();
 }
 
 /** Test seam. */
 export function resetRunEpochState(): void {
   maps.clear();
-  version = 0;
+  liveIds.clear();
   notify();
 }
 
@@ -107,7 +141,9 @@ export async function opencodeMessagesTracked(
 ): Promise<OpencodeMessage[]> {
   const issued = conn().connGen;
   const messages = await window.api.opencodeMessages(sessionId, opts);
-  if (ingestRunMessages(sessionId, messages, issued)) onStale?.();
+  const stale = ingestRunMessages(sessionId, messages, issued);
+  pruneAfterFullFetch(sessionId, messages, issued);
+  if (stale) onStale?.();
   return messages;
 }
 

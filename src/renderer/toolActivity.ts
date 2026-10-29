@@ -40,14 +40,47 @@ export type RunMergeCtx = {
 
 const isRef = (v: RunView | RunRef): v is RunRef => (v as RunRef).ref === true;
 
-/** The connection's epoch became known / changed: runs of another epoch are dropped, queued writes apply. */
+/**
+ * The connection's epoch became known / changed: runs of another epoch are dropped, queued writes apply. The SAME epoch
+ * announced again (a reconnect to the same box process) keeps the runs but still drains what queued while the connection's
+ * epoch was unknown — those writes were held for exactly this announcement.
+ */
 export function setRunEpoch(state: RunMap, epoch: string | null, connGen = 0): RunMap {
-  if (epoch === state.epoch) return state;
+  if (epoch === state.epoch) {
+    if (epoch == null || state.queue.length === 0) return state;
+    let same: RunMap = { ...state, queue: [] };
+    for (const q of state.queue) same = mergeRunViews(same, q.values, { currentEpoch: epoch, connGen, issuedConnGen: q.issuedConnGen });
+    return same;
+  }
   let next: RunMap = { epoch, runs: new Map(), minGen: 0, queue: [] };
   if (epoch != null) {
     for (const q of state.queue) next = mergeRunViews(next, q.values, { currentEpoch: epoch, connGen, issuedConnGen: q.issuedConnGen });
   }
   return next;
+}
+
+/** Keep only the runs in `keep` (a full transcript answer replaced the loaded messages): the rest are no longer drawn. */
+export function pruneRunMap(state: RunMap, keep: ReadonlySet<string>): RunMap {
+  let runs: Map<string, RunView> | null = null;
+  for (const id of state.runs.keys()) {
+    if (keep.has(id)) continue;
+    if (!runs) runs = new Map(state.runs);
+    runs.delete(id);
+  }
+  return runs ? { ...state, runs } : state;
+}
+
+/** Every run id the messages reference: parts' `runId`, and the runs their `view.runs` carry (full or ref). */
+export function runIdsOfMessages(messages: readonly OpencodeMessage[]): Set<string> {
+  const ids = new Set<string>();
+  for (const m of messages) {
+    for (const p of m.parts) {
+      const id = partView(p)?.runId;
+      if (id) ids.add(id);
+    }
+    for (const r of m.view?.runs ?? []) ids.add(r.id);
+  }
+  return ids;
 }
 
 /**

@@ -680,6 +680,7 @@ describe("ChatPanel turn footer after a live turn", () => {
     view: { turn: { durationMs: 5000, tokens: 1200, verbSeedId: "msg_a1" } },
   };
   const wait = (ms: number) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
+  const FOOTER_5S = /\bfor 5s\b/;
 
   async function runTurn(end: (bus: MockEventBus) => void) {
     const fetchCalls: Array<[string, unknown]> = [];
@@ -702,8 +703,9 @@ describe("ChatPanel turn footer after a live turn", () => {
     await emitStreamAndFlush(bus, h, { sub: "messageChanged", sessionId: "ses_test", payload: { messageID: "msg_a1" } });
     await wait(450);
     expect(h.text()).toContain("done");
-    // No footer yet: the splice carried no turn and no refetch has run.
-    expect(h.text()).not.toContain("5s");
+    // No footer yet: the splice carried no turn and no refetch has run. (The footer reads "<verb> for 5s"; the live
+    // working line shows a wall-clock elapsed that can end in "5s" too, so only the footer's own phrase counts.)
+    expect(h.text()).not.toMatch(FOOTER_5S);
     expect(fetchCalls.length).toBe(1);
 
     end(bus);
@@ -719,7 +721,37 @@ describe("ChatPanel turn footer after a live turn", () => {
     expect(calls.length).toBe(2);
     expect(calls[1][0]).toBe("ses_test");
     expect(calls[1][1]).toMatchObject({ view: true });
-    expect(h!.text()).toContain("5s");
+    expect(h!.text()).toMatch(FOOTER_5S);
+  });
+
+  // The box's REAL end-of-turn order: `running:false` first, then `turnComplete{running:false}` (a failed turn adds a
+  // `sessionError` before both). One turn end is ONE full refetch — the debounce cannot merge two calls 400 ms apart.
+  it("the box's real pair (running:false, then turnComplete) refetches EXACTLY once", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } }));
+    });
+    expect(calls.length).toBe(2); // the mount fetch + ONE refetch
+    expect(calls[1][1]).toMatchObject({ view: true });
+    expect(h!.text()).toMatch(FOOTER_5S);
+  });
+
+  it("a failed turn's real order (sessionError, running:false, turnComplete) refetches EXACTLY once", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "sessionError", sessionId: "ses_test", payload: { message: "boom", name: "UnknownError" } }));
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: true, running: false } }));
+    });
+    expect(calls.length).toBe(2);
+  });
+
+  it("a new turn starting between the two end frames re-arms: the stale settle neither refetches nor ends the new turn", async () => {
+    const calls = await runTurn((bus) => {
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: false } }));
+      act(() => bus.emitStream({ sub: "running", sessionId: "ses_test", payload: { running: true } }));
+      act(() => bus.emitStream({ sub: "turnComplete", sessionId: "ses_test", payload: { complete: false, running: true } }));
+    });
+    expect(calls.length).toBe(2); // only the first end refetched
   });
 
   it("a bare running:false refetches once (view:true) and shows the footer", async () => {
@@ -728,7 +760,7 @@ describe("ChatPanel turn footer after a live turn", () => {
     );
     expect(calls.length).toBe(2);
     expect(calls[1][1]).toMatchObject({ view: true });
-    expect(h!.text()).toContain("5s");
+    expect(h!.text()).toMatch(FOOTER_5S);
   });
 });
 

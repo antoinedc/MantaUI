@@ -1794,6 +1794,29 @@ Missing → each assistant message's tool parts collapse into ONE neutral line
 "Tool activity" (static), expandable to the raw calls, with the note "Update
 your box to see tool details"; the working line shows the turn verb only.
 
+### Review-round decisions (recorded, not in the original design)
+
+- **The parity fixture moved instead of being deleted.** `tool-activity-cases.json` now lives at
+  `src/server/fixtures/tool-activity-cases.json` and drives `transcriptRuns.test.mjs` (the box's own drift guard for the
+  wording). The acceptance line "the fixture files are gone" is read as "no CLIENT copy of the rules": the desktop
+  `toolActivity.fixture.test.ts` is deleted. The iOS test target must stop listing the old `src/shared/fixtures/` path
+  (`mobile/native/project.yml`) when the iOS half of D11 lands.
+- **A single-message fetch carries every run its parts reference, from the ledger** (a later step of a run belongs to a run
+  that began in an earlier message), and never a run id no part references.
+- **The ledger is bounded.** Tool output is kept only for `delegate` calls (the one wording rule that reads it); a
+  finished turn (`turnComplete complete:true`, nothing pending/provisional) is left out of the connect snapshot and evicted
+  after 10 min or beyond 200 sessions (oldest settled first); an evicted session's `gen` never goes back (a floor is kept),
+  so a client's `minGen` never rejects a fresh stamp.
+- **A rebuild never starts under a classification or another canonical read** (it waits, then runs); every canonical read is
+  time-bounded (10 s) and buffered events replay after it.
+- **A ledger created by a run event with no drawing user message before it** (manta-server restarted mid-turn, or the ledger
+  was evicted) is **seeded** from canonical history before the event is applied, so the run keeps its true id.
+- **The rebuild reads `100 + RUN_LOOKBACK` messages** (the same lookback a `view` fetch reads).
+- **Desktop run map:** writes queued while a reconnect's epoch is unknown are applied when the SAME epoch is announced
+  again; a full transcript answer prunes runs no loaded message references (the turn in progress is held by the latest
+  `toolRuns` frames); a session's map is dropped when its panel stops showing it. `useRunMap` re-renders only for its own
+  session.
+
 ### Tests
 
 - node `transcriptView.test.mjs`: every case of the retired fixture (wording

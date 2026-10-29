@@ -74,7 +74,7 @@ export const DELETED = [
   { scopes: ["renderer"], regex: /\b(NO_ROLLBACK_STEPS|CHECK_AGAIN_STEPS)\b|export function (currentStep|stepFraction|diskSentence)\b/, why: "D3: the upgrade gate's current step, fraction, disk sentence and Retry/Roll back rules are the box's" },
   // D11 — tool activity wording + runs.
   { scopes: ["renderer"], regex: /\b(describeActivity|describeToolPart|describePatchPart|summarizeToolGroup|groupTone|normalizeToolStatus|humanizeToolName)\b|export type (Activity|ActivityKind|GroupSummary)\b|\bfunction (hostOf|clip)\b/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every tool call's wording and every run's summary, tone and membership; the renderer lays out the box's runs and derives none of it" },
-  { scopes: ["swift", "swiftTests"], regex: /ToolActivity\.(describe|describeTool|describePatch|summarize|target|clip|hostOf|basename|humanizeToolName|userMessageDraws)\b|^struct (Activity|GroupSummary)\b|\bdelegateJobName\b|\bdelegateNameMax\b|\bfunc (mergingLive|plural)\b|\bmergingLive\(|\bLiveActivityMerge\b|\bliveTailRowID\b|\bstatic func livePart\(from (tool|subagent)\b|\bToolRun\.appending\b|\.appending\(\[/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every call's wording and every run's summary and membership; iOS lays out the box's runs and derives none of it (and the live tail is the box's ordered ledger, not a merge of tool frames)" },
+  { scopes: ["swift", "swiftTests"], regex: /ToolActivity\.(describe|describeTool|describePatch|summarize|target|clip|hostOf|basename|humanizeToolName|userMessageDraws)\b|^struct (Activity|GroupSummary)\b|\bdelegateJobName\b|\bdelegateNameMax\b|\bfunc (mergingLive|plural)\b|\bmergingLive\(|\bLiveActivityMerge\b|\bliveTailRowID\b|\bstatic func livePart\(from (tool|subagent)\b|\bToolRun\.appending\b|\.appending\(\[|\bstatic func (describeTool|describePatch|summarize|basename|hostOf|clip|humanizeToolName|userMessageDraws)\(|\bstatic func describe\(_ part\b|\bstatic func target\(of\b|\bhumanizeToolName\b/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every call's wording and every run's summary and membership; iOS lays out the box's runs and derives none of it (and the live tail is the box's ordered ledger, not a merge of tool frames)" },
 ];
 
 function* walk(dir, recursive) {
@@ -141,9 +141,72 @@ test("the guard fails on a synthetic file that re-adds a deleted symbol (self-te
   assert.match(v[0].why, /BoxCapabilitiesStore/);
 });
 
+test("the D11 Swift rule also catches an unqualified re-declaration of a deleted symbol (self-test)", () => {
+  const rule = DELETED.filter((r) => r.scopes.includes("swift") && /D11/.test(r.why));
+  assert.equal(rule.length, 1);
+  const flagged = (text) =>
+    findViolations(rule, [{ path: "mobile/native/MantaUI/Fake.swift", scope: "swift", text }], () => "swift").length;
+  for (const decl of [
+    "    static func clip(_ s: String, _ max: Int) -> String {",
+    "    static func hostOf(_ url: String) -> String {",
+    "    static func humanizeToolName(_ name: String) -> String {",
+    "    static func summarize(_ parts: [OpencodePart]) -> String {",
+    "    static func target(of part: OpencodePart) -> String {",
+    "    static func userMessageDraws(_ m: OpencodeMessage) -> Bool {",
+    "    static func describe(_ part: OpencodePart) -> Activity {",
+    "    private static func describeTool(_ part: OpencodePart) -> Activity {",
+    "    let n = humanizeToolName(raw)",
+  ]) {
+    assert.equal(flagged(decl), 1, decl);
+  }
+  // Names that merely resemble the deleted ones are not flagged.
+  for (const ok of [
+    "    private static func truncatedLine(_ s: String, _ max: Int) -> String {",
+    "    static func describeDesktopUpdate(_ r: DesktopUpdateResult) -> Row {",
+    "    static func summary(forSegment id: String?) -> Run {",
+    "    static func targetFor(_ id: String) -> String {",
+    "    func clipboardText() -> String {",
+    "    private static func describe(_ error: Error) -> String {",
+  ]) {
+    assert.equal(flagged(ok), 0, ok);
+  }
+});
+
 test("every rule names scopes that exist and a reason", () => {
   for (const r of DELETED) {
     assert.ok(r.why && r.regex instanceof RegExp);
     for (const s of r.scopes) assert.ok(SCOPES[s], s);
   }
+});
+
+// The desktop's demo box runs the REAL transcript view (one source of truth, no client copy), so its whole import closure is
+// bundled into the renderer: it must stay browser-safe. A Node-only import (media.mjs → node:fs, outbox → os) breaks the
+// production build; this fails first, naming the file.
+test("src/server/transcriptView.mjs imports nothing Node-only, directly or transitively (the demo renderer bundles it)", () => {
+  const seen = new Set();
+  const offenders = [];
+  const walk = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const src = readFileSync(file, "utf8");
+    for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)[^;\n]*?from\s+"([^"]+)"/g)) {
+      const spec = m[1];
+      if (!spec.startsWith(".")) {
+        offenders.push(`${relative(ROOT, file)} imports "${spec}"`);
+        continue;
+      }
+      const base = join(file, "..", spec);
+      const target = [base, `${base}.mjs`, `${base}.ts`].find((p) => {
+        try {
+          return statSync(p).isFile();
+        } catch {
+          return false;
+        }
+      });
+      if (target) walk(target);
+    }
+  };
+  walk(join(ROOT, "src/server/transcriptView.mjs"));
+  assert.deepEqual(offenders, []);
+  for (const f of seen) assert.match(relative(ROOT, f), /^src\/(shared\/|server\/(transcriptView|transcriptRuns)\.mjs$)/, `unexpected module in the demo bundle: ${f}`);
 });

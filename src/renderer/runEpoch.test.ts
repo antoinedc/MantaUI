@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useStore } from "./store";
 import {
   getRunMap,
+  forgetRunSession,
   ingestRunFrame,
   ingestRunMessages,
   onRunConnection,
@@ -107,5 +108,64 @@ describe("run epoch + connection counter", () => {
     expect(ingestRunMessages("s", [stale], 1)).toBe(true);
     onRunConnection();
     expect(ingestRunMessages("s", [stale], 1)).toBe(false);
+  });
+});
+
+describe("same-epoch reconnect + pruning (review S3)", () => {
+  const partOf = (runId: string) => ({ id: `p-${runId}`, type: "tool", view: { runId, gen: 1 } });
+  const msgOf = (runs: RunView[], refs: string[] = runs.map((r) => r.id)) =>
+    ({ info: { id: "m1", sessionID: "s", role: "assistant" }, parts: refs.map(partOf), view: { runs } }) as unknown as OpencodeMessage;
+
+  it("a write that lands before the reconnect's runningSet is applied when the SAME epoch is announced again", () => {
+    onRunConnection();
+    onRunEpoch("E1");
+    ingestRunMessages("s", [msgWith(run("A", "before"))], 1);
+    expect(getRunMap("s").runs.get("A")?.label).toBe("before");
+    onRunConnection(); // same box process: the epoch is unknown again until the new runningSet
+    ingestRunMessages("s", [msgWith(run("A", "during", { seq: 5 }))], 2);
+    ingestRunFrame("s", frame([run("B", "frame")]));
+    expect(getRunMap("s").queue.length).toBe(2);
+    expect(getRunMap("s").runs.get("A")?.label).toBe("before");
+    onRunEpoch("E1");
+    expect(getRunMap("s").runs.get("A")?.label).toBe("during");
+    expect(getRunMap("s").runs.get("B")?.label).toBe("frame");
+    expect(getRunMap("s").queue).toEqual([]);
+  });
+
+  it("a full fetch drops runs no loaded message references, keeps the turn in progress, and a splice / stale answer prunes nothing", async () => {
+    onRunConnection();
+    onRunEpoch("E1");
+    ingestRunMessages("s", [msgWith(run("A", "a"), run("X", "gone"))], 1); // history an earlier fetch carried
+    ingestRunFrame("s", frame([run("LIVE", "streaming")])); // the turn in progress (its message is not persisted yet)
+    vi.stubGlobal("window", { api: { opencodeMessages: async () => [msgOf([run("A", "a")])], opencodeMessage: async () => msgOf([run("A", "a")]) } });
+    // a LIVE frame names LIVE as part of the current turn (its message is not persisted yet)
+    await opencodeMessagesTracked("s", { view: true });
+    expect([...getRunMap("s").runs.keys()].sort()).toEqual(["A", "LIVE"]);
+    // a full frame of the NEXT turn replaces the live set: LIVE is no longer held
+    ingestRunFrame("s", frame([run("N", "new")], { full: true }));
+    await opencodeMessagesTracked("s", { view: true });
+    expect([...getRunMap("s").runs.keys()].sort()).toEqual(["A", "N"]);
+    // an answer issued under an older connection prunes nothing
+    let release: (m: OpencodeMessage[]) => void = () => {};
+    vi.stubGlobal("window", { api: { opencodeMessages: () => new Promise<OpencodeMessage[]>((r) => (release = r)) } });
+    const stale = opencodeMessagesTracked("s", { view: true });
+    onRunConnection();
+    onRunEpoch("E1");
+    ingestRunMessages("s", [msgOf([run("K", "kept")])], 2);
+    release([msgOf([run("A", "a")])]);
+    await stale;
+    expect(getRunMap("s").runs.has("K")).toBe(true);
+    // a splice (ingestRunMessages directly) never prunes
+    ingestRunMessages("s", [msgOf([run("Z", "z")])], 2);
+    expect(getRunMap("s").runs.has("K")).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it("forgetRunSession drops the session's map", () => {
+    onRunConnection();
+    onRunEpoch("E1");
+    ingestRunMessages("s", [msgWith(run("A", "a"))], 1);
+    forgetRunSession("s");
+    expect(getRunMap("s").runs.size).toBe(0);
   });
 });

@@ -109,13 +109,11 @@ export type RetryInfo = {
 const INITIAL_FETCH_TIMEOUT_MS = 15_000;
 const INITIAL_FETCH_RETRY_DELAY_MS = 2_000;
 
-// A `turnComplete` with running:false is NOT proof the turn ended: the box
-// derives it from the transcript, and at every tool-step boundary the just-
-// finished step's message is momentarily the transcript tail, so it fires
-// mid-turn and is re-armed by the next `session.status busy` 0-134ms later
-// (measured on the live stream, 2026-08-07). Waiting this long before
-// believing it collapses that flicker, while still self-healing if the hard
-// `session.status {"type":"idle"}` signal is ever dropped.
+// `turnComplete{running:false}` is the box's "an execution ended" frame, sent right AFTER the hard `running:false` frame
+// (it never fires per tool step any more). It is still not proof the TURN is over: a follow-up execution (a queued send, a
+// background result) can start immediately. So the running→false flip it asks for waits this long — a `running:true` in
+// the meantime cancels it — while the hard `running` frame stays authoritative. It is also the fallback for a dropped
+// `running:false`: the canonical refetch of a turn end happens ONCE (see `endRefetchedRef`).
 const TURN_SETTLE_MS = 400;
 export { TURN_SETTLE_MS };
 
@@ -316,6 +314,11 @@ export function useSseBus(params: {
       turnSettleRef.current = null;
     }
   };
+  // The box ends a turn with `running:false` and THEN `turnComplete{running:false}` (and a failed turn adds a
+  // `sessionError` first): the canonical refetch (turn footer, truncation) is wanted once per end, not once per frame. Set
+  // where an end signal already scheduled it; cleared when a turn (re)starts. The settle timer is only the fallback for
+  // a `running:false` that never arrived.
+  const endRefetchedRef = useRef(false);
   const [liveTodos, setLiveTodos] = useState<
     Array<{ content: string; status: string; priority: string }> | null
   >(null);
@@ -509,9 +512,9 @@ export function useSseBus(params: {
     //     matters because streamed text deltas never produce `messageChanged`.
     //   - `running` → the card's live running/idle badge; going idle also
     //     refetches the PARENT so the task part's own state flips.
-    // `turnComplete` is deliberately NOT used for the child badge: the box derives
-    // it from the transcript, so it fires mid-turn at every tool-step boundary
-    // (see TURN_SETTLE_MS) and would flicker the badge. `running` is the hard
+    // `turnComplete` is deliberately NOT used for the child badge: it only marks an
+    // execution end (a follow-up execution can start right after — see
+    // TURN_SETTLE_MS), so it would flicker the badge. `running` is the hard
     // signal — the same one the raw child handler used (session.status).
     const handleChildFrame = (ev: StreamEnvelope) => {
       const childId = ev.sessionId;
@@ -590,13 +593,18 @@ export function useSseBus(params: {
           setRunning(nowRunning);
           // The turn footer / truncation come only from a full view fetch (a
           // splice never carries a turn), so a turn ending needs one.
-          if (!nowRunning) scheduleRefetch();
+          if (nowRunning) endRefetchedRef.current = false;
+          else {
+            endRefetchedRef.current = true;
+            scheduleRefetch();
+          }
           return;
         }
         case "turnComplete": {
           const { running: turnRunning } = ev.payload as StreamRunningPayload;
           if (turnRunning === true) {
             cancelTurnSettle();
+            endRefetchedRef.current = false;
             setRunning(true);
             return;
           }
@@ -604,11 +612,16 @@ export function useSseBus(params: {
           // still re-arm the turn right away (queued sends, background results),
           // so settle after a short quiet period; the hard `running` signal or a
           // genuine end clears the timer early. The canonical refetch (turn
-          // footer, truncation) belongs to the settled end, so it runs here.
+          // footer, truncation) belongs to the end: it already ran for the
+          // `running:false` that precedes this frame, and runs here only when
+          // that frame never came.
           cancelTurnSettle();
           turnSettleRef.current = setTimeout(() => {
             setRunning(false);
-            scheduleRefetch();
+            if (!endRefetchedRef.current) {
+              endRefetchedRef.current = true;
+              scheduleRefetch();
+            }
           }, TURN_SETTLE_MS);
           return;
         }
@@ -667,6 +680,7 @@ export function useSseBus(params: {
           setAuthReconnectState(rc ? { providerID: rc.providerID, label: rc.label } : null);
           cancelTurnSettle();
           setRunning(false);
+          endRefetchedRef.current = true;
           scheduleRefetch();
           return;
         }

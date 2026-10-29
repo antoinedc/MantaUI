@@ -19,7 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { OpencodeMessage } from "../../shared/types";
-import { opencodeMessageTracked, opencodeMessagesTracked } from "../runEpoch";
+import { forgetRunSession, opencodeMessageTracked, opencodeMessagesTracked } from "../runEpoch";
 import {
   mergeBufferedDeltas,
   collectChildSessionIds,
@@ -323,6 +323,16 @@ export function useTranscriptState(params: {
     for (const t of spliceTimers.current.values()) clearTimeout(t);
     spliceTimers.current.clear();
     spliceFirstScheduledAt.current.clear();
+  }, [sessionId]);
+
+  // The run values of a session (and its subagent children) this hook stops showing are dropped with it — the map is
+  // per-session app-lifetime state and would otherwise hold every run ever seen.
+  useEffect(() => {
+    const children = childSessionIds.current;
+    return () => {
+      forgetRunSession(sessionId);
+      for (const cid of children) forgetRunSession(cid);
+    };
   }, [sessionId]);
 
   // Unmount cleanup — clear EVERY pending debounce timer. A timer surviving
