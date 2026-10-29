@@ -3066,11 +3066,23 @@ export type OpencodeBackgroundResultPart = {
   text: string;
 };
 
+/** A truncation as the BOX words it (canonical `view.truncation` and the live `truncation` frame carry the same). */
+export type TruncationView = { kind: "output-cap" | "context-wall" | "tool-cutoff"; label: string; hint?: string };
+
+/** What the box decided a message MEANS (`{view:true}` on `opencode:messages` / `opencode:message`, WS11 D8+). */
+export type MessageView = {
+  /** The finished turn this message ends: duration / tokens / the verb seed. Never on a lone `getMessage`. */
+  turn?: { durationMs: number | null; tokens: number | null; verbSeedId: string };
+  truncation?: TruncationView;
+};
+
 export type OpencodeMessage = {
   info: OpencodeMessageInfo;
   // OpencodePart is open (index signature), so an OpencodeBackgroundResultPart
   // is already a member; renderers narrow on `type === "background-result"`.
   parts: OpencodePart[];
+  /** Present only when the request asked for `{view:true}` and the box has something to say. */
+  view?: MessageView;
 };
 
 // Generic SSE event envelope, mirroring opencode's `Event` union. The
@@ -3121,6 +3133,8 @@ export type StreamTodosPayload = {
 export type StreamTruncationPayload = {
   kind: string;
   label: string;
+  /** The explanation (WS11 D8); absent on an older box. */
+  hint?: string;
   messageID?: string;
 };
 

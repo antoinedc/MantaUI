@@ -40,10 +40,12 @@ final class MantaAPIClient: Sendable {
     /// tool's stdout that opencode writes into `state.metadata.output` — on a
     /// real 63-message session that is most of the payload. Both are opt-in on
     /// the wire; the desktop passes neither and still gets the full history.
-    func messages(sessionId: String, limit: Int? = nil, slim: Bool = false) async throws -> [OpencodeMessage] {
+    func messages(sessionId: String, limit: Int? = nil, slim: Bool = false, view: Bool = false) async throws -> [OpencodeMessage] {
         var opts: [String: Any] = [:]
         if let limit, limit > 0 { opts["limit"] = limit }
         if slim { opts["slim"] = true }
+        // `view: true` asks the box to decide what the transcript means (turn footers, truncation — WS11 D8+).
+        if view { opts["view"] = true }
         let args: [Any] = opts.isEmpty ? [sessionId] : [sessionId, opts]
         return try await call("opencode:messages", args: args, as: [OpencodeMessage].self) ?? []
     }

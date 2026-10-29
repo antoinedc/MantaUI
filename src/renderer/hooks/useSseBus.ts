@@ -69,6 +69,7 @@ import type {
   StreamCachePayload,
   StreamTodosPayload,
   StreamTruncationPayload,
+  TruncationView,
   StreamQuestionsPayload,
   StreamSubagentChildPayload,
 } from "../../shared/types";
@@ -162,8 +163,8 @@ export type SseBus = {
   setTodosDismissed: React.Dispatch<React.SetStateAction<boolean>>;
   retryInfo: RetryInfo | null;
   setRetryInfo: React.Dispatch<React.SetStateAction<RetryInfo | null>>;
-  finishByMessageId: Map<string, import("../chatUtils").TruncationKind>;
-  setFinishByMessageId: React.Dispatch<React.SetStateAction<Map<string, import("../chatUtils").TruncationKind>>>;
+  finishByMessageId: Map<string, TruncationView>;
+  setFinishByMessageId: React.Dispatch<React.SetStateAction<Map<string, TruncationView>>>;
   commandByMessageId: Map<string, { name: string; arguments: string }>;
   setCommandByMessageId: React.Dispatch<React.SetStateAction<Map<string, { name: string; arguments: string }>>>;
   liveChildStatus: Map<string, "running" | "idle">;
@@ -194,7 +195,7 @@ export function useSseBus(params: {
   setRefreshing: React.Dispatch<React.SetStateAction<boolean>>;
   scheduleRefetch: () => void;
   // Options for every transcript fetch (tail limit until "Load earlier").
-  fetchOpts: () => { limit: number } | {};
+  fetchOpts: () => { limit?: number; view: true };
   spliceMessage: (messageId: string) => void;
   scheduleChildRefetch: (childId: string) => void;
   childSessionIds: React.MutableRefObject<Set<string>>;
@@ -319,7 +320,7 @@ export function useSseBus(params: {
   const [todosDismissed, setTodosDismissed] = useState(false);
   const [retryInfo, setRetryInfo] = useState<RetryInfo | null>(null);
   const [finishByMessageId, setFinishByMessageId] = useState<
-    Map<string, import("../chatUtils").TruncationKind>
+    Map<string, TruncationView>
   >(() => new Map());
   const [commandByMessageId, setCommandByMessageId] = useState<
     Map<string, { name: string; arguments: string }>
@@ -746,7 +747,7 @@ export function useSseBus(params: {
           if (p.messageID && p.kind) {
             setFinishByMessageId((prev) => {
               const next = new Map(prev);
-              next.set(p.messageID as string, p.kind as import("../chatUtils").TruncationKind);
+              next.set(p.messageID as string, { kind: p.kind as TruncationView["kind"], label: p.label, hint: p.hint });
               return next;
             });
           }

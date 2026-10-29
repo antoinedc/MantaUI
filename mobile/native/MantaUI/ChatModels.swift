@@ -235,10 +235,6 @@ enum ChatTranscriptMapper {
         }
         let layout = ToolActivity.layout(messages: settled, running: false, showThinking: options.showReasoning)
 
-        // The turn footer is decided over EVERY message (a turn is not finished
-        // while its last step is still in flight).
-        let turns = TranscriptTurns.info(messages, running: options.running)
-
         // Media: canonical (session-wide) plus live-only entries, grouped under
         // the settled assistant message that owns them. Entries whose owner is
         // not settled belong to `liveMediaTail`.
@@ -319,7 +315,6 @@ enum ChatTranscriptMapper {
                 appendWidgets(widgetMap[msg.info.id], into: &blocks)
                 appendFooter(
                     for: msg,
-                    turns: turns,
                     turnProse: turnProse,
                     options: options,
                     into: &blocks
@@ -331,19 +326,18 @@ enum ChatTranscriptMapper {
         return blocks
     }
 
-    /// The turn footer: duration · tokens for a finished turn, and/or a
-    /// truncation warning. The truncation is the TRANSCRIPT's own record when it
-    /// has one (survives a reload), else the latest live warning for this message.
+    /// The turn footer: duration · tokens for a finished turn, and/or a truncation warning — both decided by the BOX
+    /// (`message.view`, WS11 D8; its running gate already withheld the in-flight turn's footer). The truncation is
+    /// the box's canonical record when it has one (survives a reload), else the latest live warning for this message.
     private static func appendFooter(
         for msg: OpencodeMessage,
-        turns: [String: TranscriptTurnInfo],
         turnProse: [String],
         options: TranscriptMapOptions,
         into blocks: inout [TranscriptBlock]
     ) {
-        let live = options.liveTruncation?.messageID == msg.info.id ? options.liveTruncation?.kind : nil
-        let effective = TranscriptTruncation.kind(of: msg) ?? live
-        let info = turns[msg.info.id]
+        let live = options.liveTruncation?.messageID == msg.info.id ? options.liveTruncation?.view : nil
+        let effective = msg.view?.truncation ?? live
+        let info = msg.view?.turn
         guard TranscriptFooterRule.shouldEmit(finishedTurn: info != nil, effectiveTruncation: effective) else { return }
         blocks.append(.turnFooter(TranscriptTurnFooter(
             messageID: msg.info.id,

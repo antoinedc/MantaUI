@@ -2423,3 +2423,23 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
    The Accounts/close surfaces that DO lose a control keep their note.
 9. **Follow-up (NIT 13, master D29):** `windowStatus.stopped` / `attention` ride the payload with no consumer yet; retire
    WS04's stopped list or rewire M-09-2 and the desktop stopped marker to `windowStatus.stopped`.
+
+## Implementation notes (D8)
+
+- Box: `transcriptView.mjs` (`computeTurns`, `truncationOf`, `annotateView`, `annotateSingle`); `listMessages({view:true})`
+  adds `message.view {turn?, truncation?}` computed over the FULL parts (before slim drops any), the running gate comes
+  from the interpreter (`opencode:messages` sets `running` itself — a client value is ignored); `getMessage({view:true})`
+  carries a truncation only (a turn needs its neighbours). The live `truncation` frame gains `hint`.
+- `transcript-view-1` is advertised at the end of D9 (as specced); clients ask for `view` only when the box says it has
+  it (iOS) / always (desktop — an older box ignores the option and no footer shows).
+- Desktop: every transcript fetch/splice/child fetch passes `{view:true}`; a splice keeps the previous `view.turn` of the
+  message it replaces (a lone message has none); `turnInfoFromView` re-keys the view, `computeTurnInfo` /
+  `describeTruncation` / `classifyFinish` are no longer imported by the renderer; `finishByMessageId` stores `{kind,label,hint}`
+  and the badge hides its tooltip when `hint` is absent.
+- iOS: `OpencodeMessage.view`, lenient `TranscriptMessageView` / `TranscriptTurnView` / `TranscriptTruncationView` (a malformed view
+  never fails its message); `TranscriptLiveTruncation.from(payload:)`; the footer pill is a button only when a `hint`
+  exists; `TranscriptTurns.info` / `TranscriptTruncation.classify|describe|kind(of:)` deleted. A capability list that turns
+  out to include `transcript-view-1` after the first fetch triggers one refetch.
+- Deviation: the mapper no longer applies the client-side "running && last message" gate; the box's gate applies at
+  fetch time, so a finished turn's footer can linger for the ~300 ms until the refetch after a new send.
+- Test fixture `BoxViewFixture` (Mac test target only) stamps `view` onto raw mapper fixtures with the box's rules.

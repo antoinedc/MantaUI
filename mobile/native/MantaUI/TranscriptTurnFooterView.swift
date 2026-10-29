@@ -42,13 +42,13 @@ struct TranscriptTurnFooterView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            if let kind = footer.truncation {
+            if let truncation = footer.truncation {
                 if footer.summary != nil {
                     Text("\u{00B7}")
                         .font(.manta(size: Metrics.type.xs))
                         .foregroundColor(tokens.tx3)
                 }
-                truncationPill(kind)
+                truncationPill(truncation)
             }
             Spacer(minLength: 0)
             if !items.isEmpty {
@@ -68,38 +68,47 @@ struct TranscriptTurnFooterView: View {
         }
     }
 
-    /// The warning pill. It never truncates; a tap explains what to do.
-    private func truncationPill(_ kind: TranscriptTruncationKind) -> some View {
-        let description = TranscriptTruncation.describe(kind)
-        return Button { showHint = true } label: {
-            HStack(spacing: Metrics.spacing.sp1) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: Metrics.type.twoXS))
-                Text(description.label)
-                    .font(.manta(size: Metrics.type.xs))
-                    .lineLimit(1)
-                    .fixedSize()
-            }
-            .foregroundColor(tokens.warn)
-            .padding(.horizontal, Metrics.spacing.sp2)
-            .padding(.vertical, Metrics.spacing.sp1)
-            .background(tokens.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
-            .overlay(
-                RoundedRectangle(cornerRadius: Metrics.radius.xs)
-                    .stroke(tokens.warn.opacity(0.33), lineWidth: Metrics.spacing.spPx)
-            )
+    /// The warning pill (the box's `label`). It never truncates. When the box also sent the explanation (`hint`) a tap
+    /// shows it; with none (an older box's live frame) the pill is plain text — no control without an action.
+    @ViewBuilder
+    private func truncationPill(_ truncation: TranscriptTruncationView) -> some View {
+        if let hint = truncation.hint {
+            Button { showHint = true } label: { pillBody(truncation.label) }
+                .buttonStyle(.plain)
+                .accessibilityLabel(truncation.label)
+                .accessibilityHint("Shows what to do")
+                .popover(isPresented: $showHint) {
+                    Text(hint)
+                        .font(.manta(size: Metrics.type.small))
+                        .foregroundColor(tokens.tx1)
+                        .padding(Metrics.spacing.sp3)
+                        .frame(maxWidth: 320, alignment: .leading)
+                        .presentationCompactAdaptation(.popover)
+                }
+        } else {
+            pillBody(truncation.label)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(truncation.label)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(description.label)
-        .accessibilityHint("Shows what to do")
-        .popover(isPresented: $showHint) {
-            Text(description.hint)
-                .font(.manta(size: Metrics.type.small))
-                .foregroundColor(tokens.tx1)
-                .padding(Metrics.spacing.sp3)
-                .frame(maxWidth: 320, alignment: .leading)
-                .presentationCompactAdaptation(.popover)
+    }
+
+    private func pillBody(_ label: String) -> some View {
+        HStack(spacing: Metrics.spacing.sp1) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: Metrics.type.twoXS))
+            Text(label)
+                .font(.manta(size: Metrics.type.xs))
+                .lineLimit(1)
+                .fixedSize()
         }
+        .foregroundColor(tokens.warn)
+        .padding(.horizontal, Metrics.spacing.sp2)
+        .padding(.vertical, Metrics.spacing.sp1)
+        .background(tokens.warn.opacity(0.12), in: RoundedRectangle(cornerRadius: Metrics.radius.xs))
+        .overlay(
+            RoundedRectangle(cornerRadius: Metrics.radius.xs)
+                .stroke(tokens.warn.opacity(0.33), lineWidth: Metrics.spacing.spPx)
+        )
     }
 
     private func replyMenu(_ items: [TranscriptReplyMenuModel.Item]) -> some View {

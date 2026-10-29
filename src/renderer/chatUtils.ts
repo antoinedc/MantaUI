@@ -91,10 +91,8 @@ export {
   buildTitleInstruction,
   buildTitlePromptInput,
   classifyCacheAge,
-  classifyFinish,
   collectChildSessionIds,
   countUserTurns,
-  describeTruncation,
   extractSubagentInfo,
   humanizeProviderError,
   hydrateQuestion,
@@ -119,7 +117,6 @@ export type {
   QuestionLike,
   StaleCacheResult,
   SubagentInfo,
-  TruncationKind,
 } from "../shared/streamInterpretation.mjs";
 
 
@@ -2432,89 +2429,16 @@ export async function fetchTranscriptWithRetry<T>(
   }
 }
 
-// Turn boundary metadata: which assistant messages are the FINAL one of their
-// turn (i.e., immediately followed by a user message or end-of-list), the
-// cumulative duration of that turn (first assistant `created` → last assistant
-// `completed`), the whole turn's token figure (sum of `output + reasoning`
-// across every assistant step — one ASSISTANT MESSAGE PER STEP, and each
-// message's `tokens` describes only that step, so reading the last one
-// under-reports by an order of magnitude), and the seed id (the turn's FIRST
-// assistant message) that both the live verb and the footer verb are derived
-// from. Intermediate assistant messages within a multi-step turn get no footer
-// — only the final one does.
-//
-// The `running` gate: while a turn is still in progress we do NOT stamp the
-// footer on its in-progress last assistant message — it would render behind the
-// working indicator at the transcript tail. When `running` flips false the turn
-// is complete and its footer computes normally. When the transcript's last
-// message is a USER message (just submitted), `lastAssistantId` belongs to the
-// previous, already-complete turn, so the gate's comparison is false and that
-// turn keeps its footer.
-export function computeTurnInfo(
+// Turn footers are the BOX's (`message.view.turn`, WS11 D8): which assistant message ends a finished turn, the turn's
+// duration, its output+reasoning tokens and the verb seed. The box also owns the running gate (it reads the
+// interpreter's running flag when it builds the view). This only re-keys what the box sent.
+export function turnInfoFromView(
   messages: OpencodeMessage[] | null,
-  running: boolean,
-): Map<
-  string,
-  { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
-> {
-  const out = new Map<
-    string,
-    { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }
-  >();
-  if (!messages) return out;
-  let i = 0;
-  while (i < messages.length) {
-    // A finished background run (v2-next N4) is not part of the turn before it
-    // and starts the agent's reply to it, exactly like a user message does —
-    // otherwise the earlier turn's footer would move onto the reply and its
-    // duration would span the idle gap between them.
-    if (messages[i].info.role === "user" || isBackgroundResultMessage(messages[i])) {
-      // Walk forward over the run of assistant messages that follow.
-      let j = i + 1;
-      let firstStart: number | null = null;
-      let lastEnd: number | null = null;
-      let turnTokens = 0;
-      let lastAssistantId: string | null = null;
-      let verbSeedId: string | null = null;
-      while (
-        j < messages.length &&
-        messages[j].info.role === "assistant" &&
-        !isBackgroundResultMessage(messages[j])
-      ) {
-        const t = messages[j].info.time;
-        if (firstStart == null && t?.created != null) firstStart = t.created;
-        if (t?.completed != null) lastEnd = t.completed;
-        // `tokens` is declared on OpencodeMessageInfo (BET-733/L10) — no cast.
-        const tok = messages[j].info.tokens;
-        if (tok) turnTokens += (tok.output ?? 0) + (tok.reasoning ?? 0);
-        if (verbSeedId == null) verbSeedId = messages[j].info.id;
-        lastAssistantId = messages[j].info.id;
-        j++;
-      }
-      // Mid-turn: don't stamp the footer on the in-progress turn's last
-      // assistant message — it renders behind the working indicator. It
-      // appears once running flips false (BET per owner decision).
-      if (
-        running &&
-        lastAssistantId === messages[messages.length - 1]?.info.id
-      ) {
-        i = j;
-        continue;
-      }
-      if (lastAssistantId) {
-        out.set(lastAssistantId, {
-          turnDurationMs:
-            firstStart != null && lastEnd != null && lastEnd > firstStart
-              ? lastEnd - firstStart
-              : null,
-          turnTokens: turnTokens > 0 ? turnTokens : null,
-          verbSeedId,
-        });
-      }
-      i = j;
-    } else {
-      i++;
-    }
+): Map<string, { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }> {
+  const out = new Map<string, { turnDurationMs: number | null; turnTokens: number | null; verbSeedId: string | null }>();
+  for (const m of messages ?? []) {
+    const turn = m.view?.turn;
+    if (turn) out.set(m.info.id, { turnDurationMs: turn.durationMs, turnTokens: turn.tokens, verbSeedId: turn.verbSeedId });
   }
   return out;
 }

@@ -1,3 +1,4 @@
+import { describeTruncation } from "../shared/streamInterpretation.mjs";
 // Unit tests for the V2 stream interpreter (OpenCode V2 cutover, slice C1).
 // Each test feeds hand-built raw V2 events (`{id, type, data}`); the recorded
 // end-to-end streams live in streamInterp.golden.test.mjs.
@@ -204,6 +205,11 @@ test("truncation: max_tokens -> output-cap with the messageID; a tool-calls stop
   a.interp.interpret(ev("session.step.ended", { assistantMessageID: MID, finish: "length", rawFinish: "max_tokens" }));
   assert.deepEqual(subs(a.events, "truncation")[0].payload.kind, "output-cap");
   assert.equal(subs(a.events, "truncation")[0].payload.messageID, MID);
+  // The live frame carries the SAME {kind,label,hint} as the canonical view.truncation (WS11 D8).
+  assert.deepEqual(
+    { kind: subs(a.events, "truncation")[0].payload.kind, label: subs(a.events, "truncation")[0].payload.label, hint: subs(a.events, "truncation")[0].payload.hint },
+    { kind: "output-cap", ...describeTruncation("output-cap") },
+  );
   const b = make();
   b.interp.interpret(ev("session.step.ended", { assistantMessageID: MID, finish: "tool-calls", rawFinish: "max_tokens" }));
   assert.equal(subs(b.events, "truncation")[0].payload.kind, "tool-cutoff");

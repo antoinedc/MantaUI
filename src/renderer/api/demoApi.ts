@@ -394,7 +394,7 @@ const previewArtifactsImageMessage = {
   ],
 } as OpencodeMessage;
 
-const opencodeMessages = (sessionId: string, _opts?: { limit?: number }) =>
+const opencodeMessages = (sessionId: string, _opts?: { limit?: number; view?: boolean }) =>
   forActiveSession(
     sessionId,
     DEMO_STATE === "artifacts"

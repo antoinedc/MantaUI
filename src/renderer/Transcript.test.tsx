@@ -475,7 +475,7 @@ describe("Transcript LoadEarlier (tail-first loading)", () => {
     await h.flush();
     // applied the full-history fetch (no limit) and flipped loadedAll so the
     // button disappears and future fetches pull everything.
-    expect(fetchCalls).toEqual([["s1", {}]]);
+    expect(fetchCalls).toEqual([["s1", { view: true }]]);
     expect(loadedAllRef.current).toBe(true);
     h.unmount();
   });

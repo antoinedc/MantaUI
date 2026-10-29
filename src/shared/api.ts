@@ -1267,9 +1267,9 @@ export interface Api {
   //   chronological TAIL). Omit (or pass {}) for the whole history. The
   //   desktop passes {limit: 100} for the tail-first mount and {} for
   //   "Load earlier". Duplicate tool stdout is stripped server-side always.
-  opencodeMessages(sessionId: string, opts?: { limit?: number }): Promise<OpencodeMessage[]>;
+  opencodeMessages(sessionId: string, opts?: { limit?: number; view?: boolean }): Promise<OpencodeMessage[]>;
   // Single-message fetch — returns null on miss so callers can fall back.
-  opencodeMessage(sessionId: string, messageId: string): Promise<OpencodeMessage | null>;
+  opencodeMessage(sessionId: string, messageId: string, opts?: { view?: boolean }): Promise<OpencodeMessage | null>;
   /** The box's context breakdown for an idle session (null before a billed turn). */
   opencodeContext(sessionId: string): Promise<StreamContextPayload | null>;
   /** The box's cache-staleness payload for an idle session (null before a completed turn). */

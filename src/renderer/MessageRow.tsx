@@ -14,9 +14,8 @@
 
 import { memo, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, X } from "lucide-react";
-import type { OpencodeMessage, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeMessage, TruncationView, VoiceNoteRecord } from "../shared/types";
 import {
-  describeTruncation,
   concatUserMessageText,
   formatClockTime,
   formatDuration,
@@ -26,7 +25,6 @@ import {
   summarizeTodoProgress,
   todoStatusOf,
   type TodoStatus,
-  type TruncationKind,
 } from "./chatUtils";
 import { pastVerbFor } from "./chatShared";
 import { AssistantPart } from "./ToolCall";
@@ -280,7 +278,7 @@ export const MessageRow = memo(function MessageRow({
   // standalone footer when there's no duration, e.g. mid-turn assistant
   // messages within a multi-step turn that hit max_tokens). null = no
   // truncation, no badge.
-  truncation: TruncationKind | null;
+  truncation: TruncationView | null;
   // Slash-command provenance from commandByMessageId. When set on a user
   // message, the row shows a collapsed `/name args` pill with an expand
   // chevron instead of the full expanded template body.
@@ -547,10 +545,10 @@ export const MessageRow = memo(function MessageRow({
                   backgroundColor: "var(--warn-bg)",
                   color: "var(--warn)",
                 }}
-                title={describeTruncation(truncation).hint}
+                title={truncation.hint}
               >
                 <span aria-hidden>⚠</span>
-                {describeTruncation(truncation).label}
+                {truncation.label}
               </span>
             </>
           )}

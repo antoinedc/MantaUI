@@ -58,6 +58,9 @@ export const DELETED = [
   { scopes: ["renderer"], regex: /\bopencodeDeleteSession\b(?!Raw)/, why: "D6 review: the in-chat Delete is the box's close flow (sessions:close with expect), not a bare opencode:delete-session" },
   { scopes: ["swift", "swiftTests"], regex: /\bfunc deleteSession\(sessionId\b|\.deleteSession\(sessionId\b/, why: "D6 review: the in-chat Delete is the box's close flow (sessions:close with expect)" },
   { scopes: ["renderer"], regex: /\breplaceWindowStatus\b/, why: "D7 review: a read only FILLS the window-status map (fillWindowStatus); replacing wholesale could overwrite a newer frame" },
+  // D8 — turn footers and truncation are the box's (`message.view`).
+  { scopes: ["renderer"], regex: /\b(computeTurnInfo|describeTruncation|classifyFinish)\b/, why: "D8: message.view.turn / view.truncation carry the footer and the truncation words; the renderer derives none of it" },
+  { scopes: ["swift", "swiftTests"], regex: /\benum TranscriptTruncation\b|TranscriptTruncation\.(classify|describe|kind)\b|\bTranscriptTurns\.info\b|\bstruct TranscriptTurnInfo\b/, why: "D8: iOS reads message.view and the live frame's hint; it never classifies a finish or words a truncation" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },

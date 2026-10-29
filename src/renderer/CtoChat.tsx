@@ -60,7 +60,7 @@ import { useModelCatalog } from "./modelCatalog";
 import { useSessionModelChoice } from "./modelPrefs";
 import {
   computeLiveTurn,
-  computeTurnInfo,
+  turnInfoFromView,
   type EntryMotionState,
 } from "./chatUtils";
 import {
@@ -819,7 +819,7 @@ function CtoConversation(props: {
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
         window.api
-          .opencodeMessages(childId)
+          .opencodeMessages(childId, { view: true })
           .then((m) => ts.setChildMessages((prev) => new Map(prev).set(childId, m)))
           .catch(() => {
             /* non-fatal */
@@ -871,8 +871,7 @@ function CtoConversation(props: {
   }, [messages, queue, ts.scheduleRefetch]);
 
   // Derived maps (memoized so Transcript's MessageRow memos aren't defeated).
-  const running = bus.running;
-  const turnInfo = useMemo(() => computeTurnInfo(messages, running), [messages, running]);
+  const turnInfo = useMemo(() => turnInfoFromView(messages), [messages]);
   const liveTurn = useMemo(() => computeLiveTurn(messages), [messages]);
   const taskContextValue = useMemo<TaskContextValue>(
     () => ({

@@ -611,7 +611,7 @@ final class ChatTranscriptTests: XCTestCase {
                 toolPart("t2", "m2", tool: "read", status: "completed", input: ["filePath": str("b.ts")]),
             ]),
         ]
-        let blocks = ChatTranscriptMapper.blocks(from: msgs)
+        let blocks = ChatTranscriptMapper.blocks(from: BoxViewFixture.stamp(msgs))
         XCTAssertEqual(blocks.count, 4, "the second run's turn (after the user message) ends with its footer")
         guard case .activity(let a) = blocks[0], case .user = blocks[1], case .activity(let b) = blocks[2],
               case .turnFooter = blocks[3] else {

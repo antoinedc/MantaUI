@@ -255,6 +255,8 @@ struct StreamTurnCompletePayload: Codable, Equatable, Sendable {
 struct StreamTruncationPayload: Codable, Equatable, Sendable {
     var kind: String
     var label: String
+    /// The explanation, worded by the box (WS11 D8); nil on an older box.
+    var hint: String? = nil
     var messageID: String?
 }
 

@@ -309,18 +309,18 @@ describe("useTranscriptState child tail-first", () => {
     // Fresh ref: first child fetch pulls the tail.
     act(() => probe!.fetch("child_1"));
     await h.flush();
-    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT }]);
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT, view: true }]);
 
     // "Load earlier" pulls the whole history and marks the child loaded-all.
     act(() => probe!.loadAll("child_1"));
     await h.flush();
-    expect(fetchCalls.at(-1)).toEqual(["child_1", {}]);
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { view: true }]);
     expect(probe!.ref.current.get("child_1")).toBe(true);
 
     // A subsequent fetch for the loaded-all child stays full (no tail cut).
     act(() => probe!.fetch("child_1"));
     await h.flush();
-    expect(fetchCalls.at(-1)).toEqual(["child_1", {}]);
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { view: true }]);
   });
 
   it("clears childLoadedAllRef on session change so a fresh fetch is tail-limited again", async () => {
@@ -349,7 +349,7 @@ describe("useTranscriptState child tail-first", () => {
     // A fresh child fetch after the switch is tail-limited again.
     act(() => probe!.fetch("child_1"));
     await h.flush();
-    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT }]);
+    expect(fetchCalls.at(-1)).toEqual(["child_1", { limit: TRANSCRIPT_TAIL_LIMIT, view: true }]);
   });
 });
 

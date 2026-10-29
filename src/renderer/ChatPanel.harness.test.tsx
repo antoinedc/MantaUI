@@ -643,7 +643,7 @@ describe("ChatPanel transcript rendering", () => {
     // loadedAllRef.
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0][0]).toBe("ses_test");
-    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT });
+    expect(fetchCalls[0][1]).toEqual({ limit: TRANSCRIPT_TAIL_LIMIT, view: true });
     expect(h.text()).toContain("hello there");
   });
 });

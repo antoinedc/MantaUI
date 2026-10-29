@@ -201,6 +201,23 @@ struct OpencodePart: Codable, Equatable, Sendable {
 struct OpencodeMessage: Codable, Equatable, Sendable {
     var info: OpencodeMessageInfo
     var parts: [OpencodePart]
+    /// What the box decided this message means (`view: true` fetches; WS11 D8+). nil on an older box or a plain fetch.
+    var view: TranscriptMessageView? = nil
+
+    private enum CodingKeys: String, CodingKey { case info, parts, view }
+
+    init(info: OpencodeMessageInfo, parts: [OpencodePart], view: TranscriptMessageView? = nil) {
+        self.info = info
+        self.parts = parts
+        self.view = view
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        info = try c.decode(OpencodeMessageInfo.self, forKey: .info)
+        parts = try c.decode([OpencodePart].self, forKey: .parts)
+        view = (try? c.decodeIfPresent(TranscriptMessageView.self, forKey: .view)) ?? nil
+    }
 }
 
 struct SessionTokens: Codable, Equatable, Sendable {

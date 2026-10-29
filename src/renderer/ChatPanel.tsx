@@ -35,7 +35,7 @@ import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
   selectActiveTodos,
-  computeTurnInfo,
+  turnInfoFromView,
   computeLiveTurn,
   shouldAutoRename,
   countUserTurns,
@@ -744,7 +744,7 @@ export function ChatPanel({
       const t = setTimeout(() => {
         childRefetchTimers.current.delete(childId);
         window.api
-          .opencodeMessages(childId)
+          .opencodeMessages(childId, { view: true })
           .then((m) => {
             setChildMessages((prev) => {
               const next = new Map(prev);
@@ -2709,10 +2709,7 @@ export function ChatPanel({
   // only the final one does. While the turn is running, the footer is gated off
   // its still-streaming final assistant message (it would render behind the
   // working indicator); it appears once running flips false.
-  const turnInfo = useMemo(
-    () => computeTurnInfo(messages, running),
-    [messages, running],
-  );
+  const turnInfo = useMemo(() => turnInfoFromView(messages), [messages]);
 
   // Live metrics of the in-flight turn (startedAt, tokens, verb seed) for the
   // working row at the transcript tail. Recomputes on every messages change;

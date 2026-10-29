@@ -48,7 +48,7 @@ export type TranscriptState = {
   loadedAllRef: React.MutableRefObject<boolean>;
   // The options for the next transcript fetch: { limit: TRANSCRIPT_TAIL_LIMIT }
   // until loadedAllRef flips, then {} (full history).
-  fetchOpts: () => { limit: number } | {};
+  fetchOpts: () => { limit?: number; view: true };
   // Tail-first loading for CHILD transcripts (BET-683). `childLoadedAllRef`
   // maps each childSessionId to whether its FULL history has been pulled (via
   // "Load earlier"); until true, child fetches pass { limit:
@@ -98,8 +98,8 @@ export function useTranscriptState(params: {
   // { limit: TRANSCRIPT_TAIL_LIMIT }. Reset on session change below.
   const loadedAllRef = useRef(false);
   const fetchOpts = useCallback(
-    (): { limit: number } | {} =>
-      loadedAllRef.current ? {} : { limit: TRANSCRIPT_TAIL_LIMIT },
+    (): { limit?: number; view: true } =>
+      loadedAllRef.current ? { view: true } : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
     [],
   );
   const isActiveRef = useRef(isActive);
@@ -218,7 +218,7 @@ export function useTranscriptState(params: {
         spliceTimers.current.delete(messageId);
         spliceFirstScheduledAt.current.delete(messageId);
         window.api
-          .opencodeMessage(sessionId, messageId)
+          .opencodeMessage(sessionId, messageId, { view: true })
           .then((msg) => {
             if (!msg) {
               scheduleRefetch();
@@ -229,7 +229,10 @@ export function useTranscriptState(params: {
               const idx = prev.findIndex((m) => m.info.id === msg.info.id);
               if (idx >= 0) {
                 const next = prev.slice();
-                next[idx] = msg;
+                // A lone message never carries `view.turn` (a turn needs its neighbours): keep the one the last full
+                // fetch gave it, so a splice cannot drop a finished turn's footer.
+                const kept = prev[idx].view?.turn;
+                next[idx] = kept && !msg.view?.turn ? { ...msg, view: { ...msg.view, turn: kept } } : msg;
                 return next;
               }
               // Reconcile: if the incoming message is the real user message
@@ -268,8 +271,8 @@ export function useTranscriptState(params: {
       .opencodeMessages(
         childId,
         childLoadedAllRef.current.get(childId)
-          ? {}
-          : { limit: TRANSCRIPT_TAIL_LIMIT },
+          ? { view: true }
+          : { limit: TRANSCRIPT_TAIL_LIMIT, view: true },
       )
       .then((m) => {
         setChildMessages((prev) => {
@@ -284,7 +287,7 @@ export function useTranscriptState(params: {
   const loadEarlierChildTranscript = useCallback((childId: string) => {
     setLoadingChildEarlier((prev) => new Set(prev).add(childId));
     window.api
-      .opencodeMessages(childId, {})
+      .opencodeMessages(childId, { view: true })
       .then((m) => {
         childLoadedAllRef.current.set(childId, true);
         setChildMessages((prev) => new Map(prev).set(childId, m));

@@ -46,6 +46,7 @@ import {
   defaultCredentialsValidator,
   restoreFromBackup,
 } from "./claudeAuth.mjs";
+import { annotateView, annotateSingle } from "./transcriptView.mjs";
 // BET-418 §A removed the BET-380 background-job permission/question routing;
 // delegate.mjs ownership helpers (relatedSessionIds/jobNameForSession) are no
 // longer imported here.
@@ -501,9 +502,12 @@ async function directoryForTitles(sessionId) {
 /** Fetch a session's message transcript, in the `{info, parts}[]` shape every client reads.
  *
  *  @param {string} sessionId
- *  @param {{limit?: number, slim?: boolean}} [opts]
+ *  @param {{limit?: number, slim?: boolean, view?: boolean, running?: boolean}} [opts]
  *    limit — return only the most recent N messages (the TAIL, chronological).
  *      Omit for the whole history (the desktop's "Load earlier" / refetches).
+ *    view  — add `message.view` (turn footer, truncation — WS11 D8; more per step): what the transcript MEANS,
+ *      decided here so no client carries its own copy of the rules. `running` (the interpreter's, set by the caller)
+ *      withholds the footer of the in-flight turn.
  *    slim  — additionally drop parts the iOS client never renders (opt-in;
  *      mobile only). Duplicate tool stdout is ALWAYS stripped for every
  *      client regardless of `slim` (see stripDuplicateToolOutput).
@@ -516,20 +520,25 @@ export async function listMessages(sessionId, opts = {}) {
   await hydrateRunningShells(mapped, sessionId);
   mapped = stampCommandOrigins(mapped, commandCorrelator.originOf);
   const stripped = mapped.map(stripDuplicateToolOutput);
-  return opts.slim ? slimTranscript(stripped) : stripped;
+  // The view is computed over the FULL parts (a truncation reads the step-finish part), then slim may drop parts.
+  const viewed = opts.view === true ? annotateView(stripped, { running: opts.running === true }) : stripped;
+  return opts.slim ? slimTranscript(viewed) : viewed;
 }
 
 /** Fetch a single message by id (GET /api/session/{id}/message/{messageID}).
  *  Returns null on miss/error so the caller can fall back to a full refetch.
  *  @param {string} sessionId
  *  @param {string} messageId
+ *  @param {{view?: boolean}} [opts]
  */
-export async function getMessage(sessionId, messageId) {
+export async function getMessage(sessionId, messageId, opts = {}) {
   try {
     const record = await ocCall("getMessage", (c, o) => c.session.message.get({ sessionID: sessionId, messageID: messageId }, o), { onHttpError: () => null });
     if (record === null) return null;
     const [mapped] = stampCommandOrigins(await hydrateRunningShells(mapTimeline(record ? [record] : [], { sessionID: sessionId, directory: await directoryForTitles(sessionId) }), sessionId), commandCorrelator.originOf);
-    return mapped ? stripDuplicateToolOutput(mapped) : null;
+    if (!mapped) return null;
+    const stripped = stripDuplicateToolOutput(mapped);
+    return opts?.view === true ? annotateSingle(stripped) : stripped;
   } catch {
     return null;
   }

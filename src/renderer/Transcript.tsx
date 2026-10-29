@@ -47,9 +47,9 @@ import { PendingVoiceRow, type PendingVoiceNote } from "./VoiceNote";
 import { BackgroundRunCards } from "./BackgroundCards";
 import { anchorBackgroundCards, type BackgroundCard } from "./backgroundRun";
 import { TRANSCRIPT_TAIL_LIMIT } from "./hooks/useTranscriptState";
-import type { OpencodeMessage, ProgressRecord, QuestionRequest, VoiceNoteRecord } from "../shared/types";
+import type { OpencodeMessage, ProgressRecord, QuestionRequest, TruncationView, VoiceNoteRecord } from "../shared/types";
 import {
-  computeTurnInfo,
+  turnInfoFromView,
   createEntryMotionState,
   updateEntryMotion,
   formatDuration,
@@ -138,7 +138,8 @@ function rowContext(
     blocks: blocksByMessage.get(m.info.id),
     hasMedia: media.has(m.info.id),
     hasWidget: widgets.has(m.info.id),
-    hasFooter: turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null,
+    hasFooter:
+      turns.get(m.info.id)?.turnDurationMs != null || finishes.get(m.info.id) != null || m.view?.truncation != null,
   };
 }
 
@@ -478,7 +479,7 @@ export type TranscriptProps = {
       verbSeedId: string | null;
     }
   >;
-  finishByMessageId: Map<string, import("./chatUtils").TruncationKind>;
+  finishByMessageId: Map<string, TruncationView>;
   userCommandInfo: Map<string, { name: string; arguments: string; inline?: true }>;
   voiceNoteByMessageId: Map<string, VoiceNoteRecord>;
   // BET-1148: messageID → inline media entry (from the `media` bus events),
@@ -649,7 +650,7 @@ export function Transcript({
     if (loadingEarlier) return;
     setLoadingEarlier(true);
     window.api
-      .opencodeMessages(sessionId, {})
+      .opencodeMessages(sessionId, { view: true })
       .then((newMessages: OpencodeMessage[]) => {
         loadedAllRef.current = true;
         // Anchor the scroll shift on VISIBLE rows: prepended rows that render
@@ -659,7 +660,7 @@ export function Transcript({
         // layout of the full history (a tool run can now start in a prepended
         // message and absorb rows that were visible before).
         const nextLayout = layoutTranscript(newMessages, { running, showThinking });
-        const nextTurns = computeTurnInfo(newMessages, running);
+        const nextTurns = turnInfoFromView(newMessages);
         // NOTE: the media / widget / finish maps used below only cover the
         // messages loaded SO FAR, so a prepended message's media or widget row
         // can't be predicted here. That is why the shift is anchored on the id
@@ -926,7 +927,7 @@ export function Transcript({
                     turnDurationMs={turnInfo.get(m.info.id)?.turnDurationMs ?? null}
                     turnTokens={turnInfo.get(m.info.id)?.turnTokens ?? null}
                     verbSeedId={turnInfo.get(m.info.id)?.verbSeedId ?? null}
-                    truncation={finishByMessageId.get(m.info.id) ?? null}
+                    truncation={finishByMessageId.get(m.info.id) ?? m.view?.truncation ?? null}
                     commandInfo={cmdInfo}
                     voiceNote={voiceNote}
                     media={

@@ -12,147 +12,44 @@ import Foundation
 // ===========================================================================
 
 // MARK: - Truncation (F4)
+//
+// The classification and the words are the BOX's (`view.truncation` canonically, the `truncation` frame live —
+// `{kind, label, hint}` either way; WS11 D8). The phone keeps only the live adapter below.
 
-enum TranscriptTruncationKind: String, Equatable, Sendable {
-    case outputCap = "output-cap"
-    case contextWall = "context-wall"
-    case toolCutoff = "tool-cutoff"
-}
-
-enum TranscriptTruncation {
-    /// Port of `classifyFinish` (src/shared/streamInterpretation.mjs): nil for a
-    /// benign finish. `lastPartIsToolUse` promotes an output cap to a cut-off tool
-    /// call.
-    static func classify(_ finish: String?, lastPartIsToolUse: Bool) -> TranscriptTruncationKind? {
-        guard let finish, !finish.isEmpty else { return nil }
-        let f = finish.lowercased()
-        if f == "model_context_window_exceeded" { return .contextWall }
-        if f == "max_tokens" || f == "length" {
-            return lastPartIsToolUse ? .toolCutoff : .outputCap
-        }
-        return nil
-    }
-
-    /// Port of `describeTruncation`. The strings are verbatim copies.
-    static func describe(_ kind: TranscriptTruncationKind) -> (label: String, hint: String) {
-        switch kind {
-        case .outputCap:
-            return (
-                "truncated (output limit)",
-                "Response hit the per-turn output cap. Ask the model to continue, or raise the max output budget for this provider."
-            )
-        case .contextWall:
-            return (
-                "truncated (context full)",
-                "Response hit the model's context window mid-generation. Run /compact to free space, or start a new session."
-            )
-        case .toolCutoff:
-            return (
-                "tool call cut off \u{2014} retry needed",
-                "The model was emitting a tool call when it hit the output limit, so the call is incomplete and won't execute. Retry the turn (optionally with a higher max output)."
-            )
-        }
-    }
-
-    /// The truncation the TRANSCRIPT itself records for an assistant message: the
-    /// `step-finish` part's `reason` (the raw provider finish), falling back to
-    /// `info.finish`. Mirrors the box's own classification
-    /// (`streamInterp.mjs`: `classifyFinish(rawFinish ?? finish, {lastPartIsToolUse:
-    /// finish === "tool-calls"})`).
-    static func kind(of message: OpencodeMessage) -> TranscriptTruncationKind? {
-        let stepFinish = message.parts.last(where: { part in
-            guard part.type == "step-finish" else { return false }
-            return !(ChatJSON.string(part.extra["reason"]) ?? "").isEmpty
-        })
-        let stepReason = stepFinish.flatMap { ChatJSON.string($0.extra["reason"]) }
-        let finish = stepReason ?? message.info.finish
-        return classify(finish, lastPartIsToolUse: message.info.finish == "tool-calls")
-    }
-}
-
-/// WS02's existing single live `truncation` (the latest warning), converted to a
-/// value the mapper can compare against a message id (F4).
+/// The single live `truncation` (the latest warning), converted to a value the mapper can compare against a message
+/// id (F4).
 struct TranscriptLiveTruncation: Equatable, Sendable {
     let messageID: String
-    let kind: TranscriptTruncationKind
+    let view: TranscriptTruncationView
 
-    /// nil when `messageID` is nil/empty or `kind` is not one of the three raw
-    /// values (an unknown kind gives no badge).
-    static func from(kind: String, messageID: String?) -> TranscriptLiveTruncation? {
-        guard let messageID, !messageID.isEmpty,
-              let parsed = TranscriptTruncationKind(rawValue: kind) else { return nil }
-        return TranscriptLiveTruncation(messageID: messageID, kind: parsed)
+    /// nil when `messageID` is nil/empty or `kind` is not one of the three the box words (an unknown kind gives no
+    /// badge). `hint` is nil on an older box.
+    static func from(payload: StreamTruncationPayload) -> TranscriptLiveTruncation? {
+        guard let messageID = payload.messageID, !messageID.isEmpty,
+              TranscriptTruncationKind(rawValue: payload.kind) != nil else { return nil }
+        return TranscriptLiveTruncation(
+            messageID: messageID,
+            view: TranscriptTruncationView(kind: payload.kind, label: payload.label, hint: payload.hint)
+        )
     }
 }
 
 // MARK: - Turn info (F4)
-
-struct TranscriptTurnInfo: Equatable, Sendable {
-    let durationMs: Double?
-    let tokens: Double?
-    let verbSeedID: String
-}
+//
+// Which message ends a finished turn, its duration and tokens are the BOX's (`view.turn`); this keeps the wording.
 
 enum TranscriptTurns {
-    /// A finished background run starts a turn exactly like a user message does
-    /// (desktop `isBackgroundResultMessage`): it carries a `background-result`
-    /// part. (The wire's `info.background` flag always accompanies that part.)
+    /// A finished background run starts a turn exactly like a user message does: it carries a `background-result`
+    /// part. Still read by the mapper for the reply menu's turn text (what is "this turn's prose").
     static func isBackgroundResult(_ message: OpencodeMessage) -> Bool {
         message.parts.contains { $0.type == "background-result" }
     }
 
-    /// Port of `computeTurnInfo` over the FULL message list (settled + in-flight),
-    /// keyed by the turn's LAST assistant message id. A turn gets no entry when its
-    /// last assistant message has no `time.completed`, or — while `running` — when
-    /// that message is the transcript's last.
-    static func info(_ messages: [OpencodeMessage], running: Bool) -> [String: TranscriptTurnInfo] {
-        var out: [String: TranscriptTurnInfo] = [:]
-        let lastID = messages.last?.info.id
-        var i = 0
-        while i < messages.count {
-            let head = messages[i]
-            guard head.info.role.rawValue == "user" || isBackgroundResult(head) else {
-                i += 1
-                continue
-            }
-            var j = i + 1
-            var firstStart: Double?
-            var lastEnd: Double?
-            var tokens = 0.0
-            var lastAssistant: OpencodeMessage?
-            var seed: String?
-            while j < messages.count,
-                  messages[j].info.role.rawValue == "assistant",
-                  !isBackgroundResult(messages[j]) {
-                let m = messages[j]
-                if firstStart == nil, let created = m.info.time?.created { firstStart = created }
-                if let completed = m.info.time?.completed { lastEnd = completed }
-                if let usage = m.info.tokens { tokens += (usage.output ?? 0) + (usage.reasoning ?? 0) }
-                if seed == nil { seed = m.info.id }
-                lastAssistant = m
-                j += 1
-            }
-            if let last = lastAssistant, let seed,
-               !(running && last.info.id == lastID),
-               last.info.time?.completed != nil {
-                var duration: Double?
-                if let firstStart, let lastEnd, lastEnd > firstStart { duration = lastEnd - firstStart }
-                out[last.info.id] = TranscriptTurnInfo(
-                    durationMs: duration,
-                    tokens: tokens > 0 ? tokens : nil,
-                    verbSeedID: seed
-                )
-            }
-            i = j
-        }
-        return out
-    }
-
     /// "Pondered for 1m44s · 12.4k tokens", or nil when the turn has no duration.
-    static func summary(_ info: TranscriptTurnInfo) -> String? {
-        guard let ms = info.durationMs else { return nil }
-        var text = "\(TranscriptTurnVerb.past[TranscriptTurnVerb.index(for: info.verbSeedID)]) for \(TranscriptTurnFormat.duration(ms: ms))"
-        if let tokens = info.tokens, tokens > 0 {
+    static func summary(_ turn: TranscriptTurnView) -> String? {
+        guard let ms = turn.durationMs else { return nil }
+        var text = "\(TranscriptTurnVerb.past[TranscriptTurnVerb.index(for: turn.verbSeedId)]) for \(TranscriptTurnFormat.duration(ms: ms))"
+        if let tokens = turn.tokens, tokens > 0 {
             text += " \u{00B7} \(TranscriptTurnFormat.tokens(tokens))"
         }
         return text
@@ -226,8 +123,8 @@ struct TranscriptTurnFooter: Equatable, Sendable {
     let messageID: String
     /// "Pondered for 1m44s · 12.4k tokens"; nil when there is no duration.
     let summary: String?
-    /// The EFFECTIVE truncation: canonical (transcript) first, live as fallback.
-    let truncation: TranscriptTruncationKind?
+    /// The EFFECTIVE truncation: the box's canonical view first, the live frame as fallback.
+    let truncation: TranscriptTruncationView?
     /// True only for the last assistant message of a FINISHED turn.
     let isTurnEnd: Bool
     /// The turn's prose joined with a blank line — feeds the reply menu (F6).
@@ -238,7 +135,7 @@ struct TranscriptTurnFooter: Equatable, Sendable {
 enum TranscriptFooterRule {
     /// A footer is emitted for a finished turn, or — alone — for any message that
     /// carries a truncation warning.
-    static func shouldEmit(finishedTurn: Bool, effectiveTruncation: TranscriptTruncationKind?) -> Bool {
+    static func shouldEmit(finishedTurn: Bool, effectiveTruncation: TranscriptTruncationView?) -> Bool {
         finishedTurn || effectiveTruncation != nil
     }
 }

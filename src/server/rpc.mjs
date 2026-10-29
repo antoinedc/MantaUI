@@ -1515,7 +1515,9 @@ export function buildHandlers({
     // fetch and `{}` (whole history) for "Load earlier"; no limit at all keeps
     // the full transcript. The native iOS client passes {limit, slim}. The
     // duplicated tool stdout is stripped server-side for every client.
-    "opencode:messages": (sessionId, opts) => oc.listMessages(sessionId, opts ?? {}),
+    // `view:true` adds `message.view` (WS11 D8+). `running` is the interpreter's, never the client's.
+    "opencode:messages": (sessionId, opts) =>
+      oc.listMessages(sessionId, { ...(opts ?? {}), running: streamInterp?.getState(sessionId)?.running === true }),
 
     // Context usage for a session that may be idle. The live `stream/context`
     // frame is emitted only when an assistant message arrives, so a client
@@ -1550,8 +1552,8 @@ export function buildHandlers({
     },
 
     // Single-message fetch for live-turn splice (returns null on miss).
-    "opencode:message": (sessionId, messageId) =>
-      oc.getMessage(sessionId, messageId),
+    "opencode:message": (sessionId, messageId, opts) =>
+      oc.getMessage(sessionId, messageId, opts ?? {}),
 
     // preload: ipcRenderer.invoke(IPC.opencodePrompt, { sessionId, text, model, attachments, mentions })
     // → args[0] = that object; opencode.mjs sendPrompt expects the same shape

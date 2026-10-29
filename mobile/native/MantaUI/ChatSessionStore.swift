@@ -460,6 +460,16 @@ final class ChatSessionStore: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] available in self?.chatCardsAvailable = available }
             .store(in: &cancellables)
+        // The box's transcript view (turn footers, truncation) arrives only on a `view: true` fetch: when the capability
+        // list turns out to include it AFTER the first fetch went out without, fetch again so footers appear.
+        self.capabilities.$state
+            .map { $0.known?.has(.transcriptView) == true }
+            .removeDuplicates()
+            .dropFirst()
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.scheduleRefetch() }
+            .store(in: &cancellables)
 
         // Per-session subscription (BET-672): sink on THIS session's state
         // alone, filtered to distinct values. The whole-dictionary sink used to
@@ -1168,8 +1178,11 @@ final class ChatSessionStore: ObservableObject {
                 // it is on, because the slim one drops the reasoning parts
                 // (WS01 M-01-7 / D22).
                 let slim = TranscriptDisplayOptions.fetchSlim
+                // `view: true` only on a box that has it: an older box ignores the option, but not asking keeps the
+                // request byte-identical to what it has always been.
+                let wantsView = capabilities.has(.transcriptView) == true
                 messages = try await Self.withTimeout(seconds: 12) {
-                    try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: slim)
+                    try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: slim, view: wantsView)
                 }
             } catch {
                 failed = true
@@ -1994,9 +2007,7 @@ extension ChatSessionStore {
             liveCommands: commandByMessageID.mapValues {
                 TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments)
             },
-            liveTruncation: truncation.flatMap {
-                TranscriptLiveTruncation.from(kind: $0.kind, messageID: $0.messageID)
-            },
+            liveTruncation: truncation.flatMap { TranscriptLiveTruncation.from(payload: $0) },
             liveMedia: TranscriptMediaStore.shared.entries(for: sessionId)
         )
     }

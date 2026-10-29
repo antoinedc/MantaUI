@@ -2466,3 +2466,17 @@ test("sessions:close-preview / sessions:close are wired to the box's close flow 
   assert.deepEqual(res, { ok: true, removed: ["/wt/a"], kept: [], failed: [], warnings: [], notice: null });
   assert.deepEqual(killed, [{ sessionName: "p", windowIndex: 0 }]);
 });
+
+test("opencode:messages passes the interpreter's running flag (never the client's) and the view option; opencode:message forwards opts (WS11 D8)", async () => {
+  const seen = [];
+  const deps = makeDeps([]).deps;
+  deps.oc.listMessages = async (sid, opts) => (seen.push(opts), []);
+  let gotOpts;
+  deps.oc.getMessage = async (sid, mid, opts) => ((gotOpts = opts), null);
+  const handlers = buildHandlers({ ...deps, streamInterp: { getState: (sid) => (sid === "ses_run" ? { running: true } : undefined) } });
+  await handlers["opencode:messages"]("ses_run", { view: true, running: false });
+  await handlers["opencode:messages"]("ses_idle", { view: true });
+  assert.deepEqual(seen, [{ view: true, running: true }, { view: true, running: false }]);
+  await handlers["opencode:message"]("ses_run", "m1", { view: true });
+  assert.deepEqual(gotOpts, { view: true });
+});

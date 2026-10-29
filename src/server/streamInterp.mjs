@@ -938,6 +938,8 @@ export function createStreamInterpreter({
           emit(sid, "truncation", {
             kind,
             label: describeTruncation(kind).label,
+            // The same {kind, label, hint} the canonical `view.truncation` carries (WS11 D8): no client keeps `describe`.
+            hint: describeTruncation(kind).hint,
             messageID: mid || undefined,
           });
         }

@@ -1156,8 +1156,8 @@ export const httpApi: Api = {
   // rpc registry doesn't define them, so calling them would 500 "unknown rpc
   // channel"; rpcOptional() swallows exactly that and yields the graceful
   // no-op instead of a red console 500 on every ChatPanel mount/unmount.
-  opencodeMessage: (sessionId, messageId) =>
-    rpc(IPC.opencodeMessage, sessionId, messageId),
+  opencodeMessage: (sessionId, messageId, opts) =>
+    opts ? rpc(IPC.opencodeMessage, sessionId, messageId, opts) : rpc(IPC.opencodeMessage, sessionId, messageId),
   opencodeContext: (sessionId) => rpc(IPC.opencodeContext, sessionId),
   opencodeCache: (sessionId) => rpc(IPC.opencodeCache, sessionId),
   opencodeOpenStream: (sessionId) =>

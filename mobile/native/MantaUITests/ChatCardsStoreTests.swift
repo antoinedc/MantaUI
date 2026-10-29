@@ -605,7 +605,7 @@ final class ChatCardsStubBoxTests: XCTestCase {
         await waitUntil { h.store.messages.count == 2 }
         h.stream.inject(truncationFrame(kind: "output-cap", label: "Response truncated (output cap)", messageID: "m2"))
         await waitUntil { self.footer(for: "m2", in: h.store.blocks)?.truncation != nil }
-        XCTAssertEqual(footer(for: "m2", in: h.store.blocks)?.truncation, .outputCap, "the footer shows the live truncation")
+        XCTAssertEqual(footer(for: "m2", in: h.store.blocks)?.truncation?.kind, "output-cap", "the footer shows the live truncation")
         XCTAssertEqual(warnNotices(in: h.store.blocks), [], "…so the tail notice is gone")
     }
 

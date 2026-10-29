@@ -4,7 +4,7 @@ import {
   updateEntryMotion,
   markReconciledFromOptimistic,
   isOptimisticUserId,
-  computeTurnInfo,
+  turnInfoFromView,
   computeLiveTurn,
   contextModelLabel,
   formatTokens,
@@ -2742,9 +2742,24 @@ describe("transcript initial-fetch timeout + retry", () => {
   });
 });
 
-// ===== computeTurnInfo (BET-688) =====
+// ===== turnInfoFromView (WS11 D8) =====
+// The turn rules (running gate, background-result boundaries, token sums) are the box's — pinned in
+// src/server/transcriptView.test.mjs. The renderer only re-keys the view it was sent.
+describe("turnInfoFromView", () => {
+  it("re-keys message.view.turn by message id; messages with no turn get no entry; null → empty", () => {
+    const messages = [
+      { info: { id: "u1", role: "user" }, parts: [] },
+      { info: { id: "a1", role: "assistant" }, parts: [], view: { turn: { durationMs: 4000, tokens: 42, verbSeedId: "a0" } } },
+      { info: { id: "a2", role: "assistant" }, parts: [], view: { truncation: { kind: "output-cap", label: "x" } } },
+    ];
+    const info = turnInfoFromView(messages as never);
+    expect([...info.keys()]).toEqual(["a1"]);
+    expect(info.get("a1")).toEqual({ turnDurationMs: 4000, turnTokens: 42, verbSeedId: "a0" });
+    expect(turnInfoFromView(null).size).toBe(0);
+  });
+});
 
-describe("computeTurnInfo", () => {
+describe("computeLiveTurn", () => {
   const userMsg = (id: string) => ({
     info: { role: "user", id },
     parts: [],
@@ -2777,117 +2792,6 @@ describe("computeTurnInfo", () => {
           : undefined,
     } as never,
     parts: [],
-  });
-
-  it("running: true, transcript ending in an assistant message → no footer entry for it", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.size).toBe(0);
-    expect(info.has("a1")).toBe(false);
-  });
-
-  it("running: false, same transcript → footer entry with same duration/tokens", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 42 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.has("a1")).toBe(true);
-    expect(info.get("a1")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 42,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("running: true, transcript ending with a USER message → completed turn footer PRESENT", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 5000, output: 9 }),
-      userMsg("u2"),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.has("a1")).toBe(true);
-    expect(info.get("a1")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 9,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("multi-step turn, running: false → entry only on the final assistant message", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
-      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.has("a1")).toBe(false);
-    expect(info.has("a2")).toBe(true);
-    expect(info.get("a2")).toEqual({
-      turnDurationMs: 5000,
-      turnTokens: 23,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("multi-step turn, running: true → the still-streaming final assistant gets NO footer", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 3 }),
-      assistantMsg("a2", { created: 2000, completed: 6000, output: 20 }),
-    ];
-    const info = computeTurnInfo(messages as never, true);
-    expect(info.has("a1")).toBe(false);
-    expect(info.has("a2")).toBe(false);
-  });
-
-  it("returns empty map for a null transcript", () => {
-    expect(computeTurnInfo(null, false).size).toBe(0);
-    expect(computeTurnInfo(null, true).size).toBe(0);
-  });
-
-  it("sums output + reasoning across ALL assistant steps of the turn (not the last step's output)", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 10, reasoning: 1 }),
-      assistantMsg("a2", { created: 2000, completed: 3000, output: 20, reasoning: 2 }),
-      assistantMsg("a3", { created: 3000, completed: 7000, output: 30, reasoning: 3 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a3")).toEqual({
-      turnDurationMs: 6000,
-      turnTokens: 66,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("a turn with reasoning: 0 behaves as before (output-only arithmetic)", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 10, reasoning: 0 }),
-      assistantMsg("a2", { created: 2000, completed: 5000, output: 20, reasoning: 0 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a2")).toEqual({
-      turnDurationMs: 4000,
-      turnTokens: 30,
-      verbSeedId: "a1",
-    });
-  });
-
-  it("verbSeedId is the FIRST assistant message's id, not the last", () => {
-    const messages = [
-      userMsg("u1"),
-      assistantMsg("a1", { created: 1000, completed: 2000, output: 5 }),
-      assistantMsg("a2", { created: 2000, completed: 3000, output: 7 }),
-      assistantMsg("a3", { created: 3000, completed: 6000, output: 9 }),
-    ];
-    const info = computeTurnInfo(messages as never, false);
-    expect(info.get("a3")?.verbSeedId).toBe("a1");
   });
 
   it("computeLiveTurn: happy path — start time, summed tokens, first-assistant seed id", () => {
