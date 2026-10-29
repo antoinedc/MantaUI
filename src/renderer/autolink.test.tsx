@@ -33,7 +33,7 @@ describe("MarkdownBody autolinking", () => {
     h = mount(<MarkdownBody text="Open `https://docs.x.com/a` first" />);
     const code = h.container.querySelector("code");
     expect(code).not.toBeNull();
-    expect(code!.className).toContain("text-accent");
+    expect(code!.className).toBe("");
     expect(code!.querySelector("a")?.getAttribute("href")).toBe("https://docs.x.com/a");
   });
 
