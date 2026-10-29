@@ -132,12 +132,15 @@ enum ChatSubagentMapper {
 
 // MARK: - The mapper: `opencode:messages` → `[TranscriptBlock]`
 
-/// The result of folding the stream's live state into the canonical blocks.
-struct LiveActivityMerge: Equatable {
-    /// The blocks to render as rows.
+/// The result of laying the live turn (the box's ordered ledger) over the canonical blocks.
+struct LiveTailResult: Equatable {
+    /// The canonical blocks, with any live calls UPSERTED into a canonical run row they belong to (same row id, same
+    /// position — never a second row), and the trailing run withheld when it is the very last canonical block.
+    var canonical: [TranscriptBlock]
+    /// The live blocks to render after `canonical`, in the turn's real order (tool, prose, tool…).
     var blocks: [TranscriptBlock]
-    /// The run at the very tail while a turn runs. It is drawn by the working
-    /// line instead of inline (spec §1.1), so it is NOT in `blocks`.
+    /// The run at the very tail while a turn runs. It is drawn by the working line instead of inline (spec §1.1), so it is
+    /// NOT in `canonical` / `blocks`.
     var trailing: ToolRun?
 }
 
@@ -158,6 +161,9 @@ struct TranscriptMapOptions: Equatable, Sendable {
     var liveTruncation: TranscriptLiveTruncation? = nil
     /// This session's live media entries (session-wide, never keyed by message).
     var liveMedia: [TranscriptMediaEntry] = []
+    /// The newest value of each run (revision-merged, WS11 D11): the run lines draw these summaries. Empty before the
+    /// connection's epoch is known; a run it lacks falls back to the full view its message carries.
+    var runStore: TranscriptRunStore = TranscriptRunStore()
 
     /// The options every legacy overload forwards: the persisted reasoning switch
     /// and nothing live.
@@ -199,9 +205,9 @@ enum ChatTranscriptMapper {
     /// `.file` attachment right where its turn landed without inventing any
     /// new row identity.
     ///
-    /// Tool calls are grouped by `ToolActivity.layout` — the same rules as the
-    /// desktop. A run belongs to the message it STARTS in; the assistant
-    /// messages it absorbs draw no block of their own.
+    /// Tool calls are grouped by the box's run ids (`ToolActivity.layout`). A run
+    /// belongs to the message it STARTS in; the assistant messages it absorbs draw
+    /// no block of their own.
     static func blocks(from messages: [OpencodeMessage], voiceNotes: [VoiceNote], widgets: [WidgetRef]) -> [TranscriptBlock] {
         blocks(from: messages, voiceNotes: voiceNotes, widgets: widgets, options: .current)
     }
@@ -233,7 +239,8 @@ enum ChatTranscriptMapper {
         let settled = messages.filter {
             $0.info.role.rawValue != "assistant" || $0.info.time?.completed != nil
         }
-        let layout = ToolActivity.layout(messages: settled, running: false, showThinking: options.showReasoning)
+        let layout = ToolActivity.layout(
+            messages: settled, showThinking: options.showReasoning, runs: options.runStore.runs, minGen: options.runStore.minGen)
 
         // Media: canonical (session-wide) plus live-only entries, grouped under
         // the settled assistant message that owns them. Entries whose owner is
@@ -306,7 +313,7 @@ enum ChatTranscriptMapper {
                 // A background result is the HEAD of a turn, not part of the
                 // reply: its own text never joins the reply menu's turn text.
                 if !TranscriptTurns.isBackgroundResult(msg) {
-                    for case .prose(let text, _) in blocks[blocksStart...] {
+                    for case .prose(let text, _, _) in blocks[blocksStart...] {
                         turnProse.append(text)
                     }
                 }
@@ -432,161 +439,184 @@ enum ChatTranscriptMapper {
         }
     }
 
-    // MARK: Live merge
+    // MARK: Live tail (the box's ordered ledger)
 
-    /// A live tool frame as a tool part. The frame carries only a name, opencode's
-    /// title for the part (the "hint") and a stdout tail, so that is all the part
-    /// has: the title stands in for the input the label would otherwise be
-    /// built from. A tool whose `toolEnded` has landed reads completed (failed
-    /// when the frame says it did not succeed); the tail then holds its final
-    /// output, which is where a `delegate` call's job id comes from.
-    static func livePart(from tool: LiveTool) -> OpencodePart {
-        let status: String
-        if tool.ended {
-            status = tool.ok ? "completed" : "error"
-        } else {
-            status = (tool.status ?? "running").lowercased() == "pending" ? "pending" : "running"
-        }
-        var metadata: [String: JSONValue] = [:]
-        if !tool.tail.isEmpty { metadata["output"] = .string(tool.tail) }
-        return ToolActivity.makeToolPart(
-            id: tool.idx,
-            callID: tool.callID.isEmpty ? nil : tool.callID,
-            tool: tool.name ?? "tool",
-            status: status,
-            title: tool.presentationHint,
-            metadata: metadata
-        )
-    }
-
-    /// A live subagent frame as a task part, carrying the status it resolved to.
-    /// The id is derived from the child session (the frame carries no part id);
-    /// the canonical part takes over — and this one is dropped — once the
-    /// transcript names the same child.
-    static func livePart(from subagent: StreamSubagentPayload, status: TaskRunStatus = .running) -> OpencodePart {
+    /// A tool call of the live turn as a tool part. The box's ledger frame carries the call's wording (`activity`), the run
+    /// it belongs to and its status — never its output; the stdout tail of a running call comes from the live tool frames
+    /// (`tails`, joined by part id). A task's description rides in from its `subagent` frame.
+    static func livePart(from entry: LiveRunPart, tail: String?, subagent: StreamSubagentPayload?, gen: Int?) -> OpencodePart {
         var input: [String: JSONValue] = [:]
-        if let d = subagent.description, !d.isEmpty { input["description"] = .string(d) }
-        if let a = subagent.agent, !a.isEmpty { input["subagent_type"] = .string(a) }
-        return ToolActivity.makeToolPart(
-            id: "live-task-\(subagent.childSessionId)",
-            tool: "task",
-            status: status.wireStatus,
-            title: subagent.title,
+        var metadata: [String: JSONValue] = [:]
+        if let tail, !tail.isEmpty { metadata["output"] = .string(tail) }
+        if let childID = entry.childSessionId ?? subagent?.childSessionId, !childID.isEmpty {
+            metadata["sessionId"] = .string(childID)
+        }
+        if let d = subagent?.description, !d.isEmpty { input["description"] = .string(d) }
+        if let a = subagent?.agent, !a.isEmpty { input["subagent_type"] = .string(a) }
+        var part = ToolActivity.makeToolPart(
+            id: entry.id,
+            messageID: entry.messageID,
+            callID: entry.callID.isEmpty ? nil : entry.callID,
+            tool: entry.tool.isEmpty ? "tool" : entry.tool,
+            status: entry.status,
+            title: subagent?.title,
             input: input,
-            metadata: ["sessionId": .string(subagent.childSessionId)]
+            metadata: metadata,
+            output: subagent?.output
         )
+        part.extra["view"] = TranscriptPartView.extra(
+            activity: entry.activity, runId: entry.runId, segmentId: entry.segmentId, gen: gen
+        )
+        return part
     }
 
-    /// Fold the LIVE tools and live subagents of this turn into the transcript
-    /// as part of the run they belong to.
+    /// Lay the LIVE turn — the box's ordered ledger — over the canonical blocks.
     ///
-    /// - Live tools (`toolStarted`..`toolEnded`) and live subagents extend the run
-    ///   at the very end of the transcript, or open a new one. While a turn
-    ///   runs that run is the `trailing` one, drawn by the working line;
-    ///   otherwise it is an ordinary row.
-    /// - `tools` is EVERY call of the turn, ended ones included. The canonical
-    ///   transcript is not refetched mid-turn and skips the in-progress step
-    ///   message, so the stream is the only source of the turn's finished calls:
-    ///   dropping a call when it ends made the run lose it (and its id, which is
-    ///   its first part's). An ended call reads completed, or failed.
-    /// - When live prose follows the transcript's last run, that run is not at
-    ///   the tail any more: it stays an inline row and the live calls open a new
-    ///   run after the prose.
-    /// - A live call the transcript already owns (same part id, same call id, or
-    ///   — for a task — same child session) is skipped: the canonical one has
-    ///   taken over, so appending again would duplicate it.
-    /// - A live subagent is kept whatever it resolves to (spec §5), a finished
-    ///   one reading done/failed, until the canonical transcript names its child.
-    ///   That includes a task whose tool call already reads "completed" because
-    ///   the work was started in the background — such a row used to be dropped,
-    ///   so the card vanished mid-turn. `thisTurnChildren` narrows that for the
-    ///   store: when non-nil, a FINISHED subagent is kept only if it is in the
-    ///   set (frames of earlier turns whose task part has scrolled out of the
-    ///   loaded window must not resurface); a running one is always kept.
-    /// - A `delegate` call whose job is still running reads as running.
+    /// `layout` is the turn's draw order as it happened (runs, text parts, reasoning parts); `TranscriptLiveTailPlan`
+    /// applies the one placement rule both clients use (reasoning shown: a block per segment, reasoning between them;
+    /// hidden: consecutive blocks of one run collapse into one at the first). Per block:
+    ///  - a run / segment block whose row id is NOT canonical → appended as a live `.activity` row;
+    ///  - a run / segment block whose row id IS canonical (a partly or wholly settled run: tool A settled, a transparent
+    ///    background completion, tool B streaming in a later execution) → UPSERTED into that canonical row in place — the
+    ///    ledger only adds the parts it lacks, and the summary is the rev-merged one;
+    ///  - a text block → prose keyed by its part id, unless the canonical transcript already has that part;
+    ///  - a reasoning block (only when reasoning is shown) likewise.
+    /// Streamed text the ledger does not name (an older box has no ledger at all) still shows, after the planned blocks,
+    /// keyed by its part id — so prose never disappears.
     ///
-    /// `hasTailContent` is true when something draws after the transcript's last
-    /// run (live prose, or a prompt being sent), which keeps that run inline.
-    static func mergingLive(
-        tools: [LiveTool],
+    /// `trailing` = the last drawn block iff it is a run / segment whose run has not closed and a turn runs; it is drawn by
+    /// the working line, so it is withheld from the rows (including an upserted canonical row at the very end).
+    static func liveTail(
+        layout: [LiveBlock],
+        runs: [String: TranscriptRunView],
+        parts: [LiveRunPart],
+        closed: Set<String>,
+        chunks: [StreamTextChunk],
+        tails: [String: String],
         subagents: [StreamSubagentPayload],
-        context: TaskStatusContext,
+        taskContext: TaskStatusContext,
+        showReasoning: Bool,
+        canonical: [TranscriptBlock],
         running: Bool,
-        hasTailContent: Bool,
-        thisTurnChildren: Set<String>? = nil,
-        to blocks: [TranscriptBlock]
-    ) -> LiveActivityMerge {
-        // A task part streams as an ordinary tool AND as the richer `subagent`
-        // frame (src/server/streamInterp.mjs documents the tool triple as
-        // redundant). The subagent frame is the only source. A todo-list write is
-        // not a call the transcript draws either (`visibleAssistantParts`), so it
-        // must not appear live only to vanish when the canonical turn lands.
-        var live: [OpencodePart] = tools.compactMap { tool in
-            let name = tool.name?.lowercased()
-            // A `handoff` call is a card, never a run line: the canonical turn
-            // brings the card (the layout stands it apart from the run).
-            if name == "task" || name == "todowrite" || name == "todo_write" || name == "handoff" { return nil }
-            return TaskStatusResolver.applying(context, to: livePart(from: tool))
-        }
-        live += subagents.compactMap { payload in
-            let status = TaskStatusResolver.resolve(
-                toolStatus: payload.status,
-                childSessionID: payload.childSessionId,
-                output: payload.output,
-                context: context
-            )
-            if !status.isRunning, let thisTurnChildren, !thisTurnChildren.contains(payload.childSessionId) {
-                return nil
-            }
-            return livePart(from: payload, status: status)
-        }
+        gen: Int? = nil
+    ) -> LiveTailResult {
+        let plan = TranscriptLiveTailPlan.items(layout: layout, showReasoning: showReasoning)
 
-        // Drop what the canonical transcript already owns.
-        var ids = Set<String>()
-        var calls = Set<String>()
-        var children = Set<String>()
-        for block in blocks {
-            guard case .activity(let run) = block else { continue }
-            for part in run.parts {
-                ids.insert(part.id)
-                if let c = ChatJSON.string(part.extra["callID"]), !c.isEmpty { calls.insert(c) }
-                if let child = TaskStatusResolver.childSessionID(of: part) { children.insert(child) }
+        var text: [String: String] = [:]
+        var reasoning: [String: String] = [:]
+        var textOrder: [String] = []
+        for chunk in chunks where !chunk.text.isEmpty {
+            if chunk.field == "reasoning" {
+                reasoning[chunk.partID] = chunk.text
+            } else {
+                if text[chunk.partID] == nil { textOrder.append(chunk.partID) }
+                text[chunk.partID] = chunk.text
             }
         }
-        live = live.filter { part in
-            if ids.contains(part.id) { return false }
-            if let c = ChatJSON.string(part.extra["callID"]), calls.contains(c) { return false }
-            if let child = TaskStatusResolver.childSessionID(of: part), children.contains(child) { return false }
-            return true
+
+        // The ids of what the canonical transcript already draws.
+        var canonicalRun: [String: Int] = [:]
+        var canonicalIDs = Set<String>()
+        for (index, block) in canonical.enumerated() {
+            canonicalIDs.insert(block.stableScrollID)
+            if case .activity(let run) = block { canonicalRun["run-" + run.id] = index }
         }
 
-        var result = blocks
-        var lastRun: ToolRun? {
-            if case .activity(let run)? = result.last { return run }
-            return nil
+        let subagentByChild = Dictionary(subagents.map { ($0.childSessionId, $0) }, uniquingKeysWith: { _, latest in latest })
+        func makePart(_ entry: LiveRunPart) -> OpencodePart {
+            let part = livePart(from: entry, tail: tails[entry.id], subagent: entry.childSessionId.flatMap { subagentByChild[$0] }, gen: gen)
+            return TaskStatusResolver.applying(taskContext, to: part)
         }
 
-        if live.isEmpty {
-            // Nothing live: while a turn runs, the run at the very end of the
-            // transcript is shown by the working line.
-            if running, !hasTailContent, let run = lastRun {
-                result.removeLast()
-                return LiveActivityMerge(blocks: result, trailing: run)
+        var canonicalOut = canonical
+        var blocks: [TranscriptBlock] = []
+        // The last DRAWN live block: where it lives (canonical index or live index) and which run it is.
+        var last: (inCanonical: Bool, index: Int, run: ToolRun)?
+        var plannedText = Set<String>()
+
+        for item in plan {
+            switch item {
+            case .run(let rowID, let runID, let segmentID):
+                let members = parts.filter { part in
+                    guard part.runId == runID else { return false }
+                    guard let segmentID else { return true }
+                    return (part.segmentId ?? runID) == segmentID
+                }
+                guard !members.isEmpty else { continue }
+                let rowParts = members.map(makePart)
+                let summary = runs[runID]?.summary(forSegment: segmentID)
+                    ?? ToolActivity.fallbackSummary(calls: members.count)
+                let toolRunID = String(rowID.dropFirst(4))
+                if let at = canonicalRun[rowID], case .activity(let existing) = canonicalOut[at] {
+                    var merged = existing.upserting(rowParts)
+                    merged.view = summary
+                    canonicalOut[at] = .activity(merged)
+                    last = (true, at, merged)
+                } else {
+                    let run = ToolRun(id: toolRunID, parts: rowParts, view: summary, runID: runID, segmentID: segmentID)
+                    blocks.append(.activity(run))
+                    last = (false, blocks.count - 1, run)
+                }
+            case .text(let partID):
+                plannedText.insert(partID)
+                if canonicalIDs.contains("p" + partID) { continue }
+                guard let body = text[partID] else { continue }
+                blocks.append(.prose(body, at: nil, partID: partID))
+                last = nil
+            case .reasoning(let partID):
+                if canonicalIDs.contains("r" + partID) { continue }
+                guard let body = reasoning[partID] else { continue }
+                blocks.append(.reasoning(TranscriptReasoning(id: partID, text: body.trimmingCharacters(in: .newlines))))
+                last = nil
             }
-            return LiveActivityMerge(blocks: result, trailing: nil)
         }
 
-        var base: ToolRun?
-        if !hasTailContent, let run = lastRun {
-            base = run
-            result.removeLast()
+        // Streamed text no planned block names (an older box has no ledger): still shown, keyed by its part id.
+        for partID in textOrder where !plannedText.contains(partID) && !canonicalIDs.contains("p" + partID) {
+            if let body = text[partID] {
+                blocks.append(.prose(body, at: nil, partID: partID))
+                last = nil
+            }
         }
-        let merged = base.map { $0.appending(live) } ?? ToolRun(id: live[0].id, parts: live)
-        if running {
-            return LiveActivityMerge(blocks: result, trailing: merged)
+
+        var trailing: ToolRun?
+        if running, let tail = last, !closed.contains(tail.run.runID) {
+            if !tail.inCanonical {
+                blocks.remove(at: tail.index)
+                trailing = tail.run
+            } else if tail.index == canonicalOut.count - 1 && blocks.isEmpty {
+                canonicalOut.removeLast()
+                trailing = tail.run
+            }
         }
-        result.append(.activity(merged))
-        return LiveActivityMerge(blocks: result, trailing: nil)
+        return LiveTailResult(canonical: canonicalOut, blocks: blocks, trailing: trailing)
+    }
+
+    /// Whether the canonical blocks already draw every block of the live layout (every run row, text part and reasoning part):
+    /// the turn is over and the ledger can be forgotten.
+    static func coversLayout(canonical: [TranscriptBlock], layout: [LiveBlock], showReasoning: Bool) -> Bool {
+        let ids = Set(canonical.map(\.stableScrollID))
+        for item in TranscriptLiveTailPlan.items(layout: layout, showReasoning: showReasoning) {
+            switch item {
+            case .run(let rowID, _, _): if !ids.contains(rowID) { return false }
+            case .text(let partID): if !ids.contains("p" + partID) { return false }
+            case .reasoning(let partID): if !ids.contains("r" + partID) { return false }
+            }
+        }
+        return true
+    }
+
+    /// The canonical run rows with their summaries refreshed from the revision-merged run values: a run's line can only
+    /// move FORWARD while a turn streams (a lower revision never replaces a higher one), without re-mapping the transcript.
+    static func applyingRunViews(_ blocks: [TranscriptBlock], runs: [String: TranscriptRunView], showReasoning: Bool) -> [TranscriptBlock] {
+        guard !runs.isEmpty else { return blocks }
+        return blocks.map { block in
+            guard case .activity(var run) = block, !run.isFallback, let value = runs[run.runID] else { return block }
+            let summary = value.summary(forSegment: showReasoning ? run.segmentID : nil)
+            if summary == run.view { return block }
+            run.view = summary
+            return .activity(run)
+        }
     }
 
     /// A non-blank text part becomes prose, and a non-blank reasoning part becomes a
@@ -608,7 +638,7 @@ enum ChatTranscriptMapper {
         // inflate the gap above the next block (BET-632). Same rule as
         // `textParts(of:)`.
         if part.type == "text", let t = part.text, !isBlank(t) {
-            blocks.append(.prose(t, at: at))
+            blocks.append(.prose(t, at: at, partID: part.id))
             return
         }
         if part.type == "reasoning", let t = part.text, !isBlank(t) {

@@ -8,9 +8,9 @@ import SwiftUI
 // line, while the run is still the tail of a running turn — opens the Activity
 // sheet (`ActivitySheet`): one row per call, each expandable in place.
 //
-// All wording, grouping and detail extraction is the pure, Foundation-only
-// ToolActivity.swift (shared parity fixture with the desktop). This file only
-// draws it.
+// The wording and the grouping are the BOX's (`part.view`, `message.view.runs`,
+// the `toolRuns` frame — WS11 D11); detail extraction is the pure, Foundation-only
+// ToolActivity.swift. This file only draws them.
 // ===========================================================================
 
 /// Which run the Activity sheet is showing. The sheet is keyed by the run's id
@@ -96,7 +96,7 @@ struct ActivityRunRowView: View {
     let onOpen: (() -> Void)?
 
     var body: some View {
-        let summary = run.summary
+        let summary = run.view
         Group {
             if let onOpen {
                 Button(action: onOpen) { line(summary) }
@@ -110,7 +110,7 @@ struct ActivityRunRowView: View {
         .accessibilityIdentifier("activity-run-row")
     }
 
-    private func line(_ summary: GroupSummary) -> some View {
+    private func line(_ summary: TranscriptRunSummary) -> some View {
         HStack(spacing: Metrics.spacing.sp2) {
             ActivityStatusDot(tone: summary.tone, tokens: tokens)
             Text(summary.label)
@@ -204,7 +204,7 @@ struct ActivitySheet: View {
 
     /// The run summary over "running" or the total duration.
     private func titleBlock(_ run: ToolRun?) -> some View {
-        let summary = run?.summary
+        let summary = run?.view
         let status: String
         if summary?.running == true {
             status = "running"
@@ -226,8 +226,15 @@ struct ActivitySheet: View {
     }
 
     private func callList(_ run: ToolRun) -> some View {
-        let calls = run.summary.calls
+        let calls = run.view.calls
         return List {
+            // A box that predates the run view groups nothing and words nothing: the calls are listed raw, with this note.
+            if run.isFallback {
+                Text("Update your box to see tool details")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("activity-update-note")
+            }
             ForEach(run.parts, id: \.id) { part in
                 ActivityCallRow(
                     part: part,
@@ -269,7 +276,11 @@ struct ActivityCallRow: View {
 
     @AppStorage(TranscriptDisplayOptions.defaultsKey) private var showDetails = false
 
-    private var activity: Activity { ToolActivity.describe(part) }
+    /// The box's wording for this call; a call it did not describe reads by its raw tool id.
+    private var activity: TranscriptActivityView { TranscriptPartView.of(part)?.activity ?? ToolActivity.neutralActivity(of: part) }
+    /// The call's CURRENT status: a task or `delegate` call is resolved against its child session / job record (the status
+    /// half of `TaskStatusResolver`), which the box's wording does not know.
+    private var status: ActivityStatus { ToolActivity.status(of: part) }
     private var detail: ToolActivity.Detail { ToolActivity.detail(of: part) }
 
     /// A task is a SESSION, not a tool call: it navigates, it never expands.
@@ -290,7 +301,7 @@ struct ActivityCallRow: View {
     private var expanded: Bool {
         expandable && ActivityDisclosure.expanded(
             callCount: callCount,
-            status: activity.status,
+            status: status,
             isTool: part.type == "tool",
             userToggled: userToggled,
             kind: activity.kind,
@@ -324,10 +335,10 @@ struct ActivityCallRow: View {
 
     @MainActor
     private var header: some View {
-        let target = ToolActivity.target(of: part)
+        let target = activity.target
         return VStack(alignment: .leading, spacing: Metrics.spacing.sp1) {
             HStack(spacing: Metrics.spacing.sp2) {
-                ActivityStatusGlyph(status: activity.status, tokens: tokens)
+                ActivityStatusGlyph(status: status, tokens: tokens)
                 Text(activity.label)
                     .font(.manta(size: Metrics.type.small, weight: mantaFontWeight(Metrics.type.semibold)))
                     .foregroundColor(tokens.tx1)
@@ -368,7 +379,7 @@ struct ActivityCallRow: View {
     private var durationView: some View {
         if let text = ChatDuration.text(seconds: ToolActivity.durationSeconds(of: part)) {
             durationText(text)
-        } else if activity.status == .running, let start = ToolActivity.startMs(of: part) {
+        } else if status == .running, let start = ToolActivity.startMs(of: part) {
             // A running call ticks, so it reads as alive rather than stuck.
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 durationText(ChatDuration.text(seconds: max(0, context.date.timeIntervalSince1970 - start / 1000)) ?? "")

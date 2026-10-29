@@ -41,7 +41,10 @@ extension TranscriptBlock {
             // needs — embedding the whole text made ids huge for long prose and
             // let two identical texts sharing a timestamp collide.
             return "u\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
-        case .prose(let text, let at):
+        case .prose(let text, let at, let partID):
+            // A prose block from a text PART is identified by the part (`<msg>:text:<n>`), so the live segment and the
+            // canonical block that replaces it are the same row (WS11 D11). Prose with no part keeps its content id.
+            if let partID, !partID.isEmpty { return "p" + partID }
             return "p\(text.hashValue)@\(at?.timeIntervalSince1970 ?? 0)"
         case .file(let attachment):
             return "f" + attachmentIdentity(attachment)
@@ -359,7 +362,7 @@ private struct TranscriptCellReveal: View {
     @MainActor
     @ViewBuilder
     private var cellContent: some View {
-        if case .prose(let text, nil) = item.block {
+        if case .prose(let text, nil, _) = item.block {
             LiveProseTail(text: text, tokens: tokens)
         } else {
             transcriptBlockView(item.block, tokens: tokens, cards: cardActions, onRetry: onRetry)
@@ -386,7 +389,7 @@ func transcriptBlockView(_ block: TranscriptBlock, tokens: Tokens, cards: Transc
     case .user(let text, _):
         UserBand(text: text, tokens: tokens)
             .padding(.bottom, Metrics.spacing.sp4)
-    case .prose(let text, _):
+    case .prose(let text, _, _):
         MantaProse(text: text, tokens: tokens)
     case .file(let attachment):
         // The voice-note player sits directly under the user band it belongs

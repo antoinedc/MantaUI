@@ -18,4 +18,32 @@ final class BoxViewFixtureParityTests: XCTestCase {
             }
         }
     }
+
+    /// The run membership the stamper gives equals the box's, for every golden scenario: which run each tool part is in, its
+    /// segment, and which message owns each run.
+    func testTheRunStamperAssignsTheSameMembershipAsTheBox() throws {
+        for scenario in try TranscriptViewGolden.load() {
+            let stamped = BoxViewFixture.stampRuns(scenario.input)
+            XCTAssertEqual(stamped.map(\.info.id), scenario.output.map(\.info.id), scenario.name)
+            for (mine, boxes) in zip(stamped, scenario.output) {
+                for (a, b) in zip(mine.parts, boxes.parts) {
+                    XCTAssertEqual(a.id, b.id, scenario.name)
+                    XCTAssertEqual(TranscriptPartView.of(a)?.runId, TranscriptPartView.of(b)?.runId, "\(scenario.name) — run of \(a.id)")
+                    XCTAssertEqual(TranscriptPartView.of(a)?.segmentId, TranscriptPartView.of(b)?.segmentId, "\(scenario.name) — segment of \(a.id)")
+                }
+                func owners(_ m: OpencodeMessage) -> [String: String] {
+                    var out: [String: String] = [:]
+                    for case .view(let v) in m.view?.runs ?? [] { out[v.id] = v.ownerMessageId }
+                    return out
+                }
+                XCTAssertEqual(owners(mine), owners(boxes), "\(scenario.name) — owners on \(mine.info.id)")
+                func segmentIDs(_ m: OpencodeMessage) -> [String: [String]] {
+                    var out: [String: [String]] = [:]
+                    for case .view(let v) in m.view?.runs ?? [] { out[v.id] = v.segments.map(\.id) }
+                    return out
+                }
+                XCTAssertEqual(segmentIDs(mine), segmentIDs(boxes), "\(scenario.name) — segments on \(mine.info.id)")
+            }
+        }
+    }
 }

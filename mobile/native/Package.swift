@@ -111,6 +111,8 @@ let package = Package(
                 "ArtifactPresentationTests.swift",
                 "ArtifactWireTests.swift",
                 "BoxCapabilitiesTests.swift",
+                "BoxViewFixture.swift",
+                "BoxViewFixtureParityTests.swift",
                 "ChatCardsTests.swift",
                 "CloneFromGitHubTests.swift",
                 "ComposerInsertionTests.swift",

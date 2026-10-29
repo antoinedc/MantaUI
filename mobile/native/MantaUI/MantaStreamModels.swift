@@ -208,6 +208,8 @@ struct StreamRunningSetPayload: Codable, Equatable, Sendable {
         var type: String?
     }
     var sessions: [Entry]
+    /// The box's interpreter process id (WS11 D11): run values of any other epoch are retired. nil on an older box.
+    var epoch: String? = nil
 }
 
 /// `sub: "windowStatus"` — one windowed session's rolled-up status, decided on the box (WS11 D7): `busy` is work

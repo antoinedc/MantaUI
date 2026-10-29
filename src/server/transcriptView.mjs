@@ -11,7 +11,7 @@
 //     wording, summary and revision) — rules in transcriptRuns.mjs, shared with the live ledger.
 
 import { classifyFinish, describeTruncation } from "../shared/streamInterpretation.mjs";
-import { MIME_BY_EXT } from "./media.mjs";
+import { MIME_BY_EXT } from "../shared/mediaMime.mjs";
 import { activityView, computeRuns, runView } from "./transcriptRuns.mjs";
 
 /** A finished background run (v2-next N4) carries a `background-result` part. */

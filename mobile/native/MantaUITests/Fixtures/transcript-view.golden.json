@@ -912,6 +912,1046 @@
     ]
   },
   {
+    "name": "runs: one run spans three assistant messages; text splits it; a drawing user message ends it",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            }
+          },
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t2",
+            "tool": "bash",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2,
+            "completed": 3
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t3",
+            "tool": "read",
+            "callID": "c-t3",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t3.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "text",
+            "id": "x3",
+            "text": "Found it."
+          },
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "t4",
+            "tool": "edit",
+            "callID": "c-t4",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t4.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "u2",
+            "type": "text",
+            "id": "u2:t",
+            "text": "next"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a4",
+          "time": {
+            "created": 5,
+            "completed": 6
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a4",
+            "type": "tool",
+            "id": "t5",
+            "tool": "read",
+            "callID": "c-t5",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t5.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t1.ts",
+                "target": "/w/t1.ts",
+                "counted": true
+              },
+              "runId": "t1",
+              "gen": 1
+            }
+          },
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t2",
+            "tool": "bash",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "bash",
+                "status": "completed",
+                "label": "Ran a command",
+                "target": "",
+                "counted": true
+              },
+              "runId": "t1",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "ownerMessageId": "a1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Read 2 files, ran a command",
+              "calls": 3,
+              "failed": 0,
+              "tone": "ok",
+              "live": null
+            }
+          ]
+        }
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2,
+            "completed": 3
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t3",
+            "tool": "read",
+            "callID": "c-t3",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t3.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t3.ts",
+                "target": "/w/t3.ts",
+                "counted": true
+              },
+              "runId": "t1",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "ref": true
+            }
+          ]
+        }
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "text",
+            "id": "x3",
+            "text": "Found it."
+          },
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "t4",
+            "tool": "edit",
+            "callID": "c-t4",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t4.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "edit",
+                "status": "completed",
+                "label": "Edited t4.ts",
+                "target": "/w/t4.ts",
+                "counted": true
+              },
+              "runId": "t4",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t4",
+              "ownerMessageId": "a3",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Edited t4.ts",
+              "calls": 1,
+              "failed": 0,
+              "tone": "ok",
+              "live": null
+            }
+          ],
+          "turn": {
+            "durationMs": 3,
+            "tokens": null,
+            "verbSeedId": "a1"
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "u2",
+            "type": "text",
+            "id": "u2:t",
+            "text": "next"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a4",
+          "time": {
+            "created": 5,
+            "completed": 6
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a4",
+            "type": "tool",
+            "id": "t5",
+            "tool": "read",
+            "callID": "c-t5",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t5.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t5.ts",
+                "target": "/w/t5.ts",
+                "counted": true
+              },
+              "runId": "t5",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t5",
+              "ownerMessageId": "a4",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Read t5.ts",
+              "calls": 1,
+              "failed": 0,
+              "tone": "ok",
+              "live": null
+            }
+          ],
+          "turn": {
+            "durationMs": 1,
+            "tokens": null,
+            "verbSeedId": "a4"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "runs: reasoning starts a segment; whitespace text and todo writes are transparent; a handoff stands alone",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            }
+          },
+          {
+            "messageID": "a1",
+            "type": "text",
+            "id": "x1",
+            "text": "\n"
+          },
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t2",
+            "tool": "todowrite",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2,
+            "completed": 3
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "reasoning",
+            "id": "r1",
+            "text": "thinking it over"
+          },
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t3",
+            "tool": "grep",
+            "callID": "c-t3",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t3.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "h1",
+            "tool": "handoff",
+            "callID": "c-h1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/h1.ts"
+              },
+              "output": "ok"
+            }
+          },
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "t4",
+            "tool": "read",
+            "callID": "c-t4",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t4.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t1.ts",
+                "target": "/w/t1.ts",
+                "counted": true
+              },
+              "runId": "t1",
+              "segmentId": "t1",
+              "gen": 1
+            }
+          },
+          {
+            "messageID": "a1",
+            "type": "text",
+            "id": "x1",
+            "text": "\n"
+          },
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t2",
+            "tool": "todowrite",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "ownerMessageId": "a1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Read a file, searched code",
+              "calls": 2,
+              "failed": 0,
+              "tone": "ok",
+              "live": null,
+              "segments": [
+                {
+                  "id": "t1",
+                  "label": "Read t1.ts",
+                  "calls": 1,
+                  "failed": 0,
+                  "tone": "ok",
+                  "live": null
+                },
+                {
+                  "id": "t3",
+                  "label": "Searched",
+                  "calls": 1,
+                  "failed": 0,
+                  "tone": "ok",
+                  "live": null
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 2,
+            "completed": 3
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "reasoning",
+            "id": "r1",
+            "text": "thinking it over"
+          },
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t3",
+            "tool": "grep",
+            "callID": "c-t3",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t3.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "search",
+                "status": "completed",
+                "label": "Searched",
+                "target": "",
+                "counted": true
+              },
+              "runId": "t1",
+              "segmentId": "t3",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "ref": true
+            }
+          ]
+        }
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a3",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "h1",
+            "tool": "handoff",
+            "callID": "c-h1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/h1.ts"
+              },
+              "output": "ok"
+            }
+          },
+          {
+            "messageID": "a3",
+            "type": "tool",
+            "id": "t4",
+            "tool": "read",
+            "callID": "c-t4",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t4.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t4.ts",
+                "target": "/w/t4.ts",
+                "counted": true
+              },
+              "runId": "t4",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t4",
+              "ownerMessageId": "a3",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Read t4.ts",
+              "calls": 1,
+              "failed": 0,
+              "tone": "ok",
+              "live": null
+            }
+          ],
+          "turn": {
+            "durationMs": 3,
+            "tokens": null,
+            "verbSeedId": "a1"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "runs: a background-job completion USER message is transparent, a hidden user message too",
+    "running": false,
+    "input": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "u2",
+            "type": "text",
+            "id": "u2:t",
+            "text": "[background job \"x\" done]\n\nbody"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t2",
+            "tool": "read",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            }
+          }
+        ]
+      }
+    ],
+    "output": [
+      {
+        "info": {
+          "role": "user",
+          "id": "u1",
+          "sessionID": "ses_golden"
+        },
+        "parts": []
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a1",
+          "time": {
+            "created": 1,
+            "completed": 2
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a1",
+            "type": "tool",
+            "id": "t1",
+            "tool": "read",
+            "callID": "c-t1",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t1.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t1.ts",
+                "target": "/w/t1.ts",
+                "counted": true
+              },
+              "runId": "t1",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "ownerMessageId": "a1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "label": "Read 2 files",
+              "calls": 2,
+              "failed": 0,
+              "tone": "ok",
+              "live": null
+            }
+          ],
+          "turn": {
+            "durationMs": 1,
+            "tokens": null,
+            "verbSeedId": "a1"
+          }
+        }
+      },
+      {
+        "info": {
+          "role": "user",
+          "id": "u2",
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "u2",
+            "type": "text",
+            "id": "u2:t",
+            "text": "[background job \"x\" done]\n\nbody"
+          }
+        ]
+      },
+      {
+        "info": {
+          "role": "assistant",
+          "id": "a2",
+          "time": {
+            "created": 3,
+            "completed": 4
+          },
+          "sessionID": "ses_golden"
+        },
+        "parts": [
+          {
+            "messageID": "a2",
+            "type": "tool",
+            "id": "t2",
+            "tool": "read",
+            "callID": "c-t2",
+            "state": {
+              "status": "completed",
+              "input": {
+                "filePath": "/w/t2.ts"
+              },
+              "output": "ok"
+            },
+            "view": {
+              "activity": {
+                "kind": "read",
+                "status": "completed",
+                "label": "Read t2.ts",
+                "target": "/w/t2.ts",
+                "counted": true
+              },
+              "runId": "t1",
+              "gen": 1
+            }
+          }
+        ],
+        "view": {
+          "runs": [
+            {
+              "id": "t1",
+              "rev": {
+                "epoch": "",
+                "gen": 1,
+                "seq": 0
+              },
+              "ref": true
+            }
+          ],
+          "turn": {
+            "durationMs": 1,
+            "tokens": null,
+            "verbSeedId": "a2"
+          }
+        }
+      }
+    ]
+  },
+  {
     "name": "the last assistant message must have time.completed",
     "running": false,
     "input": [

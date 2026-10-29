@@ -1,33 +1,17 @@
 import Foundation
 
 // ===========================================================================
-// Tool activity: wording, run grouping, task status, todo card logic.
+// Tool activity: the parts of a tool call the phone still owns — detail disclosure, copy text, duration, task / delegate
+// STATUS, run placement, todo card logic.
 //
-// Swift port of the desktop's `src/renderer/toolActivity.ts` (PR #1555/#1556)
-// plus the iOS-only decisions the spec adds (docs/superpowers/specs/
-// 2026-10-04-ios-activity-parity-design.md: §1 activity rows, §5 task status,
-// §6 todo card).
+// WS11 D11: what a call SAYS ("Edited Transcript.tsx"), what a run says ("Read 3 files, ran a command"), where a run begins
+// and ends, and the run's revision are the BOX's (src/server/transcriptRuns.mjs). The phone decodes them
+// (TranscriptViewModels.swift: `part.view`, `message.view.runs`, the live `toolRuns` frame) and lays the blocks out by
+// run id. No wording, no summary and no run membership is computed here.
 //
-// FOUNDATION-ONLY ON PURPOSE. Nothing here may import SwiftUI/UIKit/Combine or
-// touch a type that does (TranscriptBlock, LiveTool, DelegateJob, ...): this
-// file is what the Linux `swift test` view of the app can compile, and what the
-// shared parity fixture (src/shared/fixtures/tool-activity-cases.json) is
-// asserted against. The block-level glue that needs the SwiftUI types lives in
-// ChatModels.swift (`ChatTranscriptMapper`).
-//
-// PARITY CONTRACT. The wording (`describe`, `summarize`) and the grouping
-// (`layout`) must produce exactly what desktop produces. The fixture file is the
-// referee: a vitest test asserts it against toolActivity.ts and
-// ToolActivityTests asserts it against this port. If you change a string here,
-// change toolActivity.ts and the fixture in the same commit.
-//
-// Known, deliberate differences from the desktop (each one is pinned by a test):
-//   - A whitespace-only text part is TRANSPARENT to a run (it neither joins nor
-//     ends it). Desktop would end the run, but iOS draws nothing for such a part
-//     (BET-632), so ending the run would split one visible run in two.
-//   - A user message "renders" iff it has non-blank text (what the user band
-//     draws), not "or has a file part".
-//   - `clip` counts UTF-16 units like JS `String.length`, so truncation agrees.
+// FOUNDATION-ONLY ON PURPOSE. Nothing here may import SwiftUI/UIKit/Combine or touch a type that does (TranscriptBlock,
+// LiveTool, DelegateJob, ...): this file is what the Linux `swift test` view of the app can compile. The block-level glue
+// that needs the SwiftUI types lives in ChatModels.swift (`ChatTranscriptMapper`).
 // ===========================================================================
 
 // MARK: - Duration formatting
@@ -46,100 +30,7 @@ enum ChatDuration {
     }
 }
 
-// MARK: - Wording
-
-enum ActivityKind: String, Equatable, Sendable {
-    case read, edit, write, bash, search, list, fetch, websearch, task, delegate, skill, question, other, patch
-
-    /// Run-summary phrase for `n` calls of this kind ("edited 3 files").
-    func plural(_ n: Int) -> String {
-        func pick(_ one: String, _ many: String) -> String {
-            n == 1 ? one : many.replacingOccurrences(of: "{n}", with: String(n))
-        }
-        switch self {
-        case .read: return pick("read a file", "read {n} files")
-        case .edit: return pick("edited a file", "edited {n} files")
-        case .write: return pick("wrote a file", "wrote {n} files")
-        case .bash: return pick("ran a command", "ran {n} commands")
-        case .search: return pick("searched code", "ran {n} searches")
-        case .list: return pick("listed a directory", "listed {n} directories")
-        case .fetch: return pick("fetched a page", "fetched {n} pages")
-        case .websearch: return n == 1 ? "searched the web" : "searched the web \(n) times"
-        case .task: return pick("ran an agent", "ran {n} agents")
-        case .delegate: return pick("started a background job", "started {n} background jobs")
-        case .skill: return pick("loaded a skill", "loaded {n} skills")
-        case .question: return pick("asked a question", "asked {n} questions")
-        case .other: return pick("used a tool", "used {n} tools")
-        case .patch: return n == 1 ? "saved a change" : "saved \(n) changes"
-        }
-    }
-}
-
-enum ActivityStatus: String, Equatable, Sendable {
-    case pending, running, completed, error
-
-    /// opencode's `state.status` onto the four states the activity wording uses.
-    /// Anything unrecognised is `pending`, exactly like desktop's
-    /// `normalizeToolStatus`.
-    static func normalize(_ raw: String?) -> ActivityStatus {
-        switch raw {
-        case "completed": return .completed
-        case "error": return .error
-        case "running": return .running
-        default: return .pending
-        }
-    }
-}
-
-struct Activity: Equatable, Sendable {
-    /// Category the run summary tallies by (grep/glob/codesearch share one).
-    var kind: ActivityKind
-    var status: ActivityStatus
-    /// Present-tense label ("Editing Transcript.tsx").
-    var running: String
-    /// Past-tense label ("Edited Transcript.tsx").
-    var done: String
-    /// Failure label ("Failed to edit Transcript.tsx").
-    var failed: String
-    /// False for patch parts: they join a run but are not a "tool".
-    var counted: Bool
-
-    /// The label for the part's CURRENT status.
-    var label: String {
-        switch status {
-        case .completed: return done
-        case .error: return failed
-        case .pending, .running: return running
-        }
-    }
-}
-
-enum GroupTone: Equatable, Sendable {
-    case ok, warn, running
-}
-
-struct GroupSummary: Equatable, Sendable {
-    /// One-line summary of the run, e.g. "Read 3 files, ran a command".
-    var label: String
-    /// The latest tool that has not finished (running OR pending), if any.
-    var live: Activity?
-    /// Tool calls in the run — patch parts are not counted.
-    var calls: Int
-    /// Tool calls that errored.
-    var failed: Int
-    /// True while any tool call is unfinished.
-    var running: Bool
-
-    /// Dot tone for a run: running while unfinished, warn if any failed, else ok.
-    var tone: GroupTone {
-        running ? .running : (failed > 0 ? .warn : .ok)
-    }
-}
-
 enum ToolActivity {
-
-    static let bashDetailMax = 60
-    static let maxSummaryCategories = 3
 
     // MARK: JSON helpers (the JS `asRecord` / `str`)
 
@@ -152,60 +43,12 @@ enum ToolActivity {
         (ChatJSON.string(v) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func basename(_ p: String) -> String {
-        var trimmed = p
-        while let last = trimmed.last, last == "/" || last == "\\" { trimmed.removeLast() }
-        if let i = trimmed.lastIndex(where: { $0 == "/" || $0 == "\\" }) {
-            return String(trimmed[trimmed.index(after: i)...])
-        }
-        return trimmed
-    }
-
-    /// JS `new URL(url).host || url`: host with a non-default port, lowercased;
-    /// the input unchanged when it is not an absolute URL.
-    static func hostOf(_ url: String) -> String {
-        guard let comps = URLComponents(string: url),
-              let scheme = comps.scheme?.lowercased(),
-              let host = comps.host, !host.isEmpty else { return url }
-        let defaults: [String: Int] = ["http": 80, "https": 443, "ftp": 21, "ws": 80, "wss": 443]
-        var result = host.lowercased()
-        if let port = comps.port, defaults[scheme] != port {
-            result += ":\(port)"
-        }
-        return result
-    }
-
-    /// JS `s.length > max ? s.slice(0, max - 1).trimEnd() + "…" : s`, counting
-    /// UTF-16 units like JS does.
-    static func clip(_ s: String, _ max: Int) -> String {
-        let units = Array(s.utf16)
-        guard units.count > max else { return s }
-        var head = String(decoding: units.prefix(max - 1), as: UTF16.self)
-        while let last = head.last, last.isWhitespace { head.removeLast() }
-        return head + "…"
-    }
-
-    /// "mcp_Axiom_queryApl" → "Axiom queryApl".
-    static func humanizeToolName(_ tool: String) -> String {
-        let name = tool.replacingOccurrences(of: "^mcp[_-]", with: "", options: [.regularExpression, .caseInsensitive])
-        let words = name.components(separatedBy: CharacterSet(charactersIn: "_-")).filter { !$0.isEmpty }
-        return words.isEmpty ? tool : words.joined(separator: " ")
-    }
-
     private static func filePath(_ input: [String: JSONValue]) -> String {
         for key in ["filePath", "file_path", "path"] {
             let s = str(input[key])
             if !s.isEmpty { return s }
         }
         return ""
-    }
-
-    private static func first(_ candidates: String...) -> String {
-        candidates.first(where: { !$0.isEmpty }) ?? ""
-    }
-
-    private static func withDetail(_ verb: String, _ detail: String) -> String {
-        detail.isEmpty ? verb : "\(verb) \(detail)"
     }
 
     // MARK: Part accessors
@@ -221,178 +64,6 @@ enum ToolActivity {
 
     static func status(of part: OpencodePart) -> ActivityStatus {
         part.type == "patch" ? .completed : ActivityStatus.normalize(ChatJSON.string(state(of: part)["status"]))
-    }
-
-    // MARK: Describe
-
-    /// Labels for one tool or patch part.
-    static func describe(_ part: OpencodePart) -> Activity {
-        part.type == "patch" ? describePatch(part) : describeTool(part)
-    }
-
-    private static func describeTool(_ part: OpencodePart) -> Activity {
-        let rawTool = toolName(of: part)
-        let tool = rawTool.lowercased()
-        let st = state(of: part)
-        let input = record(st["input"])
-        let status = ActivityStatus.normalize(ChatJSON.string(st["status"]))
-        let title = str(st["title"])
-
-        func make(_ kind: ActivityKind, _ running: String, _ done: String, _ failed: String) -> Activity {
-            Activity(kind: kind, status: status, running: running, done: done, failed: failed, counted: true)
-        }
-        func verbs(_ kind: ActivityKind, _ run: String, _ done: String, _ fail: String, _ detail: String) -> Activity {
-            make(kind, withDetail(run, detail), withDetail(done, detail), withDetail(fail, detail))
-        }
-
-        // iOS-only (desktop has no such kind): the `delegate` tool, whose MCP-
-        // prefixed id would otherwise read "Using delegate delegate".
-        if TaskStatusResolver.isDelegateToolName(tool) {
-            let name = TaskStatusResolver.delegateJobName(of: part)
-            return verbs(.delegate, "Running background job", "Started background job",
-                         "Failed to start background job", name)
-        }
-
-        switch tool {
-        case "read":
-            return verbs(.read, "Reading", "Read", "Failed to read", first(basename(filePath(input)), title))
-        case "edit", "multiedit", "apply_patch", "patch":
-            return verbs(.edit, "Editing", "Edited", "Failed to edit", first(basename(filePath(input)), title))
-        case "write":
-            return verbs(.write, "Writing", "Wrote", "Failed to write", first(basename(filePath(input)), title))
-        case "bash":
-            let command = str(input["command"]).components(separatedBy: "\n").first?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let detail = clip(first(str(input["description"]), command, title), bashDetailMax)
-            // A shell call's own description IS the label ("Run the tests"). With
-            // no description, command or title at all (a pending part), fall back
-            // to a generic phrase rather than an empty line.
-            if detail.isEmpty {
-                return make(.bash, "Running a command", "Ran a command", "Failed to run a command")
-            }
-            return make(.bash, detail, detail, "Failed: \(detail)")
-        case "grep", "glob", "codesearch":
-            return verbs(.search, "Searching", "Searched", "Failed to search",
-                         first(str(input["pattern"]), str(input["query"]), title))
-        case "list", "ls":
-            return verbs(.list, "Listing", "Listed", "Failed to list", first(basename(str(input["path"])), title))
-        case "webfetch", "web_fetch":
-            return verbs(.fetch, "Fetching", "Fetched", "Failed to fetch", first(hostOf(str(input["url"])), title))
-        case "websearch", "web_search":
-            let q = first(str(input["query"]), title)
-            // "…the web for" reads wrong with nothing after it.
-            if q.isEmpty {
-                return make(.websearch, "Searching the web", "Searched the web", "Failed to search the web")
-            }
-            return verbs(.websearch, "Searching the web for", "Searched the web for", "Failed to search the web for", q)
-        case "task":
-            let detail = first(str(input["description"]), title)
-            return make(.task,
-                        withDetail("Running agent", detail),
-                        withDetail("Ran agent", detail),
-                        withDetail("Agent failed:", detail))
-        case "skill":
-            return verbs(.skill, "Loading skill", "Loaded skill", "Failed to load skill", first(str(input["name"]), title))
-        case "question":
-            return make(.question, "Asking", "Asked", "Failed to ask")
-        default:
-            let name = humanizeToolName(ChatJSON.string(part.extra["tool"]) ?? "tool")
-            return make(.other, "Using \(name)", "Used \(name)", "Failed: \(name)")
-        }
-    }
-
-    private static func describePatch(_ part: OpencodePart) -> Activity {
-        let files = (ChatJSON.array(part.extra["files"]) ?? [])
-        let detail: String
-        if files.count == 1 {
-            detail = basename(ChatJSON.string(files[0]) ?? "")
-        } else if files.count > 1 {
-            detail = "\(files.count) files"
-        } else {
-            detail = ""
-        }
-        let done = detail.isEmpty ? "Saved changes" : "Saved changes to \(detail)"
-        // A checkpoint cannot fail; `failed` is kept equal to `done` so callers
-        // never branch.
-        return Activity(kind: .patch, status: .completed, running: withDetail("Saving", detail),
-                        done: done, failed: done, counted: false)
-    }
-
-    // MARK: Summary
-
-    static func summarize(_ parts: [OpencodePart]) -> GroupSummary {
-        let activities = parts.map(describe)
-        let tools = activities.filter(\.counted)
-        // Patches are file-save checkpoints that trail an edit, not separate
-        // activities: once the run has any tool call they stay out of the wording
-        // AND out of the one-vs-many decision ("Edited X", not "Edited a file,
-        // saved a change"). A run made only of patches is the one place they
-        // speak.
-        let described = tools.isEmpty ? activities : tools
-        let failed = tools.filter { $0.status == .error }.count
-        let unfinished = tools.filter { $0.status != .completed && $0.status != .error }
-        let live = unfinished.last
-
-        let label: String
-        if described.count == 1 {
-            let only = described[0]
-            label = only.status == .error ? only.failed : only.done
-        } else {
-            var order: [ActivityKind] = []
-            var counts: [ActivityKind: Int] = [:]
-            for a in described {
-                if counts[a.kind] != nil {
-                    counts[a.kind, default: 0] += 1
-                } else {
-                    order.append(a.kind)
-                    counts[a.kind] = 1
-                }
-            }
-            if order.count > maxSummaryCategories {
-                label = "Used \(tools.count) tools"
-            } else {
-                let text = order.map { $0.plural(counts[$0] ?? 0) }.joined(separator: ", ")
-                label = text.prefix(1).uppercased() + text.dropFirst()
-            }
-        }
-        return GroupSummary(label: label, live: live, calls: tools.count, failed: failed, running: live != nil)
-    }
-
-    // MARK: Per-call presentation (the Activity sheet)
-
-    /// The mono string a call acted on: the full path / command / pattern / url,
-    /// "" when the part carries none.
-    static func target(of part: OpencodePart) -> String {
-        if part.type == "patch" {
-            let files = (ChatJSON.array(part.extra["files"]) ?? []).compactMap { ChatJSON.string($0) }
-            return files.joined(separator: ", ")
-        }
-        let tool = toolName(of: part).lowercased()
-        let st = state(of: part)
-        let input = record(st["input"])
-        let title = str(st["title"])
-        switch tool {
-        case "bash":
-            let command = str(input["command"]).components(separatedBy: "\n").first?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return first(command, title)
-        case "read", "edit", "multiedit", "apply_patch", "patch", "write":
-            return first(filePath(input), title)
-        case "grep", "glob", "codesearch":
-            return first(str(input["pattern"]), str(input["query"]), title)
-        case "list", "ls":
-            return first(str(input["path"]), title)
-        case "webfetch", "web_fetch":
-            return first(str(input["url"]), title)
-        case "websearch", "web_search":
-            return first(str(input["query"]), title)
-        case "task":
-            return first(str(input["description"]), title)
-        case "skill":
-            return first(str(input["name"]), title)
-        default:
-            return title
-        }
     }
 
     /// `state.time.end - start` in seconds (opencode stamps tool time in ms).
@@ -477,6 +148,25 @@ enum ToolActivity {
         return ChatJSON.string(record(state["metadata"])["output"]) ?? ""
     }
 
+    /// What a call reads as when the box did not describe it (an older box, a part it did not stamp): the raw tool id and
+    /// the call's own status — no wording of the phone's own.
+    static func neutralActivity(of part: OpencodePart) -> TranscriptActivityView {
+        let name = toolName(of: part)
+        return TranscriptActivityView(
+            kind: isTask(part) ? .task : .other,
+            status: status(of: part),
+            label: name.isEmpty ? "Tool" : name,
+            target: "",
+            counted: part.type == "tool"
+        )
+    }
+
+    /// Whether a call is a `task` (a session, not a tool call): the box's `view.activity.kind`, else the tool id.
+    static func isTask(_ part: OpencodePart) -> Bool {
+        if let kind = TranscriptPartView.of(part)?.activity?.kind { return kind == .task }
+        return toolName(of: part).lowercased() == "task"
+    }
+
     /// What the Copy button puts on the clipboard for a call — the FULL text, never
     /// the tailed preview: a patch copies its file list; a `task` (a session, not
     /// a tool call) copies nothing; otherwise the diff, else the output. nil when
@@ -486,7 +176,7 @@ enum ToolActivity {
             let files = (ChatJSON.array(part.extra["files"]) ?? []).compactMap { ChatJSON.string($0) }
             return files.isEmpty ? nil : files.joined(separator: "\n")
         }
-        if describe(part).kind == .task { return nil }
+        if isTask(part) { return nil }
         let d = detail(of: part)
         guard let text = d.diff ?? d.output, !text.isEmpty else { return nil }
         return text
@@ -503,6 +193,15 @@ enum ToolActivity {
         return (tail, tail != output)
     }
 
+    /// A one-line display clip counting UTF-16 units (a detail-well limit, not wording).
+    private static func truncatedLine(_ s: String, _ max: Int) -> String {
+        let units = Array(s.utf16)
+        guard units.count > max else { return s }
+        var head = String(decoding: units.prefix(max - 1), as: UTF16.self)
+        while let last = head.last, last.isWhitespace { head.removeLast() }
+        return head + "…"
+    }
+
     /// `key: value` lines for an input object, sorted by key so the text is
     /// deterministic, long values clipped to one line.
     private static func argumentLines(_ input: [String: JSONValue], skipping: Set<String>) -> String {
@@ -517,7 +216,7 @@ enum ToolActivity {
             }
             let line = text.components(separatedBy: .newlines).first ?? text
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            return trimmed.isEmpty ? nil : "\(key): \(clip(trimmed, 160))"
+            return trimmed.isEmpty ? nil : "\(key): \(truncatedLine(trimmed, 160))"
         }.joined(separator: "\n")
     }
 
@@ -556,18 +255,17 @@ enum ToolActivity {
 
 // MARK: - Working line wording (spec §1.4)
 
-extension GroupSummary {
-    /// The emphasised part of the working line: the running tool's label while a
-    /// tool is executing, otherwise the turn's rotating verb. Always ends in "…".
+extension TranscriptRunSummary {
+    /// The emphasised part of the working line: the running tool's label while a tool is executing, otherwise the turn's
+    /// rotating verb. Always ends in "…". The label is the box's (`live`).
     func workingLineHeadline(verb: String) -> String {
-        "\(live?.running ?? verb)…"
+        "\(live?.label ?? verb)…"
     }
 
     /// The faint text after the headline:
     ///  - a tool is running → "· N tools · elapsed" (the count only past one call)
     ///  - between tools     → "· <run summary> · elapsed"
-    /// `elapsed` is nil when the turn's start is unknown. "" when there is
-    /// nothing to say.
+    /// `elapsed` is nil when the turn's start is unknown. "" when there is nothing to say.
     func workingLineMeta(elapsed: String?) -> String {
         var parts: [String] = []
         if live != nil {
@@ -582,24 +280,30 @@ extension GroupSummary {
 
 // MARK: - Runs and layout
 
-/// A run: consecutive tool calls and file-save patches, possibly spanning
-/// several assistant messages. `id` is the id of the FIRST part, so it stays
-/// stable while the run grows (and is what the Activity sheet is keyed by).
+/// A run (or, with reasoning shown, one SEGMENT of a run): consecutive tool calls and file-save patches, possibly spanning
+/// several assistant messages. `id` is the id of the FIRST part of the run (or of the segment; the first segment's id IS
+/// the run id), so it is stable while the run grows and is what the Activity sheet is keyed by. `view` is the BOX's
+/// summary of it — decoded, never recomputed.
 struct ToolRun: Equatable, Sendable, Identifiable {
     var id: String
     var parts: [OpencodePart]
+    var view: TranscriptRunSummary
+    /// The run this block belongs to (`id` for an unsplit run; the run's id when `id` is a segment's).
+    var runID: String
+    /// The segment this block draws, when reasoning is shown and the run split.
+    var segmentID: String?
+    /// True for the stand-in line of a box without `transcript-runs-1`: raw calls, a neutral label.
+    var isFallback: Bool
 
-    init(id: String, parts: [OpencodePart]) {
+    init(id: String, parts: [OpencodePart], view: TranscriptRunSummary, runID: String? = nil, segmentID: String? = nil,
+         isFallback: Bool = false) {
         self.id = id
         self.parts = parts
+        self.view = view
+        self.runID = runID ?? id
+        self.segmentID = segmentID
+        self.isFallback = isFallback
     }
-
-    init?(parts: [OpencodePart]) {
-        guard let first = parts.first else { return nil }
-        self.init(id: first.id, parts: parts)
-    }
-
-    var summary: GroupSummary { ToolActivity.summarize(parts) }
 
     /// Wall-clock span of the finished calls (first start → last end), seconds.
     var totalDurationSeconds: Double? {
@@ -611,10 +315,10 @@ struct ToolRun: Equatable, Sendable, Identifiable {
         return (end - start) / 1000
     }
 
-    /// This run with `extra` parts appended, skipping any part the run already
-    /// owns: same part id, same call id (a live row and its canonical sibling),
-    /// or — for a task — the same child session.
-    func appending(_ extra: [OpencodePart]) -> ToolRun {
+    /// This run with `extra` parts added: a part the run already owns (same part id, same call id — a live row and its
+    /// canonical sibling —, or, for a task, the same child session) is NOT added again, and the run keeps the part it has
+    /// (the canonical one wins for its content; the ledger only adds what is missing).
+    func upserting(_ extra: [OpencodePart]) -> ToolRun {
         var ids = Set(parts.map(\.id))
         var calls = Set(parts.compactMap { ChatJSON.string($0.extra["callID"]) }.filter { !$0.isEmpty })
         var children = Set(parts.compactMap { TaskStatusResolver.childSessionID(of: $0) })
@@ -628,7 +332,9 @@ struct ToolRun: Equatable, Sendable, Identifiable {
             if let c = ChatJSON.string(p.extra["callID"]), !c.isEmpty { calls.insert(c) }
             if let child = TaskStatusResolver.childSessionID(of: p) { children.insert(child) }
         }
-        return ToolRun(id: id, parts: merged)
+        var copy = self
+        copy.parts = merged
+        return copy
     }
 }
 
@@ -640,14 +346,11 @@ enum ToolLayoutBlock: Equatable, Sendable {
 struct ToolLayout: Equatable, Sendable {
     /// Blocks each assistant message draws. Absorbed messages map to [].
     var blocksByMessage: [String: [ToolLayoutBlock]]
-    /// The run at the very tail while a turn runs (drawn by the working line).
-    var trailing: ToolRun?
 }
 
 extension ToolActivity {
 
-    /// Parts a message can draw (desktop's `visibleAssistantParts`): synthetic /
-    /// ignored / empty text, step markers and todo-list writes are dropped.
+    /// Parts a message can draw: synthetic / ignored / empty text, step markers and todo-list writes are dropped.
     static func visibleAssistantParts(_ msg: OpencodeMessage) -> [OpencodePart] {
         msg.parts.filter { p in
             switch p.type {
@@ -668,59 +371,77 @@ extension ToolActivity {
         s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Whether a user message draws a band (and therefore ends a run).
-    static func userMessageDraws(_ msg: OpencodeMessage) -> Bool {
-        msg.parts.contains { p in
-            p.type == "text" && p.synthetic != true && p.ignored != true && !isBlank(p.text ?? "")
-        }
+    /// The neutral summary of a message's calls when the box did not group them (an older box, or a part the box did not
+    /// stamp): one static line, no wording of the phone's own.
+    static func fallbackSummary(calls: Int) -> TranscriptRunSummary {
+        TranscriptRunSummary(label: "Tool activity", calls: calls, failed: 0, tone: .ok, live: nil)
     }
 
-    /// Lay the transcript out as blocks (desktop's `layoutTranscript`).
+    /// Lay the transcript out as blocks, by the box's run ids.
     ///
-    /// - A run is consecutive tool + patch parts; it SPANS assistant messages
-    ///   (opencode writes one message per model step) and belongs to the message
-    ///   where it starts — later messages it absorbed draw nothing.
-    /// - Anything else that draws (text, shown reasoning, media/file, unknown
-    ///   parts) ends the run. Hidden reasoning draws nothing, so it is
-    ///   transparent.
-    /// - A user message that draws ends the run.
-    /// - While `running`, a run that nothing follows is withheld as `trailing`.
-    static func layout(messages: [OpencodeMessage], running: Bool, showThinking: Bool) -> ToolLayout {
-        var blocksByMessage: [String: [ToolLayoutBlock]] = [:]
-        // The open run: the message that owns it, its placeholder's index in that
-        // message's blocks, and its accumulated value. The placeholder is
-        // written back when the run ends.
-        var run: (owner: String, index: Int, value: ToolRun)?
-
-        func closeRun() {
-            if let r = run {
-                blocksByMessage[r.owner]?[r.index] = .tools(r.value)
-            }
-            run = nil
+    /// - A tool/patch part draws in the block of its `view.runId`; the block sits where the run's FIRST in-window part is
+    ///   (later messages that add to it draw nothing). With reasoning shown a run that reasoning split draws one block per
+    ///   SEGMENT; hidden, the segments collapse into ONE block at the first.
+    /// - Anything else that draws (non-blank text, shown reasoning, a handoff card, unknown parts) is its own block. A
+    ///   whitespace-only text part is paragraph noise and draws nothing.
+    /// - A call with no run id (an older box, or a membership a rebuild retired) joins ONE neutral line per message — it is
+    ///   never dropped.
+    /// - `runs` is the newest value of each run (revision-merged); a run it lacks falls back to the full view a message
+    ///   carries. `minGen`: parts with `view.gen` below it are a retired membership.
+    static func layout(
+        messages: [OpencodeMessage],
+        showThinking: Bool,
+        runs: [String: TranscriptRunView] = [:],
+        minGen: Int = 0
+    ) -> ToolLayout {
+        var carried: [String: TranscriptRunView] = [:]
+        for message in messages {
+            for case .view(let v) in message.view?.runs ?? [] where carried[v.id] == nil { carried[v.id] = v }
         }
 
+        var blocksByMessage: [String: [ToolLayoutBlock]] = [:]
+        // Each run/segment block's placeholder: the message that draws it, its index in that message's blocks.
+        var placed: [String: (owner: String, index: Int)] = [:]
+        var order: [String] = []
+        var groupParts: [String: [OpencodePart]] = [:]
+        var groupRun: [String: (runID: String, segmentID: String?)] = [:]
+        // A message's neutral line (one per message) has the key `tools:<messageID>`.
+
         for msg in messages {
-            if msg.info.role.rawValue == "user" {
-                if userMessageDraws(msg) { closeRun() }
-                continue
-            }
+            if msg.info.role.rawValue == "user" { continue }
             let id = msg.info.id
             blocksByMessage[id] = blocksByMessage[id] ?? []
             for part in visibleAssistantParts(msg) {
-                // A `handoff` call is a card of its own, not a line inside a run:
-                // it ends the open run and draws as a standalone part.
+                // A `handoff` call is a card of its own, not a line inside a run.
                 if HandoffToolRef.isHandoffTool(part) {
-                    closeRun()
                     blocksByMessage[id, default: []].append(.part(part))
                     continue
                 }
                 if part.type == "tool" || part.type == "patch" {
-                    if run != nil {
-                        run?.value.parts.append(part)
+                    let view = TranscriptPartView.of(part)
+                    guard let runID = view?.runId, (view?.gen ?? minGen) >= minGen else {
+                        let key = "tools:\(id)"
+                        if groupParts[key] != nil {
+                            groupParts[key]?.append(part)
+                        } else {
+                            placed[key] = (id, blocksByMessage[id, default: []].count)
+                            order.append(key)
+                            groupParts[key] = [part]
+                            groupRun[key] = (key, nil)
+                            blocksByMessage[id, default: []].append(.part(part)) // placeholder, replaced below
+                        }
+                        continue
+                    }
+                    let segment = showThinking ? view?.segmentId : nil
+                    let key = segment ?? runID
+                    if groupParts[key] != nil {
+                        groupParts[key]?.append(part)
                     } else {
-                        let value = ToolRun(id: part.id, parts: [part])
-                        blocksByMessage[id, default: []].append(.tools(value))
-                        run = (id, blocksByMessage[id, default: []].count - 1, value)
+                        placed[key] = (id, blocksByMessage[id, default: []].count)
+                        order.append(key)
+                        groupParts[key] = [part]
+                        groupRun[key] = (runID, segment)
+                        blocksByMessage[id, default: []].append(.part(part)) // placeholder, replaced below
                     }
                     continue
                 }
@@ -729,19 +450,26 @@ extension ToolActivity {
                     // Empty reasoning never draws; hidden reasoning is transparent.
                     if !showThinking || isBlank(part.text ?? "") { continue }
                 }
-                closeRun()
                 blocksByMessage[id, default: []].append(.part(part))
             }
         }
 
-        var trailing: ToolRun?
-        if running, let r = run {
-            trailing = r.value
-            blocksByMessage[r.owner]?.remove(at: r.index)
-            run = nil
+        for key in order {
+            guard let at = placed[key], let parts = groupParts[key], let ref = groupRun[key] else { continue }
+            let isFallback = key.hasPrefix("tools:") && ref.runID == key
+            let summary: TranscriptRunSummary
+            if isFallback {
+                summary = fallbackSummary(calls: parts.filter { $0.type == "tool" }.count)
+            } else if let run = runs[ref.runID] ?? carried[ref.runID] {
+                summary = run.summary(forSegment: showThinking ? ref.segmentID : nil)
+            } else {
+                summary = fallbackSummary(calls: parts.filter { $0.type == "tool" }.count)
+            }
+            blocksByMessage[at.owner]?[at.index] = .tools(
+                ToolRun(id: key, parts: parts, view: summary, runID: ref.runID, segmentID: ref.segmentID, isFallback: isFallback)
+            )
         }
-        closeRun()
-        return ToolLayout(blocksByMessage: blocksByMessage, trailing: trailing)
+        return ToolLayout(blocksByMessage: blocksByMessage)
     }
 }
 
@@ -916,28 +644,6 @@ enum TaskStatusResolver {
         return firstCapture(#"\(id ([0-9a-f]+)\)"#, in: output)
     }
 
-    static let delegateNameMax = 60
-
-    /// The job's display name for the call's label: the quoted name in the
-    /// output, else the first line of the input's description / prompt (at most
-    /// 60 characters), else "".
-    static func delegateJobName(of part: OpencodePart) -> String {
-        let st = ToolActivity.state(of: part)
-        if let name = firstCapture(#"job "(.+?)" \(id [0-9a-f]+\)"#, in: ToolActivity.resolvedOutput(st)) {
-            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return ToolActivity.clip(trimmed, delegateNameMax) }
-        }
-        let input = ChatJSON.object(st["input"]) ?? [:]
-        for key in ["description", "prompt"] {
-            let line = (ChatJSON.string(input[key]) ?? "")
-                .components(separatedBy: .newlines)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .first { !$0.isEmpty } ?? ""
-            if !line.isEmpty { return ToolActivity.clip(line, delegateNameMax) }
-        }
-        return ""
-    }
-
     /// A finished delegate call whose job is still running or paused reads as
     /// running. Nothing else changes it: a call that errored stays failed, a job
     /// that itself FAILED is not a failed tool call (the Background jobs sheet
@@ -974,7 +680,10 @@ extension ToolRun {
             if updated != part { changed = true }
             return updated
         }
-        return changed ? ToolRun(id: id, parts: next) : self
+        guard changed else { return self }
+        var copy = self
+        copy.parts = next
+        return copy
     }
 }
 

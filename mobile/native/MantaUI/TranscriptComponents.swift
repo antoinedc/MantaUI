@@ -800,7 +800,10 @@ enum TranscriptBlock: Equatable, Sendable {
     // gutter. Machinery (`.steps`) carries none: a step row already states how
     // long it took, and a second time reading next to it is noise, not detail.
     case user(String, at: Date?)
-    case prose(String, at: Date?)
+    /// `partID`: the assistant text PART this prose came from (`<msg>:text:<n>`), set by the canonical mapper and by the live
+    /// tail (the box's ledger names the same part), so a live segment and its canonical twin share one row id. nil for prose
+    /// that has no part (previews, fixtures) — its id is derived from its content as before.
+    case prose(String, at: Date?, partID: String? = nil)
     case steps(StepGroupContent)
     /// A file/attachment reference rendered inline next to the message it belongs
     /// to: a voice note (BET-1029), a widget, the files attached to a user
@@ -852,7 +855,7 @@ enum TranscriptBlock: Equatable, Sendable {
     /// The time shown in the gutter; nil for blocks that have none.
     var timestamp: Date? {
         switch self {
-        case .user(_, let at), .prose(_, let at): return at
+        case .user(_, let at), .prose(_, let at, _): return at
         case .command(let turn): return turn.at
         case .steps, .file, .notice, .queuedPrompt, .permission, .planExit, .question, .activity, .todos, .handoff,
              .reasoning, .turnFooter: return nil

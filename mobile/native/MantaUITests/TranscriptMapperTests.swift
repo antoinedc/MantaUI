@@ -93,7 +93,7 @@ final class TranscriptMapperTests: XCTestCase {
 
     private func map(_ messages: [OpencodeMessage], _ options: TranscriptMapOptions = TranscriptMapOptions()) -> [TranscriptBlock] {
         // The box stamps each message's turn/truncation view (WS11 D8); the fixture does it the box's way.
-        ChatTranscriptMapper.blocks(from: BoxViewFixture.stamp(messages, running: options.running), voiceNotes: [], widgets: [], options: options)
+        ChatTranscriptMapper.blocks(from: BoxViewFixture.stampRuns(BoxViewFixture.stamp(messages, running: options.running)), voiceNotes: [], widgets: [], options: options)
     }
 
     private func mediaEntries(_ blocks: [TranscriptBlock]) -> [TranscriptMediaEntry] {
@@ -146,7 +146,7 @@ final class TranscriptMapperTests: XCTestCase {
         state.observeRunning(true)
         state.apply(TranscriptMediaFrame(action: "show", messageID: "A", width: 10, height: 10, path: "/home/u/x.png", mime: "image/png"), now: t0)
         let blocks = map([user("u1"), a], TranscriptMapOptions(liveMedia: state.vended()))
-        guard case .file = blocks[1], case .prose(let prose, _) = blocks[2] else {
+        guard case .file = blocks[1], case .prose(let prose, _, _) = blocks[2] else {
             return XCTFail("expected media then prose, got \(blocks)")
         }
         XCTAssertEqual(prose, "here it is")

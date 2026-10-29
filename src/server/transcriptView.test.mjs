@@ -216,6 +216,10 @@ const goldenSession = (messages) =>
     info: { ...m.info, sessionID: "ses_golden" },
     parts: m.parts.map((p) => ({ messageID: m.info.id, ...p })),
   }));
+const goldenTool = (id, name) => ({ type: "tool", id, tool: name, callID: `c-${id}`, state: { status: "completed", input: { filePath: `/w/${id}.ts` }, output: "ok" } });
+const goldenText = (id, text) => ({ type: "text", id, text });
+const goldenReasoning = (id, text) => ({ type: "reasoning", id, text });
+const goldenUser = (id, text) => ({ info: { role: "user", id }, parts: [{ type: "text", id: `${id}:t`, text }] });
 const goldenScenarios = () => [
   {
     name: "one finished turn: duration from first created to last completed, tokens = output + reasoning",
@@ -269,6 +273,38 @@ const goldenScenarios = () => [
     name: "no tokens and no duration: the turn still exists, both null",
     running: false,
     input: [user("u1"), asst("a1", { created: 1000, completed: 1000, output: 0, reasoning: 0 })],
+  },
+  {
+    name: "runs: one run spans three assistant messages; text splits it; a drawing user message ends it",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1, completed: 2, parts: [goldenTool("t1", "read"), goldenTool("t2", "bash")] }),
+      asst("a2", { created: 2, completed: 3, parts: [goldenTool("t3", "read")] }),
+      asst("a3", { created: 3, completed: 4, parts: [goldenText("x3", "Found it."), goldenTool("t4", "edit")] }),
+      goldenUser("u2", "next"),
+      asst("a4", { created: 5, completed: 6, parts: [goldenTool("t5", "read")] }),
+    ],
+  },
+  {
+    name: "runs: reasoning starts a segment; whitespace text and todo writes are transparent; a handoff stands alone",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1, completed: 2, parts: [goldenTool("t1", "read"), goldenText("x1", "\n"), goldenTool("t2", "todowrite")] }),
+      asst("a2", { created: 2, completed: 3, parts: [goldenReasoning("r1", "thinking it over"), goldenTool("t3", "grep")] }),
+      asst("a3", { created: 3, completed: 4, parts: [goldenTool("h1", "handoff"), goldenTool("t4", "read")] }),
+    ],
+  },
+  {
+    name: "runs: a background-job completion USER message is transparent, a hidden user message too",
+    running: false,
+    input: [
+      user("u1"),
+      asst("a1", { created: 1, completed: 2, parts: [goldenTool("t1", "read")] }),
+      goldenUser("u2", '[background job "x" done]\n\nbody'),
+      asst("a2", { created: 3, completed: 4, parts: [goldenTool("t2", "read")] }),
+    ],
   },
   {
     name: "the last assistant message must have time.completed",

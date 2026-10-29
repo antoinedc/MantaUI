@@ -34,38 +34,17 @@ import { homedir as osHomedir, tmpdir } from "node:os";
 import { join, basename, resolve, extname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { pushArtifact as defaultPushArtifact } from "./outbox.mjs";
+import { MIME_BY_EXT } from "../shared/mediaMime.mjs";
+
+export { MIME_BY_EXT };
 
 // A `begin` with no matching `show` publishes `action:"fail"` and is dropped
 // after this long. In-memory only — a placeholder need not survive a restart.
 export const ORPHAN_TIMEOUT_MS = 10 * 60 * 1000;
 export const MEDIA_SWEEP_MS = 30 * 1000;
 
-// THE box's extension → MIME allowlist (media tools' returns AND the artifacts
-// list). Video is never measured (see readImageSize) — its mime is still
-// reported from the extension. Deliberately an allowlist, not a MIME database:
-// a full database would label `.ts` as `video/mp2t` and widen what gets
-// previewed; unknown types land on the download path.
-export const MIME_BY_EXT = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".avif": "image/avif",
-  ".svg": "image/svg+xml",
-  ".mp4": "video/mp4",
-  ".mov": "video/quicktime",
-  ".webm": "video/webm",
-  ".m4v": "video/x-m4v",
-  ".csv": "text/csv",
-  ".tsv": "text/tab-separated-values",
-  ".txt": "text/plain",
-  ".md": "text/markdown",
-  ".json": "application/json",
-  ".pdf": "application/pdf",
-  ".html": "text/html",
-  ".htm": "text/html",
-};
+// THE box's extension → MIME allowlist lives in src/shared/mediaMime.mjs (pure, so the demo renderer can import the box's
+// transcript view without pulling in this module's node dependencies).
 
 /** MIME type for a file name, or null when its extension is not on the allowlist. */
 export function mimeForName(name) {

@@ -46,11 +46,11 @@ struct RunningIndicator: View {
         let run = store.trailingRun
         Group {
             if let run, let onOpenActivity {
-                Button { onOpenActivity(run.id) } label: { line(run.summary) }
+                Button { onOpenActivity(run.id) } label: { line(run.view) }
                     .buttonStyle(.plain)
                     .accessibilityHint("Shows the tool calls")
             } else {
-                line(run?.summary)
+                line(run?.view)
             }
         }
         .padding(.horizontal, Metrics.spacing.sp3)
@@ -73,7 +73,7 @@ struct RunningIndicator: View {
     ///  - no tool run yet     → "<verb>… (elapsed)", as before
     /// A red failed count rides along whenever the run has one.
     @MainActor
-    private func line(_ summary: GroupSummary?) -> some View {
+    private func line(_ summary: TranscriptRunSummary?) -> some View {
         HStack(spacing: Metrics.spacing.sp2) {
             MantaLoader(tokens: tokens, size: .inline)
             if let summary {

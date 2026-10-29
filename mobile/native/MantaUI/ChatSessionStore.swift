@@ -316,19 +316,10 @@ final class ChatSessionStore: ObservableObject {
     /// change each time and thrash TiledView; this id doesn't. Reset when the
     /// turn ends and the tail is absorbed into the canonical transcript.
     private(set) var streamingTailID: String = ""
-    /// The row id the streaming tail actually ships in. Unlike `streamingTailID`
-    /// (which the stream merge resets the moment a `turnComplete` frame lands),
-    /// this id SURVIVES the settle until the canonical refetch absorbs the tail
-    /// — so TiledView sees the tail row turn into the canonical prose block as
-    /// an in-place UPDATE instead of a remove+insert blink at the turn boundary
-    /// (BET-752 task 2, giving prose the stable-identity treatment BET-666 gave
-    /// step rows — BET-666, `TranscriptComponents.swift`).
-    private var liveTailRowID = ""
-    /// True while the previous rebuild shipped a live tail, so the empty branch
-    /// of `rebuildBlocks` knows a settle/absorption just replaced it (and can
-    /// carry the tail id onto the new canonical row) rather than mistaking a
-    /// fresh `send()`'s pre-stream emptiness for an absorption.
-    private var wasRenderingTail = false
+    /// The last `toolRuns` rebuild count this store has acted on (a canonical rebuild retired run ids: re-map + refetch once).
+    private var lastRunRebuildSeq = 0
+    /// True once a stale-membership answer has already triggered its one extra refetch (cleared by a clean answer).
+    private var staleMembershipRefetched = false
     /// Question ids the user answered/rejected on-device. The incoming stream
     /// keeps publishing an answered question until the box catches up, so this
     /// tombstone set filters it out locally in the meantime (BET-668); an id
@@ -791,7 +782,6 @@ final class ChatSessionStore: ObservableObject {
         // is never replaced mid-turn.
         if running, streamingTailID.isEmpty {
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
-            liveTailRowID = streamingTailID
         }
         // Prefer the box's turn start; keep the optimistic stamp `send()` set
         // until the first frame confirms it, but never invent one. The box only
@@ -846,7 +836,14 @@ final class ChatSessionStore: ObservableObject {
         // The mapper's live inputs (`/command` origins, the latest truncation
         // warning, the running gate on the last turn's footer) changed: re-map the
         // canonical messages, not just the tail (WS01 M-01-3).
-        if commandsChanged || truncationChanged || wentIdle {
+        // A canonical rebuild of the box's run ledger retired run ids (a guessed boundary was repaired): the canonical rows
+        // are re-mapped against the new membership and the transcript is re-read once.
+        let rebuilt = s.liveRuns.rebuildSeq != lastRunRebuildSeq
+        if rebuilt {
+            lastRunRebuildSeq = s.liveRuns.rebuildSeq
+            scheduleRefetch()
+        }
+        if commandsChanged || truncationChanged || wentIdle || rebuilt {
             remap()
         } else {
             rebuildBlocks()
@@ -987,42 +984,42 @@ final class ChatSessionStore: ObservableObject {
             childRunning: childRunning, jobStatus: jobStatusByChild, jobStatusByID: jobStatusByID)
         let resolved = ChatTranscriptMapper.resolvingTaskStatuses(transcript, context: taskContext)
 
-        // LIVE running tools and subagents join the run at the tail of THIS turn.
-        // They are not canonical content, so they merge here (on every stream
-        // frame) rather than in the mapper that feeds `transcript` — that keeps
-        // `transcript` pristine while live calls appear and then vanish when the
-        // canonical refetch takes them over. While the turn runs, the run at the
-        // very tail is withheld from the rows: the working line draws it.
-        // EVERY call of this turn, ended ones included: the transcript is not
-        // refetched mid-turn, so the stream is the only source of the finished
-        // ones until the turn completes.
+        // The live turn, laid over the canonical blocks in the box's OWN order (tool, prose, tool…): the ledger the box keeps
+        // names every run, text part and reasoning part as it happens. A run that is already (partly) canonical is
+        // upserted into its canonical row; the rest are appended. While the turn runs, the run at the very tail is withheld
+        // from the rows: the working line draws it.
         let streamState = eventStore.sessionStates[sessionId]
-        let liveTools = streamState?.turnTools ?? []
-        // A send made while the turn runs never owns the tail: it joins the box's
-        // inbox, and the turn's own tail is unaffected.
-        let hasTailContent = !inProgressText.isEmpty || pendingPrompts.contains { $0.state == .sending && !$0.isBusySend }
-        let merge = ChatTranscriptMapper.mergingLive(
-            tools: liveTools,
+        let liveRuns = streamState?.liveRuns ?? TranscriptLiveRunsState()
+        let showReasoning = TranscriptDisplayOptions.showDetails
+        // Run lines only ever move FORWARD: their summaries come from the revision-merged run values.
+        let withRuns = ChatTranscriptMapper.applyingRunViews(resolved, runs: liveRuns.store.runs, showReasoning: showReasoning)
+        var tails: [String: String] = [:]
+        for (idx, tool) in streamState?.tools ?? [:] where !tool.tail.isEmpty { tails[idx] = tool.tail }
+        let tail = ChatTranscriptMapper.liveTail(
+            layout: liveRuns.layout,
+            runs: liveRuns.store.runs,
+            parts: liveRuns.parts,
+            closed: liveRuns.closed,
+            chunks: streamState?.chunks ?? [],
+            tails: tails,
             subagents: subagents,
-            context: taskContext,
-            running: running,
-            hasTailContent: hasTailContent,
-            thisTurnChildren: Set(streamState?.turnSubagentIDs ?? []),
-            to: resolved
+            taskContext: taskContext,
+            showReasoning: showReasoning,
+            canonical: withRuns,
+            running: running
         )
-        // Live media (images the model showed) draws after the settled transcript
-        // and before the live prose tail (WS01 M-01-2). Same `presentedMessages` as
-        // the mapper call, so a media owner is never drawn twice.
+        // Live media (images the model showed) draws after the settled transcript and before the live blocks (WS01 M-01-2).
+        // Same `presentedMessages` as the mapper call, so a media owner is never drawn twice.
         let mediaTail = ChatTranscriptMapper.liveMediaTail(
             messages: presentedMessages,
             live: TranscriptMediaStore.shared.entries(for: sessionId),
             isLiveWindow: presentedMessages.last?.info.id == messages.last?.info.id
         )
-        let liveTranscript = merge.blocks + mediaTail
+        let liveTranscript = tail.canonical + mediaTail + tail.blocks
         // @Published fires on EVERY assignment, and this runs on every stream
         // frame: only publish a real change so the working line is not re-drawn
         // for nothing.
-        if trailingRun != merge.trailing { trailingRun = merge.trailing }
+        if trailingRun != tail.trailing { trailingRun = tail.trailing }
 
         // The todo card: the LAST row of the transcript (after the queued
         // prompts), present at most once.
@@ -1050,39 +1047,10 @@ final class ChatSessionStore: ObservableObject {
             footerTruncationIDs: ChatTranscriptMapper.footerTruncationMessageIDs(liveTranscript)
         )
 
-        let newRows: [TranscriptRow]
-        if inProgressText.isEmpty {
-            // No live tail: the whole transcript is canonical. If the turn
-            // that was streaming just settled and its refetch absorbed the
-            // tail, carry the tail's STABLE id onto the canonical prose block
-            // that replaced it — same-identity swap, so TiledView updates that
-            // row in place instead of remove+insert-blinking at the boundary
-            // (BET-752 task 2 — the prose analogue of BET-666's step rows).
-            // Guarded on `wasRenderingTail`: `send()` mints `liveTailRowID`
-            // before any text exists, and that optimistic no-tail state must
-            // not rebadge the previous turn's last prose.
-            var rows = uniqueTranscriptRows(liveTranscript)
-            if wasRenderingTail,
-               !liveTailRowID.isEmpty,
-               let lastProse = rows.lastIndex(where: {
-                   if case .prose = $0.block { return true } else { return false }
-               }) {
-                rows[lastProse] = TranscriptRow(id: liveTailRowID, block: rows[lastProse].block)
-                liveTailRowID = ""
-            }
-            wasRenderingTail = false
-            blocks = liveTranscript + trailing
-            newRows = rows + uniqueTranscriptRows(trailing)
-        } else {
-            // The live tail has no completion time yet — it gets one when the
-            // turn ends and the canonical refetch replaces this block. The row
-            // keeps `liveTailRowID` across the settle so it never blinks.
-            wasRenderingTail = true
-            blocks = liveTranscript + [.prose(inProgressText, at: nil)] + trailing
-            newRows = uniqueTranscriptRows(liveTranscript)
-                + [TranscriptRow(id: liveTailRowID, block: .prose(inProgressText, at: nil))]
-                + uniqueTranscriptRows(trailing)
-        }
+        // Every block's row id is deterministic and shared with its canonical twin (a live prose block is `p<partID>`,
+        // a run `run-<id>`), so the handover at the turn boundary updates rows in place — no swap.
+        blocks = liveTranscript + trailing
+        let newRows = uniqueTranscriptRows(liveTranscript) + uniqueTranscriptRows(trailing)
         rows = newRows
     }
 
@@ -1172,6 +1140,7 @@ final class ChatSessionStore: ObservableObject {
             let limit = messageLimit
             var failed = false
             var messages: [OpencodeMessage] = []
+            var issuedConnGen = eventStore.connGen
             do {
                 // Slim while "show reasoning & full output" is off; a FULL fetch while
                 // it is on, because the slim one drops the reasoning parts
@@ -1180,6 +1149,9 @@ final class ChatSessionStore: ObservableObject {
                 // `view: true` only on a box that has it: an older box ignores the option, but not asking keeps the
                 // request byte-identical to what it has always been.
                 let wantsView = capabilities.has(.transcriptView) == true
+                // The connection generation this request is ISSUED under: an answer that outlives a reconnect must not
+                // become run state (the box may have restarted with a new epoch).
+                issuedConnGen = eventStore.connGen
                 messages = try await Self.withTimeout(seconds: 12) {
                     try await self.api.messages(sessionId: self.sessionId, limit: limit, slim: slim, view: wantsView)
                 }
@@ -1188,6 +1160,7 @@ final class ChatSessionStore: ObservableObject {
             }
             let loaded = messages
             let didFail = failed
+            let issued = issuedConnGen
             await MainActor.run {
                 if isFirstLoad { loadFailed = didFail }
                 refreshing = false
@@ -1225,6 +1198,17 @@ final class ChatSessionStore: ObservableObject {
                     // just-hydrated transcript to blank. Assign to the PROPERTY
                     // (self.messages), not the shadowed local.
                     self.messages = loaded
+                    // The run views this answer carries join the run values by revision (WS11 D11) BEFORE the transcript is
+                    // mapped; an answer that carries a membership a canonical rebuild has retired asks for one more read.
+                    if !didFail {
+                        let stale = eventStore.ingestRunViews(sessionId: sessionId, messages: loaded, issuedConnGen: issued)
+                        if stale, !staleMembershipRefetched {
+                            staleMembershipRefetched = true
+                            scheduleRefetch()
+                        } else if !stale {
+                            staleMembershipRefetched = false
+                        }
+                    }
                     // Re-locate the focused message BY ID on every fetch (F10): a
                     // message appended since the lookup, or a turn-boundary
                     // refetch, can never shift it.
@@ -1266,6 +1250,17 @@ final class ChatSessionStore: ObservableObject {
                         inProgressText = eventStore.sessionStates[sessionId]?.liveText ?? ""
                     }
                     rebuildBlocks()
+                    // A finished turn whose every live block the transcript now draws: the ledger's layout and calls are
+                    // forgotten (the run values stay).
+                    if !didFail, !running,
+                       ChatTranscriptMapper.coversLayout(
+                           canonical: transcript,
+                           layout: eventStore.sessionStates[sessionId]?.liveRuns.layout ?? [],
+                           showReasoning: TranscriptDisplayOptions.showDetails
+                       ) {
+                        eventStore.clearLiveRunLayout(sessionId: sessionId)
+                        rebuildBlocks()
+                    }
                     resolveFocusHighlight()
                 }
             }
@@ -1739,7 +1734,6 @@ final class ChatSessionStore: ObservableObject {
         if runningSince == nil {
             runningSince = Date()
             streamingTailID = "live-\(sessionId)-\(UUID().uuidString)"
-            liveTailRowID = streamingTailID
         }
         do {
             try await withBackgroundAssertion("send-prompt") {
@@ -2000,7 +1994,8 @@ extension ChatSessionStore {
                 TranscriptCommandOrigin.fromLive(name: $0.name, arguments: $0.arguments)
             },
             liveTruncation: truncation.flatMap { TranscriptLiveTruncation.from(payload: $0) },
-            liveMedia: TranscriptMediaStore.shared.entries(for: sessionId)
+            liveMedia: TranscriptMediaStore.shared.entries(for: sessionId),
+            runStore: eventStore.sessionStates[sessionId]?.liveRuns.store ?? TranscriptRunStore()
         )
     }
 

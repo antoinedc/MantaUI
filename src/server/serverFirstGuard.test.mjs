@@ -74,6 +74,7 @@ export const DELETED = [
   { scopes: ["renderer"], regex: /\b(NO_ROLLBACK_STEPS|CHECK_AGAIN_STEPS)\b|export function (currentStep|stepFraction|diskSentence)\b/, why: "D3: the upgrade gate's current step, fraction, disk sentence and Retry/Roll back rules are the box's" },
   // D11 — tool activity wording + runs.
   { scopes: ["renderer"], regex: /\b(describeActivity|describeToolPart|describePatchPart|summarizeToolGroup|groupTone|normalizeToolStatus|humanizeToolName)\b|export type (Activity|ActivityKind|GroupSummary)\b|\bfunction (hostOf|clip)\b/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every tool call's wording and every run's summary, tone and membership; the renderer lays out the box's runs and derives none of it" },
+  { scopes: ["swift", "swiftTests"], regex: /ToolActivity\.(describe|describeTool|describePatch|summarize|target|clip|hostOf|basename|humanizeToolName|userMessageDraws)\b|^struct (Activity|GroupSummary)\b|\bdelegateJobName\b|\bdelegateNameMax\b|\bfunc (mergingLive|plural)\b|\bmergingLive\(|\bLiveActivityMerge\b|\bliveTailRowID\b|\bstatic func livePart\(from (tool|subagent)\b|\bToolRun\.appending\b|\.appending\(\[/, why: "D11: part.view.activity / message.view.runs / the toolRuns frame carry every call's wording and every run's summary and membership; iOS lays out the box's runs and derives none of it (and the live tail is the box's ordered ledger, not a merge of tool frames)" },
 ];
 
 function* walk(dir, recursive) {

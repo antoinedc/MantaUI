@@ -1273,7 +1273,7 @@ final class ChatSessionStoreRetirementTests: XCTestCase {
 
     private func proseCount(_ blocks: [TranscriptBlock], containing needle: String) -> Int {
         blocks.reduce(into: 0) { total, block in
-            if case .prose(let body, _) = block, body.contains(needle) { total += 1 }
+            if case .prose(let body, _, _) = block, body.contains(needle) { total += 1 }
         }
     }
 

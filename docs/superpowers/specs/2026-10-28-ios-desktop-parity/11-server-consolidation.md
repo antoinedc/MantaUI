@@ -2498,3 +2498,39 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
    mapper tests' `BoxViewFixture` stamper to the same file. Deviation: the many incidental mapper tests that need a plausible
    footer on inline-built messages still stamp them; the stamper is now tied to the box by the golden instead of replaced.
 5. NIT 6 (older-box desktop file part) is recorded in D9's "Capability fallback"; NIT 7 (stale `turnComplete` comment) fixed.
+
+## Implementation notes (D11, `transcript-runs-1`)
+
+- Box: `transcriptRuns.mjs` (wording moved verbatim from `toolActivity.ts` + the phone's `delegate` kind; `createRunWalker` = the ONE
+  run-building walk for the canonical transcript and the live ledger; `runBoundaryOf`/`deliveryClassOf`), `runLedger.mjs` (per-session
+  live ledger: ordered layout, revisions `{epoch, gen, seq}`, boundary classification with buffer-and-replay, provisional boundaries
+  and the canonical rebuild), `transcriptView.mjs` (`part.view.{activity,runId,segmentId,gen}`, `message.view.runs`), `opencode.mjs`
+  (`RUN_LOOKBACK = 40` extra records on a `view` fetch; a run reaching back past what was read is anchored at the window and logged),
+  `streamInterp.mjs` (`toolRuns` frame; `runningSet.epoch`; `ledgerFor`), `index.mjs` (`classifyDelivered`, `rebuildFromCanonical`).
+- **Payload guard decided the fallback.** The spec's default (the FULL `RunView` on every message a run touches) measured +14.9 % on
+  the recorded session but +145 % on one 60-step run, so the implementation ships the `RunRef` fallback: the full view only on the
+  run's placement message, `{id, rev, ref:true}` on every other, always full on a lone `getMessage`. `transcriptView.payload.test.mjs`
+  pins the fallback's bytes (+15 % on all three fixtures) and that it IS the fallback.
+- The parity fixture is gone (`toolActivity.fixture.test.ts`, `src/shared/fixtures/tool-activity-cases.json`); its cases now run against
+  the box (`transcriptRuns.test.mjs`, reading `src/server/fixtures/tool-activity-cases.json` as the box's own regression suite), and
+  `streamInterp.runs.test.mjs` is the event/canonical parity guard (scripts 1–12).
+- Desktop: `toolActivity.ts` keeps only layout by run id, `stabilizeLayout`, `isRenderableRow`, `locateVisibleRow` and the pure
+  `mergeRunViews` family; `runEpoch.ts` owns the per-connection epoch/`connGen` and the per-session run maps (fed by `dispatchFrame`
+  for `runningSet`, by `httpApi`'s connection transitions, by the tracked transcript fetches in `useTranscriptState`/`useSseBus`/
+  `ChatPanel`/`CtoChat`, and by `toolRuns` frames). A box without `transcript-runs-1` shows ONE neutral "Tool activity" line per
+  message with "Update your box to see tool details". Deleted: `describeActivity`, `describeToolPart`, `describePatchPart`,
+  `summarizeToolGroup`, `groupTone`, `normalizeToolStatus`, `humanizeToolName`, `basename`, `hostOf`, `clip`, `Activity`, `ActivityKind`,
+  `GroupSummary`.
+- iOS: `TranscriptViewModels.swift` gained the view types, `TranscriptRunStore` (revision rules), `StreamToolRunsPayload`/`LiveBlock`/
+  `TranscriptLiveRunsState` and `TranscriptLiveTailPlan` (the placement rule). `ToolRun` is `{id, parts, view, runID, segmentID,
+  isFallback}`; `ToolActivity.layout` places runs by `runId`; `ChatTranscriptMapper.liveTail(...)` replaces `mergingLive` + the single
+  live prose block + the `liveTailRowID` swap; `TranscriptBlock.prose` gained `partID` (row id `"p"+partID`). Deleted: `ActivityKind.plural`,
+  `Activity`, `GroupSummary`, `describe*`, `summarize`, `target`, `basename`, `hostOf`, `clip`, `humanizeToolName`, `userMessageDraws`,
+  `TaskStatusResolver.delegateJobName`/`delegateNameMax`, `mergingLive`, both `livePart(from:)`, `LiveActivityMerge`, `liveTailRowID`.
+- Deviations: `liveTail` takes `chunks`, `closed`, `tails`, `subagents` and `taskContext` in addition to the spec's parameters (it needs
+  the ordered text chunks, the closed set, the stdout tails and the task statuses to build the synthetic parts and keep the old
+  task/delegate rules); text the ledger does not name (an older box has no ledger) is still drawn after the planned blocks, keyed by its
+  part id, so prose never disappears; a call with no run id joins one neutral line per message (never dropped). The run store lives in the
+  event store (`liveRuns.store`), so canonical answers and live frames merge into the SAME map. `BoxViewFixture.stampRuns` is a test-only
+  stand-in for the box's run membership, tied to the box by the shared golden (`BoxViewFixtureParityTests`) and compiled by the Linux
+  package too.
