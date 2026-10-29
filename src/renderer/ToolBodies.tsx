@@ -12,6 +12,7 @@ import { resolveToolOutput, trimOutputEdges } from "./chatUtils";
 import { type ToolState } from "./chatShared";
 import { CopyButton } from "./CopyButton";
 import { OutputWell } from "./OutputWell";
+import { ExternalLink, Linkified } from "./Linkified";
 
 // Renders a tool's `output` string. If it looks like a unified diff (starts
 // with `--- ` or `@@`, or has multiple `@@` headers), each line is colored
@@ -166,7 +167,7 @@ function ConnectorOutput({ body, maxLines }: { body: string; maxLines: number })
       <div className="text-text-muted">
         {visible.map((l, i) => (
           <div key={i} className="whitespace-pre-wrap break-all">
-            {l || " "}
+            {l ? <Linkified text={l} /> : " "}
           </div>
         ))}
       </div>
@@ -226,7 +227,7 @@ export function WebFetchBody({ state }: { state: ToolState }) {
         url ? (
           <div className="break-all text-text-quiet">
             <span className="select-none">→ </span>
-            <span style={{ color: "var(--accent-tx)" }}>{url}</span>
+            <ExternalLink href={url}>{url}</ExternalLink>
           </div>
         ) : null
       }
@@ -262,7 +263,7 @@ function CollapsibleLines({
       <div className="text-text-muted">
         {shown.map((l, i) => (
           <div key={i} className="whitespace-pre-wrap break-all">
-            {l || " "}
+            {l ? <Linkified text={l} /> : " "}
           </div>
         ))}
       </div>

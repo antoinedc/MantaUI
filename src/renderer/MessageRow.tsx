@@ -37,6 +37,7 @@ import { WidgetBody } from "./WidgetBody";
 import type { MediaEntry, WidgetEntry } from "./chatUtils";
 import { MantaMark } from "./MantaLoader";
 import { MessageBubble } from "./MessageBubble";
+import { Linkified } from "./Linkified";
 import { VoicePlayer } from "./VoiceNote";
 
 // ===== Active todos =====
@@ -190,7 +191,7 @@ export const ActiveTodos = memo(function ActiveTodos({
               <span
                 className={`flex-1 min-w-0 max-w-full whitespace-pre-wrap break-words ${textCls}`}
               >
-                {String(t.content ?? "")}
+                <Linkified text={String(t.content ?? "")} />
               </span>
             </div>
           );
@@ -231,7 +232,7 @@ const UserCommandBar = memo(function UserCommandBar({
       </button>
       {expanded && (
         <div className="mt-1 ml-6 pl-2 border-l border-border whitespace-pre-wrap break-words text-text-muted text-code font-mono max-w-full">
-          {expandedText}
+          <Linkified text={expandedText} />
         </div>
       )}
     </div>
@@ -453,7 +454,7 @@ export const MessageRow = memo(function MessageRow({
           commandInfo?.inline && text.startsWith(`/${commandInfo.name}`) ? (
             <MessageBubble entering={entering}>
               <span className="text-accent-tx" data-testid="user-slash-token">/{commandInfo.name}</span>
-              {text.slice(commandInfo.name.length + 1)}
+              <Linkified text={text.slice(commandInfo.name.length + 1)} />
             </MessageBubble>
           ) : commandInfo && !commandInfo.inline ? (
             <UserCommandBar
@@ -462,7 +463,9 @@ export const MessageRow = memo(function MessageRow({
               expandedText={text}
             />
           ) : (
-            <MessageBubble entering={entering}>{text}</MessageBubble>
+            <MessageBubble entering={entering}>
+              <Linkified text={text} />
+            </MessageBubble>
           )
         )}
         {/* Text-first voice note: the transcript stays fully visible; the player

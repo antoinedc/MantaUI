@@ -10,6 +10,7 @@
 // (enforced by tailwindScale.test). Controls are never stubbed: an action whose
 // dependency isn't merged is simply not rendered (no-dead-controls rule).
 import { memo, useState } from "react";
+import { Linkified } from "./Linkified";
 import {
   relativeTime,
   countdownRemaining,
@@ -206,7 +207,7 @@ export const JobLogsModal = memo(function JobLogsModal({
       >
         <h3 className="text-sm font-semibold text-text">Job logs — {name}</h3>
         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
-          {detail || "No failure detail recorded."}
+          <Linkified text={detail || "No failure detail recorded."} />
         </pre>
         <div className="mt-3 flex justify-end">
           <button
@@ -338,7 +339,7 @@ function SuggestionCard({
         </div>
         {expanded && evidence.length > 0 ? (
           <pre className="mt-1 whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
-            {evidence.join("\n")}
+            <Linkified text={evidence.join("\n")} />
           </pre>
         ) : null}
       </div>
@@ -387,7 +388,7 @@ export const ConfigConfirmModal = memo(function ConfigConfirmModal({
         <h3 className="text-sm font-semibold text-text">Apply config change?</h3>
         <p className="mt-1 text-sm text-text-muted">“{card.title}”</p>
         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
-          {diff}
+          <Linkified text={diff} />
         </pre>
         <div className="mt-3 flex justify-end gap-2">
           <button
@@ -637,7 +638,7 @@ const DigestRow = memo(function DigestRow({
         </div>
         {expanded && item.deep ? (
           <pre className="mt-1 whitespace-pre-wrap rounded-md bg-fill-active p-2 text-xs text-text-muted">
-            {item.deep}
+            <Linkified text={item.deep} />
           </pre>
         ) : null}
       </div>
