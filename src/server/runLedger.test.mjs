@@ -255,3 +255,61 @@ const enqueueUserOn = (ledger, sid) => {
   ledger.onEnqueued(`u-${sid}`, { type: "user", id: `u-${sid}`, payload: { text: "go" } });
   ledger.onDelivered(sid, `u-${sid}`, `u-${sid}`);
 };
+
+// ---- final review S-A / S-B ----
+
+test("S-A — after an eviction a continued run's revisions stay ABOVE what clients already hold (seq floor beside the gen floor)", async () => {
+  const canonical = [user("u1"), asst("a1", tool("A", "a1"), tool("B", "a1")), asst("a2", tool("C", "a2", { status: "running" }))];
+  const { ledger, frames, advance, setClock, clock } = rig({ rebuildFromCanonical: async () => canonical, graceMs: 1000 });
+  enqueueUser(ledger, "u1");
+  for (let i = 0; i < 8; i++) ledger.onTool("s1", tool("A", "a1", { status: i % 2 ? "completed" : "running" })); // the run's seq climbs
+  ledger.onTool("s1", tool("B", "a1"));
+  await advance(200);
+  const held = frames[frames.length - 1].runs.find((r) => r.id === "A").rev.seq;
+  assert.ok(held >= 8, `clients hold seq ${held}`);
+  ledger.onTurnComplete("s1", true);
+  setClock(clock + 5000);
+  ledger.snapshotFrames();
+  assert.equal(ledger._state("s1"), undefined, "evicted");
+  // a background-job completion continues the same run in a fresh ledger (seeded from history)
+  ledger.onTool("s1", tool("C", "a2", { status: "running" }));
+  await advance(300);
+  const run = ledger._state("s1").walker.runs.get("A");
+  assert.ok(run, "the seed kept the run's true id");
+  assert.ok(run.seq > held, `the continued run's seq ${run.seq} is above the held ${held}`);
+  const last = frames.filter((f) => f.runs?.some((r) => r.id === "A")).pop();
+  assert.ok(last.runs.find((r) => r.id === "A").rev.seq > held, "…and so is the emitted revision");
+});
+
+test("S-B — a turn that ends while a seed read is in flight still settles after the replay: evictable and out of the snapshot", async () => {
+  let readDone;
+  const { ledger, advance, setClock, clock } = rig({ rebuildFromCanonical: () => new Promise((r) => (readDone = r)), graceMs: 1000 });
+  ledger.onTool("s1", tool("A", "a1", { status: "running" })); // a fresh ledger's first run event → seed hold
+  assert.ok(ledger._state("s1").hold);
+  ledger.onTurnComplete("s1", true); // the turn ended during the read
+  readDone([user("u1"), asst("a1", tool("A", "a1"))]);
+  await advance(10);
+  assert.equal(ledger._state("s1").hold, null);
+  assert.deepEqual(ledger.snapshotFrames(), [], "a finished turn is excluded from the connect snapshot");
+  setClock(clock + 5000);
+  ledger.snapshotFrames();
+  assert.equal(ledger._state("s1"), undefined, "…and evicted after the grace");
+});
+
+test("S-B — a turn that ends while a classification is pending still settles once the buffered events replay", async () => {
+  let late;
+  const { ledger, advance, setClock, clock } = rig({ classifyDelivered: () => new Promise((r) => (late = r)), graceMs: 1000 });
+  enqueueUser(ledger, "u1");
+  ledger.onTool("s1", tool("A", "a1"));
+  ledger.onDelivered("s1", "u2", "u2");
+  ledger.onTool("s1", tool("B", "a2")); // buffered behind the classification
+  ledger.onTurnComplete("s1", true);
+  late("draws");
+  await advance(10);
+  assert.equal(ledger._state("s1").pending, null);
+  assert.ok(ledger.ledgerFor("s1").runOfPart("B"), "the buffered event was applied");
+  assert.deepEqual(ledger.snapshotFrames(), []);
+  setClock(clock + 5000);
+  ledger.snapshotFrames();
+  assert.equal(ledger._state("s1"), undefined);
+});

@@ -83,6 +83,15 @@ export function createRunLedger({
     genFloor.set(sid, gen);
     if (genFloor.size > 2000) genFloor.delete(genFloor.keys().next().value);
   };
+  /** sid -> the highest run revision `seq` an evicted ledger reached: a fresh ledger for a continued run counts on from it, so
+   * its revisions are never below what clients already hold at the same `gen`. */
+  const seqFloor = new Map();
+  const rememberSeq = (sid, seq) => {
+    if (seq <= 0) return;
+    seqFloor.delete(sid);
+    seqFloor.set(sid, seq);
+    if (seqFloor.size > 2000) seqFloor.delete(seqFloor.keys().next().value);
+  };
   /** inboxID -> { cls, reset } recorded at enqueue time. */
   const deliveryClass = new Map();
 
@@ -112,7 +121,7 @@ export function createRunLedger({
     let L = sessions.get(sid);
     if (!L) {
       sweep();
-      sessions.set(sid, (L = newState(sid, createRunWalker(0), genFloor.get(sid) ?? 1)));
+      sessions.set(sid, (L = newState(sid, createRunWalker(seqFloor.get(sid) ?? 0), genFloor.get(sid) ?? 1)));
     }
     return L;
   };
@@ -124,6 +133,7 @@ export function createRunLedger({
   function evict(L) {
     if (L.timer != null) clearTimer(L.timer);
     rememberGen(L.sid, L.gen);
+    rememberSeq(L.sid, L.walker.seq);
     sessions.delete(L.sid);
   }
   function sweep() {
@@ -259,8 +269,13 @@ export function createRunLedger({
   // Items that can only be placed correctly against history: a turn already running when this ledger began (a restart, an
   // eviction) has its run begun in a message the ledger never saw.
   const seedable = (item) => item.k === "tool" || ((item.k === "text" || item.k === "reasoning") && hasText(item.text));
+  /** An event ARRIVED: the ledger is live again, then it is placed (or buffered). */
   function handle(L, item) {
     L.completedAt = null;
+    route(L, item);
+  }
+  /** Place or buffer an event WITHOUT touching `completedAt`: a replayed event arrived earlier, and the turn may have ended since. */
+  function route(L, item) {
     if (L.hold) {
       L.hold.buffer.push(item);
       if (L.hold.buffer.length >= bufferCap) {
@@ -288,7 +303,7 @@ export function createRunLedger({
     applyItem(L, item);
   }
   function replay(L, buffer) {
-    for (const item of buffer) handle(L, item);
+    for (const item of buffer) route(L, item);
   }
   function settle(L, token, result, provisional) {
     const p = L.pending;
@@ -510,6 +525,7 @@ export function createRunLedger({
       if (L?.pending?.timer != null) clearTimer(L.pending.timer);
       sessions.delete(sid);
       genFloor.delete(sid);
+      seqFloor.delete(sid);
     },
     /** `full:true` frames for every session with a non-empty, unsettled ledger (the connect snapshot). */
     snapshotFrames() {
