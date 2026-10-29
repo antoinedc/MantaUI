@@ -25,6 +25,19 @@ const listeners = new Set<() => void>();
 const EMPTY = emptyRunMap();
 /** Run ids of the turn in progress, from the latest `toolRuns` frames: a prune after a full fetch never drops them. */
 const liveIds = new Map<string, Set<string>>();
+/** Sessions whose last answer was stale and already earned its one re-read: a second stale answer in a row asks for nothing. */
+const staleRetried = new Set<string>();
+
+/** "Stale answer, fetch again" runs ONCE per streak of stale answers (mirrors iOS `staleMembershipRefetched`): a box that keeps stamping an old membership must not loop the refetch. */
+function staleOnce(sessionId: string, stale: boolean, onStale?: () => void): void {
+  if (!stale) {
+    staleRetried.delete(sessionId);
+    return;
+  }
+  if (staleRetried.has(sessionId)) return;
+  staleRetried.add(sessionId);
+  onStale?.();
+}
 
 const notify = () => {
   for (const l of listeners) l();
@@ -120,6 +133,7 @@ export function ingestRunFrame(sessionId: string, frame: StreamToolRunsPayload):
 
 export function forgetRunSession(sessionId: string): void {
   liveIds.delete(sessionId);
+  staleRetried.delete(sessionId);
   if (maps.delete(sessionId)) notify();
 }
 
@@ -127,6 +141,7 @@ export function forgetRunSession(sessionId: string): void {
 export function resetRunEpochState(): void {
   maps.clear();
   liveIds.clear();
+  staleRetried.clear();
   notify();
 }
 
@@ -143,7 +158,7 @@ export async function opencodeMessagesTracked(
   const messages = await window.api.opencodeMessages(sessionId, opts);
   const stale = ingestRunMessages(sessionId, messages, issued);
   pruneAfterFullFetch(sessionId, messages, issued);
-  if (stale) onStale?.();
+  staleOnce(sessionId, stale, onStale);
   return messages;
 }
 
@@ -156,6 +171,6 @@ export async function opencodeMessageTracked(
 ): Promise<OpencodeMessage | null> {
   const issued = conn().connGen;
   const message = await window.api.opencodeMessage(sessionId, messageId, opts);
-  if (message && ingestRunMessages(sessionId, [message], issued)) onStale?.();
+  if (message) staleOnce(sessionId, ingestRunMessages(sessionId, [message], issued), onStale);
   return message;
 }

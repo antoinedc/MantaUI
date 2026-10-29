@@ -161,6 +161,29 @@ describe("same-epoch reconnect + pruning (review S3)", () => {
     vi.unstubAllGlobals();
   });
 
+  it("a stale answer asks for ONE re-read; a second stale answer in a row asks for nothing; a current answer re-arms it", async () => {
+    onRunConnection();
+    onRunEpoch("E1");
+    ingestRunMessages("s", [msgWith(run("A", "a", { gen: 2 }))], 1); // minGen 2
+    const stalePart = { id: "p1", type: "tool", view: { gen: 1, runId: "A" } };
+    const staleMsg = { info: { id: "m1", sessionID: "s", role: "assistant" }, parts: [stalePart], view: { runs: [] } } as unknown as OpencodeMessage;
+    const currentMsg = { info: { id: "m1", sessionID: "s", role: "assistant" }, parts: [{ ...stalePart, view: { gen: 2, runId: "A" } }], view: { runs: [] } } as unknown as OpencodeMessage;
+    let answer: OpencodeMessage[] = [staleMsg];
+    vi.stubGlobal("window", { api: { opencodeMessages: async () => answer } });
+    const onStale = vi.fn();
+    await opencodeMessagesTracked("s", { view: true }, onStale);
+    expect(onStale).toHaveBeenCalledTimes(1);
+    await opencodeMessagesTracked("s", { view: true }, onStale);
+    await opencodeMessagesTracked("s", { view: true }, onStale);
+    expect(onStale).toHaveBeenCalledTimes(1);
+    answer = [currentMsg];
+    await opencodeMessagesTracked("s", { view: true }, onStale);
+    answer = [staleMsg];
+    await opencodeMessagesTracked("s", { view: true }, onStale);
+    expect(onStale).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
   it("forgetRunSession drops the session's map", () => {
     onRunConnection();
     onRunEpoch("E1");

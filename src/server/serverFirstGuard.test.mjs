@@ -179,6 +179,19 @@ test("every rule names scopes that exist and a reason", () => {
   }
 });
 
+/** Every module specifier a source imports or re-exports from — including imports whose names span several lines. */
+export function importSpecifiers(src) {
+  const out = [];
+  const patterns = [
+    /\bimport\s+(?:type\s+)?[\w$*{}\s,]+?\s+from\s*["']([^"']+)["']/g,
+    /\bexport\s+(?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s*from\s*["']([^"']+)["']/g,
+    /\bimport\s*["']([^"']+)["']/g,
+    /\bimport\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const re of patterns) for (const m of src.matchAll(re)) out.push(m[1]);
+  return out;
+}
+
 // The desktop's demo box runs the REAL transcript view (one source of truth, no client copy), so its whole import closure is
 // bundled into the renderer: it must stay browser-safe. A Node-only import (media.mjs → node:fs, outbox → os) breaks the
 // production build; this fails first, naming the file.
@@ -189,8 +202,7 @@ test("src/server/transcriptView.mjs imports nothing Node-only, directly or trans
     if (seen.has(file)) return;
     seen.add(file);
     const src = readFileSync(file, "utf8");
-    for (const m of src.matchAll(/(?:^|\n)\s*(?:import|export)[^;\n]*?from\s+"([^"]+)"/g)) {
-      const spec = m[1];
+    for (const spec of importSpecifiers(src)) {
       if (!spec.startsWith(".")) {
         offenders.push(`${relative(ROOT, file)} imports "${spec}"`);
         continue;
@@ -209,4 +221,43 @@ test("src/server/transcriptView.mjs imports nothing Node-only, directly or trans
   walk(join(ROOT, "src/server/transcriptView.mjs"));
   assert.deepEqual(offenders, []);
   for (const f of seen) assert.match(relative(ROOT, f), /^src\/(shared\/|server\/(transcriptView|transcriptRuns)\.mjs$)/, `unexpected module in the demo bundle: ${f}`);
+});
+
+test("importSpecifiers sees imports whose names span several lines (self-test)", () => {
+  const src = 'import {\n  a,\n  b as c,\n} from "node:fs";\nexport {\n  x,\n} from "./y.mjs";\nimport z from "./z.mjs";\nimport "side";\nconst q = await import("./dyn.mjs");\n';
+  assert.deepEqual(importSpecifiers(src).sort(), ["./dyn.mjs", "./y.mjs", "./z.mjs", "node:fs", "side"]);
+});
+
+// Only the demo transport may bring the box's run/view derivation into the renderer. Any other renderer file importing it would
+// re-derive transcript views on the client — exactly what WS11 deleted.
+const DEMO_TRANSPORT = "src/renderer/api/demoApi.ts";
+// …and the TEST-ONLY fixture stamper (imported by *.test.* files alone, never by the app).
+const TEST_ONLY_STAMPER = "src/renderer/testRunViews.ts";
+const TRANSCRIPT_MODULE = /(?:^|\/)server\/transcript(?:View|Runs)(?:\.mjs)?$/;
+export function findTranscriptImportViolations(files) {
+  const out = [];
+  for (const { path, text } of files) {
+    if (path === DEMO_TRANSPORT || path === TEST_ONLY_STAMPER) continue;
+    for (const spec of importSpecifiers(text)) if (TRANSCRIPT_MODULE.test(spec)) out.push(`${path} imports "${spec}"`);
+  }
+  return out;
+}
+
+test("only the demo transport imports the box's transcript modules in src/renderer", () => {
+  const files = loadFiles().filter((f) => f.scope === "renderer");
+  assert.ok(files.some((f) => f.path === DEMO_TRANSPORT), "the demo transport exists");
+  assert.deepEqual(findTranscriptImportViolations(files), []);
+  // the exemption is only honest while nothing but tests imports the stamper
+  const users = files.filter((f) => f.path !== TEST_ONLY_STAMPER && importSpecifiers(f.text).some((s) => /(?:^|\/)testRunViews$/.test(s))).map((f) => f.path);
+  assert.deepEqual(users, [], "testRunViews is imported by test files only");
+});
+
+test("the transcript-import rule flags any other renderer file, multi-line imports included (self-test)", () => {
+  const bad = [{ path: "src/renderer/ChatPanel.tsx", text: 'import {\n  annotateView,\n} from "../server/transcriptView.mjs";\n' }];
+  assert.equal(findTranscriptImportViolations(bad).length, 1);
+  const ok = [
+    { path: DEMO_TRANSPORT, text: 'import { annotateView } from "../../server/transcriptView.mjs";' },
+    { path: "src/renderer/Other.tsx", text: 'import { x } from "../shared/transcriptViewTypes";' },
+  ];
+  assert.deepEqual(findTranscriptImportViolations(ok), []);
 });
