@@ -27,15 +27,18 @@ struct SessionClosePreview: Decodable, Equatable, Sendable {
     var body: String
     var confirmLabel: String
     var runningCount: Int = 0
+    /// The worktree sentence alone ("Its worktree at X will be removed."); nil when nothing will be removed.
+    var worktreeLine: String? = nil
     var worktrees: [Worktree] = []
 
-    private enum CodingKeys: String, CodingKey { case title, body, confirmLabel, runningCount, worktrees }
+    private enum CodingKeys: String, CodingKey { case title, body, confirmLabel, runningCount, worktreeLine, worktrees }
 
-    init(title: String, body: String, confirmLabel: String, runningCount: Int = 0, worktrees: [Worktree] = []) {
+    init(title: String, body: String, confirmLabel: String, runningCount: Int = 0, worktreeLine: String? = nil, worktrees: [Worktree] = []) {
         self.title = title
         self.body = body
         self.confirmLabel = confirmLabel
         self.runningCount = runningCount
+        self.worktreeLine = worktreeLine
         self.worktrees = worktrees
     }
 
@@ -45,6 +48,7 @@ struct SessionClosePreview: Decodable, Equatable, Sendable {
         body = try c.decode(String.self, forKey: .body)
         confirmLabel = try c.decode(String.self, forKey: .confirmLabel)
         runningCount = ((try? c.decodeIfPresent(Int.self, forKey: .runningCount)) ?? nil) ?? 0
+        worktreeLine = (try? c.decodeIfPresent(String.self, forKey: .worktreeLine)) ?? nil
         worktrees = ((try? c.decodeIfPresent([Worktree].self, forKey: .worktrees)) ?? nil) ?? []
     }
 
@@ -130,10 +134,36 @@ enum SessionWorktreeAnswer: Equatable, Sendable {
 }
 
 /// One session close waiting in (or running through) the store's FIFO queue.
+/// The window the user confirmed, taken from its row: a window index can be re-used by ANOTHER window between the
+/// confirm and the call, so the box refuses the close when the index no longer names this one.
+struct SessionCloseExpect: Equatable, Sendable {
+    var opencodeSessionId: String?
+    var worktreePath: String?
+
+    init(opencodeSessionId: String?, worktreePath: String?) {
+        self.opencodeSessionId = (opencodeSessionId?.isEmpty == false) ? opencodeSessionId : nil
+        self.worktreePath = (worktreePath?.isEmpty == false) ? worktreePath : nil
+    }
+
+    init(window: MantaWindow?) {
+        self.init(opencodeSessionId: window?.opencodeSessionId, worktreePath: window?.worktreePath)
+    }
+
+    /// The JSON the box reads: both keys always present (null = "this window has none").
+    var wire: [String: Any] {
+        [
+            "opencodeSessionId": opencodeSessionId.map { $0 as Any } ?? NSNull(),
+            "worktreePath": worktreePath.map { $0 as Any } ?? NSNull(),
+        ]
+    }
+}
+
 struct SessionCloseRequest: Equatable, Sendable {
     var project: String
     var index: Int
     var decision: SessionCloseChoice = .none
+    /// The window as the user saw it when they confirmed (nil only from a caller with no row to read).
+    var expect: SessionCloseExpect? = nil
 
     var key: String { "\(project)#\(index)" }
 }
@@ -148,6 +178,14 @@ struct SessionWorktreePrompt: Equatable, Sendable, Identifiable {
     var worktreePath: String
     /// The box's question (title, body, button labels).
     var ask: SessionCloseAsk
+    /// The window the original close was bound to; the answer is sent back with `worktreePath` = the shown path.
+    var expect: SessionCloseExpect? = nil
+
+    /// What the answer is bound to: the original window, with the worktree path that was SHOWN (the box force-removes
+    /// only that one).
+    var shownExpect: SessionCloseExpect {
+        SessionCloseExpect(opencodeSessionId: expect?.opencodeSessionId, worktreePath: ask.path)
+    }
 
     var id: String { key }
 }

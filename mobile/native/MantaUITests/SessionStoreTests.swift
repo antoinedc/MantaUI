@@ -30,6 +30,7 @@ final class SessionListFake: SessionListMutationAPI {
         var windowIndex: Int?
         var dirty: String?
         var deleteConversation: Bool
+        var expect: SessionCloseExpect? = nil
         var key: String { windowIndex.map { "\(project)#\($0)" } ?? project }
     }
     var closeCalls: [CloseCall] = []
@@ -88,9 +89,9 @@ final class SessionListFake: SessionListMutationAPI {
         return previews[key] ?? SessionClosePreview(title: "Close “\(project)”?", body: "Its tmux session will be killed on the server.", confirmLabel: "Close project")
     }
 
-    func close(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool) async throws -> SessionCloseResult {
+    func close(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool, expect: SessionCloseExpect?) async throws -> SessionCloseResult {
         await enter()
-        let call = CloseCall(project: project, windowIndex: windowIndex, dirty: dirtyWorktree, deleteConversation: deleteConversation)
+        let call = CloseCall(project: project, windowIndex: windowIndex, dirty: dirtyWorktree, deleteConversation: deleteConversation, expect: expect)
         closeEntered.append(call.key)
         if heldCloses.contains(call.key) {
             await withCheckedContinuation { gates[call.key] = $0 }
@@ -328,6 +329,48 @@ final class SessionStoreTests: XCTestCase {
         await store.waitForCloseQueue()
 
         XCTAssertEqual(fake.closeCalls.map(\.deleteConversation), [true, false])
+    }
+
+    func testTheCloseIsBoundToTheWindowTheUserConfirmedNotWhateverTheIndexNamesLater() async {
+        let fake = SessionListFake()
+        let store = makeStore(fake)
+        store.applyProjects([project("p", [window(0, sid: "ses_mine", worktree: "/wt/mine")])])
+        store.beginIdleDelete(session: "p", index: 0)
+        // Another device closed it and a DIFFERENT window now sits at index 0 before the undo window ends.
+        store.applyProjects([project("p", [window(0, sid: "ses_other", worktree: "/wt/other")])])
+
+        expire(store)
+        await store.waitForCloseQueue()
+
+        let call = try? XCTUnwrap(fake.closeCalls.first)
+        XCTAssertEqual(call?.expect, SessionCloseExpect(opencodeSessionId: "ses_mine", worktreePath: "/wt/mine"))
+        XCTAssertEqual(call?.deleteConversation, true, "decided from the confirmed window, which the box then verifies")
+    }
+
+    func testTheAnswerToADirtyWorktreeNamesThePathThatWasShown() async {
+        let fake = SessionListFake()
+        fake.closeResults["p#0"] = [.success(ask("/wt/0")), .success(SessionCloseResult(ok: true, removed: ["/wt/0"]))]
+        let store = makeStore(fake)
+        store.applyProjects([project("p", [window(0, sid: "ses_a", worktree: "/wt/0")])])
+        store.beginIdleDelete(session: "p", index: 0)
+        expire(store)
+        await store.waitForCloseQueue()
+
+        store.resolveWorktreePrompt(key: "p#0", decision: .remove)
+        await store.waitForCloseQueue()
+
+        XCTAssertEqual(fake.closeCalls.map(\.dirty), [nil, "remove"])
+        XCTAssertEqual(fake.closeCalls.last?.expect, SessionCloseExpect(opencodeSessionId: "ses_a", worktreePath: "/wt/0"))
+    }
+
+    func testARefusalSentenceIsShownAsTheBoxWordedIt() async {
+        let fake = SessionListFake()
+        fake.closeResults["p#0"] = [.success(SessionCloseResult(ok: false, error: "That session changed — refresh and try again."))]
+        let store = makeStore(fake)
+        store.applyProjects([project("p", [window(0)])])
+        store.enqueueClose(project: "p", index: 0)
+        await store.waitForCloseQueue()
+        XCTAssertEqual(store.closeFeedback.map(\.kind), [.failed("That session changed — refresh and try again.")])
     }
 
     func testCancelPromptRestoresRowWithoutRPC() async {

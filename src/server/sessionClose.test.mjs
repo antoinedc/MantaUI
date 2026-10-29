@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { previewClose, closeSession, METADATA_WARNING, CLOSE_FAILED } from "./sessionClose.mjs";
+import { previewClose, closeSession, METADATA_WARNING, CLOSE_FAILED, SESSION_CHANGED, CONVERSATION_WARNING } from "./sessionClose.mjs";
 
 const win = (index, name, over = {}) => ({ index, name, ...over });
 const projects = [
@@ -12,11 +12,12 @@ const running = (set) => (w, p) => set.has(`${p}:${w.index}`);
 
 test("preview: a single window — copy, running and worktree outcomes", () => {
   assert.deepEqual(previewClose({ project: "p", windowIndex: 0, projects, cleanOnClose: true, isRunning: running(new Set()) }), {
-    title: "Close “a”?", body: "Its tmux window will be killed on the server.", confirmLabel: "Close session", runningCount: 0, worktrees: [],
+    title: "Close “a”?", body: "Its tmux window will be killed on the server.", confirmLabel: "Close session", runningCount: 0, worktreeLine: null, worktrees: [],
   });
   const r = previewClose({ project: "p", windowIndex: 1, projects, cleanOnClose: true, isRunning: running(new Set(["p:1"])) });
   assert.equal(r.body, "Its tmux window will be killed on the server. A turn is currently running and will be stopped. Its worktree at /wt/b will be removed.");
   assert.deepEqual(r.worktrees, [{ path: "/wt/b", willRemove: true }]);
+  assert.equal(r.worktreeLine, "Its worktree at /wt/b will be removed.", "the worktree sentence on its own (iOS shows it inside its own running-turn confirm)");
   const off = previewClose({ project: "p", windowIndex: 1, projects, cleanOnClose: false, isRunning: running(new Set()) });
   assert.doesNotMatch(off.body, /worktree at/);
   assert.deepEqual(off.worktrees, [{ path: "/wt/b", willRemove: false }]);
@@ -24,7 +25,7 @@ test("preview: a single window — copy, running and worktree outcomes", () => {
 
 test("preview: a project — 0 / 1 / N sessions, running counts, a shared worktree counted once", () => {
   assert.deepEqual(previewClose({ project: "empty", projects, cleanOnClose: true, isRunning: running(new Set()) }), {
-    title: "Close “empty”?", body: "Its tmux session will be killed on the server.", confirmLabel: "Close project", runningCount: 0, worktrees: [],
+    title: "Close “empty”?", body: "Its tmux session will be killed on the server.", confirmLabel: "Close project", runningCount: 0, worktreeLine: null, worktrees: [],
   });
   const one = previewClose({ project: "one", projects, cleanOnClose: true, isRunning: running(new Set(["one:0"])) });
   assert.equal(one.title, "Close “one” and its 1 session?");
@@ -73,7 +74,7 @@ test("close window: a dirty worktree asks first and kills NOTHING", async () => 
 
 test("close window: dirtyWorktree 'remove' forces; 'keep' leaves it with today's notice", async () => {
   const f1 = fakes();
-  const forced = await closeSession({ project: "p", windowIndex: 1, dirtyWorktree: "remove" }, f1.d);
+  const forced = await closeSession({ project: "p", windowIndex: 1, dirtyWorktree: "remove", expect: { opencodeSessionId: null, worktreePath: "/wt/b" } }, f1.d);
   assert.deepEqual(f1.calls[0][1], { path: "/wt/b", force: true });
   assert.deepEqual(forced.removed, ["/wt/b"]);
   const f2 = fakes();
@@ -125,7 +126,67 @@ test("project metadata that cannot be cleared: ok:true plus the metadata warning
 test("a tmux failure is a sentence, not the raw error", async () => {
   const f = fakes({ killWindow: async () => { throw new Error("tmux: raw /home/x"); } });
   const r = await closeSession({ project: "p", windowIndex: 0 }, f.d);
-  assert.deepEqual(r, { ok: false, error: CLOSE_FAILED });
+  assert.deepEqual(r, { ok: false, error: CLOSE_FAILED, removed: [], kept: [], failed: [], warnings: [] });
+  assert.doesNotMatch(JSON.stringify(r), /raw|\/home\/x/);
+});
+
+test("a kill that fails AFTER the worktree was removed says so, with the lists", async () => {
+  const f = fakes({ killWindow: async () => { throw new Error("boom"); } });
+  const r = await closeSession({ project: "p", windowIndex: 1 }, f.d);
+  assert.equal(r.ok, false);
+  assert.equal(r.error, `${CLOSE_FAILED} Its worktree at /wt/b was already removed.`);
+  assert.deepEqual(r.removed, ["/wt/b"]);
+  const many = [{ tmuxSession: "m", windows: [win(0, "a", { worktreePath: "/1" }), win(1, "b", { worktreePath: "/2" })] }];
+  const g = fakes({ listProjects: async () => many, killSession: async () => { throw new Error("boom"); } });
+  assert.equal((await closeSession({ project: "m" }, g.d)).error, `${CLOSE_FAILED} 2 worktrees were already removed.`);
+});
+
+test("expect: an index re-used by ANOTHER window is refused and nothing is touched (no removal, no delete, no kill)", async () => {
+  const reused = [{ tmuxSession: "c", windows: [win(0, "other", { opencodeSessionId: "ses_other", worktreePath: "/wt/other" })] }];
+  const order = [];
+  const f = fakes({
+    listProjects: async () => reused,
+    removeWorktree: async (a) => (order.push(["remove", a]), { removed: true }),
+    deleteConversation: async (sid) => order.push(["delete", sid]),
+    killWindow: async () => order.push(["kill"]),
+  });
+  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_mine", worktreePath: "/wt/mine" } }, f.d);
+  assert.deepEqual(r, { ok: false, error: SESSION_CHANGED });
+  assert.deepEqual(order, []);
+  // The window is gone altogether → also refused.
+  const gone = fakes({ listProjects: async () => [{ tmuxSession: "c", windows: [] }] });
+  assert.deepEqual(await closeSession({ project: "c", windowIndex: 0, expect: { opencodeSessionId: null } }, gone.d), { ok: false, error: SESSION_CHANGED });
+  // A matching call behaves as before.
+  const same = [{ tmuxSession: "c", windows: [win(0, "mine", { opencodeSessionId: "ses_mine", worktreePath: "/wt/mine" })] }];
+  const ok = fakes({ listProjects: async () => same, deleteConversation: async (sid) => order.push(["delete", sid]) });
+  const done = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_mine", worktreePath: "/wt/mine" } }, ok.d);
+  assert.equal(done.ok, true);
+  assert.deepEqual(order, [["delete", "ses_mine"]]);
+});
+
+test("expect: a forced removal needs the path that was SHOWN; otherwise it never forces and asks again", async () => {
+  const live = [{ tmuxSession: "c", windows: [win(0, "w", { worktreePath: "/wt/q" })] }];
+  const attempts = [];
+  const f = fakes({ listProjects: async () => live, removeWorktree: async (a) => (attempts.push(a), { removed: false, reason: "dirty" }) });
+  // 'remove' for a path that is not the window's current one: the identity check refuses it first.
+  const stale = await closeSession({ project: "c", windowIndex: 0, dirtyWorktree: "remove", expect: { worktreePath: "/wt/p" } }, f.d);
+  assert.deepEqual(stale, { ok: false, error: SESSION_CHANGED });
+  assert.deepEqual(attempts, [], "no git call at all");
+  // 'remove' with no expect never forces: a fresh question.
+  const bare = await closeSession({ project: "c", windowIndex: 0, dirtyWorktree: "remove" }, f.d);
+  assert.equal(bare.needsConfirm?.path, "/wt/q");
+  assert.deepEqual(attempts, [{ path: "/wt/q", force: false }]);
+});
+
+test("a window moved to a different index between preview and confirm: the expect check protects the conversation", async () => {
+  const before = [{ tmuxSession: "c", windows: [win(0, "a", { opencodeSessionId: "ses_a" }), win(1, "b", { opencodeSessionId: "ses_b" })] }];
+  const after = [{ tmuxSession: "c", windows: [win(0, "b", { opencodeSessionId: "ses_b" })] }]; // a closed elsewhere; renumbered
+  const deleted = [];
+  const f = fakes({ listProjects: async () => after, deleteConversation: async (sid) => deleted.push(sid) });
+  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_a", worktreePath: null } }, f.d);
+  assert.equal(r.error, SESSION_CHANGED);
+  assert.deepEqual(deleted, [], "ses_b was never offered for deletion");
+  void before;
 });
 
 test("worktreeCleanOnClose off: no git calls at all, nothing listed", async () => {
@@ -135,7 +196,7 @@ test("worktreeCleanOnClose off: no git calls at all, nothing listed", async () =
   assert.deepEqual([r.removed, r.kept, r.failed], [[], [], []]);
 });
 
-test("deleteConversation (iOS delete) removes the window's opencode conversation before the kill; a failure is the close sentence", async () => {
+test("deleteConversation (iOS delete): the window is killed FIRST, then its conversation is deleted", async () => {
   const chat = [{ tmuxSession: "c", windows: [win(0, "chat", { opencodeSessionId: "ses_1" })] }];
   const order = [];
   const f = fakes({
@@ -145,10 +206,20 @@ test("deleteConversation (iOS delete) removes the window's opencode conversation
   });
   const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, f.d);
   assert.equal(r.ok, true);
-  assert.deepEqual(order, ["delete:ses_1", "kill"]);
+  assert.deepEqual(order, ["kill", "delete:ses_1"]);
   const plain = fakes({ listProjects: async () => chat, deleteConversation: async () => order.push("never") });
   await closeSession({ project: "c", windowIndex: 0 }, plain.d);
   assert.ok(!order.includes("never"), "without the flag the conversation is kept (desktop close)");
+});
+
+test("a conversation that cannot be deleted AFTER the kill is a warning (ok:true); an already-gone one (404) is silent", async () => {
+  const chat = [{ tmuxSession: "c", windows: [win(0, "chat", { opencodeSessionId: "ses_1" })] }];
   const bad = fakes({ listProjects: async () => chat, deleteConversation: async () => { throw new Error("boom"); } });
-  assert.deepEqual(await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, bad.d), { ok: false, error: CLOSE_FAILED });
+  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, bad.d);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.warnings, [CONVERSATION_WARNING]);
+  assert.ok(bad.calls.some((c) => c[0] === "killWindow"), "the window was killed regardless");
+  const gone = fakes({ listProjects: async () => chat, deleteConversation: async () => { throw Object.assign(new Error("Not Found"), { status: 404 }); } });
+  const r2 = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, gone.d);
+  assert.deepEqual(r2.warnings, []);
 });

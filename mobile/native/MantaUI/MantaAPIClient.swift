@@ -251,17 +251,6 @@ final class MantaAPIClient: Sendable {
         return try await callRequired("tmux:new-window", args: [dict], as: TmuxCreateResult.self).projects
     }
 
-    /// `opencode:delete-session` — delete a chat session AND its tmux window
-    /// (the desktop path). Used when the row has an opencode session id.
-    func deleteSession(sessionId: String, sessionName: String, windowIndex: Int) async throws {
-        let dict: [String: Any] = [
-            "sessionId": sessionId,
-            "sessionName": sessionName,
-            "windowIndex": windowIndex,
-        ]
-        _ = try await callVoid("opencode:delete-session", args: [dict])
-    }
-
     /// `opencode:fork-session` — fork a chat session into a new window (§7.2
     /// long-press Fork, and the chat overflow sheet). `messageID` is optional
     /// (fork at head when absent). Returns the NEW session id so the caller

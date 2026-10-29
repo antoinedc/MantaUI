@@ -801,6 +801,8 @@ struct PendingDelete: Equatable, Sendable {
     var pinID: String
     /// When the 5s undo window started; `expired(now:)` decides the commit.
     var startedAt: Date
+    /// The window as it was when the user tapped delete: the close is bound to it, not to whatever the index names later.
+    var expect: SessionCloseExpect? = nil
 
     /// The §7.3 undo window length.
     static let undoWindow: TimeInterval = 5

@@ -1253,6 +1253,7 @@ const sessionStatus = createSessionStatus({
   loadStopped: async () => new Set(((await listStopped()).records ?? []).map((r) => r.conversation)),
   listActiveSessionIds: () => oc.listActiveSessionIds(),
   getSessionParent: (id) => oc.getSessionParent(id),
+  runningSince: (id) => streamInterp.getState(id)?.runningSince ?? null,
   // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
   onJobsChanged: () => syncState.refreshNow(),
 });

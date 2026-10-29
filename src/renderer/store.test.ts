@@ -142,14 +142,17 @@ describe("setChatRunning / setChatAttention", () => {
       expect(useStore.getState().status.manta[0].running).toBe(false);
     });
 
-    it("setWindowStatus stores the box's rollup, ignores an identical frame; replaceWindowStatus replaces wholesale", () => {
+    it("setWindowStatus stores the box's rollup and ignores an identical frame; fillWindowStatus never overwrites a frame", () => {
       const p = { running: false, busy: true, startedAt: null, attention: null, subagents: 1, stopped: false };
       useStore.getState().setWindowStatus("ses_chat", p);
       const first = useStore.getState().windowStatusBySession;
       useStore.getState().setWindowStatus("ses_chat", { ...p });
       expect(useStore.getState().windowStatusBySession).toBe(first);
-      useStore.getState().replaceWindowStatus({ other: p });
-      expect(useStore.getState().windowStatusBySession).toEqual({ other: p });
+      // A read fills only what no frame has covered: it never overwrites a (newer) frame's entry.
+      const newer = { ...p, busy: false, subagents: 0 };
+      useStore.getState().setWindowStatus("ses_chat", newer);
+      useStore.getState().fillWindowStatus({ ses_chat: p, other: p });
+      expect(useStore.getState().windowStatusBySession).toEqual({ ses_chat: newer, other: p });
     });
   });
 

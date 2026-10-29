@@ -540,6 +540,8 @@ export type SessionClosePreview = {
   body: string;
   confirmLabel: string;
   runningCount: number;
+  /** The worktree sentence alone ("Its worktree at X will be removed."), null when nothing will be removed. */
+  worktreeLine?: string | null;
   worktrees: { path: string; willRemove: boolean }[];
 };
 
@@ -550,7 +552,7 @@ export type SessionCloseResult =
       ok: false;
       needsConfirm: { kind: "worktree-dirty"; path: string; title: string; body: string; removeLabel: string; keepLabel: string };
     }
-  | { ok: false; error: string };
+  | { ok: false; error: string; removed?: string[]; kept?: string[]; failed?: { path: string; message: string }[]; warnings?: string[] };
 
 // ----- Forge clone flow (BET-796) -----
 
@@ -1685,7 +1687,6 @@ export const IPC = {
   opencodeListSessions: "opencode:list-sessions",
   opencodeForkSession: "opencode:fork-session",     // returns new sessionId
   opencodeCompactSession: "opencode:compact-session",
-  opencodeDeleteSession: "opencode:delete-session",
   // BET-949: read a single session's `agent` field (GET /session/{id}) so the
   // plan-mode toggle can seed from a session already set to plan outside
   // MantaUI, before the honesty sync's first event. Returns the agent name or

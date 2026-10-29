@@ -457,7 +457,7 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     keyOnTree("Backspace", { metaKey: true });
   }
   const buttonNamed = (label: string) =>
-    [...(h!.docQuery('div[role="dialog"]') as HTMLElement).querySelectorAll("button")].find((b) => b.textContent === label) as HTMLButtonElement;
+    [...document.querySelectorAll('div[role="dialog"] button')].find((b) => b.textContent === label) as HTMLButtonElement;
 
   it("a dirty worktree comes back from the box as needsConfirm: the dialog renders the box's words and the choice is sent back", async () => {
     const asked = {
@@ -482,7 +482,12 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     expect(h!.docText()).toContain("/wt/a has changes (box words).");
     act(() => buttonNamed("Keep it").click());
     await h!.flush();
-    expect(sent).toEqual([{ project: "proj", windowIndex: 0 }, { project: "proj", windowIndex: 0, dirtyWorktree: "keep" }]);
+    const expect0 = { opencodeSessionId: null, worktreePath: "/wt/a" };
+    // Both calls carry the identity of the window that was confirmed; the second names the path that was shown.
+    expect(sent).toEqual([
+      { project: "proj", windowIndex: 0, expect: expect0 },
+      { project: "proj", windowIndex: 0, dirtyWorktree: "keep", expect: expect0 },
+    ]);
     expect(useStore.getState().appToasts.some((t) => String(t.message) === "Kept worktree at /wt/a")).toBe(true);
     expect(refreshCalls).toBe(1);
   });
@@ -502,6 +507,46 @@ describe("Sidebar — project close worktree-cleanup + toast path (killProject, 
     expect(msgs).toContain("Couldn't remove the worktree at /wt/a — it was left in place.");
     expect(msgs).toContain("The project was closed, but its saved folder setting couldn't be cleared.");
     expect(refreshCalls).toBe(1);
+  });
+
+  it("the window list changes between opening the confirm and confirming: the close is refused and NOTHING is killed", async () => {
+    const kills: unknown[] = [];
+    installMockApi({ ...CLOSE_CAPS, tmuxKillWindow: (a: unknown) => (kills.push(a), Promise.resolve([])) });
+    const original = { index: 0, name: "mine", active: true, paneCurrentPath: "/x", opencodeSessionId: "ses_mine", worktreePath: null };
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [original] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    // Another device closed it and a different window now sits at index 0.
+    act(() => {
+      useStore.setState({ projects: [proj({ tmuxSession: "proj", windows: [{ ...original, name: "other", opencodeSessionId: "ses_other" }] })] });
+    });
+    await h!.flush();
+    act(() => buttonNamed("Close session").click());
+    await h!.flush();
+    expect(kills).toEqual([]);
+    expect(useStore.getState().appToasts.some((t) => String(t.message).includes("That session changed"))).toBe(true);
+  });
+
+  it("the confirm opens at once with a pending state (not a dead click) while the box words it", async () => {
+    installMockApi({ ...CLOSE_CAPS, sessionsClosePreview: () => new Promise(() => {}) });
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, null)] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    expect(h!.docText()).toContain("Checking…");
+    expect((buttonNamed("Close") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a box that answers 'unknown rpc channel' for the close flow gets the update note, never the raw text", async () => {
+    installMockApi({ ...CLOSE_CAPS, sessionsClosePreview: () => Promise.reject(new Error("unknown rpc channel: sessions:close-preview")) });
+    resetStore({ appToasts: [], projects: [proj({ tmuxSession: "proj", windows: [makeWindow(0, null)] })] });
+    mountSidebar();
+    firstWindowCloseConfirm();
+    await h!.flush();
+    const msgs = useStore.getState().appToasts.map((t) => String(t.message));
+    expect(msgs).toContain("Update your box to use this");
+    expect(msgs.join(" ")).not.toContain("unknown rpc channel");
   });
 
   it("an older box (no sessions-close-1): Close says to update the box instead of running anything", async () => {

@@ -476,11 +476,12 @@ type State = {
   // App-level opencode-event subscription as `setChatRunning`.
   liveRunning: Record<string, true>;
   // WS11 D7: the box's per-session rollup (busy beneath, direct-subagent count, stopped), streamed as `windowStatus`
-  // frames and replaced wholesale by `sessions:window-status` on every (re)connect. Own running + the attention
+  // frames (the connect snapshot replays every windowed session) and only FILLED by `sessions:window-status`. Own running + the attention
   // latch stay on `status` / `liveRunning`; this adds only what the box derives from the parent/child graph.
   windowStatusBySession: Record<string, WindowStatusPayload>;
   setWindowStatus: (sessionId: string, payload: WindowStatusPayload) => void;
-  replaceWindowStatus: (map: Record<string, WindowStatusPayload>) => void;
+  // Fill sessions the stream has said nothing about yet. NEVER overwrites an entry: a frame is always newer than a read.
+  fillWindowStatus: (map: Record<string, WindowStatusPayload>) => void;
   // BET-738: subscription plan usage snapshots (one per connected provider),
   // fed by the composer's UsageDial. Primed once with window.api.usageList()
   // on mount and kept live by the `usage.updated` bus event — App.tsx does
@@ -1408,7 +1409,18 @@ export const useStore = create<State>((set, get) => ({
       return { windowStatusBySession: { ...prev.windowStatusBySession, [sessionId]: payload } };
     }),
 
-  replaceWindowStatus: (map) => set({ windowStatusBySession: { ...map } }),
+  fillWindowStatus: (map) =>
+    set((prev) => {
+      const next = { ...prev.windowStatusBySession };
+      let changed = false;
+      for (const [sid, payload] of Object.entries(map)) {
+        if (next[sid] === undefined) {
+          next[sid] = payload;
+          changed = true;
+        }
+      }
+      return changed ? { windowStatusBySession: next } : prev;
+    }),
 
   reconcileRunningSet: (sessionIds) => {
     const want = new Set(sessionIds);

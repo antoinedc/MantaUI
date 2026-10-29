@@ -123,10 +123,9 @@ export function sessionsWithActiveWork(running, parents, jobs) {
 /**
  * One session's `windowStatus` payload from the three maps. Pure.
  * @param {{ running: Set<string>, parentOf: Map<string,string>, jobs: object[], own: Map<string,{since?: number|null, attention?: string|null}>,
- *           stopped: Set<string>, activeWork?: Set<string> }} m  `activeWork` may be passed to avoid recomputing it per session
+ *           stopped: Set<string>, activeWork?: Set<string>, childCounts?: Map<string, number> }} m  `activeWork` / `childCounts` may be passed to avoid recomputing them per session
  */
-export function deriveWindowStatus(m, sessionId) {
-  const activeWork = m.activeWork ?? sessionsWithActiveWork(m.running, Object.fromEntries(m.parentOf), m.jobs);
+export function runningChildCounts(m) {
   // DIRECT children (by the parent edges, and by delegate records' display parent) whose OWN session is running.
   const links = new Map(m.parentOf);
   for (const job of m.jobs ?? []) {
@@ -134,8 +133,14 @@ export function deriveWindowStatus(m, sessionId) {
     const via = job.displayParentID ?? job.parentSessionID;
     if (via) links.set(job.childSessionID, via);
   }
-  let subagents = 0;
-  for (const [child, parent] of links) if (parent === sessionId && m.running.has(child)) subagents += 1;
+  const counts = new Map();
+  for (const [child, parent] of links) if (m.running.has(child)) counts.set(parent, (counts.get(parent) ?? 0) + 1);
+  return counts;
+}
+
+export function deriveWindowStatus(m, sessionId) {
+  const activeWork = m.activeWork ?? sessionsWithActiveWork(m.running, Object.fromEntries(m.parentOf), m.jobs);
+  const subagents = (m.childCounts ?? runningChildCounts(m)).get(sessionId) ?? 0;
   const own = m.own.get(sessionId);
   return {
     running: m.running.has(sessionId),
@@ -146,6 +151,11 @@ export function deriveWindowStatus(m, sessionId) {
     stopped: m.stopped.has(sessionId),
   };
 }
+
+const nestingSignature = (projects) =>
+  (projects ?? [])
+    .map((p) => `${p.tmuxSession}:${(p.windows ?? []).filter((w) => w.job).map((w) => `${w.index}=${w.job.id}/${w.job.status}/${w.job.parentWindowIndex ?? "-"}`).join(",")}`)
+    .join("|");
 
 const jobsSignature = (list) =>
   (list ?? []).map((j) => `${j.id}:${j.status}:${j.childSessionID ?? ""}:${j.supersededBy ?? ""}:${j.displayParentID ?? ""}`).sort().join("|");
@@ -162,6 +172,7 @@ const RETRY_MS = [1000, 2000, 5000, 10000];
  * @param {() => Promise<object[]>} d.loadJobs  the delegate records
  * @param {() => Promise<Iterable<string>>} [d.loadStopped]  conversation ids stopped by a usage limit
  * @param {() => Promise<string[]>} d.listActiveSessionIds  oc.listActiveSessionIds
+ * @param {(id: string) => number|null|undefined} [d.runningSince]  the interpreter's start time of a running turn
  * @param {(id: string) => Promise<{status:"ok", parentID:string|null}|{status:"not-found"}|{status:"error"}>} d.getSessionParent
  * @param {() => unknown} [d.onJobsChanged]  a job record changed (the session list's `job` fields must be re-read)
  * @param {(fn: () => void) => void} [d.schedule]  coalescing tick (default: setTimeout 0)
@@ -181,6 +192,10 @@ export function createSessionStatus(d) {
   let attempt = 0;
   let retryPending = false;
   let hydrating = null;
+  // Running edges seen on live frames WHILE a hydration read is in flight: the (older) read must not wipe them.
+  let liveDuringHydration = null;
+  let nestingSig = null;
+  let nestingPending = false;
   let pendingJobs = Promise.resolve();
 
   const ownState = (sid) => {
@@ -228,8 +243,10 @@ export function createSessionStatus(d) {
   function allPayloads() {
     const maps = currentMaps();
     const activeWork = sessionsWithActiveWork(running, Object.fromEntries(parentOf), jobs);
+    // Once per flush, not once per windowed session (O(windows × edges) otherwise).
+    const childCounts = runningChildCounts(maps);
     const out = new Map();
-    for (const sid of d.windowedSessionIds()) out.set(sid, deriveWindowStatus({ ...maps, activeWork }, sid));
+    for (const sid of d.windowedSessionIds()) out.set(sid, deriveWindowStatus({ ...maps, activeWork, childCounts }, sid));
     return out;
   }
 
@@ -268,15 +285,12 @@ export function createSessionStatus(d) {
     if (evt.kind === "stream") {
       const sid = evt.sessionId;
       const p = evt.payload;
-      if (evt.sub === "running" && sid) {
-        if (p?.running === true) running.add(sid);
+      if ((evt.sub === "running" || evt.sub === "turnComplete") && sid) {
+        const on = p?.running === true;
+        if (on) running.add(sid);
         else running.delete(sid);
-        ownState(sid).since = p?.running === true ? (p?.since ?? null) : null;
-        dirty();
-      } else if (evt.sub === "turnComplete" && sid) {
-        if (p?.running === true) running.add(sid);
-        else running.delete(sid);
-        ownState(sid).since = p?.running === true ? (p?.since ?? null) : null;
+        ownState(sid).since = on ? (p?.since ?? null) : null;
+        liveDuringHydration?.set(sid, { running: on, since: ownState(sid).since });
         dirty();
       } else if (evt.sub === "attention" && sid) {
         ownState(sid).attention = p?.kind ?? null;
@@ -314,7 +328,13 @@ export function createSessionStatus(d) {
       void refreshStopped().then(dirty);
       return;
     }
-    if (evt.kind === "sync" && evt.payload?.changed?.projects) dirty();
+    if (evt.kind === "sync" && evt.payload?.changed?.projects) {
+      dirty();
+      if (nestingPending) {
+        nestingPending = false;
+        d.publish({ kind: "sessions.nesting", payload: {} });
+      }
+    }
   }
 
   /** Walk one session's ancestry from opencode's own records. Returns false when any read could not be answered. */
@@ -352,10 +372,23 @@ export function createSessionStatus(d) {
     if (hydrating) return hydrating;
     hydrating = (async () => {
       let complete = true;
+      const live = (liveDuringHydration = new Map());
+      rootIds.clear(); // re-learned by the walk below; keeps the set bounded
       try {
         const ids = await d.listActiveSessionIds();
         running.clear();
-        for (const id of ids) running.add(id);
+        for (const id of ids) {
+          running.add(id);
+          // The interpreter knows when a turn started even if no frame has been seen since this process began.
+          const since = d.runningSince?.(id);
+          if (since != null && ownState(id).since == null) ownState(id).since = since;
+        }
+        // A turn that started or ended while the read was in flight is newer than the list.
+        for (const [id, v] of live) {
+          if (v.running) running.add(id);
+          else running.delete(id);
+          ownState(id).since = v.running ? (v.since ?? ownState(id).since) : null;
+        }
       } catch {
         complete = false;
       }
@@ -383,6 +416,7 @@ export function createSessionStatus(d) {
       return complete;
     })().finally(() => {
       hydrating = null;
+      liveDuringHydration = null;
     });
     return hydrating;
   }
@@ -401,9 +435,16 @@ export function createSessionStatus(d) {
     windowStatusMap() {
       return Object.fromEntries(allPayloads());
     },
-    /** The session list with each window's `job`. */
+    /** The session list with each window's `job`. When the job NESTING it carries changes (a job window appears, nests,
+     *  finishes or is superseded) a `sessions.nesting` frame follows the `sync` delta that carries the new list — the one
+     *  signal a client that does not follow `sync` deltas refreshes on (activity-only `delegate.updated` frames never
+     *  do), published AFTER the list is readable so that refresh sees it. */
     annotateProjects(projects) {
-      return annotateJobs(projects, jobs);
+      const out = annotateJobs(projects, jobs);
+      const sig = nestingSignature(out);
+      if (nestingSig !== null && sig !== nestingSig) nestingPending = true;
+      nestingSig = sig;
+      return out;
     },
     refreshJobs,
     /** Resolves once a job change in flight has reached the session list — so `tmux:list` read right after a

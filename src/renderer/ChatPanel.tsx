@@ -56,6 +56,7 @@ import {
   titleCase,
   providersFromExcludedKeys,
   contextModelLabel,
+  isUnknownChannelError,
 } from "./chatUtils";
 import { planPageUrl } from "../shared/planMode.mjs";
 import { serverBase } from "./api/httpApi";
@@ -246,6 +247,7 @@ export function ChatPanel({
   // INSIDE useComposerController now (they feed the composer's trust toggle +
   // model picker). ChatPanel keeps only what its OWN (non-composer) paths read.
   const autoRenameSessions = useStore((s) => s.autoRenameSessions);
+  const pushAppToast = useStore((s) => s.pushAppToast);
   const configDefaultModel = useStore((s) => s.defaultModel);
   // BET-1274 10d: the routing preset drives the Auto row's display label; the
   // value lives on the same store block Settings writes (modelRouting.preset).
@@ -2291,26 +2293,49 @@ export function ChatPanel({
   const clearSessionRef = useRef(clearSession);
   clearSessionRef.current = clearSession;
 
-  // Delete session — kills the tmux window + opencode session. Reaches the
-  // same IPC the mobile ⋯ sheet uses.
-  const deleteSession = useCallback(async () => {
-    if (!tmuxSession || windowIndex == null) return;
-    setSendError(null);
-    try {
-      await window.api.opencodeDeleteSession({
-        sessionId,
-        sessionName: tmuxSession,
-        windowIndex,
-      });
-      await refresh();
-    } catch (e) {
-      setSendError(String((e as Error)?.message ?? e));
-    }
-  }, [sessionId, tmuxSession, windowIndex, refresh]);
+  // Delete session — the SAME close flow as the sidebar (worktree clean-on-close, the dirty-tree question, the kill),
+  // plus deleting this conversation. It runs on the box (`sessions:close`) bound to THIS window's identity.
+  const closeCapability = useBoxCapability("sessions-close-1");
+  const [deleteAsk, setDeleteAsk] = useState<{ title: string; body: string; removeLabel: string; keepLabel: string; path: string } | null>(null);
+  const runDelete = useCallback(
+    async (dirtyWorktree?: "remove" | "keep", shownPath?: string) => {
+      if (!tmuxSession || windowIndex == null) return;
+      if (closeCapability === false) {
+        setSendError(UPDATE_BOX_NOTE_TEXT);
+        return;
+      }
+      setSendError(null);
+      setDeleteAsk(null);
+      const w = useStore.getState().projects.find((p) => p.tmuxSession === tmuxSession)?.windows.find((x) => x.index === windowIndex);
+      try {
+        const res = await window.api.sessionsClose({
+          project: tmuxSession,
+          windowIndex,
+          deleteConversation: true,
+          ...(dirtyWorktree ? { dirtyWorktree } : {}),
+          expect: { opencodeSessionId: sessionId, worktreePath: shownPath ?? w?.worktreePath ?? null },
+        });
+        if (res.ok === false && "needsConfirm" in res) {
+          setDeleteAsk({ ...res.needsConfirm });
+          return;
+        }
+        if (res.ok === false) {
+          setSendError(res.error);
+          return;
+        }
+        await refresh();
+        if (res.notice) pushAppToast({ tone: "info", message: res.notice });
+        for (const warning of res.warnings) pushAppToast({ tone: "error", message: warning });
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        setSendError(isUnknownChannelError(msg) ? UPDATE_BOX_NOTE_TEXT : msg);
+      }
+    },
+    [sessionId, tmuxSession, windowIndex, refresh, closeCapability, pushAppToast],
+  );
+  const deleteSession = useCallback(() => runDelete(), [runDelete]);
 
-  // Session deletion lives in the sidebar (desktop) and the mobile ⋯ sheet —
-  // it was removed from the composer status bar to declutter. The IPC
-  // (window.api.opencodeDeleteSession) is still wired for those paths.
+  // Session deletion lives in the session header menu and the sidebar (both through `sessions:close`).
 
   // ===== Auto-rename =====
   // Derives a short tmux window name from the conversation every Nth completed
@@ -3394,6 +3419,23 @@ export function ChatPanel({
       {/* Session header (BET-415): owns SESSION STATE — git branch, context
           usage pill + popover, and the session menu (fork / compact / clear /
           delete). The composer below owns only composing. */}
+      <Modal size="sm" open={deleteAsk != null} onDismiss={() => setDeleteAsk(null)} label="Uncommitted changes in this worktree">
+        <div className="space-y-4">
+          <h3 className="text-title font-semibold">{deleteAsk?.title}</h3>
+          <div className="text-body text-text-faint break-all">{deleteAsk?.body}</div>
+          <div className="flex justify-end gap-2">
+            <Button tone="ghost" onClick={() => setDeleteAsk(null)}>
+              Cancel
+            </Button>
+            <Button tone="default" onClick={() => void runDelete("keep", deleteAsk?.path)}>
+              {deleteAsk?.keepLabel}
+            </Button>
+            <Button tone="danger" onClick={() => void runDelete("remove", deleteAsk?.path)}>
+              {deleteAsk?.removeLabel}
+            </Button>
+          </div>
+        </div>
+      </Modal>
       <SessionHeader
         sessionId={sessionId}
         branch={branch}

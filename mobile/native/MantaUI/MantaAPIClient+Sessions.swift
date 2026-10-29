@@ -61,11 +61,12 @@ extension MantaAPIClient {
 
     /// `sessions:close` — runs the whole close on the box (worktree removal → kill → project settings → refresh) and
     /// reports what happened. `deleteConversation` also deletes the window's opencode conversation (this app's "delete").
-    func sessionsClose(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool) async throws -> SessionCloseResult {
+    func sessionsClose(project: String, windowIndex: Int?, dirtyWorktree: String?, deleteConversation: Bool, expect: SessionCloseExpect? = nil) async throws -> SessionCloseResult {
         var dict: [String: Any] = ["project": project]
         if let windowIndex { dict["windowIndex"] = windowIndex }
         if let dirtyWorktree { dict["dirtyWorktree"] = dirtyWorktree }
         if deleteConversation { dict["deleteConversation"] = true }
+        if windowIndex != nil, let expect { dict["expect"] = expect.wire }
         return try await callRequired("sessions:close", args: [dict], as: SessionCloseResult.self)
     }
 

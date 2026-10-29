@@ -1477,6 +1477,7 @@ export function buildHandlers({
           windowIndex: i?.windowIndex ?? undefined,
           dirtyWorktree: i?.dirtyWorktree,
           deleteConversation: i?.deleteConversation === true,
+          expect: i?.expect && typeof i.expect === "object" ? i.expect : undefined,
         },
         {
           listProjects: () => tmux.listProjects(),

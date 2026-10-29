@@ -54,6 +54,10 @@ export const DELETED = [
   // D4–D5 review — sign-in failure sentences are the box's (status replies carry `message`).
   { scopes: ["renderer"], regex: /\bfunction (seatFailureMessage|resignFailureMessage)\b/, why: "D4 review: accounts:seat-status / resign-status carry the sentence (message); no client words a sign-in failure" },
   { scopes: ["swift", "swiftTests"], regex: /\bfunc (seatFailureMessage|resignFailureMessage|resignTimedOut)\b/, why: "D4 review: the sign-in failure sentences are the box's; iOS shows `message`" },
+  // D6–D7 review — every delete goes through sessions:close (bound to the confirmed window).
+  { scopes: ["renderer"], regex: /\bopencodeDeleteSession\b(?!Raw)/, why: "D6 review: the in-chat Delete is the box's close flow (sessions:close with expect), not a bare opencode:delete-session" },
+  { scopes: ["swift", "swiftTests"], regex: /\bfunc deleteSession\(sessionId\b|\.deleteSession\(sessionId\b/, why: "D6 review: the in-chat Delete is the box's close flow (sessions:close with expect)" },
+  { scopes: ["renderer"], regex: /\breplaceWindowStatus\b/, why: "D7 review: a read only FILLS the window-status map (fillWindowStatus); replacing wholesale could overwrite a newer frame" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },

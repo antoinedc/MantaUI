@@ -789,7 +789,7 @@ struct SessionListView: View {
                 let preview = try await store.closePreview(project: name)
                 closeProjectPrompt = CloseProjectPrompt(name: name, confirm: preview.confirm)
             } catch {
-                showFeedback(SessionActionError.message("close", error: error))
+                showFeedback(BoxCapabilities.isUnknownChannel(error) ? UpdateBoxNote.text : SessionActionError.message("close", error: error))
             }
         }
     }
@@ -893,9 +893,9 @@ struct SessionListView: View {
             // removal the box no longer does (or hide one it will do).
             if let path = window.worktreePath, !path.isEmpty {
                 Task {
-                    if let preview = try? await store.closePreview(project: projectName, index: window.index),
-                       preview.worktrees.contains(where: { $0.willRemove }) {
-                        deleteWorktreeNote = preview.body
+                    // Only the worktree sentence: the running-turn confirm already says the rest.
+                    if let preview = try? await store.closePreview(project: projectName, index: window.index) {
+                        deleteWorktreeNote = preview.worktreeLine
                     }
                 }
             }

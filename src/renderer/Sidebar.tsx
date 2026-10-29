@@ -24,6 +24,7 @@ import {
   projectForNavKey,
   selectCacheTtlMs,
   windowPinId,
+  isUnknownChannelError,
 } from "./chatUtils";
 import { IS_WINDOWS, MOD_KEY } from "./platform";
 import { OBSERVED_JOB_LABEL, OBSERVED_JOB_TITLE, isObservedJob } from "./backgroundRun";
@@ -58,11 +59,14 @@ const COLLAPSE_KEY = "manta:collapsed-projects";
 
 // Shared confirm-delete union (BET-414: extracted to kill the jscpd clone that
 // appeared in WindowRow + JobChildRow prop types).
+type CloseExpect = { opencodeSessionId: string | null; worktreePath: string | null };
 type ConfirmDeleteFor =
-  | { kind: "session"; project: string; index: number; name: string }
+  // `expect`: the window the user is confirming, captured when the confirm opens — the box refuses the close if the
+  // index has come to name another window by the time it is confirmed (WS11 D6 review).
+  | { kind: "session"; project: string; index: number; name: string; expect?: CloseExpect }
   | { kind: "project"; project: string }
   // The box asked: a single-window close found a dirty worktree (nothing was killed yet).
-  | { kind: "worktree-dirty"; project: string; index: number; name: string; ask: Extract<SessionCloseResult, { needsConfirm: unknown }>["needsConfirm"] }
+  | { kind: "worktree-dirty"; project: string; index: number; name: string; expect: CloseExpect; ask: Extract<SessionCloseResult, { needsConfirm: unknown }>["needsConfirm"] }
   | null;
 
 function loadCollapsed(): Set<string> {
@@ -163,7 +167,18 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       showNotice(UPDATE_BOX_NOTE_TEXT);
       return;
     }
+    if (c && c.kind === "session" && !c.expect) {
+      const { project, index } = c;
+      const w = projects.find((p) => p.tmuxSession === project)?.windows.find((x) => x.index === index);
+      c = { ...c, expect: { opencodeSessionId: w?.opencodeSessionId ?? null, worktreePath: w?.worktreePath ?? null } };
+    }
     setConfirmDeleteForRaw(c);
+  };
+  // A box that predates the close flow answers "unknown rpc channel": say to update it, never the raw text.
+  const showCloseError = (e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (isUnknownChannelError(msg)) showNotice(UPDATE_BOX_NOTE_TEXT);
+    else showError(e);
   };
   // The box's confirm copy for the session/project being closed (null until it arrives).
   const [closeCopy, setCloseCopy] = useState<SessionClosePreview | null>(null);
@@ -186,7 +201,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       .catch((e) => {
         if (cancelled) return;
         setConfirmDeleteForRaw(null);
-        showError(e);
+        showCloseError(e);
       });
     return () => {
       cancelled = true;
@@ -273,7 +288,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   // Run the close on the box and show what it reports: the kept-worktree notice and a toast per warning. A
   // single-window close with a dirty worktree comes back as `needsConfirm` (nothing was killed).
   const runClose = async (
-    target: { project: string; index?: number; name?: string },
+    target: { project: string; index?: number; name?: string; expect?: CloseExpect },
     dirtyWorktree?: "remove" | "keep",
   ) => {
     setConfirmDeleteForRaw(null);
@@ -282,6 +297,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
         project: target.project,
         ...(target.index != null ? { windowIndex: target.index } : {}),
         ...(dirtyWorktree ? { dirtyWorktree } : {}),
+        ...(target.index != null && target.expect ? { expect: target.expect } : {}),
       });
       if (res.ok === false && "needsConfirm" in res) {
         setConfirmDeleteForRaw({
@@ -289,6 +305,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
           project: target.project,
           index: target.index ?? 0,
           name: target.name ?? "",
+          expect: target.expect ?? { opencodeSessionId: null, worktreePath: null },
           ask: res.needsConfirm,
         });
         return;
@@ -301,7 +318,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
       if (res.notice) showNotice(res.notice);
       for (const w of res.warnings) showError(new Error(w));
     } catch (e) {
-      showError(e);
+      showCloseError(e);
     }
   };
 
@@ -1016,11 +1033,20 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             />
           );
         }
-        // The words are the box's; until they arrive the dialog stays closed (never a half-worded confirm).
+        // The words are the box's; until they arrive the dialog says it is checking (never a half-worded confirm).
         const copy = closeCopy;
         if (!copy) {
+          // The box's words are still on their way: show the dialog now, with the confirm held back.
           return (
-            <ConfirmModal open={false} title="" body="" confirmLabel="" onConfirm={() => {}} onCancel={() => setConfirmDeleteFor(null)} />
+            <ConfirmModal
+              open
+              title="Checking…"
+              body="Asking your server what closing this will do."
+              confirmLabel="Close"
+              confirmDisabled
+              onConfirm={() => {}}
+              onCancel={() => setConfirmDeleteFor(null)}
+            />
           );
         }
         return (
@@ -1030,7 +1056,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
             body={copy.body}
             confirmLabel={copy.confirmLabel}
             onConfirm={() => {
-              if (c.kind === "session") void runClose({ project: c.project, index: c.index, name: c.name });
+              if (c.kind === "session") void runClose({ project: c.project, index: c.index, name: c.name, expect: c.expect });
               else void runClose({ project: c.project });
             }}
             onCancel={() => setConfirmDeleteFor(null)}
@@ -1059,7 +1085,7 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               tone="default"
               onClick={() => {
                 if (confirmDeleteFor?.kind === "worktree-dirty") {
-                  void runClose(confirmDeleteFor, "keep");
+                  void runClose({ ...confirmDeleteFor, expect: { ...confirmDeleteFor.expect, worktreePath: confirmDeleteFor.ask.path } }, "keep");
                 }
               }}
             >
@@ -1069,7 +1095,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
               tone="danger"
               onClick={() => {
                 if (confirmDeleteFor?.kind === "worktree-dirty") {
-                  void runClose(confirmDeleteFor, "remove");
+                  // The box force-removes only the path that was SHOWN.
+                  void runClose({ ...confirmDeleteFor, expect: { ...confirmDeleteFor.expect, worktreePath: confirmDeleteFor.ask.path } }, "remove");
                 }
               }}
             >

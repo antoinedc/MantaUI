@@ -17,6 +17,7 @@ export function ConfirmModal({
   body,
   confirmLabel,
   confirmTone = "danger",
+  confirmDisabled = false,
   onConfirm,
   onCancel,
 }: {
@@ -25,6 +26,7 @@ export function ConfirmModal({
   body: ReactNode;
   confirmLabel: string;
   confirmTone?: "danger" | "primary";
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -37,7 +39,7 @@ export function ConfirmModal({
           <Button tone="default" onClick={onCancel}>
             Cancel
           </Button>
-          <Button tone={confirmTone} onClick={onConfirm}>
+          <Button tone={confirmTone} onClick={onConfirm} disabled={confirmDisabled}>
             {confirmLabel}
           </Button>
         </div>

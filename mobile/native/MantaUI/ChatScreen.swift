@@ -254,7 +254,9 @@ private struct ChatScreenContent: View {
     /// When the branch was last fetched, so a 5s tick only refetches once the
     /// interval has elapsed (see `BranchFreshnessPolicy`).
     @State private var lastBranchFetch: Date?
-    @State private var sessionWindow: (name: String, index: Int, cwd: String)?
+    @State private var sessionWindow: (name: String, index: Int, cwd: String, worktree: String?)?
+    /// A dirty worktree the box asked about while deleting this session (the answer is sent back to `sessions:close`).
+    @State private var deletePrompt: SessionWorktreePrompt?
     /// Which overflow-sheet item's card is presented (BET-627).
     @State private var overflowDestination: OverflowDestination?
     /// The run the Activity sheet is showing (spec §1.5). One sheet at a time:
@@ -778,6 +780,16 @@ private struct ChatScreenContent: View {
         }
         // The Activity sheet for a tool run — tapped from a run row, or from the
         // working line while the run is still the tail of a running turn.
+        .sheet(item: $deletePrompt) { prompt in
+            SessionWorktreePromptSheet(prompt: prompt) { answer in
+                deletePrompt = nil
+                switch answer {
+                case .cancel: return
+                case .keep: Task { await runDelete(dirtyWorktree: "keep", shownPath: prompt.ask.path) }
+                case .remove: Task { await runDelete(dirtyWorktree: "remove", shownPath: prompt.ask.path) }
+                }
+            }
+        }
         .sheet(item: $activityTarget, onDismiss: flushPendingPush) { target in
             ActivitySheet(
                 store: store,
@@ -1076,7 +1088,7 @@ private struct ChatScreenContent: View {
         else { return }
         let cwd = window.paneCurrentPath.isEmpty ? project.defaultCwd : window.paneCurrentPath
         await MainActor.run {
-            sessionWindow = (project.tmuxSession, window.index, cwd)
+            sessionWindow = (project.tmuxSession, window.index, cwd, window.worktreePath)
             branchRelPath = Self.relativeWorkingPath(cwd: cwd, root: project.defaultCwd)
         }
         await refreshBranch()
@@ -1216,17 +1228,48 @@ private struct ChatScreenContent: View {
         }
     }
 
+    /// Delete this session: the SAME close flow as the list (worktree clean-on-close, the dirty-tree question, the kill),
+    /// plus deleting the conversation — on the box, bound to THIS window's identity.
     private func deleteSession() async {
+        await runDelete(dirtyWorktree: nil, shownPath: nil)
+    }
+
+    private func runDelete(dirtyWorktree: String?, shownPath: String?) async {
+        guard capabilities.has(.sessionsClose) != false else {
+            store.actionHint = UpdateBoxNote.text
+            return
+        }
         guard let w = sessionWindow else {
             store.actionHint = "Can't delete — session's window not found."
             return
         }
+        let expect = SessionCloseExpect(opencodeSessionId: store.sessionId, worktreePath: shownPath ?? w.worktree)
         do {
-            try await MantaAPIClient.live().deleteSession(
-                sessionId: store.sessionId, sessionName: w.name, windowIndex: w.index)
-            await MainActor.run { dismiss() }
+            let result = try await MantaAPIClient.live().sessionsClose(
+                project: projectName, windowIndex: w.index, dirtyWorktree: dirtyWorktree, deleteConversation: true, expect: expect
+            )
+            if let ask = result.needsConfirm {
+                await MainActor.run {
+                    deletePrompt = SessionWorktreePrompt(
+                        key: "chat-delete", project: projectName, index: w.index, windowName: title,
+                        worktreePath: ask.path, ask: ask, expect: expect
+                    )
+                }
+                return
+            }
+            guard result.ok else {
+                await MainActor.run { store.actionHint = result.error ?? "Delete failed — the session is still there" }
+                return
+            }
+            await MainActor.run {
+                if !result.warnings.isEmpty { store.actionHint = result.warnings.joined(separator: " ") }
+                dismiss()
+            }
         } catch {
-            await MainActor.run { store.actionHint = "Delete failed — the session is still there" }
+            await MainActor.run {
+                store.actionHint = BoxCapabilities.isUnknownChannel(error)
+                    ? UpdateBoxNote.text : "Delete failed — the session is still there"
+            }
         }
     }
 

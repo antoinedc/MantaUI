@@ -22,12 +22,14 @@ export function previewClose({ project, windowIndex, projects, cleanOnClose, isR
     const path = w?.worktreePath ?? null;
     const parts = ["Its tmux window will be killed on the server."];
     if (running) parts.push("A turn is currently running and will be stopped.");
-    if (path && cleanOnClose) parts.push(`Its worktree at ${path} will be removed.`);
+    const worktreeLine = path && cleanOnClose ? `Its worktree at ${path} will be removed.` : null;
+    if (worktreeLine) parts.push(worktreeLine);
     return {
       title: `Close “${w?.name ?? ""}”?`,
       body: parts.join(" "),
       confirmLabel: "Close session",
       runningCount: running ? 1 : 0,
+      worktreeLine,
       worktrees: path ? [{ path, willRemove: cleanOnClose }] : [],
     };
   }
@@ -44,7 +46,8 @@ export function previewClose({ project, windowIndex, projects, cleanOnClose, isR
   if (runningCount > 0) {
     parts.push(`${runningCount} ${plural(runningCount, "session is", "sessions are")} mid-turn and will be stopped.`);
   }
-  if (willRemove > 0) parts.push(`${willRemove} ${plural(willRemove, "worktree")} will be removed.`);
+  const worktreeLine = willRemove > 0 ? `${willRemove} ${plural(willRemove, "worktree")} will be removed.` : null;
+  if (worktreeLine) parts.push(worktreeLine);
   return {
     title:
       sessionCount === 0
@@ -53,6 +56,7 @@ export function previewClose({ project, windowIndex, projects, cleanOnClose, isR
     body: parts.join(" "),
     confirmLabel: "Close project",
     runningCount,
+    worktreeLine,
     worktrees: paths.map((path) => ({ path, willRemove: cleanOnClose })),
   };
 }
@@ -60,6 +64,23 @@ export function previewClose({ project, windowIndex, projects, cleanOnClose, isR
 const failedMessage = (path) => `Couldn't remove the worktree at ${path} — it was left in place.`;
 export const METADATA_WARNING = "The project was closed, but its saved folder setting couldn't be cleared.";
 export const CLOSE_FAILED = "Couldn't close it — the server couldn't stop it.";
+export const SESSION_CHANGED = "That session changed — refresh and try again.";
+export const CONVERSATION_WARNING = "The session was closed, but its conversation couldn't be deleted.";
+
+/** Does the window now at the index differ from the one the user confirmed? Only the keys the client sent are compared. */
+function windowChanged(w, expect) {
+  if (!w) return true;
+  if ("opencodeSessionId" in expect && (w.opencodeSessionId ?? null) !== (expect.opencodeSessionId ?? null)) return true;
+  if ("worktreePath" in expect && (w.worktreePath ?? null) !== (expect.worktreePath ?? null)) return true;
+  return false;
+}
+
+const isNotFound = (e) => e?.status === 404 || /\b404\b|not found/i.test(String(e?.message ?? e ?? ""));
+
+function removedSentence(removed) {
+  if (removed.length === 0) return "";
+  return removed.length === 1 ? ` Its worktree at ${removed[0]} was already removed.` : ` ${removed.length} worktrees were already removed.`;
+}
 
 function keptNotice(kept, { chose }) {
   if (kept.length === 0) return null;
@@ -70,8 +91,13 @@ function keptNotice(kept, { chose }) {
 
 /**
  * Close one window or a project.
- * @param {{ project: string, windowIndex?: number, dirtyWorktree?: "remove"|"keep", deleteConversation?: boolean }} input
+ * @param {{ project: string, windowIndex?: number, dirtyWorktree?: "remove"|"keep", deleteConversation?: boolean,
+ *           expect?: { opencodeSessionId?: string|null, worktreePath?: string|null } }} input
  *   `deleteConversation` (single window only) also deletes the window's opencode conversation — iOS's "delete".
+ *   `expect` binds the call to the window the user confirmed (taken from its row): a window index can be re-used by
+ *   another window between the confirm and the call, so every key sent must still match what is at the index, or the
+ *   close is refused and nothing is touched. A forced worktree removal additionally needs `expect.worktreePath` to be
+ *   the path that was shown.
  * @param {{
  *   listProjects: () => Promise<object[]>,
  *   cleanOnClose: () => Promise<boolean>,
@@ -86,7 +112,7 @@ function keptNotice(kept, { chose }) {
  */
 export async function closeSession(input, d) {
   const warn = d.warn ?? ((m, e) => console.warn(m, e?.message ?? e ?? ""));
-  const { project, windowIndex, dirtyWorktree, deleteConversation } = input;
+  const { project, windowIndex, dirtyWorktree, deleteConversation, expect } = input;
   const single = windowIndex != null;
   const clean = await d.cleanOnClose().catch(() => false);
   const projects = await d.listProjects().catch(() => []);
@@ -95,9 +121,12 @@ export async function closeSession(input, d) {
   const kept = [];
   const failed = [];
 
-  const paths = single
-    ? [proj?.windows?.find((w) => w.index === windowIndex)?.worktreePath].filter(Boolean)
-    : uniquePaths(proj?.windows);
+  const target = single ? proj?.windows?.find((w) => w.index === windowIndex) : undefined;
+  if (single && expect && typeof expect === "object" && windowChanged(target, expect)) {
+    return { ok: false, error: SESSION_CHANGED };
+  }
+
+  const paths = single ? [target?.worktreePath].filter(Boolean) : uniquePaths(proj?.windows);
 
   const chose = single && dirtyWorktree === "keep";
   if (clean) {
@@ -106,7 +135,8 @@ export async function closeSession(input, d) {
         kept.push(path);
         continue;
       }
-      const force = single && dirtyWorktree === "remove";
+      // Force only the exact path the user was shown; without it the box asks again.
+      const force = single && dirtyWorktree === "remove" && expect?.worktreePath === path;
       try {
         const res = await d.removeWorktree({ path, force });
         if (res?.removed) removed.push(path);
@@ -138,16 +168,25 @@ export async function closeSession(input, d) {
   }
 
   const warnings = failed.map((f) => f.message);
+  // The kill is the user's intent: it goes first. A failure says what already happened.
   try {
-    const conversation = single && deleteConversation === true
-      ? proj?.windows?.find((w) => w.index === windowIndex)?.opencodeSessionId
-      : null;
-    if (conversation && d.deleteConversation) await d.deleteConversation(conversation);
     if (single) await d.killWindow({ sessionName: project, windowIndex });
     else await d.killSession(project);
   } catch (e) {
     warn(`[close] kill failed for ${project}${single ? `:${windowIndex}` : ""}`, e);
-    return { ok: false, error: CLOSE_FAILED };
+    return { ok: false, error: `${CLOSE_FAILED}${removedSentence(removed)}`, removed, kept, failed, warnings };
+  }
+  const conversation = single && deleteConversation === true ? (expect?.opencodeSessionId ?? target?.opencodeSessionId) : null;
+  if (conversation && d.deleteConversation) {
+    try {
+      await d.deleteConversation(conversation);
+    } catch (e) {
+      // A conversation that is already gone is done; anything else is a warning — the window IS closed.
+      if (!isNotFound(e)) {
+        warn(`[close] conversation ${conversation} not deleted`, e);
+        warnings.push(CONVERSATION_WARNING);
+      }
+    }
   }
   if (!single) {
     try {

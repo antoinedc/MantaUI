@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeJobNesting, annotateJobs, sessionsWithActiveWork, deriveWindowStatus, createSessionStatus } from "./sessionStatus.mjs";
+import { computeJobNesting, annotateJobs, sessionsWithActiveWork, deriveWindowStatus, runningChildCounts, createSessionStatus } from "./sessionStatus.mjs";
 
 const mkProject = (name, windows) => ({ tmuxSession: name, windows });
 
@@ -277,4 +277,85 @@ test("edges are evicted beyond the bound, keeping running/windowed sessions' cha
   assert.ok(h.st._state.parentOf.size <= 5000);
   assert.equal(h.st._state.parentOf.get("r"), "rp");
   assert.equal(h.st._state.parentOf.get("w"), "wp");
+});
+
+test("hydration does not wipe a turn that STARTED (or ended) while its active-list read was in flight", async () => {
+  let release;
+  const published = [];
+  const st = createSessionStatus({
+    publish: (e) => published.push(e),
+    windowedSessionIds: () => ["p", "q"],
+    loadJobs: async () => [],
+    listActiveSessionIds: () => new Promise((resolve) => { release = () => resolve(["q"]); }), // the list: only q running
+    getSessionParent: async () => ({ status: "ok", parentID: null }),
+    runningSince: (id) => (id === "q" ? 111 : null),
+    schedule: () => {},
+    setTimer: () => {},
+  });
+  st.observe({ kind: "stream", sub: "running", sessionId: "q", payload: { running: true, since: 50 } }); // before: q running
+  const done = st.hydrate();
+  // While the read is in flight: p starts a turn, q's turn ends.
+  st.observe({ kind: "stream", sub: "running", sessionId: "p", payload: { running: true, since: 200 } });
+  st.observe({ kind: "stream", sub: "turnComplete", sessionId: "q", payload: { complete: true, running: false, since: null } });
+  release();
+  await done;
+  assert.deepEqual([...st._state.running], ["p"], "p's live start survives, q's live end survives");
+  assert.equal(st._state.own.get("p").since, 200);
+  st.flush();
+  const last = (sid) => published.filter((e) => e.sessionId === sid).at(-1).payload;
+  assert.equal(last("p").running, true);
+  assert.equal(last("p").startedAt, 200);
+  assert.equal(last("q").running, false);
+});
+
+test("a hydrated running session gets its start time from the interpreter", async () => {
+  const published = [];
+  const st = createSessionStatus({
+    publish: (e) => published.push(e),
+    windowedSessionIds: () => ["p"],
+    loadJobs: async () => [],
+    listActiveSessionIds: async () => ["p"],
+    getSessionParent: async () => ({ status: "ok", parentID: null }),
+    runningSince: () => 777,
+    schedule: () => {},
+    setTimer: () => {},
+  });
+  await st.hydrate();
+  st.flush();
+  assert.equal(published.at(-1).payload.startedAt, 777);
+});
+
+test("rootIds is cleared at the start of each hydration (bounded)", async () => {
+  const h = harness({ windowed: ["p"], active: ["c"], parents: { c: { status: "ok", parentID: null } } });
+  h.st._state.rootIds.add("stale-root");
+  await h.st.hydrate();
+  assert.deepEqual([...h.st._state.rootIds], ["c"]);
+});
+
+test("sessions.nesting: published once, AFTER the sync delta that carries the new nesting; never for activity-only changes", () => {
+  const h = harness({ windowed: ["p"] });
+  const proj = [mkProject("proj", [{ index: 0, opencodeSessionId: "p" }, { index: 1, opencodeSessionId: "c" }])];
+  h.st.annotateProjects(proj); // baseline
+  assert.equal(h.published.filter((e) => e.kind === "sessions.nesting").length, 0);
+  h.st._state.jobs = [{ id: "j1", status: "running", parentSessionID: "p", childSessionID: "c", activity: "a" }];
+  h.st.annotateProjects(proj);
+  assert.equal(h.published.filter((e) => e.kind === "sessions.nesting").length, 0, "not before the list is readable");
+  h.st.observe({ kind: "sync", payload: { changed: { projects: [] } } });
+  assert.equal(h.published.filter((e) => e.kind === "sessions.nesting").length, 1);
+  // Activity text changes: the nesting is the same → nothing.
+  h.st._state.jobs = [{ id: "j1", status: "running", parentSessionID: "p", childSessionID: "c", activity: "b" }];
+  h.st.annotateProjects(proj);
+  h.st.observe({ kind: "sync", payload: { changed: { projects: [] } } });
+  assert.equal(h.published.filter((e) => e.kind === "sessions.nesting").length, 1);
+  // The job finishes: the nested window's job status changes → one more.
+  h.st._state.jobs = [{ id: "j1", status: "done", parentSessionID: "p", childSessionID: "c" }];
+  h.st.annotateProjects(proj);
+  h.st.observe({ kind: "sync", payload: { changed: { projects: [] } } });
+  assert.equal(h.published.filter((e) => e.kind === "sessions.nesting").length, 2);
+});
+
+test("direct-child counts are computed once per flush (runningChildCounts) and match deriveWindowStatus", () => {
+  const m = { running: new Set(["a", "b"]), parentOf: new Map([["a", "p"], ["b", "p"], ["x", "p"]]), jobs: [], own: new Map(), stopped: new Set() };
+  assert.equal(runningChildCounts(m).get("p"), 2);
+  assert.equal(deriveWindowStatus(m, "p").subagents, 2);
 });

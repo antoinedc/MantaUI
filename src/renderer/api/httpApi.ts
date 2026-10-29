@@ -1252,7 +1252,6 @@ export const httpApi: Api = {
   opencodeForkSession: (input) => rpc(IPC.opencodeForkSession, input),
   opencodeCompactSession: (sessionId) =>
     rpc(IPC.opencodeCompactSession, sessionId),
-  opencodeDeleteSession: (input) => rpc(IPC.opencodeDeleteSession, input),
   // BET-421: ephemeral session lifecycle for the onboarding verifier.
   opencodeCreateEphemeralSession: (input) =>
     rpc(IPC.opencodeCreateEphemeralSession, input),

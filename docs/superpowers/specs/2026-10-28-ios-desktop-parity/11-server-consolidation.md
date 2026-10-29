@@ -2391,3 +2391,35 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
    session is deleted, so a hung opencode cannot hold the allocator. NIT 11: iOS clears the previewed name when the
    folder changes. R2-2 (misplaced K7 comment) and R2-3 (the upgrade test now asserts Retry offered / Roll back
    hidden on an older box) applied.
+
+## Review fixes (D6–D7 Opus review)
+
+1. **The close is bound to the confirmed window.** `sessions:close` takes `expect {opencodeSessionId, worktreePath}`,
+   captured from the row when the user opens the confirm (desktop: when the confirm opens; iOS: when delete is tapped /
+   a close is enqueued; in-chat delete: the open session). Every key sent must still match what is at the index, else
+   `ok:false, error:"That session changed — refresh and try again."` and nothing is touched. A forced worktree removal
+   additionally needs `expect.worktreePath` to equal the path (the answer to `needsConfirm` sends back the path that was
+   shown); without it the box never forces and asks again. `deleteConversation` deletes `expect.opencodeSessionId` (verified).
+2. **iOS refreshes on `sessions.nesting`, not on `delegate.updated`.** The box publishes `{kind:"sessions.nesting"}` once,
+   AFTER the `sync` delta that carries a changed job nesting (a job window appears / nests / finishes / is superseded —
+   computed from the annotated list's per-window `job` fields), so the refresh sees it. iOS re-reads only the project list
+   on it (coalesced); activity-only `delegate.updated` frames cost nothing (XCTest). Desktop is unaffected.
+3. **A close that fails part-way reports what it did.** Order is worktree → kill → conversation. A failed kill returns
+   `error` ("…couldn't stop it. Its worktree at X was already removed.") plus `removed/kept/failed/warnings`; a failed
+   conversation delete after a successful kill is a warning, a 404 counts as done.
+4. **Other close entry points.** Desktop in-chat Delete and iOS in-chat Delete now run `sessions:close` (with
+   `deleteConversation` and `expect`, a dirty-worktree question, the same notices); `opencodeDeleteSession` /
+   `MantaAPIClient.deleteSession` are deleted from both clients (the box handler stays for older clients). The review's
+   "iOS passes the window name" was a misread: `sessionWindow.name` holds the project's tmux session — no bug there.
+5. **Desktop never overwrites a newer frame with a read.** `fillWindowStatus` fills only sessions no frame has covered;
+   the connect snapshot already replays every windowed session.
+6. **Hydration keeps live edges.** A `running`/`turnComplete` frame seen while the active-list read is in flight is
+   re-applied after it replaces the set; hydrated sessions take `since` from the interpreter.
+7. NITs: unknown-channel on the close flow → the update note on both clients (7); the desktop confirm opens at once with
+   "Checking…" and a held-back button (8); the preview carries `worktreeLine` and iOS shows only that sentence (9);
+   direct-child counts computed once per flush (10); `rootIds` cleared per hydration (12).
+8. **No footer note for `sessions-window-status-1` (NIT 11) — amended:** without it the rail is flat and rows show their own
+   turn, which is a missing decoration, not a broken or dead control; a note on every list would nag older boxes for nothing.
+   The Accounts/close surfaces that DO lose a control keep their note.
+9. **Follow-up (NIT 13, master D29):** `windowStatus.stopped` / `attention` ride the payload with no consumer yet; retire
+   WS04's stopped list or rewire M-09-2 and the desktop stopped marker to `windowStatus.stopped`.

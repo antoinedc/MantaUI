@@ -1075,7 +1075,14 @@ export interface Api {
   // `windowStatus` frames).
   sessionsWindowStatus(): Promise<Record<string, WindowStatusPayload>>;
   sessionsClosePreview(input: { project: string; windowIndex?: number }): Promise<SessionClosePreview>;
-  sessionsClose(input: { project: string; windowIndex?: number; dirtyWorktree?: "remove" | "keep"; deleteConversation?: boolean }): Promise<SessionCloseResult>;
+  sessionsClose(input: {
+    project: string;
+    windowIndex?: number;
+    dirtyWorktree?: "remove" | "keep";
+    deleteConversation?: boolean;
+    /** The window the user confirmed (from its row): the box refuses if the index now names another window. */
+    expect?: { opencodeSessionId?: string | null; worktreePath?: string | null };
+  }): Promise<SessionCloseResult>;
   // `returnName`: ask for `{projects, name}` where `name` is the FINAL (tmux-safe) name the box gave the project.
   // A box that predates it answers a bare `Project[]`.
   tmuxRenameSession(input: { oldName: string; newName: string; returnName?: boolean }): Promise<Project[] | { projects: Project[]; name: string }>;
@@ -1471,11 +1478,6 @@ export interface Api {
     messageID?: string;
   }): Promise<{ newSessionId: string; projects: Project[] }>;
   opencodeCompactSession(sessionId: string): Promise<void>;
-  opencodeDeleteSession(input: {
-    sessionId: string;
-    sessionName: string;
-    windowIndex: number;
-  }): Promise<Project[]>;
   // BET-421: bare session lifecycle for the ephemeral onboarding verifier.
   // create makes a fresh opencode session in `directory` (no tmux window,
   // no project); deleteRaw drops it by id alone. Together they let the

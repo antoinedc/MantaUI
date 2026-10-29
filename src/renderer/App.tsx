@@ -1179,14 +1179,16 @@ function Shell() {
   }, [apiGeneration]);
 
   // WS11 D7: the box's per-window rollup (busy beneath, direct subagents, stopped). Streamed as `windowStatus`
-  // frames; this read replaces the map wholesale on connect and on every reconnect, so a session that stopped while
-  // we were away cannot stay lit. An older box (no capability) has no rollup — rows show their own turn only.
+  // frames — the connect snapshot replays every windowed session, so a session that stopped while we were away is
+  // corrected by the stream. This read only FILLS sessions no frame has covered yet and never overwrites one (a frame
+  // is always newer than a read; replacing wholesale could resurrect a finished child's `busy`). An older box (no
+  // capability) has no rollup — rows show their own turn only.
   const windowStatusCap = useBoxCapability("sessions-window-status-1");
   const pullWindowStatus = () => {
     if (windowStatusCap !== true || !window.api.sessionsWindowStatus) return;
     window.api
       .sessionsWindowStatus()
-      .then((map) => useStore.getState().replaceWindowStatus(map ?? {}))
+      .then((map) => useStore.getState().fillWindowStatus(map ?? {}))
       .catch((e) => console.warn("[window-status] read failed:", e instanceof Error ? e.message : e));
   };
   useEffect(pullWindowStatus, [apiGeneration, windowStatusCap]); // eslint-disable-line react-hooks/exhaustive-deps

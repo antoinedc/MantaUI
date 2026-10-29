@@ -97,13 +97,6 @@ final class MantaActionRPCWireTests: XCTestCase {
         XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/sessions:close")
     }
 
-    func testDeleteSessionSingleWraps() async throws {
-        let client = makeClient()
-        try await client.deleteSession(sessionId: "s", sessionName: "p", windowIndex: 2)
-        assertSingleWrapped()
-        XCTAssertEqual(CapturingURLProtocol.cache.last?.url?.path, "/rpc/opencode:delete-session")
-    }
-
     func testRenameWindowSingleWraps() async throws {
         let client = makeClient()
         try await client.renameWindow(session: "p", index: 2, newName: "n")
