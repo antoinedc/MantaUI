@@ -870,6 +870,30 @@ export async function listSessions(directory, { signal } = {}) {
 }
 
 /** One session record, mapped; null on miss/error. */
+/**
+ * A session's parent, with the three outcomes kept apart (getSessionInfo collapses the last two into null):
+ * `ok` (parentID null = a root), `not-found` (the session was deleted), `error` (could not be determined).
+ * @returns {Promise<{status:"ok", parentID: string|null}|{status:"not-found"}|{status:"error"}>}
+ */
+export async function getSessionParent(sessionId) {
+  const NOT_FOUND = Symbol("not-found");
+  try {
+    const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), {
+      signal: AbortSignal.timeout(8000),
+      onHttpError: (f) => {
+        if (f.status === 404) return NOT_FOUND;
+        throw plainError("getSession", f);
+      },
+    });
+    if (record === NOT_FOUND) return { status: "not-found" };
+    if (!record || typeof record !== "object") return { status: "error" };
+    const parent = record.parentID ?? record.parentId;
+    return { status: "ok", parentID: typeof parent === "string" && parent.length > 0 ? parent : null };
+  } catch {
+    return { status: "error" };
+  }
+}
+
 async function getSessionInfo(sessionId) {
   try {
     const record = await ocCall("getSession", (c, o) => c.session.get({ sessionID: sessionId }, o), { onHttpError: () => null });

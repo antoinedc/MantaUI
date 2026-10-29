@@ -205,11 +205,6 @@ export function extractSubagentInfo(part: SubagentPart): SubagentInfo | null;
 
 export function collectChildSessionIds(messages: SubagentMessage[] | null | undefined): Set<string>;
 
-export function countRunningSubagents(
-  messages: SubagentMessage[] | null | undefined,
-  liveStatus?: Map<string, "running" | "idle"> | null,
-): number;
-
 export function summarizeChildSession(
   messages: SubagentMessage[] | null | undefined,
 ): { toolCount: number; lastToolName: string | null; tokens: number };

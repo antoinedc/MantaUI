@@ -141,38 +141,55 @@ final class SessionActivityOrderTests: XCTestCase {
 
     // MARK: - Job windows (§2)
 
-    func testOwnerTaggedWindowIsHiddenEvenWithNoJobRecord() {
-        // No job list at all (it failed to load): the tag alone hides it.
-        let p = proj("proj", [win(0, sid: "ses_a"), win(1, sid: "ses_job", owner: "job")])
-        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p, jobs: []), [1])
+    private func jobWin(_ index: Int, sid: String, parent: Int?, status: String = "running", owner: String? = nil) -> MantaWindow {
+        var w = win(index, sid: sid, owner: owner)
+        w.job = MantaWindowJob(id: "j\(index)", status: status, parentWindowIndex: parent)
+        return w
     }
 
-    func testOrphanedOwnerTaggedWindowIsHiddenEntirely() {
-        // Its parent is in no window of this project: still hidden, never
-        // surfaced as a top-level row.
+    func testOwnerTaggedWindowIsHiddenEvenWithNoNesting() {
+        // An older box (no `job` field) or a job the box could not nest: the tag alone hides it.
         let p = proj("proj", [win(0, sid: "ses_a"), win(1, sid: "ses_job", owner: "job")])
-        let jobs = [job("j", parent: "ses_elsewhere", child: "ses_job")]
-        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p, jobs: jobs), [1])
+        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p), [1])
     }
 
-    func testUntaggedWindowHiddenByTheNestingRuleStillHidden() {
-        // Created before the owner tag existed: the job record backstops it.
-        let p = proj("proj", [win(0, sid: "ses_parent"), win(1, sid: "ses_child")])
-        let jobs = [job("j", parent: "ses_parent", child: "ses_child")]
-        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p, jobs: jobs), [1])
+    func testAWindowTheBoxNestedUnderAParentIsHidden() {
+        // Even without the owner tag (created before it existed) — the box's nesting is the signal.
+        let p = proj("proj", [win(0, sid: "ses_parent"), jobWin(1, sid: "ses_child", parent: 0)])
+        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p), [1])
+    }
+
+    func testAJobWindowTheBoxLeftTopLevelAndUntaggedStaysVisible() {
+        // The box found no parent window (`parentWindowIndex` null): the pre-existing "never orphan a reachable
+        // session" rule — no tag, no nesting → listed.
+        let p = proj("proj", [jobWin(0, sid: "ses_child", parent: nil)])
+        XCTAssertTrue(SessionJobWindows.hiddenIndices(project: p).isEmpty)
     }
 
     func testPlainWindowsAreNotHidden() {
         let p = proj("proj", [win(0, sid: "ses_a"), win(1, sid: "ses_b"), win(2)])
-        XCTAssertTrue(SessionJobWindows.hiddenIndices(project: p, jobs: []).isEmpty)
+        XCTAssertTrue(SessionJobWindows.hiddenIndices(project: p).isEmpty)
     }
 
-    func testUntaggedOrphanWithJobRecordStaysVisible() {
-        // The pre-existing "never orphan a reachable session" rule is for an
-        // UNTAGGED window: no tag and no visible parent leaves it listed.
-        let p = proj("proj", [win(0, sid: "ses_child")])
-        let jobs = [job("j", parent: "ses_gone", child: "ses_child")]
-        XCTAssertTrue(SessionJobWindows.hiddenIndices(project: p, jobs: jobs).isEmpty)
+    func testActiveChildCountsCountOnlyLiveNestedJobsPerParent() {
+        // Both children are hidden (nested), but only the running one counts toward the parent's subtitle; a child
+        // of a terminal job is still hidden, like the desktop.
+        let p = proj("proj", [
+            win(0, sid: "ses_parent"),
+            jobWin(1, sid: "ses_run", parent: 0, status: "running"),
+            jobWin(2, sid: "ses_done", parent: 0, status: "done"),
+            jobWin(3, sid: "ses_paused", parent: 0, status: "paused"),
+        ])
+        XCTAssertEqual(SessionJobWindows.hiddenIndices(project: p), [1, 2, 3])
+        XCTAssertEqual(SessionJobWindows.activeChildCounts(project: p), [0: 2])
+    }
+
+    func testWindowJobDecodesFromTheBoxsList() throws {
+        let json = #"{"index":1,"name":"w","active":false,"paneCurrentPath":"","opencodeSessionId":"s","job":{"id":"j","status":"running","parentWindowIndex":0}}"#
+        let w = try JSONDecoder().decode(MantaWindow.self, from: Data(json.utf8))
+        XCTAssertEqual(w.job, MantaWindowJob(id: "j", status: "running", parentWindowIndex: 0))
+        let none = try JSONDecoder().decode(MantaWindow.self, from: Data(#"{"index":1,"name":"w","active":false,"paneCurrentPath":""}"#.utf8))
+        XCTAssertNil(none.job)
     }
 
     func testVisibleRemovesHiddenWindowsAndKeepsTheRest() {

@@ -636,6 +636,8 @@ export function buildHandlers({
   // K3/K4: the stream interpreter that owns the pending-user-message list.
   // Null when not wired (tests) → opencode:inbox* answer a clear error.
   streamInterp = null,
+  // WS11 D7: the per-window status aggregator (null in a bare test harness).
+  sessionStatus = null,
   // WS11 D6: (session, windowIndex) → is a terminal window mid-turn (the status poller's latest batch).
   terminalRunning = () => false,
   // WS11 D2: the shared "which model is this session measured against" resolver
@@ -1268,6 +1270,7 @@ export function buildHandlers({
     // succeeded, do a synchronous refresh so the first call doesn't return a
     // hardcoded empty list to a box that just booted.
     "tmux:list": async () => {
+      await sessionStatus?.settled?.();
       if (!syncState.everSucceeded()) {
         await syncState.refreshNow();
       }
@@ -1443,6 +1446,8 @@ export function buildHandlers({
       await syncState.refreshNow();
       return result;
     },
+    // WS11 D7 (S14): every windowed session's `windowStatus` payload — a FULL replacement for the client.
+    "sessions:window-status": async () => sessionStatus?.windowStatusMap() ?? {},
     // WS11 D6 (S10): the close flow — confirm copy, then worktree removal → kill → metadata → refresh — on the box.
     "sessions:close-preview": async (i) =>
       previewClose({

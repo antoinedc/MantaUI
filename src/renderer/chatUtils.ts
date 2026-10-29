@@ -6,7 +6,7 @@
 import { formatBytes } from "../shared/formatBytes.mjs";
 import type { ReactNode } from "react";
 import type { ConnectionStateName } from "../shared/net/state.js";
-import type { StreamAttentionPayload, StreamChildSessionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
+import type { StreamAttentionPayload, StreamEnvelope, StreamRunningPayload, AppControlPayload, MediaEventPayload, OpencodeAgent, OpencodeMessage, OpencodeModel, OpencodePart, ProgressRecord, ProgressState, Project, QuestionRequest, RepoHit, TmuxWindow, UsageSnapshot, UsageWindow, WidgetEventPayload, WindowStatusPayload, ProviderView, AccountView, SeatView, SeatProviderId, SessionSeat, AccountsError } from "../shared/types";
 import type { SessionMode } from "./chatShared";
 import type { VoiceNoteRecord } from "../shared/types";
 import { isBackgroundResultMessage } from "./backgroundRun";
@@ -93,7 +93,6 @@ export {
   classifyCacheAge,
   classifyFinish,
   collectChildSessionIds,
-  countRunningSubagents,
   countUserTurns,
   describeTruncation,
   extractSubagentInfo,
@@ -731,8 +730,8 @@ export function stepTokensFromFrame(p: {
  *
  *   running {running}   → setChatRunning(sid, running)   (the hard signal)
  *   sessionError/aborted→ setChatRunning(sid, false)
- *   childSession        → setSessionParent(child, parent) (frame is published
- *                         under the PARENT's session id)
+ *   windowStatus        → setWindowStatus(sid, payload) (the box's rollup: busy
+ *                         beneath, direct subagents, stopped — WS11 D7)
  *   attention {kind}    → setChatAttention(sid, kind) (the box never frames a
  *                         trust-mode ask it auto-answers, so there is nothing
  *                         to debounce client-side)
@@ -744,12 +743,11 @@ export function stepTokensFromFrame(p: {
 export function createSidebarFrameHandler(store: {
   setChatRunning: (sid: string, running: boolean) => void;
   setChatAttention: (sid: string, kind: "question" | "permission" | null) => void;
-  setSessionParent: (child: string, parent: string) => void;
+  setWindowStatus: (sid: string, payload: WindowStatusPayload) => void;
 }): (ev: StreamEnvelope) => void {
   return (ev) => {
-    if (ev.sub === "childSession") {
-      const p = ev.payload as StreamChildSessionPayload;
-      if (p?.childSessionId && p.parentSessionId) store.setSessionParent(p.childSessionId, p.parentSessionId);
+    if (ev.sub === "windowStatus") {
+      if (ev.sessionId && ev.payload && typeof ev.payload === "object") store.setWindowStatus(ev.sessionId, ev.payload as WindowStatusPayload);
       return;
     }
     const sid = ev.sessionId;
@@ -1806,179 +1804,6 @@ export function fuzzySessionScore(
   }
   if (qi < q.length) return 0;
   return 100 + gapBonus;
-}
-
-// Background-job nesting for one project. A job's child window (the window
-// whose opencodeSessionId === job.childSessionID) renders as an indented
-// CHILD row under its parent window (the window whose opencodeSessionId ===
-// job.displayParentID ?? job.parentSessionID) whenever both windows exist.
-//
-// Returns:
-//   hidden      — child window indices that must be REMOVED from the
-//                 project's top-level window list (they render nested).
-//   children    — parent window index → ordered child window indices to
-//                 render indented under that parent row.
-export type JobNestingResult = {
-  hidden: Set<number>;
-  children: Map<number, number[]>;
-};
-
-export function computeJobNesting(
-  project: Project,
-  jobs: Record<
-    string,
-    {
-      status: string;
-      parentSessionID: string | null;
-      displayParentID?: string | null;
-      childSessionID: string | null;
-      supersededBy?: string | null;
-    }
-  >,
-): JobNestingResult {
-  const hidden = new Set<number>();
-  const children = new Map<number, number[]>();
-
-  // Index windows by opencodeSessionId for parent/child resolution.
-  const byOpencodeId = new Map<string, TmuxWindow>();
-  for (const w of project.windows) {
-    if (w.opencodeSessionId) byOpencodeId.set(w.opencodeSessionId, w);
-  }
-
-  // child window index → parent window index. Nest by the DISPLAY parent when the server resolved one (the
-  // real parent has no window); the real parent still routes results and is the fallback.
-  const parentOf = new Map<number, number>();
-  for (const job of Object.values(jobs)) {
-    if (!job.childSessionID || job.supersededBy) continue;
-    const childWin = byOpencodeId.get(job.childSessionID);
-    if (!childWin) continue; // job's window isn't in this project
-    const nestUnder = job.displayParentID ?? job.parentSessionID;
-    const parentWin = nestUnder ? byOpencodeId.get(nestUnder) : undefined;
-    if (!parentWin || parentWin.index === childWin.index) continue; // child stays top-level; parent window is gone
-    parentOf.set(childWin.index, parentWin.index);
-  }
-  // Only top-level rows render children, so a row whose parent is itself nested is lifted to the nearest
-  // top-level ancestor (cycle-safe: a cycle leaves its members top-level).
-  for (const [child] of parentOf) {
-    const seen = new Set([child]);
-    let top = parentOf.get(child)!;
-    while (parentOf.has(top) && !seen.has(top)) {
-      seen.add(top);
-      top = parentOf.get(top)!;
-    }
-    if (seen.has(top)) continue;
-    hidden.add(child);
-    const arr = children.get(top) ?? [];
-    arr.push(child);
-    children.set(top, arr);
-  }
-
-  // Sort children by window index for stable render order.
-  for (const arr of children.values()) arr.sort((a, b) => a - b);
-  return { hidden, children };
-}
-
-// Which sessions have work in flight ANYWHERE beneath them — their own turn,
-// a subagent child (inline or backgrounded, any depth), or a background job
-// they started. A session's sidebar row should read "running" for as long as
-// any of that is going, not just while its own turn is: a parent whose turn
-// ended while its background child keeps working is still busy from the
-// user's point of view.
-//
-// `running`  — session ids currently running a turn (incl. windowless ones)
-// `parents`  — child session id → parent session id
-// `jobs`     — background-job records; a `running` job counts as work in its
-//              child session AND (via displayParentID ?? parentSessionID) its parent
-//
-// Returns every running session plus all of its ancestors. Cycle-safe.
-export function sessionsWithActiveWork(
-  running: Iterable<string>,
-  parents: Record<string, string>,
-  jobs: Record<
-    string,
-    {
-      status: string;
-      parentSessionID: string | null;
-      displayParentID?: string | null;
-      childSessionID: string | null;
-      supersededBy?: string | null;
-    }
-  >,
-): Set<string> {
-  const links = new Map<string, string>(Object.entries(parents));
-  const seeds: string[] = [...running];
-  for (const job of Object.values(jobs)) {
-    if (job.status !== "running" || job.supersededBy) continue;
-    if (job.childSessionID) {
-      seeds.push(job.childSessionID);
-      // The row nests under its display parent, so that is where its running state rolls up to — even when
-      // the session's own (windowless) parent is known.
-      if (job.displayParentID) {
-        links.set(job.childSessionID, job.displayParentID);
-      } else if (job.parentSessionID && !links.has(job.childSessionID)) {
-        links.set(job.childSessionID, job.parentSessionID);
-      }
-    } else if (job.parentSessionID) {
-      // Mid-start record (no child session yet) — the parent is still busy.
-      seeds.push(job.parentSessionID);
-    }
-  }
-  const out = new Set<string>();
-  for (const seed of seeds) {
-    let cur: string | undefined = seed;
-    while (cur && !out.has(cur)) {
-      out.add(cur);
-      cur = links.get(cur);
-    }
-  }
-  return out;
-}
-
-// Does the window tree disagree with the jobs slice, so the tree needs a
-// re-list?
-//
-// `computeJobNesting` can only render a job it can find a WINDOW for
-// (`byOpencodeId.get(job.childSessionID)`), and drops the job outright when it
-// can't. The two inputs refresh on completely different schedules: the jobs
-// slice re-fetches on every `delegate.updated` bus event, while the window tree
-// is only re-listed by `refresh()` — which the app runs at bootstrap and then
-// only after an action it performed itself. A background job creates its tmux
-// window on the BOX, after boot and without the app doing anything, so its
-// window is absent from the tree and the job renders NOWHERE: not nested, not
-// orphaned, not top-level. That is the "delegated jobs never appear in the
-// sidebar" bug, and it self-heals only if the user happens to do something
-// that re-lists windows.
-//
-// Rather than re-listing tmux on a timer (polling the box for a change that is
-// already announced) or on every `delegate.updated` (activity updates fire
-// every ~10s per job, so that is a tmux call per job per tick), this states the
-// invariant the renderer actually depends on and lets the caller re-list only
-// when it is violated:
-//
-//   - a RUNNING job whose child window is missing  → the tree is behind a
-//     window that was created (job would be invisible)
-//   - a window whose session belongs to a TERMINAL job → the tree is behind a
-//     window that was removed (a finished job's window would otherwise linger
-//     and, once its record is swept, reappear as an ordinary session)
-//
-// Pure so it can be tested without a tree, a socket, or a live job.
-export function shouldResyncWindowsForJobs(
-  projects: Project[],
-  jobs: Record<string, { status: string; childSessionID: string | null; supersededBy?: string | null }>,
-): boolean {
-  const known = new Set<string>();
-  for (const p of projects) {
-    for (const w of p.windows) {
-      if (w.opencodeSessionId) known.add(w.opencodeSessionId);
-    }
-  }
-  for (const job of Object.values(jobs)) {
-    if (!job.childSessionID || job.supersededBy) continue;
-    const present = known.has(job.childSessionID);
-    if (job.status === "running" && !present) return true;
-    if (job.status !== "running" && present) return true;
-  }
-  return false;
 }
 
 // Compact model display name for the composer model pill (BET-460). The

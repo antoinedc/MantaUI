@@ -11,6 +11,7 @@ import type {
   SessionSeat,
   StoppedRecord,
   WindowStatus,
+  WindowStatusPayload,
   UpdateTarget,
 } from "../shared/types";
 import type { ConnectionState } from "../shared/net/state.js";
@@ -474,10 +475,12 @@ type State = {
   // background child kept working showed as idle in the rail. Fed by the same
   // App-level opencode-event subscription as `setChatRunning`.
   liveRunning: Record<string, true>;
-  // child session id → parent session id, learned from `session.created`
-  // (properties.info.parentID) and from the session list backfill. Lets the
-  // sidebar roll a running descendant up onto its ancestor's row.
-  sessionParents: Record<string, string>;
+  // WS11 D7: the box's per-session rollup (busy beneath, direct-subagent count, stopped), streamed as `windowStatus`
+  // frames and replaced wholesale by `sessions:window-status` on every (re)connect. Own running + the attention
+  // latch stay on `status` / `liveRunning`; this adds only what the box derives from the parent/child graph.
+  windowStatusBySession: Record<string, WindowStatusPayload>;
+  setWindowStatus: (sessionId: string, payload: WindowStatusPayload) => void;
+  replaceWindowStatus: (map: Record<string, WindowStatusPayload>) => void;
   // BET-738: subscription plan usage snapshots (one per connected provider),
   // fed by the composer's UsageDial. Primed once with window.api.usageList()
   // on mount and kept live by the `usage.updated` bus event — App.tsx does
@@ -714,9 +717,6 @@ type State = {
   // same UI; just a different update path. Owning window is resolved
   // from `sessionId` via the active projects tree.
   setChatRunning: (sessionId: string, running: boolean) => void;
-  // Record a child → parent session link (see `sessionParents`). No-op when
-  // already known.
-  setSessionParent: (childId: string, parentId: string) => void;
   // Apply the box's authoritative `runningSet` (replayed on every events
   // (re)connect): every listed session is running, every other session we
   // believed was running is not. Corrects a rail latched on a turn whose
@@ -735,20 +735,13 @@ type State = {
     sessionId: string,
     kind: AttentionKind | null,
   ) => void;
-  // Chat-mode subagent count driven by ChatPanel's task-tool inspection
-  // (`countRunningSubagents` over the live transcript + child status). The
-  // PTY poller's regex (`● Task(...)` + `⎿ Running…`) can't see chat-mode
-  // windows because their pane runs `sleep infinity` — without this update
-  // path the sidebar `·N` indicator would always be 0 for chat windows.
-  // Owning window is resolved from `sessionId` via `resolveSessionOwner`.
-  setChatSubagents: (sessionId: string, count: number) => void;
   // BET-791: reflect a chat-mode window's model-authored progress label into
   // the store so the rail row's title tooltip (the subagent count's home) can
   // carry it. Owning window resolved from `sessionId`; label null clears.
   setChatProgressLabel: (sessionId: string, label: string | null) => void;
   // BET-659: reflect a chat-mode window's live transcript into the store so
   // the Artifacts panel can derive artifacts from it. No-op when unchanged
-  // (same guard as setChatSubagents) so keystroke re-renders of ChatPanel —
+  // so keystroke re-renders of ChatPanel —
   // which leave the `messages` reference stable — don't re-emit the whole
   // array to every store subscriber.
   setChatMessages: (sessionId: string, messages: OpencodeMessage[]) => void;
@@ -882,7 +875,7 @@ export const useStore = create<State>((set, get) => ({
   sessionCost: {},
   jobs: {},
   liveRunning: {},
-  sessionParents: {},
+  windowStatusBySession: {},
   usage: [],
   accounts: [],
   sessionSeats: {},
@@ -1408,12 +1401,14 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
-  setSessionParent: (childId, parentId) =>
+  setWindowStatus: (sessionId, payload) =>
     set((prev) => {
-      if (!childId || !parentId || childId === parentId) return prev;
-      if (prev.sessionParents[childId] === parentId) return prev;
-      return { sessionParents: { ...prev.sessionParents, [childId]: parentId } };
+      const old = prev.windowStatusBySession[sessionId];
+      if (old && JSON.stringify(old) === JSON.stringify(payload)) return prev;
+      return { windowStatusBySession: { ...prev.windowStatusBySession, [sessionId]: payload } };
     }),
+
+  replaceWindowStatus: (map) => set({ windowStatusBySession: { ...map } }),
 
   reconcileRunningSet: (sessionIds) => {
     const want = new Set(sessionIds);
@@ -1462,34 +1457,6 @@ export const useStore = create<State>((set, get) => ({
         subagents: old?.subagents ?? 0,
         attention: wantAttention,
         attentionKind: wantAttention ? kind ?? "idle" : undefined,
-        lastMessageAt: old?.lastMessageAt,
-        progressLabel: old?.progressLabel,
-      };
-      return {
-        status: {
-          ...prev.status,
-          [owner.tmuxSession]: {
-            ...prev.status[owner.tmuxSession],
-            [owner.windowIndex]: nextWin,
-          },
-        },
-      };
-    }),
-
-  setChatSubagents: (sessionId, count) =>
-    set((prev) => {
-      const owner = resolveSessionOwner(prev.projects, sessionId);
-      if (!owner) return prev;
-      const old = prev.status[owner.tmuxSession]?.[owner.windowIndex];
-      const prevCount = old?.subagents ?? 0;
-      // No-op when unchanged to avoid pointless re-renders of the entire
-      // sidebar tree (zustand re-emits to all subscribers on every set).
-      if (prevCount === count) return prev;
-      const nextWin: WindowStatusUI = {
-        running: old?.running ?? false,
-        subagents: count,
-        attention: old?.attention ?? false,
-        attentionKind: old?.attentionKind,
         lastMessageAt: old?.lastMessageAt,
         progressLabel: old?.progressLabel,
       };
@@ -1663,9 +1630,6 @@ export const useStore = create<State>((set, get) => ({
         try {
           const sessions = await window.api.opencodeListSessions!(dir);
           for (const s of sessions) {
-            // Same listing carries the subagent → parent link; seed it so a
-            // child already running at connect rolls up onto its parent row.
-            if (s.parentID) get().setSessionParent(s.id, s.parentID);
             const updated = s.time?.updated;
             if (typeof updated === "number" && updated > 0) {
               updatedBySessionId.set(s.id, updated);

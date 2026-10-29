@@ -396,6 +396,24 @@ export type TmuxWindow = {
   // a pre-existing worktree is never identified by this stamp, so the
   // renderer can safely remove ONLY what manta created.
   worktreePath?: string | null;
+  // WS11 D7 (S13): set by the box (sessions-window-status-1) on a window that IS a background job's child —
+  // `parentWindowIndex` is the top-level window it nests under, or null when it stays top-level. Null / absent
+  // on every other window and on an older box (which sends no nesting, so the rail renders flat).
+  job?: { id: string; status: string; parentWindowIndex: number | null } | null;
+};
+
+/** `windowStatus` frame / `sessions:window-status` (WS11 D7): one windowed session's rolled-up status. */
+export type WindowStatusPayload = {
+  /** The session's OWN turn is running. */
+  running: boolean;
+  /** Work in flight anywhere beneath it (own turn, subagent children at any depth, a running background job). */
+  busy: boolean;
+  startedAt: number | null;
+  attention: "question" | "permission" | null;
+  /** Direct children whose own turn is running. */
+  subagents: number;
+  /** Stopped by a provider usage limit. */
+  stopped: boolean;
 };
 
 export type TmuxSession = {
@@ -1382,6 +1400,7 @@ export const IPC = {
   sessionsProposeName: "sessions:propose-name",
   sessionsClosePreview: "sessions:close-preview",
   sessionsClose: "sessions:close",
+  sessionsWindowStatus: "sessions:window-status",
   tmuxRenameSession: "tmux:rename-session",
   tmuxRenameWindow: "tmux:rename-window",
   tmuxKillSession: "tmux:kill-session",
@@ -3318,6 +3337,7 @@ export type StreamEnvelope = {
     | "inbox"
     | "childSession"
     | "attention"
+    | "windowStatus"
     | "aborted"
     // Client-synthesised (never sent by the box): the events socket reconnected,
     // so every open panel must resync (see httpApi `fireResync`). `sessionId` is "".

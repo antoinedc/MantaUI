@@ -835,6 +835,7 @@ export const httpApi: Api = {
   sessionsProposeName: (input) => rpc(IPC.sessionsProposeName, input),
   sessionsClosePreview: (input) => rpc(IPC.sessionsClosePreview, input),
   sessionsClose: (input) => rpc(IPC.sessionsClose, input),
+  sessionsWindowStatus: () => rpc(IPC.sessionsWindowStatus),
   tmuxRenameSession: (input) => rpc(IPC.tmuxRenameSession, input),
   tmuxRenameWindow: (input) => rpc(IPC.tmuxRenameWindow, input),
   tmuxKillSession: (sessionName) => rpc(IPC.tmuxKillSession, sessionName),

@@ -103,6 +103,7 @@ import { createLifecycleAdapter } from "../shared/opencodeV2.mjs";
 import { handlePermissionAsk, createAutoAnswerLedger } from "./permissionAskPump.mjs";
 import { enrichProviderError, describeBackgroundCompaction } from "../shared/streamInterpretation.mjs";
 import { createDelegateView } from "./delegateView.mjs";
+import { createSessionStatus } from "./sessionStatus.mjs";
 import { providerStateLabel } from "../shared/providerHealthLabel.mjs";
 import { startOutboxPoller, pushArtifact, createArtifactSweep } from "./outbox.mjs";
 import { startUploadCleanupPoller } from "./uploads.mjs";
@@ -385,7 +386,7 @@ oc.setCommandCorrelator(commandCorrelator);
 // interactive card reappear and stay answerable on a thin client).
 // `snapshotState()` returns these events; the bus replays them to each new
 // subscriber.
-bus.setSnapshot(() => streamInterp.snapshotState());
+bus.setSnapshot(() => [...streamInterp.snapshotState(), ...(sessionStatusRef.current?.snapshotFrames() ?? [])]);
 // Shared deps passed to store-mutating helpers so they can publish the
 // `*.updated` bus event the renderer cards listen for (JobCard, WebhooksCard,
 // etc). Single source of truth — every endpoint that creates/deletes a
@@ -405,8 +406,14 @@ const BUS_PUBLISH_DEPS = { publish: (evt) => bus.publish(evt) };
 // re-materialize — snapshots the exact tree it just applied. Persist
 // failures are warned + swallowed inside syncState and can never flip a good
 // refresh to stale; a failed listing never reaches the persister at all.
+// WS11 D7: every window of the session list carries its background-job `job` ({id, status, parentWindowIndex}),
+// annotated from the status aggregator's delegate records (assigned below, once the delegate engine exists).
+const sessionStatusRef = { current: null };
 const syncState = createSyncState({
-  listProjects: () => tmux.listProjects(),
+  listProjects: async () => {
+    const projects = await tmux.listProjects();
+    return sessionStatusRef.current ? sessionStatusRef.current.annotateProjects(projects) : projects;
+  },
   publish: (env) => bus.publish(env),
   persistTopology: createTopologyPersister(),
 });
@@ -1232,6 +1239,25 @@ const delegateView = createDelegateView({
   listProjects: () => tmux.listProjects(),
   listModels: () => oc.listModels(),
 });
+// WS11 D7 (S13, S14): per-window status (running / busy beneath / subagents / attention / stopped) and job nesting,
+// aggregated from authoritative sources only (the interpreter's own-session frames, parent edges, delegate records) and
+// published as one `windowStatus` frame per session whose payload changed.
+const sessionStatus = createSessionStatus({
+  publish: (evt) => bus.publish(evt),
+  windowedSessionIds: () => {
+    const ids = [];
+    for (const p of syncState.snapshot().projects ?? []) for (const w of p.windows ?? []) if (w.opencodeSessionId) ids.push(w.opencodeSessionId);
+    return ids;
+  },
+  loadJobs: () => delegateEngine.loadRecords(),
+  loadStopped: async () => new Set(((await listStopped()).records ?? []).map((r) => r.conversation)),
+  listActiveSessionIds: () => oc.listActiveSessionIds(),
+  getSessionParent: (id) => oc.getSessionParent(id),
+  // A job's window appears/disappears on the box: the session list (and its `job` fields) is re-read at once.
+  onJobsChanged: () => syncState.refreshNow(),
+});
+sessionStatusRef.current = sessionStatus;
+bus.subscribe((evt) => sessionStatus.observe(evt));
 // Boot reconciliation of pre-C2 records (a job from before every job ran on the V2
 // engine): a `running` one is failed "interrupted by upgrade" and reports its one
 // result; a `paused` one is upgraded in place so it can still be resumed. A healthy
@@ -2088,6 +2114,7 @@ rpcHandlers = buildHandlers({
   delegate: delegateEngine,
   handoff: handoffEngine,
   delegateView,
+  sessionStatus,
   // BET-1252: routing-services readers shared with delegate (the routing:choose
   // channel). Same degradation contract:
   // absent readers ⇒ absent services ⇒ the router returns the incumbent.
@@ -3563,6 +3590,8 @@ const stopOpencodePump = oc.subscribeEvents((raw) => {
     // opencode may have restarted outside Manta: its provider catalogue is no longer trustworthy.
     if (reconnect) oc.invalidateProvidersCache({ restarted: true });
     if (reconnect) void resyncAfterReconnect().catch((e) => console.warn("[opencode-pump] resync failed:", e?.message ?? e));
+    // The running set and the parent edges are rebuilt from opencode's own reads (no replay on V2).
+    void sessionStatus.hydrate().catch((e) => console.warn("[session-status] hydration failed:", e?.message ?? e));
     // Events may have been missed while disconnected (or before the first
     // connect): re-check every unfinished V2 job from authoritative reads.
     delegateEngine.reconcileV2().catch((e) => console.warn("[delegate] reconnect reconciliation failed:", e?.message ?? e));

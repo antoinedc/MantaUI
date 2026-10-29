@@ -238,6 +238,7 @@ export const DEMO_UNIMPLEMENTED = [
   "sessionsClose",
   "sessionsClosePreview",
   "sessionsProposeName",
+  "sessionsWindowStatus",
   "tmuxConfigStatus",
   "tmuxKillSession",
   "tmuxKillWindow",

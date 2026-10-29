@@ -17,8 +17,6 @@ import { UPDATE_BOX_NOTE_TEXT } from "./components/UpdateBoxNote";
 import { useBoxCapability } from "./hooks/useBoxCapabilities";
 import {
   classifyCacheAge,
-  computeJobNesting,
-  sessionsWithActiveWork,
   formatAge,
   fuzzySessionScore,
   isJobRow,
@@ -113,15 +111,8 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
   const activeWindowByProject = useStore((s) => s.activeWindowByProject);
   const status = useStore((s) => s.status);
   const jobs = useStore((s) => s.jobs);
-  const liveRunning = useStore((s) => s.liveRunning);
-  const sessionParents = useStore((s) => s.sessionParents);
-  // Sessions with work in flight anywhere beneath them (own turn, subagent
-  // children at any depth, background jobs). A row reads "running" while
-  // ANY of it is going — see sessionsWithActiveWork.
-  const activeWork = useMemo(
-    () => sessionsWithActiveWork(Object.keys(liveRunning), sessionParents, jobs),
-    [liveRunning, sessionParents, jobs],
-  );
+  // The box's per-session rollup (busy beneath, direct subagents) — WS11 D7. Empty on an older box.
+  const windowStatusBySession = useStore((s) => s.windowStatusBySession);
   const usageStopped = useStore((s) => s.usageStopped);
   // BET-1049: the conversations currently stopped by a provider limit (the
   // box-side record). Conversation ids → the set for O(1) row-marker lookups;
@@ -368,14 +359,25 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     [pinnedRows],
   );
 
-  // Per-project job nesting. Keyed by tmuxSession.
+  // Per-project job nesting, as the box decided it (each window carries `job.parentWindowIndex`). Keyed by tmuxSession.
   const nesting = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof computeJobNesting>>();
+    const m = new Map<string, { hidden: Set<number>; children: Map<number, number[]> }>();
     for (const p of projects) {
-      m.set(p.tmuxSession, computeJobNesting(p, jobs));
+      const hidden = new Set<number>();
+      const children = new Map<number, number[]>();
+      for (const w of p.windows) {
+        const parent = w.job?.parentWindowIndex;
+        if (parent == null) continue;
+        hidden.add(w.index);
+        const arr = children.get(parent) ?? [];
+        arr.push(w.index);
+        children.set(parent, arr);
+      }
+      for (const arr of children.values()) arr.sort((x, y) => x - y);
+      m.set(p.tmuxSession, { hidden, children });
     }
     return m;
-  }, [projects, jobs]);
+  }, [projects]);
 
   // Flat nav-order keys for keyboard tree nav (roving tabindex).
   const navKeys = useMemo(() => {
@@ -603,21 +605,23 @@ export const Sidebar = forwardRef<SidebarHandle, Props>(function Sidebar(
     if (paletteSel >= paletteResults.length) setPaletteSel(0);
   }, [paletteResults.length, paletteSel]);
 
-  // Row-indexed status lookup helper.
-  // A chat window also reads as running while a subagent or background job it
-  // started is still working, even after its own turn ended.
+  // Row-indexed status lookup helper. A chat window also reads as running while a subagent or background job it
+  // started is still working, even after its own turn ended — the box's rollup (`busy`, `subagents`).
   const statusFor = (session: string, idx: number): WindowStatusUI | undefined => {
     const own = status[session]?.[idx];
-    if (own?.running) return own;
     const sid = projects
       .find((p) => p.tmuxSession === session)
       ?.windows.find((w) => w.index === idx)?.opencodeSessionId;
-    const busyBeneath = (sid != null && activeWork.has(sid)) || (own?.subagents ?? 0) > 0;
-    if (!busyBeneath) return own;
+    const rollup = sid ? windowStatusBySession[sid] : undefined;
+    if (!rollup) return own;
+    const running = own?.running === true || rollup.busy;
+    if (!running && rollup.subagents === 0 && !own) return own;
     return {
-      ...(own ?? { subagents: 0, attention: false }),
-      running: true,
-      progressLabel: own?.progressLabel?.trim() ? own.progressLabel : "background work",
+      ...(own ?? { attention: false }),
+      running,
+      subagents: rollup.subagents,
+      progressLabel:
+        own?.running || own?.progressLabel?.trim() ? own?.progressLabel : rollup.busy ? "background work" : own?.progressLabel,
     };
   };
 

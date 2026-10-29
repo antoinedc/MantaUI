@@ -25,10 +25,10 @@ import {
 } from "./chatShared";
 import { setSessionChoice } from "./modelPrefs";
 import type { SyncPayload, CtoState } from "../shared/api";
-import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, shouldResyncWindowsForJobs, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
+import { chooseUpdateSkewVariant, isTransientUpdateNetworkError, isUnknownChannelError, pruneVisitedSessions, registerMountedTerminal, dispatchAppControl, dispatchMedia, applyMediaEvent, dispatchWidget, applyWidgetEvent, formatResetAt, formatWindowReset, voiceUi, boxUpgradeLanded, createSidebarFrameHandler, type AppControlHandlers, type MountedTerminal } from "./chatUtils";
 import { useCompatibilityCard } from "./hooks/useCompatibilityCard";
 import { useUpgradeGate } from "./hooks/useUpgradeGate";
-import { refreshBoxCapabilities, resetBoxCapabilities } from "./hooks/useBoxCapabilities";
+import { refreshBoxCapabilities, resetBoxCapabilities, useBoxCapability } from "./hooks/useBoxCapabilities";
 import { UpgradeGate } from "./UpgradeGate";
 import { boxNeedsMajorUpgrade } from "./upgradeGateLogic";
 import { UpdateBar } from "./UpdateBar";
@@ -645,22 +645,7 @@ function Shell() {
       window.api
         .delegateList()
         .then((list) => {
-          const store = useStore.getState();
-          store.setJobs(Array.isArray(list) ? list : []);
-          // A job's tmux window is created ON THE BOX, so nothing here has
-          // re-listed windows since bootstrap and the tree is missing it.
-          // computeJobNesting drops a job whose window it can't find, so
-          // without this the job is invisible in the sidebar even though the
-          // slice above holds it. Re-list only when the tree actually
-          // disagrees (window created for a running job, or still present for
-          // a finished one) — not on every event, which would mean a tmux call
-          // per job per activity tick.
-          const after = useStore.getState();
-          if (shouldResyncWindowsForJobs(after.projects, after.jobs)) {
-            void after.refresh().catch(() => {
-              /* transport blip — the next tick re-evaluates the invariant */
-            });
-          }
+          useStore.getState().setJobs(Array.isArray(list) ? list : []);
         })
         .catch((e) => {
           // BET-640: a transport blip keeps today's silent behaviour (leave
@@ -1171,7 +1156,7 @@ function Shell() {
   //                                       → running:false (latches "idle"
   //                                         attention if user isn't on the
   //                                         window — same logic as the poller)
-  //   - childSession                      → remember child → parent
+  //   - windowStatus                      → the box's per-session rollup
   //   - attention {kind}                  → "question" | "permission" | clear
   //
   // `turnComplete` is NOT used for the dot: the box derives it from the
@@ -1187,11 +1172,24 @@ function Shell() {
       createSidebarFrameHandler({
         setChatRunning: (sid, running) => useStore.getState().setChatRunning(sid, running),
         setChatAttention: (sid, kind) => useStore.getState().setChatAttention(sid, kind),
-        setSessionParent: (child, parent) => useStore.getState().setSessionParent(child, parent),
+        setWindowStatus: (sid, payload) => useStore.getState().setWindowStatus(sid, payload),
       }),
     );
     return off;
   }, [apiGeneration]);
+
+  // WS11 D7: the box's per-window rollup (busy beneath, direct subagents, stopped). Streamed as `windowStatus`
+  // frames; this read replaces the map wholesale on connect and on every reconnect, so a session that stopped while
+  // we were away cannot stay lit. An older box (no capability) has no rollup — rows show their own turn only.
+  const windowStatusCap = useBoxCapability("sessions-window-status-1");
+  const pullWindowStatus = () => {
+    if (windowStatusCap !== true || !window.api.sessionsWindowStatus) return;
+    window.api
+      .sessionsWindowStatus()
+      .then((map) => useStore.getState().replaceWindowStatus(map ?? {}))
+      .catch((e) => console.warn("[window-status] read failed:", e instanceof Error ? e.message : e));
+  };
+  useEffect(pullWindowStatus, [apiGeneration, windowStatusCap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The box replays its authoritative running set on every events
   // (re)connect. Without it, a turn already underway when the app connected
@@ -1204,9 +1202,10 @@ function Shell() {
         .map((s) => s?.sessionId)
         .filter((s): s is string => typeof s === "string" && s.length > 0);
       useStore.getState().reconcileRunningSet(ids);
+      pullWindowStatus();
     });
     return off;
-  }, [apiGeneration]);
+  }, [apiGeneration, windowStatusCap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // App-control bus (BET-840/841). The box publishes ONE `appControl` kind
   // with an `action` discriminator whenever an app-control tool lands a

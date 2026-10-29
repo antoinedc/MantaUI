@@ -2335,3 +2335,31 @@ effect, the harness `flush` and the test's own clock all use real timers, so con
   the phone used never matched the box's `project-meta:delete`; that call is gone with the rest.
 - Old box (no `sessions-close-1`): desktop shows "Update your box to use this" when Close is pressed; iOS shows the
   same line from the delete / close-project entry points.
+
+## Implementation notes (D7, `sessions-window-status-1`)
+
+- Box: `sessionStatus.mjs` (`createSessionStatus`) observes the bus (the interpreter's `running`/`turnComplete`/
+  `attention`/`childSession` frames for ANY session id, `runningSet`, `delegate.updated`, `usage-stopped.updated`) and
+  publishes one `windowStatus` frame per WINDOWED session whose payload changed (coalesced per tick, ancestors
+  included): `{running, busy, startedAt, attention, subagents, stopped}`. The connect snapshot replays every
+  windowed session; `sessions:window-status` returns the same map as a full replacement.
+- Parent edges come from `childSession` frames, delegate records and, after a start / opencode reconnect, an
+  ancestry walk from opencode's own records (`getSessionParent`, three-way ok / not-found / error) seeded from
+  `GET /api/session/active` and every running job's child. A failed read keeps what is held and retries on 1/2/5/10 s;
+  edges are evicted LRU beyond 5000 (running / windowed chains kept). `busy`/job nesting are moved verbatim from the
+  desktop (`sessionsWithActiveWork` counts `running` jobs only, as before; `computeJobNesting` incl. lifting and cycles).
+- `tmux:list` / sync deltas now carry `windows[].job = {id, status, parentWindowIndex}`; a job change re-reads the list
+  (only when ids / statuses / windows changed, not on the ~10 s activity ticks) and `tmux:list` waits for that to
+  settle, so an iOS refresh right after `delegate.updated` already has the new nesting.
+- Desktop: rail nesting is read from `job.parentWindowIndex`; the row's running / `·N` come from the rollup
+  (`windowStatusBySession`, replaced on connect, patched by frames). Own running and the attention latch stay on the
+  existing `running` / `attention` frames. Deleted: `computeJobNesting`, `sessionsWithActiveWork`,
+  `shouldResyncWindowsForJobs`, `sessionParents` / `setSessionParent`, `setChatSubagents` + ChatPanel's push,
+  `countRunningSubagents`. The jobs poll stays (activity strings / observed marks).
+- iOS: `MantaWindow.job`, `StreamWindowStatusPayload` → `MantaSessionStreamState.windowStatus`; `rowStatus` takes
+  `busy`/`subagents` from it; hidden job windows and per-parent counts come from the list. Deleted: `SessionJobNesting`,
+  `DelegateNesting`, `SessionSubagentCount`, the `delegate:list` poll and `delegateJobs`. `delegate.updated` now triggers a
+  plain refresh.
+- `stopped` rides the payload but neither client switches to it yet (desktop's header pill needs the full records and
+  iOS still reads its stopped list); `attention` likewise stays on the existing frames.
+- Old box: no `job` / `windowStatus` → rail is flat, rows show their own turn only (owner-tagged job windows still hide).

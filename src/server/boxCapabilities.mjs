@@ -44,6 +44,8 @@ export const BOX_CAPABILITIES = Object.freeze([
   "forge-clone-view-1",
   // WS11 D6 (close flow)
   "sessions-close-1",
+  // WS11 D7 (window status + job nesting)
+  "sessions-window-status-1",
 ]);
 
 export const CAPABILITY_ID_PATTERN = /^[a-z0-9-]+-\d+$/;

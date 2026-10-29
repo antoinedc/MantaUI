@@ -623,10 +623,6 @@ final class SessionRowStatusTests: XCTestCase {
                          isTerminal: terminal, runningSubagents: subagents, halted: halted)
     }
 
-    private func sub(_ status: String?) -> StreamSubagentPayload {
-        StreamSubagentPayload(childSessionId: UUID().uuidString, status: status)
-    }
-
     func testSubtitleSubagentsReplaceEverythingButJobs() {
         XCTAssertEqual(SessionRowSubtitle.text(for: status(running: true, subagents: 3, model: "opus 4.8")), "3 subagents")
     }
@@ -639,18 +635,11 @@ final class SessionRowStatusTests: XCTestCase {
         XCTAssertEqual(SessionRowSubtitle.text(for: status(running: true, jobs: 2, subagents: 3)), "2 background jobs")
     }
 
-    func testSubagentCountIgnoresCompletedAndError() {
-        let list = [sub("running"), sub("completed"), sub("error"), sub(nil)]
-        XCTAssertEqual(SessionSubagentCount.running(list, parentRunning: true), 1)
-    }
-
-    func testSubagentCountZeroWhenParentNotRunning() {
-        // A missed finish frame must not leave "2 subagents" on an idle row.
-        XCTAssertEqual(SessionSubagentCount.running([sub("running"), sub("running")], parentRunning: false), 0)
-    }
-
-    func testSubagentCountCountsPending() {
-        XCTAssertEqual(SessionSubagentCount.running([sub("pending"), sub("running")], parentRunning: true), 2)
+    func testWindowStatusPayloadDecodesLeniently() throws {
+        let full = try JSONDecoder().decode(StreamWindowStatusPayload.self, from: Data(#"{"running":false,"busy":true,"startedAt":5,"attention":"question","subagents":2,"stopped":true}"#.utf8))
+        XCTAssertEqual(full, StreamWindowStatusPayload(running: false, busy: true, startedAt: 5, attention: "question", subagents: 2, stopped: true))
+        let sparse = try JSONDecoder().decode(StreamWindowStatusPayload.self, from: Data(#"{"busy":"junk","subagents":"x"}"#.utf8))
+        XCTAssertEqual(sparse, StreamWindowStatusPayload())
     }
 
     func testHaltedSubtitleWhenIdle() {

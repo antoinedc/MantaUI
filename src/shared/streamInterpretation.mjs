@@ -837,35 +837,6 @@ export function collectChildSessionIds(messages) {
 }
 
 /**
- * Count task tool parts whose status is "running" (or "pending"). Live status
- * can be more accurate than the parent's transcript snapshot — when a child's
- * `session.idle` arrives, the caller maps its sessionId → "idle" and passes
- * it here so we don't keep counting subagents that just finished.
- *
- * `liveStatus` keys are child session ids; values are "running" | "idle".
- */
-export function countRunningSubagents(messages, liveStatus) {
-  if (!messages) return 0;
-  let n = 0;
-  for (const m of messages) {
-    const parts = m?.parts;
-    if (!parts) continue;
-    for (const p of parts) {
-      const info = extractSubagentInfo(p);
-      if (!info) continue;
-      const live = liveStatus?.get(info.childSessionId);
-      if (live === "idle") continue;
-      if (live === "running") {
-        n++;
-        continue;
-      }
-      if (info.status === "running" || info.status === "pending") n++;
-    }
-  }
-  return n;
-}
-
-/**
  * Lightweight summary of a child session's transcript, for the collapsed
  * TaskBody header (tool count, last tool name, cumulative tokens scraped from
  * the child's step-finish parts). Returns zeros for an empty/null transcript.

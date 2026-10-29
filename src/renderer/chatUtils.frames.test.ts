@@ -35,7 +35,7 @@ describe("createSidebarFrameHandler", () => {
     const handle = createSidebarFrameHandler({
       setChatRunning: (...a) => calls.push(["running", ...a]),
       setChatAttention: (...a) => calls.push(["attention", ...a]),
-      setSessionParent: (...a) => calls.push(["parent", ...a]),
+      setWindowStatus: (...a) => calls.push(["windowStatus", ...a]),
     });
     return { h: { handle }, calls };
   };
@@ -61,10 +61,12 @@ describe("createSidebarFrameHandler", () => {
     expect(calls).toEqual([["running", "ses_a", false]]);
   });
 
-  it("childSession (published under the parent) links child → parent", () => {
+  it("windowStatus frames carry the box's rollup into the store", () => {
     const { h, calls } = make();
-    h.handle(frame("childSession", "ses_parent", { childSessionId: "ses_child", parentSessionId: "ses_parent" }));
-    expect(calls).toEqual([["parent", "ses_child", "ses_parent"]]);
+    const payload = { running: false, busy: true, startedAt: null, attention: null, subagents: 1, stopped: false };
+    h.handle(frame("windowStatus", "ses_parent", payload));
+    h.handle(frame("windowStatus", "", payload));
+    expect(calls).toEqual([["windowStatus", "ses_parent", payload]]);
   });
 
   it("attention latches question/permission and clears with null", () => {

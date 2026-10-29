@@ -672,3 +672,60 @@ describe("Sidebar — nested background job rows (observed label, superseded)", 
     expect(h!.container.querySelector('[data-testid="job-observed-label"]')).toBeNull();
   });
 });
+
+describe("Sidebar — the box's job nesting and status rollup (WS11 D7)", () => {
+  let h: Harness | null = null;
+  afterEach(() => {
+    h?.unmount();
+    h = null;
+  });
+  const mountIt = async () => {
+    h = mount(
+      <Sidebar onOpenSettings={() => {}} onNewProject={() => {}} onNewSessionInProject={() => {}} onOpenResumeModal={() => {}} onOpenCto={() => {}} ctoState={null} />,
+    );
+    await h.flush();
+  };
+  const win = (index: number, name: string, sid: string | null, extra: object = {}) => ({
+    index, name, active: index === 0, paneCurrentPath: "/x", opencodeSessionId: sid, ...extra,
+  });
+
+  it("a window the box nests under its parent renders once, as the parent's child — not also as a top-level row", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({
+      pinnedWindows: [],
+      projects: [
+        proj({
+          tmuxSession: "proj",
+          windows: [
+            win(0, "parent", "ses_p"),
+            win(1, "jobwin", "ses_j", { job: { id: "j1", status: "running", parentWindowIndex: 0 } }),
+          ],
+        }),
+      ],
+      jobs: { ses_j: { id: "j1", name: "j", status: "running", childSessionID: "ses_j", parentSessionID: "ses_p" } as never },
+    });
+    await mountIt();
+    expect((h!.docText().match(/jobwin/g) ?? []).length).toBe(1);
+  });
+
+  it("an older box sends no nesting: the same window is a plain top-level row", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({ pinnedWindows: [], projects: [proj({ tmuxSession: "proj", windows: [win(0, "parent", "ses_p"), win(1, "jobwin", "ses_j")] })] });
+    await mountIt();
+    expect(h!.docText()).toContain("jobwin");
+  });
+
+  it("a parent whose own turn ended but whose rollup says busy reads as running with the box's subagent count", async () => {
+    localStorage.clear();
+    installMockApi({});
+    resetStore({
+      pinnedWindows: [],
+      projects: [proj({ tmuxSession: "proj", windows: [win(0, "parent", "ses_p")] })],
+      windowStatusBySession: { ses_p: { running: false, busy: true, startedAt: null, attention: null, subagents: 2, stopped: false } },
+    });
+    await mountIt();
+    expect(h!.container.querySelector('[title*="Running"][title*="2 subagents"]')).not.toBeNull();
+  });
+});

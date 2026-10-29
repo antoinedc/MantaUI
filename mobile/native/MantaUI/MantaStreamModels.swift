@@ -210,6 +210,40 @@ struct StreamRunningSetPayload: Codable, Equatable, Sendable {
     var sessions: [Entry]
 }
 
+/// `sub: "windowStatus"` — one windowed session's rolled-up status, decided on the box (WS11 D7): `busy` is work
+/// anywhere beneath it (own turn, subagents at any depth, a running background job), `subagents` the direct children
+/// whose own turn runs.
+struct StreamWindowStatusPayload: Codable, Equatable, Sendable {
+    var running: Bool = false
+    var busy: Bool = false
+    var startedAt: Double? = nil
+    var attention: String? = nil
+    var subagents: Int = 0
+    var stopped: Bool = false
+
+    private enum CodingKeys: String, CodingKey { case running, busy, startedAt, attention, subagents, stopped }
+
+    init(running: Bool = false, busy: Bool = false, startedAt: Double? = nil, attention: String? = nil,
+         subagents: Int = 0, stopped: Bool = false) {
+        self.running = running
+        self.busy = busy
+        self.startedAt = startedAt
+        self.attention = attention
+        self.subagents = subagents
+        self.stopped = stopped
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        running = ((try? c.decodeIfPresent(Bool.self, forKey: .running)) ?? nil) ?? false
+        busy = ((try? c.decodeIfPresent(Bool.self, forKey: .busy)) ?? nil) ?? false
+        startedAt = (try? c.decodeIfPresent(Double.self, forKey: .startedAt)) ?? nil
+        attention = (try? c.decodeIfPresent(String.self, forKey: .attention)) ?? nil
+        subagents = ((try? c.decodeIfPresent(Int.self, forKey: .subagents)) ?? nil) ?? 0
+        stopped = ((try? c.decodeIfPresent(Bool.self, forKey: .stopped)) ?? nil) ?? false
+    }
+}
+
 /// `sub: "turnComplete"` — emitted by `message.updated`/`session.idle`.
 struct StreamTurnCompletePayload: Codable, Equatable, Sendable {
     var complete: Bool

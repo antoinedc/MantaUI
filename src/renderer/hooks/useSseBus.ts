@@ -44,7 +44,7 @@
 //   - compactSession, forkSession (for voice dispatch, but we'll skip that)
 //   - selectModel (for voice dispatch, but we'll skip that)
 //   - refreshPermissions, refreshQuestions (for server.connected)
-//   - setChatAttention, setChatSubagents (for sidebar updates)
+//   - setChatAttention (for sidebar updates)
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {

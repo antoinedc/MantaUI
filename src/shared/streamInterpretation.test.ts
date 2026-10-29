@@ -15,7 +15,6 @@ import {
   collectChildSessionIds,
   computeContextBreakdown,
   computeStaleCache,
-  countRunningSubagents,
   countUserTurns,
   describeTruncation,
   extractSubagentInfo,
@@ -1396,53 +1395,6 @@ describe("collectChildSessionIds", () => {
       { parts: [{ type: "tool", tool: "task", state: { status: "pending" } }] },
     ];
     expect(collectChildSessionIds(messages).size).toBe(0);
-  });
-});
-
-describe("countRunningSubagents", () => {
-  const taskPart = (childId: string, status: string) => ({
-    parts: [{ type: "tool", tool: "task", state: { status, metadata: { sessionId: childId } } }],
-  });
-
-  it("returns 0 for null/empty transcript", () => {
-    expect(countRunningSubagents(null)).toBe(0);
-    expect(countRunningSubagents([])).toBe(0);
-  });
-
-  it("counts transcript-status running / pending; skips completed / error", () => {
-    const messages = [
-      taskPart("a", "running"),
-      taskPart("b", "completed"),
-      taskPart("c", "pending"),
-      taskPart("d", "error"),
-    ];
-    // a (running) + c (pending) = 2
-    expect(countRunningSubagents(messages)).toBe(2);
-  });
-
-  it("liveStatus 'idle' WINS over transcript 'running' (the staleness case)", () => {
-    // Child just sent session.idle but the parent's task-part status snapshot
-    // is still "running" because the parent's transcript hasn't been refetched
-    // yet. Without this override, the sidebar would over-count.
-    const messages = [taskPart("a", "running"), taskPart("b", "running")];
-    const live = new Map<string, "running" | "idle">([
-      ["a", "idle"],
-      ["b", "running"],
-    ]);
-    expect(countRunningSubagents(messages, live)).toBe(1);
-  });
-
-  it("liveStatus 'running' counts even when transcript says completed", () => {
-    // Rare but possible during a refetch race: live SSE says running, the
-    // refetched task part still shows the previous completed run. Trust live.
-    const messages = [taskPart("a", "completed")];
-    const live = new Map<string, "running" | "idle">([["a", "running"]]);
-    expect(countRunningSubagents(messages, live)).toBe(1);
-  });
-
-  it("missing live entry falls back to transcript status", () => {
-    const messages = [taskPart("a", "running")];
-    expect(countRunningSubagents(messages, new Map())).toBe(1);
   });
 });
 

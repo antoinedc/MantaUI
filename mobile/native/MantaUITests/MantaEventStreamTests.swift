@@ -610,6 +610,24 @@ final class MantaEventStreamRouterTests: XCTestCase {
         XCTAssertNil(next["ses_1"]?.permissions)
     }
 
+    // MARK: - Window status (WS11 D7)
+
+    /// The box's per-window rollup lands on the session state as sent, and a later frame replaces it.
+    func testWindowStatusFrameIsStoredAndReplaced() throws {
+        var state = MantaSessionStreamState(sessionId: "ses_1")
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"windowStatus","sessionId":"ses_1","payload":{"running":false,"busy":true,"startedAt":null,"attention":null,"subagents":1,"stopped":false}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.windowStatus, StreamWindowStatusPayload(running: false, busy: true, subagents: 1))
+        state = MantaStreamRouter.applying(
+            try MantaStreamFrame.parse(#"{"kind":"stream","sub":"windowStatus","sessionId":"ses_1","payload":{"running":false,"busy":false,"subagents":0,"stopped":true}}"#),
+            to: state
+        )
+        XCTAssertEqual(state.windowStatus?.busy, false)
+        XCTAssertEqual(state.windowStatus?.stopped, true)
+    }
+
     // MARK: - Subagent upsert (BET-672)
 
     /// A subagent that goes running→done for the SAME child must leave exactly

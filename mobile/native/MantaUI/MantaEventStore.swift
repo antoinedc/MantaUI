@@ -83,6 +83,9 @@ struct MantaSessionStreamState: Equatable, Sendable {
     /// so the Plan chip turns itself off the moment the model exits planning.
     var planOn: Bool?
     var subagents: [StreamSubagentPayload] = []
+    /// The box's per-window rollup (busy beneath, direct subagent count, stopped) — WS11 D7. Replayed in the connect
+    /// snapshot for every windowed session and streamed on change; nil until the first frame (or on an older box).
+    var windowStatus: StreamWindowStatusPayload?
     // --- WS02 chat cards. All of it lives for the app's lifetime, so nothing here
     // is "cleared by a timer": transient cards are hidden by a latch in the chat
     // store, keyed by the generation / sequence numbers below.
@@ -293,6 +296,8 @@ enum MantaStreamRouter {
             s.questions = try? frame.decodedPayload(StreamQuestionsPayload.self)
         case "permissions":
             s.permissions = try? frame.decodedPayload(StreamPermissionsPayload.self)
+        case "windowStatus":
+            s.windowStatus = try? frame.decodedPayload(StreamWindowStatusPayload.self)
         case "planMode":
             s.planOn = try? frame.decodedPayload(StreamPlanModePayload.self)?.on
         case "subagent":

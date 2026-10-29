@@ -35,7 +35,6 @@ import { flashMessageRow } from "./messageFlash";
 import {
   allTodosTerminal,
   selectActiveTodos,
-  countRunningSubagents,
   computeTurnInfo,
   computeLiveTurn,
   shouldAutoRename,
@@ -315,7 +314,6 @@ export function ChatPanel({
     setWebhookError,
     refreshWebhooks,
   } = resources;
-  const setChatSubagents = useStore((s) => s.setChatSubagents);
   const setChatMessages = useStore((s) => s.setChatMessages);
 
   // BET-418 §A: pre-flight background-job approvals. When trust mode is OFF
@@ -2891,25 +2889,6 @@ export function ChatPanel({
       showThinking,
     ],
   );
-
-  // Push the running-subagent count into the global store so the sidebar's
-  // `·N` indicator (Sidebar.tsx's StatusIndicator) lights up for chat-mode
-  // windows. The TUI poller can't see chat-mode subagents (holder pane runs
-  // `sleep infinity`), so this is the sole update path for chat-mode `·N`.
-  // Pure derivation from the same data TaskBody consumes; the store no-ops
-  // when the count is unchanged so this doesn't churn other subscribers.
-  const runningSubagents = useMemo(
-    () => countRunningSubagents(messages, liveChildStatus),
-    [messages, liveChildStatus],
-  );
-  useEffect(() => {
-    setChatSubagents(sessionId, runningSubagents);
-  }, [sessionId, runningSubagents, setChatSubagents]);
-  // Reset to zero on unmount / session change so a stale count from the
-  // previous session doesn't linger on the sidebar dot.
-  useEffect(() => {
-    return () => setChatSubagents(sessionId, 0);
-  }, [sessionId, setChatSubagents]);
 
   // BET-659: lift this session's live transcript into the store so the
   // Artifacts panel can derive artifacts without a second opencodeMessages

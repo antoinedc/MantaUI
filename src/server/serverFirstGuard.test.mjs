@@ -48,6 +48,9 @@ export const DELETED = [
   // D6 — the close flow (confirm copy, worktree orchestration, notices) is the box's.
   { scopes: ["renderer"], regex: /\b(describeSessionClose|describeProjectClose|killWorktreeDirtyAndClose)\b|const (killWindow|killProject) = /, why: "D6: sessions:close-preview words the confirm and sessions:close runs worktree removal → kill → metadata on the box" },
   { scopes: ["swift", "swiftTests"], regex: /\benum (SessionCloseCopy|SessionCloseCounts|SessionCloseDecision|SessionCloseOutcome|SessionCloseStep)\b|func readCleanOnClose|\.gitRemoveWorktree\(|struct SessionWorktreeRemoval\b/, why: "D6: iOS shows the box's close preview/result; it never orchestrates worktree removal or composes the notices" },
+  // D7 — job nesting and the per-window rollup (running beneath, subagents) are the box's.
+  { scopes: ["renderer"], regex: /\b(computeJobNesting|sessionsWithActiveWork|shouldResyncWindowsForJobs|setSessionParent|sessionParents|setChatSubagents|countRunningSubagents)\b/, why: "D7: windows[].job + the windowStatus frame carry nesting and the busy/subagent rollup; no client walks the parent graph" },
+  { scopes: ["swift", "swiftTests"], regex: /\b(SessionJobNesting|SessionSubagentCount|DelegateNesting)\b|\bdelegateJobs\b|func applyJobs/, why: "D7: iOS reads windows[].job and the windowStatus frame; it never nests jobs or counts subagents itself" },
   // D1–D3 review additions.
   { scopes: ["swift"], regex: /\.apiVersion\(\)/, except: /(BoxCapabilitiesStore|MantaAPIClient)\.swift$/, why: "D1 review #3: iOS reads capabilities through the ONE BoxCapabilitiesStore — no second reader" },
   { scopes: ["swift", "swiftTests"], regex: /\benum ExtensionsForge\b|\bUpgradePresentation\.(details|currentStep|fraction|etaText|diskText|sentence|bytes)\b/, why: "D3: the Settings forge secondary line and the upgrade wording are the box's" },
