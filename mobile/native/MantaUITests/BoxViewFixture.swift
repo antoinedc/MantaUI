@@ -162,6 +162,30 @@ enum BoxViewFixture {
             }
         }
 
+        /// The kind the box gives a call (`describeTool` / `describePatch` in transcriptRuns.mjs): the phone branches on it
+        /// (`task` is a session, not a call; `delegate` and `patch` read their own status rules), so a stamped fixture must
+        /// carry it. Written inline: this file is compiled by the Linux package, which does not have ToolActivity.swift.
+        func kind(of p: OpencodePart) -> ActivityKind {
+            if p.type == "patch" { return .patch }
+            let tool = (ChatJSON.string(p.extra["tool"]) ?? "").lowercased()
+            let name = tool.replacingOccurrences(of: "^mcp[_-]", with: "", options: .regularExpression)
+            if name == "delegate" || name == "delegate_delegate" { return .delegate }
+            switch tool {
+            case "read": return .read
+            case "edit", "multiedit", "apply_patch", "patch": return .edit
+            case "write": return .write
+            case "bash": return .bash
+            case "grep", "glob", "codesearch": return .search
+            case "list", "ls": return .list
+            case "webfetch", "web_fetch": return .fetch
+            case "websearch", "web_search": return .websearch
+            case "task": return .task
+            case "skill": return .skill
+            case "question": return .question
+            default: return .other
+            }
+        }
+
         func summary(_ ids: [String], _ run: Run) -> TranscriptRunSummary {
             let unfinished = ids.filter { let s = run.partStatus[$0] ?? ""; return s != "completed" && s != "error" }
             let failed = ids.filter { run.partStatus[$0] == "error" }.count
@@ -185,7 +209,7 @@ enum BoxViewFixture {
                 guard let runID = order.first(where: { runs[$0]?.partIDs.contains(p.id) == true }), let run = runs[runID] else { return p }
                 if !touched.contains(runID) { touched.append(runID) }
                 var out = p
-                let neutral = TranscriptActivityView(kind: .other, status: ActivityStatus.normalize(run.partStatus[p.id]),
+                let neutral = TranscriptActivityView(kind: kind(of: p), status: ActivityStatus.normalize(run.partStatus[p.id]),
                                                      label: ChatJSON.string(p.extra["tool"]) ?? "tool", target: "", counted: p.type == "tool")
                 out.extra["view"] = TranscriptPartView.extra(
                     activity: neutral, runId: runID, segmentId: run.segments.count > 1 ? run.segmentOf[p.id] : nil, gen: 1)
