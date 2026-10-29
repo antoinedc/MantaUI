@@ -95,6 +95,10 @@ export function createHandoffEngine(deps = {}) {
     contextLimitFor = () => null,
     isExcluded = () => false,
     runningJobOwner = async () => null, // sid -> "manta" | "opencode" | null (null = not a running job)
+    // sid -> the status of the manta-owned job record that points at it ("running" | "paused" | "stopped" | "failed" | "done"),
+    // or null / undefined when there is none or it can't be read (unknown: never a reason to interrupt).
+    jobStatusOf = async () => null,
+    interruptConfirmDelayMs = 300,
     hooks = {},
     timers = { setTimeout: (fn, ms) => setTimeout(fn, ms) },
     sleep = sleepReal,
@@ -994,7 +998,8 @@ export function createHandoffEngine(deps = {}) {
         changed = true;
       } else if (r.state === "starting" && pointOfNoReturn(r)) {
         // The first message is (maybe) out: the handoff commits, and the successor's turn is interrupted once it has.
-        if (!r.internal.stopAfterCommit) {
+        // Only a replacement (the job record follows it): a branch is a user-made windowed session no stop reaches.
+        if (r.how === "clear" && !r.internal.stopAfterCommit) {
           r.internal.stopAfterCommit = true;
           changed = true;
         }
@@ -1199,20 +1204,44 @@ export function createHandoffEngine(deps = {}) {
     const j = rec.internal;
     const succ = rec.successorId;
     if (rec.how !== "clear" || !succ) return;
+    // Only a POSITIVE signal interrupts: the flag a stop/pause left on the record, or a job record on the successor that
+    // exists and is not running. A lookup that fails or finds nothing is "can't tell" — a healthy job must never be
+    // killed by a store-read race (the interrupted turn would settle the job as failed).
     let stopped = j.stopAfterCommit === true;
     if (!stopped && j.plan?.job) {
       try {
-        stopped = (await runningJobOwner(succ)) !== "manta";
-      } catch {
-        stopped = true;
+        const status = await jobStatusOf(succ);
+        if (typeof status === "string") stopped = status !== "running";
+        else warn(`[handoff] couldn't tell whether the job of ${succ} was stopped; not interrupting it`);
+      } catch (e) {
+        warn("[handoff] couldn't read the job of the successor; not interrupting it:", e?.message ?? e);
       }
     }
     if (!stopped) return;
-    try {
-      await oc.interrupt?.(succ);
-    } catch (e) {
-      warn("[handoff] interrupting the successor of a stopped job failed:", e?.message ?? e);
+    await interruptSuccessor(succ);
+  }
+
+  /** The prompt POST enqueues and the turn starts asynchronously (interrupting an idle session is a no-op): interrupt, confirm once, interrupt once more. Never loops further. */
+  async function interruptSuccessor(succ) {
+    const busy = async () => {
+      try {
+        if (((await oc.listActive?.()) ?? []).includes(succ)) return true;
+        const inbox = await oc.listInbox?.(succ);
+        return Array.isArray(inbox) && inbox.length > 0;
+      } catch {
+        return false; // can't tell: the second attempt is only for a turn we can see
+      }
+    };
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await oc.interrupt?.(succ);
+      } catch (e) {
+        warn("[handoff] interrupting the successor of a stopped job failed:", e?.message ?? e);
+      }
+      await sleep(interruptConfirmDelayMs);
+      if (!(await busy())) return;
     }
+    warn(`[handoff] the successor ${succ} of a stopped job is still active after two interrupts`);
   }
 
   async function commit(rec) {

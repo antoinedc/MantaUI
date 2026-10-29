@@ -129,7 +129,7 @@ test("a handoff of a job stopped after its first message interrupts the successo
   const f = fakes({ configGet: async () => ({ handoffMode: "suggest" }) });
   let stopped = false;
   const base = f.p.delegate();
-  f.p.delegate = () => ({ ...base, runningJobOwner: async (sid) => (sid === "ses_p" && !stopped ? "manta" : null) });
+  f.p.delegate = () => ({ ...base, runningJobOwner: async (sid) => (sid === "ses_p" && !stopped ? "manta" : null), jobStatusOf: async () => (stopped ? "stopped" : "running") }); // the re-point moved the record onto the successor
   const send = f.p.oc.sendPrompt;
   f.p.oc.sendPrompt = async (a) => {
     await send(a);

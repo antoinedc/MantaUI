@@ -92,15 +92,30 @@ unreadable) is treated as `null` and is not cached.
    job re-check still refuses it while the job is stopped or parked; it succeeds
    only while the job still runs.
    **After the first message** (the point of no return: the first send attempt)
-   the start can't be undone and commits; a stop/pause then flags the record
-   `stopAfterCommit`, and at commit the engine interrupts the successor's turn
-   (the opencode interrupt, `resume=false`) if that flag is set OR the job no
-   longer runs (which also catches a handoff created after the stop's cancel
-   step ran). The job record stays on the successor, stopped (or parked, for a
-   pause) there. The interrupt happens while the successor is still a handoff
-   successor, so the adoption reconciler skips it and the turn ends before it
-   could be adopted as a new row. A failed interrupt is logged, never fails the
-   commit. An adopted (opencode-owned) session's pending handoff behaves as before.
+   the start can't be undone and commits. At commit the engine interrupts the
+   successor's turn (the opencode interrupt, `resume=false`) only on a POSITIVE
+   signal: (a) a stop/pause left the persisted `stopAfterCommit` flag on the
+   record, or (b) the job record that now points at the successor exists and is
+   not running (stopped, paused or failed; this also catches a handoff created
+   after the stop's cancel step ran). A lookup that fails or finds nothing is
+   "can't tell": it is logged and the job is NOT interrupted (a healthy job must
+   never be killed by a store-read race, since the interrupted turn would settle
+   it as failed). For a still-running job with a pending pause, the re-pointed
+   record carries the pause to the successor and the normal tool-boundary pause
+   parks it, so no commit interrupt is needed from (b); but a pause that flagged
+   the record (a) keeps the interrupt — the user paused, parking at commit is
+   accepted. The flag is set only for replacement (`clear`) handoffs: a branch
+   (`new-session`) is a user-made windowed session no stop reaches, so a stop never
+   interrupts one and the flag is not set for it.
+   The interrupt is confirmed once: since the prompt enqueues and the turn starts
+   asynchronously (interrupting an idle session is a no-op), after a short delay the
+   engine checks the successor's active/queued turn and interrupts once more if
+   there is one; never more than two attempts, and a warning if it is still active.
+   The job record stays on the successor, stopped (or parked, for a pause) there.
+   The interrupt happens while the successor is still a handoff successor, so the
+   adoption reconciler skips it and the turn ends before it could be adopted as a
+   new row. A failed interrupt is logged, never fails the commit. An adopted
+   (opencode-owned) session's pending handoff behaves as before.
 6. **Running-time limit.** The delegate sweeper's 30-minute "timed out" rule
    does not time out a job while it has a pending `send` handoff
    (`hasPendingSend`); it re-evaluates after the handoff commits or fails.

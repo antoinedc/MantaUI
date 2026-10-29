@@ -66,6 +66,7 @@ export function createProductionHandoff(p) {
     },
     isExcluded: (sid) => p.isCtoConversationSession(sid),
     runningJobOwner: (sid) => p.delegate().runningJobOwner(sid),
+    jobStatusOf: (sid) => p.delegate().jobStatusOf(sid),
     isJobSession: (sid) => p.delegate().isRunningJobSession(sid),
     gather: {
       measureContext: async (sid) => {

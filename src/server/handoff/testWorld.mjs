@@ -30,6 +30,7 @@ export function createWorld({ mode = "auto" } = {}) {
     created: [],
     deleted: [],
     interrupted: [],
+    statuses: new Map(), // session -> job status, for the engines that are given jobStatusOf by the world
     repointed: [],
     cleared: [],
     published: [],
@@ -142,6 +143,7 @@ export function createWorld({ mode = "auto" } = {}) {
       oc,
       tmux,
       ownership: { repoint: async (pred, succ) => void w.repointed.push([pred, succ]) },
+      jobStatusOf: async (sid) => w.statuses.get(sid) ?? null,
       onPendingSendCleared: (sid) => w.cleared.push(sid),
       onHeldFailure: (f) => w.heldFailures.push(f),
       gather: { facts: async () => null, measureContext: async () => null },

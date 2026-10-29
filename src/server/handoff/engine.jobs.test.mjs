@@ -23,12 +23,25 @@ function jobWorld({ mode = "suggest", owner = "manta", extra = {} } = {}) {
           jobs.set(succ, jobs.get(pred));
           jobs.delete(pred);
         }
+        moveStatus(w, pred, succ);
       },
     },
     ...extra,
   });
   return w;
 }
+
+/** The delegate's records: a stop ends the record (`stopped`), a pause parks it; the commit's re-point carries either to the successor. */
+const moveStatus = (w, pred, succ) => {
+  if (w.statuses.has(pred)) {
+    w.statuses.set(succ, w.statuses.get(pred));
+    w.statuses.delete(pred);
+  }
+};
+const endJob = (w, sid, status = "stopped") => {
+  w.jobs.delete(sid);
+  w.statuses.set(sid, status);
+};
 
 async function turn(engine, sid, { ctx = 250_000, outcome = "ok" } = {}) {
   const ev = (type, properties) => engine.observeEvent({ type, properties: { sessionID: sid, ...properties } });
@@ -367,13 +380,15 @@ function afterSendWorld(how, { cancelStep = true, at = "send" } = {}) {
           w.jobs.set(succ, w.jobs.get(pred));
           w.jobs.delete(pred);
         }
+        moveStatus(w, pred, succ);
       },
     },
     hooks: {
       step: async (name) => {
         if (name !== at) return;
         if (cancelStep) await w.engine.cancelPendingSends("ses_p");
-        if (how === "stop") w.jobs.delete("ses_p");
+        if (how === "stop") endJob(w, "ses_p");
+        if (how === "pause") endJob(w, "ses_p", "paused");
       },
     },
   });
@@ -417,7 +432,7 @@ test("an uncertain first POST: a stop landing before the retry confirms still in
   assert.equal(w.engine.get(rec.id).state, "starting");
   assert.deepEqual(w.interrupted, []);
   assert.equal(await w.engine.cancelPendingSends("ses_p"), true, "past the point of no return: flagged, not cancelled");
-  w.jobs.delete("ses_p"); // stopJob wrote `stopped`
+  endJob(w, "ses_p"); // stopJob wrote `stopped`
   await w.runTimers();
   const done = w.engine.get(rec.id);
   assert.equal(done.state, "committed");
@@ -578,7 +593,7 @@ test("commit: a lookup that answers null cannot make the job successor store the
   const w = jobWorld({ mode: "suggest" });
   w.engine = w.build({
     runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
-    hooks: { step: async (name) => name === "send" && w.jobs.delete("ses_p") }, // after the first message: past the point of no return
+    hooks: { step: async (name) => name === "send" && endJob(w, "ses_p") }, // after the first message: past the point of no return
   });
   const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
   await w.engine.onTurnEnd("ses_p", { success: true });
@@ -647,4 +662,90 @@ test("maybeAuto returns early for an own-auto manta job as well, before measurin
   await w.engine.setMode("ses_p", "auto");
   await w.engine.onTurnEnd("ses_p", { success: true });
   assert.equal(measured, 0);
+});
+
+// ---- round 3: positive signal only, confirm the interrupt, branches ----------------------------------------
+
+test("an unreadable job store at commit (status unknown) never interrupts a running job's successor", async () => {
+  for (const unknown of [null, undefined, "throw"]) {
+    const w = afterSendWorld("pause", { at: "never" });
+    w.engine = w.build({
+      runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+      jobStatusOf: async () => {
+        if (unknown === "throw") throw new Error("store unreadable");
+        return unknown;
+      },
+    });
+    const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+    await w.engine.onTurnEnd("ses_p", { success: true });
+    assert.equal(w.engine.get(rec.id).state, "committed", String(unknown));
+    assert.deepEqual(w.interrupted, [], `a lookup answering ${unknown} is "can't tell": the job keeps running`);
+  }
+});
+
+test("the job record on the successor exists and is paused (or failed) → interrupt; exists and running with no flag → no interrupt", async () => {
+  for (const [status, want] of [["paused", 1], ["stopped", 1], ["failed", 1], ["running", 0]]) {
+    const w = afterSendWorld("pause", { at: "never" });
+    w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null, jobStatusOf: async () => status });
+    const rec = await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+    await w.engine.onTurnEnd("ses_p", { success: true });
+    assert.equal(w.interrupted.length, want, status);
+    assert.equal(w.engine._state.records[rec.id].internal.stopAfterCommit, undefined);
+  }
+});
+
+test("a pause that flagged the record keeps interrupting at commit (the user paused; parking at commit is accepted)", async () => {
+  const w = afterSendWorld("pause", { at: "send" });
+  w.statuses.clear();
+  w.engine = w.build({
+    runningJobOwner: async (sid) => w.jobs.get(sid) ?? null,
+    jobStatusOf: async () => "running", // still running with pauseRequested: no record signal, only the flag
+    hooks: { step: async (name) => name === "send" && (await w.engine.cancelPendingSends("ses_p")) },
+  });
+  await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.interrupted.length, 1);
+});
+
+test("the interrupt is confirmed once: a turn that starts just after the first interrupt gets one more; a quiet successor gets exactly one; never more than two", async () => {
+  // the turn appears after the first interrupt (the prompt was still in the inbox when it landed)
+  const w = afterSendWorld("stop");
+  w.onInterrupt = () => {
+    if (w.interrupted.length === 1) w.active.add(w.engine.get(Object.keys(w.engine._state.records)[0]).successorId);
+    else w.active.delete(w.engine.get(Object.keys(w.engine._state.records)[0]).successorId);
+  };
+  await w.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await w.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(w.interrupted.length, 2, "re-interrupted because the turn was active");
+  const quiet = afterSendWorld("stop");
+  await quiet.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await quiet.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(quiet.interrupted.length, 1);
+  // a successor that never stops: two attempts, then a warning — no loop
+  const warns = [];
+  const stuck = afterSendWorld("stop");
+  stuck.engine = stuck.build({
+    runningJobOwner: async (sid) => stuck.jobs.get(sid) ?? null,
+    jobStatusOf: async () => "stopped",
+    warn: (...a) => warns.push(a.join(" ")),
+  });
+  stuck.onInterrupt = (id) => void stuck.active.add(id); // the turn is always there
+  await stuck.engine.create({ sessionId: "ses_p", trigger: "agent", action: "suggest", body: FULL_BODY });
+  await stuck.engine.onTurnEnd("ses_p", { success: true });
+  assert.equal(stuck.interrupted.length, 2);
+  assert.ok(warns.some((m) => /still active after two interrupts/.test(m)));
+});
+
+test("a branch (new-session) handoff is never interrupted by a stop: the flag is not even set", async () => {
+  const w = jobWorld({ mode: "suggest" });
+  w.engine = w.build({ runningJobOwner: async (sid) => w.jobs.get(sid) ?? null, hooks: { step: async (name) => name === "send" && (await w.engine.cancelPendingSends("ses_p")) } });
+  const card = await w.engine.create({ sessionId: "ses_p", trigger: "user", body: FULL_BODY });
+  await settle();
+  // a user-started branch with a send disposition
+  const rec = w.engine._state.records[card.id];
+  rec.state = "ready";
+  const out = await w.engine.start(card.id, { how: "new-session", disposition: "send" });
+  assert.equal(out.state, "committed");
+  assert.equal(rec.internal.stopAfterCommit, undefined);
+  assert.deepEqual(w.interrupted, []);
 });

@@ -2622,6 +2622,23 @@ export async function runningJobOwner(sessionId, deps = {}) {
   return readOwnerIndex(deps.storePath ?? STORE_PATH, deps.readFile ?? readFileSync)?.get(sessionId) ?? null;
 }
 
+/**
+ * The status of the job record Manta completes whose own session is `sessionId` (any status — the handoff's post-commit
+ * check needs to tell "stopped/parked" from "running"); `null` when there is none or the store can't be read (a read
+ * failure is never a reason to act on a job).
+ */
+export async function jobStatusOf(sessionId, deps = {}) {
+  let jobs;
+  try {
+    jobs = (await (deps.load ?? loadJobs)()) ?? [];
+  } catch {
+    return null;
+  }
+  const mine = jobs.filter((j) => j?.childSessionID === sessionId && completionOwnerOf(j) === "manta");
+  if (mine.length === 0) return null;
+  return (mine.find((j) => j.status === "running") ?? mine[mine.length - 1]).status ?? null;
+}
+
 /** V2 session ids are `ses…`, message ids `msg…`; both are minted here so a lost response stays reconcilable by id. */
 export function mintSessionId() {
   return `ses_${randomUUID().replaceAll("-", "")}`;
@@ -4907,6 +4924,8 @@ export function createDelegateEngine(baseDeps) {
     /** Who completes the running job whose OWN session is `sessionId`: "manta", "opencode", or null (not a running job). */
     runningJobOwner: (sessionId) => runningJobOwner(sessionId, deps),
     /** Is `sessionId` the own session of a job that is still running (whoever completes it)? */
+    /** The status of the manta-completed job record on `sessionId` (any status), or null. */
+    jobStatusOf: (sessionId) => jobStatusOf(sessionId, deps),
     isRunningJobSession: async (sessionId) => (await runningJobOwner(sessionId, deps)) !== null,
     getJob: (id) => getJob(id, deps),
     /** The raw job records (no progress reads) — the cheap read behind the read-only-job guard. */

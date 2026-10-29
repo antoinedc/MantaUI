@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { completionOwnerOf, createDelegateEngine, listJobs, pauseJob, repointJobSessions, runningJobOwner as ownerOf, saveJobs, settleV2Job, stopJob, sweepDelegateJobs } from "./delegate.mjs";
+import { completionOwnerOf, createDelegateEngine, jobStatusOf, listJobs, pauseJob, repointJobSessions, runningJobOwner as ownerOf, saveJobs, settleV2Job, stopJob, sweepDelegateJobs } from "./delegate.mjs";
 
 const job = (over) => ({ id: "aaaa1111", status: "running", launchState: "running", completionOwner: "opencode", submittedAt: 1, parentSessionID: "ses_parent", childSessionID: "ses_child", ...over });
 function store(seed) {
@@ -207,4 +207,18 @@ test("a stop that ends the job while its handoff is already past the first messa
   assert.equal(await repointJobSessions({ fromSessionId: "ses_old", toSessionId: "ses_new" }, { load: s.load, save: s.save, publish: () => {} }), 1, "the commit re-points the terminal record too");
   assert.equal(s.get()[0].childSessionID, "ses_new");
   assert.equal(s.get()[0].status, "stopped", "stopped on the successor — the successor's turn is then interrupted, nothing re-opens the job");
+});
+
+test("jobStatusOf: the status of the manta-completed record on the session (any status); null for none, an opencode-owned one, or an unreadable store", async () => {
+  const s = store([
+    job({ id: "a", childSessionID: "ses_a", completionOwner: "manta", status: "paused" }),
+    job({ id: "b", childSessionID: "ses_b", completionOwner: "manta", status: "stopped" }),
+    job({ id: "b2", childSessionID: "ses_b", completionOwner: "manta", status: "running" }),
+    job({ id: "o", childSessionID: "ses_o", completionOwner: "opencode", status: "stopped" }),
+  ]);
+  const engine = createDelegateEngine({ load: s.load, save: s.save, readProgress: async () => null });
+  assert.equal(await engine.jobStatusOf("ses_a"), "paused");
+  assert.equal(await engine.jobStatusOf("ses_b"), "running", "a running record wins over an older terminal one");
+  for (const sid of ["ses_o", "ses_none"]) assert.equal(await engine.jobStatusOf(sid), null, sid);
+  assert.equal(await jobStatusOf("ses_a", { load: async () => { throw new Error("EIO"); } }), null);
 });
