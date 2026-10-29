@@ -2576,7 +2576,33 @@ export type UsageDialState = {
   // (shortest) window. NOT the highest-pct one: visibility uses the worst
   // window, but the number and colour shown are the primary window's.
   window: UsageWindow | null;
+  // A longer window that is used up, which makes the reported window unusable
+  // even though it has room of its own. Null when the reported window is usable.
+  blockedBy: UsageWindow | null;
 };
+
+/**
+ * The used-up window that makes `w` unusable despite its own headroom, or null.
+ * Windows are ordered shortest-first (UsageSnapshot.windows contract), so a
+ * "higher" limit is any later window: a 7d at 100% blocks the 5h however empty
+ * the 5h is. Only an unscoped, in-force, current window can block — a
+ * model-scoped cap only stops that model, and a window past its reset is still
+ * showing the previous period's number. A scoped window is itself blocked by
+ * any used-up unscoped one: the plan-wide cap stops every model.
+ */
+export function usageWindowBlocker(
+  windows: UsageWindow[] | null | undefined,
+  w: UsageWindow,
+): UsageWindow | null {
+  const list = windows ?? [];
+  const idx = list.indexOf(w);
+  for (let j = 0; j < list.length; j++) {
+    const b = list[j];
+    if (b === w || b.active === false || b.stale === true || b.scope || b.pct < 100) continue;
+    if (w.scope || idx < 0 || j > idx) return b;
+  }
+  return null;
+}
 
 /**
  * Derive the composer dial's visibility/colour/headline window from a usage
@@ -2591,13 +2617,17 @@ export type UsageDialState = {
 export function usageDialState(
   snapshot: UsageSnapshot | null | undefined,
   alwaysShow: boolean,
+  // Off for the combined-seats ring: its windows are already folded with each
+  // seat's own blocking (combinedSeatWindows), and one seat's used-up weekly
+  // must not blank every other seat's headroom.
+  { applyBlocking = true }: { applyBlocking?: boolean } = {},
 ): UsageDialState {
   // A window the provider says is not in force (e.g. a model-scoped weekly cap)
   // is listed in the popover but never drives the dial: not its value, not its
   // visibility.
   const windows = (snapshot?.windows ?? []).filter((w) => w.active !== false);
   if (windows.length === 0) {
-    return { visible: false, pct: 0, tone: "under", awaitingReset: false, window: null };
+    return { visible: false, pct: 0, tone: "under", awaitingReset: false, window: null, blockedBy: null };
   }
   // The dial reports the PRIMARY window — `windows[0]`, which every adapter
   // emits shortest-first (session before weekly; see the ordering contract on
@@ -2621,12 +2651,19 @@ export function usageDialState(
   // still uses the pre-reset worst pct, so the dial holds its place instead of
   // vanishing.
   const awaitingReset = primary.stale === true;
+  // Room in the primary window is not room you can use when a longer window
+  // (e.g. the weekly cap) is used up: the dial reports it as full.
+  const blockedBy = applyBlocking ? usageWindowBlocker(windows, primary) : null;
+  if (blockedBy) {
+    return { visible: true, pct: 100, tone: "over", awaitingReset: false, window: primary, blockedBy };
+  }
   return {
     visible: worstPct >= 70 || alwaysShow,
     pct: awaitingReset ? 0 : primary.pct,
     tone: awaitingReset ? "under" : (primary.tone ?? null),
     awaitingReset,
     window: primary,
+    blockedBy: null,
   };
 }
 
@@ -2927,12 +2964,19 @@ export function combinedSeatWindows(
   const windows = kinds.map((kind): UsageWindow => {
     const parts = included.flatMap((s) => {
       const w = s.windows.find((x) => x.kind === kind);
-      return w ? [{ w, weight: weighted ? (s.weight as number) : 1 }] : [];
+      return w
+        ? [{ w, weight: weighted ? (s.weight as number) : 1, blocked: usageWindowBlocker(s.windows, w) != null }]
+        : [];
     });
     const total = parts.reduce((n, p) => n + p.weight, 0);
-    const sum = parts.reduce((n, p) => n + (p.w.stale === true ? 0 : p.w.pct) * p.weight, 0);
+    // A seat whose longer limit is used up has no usable room in this window,
+    // whatever its own figure says: it counts as full, and its reset frees
+    // nothing so it is not offered as the next reset.
+    const pctOf = (p: (typeof parts)[number]) =>
+      p.blocked ? 100 : p.w.stale === true ? 0 : p.w.pct;
+    const sum = parts.reduce((n, p) => n + pctOf(p) * p.weight, 0);
     const resets = parts
-      .filter((p) => p.w.stale !== true && p.w.resetsAt != null)
+      .filter((p) => !p.blocked && p.w.stale !== true && p.w.resetsAt != null)
       .map((p) => p.w.resetsAt as number);
     const first = parts[0].w;
     return {
@@ -2940,7 +2984,7 @@ export function combinedSeatWindows(
       label: first.label,
       pct: Math.round(sum / total),
       ...(resets.length > 0 ? { resetsAt: Math.min(...resets) } : {}),
-      ...(parts.every((p) => p.w.stale === true) ? { stale: true } : {}),
+      ...(parts.every((p) => p.w.stale === true && !p.blocked) ? { stale: true } : {}),
     };
   });
   return windows.length > 0 ? { windows, seatCount: included.length } : null;

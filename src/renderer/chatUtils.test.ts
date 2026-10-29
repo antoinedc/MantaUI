@@ -100,6 +100,7 @@ import {
   selectUsageSnapshot,
   providersFromExcludedKeys,
   usageDialState,
+  usageWindowBlocker,
   formatWindowReset,
   formatResetAt,
   formatResetDistance,
@@ -2870,6 +2871,55 @@ describe("selectUsageSnapshot", () => {
 });
 
 describe("usageDialState", () => {
+  it("a used-up longer window makes the primary read as full, even with headroom", () => {
+    const snap = usageSnapshot({ windows: [
+      { kind: "session", label: "5h", pct: 0, tone: "under" },
+      { kind: "weekly", label: "7d", pct: 100, tone: "over" },
+    ] });
+    const st = usageDialState(snap, false);
+    expect(st.window?.kind).toBe("session");
+    expect(st.blockedBy?.kind).toBe("weekly");
+    expect(st.pct).toBe(100);
+    expect(st.tone).toBe("over");
+    expect(st.visible).toBe(true);
+    // The combined ring folds blocking per seat and opts out here.
+    expect(usageDialState(snap, true, { applyBlocking: false }).pct).toBe(0);
+  });
+
+  it("a used-up model-scoped or inactive window does not block the primary", () => {
+    const snap = usageSnapshot({ windows: [
+      { kind: "session", label: "5h", pct: 10 },
+      { kind: "weekly_scoped:x", label: "7d · X", pct: 100, scope: "X" },
+      { kind: "weekly_scoped:y", label: "7d · Y", pct: 100, scope: "Y", active: false },
+    ] });
+    const st = usageDialState(snap, true);
+    expect(st.blockedBy).toBeNull();
+    expect(st.pct).toBe(10);
+  });
+
+  describe("usageWindowBlocker", () => {
+    const s = { kind: "session", label: "5h", pct: 100 };
+    const w = { kind: "weekly", label: "7d", pct: 30 };
+
+    it("only a longer (later) window blocks — a used-up shorter one does not", () => {
+      expect(usageWindowBlocker([s, w], w)).toBeNull();
+      expect(usageWindowBlocker([s, w], s)).toBeNull();
+    });
+
+    it("a window past its reset never blocks", () => {
+      const fresh = { ...s, pct: 0 };
+      const stale = { kind: "weekly", label: "7d", pct: 100, stale: true };
+      expect(usageWindowBlocker([fresh, stale], fresh)).toBeNull();
+    });
+
+    it("a scoped window is blocked by any used-up plan-wide window", () => {
+      const fresh = { ...s, pct: 0 };
+      const full = { ...w, pct: 100 };
+      const scoped = { kind: "weekly_scoped:x", label: "7d · X", pct: 5, scope: "X" };
+      expect(usageWindowBlocker([fresh, full, scoped], scoped)).toBe(full);
+    });
+  });
+
   it("a window with no box tone (an older box) reports tone null — no colour is invented", () => {
     const snap = usageSnapshot({ windows: [{ kind: "session", label: "5h", pct: 95, tone: undefined }] });
     expect(usageDialState(snap, false).tone).toBeNull();
@@ -2983,6 +3033,7 @@ describe("usageDialState", () => {
       tone: "under",
       awaitingReset: false,
       window: null,
+      blockedBy: null,
     });
   });
 

@@ -26,6 +26,7 @@ import {
   seatBarWindows,
   seatLoad,
   seatStateText,
+  usageWindowBlocker,
 } from "./chatUtils";
 import { providerLabel, UsageWindowRow } from "./UsageDial";
 import { AddSeatGate } from "./AddSeatFlow";
@@ -321,7 +322,12 @@ export function SeatsPanel({ view, openSignal }: { view: ProviderView; openSigna
         {bars.length > 0 ? (
           <div className="grid grid-cols-2 gap-3">
             {bars.map((w) => (
-              <UsageWindowRow key={w.kind} usageWindow={w} nowMs={nowMs} />
+              <UsageWindowRow
+                key={w.kind}
+                usageWindow={w}
+                nowMs={nowMs}
+                blockedBy={usageWindowBlocker(seat.windows, w)}
+              />
             ))}
           </div>
         ) : (
