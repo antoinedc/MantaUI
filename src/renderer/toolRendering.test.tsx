@@ -277,7 +277,7 @@ describe("non-tool assistant parts", () => {
     installMockApi();
     h = mount(
       <AssistantPart
-        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png" } as unknown as OpencodePart}
+        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png", view: { media: { kind: "image", path: "/home/dev/diagram.png" } } } as unknown as OpencodePart}
         showThinking={false}
       />,
     );
@@ -290,12 +290,23 @@ describe("non-tool assistant parts", () => {
     installMockApi();
     h = mount(
       <AssistantPart
-        part={{ type: "file", filename: "clip.mp4", mime: "video/mp4", url: "file:///home/dev/clip.mp4" } as unknown as OpencodePart}
+        part={{ type: "file", filename: "clip.mp4", mime: "video/mp4", url: "file:///home/dev/clip.mp4", view: { media: { kind: "video", path: "/home/dev/clip.mp4" } } } as unknown as OpencodePart}
         showThinking={false}
       />,
     );
     expect(h.text()).toContain("Video");
     expect(h.container.querySelector("button[aria-expanded]")).toBeTruthy();
+  });
+
+  it("an image file part the box did NOT mark (an older box) stays a header-only file card", () => {
+    installMockApi();
+    h = mount(
+      <AssistantPart
+        part={{ type: "file", filename: "diagram.png", mime: "image/png", url: "file:///home/dev/diagram.png" } as unknown as OpencodePart}
+        showThinking={false}
+      />,
+    );
+    expect(h.container.querySelector("button[aria-expanded]")).toBeNull();
   });
 
   it("keeps a non-media file part header-only (no disclosure chevron)", () => {
