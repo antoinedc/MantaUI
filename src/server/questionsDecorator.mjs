@@ -208,14 +208,17 @@ export function createQuestionsDecorator({
       scheduleRecheck(list);
     };
     // The read can lose a race with V2 persisting the `plan_exit` part: look once more shortly after, then stop.
+    // Only for a question that LOOKS like the plan-exit ask (opencode's own literal): an ordinary `question`-tool ask has no
+    // plan_exit part to wait for and must not cost a second transcript read.
+    const awaitsPlan = (q) => q?.tool?.callID && !q.plan && (q.questions ?? []).some(isPlanExitQuestion);
     const scheduleRecheck = (list) => {
-      if (!list.some((q) => q?.tool?.callID && !q.plan)) return;
+      if (!list.some(awaitsPlan)) return;
       rechecks.set(
         sid,
         setTimer(() => {
           rechecks.delete(sid);
           if (seq.get(sid) !== mine) return;
-          for (const q of list) if (q?.tool?.callID && !q.plan) cache.delete(key(sid, q.tool.callID));
+          for (const q of list) if (awaitsPlan(q)) cache.delete(key(sid, q.tool.callID));
           void decorate(sid, questions).then((next) => {
             if (seq.get(sid) !== mine) return; // overtaken while reading
             if (!next.some((q, i) => q.plan && !list[i]?.plan)) return; // still no part: stay as published
@@ -245,18 +248,22 @@ export function createQuestionsDecorator({
     decorate,
     /**
      * The connect snapshot's `questions` frames: the last decorated list published for the session when it names the
-     * same questions (so a lookup that came late is replayed too), else decorated from what is cached (a session never
+     * same question (so a lookup that came late is replayed too), merged per question with what is cached (a session never
      * decorated stays plain).
      */
     decorateSnapshot(frames) {
       return frames.map((f) => {
         if (f?.kind !== "stream" || f.sub !== "questions") return f;
         const incoming = f.payload?.questions ?? [];
-        const kept = latest.get(f.sessionId);
-        if (kept && kept.length === incoming.length && kept.every((q, i) => q?.id === incoming[i]?.id)) {
-          return { ...f, payload: { ...f.payload, questions: kept } };
-        }
-        const { questions } = decorateFromCache(f.sessionId, incoming);
+        const kept = new Map((latest.get(f.sessionId) ?? []).map((q) => [q?.id, q]));
+        const { questions: cachedList } = decorateFromCache(f.sessionId, incoming);
+        // Per question, whichever of the two knows the plan wins: a list published plain before a late lookup, and a cache
+        // that has since learned the plan, must never replay the plain card.
+        const questions = incoming.map((q, i) => {
+          const k = kept.get(q?.id);
+          if (k?.plan) return k;
+          return cachedList[i];
+        });
         return { ...f, payload: { ...f.payload, questions } };
       });
     },

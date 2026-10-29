@@ -73,7 +73,7 @@ test("isPlanExitQuestion: decorated, or opencode's own literal; nothing else", (
 });
 
 // ---- the stateful decorator ----
-function rig(messagesBySession = {}, { baseUrl = BASE } = {}) {
+function rig(messagesBySession = {}, { baseUrl = BASE, now } = {}) {
   const published = [];
   const reads = [];
   const release = [];
@@ -84,6 +84,7 @@ function rig(messagesBySession = {}, { baseUrl = BASE } = {}) {
     publish: (e) => published.push(e),
     listMessages: (sid) => { reads.push(sid); const m = messagesBySession[sid]; return typeof m === "function" ? m() : Promise.resolve(m ?? []); },
     baseUrl: () => baseUrl,
+    ...(now ? { now } : {}),
     warn: () => {},
   });
   return { d, published, reads, release, timers };
@@ -188,4 +189,31 @@ test("a re-check that still finds no part publishes nothing; one overtaken by a 
   rig2.timers[0].fn();
   await tick();
   assert.equal(rig2.published.length, 2, "only the two frames themselves");
+});
+
+test("an ORDINARY question (no plan-exit literal) arms no late-part re-check — it costs no second transcript read", async () => {
+  const { d, published, timers, reads } = rig({ ses_1: [] });
+  const plain = { id: "q1", sessionID: "ses_1", questions: [{ header: "DB", question: "Which database?", options: [] }], tool: { messageID: "m", callID: "c-ordinary" } };
+  d.publish(frame("ses_1", [plain]));
+  await tick();
+  assert.equal(published.length, 1);
+  assert.equal(timers.length, 0, "no timer for a question that does not look like plan_exit");
+  assert.equal(reads.length, 1);
+});
+
+test("the snapshot never replays a plain card the cache already knows is a plan (per question, the decorated one wins)", async () => {
+  let clock = 1_000;
+  const state = { m: [] };
+  const { d, timers } = rig({ ses_1: () => Promise.resolve(state.m) }, { now: () => clock });
+  d.publish(frame("ses_1", [q("q1", "c1")]));
+  await tick();
+  timers[0].fn(); // the re-check misses: still no part
+  await tick();
+  assert.equal(d._state.latest.get("ses_1")[0].plan, undefined, "published plain");
+  clock += 60_000; // past the negative cache
+  state.m = [msg("m", [planPart("c1", { plan: PLAN })])];
+  const out = await d.decorate("ses_1", [q("q1", "c1")]); // the part is there now (opencode:questions)
+  assert.equal(out[0].plan.title, "Ship the thing");
+  const snap = d.decorateSnapshot([frame("ses_1", [q("q1", "c1")])]);
+  assert.equal(snap[0].payload.questions[0].plan.title, "Ship the thing");
 });
