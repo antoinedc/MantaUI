@@ -582,7 +582,7 @@ final class MantaActionRPCWireTests: XCTestCase {
                 _ = try await client.accountsRemoveSeat(provider: "claude", seatId: "s1")
                 XCTFail("expected a throw for \(reply)")
             } catch {
-                XCTAssertEqual(error as? MantaError, .server("last-seat"), reply)
+                XCTAssertEqual(Self.refusalCode(error), "last-seat", reply)
             }
         }
     }
@@ -624,8 +624,17 @@ final class MantaActionRPCWireTests: XCTestCase {
             _ = try await client.accountsAddSeat(provider: "nope")
             XCTFail("expected a throw")
         } catch {
-            XCTAssertEqual(error as? MantaError, .server("unknown-provider"))
+            XCTAssertEqual(Self.refusalCode(error), "unknown-provider")
         }
+    }
+
+    /// An accounts refusal reaches the caller as `AccountsRefusal` (code + the
+    /// box's sentence, WS11 D4) when it rides in the result body, or as the
+    /// transport's `MantaError.server` when it rides in the rpc envelope.
+    private static func refusalCode(_ error: Error) -> String? {
+        if let refusal = error as? AccountsRefusal { return refusal.code }
+        if case .server(let code)? = error as? MantaError { return code }
+        return nil
     }
 }
 
