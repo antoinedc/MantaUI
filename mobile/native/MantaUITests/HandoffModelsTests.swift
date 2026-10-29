@@ -340,6 +340,64 @@ final class HandoffModelsTests: XCTestCase {
         XCTAssertEqual(entries, [HandoffPreviousEntry(sessionId: "ses_a", kind: .branchedFrom)])
     }
 
+    /// The live `handoff:list` payload of a session handed off three times (the box's own
+    /// words; ids shortened).
+    private let chainListJSON = """
+    {"records":[],"links":{"replaces":"ses_c","branches":[]},
+     "chain":{"predecessors":[
+       {"id":"ses_c","title":"Wave 2 backstop guard"},
+       {"id":"ses_b","title":"  "},
+       {"id":"ses_a","deleted":true},
+       {"id":"ses_root","title":"Original","branchedFrom":true}]},
+     "dismissed":false,"mode":"auto","modeIsDefault":false}
+    """
+
+    func testListDecodesTheChainPredecessors() throws {
+        let list = try decode(HandoffListResult.self, chainListJSON)
+        XCTAssertEqual(list.chain, [
+            HandoffChainEntry(id: "ses_c", title: "Wave 2 backstop guard"),
+            HandoffChainEntry(id: "ses_b"),
+            HandoffChainEntry(id: "ses_a", deleted: true),
+            HandoffChainEntry(id: "ses_root", title: "Original", branchedFrom: true),
+        ])
+        XCTAssertEqual(list.links?.replaces, "ses_c")
+    }
+
+    func testAnOlderBoxWithoutAChainDecodesToNil() throws {
+        XCTAssertNil(try decode(HandoffListResult.self, #"{"records":[],"links":{"branches":[]}}"#).chain)
+        XCTAssertEqual(try decode(HandoffListResult.self, #"{"records":[],"chain":{"predecessors":[]}}"#).chain, [])
+        // A malformed entry is dropped, the rest is kept.
+        let lossy = try decode(HandoffListResult.self, #"{"chain":{"predecessors":[{"title":"no id"},{"id":"ses_a"}]}}"#)
+        XCTAssertEqual(lossy.chain?.map(\.id), ["ses_a"])
+    }
+
+    func testPreviousSessionsFromTheChainKeepTheBoxOrderTitlesAndDeletions() throws {
+        let chain = try XCTUnwrap(try decode(HandoffListResult.self, chainListJSON).chain)
+        let entries = HandoffPrevious.entries(chain: chain)
+        XCTAssertEqual(entries.map(\.sessionId), ["ses_c", "ses_b", "ses_a", "ses_root"])
+        XCTAssertEqual(entries.map(\.kind), [.predecessor, .predecessor, .predecessor, .branchedFrom])
+        XCTAssertEqual(entries.map(\.deleted), [false, false, true, false])
+        XCTAssertEqual(entries.map(\.title), ["Wave 2 backstop guard", nil, nil, "Original"])
+        // One row per session, whatever the box repeats.
+        XCTAssertEqual(HandoffPrevious.entries(chain: [HandoffChainEntry(id: "x"), HandoffChainEntry(id: "x"), HandoffChainEntry(id: "")]).count, 1)
+        XCTAssertTrue(HandoffPrevious.entries(chain: []).isEmpty)
+    }
+
+    func testPreviousSessionLabelsMatchTheDesktop() {
+        let named = HandoffPreviousEntry(sessionId: "a", kind: .predecessor, title: "Fix auth")
+        let untitled = HandoffPreviousEntry(sessionId: "b", kind: .predecessor)
+        let origin = HandoffPreviousEntry(sessionId: "c", kind: .branchedFrom, title: "Original")
+        let untitledOrigin = HandoffPreviousEntry(sessionId: "d", kind: .branchedFrom)
+        XCTAssertEqual(HandoffPrevious.label(named), "Fix auth")
+        XCTAssertEqual(HandoffPrevious.label(untitled), "Untitled session")
+        XCTAssertEqual(HandoffPrevious.label(origin), "Branched from Original")
+        XCTAssertEqual(HandoffPrevious.label(untitledOrigin), "Branched from Untitled session")
+        // A title learned elsewhere fills a gap but never overrides the box's.
+        XCTAssertEqual(HandoffPrevious.label(untitled, fallbackTitle: "From the list"), "From the list")
+        XCTAssertEqual(HandoffPrevious.label(named, fallbackTitle: "From the list"), "Fix auth")
+        XCTAssertEqual(HandoffPrevious.displayTitle(untitled, fallbackTitle: "  "), "Untitled session")
+    }
+
     func testNoticeNamesThePredecessorAndTheHandoffSize() {
         let titles = ["ses_a": "Fix auth"]
         let continued = HandoffPrevious.notice(links: HandoffLinks(replaces: "ses_a"), title: { titles[$0] }, handedOffTokens: 182_000)

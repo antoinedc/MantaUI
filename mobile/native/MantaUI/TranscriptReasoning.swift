@@ -28,7 +28,7 @@ struct TranscriptReasoningView: View {
                 Text("Thinking…")
                     .font(.manta(size: Metrics.type.twoXS))
                     .foregroundColor(tokens.tx4)
-                Text(reasoning.text)
+                Text(TranscriptLinkify.attributed(reasoning.text, linkColor: tokens.accent))
                     .textSelection(.enabled)
                     .font(.manta(size: Metrics.type.small).italic())
                     .foregroundColor(tokens.tx3)

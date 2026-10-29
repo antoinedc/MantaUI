@@ -139,7 +139,7 @@ private final class Harness {
         let suite = "AccountsFlowTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suite) ?? .standard
         let events: MantaEventStore? = withEventStream ? MantaEventStore(stream: stream) : nil
-        store = AccountsStore(api: api, eventStore: events, defaults: defaults)
+        store = AccountsStore(api: api, eventStore: events)
         // A harness lives for one test; its observer holds it weakly and goes inert
         // when it is released.
         _ = NotificationCenter.default.addObserver(forName: .mantaProvidersChanged, object: nil, queue: nil) { [weak self] _ in

@@ -310,7 +310,7 @@ final class AccountsRPCWireTests: XCTestCase {
     @MainActor
     func testFreshProvidersThrowsOnTransportErrorWithoutChangingTheList() async {
         let client = makeClient()
-        let store = AccountsStore(api: client, defaults: UserDefaults(suiteName: "AccountsRPCWireTests.\(UUID().uuidString)") ?? .standard)
+        let store = AccountsStore(api: client)
 
         AccountsCapturingURLProtocol.result = #"{"result": {"providers": [{"provider": "claude", "accounts": [{"id": "a", "label": "Work", "seats": [{"id": "s1", "label": "Seat 1"}]}]}]}}"#
         await store.refresh()
@@ -329,7 +329,7 @@ final class AccountsRPCWireTests: XCTestCase {
     @MainActor
     func testASuccessfulFreshReadClearsAStaleRefreshWarning() async throws {
         let client = makeClient()
-        let store = AccountsStore(api: client, defaults: UserDefaults(suiteName: "AccountsRPCWireTests.\(UUID().uuidString)") ?? .standard)
+        let store = AccountsStore(api: client)
         AccountsCapturingURLProtocol.result = #"{"result": {"providers": [{"provider": "claude", "accounts": [{"id": "a", "label": "Work", "seats": [{"id": "s1"}]}]}]}}"#
         await store.refresh()
         AccountsCapturingURLProtocol.failure = URLError(.notConnectedToInternet)
@@ -343,7 +343,7 @@ final class AccountsRPCWireTests: XCTestCase {
     @MainActor
     func testFreshProvidersIssuesItsOwnRequestEvenWhileARefreshIsInFlight() async throws {
         let client = makeClient()
-        let store = AccountsStore(api: client, defaults: UserDefaults(suiteName: "AccountsRPCWireTests.\(UUID().uuidString)") ?? .standard)
+        let store = AccountsStore(api: client)
         AccountsCapturingURLProtocol.result = #"{"result": {"providers": [{"provider": "codex", "accounts": [{"id": "a", "label": "Home", "seats": [{"id": "s1"}]}]}]}}"#
 
         let refresh = Task { await store.refresh() }
