@@ -82,9 +82,9 @@ const MD_COMPONENTS: MarkdownComponents = {
     node?: unknown;
     children?: React.ReactNode;
   } & React.HTMLAttributes<HTMLElement>) {
-    // Inline `code` — manta's accent color, no box.
+    // Unstyled on purpose: only URLs inside it change (they become links).
     return (
-      <code className="font-mono text-accent">
+      <code>
         <Linkified text={childrenToString(children)} schemeless="whole" />
       </code>
     );
