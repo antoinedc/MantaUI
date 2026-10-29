@@ -188,6 +188,8 @@ private struct ChatScreenContent: View {
     let title: String
     let projectName: String
     @ObservedObject var eventStore: MantaEventStore
+    /// The app's one capability reader, handed to the screens this one pushes.
+    let capabilities: BoxCapabilitiesStore
     @Binding var path: NavigationPath
     @StateObject private var store: ChatSessionStore
     @StateObject private var modelStore: ChatModelStore
@@ -336,6 +338,7 @@ private struct ChatScreenContent: View {
         self.title = title
         self.projectName = projectName
         self.eventStore = eventStore
+        self.capabilities = capabilities
         self._path = path
         self.onCleared = onCleared
         self.onHandedOff = onHandedOff
