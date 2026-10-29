@@ -149,3 +149,85 @@ The iOS one also passes `sessionName: w.name`, the **window** name, not the proj
 | `sessions-window-status-1` | No `job` → flat rail (owner-tagged job windows still hide on iOS); no `windowStatus` → own-turn dot only ✓. No footer note (#11). |
 
 VERDICT: CHANGES REQUIRED
+
+---
+
+## Round 2 — re-check against fix commit `d146bd71`
+
+I read the full diff of `d146bd71` only. I ran the checks in the foreground on a `git archive d146bd71` snapshot:
+
+- **`npm run typecheck`:** clean.
+- **`npm run test:server`:** 6263 pass, 0 fail.
+- **Full `npx vitest run`:** 4837 pass, 1 fail. The failure is `tests/unit/e2e-smoke.test.ts › should confirm Playwright is installed`, an environment check that times out under the box's current load from other agents' suites. It passed in the previous round, and this commit doesn't touch Playwright.
+- **Swift:** read, not compiled. The earlier `ChatScreenContent.capabilities` compile error is fixed by `a1c76a54`. The new types (`SessionCloseExpect`, `PendingDelete.expect`, `SessionWorktreePrompt.expect`) are plain `Equatable`/`Sendable` values. `nestingTask` inherits the store's main actor, and `NSNull` in `expect.wire` serialises.
+
+### Findings 1–13
+
+| # | Status | Notes |
+|---|---|---|
+| 1 BLOCKING (close bound to the confirmed window) | **Mostly resolved — one gap, R2-1** | See the detailed check below. |
+| 2 BLOCKING (iOS refresh storm) | **Resolved** | iOS no longer reacts to `delegate.updated`. It refreshes only on `sessions.nesting`, re-reads only the project list, and coalesces the reads. An XCTest pins that activity-only frames cost nothing. The box raises the signal from a per-window `job` signature, so activity ticks never fire it. On the ordering, see R2-2 (a NIT). |
+| 3 SHOULD (partial failure) | **Resolved** | Worktree → kill → conversation. A failed kill returns the sentence plus "Its worktree at X was already removed.", with the `removed`/`kept`/`failed`/`warnings` lists. A failed conversation delete after the kill is a warning, and a 404 counts as done. Tested. |
+| 4 SHOULD (other close entry points) | **Resolved — and the dispute is upheld** | Desktop and iOS in-chat Delete now go through `sessions:close` with `deleteConversation` and `expect`, the dirty-tree question and the same notices. `opencodeDeleteSession` / `MantaAPIClient.deleteSession` are deleted, with guard rows. The box handler stays for older clients. **I was wrong about the iOS tuple:** the old code was `sessionWindow = (project.tmuxSession, window.index, cwd)`, so the field labelled `name` held the project's tmux session, not the window name. There was no bug. Retracted. |
+| 5 SHOULD (desktop reconnect overwrite) | **Resolved** | `fillWindowStatus` only fills sessions that no frame has covered. The connect snapshot replays every windowed session, so the frames correct anything held from before. A guard row forbids `replaceWindowStatus`. |
+| 6 SHOULD (hydration race) | **Resolved** | Live `running`/`turnComplete` edges seen during the active-list read are re-applied after the replace. Hydrated sessions take `since` from the interpreter. Tested. |
+| 7 NIT (raw unknown-channel errors) | Resolved | Both clients, all close entry points. |
+| 8 NIT (invisible desktop confirm) | Resolved | The confirm opens at once ("Checking…", confirm held back). |
+| 9 NIT (iOS repeated sentences) | Resolved | The preview carries `worktreeLine`; iOS shows only that. |
+| 10 NIT (per-tick recompute) | Resolved | `runningChildCounts` runs once per flush. |
+| 11 NIT (older-box footer note) | **Amended — accepted** | A flat rail without a rollup is missing decoration, not a lost or dead control. Surfaces that lose a control keep their note. |
+| 12 NIT (`rootIds` growth) | Resolved | Cleared per hydration. |
+| 13 NIT (`stopped` / `attention` follow-up) | Resolved | Recorded as a Follow-up (master D29). |
+
+### #1 in detail: is every destructive action now gated on the confirmed window?
+
+**Box (`closeSession`):**
+- With `expect`, every key sent must match the window now at the index. Otherwise the box refuses with "That session changed — refresh and try again." before any removal, kill or delete.
+- Force-removing a worktree requires `expect.worktreePath === path`. Without it the box never forces and asks again.
+- The conversation it deletes is `expect.opencodeSessionId`, which the check has just verified.
+- Tests cover all three, plus a window that moved index between preview and confirm.
+
+**Callers:**
+
+| Caller | Bound when | Gated? |
+|---|---|---|
+| Desktop Sidebar close | captured from the row when the confirm opens | ✓ |
+| Desktop dirty-worktree answer | sends back `ask.path` | ✓ |
+| Desktop in-chat Delete | the panel's own `sessionId`, which is the identity itself | ✓ |
+| iOS idle delete | captured at the tap (`beginIdleDelete`), carried through the 5 s undo into the queue | ✓ |
+| iOS worktree-prompt answers | `prompt.shownExpect` | ✓ |
+| iOS in-chat Delete | `store.sessionId` | ✓ |
+| iOS running-turn delete | **at the Delete tap, not the confirm** | ✗ — R2-1 |
+| Project close | n/a (no index to reuse) | n/a |
+
+**Can an `expect`-less call from an older client destroy the wrong thing?**
+- No client that ships has ever sent an `expect`-less `sessions:close`. The channel is new in this same release, and every in-tree caller now sends `expect`.
+- Older clients (before D6) never call `sessions:close` at all. They use `opencode:delete-session`, which deletes the session id the client supplied and kills by index. That is the pre-existing behaviour, no worse than before.
+- Without `expect` the box still never forces a dirty worktree.
+- It *would* still resolve `deleteConversation` from the index, and an empty `expect: {}` checks nothing. That residue only matters to a hypothetical third-party caller; I recommend closing it (R2-3).
+
+### New problems
+
+**R2-1 BLOCKING — the iOS running-turn delete is bound at the Delete tap, not at the window the confirm showed.**
+- **Where:** `mobile/native/MantaUI/SessionListView.swift:932`.
+- **Problem:** the confirm sheet's Delete button calls `store.enqueueClose(project: project, index: index)` with no `expect`. `enqueueClose` then fills `expect` from `window(session:index:)`, i.e. whatever the list holds at that index when Delete is tapped. While the sheet is open, another device can close that window and a new window can take the index; tmux reuses the lowest free index, and any list refresh makes it visible. The `expect` then describes the NEW window, so the box's check passes. iOS then kills it and, because `deleteConversation` follows `expect.opencodeSessionId`, deletes its conversation. That is exactly the loss #1 was raised for, on the one path still unbound.
+- **Fix (one line):** the sheet already holds the confirmed window (`target`), so pass `expect: SessionCloseExpect(window: target)`.
+- **Hardening:** drop the implicit fallback in `enqueueClose`. Make `expect` a required parameter, so a future caller can't quietly bind at execution time.
+- **Test:** an XCTest that changes the window at the index between confirm and tap, and asserts the close is refused.
+
+**R2-2 NIT — `sessions.nesting` reaches clients before the `sync` delta, not after.**
+- **Where:** `src/server/sessionStatus.mjs` `observe(sync)` → `d.publish(sessions.nesting)`.
+- **Problem:** `bus.publish` delivers to subscribers synchronously, in subscription order. The status aggregator subscribed at boot, before any `/events` connection. So when it publishes `sessions.nesting` from inside its handler for the `sync` event, every SSE client receives `sessions.nesting` first and the `sync` delta second. The comment and the test name say "AFTER the sync delta"; the test checks only the order of calls inside the aggregator.
+- **Effect today:** harmless. The box applies the new list before publishing `sync`, and `tmux:list` also awaits `settled()`, so the iOS refresh reads the new nesting regardless.
+- **Fix:** defer the publish (`queueMicrotask`, or `setImmediate`, inside the `sync` branch) so it really follows on the wire, or correct the comment. Add a bus-level test with a later subscriber.
+
+**R2-3 NIT — the box still accepts an unbound single-window close.**
+- **Problem:** `deleteConversation` without `expect.opencodeSessionId`, or an `expect` with no keys, is still resolved from the index.
+- **Fix:** since no released client sends either, refuse a single-window `sessions:close` that sets `deleteConversation` without `expect.opencodeSessionId`. This makes the guarantee hold for any future caller.
+
+**R2-4 NIT — an empty list from the iOS nesting refresh is discarded.**
+- **Where:** `SessionListStore.trackNesting`.
+- **Problem:** it skips `list.isEmpty`, so a nesting change that leaves the box with no projects is never applied until the next full refresh.
+- **Fix:** apply empty lists too. A failed read already throws and is skipped.
+
+VERDICT: CHANGES REQUIRED

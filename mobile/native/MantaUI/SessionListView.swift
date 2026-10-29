@@ -929,7 +929,10 @@ struct SessionListView: View {
                 sheetRoute = nil
                 // Through the close queue: one close at a time, a dirty worktree
                 // asks, and the haptic/toast follow the real outcome.
-                store.enqueueClose(project: project, index: index)
+                // Bound to the window this sheet SHOWED: if the index is reused
+                // while the sheet is open, the box refuses instead of deleting
+                // the newcomer.
+                store.enqueueClose(project: project, index: index, expect: SessionCloseExpect(window: target))
             } label: {
                 Text("Delete Session")
                     .font(.manta(size: Metrics.type.small, weight: .semibold))

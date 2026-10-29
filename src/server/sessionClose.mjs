@@ -125,6 +125,11 @@ export async function closeSession(input, d) {
   if (single && expect && typeof expect === "object" && windowChanged(target, expect)) {
     return { ok: false, error: SESSION_CHANGED };
   }
+  // Deleting a conversation cannot be undone, so it must name the conversation
+  // the user confirmed; a bare window index is never enough to pick one.
+  if (single && deleteConversation === true && !(typeof expect?.opencodeSessionId === "string" && expect.opencodeSessionId)) {
+    return { ok: false, error: SESSION_CHANGED };
+  }
 
   const paths = single ? [target?.worktreePath].filter(Boolean) : uniquePaths(proj?.windows);
 
@@ -176,7 +181,7 @@ export async function closeSession(input, d) {
     warn(`[close] kill failed for ${project}${single ? `:${windowIndex}` : ""}`, e);
     return { ok: false, error: `${CLOSE_FAILED}${removedSentence(removed)}`, removed, kept, failed, warnings };
   }
-  const conversation = single && deleteConversation === true ? (expect?.opencodeSessionId ?? target?.opencodeSessionId) : null;
+  const conversation = single && deleteConversation === true ? expect.opencodeSessionId : null;
   if (conversation && d.deleteConversation) {
     try {
       await d.deleteConversation(conversation);

@@ -204,7 +204,7 @@ test("deleteConversation (iOS delete): the window is killed FIRST, then its conv
     deleteConversation: async (sid) => order.push(`delete:${sid}`),
     killWindow: async () => order.push("kill"),
   });
-  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, f.d);
+  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_1" } }, f.d);
   assert.equal(r.ok, true);
   assert.deepEqual(order, ["kill", "delete:ses_1"]);
   const plain = fakes({ listProjects: async () => chat, deleteConversation: async () => order.push("never") });
@@ -215,11 +215,21 @@ test("deleteConversation (iOS delete): the window is killed FIRST, then its conv
 test("a conversation that cannot be deleted AFTER the kill is a warning (ok:true); an already-gone one (404) is silent", async () => {
   const chat = [{ tmuxSession: "c", windows: [win(0, "chat", { opencodeSessionId: "ses_1" })] }];
   const bad = fakes({ listProjects: async () => chat, deleteConversation: async () => { throw new Error("boom"); } });
-  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, bad.d);
+  const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_1" } }, bad.d);
   assert.equal(r.ok, true);
   assert.deepEqual(r.warnings, [CONVERSATION_WARNING]);
   assert.ok(bad.calls.some((c) => c[0] === "killWindow"), "the window was killed regardless");
   const gone = fakes({ listProjects: async () => chat, deleteConversation: async () => { throw Object.assign(new Error("Not Found"), { status: 404 }); } });
-  const r2 = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true }, gone.d);
+  const r2 = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect: { opencodeSessionId: "ses_1" } }, gone.d);
   assert.deepEqual(r2.warnings, []);
+});
+
+test("deleteConversation without the confirmed conversation id is refused before anything is touched", async () => {
+  const chat = [{ tmuxSession: "c", windows: [win(0, "chat", { opencodeSessionId: "ses_1" })] }];
+  for (const expect of [undefined, {}, { worktreePath: null }, { opencodeSessionId: "" }]) {
+    const f = fakes({ listProjects: async () => chat, deleteConversation: async () => { throw new Error("must not delete"); } });
+    const r = await closeSession({ project: "c", windowIndex: 0, deleteConversation: true, expect }, f.d);
+    assert.deepEqual(r, { ok: false, error: SESSION_CHANGED }, JSON.stringify(expect));
+    assert.ok(!f.calls.some((c) => c[0] === "killWindow" || c[0] === "remove"), "nothing killed or removed");
+  }
 });
