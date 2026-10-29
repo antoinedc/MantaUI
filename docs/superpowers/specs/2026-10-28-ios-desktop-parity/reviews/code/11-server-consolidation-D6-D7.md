@@ -231,3 +231,25 @@ I read the full diff of `d146bd71` only. I ran the checks in the foreground on a
 - **Fix:** apply empty lists too. A failed read already throws and is skipped.
 
 VERDICT: CHANGES REQUIRED
+
+---
+
+## Round 3 — re-check against `d13bae58`
+
+(The request named it `d13bae56`; the commit on the branch is `d13bae58`.) I read `git show d13bae58` only. `sessionClose.test.mjs` passes as part of the server suite on the `d831f84a` snapshot, which contains this commit: 6298 pass, and the 1 failure is the known `upgradeV2Reclaim` load flake, which passes 76/76 in isolation.
+
+| # | Status | Notes |
+|---|---|---|
+| R2-1 BLOCKING (iOS running-turn delete bound at the tap) | **Resolved** | `SessionListView.swift` confirm sheet now passes `expect: SessionCloseExpect(window: target)`, where `target` is the `MantaWindow` the sheet was built for (`confirmDeleteSheet(target: MantaWindow)`), so it type-checks. If the index is reused while the sheet is open, the box refuses. The suggested hardening (make `expect` a required parameter of `enqueueClose`) was not taken. That is acceptable: every in-tree caller now passes one, and the box-side guard below covers the conversation delete regardless. |
+| R2-2 NIT (nesting before the sync delta) | Open | Not addressed; harmless as noted. |
+| R2-3 NIT (unbound single-window close) | **Resolved** | `closeSession` refuses `deleteConversation` unless `expect.opencodeSessionId` is a non-empty string, returning `SESSION_CHANGED` before any lookup, removal or kill. The conversation it deletes is now only `expect.opencodeSessionId`; the index fallback is gone. The new test covers `undefined`, `{}`, `{worktreePath:null}` and `{opencodeSessionId:""}`, and asserts nothing was killed or removed. |
+| R2-4 NIT (empty nesting list discarded) | Open | Not addressed. |
+
+**No regression from the stricter guard:**
+- iOS list deletes send `deleteConversation` only when `expect.opencodeSessionId != nil`, so a terminal window (no conversation) still closes.
+- The iOS in-chat Delete always carries its own session id.
+- The desktop in-chat Delete passes the panel's session id. The Sidebar close never sets `deleteConversation`.
+
+Every destructive path is now bound to the window the user confirmed.
+
+VERDICT: APPROVE
