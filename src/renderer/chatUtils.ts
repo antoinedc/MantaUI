@@ -22,6 +22,7 @@ import { formatTokens } from "../shared/formatTokens.mjs";
 // here so renderer consumers call `isDeprecated` rather than re-comparing.
 import { isDeprecated } from "../shared/modelGuide.mjs";
 import { leastLoadedSeat, seatLoad } from "../shared/seatChoice.mjs";
+import { windowTone } from "../shared/usageWindowTone.mjs";
 
 // Stable identity for a mounted Terminal in App.tsx's visitedModes map. A
 // tmux window is identified by its session name + index, which EVERY window
@@ -2979,10 +2980,14 @@ export function combinedSeatWindows(
       .filter((p) => !p.blocked && p.w.stale !== true && p.w.resetsAt != null)
       .map((p) => p.w.resetsAt as number);
     const first = parts[0].w;
+    const pct = Math.round(sum / total);
     return {
       kind: first.kind,
       label: first.label,
-      pct: Math.round(sum / total),
+      pct,
+      // The box's band rule, applied to the combined figure — without a band
+      // the ring falls back to the neutral grey track.
+      tone: windowTone(pct),
       ...(resets.length > 0 ? { resetsAt: Math.min(...resets) } : {}),
       ...(parts.every((p) => p.w.stale === true && !p.blocked) ? { stale: true } : {}),
     };

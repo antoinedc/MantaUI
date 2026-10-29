@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   combinedSeatWindows,
+  usageDialState,
   describeSeatLine,
   formatLastMove,
   hasSeatChoice,
@@ -330,6 +331,15 @@ describe("combinedSeatWindows (automatic-mode ring)", () => {
       ],
     });
     expect(byKind(combinedSeatWindows(view([null], [a])), "session").pct).toBe(20);
+  });
+
+  it("every combined window carries the colour band of its combined figure", () => {
+    // Without a band the ring falls back to the neutral grey track.
+    const r = combinedSeatWindows(view([null, null], [seat("a", "A", 10, 80), seat("b", "B", 30, 100)]));
+    expect(byKind(r, "session").tone).toBe("under"); // 20%
+    expect(byKind(r, "weekly").tone).toBe("danger"); // 90%
+    const st = usageDialState({ ...claudeSnapshot, windows: r!.windows }, true, { applyBlocking: false });
+    expect(st.tone).toBe("under");
   });
 
   it("a kind reported by only some seats averages over just those seats", () => {
