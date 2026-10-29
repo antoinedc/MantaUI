@@ -12,9 +12,23 @@
 // a lost part is worse than a stale closed run) and marked provisional; the canonical rebuild repairs it.
 // Dependency-injected, no I/O of its own.
 
-import { activityView, computeRuns, createRunWalker, deliveryClassOf, runBoundaryOf, runView } from "./transcriptRuns.mjs";
+import { activityView, computeRuns, createRunWalker, deliveryClassOf, isDelegateTool, runBoundaryOf, runView } from "./transcriptRuns.mjs";
 
 const hasText = (s) => typeof s === "string" && s.trim() !== "";
+
+/**
+ * What the ledger keeps of a tool part: only what the wording reads (status, title, input) — and the OUTPUT only where a
+ * rule needs it (a delegate call's job name). Everything else about a part lives on the canonical message.
+ */
+export function slimLedgerPart(part) {
+  const state = part?.state && typeof part.state === "object" ? part.state : {};
+  const kept = { status: state.status, ...(state.title !== undefined ? { title: state.title } : {}), input: state.input };
+  if (isDelegateTool(part?.tool)) {
+    if (typeof state.output === "string") kept.output = state.output;
+    else if (typeof state.metadata?.output === "string") kept.metadata = { output: state.metadata.output };
+  }
+  return { ...part, state: kept };
+}
 
 /** The frame entry for one ledger part. */
 function partEntry(L, part) {
@@ -53,8 +67,22 @@ export function createRunLedger({
   coalesceMs = 100,
   classifyTimeoutMs = 3000,
   bufferCap = 2000,
+  /** A canonical read (rebuild / seed) that has not answered by then is abandoned: the ledger must never wait on it forever. */
+  rebuildTimeoutMs = 10_000,
+  /** A settled (finished-turn) ledger is kept this long for late splices, then evicted. */
+  graceMs = 10 * 60_000,
+  /** …and settled ledgers are evicted oldest-first beyond this many sessions. */
+  maxSessions = 200,
 }) {
   const sessions = new Map();
+  /** sid -> the highest `gen` an evicted/rebuilt ledger reached: a later ledger (or a bare stamp) never goes BACK below it. */
+  const genFloor = new Map();
+  const rememberGen = (sid, gen) => {
+    if (gen <= 1) return;
+    genFloor.delete(sid);
+    genFloor.set(sid, gen);
+    if (genFloor.size > 2000) genFloor.delete(genFloor.keys().next().value);
+  };
   /** inboxID -> { cls, reset } recorded at enqueue time. */
   const deliveryClass = new Map();
 
@@ -69,8 +97,12 @@ export function createRunLedger({
     dirtyParts: new Set(),
     partMeta: new Map(),
     parts: new Map(), // partId -> latest part (for frame entries)
-    pending: null, // { token, buffer: [], timer, rebuild?: boolean }
+    pending: null, // { token, buffer: [], timer } — a delivery being classified
+    hold: null, // { buffer, timer, finish } — a canonical read (rebuild / seed) in flight: run events wait behind it
     provisional: null, // { token, inboxID, messageID }
+    fresh: true, // no drawing user message seen yet: a turn already under way when this ledger began is seeded from history
+    completedAt: null, // set when the execution ended; cleared by any later event
+    rebuildLater: false,
     nextToken: 1,
     timer: null,
     lastAt: -Infinity,
@@ -78,9 +110,36 @@ export function createRunLedger({
   });
   const ledger = (sid) => {
     let L = sessions.get(sid);
-    if (!L) sessions.set(sid, (L = newState(sid)));
+    if (!L) {
+      sweep();
+      sessions.set(sid, (L = newState(sid, createRunWalker(0), genFloor.get(sid) ?? 1)));
+    }
     return L;
   };
+
+  // ---- settling and eviction -----------------------------------------------------------------------------------------
+  // A finished turn needs no live layout (the canonical fetch covers it): it is left out of the connect snapshot, and evicted
+  // after a grace period / beyond an LRU cap, so memory and the snapshot do not grow with every session that ever ran a tool.
+  const isSettled = (L) => L.completedAt != null && !L.pending && !L.hold && !L.provisional;
+  function evict(L) {
+    if (L.timer != null) clearTimer(L.timer);
+    rememberGen(L.sid, L.gen);
+    sessions.delete(L.sid);
+  }
+  function sweep() {
+    const t = now();
+    const settled = [];
+    for (const L of sessions.values()) {
+      if (!isSettled(L)) continue;
+      if (t - L.completedAt >= graceMs) evict(L);
+      else settled.push(L);
+    }
+    settled.sort((a, b) => a.completedAt - b.completedAt);
+    for (const L of settled) {
+      if (sessions.size <= maxSessions) break;
+      evict(L);
+    }
+  }
 
   const viewOf = (L, run) => runView(L.walker, run, { epoch, gen: L.gen, seq: run.seq });
 
@@ -156,7 +215,7 @@ export function createRunLedger({
   function applyItem(L, item) {
     switch (item.k) {
       case "tool": {
-        const part = item.part;
+        const part = slimLedgerPart(item.part);
         const { run, created, newSegment } = L.walker.part(part, part.messageID ?? "");
         L.parts.set(part.id, part);
         L.partMeta.set(part.id, { activity: activityView(part), childSessionId: item.childSessionId ?? L.partMeta.get(part.id)?.childSessionId });
@@ -184,7 +243,10 @@ export function createRunLedger({
       case "boundary":
         if (item.cls !== "draws") return;
         closeOpen(L);
-        if (item.reset) resetTurn(L);
+        if (item.reset) {
+          resetTurn(L);
+          L.fresh = false;
+        }
         return;
       case "deliver":
         deliver(L, item);
@@ -194,13 +256,33 @@ export function createRunLedger({
   }
 
   // ---- boundaries (inbox deliveries) ---------------------------------------------------------------------------------
+  // Items that can only be placed correctly against history: a turn already running when this ledger began (a restart, an
+  // eviction) has its run begun in a message the ledger never saw.
+  const seedable = (item) => item.k === "tool" || ((item.k === "text" || item.k === "reasoning") && hasText(item.text));
   function handle(L, item) {
+    L.completedAt = null;
+    if (L.hold) {
+      L.hold.buffer.push(item);
+      if (L.hold.buffer.length >= bufferCap) {
+        warn(`[run-ledger] ${L.sid}: buffer cap reached while reading canonical history; giving the read up`);
+        L.hold.finish(null);
+      }
+      return;
+    }
     if (L.pending) {
       L.pending.buffer.push(item);
-      if (L.pending.buffer.length >= bufferCap && !L.pending.rebuild) {
+      if (L.pending.buffer.length >= bufferCap) {
         warn(`[run-ledger] ${L.sid}: buffer cap reached while classifying a delivery; treating it as a boundary`);
         settle(L, L.pending.token, { cls: "draws", user: false }, true);
       }
+      return;
+    }
+    if (L.fresh && seedable(item) && typeof rebuildFromCanonical === "function") {
+      L.fresh = false;
+      startHold(L, [item], (messages) => {
+        if (messages) adopt(L, messages, { bump: false });
+        L.needsFull = true;
+      });
       return;
     }
     applyItem(L, item);
@@ -210,13 +292,14 @@ export function createRunLedger({
   }
   function settle(L, token, result, provisional) {
     const p = L.pending;
-    if (!p || p.token !== token || p.rebuild) return;
+    if (!p || p.token !== token) return;
     if (p.timer != null) clearTimer(p.timer);
     L.pending = null;
     L.provisional = provisional ? { token, inboxID: p.inboxID, messageID: p.messageID } : L.provisional;
     applyItem(L, { k: "boundary", cls: result.cls, reset: result.user === true });
     replay(L, p.buffer);
     schedule(L);
+    maybeRebuild(L);
   }
   function deliver(L, ev) {
     const known = deliveryClass.get(ev.inboxID);
@@ -259,53 +342,109 @@ export function createRunLedger({
     );
   }
 
-  // ---- canonical rebuild ---------------------------------------------------------------------------------------------
-  async function rebuild(L) {
-    if (!L.provisional || L.pending?.rebuild) return;
-    const token = L.provisional.token;
-    L.provisional = null; // a second rebuild for the same token cannot start; a late lookup result is now ignored
-    const hold = { token: `rebuild-${token}`, buffer: [], timer: null, rebuild: true };
-    const queued = L.pending; // a classification in flight keeps its own buffer
-    L.pending = hold;
-    let messages = null;
+  // ---- canonical reads: the repair of a guessed boundary (rebuild) and the seed of a ledger that began mid-turn -------------
+  /** Hold run events behind ONE canonical read (bounded in time and in buffered events), then `apply(messages|null)` and replay. */
+  function startHold(L, initial, apply) {
+    const hold = { buffer: initial, done: false, timer: null, finish: null };
+    L.hold = hold;
+    hold.finish = (messages) => {
+      if (hold.done) return;
+      hold.done = true;
+      if (hold.timer != null) clearTimer(hold.timer);
+      if (sessions.get(L.sid) !== L) return; // the session was deleted / evicted meanwhile
+      L.hold = null;
+      apply(Array.isArray(messages) ? messages : null);
+      replay(L, hold.buffer);
+      schedule(L);
+      maybeRebuild(L);
+    };
+    hold.timer = setTimer(() => {
+      warn(`[run-ledger] ${L.sid}: canonical read did not answer in ${rebuildTimeoutMs} ms; continuing without it`);
+      hold.finish(null);
+    }, rebuildTimeoutMs);
+    let read;
     try {
-      messages = typeof rebuildFromCanonical === "function" ? await rebuildFromCanonical(L.sid) : null;
+      read = Promise.resolve(rebuildFromCanonical(L.sid));
     } catch (e) {
-      warn(`[run-ledger] ${L.sid}: canonical rebuild failed`, e);
+      read = Promise.reject(e);
     }
-    L.pending = queued;
-    if (Array.isArray(messages)) {
-      // Only the turn in progress: from the last message that DREW (a drawing user message).
-      let from = 0;
-      messages.forEach((m, i) => {
-        if (m?.info?.role === "user" && runBoundaryOf(m) === "draws") from = i;
-      });
-      const canon = computeRuns(messages.slice(from), { startSeq: L.walker.seq });
-      const oldIds = new Set(L.walker.order);
-      const oldParts = L.walker.order.flatMap((id) => L.walker.runs.get(id)?.parts ?? []);
-      const walker = canon.walker;
-      // Ledger parts the canonical history does not contain yet (unsettled messages) keep their place at the end.
-      for (const part of oldParts) if (!walker.partRun.has(part.id)) walker.part(part, part.messageID ?? "");
-      walker.touchAll();
-      const retired = [...oldIds].filter((id) => !walker.runs.has(id));
-      L.walker = walker;
+    read.then(hold.finish, (e) => {
+      warn(`[run-ledger] ${L.sid}: canonical read failed`, e);
+      hold.finish(null);
+    });
+  }
+  /** Run a deferred rebuild once nothing is in flight (a classification or another read). */
+  function maybeRebuild(L) {
+    if (!L.rebuildLater) return;
+    if (!L.provisional) {
+      L.rebuildLater = false;
+      return;
+    }
+    if (L.pending || L.hold) return;
+    L.rebuildLater = false;
+    void rebuild(L);
+  }
+  /**
+   * Replace the ledger's membership with the canonical walk over `messages` (only the turn in progress: from the last message
+   * that DREW). Ledger parts canonical history does not contain yet (unsettled messages) keep their place at the end.
+   * `bump` (a repair) raises `gen`; a seed does not (nothing was sent before it). Returns the retired run ids.
+   */
+  function adopt(L, messages, { bump }) {
+    let from = 0;
+    messages.forEach((m, i) => {
+      if (m?.info?.role === "user" && runBoundaryOf(m) === "draws") from = i;
+    });
+    const canon = computeRuns(messages.slice(from), { startSeq: L.walker.seq });
+    const oldIds = new Set(L.walker.order);
+    const oldParts = L.walker.order.flatMap((id) => L.walker.runs.get(id)?.parts ?? []);
+    const walker = canon.walker;
+    // The ledger keeps only what the wording reads: canonical tool parts carry their whole output.
+    for (const run of walker.runs.values()) run.parts = run.parts.map(slimLedgerPart);
+    for (const part of oldParts) if (!walker.partRun.has(part.id)) walker.part(part, part.messageID ?? "");
+    walker.touchAll();
+    const retired = [...oldIds].filter((id) => !walker.runs.has(id));
+    L.walker = walker;
+    if (bump) {
       L.gen += 1;
-      // The layout keeps its text/reasoning entries and the run entries that still exist; new (run, segment) pairs are appended.
-      const keep = L.layout.filter((e) => e.kind !== "run" || (walker.runs.has(e.id) && walker.runs.get(e.id).segments.includes(e.segmentId)));
-      L.layout = keep;
-      L.layoutKeys = new Set(keep.map((e) => (e.kind === "run" ? `run:${e.id}:${e.segmentId}` : `${e.kind}:${e.partID}`)));
-      for (const id of walker.order) for (const segmentId of walker.runs.get(id).segments) addLayout(L, { kind: "run", id, segmentId }, `run:${id}:${segmentId}`);
-      for (const [id, part] of [...L.parts]) if (!walker.partRun.has(id)) L.parts.delete(id);
-      for (const id of walker.partRun.keys()) {
-        if (L.parts.has(id)) continue;
-        const part = walker.runs.get(walker.partRun.get(id).runId).parts.find((p) => p.id === id);
-        L.parts.set(id, part);
-        L.partMeta.set(id, { activity: activityView(part) });
-      }
-      flush(L, { full: true, rebuilt: true, retired });
+      rememberGen(L.sid, L.gen);
     }
-    replay(L, hold.buffer);
-    schedule(L);
+    // The layout keeps its text/reasoning entries and the run entries that still exist; new (run, segment) pairs are appended.
+    const keep = L.layout.filter((e) => e.kind !== "run" || (walker.runs.has(e.id) && walker.runs.get(e.id).segments.includes(e.segmentId)));
+    L.layout = keep;
+    L.layoutKeys = new Set(keep.map((e) => (e.kind === "run" ? `run:${e.id}:${e.segmentId}` : `${e.kind}:${e.partID}`)));
+    for (const id of walker.order) for (const segmentId of walker.runs.get(id).segments) addLayout(L, { kind: "run", id, segmentId }, `run:${id}:${segmentId}`);
+    for (const id of [...L.parts.keys()]) if (!walker.partRun.has(id)) L.parts.delete(id);
+    for (const id of walker.partRun.keys()) {
+      if (L.parts.has(id)) continue;
+      const part = walker.runs.get(walker.partRun.get(id).runId).parts.find((p) => p.id === id);
+      L.parts.set(id, part);
+      L.partMeta.set(id, { activity: activityView(part) });
+    }
+    L.dirtyRuns.clear();
+    L.closedNew.clear();
+    return retired;
+  }
+  async function rebuild(L) {
+    if (!L.provisional) return;
+    // A classification (or another read) in flight finishes first: a rebuild never starts under it.
+    if (L.pending || L.hold) {
+      L.rebuildLater = true;
+      return;
+    }
+    const prior = L.provisional;
+    L.provisional = null; // a second rebuild for the same token cannot start; a late lookup result is now ignored
+    startHold(
+      L,
+      [],
+      (messages) => {
+        if (!messages) {
+          L.provisional ??= prior; // nothing was repaired: keep the mark so a later trigger retries
+          return;
+        }
+        const retired = adopt(L, messages, { bump: true });
+        flush(L, { full: true, rebuilt: true, retired });
+      },
+    );
   }
 
   // ---- the interpreter's calls ----------------------------------------------------------------------------------------
@@ -350,26 +489,35 @@ export function createRunLedger({
       const L = sessions.get(sid);
       if (!L) return;
       flush(L);
-      if (complete && L.provisional) void rebuild(L);
+      if (complete) {
+        L.completedAt = now();
+        if (L.provisional) void rebuild(L);
+      }
+      sweep();
     },
     /** The opencode stream (re)connected: a pending classification resolves NOW (before resync frames); a guess is repaired. */
     onReconnect(sid) {
       const L = sessions.get(sid);
       if (!L) return;
-      if (L.pending && !L.pending.rebuild) settle(L, L.pending.token, { cls: "draws", user: false }, true);
+      if (L.pending) settle(L, L.pending.token, { cls: "draws", user: false }, true);
       flush(L); // the resolved boundary reaches clients BEFORE the resync's own frames
       if (L.provisional) void rebuild(L);
     },
     onDeleted(sid) {
       const L = sessions.get(sid);
       if (L?.timer != null) clearTimer(L.timer);
+      if (L?.hold?.timer != null) clearTimer(L.hold.timer);
+      if (L?.pending?.timer != null) clearTimer(L.pending.timer);
       sessions.delete(sid);
+      genFloor.delete(sid);
     },
-    /** `full:true` frames for every session with a non-empty ledger (the connect snapshot). */
+    /** `full:true` frames for every session with a non-empty, unsettled ledger (the connect snapshot). */
     snapshotFrames() {
+      sweep();
       const out = [];
       for (const [sid, L] of sessions) {
         if (L.walker.order.length === 0 && L.layout.length === 0) continue;
+        if (isSettled(L)) continue; // a finished turn: the canonical fetch covers it
         out.push({ kind: "stream", sub: "toolRuns", sessionId: sid, payload: buildFrame(L, { full: true }) });
       }
       return out;
@@ -379,7 +527,7 @@ export function createRunLedger({
       const L = sessions.get(sid);
       return {
         epoch,
-        gen: L?.gen ?? 1,
+        gen: L?.gen ?? genFloor.get(sid) ?? 1,
         runView: (id) => {
           const run = L?.walker.runs.get(id);
           return run ? viewOf(L, run) : null;

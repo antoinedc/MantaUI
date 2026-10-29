@@ -252,41 +252,58 @@ const withFileViews = (message) => {
 function withRunViews(messages, ledger, { single = false, runContext = null, runContextOpen = false } = {}) {
   let walked = computeRuns(runContext ?? messages);
   if (runContext && runContextOpen && !walked.anchored) {
-    // The run reaches back past what was read (more than RUN_LOOKBACK records before the window): annotate as if it began at
-    // the window — an id that is stable for THIS window only (the spec's accepted edge).
-    console.warn(`[transcript] a run reaches back more than the lookback before the window (${messages[0]?.info?.id ?? "?"}); anchoring it at the window`);
-    walked = computeRuns(messages);
+    // The first run reaches back past what was read (more than RUN_LOOKBACK records before the window). That only matters
+    // when it ALSO has a part inside the window (it is drawn there); a run that ended before the window is never drawn, so an
+    // ordinary tail refetch that merely starts inside an old run is not a problem and is not logged.
+    const first = walked.walker.runs.get(walked.walker.order[0]);
+    const inWindow = new Set(messages.flatMap((m) => (m?.parts ?? []).map((p) => p?.id)));
+    if (first?.parts.some((p) => inWindow.has(p.id))) {
+      // Annotate as if it began at the window — an id that is stable for THIS window only (the spec's accepted edge).
+      console.warn(`[transcript] a run reaches back more than the lookback before the window (${messages[0]?.info?.id ?? "?"}); anchoring it at the window`);
+      walked = computeRuns(messages);
+    }
   }
   const { walker, partRun, messageRuns } = walked;
   const epoch = ledger?.epoch ?? "";
   const gen = ledger?.gen ?? 1;
-  const viewOf = (run) => ledger?.runView?.(run.id) ?? runView(walker, run, { epoch, gen, seq: 0 });
+  // A run's view by id: the ledger's (with its revision) when it knows the run, else the canonical walk's at seq 0.
+  const viewById = (id) => {
+    const live = ledger?.runView?.(id);
+    if (live) return live;
+    const run = walker.runs.get(id);
+    return run ? runView(walker, run, { epoch, gen, seq: 0 }) : null;
+  };
   // PAYLOAD (measured, transcriptView.payload.test.mjs): the full RunView on EVERY message of a long run is quadratic, so a
   // list response carries it ONLY on the run's placement message (the first in-window message touching it — its owner when
   // that is in the window); every other message carries a RunRef `{id, rev, ref:true}` a client never lets overwrite a
   // stored value. A lone `getMessage` is self-contained: always full.
   const placed = new Set();
   return messages.map((m) => {
-    const runIds = messageRuns.get(m?.info?.id);
-    let parts = m?.parts;
-    if (Array.isArray(parts) && runIds) {
+    const localIds = messageRuns.get(m?.info?.id);
+    if (!localIds) return m;
+    // A lone message is stamped from the LEDGER where it knows the part (step 2+ of a live run belongs to a run that began in
+    // an earlier message), and carries exactly the runs its parts reference — never an id of its own making.
+    const ids = single && ledger ? [] : localIds;
+    let parts = m.parts;
+    if (Array.isArray(parts)) {
       parts = parts.map((p) => {
         let at = partRun.get(p.id);
-        if (single && p.type !== "text") at = ledger?.runOfPart?.(p.id) ?? at;
         if (!at) return p;
-        const run = walker.runs.get(at.runId);
-        const split = (ledger?.runView?.(at.runId)?.segments ?? (run?.segments.length > 1 ? run.segments : null)) != null;
+        if (single && ledger) {
+          const live = ledger.runOfPart?.(p.id);
+          if (live) at = live;
+          if (!ids.includes(at.runId)) ids.push(at.runId);
+        }
+        const split = (ledger?.runView?.(at.runId)?.segments ?? (walker.runs.get(at.runId)?.segments.length > 1 ? true : null)) != null;
         return { ...p, view: { ...(p.view ?? {}), activity: activityView(p), runId: at.runId, ...(split ? { segmentId: at.segmentId } : {}), gen } };
       });
     }
-    if (!runIds) return m;
-    const runs = runIds
-      .map((id) => walker.runs.get(id))
+    const runs = ids
+      .map((id) => viewById(id))
       .filter(Boolean)
-      .map((run) => {
-        const view = viewOf(run);
-        if (single || !placed.has(run.id)) {
-          placed.add(run.id);
+      .map((view) => {
+        if (single || !placed.has(view.id)) {
+          placed.add(view.id);
           return view;
         }
         return { id: view.id, rev: view.rev, ref: true };

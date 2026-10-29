@@ -365,7 +365,7 @@ const streamInterp = createStreamInterpreter({
     if (!m) throw new Error("message not found");
     return { cls: runBoundaryOf(m), user: m.info?.role === "user" };
   },
-  rebuildFromCanonical: (sid) => oc.listMessages(sid, { limit: 100 }),
+  rebuildFromCanonical: (sid) => oc.listMessagesForRebuild(sid),
   // The device stream predicts cache staleness against the SAME TTL opencode
   // actually sends (providers.readCacheTtl) that the desktop pill reads, so
   // the device cache pill matches on a 1h box instead of always assuming 5m.

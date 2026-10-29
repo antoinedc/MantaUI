@@ -31,6 +31,7 @@ function rig(opts = {}) {
   });
   const advance = async (ms) => {
     const until = clock + ms;
+    await new Promise((r) => setImmediate(r)); // real time passes before any fake timer: already-resolved reads land first
     for (;;) {
       const due = timers.filter((t) => !t.dead && t.at <= until).sort((a, b) => a.at - b.at)[0];
       if (!due) break;
@@ -286,7 +287,41 @@ test("(10) revisions — an earlier tool completes AFTER a later one joined: the
   assert.equal(early.parts[0].view.gen, 1);
 });
 
+// A splice of a LATER step of a run (the common case): its part belongs to the run that began in an earlier message.
+const onlyReferencedRuns = (msg) => {
+  const referenced = new Set(msg.parts.map((p) => p.view?.runId).filter(Boolean));
+  assert.deepEqual(new Set(msg.view.runs.map((r) => r.id)), referenced, "view.runs carries exactly the runs the parts reference");
+};
+
+test("(10b) B2 — getMessage of step 2 of a multi-step run carries the LEDGER's run (id A, its rev), never a run of its own making", async () => {
+  const { interp, runFrames, settle } = rig();
+  interp.interpret(ev("session.inbox.delivered", { inboxID: "u1" }));
+  interp.interpret(ev("session.tool.input.started", { assistantMessageID: "a1", id: "A", name: "read" }));
+  interp.interpret(ev("session.tool.called", { assistantMessageID: "a1", id: "A", input: { path: "/x/a.ts" } }));
+  interp.interpret(ev("session.tool.input.started", { assistantMessageID: "a2", id: "B", name: "read" }));
+  interp.interpret(ev("session.tool.called", { assistantMessageID: "a2", id: "B", input: { path: "/x/b.ts" } }));
+  await settle();
+  const live = reduce(runFrames()).runs.get("A");
+  const a2 = { info: { id: "a2", role: "assistant" }, parts: [mapToolBlock({ id: "B", name: "read", state: { status: "running", input: { path: "/x/b.ts" } } }, { messageID: "a2" })] };
+  const single = annotateSingle(a2, { ledger: interp.ledgerFor(SID) });
+  assert.equal(single.parts[0].view.runId, "A");
+  assert.deepEqual(single.view.runs.map((r) => r.id), ["A"]);
+  assert.equal(single.view.runs[0].ref, undefined, "a splice is self-contained: the full view");
+  assert.deepEqual(single.view.runs[0].rev, live.rev);
+  assert.equal(single.view.runs[0].calls, 2);
+  onlyReferencedRuns(single);
+  // history the ledger does not know is annotated within the message alone (seq 0) and still references only its own run
+  const cold = annotateSingle(a2, { ledger: { epoch: "E1", gen: 1, runView: () => null, runOfPart: () => null } });
+  assert.deepEqual(cold.view.runs.map((r) => [r.id, r.rev.seq]), [["B", 0]]);
+  onlyReferencedRuns(cold);
+});
+
 // ---- boundaries the ledger could not classify at enqueue time ----
+// A drawing user message delivered first: the turn began IN this process (nothing to seed from history).
+const userTurn = (interp, id) => {
+  interp.interpret(ev("session.inbox.enqueued", { inboxID: id, item: { type: "user", id, payload: { text: "go" }, delivery: "steer" } }));
+  interp.interpret(ev("session.inbox.delivered", { inboxID: id }));
+};
 const unknownDelivery = (id) => ev("session.inbox.delivered", { inboxID: id }); // never enqueued here → class unknown
 
 test("(6) unknown class resolving AFTER tool B's events: with \"draws\" B starts a NEW run, with \"transparent\" B joins run A — never a lost part", async () => {
@@ -353,6 +388,7 @@ test("(6c) provisional repair: a timed-out boundary that was truly transparent s
     classifyDelivered: () => new Promise((r) => (late = r)),
     rebuildFromCanonical: async () => canonical,
   });
+  userTurn(interp, "u1");
   interp.interpret(ev("session.tool.input.started", { assistantMessageID: "a1", id: "A", name: "read" }));
   interp.interpret(ev("session.tool.called", { assistantMessageID: "a1", id: "A", input: { path: "/x/a.ts" } }));
   interp.interpret(unknownDelivery("u2"));
@@ -375,6 +411,10 @@ test("(6c) provisional repair: a timed-out boundary that was truly transparent s
   const single = annotateSingle(canonical[3], { ledger: interp.ledgerFor(SID) });
   assert.equal(single.parts[0].view.runId, "A");
   assert.equal(single.parts[0].view.gen, 2);
+  // B2: the retired id is NOT resurrected by a splice of its own message
+  assert.deepEqual(single.view.runs.map((r) => r.id), ["A"]);
+  assert.equal(single.view.runs[0].rev.gen, 2);
+  onlyReferencedRuns(single);
 });
 
 test("(6c) an AGREEING late result clears the provisional mark without a rebuild", async () => {

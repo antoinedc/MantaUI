@@ -46,6 +46,9 @@ const isDelegateToolName = (lowercased) => {
   return name === "delegate" || name === "delegate_delegate";
 };
 
+/** Is this tool name the `delegate` call (the one wording rule that reads a tool's OUTPUT)? */
+export const isDelegateTool = (name) => isDelegateToolName(String(name ?? "").toLowerCase());
+
 /** The display name of a `delegate` call: the quoted name in the output, else the first line of the input. */
 function delegateJobName(state) {
   const out = typeof state.output === "string" ? state.output : typeof state.metadata?.output === "string" ? state.metadata.output : "";

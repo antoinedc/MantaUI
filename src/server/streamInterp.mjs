@@ -63,7 +63,7 @@ import {
 } from "../shared/opencodeV2.mjs";
 import { createSeenIdFilter } from "./seenIds.mjs";
 import { createRunLedger } from "./runLedger.mjs";
-import { isHandoffToolPart } from "./transcriptRuns.mjs";
+import { isDelegateTool, isHandoffToolPart } from "./transcriptRuns.mjs";
 import { buildContextPayload } from "./sessionContext.mjs";
 import { randomUUID } from "node:crypto";
 
@@ -277,7 +277,7 @@ export function createStreamInterpreter({
         status: tool.status,
         input: normalizeToolInput(tool.v2Name, tool.input),
         ...(tool.hint ? { title: tool.hint } : {}),
-        ...(tool.output ? { output: tool.output } : {}),
+        ...(tool.output && isDelegateTool(tool.name) ? { output: tool.output } : {}),
       },
     };
     runLedger.onTool(sid, part, { childSessionId: tool.childSessionId, handoff: isHandoffToolPart(part) });
@@ -581,7 +581,7 @@ export function createStreamInterpreter({
     }
     tool.status = ok ? "completed" : "error";
     tool.ended = true;
-    if (ok && tool.name !== "task") {
+    if (ok && isDelegateTool(tool.name)) {
       const out = toolOutputText(tool.v2Name, d.content);
       if (out) tool.output = out.length > LEDGER_OUTPUT_MAX ? out.slice(0, LEDGER_OUTPUT_MAX) : out;
     }

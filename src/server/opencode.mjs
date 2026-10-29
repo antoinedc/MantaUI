@@ -507,6 +507,10 @@ async function directoryForTitles(sessionId) {
 /** How many extra conversation records a `view` fetch reads before its window (WS11 D11 "Window edges"). */
 export const RUN_LOOKBACK = 40;
 
+/** The canonical window a run-ledger rebuild reads: the 100-message tail PLUS the lookback, so a turn's first run keeps its true id. */
+export const REBUILD_WINDOW = 100 + RUN_LOOKBACK;
+export const listMessagesForRebuild = (sessionId) => listMessages(sessionId, { limit: REBUILD_WINDOW });
+
 /** Fetch a session's message transcript, in the `{info, parts}[]` shape every client reads.
  *
  *  @param {string} sessionId

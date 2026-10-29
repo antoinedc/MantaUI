@@ -18,6 +18,8 @@ import {
   readSession,
   listMessages,
   RUN_LOOKBACK,
+  listMessagesForRebuild,
+  REBUILD_WINDOW,
   getMessage,
   slimTranscript,
   stripDuplicateToolOutput,
@@ -1001,6 +1003,42 @@ test("window edges: a run that began MORE than RUN_LOOKBACK records before the w
     console.warn = origWarn;
   }
   assert.ok(warned.some((w) => /lookback/.test(w)), "logged");
+});
+
+test("a window whose context merely STARTS inside an old run that ended before the window does not log the lookback warning", async () => {
+  // u1, a1..a20 tools (run 1), a21 text, a22..a43 tools (run 2): a 2-message tail reads 42 records, starting inside run 1.
+  const asc = [U("u1", "go")];
+  for (let i = 1; i <= 43; i++) asc.push(A(`a${i}`, i === 21 ? [{ type: "text", text: "done with that" }] : [T(`T${i}`, `f${i}.ts`)]));
+  const desc = [...asc].reverse();
+  const origWarn = console.warn;
+  const warned = [];
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    await withV2(
+      { "GET /api/session/ses_a/message": ({ query }) => (!query.cursor ? { data: desc.slice(0, RUN_LOOKBACK + 2), cursor: { next: "C1" } } : { data: desc.slice(RUN_LOOKBACK + 2), cursor: { next: null } }) },
+      async () => {
+        const out = await listMessages("ses_a", { limit: 2, view: true });
+        assert.deepEqual(out.map((m) => m.info.id), ["a42", "a43"]);
+        const run = runsOf(out).find((r) => !r.ref);
+        assert.equal(run.id, "T22", "the in-window run keeps its true id");
+        assert.equal(run.ownerMessageId, "a22");
+      },
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.deepEqual(warned.filter((w) => /lookback/.test(w)), [], "not logged: the old run is never drawn in this window");
+});
+
+test("the ledger's rebuild read covers the 100-message tail PLUS the lookback: a 120-step turn keeps its first run's true id", async () => {
+  assert.equal(REBUILD_WINDOW, 100 + RUN_LOOKBACK);
+  await withV2({ "GET /api/session/ses_a/message": { data: stepsTimeline(120), cursor: { next: null } } }, async () => {
+    const msgs = await listMessagesForRebuild("ses_a");
+    assert.equal(msgs.length, 121, "the whole turn, from its drawing user message");
+    assert.equal(msgs[0].info.id, "u1");
+    const narrow = await listMessages("ses_a", { limit: 100 });
+    assert.equal(narrow[0].info.id, "a21", "a plain 100-tail starts mid-run (what the rebuild used to read)");
+  });
 });
 
 test("a run that began inside the read context keeps its true id even when older records exist", async () => {
